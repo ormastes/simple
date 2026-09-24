@@ -1,4 +1,8 @@
 # Finding: Simple web engine diverges structurally from Chromium on widget CSS
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-03
 - **Severity:** high for "production level" widget rendering claims
@@ -300,3 +304,4 @@ implement->render->measure loop practical (minutes, not an hour).
   and discarded). Painting radials needs either a new `Style` field carrying the
   radial spec (the giant `Style(...)` constructor at ~3 sites must stay
   field-consistent) or a re-parse of the body decls in `paint`.
+

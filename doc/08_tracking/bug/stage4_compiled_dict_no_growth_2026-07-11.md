@@ -1,4 +1,8 @@
 # Stage-4 compiled in-process paths broken: RuntimeDict never grows (root cause) + Cranelift Host→x86-64 leak
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-11 · **Status:** both fixes implemented; seed/runtime rebuild + stage-4 redeploy required
 **Symptoms fixed by this:** deployed `bin/simple native-build …` traps instantly
@@ -173,3 +177,4 @@ and times out after 180s before producing a binary — the known slow-interprete
 blocker (see `doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-08.md`). Stage-4
 rebuild/redeploy with the fixed runtime is still required for the deployed binary to pick up
 dict growth.
+

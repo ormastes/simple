@@ -1,0 +1,152 @@
+# Bounded SHT_GROUP decoder over LLVM readobj Sections+SectionData+Symbols.
+# LLVM JSON emits duplicate "Group" object keys for multiple groups, so this
+# codec deliberately ignores --section-groups output and decodes exact bytes.
+use std.common.json.parser.json_parse
+use std.common.json.object_ops.json_object_get
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_number, json_to_string}
+
+pub const PARSER_LLVM_GROUP_MAX_SECTIONS_V1: i64 = 4096
+pub const PARSER_LLVM_GROUP_MAX_GROUPS_V1: i64 = 4096
+pub const PARSER_LLVM_GROUP_MAX_MEMBERS_V1: i64 = 65536
+
+pub enum ParserLlvmGroupCodecErrorV1:
+    InvalidJson
+    SchemaMismatch
+    WrongObject
+    ResourceLimit
+    InvalidSection
+    InvalidSymbol
+    InvalidGroup
+
+pub struct ParserLlvmSectionGroupV1:
+    group_section_index: i64
+    symbol_table_section_index: i64
+    signature_symbol_index: i64
+    signature: text
+    comdat: bool
+    member_section_indices: [i64]
+
+pub struct ParserLlvmGroupProjectionV1:
+    groups: [ParserLlvmSectionGroupV1]
+    grouped_executable_section_indices: [i64]
+
+fn _field_lrg(value: any, key: text) -> any?:
+    if json_get_type(value) != "object": return nil
+    json_object_get(value, key)
+fn _required_lrg(value: any, key: text) -> Result<any, ParserLlvmGroupCodecErrorV1>:
+    val found = _field_lrg(value, key)
+    if found == nil: return Err(ParserLlvmGroupCodecErrorV1.SchemaMismatch)
+    Ok(found.unwrap())
+fn _text_value_lrg(value: any) -> text?:
+    if json_get_type(value) != "string": return nil
+    json_to_string(value)
+fn _int_value_lrg(value: any) -> i64?:
+    if json_get_type(value) != "number": return nil
+    val raw = json_to_number(value)
+    if raw == nil: return nil
+    val number = raw as f64; val integer = number as i64
+    if integer as f64 == number: integer else: nil
+fn _text_lrg(value: any, key: text) -> Result<text, ParserLlvmGroupCodecErrorV1>:
+    val parsed = _text_value_lrg(_required_lrg(value, key)?)
+    if parsed == nil: return Err(ParserLlvmGroupCodecErrorV1.SchemaMismatch)
+    Ok(parsed.unwrap())
+fn _int_lrg(value: any, key: text) -> Result<i64, ParserLlvmGroupCodecErrorV1>:
+    val parsed = _int_value_lrg(_required_lrg(value, key)?)
+    if parsed == nil: return Err(ParserLlvmGroupCodecErrorV1.SchemaMismatch)
+    Ok(parsed.unwrap())
+fn _named_text_lrg(value: any, key: text) -> Result<text, ParserLlvmGroupCodecErrorV1>:
+    _text_lrg(_required_lrg(value, key)?, "Name")
+fn _named_int_lrg(value: any, key: text) -> Result<i64, ParserLlvmGroupCodecErrorV1>:
+    _int_lrg(_required_lrg(value, key)?, "Value")
+fn _array_len_lrg(value: any) -> i64:
+    if json_get_type(value) == "array": json_array_length(value) else: -1
+fn _has_lrg(values: [i64], wanted: i64) -> bool:
+    for value in values:
+        if value == wanted: return true
+    false
+fn _word_lrg(bytes: [i64], at: i64) -> i64:
+    bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24)
+
+pub fn parser_llvm_readobj_groups_decode_v1(json: text, expected_file_label: text
+) -> Result<ParserLlvmGroupProjectionV1, ParserLlvmGroupCodecErrorV1>:
+    val parsed = json_parse(json)
+    if parsed == nil: return Err(ParserLlvmGroupCodecErrorV1.InvalidJson)
+    if _array_len_lrg(parsed) != 1: return Err(ParserLlvmGroupCodecErrorV1.SchemaMismatch)
+    val root = json_array_get(parsed, 0)
+    val summary = _required_lrg(root, "FileSummary")?
+    if (_text_lrg(summary, "File")? != expected_file_label or
+        _text_lrg(summary, "Format")? != "elf64-x86-64" or
+        _text_lrg(summary, "Arch")? != "x86_64"):
+        return Err(ParserLlvmGroupCodecErrorV1.WrongObject)
+    val wrapped_sections = _required_lrg(root, "Sections")?
+    val section_count = _array_len_lrg(wrapped_sections)
+    if section_count <= 0 or section_count > PARSER_LLVM_GROUP_MAX_SECTIONS_V1:
+        return Err(ParserLlvmGroupCodecErrorV1.ResourceLimit)
+    var kinds: [text] = []; var flags: [i64] = []; var links: [i64] = []
+    var infos: [i64] = []; var group_bytes: [[i64]] = []
+    for position in 0..section_count:
+        val section = _required_lrg(json_array_get(wrapped_sections, position), "Section")?
+        if _int_lrg(section, "Index")? != position:
+            return Err(ParserLlvmGroupCodecErrorV1.InvalidSection)
+        val kind = _named_text_lrg(section, "Type")?
+        val section_size = _int_lrg(section, "Size")?
+        if section_size < 0: return Err(ParserLlvmGroupCodecErrorV1.InvalidSection)
+        kinds.push(kind); links.push(_int_lrg(section, "Link")?); infos.push(_int_lrg(section, "Info")?)
+        val flag_record = _required_lrg(section, "Flags")?
+        flags.push(_int_lrg(flag_record, "Value")?)
+        var bytes: [i64] = []
+        if kind == "SHT_GROUP":
+            val data = _required_lrg(section, "SectionData")?
+            if _int_lrg(data, "Offset")? != 0: return Err(ParserLlvmGroupCodecErrorV1.InvalidGroup)
+            val raw = _required_lrg(data, "Bytes")?
+            val count = _array_len_lrg(raw)
+            if count != section_size or count < 8 or count & 3 != 0 or
+               count / 4 > PARSER_LLVM_GROUP_MAX_MEMBERS_V1 + 1:
+                return Err(ParserLlvmGroupCodecErrorV1.InvalidGroup)
+            for i in 0..count:
+                val byte = _int_value_lrg(json_array_get(raw, i))
+                if byte == nil or byte.unwrap() < 0 or byte.unwrap() > 255:
+                    return Err(ParserLlvmGroupCodecErrorV1.InvalidGroup)
+                bytes.push(byte.unwrap())
+        group_bytes.push(bytes)
+    var symtab_count = 0; var symtab_index = -1
+    for index in 0..section_count:
+        if kinds[index] == "SHT_SYMTAB": symtab_count = symtab_count + 1; symtab_index = index
+    if symtab_count != 1: return Err(ParserLlvmGroupCodecErrorV1.InvalidSymbol)
+    val wrapped_symbols = _required_lrg(root, "Symbols")?
+    val symbol_count = _array_len_lrg(wrapped_symbols)
+    if symbol_count <= 0: return Err(ParserLlvmGroupCodecErrorV1.InvalidSymbol)
+    var symbol_names: [text] = []
+    for index in 0..symbol_count:
+        val symbol = _required_lrg(json_array_get(wrapped_symbols, index), "Symbol")?
+        symbol_names.push(_named_text_lrg(symbol, "Name")?)
+
+    var groups: [ParserLlvmSectionGroupV1] = []
+    var grouped_exec: [i64] = []
+    for index in 0..section_count:
+        if kinds[index] == "SHT_GROUP":
+            if groups.len() >= PARSER_LLVM_GROUP_MAX_GROUPS_V1 or links[index] != symtab_index or
+                infos[index] <= 0 or infos[index] >= symbol_names.len() or symbol_names[infos[index]] == "":
+                return Err(ParserLlvmGroupCodecErrorV1.InvalidGroup)
+            val bytes = group_bytes[index]
+            val group_flag = _word_lrg(bytes, 0)
+            if group_flag != 0 and group_flag != 1:
+                return Err(ParserLlvmGroupCodecErrorV1.InvalidGroup)
+            var members: [i64] = []
+            var at = 4
+            while at < bytes.len():
+                val member = _word_lrg(bytes, at)
+                if member <= 0 or member >= section_count or member == index or _has_lrg(members, member):
+                    return Err(ParserLlvmGroupCodecErrorV1.InvalidGroup)
+                members.push(member)
+                if flags[member] & 4 != 0:
+                    if _has_lrg(grouped_exec, member): return Err(ParserLlvmGroupCodecErrorV1.InvalidGroup)
+                    grouped_exec.push(member)
+                at = at + 4
+            groups.push(ParserLlvmSectionGroupV1(group_section_index: index,
+                symbol_table_section_index: links[index], signature_symbol_index: infos[index],
+                signature: symbol_names[infos[index]], comdat: group_flag == 1,
+                member_section_indices: members))
+    Ok(ParserLlvmGroupProjectionV1(groups: groups,
+        grouped_executable_section_indices: grouped_exec))

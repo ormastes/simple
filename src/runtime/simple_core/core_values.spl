@@ -11,14 +11,20 @@ extern fn rt_enum_id(value: i64) -> i64
 extern fn rt_enum_payload(value: i64) -> i64
 @unsafe(reason: "raw libc zeroed allocation ABI; contract: zero sentinel means failure", capabilities: [ffi, raw_ptr])
 extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw libc owned allocation release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
 @unsafe(reason: "raw pointer i64 load ABI; contract: caller establishes alignment and bounds", capabilities: [ffi, raw_ptr])
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
 @unsafe(reason: "raw pointer i64 store ABI; contract: caller establishes alignment and bounds", capabilities: [ffi, raw_ptr])
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
 @unsafe(reason: "raw float bit projection ABI; contract: preserves exact IEEE-754 bits", capabilities: [ffi])
 extern fn spl_f64_to_bits(value: f64) -> i64
+@unsafe(reason: "bit-preserving IEEE-754 reconstruction ABI", capabilities: [ffi])
+extern fn spl_bits_to_f64(bits: i64) -> f64
 @unsafe(reason: "raw process abort ABI; contract: never returns", capabilities: [ffi])
 extern fn abort()
+@unsafe(reason: "raw transient-tracking runtime note ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64
 
 @always_inline
 fn _sffi_core_values_enum_discriminant(value: i64) -> i64:
@@ -56,19 +62,40 @@ fn _sffi_core_values_f64_to_bits(value: f64) -> i64:
         spl_f64_to_bits(value)
 
 @always_inline
+fn _sffi_core_values_bits_to_f64(bits: i64) -> f64:
+    unsafe(capabilities: [ffi]):
+        spl_bits_to_f64(bits)
+
+@always_inline
+fn _sffi_core_values_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        free(ptr)
+
+@always_inline
 fn _sffi_core_values_abort():
     unsafe(capabilities: [ffi]):
         abort()
+
+@always_inline
+fn _sffi_core_values_transient_note(ptr: i64, kind: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_simple_core_transient_note(ptr, kind)
 
 pub fn __simple_runtime_init() -> i64:
     return 0
 
 pub fn __simple_runtime_shutdown() -> i64:
-    return 0
-
-pub fn rt_is_jit_runtime() -> i8:
-    # simple-core is the ahead-of-time bootstrap/runtime capsule.  It never
-    # enters the hosted seed's process-global JIT mode.
+    var index = 0
+    while index < core_values_float_registry_cap:
+        val ptr = _sffi_core_values_load_i64(core_values_float_registry_items, index * 8)
+        if ptr > 0:
+            _sffi_core_values_free(ptr)
+        index = index + 1
+    if core_values_float_registry_items > 0:
+        _sffi_core_values_free(core_values_float_registry_items)
+    core_values_float_registry_items = 0
+    core_values_float_registry_len = 0
+    core_values_float_registry_cap = 0
     return 0
 
 pub fn rt_value_int(value: i64) -> i64:
@@ -103,6 +130,120 @@ pub fn rt_pool_safepoint() -> i64:
     # simple-core bootstrap execution is single-threaded.
     return 0
 
+# Open-addressed membership guard.  Candidate pointers are never dereferenced
+# before membership succeeds, and lookup remains expected O(1) as boxes grow.
+var core_values_float_registry_items: i64 = 0
+var core_values_float_registry_len: i64 = 0
+var core_values_float_registry_cap: i64 = 0
+
+@always_inline
+fn core_values_float_hash(ptr: i64) -> i64:
+    (ptr >> 3) ^ (ptr >> 17) ^ (ptr >> 31)
+
+fn core_values_float_find(ptr: i64) -> bool:
+    val items = core_values_float_registry_items
+    val cap = core_values_float_registry_cap
+    if ptr < 4096 or (ptr & 7) != 0 or items < 1 or cap < 1:
+        return false
+    val mask = cap - 1
+    var index = core_values_float_hash(ptr) & mask
+    var probes = 0
+    while probes < cap:
+        val slot = _sffi_core_values_load_i64(items, index * 8)
+        if slot == 0:
+            return false
+        if slot == ptr:
+            return true
+        index = (index + 1) & mask
+        probes = probes + 1
+    false
+
+fn core_values_float_erase(ptr: i64) -> bool:
+    val items = core_values_float_registry_items
+    val cap = core_values_float_registry_cap
+    if ptr < 4096 or (ptr & 7) != 0 or items < 1 or cap < 1:
+        return false
+    val mask = cap - 1
+    var index = core_values_float_hash(ptr) & mask
+    var probes = 0
+    while probes < cap:
+        val slot = _sffi_core_values_load_i64(items, index * 8)
+        if slot == 0:
+            return false
+        if slot == ptr:
+            # Backward-shift deletion preserves every probe chain without
+            # tombstones. Repeated transient scopes therefore cannot turn
+            # absent-pointer membership checks into full-table scans.
+            var hole = index
+            var scan = (hole + 1) & mask
+            var next = _sffi_core_values_load_i64(items, scan * 8)
+            while next != 0:
+                val home = core_values_float_hash(next) & mask
+                val scan_distance = (scan - home) & mask
+                val hole_distance = (hole - home) & mask
+                if hole_distance < scan_distance:
+                    _sffi_core_values_store_i64(items, hole * 8, next)
+                    hole = scan
+                scan = (scan + 1) & mask
+                next = _sffi_core_values_load_i64(items, scan * 8)
+            _sffi_core_values_store_i64(items, hole * 8, 0)
+            core_values_float_registry_len = core_values_float_registry_len - 1
+            return true
+        index = (index + 1) & mask
+        probes = probes + 1
+    false
+
+fn core_values_float_insert_into(items: i64, cap: i64, ptr: i64) -> bool:
+    val mask = cap - 1
+    var index = core_values_float_hash(ptr) & mask
+    var probes = 0
+    while probes < cap:
+        if _sffi_core_values_load_i64(items, index * 8) == 0:
+            _sffi_core_values_store_i64(items, index * 8, ptr)
+            return true
+        index = (index + 1) & mask
+        probes = probes + 1
+    false
+
+fn core_values_float_rebuild(next_cap: i64) -> bool:
+    if next_cap < 64 or next_cap > 576460752303423488 or (next_cap & (next_cap - 1)) != 0:
+        return false
+    val next_items = _sffi_core_values_calloc(next_cap, 8)
+    if next_items < 1:
+        return false
+    val old_items = core_values_float_registry_items
+    val old_cap = core_values_float_registry_cap
+    var copied = 0
+    var index = 0
+    while index < old_cap:
+        val slot = _sffi_core_values_load_i64(old_items, index * 8)
+        if slot > 0:
+            if not core_values_float_insert_into(next_items, next_cap, slot):
+                _sffi_core_values_free(next_items)
+                return false
+            copied = copied + 1
+        index = index + 1
+    if copied != core_values_float_registry_len:
+        _sffi_core_values_free(next_items)
+        return false
+    core_values_float_registry_items = next_items
+    core_values_float_registry_cap = next_cap
+    if old_items > 0:
+        _sffi_core_values_free(old_items)
+    true
+
+fn core_values_float_register(ptr: i64) -> bool:
+    if core_values_float_registry_cap < 1:
+        if not core_values_float_rebuild(64):
+            return false
+    elif core_values_float_registry_len + 1 > core_values_float_registry_cap / 2:
+        if not core_values_float_rebuild(core_values_float_registry_cap * 2):
+            return false
+    if not core_values_float_insert_into(core_values_float_registry_items, core_values_float_registry_cap, ptr):
+        return false
+    core_values_float_registry_len = core_values_float_registry_len + 1
+    true
+
 pub fn rt_value_float(value: f64) -> i64:
     val raw_bits = _sffi_core_values_f64_to_bits(value)
     val ptr = _sffi_core_values_calloc(1, 16)
@@ -111,7 +252,30 @@ pub fn rt_value_float(value: f64) -> i64:
         return (raw_bits & -8) | 2
     _sffi_core_values_store_i64(ptr, 0, 0x464C5431)
     _sffi_core_values_store_i64(ptr, 8, raw_bits)
+    if not core_values_float_register(ptr):
+        _sffi_core_values_free(ptr)
+        return (raw_bits & -8) | 2
+    if _sffi_core_values_transient_note(ptr, 5) < 0:
+        core_values_float_erase(ptr)
+        _sffi_core_values_free(ptr)
+        return (raw_bits & -8) | 2
     ptr | 1
+
+pub fn float_is_valid(value: i64) -> i64:
+    if (value & 7) != 1:
+        return 0
+    return if core_values_float_find(value & -8): 1 else: 0
+
+pub fn float_reclaim_transient(ptr: i64):
+    if core_values_float_erase(ptr):
+        _sffi_core_values_free(ptr)
+
+pub fn rt_value_as_float(value: i64) -> f64:
+    if (value & 7) == 1:
+        val ptr = value & -8
+        if core_values_float_find(ptr) and (_sffi_core_values_load_i64(ptr, 0) & 4294967295) == 0x464C5431:
+            return _sffi_core_values_bits_to_f64(_sffi_core_values_load_i64(ptr, 8))
+    return _sffi_core_values_bits_to_f64(value & -8)
 
 pub fn rt_value_bool(value: i64) -> i64:
     return ((2 - value) << 3) | 3
@@ -127,7 +291,18 @@ pub fn rt_is_none(value: i64) -> i8:
         return 1
     if _sffi_core_values_enum_id(value) != 1:
         return 0
-    return if _sffi_core_values_enum_discriminant(value) == 1: 1 else: 0
+    # Both reference twins -- rt_is_none in src/runtime/runtime_native.c
+    # (`discriminant == 1 || discriminant == RT_DISC_NONE`) and the Rust
+    # runtime's objects.rs rt_is_none (`== 1 || == hash_variant_discriminant
+    # ("None")`) -- accept the legacy HASHED None discriminant alongside the
+    # positional one. This twin accepted only the positional 1, so a boxed
+    # None built by a hashed-discriminant producer read as SOME here and as
+    # NONE on the C/Rust lanes -- and rt_unwrap_or_trap five lines below
+    # already knew the hashed form, which is precisely the "`.?` says present,
+    # `unwrap()` yields nil" split. 2371748697 is hash("None"), the same
+    # constant that function uses.
+    val discriminant = _sffi_core_values_enum_discriminant(value)
+    return if discriminant == 1 or discriminant == 2371748697: 1 else: 0
 
 pub fn rt_unwrap_or_self(value: i64) -> i64:
     # Only the canonical Option (enum_id 1, Some=0/None=1) unwraps here.
@@ -165,3 +340,12 @@ pub fn rt_unwrap_or_trap(value: i64) -> i64:
 pub fn rt_enum_check_discriminant(value: i64, expected: i64) -> i8:
     val discriminant = _sffi_core_values_enum_discriminant(value)
     return if discriminant < expected or discriminant > expected: 0 else: 1
+
+pub fn rt_enum_check_variant(value: i64, expected_enum_id: i64, expected_discriminant: i64) -> i8:
+    val actual_discriminant = _sffi_core_values_enum_discriminant(value)
+    if actual_discriminant != expected_discriminant:
+        return 0
+    val actual_enum_id = rt_enum_id(value)
+    if actual_enum_id < 0:
+        return 0
+    return if expected_enum_id == 0 or actual_enum_id == 0 or actual_enum_id == expected_enum_id: 1 else: 0

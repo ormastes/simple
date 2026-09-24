@@ -5,10 +5,15 @@ use std::process::Command;
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let src = PathBuf::from("src/io/term/nat/term_native.c");
+    // Cargo build scripts run for HOST, so cfg!(target_*) would select the
+    // host ABI during a Windows cross-target build. These variables describe
+    // the crate TARGET and are the only valid Windows ABI authority here.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target OS not set");
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
-    let lib_name = if cfg!(target_os = "macos") {
+    let lib_name = if target_os == "macos" {
         "libterm_native.dylib"
-    } else if cfg!(target_os = "windows") {
+    } else if target_os == "windows" {
         "term_native.dll"
     } else {
         "libterm_native.so"
@@ -17,7 +22,7 @@ fn main() {
     let lib_path = out_dir.join(lib_name);
 
     // Compile the C source into a shared library using platform-appropriate flags.
-    let status = if cfg!(target_os = "macos") {
+    let status = if target_os == "macos" {
         // macOS: -dynamiclib instead of -shared, -fPIC is default
         Command::new("cc")
             .args([
@@ -28,8 +33,10 @@ fn main() {
             ])
             .status()
             .expect("failed to run cc")
-    } else if cfg!(target_os = "windows") {
-        // Windows: try cl.exe (MSVC) first, fall back to gcc (MinGW).
+    } else if target_os == "windows" {
+        // Windows bootstrap is Clang-only. The MSVC lane uses clang-cl and the
+        // GNU lane uses target-qualified clang. Both lanes stay on their
+        // admitted C driver.
         //
         // The cl.exe attempt used to be a bare `Command::new("cl.exe")`, which
         // only works when the invoking shell already has cl.exe on PATH with
@@ -39,7 +46,7 @@ fn main() {
         // separately-and-correctly-configured `cc::Build` environment doesn't
         // carry over to a different build script's process). PROVED
         // 2026-08-09: in a plain git-bash session, `where cl.exe` finds
-        // nothing, so the bare Command silently fell through to the gcc
+        // nothing, so the bare Command silently fell through to an ambient
         // fallback — which then ALSO failed silently (RC=1, zero stdout/
         // stderr) because this host's MSYS2 mingw64 `cc1.exe` turned out to
         // be non-functional independent of anything in this repo (`cc1.exe
@@ -60,37 +67,45 @@ fn main() {
         // mutates the fingerprinted seed-input tree mid-build, so the
         // --full-bootstrap post-cargo fingerprint check aborts with "Rust
         // inputs changed during full bootstrap". Keep the object in OUT_DIR.
-        let obj_path = out_dir.join("term_native.obj");
         let tool = cc::Build::new().opt_level(2).get_compiler();
-        let cl_result = tool
-            .to_command()
-            .args([
-                "/LD",
-                "/nologo",
-                src.to_str().expect("path utf8"),
-                // cl.exe and clang-cl spell attached output paths as /FePATH
-                // and /FoPATH. A colon is not a separator: `/Fo:C:/...`
-                // asks clang-cl to create a file literally beginning `:C:`.
-                &format!("/Fe{}", lib_path.to_str().expect("path utf8")),
-                &format!("/Fo{}", obj_path.to_str().expect("path utf8")),
-            ])
-            .status();
-
-        match cl_result {
-            Ok(s) if s.success() => s,
-            _ => {
-                // Fall back to MinGW gcc (kept for a non-MSVC Windows
-                // toolchain; not relied on as the primary path above).
-                Command::new("gcc")
-                    .args([
-                        "-shared",
-                        src.to_str().expect("path utf8"),
-                        "-o",
-                        lib_path.to_str().expect("path utf8"),
-                    ])
-                    .status()
-                    .expect("failed to run gcc (MinGW) after cl.exe also failed")
+        let compiler_name = tool
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if target_env == "msvc" {
+            if compiler_name != "clang-cl" && compiler_name != "clang-cl.exe" {
+                panic!("Windows MSVC bootstrap requires clang-cl, got {compiler_name}");
             }
+            let obj_path = out_dir.join("term_native.obj");
+            tool.to_command()
+                .args([
+                    "/LD",
+                    "/nologo",
+                    src.to_str().expect("path utf8"),
+                    // clang-cl spells attached output paths as /FePATH and
+                    // /FoPATH. A colon would create a literal `:C:` file.
+                    &format!("/Fe{}", lib_path.to_str().expect("path utf8")),
+                    &format!("/Fo{}", obj_path.to_str().expect("path utf8")),
+                ])
+                .status()
+                .expect("failed to run clang-cl")
+        } else if target_env == "gnu" {
+            if compiler_name != "clang" && compiler_name != "clang.exe" {
+                panic!("Windows GNU bootstrap requires clang, got {compiler_name}");
+            }
+            tool.to_command()
+                .args([
+                    "--target=x86_64-w64-windows-gnu",
+                    "-shared",
+                    src.to_str().expect("path utf8"),
+                    "-o",
+                    lib_path.to_str().expect("path utf8"),
+                ])
+                .status()
+                .expect("failed to run target-qualified clang")
+        } else {
+            panic!("unsupported Windows target environment {target_env}")
         }
     } else {
         // Linux, FreeBSD, and other Unix: cc -shared -fPIC

@@ -1,4 +1,5 @@
 use std.common.crypto.sha256 (sha256_text)
+use std.common.encoding.sha256_contract (sha256_lower_hex_valid)
 
 pub struct CheckpointSlotV1:
     generation: i64
@@ -11,6 +12,23 @@ pub struct CheckpointSelectionV1:
     present: bool
     slot: CheckpointSlotV1?
 
+pub enum CheckpointSelectionStateV1:
+    Empty
+    Selected(CheckpointSlotV1)
+    Conflict
+    Invalid
+
+pub enum CheckpointPublishErrorV1:
+    InvalidCatalogDigest
+    ConflictingGeneration
+    InvalidExistingSlots
+    GenerationExhausted
+
+pub enum L78CheckpointResolutionV4:
+    NotStarted
+    Selected
+    Unknown
+
 fn _slot_checksum_v1(generation: i64, journal_bytes: i64, journal_digest: text,
                      catalog_digest: text) -> text:
     sha256_text("simple.cache.checkpoint.v1\u0000{generation}\u0000{journal_bytes}\u0000{journal_digest}\u0000{catalog_digest}")
@@ -22,9 +40,23 @@ pub fn checkpoint_slot_v1(generation: i64, journal_bytes: i64, journal_digest: t
         checksum: _slot_checksum_v1(generation, journal_bytes, journal_digest, catalog_digest))
 
 pub fn checkpoint_slot_valid_v1(slot: CheckpointSlotV1, actual_journal: text) -> bool:
-    slot.generation >= 0 and slot.journal_bytes >= 0 and slot.journal_bytes <= actual_journal.len() and
-        slot.checksum == _slot_checksum_v1(slot.generation, slot.journal_bytes, slot.journal_digest, slot.catalog_digest) and
-        slot.journal_digest == sha256_text(actual_journal.slice(0, slot.journal_bytes))
+    if slot.generation < 0 or slot.journal_bytes < 0 or slot.journal_bytes > actual_journal.len():
+        return false
+    if not sha256_lower_hex_valid(slot.journal_digest) or
+       not sha256_lower_hex_valid(slot.catalog_digest) or
+       not sha256_lower_hex_valid(slot.checksum):
+        return false
+    if slot.checksum != _slot_checksum_v1(slot.generation, slot.journal_bytes,
+                                          slot.journal_digest, slot.catalog_digest):
+        return false
+    slot.journal_digest == sha256_text(actual_journal.slice(0, slot.journal_bytes))
+
+fn _slot_identity_equal_v1(a: CheckpointSlotV1, b: CheckpointSlotV1) -> bool:
+    a.generation == b.generation and
+        a.journal_bytes == b.journal_bytes and
+        a.journal_digest == b.journal_digest and
+        a.catalog_digest == b.catalog_digest and
+        a.checksum == b.checksum
 
 pub class CheckpointSuperblockV1:
     slot_a: CheckpointSlotV1?
@@ -33,20 +65,76 @@ pub class CheckpointSuperblockV1:
     static fn empty() -> CheckpointSuperblockV1:
         CheckpointSuperblockV1(slot_a: nil, slot_b: nil)
 
-    me publish(journal: text, catalog_digest: text) -> CheckpointSlotV1:
-        val current = self.select(journal)
-        val generation = if current.present: current.slot?.generation + 1 else: 0
-        val slot = checkpoint_slot_v1(generation, journal.len(), sha256_text(journal), catalog_digest)
-        if generation % 2 == 0: slot_a = Some(slot) else: slot_b = Some(slot)
-        slot
-
-    me select(journal: text) -> CheckpointSelectionV1:
+    fn select_checked(journal: text) -> CheckpointSelectionStateV1:
         val a_valid = if val a = self.slot_a: checkpoint_slot_valid_v1(a, journal) else: false
         val b_valid = if val b = self.slot_b: checkpoint_slot_valid_v1(b, journal) else: false
         if a_valid and b_valid:
-            if self.slot_a?.generation >= self.slot_b?.generation:
-                return CheckpointSelectionV1(present: true, slot: self.slot_a)
-            return CheckpointSelectionV1(present: true, slot: self.slot_b)
-        if a_valid: return CheckpointSelectionV1(present: true, slot: self.slot_a)
-        if b_valid: return CheckpointSelectionV1(present: true, slot: self.slot_b)
-        CheckpointSelectionV1(present: false, slot: nil)
+            val a = self.slot_a?
+            val b = self.slot_b?
+            if a.generation == b.generation:
+                if not _slot_identity_equal_v1(a, b):
+                    return CheckpointSelectionStateV1.Conflict
+                return CheckpointSelectionStateV1.Selected(a)
+            if a.generation > b.generation:
+                return CheckpointSelectionStateV1.Selected(a)
+            return CheckpointSelectionStateV1.Selected(b)
+        if a_valid: return CheckpointSelectionStateV1.Selected(self.slot_a?)
+        if b_valid: return CheckpointSelectionStateV1.Selected(self.slot_b?)
+        if self.slot_a == nil and self.slot_b == nil:
+            return CheckpointSelectionStateV1.Empty
+        CheckpointSelectionStateV1.Invalid
+
+    # Read-only compatibility projection.  Conflict and invalid storage are
+    # deliberately indistinguishable from absence to legacy readers; writers
+    # must use select_checked so neither state can reset the generation.
+    fn select(journal: text) -> CheckpointSelectionV1:
+        match self.select_checked(journal):
+            case CheckpointSelectionStateV1.Selected(slot):
+                CheckpointSelectionV1(present: true, slot: Some(slot))
+            case _:
+                CheckpointSelectionV1(present: false, slot: nil)
+
+    me publish(journal: text, catalog_digest: text) -> Result<CheckpointSlotV1, CheckpointPublishErrorV1>:
+        if not sha256_lower_hex_valid(catalog_digest):
+            return Err(CheckpointPublishErrorV1.InvalidCatalogDigest)
+
+        match self.select_checked(journal):
+            case CheckpointSelectionStateV1.Empty:
+                val slot = checkpoint_slot_v1(0, journal.len(), sha256_text(journal), catalog_digest)
+                self.slot_a = Some(slot)
+                Ok(slot)
+            case CheckpointSelectionStateV1.Conflict:
+                Err(CheckpointPublishErrorV1.ConflictingGeneration)
+            case CheckpointSelectionStateV1.Invalid:
+                Err(CheckpointPublishErrorV1.InvalidExistingSlots)
+            case CheckpointSelectionStateV1.Selected(current):
+                if current.generation == 9223372036854775807:
+                    return Err(CheckpointPublishErrorV1.GenerationExhausted)
+
+                val generation = current.generation + 1
+                val slot = checkpoint_slot_v1(generation, journal.len(), sha256_text(journal), catalog_digest)
+
+                # Preserve the selected physical slot and replace its sibling.
+                # If both slots are identical, select_checked deliberately
+                # chooses A, so A is retained here as well.
+                val selected_is_a = if val a = self.slot_a:
+                    checkpoint_slot_valid_v1(a, journal) and _slot_identity_equal_v1(a, current)
+                else:
+                    false
+                if selected_is_a:
+                    self.slot_b = Some(slot)
+                else:
+                    self.slot_a = Some(slot)
+                Ok(slot)
+
+pub fn checkpoint_superblock_resolve_l78_v4(
+    superblock: CheckpointSuperblockV1,
+    journal: text,
+) -> L78CheckpointResolutionV4:
+    match superblock.select_checked(journal):
+        # A copied/empty superblock is not proof that publication never
+        # started; the complete root/writer/in-flight evidence is unavailable.
+        case CheckpointSelectionStateV1.Empty: L78CheckpointResolutionV4.Unknown
+        case CheckpointSelectionStateV1.Selected(_): L78CheckpointResolutionV4.Selected
+        case CheckpointSelectionStateV1.Conflict: L78CheckpointResolutionV4.Unknown
+        case CheckpointSelectionStateV1.Invalid: L78CheckpointResolutionV4.Unknown

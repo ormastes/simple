@@ -9,7 +9,7 @@
 #     High surrogate: 0xD800 + ((cp - 0x10000) >> 10)
 #     Low surrogate:  0xDC00 + ((cp - 0x10000) & 0x3FF)
 
-use std.common.encoding.utf8.{utf8_encode_one, utf8_decode_all}
+use std.common.encoding.utf8.{utf8_decode_all}
 
 # ============================================================================
 # UTF-16 encode codepoint
@@ -165,16 +165,47 @@ fn utf16_from_bytes_be(bytes: [i64]) -> [i64]:
 
 fn utf16_to_utf8(units: [i64]) -> [i64]:
     """Convert UTF-16 code units to UTF-8 byte array."""
-    val codepoints = utf16_decode_all(units)
+    # Single pass: decode and encode without materializing a code-point array,
+    # and without the per-code-unit [codepoint, consumed] array that calling
+    # utf16_decode_one would allocate. The decode branches below mirror
+    # utf16_decode_one exactly; utf16_decode_all stays the differential oracle.
     var result: [i64] = []
+    val n = units.len()
     var i: i64 = 0
-    while i < codepoints.len():
-        val encoded = utf8_encode_one(codepoints[i])
-        var j: i64 = 0
-        while j < encoded.len():
-            result.push(encoded[j])
-            j = j + 1
-        i = i + 1
+    while i < n:
+        val raw0 = units[i]
+        var codepoint: i64 = 0xFFFD
+        var consumed: i64 = 1
+        if raw0 >= 0 and raw0 <= 0xFFFF:
+            if raw0 >= 0xD800 and raw0 <= 0xDBFF:
+                # High surrogate: pair it only with a well-formed low surrogate.
+                if i + 1 < n:
+                    val raw1 = units[i + 1]
+                    if raw1 >= 0xDC00 and raw1 <= 0xDFFF:
+                        codepoint = 0x10000 + ((raw0 - 0xD800) << 10) + (raw1 - 0xDC00)
+                        consumed = 2
+            elif raw0 < 0xDC00 or raw0 > 0xDFFF:
+                # Not a surrogate at all; lone low surrogates stay U+FFFD.
+                codepoint = raw0
+        # `codepoint` is always a valid scalar here (BMP non-surrogate, U+FFFD,
+        # or a decoded pair), so these branches are utf8_encode_one's valid arms
+        # written out — appending straight into `result` instead of allocating a
+        # 1..4-element array per code point.
+        if codepoint < 0x80:
+            result.push(codepoint)
+        elif codepoint < 0x800:
+            result.push(0xC0 | (codepoint >> 6))
+            result.push(0x80 | (codepoint & 0x3F))
+        elif codepoint < 0x10000:
+            result.push(0xE0 | (codepoint >> 12))
+            result.push(0x80 | ((codepoint >> 6) & 0x3F))
+            result.push(0x80 | (codepoint & 0x3F))
+        else:
+            result.push(0xF0 | (codepoint >> 18))
+            result.push(0x80 | ((codepoint >> 12) & 0x3F))
+            result.push(0x80 | ((codepoint >> 6) & 0x3F))
+            result.push(0x80 | (codepoint & 0x3F))
+        i = i + consumed
     result
 
 fn utf8_to_utf16(bytes: [i64]) -> [i64]:

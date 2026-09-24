@@ -1,4 +1,9 @@
 # Bootstrap Parser Rejects Nested Else Comparison
+## Closed 2026-09-16 — FIXED AND CLEARED IN FULL BOOTSTRAP; focused parser PASS and strict retry evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -66,3 +71,4 @@ valid `ce result:` expression block.
 
 The strict full-bootstrap evidence confirms the source fix. Do not replace the
 valid source condition with a workaround.
+

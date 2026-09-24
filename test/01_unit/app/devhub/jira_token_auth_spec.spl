@@ -1,0 +1,41 @@
+# @cover src/app/devhub/auth.spl
+# @cover src/app/devhub/adapter_jira_curl.spl
+#
+# "Token present -> no login" rule and Data Center vs Cloud request shapes.
+# Pure functions only — never contacts Jira.
+
+use app.devhub.auth.{atlassian_token_ready}
+use app.devhub.adapter_jira_curl.{JiraClient, _jira_rich_text}
+use app.devhub.atlassian_site.{AtlassianSite, jira_rest_root, jira_search_url}
+
+
+fn client_for(deployment: text) -> JiraClient:
+    JiraClient(base_url: "https://jira.corp:8443/jira", email: "", api_token: "pat", curl_path: "curl", deployment: deployment, auth_scheme: "bearer")
+
+
+describe "jira token auth":
+
+    context "atlassian_token_ready":
+
+        it "bearer PAT with url needs no user":
+            expect(atlassian_token_ready("https://jira.corp/jira", "pat", "bearer", "")).to_equal(true)
+
+        it "basic needs a user/email":
+            expect(atlassian_token_ready("https://x.atlassian.net", "tok", "basic", "")).to_equal(false)
+            expect(atlassian_token_ready("https://x.atlassian.net", "tok", "basic", "me@x.com")).to_equal(true)
+
+        it "no token means not ready (login path)":
+            expect(atlassian_token_ready("https://x.atlassian.net", "", "bearer", "me@x.com")).to_equal(false)
+
+    context "deployment shapes":
+
+        it "datacenter uses REST v2 with a context path and port":
+            val site = AtlassianSite.create("https://jira.corp:8443/jira", "datacenter")
+            expect(jira_rest_root(site)).to_equal("https://jira.corp:8443/jira/rest/api/2")
+            expect(jira_search_url(site)).to_equal("https://jira.corp:8443/jira/rest/api/2/search")
+
+        it "datacenter rich text is a plain JSON string":
+            expect(_jira_rich_text(client_for("datacenter"), "hello")).to_equal("\"hello\"")
+
+        it "cloud rich text is an ADF document":
+            expect(_jira_rich_text(client_for("cloud"), "hello").contains("\"type\":\"doc\"")).to_equal(true)

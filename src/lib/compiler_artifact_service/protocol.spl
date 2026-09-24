@@ -1,0 +1,80 @@
+use std.common.crypto.sha256.{sha256_text}
+
+enum ArtifactFrameStreamV1:
+    stdout
+    stderr
+    diagnostic
+
+struct ArtifactResultFrameV1:
+    action_id: text
+    sequence: i64
+    stream: ArtifactFrameStreamV1
+    payload: text
+    payload_digest: text
+
+struct ArtifactResultV1:
+    action_id: text
+    compatibility_id: text
+    snapshot_revision: text
+    cas_artifact_digest: text
+    frames: [ArtifactResultFrameV1]
+    success: bool
+    cancelled: bool
+    error_code: text
+
+fn artifact_frame_stream_name_v1(stream: ArtifactFrameStreamV1) -> text:
+    match stream:
+        ArtifactFrameStreamV1.stdout: "stdout"
+        ArtifactFrameStreamV1.stderr: "stderr"
+        ArtifactFrameStreamV1.diagnostic: "diagnostic"
+
+fn artifact_result_frame_v1(
+    action_id: text, sequence: i64, stream: ArtifactFrameStreamV1, payload: text
+) -> ArtifactResultFrameV1:
+    ArtifactResultFrameV1(
+        action_id, sequence, stream, payload,
+        sha256_text(["simple-artifact-frame-v1", action_id, sequence.to_text(),
+            artifact_frame_stream_name_v1(stream), payload].join("|")))
+
+fn artifact_result_validate_v1(result: ArtifactResultV1, frame_budget_bytes: i64) -> text:
+    if result.action_id == "" or result.compatibility_id == "" or result.snapshot_revision == "":
+        return "result-identity-missing"
+    if result.success and result.cancelled:
+        return "result-state-invalid"
+    if result.success and result.cas_artifact_digest == "":
+        return "cas-authority-missing"
+    if result.success and result.error_code != "":
+        return "result-error-invalid"
+    if not result.success and not result.cancelled and result.error_code == "":
+        return "result-error-missing"
+    var expected_sequence: i64 = 0
+    var bytes: i64 = 0
+    for frame in result.frames:
+        if frame.action_id != result.action_id or frame.sequence != expected_sequence:
+            return "frame-order-invalid"
+        val expected_digest = artifact_result_frame_v1(
+            frame.action_id, frame.sequence, frame.stream, frame.payload).payload_digest
+        if frame.payload_digest != expected_digest:
+            return "frame-digest-mismatch"
+        bytes = bytes + frame.payload.len()
+        if bytes > frame_budget_bytes:
+            return "frame-budget-exceeded"
+        expected_sequence = expected_sequence + 1
+    "ok"
+
+fn artifact_result_digest_v1(result: ArtifactResultV1, frame_budget_bytes: i64) -> text:
+    if artifact_result_validate_v1(result, frame_budget_bytes) != "ok":
+        return ""
+    var frame_digests: [text] = []
+    for frame in result.frames:
+        frame_digests = frame_digests.push(frame.payload_digest)
+    sha256_text([
+        "simple-artifact-result-v1", result.action_id, result.compatibility_id,
+        result.snapshot_revision, result.cas_artifact_digest,
+        result.success.to_text(), result.cancelled.to_text(), result.error_code,
+        frame_digests.join(","),
+    ].join("|"))
+
+export ArtifactFrameStreamV1, ArtifactResultFrameV1, ArtifactResultV1
+export artifact_frame_stream_name_v1, artifact_result_frame_v1
+export artifact_result_validate_v1, artifact_result_digest_v1

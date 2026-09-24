@@ -194,8 +194,9 @@ pub fn boxed_return_functions(items: &[Node]) -> HashSet<String> {
 /// would regress them); scalars and floats keep their historical raw-i64 unbox
 /// (f64 remains a separate, pre-existing gap). An optional inherits the ABI of
 /// its inner value: `text?` must retain a boxed `Some(text)`, while `i64?`
-/// keeps the historical scalar representation. Generics remain a future
-/// extension until each has a verified round-trip.
+/// keeps the historical scalar representation. `Option<T>` and `Result<T, E>`
+/// are boxed enum handles at the ABI boundary regardless of payload type; all
+/// other generic/named handles retain their historical raw-i64 behavior.
 ///
 /// `Type::Array` was the missing arm behind
 /// `doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`:
@@ -215,6 +216,7 @@ fn return_type_keeps_boxed(ty: &Type) -> bool {
         // `Type::Array`, and all of them marshal to a heap runtime array.
         Type::Array { .. } => true,
         Type::Simple(name) => matches!(name.as_str(), "text" | "str" | "string" | "String" | "Str"),
+        Type::Generic { name, .. } => matches!(name.as_str(), "Option" | "Result"),
         Type::Optional(inner) => return_type_keeps_boxed(inner),
         Type::Capability { inner, .. } => return_type_keeps_boxed(inner),
         _ => false,
@@ -401,9 +403,37 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             analyze_block(&ctx_stmt.body, reasons, mode);
             add_reason(reasons, FallbackReason::ContextBlock);
         }
-        Node::Function(_) => {
-            // Nested function definitions
-            add_reason(reasons, FallbackReason::Closure);
+        Node::Function(f) => {
+            // A nested function definition is lowered as a local closure
+            // binding (`hir/lower/stmt_lowering.rs`, `Node::Function`), so it is
+            // the same construct as the `Expr::Lambda` arm below -- which is
+            // deliberately NOT flagged, for the reason stated in its comment:
+            // closures lower through MIR `ClosureCreate` and a blanket fallback
+            // here "prevents valid native code from being emitted at all".
+            //
+            // Flagging every nested fn was correct while lowering dropped them.
+            // It no longer is, and the inconsistency was measurable: a capturing
+            // lambda compiled to standalone SMF while the byte-equivalent nested
+            // fn was refused with `outer: [Closure]`.
+            //
+            // The body still decides on its own merits -- an interpreter-only
+            // construct INSIDE the nested fn must still flag the enclosing
+            // function, or it would be admitted to an artifact that cannot fall
+            // back to an interpreter.
+            analyze_block(&f.body, reasons, mode);
+
+            // Self-recursion is the one shape lowering still leaves on the
+            // interpreter path: HIR closures have no letrec, so the fn's own
+            // name is unbound inside the converted body. On the JIT lane that
+            // costs a module drop; in a standalone artifact there is nothing to
+            // drop TO, so it must stay flagged. Same predicate as the lowering
+            // guard, computed with the same scope-aware collector.
+            let mut bound: Vec<String> = Vec::new();
+            let mut free_reads = HashSet::new();
+            crate::hir::lower::expr::control::collect_identifiers_function(f, &mut bound, &mut free_reads);
+            if free_reads.contains(&f.name) {
+                add_reason(reasons, FallbackReason::Closure);
+            }
         }
         // Definitions in blocks are not typical, skip for now
         _ => {}
@@ -1134,6 +1164,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generic_option_and_result_extern_returns_keep_their_enum_handles_boxed() {
+        let source = "extern fn maybe_text() -> Option<text>\n\
+                      extern fn maybe_i64() -> Option<i64>\n\
+                      extern fn maybe_nested() -> Option<Result<text, i64>>\n\
+                      extern fn result_value() -> Result<Option<text>, text>\n\
+                      extern fn generic_handle() -> Box<text>\n\
+                      extern fn class_handle() -> Socket\n";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse generic extern declarations");
+        let boxed = boxed_return_functions(&module.items);
+
+        assert!(boxed.contains("maybe_text"));
+        assert!(boxed.contains("maybe_i64"), "Option<i64> is an enum handle, not a raw scalar");
+        assert!(boxed.contains("maybe_nested"));
+        assert!(boxed.contains("result_value"));
+        assert!(!boxed.contains("generic_handle"));
+        assert!(!boxed.contains("class_handle"));
+    }
+
     // Regression test for the seed cranelift Dict-return ABI miscompile
     // (doc/08_tracking/bug/s59_cranelift_dict_return_abi_root_cause_2026-07-17.md,
     // doc/08_tracking/bug/seed_native_cranelift_dict_return_abi_2026-07-17.md).
@@ -1487,6 +1537,58 @@ fn run_one() -> i64:
         assert!(
             status.reasons().contains(&FallbackReason::AsyncAwait),
             "fallback subtree was skipped: {:?}",
+            status.reasons()
+        );
+    }
+
+    /// A nested `fn` is lowered as a local closure binding, exactly like a
+    /// lambda -- so it must be classified exactly like one. Until 2026-09-19
+    /// this arm flagged EVERY nested fn, which was correct while lowering
+    /// dropped them and wrong afterwards: a capturing lambda compiled to
+    /// standalone SMF while the byte-equivalent nested fn was refused with
+    /// `outer: [Closure]`.
+    #[test]
+    fn test_non_recursive_nested_fn_is_not_interpreter_only() {
+        let source = "fn outer() -> i64:\n    val k = 5\n    fn at(a: i64) -> i64:\n        a + k\n    return at(37)\n";
+        let results = parse_and_analyze_aot(source);
+        let status = results.get("outer").unwrap();
+        assert!(
+            status.is_compilable(),
+            "a nested fn lowers to the same closure a lambda does: {:?}",
+            status.reasons()
+        );
+    }
+
+    /// The one shape lowering still leaves on the interpreter path: HIR closures
+    /// have no letrec, so a self-recursive nested fn's own name is unbound
+    /// inside the converted body. A standalone artifact has no interpreter to
+    /// fall back to, so this MUST stay flagged. If letrec ever lands, this test
+    /// is the thing that says so.
+    #[test]
+    fn test_self_recursive_nested_fn_stays_interpreter_only() {
+        let source = "fn outer() -> i64:\n    fn fact(n: i64) -> i64:\n        if n <= 1:\n            return 1\n        return n * fact(n - 1)\n    return fact(4)\n";
+        let results = parse_and_analyze_aot(source);
+        let status = results.get("outer").unwrap();
+        assert!(
+            status.reasons().contains(&FallbackReason::Closure),
+            "a self-recursive nested fn has no letrec and must not reach a standalone artifact: {:?}",
+            status.reasons()
+        );
+    }
+
+    /// The nested fn's body still decides on its own merits. Flagging the fn
+    /// wholesale used to mask this; now that it does not, an interpreter-only
+    /// construct INSIDE the nested fn must still flag the enclosing function,
+    /// or it would be admitted to an artifact that cannot fall back.
+    #[test]
+    fn test_nested_fn_body_constructs_still_flag_the_enclosing_function() {
+        let source =
+            "fn helper() -> i64:\n    return 1\n\nfn outer() -> i64:\n    fn inner() -> i64:\n        return await helper()\n    return inner()\n";
+        let results = parse_and_analyze_aot(source);
+        let status = results.get("outer").unwrap();
+        assert!(
+            status.reasons().contains(&FallbackReason::AsyncAwait),
+            "the nested fn's body subtree was skipped: {:?}",
             status.reasons()
         );
     }

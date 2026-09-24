@@ -1,4 +1,8 @@
 # `std.common.units.engine` and `std.common.units.generators` do not exist — two specs cannot load
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
 - Status: OPEN (unimplemented feature, not a regression in the specs)
@@ -70,3 +74,4 @@ Unblock condition: implement the two modules above under
 `src/lib/common/units/generators/world_units_importers.spl`.
 
 ## No seed (Rust) change is required.
+

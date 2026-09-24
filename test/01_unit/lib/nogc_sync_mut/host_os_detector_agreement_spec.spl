@@ -1,0 +1,45 @@
+use std.spec
+use std.io_runtime.{host_os, platform_name}
+use std.platform.{host_os as platform_host_os}
+use std.nogc_sync_mut.env.platform.{detect_os, is_windows}
+use std.sffi.platform.{platform_name_raw}
+
+# doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md
+#
+# Four independent PRs (#941, #944, #945, #947) each found
+# std.nogc_sync_mut.env.platform.detect_os() answering "not Windows" while
+# std.io_runtime.host_os() answered "windows" correctly, in the SAME process,
+# on a real Windows host, inside the Stage 2 bootstrap sanity harness's
+# in-process native-build. The traced root cause was FIVE independently
+# declared `extern fn rt_platform_name` signatures (some `-> text`, some
+# `-> text?`) across std.sffi.platform, std.nogc_sync_mut.io_runtime,
+# std.nogc_sync_mut.fs.host_path, std.nogc_sync_mut.env.types and std.sys.pty
+# -- the same "co-compiled definitions with differing signatures" class of
+# defect this compiler already warns about for `file_read_text_at`, where a
+# JIT call site can dispatch to the wrong definition. All call sites were
+# consolidated onto the single declaration in std.sffi.platform.
+#
+# This spec pins the invariant the fix restores: every host-OS detector in
+# the tree must agree with every other one, in-process, everywhere (not just
+# on Windows -- the POSIX branches were left byte-identical by the fix, so
+# this must also hold on Linux/macOS/BSD).
+describe "host OS detectors agree with each other":
+    it "agrees across every public host-OS resolver":
+        val a = host_os()
+        val b = platform_host_os()
+        val c = detect_os()
+        val raw = platform_name_raw()
+
+        expect(a).to_equal(b)
+        expect(a).to_equal(c)
+
+        # platform_name_raw()/platform_name() report a compiled-in primitive
+        # that collapses every BSD to "unix" and only ever answers one of
+        # windows/macos/linux/unix -- so it only needs to AGREE with the
+        # richer detectors when it names windows/macos/linux specifically.
+        if raw == "windows" or raw == "macos" or raw == "linux":
+            expect(a).to_equal(raw)
+            expect(platform_name()).to_equal(raw)
+
+        # is_windows() must be consistent with host_os() == "windows".
+        expect(is_windows()).to_equal(a == "windows")

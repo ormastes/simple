@@ -1,4 +1,9 @@
 # Compiled checker expression/primary parser gaps
+## Closed 2026-09-16 — Status fixed in owned scope; 9/10 rows cleared, focused probe compiles 52 modules
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: **fixed in owned scope**
 - Claimed by: `stage4_expr_batch`
@@ -47,3 +52,4 @@ zero. It covers exact, adjacent, malformed, and recovery cases while asserting
 the rich bridge shapes for `UnaryOp.Deref`, `BinOp.Is`, `BinOp.BitXor`, and
 `ExprKind.CustomBlock(kind, BlockValue.Raw(payload))`. The permanent coverage
 is `test/01_unit/compiler/parser/expression_primary_parity_spec.spl`.
+

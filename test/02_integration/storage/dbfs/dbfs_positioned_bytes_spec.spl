@@ -25,6 +25,10 @@ use std.spec.step
 
 use std.spipe.*
 use std.db.dbfs_driver.{DbFsDriver}
+use nogc_sync_mut.db.dbfs_driver.dbfs_driver.{_dbfs_inodes}
+use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
+    dbfs_owner_transaction_begin, dbfs_owner_transaction_end
+}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.mem_block_device.{MemBlockDevice}
@@ -64,6 +68,17 @@ fn open_positioned_fixture(path: text) -> (DbFsDriver, FileHandle):
     val handle = driver.open_path(
         Path(raw: path), OpenFlags.read_write().with_create()).unwrap()
     (driver, handle)
+
+fn _inode_generation(inst_id: i64, inode_id: u64) -> Option<u64>:
+    if not dbfs_owner_transaction_begin():
+        return None
+    var found: Option<u64> = None
+    for inode in _dbfs_inodes:
+        if inode.inst_id == inst_id and inode.id == inode_id:
+            found = Some(inode.content_generation)
+    if not dbfs_owner_transaction_end():
+        return None
+    found
 
 describe "DBFS binary positioned I/O":
     # @manual scenario evidence
@@ -214,7 +229,7 @@ describe "DBFS binary positioned I/O":
     it "rolls back inode publication when the namespace commit fails":
         # @req REQ-SSPEC-INTEGRATION
         step("rolls back inode publication when the namespace commit fails")
-        val dev = NamespaceCommitFailBlockDevice.new(64u64, 19u64)
+        val dev = NamespaceCommitFailBlockDevice.new(64u64, 18u64)
         val driver = DbFsDriver.open_on_device(dev, 16i64, 4i64).unwrap()
         val path = Path(raw: "/dbfs-commit-failure.bin")
         val handle = driver.open_path(
@@ -222,9 +237,9 @@ describe "DBFS binary positioned I/O":
         driver.write_bytes_handle(handle, [0x51u8, 0x52u8]).unwrap()
 
         step("Inject a failure at the namespace publication boundary")
-        expect(driver.pwrite_bytes_handle(
-            handle, 1, [0x99u8]).unwrap_err()).to_equal(
-                FsError.IoError(code: 0))
+        val failed = driver.pwrite_bytes_handle(handle, 1, [0x99u8])
+        expect(_dbfs_namespace_write_count).to_equal(3)
+        expect(failed.unwrap_err()).to_equal(FsError.IoError(code: 0))
 
         step("Retain the prior in-memory and durable inode image")
         expect(driver.stat_path(path).unwrap().size).to_equal(2)  # oracle: pinned constant asserted by this scenario
@@ -236,3 +251,32 @@ describe "DBFS binary positioned I/O":
         expect(replayed.stat_path(path).unwrap().size).to_equal(2)  # oracle: pinned constant asserted by this scenario
         expect(replayed.pread_bytes_handle(
             replayed_handle, 0, 4).unwrap()).to_equal([0x51u8, 0x52u8])
+
+    # @req REQ-SSPEC-INTEGRATION
+    it "keeps content generation across metadata changes and a failed write":
+        step("Create a device-backed inode at generation one")
+        val dev = NamespaceCommitFailBlockDevice.new(64u64, 18u64)
+        val driver = DbFsDriver.open_on_device(dev, 16i64, 4i64).unwrap()
+        val handle = driver.open_path(
+            Path(raw: "/generation.bin"), OpenFlags.read_write().with_create()).unwrap()
+        val inode_id = driver.fstat(handle).unwrap().inode
+        expect(_inode_generation(driver.inst_id, inode_id).unwrap()).to_equal(1u64)
+
+        step("Content mutation advances generation once")
+        driver.write_bytes_handle(handle, [0x41u8]).unwrap()
+        expect(_inode_generation(driver.inst_id, inode_id).unwrap()).to_equal(2u64)
+
+        step("A failed namespace commit restores the prior generation and bytes")
+        val failed = driver.pwrite_bytes_handle(handle, 0, [0x42u8])
+        expect(_dbfs_namespace_write_count).to_equal(3)
+        expect(failed.unwrap_err()).to_equal(FsError.IoError(code: 0))
+        expect(_inode_generation(driver.inst_id, inode_id).unwrap()).to_equal(2u64)
+        expect(driver.pread_bytes_handle(handle, 0, 1).unwrap()).to_equal([0x41u8])
+
+        step("Rename and unlink change metadata without changing content generation")
+        driver.rename_path("/generation.bin", "/renamed.bin").unwrap()
+        expect(_inode_generation(driver.inst_id, inode_id).unwrap()).to_equal(2u64)
+        driver.unlink_path("/renamed.bin").unwrap()
+        expect(_inode_generation(driver.inst_id, inode_id).unwrap()).to_equal(2u64)
+        expect(driver.stat_path(Path(raw: "/renamed.bin")).is_err()).to_equal(true)
+        expect(driver.pread_bytes_handle(handle, 0, 1).unwrap()).to_equal([0x41u8])

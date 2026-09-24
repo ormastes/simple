@@ -83,3 +83,10 @@ and the unblock condition: `generator_async_runtime_module_fails_to_parse_2026-0
 The mirror's header comment was rewritten to state the real (transitive)
 reason rather than the original incorrect diagnosis. Both legs re-verified
 byte-identical at `Results: 33 total, 33 passed, 0 failed`.
+
+## Triage 2026-09-13
+
+Test-only dedup (spec shadows real GeneratorState product enum with
+different variants) -- cleanup task across a 531-line spec, not a
+functional defect. Leaving OPEN, out of this lane's per-item scope.
+

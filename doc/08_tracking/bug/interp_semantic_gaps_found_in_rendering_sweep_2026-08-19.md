@@ -1,4 +1,8 @@
 # Interpreter/semantic gaps found during rendering sanitize sweep (2026-08-19)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Three concrete product gaps surfaced while sanitizing
 `test/02_integration/rendering/`; each was worked around in-lane, but the
@@ -38,3 +42,4 @@ path into an absolute `/src/...` and making all three tests fail with empty
 file reads. Either `env_get` should return nil for an unset variable, or the
 quick-reference should warn that `??` cannot be used with it. Workaround:
 explicit empty-string guard in the spec.
+

@@ -1,4 +1,8 @@
 # SimpleOS freestanding: text.split() ABI mismatch faults inside parse_html
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-12 · **Status:** OPEN — split-ABI runtime bug FIXED (2026-07-13);
 harness still blocked by a DEEPER, distinct codegen bug (see "Verified 2026-07-13").
@@ -175,3 +179,4 @@ real PPM bytes reproducibly before any PASS claim. Do NOT re-assert 4K PASS on a
 - The generic `text.split()` ABI disagreement between hosted and freestanding runtimes is the
   real defect; the `_html_split_on_lt` workaround dodges it at one call site. A runtime-level
   fix (make `split` return the same representation in both lanes) would be the durable cure.
+

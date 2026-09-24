@@ -1,4 +1,8 @@
 # `me` (receiver) reported as an unresolved NAME in class methods during stage-4 lowering
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed (residual 20 — see Remaining)
 **Found:** 2026-07-27 (RISC-V hardening campaign, Lane H — stage-4 full-CLI bootstrap)
@@ -155,3 +159,4 @@ adding `SIMPLE_BOOTSTRAP_DIAG=1`.
 - `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` (Lane H)
 - `native_me_receiver_no_mutate` — duplicate-receiver defect site referenced
   by the fix's non-regression argument
+

@@ -1,4 +1,8 @@
 # Native-build tool rejects --version as a missing entry
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed in the frozen Phase-4 worktree; rebuilt-tool verification pending.
 **Observed:** 2026-08-15.
@@ -17,3 +21,4 @@ prints the shared `bootstrap_version()` identity. The source contract test
 locks ordering and both spellings. No fallback or fake entry is introduced.
 
 Provider token usage and comparable completed-bug average: unavailable.
+

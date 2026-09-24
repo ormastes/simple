@@ -1,4 +1,8 @@
 # `rt_*` runtime symbol census (Windows host) — 2026-08-30
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Read-only measured census of every `rt_*` runtime symbol: DECLARED/referenced
 from Simple, DEFINED in the C runtime, DEFINED in the Rust runtime crate.
@@ -1737,4 +1741,5 @@ ronly   = set(rns) - set(cns)      # 1454
 neither = ref - set(cns) - set(rns)  # 1114   <-- the critical bucket
 unref   = (set(cns) | set(rns)) - ref  # 1425
 ```
+
 

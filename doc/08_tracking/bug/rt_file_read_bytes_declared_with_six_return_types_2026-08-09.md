@@ -234,3 +234,19 @@ declarations converge on `[u8]`.
 (First attempt at this run exited `rc=2` with a zero-byte log — the resource
 slot wrapper never launched it. That is UNVERIFIED, not a failure; the numbers
 above come from the retry.)
+
+## Triage 2026-09-13
+
+Already extensively converged by prior lanes (6 return types -> 4,
+guard spec correctly RED on the remainder: test/01_unit/compiler/extern/
+rt_file_read_bytes_single_extern_signature_spec.spl, 6/7 passing). The
+remaining 4 non-[u8] declaration sites span src/lib/nogc_sync_mut/io/
+file_ops.spl (only partially in this lane's primary-file scope) plus
+sfm/container.spl and io/telnet_serial_bridge.spl outside it, each with
+deliberate caller-side rationale (i64-element indexing, SFFI hazard
+avoidance) documented against converging blind. The 2026-08-17 note
+explicitly warns that converging only the in-scope sites would be
+"strictly worse than the status quo" -- this needs one cross-cutting
+change with the whole caller set in view, which exceeds this lane's
+per-item budget. Guard spec left RED as designed. Leaving OPEN.
+

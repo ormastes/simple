@@ -1,4 +1,8 @@
 # `.?` on Option returns the payload object, not bool — both engines
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28
 **Severity:** medium (silent wrong values through `-> bool` functions)
@@ -46,3 +50,4 @@ coercion/diagnosis. Audit other `-> bool` functions returning `.?`:
 `grep -rn "^\s*\w*\.\?\s*$" src/ --include=*.spl` (last-expression position).
 Related family: JIT `Option<i64>=3 reads as None`, `Some(i64)` payload shift — Option
 representation quirks cluster; this one is engine-agnostic.
+

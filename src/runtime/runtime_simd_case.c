@@ -10,6 +10,27 @@
 #include "runtime_simd_dispatch.h"
 #include <stdlib.h>
 
+/* MSVC portability for the GCC/Clang attributes this file uses.
+ *
+ * - target(): MSVC has no per-function ISA attribute. On x64 SSE2 is baseline
+ *   and AVX2 intrinsics compile unconditionally, so dropping it is correct;
+ *   which kernel actually RUNS is still decided by the runtime dispatch table,
+ *   not by the attribute.
+ * - unused: MSVC does not warn about an unreferenced static inline, so there
+ *   is nothing to suppress.
+ * The predicate is the COMPILER, not the platform: clang targeting
+ * *-pc-windows-msvc defines _MSC_VER but supports both attributes, so gating
+ * on _MSC_VER alone would silently drop them there. GCC and Clang keep the
+ * real attributes byte for byte on every target. */
+#if defined(__GNUC__) || defined(__clang__)
+#define RT_SIMD_TARGET(feature) __attribute__((target(feature)))
+#define RT_SIMD_UNUSED __attribute__((unused))
+#else
+#define RT_SIMD_TARGET(feature)
+#define RT_SIMD_UNUSED
+#endif
+
+
 /* x86 intrinsics — guarded by platform macro */
 #if SIMD_HAS_X86
 #  include <immintrin.h>
@@ -24,14 +45,14 @@
  * Reserved-Field ASCII Cache Helpers
  * ================================================================ */
 
-__attribute__((unused)) static inline void cache_ascii_flag(RtCoreStringSimd* s, int is_ascii) {
+RT_SIMD_UNUSED static inline void cache_ascii_flag(RtCoreStringSimd* s, int is_ascii) {
     if (!s) return;
     if (is_ascii)
         s->reserved |= SIMD_CACHE_FLAG_IS_ASCII;
     /* Non-ASCII: don't cache (positive-only flag per spec) */
 }
 
-__attribute__((unused)) static inline int cached_ascii_flag(const RtCoreStringSimd* s) {
+RT_SIMD_UNUSED static inline int cached_ascii_flag(const RtCoreStringSimd* s) {
     if (!s) return -1;
     if (s->reserved & SIMD_CACHE_FLAG_IS_ASCII) return 1;
     return -1; /* unknown (could be ASCII or not) */
@@ -74,7 +95,7 @@ static void scalar_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len
 
 #if SIMD_HAS_SSE2
 
-__attribute__((target("sse2")))
+RT_SIMD_TARGET("sse2")
 static int sse2_is_ascii(const uint8_t* data, uint64_t len) {
     uint64_t i = 0;
     /* Process 16 bytes at a time */
@@ -90,7 +111,7 @@ static int sse2_is_ascii(const uint8_t* data, uint64_t len) {
     return 1;
 }
 
-__attribute__((target("sse2")))
+RT_SIMD_TARGET("sse2")
 static void sse2_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
     uint64_t i = 0;
     const __m128i lower_bound = _mm_set1_epi8('A' - 1);   /* 64 */
@@ -116,7 +137,7 @@ static void sse2_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) 
     }
 }
 
-__attribute__((target("sse2")))
+RT_SIMD_TARGET("sse2")
 static void sse2_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
     uint64_t i = 0;
     const __m128i lower_bound = _mm_set1_epi8('a' - 1);   /* 96 */
@@ -156,7 +177,7 @@ static void sse2_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) 
 
 #if SIMD_CAN_AVX2
 
-__attribute__((target("avx2")))
+RT_SIMD_TARGET("avx2")
 static int avx2_is_ascii(const uint8_t* data, uint64_t len) {
     uint64_t i = 0;
     /* Process 32 bytes at a time */
@@ -178,7 +199,7 @@ static int avx2_is_ascii(const uint8_t* data, uint64_t len) {
     return 1;
 }
 
-__attribute__((target("avx2")))
+RT_SIMD_TARGET("avx2")
 static void avx2_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
     uint64_t i = 0;
     const __m256i lower_bound = _mm256_set1_epi8('A' - 1);
@@ -204,7 +225,7 @@ static void avx2_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) 
     }
 }
 
-__attribute__((target("avx2")))
+RT_SIMD_TARGET("avx2")
 static void avx2_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
     uint64_t i = 0;
     const __m256i lower_bound = _mm256_set1_epi8('a' - 1);
@@ -309,8 +330,22 @@ static void neon_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) 
  * Dispatch Slot Upgrade — called via constructor to wire best kernels
  * ================================================================ */
 
+#if defined(__GNUC__) || defined(__clang__)
 __attribute__((constructor(200)))
 static void simd_case_init(void) {
+#elif defined(_MSC_VER)
+/* Same .CRT$XCU idiom runtime_native.c already uses for its Windows stdio
+ * constructor: MSVC has no constructor attribute, so the initializer is
+ * registered by placing a pointer to it in the C run-time initializer
+ * section. GCC/Clang keep the priority-200 attribute unchanged. */
+#pragma section(".CRT$XCU", read)
+static void __cdecl simd_case_init(void);
+__declspec(allocate(".CRT$XCU"))
+void (__cdecl *simd_case_init_ptr)(void) = simd_case_init;
+static void __cdecl simd_case_init(void) {
+#else
+#error "no constructor mechanism for this compiler"
+#endif
     /* Ensure base dispatch table is initialized first */
     simd_text_init();
 

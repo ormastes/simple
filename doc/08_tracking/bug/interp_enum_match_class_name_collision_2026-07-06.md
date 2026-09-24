@@ -1,4 +1,8 @@
 # Interpreter: enum-variant match returns nil when a class shares the variant name (closure-dependent)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-06
 - **Area:** interpreter (self-hosted deployed binary, interpret mode)
@@ -68,3 +72,4 @@ distinct `Logger` classes exist (`js_error`, `browser_engine/shared/logging`,
 load-order dependent. Workaround used in probes: avoid importing `app.io.mod`
 into graphs that load the JS engine (raw `rt_file_read_text` extern instead).
 Real fix should make interpreter class resolution module-scoped.
+

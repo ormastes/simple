@@ -1,10 +1,7 @@
 # Compatibility JIT instantiator surface for interpreter/test runner.
 
 use std.env.{env_get_or}
-
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable, file_write_exact}
 
 class JitInstantiatorConfig:
     update_smf: bool
@@ -87,8 +84,15 @@ fn _global_get(symbol: text) -> MappedRecord?:
 
 fn _global_remove(symbol: text):
     if _g_records.has(symbol):
-        _g_records = _g_records.remove(symbol)
-
+        # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+        # natively (rt_dict_remove); assigning it back destroys the map on the
+        # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+        # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+        var _kept_g_records: Dict<text, MappedRecord> = {}
+        for _k in _g_records.keys():
+            if _k != symbol:
+                _kept_g_records[_k] = _g_records[_k]
+        _g_records = _kept_g_records
 fn _jit_key_list_contains(keys: [text], key: text) -> bool:
     for item in keys:
         if item == key:
@@ -154,6 +158,8 @@ class JitInstantiator:
     in_progress: [text]
     depth: i64
     compile_count: i64
+    cached_count: i64
+    loaded_smf_count: i64
 
     static fn new(config: JitInstantiatorConfig) -> JitInstantiator:
         JitInstantiator(
@@ -166,27 +172,33 @@ class JitInstantiator:
             loaded_metadata: {},
             in_progress: [],
             depth: 0,
-            compile_count: 0
+            compile_count: 0,
+            cached_count: 0,
+            loaded_smf_count: 0
         )
 
     fn stats() -> JitStats:
         JitStats(
-            cached_count: self.jit_cache.keys().len() as i64,
+            cached_count: self.jit_cache.keys().len(),
             compile_count: self.compile_count,
-            loaded_smf_count: self.loaded_metadata.keys().len() as i64
+            loaded_smf_count: self.loaded_smf_count
         )
 
     me load_smf_metadata(path: text) -> Result<(), text>:
+        if not self.loaded_metadata.has(path):
+            self.loaded_smf_count = self.loaded_smf_count + 1
         self.loaded_metadata[path] = _load_metadata_from_disk(path)
         Ok(())
 
     me set_metadata_for_test(path: text, metadata: LoadedMetadata):
+        if not self.loaded_metadata.has(path):
+            self.loaded_smf_count = self.loaded_smf_count + 1
         self.loaded_metadata[path] = metadata
 
     fn can_jit_instantiate(symbol: text) -> bool:
         if not self.config.enabled:
             return false
-        self.find_possible(symbol).?
+        self.find_possible(symbol) != nil
 
     fn find_possible(symbol: text) -> (text, PossibleInstantiation)?:
         for path in self.loaded_metadata.keys():
@@ -212,6 +224,8 @@ class JitInstantiator:
         if val mapped_record = rec:
             if mapped_record != nil:
                 owner = mapped_record.owner_id
+        if not self.jit_cache.has(name):
+            self.cached_count = self.cached_count + 1
         self.jit_cache[name] = JitCacheRecord(code: code, address: addr, owner: owner)
 
     me set_smf_semantic_keys(path: text, keys: [text]):
@@ -231,12 +245,37 @@ class JitInstantiator:
 
     me drop_cached_symbol(name: text):
         if self.jit_cache.has(name):
-            self.jit_cache = self.jit_cache.remove(name)
+            # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+            # natively (rt_dict_remove); assigning it back destroys the map on the
+            # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+            # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+            var _kept_self_jit_cache: Dict<text, JitCacheRecord> = {}
+            for _k in self.jit_cache.keys():
+                if _k != name:
+                    _kept_self_jit_cache[_k] = self.jit_cache[_k]
+            self.jit_cache = _kept_self_jit_cache
+            self.cached_count = self.cached_count - 1
         if self.jit_semantic_keys.has(name):
-            self.jit_semantic_keys = self.jit_semantic_keys.remove(name)
+            # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+            # natively (rt_dict_remove); assigning it back destroys the map on the
+            # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+            # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+            var _kept_self_jit_semantic_keys: Dict<text, [text]> = {}
+            for _k in self.jit_semantic_keys.keys():
+                if _k != name:
+                    _kept_self_jit_semantic_keys[_k] = self.jit_semantic_keys[_k]
+            self.jit_semantic_keys = _kept_self_jit_semantic_keys
         _global_remove(name)
         if self.exec_mapper.records.has(name):
-            self.exec_mapper.records = self.exec_mapper.records.remove(name)
+            # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+            # natively (rt_dict_remove); assigning it back destroys the map on the
+            # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+            # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+            var _kept_self_exec_mapper_records: Dict = {}
+            for _k in self.exec_mapper.records.keys():
+                if _k != name:
+                    _kept_self_exec_mapper_records[_k] = self.exec_mapper.records[_k]
+            self.exec_mapper.records = _kept_self_exec_mapper_records
         var kept_syms: [text] = []
         var kept_owners: [text] = []
         var kept_addrs: [i64] = []
@@ -295,6 +334,8 @@ class JitInstantiator:
             path
         _global_set(name, owner_id, address)
         self.exec_mapper.set_record(name, owner_id, address)
+        if not self.jit_cache.has(name):
+            self.cached_count = self.cached_count + 1
         self.jit_cache[name] = JitCacheRecord(code: compiled, address: address, owner: owner_id)
         if self.smf_semantic_keys.has(path):
             self.jit_semantic_keys[name] = self.smf_semantic_keys[path]
@@ -338,7 +379,7 @@ class JitInstantiator:
         metadata.possible = remaining
         metadata.instantiations.push(inst)
         self.loaded_metadata[path] = metadata
-        val persisted = rt_file_write_text(_metadata_sidecar_path(path), _metadata_to_text(metadata))
+        val persisted = file_write_exact(_metadata_sidecar_path(path), _metadata_to_text(metadata))
         if not persisted:
             return Err("failed to persist JIT metadata for " + path)
         Ok(())
@@ -409,8 +450,8 @@ fn _metadata_sidecar_path(path: text) -> text:
 
 fn _load_metadata_from_disk(path: text) -> LoadedMetadata:
     val sidecar = _metadata_sidecar_path(path)
-    if rt_file_exists(sidecar):
-        val content = rt_file_read_text(sidecar) ?? ""
+    if file_exists(sidecar):
+        val content = file_read_nullable(sidecar) ?? ""
         return _metadata_from_text(content)
     LoadedMetadata(possible: [], instantiations: [])
 

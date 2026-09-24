@@ -1,4 +1,8 @@
 # `match` arm naming a `val` constant lowers as an irrefutable capture
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-20):** OPEN. Worked around at every known call site; no root
 fix yet. Distinct from `native_const_pattern_lowers_irrefutably_2026-07-13.md`
@@ -114,3 +118,4 @@ reachable. Until then the `==`/`elif` workaround in
 carries the row "leaves a capitalized arm on a NON-enum scrutinee a binder",
 which asserts today's (wrong) behaviour explicitly and names this record. A
 const-resolution fix must flip that row on purpose.
+

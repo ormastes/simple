@@ -1,0 +1,183 @@
+#!/bin/sh
+# Central storage-root authority for shell orchestration producers.
+
+storage_roots_die() {
+    echo "storage-roots: $*" >&2
+    return 2
+}
+
+storage_roots_canonical_dir() {
+    _sr_path=$1
+    mkdir -p "$_sr_path" || return 1
+    (CDPATH= cd -- "$_sr_path" 2>/dev/null && pwd -P)
+}
+
+storage_roots_digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+storage_roots_validate_root() {
+    _sr_root=$1
+    _sr_repo=$2
+    case "$_sr_root" in
+        ""|/|"$HOME"|"$_sr_repo") return 1 ;;
+        /*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+storage_roots_ensure_marker() {
+    _sr_root=$1
+    _sr_kind=$2
+    _sr_marker="$_sr_root/.simple-storage-root-v1"
+    _sr_digest=$(storage_roots_digest "simple-storage-root-v1
+$_sr_root") || return 1
+    _sr_expected="magic=simple-storage-root-v1
+root_kind=$_sr_kind
+canonical_root_digest=$_sr_digest
+policy_version=1"
+    if [ -e "$_sr_marker" ]; then
+        [ -f "$_sr_marker" ] &&
+            grep -Fqx 'magic=simple-storage-root-v1' "$_sr_marker" &&
+            grep -Fqx "root_kind=$_sr_kind" "$_sr_marker" &&
+            grep -Fqx "canonical_root_digest=$_sr_digest" "$_sr_marker" &&
+            grep -Fqx 'policy_version=1' "$_sr_marker"
+        return
+    fi
+    _sr_tmp="$_sr_marker.new.$$"
+    (umask 077
+        printf '%s\ncreated_at=%s\ncreator_build_digest=shell-orchestration-v1\ncleanup_classes=ephemeral,managed-worktree\n' \
+            "$_sr_expected" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$_sr_tmp") || return 1
+    if (set -C; : >"$_sr_marker") 2>/dev/null; then
+        cat "$_sr_tmp" >"$_sr_marker" || { rm -f "$_sr_tmp" "$_sr_marker"; return 1; }
+        rm -f "$_sr_tmp"
+    else
+        rm -f "$_sr_tmp"
+        storage_roots_ensure_marker "$_sr_root" "$_sr_kind"
+    fi
+}
+
+storage_roots_repair_darwin_case_marker() {
+    _sr_canonical=$1
+    _sr_requested=$2
+    _sr_kind=$3
+    [ "$(uname -s 2>/dev/null || echo unknown)" = Darwin ] || return 0
+    [ "$_sr_canonical" != "$_sr_requested" ] || return 0
+    [ "$(printf '%s' "$_sr_canonical" | tr '[:upper:]' '[:lower:]')" = \
+      "$(printf '%s' "$_sr_requested" | tr '[:upper:]' '[:lower:]')" ] || return 0
+    _sr_marker="$_sr_canonical/.simple-storage-root-v1"
+    [ -f "$_sr_marker" ] && [ ! -L "$_sr_marker" ] || return 0
+    _sr_legacy_digest=$(storage_roots_digest "simple-storage-root-v1
+$_sr_requested") || return 1
+    grep -Fqx 'magic=simple-storage-root-v1' "$_sr_marker" &&
+        grep -Fqx "root_kind=$_sr_kind" "$_sr_marker" &&
+        grep -Fqx "canonical_root_digest=$_sr_legacy_digest" "$_sr_marker" &&
+        grep -Fqx 'policy_version=1' "$_sr_marker" || return 0
+    _sr_canonical_digest=$(storage_roots_digest "simple-storage-root-v1
+$_sr_canonical") || return 1
+    _sr_repaired="$_sr_marker.case-repair.$$"
+    sed "s/^canonical_root_digest=$_sr_legacy_digest$/canonical_root_digest=$_sr_canonical_digest/" \
+        "$_sr_marker" >"$_sr_repaired" || return 1
+    mv -f "$_sr_repaired" "$_sr_marker"
+}
+
+storage_roots_init() {
+    _sr_repo=${STORAGE_ROOTS_REPO_ROOT:-}
+    if [ -z "$_sr_repo" ]; then
+        _sr_repo=$(git rev-parse --show-toplevel 2>/dev/null) || return 2
+    fi
+    _sr_repo=$(CDPATH= cd -- "$_sr_repo" 2>/dev/null && pwd -P) || return 2
+
+    _sr_legacy_user=
+    if [ -n "${SIMPLE_USER_STORAGE_ROOT:-}" ]; then
+        _sr_user=$SIMPLE_USER_STORAGE_ROOT
+    else
+        case "$(uname -s 2>/dev/null || echo unknown)" in
+            Darwin)
+                _sr_user="$HOME/Library/Caches/simple/storage"
+                _sr_legacy_user="$HOME/Library/Caches/Simple/storage"
+                ;;
+            *) _sr_user="${XDG_CACHE_HOME:-$HOME/.cache}/simple/storage" ;;
+        esac
+    fi
+    _sr_worktree=${SIMPLE_WORKTREE_STORAGE_ROOT:-$_sr_repo/.simple/storage}
+    _sr_user_requested=$_sr_user
+    _sr_worktree_requested=$_sr_worktree
+    _sr_user=$(storage_roots_canonical_dir "$_sr_user") || return 2
+    _sr_worktree=$(storage_roots_canonical_dir "$_sr_worktree") || return 2
+    storage_roots_validate_root "$_sr_user" "$_sr_repo" || return 2
+    storage_roots_validate_root "$_sr_worktree" "$_sr_repo" || return 2
+    [ "$_sr_user" != "$_sr_worktree" ] || return 2
+    [ -z "$_sr_legacy_user" ] || \
+        storage_roots_repair_darwin_case_marker "$_sr_user" "$_sr_legacy_user" user || return 2
+    storage_roots_repair_darwin_case_marker "$_sr_user" "$_sr_user_requested" user || return 2
+    storage_roots_repair_darwin_case_marker "$_sr_worktree" "$_sr_worktree_requested" worktree || return 2
+    storage_roots_ensure_marker "$_sr_user" user || return 2
+    storage_roots_ensure_marker "$_sr_worktree" worktree || return 2
+    SIMPLE_USER_STORAGE_ROOT=$_sr_user
+    SIMPLE_WORKTREE_STORAGE_ROOT=$_sr_worktree
+    export SIMPLE_USER_STORAGE_ROOT SIMPLE_WORKTREE_STORAGE_ROOT
+}
+
+storage_roots_safe_segment() {
+    case "$1" in
+        ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+storage_roots_mktemp() {
+    _sr_operation=$1
+    storage_roots_safe_segment "$_sr_operation" || return 2
+    storage_roots_init || return 2
+    _sr_parent="$SIMPLE_WORKTREE_STORAGE_ROOT/tmp/$_sr_operation"
+    mkdir -p "$_sr_parent" || return 2
+    mktemp -d "$_sr_parent/run.XXXXXXXX"
+}
+
+storage_roots_user_path() {
+    _sr_class=$1
+    _sr_owner=$2
+    storage_roots_safe_segment "$_sr_class" || return 2
+    storage_roots_safe_segment "$_sr_owner" || return 2
+    storage_roots_init || return 2
+    printf '%s/%s/%s\n' "$SIMPLE_USER_STORAGE_ROOT" "$_sr_class" "$_sr_owner"
+}
+
+storage_roots_acquire_lease() {
+    _sr_dir=$1
+    _sr_owner=$2
+    case "$_sr_dir" in
+        "$SIMPLE_USER_STORAGE_ROOT"/*|"$SIMPLE_WORKTREE_STORAGE_ROOT"/*) ;;
+        *) return 2 ;;
+    esac
+    mkdir -p "$_sr_dir" || return 2
+    _sr_lease="$_sr_dir/.simple-live-lease.$_sr_owner"
+    (umask 077; set -C; printf 'pid=%s\n' "$$" >"$_sr_lease") 2>/dev/null || return 1
+    printf '%s\n' "$_sr_lease"
+}
+
+storage_roots_release_lease() {
+    _sr_lease=$1
+    case "$_sr_lease" in
+        "$SIMPLE_USER_STORAGE_ROOT"/*/.simple-live-lease.*|"$SIMPLE_WORKTREE_STORAGE_ROOT"/*/.simple-live-lease.*)
+            rm -f -- "$_sr_lease" ;;
+        *) return 2 ;;
+    esac
+}
+
+storage_roots_cleanup_scratch() {
+    _sr_path=$1
+    case "$_sr_path" in
+        "$SIMPLE_WORKTREE_STORAGE_ROOT"/tmp/*/run.*)
+            [ -f "$_sr_path/.simple-live-lease" ] && return 1
+            rm -rf -- "$_sr_path" ;;
+        *) return 2 ;;
+    esac
+}

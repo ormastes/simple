@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence recorded at an orphaned-work recovery landing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-17
 Landed with: `recover(verify): 3 orphaned files from fv2-rebase worktree`
@@ -861,3 +865,4 @@ landing and remain open.
     unit:test_runner/mode_filter_spec.spl
     unit:tools/cat_spec.spl
     unit:tools/simple_os_primary_spec.spl
+

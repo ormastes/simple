@@ -1,4 +1,8 @@
 # `bin/simple test` reports only the LAST failure per example
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** 2026-08-04, while sabotage-verifying the M6 gen-arena lane.
 **Severity:** measurement trap (not a product defect) — it makes sabotage logs
@@ -55,3 +59,4 @@ Related standing traps: bare `assert x == y` in an `it` block is inert (use
 `expect` / `assert_true` / `assert_false`); a persistent test daemon freezes env
 at daemon start (pass `--no-session-daemon`); only the final
 `Results: N total, ...` line is an authoritative verdict.
+

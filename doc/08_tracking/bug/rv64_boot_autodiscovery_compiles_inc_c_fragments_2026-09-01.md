@@ -1,4 +1,8 @@
 # Boot autodiscovery compiles `.inc.c` include-fragments as standalone TUs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed** 2026-09-01 · **Status** OPEN · **Severity** medium
 
@@ -30,3 +34,4 @@ Skip stems ending in `.inc` during boot autodiscovery, and make a genuine `.c`
 TU that fails to compile a hard ERROR rather than a warning -- the current
 policy is what let `freestanding_runtime.c` sit uncompilable indefinitely (see
 `rv64_src_boot_freestanding_runtime_never_compiles_2026-09-01.md`).
+

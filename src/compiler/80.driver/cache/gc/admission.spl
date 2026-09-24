@@ -8,17 +8,12 @@
 # storage-accounting decision only; it never touches identity/trust classes
 # (see cache_protocol.sdn header note on CAS/TRUST/GC_METADATA separation).
 
-@unsafe(reason: "raw cache admission nullable file-size ABI", capabilities: [ffi])
-extern fn rt_file_size(path: text) -> usize?
-@unsafe(reason: "raw cache admission runtime-owned directory-walk ABI", capabilities: [ffi])
-extern fn rt_dir_walk(root: text) -> [text]
-
-use std.io_runtime.{dir_exists, file_exists}
+use std.io_runtime.{dir_exists, dir_walk, file_exists}
 use compiler.driver.cache.metadata.cache_limits.{
     CacheLimits, cache_limits_hard_limit_bytes, cache_limits_min_free_bytes,
 }
 use compiler.driver.cache.cas_store.{cas_blob_path}
-use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable, file_size_signed}
 
 # One direct ABI call per helper after inlining. Pin reads use the canonical
 # nullable owner so unreadable pins remain absent rather than being forged as a
@@ -29,9 +24,8 @@ fn admission_file_exists_raw(path: text) -> bool:
         file_exists(path)
 
 @always_inline
-fn admission_file_size_raw(path: text) -> usize?:
-    unsafe(capabilities: [ffi]):
-        rt_file_size(path)
+fn admission_file_size_raw(path: text) -> i64:
+    file_size_signed(path)
 
 @always_inline
 fn admission_dir_exists_raw(path: text) -> bool:
@@ -40,8 +34,7 @@ fn admission_dir_exists_raw(path: text) -> bool:
 
 @always_inline
 fn admission_dir_walk_raw(root: text) -> [text]:
-    unsafe(capabilities: [ffi]):
-        rt_dir_walk(root)
+    dir_walk(root)
 
 struct AdmissionResult:
     admitted: bool
@@ -59,11 +52,9 @@ fn dir_total_bytes(root: text) -> i64:
     var total: i64 = 0
     for path in admission_dir_walk_raw(root):
         if not admission_dir_exists_raw(path):
-            match admission_file_size_raw(path):
-                case Some(sz):
-                    total = total + sz.to_i64()
-                case nil:
-                    pass_do_nothing
+            val size = admission_file_size_raw(path)
+            if size >= 0:
+                total = total + size
     total
 
 fn cache_total_bytes(root: text) -> i64:
@@ -94,11 +85,9 @@ fn pinned_bytes(root: text) -> i64:
     var total: i64 = 0
     for digest in pins:
         val path = cas_blob_path(root, digest)
-        match admission_file_size_raw(path):
-            case Some(sz):
-                total = total + sz.to_i64()
-            case nil:
-                pass_do_nothing
+        val size = admission_file_size_raw(path)
+        if size >= 0:
+            total = total + size
     total
 
 # Pre-write admission check. write_bytes is the size of the write about to

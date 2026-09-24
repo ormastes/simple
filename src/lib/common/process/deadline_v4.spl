@@ -1,0 +1,131 @@
+"""Pure absolute-deadline reducer for process observation V4.
+
+The host owns clocks and process signals.  This module only reduces already
+captured monotonic instants, so retries (including EINTR) cannot extend a
+request's lifetime.
+"""
+
+pub enum ProcessObservationPhaseV4:
+    Unknown = 0
+    Prepared = 1
+    Running = 2
+    TermRequested = 3
+    KillRequested = 4
+    CleanupPending = 5
+    Terminal = 6
+    Frozen = 7
+    Acknowledged = 8
+    Rejected = 9
+
+pub enum ProcessObservationDeadlineActionV4:
+    Unknown = 0
+    None = 1
+    AttemptTerm = 2
+    AttemptKill = 3
+    AttemptTermAndKill = 4
+    ReportCleanupPending = 5
+
+pub struct ProcessObservationDeadlinesV4:
+    request_started_ns: i64
+    execution_deadline_ns: i64
+    kill_deadline_ns: i64
+    cleanup_deadline_ns: i64
+
+pub struct ProcessObservationDeadlineStateV4:
+    phase: ProcessObservationPhaseV4
+    term_attempted: bool
+    kill_attempted: bool
+    leader_reaped: bool
+    tree_empty: bool
+
+pub struct ProcessObservationDeadlineDecisionV4:
+    phase: ProcessObservationPhaseV4
+    action: ProcessObservationDeadlineActionV4
+
+fn process_observation_checked_add_v4(left: i64, right: i64) -> Result<i64, text>:
+    if left < 0 or right < 0 or left > 9223372036854775807 - right:
+        return Err("process observation V4 deadline overflow")
+    Ok(left + right)
+
+pub fn process_observation_deadlines_v4(
+    request_started_ns: i64,
+    wall_budget_ns: i64,
+    term_grace_ns: i64,
+    cleanup_budget_ns: i64
+) -> Result<ProcessObservationDeadlinesV4, text>:
+    if request_started_ns < 0 or wall_budget_ns <= 0 or term_grace_ns < 0 or cleanup_budget_ns < 0:
+        return Err("process observation V4 requires nonnegative absolute deadline inputs and positive wall budget")
+    val execution = process_observation_checked_add_v4(request_started_ns, wall_budget_ns)?
+    val kill = process_observation_checked_add_v4(execution, term_grace_ns)?
+    val cleanup = process_observation_checked_add_v4(kill, cleanup_budget_ns)?
+    Ok(ProcessObservationDeadlinesV4(
+        request_started_ns: request_started_ns,
+        execution_deadline_ns: execution,
+        kill_deadline_ns: kill,
+        cleanup_deadline_ns: cleanup))
+
+pub fn process_observation_deadline_order_valid_v4(
+    deadlines: ProcessObservationDeadlinesV4
+) -> bool:
+    deadlines.request_started_ns >= 0 and
+        deadlines.execution_deadline_ns >= deadlines.request_started_ns and
+        deadlines.kill_deadline_ns >= deadlines.execution_deadline_ns and
+        deadlines.cleanup_deadline_ns >= deadlines.kill_deadline_ns
+
+pub fn process_observation_reduce_deadline_v4(
+    deadlines: ProcessObservationDeadlinesV4,
+    observed_ns: i64,
+    state: ProcessObservationDeadlineStateV4
+) -> ProcessObservationDeadlineDecisionV4:
+    if not process_observation_deadline_order_valid_v4(deadlines) or observed_ns < deadlines.request_started_ns:
+        return ProcessObservationDeadlineDecisionV4(
+            phase: ProcessObservationPhaseV4.Rejected,
+            action: ProcessObservationDeadlineActionV4.None)
+    if state.phase == ProcessObservationPhaseV4.Frozen or
+            state.phase == ProcessObservationPhaseV4.Acknowledged or
+            state.phase == ProcessObservationPhaseV4.Rejected:
+        return ProcessObservationDeadlineDecisionV4(
+            phase: state.phase, action: ProcessObservationDeadlineActionV4.None)
+    if state.leader_reaped and state.tree_empty:
+        return ProcessObservationDeadlineDecisionV4(
+            phase: ProcessObservationPhaseV4.Terminal,
+            action: ProcessObservationDeadlineActionV4.None)
+    if observed_ns >= deadlines.kill_deadline_ns:
+        # A zero grace period makes TERM and KILL simultaneously due.  They
+        # are one ordered host action and must win over cleanup, even when the
+        # cleanup budget is also zero.
+        if not state.term_attempted and not state.kill_attempted:
+            return ProcessObservationDeadlineDecisionV4(
+                phase: ProcessObservationPhaseV4.KillRequested,
+                action: ProcessObservationDeadlineActionV4.AttemptTermAndKill)
+        if not state.term_attempted:
+            return ProcessObservationDeadlineDecisionV4(
+                phase: ProcessObservationPhaseV4.TermRequested,
+                action: ProcessObservationDeadlineActionV4.AttemptTerm)
+        if not state.kill_attempted:
+            return ProcessObservationDeadlineDecisionV4(
+                phase: ProcessObservationPhaseV4.KillRequested,
+                action: ProcessObservationDeadlineActionV4.AttemptKill)
+        if observed_ns >= deadlines.cleanup_deadline_ns:
+            return ProcessObservationDeadlineDecisionV4(
+                phase: ProcessObservationPhaseV4.CleanupPending,
+                action: ProcessObservationDeadlineActionV4.ReportCleanupPending)
+        return ProcessObservationDeadlineDecisionV4(
+            phase: ProcessObservationPhaseV4.KillRequested,
+            action: ProcessObservationDeadlineActionV4.None)
+    if observed_ns >= deadlines.execution_deadline_ns:
+        return ProcessObservationDeadlineDecisionV4(
+            phase: ProcessObservationPhaseV4.TermRequested,
+            action: if state.term_attempted:
+                ProcessObservationDeadlineActionV4.None
+            else:
+                ProcessObservationDeadlineActionV4.AttemptTerm)
+    ProcessObservationDeadlineDecisionV4(
+        phase: ProcessObservationPhaseV4.Running,
+        action: ProcessObservationDeadlineActionV4.None)
+
+export ProcessObservationPhaseV4, ProcessObservationDeadlineActionV4
+export ProcessObservationDeadlinesV4, ProcessObservationDeadlineStateV4
+export ProcessObservationDeadlineDecisionV4
+export process_observation_deadlines_v4, process_observation_deadline_order_valid_v4
+export process_observation_reduce_deadline_v4

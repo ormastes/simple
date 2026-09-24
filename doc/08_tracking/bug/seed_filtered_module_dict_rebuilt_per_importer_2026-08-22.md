@@ -1,4 +1,9 @@
 # Seed interpreter rebuilt every imported module's export dict once per importing module
+## Closed 2026-09-16 — FIXED 2026-08-22 with measured table and pin test
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-22 (seed, `src/compiler_rust/compiler/src/module_cache.rs`).
 **Class:** memory retention — O(importers x exports) materialisation; second slice of the
@@ -48,3 +53,4 @@ the same base module -> >= 5 memo hits, builds do not scale with importers (pre-
 | `FILTERED_DICT_BUILDS` / `HITS` | 629 / 0 (by construction) | 165 / 464 |
 
 Cumulative from the fix-1 seed: eval_retained 157.2 -> 92.3 MB (-41%), live 237 -> 172 MB.
+

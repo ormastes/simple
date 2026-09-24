@@ -1,4 +1,8 @@
 # FV2 gate collector self-hosted compile SIGSEGV
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -325,3 +329,4 @@ passing self-host result.
    signals.
 4. Execute all focused Gate 0–7 specs once, followed by required compiler/lib
    and MCP/LSP verification.
+

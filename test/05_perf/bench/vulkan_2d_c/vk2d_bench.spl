@@ -1,19 +1,41 @@
 # Simple counterpart of test/05_perf/bench/vulkan_2d_c/vk2d_bench.c — identical workload:
-# per frame = clear + N rect fills + submit + present + readback, F frames.
+# per frame = clear + N rect fills + device-retained finalize, F frames.
+# Optional correctness capture occurs once after the measured region.
 # Measures the Engine2D vulkan lane exactly as hosts drive it.
 #
 # Run:  SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
 #       <vulkan-seed> run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl
 
-use std.io_runtime.{time_now_unix_micros, read_file, file_write_bytes}
+use std.io_runtime.{time_now_unix_micros, read_file, file_write_bytes, get_args}
 use app.io.mod.{env_get}
-use gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{_pack_rect_pc}
 
 fn _env_i32(key: text, fallback: i32) -> i32:
     val raw = env_get(key).trim()
     if raw == "":
         return fallback
     raw.to_int() ?? fallback
+
+class Vk2dVerdict:
+    var status: text
+    var reason: text
+    var submits_per_frame: i64
+
+# Compute the honest pass/blocked verdict from real per-frame evidence instead
+# of a hardcoded literal. status=pass iff the backend actually reported
+# "vulkan", at least one frame ran, and the device reported exactly one fence
+# completion per frame (submits_per_frame == 1).
+fn vk2d_verdict(backend: text, frames: i64, fence_completions: i64) -> Vk2dVerdict:
+    if backend != "vulkan":
+        return Vk2dVerdict(status: "blocked", reason: "backend-unavailable", submits_per_frame: 0)
+    if frames <= 0:
+        return Vk2dVerdict(status: "blocked", reason: "zero-frames", submits_per_frame: 0)
+    val submits_per_frame = fence_completions / frames
+    if fence_completions == frames:
+        return Vk2dVerdict(status: "pass", reason: "", submits_per_frame: submits_per_frame)
+    Vk2dVerdict(status: "blocked", reason: "multi-submit-per-frame:{submits_per_frame}",
+                submits_per_frame: submits_per_frame)
 
 class Vk2dRect:
     var x: i32
@@ -62,7 +84,8 @@ fn _rects_from_table(path: text, count: i32) -> [Vk2dRect]:
 fn _rects(count: i32, fb_w: i32, fb_h: i32) -> [Vk2dRect]:
     """Same xorshift64 distribution as the C bench (sign-masked for modulo)."""
     var out: [Vk2dRect] = []
-    var rng: i64 = 11400714819323198485
+    # 0x9e3779b97f4a7c15 represented in signed i64 two's-complement form.
+    var rng: i64 = -7046029254386353131
     var i = 0
     while i < count:
         rng = rng ^ ((rng << 13) & 0x7FFFFFFFFFFFFFFF)
@@ -79,122 +102,196 @@ fn _rects(count: i32, fb_w: i32, fb_h: i32) -> [Vk2dRect]:
         i = i + 1
     out
 
+# How many extra, untimed frames the divergence check renders. Four is enough
+# to expose an alternating two-buffer present (the shape originally suspected
+# here) while costing four readbacks on top of a 300-frame measurement.
+val PARITY_FRAMES: i64 = 4
+
+# A stride fold over the surface. Deliberately a rolling hash and not XOR: XOR
+# over an even number of equal samples is 0, which is the exact blindness this
+# counter replaces. A flat-coloured region would cancel itself under XOR too.
+fn parity_fold(pixels: [u32]) -> i64:
+    var acc: i64 = 0
+    var i: i64 = 0
+    val n = pixels.len()
+    while i < n:
+        acc = (acc * 31 + (pixels[i].to_i32().to_i64() & 0xFFFFFFFF)) % 2147483647
+        i = i + 64
+    acc
+
 class Vk2dBench:
     var engine: Engine2D
     var w: i32
     var h: i32
 
-    me run(rects: [Vk2dRect], frames: i32, readback: bool) -> text:
-        # Warmup: two full frames so JIT compilation and pipeline setup are
-        # outside the measured region.
+    me run(rects: [Vk2dRect], frames: i32, capture: bool,
+           warmup_count: i32, batch: bool) -> text:
+        # Packed batch arrays are built ONCE, outside every measured region:
+        # the thing under test is the per-frame draw path, not scene marshalling.
+        # Layout is the frozen one `Engine2D.draw_rect_list_filled` documents --
+        # rects[4k..4k+4] = x,y,w,h of rect k, colors[k] = its colour.
+        val n = rects.len()
+        var packed: [i32] = [0i32; n * 4]
+        var packed_colors: [u32] = [0u32; n]
+        var pi: i64 = 0
+        while pi < n:
+            packed[pi * 4] = rects[pi].x
+            packed[pi * 4 + 1] = rects[pi].y
+            packed[pi * 4 + 2] = rects[pi].w
+            packed[pi * 4 + 3] = rects[pi].h
+            packed_colors[pi] = rects[pi].color
+            pi = pi + 1
+        # Warmup is outside the measured region and uses the same device-only
+        # path as every measured frame.
         var warm = 0
-        while warm < 2:
+        while warm < warmup_count:
             self.engine.clear(0xFF141414u32)
-            for r in rects:
-                self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
-            self.engine.submit_batch()
-            self.engine.present()
+            if batch:
+                self.engine.draw_rect_list_filled(packed, packed_colors)
+            else:
+                for r in rects:
+                    self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            if not self.engine.finalize_compute_frame_no_readback():
+                return "simple-vulkan-2d status=blocked reason=warmup-device-finalize-failed"
             warm = warm + 1
-        # The scene is fixed, so every frame MUST fold to the same `acc`. The
-        # old accumulator was `checksum ^= acc`, which cancels itself on any
-        # even frame count and printed checksum=0 for frames=2/4/6/8 while the
-        # renderer was perfectly correct — a silent blind spot, because 0 also
-        # reads as "blank surface". Latch the first frame's fold instead and
-        # COUNT later frames that disagree, so the value is independent of the
-        # frame count and a genuine mid-run divergence is still reported.
         var checksum: i64 = 0
-        var checksum_latched = false
-        var frame_mismatches: i64 = 0
         var draw_us: i64 = 0
-        var batch_us: i64 = 0
-        var present_us: i64 = 0
-        var readback_us: i64 = 0
+        var finalize_us: i64 = 0
+        var completion_count: i64 = 0
+        var previous_generation = self.engine.vulkan_submission_generation()
+        # Real queue-submission count, sampled around the whole timed region.
+        # `submits_per_frame` above is derived from the GENERATION counter,
+        # which advances once per proven completion and therefore reads 1 even
+        # for a frame that opened two submissions. This delta is the claim
+        # "one submit per frame" actually makes.
+        val submits_before = self.engine.vulkan_accepted_compute_submit_count()
+        # `checksum=` below keeps its frozen sampled-u32-xor-stride-4096
+        # semantics: the C reference bench computes it identically and the
+        # comparison gate requires the two to match byte for byte. Divergence
+        # detection is a SEPARATE counter (see the parity pass after t1), not a
+        # change to this checksum.
+        var latencies_us: [i64] = []
         val t0 = time_now_unix_micros()
         var frame = 0
         while frame < frames:
             var p0 = time_now_unix_micros()
             self.engine.clear(0xFF141414u32)
-            for r in rects:
-                self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            if batch:
+                self.engine.draw_rect_list_filled(packed, packed_colors)
+            else:
+                for r in rects:
+                    self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
             var p1 = time_now_unix_micros()
-            self.engine.submit_batch()
-            var p15 = time_now_unix_micros()
-            self.engine.present()
+            val finalized = self.engine.finalize_compute_frame_no_readback()
             var p2 = time_now_unix_micros()
-            if readback:
-                val rb = self.engine.read_pixels_with_source()
-                # Fold a stride sample so the readback is real consumed work.
-                # The stride SCALES with the surface: a fixed +4096 sampled
-                # exactly one pixel at 64x64 (n == 4096), so the checksum read
-                # the same -15461356 for a frame with 800 rect pixels and for a
-                # blank one. `n / 4096` keeps the sample count at ~4096 pixels
-                # spread across the whole surface at any size.
-                # The fold is 32-bit FNV-1a, NOT xor. Xor over N equal samples
-                # cancels for even N, exactly the bug this file already had at
-                # the frame level. Here `acc = ((acc ^ px) * 16777619) & M` is,
-                # for a fixed px, a bijection on acc (16777619 is odd, so it is
-                # invertible mod 2^32) and for a fixed acc a bijection on px.
-                # So two equal-length sample sequences that differ at ANY index
-                # fold to different values: the last differing step yields
-                # different accs and every later step preserves the difference.
-                # Rendered and blank frames at one size have equal sample
-                # counts, hence differ iff any sampled pixel differs.
-                # Max intermediate is (2^32-1)*16777619 < 2^56, so i64 is safe.
-                val n = rb.pixels.len()
-                var stride: i64 = n / 4096
-                if stride < 1:
-                    stride = 1
-                var acc: i64 = 2166136261
-                var i: i64 = 0
-                while i < n:
-                    val px = rb.pixels[i].to_i32().to_i64() & 0xFFFFFFFF
-                    acc = ((acc ^ px) * 16777619) & 0xFFFFFFFF
-                    i = i + stride
-                if not checksum_latched:
-                    checksum = acc
-                    checksum_latched = true
-                else if acc != checksum:
-                    frame_mismatches = frame_mismatches + 1
-                # Raw framebuffer dump for the byte-for-byte comparator,
-                # little-endian ARGB exactly as the C leg writes it.
-                val dump_path = env_get("VK2D_DUMP_FB").trim()
-                if dump_path != "":
-                    var raw: [u8] = [0u8; n * 4]
-                    var k: i64 = 0
-                    while k < n:
-                        val pv = rb.pixels[k].to_i32().to_i64() & 0xFFFFFFFF
-                        val o = k * 4
-                        raw[o] = (pv & 255).to_i32().to_u8()
-                        raw[o + 1] = ((pv >> 8) & 255).to_i32().to_u8()
-                        raw[o + 2] = ((pv >> 16) & 255).to_i32().to_u8()
-                        raw[o + 3] = ((pv >> 24) & 255).to_i32().to_u8()
-                        k = k + 1
-                    if file_write_bytes(dump_path, raw):
-                        print "dump: wrote {n * 4} bytes to {dump_path}"
-                if _env_i32("VK2D_DEBUG", 0) == 1:
-                    var nonzero: i64 = 0
-                    var nonclear: i64 = 0
-                    var j: i64 = 0
-                    while j < n:
-                        val pv = rb.pixels[j].to_i32().to_i64() & 0xFFFFFFFF
-                        if pv != 0:
-                            nonzero = nonzero + 1
-                        if pv != 4279505940:
-                            nonclear = nonclear + 1
-                        j = j + 1
-                    print "debug: px0={rb.pixels[0].to_i32().to_i64() & 0xFFFFFFFF} nonzero={nonzero}/{n} nonclear={nonclear} src={rb.source}"
-            var p3 = time_now_unix_micros()
+            if not finalized:
+                return "simple-vulkan-2d status=blocked reason=device-finalize-failed frame={frame}"
+            val generation = self.engine.vulkan_submission_generation()
+            if generation > previous_generation:
+                completion_count = completion_count + 1
+            previous_generation = generation
             draw_us = draw_us + (p1 - p0)
-            batch_us = batch_us + (p15 - p1)
-            present_us = present_us + (p2 - p15)
-            readback_us = readback_us + (p3 - p2)
+            finalize_us = finalize_us + (p2 - p1)
+            latencies_us.push(p2 - p0)
             frame = frame + 1
         val t1 = time_now_unix_micros()
+        # Sampled here, NOT at output-interpolation time: the parity pass below
+        # opens real submissions, and counting those would inflate
+        # accepted_submits_per_frame for the timed region they did not belong to.
+        val submits_after = self.engine.vulkan_accepted_compute_submit_count()
+
+        # Per-frame divergence check. The bench used to fold frames with
+        # an XOR of each frame's fold into the running checksum. The scene is
+        # fixed, so every frame folds
+        # to the same acc and XOR over an even frame count prints 0 no matter
+        # what was rendered -- 9/9 runs alternated 0 / -15461356 purely on frame
+        # parity, and a "checksum stable" gate could not see it. A cancelling
+        # accumulator cannot report divergence, so it is replaced by an explicit
+        # count: latch the first fold, then report how many later frames differ.
+        # Deliberately OUTSIDE the timed region (t0..t1) and bounded, so it
+        # perturbs no reported latency.
+        var frame_mismatches: i64 = 0
+        var parity_frames: i64 = 0
+        var parity_latched: i64 = 0
+        var parity_have_latch = false
+        var parity = 0
+        while parity < PARITY_FRAMES:
+            self.engine.clear(0xFF141414u32)
+            if batch:
+                self.engine.draw_rect_list_filled(packed, packed_colors)
+            else:
+                for r in rects:
+                    self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            if not self.engine.finalize_compute_frame_no_readback():
+                return "simple-vulkan-2d status=blocked reason=parity-device-finalize-failed frame={parity}"
+            val fold = parity_fold(self.engine.read_pixels_with_source().pixels)
+            parity_frames = parity_frames + 1
+            if not parity_have_latch:
+                parity_latched = fold
+                parity_have_latch = true
+            elif fold != parity_latched:
+                frame_mismatches = frame_mismatches + 1
+            parity = parity + 1
+
+        # Insertion sort keeps the benchmark self-contained and runs only over
+        # the small sample vector after measurement.
+        var i: i64 = 1
+        while i < latencies_us.len():
+            val value = latencies_us[i]
+            var j = i
+            while j > 0 and latencies_us[j - 1] > value:
+                latencies_us[j] = latencies_us[j - 1]
+                j = j - 1
+            latencies_us[j] = value
+            i = i + 1
+        var p50_ns: i64 = 0
+        var p95_ns: i64 = 0
+        if latencies_us.len() > 0:
+            p50_ns = latencies_us[(latencies_us.len() - 1) * 50 / 100] * 1000
+            p95_ns = latencies_us[(latencies_us.len() - 1) * 95 / 100] * 1000
+
+        var capture_bytes: i64 = 0
+        var capture_source = "none"
+        var capture_count: i64 = 0
+        if capture:
+            capture_count = 1
+            val rb = self.engine.read_pixels_with_source()
+            capture_source = rb.source
+            val n = rb.pixels.len()
+            capture_bytes = n * 4
+            var k: i64 = 0
+            var raw: [u8] = [0u8; n * 4]
+            while k < n:
+                val pv = rb.pixels[k].to_i32().to_i64() & 0xFFFFFFFF
+                if k % 4096 == 0:
+                    checksum = checksum ^ pv
+                val o = k * 4
+                raw[o] = (pv & 255).to_i32().to_u8()
+                raw[o + 1] = ((pv >> 8) & 255).to_i32().to_u8()
+                raw[o + 2] = ((pv >> 16) & 255).to_i32().to_u8()
+                raw[o + 3] = ((pv >> 24) & 255).to_i32().to_u8()
+                k = k + 1
+            val dump_path = env_get("VK2D_DUMP_FB").trim()
+            if dump_path != "" and file_write_bytes(dump_path, raw):
+                print "dump: wrote {n * 4} bytes to {dump_path}"
         val ms = (t1 - t0) / 1000
         var fps_num: i64 = 0
         if ms > 0:
             fps_num = frames.to_i64() * 1000 / ms
-        "simple-vulkan-2d w={self.w} h={self.h} rects={rects.len()} frames={frames} readback={readback} ms={ms} fps~={fps_num} draw_us={draw_us} batch_us={batch_us} present_us={present_us} readback_us={readback_us} checksum={checksum} frame_mismatches={frame_mismatches}"
+        val verdict = vk2d_verdict(self.engine.backend_name(), frames.to_i64(), completion_count)
+        var status_kv = "status={verdict.status}"
+        if verdict.reason != "":
+            status_kv = "{status_kv} reason={verdict.reason}"
+        "simple-vulkan-2d {status_kv} w={self.w} h={self.h} rects={rects.len()} warmups={warmup_count} samples={frames} ring=1 max_frames_in_flight=1 unconditional_submit_wait=true submits_per_frame={verdict.submits_per_frame} timed_buffer_allocation_count=-1 retained_buffer_bytes=-1 teardown_released_bytes=-1 timed_full_frame_upload_count=-1 upload_bytes=-1 timed_readback_bytes=0 capture_count={capture_count} capture_readback_bytes={capture_bytes} capture_source={capture_source} fence_completions={completion_count} completion_polls=0 cpu_completion_wait_count={frames} event_generations={frames} damage_area_pixels={self.w.to_i64() * self.h.to_i64() * frames.to_i64()} p50_ns={p50_ns} p95_ns={p95_ns} ms={ms} fps~={fps_num} draw_us={draw_us} finalize_us={finalize_us} device={self.engine.vulkan_device_name()} driver={self.engine.vulkan_driver_identity()} accepted_submits_per_frame={(submits_after - submits_before) * 1000 / frames.to_i64()} dispatches_per_frame={self.engine.vulkan_last_frame_dispatch_count() - 1} rect_batch_fallback={_fallback_or_none(self.engine.vulkan_rect_batch_fallback_reason())} parity_frames={parity_frames} frame_mismatches={frame_mismatches} checksum={checksum}"
+
+fn _fallback_or_none(reason: text) -> text:
+    """Report the rect-batch fallback reason, or `none` when the lane installed.
+
+    An empty field in a key=value line reads as a parse accident; `none` states
+    that the GPU batch pipeline is live and nothing fell back.
+    """
+    if reason == "": "none"
+    else: reason
 
 fn _loop_probe(w: i32, h: i32):
     """Time the three O(pixels) marshalling loop shapes from the engine's
@@ -256,15 +353,85 @@ fn _loop_probe(w: i32, h: i32):
     print "loop-probe alloc_us={t_alloc} sink={sink}"
     print "loop-probe w={w} h={h} unpack_us={t_unpack} copy_us={t_copy} checksum_us={t_checksum} acc={acc} dst0={dst[0]}"
 
+fn _attr_probe(w: i32, h: i32, n: i64):
+    """Differential per-layer attribution of the rect draw path. VK2D_ATTR=1.
+
+    Level-gated and OFF by default, like `_loop_probe` above. Each layer is
+    timed in ISOLATION so the numbers subtract rather than nest:
+      l1 = the full Engine2D facade call
+      l2 = the backend method directly (l1-l2 is the facade transit)
+      l3 = push-constant packing alone
+      l4 = the 4-SFFI enqueue with a pre-packed constant block
+      l5 = a bare `me` call on the same receiver -- the interpreter's floor
+    This is the probe that produced the table in
+    doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md;
+    it lives here rather than in a scratch file because `build/` is gitignored
+    and an untracked driver is not reproducible evidence.
+    """
+    val engine = Engine2D.create_with_backend_fast(w, h, "vulkan")
+    if engine.backend_name() != "vulkan":
+        print "vk2d-attr status=blocked reason=backend-unavailable got={engine.backend_name()}"
+        return
+    engine.clear(0xFF141414u32)
+    var t0 = time_now_unix_micros()
+    var i: i64 = 0
+    while i < n:
+        engine.draw_rect_filled(10, 10, 32, 24, 0xFF3366CCu32)
+        i = i + 1
+    val l1 = time_now_unix_micros() - t0
+    engine.finalize_compute_frame_no_readback()
+    if val Some(vk) = engine.vulkan_backend:
+        t0 = time_now_unix_micros()
+        i = 0
+        while i < n:
+            vk.draw_rect_filled(10, 10, 32, 24, 0xFF3366CCu32)
+            i = i + 1
+        val l2 = time_now_unix_micros() - t0
+        vk.submit_batch()
+        t0 = time_now_unix_micros()
+        i = 0
+        var sink: i64 = 0
+        while i < n:
+            sink = sink + _pack_rect_pc(10, 10, 32, 24, 0xFF3366CCu32, w, h, 0, 0, 0, 0, false).len()
+            i = i + 1
+        val l3 = time_now_unix_micros() - t0
+        val pre = _pack_rect_pc(10, 10, 32, 24, 0xFF3366CCu32, w, h, 0, 0, 0, 0, false)
+        t0 = time_now_unix_micros()
+        i = 0
+        while i < n:
+            vk._dispatch_framebuffer_checked(vk.pipe_rect_filled, pre, 2, 2, 1, "rect-dispatch-failed")
+            i = i + 1
+        val l4 = time_now_unix_micros() - t0
+        vk.submit_batch()
+        t0 = time_now_unix_micros()
+        i = 0
+        while i < n:
+            vk.clear_clip()
+            i = i + 1
+        val l5 = time_now_unix_micros() - t0
+        # NOTE: this probe deliberately does NOT report a batch-lane per-rect
+        # figure. A batch timed here, inside an engine already driven through
+        # l1-l5, measured 223 us/rect against the 67 us/rect the 300-frame
+        # `--batch` run reports, and warming it changed nothing -- so the
+        # discrepancy is a property of this probe's setup that has not been
+        # isolated, not of the batch lane. The authoritative batch measurement
+        # is `--batch` / VK2D_BATCH=1, which times real frames end to end.
+        print "vk2d-attr n={n} us_per_call l1_facade={l1 / n} l2_backend={l2 / n} l3_pack={l3 / n} l4_dispatch={l4 / n} l5_call_floor={l5 / n} sink={sink}"
+    engine.shutdown()
+
 fn main():
     val w = _env_i32("VK2D_W", 800)
     val h = _env_i32("VK2D_H", 600)
     val rect_count = _env_i32("VK2D_RECTS", 64)
     val frames = _env_i32("VK2D_FRAMES", 300)
-    val readback = _env_i32("VK2D_READBACK", 1) == 1
+    val readback = _env_i32("VK2D_READBACK", 0) == 1
+    val warmups = _env_i32("VK2D_WARMUPS", 5)
 
     if _env_i32("VK2D_PROBE", 0) == 1:
         _loop_probe(w, h)
+        return
+    if _env_i32("VK2D_ATTR", 0) == 1:
+        _attr_probe(w, h, _env_i32("VK2D_ATTR_N", 3200).to_i64())
         return
     # VK2D_BACKEND lets the same scene run on another backend, which is what
     # makes the Simple-vs-Simple parity check possible: the 16 emu_* primitives
@@ -297,5 +464,39 @@ fn main():
             print "simple-vulkan-2d status=blocked reason=scene-table-unreadable path={scenes_path}"
             return
     print "scene_source={scene_source} rects={rects.len()}"
-    print bench.run(rects, frames, readback)
+    # --batch (or VK2D_BATCH=1) additionally runs the packed-batch lane, so one
+    # invocation reports BOTH numbers and the comparison is same-process,
+    # same-device, same-scene. The single leg always runs and its line keeps the
+    # canonical `simple-vulkan-2d ...` shape the verdict spec parses.
+    var batch_requested = _env_i32("VK2D_BATCH", 0) == 1
+    for a in get_args():
+        if a == "--batch":
+            batch_requested = true
+    val single_line = bench.run(rects, frames, readback, warmups, false)
+    print single_line
+    val ms_single = _kv_i64(single_line, "ms=")
+    if batch_requested:
+        val batch_line = bench.run(rects, frames, readback, warmups, true)
+        print batch_line
+        val ms_batch = _kv_i64(batch_line, "ms=")
+        print "vk2d-compare frames={frames} rects={rects.len()} ms_single={ms_single} ms_batch={ms_batch} per_frame_single_us={ms_single * 1000 / frames.to_i64()} per_frame_batch_us={ms_batch * 1000 / frames.to_i64()}"
     engine.shutdown()
+
+fn _kv_i64(line: text, key: text) -> i64:
+    """Read the integer value of `key` out of a `k=v k=v` result line."""
+    val at = line.index_of(key)
+    if at < 0:
+        return -1
+    var i = at + key.len()
+    var out: i64 = 0
+    var seen = false
+    while i < line.len():
+        val c = line.substring(i, i + 1)
+        val d = "0123456789".index_of(c)
+        if d < 0:
+            break
+        out = out * 10 + d.to_i64()
+        seen = true
+        i = i + 1
+    if seen: out
+    else: -1

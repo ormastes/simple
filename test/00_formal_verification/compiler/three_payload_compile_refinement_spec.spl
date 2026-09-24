@@ -1,0 +1,135 @@
+# Bounded source-replay contract for the L7 three-payload formal model.
+# This spec is authored but cannot be admitted until a self-hosted full CLI is
+# available.  It does not promote ModelProven evidence to SourceRefined.
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    PreparedThreePayloadV2, verify_prepared_three_payload_v2}
+use verification.three_payload_compile_refinement.{
+    ThreePayloadSourceBindingV1, ThreePayloadFormalObservationV1,
+    three_payload_formal_prepared_case_v1,
+    current_three_payload_source_binding_v1,
+    validate_three_payload_source_binding_v1,
+    compare_three_payload_formal_observation_v1,
+    replay_three_payload_formal_case_v1,
+    make_three_payload_formal_receipt_v1}
+
+val THREE_PAYLOAD_FORMAL_FIXTURE_ROOT =
+    "build/test/three_payload_compile_formal"
+
+fn prepare_cold_three_payload_case_v1() -> PreparedThreePayloadV2:
+    three_payload_formal_prepared_case_v1(false)
+
+fn prepare_warm_three_payload_case_v1() -> PreparedThreePayloadV2:
+    three_payload_formal_prepared_case_v1(true)
+
+fn require_three_payload_formal_observation_v1(
+    observation: ThreePayloadFormalObservationV1,
+):
+    expect(observation.matched).to_be(true)
+    expect(observation.actual).to_equal(observation.expected)
+
+fn fabricated_complete_three_payload_axiom_report_v1() -> text:
+    "'ThreePayloadCompile.broker_prefix_read_bound' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.broker_success_read_count' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.broker_prefix_byte_bound' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.reverse_delta_reconstructs' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.reverse_delta_unrelated_consumer_preserved' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.journal_exact_replay_idempotent' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.journal_conflicting_prefix_rejected' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.protected_pin_not_swept' does not depend on any axioms\n" +
+        "'ThreePayloadCompile.changed_source_binding_stale' does not depend on any axioms\n"
+
+describe "L7 three-payload bounded formal source replay":
+    it "binds proof evidence to current source bytes and fails closed without an axiom report":
+        step("Bind proof evidence to current L7 source")
+        val current = current_three_payload_source_binding_v1(".").unwrap()
+        expect(validate_three_payload_source_binding_v1(current, current)).to_be(true)
+        val stale = ThreePayloadSourceBindingV1(
+            source_path: current.source_path, source_symbol: current.source_symbol,
+            source_bytes_hash: sha256_text("mutated-source"),
+            dependency_bytes_hash: current.dependency_bytes_hash,
+            model_hash: current.model_hash, checker_hash: current.checker_hash,
+            toolchain_identity: current.toolchain_identity)
+        expect(validate_three_payload_source_binding_v1(stale, current)).to_be(false)
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("source_binding_stale", "."))
+        val unavailable = make_three_payload_formal_receipt_v1([current], [
+            compare_three_payload_formal_observation_v1("binding", current.source_symbol,
+                "current", "current")], [], "")
+        expect(unavailable.status).to_equal(FormalStatus.NotChecked)
+        expect(unavailable.diagnostic).to_contain("AXIOMS")
+        expect(unavailable.killed_mutant_count).to_equal(0)
+        expect(unavailable.status.permits_verified_release()).to_be(false)
+
+        step("Keep copied bindings and fabricated proof or mutant DTOs below ModelProven")
+        val fabricated_match = compare_three_payload_formal_observation_v1(
+            "fabricated", current.source_symbol, "copied", "copied")
+        val fabricated_mutant = compare_three_payload_formal_observation_v1(
+            "unknown_case", "fabricated-mutant", "different", "expected")
+        val forged = make_three_payload_formal_receipt_v1([current],
+            [fabricated_match], [fabricated_mutant],
+            fabricated_complete_three_payload_axiom_report_v1())
+        expect(forged.status).to_equal(FormalStatus.NotChecked)
+        expect(forged.killed_mutant_count).to_equal(0)
+        expect(forged.diagnostic).to_contain("MUTATION")
+
+    it "replays exact cold-two and warm-three physical broker observations":
+        step("Replay the cold or warm worker read trace")
+        val cold = prepare_cold_three_payload_case_v1()
+        val warm = prepare_warm_three_payload_case_v1()
+        expect(verify_prepared_three_payload_v2(cold)).to_be(true)
+        expect(verify_prepared_three_payload_v2(warm)).to_be(true)
+        expect(cold.prior_tld_bytes.is_none()).to_be(true)
+        expect(warm.prior_tld_bytes.is_some()).to_be(true)
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("broker_cold2",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("broker_warm3",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+
+    it "rejects source corruption, external reads, and incomplete semantic authority":
+        step("Reject incomplete semantic authority")
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("broker_external_rejected",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("prepared_source_corrupt",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+        val unknown = replay_three_payload_formal_case_v1(
+            "unknown_three_payload_case", THREE_PAYLOAD_FORMAL_FIXTURE_ROOT)
+        expect(unknown.matched).to_be(false)
+        expect(unknown.actual).to_equal("unknown_case")
+
+    it "replays fingerprint replacement and rejects nil mutation history [importance=critical; importance_weight=3]":
+        step("Replay reverse-reference replacement")
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("rr_replace_fingerprint",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("rr_consumer_mismatch",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("rr_nil_history_refused",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+
+    it "accepts exact journal replay and quarantines a torn final newline":
+        step("Recover only a durable coherent generation")
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("journal_exact_replay",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("journal_conflicting_prefix",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))
+        val torn = replay_three_payload_formal_case_v1(
+            "journal_torn_final_newline", THREE_PAYLOAD_FORMAL_FIXTURE_ROOT)
+        require_three_payload_formal_observation_v1(torn)
+        expect(torn.actual).to_contain("accepted_gt_input=true")
+        expect(torn.actual).to_contain("quarantined=true")
+        require_three_payload_formal_observation_v1(
+            replay_three_payload_formal_case_v1("gc_stale_epoch",
+                THREE_PAYLOAD_FORMAL_FIXTURE_ROOT))

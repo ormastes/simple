@@ -1,0 +1,296 @@
+# Bounded staged scalar-tail coordinator. Complete blocks are never silently
+# scalarized; until the full guarded execution context is supplied they fail
+# before publication. This provides the truthful AArch scalar-only path.
+use compiler.backend.native.parser_byte_avx2_lowering.parser_structural_mask_scalar_v1
+use std.nogc_sync_mut.composition.environment_variants.structural_mask_leases_v1.*
+use compiler.loader.parser_structural_guarded_call_v1.parser_structural_guarded_mask_call_v1
+use compiler.loader.parser_structural_mask_mapper_v1.{ParserStructuralMapperOwnerV1, ParserStructuralMappedKernelV1}
+use compiler.loader.parser_structural_source_buffer_v1.{ParserStructuralSourceBufferOwnerV1, ParserStructuralNativeSourceLeaseV1}
+use compiler.loader.parser_structural_mask_mapping_authorization_v1.ParserStructuralMappingAuthorizationV1
+use compiler.loader.parser_structural_provider_activation_v2.{ParserStructuralProviderActivationOwnerV2, ParserStructuralProviderActivationV2, parser_structural_provider_activation_live_v2}
+use compiler.driver.execution_domain_affinity_lease_v1.{ExecutionDomainAffinityLeaseOwnerV1, ExecutionDomainAffinityLeaseV1}
+use compiler.driver.parser_simd_execution_capability_v1.ParserSimdExecutionCapabilityReceiptV1
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.ProviderGenerationManagerV2
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{EnvironmentSnapshotV1, EnvironmentDigest256V1}
+
+pub const PARSER_STRUCTURAL_BATCH_MAX_V2: u64 = 256u64
+pub enum ParserStructuralMaskBatchErrorV2:
+    InvalidSession
+    RangeInvalid
+    SimdContextRequired
+    CapacityExceeded
+    CounterOverflow
+    UnknownOrReplayed
+    ValidationFailed
+
+pub struct ParserStructuralMaskBatchTokenV2:
+    token_id: u64
+    owner_identity: u64
+    owner_generation: u64
+pub struct ParserStructuralMaskBatchResultV2:
+    session_id: u64
+    offset: u64
+    count: u64
+    masks: [u32]
+    positions: [u64]
+    executed_provider: bool
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    plan_identity: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    provider_generation: u64
+
+struct _ParserStructuralBatchStageV2:
+    token: ParserStructuralMaskBatchTokenV2
+    result: ParserStructuralMaskBatchResultV2
+    session: StructuralMaskSessionV1
+    source: StableSourceBufferLeaseV1
+    simd: bool
+    activation_id: u64
+    mapped_handle: u64
+    authorization_artifact: EnvironmentDigest256V1
+    live: bool
+var _next_parser_batch_owner_identity_v2: u64 = 1u64
+pub class ParserStructuralMaskBatchOwnerV2:
+    var stages: [_ParserStructuralBatchStageV2]
+    var next_id: u64
+    var owner_identity: u64
+    var owner_generation: u64
+    pub static fn create() -> ParserStructuralMaskBatchOwnerV2:
+        val identity = _next_parser_batch_owner_identity_v2
+        # This sync owner is created by the serialized loader publication lane;
+        # V2 does not claim an atomic process-global allocator.
+        if identity != 0u64 and identity != 0xffffffffffffffffu64:
+            _next_parser_batch_owner_identity_v2 = identity + 1u64
+        ParserStructuralMaskBatchOwnerV2(stages: [], next_id: 1u64,
+            owner_identity: identity, owner_generation: 1u64)
+
+fn _zero_batch_digest_v2() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(
+        w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+pub fn parser_structural_mask_batch_result_valid_v2(r: ParserStructuralMaskBatchResultV2) -> bool:
+    if r.offset > 0xffffffffffffffffu64 - r.count: return false
+    val blocks = r.count / 32u64; val tail = r.count % 32u64
+    val expected_masks = blocks + (if tail > 0u64: 1u64 else: 0u64)
+    if r.masks.len() as u64 != expected_masks: return false
+    if r.count == 0u64 and (r.masks.len() != 0 or r.positions.len() != 0): return false
+    var expected: [u64] = []; var mi = 0u64
+    while mi < expected_masks:
+        val valid_bits = if mi < blocks: 32u64 else: tail
+        val mask = r.masks[mi as i64]
+        if valid_bits < 32u64 and (mask >> (valid_bits as u32)) != 0u32: return false
+        var bit = 0u64
+        while bit < valid_bits:
+            if (mask & (1u32 << (bit as u32))) != 0u32:
+                expected.push(r.offset + mi * 32u64 + bit)
+            bit = bit + 1u64
+        mi = mi + 1u64
+    if expected != r.positions: return false
+    val provider_declared = r.provider_identity.w0 != 0u64 or r.provider_identity.w1 != 0u64 or
+        r.provider_identity.w2 != 0u64 or r.provider_identity.w3 != 0u64
+    val all_declared = provider_declared and
+        (r.variant_identity.w0 != 0u64 or r.variant_identity.w1 != 0u64 or r.variant_identity.w2 != 0u64 or r.variant_identity.w3 != 0u64) and
+        (r.artifact_identity.w0 != 0u64 or r.artifact_identity.w1 != 0u64 or r.artifact_identity.w2 != 0u64 or r.artifact_identity.w3 != 0u64) and
+        (r.plan_identity.w0 != 0u64 or r.plan_identity.w1 != 0u64 or r.plan_identity.w2 != 0u64 or r.plan_identity.w3 != 0u64) and
+        (r.environment_identity.w0 != 0u64 or r.environment_identity.w1 != 0u64 or r.environment_identity.w2 != 0u64 or r.environment_identity.w3 != 0u64) and
+        r.environment_generation > 0u64 and r.provider_generation > 0u64
+    val all_zero = not provider_declared and r.variant_identity == _zero_batch_digest_v2() and
+        r.artifact_identity == _zero_batch_digest_v2() and r.plan_identity == _zero_batch_digest_v2() and
+        r.environment_identity == _zero_batch_digest_v2() and r.environment_generation == 0u64 and
+        r.provider_generation == 0u64
+    (blocks > 0u64 and r.executed_provider and all_declared) or
+    (blocks == 0u64 and not r.executed_provider and all_zero)
+
+pub fn parser_structural_mask_batch_stage_scalar_v2(owner: ParserStructuralMaskBatchOwnerV2,
+    leases: StructuralMaskLeaseOwnerV1, session: StructuralMaskSessionV1,
+    source: StableSourceBufferLeaseV1, offset: u64, count: u64
+) -> Result<ParserStructuralMaskBatchTokenV2, ParserStructuralMaskBatchErrorV2>:
+    if owner.owner_identity == 0u64 or owner.owner_identity == 0xffffffffffffffffu64:
+        return Err(ParserStructuralMaskBatchErrorV2.CounterOverflow)
+    if count >= 32u64: return Err(ParserStructuralMaskBatchErrorV2.SimdContextRequired)
+    if not structural_mask_scalar_session_range_valid_v1(leases, session, source, offset, count):
+        return Err(ParserStructuralMaskBatchErrorV2.InvalidSession)
+    if owner.stages.len() as u64 >= PARSER_STRUCTURAL_BATCH_MAX_V2:
+        return Err(ParserStructuralMaskBatchErrorV2.CapacityExceeded)
+    if owner.next_id == 0u64 or owner.next_id == 0xffffffffffffffffu64:
+        return Err(ParserStructuralMaskBatchErrorV2.CounterOverflow)
+    val bytes = match stable_source_buffer_range_copy_v1(leases, source, offset, count):
+        case Ok(v): v
+        case Err(_): return Err(ParserStructuralMaskBatchErrorV2.RangeInvalid)
+    val mask = match parser_structural_mask_scalar_v1(bytes, 0, count as i64,
+            session.first_delimiter, session.second_delimiter):
+        case Ok(v): v
+        case Err(_): return Err(ParserStructuralMaskBatchErrorV2.ValidationFailed)
+    var masks: [u32] = []
+    if count > 0u64: masks.push(mask)
+    var positions: [u64] = []; var i = 0u64
+    while i < count:
+        if (mask & (1u32 << (i as u32))) != 0u32: positions.push(offset + i)
+        i = i + 1u64
+    val token = ParserStructuralMaskBatchTokenV2(token_id: owner.next_id,
+        owner_identity: owner.owner_identity, owner_generation: owner.owner_generation)
+    owner.next_id = owner.next_id + 1u64
+    owner.stages.push(_ParserStructuralBatchStageV2(token: token,
+        result: ParserStructuralMaskBatchResultV2(session_id: session.session_id,
+            offset: offset, count: count, masks: masks, positions: positions,
+            executed_provider: false, provider_identity: _zero_batch_digest_v2(),
+            variant_identity: _zero_batch_digest_v2(), artifact_identity: _zero_batch_digest_v2(),
+            plan_identity: _zero_batch_digest_v2(), environment_identity: _zero_batch_digest_v2(),
+            environment_generation: 0u64, provider_generation: 0u64),
+        session: session, source: source, simd: false, activation_id: 0u64,
+        mapped_handle: 0u64, authorization_artifact: _zero_batch_digest_v2(), live: true))
+    Ok(token)
+
+pub fn parser_structural_mask_batch_commit_v2(owner: ParserStructuralMaskBatchOwnerV2,
+    leases: StructuralMaskLeaseOwnerV1, token: ParserStructuralMaskBatchTokenV2,
+    session: StructuralMaskSessionV1, source: StableSourceBufferLeaseV1
+) -> Result<ParserStructuralMaskBatchResultV2, ParserStructuralMaskBatchErrorV2>:
+    if token.owner_identity != owner.owner_identity or token.owner_generation != owner.owner_generation:
+        return Err(ParserStructuralMaskBatchErrorV2.UnknownOrReplayed)
+    var i = 0
+    while i < owner.stages.len():
+        if owner.stages[i].token == token and owner.stages[i].live:
+            val staged = owner.stages[i]
+            if staged.simd or staged.session != session or staged.source != source or
+               not structural_mask_scalar_session_range_valid_v1(leases, session, source,
+                   staged.result.offset, staged.result.count) or not parser_structural_mask_batch_result_valid_v2(staged.result):
+                return Err(ParserStructuralMaskBatchErrorV2.ValidationFailed)
+            val result = staged.result
+            var kept: [_ParserStructuralBatchStageV2] = []; var j = 0
+            while j < owner.stages.len():
+                if j != i: kept.push(owner.stages[j])
+                j = j + 1
+            owner.stages = kept
+            return Ok(result)
+        i = i + 1
+    Err(ParserStructuralMaskBatchErrorV2.UnknownOrReplayed)
+
+fn parser_structural_mask_batch_stage_v2(owner: ParserStructuralMaskBatchOwnerV2,
+    leases: StructuralMaskLeaseOwnerV1, session: StructuralMaskSessionV1,
+    stable_source: StableSourceBufferLeaseV1,
+    mapper: ParserStructuralMapperOwnerV1, mapped: ParserStructuralMappedKernelV1,
+    generations: ProviderGenerationManagerV2,
+    activation_owner: ParserStructuralProviderActivationOwnerV2,
+    activation: ParserStructuralProviderActivationV2,
+    native_sources: ParserStructuralSourceBufferOwnerV1,
+    native_source: ParserStructuralNativeSourceLeaseV1,
+    affinity_owner: ExecutionDomainAffinityLeaseOwnerV1, affinity: ExecutionDomainAffinityLeaseV1,
+    snapshot: EnvironmentSnapshotV1, feature_words: [u64],
+    authorization: ParserStructuralMappingAuthorizationV1,
+    capability: ParserSimdExecutionCapabilityReceiptV1,
+    offset: u64, count: u64
+) -> Result<ParserStructuralMaskBatchTokenV2, ParserStructuralMaskBatchErrorV2>:
+    if owner.owner_identity == 0u64 or owner.owner_identity == 0xffffffffffffffffu64:
+        return Err(ParserStructuralMaskBatchErrorV2.CounterOverflow)
+    if count < 32u64: return Err(ParserStructuralMaskBatchErrorV2.SimdContextRequired)
+    if not structural_mask_session_source_range_valid_v1(leases, session, stable_source, offset, count) or
+       native_source.source_lease_id != stable_source.lease_id or
+       native_source.source_lease_generation != stable_source.lease_generation or
+       native_source.byte_length != stable_source.byte_length:
+        return Err(ParserStructuralMaskBatchErrorV2.InvalidSession)
+    if owner.stages.len() as u64 >= PARSER_STRUCTURAL_BATCH_MAX_V2: return Err(ParserStructuralMaskBatchErrorV2.CapacityExceeded)
+    if owner.next_id == 0u64 or owner.next_id == 0xffffffffffffffffu64: return Err(ParserStructuralMaskBatchErrorV2.CounterOverflow)
+    val bytes = match stable_source_buffer_range_copy_v1(leases, stable_source, offset, count):
+        case Ok(v): v
+        case Err(_): return Err(ParserStructuralMaskBatchErrorV2.RangeInvalid)
+    var masks: [u32] = []; var positions: [u64] = []; var executed_generation = 0u64
+    val blocks = count / 32u64; var block = 0u64
+    while block < blocks:
+        val absolute = offset + block * 32u64
+        val result = parser_structural_guarded_mask_call_v1(mapper, mapped, generations,
+            activation_owner, activation, native_sources, native_source, affinity_owner, affinity,
+            snapshot, feature_words, authorization, capability, absolute,
+            session.first_delimiter, session.second_delimiter)
+        if result.is_err(): return Err(ParserStructuralMaskBatchErrorV2.SimdContextRequired)
+        val guarded = result.unwrap()
+        if executed_generation != 0u64 and executed_generation != guarded.provider_generation:
+            return Err(ParserStructuralMaskBatchErrorV2.ValidationFailed)
+        executed_generation = guarded.provider_generation
+        val mask = guarded.mask; masks.push(mask)
+        var bit = 0u64
+        while bit < 32u64:
+            if (mask & (1u32 << (bit as u32))) != 0u32: positions.push(absolute + bit)
+            bit = bit + 1u64
+        block = block + 1u64
+    val tail = count - blocks * 32u64
+    if tail > 0u64:
+        val mask = match parser_structural_mask_scalar_v1(bytes, (blocks * 32u64) as i64,
+                tail as i64, session.first_delimiter, session.second_delimiter):
+            case Ok(v): v
+            case Err(_): return Err(ParserStructuralMaskBatchErrorV2.ValidationFailed)
+        masks.push(mask); var bit = 0u64
+        while bit < tail:
+            if (mask & (1u32 << (bit as u32))) != 0u32:
+                positions.push(offset + blocks * 32u64 + bit)
+            bit = bit + 1u64
+    val expected_masks = blocks + (if tail > 0u64: 1u64 else: 0u64)
+    if masks.len() as u64 != expected_masks: return Err(ParserStructuralMaskBatchErrorV2.ValidationFailed)
+    var pi = 1
+    while pi < positions.len():
+        if positions[pi] <= positions[pi - 1] or positions[pi] < offset or
+           positions[pi] >= offset + count: return Err(ParserStructuralMaskBatchErrorV2.ValidationFailed)
+        pi = pi + 1
+    val token = ParserStructuralMaskBatchTokenV2(token_id: owner.next_id,
+        owner_identity: owner.owner_identity, owner_generation: owner.owner_generation); owner.next_id = owner.next_id + 1u64
+    owner.stages.push(_ParserStructuralBatchStageV2(token: token,
+        result: ParserStructuralMaskBatchResultV2(session_id: session.session_id, offset: offset,
+            count: count, masks: masks, positions: positions, executed_provider: blocks > 0u64,
+            provider_identity: authorization.provider_identity, variant_identity: authorization.variant_identity,
+            artifact_identity: authorization.artifact_digest, plan_identity: authorization.plan_digest,
+            environment_identity: authorization.environment_identity,
+            environment_generation: authorization.environment_generation,
+            provider_generation: executed_generation), session: session, source: stable_source,
+        simd: blocks > 0u64, activation_id: activation.activation_id,
+        mapped_handle: mapped.mapped_handle, authorization_artifact: authorization.artifact_digest, live: true))
+    Ok(token)
+
+pub fn parser_structural_mask_batch_cancel_v2(owner: ParserStructuralMaskBatchOwnerV2,
+    token: ParserStructuralMaskBatchTokenV2) -> bool:
+    if token.owner_identity != owner.owner_identity or token.owner_generation != owner.owner_generation:
+        return false
+    var i = 0
+    while i < owner.stages.len():
+        if owner.stages[i].token == token and owner.stages[i].live:
+            var kept: [_ParserStructuralBatchStageV2] = []; var j = 0
+            while j < owner.stages.len():
+                if j != i: kept.push(owner.stages[j])
+                j = j + 1
+            owner.stages = kept; return true
+        i = i + 1
+    false
+
+fn parser_structural_mask_batch_commit_simd_v2(owner: ParserStructuralMaskBatchOwnerV2,
+    leases: StructuralMaskLeaseOwnerV1, token: ParserStructuralMaskBatchTokenV2,
+    session: StructuralMaskSessionV1, source: StableSourceBufferLeaseV1,
+    activation_owner: ParserStructuralProviderActivationOwnerV2,
+    generations: ProviderGenerationManagerV2, mapper: ParserStructuralMapperOwnerV1,
+    activation: ParserStructuralProviderActivationV2,
+    authorization: ParserStructuralMappingAuthorizationV1,
+    mapped: ParserStructuralMappedKernelV1
+) -> Result<ParserStructuralMaskBatchResultV2, ParserStructuralMaskBatchErrorV2>:
+    if token.owner_identity != owner.owner_identity or token.owner_generation != owner.owner_generation:
+        return Err(ParserStructuralMaskBatchErrorV2.UnknownOrReplayed)
+    var i = 0
+    while i < owner.stages.len():
+        val staged = owner.stages[i]
+        if staged.token == token and staged.live:
+            if not staged.simd or staged.session != session or staged.source != source or
+               staged.activation_id != activation.activation_id or
+               staged.mapped_handle != mapped.mapped_handle or
+               staged.authorization_artifact != authorization.artifact_digest or
+               not structural_mask_session_source_range_valid_v1(leases, session, source,
+                   staged.result.offset, staged.result.count) or
+               not parser_structural_provider_activation_live_v2(activation_owner, generations,
+                   mapper, activation, authorization, mapped) or not parser_structural_mask_batch_result_valid_v2(staged.result):
+                return Err(ParserStructuralMaskBatchErrorV2.ValidationFailed)
+            val result = staged.result
+            var kept: [_ParserStructuralBatchStageV2] = []; var j = 0
+            while j < owner.stages.len():
+                if j != i: kept.push(owner.stages[j])
+                j = j + 1
+            owner.stages = kept
+            return Ok(result)
+        i = i + 1
+    Err(ParserStructuralMaskBatchErrorV2.UnknownOrReplayed)

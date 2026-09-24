@@ -139,6 +139,15 @@ child, so MCP startup gains exactly one module. Config comes from
 
 ## Landmines (learned the hard way — do not relearn)
 
+- **Check `git show e274cd33719^:<file>` FIRST for any "symbol not found" that
+  obviously ought to exist.** `e274cd33719` ("merge all share-history worktree
+  branches into main") is a stale-snapshot clobber: it replaced spec preambles
+  with OLDER variants while keeping newer bodies, orphaning helpers, and cut
+  live product code the same way across many lanes. All 19 llm_caret reds
+  (138/157) were that one defect; `2796fe9a93c` restored the preambles
+  (157/157). `src/app/llm_dashboard` was hit too (`631209209f1`), and ~27 more
+  files there are still regressed. Diff against `e274cd33719^` before
+  re-implementing anything.
 - **Spec docstrings are load-bearing and get silently stripped.** Twice a
   subagent "fixing one line" removed docstring/`@req`/`step()` structure from a
   spec. Restore the origin spec and re-apply only the intended hunk. Never

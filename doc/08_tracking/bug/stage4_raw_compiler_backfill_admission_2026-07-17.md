@@ -1,4 +1,8 @@
 # Stage4 admitted no compiler-backfill capsule
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -28,3 +32,4 @@ clean the owned transaction; the raw input is never copied, modified, or
 deleted. Projected linking and executable proof remain open. No compiler, native,
 runtime, C, Cargo, or Simple execution is claimed under this session's
 static-only restriction.
+

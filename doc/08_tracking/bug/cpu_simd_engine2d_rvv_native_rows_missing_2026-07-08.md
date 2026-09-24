@@ -1,4 +1,8 @@
 # CPU-SIMD Engine2D RVV native target proof missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -61,3 +65,4 @@ in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`. The matrix's
   Cross toolchains and qemu-user are NOT the gap — `aarch64-linux-gnu-gcc`,
   `riscv64-linux-gnu-gcc`, `qemu-aarch64`, `qemu-riscv64` and both sysroots
   are all present on this host.
+

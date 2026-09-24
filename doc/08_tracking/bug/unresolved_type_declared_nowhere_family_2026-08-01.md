@@ -1,4 +1,8 @@
 # "Unresolved type" family: lower_named_kind whitelist drift, not source defects
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** Class A **closed except the cross-module struct fallback**.
@@ -447,3 +451,4 @@ that picking `U64` there "would make the JIT emit ushr and silently diverge from
 the interpreter on high-bit-set limbs" — the same reasoning may argue for signed
 `usize`, but changing it would contradict this compiler's `HirType.named` and the
 `u64` arm beside it. Needs a deliberate cross-engine decision.
+

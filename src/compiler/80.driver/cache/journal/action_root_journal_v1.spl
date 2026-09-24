@@ -15,6 +15,20 @@ pub struct JournalRecoveryV1:
     quarantined_tail: bool
     generation: i64
 
+# Immutable Simple-owned proposal passed to the host's bounded durable append
+# primitive.  Preparing it never advances the visible in-memory head.
+pub struct ActionRootPreparedAppendV1:
+    record: ActionRootRecordV1
+    expected_bytes: i64
+    expected_prefix_digest: text
+    append_bytes: text
+    operation_digest: text
+
+pub enum L78JournalResolutionV4:
+    ExactCommitted
+    ExactNotCommitted
+    Unknown
+
 fn _digest_v1(value: text) -> bool:
     if value.len() != 64: return false
     for index in 0..value.len():
@@ -23,7 +37,8 @@ fn _digest_v1(value: text) -> bool:
     true
 
 fn _kind_v1(value: text) -> bool:
-    value == "source_blob" or value == "file_ast" or value == "public_summary" or value == "semantic_read_set" or value == "native_object"
+    value == "source_blob" or value == "compile_snapshot" or value == "file_ast" or
+        value == "public_summary" or value == "semantic_read_set" or value == "native_object"
 
 fn _body_v1(record: ActionRootRecordV1) -> text:
     "{record.sequence}|{record.action_digest}|{record.object_kind}|{record.object_digest}|{record.manifest_digest}"
@@ -54,14 +69,62 @@ pub class ActionRootJournalV1:
     static fn empty(generation: i64) -> ActionRootJournalV1:
         ActionRootJournalV1(bytes: "", generation: generation, next_sequence: 0)
 
+    static fn recovered(bytes: text, generation: i64) -> Result<ActionRootJournalV1, text>:
+        val recovery = recover_action_root_journal_v1(bytes, generation)
+        if recovery.quarantined_tail:
+            return Err("journal recovery requires quarantine")
+        Ok(ActionRootJournalV1(bytes: bytes, generation: generation,
+            next_sequence: recovery.records.len()))
+
+    fn prepare(action_digest: text, object_kind: text, object_digest: text,
+               manifest_digest: text) -> Result<ActionRootPreparedAppendV1, text>:
+        val record = ActionRootRecordV1(sequence: self.next_sequence,
+            action_digest: action_digest, object_kind: object_kind,
+            object_digest: object_digest, manifest_digest: manifest_digest)
+        if not _record_valid_v1(record): return Err("journal record rejected")
+        val append_bytes = _line_v1(record)
+        val expected_prefix_digest = sha256_text(self.bytes)
+        val operation_digest = sha256_text(
+            "simple.action.root.operation.v1\u0000{self.generation}\u0000{self.bytes.len()}\u0000" +
+            expected_prefix_digest + "\u0000" + append_bytes)
+        Ok(ActionRootPreparedAppendV1(record: record,
+            expected_bytes: self.bytes.len(),
+            expected_prefix_digest: expected_prefix_digest,
+            append_bytes: append_bytes,
+            operation_digest: operation_digest))
+
+    # Apply only after the host returned definite durable admission.  Exact
+    # replay is idempotent; any divergent local head fails closed.
+    me accept_durable(prepared: ActionRootPreparedAppendV1) -> Result<ActionRootRecordV1, text>:
+        if (not _record_valid_v1(prepared.record) or
+                _line_v1(prepared.record) != prepared.append_bytes):
+            return Err("journal prepared record does not match append bytes")
+        if (prepared.expected_bytes < 0 or prepared.expected_bytes > self.bytes.len() or
+                sha256_text(self.bytes.slice(0, prepared.expected_bytes)) !=
+                    prepared.expected_prefix_digest):
+            return Err("journal expected prefix identity mismatch")
+        val expected_operation = sha256_text(
+            "simple.action.root.operation.v1\u0000{self.generation}\u0000{prepared.expected_bytes}\u0000" +
+            prepared.expected_prefix_digest + "\u0000" + prepared.append_bytes)
+        if expected_operation != prepared.operation_digest:
+            return Err("journal operation digest mismatch")
+        if self.bytes.len() == prepared.expected_bytes:
+            if self.next_sequence != prepared.record.sequence:
+                return Err("journal sequence changed before durable apply")
+            self.bytes = self.bytes + prepared.append_bytes
+            self.next_sequence = self.next_sequence + 1
+            return Ok(prepared.record)
+        if (self.bytes.len() == prepared.expected_bytes + prepared.append_bytes.len() and
+                self.bytes.slice(prepared.expected_bytes, self.bytes.len()) == prepared.append_bytes and
+                self.next_sequence == prepared.record.sequence + 1):
+            return Ok(prepared.record)
+        Err("journal head changed before durable apply")
+
     me append(action_digest: text, object_kind: text, object_digest: text,
               manifest_digest: text) -> Result<ActionRootRecordV1, text>:
-        val record = ActionRootRecordV1(sequence: self.next_sequence, action_digest: action_digest,
-            object_kind: object_kind, object_digest: object_digest, manifest_digest: manifest_digest)
-        if not _record_valid_v1(record): return Err("journal record rejected")
-        self.bytes = self.bytes + _line_v1(record)
-        self.next_sequence = self.next_sequence + 1
-        Ok(record)
+        val prepared = self.prepare(action_digest, object_kind, object_digest,
+            manifest_digest)?
+        self.accept_durable(prepared)
 
     me recover() -> JournalRecoveryV1:
         recover_action_root_journal_v1(self.bytes, self.generation)
@@ -86,3 +149,56 @@ pub fn recover_action_root_journal_v1(bytes: text, generation: i64) -> JournalRe
         expected = expected + 1
     JournalRecoveryV1(records: records, accepted_bytes: accepted,
         quarantined_tail: quarantined or accepted != bytes.len(), generation: generation)
+
+# Read-only semantic lookup for an operation committed in one exact complete
+# journal prefix. The journal owner alone reconstructs its private record
+# framing; callers receive a copied record, never durability authority.
+pub fn action_root_journal_find_operation_v1(
+    bytes: text,
+    generation: i64,
+    operation_digest: text,
+) -> ActionRootRecordV1?:
+    if generation < 0 or not _digest_v1(operation_digest): return nil
+    val recovery = recover_action_root_journal_v1(bytes, generation)
+    if recovery.quarantined_tail or recovery.accepted_bytes != bytes.len():
+        return nil
+    val lines = bytes.split("\n")
+    var offset: i64 = 0
+    var matched: ActionRootRecordV1? = nil
+    var index: i64 = 0
+    for record in recovery.records:
+        val append_bytes = _line_v1(record)
+        # Recovery historically accepts numeric parser normalization. This
+        # authority-adjacent lookup instead requires every physical frame to
+        # equal the journal owner's canonical bytes before returning a match.
+        if index >= lines.len() or lines[index] + "\n" != append_bytes:
+            return nil
+        val prior = bytes.slice(0, offset)
+        val candidate = sha256_text(
+            "simple.action.root.operation.v1\u0000" + generation.to_string() +
+            "\u0000" + offset.to_string() + "\u0000" + sha256_text(prior) +
+            "\u0000" + append_bytes)
+        if candidate == operation_digest: matched = Some(record)
+        offset = offset + append_bytes.len()
+        index = index + 1
+    matched
+
+# Recovery authority is sticky: a torn or quarantined journal cannot be
+# reclassified as an exact negative merely because the requested operation was
+# not found in its accepted prefix.
+pub fn action_root_journal_resolve_l78_v4(
+    bytes: text,
+    generation: i64,
+    operation_digest: text,
+) -> L78JournalResolutionV4:
+    if generation < 0 or not _digest_v1(operation_digest):
+        return L78JournalResolutionV4.Unknown
+    val recovery = recover_action_root_journal_v1(bytes, generation)
+    if recovery.quarantined_tail or recovery.accepted_bytes != bytes.len():
+        return L78JournalResolutionV4.Unknown
+    if action_root_journal_find_operation_v1(bytes, generation,
+            operation_digest) != nil:
+        return L78JournalResolutionV4.ExactCommitted
+    # Absence is not exact negative evidence without the manifest/root,
+    # writer, checkpoint and in-flight-operation proofs owned by P08.
+    L78JournalResolutionV4.Unknown

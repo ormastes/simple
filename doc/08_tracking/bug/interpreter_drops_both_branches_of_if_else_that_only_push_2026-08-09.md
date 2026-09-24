@@ -1,5 +1,43 @@
 # Tree-walk interpreter silently drops BOTH branches of an if/else whose bodies only `push`
 
+## 2026-09-13 — a likely explanation for the original sighting (entry stays CLOSED)
+
+Stays CLOSED — this adds a candidate cause for the "either the defect was
+specific to the since-replaced binary, or C8's probe mismeasured" dangling end
+below, so a future recurrence is not re-investigated from zero.
+
+There is a live defect that produces **exactly** this symptom and is invisible
+to the 20-shape sweep recorded below: at **module scope** (top-level statements,
+outside any `fn`), the seed executes statements against a discarded copy of the
+scope, so mutations performed inside a loop or branch body vanish while the
+body demonstrably runs. Measured 2026-09-13 on
+`build/vt4/bootstrap/simple.exe`, and tracked at
+`top_level_array_index_assign_in_loop_silently_dropped_2026-08-25.md`
+(re-characterised the same day: it is not limited to array-index writes, a plain
+`n = n + 1` is dropped too, and it is sensitive to how many top-level
+declarations precede the construct — a reduced repro can flip it clean).
+
+Why this fits the original report and evades the sweep:
+
+- it presents as "the body ran but nothing was pushed", with exit 0 and no
+  diagnostic — the reported shape;
+- every shape in the table below was almost certainly probed **inside a
+  function**, where the defect does not occur, so all 20 correctly came back OK;
+- it is position-sensitive, which explains a sighting that would not
+  re-reproduce on a re-run of a slightly different program.
+
+Independently corroborated the same day: the `MirToWat`/`WatBuilder` probe in
+`chained_static_ctor_receiver_drops_mutation_2026-08-01.md` prints `[]` for all
+three receiver forms at module scope and the correct `[i64.const 7]` for all
+three inside `fn main()` — the same push-only-body-drops-silently signature,
+from the same cause.
+
+**Action if this ever recurs:** before reopening, check whether the failing
+probe was module-scope. The regression spec
+`test/01_unit/bugs/if_else_push_only_branch_spec.spl` runs inside a spec block
+and so cannot catch the module-scope variant.
+
+
 **Date:** 2026-08-09
 Status: CLOSED (not reproducible)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).

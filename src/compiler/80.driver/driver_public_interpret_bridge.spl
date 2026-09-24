@@ -1,5 +1,10 @@
 use compiler.common.driver_core_types.{CompileResult}
-use compiler.driver.driver_public_shared.{find_simple_binary, clean_child_output}
+use compiler.driver.driver_public_shared.{
+    find_simple_binary,
+    clean_child_output,
+    check_compile_delegation_guard,
+    mark_compile_delegated
+}
 use std.io_runtime.{process_run}
 
 
@@ -8,13 +13,28 @@ use std.io_runtime.{process_run}
 
 pub fn interpret_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
+    val guard_error = check_compile_delegation_guard("source interpretation", simple_bin)
+    if guard_error != "":
+        return CompileResult.RuntimeError(
+            "{guard_error}; no compatible in-process interpreter is available in this runtime"
+        )
+    mark_compile_delegated()
     val (stdout, stderr, exit_code) = process_run(simple_bin, [path])
+    interpret_bridge_result(simple_bin, stdout, stderr, exit_code)
+
+pub fn interpret_bridge_result(simple_bin: text, stdout: text, stderr: text, exit_code: i64) -> CompileResult:
     val combined = _clean_child_output(stdout, stderr)
     if _looks_like_driver_failure(combined):
         return CompileResult.RuntimeError(combined)
-    if exit_code == 0 or combined == "":
+    if exit_code == 0:
         return CompileResult.Success(combined)
-    CompileResult.Success(combined)
+    if combined == "":
+        return CompileResult.RuntimeError(
+            "external interpreter '{simple_bin}' failed with exit code {exit_code} and produced no diagnostic"
+        )
+    CompileResult.RuntimeError(
+        "external interpreter '{simple_bin}' failed with exit code {exit_code}:\n{combined}"
+    )
 
 fn _clean_child_output(stdout: text, stderr: text) -> text:
     val base = clean_child_output(stdout, stderr)

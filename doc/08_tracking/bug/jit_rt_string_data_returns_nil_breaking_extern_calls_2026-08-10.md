@@ -1,4 +1,8 @@
 # jit lane: a nested extern call used as an extern ARGUMENT marshals as Nil/Bool/garbage
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 *(Filed as "`rt_string_data(text)` evaluates to Nil". That title named the
 symptom, not the defect — `rt_string_data` is fine in isolation in both lanes.
@@ -216,3 +220,4 @@ shown to check anything.**
 - `doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md`
 - `doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md`
 - `scripts/check/check-noalloc-log-error-reaches-stderr.shs`
+

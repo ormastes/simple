@@ -1,4 +1,9 @@
 # COLL006 "string concat in loop" fires on plain integer accumulators (`i = i + 1`)
+## Closed 2026-09-16 — Status fixed 2026-07-28 per .spipe/lint_coll006/state.md; type-check fix described
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed 2026-07-28 (working copy) — see .spipe/lint_coll006/state.md
 **Found:** 2026-07-27 (KV260 JTAG-console completeness work)
@@ -60,3 +65,4 @@ diagnostic to the assignment's own line instead of the function's.
 
 A regression case should cover: `text` accumulator in a loop → COLL006 fires;
 `i64` accumulator in a loop → no diagnostic.
+

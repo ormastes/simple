@@ -1,4 +1,8 @@
 # Stage 2 bootstrap link lacks the C-only `rt_file_sync` provider
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** root fix implemented and focused Rust regression passed; canonical
 verification is blocked before Stage 2 by the authority-fingerprint bug.
@@ -75,3 +79,4 @@ SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
 Success requires the admitted Stage-2 binary, exact candidate hash, sanity and
 struct-receiver receipts, and no Stage-3/Stage-4 start. A distinct first
 failure is retained and fixed only within the remaining bounded cycle budget.
+

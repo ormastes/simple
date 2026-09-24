@@ -56,6 +56,39 @@ function manifest(path = "README.md", kind = "text", previousPath = "") {
   ].join("\n");
 }
 
+function typeChangedManifest(fileType = "regular", previousFileType = "symlink") {
+  return [
+    "schema: spipe-changed-path-manifest/1",
+    "repository_provider: github",
+    "repository_id: 1175797696",
+    "repository_node_id: R_kgDORhU_wA",
+    "repository: ormastes/simple",
+    "pull_request_number: 83",
+    `head_sha: ${HEAD}`,
+    "base_repository_provider: github",
+    "base_repository_id: 1175797696",
+    "base_repository_node_id: R_kgDORhU_wA",
+    "base_repository: ormastes/simple",
+    "base_ref: refs/heads/main",
+    `base_sha: ${BASE}`,
+    `merge_base_sha: ${MERGE}`,
+    `diff_sha256: ${HASH_B}`,
+    "changes:",
+    "  - status: type_changed",
+    "    path: src/app/debug/coordinator.spl",
+    "    previous_path:",
+    "    content_kind: code",
+    "    previous_content_kind: code",
+    "    semantic_class: ordinary",
+    "    previous_semantic_class: ordinary",
+    `    file_type: ${fileType}`,
+    `    previous_file_type: ${previousFileType}`,
+    "    encoding: utf8",
+    "    previous_encoding: utf8",
+    "",
+  ].join("\n");
+}
+
 function policy(manifestSha, effect = "", allowScopes = [], denyScopes = []) {
   const header = { schema: "spipe-self-review-policy-db/1", default_allow: true, max_ttl_seconds: 86400, authority: "operator_owned_external" };
   if (!effect) return JSON.stringify(header);
@@ -130,6 +163,19 @@ test("tracked adapter checks both names of a rename against each constraint", ()
   const decision = evaluate(policy(sha256(changed), "constrain", allowDoc), changed);
   assert.equal(decision.allowed, false);
   assert.match(decision.reason, /does not allow every changed path/);
+});
+
+test("tracked adapter admits type_changed de-symlink records and rejects unsafe shapes", () => {
+  const deSymlink = typeChangedManifest();
+  assert.equal(parseChangedManifest(deSymlink).valid, true);
+  const decision = evaluate(policy(sha256(deSymlink)), deSymlink);
+  assert.equal(decision.allowed, true);
+
+  const reverse = typeChangedManifest("symlink", "regular");
+  assert.match(parseChangedManifest(reverse).error, /invalid or unsafe shape/);
+
+  const nonUtf8 = typeChangedManifest().replace("    encoding: utf8\n", "    encoding: binary\n");
+  assert.match(parseChangedManifest(nonUtf8).error, /invalid or unsafe shape/);
 });
 
 test("tracked adapter fails closed on duplicate policy keys and non-ASCII path aliases", () => {

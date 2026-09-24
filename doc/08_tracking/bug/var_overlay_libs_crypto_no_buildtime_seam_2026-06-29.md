@@ -1,5 +1,10 @@
 # Variant Overlay — libs/crypto constant_time: No Build-Time Seam
 
+## Closed 2026-09-13 — stale: rejected overlay CANDIDATE record, not a defect
+
+- **inferred** The entry's own verdict is `FAILS criterion (1)`: `src/lib/common/crypto/constant_time.spl` is a single 34-line pure-Simple XOR accumulator with zero `extern fn` / `rt_*` / OpenSSL / mbedtls binding, so there is no second backend for an overlay to select between.
+- **inferred** No defect and no work item — the analysis concluded the seam should not exist.
+
 Date: 2026-06-29
 Candidate: `variants/libs/crypto/` overlay keyed on `constant_time` backend (e.g. "pure" vs "openssl")
 

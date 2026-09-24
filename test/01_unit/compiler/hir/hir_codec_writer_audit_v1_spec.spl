@@ -1,0 +1,138 @@
+# B03: canonical writer charging/chunking and audit boundary.  Counters are
+# copied only from actual reader/writer attempts; no synthetic values are
+# accepted as evidence.
+# @req REQ-CSM-024
+
+use std.spec.*
+use std.spec.step
+use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_hir_module_v1}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.hir_codec_support.{HirCodecWriter, HirDecodeAuditObserver,
+    HIR_CODEC_CHUNK_LINES}
+use compiler.hir.hir_codec.{hir_canonical_codec_header, hir_module_encode,
+    hir_module_decode}
+
+fn writer(output: i64, allocation: i64, work: i64) -> HirCodecWriter:
+    HirCodecWriter.create_canonical_bounded(output, allocation, work)
+
+describe "B03 canonical writer audit [OPT-L07-T003]":
+    it "should finish a complete bounded frame with charged output":
+        step("Freeze the exact source and required case universe")
+        var w = writer(1024, 8192, 8192)
+        w.put_i64(7)
+        val body = w.finish_with_header(hir_canonical_codec_header())
+        expect(w.ok).to_equal(true)
+        expect(body).to_start_with(hir_canonical_codec_header() + "\n")
+        expect(w.output_bytes).to_equal(body.len())
+        expect(w.charged_work_units).to_be_greater_than(0)
+        var empty = writer(1024, 8192, 8192)
+        expect(empty.finish()).to_equal("")
+
+    it "should seal full chunks while keeping the mutable part bounded":
+        step("Exercise the production owner with a real typed input")
+        for count in [511, 512, 513]:
+            var w = writer(20000, 1000000, 1000000)
+            var index: i64 = 0
+            while index < count:
+                w.put_i64(index)
+                index = index + 1
+            expect(w.ok).to_equal(true)
+            expect(w.parts.len()).to_be_less_than(HIR_CODEC_CHUNK_LINES + 1)
+            if count >= HIR_CODEC_CHUNK_LINES:
+                expect(w.chunks.len()).to_equal(1)
+            else:
+                expect(w.chunks.len()).to_equal(0)
+            expect(w.output_bytes).to_be_greater_than(0)
+
+    it "should finalize legacy small and 511, 512, and 513 line writers":
+        step("Exercise the production owner with a real typed input")
+        for count in [0, 1, 511, 512, 513]:
+            var legacy = HirCodecWriter.create()
+            var expected = ""
+            var index: i64 = 0
+            while index < count:
+                legacy.put_i64(index)
+                expected = expected + "{index}\n"
+                index = index + 1
+            expect(legacy.finish()).to_equal(expected)
+
+    it "should charge exact scalar bounds and refuse every one-short limit":
+        step("Inject one missing case or invalid boundary")
+        var exact = writer(22, 64, 22)
+        exact.put_i64(7)
+        expect(exact.ok).to_equal(true)
+        expect(exact.output_bytes).to_equal(2)
+        expect(exact.charged_allocation_bytes).to_equal(64)
+        expect(exact.charged_work_units).to_equal(22)
+        var output_short = writer(21, 64, 22)
+        output_short.put_i64(7)
+        expect(output_short.ok).to_equal(false)
+        var allocation_short = writer(22, 63, 22)
+        allocation_short.put_i64(7)
+        expect(allocation_short.ok).to_equal(false)
+        var work_short = writer(22, 64, 21)
+        work_short.put_i64(7)
+        expect(work_short.ok).to_equal(false)
+        var nil_writer = writer(1024, 8192, 8192)
+        nil_writer.put_text(nil)
+        expect(nil_writer.ok).to_equal(true)
+
+    it "should preserve a real legacy HIR encode decode reencode":
+        step("Require the exact refusal before publication or execution")
+        val module = fixture_hir_module_v1(false)
+        val encoded = hir_module_encode(module)
+        expect(encoded.len()).to_be_greater_than(0)
+        match hir_module_decode(encoded):
+            case Some(decoded):
+                expect(hir_module_encode(decoded)).to_equal(encoded)
+            case nil: fail("legacy HIR decode unexpectedly returned nil")
+
+    it "should refuse before materializing work beyond output and work bounds":
+        step("Inject one missing case or invalid boundary")
+        var output_short = writer(1, 1024, 1024)
+        output_short.put_i64(1)
+        expect(output_short.ok).to_equal(false)
+        expect(output_short.failure_kind).to_equal("bounds")
+        var work_short = writer(1024, 1024, 1)
+        work_short.put_text("long text")
+        expect(work_short.ok).to_equal(false)
+        expect(work_short.failure_kind).to_equal("bounds")
+        expect(work_short.finish()).to_equal("")
+        var allocation_short = writer(100, 1, 100)
+        allocation_short.put_i64(1)
+        expect(allocation_short.ok).to_equal(false)
+        expect(allocation_short.failure_kind).to_equal("bounds")
+        expect(allocation_short.finish()).to_equal("")
+
+        var poisoned = writer(2, 8192, 8192)
+        poisoned.put_i64(1)
+        poisoned.put_i64(2)
+        val bytes_after_failure = poisoned.output_bytes
+        val work_after_failure = poisoned.charged_work_units
+        val parts_after_failure = poisoned.parts.len()
+        poisoned.put_i64(3)
+        expect(poisoned.output_bytes).to_equal(bytes_after_failure)
+        expect(poisoned.charged_work_units).to_equal(work_after_failure)
+        expect(poisoned.parts.len()).to_equal(parts_after_failure)
+
+    it "should retain failed writer accounting in the audit observer":
+        step("Require the exact refusal before publication or execution")
+        var w = writer(24, 8192, 8192)
+        w.put_i64(1)
+        w.put_i64(2)
+        w.put_i64(3)
+        expect(w.ok).to_equal(false)
+        val reader = FlatPoolReader.new_bounded("", 0, 8192, 8, 4, 8192)
+        var observer = HirDecodeAuditObserver.create(8192)
+        observer.capture(reader)
+        observer.capture_reencode(w)
+        val usage = observer.snapshot()
+        expect(observer.reencode_captured).to_equal(true)
+        expect(w.charged_work_units).to_be_greater_than(0)
+        expect(usage.charged_work_units).to_equal(
+            reader.charged_work_units + w.charged_work_units)
+        expect(usage.overflowed).to_equal(false)
+
+    it "should bind writer audit hits to the admitted build":
+        step("Bind executed branch hits to the admitted build")
+        fail("MissingEvidence: B03 qualified branch instrumentation and runner")

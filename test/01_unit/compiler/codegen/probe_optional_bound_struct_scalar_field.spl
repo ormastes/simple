@@ -1,0 +1,74 @@
+# Native probe for the optional-bound struct scalar field defect.
+#
+# Companion to optional_bound_struct_scalar_field_spec.spl. That spec pins the
+# oracle on the seed interpreter; THIS file is built by the self-hosted lane
+# (`<stage-binary> native-build <this file> -o probe`) and executed. It prints
+# a single verdict line and exits non-zero on failure so a lane can gate on it.
+#
+# Defect it reproduces (2026-09-12): an `i64` field read off a struct bound
+# through an Optional returned a fresh tagged heap pointer per read instead of
+# the value. Absolute oracle: 632.
+#
+# See doc/08_tracking/bug/bootstrap_stage2_native_capsule_receipt_mismatch_equal_byte_counts_2026-09-12.md
+
+struct FieldProbe:
+    size: i64
+    width: i32
+    ready: bool
+    ratio: f64
+    name: text
+
+
+fn probe_of(n: i64) -> FieldProbe?:
+    return FieldProbe(size: n, width: 17, ready: true, ratio: 2.5, name: "obj")
+
+
+fn main() -> i64:
+    var size_a = -1
+    var size_b = -1
+    var width = -1
+    var ready = false
+    var ratio = 0.0
+    var name = ""
+    var matched = -1
+    if val fp = probe_of(632):
+        size_a = fp.size
+        size_b = fp.size
+        width = fp.width as i64
+        ready = fp.ready
+        ratio = fp.ratio
+        name = fp.name
+    match probe_of(632):
+        case Some(fp2):
+            matched = fp2.size
+        case None:
+            matched = -1
+
+    var failures = 0
+    if size_a != 632:
+        print("FAIL if-val i64 field: expected 632 got {size_a}")
+        failures = failures + 1
+    if size_b != size_a:
+        print("FAIL repeated read disagrees: {size_a} vs {size_b}")
+        failures = failures + 1
+    if matched != 632:
+        print("FAIL match-bound i64 field: expected 632 got {matched}")
+        failures = failures + 1
+    if width != 17:
+        print("FAIL i32 field: expected 17 got {width}")
+        failures = failures + 1
+    if not ready:
+        print("FAIL bool field: expected true")
+        failures = failures + 1
+    if ratio != 2.5:
+        print("FAIL f64 field: expected 2.5 got {ratio}")
+        failures = failures + 1
+    if name != "obj":
+        print("FAIL text field: expected obj got {name}")
+        failures = failures + 1
+
+    if failures == 0:
+        print("PASS optional-bound struct scalar field reads")
+        return 0
+    print("FAIL {failures} check(s)")
+    return 1

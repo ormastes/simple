@@ -1,4 +1,8 @@
 # Skia path_op boolean polygon ops: 2 of 6 examples fail
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (pure computational geometry, not a rendering/pixel test)
@@ -49,3 +53,4 @@ the pattern used for `math3d_cos_taylor_precision_2026-07-20.md`) printing
 `u.contains(...)`/`u.bounds()` values directly to bisect which 2 of the 6
 actually fail and get concrete expected-vs-actual numbers before touching
 `boolean.spl`.
+

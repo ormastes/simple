@@ -1,4 +1,9 @@
 # Self-hosted parser: trailing-operator continuation fails across a DEDENT
+## Closed 2026-09-16 — status CLOSED; not reproducible on current source (G27 rule); regression spec added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-11 · **Status:** CLOSED — not reproducible against current source; premise
 corrected (see "Re-diagnosis" below). Regression spec added:
@@ -91,3 +96,4 @@ Self-hosted lexer/parser: while a binary operator ends a line, treat subsequent
 INDENT/DEDENT as insignificant until the expression closes (mirror the seed's rule).
 Owner: compiler 10.lexer/parser layer. Until fixed, the dedented-close style is legal
 per the seed grammar and WILL reappear from peers writing JSON builders.
+

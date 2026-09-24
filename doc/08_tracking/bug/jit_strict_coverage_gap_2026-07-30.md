@@ -1,4 +1,9 @@
 # SIMPLE_JIT_STRICT coverage gap (2026-07-30, part 2 of the fail-open fix)
+## Closed 2026-09-16 — rows 2-3 strict tagging fixed with before/after evidence; remaining rows by-design or inherent, tracked elsewhere
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Follow-up to `doc/08_tracking/bug/jit_strict_fail_open_fix_2026-07-30.md`
 (part 1: the tag reached the catch site but nothing else was tagged). This
@@ -243,3 +248,4 @@ Raw probe fixtures: `/tmp/.../scratchpad/probe_hir_unknown_var.spl` (Fixture A),
 - No spec can serve as evidence for any of the above; only `simple run`
   transcripts can, because `simple test` forces interpreter mode
   unconditionally (§4a).
+

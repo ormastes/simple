@@ -1,4 +1,19 @@
 # GUI/Web/2D Vulkan Pairwise Aggregate Evidence
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
+- **measured** — the referenced sources still exist
+  (`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`, `src/runtime/runtime_native.c`,
+  the `browser_engine` renderers), so the "all referenced paths are gone" stale test does
+  not apply.
+- **measured** — the gate's evidence directory `build/gui-web-2d-vulkan-env/` does not
+  exist here, i.e. the Vulkan/Electron/RenderDoc lane has never been run on this machine.
+- **inferred** — confirming or refuting GPU-backend behaviour requires a real Vulkan device
+  and that lane; neither is available from this Windows triage host. Left OPEN,
+  host-blocked — not stale.
 
 - Date: 2026-06-22
 - Status: pass for pairwise pixels; browser/RenderDoc completion still blocked
@@ -180,3 +195,4 @@ software, `cpu`, and `cpu_simd` aliases on the direct `cpu_mirror` path, leaving
 real GPU backend requests on the existing Engine2D path. Verification evidence:
 native probe exit `0`, `Engine2D.is_err` stderr count `0`, JSON pixels `768`,
 and GUI/Web/2D Vulkan pairwise mismatches all `0`.
+

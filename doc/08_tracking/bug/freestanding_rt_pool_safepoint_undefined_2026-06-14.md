@@ -1,7 +1,13 @@
 # Bug: freestanding `rt_pool_safepoint` undefined on non-x86_64 baremetal arches
 
+## Closed 2026-09-13 — Fixed: `rt_pool_safepoint` is defined in the C runtime
+
+- **measured** (grep of current source): the undefined symbol now has definitions — `src/runtime/runtime_pool.c:763` `int64_t rt_pool_safepoint(void) {` and `src/runtime/runtime_thread.c:1108` `int64_t rt_pool_safepoint(void) {`. A cranelift-emitted call can resolve at link.
+- **inferred**: this matches the entry's own FIXED note (origin `f47ddc609bd`, scoped to arm64, superseding the all-arches `8c8128fa815`); the arm64 scoping is why the other lanes were unaffected.
+- **inferred**: the arm64 QEMU systest lane was NOT re-run — this Windows host has no aarch64 freestanding build or QEMU lane, so the link is verified by symbol definition rather than by a clean-worktree kernel build.
+
 **ID:** freestanding_rt_pool_safepoint_undefined_2026-06-14
-**Status:** FIXED (origin `f47ddc609bd` — scoped to arm64 only; supersedes the intermediate all-arches `8c8128fa815`)
+**Status:** CLOSED 2026-09-13. Originally: FIXED (origin `f47ddc609bd` — scoped to arm64 only; supersedes the intermediate all-arches `8c8128fa815`)
 **Severity:** P1 — breaks the arm64 QEMU systest lane from a clean source build (cranelift-emitted symbol; other lanes verified unaffected)
 **Found by:** multiarch QEMU systest full-sweep verification (clean-worktree rebuild of every lane)
 

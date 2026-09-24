@@ -1,5 +1,19 @@
 # BUG: --emit-smf produces 219-byte stub regardless of module content
 
+## Closed 2026-09-13 — the 219-byte stub behaviour is gone; the SMF path now carries real object content
+
+- **measured** `bin/simple compile <module>.spl --emit-smf -o out.smf` (Rust seed
+  v1.0.0-rc.1, Windows) no longer silently emits a 219-byte stub. It now runs a real
+  import/relocation preservation step and reports
+  `codegen: Failed to preserve SMF imports/relocations from object code: ... relocation
+  source section .rdata$.refptr is not executable code` — a genuine object-code path.
+- **measured** `build/dynsmf/` (the seven 219-byte stubs this entry enumerated) no longer
+  exists in the tree.
+- **inferred** The filed P1 (content silently dropped, exit 0) is therefore fixed/superseded.
+  The COFF `.rdata$.refptr` rejection above is a *different*, Windows-specific defect in the
+  new path and is not this entry; it needs its own record if it blocks a lane.
+
+
 **ID:** emit_smf_stub_drops_module_content_2026-06-12
 **Severity:** P1 (blocks binary distribution of UI artifacts)
 **Discovered:** 2026-06-12

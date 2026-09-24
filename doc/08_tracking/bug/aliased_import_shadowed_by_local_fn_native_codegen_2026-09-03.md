@@ -160,3 +160,7 @@ level by importing `detect_os` (no bare-name collision) instead of `is_windows`:
 `platform.spl`, `platform/__init__.spl`, `play/xvfb.spl`, `spec.spl`.
 `env.platform.is_windows` is literally `detect_os() == "windows"`, so behaviour is unchanged on
 every platform.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

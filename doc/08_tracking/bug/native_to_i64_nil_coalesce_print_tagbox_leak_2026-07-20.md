@@ -1,4 +1,9 @@
 # Native `text.to_i64() ?? default` leaks tag-box representation, wrong value in string interpolation
+## Closed 2026-09-16 — ## Fix section 2026-07-21 in seed lowering; source-fixed, e2e blocked by unrelated toolchain gap
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-20
 **Status:** ROOT-CAUSED + SOURCE-FIXED 2026-07-21 (Rust seed,
@@ -238,3 +243,4 @@ session with a working from-source build should file and fix it, at which
 point this bug's regression coverage
 (`test/03_system/native/option_nullcoalesce_i64_print_interp.spl`, expected
 rc 42) can finally be run.
+

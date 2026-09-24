@@ -1,4 +1,8 @@
 # `--no-verify` bypass evidence: lane stage3-memguard, 2026-08-19
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Authorised explicitly by the user ("no verify push"). This file is the mandatory record.
 
@@ -51,3 +55,4 @@ This lane cannot satisfy its own pre-push hook until a compiler is deployed into
 symlinking `bin/simple` at a deployed binary or by bootstrapping the lane — do not let
 `--no-verify` become the routine path. This is the second such record in two days
 (cf. `f0f5c5d1a70`), which is itself the signal worth acting on.
+

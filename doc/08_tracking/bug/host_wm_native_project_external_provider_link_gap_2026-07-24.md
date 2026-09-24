@@ -1,4 +1,8 @@
 # Host WM Native-Project External Provider Link Gap — 2026-07-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -52,3 +56,4 @@ The three permitted host cycles are exhausted:
 No fourth host launch is permitted in this session. The next session must
 bootstrap the compiler containing this fix, then run the production host gate
 once. No screenshot or runtime PASS exists yet.
+

@@ -1,4 +1,8 @@
 # Interpreter: Dict values corrupted inside struct under copy-return semantics
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** high (silent data corruption)
@@ -111,3 +115,4 @@ note above.
 Affected spec: `test/feature/plugin/plugin_startup_block_spec.spl` (2 of 3
 examples fail; left unmodified per the "never weaken an assertion" rule — the
 spec is asserting the correct/intended two-phase contract).
+

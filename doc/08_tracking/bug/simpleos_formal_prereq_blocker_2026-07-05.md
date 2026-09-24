@@ -1,4 +1,8 @@
 # SimpleOS mission-critical release blocked by missing SymbiYosys stack
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-05
 - **Severity:** P1 (release evidence — mission-critical SimpleOS release cannot
@@ -50,3 +54,4 @@ command -v boolector || command -v z3
 sh scripts/check/check-simpleos-mission-critical-prereqs.shs
 sh scripts/check/check-simpleos-mission-critical-release.shs
 ```
+

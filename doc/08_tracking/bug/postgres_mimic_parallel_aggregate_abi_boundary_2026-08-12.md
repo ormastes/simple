@@ -1,4 +1,8 @@
 # PostgreSQL mimic parallel worker aggregate ABI boundary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -72,3 +76,4 @@ entrypoints and a focused cross-thread test proves: wrong-handle rejection,
 bounded slots, stale-generation rejection, concurrent reads, join-before-
 release, and no aggregate/`Any` crossing.  Until then, use `--inline` and keep
 the parallel claim RED.
+

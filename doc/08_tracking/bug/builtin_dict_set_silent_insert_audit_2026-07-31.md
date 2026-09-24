@@ -1,4 +1,8 @@
 # Audit: `.set()` on builtin Dict -- silent-insert-failure blast radius (2026-07-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Background
 
@@ -322,3 +326,4 @@ row-by-row here:
    the LSP hover/type-at tool, or a compiler-assisted grep) could resolve more of the 662 remaining UNKNOWN sites.
 4. Update `doc/07_guide/language/dict_native_pitfalls.md` to add `.set()`
    silent-insert-failure as a third documented defect alongside `.get()`/`.len()`.
+

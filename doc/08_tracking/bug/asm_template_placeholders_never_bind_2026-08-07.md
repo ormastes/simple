@@ -1,4 +1,8 @@
 # `asm """..."""` template placeholders never bind — and `@cfg("target_arch", ...)` is inert
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-07
 - Status: OPEN (P2 — downgraded from P1) — **root cause C and the arch-gating gap
@@ -465,3 +469,4 @@ are untouched by the above and remain open as filed. Root cause C is **retired
 for the pure-Simple compiler** and **re-scoped to a seed MIR gap** (cross-owner).
 The `timer.spl` / `topology.spl` conversion is still correctly blocked: it is the
 seed that builds the SimpleOS lanes, and the seed still cannot bind operands.
+

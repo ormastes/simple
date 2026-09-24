@@ -1,4 +1,9 @@
 # Most math methods do not exist on numeric receivers (`f64.sin`, `i64.abs`, ...)
+## Closed 2026-09-16 — Status FIXED, re-verified; 28-assertion dispatch check green both lanes
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-10
 - Status: FIXED
@@ -99,3 +104,4 @@ SIMPLE_JIT_STRICT=1 simple repro.spl    # same
 - `doc/08_tracking/bug/float_returning_method_in_argument_position_prints_tagged_bits_2026-08-10.md`
 - `doc/08_tracking/bug/float_literal_receiver_method_call_returns_receiver_2026-08-10.md`
 - `doc/08_tracking/bug/numeric_builtins_hardcode_i64_result_type_2026-08-10.md` (free-function forms)
+

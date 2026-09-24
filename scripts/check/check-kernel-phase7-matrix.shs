@@ -1,0 +1,773 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+policy=llvm-cranelift
+coverage=atomic-apk-only
+mode=
+abi=v1
+manifest=simple-sdn
+execute=0
+observe_runtime=0
+ci=0
+receipt_dir=${SIMPLE_PHASE7_RECEIPT_DIR:-$root/build/check/kernel-phase7}
+
+usage() {
+  echo "usage: $0 [--policy=llvm-cranelift] [--coverage=atomic-apk-only] --mode=one-binary|dynload [--abi=v1] [--manifest=simple-sdn] [--execute|--observe-admitted-runtime] [--ci]" >&2
+  exit 2
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --policy=*) policy=${arg#*=} ;;
+    --coverage=*) coverage=${arg#*=} ;;
+    --mode=*) mode=${arg#*=} ;;
+    --abi=*) abi=${arg#*=} ;;
+    --manifest=*) manifest=${arg#*=} ;;
+    --execute) execute=1 ;;
+    --observe-admitted-runtime) observe_runtime=1 ;;
+    --ci) ci=1 ;;
+    *) usage ;;
+  esac
+done
+
+case "$policy" in llvm-cranelift) ;; *) usage ;; esac
+case "$coverage" in atomic-apk-only) ;; *) usage ;; esac
+case "$mode" in one-binary|dynload) ;; *) usage ;; esac
+case "$abi" in v1) ;; *) usage ;; esac
+case "$manifest" in simple-sdn) ;; *) usage ;; esac
+[ "$execute" -eq 0 ] || [ "$observe_runtime" -eq 0 ] || usage
+
+row=${policy}__${coverage}__${mode}__${abi}__${manifest}
+mkdir -p "$receipt_dir"
+receipt=$receipt_dir/$row.env
+tmp=$receipt.tmp.$$
+native_receipt_tmp=
+trap 'rm -f "$tmp" ${native_receipt_tmp:+"$native_receipt_tmp"}' EXIT HUP INT TERM
+
+status=PASS
+reason=qualified
+spipe_results=blocked
+child_apk_consumption=blocked
+legacy_policy_rejected=pass
+source_rewrite_gate=blocked
+policy_root_runtime=blocked
+bootstrap_runtime=blocked
+produced_binary_gate=blocked
+composition_receipt_gate=blocked
+mode_gate=blocked
+startup_budget=blocked
+plugin_edit_hash_independent=blocked
+k0_edit_invalidates=blocked
+candidate_manifest_sha256=blocked
+candidate_manifest_path=blocked
+candidate_path=blocked
+candidate_sha256=blocked
+candidate_architecture=blocked
+child_binary_path=blocked
+child_binary_sha256=blocked
+child_identity_binding=blocked
+child_identity_verified=blocked
+composition_receipt_path=blocked
+composition_receipt_sha256=blocked
+stage3_acceptance_path=blocked
+stage3_acceptance_sha256=blocked
+stage4_provenance_path=blocked
+stage4_provenance_sha256=blocked
+spipe_log_path=blocked
+spipe_log_sha256=blocked
+coverage_artifact_path=blocked
+coverage_artifact_sha256=blocked
+mode_evidence_path=blocked
+mode_evidence_sha256=blocked
+startup_samples_path=blocked
+startup_samples_sha256=blocked
+performance_receipt_path=blocked
+performance_receipt_sha256=blocked
+performance_samples_path=blocked
+performance_samples_sha256=blocked
+performance_baseline_receipt_path=blocked
+performance_baseline_receipt_sha256=blocked
+performance_baseline_evidence_path=blocked
+performance_baseline_evidence_sha256=blocked
+performance_server_sha256=blocked
+performance_gate=blocked
+host_system=$(uname -s)
+architecture=blocked
+translated_execution=blocked
+native_pass_receipt=blocked
+native_pass_receipt_sha256=blocked
+one_binary_observation=blocked
+dynload_observation=blocked
+backend_parity_observation=blocked
+startup_observation=blocked
+rss_observation=blocked
+observation_evidence_path=blocked
+observation_evidence_sha256=blocked
+runtime_provenance_path=blocked
+runtime_provenance_sha256=blocked
+runtime=${SIMPLE_PHASE7_RUNTIME:-$root/bin/simple}
+runtime_provenance=${SIMPLE_PHASE7_RUNTIME_PROVENANCE:-${runtime}.provenance.env}
+runtime_cache_receipt=${SIMPLE_PHASE7_RUNTIME_CACHE_RECEIPT:-}
+runtime_receipt=${SIMPLE_PHASE7_RUNTIME_RECEIPT:-}
+baseline_binary=${SIMPLE_PHASE7_BASELINE_BINARY:-}
+candidate_binary=${SIMPLE_PHASE7_CANDIDATE_BINARY:-}
+performance_receipt=${SIMPLE_PHASE7_PERFORMANCE_RECEIPT:-}
+performance_samples=${SIMPLE_PHASE7_PERFORMANCE_SAMPLES:-}
+performance_baseline_receipt=${SIMPLE_PHASE7_BASELINE_RECEIPT:-}
+performance_baseline_evidence=${SIMPLE_PHASE7_BASELINE_EVIDENCE:-}
+. "$root/scripts/check/lib/kernel-phase7-runtime-observation.shs"
+
+require_text() {
+  grep -Fq -- "$2" "$1" || { echo "FAIL: $1 lacks $2" >&2; exit 1; }
+}
+
+hash_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    echo "FAIL: no SHA-256 tool is available" >&2
+    exit 1
+  fi
+}
+
+canonical_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  directory=$(CDPATH= cd -P -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) || return 1
+  resolved=$directory/$(basename -- "$1")
+  [ -f "$resolved" ] && [ ! -L "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
+}
+
+normalize_architecture() {
+  case "$1" in
+    arm64|aarch64) echo arm64 ;;
+    x86_64|amd64) echo x86_64 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_native_host() {
+  architecture=$(normalize_architecture "$(uname -m)") || {
+    echo "FAIL: unsupported native Phase 7 architecture: $(uname -m)" >&2
+    exit 1
+  }
+  translated_execution=false
+  if [ "$host_system" = Darwin ] && command -v sysctl >/dev/null 2>&1; then
+    translated=$(sysctl -in sysctl.proc_translated 2>/dev/null || echo 0)
+    [ "$translated" != 1 ] || {
+      echo "FAIL: translated execution cannot produce native Phase 7 authority" >&2
+      exit 1
+    }
+  fi
+}
+
+require_candidate_architecture() {
+  input=$1
+  case "$host_system:$architecture" in
+    Darwin:arm64|Darwin:x86_64)
+      command -v lipo >/dev/null 2>&1 || {
+        echo "FAIL: lipo is required for native Darwin architecture admission" >&2
+        exit 1
+      }
+      archs=$(lipo -archs "$input" 2>/dev/null) || {
+        echo "FAIL: candidate is not an inspectable Mach-O binary" >&2
+        exit 1
+      }
+      case " $archs " in *" $architecture "*) ;; *)
+        echo "FAIL: candidate does not contain the executing $architecture slice" >&2
+        exit 1
+      esac
+      ;;
+    Linux:arm64)
+      file "$input" | grep -Eq 'ELF .* (ARM aarch64|aarch64)' || {
+        echo "FAIL: candidate architecture does not match arm64" >&2
+        exit 1
+      }
+      ;;
+    Linux:x86_64)
+      file "$input" | grep -Eq 'ELF .* (x86-64|X86-64)' || {
+        echo "FAIL: candidate architecture does not match x86_64" >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "FAIL: native Phase 7 host system is unsupported: $host_system" >&2
+      exit 1
+      ;;
+  esac
+}
+
+policy_authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+policy_authority_sha256=$(hash_file "$root/$policy_authority_path")
+performance_threshold_mode=baseline-relative-10-percent
+performance_baseline_scope=admitted-per-architecture-receipt
+performance_steady_rss_percent=110
+performance_growth_percent=10
+performance_warm_request_count=20
+
+manifest_value() {
+  key=$1
+  file=$2
+  count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count+0 }' "$file")
+  [ "$count" -eq 1 ] || return 1
+  awk -v key="$key" 'index($0, key "=") == 1 { print substr($0, length(key) + 2) }' "$file"
+}
+
+require_positive_integer() {
+  case "$1" in ''|*[!0-9]*|0) return 1 ;; *) return 0 ;; esac
+}
+
+require_nonnegative_integer() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+validate_native_performance_authority() {
+  [ -n "$performance_receipt" ] && [ -n "$performance_samples" ] && \
+    [ -n "$performance_baseline_receipt" ] && [ -n "$performance_baseline_evidence" ] || return 1
+  performance_receipt_path=$(canonical_file "$performance_receipt") || return 2
+  performance_samples_path=$(canonical_file "$performance_samples") || return 2
+  performance_baseline_receipt_path=$(canonical_file "$performance_baseline_receipt") || return 2
+  performance_baseline_evidence_path=$(canonical_file "$performance_baseline_evidence") || return 2
+  authority_document=doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md
+  authority_document_sha256=$(hash_file "$root/$authority_document")
+  [ "$(manifest_value schema "$performance_baseline_receipt_path")" = macos-m4-residency-baseline-v1 ] && \
+    [ "$(manifest_value status "$performance_baseline_receipt_path")" = ADMITTED ] && \
+    [ "$(manifest_value requirement_id "$performance_baseline_receipt_path")" = MBH-NFR-003 ] && \
+    [ "$(manifest_value selection_policy "$performance_baseline_receipt_path")" = "$performance_threshold_mode" ] && \
+    [ "$(manifest_value decision_source "$performance_baseline_receipt_path")" = user-final-performance-authority-2026-09-02 ] && \
+    [ "$(manifest_value architecture "$performance_baseline_receipt_path")" = "$architecture" ] && \
+    [ "$(manifest_value request_count "$performance_baseline_receipt_path")" = "$performance_warm_request_count" ] && \
+    [ "$(manifest_value producer_sha256 "$performance_baseline_receipt_path")" = "$candidate_sha256" ] && \
+    [ "$(manifest_value authority_document "$performance_baseline_receipt_path")" = "$authority_document" ] && \
+    [ "$(manifest_value authority_document_sha256 "$performance_baseline_receipt_path")" = "$authority_document_sha256" ] || return 2
+  baseline_rss=$(manifest_value baseline_rss_kib "$performance_baseline_receipt_path") || return 2
+  require_positive_integer "$baseline_rss" || return 2
+  performance_server_sha256=$(manifest_value server_sha256 "$performance_baseline_receipt_path") || return 2
+  baseline_evidence_sha=$(manifest_value baseline_evidence_sha256 "$performance_baseline_receipt_path") || return 2
+  [ "$baseline_evidence_sha" = "$(hash_file "$performance_baseline_evidence_path")" ] || return 2
+  performance_baseline_receipt_sha256=$(hash_file "$performance_baseline_receipt_path")
+  performance_baseline_evidence_sha256=$baseline_evidence_sha
+
+  [ "$(manifest_value schema "$performance_receipt_path")" = macos-bootstrap-long-lived-residency-gate-v3 ] && \
+    [ "$(manifest_value status "$performance_receipt_path")" = PASS ] && \
+    [ "$(manifest_value architecture "$performance_receipt_path")" = "$architecture" ] && \
+    [ "$(manifest_value request_count "$performance_receipt_path")" = "$performance_warm_request_count" ] && \
+    [ "$(manifest_value producer_sha256 "$performance_receipt_path")" = "$candidate_sha256" ] && \
+    [ "$(manifest_value server_sha256 "$performance_receipt_path")" = "$performance_server_sha256" ] && \
+    [ "$(manifest_value baseline_rss_kib "$performance_receipt_path")" = "$baseline_rss" ] && \
+    [ "$(manifest_value baseline_receipt_sha256 "$performance_receipt_path")" = "$performance_baseline_receipt_sha256" ] && \
+    [ "$(manifest_value baseline_evidence_sha256 "$performance_receipt_path")" = "$performance_baseline_evidence_sha256" ] && \
+    [ "$(manifest_value authority_document_sha256 "$performance_receipt_path")" = "$authority_document_sha256" ] && \
+    [ "$(manifest_value decision_source "$performance_receipt_path")" = user-final-performance-authority-2026-09-02 ] && \
+    [ "$(manifest_value threshold_mode "$performance_receipt_path")" = "$performance_threshold_mode" ] && \
+    [ "$(manifest_value steady_rss_limit_percent "$performance_receipt_path")" = "$performance_steady_rss_percent" ] && \
+    [ "$(manifest_value growth_limit_percent "$performance_receipt_path")" = "$performance_growth_percent" ] && \
+    [ "$(manifest_value samples_sha256 "$performance_receipt_path")" = "$(hash_file "$performance_samples_path")" ] || return 2
+  observed_rss=$(manifest_value observed_max_steady_rss_kib "$performance_receipt_path") || return 2
+  observed_growth=$(manifest_value observed_nonnegative_growth_kib "$performance_receipt_path") || return 2
+  require_positive_integer "$observed_rss" && require_nonnegative_integer "$observed_growth" || return 2
+  [ $((observed_rss * 100)) -le $((baseline_rss * performance_steady_rss_percent)) ] && \
+    [ $((observed_growth * 100)) -le $((baseline_rss * performance_growth_percent)) ] || return 2
+  sample_verdict=$(awk -F '\t' -v expected_sha="$performance_server_sha256" '
+    NR == 1 {
+      if ($0 != "sequence\trequest_id\tpid\tprocess_start_token\texecutable_sha256\trss_kib\thwm_kib") exit 1
+      next
+    }
+    {
+      sequence=NR-1
+      if (NF != 7 || $1 != sequence || $2 != "m4-residency-" sequence ||
+          $3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[0-9a-f]{64}$/ ||
+          $5 != expected_sha || $6 !~ /^[1-9][0-9]*$/ ||
+          $7 !~ /^[1-9][0-9]*$/ || $7 < $6) exit 1
+      if (sequence == 1) { pid=$3; token=$4; first_hwm=$7; previous_hwm=$7; max_rss=$6 }
+      else {
+        if ($3 != pid || $4 != token || $7 < previous_hwm) exit 1
+        previous_hwm=$7
+        if ($6 > max_rss) max_rss=$6
+      }
+      count++
+    }
+    END {
+      if (count != 20) exit 1
+      print max_rss " " previous_hwm-first_hwm
+    }
+  ' "$performance_samples_path") || return 2
+  [ "$sample_verdict" = "$observed_rss $observed_growth" ] || return 2
+  performance_receipt_sha256=$(hash_file "$performance_receipt_path")
+  performance_samples_sha256=$(hash_file "$performance_samples_path")
+  performance_gate=pass
+  return 0
+}
+
+# Production composition contract: the full CLI installs the plugin registry,
+# therefore every bootstrap build of that entry must expose src/plugins.
+require_text "$root/src/app/cli/_CliMain/main_and_help.spl" 'install_full_static_backends_for_k1_policy_v1'
+require_text "$root/src/app/cli/_CliMain/main_and_help.spl" 'SIMPLE_KERNEL_K1_POLICY'
+require_text "$root/src/plugins/backend_registry/full_static_backend_registry.spl" 'full_static_backend_table_for_k1_policy_v1'
+require_text "$root/scripts/bootstrap/bootstrap-from-scratch.sh" 'selected_manifest_policy=$(kernel_policy_value plugin_manifest_policy)'
+require_text "$root/scripts/bootstrap/bootstrap-from-scratch.sh" '--source "${plugin_policy_source_root}"'
+require_text "$root/$policy_authority_path" "performance_threshold_mode: $performance_threshold_mode"
+require_text "$root/$policy_authority_path" "performance_baseline_scope: $performance_baseline_scope"
+require_text "$root/$policy_authority_path" "performance_steady_rss_percent: $performance_steady_rss_percent"
+require_text "$root/$policy_authority_path" "performance_growth_percent: $performance_growth_percent"
+require_text "$root/$policy_authority_path" "performance_warm_request_count: $performance_warm_request_count"
+
+sh "$root/scripts/check/check-bootstrap-kernel-inputs.shs" >/dev/null
+[ -f "$root/build/review/final_phase5_misplaced_backends.txt" ] || \
+  sh "$root/scripts/check/generate-phase5-backend-relocation-audit.shs" >/dev/null
+sh "$root/scripts/check/check-k1-composition-modules.shs" >/dev/null
+plugin_edit_hash_independent=pass
+k0_edit_invalidates=pass
+
+if [ "$execute" -eq 1 ]; then
+  require_native_host
+  BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+  export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+  . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+  . "$STAGE4_PROVENANCE_HELPER_PATH"
+  . "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
+  if [ ! -x "$runtime" ] ||
+      [ -z "$runtime_cache_receipt" ] ||
+      [ -z "$runtime_receipt" ] ||
+      ! kernel_phase7_admit_runtime "$runtime" "$runtime_provenance" "$runtime_cache_receipt" "$root" "$runtime_receipt" ||
+      ! "$runtime" --help 2>&1 | grep -q 'native-build'; then
+    status=BLOCKED
+    reason=full-simple-runtime-unavailable
+  else
+    work=$receipt_dir/work-$row
+    rm -rf "$work"
+    mkdir -p "$work"
+    candidate_manifest=$work/produced-candidates.env
+    : >"$candidate_manifest"
+    backends=cranelift
+    [ "$policy" = llvm-cranelift ] && backends="llvm cranelift"
+    for backend in $backends; do
+      if ! SIMPLE_KERNEL_K1_POLICY=$policy \
+          SIMPLE_PLUGIN_MANIFEST_POLICY=$manifest \
+          SIMPLE_ABI_POLICY=$abi \
+          SIMPLE_COVERAGE_CUTOVER_STATE=$coverage \
+          sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+          --backend="$backend" --mode="$mode" --full-cli --output-dir="$work/$backend" >/dev/null 2>&1; then
+        echo "FAIL: production bootstrap failed for available $backend row" >&2
+        exit 1
+      fi
+      candidates=$work/$backend-candidates.txt
+      find "$work/$backend/full" -type f \( -name simple -o -name simple.exe \) \
+        -perm -111 2>/dev/null | LC_ALL=C sort >"$candidates"
+      [ "$(wc -l <"$candidates" | tr -d ' ')" -eq 1 ] || {
+        echo "FAIL: produced $backend row does not have exactly one full CLI candidate" >&2
+        exit 1
+      }
+      candidate=$(sed -n '1p' "$candidates")
+      candidate=$(canonical_file "$candidate") || {
+        echo "FAIL: produced $backend candidate is missing, symlinked, or non-canonical" >&2
+        exit 1
+      }
+      require_candidate_architecture "$candidate"
+      if ! "$candidate" -c 'print(1+1)' 2>/dev/null | grep -Fxq 2; then
+        echo "FAIL: produced $backend candidate is not runnable" >&2
+        exit 1
+      fi
+      candidate_sha=$(hash_file "$candidate")
+      acceptance=$candidate.stage3-acceptance.env
+      provenance=$candidate.provenance.env
+      [ -f "$acceptance" ] && [ ! -L "$acceptance" ] && \
+        [ -f "$provenance" ] && [ ! -L "$provenance" ] || {
+        echo "FAIL: produced $backend candidate lacks non-symlinked Stage 3 acceptance/provenance" >&2
+        exit 1
+      }
+      [ "$(manifest_value status "$acceptance")" = verified ] && \
+        [ "$(manifest_value stage4_candidate_path "$acceptance")" = "$candidate" ] && \
+        [ "$(manifest_value stage4_candidate_sha256 "$acceptance")" = "$candidate_sha" ] && \
+        [ "$(manifest_value stage4_provenance_path "$acceptance")" = "$provenance" ] && \
+        [ "$(manifest_value stage4_provenance_sha256 "$acceptance")" = "$(hash_file "$provenance")" ] || {
+        echo "FAIL: produced $backend candidate is not bound to its Stage 3 acceptance/provenance" >&2
+        exit 1
+      }
+      composition_receipts=$work/$backend-composition-receipts.txt
+      find "$work/$backend" -name stage2-stage3-k1-composition.env -type f \
+        2>/dev/null | LC_ALL=C sort >"$composition_receipts"
+      [ "$(wc -l <"$composition_receipts" | tr -d ' ')" -eq 1 ] || {
+        echo "FAIL: produced $backend candidate lacks one authoritative K1 composition receipt" >&2
+        exit 1
+      }
+      composition_receipt=$(sed -n '1p' "$composition_receipts")
+      [ ! -L "$composition_receipt" ] && \
+        [ "$(manifest_value schema "$composition_receipt")" = simple-bootstrap-k1-composition-receipt-v1 ] && \
+        [ "$(manifest_value policy "$composition_receipt")" = "$policy" ] && \
+        [ "$(manifest_value build_mode "$composition_receipt")" = "$mode" ] && \
+        [ "$(manifest_value simple_abi_policy "$composition_receipt")" = "$abi" ] && \
+        [ "$(manifest_value plugin_manifest_policy "$composition_receipt")" = "$manifest" ] && \
+        [ "$(manifest_value coverage_cutover_policy "$composition_receipt")" = "$coverage" ] && \
+        [ "$(manifest_value coverage_implementation "$composition_receipt")" = apk-only ] && \
+        [ "$(manifest_value policy_authority_path "$composition_receipt")" = "$policy_authority_path" ] && \
+        [ "$(manifest_value policy_authority_sha256 "$composition_receipt")" = "$policy_authority_sha256" ] && \
+        [ "$(manifest_value status "$composition_receipt")" = pass ] || {
+        echo "FAIL: produced $backend candidate K1 composition receipt is invalid" >&2
+        exit 1
+      }
+      {
+        echo "backend=$backend"
+        echo "candidate_path=$candidate"
+        echo "candidate_sha256=$candidate_sha"
+        echo "acceptance_sha256=$(hash_file "$acceptance")"
+        echo "provenance_sha256=$(hash_file "$provenance")"
+        echo "composition_receipt_sha256=$(hash_file "$composition_receipt")"
+      } >>"$candidate_manifest"
+      candidate_binary=$candidate
+      candidate_path=$candidate
+      candidate_sha256=$candidate_sha
+      candidate_architecture=$architecture
+      composition_receipt_path=$(canonical_file "$composition_receipt") || {
+        echo "FAIL: composition receipt cannot be canonically retained" >&2
+        exit 1
+      }
+      composition_receipt_sha256=$(hash_file "$composition_receipt")
+      stage3_acceptance_path=$(canonical_file "$acceptance") || {
+        echo "FAIL: Stage 3 acceptance cannot be canonically retained" >&2
+        exit 1
+      }
+      stage3_acceptance_sha256=$(hash_file "$acceptance")
+      stage4_provenance_path=$(canonical_file "$provenance") || {
+        echo "FAIL: Stage 4 provenance cannot be canonically retained" >&2
+        exit 1
+      }
+      stage4_provenance_sha256=$(hash_file "$provenance")
+      bootstrap_runtime=pass
+    done
+    candidate_manifest_path=$(canonical_file "$candidate_manifest") || {
+      echo "FAIL: candidate manifest cannot be canonically retained" >&2
+      exit 1
+    }
+    candidate_manifest_sha256=$(hash_file "$candidate_manifest")
+    produced_binary_gate=pass
+    composition_receipt_gate=pass
+    policy_root_runtime=pass
+    if [ "$status" = PASS ]; then
+      probe=$root/test/fixtures/phase7_coverage_probe_spec.spl
+      probe_before=$(hash_file "$probe")
+      spipe_log=$receipt_dir/$row-spipe.log
+      coverage_output=$receipt_dir/$row-authoritative.sdn
+      rm -f "$coverage_output"
+      if ! SIMPLE_COVERAGE_CUTOVER_STATE=$coverage SIMPLE_PHASE7_TRACE=1 \
+          SIMPLE_BINARY="$candidate_binary" \
+          SIMPLE_COVERAGE_OUTPUT=$coverage_output \
+          "$candidate_binary" test "$probe" --mode=interpreter --coverage \
+          --no-session-daemon --sequential --no-db --no-cache --assert-ran --fail-fast \
+          >"$spipe_log" 2>&1; then
+        echo "FAIL: produced compiler could not execute Phase 7 coverage probe" >&2
+        exit 1
+      fi
+      grep -Eq '^Results:.*[1-9][0-9]* passed.*0 failed' "$spipe_log" || {
+        echo "FAIL: coverage probe lacks a non-zero passing Results row" >&2
+        exit 1
+      }
+      grep -Eq '^phase7-apk-child-startup: pid=[1-9][0-9]* activated=1 generation=[1-9][0-9]* payload_bytes=[1-9][0-9]* consumer=simple\.runtime\.coverage\.collector\.v1$' "$spipe_log" || {
+        echo "FAIL: spawned test process APK activation/consumer receipt is absent" >&2
+        exit 1
+      }
+      runner_pid=$(sed -n 's/^phase7-apk-runner: pid=//p' "$spipe_log")
+      child_pid=$(sed -n 's/^phase7-apk-child-startup: pid=\([0-9][0-9]*\) .*/\1/p' "$spipe_log")
+      [ -n "$runner_pid" ] && [ -n "$child_pid" ] && [ "$runner_pid" != "$child_pid" ] || {
+        echo "FAIL: APK activation was not proven in the spawned test process" >&2
+        exit 1
+      }
+      [ "$(hash_file "$candidate_binary")" = "$candidate_sha256" ] || {
+        echo "FAIL: candidate bytes changed while the pinned child executed" >&2
+        exit 1
+      }
+      child_binary_path=$candidate_binary
+      child_binary_sha256=$candidate_sha256
+      child_identity_binding=SIMPLE_BINARY
+      child_identity_verified=pass
+      child_apk_consumption=pass
+      [ -s "$coverage_output" ] || {
+        echo "FAIL: production runtime emitted no authoritative coverage artifact" >&2
+        exit 1
+      }
+      probe_after=$(hash_file "$probe")
+      [ "$probe_before" = "$probe_after" ] || {
+        echo "FAIL: coverage execution mutated the source fixture" >&2
+        exit 1
+      }
+      grep -Fxq 'phase7-coverage-source-rewrite=0' "$spipe_log" || {
+        echo "FAIL: atomic APK-only cutover did not prove zero coverage source rewriting" >&2
+        exit 1
+      }
+      source_rewrite_gate=pass
+      if find "$(dirname "$probe")" -maxdepth 1 \
+          \( -name '.spipe_cov_*phase7_coverage_probe_spec.spl' -o \
+             -name '.spipe_matchers_*phase7_coverage_probe_spec.spl' \) \
+          -print -quit | grep -q .; then
+        echo "FAIL: source-rewrite artifact leaked from production runner" >&2
+        exit 1
+      fi
+      spipe_results=pass
+      spipe_log_path=$(canonical_file "$spipe_log") || {
+        echo "FAIL: SPipe evidence log cannot be canonically retained" >&2
+        exit 1
+      }
+      spipe_log_sha256=$(hash_file "$spipe_log_path")
+      coverage_artifact_path=$(canonical_file "$coverage_output") || {
+        echo "FAIL: coverage evidence cannot be canonically retained" >&2
+        exit 1
+      }
+      coverage_artifact_sha256=$(hash_file "$coverage_artifact_path")
+      if [ "$mode" = dynload ]; then
+        dynload_log=$receipt_dir/$row-dynload.log
+        set +e
+        SIMPLE_DYNLOAD_CONFIG=$work/definitely-missing-phase7.sdn \
+          "$candidate_binary" --dynsmf-status >"$dynload_log" 2>&1
+        dynload_status=$?
+        set -e
+        [ "$dynload_status" -ne 0 ] && \
+          grep -Fq 'missing_explicit_dynload_config' "$dynload_log" || {
+          echo "FAIL: dynload candidate did not execute its fail-closed production startup path" >&2
+          exit 1
+        }
+        mode_evidence_path=$(canonical_file "$dynload_log") || {
+          echo "FAIL: dynload evidence cannot be canonically retained" >&2
+          exit 1
+        }
+        mode_evidence_sha256=$(hash_file "$mode_evidence_path")
+        mode_gate=pass
+      else
+        one_binary_deps=$receipt_dir/$row-one-binary-deps.txt
+        if command -v otool >/dev/null 2>&1; then
+          otool -L "$candidate_binary" >"$one_binary_deps"
+        elif command -v ldd >/dev/null 2>&1; then
+          ldd "$candidate_binary" >"$one_binary_deps"
+        else
+          echo "FAIL: no native dependency inspector for one-binary gate" >&2
+          exit 1
+        fi
+        if grep -Ei 'backend_(llvm|cranelift|vhdl|vulkan|cuda)|simple_stage4_dynload' \
+            "$one_binary_deps" >/dev/null; then
+          echo "FAIL: one-binary candidate retains an external backend/dynload dependency" >&2
+          exit 1
+        fi
+        mode_evidence_path=$(canonical_file "$one_binary_deps") || {
+          echo "FAIL: one-binary evidence cannot be canonically retained" >&2
+          exit 1
+        }
+        mode_evidence_sha256=$(hash_file "$mode_evidence_path")
+        mode_gate=pass
+      fi
+      [ -n "$baseline_binary" ] || baseline_binary=$runtime
+      if [ -z "$candidate_binary" ] || \
+          [ ! -x "$baseline_binary" ] || [ ! -x "$candidate_binary" ]; then
+        status=BLOCKED
+        reason=startup-baseline-or-candidate-unavailable
+      else
+        baseline_samples=$work/startup-baseline-ms.txt
+        candidate_samples=$work/startup-candidate-ms.txt
+        : >"$baseline_samples"
+        : >"$candidate_samples"
+        i=0
+        while [ "$i" -lt 7 ]; do
+          start=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000')
+          "$baseline_binary" --version >/dev/null 2>&1
+          end=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000')
+          echo $((end - start)) >>"$baseline_samples"
+          start=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000')
+          "$candidate_binary" --version >/dev/null 2>&1
+          end=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000')
+          echo $((end - start)) >>"$candidate_samples"
+          i=$((i + 1))
+        done
+        baseline_p50=$(LC_ALL=C sort -n "$baseline_samples" | sed -n '4p')
+        if ! SIMPLE_STARTUP_BASELINE_MS=$baseline_p50 \
+          SIMPLE_STARTUP_SAMPLES_FILE=$candidate_samples SIMPLE_PLUGIN_STARTUP_DELTA_MS=2 \
+          sh "$root/scripts/check/check-startup-budget.shs" >/dev/null; then
+          echo "FAIL: strict startup budget exceeded" >&2
+          exit 1
+        fi
+        startup_samples_path=$(canonical_file "$candidate_samples") || {
+          echo "FAIL: startup evidence cannot be canonically retained" >&2
+          exit 1
+        }
+        startup_samples_sha256=$(hash_file "$startup_samples_path")
+        startup_budget=pass
+        set +e
+        validate_native_performance_authority
+        performance_status=$?
+        set -e
+        case "$performance_status" in
+          0) ;;
+          1)
+            status=BLOCKED
+            reason=admitted-native-performance-evidence-unavailable
+            ;;
+          *)
+            echo "FAIL: supplied native performance/baseline authority is invalid" >&2
+            exit 1
+            ;;
+        esac
+      fi
+    fi
+  fi
+elif [ "$observe_runtime" -eq 1 ]; then
+  observe_admitted_runtime
+else
+  status=BLOCKED
+  reason=runtime-row-not-requested
+fi
+
+if [ "$status" = PASS ]; then
+  for gate in "$child_apk_consumption" "$source_rewrite_gate" "$spipe_results" \
+      "$policy_root_runtime" "$bootstrap_runtime" "$produced_binary_gate" \
+      "$composition_receipt_gate" "$mode_gate" "$startup_budget" "$performance_gate" \
+      "$child_identity_verified"; do
+    [ "$gate" = pass ] || {
+      echo "FAIL: native Phase 7 receipt publication found an incomplete gate" >&2
+      exit 1
+    }
+  done
+  [ "$(hash_file "$candidate_path")" = "$candidate_sha256" ] || {
+    echo "FAIL: candidate bytes changed before immutable receipt publication" >&2
+    exit 1
+  }
+  native_receipt_dir=$receipt_dir/native-pass/$architecture/$candidate_sha256
+  mkdir -p "$native_receipt_dir"
+  native_pass_receipt=$native_receipt_dir/$row.env
+  [ ! -e "$native_pass_receipt" ] && [ ! -L "$native_pass_receipt" ] || {
+    echo "FAIL: immutable native Phase 7 receipt already exists" >&2
+    exit 1
+  }
+  native_receipt_tmp=$native_pass_receipt.tmp.$$
+  {
+    echo 'schema=simple-kernel-phase7-native-pass-v1'
+    echo 'status=PASS'
+    echo 'reason=qualified'
+    echo 'evidence_class=NATIVE_EXECUTION'
+    echo 'native_execution=true'
+    echo 'deployment_authorization=ALLOW'
+    echo 'producer_path=scripts/check/check-kernel-phase7-matrix.shs'
+    echo "producer_sha256=$(hash_file "$root/scripts/check/check-kernel-phase7-matrix.shs")"
+    echo "host_system=$host_system"
+    echo "architecture=$architecture"
+    echo "candidate_architecture=$candidate_architecture"
+    echo "translated_execution=$translated_execution"
+    echo "policy=$policy"
+    echo "coverage_cutover=$coverage"
+    echo "simple_abi_policy=$abi"
+    echo "plugin_manifest_policy=$manifest"
+    echo 'coverage_implementation=apk-only'
+    echo "performance_threshold_mode=$performance_threshold_mode"
+    echo "performance_baseline_scope=$performance_baseline_scope"
+    echo "performance_steady_rss_percent=$performance_steady_rss_percent"
+    echo "performance_growth_percent=$performance_growth_percent"
+    echo "performance_warm_request_count=$performance_warm_request_count"
+    echo "mode=$mode"
+    echo "policy_authority_path=$policy_authority_path"
+    echo "policy_authority_sha256=$policy_authority_sha256"
+    echo "candidate_path=$candidate_path"
+    echo "candidate_sha256=$candidate_sha256"
+    echo "child_binary_path=$child_binary_path"
+    echo "child_binary_sha256=$child_binary_sha256"
+    echo "child_identity_binding=$child_identity_binding"
+    echo "child_identity_verified=$child_identity_verified"
+    echo "composition_receipt_path=$composition_receipt_path"
+    echo "composition_receipt_sha256=$composition_receipt_sha256"
+    echo "candidate_manifest_path=$candidate_manifest_path"
+    echo "candidate_manifest_sha256=$candidate_manifest_sha256"
+    echo "stage3_acceptance_path=$stage3_acceptance_path"
+    echo "stage3_acceptance_sha256=$stage3_acceptance_sha256"
+    echo "stage4_provenance_path=$stage4_provenance_path"
+    echo "stage4_provenance_sha256=$stage4_provenance_sha256"
+    echo "spipe_log_path=$spipe_log_path"
+    echo "spipe_log_sha256=$spipe_log_sha256"
+    echo "coverage_artifact_path=$coverage_artifact_path"
+    echo "coverage_artifact_sha256=$coverage_artifact_sha256"
+    echo "mode_evidence_path=$mode_evidence_path"
+    echo "mode_evidence_sha256=$mode_evidence_sha256"
+    echo "startup_samples_path=$startup_samples_path"
+    echo "startup_samples_sha256=$startup_samples_sha256"
+    echo "performance_receipt_path=$performance_receipt_path"
+    echo "performance_receipt_sha256=$performance_receipt_sha256"
+    echo "performance_samples_path=$performance_samples_path"
+    echo "performance_samples_sha256=$performance_samples_sha256"
+    echo "performance_baseline_receipt_path=$performance_baseline_receipt_path"
+    echo "performance_baseline_receipt_sha256=$performance_baseline_receipt_sha256"
+    echo "performance_baseline_evidence_path=$performance_baseline_evidence_path"
+    echo "performance_baseline_evidence_sha256=$performance_baseline_evidence_sha256"
+    echo "performance_server_sha256=$performance_server_sha256"
+    echo "child_apk_consumption=$child_apk_consumption"
+    echo "source_rewrite_gate=$source_rewrite_gate"
+    echo "spipe_results=$spipe_results"
+    echo "policy_root_runtime=$policy_root_runtime"
+    echo "bootstrap_runtime=$bootstrap_runtime"
+    echo "produced_binary_gate=$produced_binary_gate"
+    echo "composition_receipt_gate=$composition_receipt_gate"
+    echo "mode_gate=$mode_gate"
+    echo "startup_budget=$startup_budget"
+    echo "performance_gate=$performance_gate"
+  } >"$native_receipt_tmp"
+  chmod 0444 "$native_receipt_tmp"
+  ln "$native_receipt_tmp" "$native_pass_receipt" || {
+    echo "FAIL: immutable native Phase 7 receipt publication collision" >&2
+    exit 1
+  }
+  rm -f "$native_receipt_tmp"
+  native_receipt_tmp=
+  native_pass_receipt_sha256=$(hash_file "$native_pass_receipt")
+fi
+
+summary_native_execution=false
+[ "$status" != PASS ] || summary_native_execution=true
+{
+  echo 'schema=simple-kernel-phase7-qualification-summary-v2'
+  echo 'evidence_class=NON_AUTHORIZING_SUMMARY'
+  echo "native_execution=$summary_native_execution"
+  echo 'deployment_authorization=DENY'
+  echo "policy=$policy"
+  echo "coverage_cutover=$coverage"
+  echo "simple_abi_policy=$abi"
+  echo "plugin_manifest_policy=$manifest"
+  echo 'coverage_implementation=apk-only'
+  echo "policy_authority_path=$policy_authority_path"
+  echo "policy_authority_sha256=$policy_authority_sha256"
+  echo "mode=$mode"
+  echo "child_apk_consumption=$child_apk_consumption"
+  echo "legacy_policy_rejected=$legacy_policy_rejected"
+  echo "source_rewrite_gate=$source_rewrite_gate"
+  echo "plugin_edit_hash_independent=$plugin_edit_hash_independent"
+  echo "k0_edit_invalidates=$k0_edit_invalidates"
+  echo 'startup_delta_budget_ms_lt=2'
+  echo "spipe_results=$spipe_results"
+  echo "policy_root_runtime=$policy_root_runtime"
+  echo "bootstrap_runtime=$bootstrap_runtime"
+  echo "produced_binary_gate=$produced_binary_gate"
+  echo "composition_receipt_gate=$composition_receipt_gate"
+  echo "mode_gate=$mode_gate"
+  echo "candidate_manifest_sha256=$candidate_manifest_sha256"
+  echo "architecture=$architecture"
+  echo "candidate_sha256=$candidate_sha256"
+  echo "child_binary_sha256=$child_binary_sha256"
+  echo "child_identity_verified=$child_identity_verified"
+  echo "native_pass_receipt=$native_pass_receipt"
+  echo "native_pass_receipt_sha256=$native_pass_receipt_sha256"
+  echo "one_binary_observation=$one_binary_observation"
+  echo "dynload_observation=$dynload_observation"
+  echo "backend_parity_observation=$backend_parity_observation"
+  echo "startup_observation=$startup_observation"
+  echo "rss_observation=$rss_observation"
+  echo "observation_evidence_path=$observation_evidence_path"
+  echo "observation_evidence_sha256=$observation_evidence_sha256"
+  echo "runtime_provenance_path=$runtime_provenance_path"
+  echo "runtime_provenance_sha256=$runtime_provenance_sha256"
+  echo "startup_budget=$startup_budget"
+  echo "performance_gate=$performance_gate"
+  echo "status=$status"
+  echo "reason=$reason"
+} >"$tmp"
+mv "$tmp" "$receipt"
+echo "STATUS: $status phase7 $row — $reason"
+if [ "$ci" -eq 1 ]; then
+  [ "$status" = PASS ] || exit 1
+fi
+[ "$status" != FAIL ]

@@ -1,0 +1,225 @@
+use std.async.cancellation.{CancellationToken}
+use std.async.future.{Future}
+use std.async.runtime.{block_on}
+use std.common.io.file_read_policy.{
+    FileReadPolicyV1, FileViewTransportV1,
+    file_read_policy_allows_fallback_v1,
+    file_read_policy_selects_mapping_v1
+}
+use std.common.io.file_view_buffered.{
+    BufferedFileViewErrorV1, FileViewIdentityV1,
+    file_view_buffered_read_v1, file_view_descriptor_identity_v1,
+    file_view_identity_equal_v1, file_view_range_valid_v1
+}
+
+val FILE_VIEW_DEFAULT_ADDRESS_SPACE_BUDGET_V1: u64 = 268435456
+
+enum ReadOnlyFileViewErrorV1:
+    cancelled
+    invalid_range
+    path_outside_snapshot
+    symlink_or_non_regular
+    open_failed
+    mapping_unsupported
+    mapping_failed
+    short_read
+    identity_changed
+    closed
+
+struct FileViewSliceV1:
+    bytes: [u8]
+    offset: u64
+    length: u64
+    identity: FileViewIdentityV1
+    transport: FileViewTransportV1
+
+class ReadOnlyFileViewV1:
+    descriptor: i64
+    identity: FileViewIdentityV1
+    policy: FileReadPolicyV1
+    mapping_supported: bool
+    address_space_budget: u64
+    open: bool
+
+fn read_only_file_view_open_v1(
+    snapshot_root: text,
+    path: text,
+    snapshot_digest: text,
+    policy: FileReadPolicyV1,
+    address_space_budget: u64 = FILE_VIEW_DEFAULT_ADDRESS_SPACE_BUDGET_V1
+) -> Result[ReadOnlyFileViewV1, ReadOnlyFileViewErrorV1]:
+    if snapshot_digest == "":
+        return Err(ReadOnlyFileViewErrorV1.path_outside_snapshot)
+    var descriptor: i64 = -1
+    unsafe(capabilities: [ffi]):
+        descriptor = rt_file_view_open_beneath_no_follow_v1(snapshot_root, path)
+    if descriptor == -2:
+        return Err(ReadOnlyFileViewErrorV1.path_outside_snapshot)
+    if descriptor == -3:
+        return Err(ReadOnlyFileViewErrorV1.symlink_or_non_regular)
+    if descriptor < 0:
+        return Err(ReadOnlyFileViewErrorV1.open_failed)
+    val identity = file_view_descriptor_identity_v1(descriptor, snapshot_digest)
+    if identity == nil:
+        read_only_file_view_close_descriptor_v1(descriptor)
+        return Err(ReadOnlyFileViewErrorV1.open_failed)
+    var mapping_supported = false
+    unsafe(capabilities: [ffi]):
+        mapping_supported = rt_file_view_mapping_supported_v1(descriptor)
+    if policy == FileReadPolicyV1.must_map and not mapping_supported:
+        read_only_file_view_close_descriptor_v1(descriptor)
+        return Err(ReadOnlyFileViewErrorV1.mapping_unsupported)
+    Ok(ReadOnlyFileViewV1(
+        descriptor, identity!, policy, mapping_supported,
+        address_space_budget, true))
+
+fn read_only_file_view_adopt_descriptor_v1(
+    descriptor: i64,
+    snapshot_digest: text,
+    policy: FileReadPolicyV1,
+    address_space_budget: u64 = FILE_VIEW_DEFAULT_ADDRESS_SPACE_BUDGET_V1
+) -> Result[ReadOnlyFileViewV1, ReadOnlyFileViewErrorV1]:
+    if descriptor < 0 or snapshot_digest == "":
+        return Err(ReadOnlyFileViewErrorV1.open_failed)
+    val identity = file_view_descriptor_identity_v1(descriptor, snapshot_digest)
+    if identity == nil:
+        return Err(ReadOnlyFileViewErrorV1.open_failed)
+    var mapping_supported = false
+    unsafe(capabilities: [ffi]):
+        mapping_supported = rt_file_view_mapping_supported_v1(descriptor)
+    if policy == FileReadPolicyV1.must_map and not mapping_supported:
+        return Err(ReadOnlyFileViewErrorV1.mapping_unsupported)
+    Ok(ReadOnlyFileViewV1(
+        descriptor, identity!, policy, mapping_supported,
+        address_space_budget, true))
+
+fn read_only_file_view_buffer_error_v1(
+    error: BufferedFileViewErrorV1
+) -> ReadOnlyFileViewErrorV1:
+    match error:
+        BufferedFileViewErrorV1.cancelled:
+            ReadOnlyFileViewErrorV1.cancelled
+        BufferedFileViewErrorV1.invalid_range:
+            ReadOnlyFileViewErrorV1.invalid_range
+        BufferedFileViewErrorV1.short_read:
+            ReadOnlyFileViewErrorV1.short_read
+        BufferedFileViewErrorV1.identity_changed:
+            ReadOnlyFileViewErrorV1.identity_changed
+        BufferedFileViewErrorV1.read_failed:
+            ReadOnlyFileViewErrorV1.open_failed
+
+fn read_only_file_view_read_now_v1(
+    view: &ReadOnlyFileViewV1,
+    offset: u64,
+    length: u64,
+    cancellation: CancellationToken
+) -> Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]:
+    if not view.open or view.descriptor < 0:
+        return Err(ReadOnlyFileViewErrorV1.closed)
+    if cancellation.is_cancelled():
+        return Err(ReadOnlyFileViewErrorV1.cancelled)
+    if not file_view_range_valid_v1(view.identity.size, offset, length):
+        return Err(ReadOnlyFileViewErrorV1.invalid_range)
+    val select_mapping = file_read_policy_selects_mapping_v1(
+        view.policy, view.mapping_supported, true, view.identity.size,
+        length, view.address_space_budget)
+    if select_mapping:
+        val before = file_view_descriptor_identity_v1(
+            view.descriptor, view.identity.snapshot_digest)
+        if before == nil or not file_view_identity_equal_v1(view.identity, before!):
+            return Err(ReadOnlyFileViewErrorV1.identity_changed)
+        var mapped: [u8]? = nil
+        unsafe(capabilities: [ffi]):
+            mapped = rt_file_view_map_copy_v1(view.descriptor, offset, length)
+        if cancellation.is_cancelled():
+            return Err(ReadOnlyFileViewErrorV1.cancelled)
+        if mapped != nil and mapped!.len().to_u64() == length:
+            val after = file_view_descriptor_identity_v1(
+                view.descriptor, view.identity.snapshot_digest)
+            if after == nil or not file_view_identity_equal_v1(view.identity, after!):
+                return Err(ReadOnlyFileViewErrorV1.identity_changed)
+            return Ok(FileViewSliceV1(
+                mapped!, offset, length, view.identity,
+                FileViewTransportV1.mapped))
+        if not file_read_policy_allows_fallback_v1(view.policy):
+            return Err(ReadOnlyFileViewErrorV1.mapping_failed)
+    val buffered = file_view_buffered_read_v1(
+        view.descriptor, view.identity, offset, length, cancellation)
+    match buffered:
+        Ok(bytes):
+            Ok(FileViewSliceV1(
+                bytes, offset, length, view.identity,
+                FileViewTransportV1.buffered))
+        Err(error):
+            Err(read_only_file_view_buffer_error_v1(error))
+
+fn read_only_file_view_read_async_v1(
+    view: &ReadOnlyFileViewV1,
+    offset: u64,
+    length: u64,
+    cancellation: CancellationToken
+) -> Future<Result[FileViewSliceV1, ReadOnlyFileViewErrorV1] >:
+    Future.from_value(read_only_file_view_read_now_v1(
+        view, offset, length, cancellation))
+
+fn read_only_file_view_read_v1(
+    view: &ReadOnlyFileViewV1,
+    offset: u64,
+    length: u64,
+    cancellation: CancellationToken
+) -> Result[FileViewSliceV1, ReadOnlyFileViewErrorV1]:
+    block_on(read_only_file_view_read_async_v1(
+        view, offset, length, cancellation))
+
+fn read_only_file_view_prefetch_async_v1(
+    view: &ReadOnlyFileViewV1,
+    offset: u64,
+    length: u64,
+    cancellation: CancellationToken
+) -> Future<Result[(), ReadOnlyFileViewErrorV1] >:
+    if not view.open:
+        return Future.from_value(Err(ReadOnlyFileViewErrorV1.closed))
+    if cancellation.is_cancelled():
+        return Future.from_value(Err(ReadOnlyFileViewErrorV1.cancelled))
+    if not file_view_range_valid_v1(view.identity.size, offset, length):
+        return Future.from_value(Err(ReadOnlyFileViewErrorV1.invalid_range))
+    unsafe(capabilities: [ffi]):
+        _ = rt_file_view_prefetch_v1(view.descriptor, offset, length)
+    Future.from_value(Ok(()))
+
+fn read_only_file_view_close_v1(
+    view: ReadOnlyFileViewV1
+) -> Result[(), ReadOnlyFileViewErrorV1]:
+    if not view.open or view.descriptor < 0:
+        return Err(ReadOnlyFileViewErrorV1.closed)
+    view.open = false
+    val descriptor = view.descriptor
+    view.descriptor = -1
+    var closed = false
+    unsafe(capabilities: [ffi]):
+        closed = rt_file_view_close_v1(descriptor)
+    if not closed:
+        return Err(ReadOnlyFileViewErrorV1.open_failed)
+    Ok(())
+
+fn read_only_file_view_close_descriptor_v1(descriptor: i64):
+    unsafe(capabilities: [ffi]):
+        _ = rt_file_view_close_v1(descriptor)
+
+@unsafe(reason: "open a regular file beneath an admitted immutable snapshot without following links", capabilities: [ffi])
+extern fn rt_file_view_open_beneath_no_follow_v1(snapshot_root: text, path: text) -> i64
+@unsafe(reason: "query whether the pinned descriptor supports stable read-only mapping", capabilities: [ffi])
+extern fn rt_file_view_mapping_supported_v1(descriptor: i64) -> bool
+@unsafe(reason: "copy one bounded mapped window into transport-independent owned bytes", capabilities: [ffi])
+extern fn rt_file_view_map_copy_v1(descriptor: i64, offset: u64, length: u64) -> [u8]?
+@unsafe(reason: "issue a non-binding prefetch hint for a pinned descriptor range", capabilities: [ffi])
+extern fn rt_file_view_prefetch_v1(descriptor: i64, offset: u64, length: u64) -> bool
+@unsafe(reason: "consume a pinned read-only file descriptor", capabilities: [ffi])
+extern fn rt_file_view_close_v1(descriptor: i64) -> bool
+
+export FILE_VIEW_DEFAULT_ADDRESS_SPACE_BUDGET_V1
+export ReadOnlyFileViewErrorV1, FileViewSliceV1, ReadOnlyFileViewV1
+export read_only_file_view_open_v1, read_only_file_view_adopt_descriptor_v1
+export read_only_file_view_read_async_v1
+export read_only_file_view_read_v1, read_only_file_view_prefetch_async_v1
+export read_only_file_view_close_v1

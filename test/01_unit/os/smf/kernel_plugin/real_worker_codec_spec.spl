@@ -1,0 +1,38 @@
+use std.spec
+use std.spec.step
+use os.smf.kernel_plugin.real_worker_codec.*
+use os.smf.kernel_plugin.worker_protocol.*
+
+fn real_frame(kind: KpfWorkerFrameKind, payload: [u8]) -> KpfWorkerFrameV1:
+    KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1, kind: kind,
+        generation: 7, session_epoch: 3, request_slot: 4, request_epoch: 9,
+        capability_bits: 5, payload_length: payload.len, payload: payload)
+
+describe "real KPF worker framing":
+    it "round trips version capabilities identity and payload":
+        step("encode and decode one bounded completion frame")
+        val decoded = kpf_real_worker_decode_line_v1(
+            kpf_real_worker_encode_frame_v1(real_frame(KpfWorkerFrameKind.Completion,
+                [0u8, 15u8, 16u8, 255u8]), 8), 8)
+        assert_equal(decoded.outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(decoded.frame.generation, 7)
+        assert_equal(decoded.frame.session_epoch, 3)
+        assert_equal(decoded.frame.request_epoch, 9)
+        assert_equal(decoded.frame.capability_bits, 5u64)
+        assert_equal(decoded.frame.payload, [0u8, 15u8, 16u8, 255u8])
+
+    it "rejects malformed wrong-version and oversized frames":
+        step("mutate each wire authority independently")
+        assert_equal(kpf_real_worker_decode_line_v1("garbage", 8).outcome,
+            KpfWorkerOutcome.MalformedFrame)
+        assert_equal(kpf_real_worker_decode_line_v1(
+            "KPFW1|1|3|7|3|4|9|5|2|x0g", 8).outcome,
+            KpfWorkerOutcome.MalformedFrame)
+        var wrong_version = real_frame(KpfWorkerFrameKind.Completion, [])
+        wrong_version.protocol_version = 99
+        assert_equal(kpf_real_worker_decode_line_v1(
+            kpf_real_worker_encode_frame_v1(wrong_version, 8), 8).outcome,
+            KpfWorkerOutcome.ProtocolMismatch)
+        assert_equal(kpf_real_worker_encode_frame_v1(
+            real_frame(KpfWorkerFrameKind.Completion,
+                [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8]), 8), "")

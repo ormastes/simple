@@ -1,4 +1,8 @@
 # Stage 4 DevHub daily-debug time owner
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -25,3 +29,4 @@ Bind the clock call to `std.nogc_sync_mut.io.time_ops`, its physical owner.
 checked a positive Unix time and the existing firmware triage behavior, then
 exited 30. The three-cycle cap is exhausted, so no fourth full closure is run in
 this session.
+

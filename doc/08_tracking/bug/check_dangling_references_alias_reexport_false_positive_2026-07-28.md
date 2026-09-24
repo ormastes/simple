@@ -1,4 +1,8 @@
 # `check-dangling-references.shs` reports false SYMBOL findings for alias re-exports
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` scope)
@@ -60,3 +64,4 @@ plain name is. The pass-2 call-site skip for aliased imports can stay as is.
 
 Of the 83 findings under `src/os/**` + `src/unit/**` as of 2026-07-28, **5 are
 this false positive** (all `NvfsHostedDriver`). Real remaining findings: 78.
+

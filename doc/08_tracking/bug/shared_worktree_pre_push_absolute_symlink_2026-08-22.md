@@ -1,4 +1,9 @@
 # Shared worktree pre-push hook was bound to the last installer's checkout
+## Closed 2026-09-16 — Status RESOLVED; launcher contract fix; two-worktree test passed before/after within budget
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (`/root`, must-check tiering, 2026-08-22)
 
@@ -40,3 +45,4 @@ ten-second budget.
 Adjacent coverage retains unrelated-hook preservation and exact legacy-payload
 replacement. Windows uses the same content-addressed launcher but still needs
 a native PowerShell execution row before cross-host completion is claimed.
+

@@ -27,6 +27,9 @@ use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
     SemanticScopeLiveIdentityV1, SemanticScopeWriterLiveRequestV1,
     SemanticScopeSummaryLiveRequestV1, SemanticScopeAttemptLiveRequestV1,
     SemanticScopeContributionLiveRequestV1,
+    L78BoundaryErrorV4, L78AuthorityDomainV4, L78TokenKindV4,
+    L78AttemptKeyV4, L78OwnerTokenV4, L78LimitsV4, L78OwnedResultV4,
+    l78_attempt_key_digest_v4,
     semantic_scope_live_requests_coherent_v1
 }
 use compiler.common.cache_contract.three_payload_compile_v2.{
@@ -96,11 +99,256 @@ use compiler.semantics.semantic_scope_issuers_v2.{
     SemanticScopeIssuerEvidenceProjectionV2
 }
 
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
 pub const SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2: i64 = 64
 pub const SEMANTIC_SCOPE_LIVE_ISSUERS_V2: i64 = 5
 pub const SEMANTIC_SCOPE_LIVE_MAX_BODY_OBJECTS_V2: i64 = 1024
 pub const SEMANTIC_SCOPE_LIVE_MAX_DEPENDENCY_EDGES_V2: i64 = 65536
 pub const SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2: i64 = 134217728
+
+# V4 registry state is private to the live owner. It is initially empty and
+# therefore cannot authorize production work without five real hook owners.
+struct L78ScopeRegistryEntryV4:
+    token: L78OwnerTokenV4
+    attempt: L78AttemptKeyV4
+    request: SemanticScopeAttemptLiveRequestV1
+    contributions: [L78OwnerTokenV4]
+    closed: bool
+
+struct L78ScopeRegistryV4:
+    owner_instance: i64
+    epoch: i64
+    next_slot: i64
+    limits: L78LimitsV4
+    entries: [L78ScopeRegistryEntryV4]
+
+fn _l78_scope_registry_new_v4(
+    owner_instance: i64,
+    limits: L78LimitsV4,
+) -> Result<L78ScopeRegistryV4, L78BoundaryErrorV4>:
+    if owner_instance <= 0 or limits.max_items <= 0 or
+            limits.max_items > 65536 or limits.max_bytes <= 0 or
+            limits.max_bytes > 16777216 or limits.max_steps <= 0 or
+            limits.max_steps > 65536:
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    Ok(L78ScopeRegistryV4(owner_instance: owner_instance, epoch: 1,
+        next_slot: 1, limits: limits, entries: []))
+
+fn _l78_attempt_request_same_v4(
+    left: SemanticScopeAttemptLiveRequestV1,
+    right: SemanticScopeAttemptLiveRequestV1,
+) -> bool:
+    val a = left.identity
+    val b = right.identity
+    a.writer_instance_digest == b.writer_instance_digest and
+        a.generation == b.generation and
+        a.manifest_digest == b.manifest_digest and
+        a.pin_snapshot_digest == b.pin_snapshot_digest and
+        a.generation_closure_digest == b.generation_closure_digest and
+        a.binding_digest == b.binding_digest and
+        a.query_domain_digest == b.query_domain_digest and
+        a.semantic_rules_digest == b.semantic_rules_digest and
+        a.cancellation_epoch == b.cancellation_epoch and
+        left.attempt_seal_digest == right.attempt_seal_digest and
+        left.source_content_digest == right.source_content_digest and
+        left.snapshot_semantic_digest == right.snapshot_semantic_digest
+
+fn _l78_scope_registry_entry_current_v4(
+    registry: L78ScopeRegistryV4,
+    entry: L78ScopeRegistryEntryV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+) -> Result<(), L78BoundaryErrorV4>:
+    if entry.closed: return Err(L78BoundaryErrorV4.StaleToken)
+    if entry.token.domain != L78AuthorityDomainV4.TestDouble:
+        return Err(L78BoundaryErrorV4.Unavailable)
+    if entry.token.kind != L78_KIND_SCOPE_V4:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.token.owner_instance != registry.owner_instance:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.token.slot <= 0 or entry.token.slot >= registry.next_slot or
+            entry.token.epoch != registry.epoch:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    val attempt_digest = l78_attempt_key_digest_v4(attempt)?
+    val retained_attempt_digest = l78_attempt_key_digest_v4(entry.attempt)?
+    if attempt_digest != retained_attempt_digest or
+            entry.token.attempt_digest != retained_attempt_digest or
+            attempt.profile_digest != request.identity.semantic_rules_digest or
+            not _l78_attempt_request_same_v4(entry.request, request):
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.contributions.len() != 5:
+        return Err(L78BoundaryErrorV4.Incomplete)
+    for index in 0..entry.contributions.len():
+        val contribution = entry.contributions[index]
+        if contribution.domain != L78AuthorityDomainV4.TestDouble or
+                contribution.kind != L78TokenKindV4.Candidate or
+                contribution.owner_instance <= 0 or
+                contribution.epoch != registry.epoch or
+                contribution.attempt_digest != attempt_digest or
+                contribution.slot <= 0:
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        for prior_index in 0..index:
+            val prior = entry.contributions[prior_index]
+            if (prior.owner_instance == contribution.owner_instance and
+                    prior.slot == contribution.slot and
+                    prior.epoch == contribution.epoch):
+                return Err(L78BoundaryErrorV4.Conflict)
+    Ok(())
+
+# Resolve only through the retained registry row. A copied entry or token does
+# not create authority, and the empty production registry remains unavailable.
+fn _l78_scope_registry_validate_v4(
+    registry: L78ScopeRegistryV4,
+    token: L78OwnerTokenV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+) -> Result<(), L78BoundaryErrorV4>:
+    if registry.entries.len() > registry.limits.max_items:
+        return Err(L78BoundaryErrorV4.Bounds)
+    if token.owner_instance != registry.owner_instance:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if token.slot <= 0 or token.epoch != registry.epoch:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    var found = -1
+    for index in 0..registry.entries.len():
+        val retained = registry.entries[index].token
+        if retained.owner_instance == token.owner_instance and
+                retained.slot == token.slot and retained.epoch == token.epoch:
+            if found >= 0: return Err(L78BoundaryErrorV4.Conflict)
+            found = index
+    if found < 0: return Err(L78BoundaryErrorV4.Unavailable)
+    if registry.entries[found].token != token:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    _l78_scope_registry_entry_current_v4(
+        registry, registry.entries[found], request, attempt)
+
+# Admission for one registry row.  The owner instance is the only issuer and
+# the Live domain is refused outright: no default owner may mint live scope
+# authority, and no flag exists that would let it.
+fn _l78_scope_registry_issue_admits_v4(
+    registry: L78ScopeRegistryV4,
+    domain: L78AuthorityDomainV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+    contributions: [L78OwnerTokenV4],
+) -> Result<text, L78BoundaryErrorV4>:
+    if domain != L78AuthorityDomainV4.TestDouble:
+        return Err(L78BoundaryErrorV4.Unavailable)
+    if registry.owner_instance <= 0 or registry.epoch <= 0 or
+            registry.next_slot <= 0:
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    if registry.entries.len() >= registry.limits.max_items:
+        return Err(L78BoundaryErrorV4.Bounds)
+    if attempt.generation != request.identity.generation or
+            attempt.manifest_digest != request.identity.manifest_digest or
+            attempt.profile_digest != request.identity.semantic_rules_digest:
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    if contributions.len() != SEMANTIC_SCOPE_LIVE_ISSUERS_V2:
+        return Err(L78BoundaryErrorV4.Incomplete)
+    val attempt_digest = l78_attempt_key_digest_v4(attempt)?
+    for index in 0..contributions.len():
+        val contribution = contributions[index]
+        if contribution.domain != L78AuthorityDomainV4.TestDouble or
+                contribution.kind != L78TokenKindV4.Candidate or
+                contribution.owner_instance <= 0 or
+                contribution.epoch != registry.epoch or
+                contribution.attempt_digest != attempt_digest or
+                contribution.slot <= 0:
+            return Err(L78BoundaryErrorV4.ForeignToken)
+        for prior_index in 0..index:
+            val prior = contributions[prior_index]
+            if (prior.owner_instance == contribution.owner_instance and
+                    prior.slot == contribution.slot and
+                    prior.epoch == contribution.epoch):
+                return Err(L78BoundaryErrorV4.Conflict)
+    Ok(attempt_digest)
+
+# Issue one retained row and hand the updated registry back on every branch.
+# Slots are never reused: `next_slot` only advances, and a closed row stays as
+# a tombstone so a revoked token can never be revived.
+fn _l78_scope_registry_issue_v4(
+    registry: L78ScopeRegistryV4,
+    domain: L78AuthorityDomainV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+    attempt: L78AttemptKeyV4,
+    contributions: [L78OwnerTokenV4],
+) -> L78OwnedResultV4<L78ScopeRegistryV4, L78OwnerTokenV4>:
+    val attempt_digest = match _l78_scope_registry_issue_admits_v4(
+            registry, domain, request, attempt, contributions):
+        case Ok(value): value
+        case Err(error):
+            return L78OwnedResultV4<L78ScopeRegistryV4, L78OwnerTokenV4>(
+                owner: registry, outcome: Err(error))
+    val token = L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+        kind: L78_KIND_SCOPE_V4, owner_instance: registry.owner_instance,
+        slot: registry.next_slot, epoch: registry.epoch,
+        attempt_digest: attempt_digest)
+    var entries: [L78ScopeRegistryEntryV4] = []
+    for existing in registry.entries:
+        entries.push(existing)
+    entries.push(L78ScopeRegistryEntryV4(token: token, attempt: attempt,
+        request: request, contributions: contributions, closed: false))
+    val updated = L78ScopeRegistryV4(owner_instance: registry.owner_instance,
+        epoch: registry.epoch, next_slot: registry.next_slot + 1,
+        limits: registry.limits, entries: entries)
+    L78OwnedResultV4<L78ScopeRegistryV4, L78OwnerTokenV4>(
+        owner: updated, outcome: Ok(token))
+
+fn _l78_scope_registry_close_admits_v4(
+    registry: L78ScopeRegistryV4,
+    token: L78OwnerTokenV4,
+) -> Result<i64, L78BoundaryErrorV4>:
+    if registry.entries.len() > registry.limits.max_items:
+        return Err(L78BoundaryErrorV4.Bounds)
+    if token.owner_instance != registry.owner_instance:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if token.slot <= 0 or token.epoch != registry.epoch:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    var found = -1
+    for index in 0..registry.entries.len():
+        val retained = registry.entries[index].token
+        if retained.owner_instance == token.owner_instance and
+                retained.slot == token.slot and retained.epoch == token.epoch:
+            if found >= 0: return Err(L78BoundaryErrorV4.Conflict)
+            found = index
+    if found < 0: return Err(L78BoundaryErrorV4.Unavailable)
+    val entry = registry.entries[found]
+    if entry.token != token:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.token.domain != L78AuthorityDomainV4.TestDouble:
+        return Err(L78BoundaryErrorV4.Unavailable)
+    if entry.token.kind != L78_KIND_SCOPE_V4:
+        return Err(L78BoundaryErrorV4.ForeignToken)
+    if entry.closed:
+        return Err(L78BoundaryErrorV4.StaleToken)
+    Ok(found)
+
+# Close one retained row by tombstoning it in place.  The row is kept so the
+# revoked slot is never handed out again, and the caller must retain the
+# returned registry.
+fn _l78_scope_registry_close_v4(
+    registry: L78ScopeRegistryV4,
+    token: L78OwnerTokenV4,
+) -> L78OwnedResultV4<L78ScopeRegistryV4, ()>:
+    val found = match _l78_scope_registry_close_admits_v4(registry, token):
+        case Ok(value): value
+        case Err(error):
+            return L78OwnedResultV4<L78ScopeRegistryV4, ()>(
+                owner: registry, outcome: Err(error))
+    var entries: [L78ScopeRegistryEntryV4] = []
+    for index in 0..registry.entries.len():
+        val existing = registry.entries[index]
+        if index == found:
+            entries.push(L78ScopeRegistryEntryV4(token: existing.token,
+                attempt: existing.attempt, request: existing.request,
+                contributions: existing.contributions, closed: true))
+        else:
+            entries.push(existing)
+    val updated = L78ScopeRegistryV4(owner_instance: registry.owner_instance,
+        epoch: registry.epoch, next_slot: registry.next_slot,
+        limits: registry.limits, entries: entries)
+    L78OwnedResultV4<L78ScopeRegistryV4, ()>(owner: updated, outcome: Ok(()))
 
 # These states are owner-internal facts.  Handles never carry them.
 enum SemanticScopeAttemptStateV2:

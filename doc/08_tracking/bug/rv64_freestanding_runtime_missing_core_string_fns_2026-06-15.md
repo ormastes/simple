@@ -1,4 +1,17 @@
 # rv64 freestanding C runtime silently lacks core_string.spl runtime fns
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: host-blocked, explicitly NOT stale
+- **measured** — the lane is alive: `scripts/qemu/qemu_rv64_http_test.shs`,
+  `test/03_system/os/simpleos_riscv_network_gate_spec.spl`,
+  `src/os/kernel/boot/tcp_baremetal_min.spl` and `src/os/apps/sshd/ssh_session.spl` all
+  still exist.
+- **inferred** — confirming or refuting this needs a `riscv64-unknown-none` link plus a
+  QEMU boot; neither runs from this Windows triage host, and the entry was filed on a Linux
+  box. Left OPEN, host-blocked.
 
 - **Date:** 2026-06-15
 - **Severity:** P2 (link-time, caught by from-source link; was masked by `--allow-prebuilt-artifact`)
@@ -46,3 +59,4 @@ the core_string.spl semantics. Raw-int return convention matches sibling C rt_*.
   fails the baremetal build on drift, OR
 - Make the rv64 freestanding closure compile core_string.spl directly so there
   is one implementation.
+

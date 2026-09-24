@@ -1,0 +1,98 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.policy.*
+
+fn digest(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn snapshot_v1() -> EnvironmentSnapshotV1:
+    val features = EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))
+    EnvironmentSnapshotV1(
+        descriptor_size: 232u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: ENV_ARCH_X86_64_V1,
+        os_id: 1u32, abi_id: 1u32, object_format_id: 1u32,
+        endian_id: 1u16, pointer_width_bits: 64u16,
+        snapshot_identity: digest(1u64), snapshot_generation: 1u64,
+        execution_domain_identity: digest(2u64),
+        hardware_features: features, os_usable_features: features,
+        policy_allowed_features: features, vector_state_mode: ENV_VECTOR_FIXED_V1,
+        vector_length_bits: 256u32, loader_permission_bits: 3u64,
+        allowed_effect_bits: 3u64, numerical_contract_id: 1u32,
+        resource_layout_digest: digest(17u64),
+        gpu_devices: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+
+fn ceiling_v1(offset: u32) -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: offset, count: 1u32))
+
+fn descriptor_v1(identity: u64, placement: u16, budget: u64) -> VariantDescriptorV1:
+    val one = EnvironmentArenaRangeV1(offset: 0u32, count: 1u32)
+    val empty = EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: placement, provider_identity: digest(10u64),
+        variant_identity: digest(identity), contract_identity: digest(11u64),
+        contract_major: 1u16, contract_minor: 0u16, abi_digest: digest(12u64),
+        semantic_identity: digest(13u64), grammar_identity: digest(14u64),
+        program_identity: digest(15u64), artifact_digest: digest(16u64),
+        artifact_location: one, target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32,
+        required_object_format_id: 1u32, required_endian_id: 1u16,
+        required_pointer_width_bits: 64u16, required_loader_permission_bits: 1u64,
+        required_cpu_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1, words: one),
+        required_os_state_words: one,
+        required_vector_state_mode: ENV_VECTOR_FIXED_V1, required_vector_length_bits: 256u32,
+        required_device_api: 0u32, minimum_device_api_version: 0u32,
+        required_device_features: empty, required_memory_domain_bits: 0u64,
+        minimum_device_buffer_bytes: 0u64, minimum_workgroup_invocations: 0u32,
+        minimum_queue_family_count: 0u32,
+        required_effect_bits: 0u64, numerical_contract_id: 1u32,
+        resource_layout_digest: digest(17u64), dependencies: empty,
+        assurance_receipt_digest: digest(18u64), startup_budget_us: budget,
+        max_session_bytes: 4096u64, max_inflight_operations: 4u32)
+
+describe "Environment variant policy V1":
+    it "keeps prefer distinct from require and ranks an explicit preference first":
+        val preferred = descriptor_v1(2u64, ENV_PLACEMENT_STATIC_V1, 20u64)
+        val fallback = descriptor_v1(3u64, ENV_PLACEMENT_STATIC_V1, 10u64)
+        expect(variant_policy_allows_v1(
+            ENV_POLICY_PREFER_V1, preferred, snapshot_v1(), digest(2u64),
+            0u16, 0u64, 0u16, ceiling_v1(0u32), [1u64])).to_equal(true)
+        expect(variant_policy_allows_v1(
+            ENV_POLICY_REQUIRE_V1, fallback, snapshot_v1(), digest(2u64),
+            0u16, 0u64, 0u16, ceiling_v1(0u32), [1u64])).to_equal(false)
+        expect(variant_policy_rank_v1(ENV_POLICY_PREFER_V1, preferred, digest(2u64)))
+            .to_be_less_than(variant_policy_rank_v1(ENV_POLICY_PREFER_V1, fallback, digest(2u64)))
+
+    it "applies max bounds without treating architecture as an ordinal":
+        val descriptor = descriptor_v1(4u64, ENV_PLACEMENT_NATIVE_DYNLIB_V1, 50u64)
+        expect(variant_policy_allows_v1(
+            ENV_POLICY_MAX_V1, descriptor, snapshot_v1(), digest(0u64),
+            ENV_ARCH_X86_64_V1, 50u64, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+            ceiling_v1(0u32), [1u64])).to_equal(true)
+        expect(variant_policy_allows_v1(
+            ENV_POLICY_MAX_V1, descriptor, snapshot_v1(), digest(0u64),
+            ENV_ARCH_AARCH64_V1, 50u64, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+            ceiling_v1(0u32), [1u64])).to_equal(false)
+        expect(variant_policy_reason_v1(
+            ENV_POLICY_MAX_V1, descriptor, snapshot_v1(), digest(0u64),
+            ENV_ARCH_X86_64_V1, 49u64, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+            ceiling_v1(0u32), [1u64])).to_equal(ENV_POLICY_MAX_EXCEEDED_V1)
+
+        val high_features = [3u64, 1u64]
+        expect(variant_policy_allows_v1(
+            ENV_POLICY_MAX_V1, descriptor, snapshot_v1(), digest(0u64),
+            ENV_ARCH_X86_64_V1, 50u64, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+            ceiling_v1(1u32), high_features)).to_equal(false)
+
+    it "rejects unknown modes deterministically":
+        val descriptor = descriptor_v1(5u64, ENV_PLACEMENT_STATIC_V1, 1u64)
+        expect(variant_policy_mode_valid_v1(99u16)).to_equal(false)
+        expect(variant_policy_reason_v1(
+            99u16, descriptor, snapshot_v1(), digest(0u64), 0u16, 0u64, 0u16,
+            ceiling_v1(0u32), [1u64]))
+            .to_equal(ENV_POLICY_INVALID_MODE_V1)

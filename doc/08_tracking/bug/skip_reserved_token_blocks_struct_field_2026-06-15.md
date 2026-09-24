@@ -1,4 +1,15 @@
 # Bug: `skip` reserved token cannot be used as a struct field name
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN, reproduced; fix is in the lexer and blocked here
+- **measured** — `struct S: skip: bool / n: i64` still fails to parse under `bin/simple run`
+  (Rust seed v1.0.0-rc.1, Windows): `Unexpected token: expected identifier, found Skip`.
+- **inferred** — the fix belongs in lexer/parser code under `src/compiler/**` and
+  `src/compiler_rust/**`, which this triage pass must not edit (a bootstrap is running
+  concurrently). Left OPEN — fix blocked by concurrent bootstrap, not by difficulty.
 
 - **Id:** skip_reserved_token_blocks_struct_field_2026-06-15
 - **Severity:** P3 (workaround: rename field)
@@ -34,3 +45,4 @@ statement position inside an `it`/`describe` block, not as a globally reserved
 token. Several other words have the same problem (`gen`, `val`, `unit`,
 `pass_out`, `kernel`, `trace`) — a general "soft keyword in non-directive
 position" pass would cover the family.
+

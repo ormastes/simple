@@ -1,5 +1,13 @@
 # `bin/simple lint` reports "all files clean" on a module that does not parse
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: shard file column is
+src/compiler_rust/parser/src/parser_impl/items.rs -- Rust seed parser/lint
+interaction, not pure-Simple src/app lint code. The doc's own "Fresh
+investigation" section already notes this may not be the fail-open it looks
+like; did not re-derive further. Left OPEN.
+
+
 Date: 2026-08-09
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).

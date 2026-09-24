@@ -1,4 +1,8 @@
 # `SpirvBuilder.emit_function()` cannot be paired with a pre-allocated entry-point id
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open (workaround applied in the affected caller)
 **Component:** `src/compiler/70.backend/backend/vulkan/spirv_builder.spl`
@@ -109,3 +113,4 @@ clobber"). The Khronos-tools findings above were therefore verified by
 hand-reproducing the exact instruction sequences against the real installed
 `spirv-as`/`spirv-val` directly, decoupled from the broken compiler tree; the
 committed spec file will execute as soon as those conflicts are resolved.
+

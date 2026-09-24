@@ -1,0 +1,88 @@
+#!/bin/sh
+# gen-rect-batch-spirv.shs -- regenerate backend_vulkan_rect_batch_spirv.spl.
+#
+#   sh scripts/tool/gen-rect-batch-spirv.shs
+#
+# Compiles shaders/rect_batch.comp with glslangValidator and rewrites the
+# generated Simple module in place. The .spv is a build intermediate and is NOT
+# checked in; the word array plus its pinned sha256 are the artifact.
+# `scripts/check/check-rect-batch-spirv-pinned.shs` verifies the two agree.
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+comp="$repo_root/src/lib/gc_async_mut/gpu/engine2d/shaders/rect_batch.comp"
+out="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_spirv.spl"
+tmp="${TMPDIR:-/tmp}/rect_batch_gen.$$"
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT
+
+glslang="${GLSLANG:-}"
+if [ -z "$glslang" ]; then
+    for cand in /opt/homebrew/bin/glslangValidator /usr/local/bin/glslangValidator \
+                /usr/bin/glslangValidator; do
+        [ -x "$cand" ] && glslang="$cand" && break
+    done
+fi
+if [ -z "$glslang" ]; then
+    glslang=$(command -v glslangValidator 2>/dev/null || true)
+fi
+if [ -z "$glslang" ]; then
+    echo "ERROR: glslangValidator not found (set GLSLANG=/path/to/glslangValidator)" >&2
+    exit 2
+fi
+
+"$glslang" -V --target-env vulkan1.1 -o "$tmp/rect_batch.spv" "$comp" >"$tmp/log" 2>&1 || {
+    echo "ERROR: glslangValidator failed:" >&2
+    cat "$tmp/log" >&2
+    exit 2
+}
+
+sh "$repo_root/scripts/tool/spirv-to-spl-words.shs" "$tmp/rect_batch.spv" 8 > "$tmp/words"
+sha_line=$(head -1 "$tmp/words")
+
+{
+cat <<'HDR'
+# 2D Engine — Vulkan batched filled-rectangle SPIR-V blob
+#
+# GENERATED — do not hand-edit. Regenerate with:
+#   sh scripts/tool/gen-rect-batch-spirv.shs
+# which runs
+#   glslangValidator -V --target-env vulkan1.1 \
+#       -o rect_batch.spv src/lib/gc_async_mut/gpu/engine2d/shaders/rect_batch.comp
+#   sh scripts/tool/spirv-to-spl-words.shs rect_batch.spv 8
+#
+# The .spv is a build intermediate and is NOT checked in; the words below plus
+# the pinned sha256 ARE the artifact.
+# `sh scripts/check/check-rect-batch-spirv-pinned.shs` recompiles the .comp and
+# fails closed if these bytes no longer match it, so a shader edit that is not
+# regenerated here cannot pass unnoticed.
+#
+# Source of truth for the layout:
+#   src/lib/gc_async_mut/gpu/engine2d/shaders/rect_batch.comp
+# Frozen contract, restated so a reader of this file need not open the GLSL:
+#   binding 0 = framebuffer uint[], index = y * fb_w + x
+#   binding 1 = rect list uint[], 5 words per rect: x, y, w, h, colour
+#   push constants (48 bytes): bx, by, bw, bh, n, fb_w, fb_h,
+#                              clip_x, clip_y, clip_w, clip_h, clip_enabled
+#   dispatch: 2D, ceil(bw/16) x ceil(bh/16) workgroups of 16x16
+#   painter order: per pixel, rects are walked in ASCENDING index order and the
+#                  LAST covering rect wins — identical to N sequential
+#                  single-rect dispatches.
+HDR
+echo "$sha_line"
+cat <<'FN'
+
+fn spirv_rect_batch() -> [u8]:
+    """Validated SPIR-V bytecode for the batched filled-rectangle kernel.
+
+    One dispatch paints every rect in the binding-1 list. See the module header
+    for the frozen buffer and push-constant layout.
+    """
+    [
+FN
+tail -n +2 "$tmp/words"
+echo "    ]"
+} > "$out"
+
+echo "wrote $out"
+echo "$sha_line"

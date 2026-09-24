@@ -1,4 +1,9 @@
 # Bug: ML-KEM NTT AVX2 SIMD lane mismatches the scalar reference
+## Closed 2026-09-16 — ...a `mlkem_ntt_simd_backend`. ## Resolution `mlkem_ntt_one` performed a scalar butterfly aft
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-08) — current-source C lane passed 768 forward and
 inverse coefficients plus noncanonical canonicalization at 30 samples.
@@ -49,3 +54,4 @@ had already consumed an entire group. At `j == end`, that extra scalar write
 corrupted the next group. The dispatcher now continues when vector work reaches
 the group boundary. The restored AVX2 C lane passed the pinned scalar comparison
 with 240 forward and 480 total observed chunks across three polynomials.
+

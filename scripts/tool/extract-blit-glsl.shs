@@ -1,0 +1,28 @@
+#!/bin/sh
+# extract-blit-glsl.shs -- print the GLSL source that `_glsl_blit()` returns.
+#
+#   sh scripts/tool/extract-blit-glsl.shs <backend_vulkan_glsl.spl>
+#
+# The kernel's single source of truth is that raw string literal; both
+# scripts/tool/gen-blit-spirv.shs and scripts/check/check-blit-spirv-pinned.shs
+# read it through here so they can never disagree about what "the GLSL" is.
+# Fail-closed: an empty extraction is an error, never an empty shader.
+set -eu
+f="${1:-}"
+[ -n "$f" ] || { echo "usage: extract-blit-glsl.shs <glsl.spl>" >&2; exit 2; }
+[ -f "$f" ] || { echo "ERROR: no such file: $f" >&2; exit 2; }
+
+awk '
+/^fn _glsl_blit\(\)/ { infn = 1; next }
+infn && !inlit && /r"""/ {
+    inlit = 1
+    i = index($0, "r\"\"\"")
+    print substr($0, i + 4)
+    next
+}
+inlit {
+    if ($0 == "\"\"\"") { inlit = 0; infn = 0; done = 1; exit }
+    print
+}
+END { if (!done) { print "ERROR: _glsl_blit() literal not found" > "/dev/stderr"; exit 2 } }
+' "$f"

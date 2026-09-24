@@ -1,4 +1,8 @@
 # RV32 Sv32 user-entry and trap-return owner is missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The nonce-bound RV32 ELF and exact mounted-byte admission are ready, but the
 repository cannot safely execute that image in U-mode yet.
@@ -99,3 +103,4 @@ ABI expects contiguous raw 16/80-byte buffers. Add kernel-only fixed packed
 storage with stable raw pointers and volatile wipe, or version the ABI to pass
 scalar words and serialize inside C. Do not use long-lived device-visible DMA
 storage for the secret and do not publish an anchor before this is resolved.
+

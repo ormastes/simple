@@ -1,4 +1,19 @@
 # rt_vulkan_* Only Execute Under Classic Interpreter - 2026-06-17
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
+- **measured** — the referenced sources still exist
+  (`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`, `src/runtime/runtime_native.c`,
+  the `browser_engine` renderers), so the "all referenced paths are gone" stale test does
+  not apply.
+- **measured** — the gate's evidence directory `build/gui-web-2d-vulkan-env/` does not
+  exist here, i.e. the Vulkan/Electron/RenderDoc lane has never been run on this machine.
+- **inferred** — confirming or refuting GPU-backend behaviour requires a real Vulkan device
+  and that lane; neither is available from this Windows triage host. Left OPEN,
+  host-blocked — not stale.
 
 ## Severity
 P1 — GPU backends silently no-op (report zero devices) outside the classic
@@ -90,3 +105,4 @@ its loader probes only `libvulkan.so.1` and `libvulkan.so` under `cfg(unix)`,
 so Darwin never tries `libvulkan.1.dylib` or `libvulkan.dylib`. That source
 file was already dirty in another active compiler lane and was not modified
 by this investigation.
+

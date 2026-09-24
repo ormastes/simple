@@ -1,4 +1,9 @@
 # Native entry closure excludes executable `src/app/doc` modules
+## Closed 2026-09-16 — ...ble `src/app/doc` modules - Status: fixed in source; self-hosted native-build confirmation
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: fixed in source; self-hosted native-build confirmation pending.
 - Owner: compiler driver source loading.
@@ -40,3 +45,4 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --backend cranelift \
   --cache-dir build/bootstrap/native_cache --mode dynload \
   --output build/mini_builds/v9_selfhosted/simple
 ```
+

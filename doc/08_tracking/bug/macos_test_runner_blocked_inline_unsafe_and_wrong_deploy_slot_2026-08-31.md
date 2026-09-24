@@ -1,4 +1,8 @@
 # CORRECTION (2026-08-31, after this record was drafted)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **The parser gap described below is NOT a code defect. The fix is already in the
 tree, and every failure recorded here is a STALE BINARY.**
@@ -192,3 +196,4 @@ parses `inline.spl` fine.
 2. Teach the Rust seed's parser the suffixed `unsafe(...): <expr>` form so the seed can
    still build current source. Do **not** rewrite the 53 call sites to the block form —
    that normalizes a workaround over a compact form the language is supposed to accept.
+

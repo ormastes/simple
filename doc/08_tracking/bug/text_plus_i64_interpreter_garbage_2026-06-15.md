@@ -1,7 +1,14 @@
 # BUG: `text + i64` produces garbage in interpreter (seed) — use `.to_text()`
 
+## Closed 2026-09-13 — does not reproduce: `text + i64` renders the decimal string
+- **measured** — `print("x" + v)` with `val v: i64 = 42` prints `x42`; `print("" + 7)`
+  prints `7`. Rust seed `bin/simple` v1.0.0-rc.1 on Windows, in both the default JIT run
+  and with `SIMPLE_NO_JIT=1`.
+- **inferred** — filed against the seed driver, which is what was measured; the Linux host
+  was not re-tested.
+
 **Date:** 2026-06-15
-**Status:** OPEN
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 **Severity:** Medium — silently corrupts string building; no error, just wrong output
 **Found by:** search-custom-types AC-3 (Aho-Corasick) spec, while building canonical
 sort keys with `"" + v`.

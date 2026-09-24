@@ -1,4 +1,8 @@
 # V9 scalar runtime lacks solver-backed RVFI receipts
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: implementation scaffold complete; external formal evidence blocked.
 - Owner: RISC-V Gen2 formal/backend lane.
@@ -30,3 +34,4 @@ After an admitted self-hosted CLI is deployed, run the V9 RVFI GHDL fixture
 once and then the new V9-specific formal runner with Yosys/GHDL/SymbiYosys and
 Boolector receipts. Do not substitute bootstrap output or the legacy ADD-only
 aggregate for these jobs.
+

@@ -1,0 +1,155 @@
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.hir.import_materialization.state.{ImportSnapshotIdentityV1}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.package_index_route.{
+    PackageArchiveAdmissionV1, PackageIndexRouteV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    PinnedArchiveCapability, pinned_archive_close_v1,
+    pinned_archive_digest_valid_v1, pinned_archive_open_verified_v1,
+    pinned_archive_read_member_v1, pinned_archive_receipt_valid_v1}
+
+struct PackageCommandResolutionV1:
+    resolver_root: text
+    root_generation: text
+    variant_digest: text
+
+struct InterpreterPackageSectionReaderV1:
+    capability: PinnedArchiveCapability
+    selected_sections: [text]
+    closed: bool
+
+struct InterpreterPackageLoadV1:
+    package_identity: text
+    snapshot: ImportSnapshotIdentityV1
+    resolution: PackageCommandResolutionV1
+    archive_digest: text
+    receipt_digest: text
+    sections: [text]
+    receipt: text
+
+fn interpreter_snapshot_identity_valid_v1(
+    snapshot: ImportSnapshotIdentityV1
+) -> bool:
+    snapshot.revision != "" and
+    pinned_archive_digest_valid_v1(snapshot.tree_digest) and
+    pinned_archive_digest_valid_v1(snapshot.inventory_digest)
+
+fn interpreter_resolution_identity_valid_v1(
+    resolution: PackageCommandResolutionV1
+) -> bool:
+    pinned_archive_digest_valid_v1(resolution.resolver_root) and
+    resolution.root_generation != "" and
+    pinned_archive_digest_valid_v1(resolution.variant_digest)
+
+fn interpreter_archive_identity_valid_v1(
+    receipt: PackageArchiveReceiptV1
+) -> bool:
+    pinned_archive_receipt_valid_v1(receipt)
+
+fn package_section_reader_open_v1(
+    capability: PinnedArchiveCapability, selected_sections: [text]
+) -> InterpreterPackageSectionReaderV1:
+    InterpreterPackageSectionReaderV1(capability, selected_sections, false)
+
+fn package_section_reader_read_v1(
+    reader: &InterpreterPackageSectionReaderV1, section: text
+) -> Result[[u8], DiagnosticV1]:
+    if reader.closed:
+        return Err(DiagnosticV1.error(
+            "IL1006", "interpreter package section read on a closed reader"))
+    if not reader.selected_sections.contains(section):
+        return Err(DiagnosticV1.error(
+            "IL1006", "interpreter package section is not selected: {section}"))
+    val payload = pinned_archive_read_member_v1(&reader.capability, section)
+    if payload.is_err():
+        return Err(DiagnosticV1.error(
+            "IL1006", "interpreter package section read failed: {section}"))
+    Ok(payload.unwrap())
+
+fn package_section_reader_close_v1(
+    reader: InterpreterPackageSectionReaderV1
+) -> Result[(), DiagnosticV1]:
+    if reader.closed:
+        return Err(DiagnosticV1.error(
+            "IL1006", "interpreter package section reader already closed"))
+    reader.closed = true
+    Ok(())
+
+fn interpreter_load_package_v1(
+    route: PackageIndexRouteV1,
+    snapshot: ImportSnapshotIdentityV1,
+    resolution: PackageCommandResolutionV1,
+    cas_root: text,
+    selected_sections: [text]
+) -> Result[InterpreterPackageLoadV1, DiagnosticV1]:
+    if not interpreter_snapshot_identity_valid_v1(snapshot):
+        return Err(DiagnosticV1.error(
+            "IL1001",
+            "interpreter load snapshot identity is not a valid pinned identity"))
+    if not interpreter_resolution_identity_valid_v1(resolution):
+        return Err(DiagnosticV1.error(
+            "IL1002",
+            "interpreter load resolver identity is not a valid package command resolution"))
+    if not route.valid:
+        return Err(DiagnosticV1.error(
+            "IL1003", "interpreter load demand route is invalid: {route.reason}"))
+    if route.archive_admissions.len() != 1:
+        return Err(DiagnosticV1.error(
+            "IL1003",
+            "interpreter load requires exactly one admitted package archive"))
+    val admission = route.archive_admissions[0]
+    if admission.load.receipt == nil:
+        return Err(DiagnosticV1.error(
+            "IL1004",
+            "interpreter load archive admission carries no archive receipt"))
+    val receipt = admission.load.receipt.unwrap()
+    if not interpreter_archive_identity_valid_v1(receipt):
+        return Err(DiagnosticV1.error(
+            "IL1004", "interpreter load archive identity is not receipt-valid"))
+    if receipt.variant_digest != resolution.variant_digest:
+        return Err(DiagnosticV1.error(
+            "IL1005",
+            "interpreter load archive authority is bound to another variant"))
+    val opened = pinned_archive_open_verified_v1(
+        cas_root, admission.archive_path, receipt)
+    if opened.is_err():
+        return Err(DiagnosticV1.error(
+            "IL1004",
+            "interpreter load pinned archive open rejected the archive identity"))
+    var reader = package_section_reader_open_v1(
+        opened.unwrap(), selected_sections)
+    var sections: [text] = []
+    for section in selected_sections:
+        val payload = package_section_reader_read_v1(&reader, section)
+        if payload.is_err():
+            _ = pinned_archive_close_v1(reader.capability)
+            return Err(payload.unwrap_err())
+        sections.push(section)
+    if pinned_archive_close_v1(reader.capability).is_err():
+        return Err(DiagnosticV1.error(
+            "IL1006", "interpreter load pinned archive close failed"))
+    if package_section_reader_close_v1(reader).is_err():
+        return Err(DiagnosticV1.error(
+            "IL1006", "interpreter load section reader close failed"))
+    var receipt_text = "simple-interpreter-load-receipt-v1\n"
+    receipt_text = receipt_text + "resolver-root={resolution.resolver_root}\n"
+    receipt_text = receipt_text + "root-generation={resolution.root_generation}\n"
+    receipt_text = receipt_text + "variant={resolution.variant_digest}\n"
+    receipt_text = receipt_text + "revision={snapshot.revision}\n"
+    receipt_text = receipt_text + "tree={snapshot.tree_digest}\n"
+    receipt_text = receipt_text + "inventory={snapshot.inventory_digest}\n"
+    receipt_text = receipt_text + "package={admission.package_identity}\n"
+    receipt_text = receipt_text + "archive={receipt.archive_digest}\n"
+    receipt_text = receipt_text + "receipt={receipt.receipt_digest}\n"
+    Ok(InterpreterPackageLoadV1(
+        admission.package_identity, snapshot, resolution,
+        receipt.archive_digest, receipt.receipt_digest, sections, receipt_text))
+
+export PackageCommandResolutionV1, InterpreterPackageLoadV1
+export InterpreterPackageSectionReaderV1
+export interpreter_snapshot_identity_valid_v1
+export interpreter_resolution_identity_valid_v1
+export interpreter_archive_identity_valid_v1
+export package_section_reader_open_v1, package_section_reader_read_v1
+export package_section_reader_close_v1
+export interpreter_load_package_v1

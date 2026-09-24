@@ -45,7 +45,13 @@ pub fn input(args: &[Value]) -> Result<Value, CompileError> {
     // `-> text?` extern contract declared at every `.spl` call site (e.g.
     // src/lib/nogc_sync_mut/io/pipe.spl:185). See
     // doc/08_tracking/bug/seed_interpreter_stdin_read_line_erases_eof_2026-09-06.md.
-    match stdin.lock().lines().next().transpose().map_err(|e| crate::error::factory::input_error(&e))? {
+    match stdin
+        .lock()
+        .lines()
+        .next()
+        .transpose()
+        .map_err(|e| crate::error::factory::input_error(&e))?
+    {
         Some(line) => Ok(Value::text(line)),
         None => Ok(Value::Nil),
     }

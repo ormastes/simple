@@ -1,0 +1,359 @@
+#!/bin/sh
+# Frontend closure memory budget gate.
+#
+# WHAT THIS GUARDS
+# ----------------
+# The phase-2 (self-hosted) compiler runs out of memory building the phase-3
+# entry closure. Measured 2026-09-13 on the 813-file closure with
+# build/p3/phase2/simple.exe (Windows/MSVC, 64 GB RAM, 24 cores), sampling
+# PrivateMemorySize64 once per second and joining each sample to the last
+# `phase=` line of the build log:
+#
+#   phase entered        private MB    delta
+#   source_closure               57
+#   load_sources end            297     +240
+#   parse start                 322
+#   surface_build             6,756   +6,434   <- 7.9 MB RETAINED PER FILE
+#   surface_alias             7,013     +257
+#   export_origins            7,025      +12
+#   surface_freeze start      7,036      +11
+#   (stopped by operator)    15,179   +8,143   <- STILL CLIMBING, NO RECEIPTS
+#
+# Two monotonic retention sites, neither ever released (this compiler has no
+# GC):
+#
+#   A. parse - src/compiler/80.driver/driver_source_pipeline_parsing.spl:620
+#      `parse_all_impl`'s entry-closure loop has no
+#      `_sffi_transient_array_scope_begin()` / `driver_end_transient_parse_scope()`
+#      pair, unlike the streaming path's `add_streaming_module_surface` (:363),
+#      so every file's full ParserModule AND every parse temporary stay in the
+#      process-lifetime heap for the whole build.
+#
+#   B. surface_freeze - src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl:372
+#      `module_surfaces_freeze` grows without bound. Per import of every
+#      surface it makes ~90-120 full LINEAR scans of `registry.ordered_names`
+#      through `module_surface_registry_index` (:73), via
+#      `module_surface_resolve_absolute_key` (:91, up to 28 scans),
+#      `module_surface_resolve_import_key` (:143, which redoes the same
+#      resolution and adds ~30 more), and
+#      `module_surface_import_resolution_trace_v1` (:167, ~32 more). The 12
+#      `.copy()` calls in the same loop are NOT the cause: surface_build
+#      measured the entire surface content at +257 MB, so copying it once
+#      cannot produce gigabytes.
+#
+# Historical peaks this explains: 26.9 GB (streaming surfaces on) and 46.9 GB
+# (off), and the OOM `memory allocation of 165888 bytes failed` at
+# surface_freeze start.
+#
+# `--threads` is NOT a multiplier. Measured across a full JOBS=24 run and a
+# full JOBS=2 run of the identical command, private bytes agreed within 2.4% at
+# every phase boundary (parse complete 6,756 vs 6,759 MB; surface_freeze start
+# 7,036 vs 7,060 MB). The whole parse..freeze window is single-threaded: one
+# process, `for source in unique_entry_sources:`, ~1 file/s.
+#
+# BUDGETS
+# -------
+# FREEZE_BUDGET_MB is a real defect bound: surface_freeze rewrites index
+# projections over surface content that surface_build measured at 257 MB, so it
+# has no business allocating gigabytes. Today's run blew it by >4x before being
+# stopped, so this gate FAILS on the pre-fix compiler and is expected to pass
+# once retention site B is fixed.
+#
+# PARSE_BUDGET_MB_PER_FILE is a RATCHET, not a target: 9.0 is today's measured
+# 7.9 plus headroom. It exists so site A cannot get worse while site B is
+# addressed. Lower it when the non-streaming parse loop gets a per-file
+# transient scope.
+#
+# THREADS_TOLERANCE_PCT pins the measured thread-independence, so a future
+# change that makes frontend memory scale with `--threads` is caught.
+#
+# USAGE
+#   sh scripts/check/check-frontend-closure-memory-budget.shs --selftest
+#   sh scripts/check/check-frontend-closure-memory-budget.shs --csv SAMPLES.csv
+#   sh scripts/check/check-frontend-closure-memory-budget.shs \
+#       --csv A.csv --compare-csv B.csv        # also check thread independence
+#
+# SAMPLES.csv is `t_s,ws_mb,priv_mb,nproc,phase,done,total`, one row per sample,
+# with a header line. Produce one by sampling the compiler process while a
+# `native-build` runs and tagging each sample with the last `phase=` line of the
+# build log.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS  - exit 0 - budgets met, and the run really was measured
+#   FAIL  - exit 1 - a budget was exceeded
+#   ERROR - exit 2 - nothing was checked (no samples, no phases, unreadable csv)
+# A csv that yields zero usable samples is an ERROR, never a pass.
+
+set -u
+
+FREEZE_BUDGET_MB=${FREEZE_BUDGET_MB:-2000}
+PARSE_BUDGET_MB_PER_FILE=${PARSE_BUDGET_MB_PER_FILE:-9.0}
+THREADS_TOLERANCE_PCT=${THREADS_TOLERANCE_PCT:-25}
+
+verdict_error() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+# Emit "<samples> <parse_start_mb> <parse_files> <parse_end_mb> <freeze_start_mb> <freeze_peak_mb>"
+# for one csv, or an empty line if the csv yields nothing usable.
+summarize_csv() {
+    awk -F, '
+        NR == 1 && $1 == "t_s" { next }
+        NF < 5 { next }
+        $3 !~ /^[0-9]+$/ { next }
+        {
+            n++
+            phase = $5
+            if (phase == "parse") {
+                if (parse_start == "") parse_start = $3
+                parse_end = $3
+                if ($6 ~ /^[0-9]+$/ && $6 + 0 > parse_files) parse_files = $6 + 0
+                if ($7 ~ /^[0-9]+$/ && $7 + 0 > parse_total) parse_total = $7 + 0
+            }
+            if (phase == "surface_build" && sb == "") sb = $3
+            if (phase == "surface_freeze") {
+                if (freeze_start == "") { freeze_start = $3; freeze_t0 = $1 }
+                freeze_t1 = $1
+                if ($3 + 0 > freeze_peak + 0) freeze_peak = $3
+            } else if (freeze_start != "") {
+                # a phase after surface_freeze proves freeze completed
+                freeze_done = 1
+            }
+        }
+        END {
+            if (n == 0) exit 0
+            # parse retention is measured to the first surface_build sample when
+            # there is one: that is the true end of the parse phase.
+            pe = (sb != "" ? sb : parse_end)
+            files = (parse_total > 0 ? parse_total : parse_files)
+            fsecs = (freeze_start == "" ? 0 : freeze_t1 - freeze_t0)
+            printf "%d %s %s %s %s %s %d %.0f\n", n,
+                (parse_start == "" ? "-" : parse_start),
+                (files == 0 ? "-" : files),
+                (pe == "" ? "-" : pe),
+                (freeze_start == "" ? "-" : freeze_start),
+                (freeze_peak == "" ? "-" : freeze_peak),
+                freeze_done + 0, fsecs
+        }
+    ' "$1" 2>/dev/null
+}
+
+# evaluate <csv> [compare_csv] -> prints findings, sets EV_* via a temp file
+evaluate() {
+    csv=$1
+    cmp_csv=${2:-}
+    [ -r "$csv" ] || verdict_error "csv not readable: $csv"
+
+    summary=$(summarize_csv "$csv")
+    [ -n "$summary" ] || verdict_error "no usable samples in $csv"
+
+    set -- $summary
+    n_samples=$1; parse_start=$2; parse_files=$3; parse_end=$4
+    freeze_start=$5; freeze_peak=$6; freeze_done=$7; freeze_secs=$8
+
+    [ "$n_samples" -gt 0 ] || verdict_error "no usable samples in $csv"
+    if [ "$parse_start" = "-" ] && [ "$freeze_start" = "-" ]; then
+        verdict_error "$csv has samples but no parse or surface_freeze phase"
+    fi
+
+    checks=0
+    failures=""
+
+    if [ "$parse_start" != "-" ] && [ "$parse_end" != "-" ] && [ "$parse_files" != "-" ]; then
+        checks=$((checks + 1))
+        per_file=$(awk -v a="$parse_start" -v b="$parse_end" -v f="$parse_files" \
+            'BEGIN { if (f > 0) printf "%.2f", (b - a) / f; else print "0" }')
+        printf 'parse: %s files, %s MB -> %s MB, %s MB/file (budget %s)\n' \
+            "$parse_files" "$parse_start" "$parse_end" "$per_file" "$PARSE_BUDGET_MB_PER_FILE"
+        over=$(awk -v v="$per_file" -v b="$PARSE_BUDGET_MB_PER_FILE" \
+            'BEGIN { print (v > b) ? 1 : 0 }')
+        [ "$over" = "1" ] && failures="$failures parse=${per_file}MB/file>${PARSE_BUDGET_MB_PER_FILE}"
+    fi
+
+    if [ "$freeze_start" != "-" ] && [ "$freeze_peak" != "-" ]; then
+        # Fail closed on a truncated run: a freeze window that was cut short
+        # can sit under budget purely because it was stopped early. Require
+        # either a later phase (proving freeze finished) or FREEZE_MIN_SECONDS
+        # of samples.
+        if [ "$freeze_done" -eq 0 ] && [ "$freeze_secs" -lt "${FREEZE_MIN_SECONDS:-120}" ]; then
+            verdict_error "surface_freeze sampled for only ${freeze_secs}s and never completed; a truncated freeze window cannot be judged against a budget"
+        fi
+        checks=$((checks + 1))
+        grew=$((freeze_peak - freeze_start))
+        printf 'surface_freeze: %s MB -> %s MB, grew %s MB (budget %s)\n' \
+            "$freeze_start" "$freeze_peak" "$grew" "$FREEZE_BUDGET_MB"
+        [ "$grew" -gt "$FREEZE_BUDGET_MB" ] && \
+            failures="$failures surface_freeze=${grew}MB>${FREEZE_BUDGET_MB}MB"
+    fi
+
+    if [ -n "$cmp_csv" ]; then
+        [ -r "$cmp_csv" ] || verdict_error "compare csv not readable: $cmp_csv"
+        cmp_summary=$(summarize_csv "$cmp_csv")
+        [ -n "$cmp_summary" ] || verdict_error "no usable samples in $cmp_csv"
+        cmp_end=$(echo "$cmp_summary" | cut -d' ' -f4)
+        if [ "$parse_end" != "-" ] && [ "$cmp_end" != "-" ]; then
+            checks=$((checks + 1))
+            pct=$(awk -v a="$parse_end" -v b="$cmp_end" \
+                'BEGIN { m = (a > b ? a : b); if (m > 0) printf "%.1f", (a > b ? a - b : b - a) * 100 / m; else print "0" }')
+            printf 'thread independence: parse complete %s MB vs %s MB, %s%% apart (tolerance %s%%)\n' \
+                "$parse_end" "$cmp_end" "$pct" "$THREADS_TOLERANCE_PCT"
+            over=$(awk -v v="$pct" -v b="$THREADS_TOLERANCE_PCT" 'BEGIN { print (v > b) ? 1 : 0 }')
+            [ "$over" = "1" ] && failures="$failures threads=${pct}%>${THREADS_TOLERANCE_PCT}%"
+        fi
+    fi
+
+    [ "$checks" -gt 0 ] || verdict_error "$csv yielded 0 evaluable budgets"
+
+    if [ -n "$failures" ]; then
+        printf 'FAIL — %s sample(s), %s budget(s) checked, over budget:%s\n' \
+            "$n_samples" "$checks" "$failures"
+        return 1
+    fi
+    printf 'PASS — %s sample(s), %s budget(s) checked, 0 over budget\n' \
+        "$n_samples" "$checks"
+    return 0
+}
+
+# ---------------------------------------------------------------- selftest --
+# Fatal, and runs before every scan. Fixture 1 replays the REAL 2026-09-13
+# blowup and must FAIL; fixture 2 is the same shape within budget and must
+# PASS; the rest pin the non-vacuity and ERROR paths.
+selftest() {
+    d=$(mktemp -d "${TMPDIR:-/tmp}/fcmb-selftest.XXXXXX") || return 1
+    rc=0
+
+    # 1. real measured pre-fix run (build/p3/mem/m24s0.csv, abridged to its
+    #    phase boundaries). MUST FAIL on surface_freeze.
+    cat >"$d/prefix.csv" <<'EOF'
+t_s,ws_mb,priv_mb,nproc,phase,done,total
+40.4,300,322,1,parse,6,813
+218.4,6650,6756,1,surface_build,2,813
+349.7,6862,7013,1,surface_alias,273,1058
+356.3,6870,7025,1,export_origins,0,unknown
+361.7,6880,7036,1,surface_freeze,0,unknown
+600.3,14886,15179,1,surface_freeze,0,unknown
+EOF
+    out=$( (FREEZE_BUDGET_MB=2000 PARSE_BUDGET_MB_PER_FILE=9.0 evaluate "$d/prefix.csv") 2>&1 )
+    case "$out" in
+        *"FAIL —"*surface_freeze*) : ;;
+        *) echo "selftest 1: real pre-fix blowup was not caught: $out" >&2; rc=1 ;;
+    esac
+
+    # 2. same run with retention site B fixed (freeze grows with the surface
+    #    content it rewrites, not gigabytes). MUST PASS.
+    cat >"$d/postfix.csv" <<'EOF'
+t_s,ws_mb,priv_mb,nproc,phase,done,total
+40.4,300,322,1,parse,6,813
+218.4,6650,6756,1,surface_build,2,813
+361.7,6880,7036,1,surface_freeze,0,unknown
+420.0,7200,7330,1,surface_freeze,0,unknown
+421.0,7201,7331,1,hir,0,813
+EOF
+    out=$( (FREEZE_BUDGET_MB=2000 PARSE_BUDGET_MB_PER_FILE=9.0 evaluate "$d/postfix.csv") 2>&1 )
+    case "$out" in
+        *"PASS —"*) : ;;
+        *) echo "selftest 2: in-budget run was not accepted: $out" >&2; rc=1 ;;
+    esac
+
+    # 3. parse ratchet must bite on its own.
+    cat >"$d/parsehog.csv" <<'EOF'
+t_s,ws_mb,priv_mb,nproc,phase,done,total
+40.4,300,322,1,parse,6,813
+218.4,20000,20322,1,surface_build,2,813
+EOF
+    out=$( (FREEZE_BUDGET_MB=2000 PARSE_BUDGET_MB_PER_FILE=9.0 evaluate "$d/parsehog.csv") 2>&1 )
+    case "$out" in
+        *"FAIL —"*parse=*) : ;;
+        *) echo "selftest 3: parse ratchet did not bite: $out" >&2; rc=1 ;;
+    esac
+
+    # 4. thread independence: the real 24-vs-2 pair must PASS, a 4x split must FAIL.
+    cat >"$d/j2.csv" <<'EOF'
+t_s,ws_mb,priv_mb,nproc,phase,done,total
+43.8,300,322,1,parse,6,813
+204.8,6650,6759,1,surface_build,0,813
+EOF
+    out=$( (FREEZE_BUDGET_MB=2000 PARSE_BUDGET_MB_PER_FILE=9.0 evaluate "$d/postfix.csv" "$d/j2.csv") 2>&1 )
+    case "$out" in
+        *"thread independence: parse complete"*"PASS —"*) : ;;
+        *) echo "selftest 4a: measured thread parity rejected: $out" >&2; rc=1 ;;
+    esac
+    cat >"$d/j2bad.csv" <<'EOF'
+t_s,ws_mb,priv_mb,nproc,phase,done,total
+43.8,300,322,1,parse,6,813
+204.8,26000,27000,1,surface_build,0,813
+EOF
+    out=$( (FREEZE_BUDGET_MB=2000 PARSE_BUDGET_MB_PER_FILE=9.0 evaluate "$d/postfix.csv" "$d/j2bad.csv") 2>&1 )
+    case "$out" in
+        *"FAIL —"*threads=*) : ;;
+        *) echo "selftest 4b: thread scaling was not caught: $out" >&2; rc=1 ;;
+    esac
+
+    # 5. non-vacuity: header only must ERROR, not pass.
+    printf 't_s,ws_mb,priv_mb,nproc,phase,done,total\n' >"$d/empty.csv"
+    out=$( (evaluate "$d/empty.csv") 2>&1 ); ec=$?
+    case "$out$ec" in
+        *"ERROR — nothing was checked"*2) : ;;
+        *) echo "selftest 5: empty csv did not ERROR (exit $ec): $out" >&2; rc=1 ;;
+    esac
+
+    # 6. samples with no parse/freeze phase must ERROR, not pass.
+    cat >"$d/nophase.csv" <<'EOF'
+t_s,ws_mb,priv_mb,nproc,phase,done,total
+1.0,10,12,1,load_sources,0,0
+2.0,11,13,1,load_sources,0,0
+EOF
+    out=$( (evaluate "$d/nophase.csv") 2>&1 ); ec=$?
+    case "$out$ec" in
+        *"ERROR — nothing was checked"*2) : ;;
+        *) echo "selftest 6: phaseless csv did not ERROR (exit $ec): $out" >&2; rc=1 ;;
+    esac
+
+    # 7. truncated freeze window must ERROR, not pass. This is the real
+    #    JOBS=2 run (build/p3/mem/m2s0.csv), stopped 25 s into freeze: under
+    #    budget only because it was cut short.
+    cat >"$d/truncated.csv" <<'EOF'
+t_s,ws_mb,priv_mb,nproc,phase,done,total
+43.8,300,322,1,parse,6,813
+204.8,6650,6759,1,surface_build,0,813
+329.1,6900,7060,1,surface_freeze,0,unknown
+354.2,8100,8313,1,surface_freeze,0,unknown
+EOF
+    out=$( (FREEZE_BUDGET_MB=2000 PARSE_BUDGET_MB_PER_FILE=9.0 evaluate "$d/truncated.csv") 2>&1 ); ec=$?
+    case "$out$ec" in
+        *"ERROR — nothing was checked"*"never completed"*2) : ;;
+        *) echo "selftest 7: truncated freeze window was not rejected (exit $ec): $out" >&2; rc=1 ;;
+    esac
+
+    rm -rf "$d"
+    return $rc
+}
+
+# -------------------------------------------------------------------- main --
+csv=""
+compare_csv=""
+selftest_only=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest_only=1 ;;
+        --csv) shift; csv=${1:-} ;;
+        --compare-csv) shift; compare_csv=${1:-} ;;
+        -h|--help)
+            # Print the header block, which ends at the first `set -u`.
+            help_end=$(grep -n '^set -u' "$0" | head -1 | cut -d: -f1)
+            sed -n "2,$((help_end - 2))p" "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; verdict_error "unknown argument: $1" ;;
+    esac
+    shift || true
+done
+
+if ! selftest; then
+    printf 'ERROR — nothing was checked (selftest failed)\n'
+    exit 2
+fi
+if [ "$selftest_only" = "1" ]; then
+    printf 'PASS — 9 selftest fixture(s) checked, 0 failed\n'
+    exit 0
+fi
+[ -n "$csv" ] || verdict_error "no --csv given (and --selftest not requested)"
+
+evaluate "$csv" "$compare_csv"
+exit $?

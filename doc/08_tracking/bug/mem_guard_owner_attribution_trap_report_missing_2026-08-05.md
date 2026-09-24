@@ -146,3 +146,8 @@ report never implemented), not a silent-wrong-result defect — a guard-page
 SIGSEGV is loud, it just lands without owner attribution. Correctly scoped as P3.
 Implementing it requires a trap handler outside the interpreter scope, so it was
 not attempted in this lane.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: fix surface is the Rust seed's guard-page trap owner-attribution
+reporting (both backends), needs a seed rebuild to verify. No change made.

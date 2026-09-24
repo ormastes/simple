@@ -21,7 +21,7 @@ Follow the current SPipe dev entrypoint in `.codex/skills/sp_dev/SKILL.md`.
 
 ## Protected PR self-review handoff
 
-GitHub forbids a PR author `APPROVED` review. `SPipe Self Review Admission` is
+GitHub forbids a PR author from submitting an `APPROVED` review. `SPipe Self Review Admission` is
 a required status check, not provider/independent approval. Ordinary code/text
 is default allow absent external deny/constrain through `code`, `text`, exact
 `file`, immediate `directory_files`, and recursive `directory_recursive`

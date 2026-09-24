@@ -1,4 +1,8 @@
 # Unresolved type corrupts nested struct projection
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Reproduction and corrected diagnosis
 
@@ -165,3 +169,4 @@ The emitted artifact identifies
 sets `gpu_backend_used=true`. The focused browser/Metal fixture now retains
 the original surfaced batch and requires all four commands to render, so the
 short-circuit regression cannot be hidden by forcing an empty surface ID.
+

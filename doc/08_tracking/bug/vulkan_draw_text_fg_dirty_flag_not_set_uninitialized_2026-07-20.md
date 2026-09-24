@@ -1,4 +1,8 @@
 # Bug: `VulkanBackend.draw_text` does not set `dirty=true` on uninitialized-Vulkan fallback (sibling `draw_text_bg` does)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-20
 
@@ -73,3 +77,4 @@ Add `self.dirty = true` before the early `return` in
 ## Affected
 
 - `test/01_unit/lib/gpu/engine2d/backend_vulkan_text_fallback_spec.spl` (1 of 2 examples)
+

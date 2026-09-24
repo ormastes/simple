@@ -85,3 +85,19 @@ SIMPLE_TIMEOUT_SECONDS=0 bin/simple test test/02_integration/svmg/conformance/co
   spec were found deleted from `main` (a sibling-commit clobber) at the start
   of this work and were recovered before any D4 edit.
 - `doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md` §5 Task D4.
+
+## Triage 2026-09-13
+
+Attempted to re-verify via the documented command
+(`bin/simple test test/01_unit/compiler/backend/svmg_lowering_spec.spl --no-session-daemon`)
+and found the spec file no longer PARSES at all on the deployed seed:
+`error: compile failed: parse: ... Unexpected token: expected expression,
+found Error("Unterminated f-string")` — zero examples execute, so the
+documented "fails fast with a diagnostic naming the gap" behavior cannot be
+re-confirmed right now. This is a distinct, newly-found defect (in the
+lexer/parser, not in `svmg_lowering.spl`'s deferred-subset gating), filed
+separately as
+`doc/08_tracking/bug/svmg_lowering_spec_unterminated_fstring_parse_failure_2026-09-13.md`
+since root-causing it needs bisection beyond this pass's per-bug budget.
+Leaving this row OPEN as originally filed; the parse failure is tracked in
+the new sibling doc.

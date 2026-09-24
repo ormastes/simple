@@ -1,0 +1,187 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_is_zero}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+pub struct KpfGenerationHandle:
+    index: u32
+    epoch: u64
+
+pub struct KpfGenerationPublication:
+    status: KpfSyncStatus
+    current: KpfGenerationHandle
+    previous: KpfGenerationHandle
+
+pub struct KpfGenerationView:
+    status: KpfSyncStatus
+    provider_id: KpfId128
+    composition_digest: KpfDigest256
+    registry_revision: u64
+    pin_count: u32
+    active: bool
+    retired: bool
+
+class _KpfGenerationSlot:
+    var occupied: bool
+    var epoch: u64
+    var provider_id: KpfId128
+    var composition_digest: KpfDigest256
+    var registry_revision: u64
+    var pin_count: u32
+    var active: bool
+    var retired: bool
+
+class _KpfPinSlot:
+    var occupied: bool
+    var epoch: u64
+    var generation: KpfGenerationHandle
+
+pub struct KpfPinHandle:
+    index: u32
+    epoch: u64
+
+pub struct KpfPinResult:
+    status: KpfSyncStatus
+    handle: KpfPinHandle
+
+class KpfGenerationTable:
+    var generations: [_KpfGenerationSlot]
+    var pins: [_KpfPinSlot]
+    generation_capacity: u32
+    pin_capacity: u32
+    var active: KpfGenerationHandle
+    var rollback_candidate: KpfGenerationHandle
+    var generation_cursor: u32
+    var pin_cursor: u32
+
+    static fn create(generation_capacity: u32, pin_capacity: u32) -> KpfGenerationTable:
+        var generations: [_KpfGenerationSlot] = []
+        var index = 0u32
+        while index < generation_capacity:
+            generations.push(_KpfGenerationSlot(occupied: false, epoch: 1,
+                provider_id: KpfId128(hi: 0, lo: 0), composition_digest: KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0),
+                registry_revision: 0, pin_count: 0, active: false, retired: false))
+            index = index + 1
+        var pins: [_KpfPinSlot] = []
+        index = 0
+        while index < pin_capacity:
+            pins.push(_KpfPinSlot(occupied: false, epoch: 1, generation: KpfGenerationHandle(index: 0, epoch: 0)))
+            index = index + 1
+        KpfGenerationTable(generations: generations, pins: pins,
+            generation_capacity: generation_capacity, pin_capacity: pin_capacity,
+            active: KpfGenerationHandle(index: 0, epoch: 0),
+            rollback_candidate: KpfGenerationHandle(index: 0, epoch: 0),
+            generation_cursor: 0, pin_cursor: 0)
+
+    fn _valid_generation(handle: KpfGenerationHandle) -> bool:
+        handle.index < self.generation_capacity and self.generations[handle.index].occupied and self.generations[handle.index].epoch == handle.epoch
+
+    me publish(provider_id: KpfId128, composition_digest: KpfDigest256, registry_revision: u64) -> KpfGenerationPublication:
+        if kpf_id128_is_zero(provider_id):
+            return KpfGenerationPublication(status: KpfSyncStatus.IdentityMissing, current: KpfGenerationHandle(index: 0, epoch: 0), previous: self.active)
+        var scanned = 0u32
+        while scanned < self.generation_capacity:
+            val index = (self.generation_cursor + scanned) % self.generation_capacity
+            if not self.generations[index].occupied:
+                val previous = self.active
+                self.generations[index].provider_id = provider_id
+                self.generations[index].composition_digest = composition_digest
+                self.generations[index].registry_revision = registry_revision
+                self.generations[index].pin_count = 0
+                self.generations[index].retired = false
+                self.generations[index].active = true
+                self.generations[index].occupied = true
+                val current = KpfGenerationHandle(index: index, epoch: self.generations[index].epoch)
+                if self._valid_generation(previous):
+                    self.generations[previous.index].active = false
+                    self.generations[previous.index].retired = true
+                self.active = current
+                self.rollback_candidate = previous
+                self.generation_cursor = (index + 1) % self.generation_capacity
+                return KpfGenerationPublication(status: KpfSyncStatus.Ok, current: current, previous: previous)
+            scanned = scanned + 1
+        KpfGenerationPublication(status: KpfSyncStatus.CapacityExceeded, current: KpfGenerationHandle(index: 0, epoch: 0), previous: self.active)
+
+    me rollback(handle: KpfGenerationHandle) -> KpfGenerationPublication:
+        val current = self.active
+        if not self._valid_generation(handle):
+            return KpfGenerationPublication(status: KpfSyncStatus.StaleHandle,
+                current: current, previous: handle)
+        if not self._valid_generation(current) or not self.generations[current.index].active:
+            return KpfGenerationPublication(status: KpfSyncStatus.GenerationNotActive,
+                current: current, previous: handle)
+        if handle.index != self.rollback_candidate.index or handle.epoch != self.rollback_candidate.epoch:
+            return KpfGenerationPublication(status: KpfSyncStatus.GenerationNotActive,
+                current: current, previous: handle)
+        if not self.generations[handle.index].retired:
+            return KpfGenerationPublication(status: KpfSyncStatus.GenerationNotRetired,
+                current: current, previous: handle)
+
+        self.generations[current.index].active = false
+        self.generations[current.index].retired = true
+        self.generations[handle.index].retired = false
+        self.generations[handle.index].active = true
+        self.active = handle
+        self.rollback_candidate = current
+        KpfGenerationPublication(status: KpfSyncStatus.Ok, current: handle, previous: current)
+
+    fn view(handle: KpfGenerationHandle) -> KpfGenerationView:
+        if not self._valid_generation(handle):
+            return KpfGenerationView(status: KpfSyncStatus.StaleHandle,
+                provider_id: KpfId128(hi: 0, lo: 0), composition_digest: KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0),
+                registry_revision: 0, pin_count: 0, active: false, retired: false)
+        val slot = self.generations[handle.index]
+        KpfGenerationView(status: KpfSyncStatus.Ok, provider_id: slot.provider_id,
+            composition_digest: slot.composition_digest, registry_revision: slot.registry_revision,
+            pin_count: slot.pin_count, active: slot.active, retired: slot.retired)
+
+    me pin(handle: KpfGenerationHandle) -> KpfPinResult:
+        if not self._valid_generation(handle):
+            return KpfPinResult(status: KpfSyncStatus.StaleHandle, handle: KpfPinHandle(index: 0, epoch: 0))
+        if not self.generations[handle.index].active:
+            return KpfPinResult(status: KpfSyncStatus.GenerationNotActive, handle: KpfPinHandle(index: 0, epoch: 0))
+        var scanned = 0u32
+        while scanned < self.pin_capacity:
+            val index = (self.pin_cursor + scanned) % self.pin_capacity
+            if not self.pins[index].occupied:
+                self.pins[index].generation = handle
+                self.pins[index].occupied = true
+                self.generations[handle.index].pin_count = self.generations[handle.index].pin_count + 1
+                self.pin_cursor = (index + 1) % self.pin_capacity
+                return KpfPinResult(status: KpfSyncStatus.Ok, handle: KpfPinHandle(index: index, epoch: self.pins[index].epoch))
+            scanned = scanned + 1
+        KpfPinResult(status: KpfSyncStatus.CapacityExceeded, handle: KpfPinHandle(index: 0, epoch: 0))
+
+    me pin_active() -> KpfPinResult:
+        if not self._valid_generation(self.active):
+            return KpfPinResult(status: KpfSyncStatus.GenerationNotActive, handle: KpfPinHandle(index: 0, epoch: 0))
+        self.pin(self.active)
+
+    me release_pin(handle: KpfPinHandle) -> KpfSyncStatus:
+        if handle.index >= self.pin_capacity: return KpfSyncStatus.StaleHandle
+        val pin = self.pins[handle.index]
+        if not pin.occupied or pin.epoch != handle.epoch: return KpfSyncStatus.StaleHandle
+        if not self._valid_generation(pin.generation): return KpfSyncStatus.StaleHandle
+        if self.generations[pin.generation.index].pin_count == 0: return KpfSyncStatus.StaleHandle
+        self.generations[pin.generation.index].pin_count = self.generations[pin.generation.index].pin_count - 1
+        self.pins[handle.index].occupied = false
+        self.pins[handle.index].epoch = self.pins[handle.index].epoch + 1
+        if self.pins[handle.index].epoch == 0: self.pins[handle.index].epoch = 1
+        self.pin_cursor = handle.index
+        KpfSyncStatus.Ok
+
+    me collect(handle: KpfGenerationHandle) -> KpfSyncStatus:
+        if not self._valid_generation(handle): return KpfSyncStatus.StaleHandle
+        if not self.generations[handle.index].retired: return KpfSyncStatus.GenerationNotRetired
+        if self.generations[handle.index].pin_count != 0: return KpfSyncStatus.GenerationStillPinned
+        self.generations[handle.index].occupied = false
+        self.generations[handle.index].active = false
+        self.generations[handle.index].retired = false
+        self.generations[handle.index].provider_id = KpfId128(hi: 0, lo: 0)
+        self.generations[handle.index].composition_digest = KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0)
+        self.generations[handle.index].registry_revision = 0
+        self.generations[handle.index].epoch = self.generations[handle.index].epoch + 1
+        if self.generations[handle.index].epoch == 0: self.generations[handle.index].epoch = 1
+        self.generation_cursor = handle.index
+        KpfSyncStatus.Ok
+
+    fn generation_storage_capacity() -> u32: self.generation_capacity
+
+    fn pin_storage_capacity() -> u32: self.pin_capacity

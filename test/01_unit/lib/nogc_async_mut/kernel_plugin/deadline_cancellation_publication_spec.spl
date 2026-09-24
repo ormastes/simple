@@ -1,0 +1,94 @@
+# Purpose: acceptance evidence for KPF terminal races and safe generation publication.
+# @req REQ-KPF-ASYNC-BOUNDED
+# @req REQ-KPF-GENERATION-SAFETY
+# @cover src/lib/nogc_async_mut/kernel_plugin/testing/race_evidence.spl 90%
+
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.kernel_plugin.testing.*
+use std.nogc_async_mut.kernel_plugin.runtime.KpfQueueStatus
+use std.nogc_sync_mut.kernel_plugin.KpfSyncStatus
+
+describe "KPF deadline and cancellation arbitration":
+    it "lets cancellation win exactly once when completion arrives later":
+        step("race cancellation against a later provider completion")
+        val arbiter = KpfTerminalArbiterV1.create()
+        assert_true(arbiter.apply(KpfTerminalEventV1.Cancel))
+        assert_false(arbiter.apply(KpfTerminalEventV1.Complete))
+        assert_equal(arbiter.state, KpfTerminalStateV1.Cancelled)
+        assert_equal(arbiter.accepted_terminal_events, 1)
+        assert_equal(arbiter.rejected_terminal_events, 1)
+
+    it "lets completion win exactly once when cancellation arrives later":
+        step("race provider completion against later cancellation")
+        val arbiter = KpfTerminalArbiterV1.create()
+        assert_true(arbiter.apply(KpfTerminalEventV1.Complete))
+        assert_false(arbiter.apply(KpfTerminalEventV1.Cancel))
+        assert_equal(arbiter.state, KpfTerminalStateV1.Completed)
+        assert_equal(arbiter.accepted_terminal_events, 1)
+        assert_equal(arbiter.rejected_terminal_events, 1)
+
+    it "lets deadline expiry win exactly once when completion arrives later":
+        step("race deadline expiry against a later provider completion")
+        val arbiter = KpfTerminalArbiterV1.create()
+        assert_true(arbiter.apply(KpfTerminalEventV1.Deadline))
+        assert_false(arbiter.apply(KpfTerminalEventV1.Complete))
+        assert_equal(arbiter.state, KpfTerminalStateV1.TimedOut)
+        assert_equal(arbiter.accepted_terminal_events, 1)
+        assert_equal(arbiter.rejected_terminal_events, 1)
+
+    it "lets completion win exactly once when deadline expiry arrives later":
+        step("race provider completion against later deadline expiry")
+        val arbiter = KpfTerminalArbiterV1.create()
+        assert_true(arbiter.apply(KpfTerminalEventV1.Complete))
+        assert_false(arbiter.apply(KpfTerminalEventV1.Deadline))
+        assert_equal(arbiter.state, KpfTerminalStateV1.Completed)
+        assert_equal(arbiter.accepted_terminal_events, 1)
+        assert_equal(arbiter.rejected_terminal_events, 1)
+
+    it "rejects a stale completion after its request slot is reused":
+        step("reuse one request slot and validate both epochs")
+        val evidence = kpf_slot_reuse_evidence_v1()
+        assert_equal(evidence.old_handle.request_slot, evidence.current_handle.request_slot)
+        assert_false(evidence.old_handle.request_epoch == evidence.current_handle.request_epoch)
+        assert_equal(evidence.stale_completion_status, KpfQueueStatus.StaleHandle)
+        assert_equal(evidence.current_completion_status, KpfQueueStatus.Accepted)
+
+describe "KPF failed-candidate publication and unload safety":
+    it "keeps the prior generation active when candidate admission fails":
+        step("attempt to publish a candidate with missing identity")
+        val evidence = kpf_failed_candidate_publication_evidence_v1()
+        assert_equal(evidence.failed_status, KpfSyncStatus.IdentityMissing)
+        assert_equal(evidence.active_after_failure.index, evidence.first.index)
+        assert_equal(evidence.active_after_failure.epoch, evidence.first.epoch)
+        assert_true(evidence.prior_still_active)
+
+    it "denies collection while a retired generation remains pinned":
+        step("retire a pinned generation and attempt collection")
+        val evidence = kpf_pinned_unload_evidence_v1()
+        assert_equal(evidence.denied_status, KpfSyncStatus.GenerationStillPinned)
+        assert_equal(evidence.pin_release_status, KpfSyncStatus.Ok)
+        assert_equal(evidence.collected_status, KpfSyncStatus.Ok)
+
+    it "fails candidates atomically and unloads only the retired unpinned generation":
+        step("exercise identity, capacity, pin, rollback, active-unload, and stale-handle outcomes")
+        val evidence = kpf_lifecycle_matrix_evidence_v1()
+        assert_equal(evidence.failed_identity_status, KpfSyncStatus.IdentityMissing)
+        assert_equal(evidence.failed_capacity_status, KpfSyncStatus.CapacityExceeded)
+        assert_equal(evidence.active_after_failures.index, 1u32)
+        assert_equal(evidence.second_pin_status, KpfSyncStatus.CapacityExceeded)
+        assert_equal(evidence.collect_active_status, KpfSyncStatus.GenerationNotRetired)
+        assert_equal(evidence.rollback_status, KpfSyncStatus.Ok)
+        assert_equal(evidence.collect_rolled_back_candidate_status, KpfSyncStatus.Ok)
+        assert_equal(evidence.collect_again_status, KpfSyncStatus.StaleHandle)
+        assert_equal(evidence.stale_pin_release_status, KpfSyncStatus.StaleHandle)
+
+describe "KPF race evidence mutation guards":
+    it "detects terminal overwrite and stale-epoch mutations":
+        step("prove both safety predicates depend on rejected late events and exact epochs")
+        assert_true(kpf_overwrite_terminal_mutation_detected_v1())
+        assert_true(kpf_stale_epoch_mutation_detected_v1())
+
+    it "detects unsafe active unload and stale pin reuse mutations":
+        step("prove lifecycle acceptance depends on active and epoch guards")
+        assert_true(kpf_lifecycle_matrix_mutant_exposed_v1())

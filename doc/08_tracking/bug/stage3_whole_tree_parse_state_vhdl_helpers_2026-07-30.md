@@ -1,4 +1,8 @@
 # Stage-3 whole-tree build mis-parses vhdl_codegen_helpers.spl (parser STATE, not grammar)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** L7 run 9 (2026-07-30), faithful stage-3 invocation on origin
 `110f743b2a2`, cranelift, `--entry-closure --mode one-binary`.
@@ -336,3 +340,4 @@ whole-file bytes). The open question is now why 3 clean repro attempts all
 passed — see "Recommended next step" in the 2026-07-30 section above (retry
 under concurrent load; instrument hypothesis 3's side tables if it
 reproduces).
+

@@ -285,7 +285,7 @@ impl HmInferContext:
                     Err(TypeInferError.Other("matrix multiplication requires at least 2D tensors", span))
 
             case _:
-                Err(TypeInferError(message: "unsupported matmul types", span: span))
+                Err(TypeInferError.Other(message: "unsupported matmul types", span: span))
 
     me infer_broadcast_op(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
         """Infer type of broadcast operations (.+, .-, .*, ./, .^).
@@ -324,7 +324,7 @@ impl HmInferContext:
                 ))
 
             case _:
-                Err(TypeInferError(message: "unsupported broadcast op types", span: span))
+                Err(TypeInferError.Other(message: "unsupported broadcast op types", span: span))
 
     me broadcast_shapes(dims1: [DimExpr], dims2: [DimExpr], span: Span) -> [DimExpr]:
         """Compute broadcast result shape.
@@ -446,11 +446,19 @@ impl HmInferContext:
         """Infer type of a block."""
         val stmts: [HirStmt] = block.stmts
         var stmt_idx = 0
+        var last_stmt_ty = HirType(kind: HirTypeKind.Unit, span: block.span)
+        var last_stmt_is_return = false
         while stmt_idx < stmts.len():
             val stmt: HirStmt = stmts[stmt_idx]
             match self.infer_stmt(stmt):
-                case Ok(_):
-                    pass
+                case Ok(stmt_ty):
+                    last_stmt_ty = stmt_ty
+                    last_stmt_is_return = match stmt.kind:
+                        case Expr(e):
+                            match e.kind:
+                                case HirExprKind.Return(_): true
+                                case _: false
+                        case _: false
                 case Err(e):
                     return Err(e)
             stmt_idx = stmt_idx + 1
@@ -458,23 +466,44 @@ impl HmInferContext:
         if block.has:
             return self.synthesize_expr(block.value)
 
+        # A block whose final statement is `return expr` never falls through,
+        # so its type is the returned expression's type. This lets the
+        # enclosing function's body-vs-declared-return-type check see the
+        # real payload type (e.g. the T? yielded by `.?`) instead of Unit.
+        if last_stmt_is_return:
+            return Ok(last_stmt_ty)
+
         Ok(HirType(kind: HirTypeKind.Unit, span: block.span))
 
     me infer_stmt(stmt: HirStmt) -> Result<HirType, TypeInferError>:
         """Infer type of a statement."""
         match stmt.kind:
             case Expr(expr):
+                # A `return` statement terminates the block: its expression
+                # type (not Unit) is what the block yields to the enclosing
+                # function's body-vs-declared-return-type check.
                 self.synthesize_expr(expr)
 
             case Let(symbol, type_, init):
                 self.enter_level()
 
                 # Use bidirectional checking: if there's a type annotation,
-                # use Check mode to propagate types into ALL initializers
-                val has_annotation = type_.? and type_.unwrap().kind != HirTypeKind.Infer(0, 0)
+                # use Check mode to propagate types into ALL initializers.
+                # `type_` is declared `HirType` (non-optional) in
+                # HirStmtKind.Let, but is treated as nilable at Let-statement
+                # construction sites with no annotation. Bind the unwrapped
+                # value to its declared type explicitly before `.kind`
+                # access -- `.unwrap()`'s bare result was inferred as an
+                # untyped receiver by the seed. Preserve the original
+                # short-circuit: `.unwrap()` is only ever called under the
+                # `type_.?` guard.
+                var has_annotation = false
+                if type_.?:
+                    val annotated_type: HirType = type_
+                    has_annotation = annotated_type.kind != HirTypeKind.Infer(0, 0)
 
                 val init_result = if has_annotation:
-                    val expected = type_.unwrap()
+                    val expected: HirType = type_
                     # Use Check mode for ALL initializers (not just lambdas)
                     # This enables type propagation for lambdas, arrays, etc.
                     self.infer_expr(init, InferMode.Check(expected))
@@ -511,6 +540,49 @@ impl HmInferContext:
             case _:
                 Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
 
+    me infer_optional_pattern_payload(variant: text, payload: HirPatternPayload?, inner: HirType, span: Span) -> Result<(), TypeInferError>:
+        if variant == "Some":
+            if val present_payload = payload:
+                match present_payload:
+                    case Tuple(patterns) if patterns.len() == 1:
+                        self.infer_pattern(patterns[0], inner)
+                    case _:
+                        Err(TypeInferError.Other("Option pattern 'Some' requires exactly one payload pattern", span))
+            else:
+                Err(TypeInferError.Other("Option pattern 'Some' requires exactly one payload pattern", span))
+        else:
+            if val _ = payload:
+                Err(TypeInferError.Other("Option pattern 'None' cannot have a payload pattern", span))
+            else:
+                Ok(())
+
+    me infer_option_pattern(variant: text, payload: HirPatternPayload?, expected: HirType, span: Span) -> Result<(), TypeInferError>:
+        val resolved = self.resolve(expected)
+        match resolved.kind:
+            case Optional(inner):
+                self.infer_optional_pattern_payload(variant, payload, inner, span)
+            case Infer(_, _):
+                val inner = self.fresh_var(span)
+                val optional = HirType(kind: HirTypeKind.Optional(inner), span: span)
+                match self.unify(resolved, optional):
+                    case Err(e): Err(e)
+                    case _:
+                        self.infer_optional_pattern_payload(variant, payload, inner, span)
+            # Pattern matching auto-dereferences references (for example,
+            # `match &enum_value`), so retain the same behavior for &Option<T>.
+            case Ref(inner, _):
+                self.infer_option_pattern(variant, payload, inner, span)
+            # Named scrutinees may be user enums whose variants happen to be
+            # named Some or None. HIR does not yet expose enum ownership to the
+            # inference context, so retain those until ownership is explicit.
+            case Named(_, _) | Any | Error:
+                Ok(())
+            case _:
+                Err(TypeInferError.Other(
+                    "Option pattern '{variant}' requires an optional scrutinee; found '{resolved.kind}'",
+                    span
+                ))
+
     me infer_pattern(pattern: HirPattern, expected: HirType) -> Result<(), TypeInferError>:
         """Infer types from pattern matching."""
         match pattern.kind:
@@ -537,6 +609,18 @@ impl HmInferContext:
                         Ok(())
                     case _:
                         Ok(())
+            case Enum(owner, variant, payload):
+                # Unqualified builtin Option patterns arrive with an Error
+                # owner because Optional is a type shape rather than a named
+                # user enum. Keep named owners untouched so a user enum may
+                # legitimately define Some/None variants.
+                val builtin_option_shape = match owner.kind:
+                    case Error | Optional(_): variant == "Some" or variant == "None"
+                    case _: false
+                if builtin_option_shape:
+                    self.infer_option_pattern(variant, payload, expected, pattern.span)
+                else:
+                    Ok(())
             case _:
                 Ok(())
 
@@ -561,9 +645,16 @@ impl HmInferContext:
             # Function parameters are immutable by default (val)
             self.register_symbol_mutability(param.symbol.id, false)
 
-        # Infer body with bidirectional checking
+        # Expose the declared return type to `return` statements while the
+        # body is being inferred, so optional payloads in non-optional
+        # return positions are rejected at their return site.
         val has_return_type = fn_.return_type.kind != HirTypeKind.Infer(0, 0)
+        val saved_return_type = self.current_return_type
+        val saved_fn_name = self.current_fn_name
+        self.current_return_type = if has_return_type: Some(fn_.return_type) else: nil
+        self.current_fn_name = fn_.name
 
+        # Infer body with bidirectional checking
         if has_return_type:
             # Return type annotated - use Check mode to propagate into body
             match self.infer_block(fn_.body):
@@ -579,6 +670,9 @@ impl HmInferContext:
                 case Ok(_): pass
                 case Err(e):
                     self.error(e)
+
+        self.current_return_type = saved_return_type
+        self.current_fn_name = saved_fn_name
 
         self.exit_level()
 
@@ -597,6 +691,25 @@ impl HmInferContext:
         """Infer types for all functions in a module."""
         # Register symbol mutability from module symbol table for narrowing
         self._register_module_symbols(module)
+
+        # Forward-declare every function's signature first so a body may call
+        # a function declared later in the module (`undefined: <callee>`
+        # otherwise depends on dict iteration order).
+        for fn_ in module.functions.values():
+            val symbol = module.symbols.get_symbol(fn_.symbol)
+            if symbol.?:
+                var param_types: [HirType] = []
+                for p in fn_.params:
+                    param_types = param_types.push(p.type_)
+                val declared_ret = if fn_.return_type.kind != HirTypeKind.Infer(0, 0):
+                    fn_.return_type
+                else:
+                    self.fresh_var(fn_.span)
+                val sig_ty = HirType(
+                    kind: HirTypeKind.Function(param_types, declared_ret, fn_.effects),
+                    span: fn_.span
+                )
+                self.bind_poly(fn_.name, self.generalize_all(sig_ty))
 
         for fn_ in module.functions.values():
             val symbol = module.symbols.get_symbol(fn_.symbol)

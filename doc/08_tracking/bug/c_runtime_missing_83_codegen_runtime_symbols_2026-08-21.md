@@ -1,4 +1,9 @@
 # 84 codegen-emitted runtime symbols with no definition anywhere (2026-08-21)
+## Closed 2026-09-16 — Status FIXED; guard PASS 0 unresolved; re-verified 2026-08-26
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED for the guard's scope (2026-08-21, second pass). Link policy
 fail-closed; all 84 now implemented or NAMED-trapped in the C runtime; the
@@ -311,3 +316,4 @@ was told not to run — so a genuinely new regression introduced very recently
 and not yet exercised by any build could still be missed. If a future run
 finds a real unresolved count again, extend this record rather than filing
 a new one.
+

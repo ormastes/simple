@@ -1,4 +1,8 @@
 # H1 (streaming source reclaim) experiment — IN FLIGHT (earlier 'died' reading RETRACTED)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-03  **Status:** running
 
@@ -81,3 +85,4 @@ raise site needs) or more RAM headroom. Until then the pre-registered alternativ
 hypothesis, on the independent evidence that `current_module_id` has exactly one
 writer (`module_lowering.spl:1151`, inside `lower_module`), so an empty value
 proves `lower_module` never ran on that instance.
+

@@ -1,4 +1,8 @@
 # HIR comprehension-clause children are omitted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Fixed in current compiler-performance branch; execution unverified
 **Area:** generated HIR traversal / typed performance facts  
@@ -28,3 +32,4 @@ and frame expansion. A focused typed-PerfFacts fixture pins `For` iterable and
 `If` condition discovery and order. Comprehension analysis remains explicitly
 incomplete because cardinality/execution-domain modeling is still pending; the
 repair does not authorize transforms.
+

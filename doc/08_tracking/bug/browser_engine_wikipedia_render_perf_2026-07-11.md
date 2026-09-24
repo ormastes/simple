@@ -1,4 +1,8 @@
 # browser_engine: real-page software render is ~176s interpreted (248KB page); default 10s budget always degrades
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open (degraded-output honesty fixed; perf itself remains)
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
@@ -59,3 +63,4 @@ When compute_styles exceeds the budget slice, the render correctly reports `degr
 The staged-budget change (style ≤70% of total budget) reduced the quota test's effective style budget from 60s to 42s, widening the flake window under load. Not a correctness bug—the test's "generous budget" assumption (60s >> work) no longer holds on a loaded interpreter.
 
 Follow-ups to consider (do not implement): (a) raise the quota test's budget or lower its junk-rule count so intent (rule quota, not wall clock) is tested with margin; (b) reduce per-rule preprocessing cost (memoize specificity parsing); (c) count rule preprocessing against its own guarded sub-slice so a preprocessing overrun degrades earlier and cheaper.
+

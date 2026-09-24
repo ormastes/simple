@@ -1,0 +1,93 @@
+use os.smf.kernel_plugin.shared_memory_wire.*
+use os.smf.kernel_plugin.worker_protocol.*
+
+pub class KpfSharedMemoryRingV1:
+    payload_storage: [u8]
+    descriptors: [KpfSharedMemoryDescriptorV1]
+    occupied: [bool]
+    slot_capacity: i64
+    slot_payload_bytes: i64
+    head: i64
+    count: i64
+    binding_valid: bool
+
+impl KpfSharedMemoryRingV1:
+    pub static fn bind(payload_storage: [u8],
+            descriptors: [KpfSharedMemoryDescriptorV1], occupied: [bool],
+            slot_payload_bytes: i64) -> KpfSharedMemoryRingV1:
+        val capacity = descriptors.len
+        val valid = (capacity > 0 and occupied.len == capacity and
+            slot_payload_bytes >= 0 and
+            payload_storage.len == capacity * slot_payload_bytes)
+        KpfSharedMemoryRingV1(payload_storage: payload_storage,
+            descriptors: descriptors, occupied: occupied,
+            slot_capacity: capacity, slot_payload_bytes: slot_payload_bytes,
+            head: 0, count: 0, binding_valid: valid)
+
+    pub fn is_empty() -> bool: self.count == 0
+
+    pub fn is_full() -> bool: self.count >= self.slot_capacity
+
+    me enqueue(frame: KpfWorkerFrameV1) -> KpfWorkerOutcome:
+        if not self.binding_valid: return KpfWorkerOutcome.MalformedFrame
+        val valid = kpf_worker_validate_frame_v1(frame, self.slot_payload_bytes)
+        if valid != KpfWorkerOutcome.Accepted: return valid
+        if self.is_full(): return KpfWorkerOutcome.WouldBlock
+        val slot = (self.head + self.count) % self.slot_capacity
+        if self.occupied[slot]: return KpfWorkerOutcome.MalformedFrame
+        val offset = slot * self.slot_payload_bytes
+        var index = 0
+        while index < frame.payload_length:
+            self.payload_storage[offset + index] = frame.payload[index]
+            index = index + 1
+        self.descriptors[slot] = KpfSharedMemoryDescriptorV1(
+            wire_version: KPF_SHARED_MEMORY_WIRE_V1,
+            protocol_version: frame.protocol_version, kind: frame.kind,
+            generation: frame.generation, session_epoch: frame.session_epoch,
+            request_slot: frame.request_slot, request_epoch: frame.request_epoch,
+            capability_bits: frame.capability_bits, payload_offset: offset,
+            payload_length: frame.payload_length)
+        self.occupied[slot] = true
+        self.count = self.count + 1
+        KpfWorkerOutcome.Accepted
+
+    me dequeue_into(output: [u8]) -> KpfSharedMemoryReadV1:
+        val empty = kpf_worker_empty_frame_v1()
+        if not self.binding_valid:
+            return KpfSharedMemoryReadV1(outcome: KpfWorkerOutcome.MalformedFrame,
+                frame: empty)
+        if self.is_empty():
+            return KpfSharedMemoryReadV1(outcome: KpfWorkerOutcome.Empty, frame: empty)
+        val slot = self.head
+        if not self.occupied[slot]:
+            return KpfSharedMemoryReadV1(outcome: KpfWorkerOutcome.MalformedFrame,
+                frame: empty)
+        val descriptor = self.descriptors[slot]
+        val expected_offset = slot * self.slot_payload_bytes
+        val valid = kpf_shared_memory_validate_descriptor_v1(descriptor,
+            self.payload_storage.len, expected_offset, self.slot_payload_bytes)
+        if valid != KpfWorkerOutcome.Accepted:
+            return KpfSharedMemoryReadV1(outcome: valid, frame: empty)
+        if output.len < descriptor.payload_length:
+            return KpfSharedMemoryReadV1(outcome: KpfWorkerOutcome.FrameTooLarge,
+                frame: empty)
+        var index = 0
+        while index < descriptor.payload_length:
+            output[index] = self.payload_storage[descriptor.payload_offset + index]
+            index = index + 1
+        val frame = KpfWorkerFrameV1(protocol_version: descriptor.protocol_version,
+            kind: descriptor.kind, generation: descriptor.generation,
+            session_epoch: descriptor.session_epoch,
+            request_slot: descriptor.request_slot, request_epoch: descriptor.request_epoch,
+            capability_bits: descriptor.capability_bits,
+            payload_length: descriptor.payload_length, payload: output)
+        self.occupied[slot] = false
+        self.descriptors[slot] = kpf_shared_memory_empty_descriptor_v1()
+        self.head = (self.head + 1) % self.slot_capacity
+        self.count = self.count - 1
+        KpfSharedMemoryReadV1(outcome: KpfWorkerOutcome.Accepted, frame: frame)
+
+    me corrupt_next_offset_for_test(offset: i64) -> bool:
+        if self.is_empty(): return false
+        self.descriptors[self.head].payload_offset = offset
+        true

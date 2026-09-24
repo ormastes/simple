@@ -1,4 +1,9 @@
 # Stage 2 worker stack overflow compiling advice_form.spl
+## Closed 2026-09-16 — ...r an unregistered global struct resolved **all field types first and registered the struct
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed and cleared by the next canonical cycle; successor blocker
 tracked separately.
@@ -132,3 +137,4 @@ Observed Stage-2 outcome: the `compile-advice_form.spl` worker and every other
 entry-closure worker survived the global-enum pre-pass. The canonical run's
 distinct first failure was the final-link `rt_file_sync` provider gap recorded
 in `stage2_bootstrap_rt_file_sync_provider_missing_2026-08-15.md`.
+

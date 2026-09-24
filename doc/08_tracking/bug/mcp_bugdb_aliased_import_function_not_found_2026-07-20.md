@@ -1,4 +1,8 @@
 # `mcp_bugdb_spec.spl`: aliased free-function import unresolved (`file_exists as file_exists_backend`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/lib/nogc_async_mut/mcp/bugdb_resource.spl` (and sibling
@@ -55,3 +59,4 @@ whoever investigates either.
 Spec left unmodified — `file_exists_backend` is correctly declared and used
 per current import-aliasing syntax; this is an evaluator/resolver defect,
 not a stale test.
+

@@ -1,4 +1,8 @@
 # macos-gui-run.shs exits 141 after a successful launch; its winit-marker gate refuses dlopen-route binaries
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06 · **Status:** OPEN · **Found by:** slim-UI lane A07 (G1 presentation), read-only scope — not patched
 
@@ -32,3 +36,4 @@ the marker grep with a positive probe (run the candidate with a `--probe-winit` 
 attempts the dlopen). Add a spec that launches through the script and asserts exit 0
 plus a PID receipt when a window was created. Evidence of the working run:
 `doc/07_guide/ui/ui_slim_gui_presentation.md`.
+

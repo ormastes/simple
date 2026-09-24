@@ -1,4 +1,8 @@
 # RV32 scheduler user-entry adoption blocker — 2026-08-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The first isolated Sv32 mapper draft was rejected and removed. Static review
 found that a copyable owner could be forged or double-destroyed, an Armed
@@ -27,3 +31,4 @@ It must admit RV32 and select the already-available four-byte serializer.
 
 No tests, builds, SPipe, benchmarks, optimizer, bootstrap, or runtime
 verification were run for this change, per user instruction.
+

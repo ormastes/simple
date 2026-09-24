@@ -250,11 +250,15 @@ mod tests {
             "cross target library paths should not retain host x86_64 directories: {:?}",
             options.library_paths
         );
+        let aarch64_dirs_present = ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib"]
+            .iter()
+            .any(|dir| std::path::Path::new(dir).exists());
         assert!(
-            options
-                .library_paths
-                .iter()
-                .any(|path| path.to_string_lossy().contains("aarch64-linux-gnu")),
+            !aarch64_dirs_present
+                || options
+                    .library_paths
+                    .iter()
+                    .any(|path| path.to_string_lossy().contains("aarch64-linux-gnu")),
             "cross target library paths should include aarch64 search dirs when present: {:?}",
             options.library_paths
         );
@@ -272,7 +276,7 @@ mod tests {
     fn test_for_native_executable_defaults_to_available_backend_and_arch_cpu_policy() {
         let options = NativeBinaryOptions::for_native_executable();
         assert_eq!(options.backend, Some(crate::default_native_codegen_backend()));
-        assert_eq!(options.cpu, TargetCpu::builtin_default_for_arch(options.target.arch));
+        assert_eq!(options.cpu, TargetCpu::host_aware_default_for(options.target));
     }
 
     #[test]

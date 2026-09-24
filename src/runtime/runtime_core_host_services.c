@@ -36,6 +36,10 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#if defined(__FreeBSD__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
 #endif
 
 static char* core_host_strdup(const char* value) {
@@ -514,6 +518,17 @@ int64_t rt_cpu_count(void) {
     SYSTEM_INFO info;
     GetSystemInfo(&info);
     return info.dwNumberOfProcessors > 0 ? (int64_t)info.dwNumberOfProcessors : -1;
+#elif defined(__FreeBSD__)
+    /* FreeBSD hides the non-POSIX _SC_NPROCESSORS_ONLN the same way macOS
+     * does (see the _DARWIN_C_SOURCE note at the top of this file); the
+     * native sysctl is the documented FreeBSD path. */
+    int cpus = 0;
+    size_t cpus_len = sizeof(cpus);
+    if (sysctlbyname("kern.smp.cpus", &cpus, &cpus_len, NULL, 0) == 0 &&
+        cpus > 0) {
+        return (int64_t)cpus;
+    }
+    return -1;
 #else
     long count = sysconf(_SC_NPROCESSORS_ONLN);
     return count > 0 ? (int64_t)count : -1;

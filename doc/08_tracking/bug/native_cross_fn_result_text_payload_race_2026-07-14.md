@@ -1,4 +1,8 @@
 # native-build: cross-function `Result` text-payload match is non-deterministic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity:** high (non-deterministic silent-wrong)
 **Found:** 2026-07-14, errhandling lane
@@ -46,3 +50,4 @@ module (`boomboom41`) in the 40-case gate.
 ## Reproduce
 
 `/tmp/wt_errhandling/` probes; run the same `--entry` build 3× with `--clean`.
+

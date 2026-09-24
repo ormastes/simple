@@ -9,7 +9,7 @@ Date: 2026-09-08
 - PASS — Numbered-artifact guards passed for working and staged paths: 674
   working paths classified, zero violations; zero staged violations.
 - PASS — Staged direct-env/runtime guard passed.
-- PASS — Two synthetic project fixtures have independent expected-content and
+- PASS — Three synthetic project fixtures have independent expected-content and
   SHA-256 records under `test/fixture/image_to_markdown/`.
 - PASS — Astra's final scoped source/design review accepted receipt redaction,
   pre-dispatch request counting, validation-failure classification, retained
@@ -17,10 +17,9 @@ Date: 2026-09-08
 - PASS — Static coverage now includes typed timeout/truncation propagation and
   corrupted-cache rejection. Obsolete standalone inventory/extract/audit prompt
   helpers were removed so the test surface matches the single-request protocol.
-- FAIL — The working-tree direct-env/runtime guard reports violations in
-  `src/app/io/debug_stubs.spl` and `src/app/io/file_shell.spl`. Those files are
-  pre-existing concurrent work outside this feature lane and were not folded
-  into this change.
+- PASS — In the clean PR integration worktree rebased onto
+  `origin/main@ff2431632dc4cbefa5484727bcb6518d38fc1abc`, both
+  `direct-env-runtime-guard.shs --working` and `--staged` report `STATUS: PASS`.
 - FAIL — No authoritative Simple compile/test result exists. A fresh three-cycle
   audit fixed backend diagnostic collection and two staged module-surface
   dictionary-boundary failures. The final `v6` candidate completed surface
@@ -87,5 +86,11 @@ Date: 2026-09-08
   `transport_ms` upper bound, while `inference_ms` remains zero. Exact transport
   and trusted provider-side inference timing remain an NFR-009 gap; the receipt
   no longer presents the aggregate as inference-only measurement.
+- WARN — The image profile now has a 384 MiB default
+  `max_working_set_bytes` admission budget (2 GiB ceiling). Admission rejects
+  before pixel decode or Base64/provider serialization when the conservative
+  source/view/serialization/RGBA estimate exceeds that budget. Static guards
+  pass; executable proof and an external model-process cgroup/service ceiling
+  remain pending with the admitted-runtime blocker.
 
-STATUS: FAIL (3 failures, 11 warnings)
+STATUS: FAIL (2 failures, 12 warnings)

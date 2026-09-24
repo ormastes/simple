@@ -52,7 +52,11 @@ thread_local! {
 }
 
 /// True when `s` contains no byte >= 0x80. Memoized per string allocation.
-fn shared_text_is_ascii(s: &Arc<String>) -> bool {
+///
+/// `pub(crate)` (not just module-private) so `interpreter::expr::collections`'s
+/// `indexed_string_char` (the `s[i]` path) can share this memo instead of
+/// re-running its own `s.is_ascii()` scan per call -- see that file.
+pub(crate) fn shared_text_is_ascii(s: &Arc<String>) -> bool {
     ASCII_MEMO.with(|cell| {
         let mut m = cell.borrow_mut();
         let (slots, next) = &mut *m;
@@ -170,8 +174,8 @@ fn try_bare_some_option_method(
 // Re-export the with-self-update functions
 pub(crate) use special::{
     evaluate_call_args, exec_function_with_self_return, find_and_exec_method_with_self,
-    find_and_exec_method_with_self_owned, find_and_exec_method_with_self_owned_values, lookup_class_method_index,
-    lookup_impl_method_index, object_method_exists,
+    find_and_exec_method_with_self_owned, exec_resolved_method_with_self_owned_values, lookup_class_method_index,
+    lookup_impl_method_index, resolve_object_method, ResolvedMethod,
 };
 
 fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool, receiver_is_enum: bool) -> bool {

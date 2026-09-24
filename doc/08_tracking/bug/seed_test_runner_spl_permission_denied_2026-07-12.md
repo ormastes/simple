@@ -1,4 +1,9 @@
 # Seed Test Runner Executes Simple Source as a Host Program
+## Closed 2026-09-16 — Fixed 2026-07-12; all selectors reject .spl argv[0]; regression spec noted
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -28,3 +33,4 @@ The daemon-client path fails identically with `test_runner_client.spl`.
 `test_daemon/light_daemon.spl` require a non-`.spl` existing `argv[0]` before
 using it as the compiler binary. The source-contract regression is
 `test/01_unit/app/test_runner_binary_source_guard_spec.spl`.
+

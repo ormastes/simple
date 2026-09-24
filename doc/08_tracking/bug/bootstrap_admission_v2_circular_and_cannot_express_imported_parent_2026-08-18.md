@@ -1,3 +1,15 @@
+> **RESOLVED 2026-09-13 (macOS lane F74 r2).** The claim "nothing in the repo
+> ever WRITES the two receipts the gate reads" is no longer true and has not
+> been for some time: `bootstrap_stage3_write_stage2_admission_receipt`
+> (`scripts/check/lib/bootstrap-stage3/sanity.shs:571`) writes the Stage-2
+> admission receipt and `scripts/bootstrap/publish-stage2-parent-receipts.shs`
+> writes the sanity + provenance pair, both wired into the trust-root Stage-2
+> lane. The remaining gap — nothing invoked
+> `produce-bootstrap-planner-admission-v2.shs`, so the chain had no entry point
+> — is closed by `--produce-stage3-receipt=<typed-reason>`, pinned by
+> `scripts/check/check-bootstrap-stage3-receipt-autowire.shs`. See
+> `doc/08_tracking/bug/stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md`.
+
 # bootstrap planner-admission-v2 is circular, and its receipt cannot express an imported parent
 
 - **Date:** 2026-08-18
@@ -66,3 +78,16 @@ the gate look unsatisfiable when it is not.
 - Extend the v2 receipt schema with `parent_origin_root`,
   `parent_origin_git_head`, and `parent_is_imported`, and have consumers treat
   an imported parent as a weaker authority rather than an indistinguishable one.
+
+## Still OPEN, and now reproduced from a SUCCESSFUL Stage 2 (macOS run 35, 2026-09-13)
+
+This record states the cycle for a tree with no `build/bootstrap/stage2/`. macOS
+run 35 (tip `60c78b96789`) reached an **admitted, byte-stable Stage 2**
+(sha256 `aed71b28…`, `stage2-sanity.env status=pass checks_run=5`) and the gate
+still has no entry point: what is missing is the admission/provenance receipt
+pair that, as section 2 above says, nothing in the repo ever writes — not the
+compiler. Three routes refused with the identical
+`bootstrap-policy-error: reason-receipt-required` (rc=64), including
+`bootstrap-strategy.sh`, which is a supervisor and `exec`s the engine unchanged
+when given no `--bootstrap-receipt=`. Evidence and the route table:
+`stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md`.

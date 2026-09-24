@@ -73,7 +73,7 @@ fn dot_f32(left: NDArray, right: NDArray) -> Result<Float32, LinalgError>:
     var total: f32 = 0.0
     var i = 0
     while i < left.len().value:
-        total = total + left.flat_f32(i).value * right.flat_f32(i).value
+        total = total + left.flat_f32(Index.new(i)).value * right.flat_f32(Index.new(i)).value
         i = i + 1
     Ok(Float32.new(total))
 
@@ -132,7 +132,7 @@ fn try_axpy_f32(alpha: Float32, x: NDArray, y: NDArray) -> Result<NDArray, Linal
     var out: [Float32] = []
     var i = 0
     while i < x.len().value:
-        out.push(Float32.new(alpha.value * x.flat_f32(i).value + y.flat_f32(i).value))
+        out.push(Float32.new(alpha.value * x.flat_f32(Index.new(i)).value + y.flat_f32(Index.new(i)).value))
         i = i + 1
     Ok(make_f32_array(out, x.shape))
 
@@ -581,6 +581,12 @@ fn geqrf(a: NDArray) -> Result<QrFactorization, LinalgError>:
 # Only the symmetric case is supported; a non-symmetric input is rejected
 # rather than silently symmetrised.
 fn syevd(a: NDArray) -> Result<SymmetricEigen, LinalgError>:
+    syevd_with_sweep_limit(a, Index.new(100))
+
+# Explicit bounded variant used by callers that need deterministic convergence
+# policy and by the error-path contract. The bound is wrapped so Layer C does
+# not expose a primitive control parameter.
+fn syevd_with_sweep_limit(a: NDArray, max_sweeps: Index) -> Result<SymmetricEigen, LinalgError>:
     if a.dtype != DType.F64 or a.shape.dims.len() != 2:
         return Err(LinalgError.DimensionMismatch)
     if a.rows() != a.cols():
@@ -609,7 +615,7 @@ fn syevd(a: NDArray) -> Result<SymmetricEigen, LinalgError>:
         d = d + 1
     var sweep = 0
     var converged = false
-    while sweep < 100:
+    while sweep < max_sweeps.value:
         var off = 0.0
         var p = 0
         while p < n:
@@ -620,7 +626,7 @@ fn syevd(a: NDArray) -> Result<SymmetricEigen, LinalgError>:
             p = p + 1
         if off < 0.000000000000000000000001:
             converged = true
-            sweep = 100
+            sweep = max_sweeps.value
         else:
             p = 0
             while p < n:

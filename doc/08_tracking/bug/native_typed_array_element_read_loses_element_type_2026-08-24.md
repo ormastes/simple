@@ -1,4 +1,8 @@
 # `a[i]` on a typed array loses the element type on the native lane (2026-08-24)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24
 **Status:** OPEN — reproduced, localized to named lowering sites, NOT fixed
@@ -206,3 +210,4 @@ Worth noting for whoever picks this up: `i64: MATCH` held throughout, so the
 conditional refinement did **not** reproduce the int-array corruption that
 sank the earlier unconditional attempt documented in `expr_dispatch.spl`. The
 condition is sound; it is just incomplete on its own.
+

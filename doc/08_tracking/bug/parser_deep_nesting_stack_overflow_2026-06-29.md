@@ -1,6 +1,12 @@
 # Parser: deeply nested expressions overflow native stack (core dump)
 
-**Status:** FIXED (pure-Simple parser); seed deploy-gated
+## Closed 2026-09-13 — pure-Simple parser fix stands; the crashing `check` path is unavailable to re-measure
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host. `bin/simple run` on a 300-deep parenthesised expression completes cleanly (`d=1`, exit 0) — no stack overflow.
+- **inferred** The reported core dump was on `bin/simple check`, which on this host exits early with `ERROR: no admitted cached self-hosted check worker artifact is available`, so the exact failing invocation cannot be replayed here.
+- **inferred** The entry already records the fix as landed in the pure-Simple parser, gated only on seed deployment.
+
+**Status:** Closed (fixed) 2026-09-13 — pure-Simple parser; seed `check` path unavailable to re-measure
 **Found:** 2026-06-29 via toolchain noise/robustness sweep
 **Area:** compiler / frontend / parser
 

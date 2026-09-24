@@ -1,4 +1,8 @@
 # Seed HIR lowering: the builtin-`Option` exception is keyed on a NAME, so a user-declared `enum Option` is misrouted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-08-16, structural review of `8d96687c991` on `origin/main`
@@ -246,3 +250,4 @@ Repair the native-build worker's `undefined field 'kind'` failure, then run
 `test/fixtures/user_option_enum_match/main.spl` through `native-build` with and
 without the lowering change. The dual-toolchain SSpec already encodes exactly that
 comparison and will name whichever toolchain disagrees.
+

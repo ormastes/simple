@@ -174,3 +174,10 @@ another lane in the current parallel session, so this lane contributes
 `native-build` run, and the one native-build lane this session attempted
 (`check-native-crossmodule-result-u8.shs`, see that doc) was still executing
 when this batch closed under a host load average of 81-133.
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

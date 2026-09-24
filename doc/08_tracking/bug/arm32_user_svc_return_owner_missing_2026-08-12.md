@@ -1,4 +1,8 @@
 # ARM32 user SVC-return owner is missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The nonce-bound ARM32 ELF and exact mounted-byte admission are ready, but the
 current architecture layer cannot execute them honestly in PL0/User mode.
@@ -72,3 +76,4 @@ The v1.6 C owner resolves that entropy gap with bounded device-ID-4
 virtio-mmio discovery, exact short-fill accumulation to 16 bytes, explicit
 provenance, all-zero rejection, and unconditional boot-key wipe. The canonical
 ARM32 QEMU descriptor now supplies the RNG backend and device.
+

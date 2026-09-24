@@ -4,12 +4,53 @@
 # before the strategy/session wrappers: progress-watch observes another process
 # and must not acquire bootstrap ownership or create its own process group.
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
+. "${bootstrap_entry_dir}/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
 case "${1:-}" in
   progress-watch)
     shift
     exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
     ;;
 esac
+
+# -- argv-normalize begin
+# Options with a REQUIRED value accept `--opt=value` and `--opt value`
+# (GNU getopt_long convention). Rewrite the space form to the `=` form once,
+# here, so every later scanner -- the strategy pre-scan below,
+# bootstrap-strategy.sh, and the option loop -- sees a single spelling.
+# Options with an OPTIONAL value (--progress[=PATH], --diagnostics[=MODE]) take
+# it only after `=`; the next word is never consumed. A required value that is
+# missing, or that looks like another option, is a hard error.
+bootstrap_argc=$#
+while [ "${bootstrap_argc}" -gt 0 ]; do
+  bootstrap_arg=$1
+  shift
+  bootstrap_argc=$((bootstrap_argc - 1))
+  case "${bootstrap_arg}" in
+    --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
+    --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
+    --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
+    --progress-interval)
+      bootstrap_value_missing=1
+      if [ "${bootstrap_argc}" -gt 0 ]; then
+        case "$1" in -*) ;; *) bootstrap_value_missing=0 ;; esac
+      fi
+      if [ "${bootstrap_value_missing}" -eq 1 ]; then
+        echo "error: ${bootstrap_arg} requires a value: use ${bootstrap_arg}=<value> or ${bootstrap_arg} <value>" >&2
+        echo "Run '$0 --help' for usage." >&2
+        exit 2
+      fi
+      set -- "$@" "${bootstrap_arg}=$1"
+      shift
+      bootstrap_argc=$((bootstrap_argc - 1))
+      ;;
+    *)
+      set -- "$@" "${bootstrap_arg}"
+      ;;
+  esac
+done
+# -- argv-normalize end
 
 # The coordinated strategy supervisor is the default entry for an ordinary
 # multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
@@ -18,20 +59,14 @@ esac
 if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
   bootstrap_strategy_entry=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
   bootstrap_strategy_arg=${SIMPLE_BOOTSTRAP_STRATEGY:-normal}
-  bootstrap_strategy_output=build/bootstrap
+  bootstrap_strategy_output=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
   bootstrap_strategy_bypass=0
-  bootstrap_strategy_expect_value=0
   for bootstrap_strategy_option in "$@"; do
-    if [ "${bootstrap_strategy_expect_value}" -eq 1 ]; then
-      bootstrap_strategy_arg=${bootstrap_strategy_option}
-      bootstrap_strategy_expect_value=0
-      continue
-    fi
     case "${bootstrap_strategy_option}" in
       --strategy=*) bootstrap_strategy_arg=${bootstrap_strategy_option#*=} ;;
-      --strategy) bootstrap_strategy_expect_value=1 ;;
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
       --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
+      --produce-stage3-receipt=*|\
       --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|--diagnostic-sweep)
         bootstrap_strategy_bypass=1
         ;;
@@ -77,13 +112,67 @@ else
     /bin/sh "$0" "$@"
 fi
 set -eu
-bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
+. "${bootstrap_entry_dir}/lib/host-shared-cache.shs"
+simple_host_cache_configure
 . "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+kernel_policy_manifest="${bootstrap_early_repo_root}/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
+kernel_policy_value() {
+  kernel_policy_key=$1
+  awk -v key="${kernel_policy_key}" '
+    $1 == key ":" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "${kernel_policy_manifest}"
+}
+[ -f "${kernel_policy_manifest}" ] || {
+  echo "error: canonical kernel policy authority is missing" >&2
+  exit 1
+}
+selected_k1_policy=$(kernel_policy_value k1_policy) || exit 1
+selected_abi_policy=$(kernel_policy_value simple_abi_policy) || exit 1
+selected_manifest_policy=$(kernel_policy_value plugin_manifest_policy) || exit 1
+selected_coverage_policy=$(kernel_policy_value coverage_cutover_policy) || exit 1
+selected_coverage_implementation=$(kernel_policy_value coverage_implementation) || exit 1
+selected_performance_mode=$(kernel_policy_value performance_threshold_mode) || exit 1
+selected_performance_status=$(kernel_policy_value performance_threshold_status) || exit 1
+selected_performance_baseline_scope=$(kernel_policy_value performance_baseline_scope) || exit 1
+selected_performance_steady_percent=$(kernel_policy_value performance_steady_rss_percent) || exit 1
+selected_performance_growth_percent=$(kernel_policy_value performance_growth_percent) || exit 1
+selected_performance_warm_requests=$(kernel_policy_value performance_warm_request_count) || exit 1
+[ "${selected_k1_policy}" = llvm-cranelift ] &&
+  [ "${selected_abi_policy}" = v1 ] &&
+  [ "${selected_manifest_policy}" = simple-sdn ] &&
+  [ "${selected_coverage_policy}" = atomic-apk-only ] &&
+  [ "${selected_coverage_implementation}" = apk-only ] &&
+  [ "${selected_performance_mode}" = baseline-relative-10-percent ] &&
+  [ "${selected_performance_status}" = selected ] &&
+  [ "${selected_performance_baseline_scope}" = admitted-per-architecture-receipt ] &&
+  [ "${selected_performance_steady_percent}" = 110 ] &&
+  [ "${selected_performance_growth_percent}" = 10 ] &&
+  [ "${selected_performance_warm_requests}" = 20 ] || {
+    echo "error: canonical kernel policy authority drifted" >&2
+    exit 1
+  }
+for kernel_policy_binding in \
+    "SIMPLE_KERNEL_K1_POLICY:${selected_k1_policy}" \
+    "SIMPLE_ABI_POLICY:${selected_abi_policy}" \
+    "SIMPLE_PLUGIN_MANIFEST_POLICY:${selected_manifest_policy}" \
+    "SIMPLE_COVERAGE_CUTOVER_STATE:${selected_coverage_policy}"; do
+  kernel_policy_name=${kernel_policy_binding%%:*}
+  kernel_policy_expected=${kernel_policy_binding#*:}
+  eval "kernel_policy_actual=\${${kernel_policy_name}:-}"
+  if [ -n "${kernel_policy_actual}" ] &&
+     [ "${kernel_policy_actual}" != "${kernel_policy_expected}" ]; then
+    echo "error: ${kernel_policy_name}='${kernel_policy_actual}' drifts from canonical '${kernel_policy_expected}'" >&2
+    exit 1
+  fi
+  eval "${kernel_policy_name}=\${kernel_policy_expected}"
+  export "${kernel_policy_name}"
+done
 
 # Bootstrap wrapper for Linux, macOS, Windows/MSYS2, and FreeBSD.
 #
 # Output layout uses <arch>-<vendor>-<os>-<abi> target triple:
-#   build/bootstrap/stage{1,2,3}/<triple>/simple
+#   <SIMPLE_WORKTREE_STORAGE_ROOT>/build/bootstrap/stage{1,2,3}/<triple>/simple
 #
 # Triple examples:
 #   Linux:   x86_64-unknown-linux-gnu
@@ -109,13 +198,28 @@ Subcommands:
                      Standalone bootstrap progress/liveness watcher
 
 Options:
-  --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm; cranelift also supported)
-  --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
+  An option shown as --opt=<value> also accepts --opt <value>. An optional
+  value, shown as --opt[=<value>], must be attached with '='. An unknown or
+  malformed argument is an error (exit 2).
+  --backend=<name>   Backend for stage2/stage3/stage4 (selected default: llvm;
+                     explicit cranelift remains supported).
+  --output=<dir>     Explicit legacy-compatible output override. The default is
+                     <SIMPLE_WORKTREE_STORAGE_ROOT>/build/bootstrap.
   --bootstrap-receipt=<path>
                      Canonical non-None typed-reason receipt emitted by
                      `simple build bootstrap`; required before any stage starts
   --validate-bootstrap-receipt
                      Validate authorization and exit without starting a stage
+  --produce-stage3-receipt=<typed-reason>
+                     Only with `--full-bootstrap --stop-after-stage2`. After the
+                     Stage 2 admission is published, run the canonical producer
+                     (scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs)
+                     against the just-admitted parent and write
+                     <output>/stage3-planner-admission.receipt, then print the
+                     exact `--resume-stage3-from-admitted` command. The reason is
+                     yours to type; it is validated by the producer's allow-list
+                     and never defaulted. Fail-closed: a producer failure fails
+                     the run and no receipt is written.
   --stop-after-stage3
                      Stop after producing and independently verifying the
                      provenance-bound Stage 3 compiler. Requires a planner
@@ -124,6 +228,13 @@ Options:
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
+                     Stage 2 additionally EXERCISES the admitted Stage 2
+                     compiler with the phase verification matrix: it builds a
+                     phase-bound full CLI and standalone test runner from that
+                     compiler and runs the compiler-bootstrap, interpreter and
+                     loader suites through them. A failing suite, an incomplete
+                     verification summary, or a missing admitted artifact stops
+                     the bootstrap.
   --strategy=<name>  Bootstrap scheduling strategy: adhoc, normal, or full
                      (default: normal; env: SIMPLE_BOOTSTRAP_STRATEGY).
                      normal reuses incremental caches and schedules isolated
@@ -131,8 +242,9 @@ Options:
                      and test to a terminal summary even after task crashes.
   --stop-after-stage2
                      With --full-bootstrap, build and admit the measured
-                     Stage-2 trust root, then stop before Stage 3. This is the
-                     sole receipt-free bootstrap lane.
+                     Stage-2 trust root, run the Stage 2 compiler tests
+                     described under --full-bootstrap, then stop before
+                     Stage 3. This is the sole receipt-free bootstrap lane.
   --resume-stage3-from-admitted=<output>
                      Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
                      using a new one-thread recovery transcript/evidence lane.
@@ -172,7 +284,7 @@ Options:
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
   --jobs=<n|full|half|min|auto>
-                     Native build workers (default: half CPUs locally, 2 on GitHub Actions)
+                     Native build workers (default: all detected available CPUs)
   --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
@@ -186,8 +298,9 @@ Options:
 EOF
 }
 
-backend="llvm"
-output_dir="build/bootstrap"
+# -- argv-parse begin
+backend=""
+output_dir="${SIMPLE_BOOTSTRAP_BUILD_ROOT}"
 deploy=0
 build_mcp=1
 target=""
@@ -219,6 +332,10 @@ bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
+# Typed reason used to auto-produce the Stage-3 planner receipt at the end of a
+# trust-root Stage-2 lane. Empty means 'do not produce' -- the reason is NEVER
+# invented here; the operator types it, exactly as the planner policy requires.
+produce_stage3_receipt_reason=''
 stop_after_stage3=0
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -239,6 +356,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --validate-bootstrap-receipt)
       validate_bootstrap_receipt=1
+      ;;
+    --produce-stage3-receipt=*)
+      produce_stage3_receipt_reason=${1#*=}
       ;;
     --stop-after-stage3)
       stop_after_stage3=1
@@ -261,15 +381,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --strategy=*)
       bootstrap_strategy=${1#*=}
-      ;;
-    --strategy)
-      shift
-      if [ "$#" -eq 0 ]; then
-        echo "error: --strategy requires adhoc, normal, or full" >&2
-        usage >&2
-        exit 1
-      fi
-      bootstrap_strategy=$1
       ;;
     --resume-stage3-from-admitted=*)
       resume_stage3_output=${1#*=}
@@ -328,15 +439,6 @@ while [ "$#" -gt 0 ]; do
         bootstrap_mode=dynload
       fi
       ;;
-    --mode)
-      shift
-      if [ "$#" -eq 0 ]; then
-        echo "error: --mode requires dynload or one-binary" >&2
-        usage >&2
-        exit 1
-      fi
-      bootstrap_mode=$1
-      ;;
     --verbose)
       verbose=1
       ;;
@@ -360,13 +462,16 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
-      echo "error: unknown option '$1'" >&2
-      usage >&2
-      exit 1
+      # Never dump usage here: 100+ lines of help buried the one error line,
+      # so a mistyped launch looked exactly like --help.
+      echo "error: unknown argument: $1" >&2
+      echo "Run '$0 --help' for usage." >&2
+      exit 2
       ;;
   esac
   shift
 done
+# -- argv-parse end
 
 if [ "${stop_after_stage2}" -eq 1 ]; then
   [ "${stop_after_stage3}" -eq 0 ] &&
@@ -406,7 +511,21 @@ esac
 # This is the common staged-bootstrap boundary, including Windows forwarding
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
 # Stage 1 without the canonical receipt produced by the pure-Simple planner.
+# Checked BEFORE the trust-root chain below, on the raw flags that select that
+# lane, so the refusal is what the caller sees rather than the generic
+# reason-receipt diagnostic. Fail closed rather than silently ignore: a receipt
+# the caller believes was produced, but was not, is exactly the failure mode
+# this gate exists to stop. Pinned by
+# scripts/check/check-bootstrap-stage3-receipt-autowire.shs.
+if [ -n "${produce_stage3_receipt_reason}" ] &&
+   { [ "${stop_after_stage2}" -ne 1 ] || [ "${full_bootstrap}" -ne 1 ] ||
+     { [ -n "${bootstrap_receipt_path}" ] && [ -f "${bootstrap_receipt_path}" ]; }; }; then
+  echo "bootstrap-policy-error: produce-stage3-receipt-requires-stage2-trust-root-lane" >&2
+  exit 64
+fi
 bootstrap_stage2_trust_root=0
+bootstrap_stage2_parent_override=
+bootstrap_stage2_parent_authority=
 if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
    { [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; }; then
   # The first independently admitted pure-Simple parent cannot itself require
@@ -414,6 +533,24 @@ if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
   # than every ordinary/resume/deploy path: explicit Rust rebuild, native
   # Stage-2-only stop, dynload mode, and the full Stage 2 admission gates below.
   bootstrap_stage2_trust_root=1
+  bootstrap_stage2_parent_authority=explicit-full-bootstrap-stage2-trust-root
+  bootstrap_reason=stage2-trust-root-refresh
+elif [ "${stop_after_stage2}" -eq 1 ] &&
+   [ -n "${SIMPLE_BUILD_COMPILER:-}" ] &&
+   { [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; }; then
+  # A previously admitted pure-Simple release may refresh the first Stage2
+  # producer without re-entering the Rust seed lane. Admission is bound to the
+  # executable bytes, host target, and exact version by the immutable runtime
+  # provenance record; a path or version string alone is never authority.
+  . "${bootstrap_early_repo_root}/scripts/bootstrap/admit-stage2-parent.shs"
+  bootstrap_stage2_parent_admit \
+    "${SIMPLE_BUILD_COMPILER}" "${bootstrap_early_repo_root}" || {
+    echo "bootstrap-policy-error: stage2-parent-runtime-provenance-rejected" >&2
+    exit 64
+  }
+  bootstrap_stage2_trust_root=1
+  bootstrap_stage2_parent_override=${BOOTSTRAP_STAGE2_PARENT_PATH}
+  bootstrap_stage2_parent_authority=${BOOTSTRAP_STAGE2_PARENT_AUTHORITY}
   bootstrap_reason=stage2-trust-root-refresh
 elif [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; then
   # The named command must be one that PLANS a receipt, never one that starts a
@@ -434,6 +571,38 @@ if [ "${bootstrap_stage2_trust_root}" -eq 0 ]; then
     bootstrap_receipt_target='//bootstrap:stage2'
   elif [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
     bootstrap_receipt_target='//bootstrap:stage3'
+  fi
+  # Reader-side twin of the producer binding at the Stage-2 trust-root lane
+  # (PR #929, SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${...:-${output_dir}}).
+  # bootstrap_planner_v2_verify refuses a receipt whose output root is outside
+  # <repo>/build unless that variable names it -- and this call site never set
+  # it. A Stage 3 resume names its own output root right there on the command
+  # line, so a lane using a private storage root (.simple/storage/build/...)
+  # produced a receipt that its own next step refused as
+  # planner-admission-v2-unbound. Bind the verify to THIS run's own resume
+  # output root and nothing wider; an operator-supplied value always wins.
+  # Stage 4 is the exact twin of the Stage 3 case above and was left unbound by
+  # PR #955: bootstrap-strategy.sh:693 drives --resume-stage4-from-admitted
+  # through this SAME bootstrap_planner_v2_verify call, and
+  # resume-stage4-from-admitted.sh repeats the //bootstrap:stage4 verification,
+  # so a lane on a private storage root reached Stage 4 and was refused as
+  # planner-admission-v2-unbound for the identical reason. Bind it the same way,
+  # to THIS run's own resume output root and nothing wider.
+  bootstrap_resume_output_arg=${resume_stage3_output}
+  [ -n "${bootstrap_resume_output_arg}" ] ||
+    bootstrap_resume_output_arg=${resume_stage4_output}
+  if [ -n "${bootstrap_resume_output_arg}" ] &&
+     [ -z "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ]; then
+    bootstrap_resume_output_root=$(
+      CDPATH= cd -- "${bootstrap_resume_output_arg}" 2>/dev/null && pwd -P
+    ) || bootstrap_resume_output_root=
+    [ -n "${bootstrap_resume_output_root}" ] &&
+      [ "${bootstrap_resume_output_root}" != / ] || {
+      echo "bootstrap-policy-error: resume-output-root-unresolvable" >&2
+      exit 64
+    }
+    SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${bootstrap_resume_output_root}
+    export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
   fi
   bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
     echo "bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2" >&2
@@ -492,6 +661,16 @@ case "${progress_interval}" in
     ;;
 esac
 
+if [ -z "${backend}" ]; then
+  backend=llvm
+fi
+case "${SIMPLE_KERNEL_K1_POLICY:-unselected}:${backend}" in
+  llvm-cranelift:llvm|llvm-cranelift:llvm-lib|llvm-cranelift:cranelift) ;;
+  *)
+    echo "error: bootstrap backend '${backend}' is incompatible with SIMPLE_KERNEL_K1_POLICY='${SIMPLE_KERNEL_K1_POLICY}'" >&2
+    exit 1
+    ;;
+esac
 case "${backend}" in
   llvm|llvm-lib|cranelift) ;;
   *)
@@ -645,8 +824,11 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 PORTABLE_LOCK_ATOMIC_HELPER_PATH=\
 "${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
 export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "${repo_root}/scripts/check/lib/bootstrap-stage3/phase2-compat-manifest.shs"
 . "${repo_root}/scripts/check/lib/portable-process-lock.shs"
 . "${repo_root}/scripts/bootstrap/bootstrap-authority-wiring.shs"
+. "${repo_root}/scripts/bootstrap/bootstrap-deploy-transaction.shs"
+. "${repo_root}/scripts/setup/release-platform.shs"
 bootstrap_runtime_authority_path=\
 "${repo_root}/src/compiler_rust/target/bootstrap"
 bootstrap_script_path="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
@@ -680,6 +862,8 @@ portable_lock_canonical_output "${output_dir}" || {
   exit 1
 }
 output_dir=${PORTABLE_LOCK_CANONICAL_OUTPUT}
+bootstrap_storage_receipt="${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}/storage-authority.sdn"
+output_dir=$(simple_bootstrap_storage_select_output "${output_dir}" "${bootstrap_storage_receipt}") || exit 70
 
 # Disk-space precondition. A full bootstrap needs ~10-15 GB (Rust authority
 # cargo target tree + generation publish + stage2/3 native artifacts); below
@@ -738,6 +922,12 @@ bootstrap_check_disk_space() {
   fi
 }
 bootstrap_check_disk_space || exit 1
+if [ "${full_bootstrap}" -eq 1 ]; then
+  sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" --disk-only || {
+    echo "error: bootstrap disk preflight failed before Cargo; no compiler stage was started" >&2
+    exit 1
+  }
+fi
 
 [ -z "${resume_stage4_output}" ] ||
   [ "${output_dir}" = "${scheduler_lineage_output}" ] || {
@@ -754,8 +944,17 @@ portable_lock_acquire "${bootstrap_lock_root}" "${bootstrap_lock_name}" \
 bootstrap_lock_handle=${PORTABLE_LOCK_HANDLE}
 bootstrap_progress_pid=
 deploy_lock_handle=
+bootstrap_deploy_tx_active=0
 bootstrap_progress_state=
 build_progress_events=
+build_progress_storage_root=${SIMPLE_WORKTREE_STORAGE_ROOT:-"${repo_root}/.simple/storage"}
+build_progress_snapshot="${build_progress_storage_root}/build/progress/current.sdn"
+build_id="bootstrap-$$"
+mkdir -p "$(dirname -- "${build_progress_snapshot}")"
+rm -f "${build_progress_snapshot}"
+export SIMPLE_WORKTREE_STORAGE_ROOT="${build_progress_storage_root}"
+export SIMPLE_BUILD_PROGRESS_SNAPSHOT="${build_progress_snapshot}"
+export SIMPLE_BUILD_ID="${build_id}"
 bootstrap_progress_event() {
   [ -n "${build_progress_events}" ] || return 0
   progress_phase=$1
@@ -771,9 +970,20 @@ bootstrap_progress_event() {
       "${progress_terminal}" >>"${build_progress_events}"
   fi
 }
+bootstrap_last_milestone=init
+bootstrap_verdict_written=0
+bootstrap_verdict() {
+  bootstrap_verdict_written=1
+  line="VERDICT — $1"
+  echo "$line" >&2
+  if [ -n "${progress_log}" ]; then
+    echo "$line" >>"${progress_log}" 2>/dev/null || true
+  fi
+}
 bootstrap_progress_mark() {
-  [ -n "${progress_log}" ] || return 0
   milestone=$1
+  bootstrap_last_milestone=${milestone}
+  [ -n "${progress_log}" ] || return 0
   main_log=${2:-}
   {
     echo "milestone=${milestone}"
@@ -794,11 +1004,36 @@ bootstrap_progress_mark() {
       ;;
   esac
 }
+# Cheap per-step elapsed-time instrumentation for the pre-stage-2 region
+# (fingerprint milestone -> stage2 milestone), which measured ~85-106s at
+# 0.5-7% tree CPU with no prior attribution. One `date +%s` call per named
+# step (never per inner-loop iteration) — negligible added wall time.
+bootstrap_step_ts=""
+bootstrap_step_mark() {
+  step_name=$1
+  step_now=$(date +%s)
+  if [ -n "${bootstrap_step_ts}" ]; then
+    step_elapsed_s=$(( step_now - bootstrap_step_ts ))
+  else
+    step_elapsed_s=0
+  fi
+  bootstrap_step_ts=${step_now}
+  printf 'event=step name=%s elapsed_s=%s\n' "${step_name}" "${step_elapsed_s}" >&2
+  if [ -n "${progress_log}" ]; then
+    printf 'event=step name=%s elapsed_s=%s\n' "${step_name}" "${step_elapsed_s}" >>"${progress_log}" 2>/dev/null || true
+  fi
+}
 bootstrap_cleanup() {
   bootstrap_status=${1:-$?}
   trap - EXIT HUP INT QUIT TERM
   set +e
+  if [ "${bootstrap_verdict_written}" -eq 0 ]; then
+    bootstrap_verdict "ABORTED: stage=${bootstrap_last_milestone} exit=${bootstrap_status} signal=${bootstrap_abnormal_signal:-none} reason=${bootstrap_last_milestone}"
+  fi
   resume_stage4_release_continuation_lock
+  if [ "${bootstrap_deploy_tx_active:-0}" -eq 1 ]; then
+    bootstrap_deploy_tx_abort || true
+  fi
   if [ -n "${progress_log}" ] && [ -n "${bootstrap_progress_state}" ]; then
     bootstrap_progress_mark "exit-${bootstrap_status}" ""
   fi
@@ -902,6 +1137,18 @@ if [ "${target}" = "simpleos-x86_64" ]; then
   exec "${repo_root}/bin/simple" run src/os/port/bootstrap_cross.spl -- ${simpleos_args}
 fi
 
+# Git Bash exports MSYSTEM and would otherwise select GNU implicitly. The
+# Windows bootstrap default is the clang-cl/MSVC lane; --mingw remains an
+# explicit Clang GNU lane through SIMPLE_WINDOWS_ABI=gnu.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows*)
+    if [ -z "${SIMPLE_WINDOWS_ABI:-}" ]; then
+      SIMPLE_WINDOWS_ABI=msvc
+      export SIMPLE_WINDOWS_ABI
+    fi
+    ;;
+esac
+
 # Shared platform detection
 . "${repo_root}/scripts/setup/platform-detect.shs"
 PLATFORM="${PLATFORM_TRIPLE}"
@@ -915,6 +1162,10 @@ archive_suffix=".a"
 # Empty off Windows: the expansion below then contributes no arguments at all,
 # leaving the Linux/macOS/FreeBSD invocations byte-identical.
 bootstrap_windows_abi_env=""
+bootstrap_windows_cc_env=""
+bootstrap_windows_include_env=""
+bootstrap_windows_lib_env=""
+bootstrap_windows_libpath_env=""
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
   case "${SIMPLE_LINKER_FLAVOR:-${PLATFORM_ABI}}" in
@@ -937,8 +1188,8 @@ if [ "${os}" = "windows" ]; then
   # heuristic. Dropping the variable therefore did not fall back to the
   # requested target -- it fell back to MSYSTEM, which is always set under Git
   # Bash, so an explicit `--target x86_64-pc-windows-msvc` silently built with
-  # GNU flavour and invoked `g++` for the main stub (measured 2026-08-30:
-  # "Failed to compile main stub (g++)"). Forward the explicit choice.
+  # GNU flavour and selected the wrong main-stub C driver. Forward the explicit
+  # choice.
   bootstrap_windows_abi_env="SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI} SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR}"
   if [ "${PLATFORM_ABI}" = "msvc" ]; then
     archive_prefix=""
@@ -1092,74 +1343,81 @@ export PATH
 
 log_dir="${output_dir}/logs/${PLATFORM}"
 mkdir -p "${log_dir}"
+case "${SIMPLE_ABI_POLICY:-unselected}" in
+  v1)
+    simple_abi_policy=v1
+    simple_abi_version=1
+    simple_abi_deferred=0
+    simple_abi_cflags='-DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0'
+    ;;
+  unselected|'')
+    echo "error: SIMPLE_ABI_POLICY must match canonical v1" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: unknown SIMPLE_ABI_POLICY '${SIMPLE_ABI_POLICY}'" >&2
+    exit 1
+    ;;
+esac
+SIMPLE_ABI_POLICY=${simple_abi_policy}
+export SIMPLE_ABI_POLICY
+case "${SIMPLE_PLUGIN_MANIFEST_POLICY:-unselected}" in
+  simple-sdn) ;;
+  unselected|'')
+    echo "error: SIMPLE_PLUGIN_MANIFEST_POLICY must match canonical simple-sdn" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: unknown SIMPLE_PLUGIN_MANIFEST_POLICY '${SIMPLE_PLUGIN_MANIFEST_POLICY}'" >&2
+    exit 1
+    ;;
+esac
+export SIMPLE_PLUGIN_MANIFEST_POLICY
+plugin_policy_source_root=$(absolute_path "${repo_root}/src/plugins")
+case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
+  llvm-cranelift)
+    k1_composition_root="${repo_root}/src/compositions/kernel_llvm_cranelift"
+    ;;
+  unselected|'')
+    echo "error: SIMPLE_KERNEL_K1_POLICY must match canonical llvm-cranelift" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: unknown SIMPLE_KERNEL_K1_POLICY '${SIMPLE_KERNEL_K1_POLICY}'" >&2
+    exit 1
+    ;;
+esac
+export SIMPLE_KERNEL_K1_POLICY
+# The stage-3 K1 composition receipt gate (write-k1-composition-receipt.shs)
+# parses `phase1:load_sources:closure:scan path=... imports=N content_len=N`
+# traces out of the stage2/stage3 native-build logs. Stage 2 runs the Rust
+# seed, which has no log_phase instrumentation and cannot emit those lines;
+# the receipt gate falls back to transcript-level source binding for Stage 2
+# and keeps content-level closure verification for Stage 3.
+k1_composition_source_args="--source ${k1_composition_root}"
+k1_composition_file="${k1_composition_root}/compiler/driver/bootstrap_k1_selected.spl"
+[ -f "${k1_composition_file}" ] && [ ! -L "${k1_composition_file}" ] || {
+  echo "error: selected K1 composition is missing or a symlink: ${k1_composition_file}" >&2
+  exit 1
+}
+k1_composition_sha256_before=$(bootstrap_stage3_hash_file "${k1_composition_file}") || {
+  echo "error: failed to hash selected K1 composition" >&2
+  exit 1
+}
+SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}
+export SIMPLE_K1_COMPOSITION_SHA256_BEFORE
 
-host_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 2)
-case "${host_cpus}" in
-  ''|*[!0-9]*) host_cpus=2 ;;
-esac
-case "${jobs}" in
-  ""|auto)
-    jobs=""
-    ;;
-  full)
-    jobs="${host_cpus}"
-    ;;
-  half)
-    jobs=$((host_cpus / 2))
-    if [ "${jobs}" -lt 1 ]; then
-      jobs=1
-    fi
-    ;;
-  min|minimal|minimum)
-    jobs=1
-    ;;
-esac
-if [ -z "${jobs}" ]; then
-  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    jobs=2
-  elif [ "${execution_profile}" = "clean-release" ]; then
-    # A release proof is intentionally full-resource: it must not inherit the
-    # conservative incremental scheduler used for developer iteration.
-    jobs="${host_cpus}"
-  elif [ "${execution_profile}" = "incremental-unlimited" ]; then
-    jobs="${host_cpus}"
-  else
-    jobs=$((host_cpus / 2))
-    if [ "${jobs}" -lt 1 ]; then
-      jobs=1
-    fi
-  fi
-fi
-case "${jobs}" in
-  ''|*[!0-9]*|0)
-    echo "error: --jobs must be a positive integer" >&2
-    exit 1
-    ;;
-esac
-. "${repo_root}/scripts/bootstrap/bootstrap-build-jobs-policy.shs"
-jobs_cpu_derived="${jobs}"
-jobs=$(bootstrap_build_jobs_memory_clamp "${jobs}")
-if [ "${jobs}" != "${jobs_cpu_derived}" ]; then
-  echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}; clamped from ${jobs_cpu_derived} by available memory)"
-else
-  echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
-fi
-selfhost_jobs="${jobs}"
-if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
-  selfhost_jobs=2
-fi
-# Opt-in override of the self-host thread count (stage 2/3/4 recompiles);
-# unset keeps the profile-derived value above.  `full` = host CPUs.
-case "${SIMPLE_NATIVE_BUILD_THREADS:-}" in
-  '') ;;
-  full) selfhost_jobs="${host_cpus}" ;;
-  *[!0-9]*|0)
-    echo "error: SIMPLE_NATIVE_BUILD_THREADS must be a positive integer or 'full'" >&2
-    exit 1
-    ;;
-  *) selfhost_jobs="${SIMPLE_NATIVE_BUILD_THREADS}" ;;
-esac
+. "${bootstrap_entry_dir}/bootstrap-jobs.shs"
+bootstrap_select_jobs "${jobs}" "${bootstrap_early_repo_root}/config/bootstrap.sdn" || exit 1
+echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}, source: ${job_source})"
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
+{
+  echo schema=simple-bootstrap-selected-jobs-v1
+  echo host_cpus="${host_cpus}"
+  echo jobs="${jobs}"
+  echo selfhost_jobs="${selfhost_jobs}"
+  echo source="${job_source}"
+} >"${output_dir}/selected-build-jobs.env"
 
 native_cache_dir="${output_dir}/native_cache"
 native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
@@ -1169,10 +1427,16 @@ bootstrap_wide_inputs_hash() {
   {
     # Module fingerprints cover source edits, but unchanged modules must also
     # be rebuilt when the compiler/runtime that emits their objects changes.
-    printf 'platform=%s backend=%s mode=%s stub_fallback=forbidden\n' "${PLATFORM}" "${backend}" "${bootstrap_mode}"
+    case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
+      llvm-cranelift) ;;
+      *) echo "error: unknown SIMPLE_KERNEL_K1_POLICY '${SIMPLE_KERNEL_K1_POLICY}'" >&2; return 1 ;;
+    esac
+    printf 'platform=%s backend=%s mode=%s k1_policy=%s stub_fallback=forbidden\n' \
+      "${PLATFORM}" "${backend}" "${bootstrap_mode}" "${SIMPLE_KERNEL_K1_POLICY:-unselected}"
     printf 'seed-inputs=%s\n' "${seed_inputs_fingerprint:-missing}"
-    find src/compiler -name '*.spl' -type f -print 2>/dev/null \
-      | LC_ALL=C sort | hash_path_list
+    KERNEL_CLOSURE_ROOT="${repo_root}" \
+      KERNEL_CLOSURE_MANIFEST="doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn" \
+      /bin/sh "${repo_root}/scripts/lib/kernel-closure-inputs.shs" || return 1
     env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)/ { print }'
   } | hash_stream
 }
@@ -1209,6 +1473,18 @@ bootstrap_native_cache_prune() {
   find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
     -mtime +"${bnc_ttl}" -exec rm -rf {} + 2>/dev/null || true
   echo "  native cache: pruned ${bnc_n} scope dir(s) older than ${bnc_ttl}d in ${bnc_dir}"
+  # NOTE: the Rust seed's stage-2/3 native-build cache uses a DIFFERENT
+  # layout — `scope-<16hex>/objects/<16hex>.o`, keyed by lane +
+  # compiler_fingerprint (native_project/mod.rs: cache_scope_segment). An
+  # mtime-based TTL is UNSAFE for that layout: writes land in
+  # `scope-*/objects/`, not the scope dir itself, so the in-use scope's own
+  # mtime goes stale under continuous use and a naive TTL sweep here would
+  # eventually delete the dir a build is actively reading (and would not
+  # remove a freshly-orphaned scope from a seed rebuild until the TTL
+  # elapses either). That case is handled at its own call site instead —
+  # see the scope-name-provable prune right after the Stage 2 native-build
+  # log is written in the main script, keyed off the seed's own
+  # `[native-build] ... scope=<name>` receipt rather than mtime.
 }
 
 # Per-lane private cache. Each stage gets build/bootstrap/native_cache/<lane>/
@@ -1317,12 +1593,26 @@ bootstrap_stage3_archive_prior_evidence() (
 
 # A reused output root can contain hash-bound sanity evidence from an earlier
 # run. The bounded collector correctly refuses to overwrite those leaves.
-# Fail before any cleanup or probe so evidence and cache remain untouched.
+#
+# Preserving that evidence is the requirement; REFUSING THE RUN never was. The
+# old behaviour failed with "use a new output root with a cache clone", which
+# is the heaviest possible remedy: it discards a warm native cache (tens of
+# minutes on this host) to protect log files that a rename preserves just as
+# well. Every failing-then-retried bootstrap paid that, and in practice the
+# operator archived the leaves by hand and re-ran -- so the guard was not
+# preventing anything, only making the fix manual and undocumented.
+#
+# The leaves are now MOVED into a timestamped sibling directory before the run
+# proceeds. Nothing is overwritten and nothing is deleted, so the invariant the
+# guard exists for is intact and strictly more evidence survives than under a
+# fresh output root. The run is still refused, loudly, if a leaf cannot be
+# moved -- an unmovable leaf means something else holds it, and proceeding
+# would be the overwrite this guard forbids.
 bootstrap_stage2_sanity_output_preflight() (
   bssop_base=$1
   [ -n "${bssop_base}" ] || return 0
   for bssop_suffix in \
-    '' .frontend-driver.log \
+    '' .frontend-driver.log .frontend-failure.log \
     .frontend-bootstrap-0.log .frontend-bootstrap-0.log.bounded.env \
     .frontend-bootstrap-0.log.stage2-mir-retention .frontend-bootstrap-0.log.stage2-mir-retention.bounded.env \
     .frontend-bootstrap-0.log.stage2-module-path-naming .frontend-bootstrap-0.log.stage2-module-path-naming.bounded.env \
@@ -1334,10 +1624,23 @@ bootstrap_stage2_sanity_output_preflight() (
     .frontend-bootstrap-1.log.hello-world-positional .frontend-bootstrap-1.log.hello-world-positional.bounded.env \
     .frontend-bootstrap-1.status.env; do
     if [ -e "${bssop_base}${bssop_suffix}" ] || [ -L "${bssop_base}${bssop_suffix}" ]; then
-      echo "stage2-sanity-error: stale-evidence-output-root; use a new output root with a cache clone" >&2
-      return 1
+      if [ -z "${bssop_archive:-}" ]; then
+        bssop_archive=${bssop_base}.superseded-$(date +%Y%m%d-%H%M%S)
+        if ! mkdir -p "${bssop_archive}"; then
+          echo "stage2-sanity-error: stale-evidence-output-root; cannot create ${bssop_archive}" >&2
+          return 1
+        fi
+      fi
+      if ! mv "${bssop_base}${bssop_suffix}" "${bssop_archive}/"; then
+        echo "stage2-sanity-error: stale-evidence-output-root; cannot archive ${bssop_base}${bssop_suffix}" >&2
+        return 1
+      fi
+      bssop_moved=$(( ${bssop_moved:-0} + 1 ))
     fi
   done
+  if [ "${bssop_moved:-0}" -gt 0 ]; then
+    echo "stage2 sanity: archived ${bssop_moved} stale evidence leaf(s) to ${bssop_archive}" >&2
+  fi
 )
 
 # A timed-out Rust native-build leaves every already-published object in its
@@ -1362,6 +1665,8 @@ bootstrap_stage2_single_timeout_cache_retry_eligible() {
   ' "${bsscre_log}"
 }
 
+. "${repo_root}/scripts/bootstrap/bootstrap-logged-process.shs"
+
 run_logged() {
   label=$1
   shift
@@ -1374,7 +1679,12 @@ run_logged() {
   } >"${log_file}"
 
   set +e
-  "$@" >>"${log_file}" 2>&1
+  case "${os:-}:${label}" in
+    windows:rust-seed-build|windows:rust-native-all-build|windows:rust-runtime-nolto-build|windows:rust-compiler-backfill-build)
+      bootstrap_logged_windows_cargo "${repo_root}" "${log_file}" "$@" >>"${log_file}" 2>&1
+      ;;
+    *) "$@" >>"${log_file}" 2>&1 ;;
+  esac
   status=$?
   set -e
 
@@ -1395,7 +1705,7 @@ COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 NATIVE_FILE_TIMEOUT_SECONDS=${SIMPLE_NATIVE_FILE_TIMEOUT:-300}   # per-file native-build cap; 0 = wait for completion
-NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-1}   # 1 = --low-memory (single worker); 0 = full parallel
+NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-0}   # Explicit opt-in; default uses selected parallel workers.
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
@@ -1416,7 +1726,7 @@ bootstrap_stage_sanity() (
   # Target::linker_flavor() (common/src/target.rs) falls back to an MSYSTEM
   # heuristic, which is always set under Git Bash -- so a requested
   # --target x86_64-pc-windows-msvc build silently ran GNU flavor and invoked
-  # g++ for the main stub. This is the exact "bootstrap_windows_abi_env" fix
+  # the wrong main-stub C driver. This is the exact "bootstrap_windows_abi_env" fix
   # already applied to the stage2/stage3 native-build invocations (see that
   # variable's own comment above) but never wired into this sanity check.
   # INCLUDE/LIB/LIBPATH: required for cl.exe/clang-cl to find MSVC headers and
@@ -1427,8 +1737,8 @@ bootstrap_stage_sanity() (
   # empty. SystemDrive is required for link.exe to resolve drive-rooted LIB
   # entries (bisected 2026-08-24: its absence alone produces
   # LNK1181 'cannot open input file kernel32.lib' even with LIB correct).
-  # TEMP/TMP: native (non-MSYS) Windows toolchain binaries such as mingw64
-  # g++.exe resolve their own scratch directory via the Win32 TEMP/TMP
+  # TEMP/TMP: native (non-MSYS) Windows toolchain binaries resolve their own
+  # scratch directory via the Win32 TEMP/TMP
   # environment variables, not the POSIX TMPDIR this function sets below. With
   # both unset, GetTempPath falls back to the Windows install directory, which
   # is not writable without elevation: "Cannot create temporary file in
@@ -1437,6 +1747,13 @@ bootstrap_stage_sanity() (
   # all (see the frontend_log preservation added just above this function).
   sanity_windows_abi=${SIMPLE_WINDOWS_ABI:-}
   sanity_linker_flavor=${SIMPLE_LINKER_FLAVOR:-}
+  # Captured before the scrub, like INCLUDE/LIB below. The backend resolves
+  # llc through _env_tool_dirs, which reads these two BEFORE any PATH lookup.
+  # Without them the sanity child saw env_dirs=0 (measured), fell through to a
+  # shell `where llc`, and the LLVM object stage returned "llc not found" --
+  # surfacing only as "backend object-path status 1".
+  sanity_llvm_bin=${SIMPLE_LLVM_BIN:-}
+  sanity_llvm_prefix=${LLVM_SYS_231_PREFIX:-}
   sanity_include=${INCLUDE:-}
   sanity_lib=${LIB:-}
   sanity_libpath=${LIBPATH:-}
@@ -1446,8 +1763,26 @@ bootstrap_stage_sanity() (
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
+  # The stage2 sanity probes are bounded by COMPILER_BUILD_TIMEOUT_SECONDS
+  # (admission script default 180s, sized for native hardware). Capture the
+  # caller's value before the scrub so an emulated lane (QEMU TCG FreeBSD,
+  # where hello-world-positional scans the whole import graph and exceeds
+  # 180s) can raise it; without this the scrub always restored the 180s
+  # default and the probe timed out with raw_status=124.
+  sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
+  # The outer guard owns these values. Scrubbing them makes the bounded-log
+  # collector create a new session, escaping the still-active outer monitor.
+  # Validate before any candidate execution, and preserve presence (including
+  # malformed/empty contracts) rather than silently falling back to standalone.
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+  fi
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
+      SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
     esac
     unset "${sanity_env_name}"
@@ -1458,6 +1793,18 @@ bootstrap_stage_sanity() (
   LC_ALL=C
   LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
+  if [ -n "${sanity_llvm_bin}" ]; then
+    SIMPLE_LLVM_BIN=${sanity_llvm_bin}
+    export SIMPLE_LLVM_BIN
+  fi
+  if [ -n "${sanity_llvm_prefix}" ]; then
+    LLVM_SYS_231_PREFIX=${sanity_llvm_prefix}
+    export LLVM_SYS_231_PREFIX
+  fi
+  if [ -n "${sanity_build_timeout}" ]; then
+    COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
+    export COMPILER_BUILD_TIMEOUT_SECONDS
+  fi
   if [ -n "${sanity_windows_abi}" ]; then
     SIMPLE_WINDOWS_ABI=${sanity_windows_abi}
     export SIMPLE_WINDOWS_ABI
@@ -1510,16 +1857,17 @@ bootstrap_stage_sanity() (
     CC=${sanity_cc}
     export CC
   fi
-  if [ -n "${sanity_cxx}" ]; then
+  if [ "${os}" != windows ] && [ -n "${sanity_cxx}" ]; then
     CXX=${sanity_cxx}
     export CXX
   fi
-  evidence_tmp="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.tmp.$$"
-  frontend_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-driver.log"
-  frontend_bootstrap0_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-0.log"
-  frontend_bootstrap0_status_path="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-0.status.env"
-  frontend_bootstrap1_log="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-1.log"
-  frontend_bootstrap1_status_path="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.frontend-bootstrap-1.status.env"
+  sanity_evidence_stem="${evidence_path:-${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}/bootstrap-sanity}"
+  evidence_tmp="${sanity_evidence_stem}.tmp.$$"
+  frontend_log="${sanity_evidence_stem}.frontend-driver.log"
+  frontend_bootstrap0_log="${sanity_evidence_stem}.frontend-bootstrap-0.log"
+  frontend_bootstrap0_status_path="${sanity_evidence_stem}.frontend-bootstrap-0.status.env"
+  frontend_bootstrap1_log="${sanity_evidence_stem}.frontend-bootstrap-1.log"
+  frontend_bootstrap1_status_path="${sanity_evidence_stem}.frontend-bootstrap-1.status.env"
   bootstrap_stage2_sanity_output_preflight "${evidence_path}" || return 1
   rm -f "${evidence_tmp}" "${frontend_log}" \
     "${frontend_bootstrap0_log}" "${frontend_bootstrap0_status_path}" \
@@ -1555,21 +1903,26 @@ bootstrap_stage_sanity() (
   unsupported_status=$?
   set -e
   frontend_status=0
-  frontend_owner_pid=$(perl -e 'print getppid') || return 1
-  exec 6<"${frontend_bootstrap0_log%/*}" \
-    7<"${sanity_repo_root}/scripts/bootstrap/run-process-group-bounded-log.pl" \
-    8<"$(command -v perl)" || return 1
-  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
-  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
-  frontend_log_authority=/proc/$frontend_owner_pid/fd/6/${frontend_log##*/}
-  export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+  candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || return 1
+  frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
-  CANDIDATE_FRONTEND_BACKEND="${backend}" \
+  # The smoke exercises the FRONTEND through whichever worker binary the lane
+  # admits. When the Rust seed was built without the llvm cargo feature (the
+  # decoupled lane: SIMPLE_BOOTSTRAP_RUST_LLVM=0, LLVM served to the
+  # pure-Simple backends via LLVM-C.dll), the seed-side worker cannot honour
+  # --backend llvm, so the smoke drives it with cranelift. The llvm backend
+  # admission itself is the K1 composition gate downstream, unaffected here.
+  if [ "${llvm_features}" = "" ]; then
+    frontend_smoke_backend=cranelift
+  else
+    frontend_smoke_backend=${backend}
+  fi
+  CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
-    CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
-    CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_status_path##*/}" \
-    candidate_frontend_smoke "${candidate}" >"${frontend_log_authority}" 2>&1 ||
+    CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_status_path##*/}" \
+    candidate_frontend_pinned_smoke "${candidate}" "${frontend_log_authority}" ||
     frontend_status=$?
   # Second pass under SIMPLE_BOOTSTRAP=1 -- the EXACT configuration Stage 3
   # invokes this candidate in. The single-pass (SIMPLE_BOOTSTRAP=0) gate
@@ -1581,12 +1934,12 @@ bootstrap_stage_sanity() (
   frontend_bootstrap_ran=false
   if [ "${frontend_status}" -eq 0 ]; then
     frontend_bootstrap_ran=true
-    CANDIDATE_FRONTEND_BACKEND="${backend}" \
+    CANDIDATE_FRONTEND_BACKEND="${frontend_smoke_backend}" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
-      CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
-      CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_status_path##*/}" \
-      candidate_frontend_smoke "${candidate}" >>"${frontend_log_authority}" 2>&1 ||
+      CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_status_path##*/}" \
+      candidate_frontend_pinned_smoke "${candidate}" "${frontend_log_authority}" ||
       frontend_bootstrap_status=$?
     frontend_status=${frontend_bootstrap_status}
   fi
@@ -1709,7 +2062,7 @@ bootstrap_native_build_main() {
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
+    --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" --source examples/10_tooling \
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
@@ -1720,6 +2073,19 @@ bootstrap_native_build_main() {
     --entry src/app/cli/main.spl \
     --runtime-path "${bootstrap_runtime_authority_path}" \
     -o "${output}"
+  # An outer bootstrap guard already owns the session (including the Rust
+  # phase). Keep this subtree monitor in that admitted session. Presence of
+  # either variable selects strict inheritance so partial contracts fail closed.
+  bootstrap_native_session_mode=new
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    bootstrap_native_session_mode=inherit
+  fi
+  perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode="${bootstrap_native_session_mode}" \
+    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+    --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+    --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+    --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
@@ -1736,6 +2102,7 @@ bootstrap_native_build_main() {
     SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
     "${compiler}" "$@"
 }
@@ -1753,7 +2120,13 @@ rust_authority_current_marker="${repo_root}/src/compiler_rust/target/bootstrap.c
 rust_authority_compatibility_path="${repo_root}/src/compiler_rust/target/bootstrap"
 
 bootstrap_acquire_rust_authority() {
-  [ -z "${rust_target_lock_handle}" ] || return 0
+  if [ -n "${rust_target_lock_handle}" ]; then
+    bootstrap_authority_require_owned_lock "${rust_target_lock_handle}" || {
+      echo "error: Rust authority lock ownership was lost" >&2
+      return 1
+    }
+    return 0
+  fi
   portable_lock_acquire "${rust_authority_lock_root}" authority \
     "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || {
     echo "error: timed out waiting for shared Rust authority publication" >&2
@@ -1809,6 +2182,9 @@ fi
 # churn. Any doubt (missing stamp, hash failure → empty mismatch) rebuilds: a
 # stale seed would silently miscompile, which is worse than a slow build.
 seed_stamp="${seed_bin}.inputs.sha256"
+seed_fingerprint_details="${seed_stamp}.details.env"
+seed_fingerprint_observation_details=\
+"${output_dir}/rust-authority-fingerprint-current.details.env"
 seed_fingerprint_tmp="${output_dir}/rust-authority-fingerprint-tmp"
 seed_fingerprint_error_manifest=\
 "${output_dir}/rust-authority-fingerprint-error.manifest"
@@ -1816,6 +2192,10 @@ seed_fingerprint_error=\
 "${output_dir}/rust-authority-fingerprint-error.log"
 seed_inputs_hash() {
   seed_fingerprint_phase=$1
+  # Never overwrite the sidecar bound to the published stamp while deciding
+  # whether that stamp is stale.  Current observations remain separate until
+  # a rebuilt tuple is committed as a new immutable generation.
+  BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="${seed_fingerprint_observation_details}" \
   bootstrap_authority_seed_inputs_fingerprint \
     "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
     "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
@@ -1842,15 +2222,30 @@ if [ -e "${rust_authority_current_marker}.transaction" ]; then
 fi
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
-# Detect LLVM 18 availability for LLVM backends.
+# Detect the pinned LLVM 23.1.1 provider for LLVM backends.
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM is resolved once by the shared platform interface
   # (scripts/setup/platform-detect.shs, sourced above), which also exports the
-  # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
+  # LLVM_SYS_231_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
+    if [ "$LLVM_VERSION" != 23 ]; then
+      echo "error: LLVM backend requires LLVM 23.1.1, found LLVM ${LLVM_VERSION}" >&2
+      exit 1
+    fi
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
-    llvm_features="--features llvm"
+    # The Rust seed's llvm-sys pins one LLVM major (180 -> LLVM 18), while the
+    # pure-Simple llvm backend loads LLVM-C.dll directly and tolerates any
+    # recent C API. On hosts whose LLVM major differs from the llvm-sys pin,
+    # set SIMPLE_BOOTSTRAP_RUST_LLVM=0 to keep LLVM for the pure-Simple
+    # backends and build the seed without the llvm feature (the seed does not
+    # need it to drive the bootstrap).
+    if [ "${SIMPLE_BOOTSTRAP_RUST_LLVM:-1}" = "1" ]; then
+      llvm_features="--features llvm"
+    else
+      llvm_features=""
+      echo "LLVM ${LLVM_VERSION} reserved for the pure-Simple backends (SIMPLE_BOOTSTRAP_RUST_LLVM=0; Rust seed builds without the llvm feature)"
+    fi
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
     if [ "${host_os}" = "Darwin" ]; then
       brew_prefix="$(brew --prefix 2>/dev/null || true)"
@@ -1861,7 +2256,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "error: LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18})" >&2
+    echo "error: LLVM 23.1.1 not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
@@ -1870,13 +2265,50 @@ fi
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
 # backend/features are final before they enter the fingerprint. If the seed or
 # runtime library is missing, the cargo branch below rebuilds regardless.
+# Bind Windows GNU Cargo tools before the pre-build fingerprint. The same
+# exported canonical paths pass into Cargo and remain present for the post and
+# commit fingerprints, so tool-name spelling cannot create input drift.
+cc_abs=""
+if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
+  cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
+    echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
+    exit 1
+  }
+  mingw_tools=$(bootstrap_stage3_windows_gnu_cargo_tools "${cc_abs}") || {
+    echo "error: could not resolve canonical Windows GNU Cargo tools" >&2
+    exit 1
+  }
+  mingw_linker=$(printf '%s\n' "${mingw_tools}" | sed -n 's/^linker=//p')
+  mingw_cc=$(printf '%s\n' "${mingw_tools}" | sed -n 's/^cc=//p')
+  mingw_ar=$(printf '%s\n' "${mingw_tools}" | sed -n 's/^ar=//p')
+  mingw_target=x86_64-w64-windows-gnu
+  mingw_cflags=--target=${mingw_target}
+  mingw_rustflags="-C link-arg=--target=${mingw_target}"
+  [ -n "${mingw_linker}" ] && [ -n "${mingw_cc}" ] && [ -n "${mingw_ar}" ] || {
+    echo "error: incomplete Windows GNU Cargo tool authority" >&2
+    exit 1
+  }
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}"
+  export CC_x86_64_pc_windows_gnu="${mingw_cc}"
+  export AR_x86_64_pc_windows_gnu="${mingw_ar}"
+  export CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}"
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}"
+  # Normal bootstrap and --full-bootstrap share the same Windows GNU linker
+  # owner. Bind CC before fingerprinting so both modes reach the canonical
+  # Clang C-driver authority.
+  bootstrap_windows_cc_env="CC=${mingw_cc}"
+  CC=${mingw_cc}
+  export CC
+fi
 seed_inputs_fingerprint=not-used-by-admitted-stage4-resume
 if [ -z "${resume_stage4_output}" ]; then
   bootstrap_progress_mark fingerprint ""
+  bootstrap_step_mark fingerprint-start
   seed_inputs_fingerprint=$(seed_inputs_hash pre) || {
     echo "error: failed to fingerprint Rust seed inputs" >&2
     exit 1
   }
+  bootstrap_step_mark seed-inputs-hash-pre
 fi
 if [ -z "${resume_stage4_output}" ] && [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
   if ! bootstrap_stage3_verify_seed_stamp "${seed_stamp}" \
@@ -1892,11 +2324,16 @@ if [ -z "${resume_stage4_output}" ] && [ -x "${seed_bin}" ] && [ -f "${native_al
     echo "Seed/runtime current (input content hash matches); skipping Rust rebuild."
   fi
 fi
+bootstrap_step_mark seed-stale-check
 
 if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
-  rust_authority_target="${rust_authority_root}/target"
-  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
+  # rust_authority_target/profile_dir are computed further below, once the
+  # Rust toolchain and LLVM authorities are resolved: the shared
+  # CARGO_TARGET_DIR is keyed by build CONFIGURATION (rustc/cargo identity,
+  # target, backend/features, LLVM version, C toolchain), not by
+  # seed_inputs_fingerprint (which also hashes source content) -- see
+  # bootstrap_authority_rust_build_config_key in bootstrap-authority-wiring.shs.
   rust_authority_home="${rust_authority_root}/home"
   rust_authority_cargo_home="${rust_authority_root}/cargo-home"
   rust_authority_tmp="${rust_authority_root}/tmp"
@@ -1906,6 +2343,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: could not resolve canonical Rust toolchain" >&2
     exit 1
   }
+  bootstrap_step_mark rust-toolchain-resolve
   rust_sysroot=$(
     printf '%s\n' "${rust_toolchain_authority}" |
       sed -n 's/^rust-sysroot=//p'
@@ -1918,26 +2356,48 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_toolchain_authority}" |
       sed -n 's/^cargo-path=//p'
   )
+  rust_authority_dylib="${rust_authority_root}/rust-helper-lib-$(
+    printf '%s\n' "${rust_toolchain_authority}" | sed -n 's/^rust-llvm-dylib-sha256=//p'
+  )"
   [ -x "${rustc_abs}" ] && [ -x "${cargo_abs}" ] || {
     echo "error: Rust toolchain binaries missing under sysroot: ${rust_sysroot}" >&2
     exit 1
   }
-  mingw_linker="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}"
-  mingw_cc="${CC_x86_64_pc_windows_gnu:-gcc}"
-  mingw_ar="${AR_x86_64_pc_windows_gnu:-ar}"
-  cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
-    echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
-    exit 1
-  }
+  if [ -z "${cc_abs}" ]; then
+    cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
+      echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
+      exit 1
+    }
+  fi
+  if [ "${os}" != windows ] || [ "${PLATFORM_ABI}" != gnu ]; then
+    mingw_linker="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-clang}"
+    mingw_cc="${CC_x86_64_pc_windows_gnu:-clang}"
+    mingw_ar="${AR_x86_64_pc_windows_gnu:-llvm-ar}"
+    mingw_cflags="${CFLAGS_x86_64_pc_windows_gnu:-}"
+    mingw_rustflags="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:-}"
+  fi
   if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
-    # Stage 2/3 must use the compiler admitted above by exact path. Leaving
-    # CC/CXX unset makes the Rust seed perform a second PATH search; on hosts
+    # Stage 2/3 must use the compiler admitted above by exact path. Leaving CC
+    # unset makes the Rust seed perform a second PATH search; on hosts
     # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
     # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
-    bootstrap_windows_abi_env="${bootstrap_windows_abi_env} CC=${cc_abs} CXX=${cc_abs}"
+    # Kept OUT of bootstrap_windows_abi_env: that variable is expanded
+    # UNQUOTED at every use site so its two space-free assignments become
+    # separate arguments, but cc_abs routinely contains spaces (the stock MSVC
+    # location is C:/Program Files/Microsoft Visual Studio/...). Appending it
+    # there word-split "CC=C:/Program Files/.../cl.exe" into "CC=C:/Program"
+    # and "Files/.../cl.exe", and the latter fails the NAME=value check in
+    # bootstrap_stage3_env_assignment_names -- a pre-exec refusal that produced
+    # no build log at all. Carry them as single quoted words instead.
+    bootstrap_windows_cc_env="CC=${cc_abs}"
+    # Same sandbox reason as CC, and each may legitimately contain spaces and
+    # is therefore carried as its own single quoted word. LIBPATH is often
+    # empty; it is still passed so the assignment-name list is stable.
+    bootstrap_windows_include_env="INCLUDE=${INCLUDE:-}"
+    bootstrap_windows_lib_env="LIB=${LIB:-}"
+    bootstrap_windows_libpath_env="LIBPATH=${LIBPATH:-}"
     CC=${cc_abs}
-    CXX=${cc_abs}
-    export CC CXX
+    export CC
   fi
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
@@ -1975,6 +2435,22 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-prefix=//p'
   )
+  rust_llvm_version=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-version=//p'
+  )
+  rust_llvm_link_kind=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-link-kind=//p'
+  )
+  rust_llvm_clang_cl_path=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-clang-cl-path=//p'
+  )
+  rust_llvm_clang_cl_version=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-clang-cl-version=//p'
+  )
   rust_llvm_sdkroot=$(
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-sdkroot=//p'
@@ -1987,7 +2463,98 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-library-path=//p'
   )
+  if [ "${rust_llvm_status}" = enabled ]; then
+    [ "${rust_llvm_major}" = 23 ] || {
+      echo "error: Rust LLVM authority must be major 23, got ${rust_llvm_major}" >&2
+      exit 1
+    }
+    if [ -n "${rust_llvm_version}" ] &&
+       [ "${rust_llvm_version}" != 23.1.1 ]; then
+      echo "error: Rust LLVM authority must be 23.1.1, got ${rust_llvm_version}" >&2
+      exit 1
+    fi
+    if [ "${os}" = windows ] &&
+       [ "${rust_llvm_link_kind}" != dynamic-c-api ]; then
+      echo "error: Windows Rust LLVM authority must use dynamic-c-api" >&2
+      exit 1
+    fi
+    if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
+      [ -x "${rust_llvm_clang_cl_path}" ] || {
+        echo "error: Windows Rust LLVM authority lacks physical clang-cl: ${rust_llvm_clang_cl_path}" >&2
+        exit 1
+      }
+      [ "${rust_llvm_clang_cl_version}" = 23.1.1 ] || {
+        echo "error: Windows Rust LLVM authority must bind clang-cl 23.1.1, got ${rust_llvm_clang_cl_version:-unknown}" >&2
+        exit 1
+      }
+      # Keep the C ABI owner in the same immutable LLVM 23.1.1 package as
+      # llvm-config and LLVM-C. An ambient clang-cl is never carried forward.
+      cc_abs=${rust_llvm_clang_cl_path}
+      bootstrap_windows_cc_env="CC=${cc_abs}"
+      CC=${cc_abs}
+      export CC
+    fi
+    rust_llvm_path="${rust_llvm_prefix}/bin:${PATH}"
+  fi
+  bootstrap_step_mark rust-llvm-authority-resolve
+
+  # Compute the shared CARGO_TARGET_DIR now that every build-configuration
+  # input (toolchain identity, target, backend/features, LLVM version, C
+  # toolchain) has settled -- see bootstrap_authority_rust_build_config_key
+  # in bootstrap-authority-wiring.shs for exactly what is folded in and why.
+  # --verbose (not bare --version) is required: it is what actually carries
+  # the commit hash, host tuple and rustc's embedded LLVM version.
+  rust_authority_rustc_version=$("${rustc_abs}" --version --verbose) || {
+    echo "error: could not query Rust seed toolchain identity" >&2
+    exit 1
+  }
+  rust_authority_cargo_version=$("${cargo_abs}" --version) || {
+    echo "error: could not query Cargo seed toolchain identity" >&2
+    exit 1
+  }
+  rust_authority_cargo_config_sha256=$(
+    bootstrap_stage3_hash_file \
+      "${repo_root}/src/compiler_rust/.cargo/config.toml"
+  ) || {
+    echo "error: could not hash src/compiler_rust/.cargo/config.toml" >&2
+    exit 1
+  }
+  # toolchain_extra: THE definitive list of every OTHER input folded into the
+  # shared-target-dir config key, kept next to this assembly so the two
+  # cannot drift (bootstrap_authority_rust_build_config_key's header comment
+  # points back here rather than duplicating this list). Each of these can
+  # change a Cargo build's output bytes for fixed-name artifacts:
+  #   - simple_abi_cflags: forwarded as CFLAGS (SIMPLE_ABI_VERSION defines).
+  #   - mingw_linker/cc/ar/cflags/rustflags: the resolved Windows-GNU C
+  #     toolchain and its per-target RUSTFLAGS.
+  #   - CXX/AR/LD/LLVM_CONFIG: forwarded verbatim into the Cargo environment
+  #     by run_rust_authority_env whenever ambiently set.
+  #   - rust_llvm_prefix (LLVM_SYS_231_PREFIX) and rust_llvm_link_kind
+  #     (static vs dynamic-c-api): which LLVM install/link mode Cargo builds
+  #     LLVM-dependent crates against.
+  #   - RUSTFLAGS, the macOS CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS
+  #     passthrough, and CARGO_ENCODED_RUSTFLAGS: ambient rustflags that can
+  #     reach Cargo (directly, or via run_rust_authority_env's macOS branch).
+  #   - SDKROOT/INCLUDE/LIB: header/library search paths a build script's
+  #     compiled objects depend on.
+  #   - a sha256 of src/compiler_rust/.cargo/config.toml's contents (registry
+  #     replacement, vendor directory, any [build] settings it carries).
+  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${CXX:-};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
+  rust_authority_config_key=$(
+    bootstrap_authority_rust_build_config_key \
+      "${rust_authority_rustc_version}" "${rust_authority_cargo_version}" \
+      "${PLATFORM}" "${backend}" "${llvm_features}" "${rust_llvm_version:-}" \
+      "${rust_authority_toolchain_extra}"
+  ) || {
+    echo "error: could not compute Rust build configuration key" >&2
+    exit 1
+  }
+  rust_authority_target=$(bootstrap_authority_rust_cargo_target \
+    "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
+    "${rust_authority_root}" "${rust_authority_config_key}") || exit 1
+  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
 fi
+bootstrap_step_mark rust-authority-target-key
 
 rust_authority_workspace_prepared=0
 prepare_rust_authority_workspace() {
@@ -1995,7 +2562,7 @@ prepare_rust_authority_workspace() {
     return 0
   fi
 
-  # The authority root is already content-addressed by every Rust seed input.
+  # Both the authority root and Cargo target bind every Rust seed input.
   # Preserve its Cargo target so an interrupted/retried build with the same
   # fingerprint can reuse dependency artifacts. Ephemeral HOME/config/tmp state
   # is recreated below; a changed fingerprint selects a different root.
@@ -2030,10 +2597,71 @@ prepare_rust_authority_workspace() {
     echo "error: could not create private offline Cargo configuration" >&2
     exit 1
   }
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_prepare \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || {
+      echo "error: Rust macOS helper/library authority invalid" >&2
+      exit 1
+    }
+    printf '%s\n' "${rust_toolchain_authority}" \
+      >"${rust_authority_root}/rust-toolchain-authority.env"
+    if printf '%s\n' "${rust_toolchain_authority}" | grep -qx 'rust-helper-library-mode=private-dylib'; then
+      printf 'rust-helper-capsule-path=%s\nrust-helper-copied-dylib-sha256=%s\n' \
+        "${rust_authority_dylib}" \
+        "$(bootstrap_stage3_hash_file "${rust_authority_dylib}/libLLVM.dylib")" \
+        >>"${rust_authority_root}/rust-toolchain-authority.env"
+    else
+      printf 'rust-helper-capsule-path=absent\nrust-helper-copied-dylib-sha256=absent\n' \
+        >>"${rust_authority_root}/rust-toolchain-authority.env"
+    fi
+  fi
   rust_authority_workspace_prepared=1
 }
 
+# Forward only explicitly selected tools; unset tools keep target-aware Cargo
+# defaults (notably clang-cl and llvm-lib on Windows MSVC).
+run_rust_authority_env() {
+  rust_env_log=$1
+  shift
+  if [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
+  if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
+  if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
+  if [ "${LLVM_CONFIG+x}" = x ]; then set -- "LLVM_CONFIG=$LLVM_CONFIG" "$@"; fi
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_validate \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || return 1
+    for rust_env_arg in "$@"; do
+      case "$rust_env_arg" in DYLD_*=*) echo 'error: unadmitted Rust DYLD assignment' >&2; return 1 ;; esac
+    done
+    if printf '%s\n' "${rust_toolchain_authority}" | grep -qx 'rust-helper-library-mode=private-dylib'; then
+      set -- "DYLD_LIBRARY_PATH=${rust_authority_dylib}" "$@"
+    fi
+    set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$cc_abs}" "$@"
+    if [ "${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS+x}${RUSTFLAGS+x}" != '' ]; then
+      set -- "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" "$@"
+    fi
+  fi
+  run_logged "$rust_env_log" env -i "$@"
+  if [ "${os}" = macos ]; then
+    bootstrap_stage3_rust_macos_helper_validate \
+      "${rust_toolchain_authority}" "${rust_authority_dylib}" || return 1
+    if grep -Fq 'stripping debug info with `rust-objcopy` failed' \
+      "${log_dir}/${rust_env_log}.log"; then
+      echo "error: Rust objcopy stripping failed despite Cargo success" >&2
+      return 1
+    fi
+  fi
+}
+
 run_rust_authority_cargo() {
+  # Cargo outputs are shared across output roots on Windows. Acquire the
+  # existing authority lock before even preparing the workspace, and retain
+  # it across every Cargo call, immutable snapshot, publication and runtime
+  # normalization. Lock order stays output -> authority; later acquisitions
+  # revalidate this same handle instead of trying to acquire a second lock.
+  if [ "${os}" = windows ]; then
+    bootstrap_acquire_rust_authority || return 1
+  fi
   rust_authority_log=$1
   rust_authority_lto=$2
   shift 2
@@ -2047,66 +2675,74 @@ run_rust_authority_cargo() {
   prepare_rust_authority_workspace
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
     if [ "${rust_authority_lto}" = off ]; then
-      run_logged "${rust_authority_log}" env -i \
+      run_rust_authority_env "${rust_authority_log}" \
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
-        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-        RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+        CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
         "${cargo_abs}" "$@"
     else
-      run_logged "${rust_authority_log}" env -i \
+      run_rust_authority_env "${rust_authority_log}" \
         HOME="$(absolute_path "${rust_authority_home}")" \
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
-        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-        RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${rust_llvm_path}" \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+        CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" \
         "${cargo_abs}" "$@"
     fi
   elif [ "${rust_authority_lto}" = off ]; then
-    run_logged "${rust_authority_log}" env -i \
+    run_rust_authority_env "${rust_authority_log}" \
       HOME="$(absolute_path "${rust_authority_home}")" \
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-      RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+      CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
       CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
   else
-    run_logged "${rust_authority_log}" env -i \
+    run_rust_authority_env "${rust_authority_log}" \
       HOME="$(absolute_path "${rust_authority_home}")" \
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-      RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" CFLAGS="${simple_abi_cflags}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+      CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" \
@@ -2154,10 +2790,17 @@ elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_compl
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     --target "${PLATFORM}" -p simple-driver ${llvm_features}
+  # spl_hosted_runtime is selected alongside simple-native-all because the
+  # authority tuple freezes deps/libspl_hosted_runtime-*.rlib: cargo < 1.100
+  # left it in deps/ as a byproduct of these invocations, but the cargo >=
+  # 1.100 build-dir layout only materializes artifacts of SELECTED packages,
+  # so the hosted rlib must be selected explicitly or the publish step has
+  # nothing to freeze. Same features as the simple-compiler dependency
+  # (win32-real on Windows), so feature unification is unchanged.
   run_rust_authority_cargo rust-native-all-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-native-all ${llvm_features}
+    --target "${PLATFORM}" -p simple-native-all -p spl_hosted_runtime ${llvm_features}
   # Rebuild simple-runtime LAST with LTO off so deps/libsimple_runtime.a holds
   # machine-code symbol definitions. Under the bootstrap profile's thin-LTO the
   # rlib members export symbols only inside embedded `__bitcode` sections, which
@@ -2189,6 +2832,8 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     exit 1
   fi
   seed_inputs_fingerprint="${seed_inputs_fingerprint_after}"
+  BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE="${seed_fingerprint_observation_details}"
+  export BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE
   rust_generation_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   case "${rust_generation_nonce}" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
@@ -2199,7 +2844,7 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     "${seed_inputs_fingerprint}" "simple${exe_suffix}" \
     "${archive_prefix}simple_native_all${archive_suffix}" \
     "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
-    "${rust_generation_nonce}" || {
+    "${rust_generation_nonce}" "${PLATFORM}" || {
     echo "error: could not prepare immutable Rust authority generation" >&2
     exit 1
   }
@@ -2232,7 +2877,32 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
   compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
   seed_stamp="${seed_bin}.inputs.sha256"
+  seed_fingerprint_details="${seed_stamp}.details.env"
+  seed_fingerprint_observation_details=\
+"${output_dir}/rust-authority-fingerprint-current.details.env"
 fi
+bootstrap_step_mark cargo-build-or-skip
+
+# Cargo is itself the producer of the selected Rust seed, so the authoritative
+# preflight must run after that seed is rebuilt/published and before any
+# pure-Simple compiler stage starts. The cleanup traps and output lock are
+# already active here, making every refusal release ownership correctly.
+if [ "${full_bootstrap}" -eq 1 ]; then
+  bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
+  rm -f "${bootstrap_preflight_receipt}"
+  bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
+  sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
+    --seed="${seed_bin}" --config="${bootstrap_preflight_config}" \
+    --receipt="${bootstrap_preflight_receipt}" || {
+    echo "error: authoritative bootstrap preflight failed; no pure-Simple stage was started" >&2
+    exit 1
+  }
+  SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=${bootstrap_preflight_receipt}
+  SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG=${bootstrap_preflight_config}
+  export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT \
+    SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG
+fi
+bootstrap_step_mark bootstrap-preflight
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
 # The full CLI `build bootstrap` command doesn't forward the runtime path
@@ -2431,7 +3101,7 @@ else
       "${archive_prefix}simple_native_all${archive_suffix}" \
       "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
       "${legacy_generation_nonce}" "${rust_target_lock_handle}" \
-      "${legacy_observed_fingerprint}" || {
+      "${legacy_observed_fingerprint}" "${PLATFORM}" || {
       echo "error: complete legacy Rust authority migration failed" >&2
       exit 1
     }
@@ -2452,6 +3122,7 @@ else
     echo "error: could not snapshot Rust runtime authority" >&2
     exit 1
   }
+  bootstrap_step_mark runtime-origin-before
   bootstrap_stage3_copy_authority "${runtime_origin_absolute}" \
     "$(absolute_path "${stage2_runtime_authority}")" || {
     echo "error: could not freeze Stage 2 runtime authority" >&2
@@ -2465,14 +3136,39 @@ else
   stage2_hosted_runtime_relative_path=\
 ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_hosted_runtime_sha256=${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256}
+  case "${PLATFORM}" in
+    *apple-darwin*)
+      # Cocoa has one dynamic owner. Audit the just-frozen native-all archive
+      # before spending a Stage 2 compile on duplicate static definitions.
+      # LLVM nm must match the pinned bitcode toolchain (Apple nm cannot read
+      # the Rust LLVM 23 archive members).
+      bootstrap_cocoa_tool_dir=$("${LLVM_CONFIG:-llvm-config}" --bindir) || exit 1
+      case "${bootstrap_cocoa_tool_dir}" in /*) ;; *) exit 1 ;; esac
+      [ -x "${bootstrap_cocoa_tool_dir}/llvm-nm" ] || {
+        echo "error: pinned LLVM nm is unavailable for Cocoa ownership audit" >&2
+        exit 1
+      }
+      run_logged macos-cocoa-owner sh "${repo_root}/scripts/bootstrap/run-process-group-timeout.shs" 60 2 \
+        env "NM=${bootstrap_cocoa_tool_dir}/llvm-nm" \
+        sh "${repo_root}/scripts/check/check-macos-cocoa-runtime-owner.shs" \
+        "${stage2_runtime_authority}/libsimple_runtime.dylib" \
+        "${stage2_runtime_authority}/libsimple_native_all.a"
+      ;;
+  esac
+  bootstrap_stage3_compare_bind || {
+    echo "error: could not bind canonical Stage 3 comparator" >&2
+    exit 1
+  }
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_origin_after}")" \
     "${runtime_origin_absolute}" || exit 1
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_admitted_snapshot}")" \
     "$(absolute_path "${stage2_runtime_authority}")" || exit 1
-  cmp -s "${runtime_origin_before}" "${runtime_origin_after}" &&
-    cmp -s "${runtime_origin_after}" "${runtime_admitted_snapshot}" || {
+  bootstrap_stage3_require_equal "Rust runtime authority private-admission origin" \
+    "${runtime_origin_before}" "${runtime_origin_after}" &&
+    bootstrap_stage3_require_equal "Rust runtime authority private-admission snapshot" \
+      "${runtime_origin_after}" "${runtime_admitted_snapshot}" || {
     echo "error: Rust runtime authority changed during private admission" >&2
     exit 1
   }
@@ -2504,6 +3200,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: hosted runtime identity changed while pinning Stage 2 authority" >&2
     exit 1
   }
+  bootstrap_step_mark private-admission-and-pin-stage4
   stage_runtime_absolute=${BOOTSTRAP_STAGE4_RUNTIME_PATH}
   stage2_seed_absolute=${BOOTSTRAP_STAGE4_SEED}
   seed_bin=${BOOTSTRAP_STAGE4_SEED}
@@ -2519,27 +3216,36 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "error: could not bind bootstrap tool authority" >&2
     exit 1
   }
+  bootstrap_step_mark tool-authority-before
   bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
     echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
     exit 1
   }
+  bootstrap_step_mark git-state-before
   bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
     echo "error: could not snapshot Stage 3 source authority" >&2
     exit 1
   }
+  bootstrap_step_mark source-inputs-before
 
-  # Stage 2: seed compiles bootstrap_main.spl
+  # Stage 2: the admitted parent compiles bootstrap_main.spl.
   # Stage 2 uses the configured backend; LLVM is the default and Cranelift is
   # an explicit supported alternative.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
-  echo "Stage 2: seed → bootstrap_main.spl"
+  echo "Stage 2: admitted parent → bootstrap_main.spl"
   # Preserve the verified phase-1 (seed) compiler as an immutable lineage snapshot.
-  if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+  if [ -z "${bootstrap_stage2_parent_override}" ] &&
+     [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
     sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${seed_bin}" phase1 || \
       echo "  warning: phase1 snapshot preservation failed (non-fatal)" >&2
   fi
+  bootstrap_step_mark phase1-snapshot-preserve
   bootstrap_progress_mark stage2 "$(absolute_path "${log_dir}/stage2-native-build.log")"
   mkdir -p "${stage2_provenance_cache}"
+  # M3 manifests bind canonical filesystem roots, not unresolved future path
+  # spellings. Create the separate Phase 3 ownership root before Phase 2 emits
+  # its immutable manifest; Phase 2 still never writes within that root.
+  mkdir -p "${stage3_provenance_cache}"
   # Stage 2 failure is reported before Stage 3; no later stage may claim it.
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
@@ -2553,8 +3259,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     native_verbose_arg="--verbose"
   fi
   stage_build_rust_log="${RUST_LOG:-error}"
-  stage2_seed_absolute="$(absolute_path \
-    "${stage2_runtime_authority}/simple${exe_suffix}")"
+  if [ -n "${bootstrap_stage2_parent_override}" ]; then
+    stage2_seed_absolute=${bootstrap_stage2_parent_override}
+  else
+    stage2_seed_absolute="$(absolute_path \
+      "${stage2_runtime_authority}/simple${exe_suffix}")"
+  fi
   stage2_output_absolute="${stage2_bin}"
   stage3_output_absolute="${stage3_bin}"
   stage2_admitted_absolute="$(absolute_path "${stage2_admitted_bin}")"
@@ -2563,6 +3273,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage_runtime_absolute="$(absolute_path "${stage2_runtime_authority}")"
   stage2_cache_absolute="$(absolute_path "${stage2_provenance_cache}")"
   stage3_cache_absolute="$(absolute_path "${stage3_provenance_cache}")"
+  stage2_compatibility_manifest="${stage3_provenance_dir}/phase2-compatibility.manifest"
+  stage2_compatibility_manifest_absolute="$(absolute_path "${stage2_compatibility_manifest}")"
   stage2_home_absolute="$(absolute_path "${stage2_provenance_home}")"
   stage2_tmp_absolute="$(absolute_path "${stage2_provenance_tmp}")"
   stage3_home_absolute="$(absolute_path "${stage3_provenance_home}")"
@@ -2601,22 +3313,60 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ) || exit 1
     fi
   fi
+  # Per-file native-build timeout for the strict Stage 2 invocation. OPT-IN via
+  # SIMPLE_NATIVE_FILE_TIMEOUT (unset => empty => pinned argv byte-identical),
+  # mirroring stage3_timeout_args in resume-stage3-from-admitted.sh, whose
+  # stage2 args-hash formula must stay word-for-word identical to this one.
+  stage2_timeout_args=
+  bootstrap_stage2_darwin_env=
+  case "${PLATFORM}" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
+  case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
+    '') ;;
+    *[!0-9]*)
+      echo "error: SIMPLE_NATIVE_FILE_TIMEOUT must be a number" >&2
+      exit 1
+      ;;
+    *) stage2_timeout_args="--timeout ${SIMPLE_NATIVE_FILE_TIMEOUT}" ;;
+  esac
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
-      "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+      "SIMPLE_BOOTSTRAP=1" \
+      "SIMPLE_ABI_POLICY=${simple_abi_policy}" \
+      "SIMPLE_PLUGIN_MANIFEST_POLICY=${SIMPLE_PLUGIN_MANIFEST_POLICY}" \
+      "SIMPLE_KERNEL_K1_POLICY=${SIMPLE_KERNEL_K1_POLICY}" \
+      "SIMPLE_COVERAGE_CUTOVER_STATE=${SIMPLE_COVERAGE_CUTOVER_STATE}" \
+      "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
+      "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
+      "SIMPLE_FRONTEND_CACHE=1" \
+      "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
       ${bootstrap_windows_abi_env} \
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+      "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
+      "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      --source src/compiler --source src/app --source src/lib \
-      --entry-closure --threads "${jobs}" --cache-dir "${stage2_cache_absolute}" \
+      ${k1_composition_source_args} --source src/compiler --source src/app --source src/lib \
+      --entry-closure --threads "${jobs}" \
       ${native_verbose_arg} \
+      ${stage2_timeout_args} \
+      --cache-dir "${stage2_cache_absolute}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_bin}"
@@ -2649,12 +3399,24 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
-      "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+      "SIMPLE_BOOTSTRAP=1" \
+      "SIMPLE_BOOTSTRAP_STAGE3=1" \
+      "SIMPLE_ABI_POLICY=${simple_abi_policy}" \
+      "SIMPLE_ABI_ADMISSION_RECEIPT=${stage2_admission_receipt_absolute}" \
+      "SIMPLE_PLUGIN_MANIFEST_POLICY=${SIMPLE_PLUGIN_MANIFEST_POLICY}" \
+      "SIMPLE_KERNEL_K1_POLICY=${SIMPLE_KERNEL_K1_POLICY}" \
+      "SIMPLE_COVERAGE_CUTOVER_STATE=${SIMPLE_COVERAGE_CUTOVER_STATE}" \
+      "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
+      "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
-      "SIMPLE_FRONTEND_CACHE=0" \
+      "SIMPLE_FRONTEND_CACHE=1" \
+      "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
+      "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ=${stage2_compatibility_manifest_absolute}" \
+      "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
       ${stage3_mc_env} \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_COMPILER_PHASE_PROFILE=1" \
@@ -2668,50 +3430,136 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
       ${bootstrap_windows_abi_env} \
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      --threads "${selfhost_jobs}" \
+      ${k1_composition_source_args} \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --runtime-path "${stage_runtime_absolute}" \
-      -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
+      --entry src/app/cli/bootstrap_main.spl -o "${stage3_bin}"
   )
   rm -f "${stage2_bin}" "${stage3_bin}"
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
-  cmp -s "${runtime_admitted_snapshot}" \
+  bootstrap_stage3_require_equal "Rust runtime authority before Stage 2" \
+    "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
   stage2_native_log="$(absolute_path "${log_dir}/stage2-native-build.log")"
   # A pre-execution transcript refusal produces no build log. Remove the prior
   # attempt before entering the runner so failure diagnostics cannot attribute
   # stale compiler output to this invocation.
-  rm -f "${stage2_native_log}"
+  # The pre-exec refusal reason is written to its own file (not the build log,
+  # whose absence is itself the "nothing executed" signal) and handed to
+  # check-stage-log-diagnosable.shs, which scans secondary logs when the build
+  # log was never created.
+  stage2_refusal_log="${stage2_native_log}.refusal"
+  rm -f "${stage2_native_log}" "${stage2_refusal_log}"
   bootstrap_run_stage2_native() {
+    set -- \
+      "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
+      "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
+      "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
+      "LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-}" \
+      "PATH=${stage_build_path}" \
+      "RUST_LOG=${stage_build_rust_log}" \
+      "LIBRARY_PATH=${bootstrap_link_library_path}" \
+      "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
+      SIMPLE_BOOTSTRAP=1 \
+      "SIMPLE_ABI_POLICY=${simple_abi_policy}" \
+      "SIMPLE_PLUGIN_MANIFEST_POLICY=${SIMPLE_PLUGIN_MANIFEST_POLICY}" \
+      "SIMPLE_KERNEL_K1_POLICY=${SIMPLE_KERNEL_K1_POLICY}" \
+      "SIMPLE_COVERAGE_CUTOVER_STATE=${SIMPLE_COVERAGE_CUTOVER_STATE}" \
+      "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
+      SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+      SIMPLE_NATIVE_BUILD_RUST=1 \
+      SIMPLE_NO_STUB_FALLBACK=1 \
+      "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
+      SIMPLE_FRONTEND_CACHE=1 \
+      "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
+      ${bootstrap_windows_abi_env} \
+      ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+      ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+      ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+      ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
+      "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
+      "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
+      "SIMPLE_BINARY=${stage2_seed_absolute}"
+    # These three guards are the ONLY pre-exec refusal on this path, and they
+    # used to be bare `|| return 1`. A mismatch therefore produced no build log
+    # and no reason anywhere, and the script's own failure diagnosis correctly
+    # but uselessly reported "UNDIAGNOSABLE: no reason was recorded for the
+    # refusal" across 8 empty logs. Fail closed exactly as before, but say what
+    # differed -- a fail-closed check that cannot be diagnosed is a dead end.
+    # Printing to stderr alone was still not enough: stderr reaches only the
+    # terminal, so the stage diagnosis (which reads files) kept reporting
+    # UNDIAGNOSABLE while the reason sat in scrollback. Each refusal now writes
+    # its reason to ${stage2_refusal_log} first, then echoes that file.
+    stage2_env_names=$(bootstrap_stage3_env_assignment_names "$@") || {
+      echo "error: stage2 pre-exec refusal: env assignment names could not be derived" \
+        > "${stage2_refusal_log}"
+      cat "${stage2_refusal_log}" >&2
+      return 1
+    }
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}") || {
+      echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
+        > "${stage2_refusal_log}"
+      cat "${stage2_refusal_log}" >&2
+      return 1
+    }
+    [ "${stage2_env_names}" = "${stage2_expected_env_names}" ] || {
+      {
+        echo "error: stage2 pre-exec refusal: env assignment names do not match the canonical list for ${PLATFORM}"
+        echo "  (builder: bootstrap_run_stage2_native in scripts/bootstrap/bootstrap-from-scratch.sh;"
+        echo "   canonical list: bootstrap_stage3_stage2_canonical_env_names in scripts/check/lib/bootstrap-stage3/authority.shs)"
+        printf '  actual:   %s\n' "${stage2_env_names}"
+        printf '  expected: %s\n' "${stage2_expected_env_names}"
+        for stage2_env_name in ${stage2_expected_env_names}; do
+          case " ${stage2_env_names} " in
+            *" ${stage2_env_name} "*) ;;
+            *) printf '  missing:  %s\n' "${stage2_env_name}" ;;
+          esac
+        done
+        for stage2_env_name in ${stage2_env_names}; do
+          case " ${stage2_expected_env_names} " in
+            *" ${stage2_env_name} "*) ;;
+            *) printf '  unexpected: %s\n' "${stage2_env_name}" ;;
+          esac
+        done
+      } > "${stage2_refusal_log}"
+      cat "${stage2_refusal_log}" >&2
+      return 1
+    }
     bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \
     "${stage2_native_log}" \
     "${stage2_home_absolute}" "${stage2_tmp_absolute}" "${stage_build_path}" \
-    RUST_LOG="${stage_build_rust_log}" \
-    LIBRARY_PATH="${bootstrap_link_library_path}" \
-    SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
-    SIMPLE_BOOTSTRAP=1 \
-    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_NATIVE_BUILD_RUST=1 \
-    SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
-    ${bootstrap_windows_abi_env} \
-    SIMPLE_BINARY="${stage2_seed_absolute}" -- \
+    "$@" -- \
     "${stage2_seed_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib \
+    ${k1_composition_source_args} --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
+    ${stage2_timeout_args} \
     --cache-dir "${stage2_cache_absolute}" \
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \
@@ -2727,6 +3575,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "  Stage 2: one worker timed out; retrying once with the same producer-scoped cache"
     cp "${stage2_native_log}" \
       "${stage2_tmp_absolute}/stage2-native-build.before-cache-retry.log"
+    cp "${stage2_native_log}.rss.env" \
+      "${stage2_tmp_absolute}/stage2-native-build.before-cache-retry.log.rss.env" || exit 89
     set +e
     bootstrap_run_stage2_native
     stage2_status=$?
@@ -2735,12 +3585,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-after-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
-  cmp -s "${runtime_admitted_snapshot}" \
+  bootstrap_stage3_require_equal "Rust runtime authority after Stage 2" \
+    "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-after-stage2.txt" || {
     echo "error: frozen runtime authority changed during Stage 2" >&2
     exit 1
   }
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
+  # See bootstrap_prune_stale_seed_scope_dirs (bootstrap-cache-policy.shs)
+  # for the full rationale and safety rules (Stage-2-success gate, exact
+  # scope-<16 hex> match, single-value requirement, warn-not-fail on rm).
+  bootstrap_prune_stale_seed_scope_dirs \
+    "${stage2_status}" "${stage2_native_log}" "${stage2_cache_absolute}"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
     if ! bootstrap_stage_sanity "${stage2_bin}" \
@@ -2778,15 +3634,21 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt" \
       "${stage_runtime_absolute}" || exit 1
     receiver_status=fail
+    receiver_compare_status=0
     if [ "${stage2_receiver_status}" -eq 0 ] &&
-      [ "${stage2_receiver_sha_before}" = "${stage2_receiver_sha_after}" ] &&
-      cmp -s "${runtime_admitted_snapshot}" \
-        "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt"; then
-      receiver_status=pass
+      [ "${stage2_receiver_sha_before}" = "${stage2_receiver_sha_after}" ]; then
+      if bootstrap_stage3_require_equal "Rust runtime authority after receiver" \
+          "${runtime_admitted_snapshot}" \
+          "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt"; then
+        receiver_status=pass
+      else
+        receiver_compare_status=$?
+      fi
     fi
     {
       echo "schema=simple-bootstrap-stage2-receiver-evidence-v1"
       echo "status=${receiver_status}"
+      echo "runtime_compare_status=${receiver_compare_status}"
       echo "probe_exit=${stage2_receiver_status}"
       echo "candidate_sha256_before=${stage2_receiver_sha_before}"
       echo "candidate_sha256_after=${stage2_receiver_sha_after}"
@@ -2795,7 +3657,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "probe_log_sha256=$(bootstrap_stage3_hash_file "${stage2_receiver_log}")"
     } >"${stage2_receiver_evidence}"
     if [ "${receiver_status}" != pass ]; then
-      echo "error: Stage 2 struct receiver/runtime capability failed" >&2
+      if [ "${receiver_compare_status}" -gt 1 ]; then
+        echo "error: Stage 2 receiver admission comparator infrastructure failed (status=${receiver_compare_status})" >&2
+      else
+        echo "error: Stage 2 struct receiver/runtime capability failed" >&2
+      fi
       stage2_status=3
       stage2_rejected_dir="${output_dir}/stage2-rejected/${PLATFORM}"
       stage2_rejected_bin="${stage2_rejected_dir}/simple${exe_suffix}"
@@ -2825,11 +3691,23 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "$(absolute_path "${tool_authority_after}")" "${PATH}" "${repo_root}" || exit 1
     bootstrap_stage3_git_state "${repo_root}" "${stage3_git_after}" || exit 1
     bootstrap_stage3_source_snapshot "${stage3_source_after}" "${repo_root}" || exit 1
-    if ! cmp -s "${tool_authority_before}" "${tool_authority_after}" ||
-       ! cmp -s "${stage3_source_before}" "${stage3_source_after}" ||
+    stage2_tool_compare_status=0
+    if bootstrap_stage3_require_equal "Stage 2 tool authority" "${tool_authority_before}" "${tool_authority_after}"; then :; else
+      stage2_tool_compare_status=$?
+    fi
+    stage3_source_compare_status=0
+    if bootstrap_stage3_require_equal "Stage 3 source snapshot" "${stage3_source_before}" "${stage3_source_after}"; then :; else
+      stage3_source_compare_status=$?
+    fi
+    if [ "${stage2_tool_compare_status}" -ne 0 ] ||
+       [ "${stage3_source_compare_status}" -ne 0 ] ||
        ! grep -qx 'status=pass' "${stage2_sanity_evidence}" ||
        ! grep -qx 'status=pass' "${stage2_receiver_evidence}"; then
-      echo "error: refused incomplete Stage 2 admission provenance" >&2
+      if [ "${stage2_tool_compare_status}" -gt 1 ] || [ "${stage3_source_compare_status}" -gt 1 ]; then
+        echo "error: refused Stage 2 admission: comparator infrastructure failure" >&2
+      else
+        echo "error: refused incomplete Stage 2 admission provenance" >&2
+      fi
       stage2_status=4
     else
       stage2_origin_sha_before=$(bootstrap_stage3_hash_file "${stage2_bin}")
@@ -2846,7 +3724,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # Re-snapshot after publication: a concurrent source edit invalidates
       # the private copy and prevents a stop-after-stage2 false admission.
       bootstrap_stage3_source_snapshot "${stage3_source_after}" "${repo_root}" || exit 1
-      if ! cmp -s "${stage3_source_before}" "${stage3_source_after}"; then
+      if ! bootstrap_stage3_require_equal "Stage 3 source snapshot" "${stage3_source_before}" "${stage3_source_after}"; then
         chmod u+w "${stage2_admitted_bin}"
         rm -f "${stage2_admitted_bin}"
         rmdir "${stage2_admitted_dir}" 2>/dev/null || true
@@ -2878,30 +3756,79 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
           stage2_parent_provenance="${stage2_parent_dir}/stage2-provenance.receipt"
-          stage2_parent_sanity_tmp="${stage2_parent_sanity}.tmp.$$"
-          stage2_parent_provenance_tmp="${stage2_parent_provenance}.tmp.$$"
-          {
-            echo 'schema=simple-bootstrap-stage2-parent-sanity-v1'
-            echo 'stage2-sanity: pass'
-            echo "candidate_sha256=${stage2_origin_sha_before}"
-            echo "admission_receipt_path=${stage2_admission_receipt_absolute}"
-            echo "admission_receipt_sha256=$(bootstrap_stage3_hash_file "${stage2_admission_receipt_absolute}")"
-          } >"${stage2_parent_sanity_tmp}"
-          {
-            echo 'schema=simple-bootstrap-stage2-parent-provenance-v1'
-            echo 'stage2-provenance: pure-simple'
-            echo 'authority=explicit-full-bootstrap-stage2-trust-root'
-            echo "candidate_sha256=${stage2_origin_sha_before}"
-            echo "admission_receipt_path=${stage2_admission_receipt_absolute}"
-            echo "source_snapshot_sha256=$(bootstrap_stage3_hash_file "${stage3_source_before}")"
-            echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "${runtime_admitted_snapshot}")"
-            echo "tool_authority_sha256=$(bootstrap_stage3_hash_file "${tool_authority_before}")"
-            echo "admission_receipt_sha256=$(bootstrap_stage3_hash_file "${stage2_admission_receipt_absolute}")"
-          } >"${stage2_parent_provenance_tmp}"
-          chmod 400 "${stage2_parent_sanity_tmp}" "${stage2_parent_provenance_tmp}"
-          mv -f "${stage2_parent_sanity_tmp}" "${stage2_parent_sanity}"
-          mv -f "${stage2_parent_provenance_tmp}" "${stage2_parent_provenance}"
+          # The publisher is fail-closed on the CANDIDATE PATH: it asserts
+          # `[ "$(field candidate_path)" = "$candidate" ]`, and the admission
+          # receipt above recorded `${stage2_admitted_absolute}`. Passing
+          # `${stage2_bin}` instead offered a byte-identical copy at a DIFFERENT
+          # path, the assertion exited under `set -eu`, the parent receipts were
+          # never written, and Stage 3 then refused with
+          # `parent-stage2-sanity-unavailable` on a Stage 2 that WAS admitted.
+          # Both sides must read the same variable -- see
+          # doc/08_tracking/bug/stage2_parent_receipt_publish_passes_wrong_candidate_path_2026-09-13.md
+          # and scripts/check/check-stage2-parent-receipt-candidate-binding.shs.
+          # The receipts still land beside ${stage2_bin} (stage2_parent_dir
+          # above); only the identity argument changes.
+          sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
+            "${stage2_admitted_absolute}" \
+            "${stage2_admission_receipt_absolute}" \
+            "$(absolute_path "${stage3_source_before}")" \
+            "$(absolute_path "${runtime_admitted_snapshot}")" \
+            "$(absolute_path "${tool_authority_before}")" \
+            "$(absolute_path "${stage2_parent_sanity}")" \
+            "$(absolute_path "${stage2_parent_provenance}")" \
+            "${bootstrap_stage2_parent_authority}" || {
+            echo "error: could not publish producer-bound Stage 2 parent receipts" >&2
+            exit 1
+          }
+          # Close the operational gap recorded in
+          # doc/08_tracking/bug/stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md
+          # (site 20): every receipt the Stage 3 gate reads now has a producer,
+          # but nothing invoked the LAST one, so a seed-rooted lane admitted a
+          # Stage 2 and then had no way to reach Stage 3. The producer below
+          # re-verifies the parent authority itself (stage2 binary + the two
+          # receipts published immediately above) and refuses on any mismatch,
+          # so invoking it here grants no trust the operator did not already
+          # establish -- it only removes a manual transcription step. The typed
+          # reason is still the operator's: no default, no invention.
+          if [ -n "${produce_stage3_receipt_reason}" ]; then
+            stage3_planner_receipt="${output_dir}/stage3-planner-admission.receipt"
+            rm -f "${stage3_planner_receipt}"
+            # The producer allowlists its --bootstrap-output to <repo>/build/**
+            # or to the root named by SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT.
+            # Centralized storage puts this run's output outside <repo>/build,
+            # so without this the producer refuses its own lane's directory with
+            # bootstrap-output-outside-allowlisted-root. The value passed is not
+            # a caller-chosen path: it is exactly ${output_dir}, the directory
+            # this script already selected, created and locked, so the allowlist
+            # is narrowed to this run's own output and nothing else. An
+            # explicitly configured root still wins.
+            if ! env "SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-${output_dir}}" \
+              sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
+              "--target=//bootstrap:stage3" \
+              "--reason=${produce_stage3_receipt_reason}" \
+              "--parent-compiler=${stage2_bin}" \
+              "--bootstrap-output=${output_dir}" \
+              "--out=${stage3_planner_receipt}"; then
+              echo "error: could not produce the Stage 3 planner admission receipt" >&2
+              rm -f "${stage3_planner_receipt}"
+              exit 1
+            fi
+            [ -f "${stage3_planner_receipt}" ] || {
+              echo "error: Stage 3 planner admission producer wrote no receipt" >&2
+              exit 1
+            }
+            echo "bootstrap-policy: stage3-planner-receipt=${stage3_planner_receipt}"
+            echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=${output_dir} --bootstrap-receipt=${stage3_planner_receipt}"
+          fi
         fi
+        # Publish the platform's runtime names and bind the exact capsule to
+        # this admission before exposing a completed Stage 2 to verification.
+        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
+          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
+          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
+          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
+          exit 1
+        }
         # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
         if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
           sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
@@ -2933,6 +3860,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       --stage stage2 \
       --status "${stage2_status}" \
       --log "${log_dir}/stage2-native-build.log" \
+      --log "${log_dir}/stage2-native-build.log.refusal" \
       --log "${stage2_sanity_evidence}.frontend-failure.log" \
       --log "${stage2_sanity_evidence}.frontend-driver.log" \
       --log "${stage2_sanity_evidence}.frontend-bootstrap-0.log.hello-world-positional" \
@@ -2954,12 +3882,450 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     echo "  warning: see doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
   fi
 
+  if [ "${stage2_status}" -eq 0 ]; then
+    # Producer-scoped compatibility-manifest gate. The manifest and the M2
+    # reverse-reference authority it binds exist ONLY in the pure-Simple driver
+    # (driver_aot_native_output.spl:398 / reverse_reference_receipt.spl:243);
+    # `grep -rn PHASE2_COMPATIBILITY_MANIFEST src/compiler_rust/` is empty and
+    # so is the seed's reverse-reference grep, so a seed-produced Phase-2 cache
+    # can never carry one. The gate is NOT dropped: it is scoped on a POSITIVE
+    # producer fact computed before Stage 2 ran, a skip leaves evidence on
+    # disk, and Stage 3 still gets MANIFEST_READ and therefore admits ZERO
+    # Phase-2 reuse without a manifest. Selftest is fatal inside the checker.
+    # doc/08_tracking/bug/stage2_compatibility_manifest_unwritable_by_rust_seed_2026-09-13.md
+    stage2_compat_producer_kind=$(
+      bootstrap_phase2_compat_producer_kind \
+        "${bootstrap_stage2_parent_override}"
+    ) || {
+      echo "error: could not determine the Stage 2 producer kind" >&2
+      exit 1
+    }
+    sh "${repo_root}/scripts/check/check-stage2-compat-manifest-gate.shs" \
+      "--producer-kind=${stage2_compat_producer_kind}" \
+      "--manifest=${stage2_compatibility_manifest_absolute}" \
+      "--evidence=${stage2_compatibility_manifest_absolute}.not-published" \
+      "--producer-path=${stage2_seed_absolute}" || exit 1
+    # Claim the lane BEFORE sealing the cache. resume-stage3-from-admitted.sh
+    # runs check-cache-scope-ownership.shs over this exact dir with lane
+    # `stage2` (:549); with no marker present the guard takes its "unowned or
+    # brand-new cache: claim it" branch and WRITES `.cache_scope` -- into a dir
+    # this line has already made read-only. The write failed `Permission
+    # denied`, the guard returned 2 => `ERROR — nothing was checked`, and
+    # Stage 3 aborted before doing any work, on a Stage 2 that was properly
+    # admitted. Stage 2 sealed a cache it never claimed, and Stage 3 could not
+    # claim it because it was sealed. Writing the marker here closes that
+    # ordering gap: the lane that owns the cache stamps it while the dir is
+    # still writable, and the resume then finds a matching marker and writes
+    # nothing. Fail closed, exactly like the resume side -- a cache already
+    # stamped by a FOREIGN lane is still refused, which is the property the
+    # guard exists for.
+    if [ -f "${bootstrap_cache_scope_guard}" ]; then
+      sh "${bootstrap_cache_scope_guard}" "${stage2_cache_absolute}" stage2 || {
+        echo "error: Stage 2 native cache belongs to a foreign lane scope" >&2
+        exit 1
+      }
+    fi
+    chmod -R a-w "${stage2_cache_absolute}"
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      chmod 400 "${stage2_compatibility_manifest_absolute}"
+    fi
+  fi
+
+  # Stage 2 compiler tests (--full-bootstrap).
+  #
+  # Until this step, Stage 2 ended at admission: it built the compiler, probed
+  # it on a hello world (sanity), probed one struct-receiver/runtime capability,
+  # admitted it, published the parent receipts and the frozen runtime capsule,
+  # and sealed the native cache. Nothing ever RAN a compiler test with it. A
+  # Stage 2 that compiles three lines but cannot build its own test runner, or
+  # whose test runner fails the compiler suites, stayed invisible until Stage 3
+  # or later — which is the whole point of having a Phase 2 at all.
+  #
+  # This does not invent a mechanism. `bootstrap-phase-verification.shs
+  # --phase=stage2` is the repo's existing executable Phase 2 gate (the same one
+  # run-linux-phase2-tests.shs and run-freebsd-phase2-tests.shs drive after the
+  # fact, and the one named as authoritative in
+  # doc/09_report/phase2_binary_verification_blocked_2026-09-21.md). It resolves
+  # the bound runtime capsule itself via phase2-runtime-binding.shs resolve — so
+  # no --runtime-path is passed and no path-equality assumption is made — then
+  # builds a phase-bound full CLI and `simple_test_runner` FROM this Stage 2
+  # compiler (compiler_cli_build / test_runner_build) and runs
+  # compiler_bootstrap_tests, interpreter_* and loader_* through them under
+  # --verification-require-test-json and a frozen command-owner receipt.
+  #
+  # The "compiler test binary" therefore does not pre-exist: Stage 2 produces
+  # it. Absence of it is a FAILED test_runner_build, which the summary check
+  # below treats as an error, never as a skip.
+  #
+  # It necessarily runs AFTER admission, because the verifier reads
+  # admission.env and the capsule published immediately above. Ordering note in
+  # the report below: on failure the admitted binary, its receipts and the
+  # capsule are already on disk, so this step writes rejection evidence and
+  # refuses the run rather than retracting them — there is no post-admission
+  # retraction idiom in this script (stage2-rejected/ is pre-admission only).
+  # No existing gate, receipt or admission step is relaxed to make room here.
+  if [ "${full_bootstrap}" -eq 1 ] && [ "${stage2_status}" -eq 0 ]; then
+    stage2_tests_root="${output_dir}/stage2-compiler-tests/${PLATFORM}"
+    stage2_tests_work="${stage2_tests_root}/verification"
+    stage2_tests_summary="${stage2_tests_work}/summary.env"
+    stage2_tests_evidence="${stage2_tests_root}/stage2-compiler-tests.env"
+    stage2_tests_rejection="${stage2_tests_root}/rejection.env"
+    stage2_tests_log="${log_dir}/stage2-compiler-tests.log"
+    mkdir -p "${stage2_tests_root}" || {
+      echo "error: cannot create the Stage 2 compiler-test evidence root" >&2
+      exit 1
+    }
+    # A previous run may have left these 400; clear them so this run records
+    # truthfully instead of inheriting a stale verdict (same failure mode the
+    # stage2-rejected receipts already guard against above).
+    rm -f "${stage2_tests_evidence}" "${stage2_tests_rejection}"
+    # Absence of the artifact under test is an ERROR, never a silent pass.
+    [ -f "${stage2_admitted_bin}" ] && [ -x "${stage2_admitted_bin}" ] || {
+      echo "error: Stage 2 compiler tests have nothing to run: no executable admitted compiler at ${stage2_admitted_bin}" >&2
+      exit 1
+    }
+    [ -f "${stage2_admission_receipt}" ] || {
+      echo "error: Stage 2 compiler tests have no admission receipt at ${stage2_admission_receipt}" >&2
+      exit 1
+    }
+    # Under `set -eu` (line 114), a bare `sha=$(cmd)` with `cmd` failing would
+    # exit the script on that line -- before a later `status=$?` line ever
+    # runs -- so the diagnostic below would never print. Initialize the
+    # status and let `|| stage2_tests_hash_status=$?` capture a nonzero exit
+    # without tripping -e.
+    stage2_tests_hash_status=0
+    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}") || stage2_tests_hash_status=$?
+    # bootstrap_stage3_hash_file's own body is a pipeline (`sha256sum "$1" |
+    # awk '{print $1}'`, or the shasum/sha256/openssl equivalents): if the
+    # hashing command fails but awk still runs (on no input, awk exits 0 and
+    # prints nothing), the FUNCTION's exit status is awk's, so `|| { ... }`
+    # on the call above would never fire even though the hash is empty.
+    # Check the captured status directly (never through a further pipe) AND
+    # require non-empty output before trusting this value for anything --
+    # especially before the prune below, which would otherwise delete the
+    # CURRENT hash's own cache/output dirs (never anything outside this
+    # tree, but it silently discards a warm cache on every such failure).
+    [ "${stage2_tests_hash_status}" -eq 0 ] && [ -n "${stage2_tests_sha}" ] || {
+      echo "error: cannot hash the admitted Stage 2 compiler for verification (status=${stage2_tests_hash_status}, sha='${stage2_tests_sha}')" >&2
+      exit 1
+    }
+    # Prune stale per-hash cache/output dirs from earlier bootstraps before
+    # running. The verifier keys its object cache and built-tool output dirs
+    # by this Stage 2 compiler's own hash (perf/mem audit of PR #1458,
+    # 2026-09-24), which changes on essentially every bootstrap, so nothing
+    # ever deleted the PREVIOUS hash's cache/output dir; left alone, disk use
+    # under stage2-compiler-tests/<PLATFORM>/ grows without bound across
+    # repeated bootstraps. Keep only the directory matching the CURRENT
+    # admitted-compiler hash; everything else here is dead weight from a
+    # compiler that is no longer the admitted Stage 2 binary.
+    for stage2_tests_stale_root in \
+      "${stage2_tests_root}/cache/compiler-tools/stage2" \
+      "${stage2_tests_root}/cache/tool_builds/stage2" \
+      "${stage2_tests_work}/outputs/compiler-tools/stage2" \
+      "${stage2_tests_work}/outputs/tool-builds/stage2"; do
+      [ -d "${stage2_tests_stale_root}" ] || continue
+      for stage2_tests_stale_dir in "${stage2_tests_stale_root}"/*; do
+        [ -d "${stage2_tests_stale_dir}" ] || continue
+        [ "$(basename "${stage2_tests_stale_dir}")" = "${stage2_tests_sha}" ] && continue
+        rm -rf "${stage2_tests_stale_dir}" ||
+          echo "warning: could not prune stale Stage 2 compiler-test dir: ${stage2_tests_stale_dir}" >&2
+      done
+    done
+    # The verifier accepts normal or full only; every other bootstrap strategy
+    # (adhoc, unset) maps onto its normal matrix, which already includes the
+    # compiler-bootstrap, interpreter and loader suites at Stage 2.
+    case "${SIMPLE_BOOTSTRAP_STRATEGY:-normal}" in
+      full) stage2_tests_strategy=full; stage2_tests_profile=full ;;
+      *) stage2_tests_strategy=normal; stage2_tests_profile=slim ;;
+    esac
+    # Timeout/worker realism (perf/mem audit of PR #1458): the outer per-task
+    # timeout (BOOTSTRAP_VERIFY_TIMEOUT_SECONDS, verifier default 1800s) binds
+    # a cold full-CLI/test-runner native-build, and documented full-CLI builds
+    # of this same closure took 18-40+ minutes elsewhere -- 1800s is not
+    # realistic on a cold cache, especially on Windows (slower spawns,
+    # Defender, cold cache, and native-build's own worker default is already
+    # sized in hours for exactly this reason). Raise it, and raise it further
+    # still on Windows (MSYS/MINGW/CYGWIN via `uname -s`) until real Windows
+    # numbers exist. Also default the test-runner's own internal worker count
+    # above the verifier's built-in default of 1 (fully sequential); nothing
+    # in this codebase's `--parallel --max-workers=N` test-runner path
+    # (already used elsewhere in bootstrap-phase-verification.shs) documents
+    # it as unsafe for this suite. Capped at 4, matching the audit's own
+    # min(nproc/2, 4) recommendation rather than the verifier's wider
+    # accepted range (1-12): per-worker RSS in interpreter mode is unmeasured
+    # here and this repo has SIGKILL-for-memory history on large parses
+    # (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md), so this
+    # stays conservative pending a real measurement. Scoped to this stage-2
+    # step only via the subshell below -- other bootstrap-phase-verification
+    # .shs callers (stage1/stage3/stage4, run-*-phase2-tests.shs) keep their
+    # own defaults.
+    case "$(uname -s 2>/dev/null || :)" in
+      MINGW*|MSYS*|CYGWIN*) stage2_tests_timeout_default=7200 ;;
+      *) stage2_tests_timeout_default=3600 ;;
+    esac
+    stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-${stage2_tests_timeout_default}}
+    # `jobs` (this bootstrap's own --jobs selection) is expected to already be
+    # a resolved integer by the time this step runs (bootstrap_select_jobs,
+    # sourced from bootstrap-jobs.shs above, replaces a symbolic
+    # full/half/min/auto with a real host CPU count). Do not trust that
+    # blindly: a symbolic or empty value here would otherwise silently
+    # collapse to 1 test worker / 1 build thread even on a wide host
+    # (observed: `--jobs=full --stop-after-stage2` on a 24-thread host).
+    # Re-resolve a real host CPU count whenever `jobs` is not a plain
+    # positive integer, reusing bootstrap_detect_host_cpus (same
+    # nproc -> getconf _NPROCESSORS_ONLN -> sysctl -> NUMBER_OF_PROCESSORS
+    # probe chain bootstrap-jobs.shs itself uses, so Windows Git Bash where
+    # `nproc` is absent still resolves via NUMBER_OF_PROCESSORS).
+    case "${jobs:-}" in
+      ''|*[!0-9]*|0)
+        # `0` is included here (not just empty/non-numeric): a literal
+        # --jobs=0 is not a valid worker count either, and letting it
+        # through would divide-derive a 0 build-thread count that
+        # bootstrap-phase-verification.shs's own `case "$build_threads" in
+        # ''|*[!0-9]*|0) die ...` (:164) rejects outright, killing the
+        # verifier instead of just re-detecting a sane count here.
+        stage2_tests_cpu_basis=$(bootstrap_detect_host_cpus 2>/dev/null || :)
+        case "${stage2_tests_cpu_basis}" in
+          ''|*[!0-9]*|0) stage2_tests_cpu_basis=1 ;;
+        esac
+        ;;
+      *) stage2_tests_cpu_basis=${jobs} ;;
+    esac
+    stage2_tests_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-}
+    if [ -z "${stage2_tests_workers}" ]; then
+      # Capped at 4, matching the audit's own min(nproc/2, 4) recommendation
+      # rather than the verifier's wider accepted range (1-12): per-worker
+      # RSS in interpreter mode is unmeasured here and this repo has
+      # SIGKILL-for-memory history on large parses
+      # (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md), so
+      # this stays conservative pending a real measurement. Confirmed still
+      # appropriate after the build-thread memory review below: each test
+      # worker here runs `simple_test_runner` against ALREADY-BUILT CLI/
+      # test-runner binaries (spec-by-spec interpreter execution), not a
+      # fresh whole-entry-closure native-build per worker, so it is not the
+      # same 2.4-2.7 GB-per-worker cost native-build threads carry. 4 stays
+      # the cap pending a real per-worker RSS measurement of this path.
+      stage2_tests_workers=$((stage2_tests_cpu_basis / 2))
+      [ "${stage2_tests_workers}" -ge 1 ] || stage2_tests_workers=1
+      [ "${stage2_tests_workers}" -le 4 ] || stage2_tests_workers=4
+    fi
+    # Portable free-memory probe (perf/mem re-review, 2026-09-24): deriving
+    # build threads from CPU count alone (the prior version of this step)
+    # is wrong by the repo's own numbers -- shard_mem_clamp.spl and the
+    # 2026-08-18 bug record measure each native-build worker at 2.4-2.7 GB
+    # with nothing shared between workers, and a 16-worker run was already
+    # OOM-killed at ~40 GB. On a 24-thread/64 GB host, 24 threads would ask
+    # for ~58-65 GB against ~36-52 GB free. The existing memory clamp
+    # (bootstrap_build_jobs_memory_clamp, bootstrap-build-jobs-policy.shs)
+    # reads only /proc/meminfo, which does not exist on Windows -- this
+    # step's own primary target -- so it is reimplemented here per-platform:
+    # Linux via /proc/meminfo MemAvailable, macOS via hw.pagesize + vm_stat
+    # "Pages free", FreeBSD via hw.pagesize + vm.stats.vm.v_free_count, and
+    # Windows via `Get-CimInstance Win32_OperatingSystem` (FreePhysicalMemory
+    # is already reported in KiB). Any detection failure leaves
+    # stage2_tests_free_kib empty, which the build-threads block below
+    # treats as "assume the worst" (falls back to the 8-thread hard ceiling
+    # below, never to the full CPU count).
+    stage2_tests_free_kib=""
+    case "$(uname -s 2>/dev/null || :)" in
+      Linux)
+        if [ -r /proc/meminfo ]; then
+          stage2_tests_free_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null)
+        fi
+        ;;
+      Darwin)
+        # `|| :` on every `$(sysctl ...)`/`$(vm_stat ...)` substitution below:
+        # under `set -eu` (line 114), a failing command substitution on its
+        # own line exits the WHOLE SCRIPT immediately (verified:
+        # `sh -c 'set -eu; x=$(false); echo survived'` -> exit 1, no output)
+        # rather than merely leaving the variable empty for the numeric
+        # guard below to catch -- so a missing/failing sysctl or vm_stat
+        # must never be allowed to propagate a nonzero status here.
+        # "Pages free" alone undercounts real headroom: macOS also reports
+        # inactive/purgeable/speculative pages as reclaimable without
+        # swapping, so sum all four the way `vm_stat`'s own summary line
+        # implies (matches the intent of MemAvailable on Linux, not just
+        # MemFree).
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+        stage2_tests_vm_stat_out=$(vm_stat 2>/dev/null || :)
+        stage2_tests_free_pages=$(printf '%s\n' "${stage2_tests_vm_stat_out}" |
+          awk '
+            /^Pages free:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages inactive:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages purgeable:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages speculative:/ { gsub(/\./, "", $3); sum += $3 }
+            END { print sum + 0 }
+          ')
+        case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
+        case "${stage2_tests_free_pages}" in ''|*[!0-9]*) stage2_tests_free_pages="" ;; esac
+        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_pages}" ]; then
+          stage2_tests_free_kib=$(( stage2_tests_page_size * stage2_tests_free_pages / 1024 ))
+        fi
+        ;;
+      FreeBSD)
+        # Same `|| :` reasoning as the Darwin branch above. Also add
+        # v_inactive_count: FreeBSD's v_free_count alone is the same
+        # undercount as macOS's "Pages free" -- inactive pages are
+        # reclaimable without swapping.
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+        stage2_tests_free_count=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || :)
+        stage2_tests_inactive_count=$(sysctl -n vm.stats.vm.v_inactive_count 2>/dev/null || :)
+        case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
+        case "${stage2_tests_free_count}" in ''|*[!0-9]*) stage2_tests_free_count="" ;; esac
+        case "${stage2_tests_inactive_count}" in ''|*[!0-9]*) stage2_tests_inactive_count="" ;; esac
+        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_count}" ]; then
+          stage2_tests_free_pages=$(( stage2_tests_free_count + ${stage2_tests_inactive_count:-0} ))
+          stage2_tests_free_kib=$(( stage2_tests_page_size * stage2_tests_free_pages / 1024 ))
+        fi
+        ;;
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v powershell.exe >/dev/null 2>&1; then
+          # WMI can stall; bound it with `timeout` when available (this repo
+          # already requires POSIX sh + clang-only tooling, not extra
+          # dependencies, and `timeout` is coreutils, already assumed
+          # elsewhere in this script). -NonInteractive plus redirecting
+          # stdin from /dev/null stops a stalled/broken WMI provider from
+          # ever presenting a prompt this non-interactive step cannot answer.
+          if command -v timeout >/dev/null 2>&1; then
+            stage2_tests_free_kib=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
+              "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" </dev/null 2>/dev/null |
+              tr -d '\r\n ') || :
+          else
+            stage2_tests_free_kib=$(powershell.exe -NoProfile -NonInteractive -Command \
+              "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" </dev/null 2>/dev/null |
+              tr -d '\r\n ') || :
+          fi
+        fi
+        ;;
+    esac
+    case "${stage2_tests_free_kib}" in ''|*[!0-9]*) stage2_tests_free_kib="" ;; esac
+    # An explicit BOOTSTRAP_VERIFY_BUILD_THREADS is a deliberate override: it
+    # is honored as-is and deliberately bypasses the free-memory derivation
+    # and the 8-thread hard ceiling below -- the caller who sets this env var
+    # is asserting they already know the safe count for their host.
+    stage2_tests_build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-}
+    if [ -z "${stage2_tests_build_threads}" ]; then
+      if [ -n "${stage2_tests_free_kib}" ]; then
+        # free_GB / 3, per the measured ~2.4-2.7 GB/worker above (3 GB divisor
+        # leaves headroom rather than assuming the tightest measured figure).
+        stage2_tests_build_threads=$(( stage2_tests_free_kib / 1024 / 1024 / 3 ))
+      else
+        # Detection failed outright: fall back to the conservative 8-thread
+        # ceiling below, never to the (potentially much larger) CPU count.
+        stage2_tests_build_threads=8
+      fi
+      case "${stage2_tests_build_threads}" in ''|*[!0-9]*) stage2_tests_build_threads=8 ;; esac
+      [ "${stage2_tests_build_threads}" -ge 1 ] || stage2_tests_build_threads=1
+      [ "${stage2_tests_build_threads}" -le "${stage2_tests_cpu_basis}" ] ||
+        stage2_tests_build_threads=${stage2_tests_cpu_basis}
+      # Hard ceiling regardless of how much memory is free -- this is a
+      # native-build worker count, not a job-scheduling optimization target.
+      [ "${stage2_tests_build_threads}" -le 8 ] || stage2_tests_build_threads=8
+    fi
+    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s, build-threads=${stage2_tests_build_threads}, test-workers=${stage2_tests_workers})"
+    # Without a milestone the progress watcher reads this multi-minute step as a
+    # hang between Stage 2 and Stage 3.
+    bootstrap_progress_mark stage2-compiler-tests \
+      "$(absolute_path "${stage2_tests_log}")"
+    stage2_tests_status=0
+    # Status is captured directly from the subshell, never through a pipe: a
+    # pipeline's $? is the last stage's status and has produced false greens in
+    # this repo before.
+    (
+      cd "${repo_root}" || exit 125
+      BOOTSTRAP_VERIFY_TEST_WORKERS="${stage2_tests_workers}"
+      BOOTSTRAP_VERIFY_BUILD_THREADS="${stage2_tests_build_threads}"
+      export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS
+      sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
+        --phase=stage2 \
+        --compiler="${stage2_admitted_absolute}" \
+        --compiler-sha256="${stage2_tests_sha}" \
+        --strategy="${stage2_tests_strategy}" \
+        --profile="${stage2_tests_profile}" \
+        --hash-policy=canonical \
+        --work-root="${stage2_tests_work}" \
+        --cache-root="${stage2_tests_root}/cache" \
+        --source-root="${repo_root}" \
+        --timeout-seconds="${stage2_tests_timeout_seconds}"
+    ) >"${stage2_tests_log}" 2>&1 || stage2_tests_status=$?
+    if [ "${stage2_tests_status}" -eq 0 ] && [ ! -f "${stage2_tests_summary}" ]; then
+      echo "error: Stage 2 compiler tests exited 0 but wrote no verification summary" >&2
+      stage2_tests_status=95
+    fi
+    # Exit 0 alone is not evidence. The verifier records UNSUPPORTED tasks
+    # rather than failing them outright, so require the rows that prove a
+    # compiler test binary was BUILT and USED, each exactly once and PASS.
+    # A summary that names none of them checked nothing and is an ERROR.
+    if [ "${stage2_tests_status}" -eq 0 ] &&
+      ! awk -F'[=|]' -v sha="${stage2_tests_sha}" '
+        $1 == "phase" { phases++; if ($2 != "stage2") bad = 1 }
+        $1 == "hash_policy" { policies++; if ($2 != "canonical") bad = 1 }
+        $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad = 1 }
+        $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
+        $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
+        $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
+        $1 == "task" {
+          if ($3 != "result" || $4 != "PASS") bad = 1
+          if ($2 == "compiler_cli_build") cli++
+          if ($2 == "test_runner_build") runner++
+          if ($2 == "compiler_bootstrap_tests") bootstrap_tests++
+          if ($2 == "interpreter_interpreter_tests") interpreter_tests++
+          if ($2 == "loader_interpreter_tests") loader_tests++
+        }
+        END {
+          exit (bad || phases != 1 || policies != 1 || expected != 1 ||
+            actual != 1 || failures != 1 || outcomes != 1 ||
+            cli != 1 || runner != 1 || bootstrap_tests != 1 ||
+            interpreter_tests != 1 || loader_tests != 1)
+        }
+      ' "${stage2_tests_summary}"; then
+      echo "error: Stage 2 compiler-test summary is incomplete, not PASS, or names no executed compiler test suite" >&2
+      stage2_tests_status=95
+    fi
+    if [ "${stage2_tests_status}" -ne 0 ]; then
+      {
+        echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
+        echo "status=rejected"
+        echo "reason=stage2-compiler-tests-failed"
+        echo "candidate=${stage2_admitted_absolute}"
+        echo "candidate_sha256=${stage2_tests_sha}"
+        echo "strategy=${stage2_tests_strategy}"
+        echo "verification_status=${stage2_tests_status}"
+        echo "verification_summary=${stage2_tests_summary}"
+        echo "verification_log=${stage2_tests_log}"
+      } >"${stage2_tests_rejection}"
+      chmod 400 "${stage2_tests_rejection}"
+      echo "error: Stage 2 compiler tests failed (status=${stage2_tests_status})" >&2
+      echo "       summary:   ${stage2_tests_summary}" >&2
+      echo "       log:       ${stage2_tests_log}" >&2
+      echo "       rejection: ${stage2_tests_rejection}" >&2
+      echo "       The Stage 2 admission receipt, parent receipts and runtime" >&2
+      echo "       capsule were published before these tests ran and remain on" >&2
+      echo "       disk; do NOT resume Stage 3 from this output until the" >&2
+      echo "       failure above is understood." >&2
+      exit 1
+    fi
+    {
+      echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
+      echo "status=pass"
+      echo "candidate=${stage2_admitted_absolute}"
+      echo "candidate_sha256=${stage2_tests_sha}"
+      echo "strategy=${stage2_tests_strategy}"
+      echo "verification_summary=${stage2_tests_summary}"
+      echo "verification_summary_sha256=$(bootstrap_stage3_hash_file "${stage2_tests_summary}")"
+      echo "verification_log=${stage2_tests_log}"
+    } >"${stage2_tests_evidence}"
+    chmod 400 "${stage2_tests_evidence}"
+    echo "bootstrap-policy: stage2-compiler-tests=${stage2_tests_evidence}"
+  fi
+
   if [ "${stop_after_stage2}" -eq 1 ]; then
     [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_admitted_bin}" ] || {
       echo "error: --stop-after-stage2 requires a successful admitted Stage 2 compiler" >&2
       exit 1
     }
     echo "Stage 2 admitted; stopping before Stage 3 as requested."
+    bootstrap_verdict "ADMITTED: stage=stage2 exit=0 signal=none reason=stop-after-stage2"
     exit 0
   fi
 
@@ -2980,6 +4346,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
 
   stage3_ok=0
   rm -f "${stage3_bin}"
+  phase2_cache_before_stage3="${stage3_provenance_dir}/phase2-cache-before-stage3.txt"
+  phase2_cache_after_stage3="${stage3_provenance_dir}/phase2-cache-after-stage3.txt"
+  phase2_manifest_sha_before_stage3=absent
   stage2_admitted_sha_before_stage3=absent
   if [ "${stage2_status}" -eq 0 ]; then
     stage2_admitted_sha_before_stage3=$(
@@ -2988,21 +4357,26 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     bootstrap_stage3_directory_snapshot \
       "${stage3_provenance_dir}/runtime-before-stage3.txt" \
       "${stage_runtime_absolute}" || exit 1
-    cmp -s "${runtime_admitted_snapshot}" \
+    bootstrap_stage3_require_equal "Rust runtime authority before Stage 3" \
+      "${runtime_admitted_snapshot}" \
       "${stage3_provenance_dir}/runtime-before-stage3.txt" || exit 1
+    bootstrap_stage3_directory_snapshot \
+      "${phase2_cache_before_stage3}" "${stage2_cache_absolute}" || exit 1
+    # Absent-by-design on a rust-seed producer (see the producer-scoped gate
+    # above). The sentinel is compared verbatim after Stage 3, so a manifest
+    # that APPEARS mid-Stage-3 is still caught as a mutation.
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      phase2_manifest_sha_before_stage3=$(bootstrap_stage3_hash_file \
+        "${stage2_compatibility_manifest_absolute}") || exit 1
+    else
+      phase2_manifest_sha_before_stage3=absent
+    fi
   fi
-  # STAGE 3 MUST USE THE BARE POSITIONAL `.spl` SHAPE. Do NOT add `--entry`,
-  # `--entry-closure`, or `--source` here (see
-  # doc/08_tracking/bug/stage3_entry_flag_delegates_to_rust_seed_2026-08-04.md).
-  # `run_native_build_bootstrap` (src/app/cli/bootstrap_main.spl) routes to the
-  # pure-Simple in-process CompilerDriver ONLY for a single `.spl` positional
-  # with no `--source`. An explicit `--entry` outside the Stage 4 allowlist, or
-  # ANY `--source`, falls through to `run_rt_native_build` -> the Rust seed FFI,
-  # which silently turns the self-host verification into a second seed build.
-  # The positional branch already seeds SIMPLE_NATIVE_BUILD_ENTRY and
-  # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0, so entry-closure discovery still
-  # happens -- inside the self-hosted driver, which is the point of Stage 3.
-  # Stage 2 above is a seed build by design and keeps its --entry/--source form.
+  # Stage 3 uses the exact SIMPLE_BOOTSTRAP_STAGE3 focused capsule. That route
+  # accepts only bootstrap_main, dynload mode, and the transcribed source roots,
+  # and calls the pure-Simple CompilerDriver directly. Any unmarked explicit
+  # entry still falls through to rt_native_build and is rejected below by the
+  # seed-delegation evidence gate.
   bootstrap_stage3_archive_prior_evidence \
     "${stage3_memory_snapshot}" "${stage3_evidence_run_id}" || exit 1
   bootstrap_stage3_archive_prior_evidence \
@@ -3019,15 +4393,26 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     LIBRARY_PATH="${bootstrap_link_library_path}" \
     SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
     SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_BOOTSTRAP_STAGE3=1 \
+    SIMPLE_ABI_POLICY="${simple_abi_policy}" \
+    SIMPLE_ABI_ADMISSION_RECEIPT="${stage2_admission_receipt_absolute}" \
+    SIMPLE_PLUGIN_MANIFEST_POLICY="${SIMPLE_PLUGIN_MANIFEST_POLICY}" \
+    SIMPLE_KERNEL_K1_POLICY="${SIMPLE_KERNEL_K1_POLICY}" \
+    SIMPLE_COVERAGE_CUTOVER_STATE="${SIMPLE_COVERAGE_CUTOVER_STATE}" \
+    SIMPLE_K1_COMPOSITION_SHA256_BEFORE="${k1_composition_sha256_before}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_STAGE3_STREAMING_SURFACES=1 \
     SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
-    SIMPLE_FRONTEND_CACHE=0 \
+    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \
+    SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ="${stage2_compatibility_manifest_absolute}" \
+    SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="${stage3_cache_absolute}" \
     MALLOC_ARENA_MAX=2 \
     MALLOC_TRIM_THRESHOLD_=0 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
     ${stage3_mc_env} \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_COMPILER_PHASE_PROFILE=1 \
@@ -3041,22 +4426,51 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
     ${bootstrap_windows_abi_env} \
+    ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
+    ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
+    ${bootstrap_windows_lib_env:+"${bootstrap_windows_lib_env}"} \
+    ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} -- \
     "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
+    ${k1_composition_source_args} \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --runtime-path "${stage_runtime_absolute}" \
-    -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
+    --entry src/app/cli/bootstrap_main.spl \
+    -o "${stage3_bin}"
   stage3_status=$?
   set -e
+  if [ "${stage2_status}" -eq 0 ]; then
+    bootstrap_stage3_directory_snapshot \
+      "${phase2_cache_after_stage3}" "${stage2_cache_absolute}" || exit 1
+    bootstrap_stage3_require_equal "Phase 2 cache immutability" \
+      "${phase2_cache_before_stage3}" \
+      "${phase2_cache_after_stage3}" || {
+      echo "error: Stage 3 mutated the read-only Phase 2 cache" >&2
+      exit 1
+    }
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      phase2_manifest_sha_after_stage3=$(bootstrap_stage3_hash_file \
+        "${stage2_compatibility_manifest_absolute}") || exit 1
+    else
+      phase2_manifest_sha_after_stage3=absent
+    fi
+    [ "${phase2_manifest_sha_before_stage3}" = \
+      "${phase2_manifest_sha_after_stage3}" ] || {
+      echo "error: Stage 3 mutated the Phase 2 compatibility manifest" >&2
+      exit 1
+    }
+  fi
   # Stage 3 self-host provenance gate (fail-closed).
   # `Build complete: N compiled, M cached, K failed` and `Linked: ... via
-  # clang++` are emitted ONLY by src/compiler_rust/native_all/src/lib.rs. The
+  # clang` are emitted ONLY by src/compiler_rust/native_all/src/lib.rs. The
   # pure-Simple in-process CompilerDriver path prints neither -- it is silent on
   # success and prints `error: in-process native-build: ...` on failure. So
   # either marker in the Stage 3 log proves the Rust seed, not the Stage 2
@@ -3069,8 +4483,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "${stage3_provenance_log}"; then
     echo "error: Stage 3 was built by the Rust seed (rt_native_build), not the" >&2
     echo "       Stage 2 self-hosted compiler -- the self-host verification is" >&2
-    echo "       vacuous. The Stage 3 native-build args must be the bare" >&2
-    echo "       positional .spl form (no --entry / --entry-closure / --source)." >&2
+    echo "       vacuous. The Stage 3 command must route through the exact" >&2
+    echo "       SIMPLE_BOOTSTRAP_STAGE3 pure-Simple focused capsule." >&2
     echo "       See doc/08_tracking/bug/stage3_entry_flag_delegates_to_rust_seed_2026-08-04.md" >&2
     echo "       Evidence: ${stage3_provenance_log}" >&2
     exit 1
@@ -3084,7 +4498,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     bootstrap_stage3_directory_snapshot \
       "${stage3_provenance_dir}/runtime-after-stage3.txt" \
       "${stage_runtime_absolute}" || exit 1
-    cmp -s "${runtime_admitted_snapshot}" \
+    bootstrap_stage3_require_equal "Rust runtime authority after Stage 3" \
+      "${runtime_admitted_snapshot}" \
       "${stage3_provenance_dir}/runtime-after-stage3.txt" || {
       echo "error: frozen runtime authority changed during Stage 3" >&2
       exit 1
@@ -3092,6 +4507,19 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
+  if [ "${SIMPLE_KERNEL_K1_POLICY:-}" = "llvm-cranelift" ]; then
+    k1_composition_receipt="${log_dir}/stage2-stage3-k1-composition.env"
+    sh scripts/bootstrap/write-k1-composition-receipt.shs \
+      "${SIMPLE_KERNEL_K1_POLICY}" \
+      "${bootstrap_mode}" \
+      "${backend}" \
+      "${log_dir}/stage2-native-build.log" \
+      "${log_dir}/stage3-native-build.log" \
+      "${stage2_command_transcript}" \
+      "${stage3_command_transcript}" \
+      "${k1_composition_receipt}" || exit 1
+    echo "  K1 composition receipt: ${k1_composition_receipt}"
+  fi
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
     if bootstrap_stage_sanity "${stage3_bin}" \
       "$(absolute_path "${stage3_sanity_evidence}")" \
@@ -3160,7 +4588,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     bootstrap_stage3_tool_authority_snapshot \
       "$(absolute_path "${tool_authority_after}")" "${PATH}" \
       "${repo_root}" || exit 1
-    cmp -s "${tool_authority_before}" "${tool_authority_after}" || {
+    bootstrap_stage3_require_equal "Bootstrap tool authority Stage 2/3" \
+      "${tool_authority_before}" "${tool_authority_after}" || {
       echo "error: bootstrap tool authority changed during Stage 2/3" >&2
       exit 1
     }
@@ -3475,12 +4904,14 @@ stage4_write_candidate_provenance \
   "${stage4_provenance_helper_sha256_before}" \
   "$(absolute_path "${bootstrap_lock}")" \
   "$(absolute_path "${log_dir}/stage4-native-build.log")" \
-  "$(absolute_path "${log_dir}/stage4-essential-tools-smoke.log")" || {
+  "$(absolute_path "${log_dir}/stage4-essential-tools-smoke.log")" \
+  "${SIMPLE_STAGE4_PROVENANCE_MODE:-generic}" || {
     echo "error: refusing Stage 4 without canonical candidate provenance" >&2
     exit 1
   }
 stage4_verify_candidate_provenance \
-  "${stage4_provenance}" "${full_bin}" "${repo_root}" || {
+  "${stage4_provenance}" "${full_bin}" "${repo_root}" \
+  "${SIMPLE_STAGE4_PROVENANCE_MODE:-generic}" || {
     echo "error: Stage 4 candidate provenance did not re-verify" >&2
     exit 1
   }
@@ -3532,7 +4963,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   "${full_bin}" native-build \
     --backend "${backend}" \
-  --source src/compiler --source src/app --source src/lib \
+  --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
   --runtime-path "${stage_runtime_absolute}" \
@@ -3571,7 +5002,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${backend}" \
-      --source src/compiler --source src/app --source src/lib \
+      --source src/compiler --source src/app --source src/lib --source "${plugin_policy_source_root}" \
       --entry-closure \
       --threads "${jobs}" \
       --cache-dir "${native_cache_dir}" \
@@ -3619,26 +5050,127 @@ fi
 # Deploy
 # ===========================================================================
 
+bootstrap_verify_phase7_deploy_authority() {
+  phase7_receipt_input=$1
+  phase7_candidate_sha=$2
+  [ -f "${phase7_receipt_input}" ] && [ ! -L "${phase7_receipt_input}" ] || return 1
+  phase7_receipt_canonical=$(bootstrap_stage3_canonical_file "${phase7_receipt_input}") || return 1
+  [ "${phase7_receipt_canonical}" = "${phase7_receipt_input}" ] || return 1
+  for phase7_pair in \
+    schema:simple-kernel-phase7-qualification-v2 \
+    status:PASS \
+    platform:"${PLATFORM}" \
+    policy:"${selected_k1_policy}" \
+    coverage_cutover:"${selected_coverage_policy}" \
+    simple_abi_policy:"${selected_abi_policy}" \
+    plugin_manifest_policy:"${selected_manifest_policy}" \
+    coverage_implementation:"${selected_coverage_implementation}" \
+    policy_authority_path:doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn \
+    policy_authority_sha256:"$(hash_file "${kernel_policy_manifest}")" \
+    mode:"${bootstrap_mode}" \
+    spipe_results:pass child_apk_consumption:pass \
+    legacy_policy_rejected:pass source_rewrite_gate:pass \
+    policy_root_runtime:pass bootstrap_runtime:pass produced_binary_gate:pass \
+    composition_receipt_gate:pass mode_gate:pass startup_budget:pass \
+    performance_threshold_mode:"${selected_performance_mode}" \
+    performance_baseline_scope:"${selected_performance_baseline_scope}" \
+    performance_steady_rss_percent:"${selected_performance_steady_percent}" \
+    performance_growth_percent:"${selected_performance_growth_percent}" \
+    performance_warm_request_count:"${selected_performance_warm_requests}" \
+    performance_status:pass; do
+    phase7_key=${phase7_pair%%:*}
+    phase7_expected=${phase7_pair#*:}
+    [ "$(bootstrap_stage3_manifest_value "${phase7_key}" "${phase7_receipt_canonical}")" = "${phase7_expected}" ] || return 1
+  done
+  phase7_candidate_manifest=$(bootstrap_stage3_manifest_value candidate_manifest_path "${phase7_receipt_canonical}") || return 1
+  phase7_baseline_receipt=$(bootstrap_stage3_manifest_value performance_baseline_receipt_path "${phase7_receipt_canonical}") || return 1
+  phase7_measurement_receipt=$(bootstrap_stage3_manifest_value performance_measurement_receipt_path "${phase7_receipt_canonical}") || return 1
+  for phase7_bound in \
+    "${phase7_candidate_manifest}:candidate_manifest_sha256" \
+    "${phase7_baseline_receipt}:performance_baseline_receipt_sha256" \
+    "${phase7_measurement_receipt}:performance_measurement_receipt_sha256"; do
+    phase7_bound_path=${phase7_bound%:*}
+    phase7_bound_key=${phase7_bound##*:}
+    [ -f "${phase7_bound_path}" ] && [ ! -L "${phase7_bound_path}" ] &&
+      [ "$(bootstrap_stage3_canonical_file "${phase7_bound_path}")" = "${phase7_bound_path}" ] &&
+      [ "$(hash_file "${phase7_bound_path}")" = \
+        "$(bootstrap_stage3_manifest_value "${phase7_bound_key}" "${phase7_receipt_canonical}")" ] || return 1
+  done
+  awk -F= -v backend="${backend}" -v sha="${phase7_candidate_sha}" '
+    $1 == "backend" { selected = substr($0, index($0, "=") + 1) == backend; next }
+    selected && $1 == "candidate_sha256" &&
+        substr($0, index($0, "=") + 1) == sha { matches++ }
+    END { exit matches != 1 }
+  ' "${phase7_candidate_manifest}" || return 1
+  [ "$(bootstrap_stage3_manifest_value architecture "${phase7_baseline_receipt}")" = "${PLATFORM}" ] &&
+    [ "$(bootstrap_stage3_manifest_value architecture "${phase7_measurement_receipt}")" = "${PLATFORM}" ] &&
+    [ "$(bootstrap_stage3_manifest_value threshold_mode "${phase7_measurement_receipt}")" = "${selected_performance_mode}" ] &&
+    [ "$(bootstrap_stage3_manifest_value steady_rss_limit_percent "${phase7_measurement_receipt}")" = "${selected_performance_steady_percent}" ] &&
+    [ "$(bootstrap_stage3_manifest_value growth_limit_percent "${phase7_measurement_receipt}")" = "${selected_performance_growth_percent}" ] &&
+    [ "$(bootstrap_stage3_manifest_value request_count "${phase7_measurement_receipt}")" = "${selected_performance_warm_requests}" ] || return 1
+  phase7_receipt_sha256=$(hash_file "${phase7_receipt_canonical}") || return 1
+  phase7_candidate_manifest_sha256=$(hash_file "${phase7_candidate_manifest}") || return 1
+  phase7_baseline_receipt_sha256=$(hash_file "${phase7_baseline_receipt}") || return 1
+  phase7_measurement_receipt_sha256=$(hash_file "${phase7_measurement_receipt}") || return 1
+}
+
 resume_stage4_verify_immutable || exit 1
 if [ "${deploy}" -eq 1 ]; then
   bootstrap_progress_mark deploy ""
-  deploy_dir="bin/release/${PLATFORM}"
-  if [ -L "bin" ] || [ -L "bin/release" ]; then
+  deploy_platform=$(simple_release_platform_dir "${PLATFORM}") || {
+    echo "ERROR: deploy refused - unsupported release platform: ${PLATFORM}" >&2
+    exit 1
+  }
+  deploy_release_root="${repo_root}/bin/release"
+  deploy_dir="${deploy_release_root}/${deploy_platform}"
+  if [ -L "${repo_root}/bin" ] || [ -L "${repo_root}/bin/release" ]; then
     echo "ERROR: deploy refused - symlinked deployment parent" >&2
     exit 1
   fi
-  mkdir -p "${deploy_dir}"
-  if [ -L "${deploy_dir}" ]; then
-    echo "ERROR: deploy refused - symlinked deployment directory: ${deploy_dir}" >&2
+  mkdir -p "${deploy_release_root}"
+  if [ "$(CDPATH= cd -- "${deploy_release_root}" && pwd -P)" != "${deploy_release_root}" ]; then
+    echo "ERROR: deploy refused - non-canonical deployment root: ${deploy_release_root}" >&2
     exit 1
   fi
-  deploy_lock_root="${deploy_dir}/.bootstrap-deploy-locks"
-  if ! portable_lock_acquire "${deploy_lock_root}" deployment \
+  deploy_lock_root="${deploy_release_root}/.bootstrap-deploy-locks"
+  if ! portable_lock_acquire "${deploy_lock_root}" "${deploy_platform}" \
     "${SIMPLE_BOOTSTRAP_LOCK_WAIT_SECONDS:-30}"; then
     echo "ERROR: deploy refused - deployment is locked: ${deploy_dir}" >&2
     exit 1
   fi
   deploy_lock_handle=${PORTABLE_LOCK_HANDLE}
+
+  # The lock is the deployment admission boundary. Reverify the exact Stage 4
+  # provenance and its recorded digest here, immediately before any candidate
+  # byte is used or staged; earlier verification cannot authorize this swap.
+  stage4_verify_candidate_provenance \
+    "${stage4_provenance}" "${full_bin}" "${repo_root}" || {
+    echo "ERROR: deploy refused - Stage 4 provenance changed before locked use" >&2
+    exit 1
+  }
+  locked_stage4_output_sha=$(bootstrap_stage3_manifest_value output_sha256 "${stage4_provenance}") || exit 1
+  full_hash=$(hash_file "${full_bin}")
+  locked_stage4_provenance_sha=$(hash_file "${stage4_provenance}")
+  locked_stage3_acceptance_sha=$(hash_file "${stage3_acceptance_receipt}")
+  locked_policy_authority_sha=$(hash_file "${kernel_policy_manifest}")
+  [ "${locked_stage4_output_sha}" = "${full_hash}" ] || {
+    echo "ERROR: deploy refused - locked Stage 4 digest differs from provenance" >&2
+    exit 1
+  }
+  phase7_row="${selected_k1_policy}__${selected_coverage_policy}__${bootstrap_mode}__${selected_abi_policy}__${selected_manifest_policy}"
+  phase7_receipt=${SIMPLE_BOOTSTRAP_PHASE7_RECEIPT:-"${repo_root}/build/check/kernel-phase7/${phase7_row}.env"}
+  bootstrap_verify_phase7_deploy_authority "${phase7_receipt}" "${full_hash}" || {
+    echo "ERROR: deploy refused - canonical native Phase 7 policy/performance authority is absent or stale" >&2
+    exit 1
+  }
+  deploy_transaction_id="${full_hash}.$$"
+  BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER="${repo_root}/scripts/bootstrap/verify-bootstrap-deploy-generation-authority.shs"
+  export BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER
+  bootstrap_deploy_tx_begin "${deploy_release_root}" "${deploy_platform}" \
+    "${deploy_transaction_id}" || {
+    echo "ERROR: deploy refused - generation transaction recovery/admission failed" >&2
+    exit 1
+  }
 
   # Deploy gate: never swap bin/simple to the self-hosted stage4 binary unless
   # a working seed driver exists at the delegate path. Without it the stage4
@@ -3656,8 +5188,6 @@ if [ "${deploy}" -eq 1 ]; then
       echo "ERROR: deploy refused — current seed driver failed smoke test: ${seed_src}." >&2
       exit 1
     fi
-    install -m755 "${seed_src}" "${seed_delegate}"
-    echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
   fi
 
   # Identity gate: bin/simple MUST be the pure-Simple self-hosted compiler and
@@ -3690,12 +5220,17 @@ if [ "${deploy}" -eq 1 ]; then
   echo "Identity gate: Stage 4 output verified pure-Simple self-hosted"
 
   deployed_bin="${deploy_dir}/simple${exe_suffix}"
-  prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
   deploy_receipt="${deploy_dir}/bootstrap-deploy-receipt.env"
-  deploy_tmp="${deploy_dir}/.simple${exe_suffix}.deploy.$$"
-  receipt_tmp="${deploy_dir}/.bootstrap-deploy-receipt.$$"
-  rm -f "${deploy_receipt}"
-  backup_created=0
+  if [ "${os}" = windows ]; then
+    bootstrap_deploy_tx_stable_prepare "${full_hash}" || {
+      echo "ERROR: deploy refused - durable Windows launcher backup failed" >&2
+      exit 1
+    }
+  fi
+  [ ! -L "${deploy_receipt}" ] || {
+    echo "ERROR: deploy refused - symlinked deployment receipt" >&2
+    exit 1
+  }
   if [ -e "${deployed_bin}" ]; then
     if [ ! -f "${deployed_bin}" ] || [ -L "${deployed_bin}" ] || \
        ! selfhost_identity_ok "${deployed_bin}" || \
@@ -3703,94 +5238,290 @@ if [ "${deploy}" -eq 1 ]; then
       echo "ERROR: deploy refused - current compiler is not a safe known-good backup." >&2
       exit 1
     fi
-    prev_tmp="${deploy_dir}/.simple${exe_suffix}.pre_deploy.$$"
-    install -m755 "${deployed_bin}" "${prev_tmp}"
-    mv "${prev_tmp}" "${prev_bin}"
-    backup_created=1
-  else
-    rm -f "${prev_bin}"
   fi
-  install -m755 "${full_bin}" "${deploy_tmp}"
-  mv "${deploy_tmp}" "${deployed_bin}"
-  echo "Deployed full CLI binary to ${deployed_bin}"
 
-  # Post-swap smoke: the deployed binary must evaluate code; restore on failure.
-  if smoke_out="$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)"; then
+  bootstrap_deploy_tx_add simple "${full_bin}" "${deployed_bin}" 755 "${full_hash}" || {
+    echo "ERROR: deploy refused - compiler transaction admission failed" >&2
+    exit 1
+  }
+  if [ -z "${resume_stage4_output}" ]; then
+    bootstrap_deploy_tx_add simple_seed "${seed_src}" "${seed_delegate}" 755 \
+      "$(hash_file "${seed_src}")" || {
+      echo "ERROR: deploy refused - seed transaction admission failed" >&2
+      exit 1
+    }
+  fi
+  bootstrap_deploy_tx_add simple_ui_backend "${ui_backend_bin}" \
+    "${deploy_dir}/simple_ui_backend${exe_suffix}" 755 \
+    "$(hash_file "${ui_backend_bin}")" || {
+    echo "ERROR: deploy refused - UI backend transaction admission failed" >&2
+    exit 1
+  }
+
+  # Canonical deployment is always a complete tooling generation. Resume and
+  # --no-mcp lanes may build partial artifacts, but cannot publish them.
+  [ -z "${resume_stage4_output}" ] || {
+    echo "ERROR: deploy refused - resumed Stage 4 is a partial generation" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+  [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ] || {
+    echo "ERROR: deploy refused - MCP/LSP companions are required for canonical publication" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+
+  if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
+    for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
+      mcp_candidate="${full_dir}/${mcp_bin_name}${exe_suffix}"
+      mcp_digest_candidate="${mcp_candidate}.sha256"
+      [ -x "${mcp_candidate}" ] && [ -s "${mcp_candidate}" ] &&
+        [ -f "${mcp_digest_candidate}" ] && [ ! -L "${mcp_digest_candidate}" ] || {
+        echo "ERROR: deploy refused - incomplete ${mcp_bin_name} candidate" >&2
+        exit 1
+      }
+      [ "$(wc -l <"${mcp_digest_candidate}" | tr -d ' ')" = 1 ] || {
+        echo "ERROR: deploy refused - malformed ${mcp_bin_name} digest" >&2
+        exit 1
+      }
+      mcp_expected=$(awk 'NF == 1 && $1 ~ /^[0-9a-f]{64}$/ { print $1 }' "${mcp_digest_candidate}")
+      [ -n "${mcp_expected}" ] && [ "$(hash_file "${mcp_candidate}")" = "${mcp_expected}" ] || {
+        echo "ERROR: deploy refused - ${mcp_bin_name} digest mismatch" >&2
+        exit 1
+      }
+      bootstrap_deploy_tx_add "${mcp_bin_name}" "${mcp_candidate}" \
+        "${deploy_dir}/${mcp_bin_name}${exe_suffix}" 755 "${mcp_expected}" || {
+        echo "ERROR: deploy refused - ${mcp_bin_name} transaction admission failed" >&2
+        exit 1
+      }
+      bootstrap_deploy_tx_add "${mcp_bin_name}.sha256" "${mcp_digest_candidate}" \
+        "${deploy_dir}/${mcp_bin_name}${exe_suffix}.sha256" 644 \
+        "$(hash_file "${mcp_digest_candidate}")" || {
+        echo "ERROR: deploy refused - ${mcp_bin_name} digest transaction admission failed" >&2
+        exit 1
+      }
+    done
+  fi
+
+  bootstrap_add_deploy_authority() {
+    authority_name=$1
+    authority_source=$2
+    authority_sha=$3
+    bootstrap_deploy_tx_add "${authority_name}" "${authority_source}" \
+      "${deploy_dir}/${authority_name}" 644 "${authority_sha}" || {
+      echo "ERROR: deploy refused - ${authority_name} authority admission failed" >&2
+      return 1
+    }
+  }
+  bootstrap_add_deploy_authority authority.stage4-provenance.env \
+    "${stage4_provenance}" "${locked_stage4_provenance_sha}" || exit 1
+  bootstrap_add_deploy_authority authority.stage3-acceptance.env \
+    "${stage3_acceptance_receipt}" "${locked_stage3_acceptance_sha}" || exit 1
+  bootstrap_add_deploy_authority authority.kernel-policy.sdn \
+    "${kernel_policy_manifest}" "${locked_policy_authority_sha}" || exit 1
+  bootstrap_add_deploy_authority authority.phase7.env \
+    "${phase7_receipt_canonical}" "${phase7_receipt_sha256}" || exit 1
+  bootstrap_add_deploy_authority authority.phase7-candidates.env \
+    "${phase7_candidate_manifest}" "${phase7_candidate_manifest_sha256}" || exit 1
+  bootstrap_add_deploy_authority authority.performance-baseline.env \
+    "${phase7_baseline_receipt}" "${phase7_baseline_receipt_sha256}" || exit 1
+  bootstrap_add_deploy_authority authority.performance-measurement.env \
+    "${phase7_measurement_receipt}" "${phase7_measurement_receipt_sha256}" || exit 1
+
+  for launcher_program in simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do
+    launcher_candidate="${full_dir}/launcher.${launcher_program}${exe_suffix}"
+    simple_release_write_generation_launcher "${launcher_candidate}" "${launcher_program}${exe_suffix}" v1 || exit 1
+    bootstrap_deploy_tx_add "launcher.${launcher_program}${exe_suffix}" \
+      "${launcher_candidate}" "${deploy_dir}/launcher.${launcher_program}${exe_suffix}" 755 \
+      "$(hash_file "${launcher_candidate}")" || exit 1
+  done
+
+  staged_bin="${bootstrap_deploy_tx_dir}/simple${exe_suffix}"
+  [ "$(hash_file "${staged_bin}")" = "${full_hash}" ] || {
+    echo "ERROR: deploy refused - staged generation compiler digest drifted" >&2
+    exit 1
+  }
+
+  # Post-swap smoke must prove the deployed inode owns source checking and the
+  # real test runner.  A `-c`-only probe is vacuous because a seed/delegate can
+  # satisfy it while `test` and `check` are absent.
+  if smoke_out="$(run_timeout 30 "${staged_bin}" -c 'print(1+1)' 2>/dev/null)"; then
     :
   else
     smoke_out=""
   fi
-  if [ "${smoke_out}" != "2" ]; then
-    echo "ERROR: deployed binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
-    if [ "${backup_created}" -eq 1 ] && [ -x "${prev_bin}" ]; then
-      restore_tmp="${deploy_dir}/.simple${exe_suffix}.restore.$$"
-      install -m755 "${prev_bin}" "${restore_tmp}"
-      mv "${restore_tmp}" "${deployed_bin}"
-      echo "Restored previous binary to ${deployed_bin}" >&2
-    else
-      rm -f "${deployed_bin}"
-    fi
+  deploy_check_ok=0
+  if run_timeout 60 env SIMPLE_BINARY="$(absolute_path "${staged_bin}")" \
+      "${staged_bin}" check src/app/cli/bootstrap_main.spl >/dev/null 2>&1; then
+    deploy_check_ok=1
+  fi
+  deploy_test_log="${bootstrap_deploy_tx_dir}/deploy-test.log"
+  deploy_test_ok=0
+  if run_timeout 90 env SIMPLE_BINARY="$(absolute_path "${staged_bin}")" \
+      "${staged_bin}" test test/fixtures/pure_simple_tooling/sibling_describe_green_spec.spl \
+      --mode=interpreter --no-session-daemon --sequential --no-db --no-cache \
+      --assert-ran --fail-fast >"${deploy_test_log}" 2>&1 &&
+     grep -Fq 'Results: 2 total, 2 passed, 0 failed' "${deploy_test_log}"; then
+    deploy_test_ok=1
+  fi
+  rm -f "${deploy_test_log}"
+  if [ "${smoke_out}" != "2" ] || [ "${deploy_check_ok}" -ne 1 ] || \
+     [ "${deploy_test_ok}" -ne 1 ]; then
+    echo "ERROR: staged generation failed non-vacuous -c/check/test smoke." >&2
+    bootstrap_deploy_tx_abort || echo "ERROR: deploy transaction rollback failed" >&2
     exit 1
   fi
-  install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
-  echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
 
-  # Deploy MCP servers if they were built successfully
-  if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
-    for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
-      if [ -x "${full_dir}/${mcp_bin_name}${exe_suffix}" ] && [ -s "${full_dir}/${mcp_bin_name}${exe_suffix}" ]; then
-        mcp_deploy_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.deploy.$$"
-        mcp_hash_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.sha256.deploy.$$"
-        install -m755 "${full_dir}/${mcp_bin_name}${exe_suffix}" "${mcp_deploy_tmp}"
-        install -m644 "${full_dir}/${mcp_bin_name}${exe_suffix}.sha256" "${mcp_hash_tmp}"
-        mv "${mcp_deploy_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}"
-        mv "${mcp_hash_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}.sha256"
-        echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}${exe_suffix}"
-      fi
-    done
-  fi
-
-  # Recreate wrapper/launcher entrypoints (bin/simple plus release links)
-  if [ "${os}" != "windows" ]; then
-    if ! "${repo_root}/scripts/setup/setup.shs"; then
-      echo "ERROR: deployment setup failed; restoring previous compiler" >&2
-      if [ "${backup_created}" -eq 1 ] && [ -x "${prev_bin}" ]; then
-        restore_tmp="${deploy_dir}/.simple${exe_suffix}.setup-restore.$$"
-        install -m755 "${prev_bin}" "${restore_tmp}"
-        mv "${restore_tmp}" "${deployed_bin}"
-      else
-        rm -f "${deployed_bin}"
-      fi
-      exit 1
-    fi
-  fi
-
-  full_hash="$(hash_file "${full_bin}")"
-  current_hash="$(hash_file "${deployed_bin}")"
+  current_hash="$(hash_file "${staged_bin}")"
   if [ "${current_hash}" != "${full_hash}" ]; then
     echo "ERROR: deployed compiler hash differs from admitted Stage 4 candidate" >&2
     echo "  candidate: ${full_hash}" >&2
     echo "  deployed:  ${current_hash}" >&2
+    bootstrap_deploy_tx_abort || echo "ERROR: deploy transaction rollback failed" >&2
     exit 1
   fi
-  backup_hash="none"
-  [ "${backup_created}" -eq 1 ] && [ -f "${prev_bin}" ] && [ ! -L "${prev_bin}" ] && backup_hash="$(hash_file "${prev_bin}")"
+
+  receipt_entries="${bootstrap_deploy_tx_dir}/receipt-entries.env"
+  bootstrap_deploy_tx_write_receipt_entries "${receipt_entries}" || {
+    echo "ERROR: deploy transaction entries could not be recorded" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+  receipt_entries_sha="$(hash_file "${receipt_entries}")"
+  generation_manifest="${bootstrap_deploy_tx_dir}/bootstrap-generation.env"
   {
-    echo "schema=bootstrap-deploy-receipt-v1"
+    echo "schema=bootstrap-deploy-generation-v1"
+    echo "generation_id=${deploy_transaction_id}"
+    echo "generation_kind=provenance-qualified"
     echo "platform=${PLATFORM}"
+    echo "deploy_platform=${deploy_platform}"
+    echo "transaction_entries_path=${bootstrap_deploy_tx_final_dir}/receipt-entries.env"
+    echo "transaction_entries_sha256=${receipt_entries_sha}"
+    echo "stage4_candidate_sha256=${full_hash}"
+    echo "stage4_provenance_sha256=${locked_stage4_provenance_sha}"
+    echo "stage3_acceptance_sha256=${locked_stage3_acceptance_sha}"
+    echo "policy_authority_sha256=${locked_policy_authority_sha}"
+    echo "phase7_receipt_sha256=${phase7_receipt_sha256}"
+    echo "performance_baseline_receipt_sha256=${phase7_baseline_receipt_sha256}"
+    echo "performance_measurement_receipt_sha256=${phase7_measurement_receipt_sha256}"
+  } >"${generation_manifest}" || exit 1
+  chmod 444 "${receipt_entries}" "${generation_manifest}"
+  generation_manifest_sha=$(hash_file "${generation_manifest}")
+  receipt_tmp="${bootstrap_deploy_tx_dir}/bootstrap-deploy-receipt.env"
+  {
+    echo "schema=bootstrap-deploy-receipt-v3"
+    echo "platform=${PLATFORM}"
+    echo "deploy_platform=${deploy_platform}"
+    echo "transaction_id=${deploy_transaction_id}"
+    echo "transaction_status=committed"
+    echo "generation_id=${deploy_transaction_id}"
+    echo "generation_path=${bootstrap_deploy_tx_final_dir}"
+    echo "generation_manifest_path=${bootstrap_deploy_tx_final_dir}/bootstrap-generation.env"
+    echo "generation_manifest_sha256=${generation_manifest_sha}"
+    echo "current_pointer_path=${deploy_dir}"
+    echo "current_pointer_target=${bootstrap_deploy_tx_pointer_target}"
+    echo "previous_pointer_target=${bootstrap_deploy_tx_previous_target}"
+    echo "previous_generation_id=${bootstrap_deploy_tx_previous_generation}"
+    echo "previous_generation_path=${bootstrap_deploy_tx_previous_path}"
+    echo "previous_generation_manifest_path=${bootstrap_deploy_tx_previous_manifest}"
+    echo "previous_generation_manifest_sha256=${bootstrap_deploy_tx_previous_manifest_sha256}"
+    echo "transaction_entries_path=${bootstrap_deploy_tx_final_dir}/receipt-entries.env"
+    echo "transaction_entries_sha256=${receipt_entries_sha}"
     echo "current_path=${deployed_bin}"
     echo "current_sha256=${current_hash}"
+    echo "stage4_candidate_path=${bootstrap_deploy_tx_final_dir}/simple${exe_suffix}"
+    echo "stage4_candidate_source_path=${full_bin}"
     echo "stage4_candidate_sha256=${full_hash}"
-    echo "backup_path=${prev_bin}"
-    echo "backup_sha256=${backup_hash}"
+    bootstrap_deploy_tx_stable_fields
+    echo "stage4_provenance_path=${bootstrap_deploy_tx_final_dir}/authority.stage4-provenance.env"
+    echo "stage4_provenance_source_path=${stage4_provenance}"
+    echo "stage4_provenance_sha256=${locked_stage4_provenance_sha}"
+    echo "policy_authority_path=${bootstrap_deploy_tx_final_dir}/authority.kernel-policy.sdn"
+    echo "policy_authority_source_path=${kernel_policy_manifest}"
+    echo "policy_authority_sha256=${locked_policy_authority_sha}"
+    echo "kernel_k1_policy=${selected_k1_policy}"
+    echo "simple_abi_policy=${selected_abi_policy}"
+    echo "plugin_manifest_policy=${selected_manifest_policy}"
+    echo "coverage_cutover_policy=${selected_coverage_policy}"
+    echo "coverage_implementation=${selected_coverage_implementation}"
+    echo "performance_threshold_mode=${selected_performance_mode}"
+    echo "performance_baseline_scope=${selected_performance_baseline_scope}"
+    echo "performance_steady_rss_percent=${selected_performance_steady_percent}"
+    echo "performance_growth_percent=${selected_performance_growth_percent}"
+    echo "performance_warm_request_count=${selected_performance_warm_requests}"
+    echo "phase7_receipt_path=${bootstrap_deploy_tx_final_dir}/authority.phase7.env"
+    echo "phase7_receipt_source_path=${phase7_receipt_canonical}"
+    echo "phase7_receipt_sha256=${phase7_receipt_sha256}"
+    echo "phase7_candidate_manifest_path=${bootstrap_deploy_tx_final_dir}/authority.phase7-candidates.env"
+    echo "phase7_candidate_manifest_source_path=${phase7_candidate_manifest}"
+    echo "phase7_candidate_manifest_sha256=${phase7_candidate_manifest_sha256}"
+    echo "performance_baseline_receipt_path=${bootstrap_deploy_tx_final_dir}/authority.performance-baseline.env"
+    echo "performance_baseline_receipt_source_path=${phase7_baseline_receipt}"
+    echo "performance_baseline_receipt_sha256=${phase7_baseline_receipt_sha256}"
+    echo "performance_measurement_receipt_path=${bootstrap_deploy_tx_final_dir}/authority.performance-measurement.env"
+    echo "performance_measurement_receipt_source_path=${phase7_measurement_receipt}"
+    echo "performance_measurement_receipt_sha256=${phase7_measurement_receipt_sha256}"
+    if [ -n "${STAGE4_CONTINUATION_RECEIPT:-}" ]; then
+      echo "stage4_continuation_path=${STAGE4_CONTINUATION_RECEIPT}"
+      echo "stage4_continuation_sha256=$(hash_file "${STAGE4_CONTINUATION_RECEIPT}")"
+      echo "planner_stage4_binding_sha256=$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "${STAGE4_CONTINUATION_RECEIPT}")"
+    fi
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "deployment_status=pass"
     echo "stage3_current_acceptance_status=${stage3_current_acceptance_status}"
-    echo "stage3_current_acceptance_receipt=${stage3_acceptance_receipt}"
+    echo "stage3_current_acceptance_receipt=${bootstrap_deploy_tx_final_dir}/authority.stage3-acceptance.env"
+    echo "stage3_current_acceptance_source_path=${stage3_acceptance_receipt}"
+    echo "stage3_current_acceptance_sha256=${locked_stage3_acceptance_sha}"
     echo "platform_acceptance_claimed=false"
-  } > "${receipt_tmp}"
-  chmod 644 "${receipt_tmp}"
-  mv "${receipt_tmp}" "${deploy_receipt}"
+    cat "${receipt_entries}"
+  } >"${receipt_tmp}"
+  chmod 444 "${receipt_tmp}"
+  bootstrap_deploy_tx_seal || {
+    echo "ERROR: deploy generation could not be sealed" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+  if [ "${os}" != windows ]; then
+    simple_release_bind_generation_launchers "${repo_root}" "${deploy_platform}" "${exe_suffix}" || {
+      echo "ERROR: immutable generation launchers could not be bound" >&2
+      bootstrap_deploy_tx_abort || true
+      exit 1
+    }
+  fi
+  bootstrap_deploy_tx_apply || {
+    echo "ERROR: deploy generation pointer CAS failed" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+  # Publish the immutable admitted candidate; the transaction journal owns
+  # rollback of the stable executable and its prior receipt on every exit.
+  if [ "${os}" = windows ]; then
+    stable_windows_bin="${bootstrap_deploy_tx_stable_path}"
+    stable_windows_receipt="${repo_root}/bin/.simple-windows-stable-entrypoint.env"
+    powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+      -File "${repo_root}/scripts/bootstrap/publish-windows-stable-entrypoint.ps1" \
+      -Candidate "${bootstrap_deploy_tx_final_dir}/simple.exe" -Destination "${stable_windows_bin}" \
+      -ExpectedSha256 "${full_hash}" -Receipt "${stable_windows_receipt}" || {
+        echo "ERROR: deploy refused - could not atomically publish bin/simple.exe" >&2
+        bootstrap_deploy_tx_abort || echo "ERROR: rollback incomplete; recovery journal retained" >&2
+        exit 1
+      }
+    run_timeout 30 "${stable_windows_bin}" build --help >/dev/null 2>&1 || {
+      echo "ERROR: deploy refused - published bin/simple.exe cannot execute build --help" >&2
+      bootstrap_deploy_tx_abort || echo "ERROR: rollback incomplete; recovery journal retained" >&2
+      exit 1
+    }
+  fi
+  [ "$(hash_file "${deployed_bin}")" = "${full_hash}" ] || {
+    echo "ERROR: published generation does not resolve to the admitted Stage 4 digest" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+  bootstrap_deploy_tx_commit || {
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+  echo "Deployed compiler and companions as immutable generation ${deploy_transaction_id}"
   echo "Deployment receipt: ${deploy_receipt}"
 
   if [ "${release_tests}" -eq 1 ]; then
@@ -3821,10 +5552,12 @@ if [ "${stage3_ok:-0}" -eq 0 ]; then
   echo "ERROR: internal invariant broken — reached completion with stage3_ok=0." >&2
   echo "  A failed self-host must have exited at the seed-fallback refusal." >&2
   echo "  Treat any binary deployed by this run as unverified." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=2 signal=none reason=stage3-invariant-broken"
   exit 2
 fi
 [ "${stage3_current_acceptance_status}" = verified ] || {
   echo "ERROR: current Stage 3 acceptance was not bound to verified Stage 4 evidence." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=2 signal=none reason=stage3-acceptance-unverified"
   exit 2
 }
 
@@ -3838,6 +5571,8 @@ if ! sh "${repo_root}/scripts/check/check-bootstrap-must-pass.shs" \
   --stage4-binary "${full_bin}" \
   --stage4-provenance "${full_bin}.provenance.env"; then
   echo "ERROR: bootstrap completed but mandatory-check evidence was not recorded." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=1 signal=none reason=mandatory-check-evidence-not-recorded"
   exit 1
 fi
+bootstrap_verdict "ADMITTED: stage=complete exit=0 signal=none reason=bootstrap-must-pass-recorded"
 bootstrap_progress_mark complete ""

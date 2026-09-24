@@ -1,0 +1,186 @@
+# Canonical scalar lexical block summary. This is preprocessing evidence only;
+# unsupported Simple constructs are tagged for the legacy lexer, never guessed.
+pub const LEXICAL_BLOCK_WIDTH_V1: u64 = 32u64
+pub const LEX_FALLBACK_RAW_STRING_V1: u64 = 1u64
+pub const LEX_FALLBACK_TRIPLE_STRING_V1: u64 = 2u64
+pub const LEX_FALLBACK_INTERPOLATION_V1: u64 = 4u64
+pub const LEX_FALLBACK_CUSTOM_BLOCK_V1: u64 = 8u64
+pub const LEX_FALLBACK_INDENTATION_V1: u64 = 16u64
+pub const LEX_FALLBACK_BLOCK_COMMENT_V1: u64 = 32u64
+pub const LEX_FALLBACK_MULTILINE_STRING_V1: u64 = 64u64
+
+pub enum LexicalQuoteKindV1:
+    None
+    Single
+    Double
+pub struct LexicalBlockStateV1:
+    quote_kind: LexicalQuoteKindV1
+    escape_parity: bool
+    in_line_comment: bool
+    in_block_comment: bool
+    pending_quote_byte: u8
+    pending_quote_run: u8
+    pending_raw_prefix: bool
+    pending_identifier: bool
+    pending_slash: bool
+    after_newline: bool
+pub struct LexicalBlockSummaryV1:
+    input_state: LexicalBlockStateV1
+    output_state: LexicalBlockStateV1
+    byte_count: u32
+    quote_mask: u32
+    escape_mask: u32
+    line_comment_mask: u32
+    newline_mask: u32
+    delimiter_mask: u32
+    fallback_bits: u64
+    canonical_usable: bool
+pub struct LexicalSummaryCompositionV1:
+    input_state: LexicalBlockStateV1
+    output_state: LexicalBlockStateV1
+    blocks: [LexicalBlockSummaryV1]
+    fallback_bits: u64
+    canonical_usable: bool
+pub enum LexicalBlockSummaryErrorV1:
+    BlockTooWide
+    InvalidInputState
+    BoundaryMismatch
+
+pub fn lexical_block_state_valid_v1(s: LexicalBlockStateV1) -> bool:
+    val quote_pending = s.pending_quote_run > 0u8
+    if s.in_block_comment or s.pending_quote_run > 2u8: return false
+    if quote_pending != (s.pending_quote_byte == 34u8 or s.pending_quote_byte == 39u8): return false
+    if s.pending_quote_run == 0u8 and s.pending_quote_byte != 0u8: return false
+    if s.in_line_comment:
+        return s.quote_kind == LexicalQuoteKindV1.None and not s.escape_parity and
+            not quote_pending and not s.pending_raw_prefix and not s.pending_identifier and
+            not s.pending_slash and not s.after_newline
+    if s.quote_kind != LexicalQuoteKindV1.None:
+        return not s.pending_raw_prefix and not s.pending_identifier and
+            not s.pending_slash and not s.after_newline and
+            (not quote_pending or not s.escape_parity)
+    if s.escape_parity: return false
+    if s.pending_raw_prefix and not s.pending_identifier: return false
+    val categories = (if quote_pending: 1 else: 0) + (if s.pending_identifier: 1 else: 0) +
+        (if s.pending_slash: 1 else: 0) + (if s.after_newline: 1 else: 0)
+    categories <= 1
+
+pub fn lexical_block_initial_state_v1() -> LexicalBlockStateV1:
+    LexicalBlockStateV1(quote_kind: LexicalQuoteKindV1.None, escape_parity: false,
+        in_line_comment: false, in_block_comment: false, pending_quote_byte: 0u8,
+        pending_quote_run: 0u8, pending_raw_prefix: false,
+        pending_identifier: false, pending_slash: false, after_newline: false)
+fn _is_delimiter_lbs(v: u8) -> bool:
+    v == 40u8 or v == 41u8 or v == 91u8 or v == 93u8 or v == 123u8 or
+    v == 125u8 or v == 44u8 or v == 58u8
+fn _is_ident_lbs(v: u8) -> bool:
+    (v >= 65u8 and v <= 90u8) or (v >= 97u8 and v <= 122u8) or
+    (v >= 48u8 and v <= 57u8) or v == 95u8
+
+pub fn lexical_block_summary_scalar_v1(bytes: [u8], input: LexicalBlockStateV1
+) -> Result<LexicalBlockSummaryV1, LexicalBlockSummaryErrorV1>:
+    if bytes.len() as u64 > LEXICAL_BLOCK_WIDTH_V1:
+        return Err(LexicalBlockSummaryErrorV1.BlockTooWide)
+    if not lexical_block_state_valid_v1(input):
+        return Err(LexicalBlockSummaryErrorV1.InvalidInputState)
+    var state = input; var quote_mask = 0u32; var escape_mask = 0u32
+    var comment_mask = 0u32; var newline_mask = 0u32; var delimiter_mask = 0u32
+    var fallback = 0u64; var i = 0
+    # Resolve constructs whose introducer was split at the block boundary.
+    if bytes.len() > 0:
+        val first = bytes[0]
+        if input.pending_quote_run > 0u8 and first == input.pending_quote_byte:
+            var leading = 0u8; var q = 0
+            while q < bytes.len() and bytes[q] == first and leading < 3u8:
+                leading = leading + 1u8; q = q + 1
+            if input.pending_quote_run + leading >= 3u8:
+                fallback = fallback | LEX_FALLBACK_TRIPLE_STRING_V1
+        if input.pending_raw_prefix and (first == 34u8 or first == 39u8):
+            fallback = fallback | LEX_FALLBACK_RAW_STRING_V1
+        if input.pending_identifier and first == 123u8:
+            fallback = fallback | LEX_FALLBACK_CUSTOM_BLOCK_V1
+        if input.pending_slash and first == 42u8:
+            fallback = fallback | LEX_FALLBACK_BLOCK_COMMENT_V1
+        if input.after_newline and (first == 32u8 or first == 9u8):
+            fallback = fallback | LEX_FALLBACK_INDENTATION_V1
+    # Only a block that actually consumed bytes retires the pending facts; an
+    # empty block is the identity, or a split introducer would evade fallback.
+    if bytes.len() > 0:
+        state.pending_quote_byte = 0u8; state.pending_quote_run = 0u8
+        state.pending_raw_prefix = false; state.pending_identifier = false
+        state.pending_slash = false; state.after_newline = false
+    while i < bytes.len():
+        val b = bytes[i]; val bit = 1u32 << (i as u32)
+        val next = if i + 1 < bytes.len(): bytes[i + 1] else: 0u8
+        val next2 = if i + 2 < bytes.len(): bytes[i + 2] else: 0u8
+        if b == 10u8:
+            newline_mask = newline_mask | bit
+            if state.in_line_comment: state.in_line_comment = false
+            if state.quote_kind != LexicalQuoteKindV1.None:
+                fallback = fallback | LEX_FALLBACK_MULTILINE_STRING_V1
+            if state.quote_kind == LexicalQuoteKindV1.None and i + 1 < bytes.len() and
+               (next == 32u8 or next == 9u8): fallback = fallback | LEX_FALLBACK_INDENTATION_V1
+            state.escape_parity = false
+        elif state.in_line_comment:
+            comment_mask = comment_mask | bit
+        elif state.quote_kind != LexicalQuoteKindV1.None:
+            if b == 92u8:
+                escape_mask = escape_mask | bit; state.escape_parity = not state.escape_parity
+            else:
+                val closes = (state.quote_kind == LexicalQuoteKindV1.Single and b == 39u8) or
+                    (state.quote_kind == LexicalQuoteKindV1.Double and b == 34u8)
+                if closes and not state.escape_parity:
+                    quote_mask = quote_mask | bit; state.quote_kind = LexicalQuoteKindV1.None
+                if b == 123u8: fallback = fallback | LEX_FALLBACK_INTERPOLATION_V1
+                state.escape_parity = false
+        else:
+            if b == 35u8:
+                comment_mask = comment_mask | bit; state.in_line_comment = true
+            elif b == 47u8 and next == 42u8:
+                fallback = fallback | LEX_FALLBACK_BLOCK_COMMENT_V1
+            elif (b == 34u8 or b == 39u8) and next == b and next2 == b:
+                fallback = fallback | LEX_FALLBACK_TRIPLE_STRING_V1
+            elif b == 114u8 and (next == 34u8 or next == 39u8):
+                fallback = fallback | LEX_FALLBACK_RAW_STRING_V1
+            elif b == 34u8 or b == 39u8:
+                quote_mask = quote_mask | bit
+                state.quote_kind = if b == 34u8: LexicalQuoteKindV1.Double else: LexicalQuoteKindV1.Single
+                state.escape_parity = false
+            elif b == 123u8 and i > 0 and _is_ident_lbs(bytes[i - 1]):
+                fallback = fallback | LEX_FALLBACK_CUSTOM_BLOCK_V1
+            if _is_delimiter_lbs(b): delimiter_mask = delimiter_mask | bit
+        i = i + 1
+    if bytes.len() > 0:
+        val last = bytes[bytes.len() - 1]
+        state.pending_raw_prefix = state.quote_kind == LexicalQuoteKindV1.None and not state.in_line_comment and last == 114u8
+        state.pending_identifier = state.quote_kind == LexicalQuoteKindV1.None and not state.in_line_comment and _is_ident_lbs(last)
+        state.pending_slash = state.quote_kind == LexicalQuoteKindV1.None and not state.in_line_comment and last == 47u8
+        state.after_newline = last == 10u8 and state.quote_kind == LexicalQuoteKindV1.None
+        if not state.in_line_comment and (last == 34u8 or last == 39u8):
+            state.pending_quote_byte = last; state.pending_quote_run = 1u8
+            if bytes.len() > 1 and bytes[bytes.len() - 2] == last: state.pending_quote_run = 2u8
+    Ok(LexicalBlockSummaryV1(input_state: input, output_state: state,
+        # quote_mask marks syntactic quote bytes, not every byte inside a string.
+        byte_count: bytes.len() as u32, quote_mask: quote_mask, escape_mask: escape_mask,
+        line_comment_mask: comment_mask, newline_mask: newline_mask,
+        delimiter_mask: delimiter_mask, fallback_bits: fallback,
+        canonical_usable: fallback == 0u64))
+
+# This is checked sequential-provenance concatenation for summaries already
+# evaluated from concrete input states. It is not a parallel-prefix monoid.
+# A future parallel summary must encode the transition for every finite input
+# state (or an equivalent complete transition table).
+pub fn lexical_summary_compose_v1(left: LexicalSummaryCompositionV1,
+    right: LexicalSummaryCompositionV1
+) -> Result<LexicalSummaryCompositionV1, LexicalBlockSummaryErrorV1>:
+    if left.output_state != right.input_state:
+        return Err(LexicalBlockSummaryErrorV1.BoundaryMismatch)
+    var blocks = left.blocks
+    for b in right.blocks: blocks.push(b)
+    val fallback = left.fallback_bits | right.fallback_bits
+    Ok(LexicalSummaryCompositionV1(input_state: left.input_state,
+        output_state: right.output_state, blocks: blocks, fallback_bits: fallback,
+        canonical_usable: left.canonical_usable and right.canonical_usable and fallback == 0u64))
+pub fn lexical_summary_from_block_v1(block: LexicalBlockSummaryV1) -> LexicalSummaryCompositionV1:
+    LexicalSummaryCompositionV1(input_state: block.input_state, output_state: block.output_state,
+        blocks: [block], fallback_bits: block.fallback_bits, canonical_usable: block.canonical_usable)

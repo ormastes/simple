@@ -1,0 +1,199 @@
+# Compiler-owned authority over canonical environment-variant build plans.
+use compiler.driver.environment_variant_build_planner_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1}
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.TargetCodegenProfileV1
+
+pub enum EnvironmentVariantBuildPlanOwnerErrorV1:
+    InvalidOwner
+    CapacityExceeded
+    CounterOverflow
+    PlannerRejected
+    UnknownOrSubstituted
+    UsesLive
+    AlreadyReleased
+
+pub struct EnvironmentVariantBuildPlanOwnerTokenV1:
+    token_id: u64
+    owner_identity: u64
+
+pub struct EnvironmentVariantBuildPlanUseTokenV1:
+    use_id: u64
+    owner_identity: u64
+
+struct _EnvironmentVariantBuildPlanOwnerRecordV1:
+    token: EnvironmentVariantBuildPlanOwnerTokenV1
+    plan: EnvironmentVariantBuildPlanV1
+    baseline_feature_words: [u64]
+    artifact_feature_words: [[u64]]
+
+struct _EnvironmentVariantBuildPlanUseRecordV1:
+    token: EnvironmentVariantBuildPlanUseTokenV1
+    plan_token: EnvironmentVariantBuildPlanOwnerTokenV1
+    artifact_index: i64
+    projection: EnvironmentVariantBuildArtifactOwnerProjectionV1
+
+pub struct EnvironmentVariantBuildArtifactOwnerProjectionV1:
+    plan: EnvironmentVariantBuildPlanV1
+    artifact_index: i64
+    artifact: EnvironmentVariantArtifactPlanV1
+    target_feature_words: [u64]
+
+var _next_build_plan_owner_identity_v1: u64 = 1u64
+pub class EnvironmentVariantBuildPlanOwnerV1:
+    var owner_identity: u64
+    var next_token_id: u64
+    var records: [_EnvironmentVariantBuildPlanOwnerRecordV1]
+    var uses: [_EnvironmentVariantBuildPlanUseRecordV1]
+    var next_use_id: u64
+    pub static fn create() -> EnvironmentVariantBuildPlanOwnerV1:
+        val candidate = _next_build_plan_owner_identity_v1
+        val identity = if candidate == 0u64 or candidate == 0xffffffffffffffffu64: 0u64 else: candidate
+        if identity != 0u64:
+            _next_build_plan_owner_identity_v1 = identity + 1u64
+        EnvironmentVariantBuildPlanOwnerV1(owner_identity: identity,
+            next_token_id: 1u64, records: [], uses: [], next_use_id: 1u64)
+
+fn _copy_plan_evbp(value: EnvironmentVariantBuildPlanV1) -> EnvironmentVariantBuildPlanV1:
+    var artifacts: [EnvironmentVariantArtifactPlanV1] = []
+    for artifact in value.artifacts: artifacts.push(artifact)
+    EnvironmentVariantBuildPlanV1(schema_version: value.schema_version,
+        baseline_core_identity: value.baseline_core_identity,
+        baseline_core_profile: value.baseline_core_profile,
+        artifacts: artifacts, plan_identity: value.plan_identity)
+fn _copy_words_evbp(values: [u64]) -> [u64]:
+    var copied: [u64] = []; for value in values: copied.push(value)
+    copied
+fn _copy_word_rows_evbp(values: [[u64]]) -> [[u64]]:
+    var copied: [[u64]] = []; for value in values: copied.push(_copy_words_evbp(value))
+    copied
+
+pub fn environment_variant_build_plan_owner_create_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    baseline_core_identity: EnvironmentDigest256V1,
+    baseline_core_profile: TargetCodegenProfileV1,
+    baseline_feature_words: [u64], requests: [EnvironmentVariantBuildRequestV1],
+    request_feature_words: [[u64]], backend_supported_features: [EnvironmentFeatureSetV1],
+    backend_feature_words: [[u64]]
+) -> Result<EnvironmentVariantBuildPlanOwnerTokenV1, EnvironmentVariantBuildPlanOwnerErrorV1>:
+    if owner.owner_identity == 0u64: return Err(EnvironmentVariantBuildPlanOwnerErrorV1.InvalidOwner)
+    if owner.records.len() >= 256: return Err(EnvironmentVariantBuildPlanOwnerErrorV1.CapacityExceeded)
+    if owner.next_token_id == 0u64 or owner.next_token_id == 0xffffffffffffffffu64:
+        return Err(EnvironmentVariantBuildPlanOwnerErrorV1.CounterOverflow)
+    val planned = match environment_variant_build_plan_v1(baseline_core_identity,
+        baseline_core_profile, baseline_feature_words, requests,
+        request_feature_words, backend_supported_features, backend_feature_words):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantBuildPlanOwnerErrorV1.PlannerRejected)
+    val token = EnvironmentVariantBuildPlanOwnerTokenV1(token_id: owner.next_token_id,
+        owner_identity: owner.owner_identity)
+    owner.records.push(_EnvironmentVariantBuildPlanOwnerRecordV1(token: token,
+        plan: _copy_plan_evbp(planned),
+        baseline_feature_words: _copy_words_evbp(baseline_feature_words),
+        artifact_feature_words: _copy_word_rows_evbp(request_feature_words)))
+    owner.next_token_id = owner.next_token_id + 1u64
+    Ok(token)
+
+pub fn environment_variant_build_plan_owner_project_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    token: EnvironmentVariantBuildPlanOwnerTokenV1
+) -> Result<EnvironmentVariantBuildPlanV1, EnvironmentVariantBuildPlanOwnerErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentVariantBuildPlanOwnerErrorV1.UnknownOrSubstituted)
+    for record in owner.records:
+        if record.token == token: return Ok(_copy_plan_evbp(record.plan))
+    Err(EnvironmentVariantBuildPlanOwnerErrorV1.UnknownOrSubstituted)
+
+pub fn environment_variant_build_plan_owner_artifact_project_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    token: EnvironmentVariantBuildPlanOwnerTokenV1, artifact_index: i64
+) -> Result<EnvironmentVariantBuildArtifactOwnerProjectionV1, EnvironmentVariantBuildPlanOwnerErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentVariantBuildPlanOwnerErrorV1.UnknownOrSubstituted)
+    for record in owner.records:
+        if record.token == token:
+            if artifact_index < 0 or artifact_index >= record.plan.artifacts.len() or
+               artifact_index >= record.artifact_feature_words.len():
+                return Err(EnvironmentVariantBuildPlanOwnerErrorV1.UnknownOrSubstituted)
+            return Ok(EnvironmentVariantBuildArtifactOwnerProjectionV1(
+                plan: _copy_plan_evbp(record.plan), artifact_index: artifact_index,
+                artifact: record.plan.artifacts[artifact_index],
+                target_feature_words: _copy_words_evbp(record.artifact_feature_words[artifact_index])))
+    Err(EnvironmentVariantBuildPlanOwnerErrorV1.UnknownOrSubstituted)
+
+pub fn environment_variant_build_plan_owner_projection_live_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    token: EnvironmentVariantBuildPlanOwnerTokenV1,
+    projection: EnvironmentVariantBuildPlanV1) -> bool:
+    match environment_variant_build_plan_owner_project_v1(owner, token):
+        case Ok(expected): expected == projection
+        case Err(_): false
+
+pub fn environment_variant_build_plan_owner_use_acquire_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    token: EnvironmentVariantBuildPlanOwnerTokenV1,
+    artifact_index: i64
+) -> Result<EnvironmentVariantBuildPlanUseTokenV1, EnvironmentVariantBuildPlanOwnerErrorV1>:
+    if owner.owner_identity == 0u64: return Err(EnvironmentVariantBuildPlanOwnerErrorV1.InvalidOwner)
+    if owner.uses.len() >= 256: return Err(EnvironmentVariantBuildPlanOwnerErrorV1.CapacityExceeded)
+    if owner.next_use_id == 0u64 or owner.next_use_id == 0xffffffffffffffffu64:
+        return Err(EnvironmentVariantBuildPlanOwnerErrorV1.CounterOverflow)
+    val projection = environment_variant_build_plan_owner_artifact_project_v1(
+        owner, token, artifact_index)?
+    val use_token = EnvironmentVariantBuildPlanUseTokenV1(
+        use_id: owner.next_use_id, owner_identity: owner.owner_identity)
+    owner.uses.push(_EnvironmentVariantBuildPlanUseRecordV1(token: use_token,
+        plan_token: token, artifact_index: artifact_index, projection: projection))
+    owner.next_use_id = owner.next_use_id + 1u64
+    Ok(use_token)
+
+pub fn environment_variant_build_plan_owner_use_live_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    token: EnvironmentVariantBuildPlanOwnerTokenV1,
+    use_token: EnvironmentVariantBuildPlanUseTokenV1
+) -> bool:
+    if token.owner_identity != owner.owner_identity or use_token.owner_identity != owner.owner_identity:
+        return false
+    for retained in owner.uses:
+        if retained.token == use_token and retained.plan_token == token:
+            val current = environment_variant_build_plan_owner_artifact_project_v1(
+                owner, token, retained.artifact_index)
+            return current.is_ok() and current.unwrap() == retained.projection
+    false
+
+pub fn environment_variant_build_plan_owner_use_release_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    token: EnvironmentVariantBuildPlanOwnerTokenV1,
+    use_token: EnvironmentVariantBuildPlanUseTokenV1
+) -> Result<(), EnvironmentVariantBuildPlanOwnerErrorV1>:
+    if owner.owner_identity == 0u64: return Err(EnvironmentVariantBuildPlanOwnerErrorV1.InvalidOwner)
+    var index: i64 = -1; var i = 0
+    while i < owner.uses.len():
+        if owner.uses[i].token == use_token and owner.uses[i].plan_token == token and
+           token.owner_identity == owner.owner_identity and use_token.owner_identity == owner.owner_identity:
+            index = i
+        i = i + 1
+    if index < 0: return Err(EnvironmentVariantBuildPlanOwnerErrorV1.UnknownOrSubstituted)
+    var kept: [_EnvironmentVariantBuildPlanUseRecordV1] = []; i = 0
+    while i < owner.uses.len():
+        if i != index: kept.push(owner.uses[i])
+        i = i + 1
+    owner.uses = kept
+    Ok(())
+
+pub fn environment_variant_build_plan_owner_release_v1(
+    owner: EnvironmentVariantBuildPlanOwnerV1,
+    token: EnvironmentVariantBuildPlanOwnerTokenV1
+) -> Result<(), EnvironmentVariantBuildPlanOwnerErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentVariantBuildPlanOwnerErrorV1.UnknownOrSubstituted)
+    for retained in owner.uses:
+        if retained.plan_token == token:
+            return Err(EnvironmentVariantBuildPlanOwnerErrorV1.UsesLive)
+    var found = false
+    var kept: [_EnvironmentVariantBuildPlanOwnerRecordV1] = []
+    for record in owner.records:
+        if record.token == token: found = true
+        else: kept.push(record)
+    if not found: return Err(EnvironmentVariantBuildPlanOwnerErrorV1.AlreadyReleased)
+    owner.records = kept; Ok(())

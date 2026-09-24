@@ -1,4 +1,8 @@
 # `origin/main` violates its own blocking push gate — nobody can push cleanly
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -88,3 +92,4 @@ the next reader does not have to infer it. It does not discharge the debt above.
   routinely been made with `--no-verify`, which is how this class of debt
   accumulates unseen.
 - `doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md`
+

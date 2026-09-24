@@ -1,0 +1,142 @@
+# Internal ELF linker: GOT relocations in static links — lane A7 slice 2 step 1
+#
+# clang -fPIC objects (test/fixtures/linker/elf/pic_*.o, recipe in RECIPE.md)
+# reach extern data through the GOT: aarch64 ADR_GOT_PAGE + LD64_GOT_LO12_NC,
+# x86_64 REX_GOTPCRELX. A static ET_EXEC link must synthesize .got (aarch64,
+# kept like ld.lld does for non-adjacent pairs) or relax mov -> lea (x86_64,
+# as ld.lld does), and the result runs (exit 42; evidence in the lane report).
+#
+# @cover src/compiler/70.backend/linker/reloc_engine.spl
+# @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.reloc_engine.{
+    RelocArch, reloc_apply, reloc_patch_bytes,
+    R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC, R_AARCH64_PREL32,
+    R_X86_64_REX_GOTPCRELX
+}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("{FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+# Section header of the named output section: [offset_of_shdr] or -1.
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val shstr = shoff + rd16(b, 0x3e) * 64
+    val stroff = rd64(b, shstr + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 16)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 24)
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 32)
+
+fn link_or_empty(objs: [[i64]], target: RelocArch) -> [i64]:
+    val r = elf_static_link(objs, [], "_start", target)
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "reloc_engine - GOT and PREL rows":
+    it "ADR_GOT_PAGE encodes the GOT entry's page delta like ADRP":
+        val r = reloc_apply(RelocArch.AArch64, [0x01, 0x00, 0x00, 0x90], 0, R_AARCH64_ADR_GOT_PAGE, 0x412345, 0, 0x401004)
+        expect(r.success).to_equal(true)
+        expect(r.value).to_equal(0x11)
+        val b = reloc_patch_bytes(RelocArch.AArch64, [0x01, 0x00, 0x00, 0x90], 0, R_AARCH64_ADR_GOT_PAGE, 0x412345, 0, 0x401004)
+        # immlo = 1 -> bit 29; immhi = 4 -> bits 23:5 ; Rd x1 kept
+        expect(rd32(b, 0)).to_equal(0x90000001 | (1 << 29) | (4 << 5))
+
+    it "LD64_GOT_LO12_NC scales the GOT entry's low 12 bits by 8":
+        val r = reloc_apply(RelocArch.AArch64, [0x21, 0x00, 0x40, 0xf9], 0, R_AARCH64_LD64_GOT_LO12_NC, 0x412348, 0, 0x401010)
+        expect(r.success).to_equal(true)
+        expect(r.value).to_equal(0x69)
+        val bad = reloc_apply(RelocArch.AArch64, [0x21, 0x00, 0x40, 0xf9], 0, R_AARCH64_LD64_GOT_LO12_NC, 0x412344, 0, 0x401010)
+        expect(bad.success).to_equal(false)
+
+    it "PREL32 is S + A - P in 32 bits and rejects out-of-range deltas":
+        val r = reloc_apply(RelocArch.AArch64, [0, 0, 0, 0], 0, R_AARCH64_PREL32, 0x1000, 0, 0x2000)
+        expect(r.success).to_equal(true)
+        expect(r.value).to_equal(0xfffff000)
+        val bad = reloc_apply(RelocArch.AArch64, [0, 0, 0, 0], 0, R_AARCH64_PREL32, 0x200000000, 0, 0)
+        expect(bad.success).to_equal(false)
+
+    it "REX_GOTPCRELX uses the GOTPCREL formula G + A - P":
+        val r = reloc_apply(RelocArch.X86_64, [0, 0, 0, 0], 0, R_X86_64_REX_GOTPCRELX, 0x403000, -4, 0x401004)
+        expect(r.success).to_equal(true)
+        expect(r.value).to_equal(0x1ff8)
+
+describe "elf_static_link - static GOT for clang -fPIC objects":
+    it "aarch64 link synthesizes .got with one slot per GOT-referenced symbol":
+        val b = link_or_empty([load_fixture("pic_start_a64.o"), load_fixture("pic_lib_a64.o")], RelocArch.AArch64)
+        expect(b.len() > 64).to_equal(true)
+        expect(shdr_by_name(b, ".got") >= 0).to_equal(true)
+        # msg, base, scratch
+        expect(sec_size(b, ".got")).to_equal(24)
+
+    it "aarch64 ADRP/LDR at _start+4/+0x10 address msg's GOT slot, which holds &msg":
+        val b = link_or_empty([load_fixture("pic_start_a64.o"), load_fixture("pic_lib_a64.o")], RelocArch.AArch64)
+        val text_v = sec_addr(b, ".text")
+        val text_o = sec_off(b, ".text")
+        val got_v = sec_addr(b, ".got")
+        val got_o = sec_off(b, ".got")
+        # msg is the first GOT user (start object) -> slot 0; it holds .rodata's address
+        expect(rd64(b, got_o)).to_equal(sec_addr(b, ".rodata"))
+        val adrp = rd32(b, text_o + 4)
+        val pages = ((adrp >> 29) & 3) | (((adrp >> 5) & 0x7ffff) << 2)
+        val place_page = (text_v + 4) - ((text_v + 4) & 0xfff)
+        expect(place_page + pages * 4096).to_equal(got_v - (got_v & 0xfff))
+        val ldr = rd32(b, text_o + 0x10)
+        expect(((ldr >> 10) & 0xfff) * 8).to_equal(got_v & 0xfff)
+
+    it "x86_64 mov foo@GOTPCREL is relaxed to lea foo(%rip) with no .got":
+        val b = link_or_empty([load_fixture("pic_start_x64.o"), load_fixture("pic_lib_x64.o")], RelocArch.X86_64)
+        expect(b.len() > 64).to_equal(true)
+        expect(shdr_by_name(b, ".got")).to_equal(-1)
+        val text_v = sec_addr(b, ".text")
+        val text_o = sec_off(b, ".text")
+        # push %rax ; mov msg@GOTPCREL(%rip),%rsi -> opcode byte at +2 becomes lea (0x8d)
+        expect(b[text_o + 2]).to_equal(0x8d)
+        var rel = rd32(b, text_o + 4)
+        if rel >= 0x80000000:
+            rel = rel - 0x100000000
+        expect(text_v + 8 + rel).to_equal(sec_addr(b, ".rodata"))

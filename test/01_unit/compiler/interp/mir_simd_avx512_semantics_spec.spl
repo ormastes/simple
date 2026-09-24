@@ -1,0 +1,261 @@
+# REQ-SIMD-004: strict fixed-width interpreter semantics. Execute through an
+# admitted phase artifact; source/host numeric checks are not runtime evidence.
+use std.spec
+use compiler.interp.mir_simd_interpreter.{MirSimdState, MirSimdShape}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use std.common.math.ieee754_bits.{
+    math_f32_widen_bits, math_f64_decode_bits, math_f64_round_to_f32_bits,
+    math_f32_fma_bits, math_f64_fma_bits
+}
+use std.common.binary_io.{f64_to_bits}
+
+fn avx_shape(kind: text, lanes: i64) -> MirSimdShape:
+    MirSimdShape(lanes: lanes, lane_kind: kind, scalable: false)
+
+fn avx_fill(word: i64, lanes: i64) -> [i64]:
+    var values: [i64] = []
+    for i in 0..lanes: values.push(word)
+    values
+
+fn avx_words(state: MirSimdState, handle: i64) -> [i64]:
+    val words = state.get(handle)
+    words.unwrap()
+
+describe "MIR SIMD exact IEEE bit helpers":
+    it "widens signed zero and minimum subnormal without losing bits":
+        expect(math_f32_widen_bits(0x80000000)).to_equal(~0x7FFFFFFFFFFFFFFF)
+        expect(math_f32_widen_bits(1)).to_equal(0x36A0000000000000)
+        expect(math_f32_widen_bits(0x7FC12345)).to_equal(0x7FF82468A0000000)
+        expect(f64_to_bits(math_f64_decode_bits(~0x7FFFFFFFFFFFFFFF)) as i64).to_equal(~0x7FFFFFFFFFFFFFFF)
+
+    it "rounds halfway to even and handles subnormal, normal and overflow boundaries":
+        expect(math_f64_round_to_f32_bits(math_f64_decode_bits(0x3FF0000010000000))).to_equal(0x3F800000)
+        expect(math_f64_round_to_f32_bits(math_f64_decode_bits(0x3FF0000030000000))).to_equal(0x3F800002)
+        expect(math_f64_round_to_f32_bits(math_f64_decode_bits(0x3FF0000010000001))).to_equal(0x3F800001)
+        expect(math_f64_round_to_f32_bits(math_f64_decode_bits(0x3690000000000000))).to_equal(0)
+        expect(math_f64_round_to_f32_bits(math_f64_decode_bits(0x3690000000000001))).to_equal(1)
+        expect(math_f64_round_to_f32_bits(math_f64_decode_bits(0x380FFFFFE0000000))).to_equal(0x800000)
+        expect(math_f64_round_to_f32_bits(math_f64_decode_bits(0x47EFFFFFF0000000))).to_equal(0x7F800000)
+
+    it "retains cancellation lost by unfused binary32 and binary64 multiply-add":
+        expect(math_f32_fma_bits(0x3F800001, 0x3F7FFFFE, 0xBF800000)).to_equal(0xA8800000)
+        val minus_one = 0x3FF0000000000000 xor (~0x7FFFFFFFFFFFFFFF)
+        val cancellation = 0x3970000000000000 xor (~0x7FFFFFFFFFFFFFFF)
+        expect(math_f64_fma_bits(0x3FF0000000000001, 0x3FEFFFFFFFFFFFFE, minus_one)).to_equal(cancellation)
+
+    it "corrects both directions of a binary64-to-binary32 double-rounding midpoint":
+        # Products are exact binary32 midpoints; +/-2^-80 is lost in a
+        # binary64 addition but changes the correctly rounded binary32 FMA.
+        expect(math_f32_fma_bits(0x3F800800, 0x3F800800, 0x17800000)).to_equal(0x3F801001)
+        expect(math_f32_fma_bits(0x3F801800, 0x3F800800, 0x97800000)).to_equal(0x3F802001)
+        expect(math_f32_fma_bits(0xBF800800, 0x3F800800, 0x97800000)).to_equal(0xBF801001)
+
+    it "handles invalid infinity, first NaN payload, signed zero and tiny products":
+        expect(math_f32_fma_bits(0x7F800000, 0, 0)).to_equal(0x7FC00000)
+        expect(math_f32_fma_bits(0x7F800000, 0x3F800000, 0xFF800000)).to_equal(0x7FC00000)
+        expect(math_f32_fma_bits(0x7FC12345, 0x3F800000, 0)).to_equal(0x7FC12345)
+        expect(math_f32_fma_bits(0x80000000, 0x40000000, 0x80000000)).to_equal(0x80000000)
+        expect(math_f32_fma_bits(1, 0x3F800000, 1)).to_equal(2)
+        expect(math_f32_fma_bits(1, 0x3F000000, 0)).to_equal(0)
+        expect(math_f64_fma_bits(0x7FF8123456789ABC, 0, 0)).to_equal(0x7FF8123456789ABC)
+        expect(math_f64_fma_bits(~0x7FFFFFFFFFFFFFFF, 0x4000000000000000, ~0x7FFFFFFFFFFFFFFF)).to_equal(~0x7FFFFFFFFFFFFFFF)
+
+describe "MIR SIMD fixed AVX512 scalar oracle":
+    it "executes fused f64x8 lanes and rejects mismatched ternary shapes":
+        var state = MirSimdState.create()
+        val shape = avx_shape("f64", 8)
+        val a = state.put(avx_fill(0x3FF0000000000001, 8), shape)
+        val b = state.put(avx_fill(0x3FEFFFFFFFFFFFFE, 8), shape)
+        val positive_one = state.put(avx_fill(0x3FF0000000000000, 8), shape)
+        val negative_one = state.put(avx_fill(0x3FF0000000000000 xor (~0x7FFFFFFFFFFFFFFF), 8), shape)
+        val fused = state.ternop(a, b, negative_one, "Fma")
+        val negated = state.ternop(a, b, positive_one, "Fnmadd")
+        expect(avx_words(state, fused)).to_equal(avx_fill(0x3970000000000000 xor (~0x7FFFFFFFFFFFFFFF), 8))
+        expect(avx_words(state, negated)).to_equal(avx_fill(0x3970000000000000, 8))
+        val wrong_shape = state.put(avx_fill(0x3F800000, 16), avx_shape("f32", 16))
+        val next = state.next_handle
+        expect(state.ternop(a, b, wrong_shape, "Fma")).to_equal(-1)
+        expect(state.next_handle).to_equal(next)
+
+    it "performs fused Fma and Fnmadd in every f32x16 lane":
+        var state = MirSimdState.create()
+        val shape = avx_shape("f32", 16)
+        val a = state.put(avx_fill(0x3F800001, 16), shape)
+        val b = state.put(avx_fill(0x3F7FFFFE, 16), shape)
+        val minus_one = state.put(avx_fill(0xBF800000, 16), shape)
+        val plus_one = state.put(avx_fill(0x3F800000, 16), shape)
+        val fused = state.ternop(a, b, minus_one, "Fma")
+        val negated = state.ternop(a, b, plus_one, "Fnmadd")
+        expect(avx_words(state, fused)).to_equal(avx_fill(0xA8800000, 16))
+        expect(avx_words(state, negated)).to_equal(avx_fill(0x28800000, 16))
+
+    it "rounds f32 arithmetic once and preserves right min/max NaN and zero bits":
+        var state = MirSimdState.create()
+        val shape = avx_shape("f32", 16)
+        val one = state.put(avx_fill(0x3F800000, 16), shape)
+        val above_half = state.put(avx_fill(0x33800001, 16), shape)
+        val sum = state.binop(one, above_half, "Add")
+        expect(avx_words(state, sum)).to_equal(avx_fill(0x3F800001, 16))
+        val zero = state.put(avx_fill(0, 16), shape)
+        val negative_zero = state.put(avx_fill(0x80000000, 16), shape)
+        val payload = state.put(avx_fill(0x7FC12345, 16), shape)
+        val low_zero = state.binop(zero, negative_zero, "Min")
+        val high_zero = state.binop(negative_zero, zero, "Max")
+        val unordered_right = state.binop(one, payload, "Min")
+        val unordered_left = state.binop(payload, one, "Max")
+        expect(avx_words(state, low_zero)).to_equal(avx_fill(0x80000000, 16))
+        expect(avx_words(state, high_zero)).to_equal(avx_fill(0, 16))
+        expect(avx_words(state, unordered_right)).to_equal(avx_fill(0x7FC12345, 16))
+        expect(avx_words(state, unordered_left)).to_equal(avx_fill(0x3F800000, 16))
+
+    it "keeps f64x8 reductions left-to-right with right-selected min/max ties":
+        var state = MirSimdState.create()
+        val shape = avx_shape("f64", 8)
+        # ((2^53 + 1) - 2^53) + 1 = 1 in strict left-fold order.
+        val negative_big = 0x4340000000000000 xor (~0x7FFFFFFFFFFFFFFF)
+        val input = state.put([0x4340000000000000, 0x3FF0000000000000, negative_big, 0x3FF0000000000000, 0, 0, 0, 0], shape)
+        expect(state.reduce(input, "Sum")).to_equal(0x3FF0000000000000)
+        val zeros = state.put([0, 0, 0, 0, 0, 0, 0, ~0x7FFFFFFFFFFFFFFF], shape)
+        expect(state.reduce(zeros, "Min")).to_equal(~0x7FFFFFFFFFFFFFFF)
+        expect(state.reduce(zeros, "Max")).to_equal(~0x7FFFFFFFFFFFFFFF)
+        val payload = state.put([0, 0, 0, 0, 0, 0, 0, 0x7FF8123456789ABC], shape)
+        expect(state.reduce(payload, "Max")).to_equal(0x7FF8123456789ABC)
+
+    it "uses i32 modulo arithmetic, ~lhs & rhs, Not, and correct right shifts":
+        var state = MirSimdState.create()
+        val shape = avx_shape("i32", 16)
+        val high = state.put(avx_fill(2147483647, 16), shape)
+        val one = state.put(avx_fill(1, 16), shape)
+        val added = state.binop(high, one, "Add")
+        expect(avx_words(state, added)).to_equal(avx_fill(-2147483648, 16))
+        val lhs = state.put(avx_fill(0x0F, 16), shape)
+        val rhs = state.put(avx_fill(0x33, 16), shape)
+        val cleared = state.binop(lhs, rhs, "Andnot")
+        val inverted = state.unop(lhs, "Not")
+        expect(avx_words(state, cleared)).to_equal(avx_fill(0x30, 16))
+        expect(avx_words(state, inverted)).to_equal(avx_fill(-16, 16))
+        val negative = state.put(avx_fill(-2147483648, 16), shape)
+        val logical = state.binop(negative, one, "ShrLogical")
+        val arithmetic = state.binop(negative, one, "ShrArith")
+        expect(avx_words(state, logical)).to_equal(avx_fill(1073741824, 16))
+        expect(avx_words(state, arithmetic)).to_equal(avx_fill(-1073741824, 16))
+        val last = state.put(avx_fill(31, 16), shape)
+        val shifted_last = state.binop(one, last, "Shl")
+        expect(avx_words(state, shifted_last)).to_equal(avx_fill(-2147483648, 16))
+
+    it "preserves unary zero signs and handles invalid sqrt and reciprocal zero":
+        var state = MirSimdState.create()
+        val shape = avx_shape("f32", 16)
+        val negative_zero = state.put(avx_fill(0x80000000, 16), shape)
+        val root_zero = state.unop(negative_zero, "Sqrt")
+        val reciprocal_zero = state.unop(negative_zero, "Recip")
+        expect(avx_words(state, root_zero)).to_equal(avx_fill(0x80000000, 16))
+        expect(avx_words(state, reciprocal_zero)).to_equal(avx_fill(0xFF800000, 16))
+        val negative = state.put(avx_fill(0xBF800000, 16), shape)
+        val invalid_root = state.unop(negative, "Sqrt")
+        expect(avx_words(state, invalid_root)).to_equal(avx_fill(0x7FC00000, 16))
+        val negative_nan = state.put(avx_fill(0xFFC12345, 16), shape)
+        val absolute = state.unop(negative_nan, "Abs")
+        expect(avx_words(state, absolute)).to_equal(avx_fill(0x7FC12345, 16))
+
+    it "rejects negative and large shifts before creating a result or changing inputs":
+        var state = MirSimdState.create()
+        val shape = avx_shape("i32", 16)
+        val lhs = state.put(avx_fill(123, 16), shape)
+        for count in [-1, 32, 63, 2147483647]:
+            val rhs = state.put(avx_fill(count, 16), shape)
+            for op in ["Shl", "ShrLogical", "ShrArith"]:
+                val next = state.next_handle
+                expect(state.binop(lhs, rhs, op)).to_equal(-1)
+                val failure = state.take_error()
+                expect(failure.unwrap()).to_contain("shift count")
+                expect(state.next_handle).to_equal(next)
+        expect(avx_words(state, lhs)).to_equal(avx_fill(123, 16))
+
+    it "normalizes masks and rejects data-shaped or differently sized selectors":
+        var state = MirSimdState.create()
+        val data = avx_shape("f32", 16)
+        val a = state.put(avx_fill(0x7FC12345, 16), data)
+        val b = state.put(avx_fill(0x3F800000, 16), data)
+        val compared = state.compare(a, b, "Ne")
+        val compared_shape = state.shape(compared)
+        val mask_shape = compared_shape.unwrap()
+        expect(mask_shape.lane_kind).to_equal("mask")
+        expect(avx_words(state, compared)).to_equal(avx_fill(1, 16))
+        val mask = state.put(avx_fill(-9, 16), avx_shape("mask", 16))
+        val selected = state.select(mask, a, b)
+        expect(avx_words(state, selected)).to_equal(avx_fill(0x7FC12345, 16))
+        expect(state.select(b, a, b)).to_equal(-1)
+        val short_mask = state.put(avx_fill(1, 8), avx_shape("mask", 8))
+        expect(state.select(short_mask, a, b)).to_equal(-1)
+        val scalable_mask = state.put(avx_fill(1, 16), MirSimdShape(lanes: 16, lane_kind: "mask", scalable: true))
+        expect(state.select(scalable_mask, a, b)).to_equal(-1)
+        val zeros = state.mask_op(mask, 0, "Not")
+        expect(avx_words(state, zeros)).to_equal(avx_fill(0, 16))
+        val cleared = state.mask_op(mask, compared, "Andnot")
+        expect(avx_words(state, cleared)).to_equal(avx_fill(0, 16))
+
+    it "checks permutation controls and treats broadcast rhs as a scalar index":
+        var state = MirSimdState.create()
+        val shape = avx_shape("i32", 16)
+        var source: [i64] = []
+        var reversed: [i64] = []
+        for i in 0..16:
+            source.push(i)
+            reversed.push(15 - i)
+        val input = state.put(source, shape)
+        val controls = state.put(reversed, shape)
+        val permuted = state.permute(input, controls)
+        expect(avx_words(state, permuted)).to_equal(reversed)
+        val broadcast = state.shuffle(input, 15, "BroadcastLane")
+        expect(avx_words(state, broadcast)).to_equal(avx_fill(15, 16))
+        for invalid in [-1, 16, 2147483647]:
+            val bad = state.put(avx_fill(invalid, 16), shape)
+            val next = state.next_handle
+            expect(state.permute(input, bad)).to_equal(-1)
+            expect(state.shuffle(input, invalid, "BroadcastLane")).to_equal(-1)
+            expect(state.next_handle).to_equal(next)
+        val float_controls = state.put(avx_fill(0, 16), avx_shape("f32", 16))
+        expect(state.permute(input, float_controls)).to_equal(-1)
+
+    it "interleaves complete logical halves and refuses odd active widths":
+        var state = MirSimdState.create()
+        val shape = avx_shape("i32", 16)
+        var lhs: [i64] = []
+        var rhs: [i64] = []
+        var expected_lo: [i64] = []
+        var expected_hi: [i64] = []
+        for i in 0..16:
+            lhs.push(i)
+            rhs.push(100 + i)
+        for i in 0..8:
+            expected_lo.push(i)
+            expected_lo.push(100 + i)
+            expected_hi.push(8 + i)
+            expected_hi.push(108 + i)
+        val a = state.put(lhs, shape)
+        val b = state.put(rhs, shape)
+        val lo = state.shuffle(a, b, "InterleaveLo")
+        val hi = state.shuffle(a, b, "InterleaveHi")
+        expect(avx_words(state, lo)).to_equal(expected_lo)
+        expect(avx_words(state, hi)).to_equal(expected_hi)
+        val odd = MirSimdShape(lanes: 3, lane_kind: "i32", scalable: true)
+        val odd_a = state.put([1, 2, 3], odd)
+        val odd_b = state.put([4, 5, 6], odd)
+        val next = state.next_handle
+        expect(state.shuffle(odd_a, odd_b, "InterleaveLo")).to_equal(-1)
+        expect(state.next_handle).to_equal(next)
+
+    it "rejects scalable integer widths that cannot be represented without truncation":
+        var state = MirSimdState.create()
+        val i64_type = MirType.i64()
+        val unsupported = MirType.scalable_vec(i64_type, 2)
+        expect(state.splat(0x100000000, unsupported)).to_equal(-1)
+        expect(state.set_scalable_vl(2, i64_type)).to_equal(-1)
+        val unsigned = MirType(kind: MirTypeKind.U32)
+        expect(state.set_scalable_vl(4, unsigned)).to_equal(-1)
+        val i32_type = MirType(kind: MirTypeKind.I32)
+        expect(state.set_scalable_vl(3, i32_type)).to_equal(3)
+        val supported = MirType.scalable_vec(i32_type, 4)
+        val handle = state.splat(7, supported)
+        expect(avx_words(state, handle)).to_equal([7, 7, 7])

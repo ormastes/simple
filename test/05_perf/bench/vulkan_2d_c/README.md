@@ -2,7 +2,8 @@
 
 Apples-to-apples 2D workload over the same device (MoltenVK): per frame =
 `vkCmdFillBuffer` clear + N rect-fill compute dispatches + submit + fence +
-optional full-frame readback.
+three-slot asynchronous submission ring. Optional full-frame capture happens
+once after the timed samples and is excluded from p50/p95.
 
 ## Files
 
@@ -12,34 +13,83 @@ optional full-frame readback.
   <https://raw.githubusercontent.com/Magicalbat/videos/main/vulkan-compute/main.c>
 - `vk2d_bench.c` — the 2D adaptation of that example: same instance/device/
   memory strategy (one HOST_VISIBLE|HOST_COHERENT allocation, first compute
-  queue, one-shot command buffer per frame, one fence wait per frame), plus
-  the 2D frame loop (clear + N rects + optional readback). Adds the
+  queue), plus a retained three-command-buffer/fence ring, five untimed
+  warmups, nonblocking `vkGetFenceStatus` completion polling, per-frame
+  draw/record-through-device-completion latency, deterministic teardown, and
+  optional post-timing capture. Its receipt reports retained/released bytes,
+  timed allocations,
+  push-constant upload bytes, full-frame uploads, readbacks, completion polls,
+  driver waits, event/frame generations, and damage area. Adds the
   `VK_KHR_portability_enumeration` flag MoltenVK requires.
 - `rect.comp.glsl` — the rect-fill compute kernel (16×16 groups, push
   constants), compiled to `rect.spv`.
 - `vk2d_bench.spl` — the Simple counterpart driving Engine2D's vulkan backend
-  (`clear` + `draw_rect_filled` ×N + `submit_batch` + `present` +
-  `read_pixels_with_source`) with per-phase timing (draw / submit / readback).
+  (`clear` + `draw_rect_filled` ×N + device-retained finalize). It performs no
+  timed readback, captures once afterward when requested, and reports the
+  current synchronous one-frame limitation as an inadmissible receipt. Missing
+  backend telemetry is emitted as `-1` rather than inferred: timed allocation,
+  retained/released bytes, upload bytes, and full-frame upload counts cannot be
+  admitted until Engine2D exposes real counters.
 
 ## Build & run
 
 ```sh
 glslangValidator -V rect.comp.glsl -o rect.spv
 clang -std=c99 -O2 vk2d_bench.c -I/opt/homebrew/include -L/opt/homebrew/lib -lvulkan -o vk2d_bench
-VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json ./vk2d_bench 800 600 64 300 1
+VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json ./vk2d_bench 800 600 64 300 0 5
+# Arguments: width height rects samples capture_after_timing warmups
 ```
 
 ```sh
 SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
   src/compiler_rust/target/vulkan/release/simple run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl
-# knobs: VK2D_W VK2D_H VK2D_RECTS VK2D_FRAMES VK2D_READBACK
+# knobs: VK2D_W VK2D_H VK2D_RECTS VK2D_FRAMES VK2D_WARMUPS VK2D_READBACK
 ```
 
 ## Comparison harness + gate
 
 `sh scripts/check/check-vulkan-2d-c-compare.shs` builds/runs both legs and
-writes `build/vulkan-2d-c-compare/evidence.env` (ratio vs budget, explicit
-`skipped` rows when a toolchain leg is missing — never a fake pass).
+publishes one immutable run under
+`build/vulkan-2d-c-compare/runs/<run_id>/evidence.env` (ratio vs budget,
+explicit `skipped` rows when a toolchain leg is missing — never a fake pass).
+Set `VK2D_RUN_ID` when coordinating a receipt externally; reusing an ID is a
+hard collision and cannot overwrite the earlier run. A private 0700 staging
+directory reserves that ID until its same-filesystem publication rename.
+`latest` at the output root is an atomic, non-authoritative convenience
+pointer only; inability to update it does not invalidate a published run. Pass the
+direct `runs/<run_id>` directory to `--aggregate`; pointers and stale output
+roots are rejected, and bound receipt hashes are rechecked before aggregation.
+Each published run retains the producer streams as `c.stdout.raw`,
+`c.stderr.raw`, `simple.stdout.raw`, and `simple.stderr.raw`; on macOS the C
+stderr includes `/usr/bin/time -l` process statistics. The
+canonical wrapper passes the committed `scenes.txt` as a required table and
+rejects a C receipt unless it reports `scene_source=table`.
+`c.runtime.env` and `simple.runtime.env` bind those streams and hashes, while
+`c.toolchain.env` binds the C/shader compiler paths, hashes, versions, and
+exact flags. The run manifest also binds the combined raw row, compiled shader
+when present, and both framebuffer paths.
+The ratio is Simple p95 divided by C p95 with the selected 2.0x ceiling. Both
+rows must already be `admitted`; raw measured output is intentionally reported
+as `measured-unadmitted` until the common receipt validator accepts it. The live
+path refuses Rust bootstrap-seed binaries.
+
+The run manifest is also provenance-bound. It records the exact Git commit and
+committed tree, tracked dirty state and exact tracked-diff digest, a validated
+UTC start timestamp, unique reservation nonce, the
+wrapper and both sourced helper SHA-256 digests, the complete workload/config
+hash inputs, and line-safe argc plus one-argument-per-line argv and an argv
+digest. The
+manifest has a self-digest; aggregation verifies every bound file and recomputes
+the current-tree policy before accepting rows. A candidate from another source
+revision is retained for analysis but returns
+`compare_status=skipped` with
+`compare_reason=provenance-cross-revision:source-revision-mismatch` (or the
+declared-revision equivalent), never a silent performance pass. Commands are
+executed through explicit argv arrays; no eval or backtick expansion is part
+of the evidence path.
+Aggregate mode uses the recorded budget rather than a caller override. Future
+Simple-web/Chrome legs use the same numbered `*_command_argc`,
+`*_command_argv_N`, and digest convention; no shell command string is decoded.
 The aggregate verdict logic is executable-tested by
 `test/03_system/check/engine2d_vulkan_2d_perf_contract_spec.spl`.
 

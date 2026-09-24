@@ -1,4 +1,8 @@
 # Deployed Simple misses Engine2D blend-span externs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -41,3 +45,4 @@ negative clipping, transparent no-op, identical damage rectangles, nonzero
 native receipts for an ISA lane, and no per-row allocation. Keep the existing
 cross-architecture C operation report as native kernel evidence, not as an
 end-to-end Engine2D or 8K/80 receipt.
+

@@ -1,0 +1,216 @@
+# @manual_section: Process observation V1 is an unavailable typed facade contract.
+"""End-to-end RED contract for the future process-observation V1 facade.
+
+The only authority to create, poll, reap, collect, and release an observed
+process remains io/process_ops.spl. This test imports the typed facade only.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_copy, file_delete, file_rename, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.process_observation_v1.*
+
+# Host-provided executable candidate only. No architecture/admission claim is
+# made here; the target-specific native fixture is unavailable in this RED lane.
+const NATIVE_FIXTURE: text = "/bin/sh"
+
+# These are the four and only test helpers in the frozen contract.
+fn start_observed(command: text, args: [text], deadline_ms: i64,
+                  stdout_limit: i64, stderr_limit: i64) -> ObservedProcessStartV1:
+    process_observation_start_v1(ObservedProcessRequestV1(
+        command: command, args: args, deadline_ms: deadline_ms,
+        term_grace_ms: 50, stdout_limit: stdout_limit,
+        stderr_limit: stderr_limit, pin_executable: true))
+
+fn poll_until_terminal(lease: ObservedProcessLeaseV1) -> ObservedProcessPollV1:
+    # The owner lease carries the captured absolute deadline and cleanup
+    # reserve; this helper only issues bounded turns and never extends it.
+    var poll = process_observation_poll_v1(lease, 50, 8192, 8192)
+    var turns = 0
+    while (not poll.terminal and turns < 19):
+        poll = process_observation_poll_v1(lease, 50, 8192, 8192)
+        turns = turns + 1
+    poll
+
+fn collect_observed(lease: ObservedProcessLeaseV1) -> ObservedProcessResultV1:
+    process_observation_collect_v1(lease)
+
+fn expect_unsupported_before_spawn(command: text, args: [text]):
+    val denied = process_observation_start_with_provider_v1(
+        ProcessObservationProviderV1.Unsupported,
+        ObservedProcessRequestV1(command: command, args: args, deadline_ms: 250,
+            term_grace_ms: 50, stdout_limit: 4096, stderr_limit: 4096,
+            pin_executable: true))
+    expect(denied.status).to_equal(ObservedProcessStartStatusV1.Unsupported)
+    expect(denied.spawned).to_equal(false)
+    expect(denied.pid).to_equal(0)
+
+describe "process observation V1 typed facade":
+    it "should require the real provider before launch and reject unsupported explicitly":
+        # @req REQ-001 REQ-003
+        step("Require the actual observation provider before launch")
+        # Intentionally RED while linked capability discovery is absent.
+        expect(process_observation_provider_v1()).to_equal(ProcessObservationProviderV1.Available)
+        expect_unsupported_before_spawn(NATIVE_FIXTURE, ["-c", "exit 0"])
+
+    it "should observe PID, exact wait status, and child rusage":
+        # @req REQ-001 REQ-002
+        step("Observe PID, exact wait status and child rusage")
+        val started = start_observed(NATIVE_FIXTURE, ["-c", "exit 0"], 1000, 8192, 8192)
+        expect(started.status).to_equal(ObservedProcessStartStatusV1.Started)
+        expect(started.pid > 1).to_equal(true)
+        val polled = poll_until_terminal(started.lease)
+        expect(polled.terminal).to_equal(true)
+        val result = collect_observed(started.lease)
+        expect(result.pid).to_equal(started.pid)
+        expect(result.exit_code).to_equal(0)
+        expect(result.signal).to_equal(0)
+        expect(result.rusage.available).to_equal(true)
+
+    it "should distinguish exit 143 from TERM and forced KILL":
+        # @req REQ-003
+        step("Distinguish exit 143 from TERM and forced KILL")
+        val exited = start_observed(NATIVE_FIXTURE, ["-c", "exit 143"], 1000, 4096, 4096)
+        val exit_result = collect_observed(exited.lease)
+        expect(exit_result.exit_code).to_equal(143)
+        expect(exit_result.signal).to_equal(0)
+        val term_child = start_observed(NATIVE_FIXTURE,
+            ["-c", "printf READY; while :; do :; done"], 100, 4096, 4096)
+        val term_ready = process_observation_poll_v1(term_child.lease, 50, 8192, 8192)
+        expect(term_ready.stdout.seen_bytes >= 5).to_equal(true)
+        expect(term_ready.terminal).to_equal(false)
+        val term_poll = poll_until_terminal(term_child.lease)
+        expect(term_poll.terminal).to_equal(true)
+        val term_result = collect_observed(term_child.lease)
+        expect(term_result.exit_code).to_equal(-1)
+        expect(term_result.signal).to_equal(15)
+        expect(term_result.term_sent).to_equal(true)
+        expect(term_result.kill_sent).to_equal(false)
+        expect(term_result.deadline_exceeded).to_equal(true)
+        val kill_child = start_observed(NATIVE_FIXTURE,
+            ["-c", "trap '' TERM; printf READY; while :; do :; done"], 100, 4096, 4096)
+        val kill_ready = process_observation_poll_v1(kill_child.lease, 50, 8192, 8192)
+        expect(kill_ready.stdout.seen_bytes >= 5).to_equal(true)
+        expect(kill_ready.terminal).to_equal(false)
+        val kill_poll = poll_until_terminal(kill_child.lease)
+        expect(kill_poll.terminal).to_equal(true)
+        val kill_result = collect_observed(kill_child.lease)
+        expect(kill_result.exit_code).to_equal(-1)
+        expect(kill_result.signal).to_equal(9)
+        expect(kill_result.term_sent).to_equal(true)
+        expect(kill_result.kill_sent).to_equal(true)
+        expect(kill_result.deadline_exceeded).to_equal(true)
+
+    it "should distinguish failed exec from exit 127":
+        # @req REQ-003
+        step("Distinguish failed exec from exit 127")
+        val exec_failed = start_observed("test/fixtures/process_observation_v1/not-present", [], 250, 4096, 4096)
+        expect(exec_failed.status).to_equal(ObservedProcessStartStatusV1.ExecFailed)
+        expect(exec_failed.pid).to_equal(0)
+        val exited_127 = start_observed(NATIVE_FIXTURE, ["-c", "exit 127"], 250, 4096, 4096)
+        val result_127 = collect_observed(exited_127.lease)
+        expect(result_127.exit_code).to_equal(127)
+        expect(result_127.signal).to_equal(0)
+
+    it "should drain independent capture boundaries without deadlock":
+        # @req REQ-002 REQ-004
+        step("Drain independent capture boundaries without deadlock")
+        val exact = start_observed(NATIVE_FIXTURE,
+            ["-c", "yes o | tr -d '\\n' | head -c 4096; yes e | tr -d '\\n' | head -c 4096 >&2"], 1000, 4096, 4096)
+        val exact_poll = poll_until_terminal(exact.lease)
+        expect(exact_poll.terminal).to_equal(true)
+        val exact_result = collect_observed(exact.lease)
+        expect(exact_result.stdout.retained_bytes).to_equal(4096)
+        expect(exact_result.stderr.retained_bytes).to_equal(4096)
+        expect(exact_result.stdout.seen_bytes).to_equal(4096)
+        expect(exact_result.stderr.seen_bytes).to_equal(4096)
+        expect(exact_result.stdout.bytes.len()).to_equal(4096)
+        expect(exact_result.stderr.bytes.len()).to_equal(4096)
+        expect(exact_result.stdout.bytes[0]).to_equal(111)
+        expect(exact_result.stdout.bytes[4095]).to_equal(111)
+        expect(exact_result.stderr.bytes[0]).to_equal(101)
+        expect(exact_result.stderr.bytes[4095]).to_equal(101)
+        expect(exact_result.stdout.truncated).to_equal(false)
+        expect(exact_result.stderr.truncated).to_equal(false)
+        expect(exact_result.output_complete).to_equal(true)
+        val overflow = start_observed(NATIVE_FIXTURE,
+            ["-c", "yes o | tr -d '\\n' | head -c 4097; yes e | tr -d '\\n' | head -c 4097 >&2"], 1000, 4096, 4096)
+        val overflow_result = collect_observed(overflow.lease)
+        expect(overflow_result.stdout.seen_bytes).to_equal(4097)
+        expect(overflow_result.stderr.seen_bytes).to_equal(4097)
+        expect(overflow_result.stdout.truncated).to_equal(true)
+        expect(overflow_result.stderr.truncated).to_equal(true)
+        expect(overflow_result.output_complete).to_equal(true)
+        val flooded = start_observed(NATIVE_FIXTURE,
+            ["-c", "yes o | tr -d '\\n' | head -c 65536 & yes e | tr -d '\\n' | head -c 65536 >&2; wait"], 1000, 4096, 4096)
+        val flood_result = collect_observed(flooded.lease)
+        expect(flood_result.stdout.seen_bytes >= 65536).to_equal(true)
+        expect(flood_result.stderr.seen_bytes >= 65536).to_equal(true)
+        expect(flood_result.stdout.truncated).to_equal(true)
+        expect(flood_result.stderr.truncated).to_equal(true)
+
+    it "should preserve the absolute deadline across real EINTR":
+        # @req REQ-002 REQ-003
+        step("Preserve the absolute deadline across real EINTR")
+        # A synchronized parent signal handler plus a blocked syscall fixture
+        # is not admitted yet. Do not send an unsafe signal from this spec.
+        assert(false)
+
+    it "should launch the pinned image after pathname replacement":
+        # @req REQ-003
+        step("Launch the pinned image after pathname replacement")
+        val fixture_dir = secure_temp_dir("/tmp", "process-observation-v1-").unwrap()
+        val fixture_copy = fixture_dir + "/original"
+        val fixture_renamed = fixture_copy + "-renamed"
+        expect(file_copy(NATIVE_FIXTURE, fixture_copy)).to_equal(true)
+        val pin = OwnedExecutablePin.pin(fixture_copy).unwrap()
+        val pinned_digest = pin.digest().unwrap()
+        expect(file_rename(fixture_copy, fixture_renamed)).to_equal(true)
+        expect(file_copy("/bin/true", fixture_copy)).to_equal(true)
+        val started = process_observation_start_pinned_v1(pin,
+            ObservedProcessRequestV1(command: fixture_copy, args: ["-c", "exit 143"],
+                deadline_ms: 250, term_grace_ms: 50, stdout_limit: 4096,
+                stderr_limit: 4096, pin_executable: true))
+        expect(started.status).to_equal(ObservedProcessStartStatusV1.Started)
+        expect(started.pid > 1).to_equal(true)
+        val pinned_poll = poll_until_terminal(started.lease)
+        expect(pinned_poll.terminal).to_equal(true)
+        expect(pinned_poll.reaped).to_equal(true)
+        val result = collect_observed(started.lease)
+        expect(result.status).to_equal(ObservedProcessResultStatusV1.Collected)
+        expect(result.reaped).to_equal(true)
+        expect(result.exit_code).to_equal(143)
+        expect(result.signal).to_equal(0)
+        expect(result.executable_pin.pinned).to_equal(true)
+        expect(result.executable_pin.replacement_detected).to_equal(true)
+        expect(result.executable_pin.digest.len()).to_equal(32)
+        expect(result.executable_pin.digest).to_equal(pinned_digest)
+        expect(file_delete(fixture_copy)).to_equal(true)
+        expect(file_delete(fixture_renamed)).to_equal(true)
+        expect(dir_remove(fixture_dir, false)).to_equal(true)
+
+    it "should consume once and reject stale lease aliases":
+        # @req REQ-004
+        step("Consume once and reject stale lease aliases")
+        val started = start_observed(NATIVE_FIXTURE, ["-c", "exit 0"], 250, 4096, 4096)
+        val collected = collect_observed(started.lease)
+        expect(collected.status).to_equal(ObservedProcessResultStatusV1.Collected)
+        expect(process_observation_poll_v1(started.lease, 50, 8192, 8192).status).to_equal(ObservedProcessPollStatusV1.ReuseRejected)
+        expect(process_observation_collect_v1(started.lease).status).to_equal(ObservedProcessResultStatusV1.ReuseRejected)
+        expect(process_observation_decode_result_v1([1, 2, 3]).status).to_equal(ObservedProcessResultStatusV1.Malformed)
+        expect(process_observation_decode_result_v1([]).status).to_equal(ObservedProcessResultStatusV1.Missing)
+
+    it "should validate unavailable RSS as a receipt fact rather than a fake provider":
+        # @req REQ-002
+        step("Report unavailable RSS without manufacturing successful live evidence")
+        val rejected = process_observation_decode_result_v1([1, 2, 3])
+        expect(rejected.status).to_equal(ObservedProcessResultStatusV1.Malformed)
+        expect(rejected.rusage.available).to_equal(false)
+        expect(rejected.rusage.max_rss_kib).to_equal(0)
+
+    it "should report bounded cleanup failure without losing ownership":
+        # @req REQ-004
+        step("Report bounded cleanup failure without losing ownership")
+        # CleanupPending is a required future typed status. Until the provider
+        # is admitted this remains RED/unavailable, never a skip.
+        assert(false)

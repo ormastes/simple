@@ -1,4 +1,9 @@
 # Native codegen: `x != ""` unreliable for text built via `.trim().lower()` chains
+## Closed 2026-09-16 — in-body RESOLVED 2026-08-11; runtime fix across six lanes, red-then-green guard evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 **RESOLVED 2026-08-11** — root-caused and fixed in the runtime across all six
@@ -276,3 +281,4 @@ decision in this file's companion bug doc). Recommended follow-up:
 ## Evidence
 Full before/after serial tails and gate verdicts:
 `doc/08_tracking/bug/simpleos_baremetal_backend_resolve_empty_override_rt_process_run_trap_2026-08-11.md`
+

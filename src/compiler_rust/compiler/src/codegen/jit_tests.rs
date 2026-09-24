@@ -17,6 +17,57 @@ fn jit_compile(source: &str) -> JitResult<JitCompiler> {
 }
 
 #[test]
+fn stage2_nullable_named_unwrap_jit_preserves_present_values() {
+    use simple_runtime::value::{hash_variant_discriminant, rt_enum_new, rt_string_new, RuntimeValue};
+    let some = |payload| rt_enum_new(1, hash_variant_discriminant("Some"), payload);
+    let none = rt_enum_new(1, hash_variant_discriminant("None"), RuntimeValue::NIL);
+    let jit = jit_compile("enum UserKind:\n    Ok(value: i64)\n    Err(value: text)\n    None\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n\nfn nested(value: Option<i64>?) -> Option<i64>:\n    value.unwrap()\n").unwrap();
+    for variant in ["Ok", "Err", "None"] {
+        let value = rt_enum_new(773, hash_variant_discriminant(variant), RuntimeValue::from_int(19));
+        for input in [value, some(value)] {
+            let actual = unsafe { jit.call_i64_i64("probe", input.to_raw() as i64).unwrap() };
+            assert_eq!(actual as u64, value.to_raw(), "present user variant {variant} remains intact");
+        }
+    }
+    // Exercise the runtime ABI with falsy and empty payload words: absence
+    // depends on nil/Option.None, never truthiness or collection length.
+    for value in [RuntimeValue::from_int(0), RuntimeValue::from_bool(false), rt_string_new(b"".as_ptr(), 0)] {
+        for input in [value, some(value)] {
+            let actual = unsafe { jit.call_i64_i64("probe", input.to_raw() as i64).unwrap() };
+            assert_eq!(actual as u64, value.to_raw());
+        }
+    }
+    for inner in [none, some(RuntimeValue::from_int(0))] {
+        let outer = some(inner);
+        let actual = unsafe { jit.call_i64_i64("nested", outer.to_raw() as i64).unwrap() };
+        assert_eq!(actual as u64, inner.to_raw(), "only the outer Option is unwrapped");
+    }
+}
+
+#[test]
+fn stage2_nullable_named_unwrap_jit_traps_absence() {
+    const MODE: &str = "SIMPLE_STAGE2_NULLABLE_TRAP_TEST";
+    if let Ok(mode) = std::env::var(MODE) {
+        let jit = jit_compile("enum UserKind:\n    Ok(value: i64)\n    None\n\nfn probe(value: UserKind?) -> UserKind:\n    value.unwrap()\n").unwrap();
+        use simple_runtime::value::{hash_variant_discriminant, rt_enum_new, RuntimeValue};
+        let value = if mode == "nil" { RuntimeValue::NIL } else { rt_enum_new(1, hash_variant_discriminant("None"), RuntimeValue::NIL) };
+        eprintln!("NULLABLE_TRAP_READY");
+        unsafe { jit.call_i64_i64("probe", value.to_raw() as i64).unwrap(); }
+        panic!("NULLABLE_TRAP_RETURNED");
+    }
+    for mode in ["nil", "none"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "codegen::jit::tests::stage2_nullable_named_unwrap_jit_traps_absence", "--nocapture"])
+            .env(MODE, mode).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("NULLABLE_TRAP_READY"), "child must reach unwrap: {stderr}");
+        assert!(!output.status.success(), "{mode} must trap");
+        assert!(stderr.contains("unwrap"), "expected unwrap diagnostic: {stderr}");
+        assert!(!stderr.contains("NULLABLE_TRAP_RETURNED"), "{stderr}");
+    }
+}
+
+#[test]
 fn strict_all_marks_jit_fallbacks_as_hard_failures() {
     // Keep this predicate test process-local: mutating the environment would
     // race the parallel JIT test suite. The contained native-build worker
@@ -479,5 +530,72 @@ fn test_jit_f64_call_result_print() {
         "21.5",
         "print() of an f64 call result must format the value, got: '{}'",
         captured
+    );
+}
+
+// Regression coverage for:
+//   doc/08_tracking/bug/seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md
+//   doc/08_tracking/bug/seed_jit_function_local_use_segfaults_2026-09-13.md
+//
+// Root cause: on Windows, `dlsym_resolves` unconditionally returned `true`
+// ("Conservative on Windows: assume resolvable"), so `jit_import_resolves`
+// could never say a directly-called `Linkage::Import` was unresolvable and
+// `first_unresolved_import_called` never fired on that platform. A call to a
+// cross-module Simple function symbol that cranelift-jit itself cannot
+// resolve (no registered runtime symbol, no process/CRT export — exactly the
+// shape of an `app.*`-module function call, or a function reached only
+// through a function-local `use`) therefore finalized with a NULL GOT slot
+// and SIGSEGV'd on first call, with nothing printed to stderr. The fix makes
+// `dlsym_resolves` on Windows actually probe resolvability via
+// `GetProcAddress`, mirroring cranelift-jit's own Windows fallback resolver
+// (`cranelift-jit::backend::lookup_with_dlsym`), so the existing guard can
+// do its job on Windows exactly as it already does on Unix.
+#[cfg(windows)]
+#[test]
+fn dlsym_resolves_rejects_a_nonexistent_symbol_on_windows() {
+    assert!(
+        !super::dlsym_resolves("simple_seed_jit_bug_nonexistent_symbol_zzqq"),
+        "a symbol name that is not a registered runtime symbol and not a real \
+         process/CRT export must NOT be reported as resolvable, or the \
+         unresolved-import guard can never fire on Windows"
+    );
+    assert!(
+        super::dlsym_resolves("malloc"),
+        "a genuine C runtime export must still resolve, so the guard does not \
+         force unnecessary interpreter fallbacks for symbols that really link"
+    );
+}
+
+#[test]
+fn test_jit_unresolved_extern_call_refuses_to_finalize_instead_of_null_jumping() {
+    // End-to-end shape of both bug reports: a direct call to an extern whose
+    // name resolves to neither a registered runtime symbol nor a real
+    // process/CRT export. `compile_module` must refuse (Err) so the driver
+    // falls back to the interpreter, matching non-Windows and AOT behaviour —
+    // never finalize a NULL import and let the first call SIGSEGV.
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    assert!(provider
+        .get_symbol("simple_seed_jit_bug_nonexistent_symbol_zzqq")
+        .is_none());
+
+    let source = r#"
+@unsafe(reason: "test unresolved extern", capabilities: [ffi])
+extern fn simple_seed_jit_bug_nonexistent_symbol_zzqq(x: i64) -> i64
+
+fn caller() -> i64:
+    simple_seed_jit_bug_nonexistent_symbol_zzqq(1)
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse unresolved-extern fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower unresolved-extern fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower unresolved-extern fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    let result = jit.compile_module(&mir_module);
+    assert!(
+        result.is_err(),
+        "an extern call that would NULL-jump at finalize time must be refused here, \
+         not silently accepted and left to SIGSEGV on first call"
     );
 }

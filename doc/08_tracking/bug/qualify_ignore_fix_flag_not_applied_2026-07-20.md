@@ -1,4 +1,8 @@
 # `qualify_ignore` app CLI: `--fix` flag doesn't switch mode; JSON output stays `mode:"scan"`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/qualify_ignore/main.spl` CLI flag handling
@@ -41,3 +45,4 @@ branch isn't wired to change the reported `mode`/perform the fix.
 
 Spec left unmodified — the assertion describes the intended `--fix`
 contract; this is a CLI implementation gap, not a stale test.
+

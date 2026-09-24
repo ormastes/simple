@@ -1,4 +1,8 @@
 # `simple_portal` DBFS mount: file written via `_write_mount_file` not visible to `portal_content_db_load_from_mount`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `MountTable`/`DbFsDriver` (`src/lib/nogc_sync_mut/fs_driver/mount_table.spl`)
@@ -62,3 +66,4 @@ elsewhere in the same file for `_write_mount_file` reassignment, so it
 isn't an obvious test-authoring mistake; treating as a genuine defect in
 the mount/DBFS write-then-read path (or, less likely, a value-semantics gap
 in `me fn` mutation) rather than a stale test.
+

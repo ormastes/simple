@@ -1,4 +1,9 @@
 # `simple lint` prints "Lint passed: all files clean" for a file it just reported warnings on
+## Closed 2026-09-16 — Status RESOLVED 2026-09-02; before/after measured, specs 5/5 and 4/4 green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-09-02
 - Status: RESOLVED 2026-09-02 (see "Resolution 2026-09-02" at the end)
@@ -215,3 +220,4 @@ Lint failed in 1 file(s)
 The `--deny-all` escape hatch cited in the exit-semantics reasoning above was
 run, not merely asserted: it promotes the same finding to `error`, takes the
 `failed_files` branch, and exits 1.
+

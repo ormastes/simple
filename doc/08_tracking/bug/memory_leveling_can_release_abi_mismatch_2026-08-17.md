@@ -1,4 +1,9 @@
 # MemoryLevelingManager missing `can_release` — kernel-build ABI mismatch (RESOLVED 2026-08-17)
+## Closed 2026-09-16 — RESOLVED 2026-08-17; can_release added, toggle proof, OVMF gate PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Lane W16-A. Unblocks `scripts/check/check-enterprise-store-in-guest-ovmf.shs`
 (enterprise-store in-guest board-runnable gate).
@@ -62,3 +67,4 @@ Runner: Rust seed at
 ## Files changed
 
 - `src/os/kernel/memory/memory_leveling_manager.spl` — added `can_release`.
+

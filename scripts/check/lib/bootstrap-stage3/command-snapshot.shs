@@ -13,6 +13,7 @@ bootstrap_stage3_write_command_transcript() {
     bootstrap_stage3_transcript_tmp="${bootstrap_stage3_transcript}.tmp.$$"
     (
         echo "schema=simple-bootstrap-command-transcript-v2"
+        echo "runtime-env-contract:bootstrap-session-v1"
         printf 'cwd:%s:%s\n' "${#bootstrap_stage3_command_cwd}" \
             "$bootstrap_stage3_command_cwd"
         # Emitted one call at a time rather than through `for ... in` over
@@ -71,6 +72,11 @@ ${ProgramData:-${PROGRAMDATA:-}}
                 *) exit 1 ;;
             esac
             bootstrap_stage3_env_name=${1%%=*}
+            case "$bootstrap_stage3_env_name" in
+                SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE)
+                    echo "bootstrap-transcript-error: reserved session environment name" >&2
+                    exit 1 ;;
+            esac
             case "$bootstrap_stage3_seen_env" in
                 *":$bootstrap_stage3_env_name:"*) exit 1 ;;
             esac
@@ -245,10 +251,14 @@ bootstrap_stage3_verify_command_transcript() (
     fi
     (
         echo "schema=simple-bootstrap-command-transcript-v2"
+        echo "runtime-env-contract:bootstrap-session-v1"
         printf 'cwd:%s:%s\n' "${#bootstrap_stage3_command_cwd}" \
             "$bootstrap_stage3_command_cwd"
         cat "$bootstrap_stage3_host" || exit 1
         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+            case "${1%%=*}" in
+                SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) exit 1 ;;
+            esac
             printf 'explicit-env:%s:%s\n' "${#1}" "$1"
             shift
         done
@@ -337,6 +347,9 @@ ${ProgramData:-${PROGRAMDATA:-}}
                     "ProgramData=$bootstrap_stage3_run_program_data" \
                     "LC_ALL=C" "LANG=C" /bin/sh -c '
                         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+                            case "${1%%=*}" in
+                                SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) exit 125 ;;
+                            esac
                             export "$1" || exit 1
                             shift
                         done
@@ -348,11 +361,39 @@ ${ProgramData:-${PROGRAMDATA:-}}
                 exit $?
                 ;;
         esac
-        env -i "HOME=$bootstrap_stage3_run_home" \
+        # The guard allocates SID after this transcript is frozen. Preserve
+        # its validated session pair and RSS policy across env -i; the guard receipt
+        # owns their concrete values. Fixed host/explicit env remains exact.
+        # Every Stage 2 retry, Stage 3 build, and admitted resume enters here.
+        # Wrap env so the compiler environment and transcript remain exact.
+        bootstrap_stage3_rss_runner="$bootstrap_stage3_run_cwd/scripts/resource/process-tree-rss-watchdog.pl"
+        bootstrap_stage3_rss_session_mode=new
+        if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+            bootstrap_stage3_rss_session_mode=inherit
+        fi
+        perl "$bootstrap_stage3_rss_runner" \
+            --session-mode="$bootstrap_stage3_rss_session_mode" \
+            --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+            --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
+            --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+            --receipt="$bootstrap_stage3_run_log.rss.env" -- \
+        /bin/sh -c '
+            if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+                case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) exit 125 ;; esac
+                "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check || exit 125
+                exec env -i "SIMPLE_BOOTSTRAP_SESSION_ID=$SIMPLE_BOOTSTRAP_SESSION_ID" \
+                    "SIMPLE_BOOTSTRAP_SESSION_EXEC=$SIMPLE_BOOTSTRAP_SESSION_EXEC" \
+                    "SIMPLE_BOOTSTRAP_RSS_CAP_MODE=$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" "$@"
+            fi
+            exec env -i "$@"
+        ' sh "HOME=$bootstrap_stage3_run_home" \
             "PATH=$bootstrap_stage3_run_path" \
             "TMPDIR=$bootstrap_stage3_run_tmpdir" \
             "LC_ALL=C" "LANG=C" /bin/sh -c '
                 while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+                    case "${1%%=*}" in
+                        SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) exit 125 ;;
+                    esac
                     export "$1" || exit 1
                     shift
                 done
@@ -656,7 +697,7 @@ bootstrap_stage3_source_snapshot_once() {
         }
         @records or die "empty authority\n";
         print join("\n", sort @records), "\n";
-    ' "$bootstrap_stage3_root" src/compiler src/app src/lib examples/10_tooling \
+    ' "$bootstrap_stage3_root" src/compiler src/app src/lib src/plugins src/compositions examples/10_tooling \
         >"$bootstrap_stage3_tmp" || {
         rm -f "$bootstrap_stage3_tmp"
         return 1

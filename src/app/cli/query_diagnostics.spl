@@ -202,10 +202,24 @@ fn _strip_ansi(s: text) -> text:
             if i > span_start:
                 parts.push(s.substring(span_start, i))
             i = i + 1
-            while i < s.len() and s.byte_at(i) != 109:
+            # Well-formed SGR: ESC '[' digit/semicolon params 'm'. A malformed
+            # escape (a non-param byte right after '[') consumes the rest of the
+            # string, so "prefix\033[unterminated" strips to "prefix".
+            if i < s.len() and s.byte_at(i) == 91:
                 i = i + 1
-            if i == s.len():
-                return parts.join("")
+                if i < s.len() and s.byte_at(i) != 109 and
+                        not ((s.byte_at(i) >= 48 and s.byte_at(i) <= 57) or
+                             s.byte_at(i) == 59):
+                    return parts.join("")
+                while i < s.len() and s.byte_at(i) != 109:
+                    i = i + 1
+                if i == s.len():
+                    return parts.join("")
+            else:
+                while i < s.len() and s.byte_at(i) != 109:
+                    i = i + 1
+                if i == s.len():
+                    return parts.join("")
             i = i + 1
             span_start = i
             continue
@@ -233,9 +247,9 @@ fn _count_check_output_diagnostics_clean(file: text, clean_output: text) -> i64:
         val line_end = _check_output_line_end(clean_output, line_start)
         val line = clean_output.substring(line_start, line_end)
         val trimmed = line.trim()
-        # _parse_check_output_line_json emits one object for every nonblank
-        # line with this prefix, even when location fields fall back to 1:1.
-        # Count that exact admission predicate without allocating JSON objects.
+        # The JSON collect path emits one object for every nonblank line with
+        # this prefix, even when location fields fall back to 1:1. Count that
+        # exact admission predicate without allocating JSON objects.
         if trimmed != "" and trimmed.starts_with(prefix):
             count = count + 1
         if line_end == clean_output.len():

@@ -1,4 +1,8 @@
 # Interpreter lazy import: global first use is not materialized
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-15
 **Severity:** high
@@ -39,3 +43,4 @@ loads. It must evaluate newly appended module declarations once, preserve
 dependency order, propagate initialization errors, and publish globals only
 after successful initialization. `module_loader_core` cannot directly import
 `eval_decl` today because `eval_decls` already depends on the loader.
+

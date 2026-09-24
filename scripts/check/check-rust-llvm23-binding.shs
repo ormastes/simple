@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+required_version=23.1.1
+
+case "$(uname -s 2>/dev/null || printf unknown)" in
+    MSYS*|MINGW*|CYGWIN*)
+        : "${LLVM_SYS_231_PREFIX:=C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc}"
+        ;;
+    *)
+        : "${LLVM_SYS_231_PREFIX:?set LLVM_SYS_231_PREFIX to the LLVM 23.1.1 install prefix}"
+        ;;
+esac
+export LLVM_SYS_231_PREFIX
+unset LLVM_SYS_180_PREFIX LLVM_SYS_181_PREFIX
+
+llvm_config="$LLVM_SYS_231_PREFIX/bin/llvm-config.exe"
+[ -f "$llvm_config" ] || llvm_config="$LLVM_SYS_231_PREFIX/bin/llvm-config"
+[ -x "$llvm_config" ] || {
+    printf 'FAIL: missing llvm-config under LLVM_SYS_231_PREFIX=%s\n' \
+        "$LLVM_SYS_231_PREFIX" >&2
+    exit 1
+}
+
+actual_version=$($llvm_config --version)
+[ "$actual_version" = "$required_version" ] || {
+    printf 'FAIL: expected LLVM %s, got %s from %s\n' \
+        "$required_version" "$actual_version" "$llvm_config" >&2
+    exit 1
+}
+
+case "$(uname -s 2>/dev/null || printf unknown)" in
+    MSYS*|MINGW*|CYGWIN*)
+        [ -f "$LLVM_SYS_231_PREFIX/lib/LLVM-C.lib" ] || {
+            printf 'FAIL: missing LLVM-C.lib under %s/lib\n' \
+                "$LLVM_SYS_231_PREFIX" >&2
+            exit 1
+        }
+        [ -f "$LLVM_SYS_231_PREFIX/bin/LLVM-C.dll" ] || {
+            printf 'FAIL: missing LLVM-C.dll under %s/bin\n' \
+                "$LLVM_SYS_231_PREFIX" >&2
+            exit 1
+        }
+        ;;
+esac
+
+PATH="$LLVM_SYS_231_PREFIX/bin:$PATH"
+export PATH
+: "${CARGO_TARGET_DIR:=$root/build/mini_cache_llvm23_rust}"
+export CARGO_TARGET_DIR
+
+cd "$root/src/compiler_rust"
+cargo check --locked --offline -p simple-compiler --features llvm
+
+printf 'PASS: Rust compiler LLVM feature builds against LLVM %s\n' \
+    "$required_version"

@@ -1,4 +1,8 @@
 # dbfs_no_regression_spec pre-existing RED at HEAD (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `bin/simple test test/integration/storage/dbfs/dbfs_no_regression_spec.spl`
@@ -28,3 +32,4 @@ DbFsDriver hosted mount must accept trailing-slash stat of the mount root and
 resolve/open hosted file paths such as `/data/README.TXT` (or the spec's
 fixture expectations must be reconciled with the driver's current hosted
 behavior by the feature owner).
+

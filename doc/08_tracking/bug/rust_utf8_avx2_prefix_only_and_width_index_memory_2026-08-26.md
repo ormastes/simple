@@ -1,4 +1,8 @@
 # Rust UTF-8 AVX2 is prefix-only and width index costs 8 bytes/scalar
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The Rust `utf8_kernels.rs` AVX2 path scans only an ASCII prefix, then calls the
 scalar standard-library validator/count/finder. On a 656 KiB mixed-valid corpus,
@@ -14,3 +18,4 @@ Replace default random-access storage with owner-bound sparse checkpoints;
 benchmark a succinct continuation bitmap separately. Required evidence includes
 bytes/source byte and scalar, build/query/free latency, allocations, RSS,
 post-free retention, and contention scaling.
+

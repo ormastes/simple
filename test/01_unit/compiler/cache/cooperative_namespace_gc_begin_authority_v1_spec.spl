@@ -1,0 +1,144 @@
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-012
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.driver.cache.gateway.cooperative_namespace_gc_begin_authority_v1.*
+use compiler.driver.cache.gateway.cooperative_namespace_host_prerequisite_v1.{
+    cache_cooperative_namespace_host_prerequisite_available_v1}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    L78BoundaryErrorV4}
+
+fn complete_contributions() -> CacheCooperativeNamespaceGcContributionsV1:
+    CacheCooperativeNamespaceGcContributionsV1(
+        namespace_generation: 7, expected_generation: 7,
+        expected_writer_incarnation: 11, observed_writer_incarnation: 11,
+        root_owner_count: 1, reader_domain_count: 3,
+        lease_contributor_count: 2, explicit_pin_contributor_count: 4,
+        root_set_complete: true, reader_domains_complete: true,
+        lease_set_complete: true, explicit_pin_set_complete: true)
+
+describe "cooperative namespace GC begin authority v1":
+    it "rejects every negative or over-limit contribution dimension":
+        step("Check each bounded contribution before namespace-union validation")
+        var candidate = complete_contributions()
+        candidate.namespace_generation = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.expected_generation = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.expected_writer_incarnation = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.observed_writer_incarnation = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.root_owner_count = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.reader_domain_count = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.lease_contributor_count = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.explicit_pin_contributor_count = -1
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.root_owner_count = 2
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.reader_domain_count = 65537
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.lease_contributor_count = 65537
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.explicit_pin_contributor_count = 65537
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_authority_v1(candidate)).to_equal(
+            Err(CacheCooperativeNamespaceGcBeginFailureV1.InvalidContributionBounds))
+
+    it "accepts bounded empty and maximum contributor counts as validation facts":
+        step("Exercise zero and maximum contributor boundaries without granting authority")
+        var candidate = complete_contributions()
+        candidate.reader_domain_count = 0
+        candidate.lease_contributor_count = 0
+        candidate.explicit_pin_contributor_count = 0
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(true)
+        expect(cache_cooperative_namespace_gc_union_complete_v1(candidate)).to_equal(true)
+        candidate.reader_domain_count = 65536
+        candidate.lease_contributor_count = 65536
+        candidate.explicit_pin_contributor_count = 65536
+        expect(cache_cooperative_namespace_gc_contributions_valid_v1(candidate)).to_equal(true)
+
+    it "requires each namespace-union completeness dimension independently":
+        step("Reject copied contribution facts when any complete-set proof is absent")
+        var candidate = complete_contributions()
+        candidate.root_owner_count = 0
+        expect(cache_cooperative_namespace_gc_union_complete_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.root_set_complete = false
+        expect(cache_cooperative_namespace_gc_union_complete_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.reader_domains_complete = false
+        expect(cache_cooperative_namespace_gc_union_complete_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.lease_set_complete = false
+        expect(cache_cooperative_namespace_gc_union_complete_v1(candidate)).to_equal(false)
+        candidate = complete_contributions()
+        candidate.explicit_pin_set_complete = false
+        expect(cache_cooperative_namespace_gc_union_complete_v1(candidate)).to_equal(false)
+
+    it "refuses a missing contribution set before host issuance":
+        step("Require root reader lease and explicit-pin union evidence")
+        val missing = CacheCooperativeNamespaceGcContributionsV1(
+            namespace_generation: 7, expected_generation: 7,
+            expected_writer_incarnation: 11, observed_writer_incarnation: 11,
+            root_owner_count: 1, reader_domain_count: 3,
+            lease_contributor_count: 2, explicit_pin_contributor_count: 4,
+            root_set_complete: true, reader_domains_complete: false,
+            lease_set_complete: true, explicit_pin_set_complete: true)
+        expect(cache_cooperative_namespace_gc_union_complete_v1(missing)).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_authority_v1(missing)).to_equal(
+            Err(CacheCooperativeNamespaceGcBeginFailureV1.IncompleteNamespaceUnion))
+
+    it "refuses stale generation and writer incarnation before host issuance":
+        step("Validate generation and writer incarnation at the issuer boundary")
+        val stale_generation = CacheCooperativeNamespaceGcContributionsV1(
+            namespace_generation: 6, expected_generation: 7,
+            expected_writer_incarnation: 11, observed_writer_incarnation: 11,
+            root_owner_count: 1, reader_domain_count: 1,
+            lease_contributor_count: 0, explicit_pin_contributor_count: 0,
+            root_set_complete: true, reader_domains_complete: true,
+            lease_set_complete: true, explicit_pin_set_complete: true)
+        expect(cache_cooperative_namespace_gc_begin_authority_v1(stale_generation)).to_equal(
+            Err(CacheCooperativeNamespaceGcBeginFailureV1.StaleGeneration))
+        val stale_writer = CacheCooperativeNamespaceGcContributionsV1(
+            namespace_generation: 7, expected_generation: 7,
+            expected_writer_incarnation: 11, observed_writer_incarnation: 12,
+            root_owner_count: 1, reader_domain_count: 1,
+            lease_contributor_count: 0, explicit_pin_contributor_count: 0,
+            root_set_complete: true, reader_domains_complete: true,
+            lease_set_complete: true, explicit_pin_set_complete: true)
+        expect(cache_cooperative_namespace_gc_begin_authority_v1(stale_writer)).to_equal(
+            Err(CacheCooperativeNamespaceGcBeginFailureV1.StaleWriter))
+
+    it "keeps a complete copied contribution request fail closed without host issuance":
+        step("Refuse to mint an opaque capability from copied contributor facts")
+        val complete = complete_contributions()
+        expect(cache_cooperative_namespace_gc_union_complete_v1(complete)).to_equal(true)
+        expect(cache_cooperative_namespace_gc_host_issuance_available_v1()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_authority_available_v1()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_available_v2()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_authority_v1(complete)).to_equal(
+            Err(CacheCooperativeNamespaceGcBeginFailureV1.HostNamespaceIssuanceUnavailable))
+
+    it "keeps the raw V3 availability probe behind the checked host prerequisite":
+        step("An unqualified host prerequisite must answer Unavailable without calling the probe")
+        expect(cache_cooperative_namespace_host_prerequisite_available_v1()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_host_probe_reachable_v1()).to_equal(false)
+        expect(l78_namespace_host_capability_v4()).to_equal(
+            Err(L78BoundaryErrorV4.Unavailable))
+        expect(cache_cooperative_namespace_gc_host_issuance_available_v1()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_authority_available_v1()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_available_v2()).to_equal(false)

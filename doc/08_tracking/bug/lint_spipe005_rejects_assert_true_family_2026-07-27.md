@@ -1,4 +1,8 @@
 # SPIPE005 does not recognize `assert_true`/`assert_false` as assertions — contradicts the testing rule
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane F)
@@ -61,3 +65,4 @@ catching what it is for.
   — a second lint false positive found the same day
 - `doc/08_tracking/bug/test_runner_post_spec_lint_gate_empty_file_arg_2026-07-20.md`
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
+

@@ -218,3 +218,17 @@ inferred from this host result.
   `nogc_async_mut/gpu/engine2d/simd_{kernels,provider}.spl` files are 21- and
   9-line re-export facades over `nogc_sync_mut`, and exactly one
   `fn simd_blend_row` exists in `src/lib`. There is no duplicate implementation.
+
+## 2026-09-16 — §3 resolved as not-a-live-cost; Windows harness note
+
+Per the seed-only triage rule: §3's remaining item (native
+`rt_engine2d_simd_blit_row_u32` in `src/runtime/runtime_simd_dispatch.c`) was
+blocked on rebuilding/redeploying the shared Rust seed binary. That blocker is
+bootstrap-only, and the 2026-08-17/20 measurements already show `blit` at 0 ms
+native via the existing `write_span` path — the missing kernel is not costing
+anything today. §3 is therefore RESOLVED as not-a-live-cost; if a future C
+runtime revision wants the native blit kernel for symmetry, that is ordinary
+runtime work, not this bug. The Windows span-kernel harness
+(`run_span_bench.shs`) returned NO DATA under the Windows seed on this date
+(output format not parseable); the authoritative measurements remain the
+2026-08 Linux ones above.

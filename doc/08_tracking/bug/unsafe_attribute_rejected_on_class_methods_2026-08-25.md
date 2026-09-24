@@ -1,4 +1,8 @@
 # `@unsafe` is rejected on class methods
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -39,3 +43,4 @@ Parse declaration attributes before class `fn`, `me fn`, and `static fn`
 members, preserve them in HIR, and enforce their capabilities at method call
 sites identically to module-level functions. Add parser, HIR, safety-checker,
 and call-site negative coverage before migrating the class-level annotation.
+

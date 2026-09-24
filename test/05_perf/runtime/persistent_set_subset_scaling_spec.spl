@@ -1,0 +1,155 @@
+# PersistentSet.is_subset cardinality-guard SCALING pin.
+#
+# The sibling spec `persistent_set_subset_spec.spl` pins one absolute
+# wall-clock budget (200ms for 256 calls). That budget is a host-dependent
+# constant: on a fast host it also passes with a much weaker guard, and on a
+# loaded host it can fail for reasons that have nothing to do with the guard.
+#
+# This spec pins the SHAPE instead, which is what the guard actually buys:
+# when `|left| > |right|`, `left.is_subset(right)` must reject by cardinality
+# WITHOUT materializing `left`'s keys, so its cost must not scale with
+# `|left|`. Two anchors, neither of them an absolute host constant:
+#
+#   1. Ratio: quadrupling `|left|` (512 -> 2048) must not multiply the cost of
+#      a fixed call count. Without the guard each call pays an O(|left|) HAMT
+#      key snapshot, so 4x the set is ~4x the time.
+#   2. Absolute-work anchor: 64 guarded calls over the 2048-element set must
+#      cost LESS than 8 honest O(n) walks (`to_array()`) over the *smaller*
+#      512-element set. Guarded that is 64 x O(1) vs 8 x O(512) and wins by
+#      orders of magnitude; unguarded it is 64 x O(2048) vs 8 x O(512), i.e.
+#      ~32x on the wrong side. The anchor is measured in the same process, in
+#      the same units, on the same host, so it needs no calibration.
+#
+# Vacuity fences (this spec must FAIL, not pass, when it measured nothing):
+#   - every call must return false (`false_count == CALLS`), so a guard that
+#     short-circuits to the wrong answer is caught;
+#   - the control walk must take strictly more than 0us, so a dead or
+#     coarse clock reports FAIL instead of a free pass;
+#   - both sets must report their exact expected cardinality before timing.
+#
+# Guard under test: src/lib/nogc_async_immut/persistent_set/__init__.spl,
+# `fn is_subset` — `if self.len() > other.len(): return false` placed BEFORE
+# the `self._inner.keys()` snapshot.
+#
+# See doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+# section "L2 runtime/interpreter PersistentSet subset guard — 2026-09-09".
+
+use std.persistent_set.{PersistentSet}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+val SMALL_N = 512
+val BIG_N = 2048
+val CALLS = 64
+val WALKS = 8
+
+fn build_set(n: i64) -> PersistentSet:
+    var s = PersistentSet.empty()
+    var i = 0
+    while i < n:
+        s = s.add("item_{i}")
+        i = i + 1
+    s
+
+# Elapsed microseconds for CALLS rejections of `left.is_subset(right)`.
+# Returns -1 when any call answered anything but false, so a wrong answer can
+# never be reported as a fast one.
+fn time_subset_calls(left: PersistentSet, right: PersistentSet) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    var false_count = 0
+    while i < CALLS:
+        if not left.is_subset(right):
+            false_count = false_count + 1
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    if false_count != CALLS:
+        return -1
+    elapsed
+
+# Elapsed microseconds for WALKS honest O(n) key materializations of `s`.
+# Returns -1 when any walk produced the wrong element count.
+fn time_full_walks(s: PersistentSet, expected: i64) -> i64:
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    var seen = 0
+    while i < WALKS:
+        seen = seen + len(s.to_array())
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - t0
+    if seen != WALKS * expected:
+        return -1
+    elapsed
+
+# Best (minimum) of three samples: the minimum is the sample least polluted by
+# this shared host's scheduling noise, and it can only make the guarded side
+# look worse relative to a floor it never approaches.
+fn best_subset_calls(left: PersistentSet, right: PersistentSet) -> i64:
+    var best = time_subset_calls(left, right)
+    var r = 0
+    while r < 2:
+        val next = time_subset_calls(left, right)
+        if next < 0:
+            return -1
+        if best >= 0 and next < best:
+            best = next
+        r = r + 1
+    best
+
+fn best_full_walks(s: PersistentSet, expected: i64) -> i64:
+    var best = time_full_walks(s, expected)
+    var r = 0
+    while r < 2:
+        val next = time_full_walks(s, expected)
+        if next < 0:
+            return -1
+        if best >= 0 and next < best:
+            best = next
+        r = r + 1
+    best
+
+describe "PersistentSet.is_subset cardinality guard does not scale with |left|":
+    it "answers false for every oversized-left call at both sizes":
+        val small = build_set(SMALL_N)
+        val big = build_set(BIG_N)
+        val empty = PersistentSet.empty()
+
+        expect("{small.len()}/{big.len()}/{empty.len()}").to_equal("512/2048/0")
+
+        # -1 is the wrong-answer sentinel from time_subset_calls.
+        val t_small = best_subset_calls(small, empty)
+        val t_big = best_subset_calls(big, empty)
+        expect("small_ok={t_small >= 0} big_ok={t_big >= 0}").to_equal(
+            "small_ok=true big_ok=true")
+
+    it "does not multiply cost when |left| is quadrupled":
+        val small = build_set(SMALL_N)
+        val big = build_set(BIG_N)
+        val empty = PersistentSet.empty()
+
+        val t_small = best_subset_calls(small, empty)
+        val t_big = best_subset_calls(big, empty)
+
+        # Unguarded this is ~4x (each call pays an O(|left|) key snapshot).
+        # Guarded both sides are O(1), so the absolute slack dominates and the
+        # ratio never comes into play. The slack is deliberately larger than a
+        # guarded measurement and far smaller than an unguarded one.
+        val budget = t_small * 2 + 2000
+        expect("{CALLS} calls: 512->{t_small}us 2048->{t_big}us within {budget}us: {t_big <= budget}").to_equal(
+            "{CALLS} calls: 512->{t_small}us 2048->{t_big}us within {budget}us: true")
+
+    it "costs less than a handful of honest O(n) walks over the SMALLER set":
+        val small = build_set(SMALL_N)
+        val big = build_set(BIG_N)
+        val empty = PersistentSet.empty()
+
+        val t_walks = best_full_walks(small, SMALL_N)
+        val t_big = best_subset_calls(big, empty)
+
+        # Vacuity fence: a clock that never moves must FAIL here, not pass the
+        # comparison below for free.
+        expect("control walks measurable: {t_walks > 0}").to_equal(
+            "control walks measurable: true")
+
+        expect("{CALLS}x is_subset(2048) = {t_big}us < {WALKS}x to_array(512) = {t_walks}us: {t_big < t_walks}").to_equal(
+            "{CALLS}x is_subset(2048) = {t_big}us < {WALKS}x to_array(512) = {t_walks}us: true")

@@ -1,4 +1,8 @@
 # Bootstrap atomic SFFI ABI and semantics mismatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-26
 
@@ -99,3 +103,4 @@ is authorized; report latency, throughput, and peak allocation/RSS.
 Unsafe and unverified. No exact artifact evidence or trusted signature is bound
 to this family. Until the ABI and semantic defects above are fixed, even an
 artifact signature would authenticate broken behavior rather than make it safe.
+

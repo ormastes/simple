@@ -1,4 +1,8 @@
 # Bug: `spawn(...)` call expressions silently lower to `HirExprKind.NilLit` on the bootstrap seed frontend — the callee and every argument are discarded with zero diagnostic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-29
 **Status:** open — root-caused, not fixed (out of scope for the lane that found it)
@@ -134,3 +138,4 @@ analogous parser-layer gap) specifically because real `spawn(...)` source
 text cannot reach that code path on this seed until this bug is fixed. The
 rule is not blocked on this bug to be correct, but it IS blocked on this bug
 to ever fire against real compiled source on the seed.
+

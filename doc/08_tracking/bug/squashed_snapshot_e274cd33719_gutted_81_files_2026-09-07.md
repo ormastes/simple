@@ -1,4 +1,8 @@
 # `e274cd33719` is a squashed stale snapshot that gutted 81 files repo-wide
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-07
 **Status:** PARTIALLY REPAIRED — one file proven and restored; 14 more need per-file triage.
@@ -142,3 +146,4 @@ A push-tier check that FAILs when a merge commit's result for a file is
 byte-identical to an ancestor OLDER than its first parent, unless the commit
 message records the rollback. That is the generalisation of the frame_pacer
 proof and is cheap to compute.
+

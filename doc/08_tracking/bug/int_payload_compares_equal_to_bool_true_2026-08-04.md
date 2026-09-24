@@ -1,4 +1,9 @@
 # `1` compares equal to `true`, turning a real type error into a passing assertion
+## Closed 2026-09-16 — repro refuted with evidence: expect(1).to_equal(true) fails on old/new/pure-Simple engines alike
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** **NOT REPRODUCIBLE 2026-08-04 — the stated repro is refuted.**
 Retained because the *observation* that prompted it is real and still
@@ -101,3 +106,4 @@ changing only the matcher; if it does, the matcher fix alone would leave `1 ==
 true` true in ordinary code.
 
 Related: `optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`.
+

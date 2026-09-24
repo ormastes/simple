@@ -1,0 +1,71 @@
+# G4 component contract: ContextStoreV1 uses the production PureDatabase
+# owner and keeps replacement atomic. It does not claim physical namespace or
+# service authority.
+# @req REQ-CSM-013 REQ-CSM-014
+
+use std.spec.*
+use std.spec.step
+use app.io.context_store_v1.{ContextPackV1, ContextStoreV1, ContextStoreErrorV1}
+
+fn g4_context_pack_v1(id: i64, source: text, content: text) -> ContextPackV1:
+    ContextPackV1(id: id, source: source, target: "g4", status: "ready",
+        lines: 1, token_estimate: 1, content: content)
+
+fn assert_pack(actual: ContextPackV1, expected: ContextPackV1):
+    expect(actual.id).to_equal(expected.id)
+    expect(actual.source).to_equal(expected.source)
+    expect(actual.target).to_equal(expected.target)
+    expect(actual.status).to_equal(expected.status)
+    expect(actual.lines).to_equal(expected.lines)
+    expect(actual.token_estimate).to_equal(expected.token_estimate)
+    expect(actual.content).to_equal(expected.content)
+
+describe "G4 ContextStoreV1 component boundary":
+    it "should store and query exact context rows through the production owner":
+        step("Open the production owner")
+        val store = ContextStoreV1.memory().unwrap()
+        step("Submit the bounded request")
+        val first = g4_context_pack_v1(1, "src/a.spl", "alpha雪")
+        val second = g4_context_pack_v1(2, "src/b.spl", "beta")
+        expect(store.replace_all([first, second]).is_ok()).to_equal(true)
+        expect(store.get_exact("src/a.spl").unwrap().len()).to_equal(1)
+        assert_pack(store.get_exact("src/a.spl").unwrap()[0], first)
+        expect(store.query_literal("雪").unwrap().len()).to_equal(1)
+        expect(store.query_literal("missing").unwrap().len()).to_equal(0)
+
+    it "should preserve the previous image when replacement validation refuses":
+        step("Capture the selected operation")
+        val store = ContextStoreV1.memory().unwrap()
+        val before = g4_context_pack_v1(3, "src/c.spl", "stable")
+        expect(store.replace_all([before]).is_ok()).to_equal(true)
+        step("Observe committed or unchanged state")
+        val invalid = g4_context_pack_v1(-1, "src/invalid.spl", "bad")
+        val rejected = store.replace_all([invalid])
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal(ContextStoreErrorV1.InvalidIdentity)
+        val after = store.get_exact("src/c.spl").unwrap()
+        expect(after.len()).to_equal(1)
+        assert_pack(after[0], before)
+        expect(store.get_exact("src/invalid.spl").unwrap().len()).to_equal(0)
+
+    it "should reject duplicate identities without changing rows":
+        step("Submit the bounded request")
+        val store = ContextStoreV1.memory().unwrap()
+        val stable = g4_context_pack_v1(4, "src/stable.spl", "stable")
+        expect(store.replace_all([stable]).is_ok()).to_equal(true)
+        val duplicate = [stable, g4_context_pack_v1(4, "src/other.spl", "other")]
+        val rejected = store.replace_all(duplicate)
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal(ContextStoreErrorV1.DuplicateIdentity)
+        val unchanged = store.get_exact("src/stable.spl").unwrap()
+        expect(unchanged.len()).to_equal(1)
+        assert_pack(unchanged[0], stable)
+
+    it "should make close idempotent and reject later mutations":
+        step("Observe committed or unchanged state")
+        val store = ContextStoreV1.memory().unwrap()
+        expect(store.close().is_ok()).to_equal(true)
+        expect(store.close().is_ok()).to_equal(true)
+        expect(store.put(g4_context_pack_v1(5, "src/closed.spl", "closed")).is_err()).to_equal(true)
+        expect(store.replace_all([]).is_err()).to_equal(true)
+        expect(store.get_exact("src/closed.spl").is_err()).to_equal(true)

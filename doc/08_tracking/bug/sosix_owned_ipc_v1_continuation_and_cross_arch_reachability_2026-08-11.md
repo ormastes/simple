@@ -1,4 +1,8 @@
 # SOSIX Owned IPC v1 Continuation and Cross-Architecture Reachability
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** OPEN  
@@ -38,3 +42,4 @@ shims.
    fresh QEMU transport round trip per applicable architecture.
 
 No existing boot/list/program receipt proves these gates.
+

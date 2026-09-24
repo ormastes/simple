@@ -1,0 +1,117 @@
+"""
+# Switching showcase tabs and coming back redraws the page without rebuilding the lane
+## Purpose and audience
+For the engineers who own the showcase's tab-like screens
+(`src/app/ui/chrome_showcase/catalog.spl`) and the Vulkan lane's resource
+cache. Moving between showcase pages is the ordinary way the catalog is used,
+and it exercises two things a single-page render never does: that returning to
+a page reproduces it exactly, and that the renderer reuses its per-size lane
+resources instead of recreating them on every visit.
+## Operator workflow
+Run: SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \\
+     bin/simple test test/02_integration/ui/web_showcase/tab_switch_reuse_spec.spl
+The scenario walks page A, then page B, then back to page A at one fixed
+size, comparing the two renders of A and reading the lane's create/reuse
+counters across the walk.
+## Compatibility and limitations
+Needs a working Vulkan device for the reuse counters; on a CPU fallback the
+lane counters do not describe GPU resources, so that half is reported as
+blocked. Upload counters (`font_atlas_uploads`, `image_host_uploads`) are
+captured rather than asserted: they read zero on the FIRST visit too on this
+content, so "zero on the second visit" would not discriminate. The counter
+that does discriminate is `creates` staying flat while `reuses` advances.
+UNVERIFIED as landed: this spec has never produced a verdict on the authoring
+host, because the runner kills a spec at ~900 s and relaunches it forever
+instead of failing it --
+doc/08_tracking/bug/web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13.md.
+The behaviour it asserts WAS confirmed by direct probe outside the runner: the
+A->B->A walk reproduced tab A's digest exactly (cd562909) while `creates`
+stayed at 1 and `reuses` advanced 3 -> 5. Treat the spec itself as unproven
+until that loop is fixed.
+## Verification guidance and troubleshooting
+If the digest of A changes after visiting B, the renderer is carrying state
+across pages -- compare the two captured digests and look for a cache keyed on
+something the page does not own. If `creates` grows on the return visit, the
+lane is rebuilding resources it already had for that size.
+"""
+# Lifecycle: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/05_design/chromium_web_renderer_primitive_differential.md
+# @manual_section: web-showcase-tab-switch
+# @tag: ui, web, showcase, vulkan, gpu, integration, slow
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_vulkan_lane_census_line, web_vulkan_lane_census_drain}
+use app.ui.chrome_showcase.catalog.{
+    chrome_catalog_tabs, chrome_catalog_page, CHROME_CATALOG_SOURCE}
+use app.ui.chrome_showcase.gpu_boundary_audit.{audit_frame_digest, audit_field}
+
+val TAB_W: i32 = 320
+val TAB_H: i32 = 180
+
+describe "switching between showcase tabs":
+
+    it "shows the same page again, from the same lane, after a visit to another tab":
+        # @req REQ-UI-WEBSHOWCASE-030
+        # @capture(statistics): tab A's digest on both visits, and the lane create/reuse counters
+        step("Render tab A, switch to tab B, then switch back to tab A, reading the lane census across the walk")
+        # One walk serves both halves of the contract deliberately: a 320x180
+        # Vulkan frame costs tens of seconds here, and a second identical walk
+        # would push this file past the runner's per-spec budget for no new
+        # information.
+        val tabs = chrome_catalog_tabs()
+        val source = read_file(CHROME_CATALOG_SOURCE)
+        val page_a = chrome_catalog_page(source, tabs[0])
+        val page_b = chrome_catalog_page(source, tabs[1])
+        web_vulkan_lane_census_drain()
+        val first_a = audit_frame_digest(
+            simple_web_render_html_to_pixels_with_engine2d_backend(page_a, TAB_W, TAB_H, "vulkan"))
+        val after_first = web_vulkan_lane_census_line()
+        val visited_b = audit_frame_digest(
+            simple_web_render_html_to_pixels_with_engine2d_backend(page_b, TAB_W, TAB_H, "vulkan"))
+        val return_a = audit_frame_digest(
+            simple_web_render_html_to_pixels_with_engine2d_backend(page_a, TAB_W, TAB_H, "vulkan"))
+        val after_return = web_vulkan_lane_census_line()
+        print("A_first={first_a} B={visited_b} A_return={return_a}")
+        print("first: creates={audit_field(after_first, \"creates\")} reuses={audit_field(after_first, \"reuses\")} font_atlas_uploads={audit_field(after_first, \"font_atlas_uploads\")}")
+        print("return: creates={audit_field(after_return, \"creates\")} reuses={audit_field(after_return, \"reuses\")} font_atlas_uploads={audit_field(after_return, \"font_atlas_uploads\")}")
+
+        step("Tab A came back byte-for-byte, and tab B really was a different screen in between")
+        # oracle: audit_frame_digest is a pure function of the frame, so an
+        #         unchanged page must reproduce its digest
+        expect(return_a).to_equal(first_a)
+        expect(visited_b == first_a).to_equal(false)
+
+        if audit_field(after_return, "cpu_fallback") != "false":
+            step("blocked: no usable Vulkan device on this host, the lane create/reuse counters do not describe GPU resources")
+        else:
+            step("The extra visits were served from the lane resources that already existed")
+            # oracle: census counters emitted by web_vulkan_lane_census_line();
+            #         a reused lane advances `reuses` and leaves `creates` alone
+            expect(audit_field(after_return, "creates").to_i64()).to_equal(
+                audit_field(after_first, "creates").to_i64())
+            expect(audit_field(after_return, "reuses").to_i64() > audit_field(after_first, "reuses").to_i64()).to_equal(true)
+
+    it "builds a fresh lane when the operator resizes instead of switching tabs":
+        # @req REQ-UI-WEBSHOWCASE-032
+        # @capture(statistics): census after rendering the same page at a second size
+        step("Render tab A, then render it again at a different size")
+        # The adverse twin for the reuse scenario: if `creates` never moved for
+        # anything, the flat-creates assertion above would be meaningless.
+        val tabs = chrome_catalog_tabs()
+        val page_a = chrome_catalog_page(read_file(CHROME_CATALOG_SOURCE), tabs[0])
+        web_vulkan_lane_census_drain()
+        simple_web_render_html_to_pixels_with_engine2d_backend(page_a, TAB_W, TAB_H, "vulkan")
+        val before = web_vulkan_lane_census_line()
+        simple_web_render_html_to_pixels_with_engine2d_backend(page_a, TAB_W * 2, TAB_H * 2, "vulkan")
+        val after = web_vulkan_lane_census_line()
+        print("before={audit_field(before, \"creates\")} after={audit_field(after, \"creates\")}")
+
+        if audit_field(after, "cpu_fallback") != "false":
+            step("blocked: no usable Vulkan device on this host, lane creation cannot be observed")
+        else:
+            step("The new size required its own lane")
+            expect(audit_field(after, "creates").to_i64() > audit_field(before, "creates").to_i64()).to_equal(true)

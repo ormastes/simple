@@ -1,4 +1,9 @@
 # `rt_arm_virtio_` prefix allowlist defeats the fabricated-rt guard on a storage path
+## Closed 2026-09-16 — Status fixed 2026-07-28; prefix dropped, exact-name list verified both directions
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed (source hunk applied 2026-07-28; see "Fix applied" below)
 **Scope:** `src/compiler/70.backend/backend/llvm_native_link.spl` (pure-Simple
@@ -193,3 +198,4 @@ also returns 0, which is a link-time problem and is what this fix closes.
 Do **not** implement a VirtIO-BLK driver for the arches that lack one. arm64 and
 arm32 already have real implementations; no other arch currently reaches this
 code. This item is about the guard's allowlist granularity only.
+

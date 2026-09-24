@@ -25,12 +25,41 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 root=$(CDPATH= cd -- "$root/.." && pwd -P)
+. "$root/scripts/bootstrap/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "$root" || exit 70
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+
+# The Stage-2 admission receipt records the ABI policy the bootstrap ran under,
+# and bootstrap_stage3_verify_stage2_admission_receipt re-derives it from the
+# AMBIENT SIMPLE_ABI_POLICY and requires the two to agree -- deliberately, so a
+# replay cannot admit a Stage 2 built under a different ABI. This producer is
+# invoked standalone, outside bootstrap-from-scratch.sh (which exports it at
+# :1222), so with nothing establishing it the verifier's `case` fell through to
+# `return 1` and every real admission was reported
+# `parent-stage2-admission-invalid` -- a receipt-shaped failure for an
+# environment-shaped cause. Derive it from the SAME canonical authority
+# bootstrap-from-scratch.sh reads (kernel_closure.sdn), never from an
+# unvalidated caller value: a pre-set policy that drifts from canonical is
+# refused rather than honoured.
+adm_abi_manifest="$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
+adm_abi_canonical=$(awk '$1 == "simple_abi_policy:" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }' \
+    "$adm_abi_manifest" 2>/dev/null) || {
+    echo "bootstrap-admission-error: canonical-abi-policy-unavailable" >&2
+    exit 64
+}
+if [ -n "${SIMPLE_ABI_POLICY:-}" ] &&
+   [ "${SIMPLE_ABI_POLICY}" != "$adm_abi_canonical" ]; then
+    echo "bootstrap-admission-error: abi-policy-drifts-from-canonical" >&2
+    exit 64
+fi
+SIMPLE_ABI_POLICY=$adm_abi_canonical
+export SIMPLE_ABI_POLICY
 
 adm_fail() {
     echo "bootstrap-admission-error: $1" >&2
@@ -50,6 +79,12 @@ adm_parent=''
 adm_runtime=''
 adm_out=''
 adm_root=$root
+# Left EMPTY on purpose; resolved after argv parsing, because the correct
+# default depends on --root. Presetting it to the ambient centralized storage
+# root (which is keyed to the REAL worktree) made every `--root=<fixture>`
+# invocation -- i.e. the whole selftest -- refuse its own well-formed fixture
+# with `bootstrap-output-outside-allowlisted-root`, since the storage root is
+# not under the fixture's build/.
 adm_bootstrap_output=''
 
 while [ "$#" -gt 0 ]; do
@@ -80,7 +115,13 @@ bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail type
 
 physical_cwd=$(pwd -P) || adm_fail cwd-not-canonical
 if [ -z "$adm_bootstrap_output" ]; then
-    adm_bootstrap_output="$adm_root/build/bootstrap"
+    # Ambient centralized storage is the default ONLY for the real worktree it
+    # was initialized for; any other --root gets that root's own build/bootstrap.
+    if [ "$adm_root" = "$root" ] && [ -n "${SIMPLE_BOOTSTRAP_BUILD_ROOT:-}" ]; then
+        adm_bootstrap_output=$SIMPLE_BOOTSTRAP_BUILD_ROOT
+    else
+        adm_bootstrap_output="$adm_root/build/bootstrap"
+    fi
 fi
 case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$physical_cwd/$adm_bootstrap_output" ;; esac
 adm_bootstrap_output=$(bootstrap_planner_v2_canonical_dir "$adm_bootstrap_output") || adm_fail bootstrap-output-missing
@@ -121,7 +162,11 @@ parent_sha=$(bootstrap_planner_v2_hash_file "$parent_file")
 [ "$(parent_field "$sanity_file" candidate_sha256 || true)" = "$parent_sha" ] || adm_fail parent-stage2-sanity-candidate-mismatch
 [ "$(parent_field "$prov_file" schema || true)" = simple-bootstrap-stage2-parent-provenance-v1 ] || adm_fail parent-stage2-provenance-schema-mismatch
 [ "$(grep -c '^stage2-provenance: pure-simple$' "$prov_file" 2>/dev/null || true)" -eq 1 ] || adm_fail parent-stage2-provenance-not-pure-simple
-[ "$(parent_field "$prov_file" authority || true)" = explicit-full-bootstrap-stage2-trust-root ] || adm_fail parent-stage2-provenance-authority-mismatch
+case "$(parent_field "$prov_file" authority || true)" in
+    explicit-full-bootstrap-stage2-trust-root|\
+    admitted-pure-simple-runtime-stage2-trust-root) ;;
+    *) adm_fail parent-stage2-provenance-authority-mismatch ;;
+esac
 [ "$(parent_field "$prov_file" candidate_sha256 || true)" = "$parent_sha" ] || adm_fail parent-stage2-provenance-candidate-mismatch
 admission_file=$(parent_field "$sanity_file" admission_receipt_path || true)
 [ -n "$admission_file" ] && [ "$admission_file" = "$(parent_field "$prov_file" admission_receipt_path || true)" ] || adm_fail parent-stage2-admission-path-mismatch
@@ -138,7 +183,14 @@ admission_args_sha=$(parent_field "$admission_file" build_args_sha256 || true)
 admission_sanity=$(parent_field "$admission_file" sanity_evidence_path || true)
 admission_receiver=$(parent_field "$admission_file" receiver_evidence_path || true)
 admission_root=$(dirname -- "$(dirname -- "$admission_file")")
-admission_candidate=$admission_root/stage2-admitted/simple
+# The receipt binds the immutable candidate's canonical absolute path. Both
+# native artifact names are valid (Windows uses .exe); never replace that
+# binding with a POSIX-only guess or accept an arbitrary receipt path.
+case "$admission_candidate" in
+    "$admission_root/stage2-admitted/simple"|\
+    "$admission_root/stage2-admitted/simple.exe") ;;
+    *) adm_fail parent-stage2-admission-candidate-path-invalid ;;
+esac
 admission_source=$admission_root/source-inputs-before.txt
 admission_runtime=$admission_root/runtime-admitted.txt
 admission_tool=$admission_root/tool-authority-before.txt
@@ -171,14 +223,16 @@ sanity_sha=$(bootstrap_planner_v2_hash_file "$sanity_file")
 prov_sha=$(bootstrap_planner_v2_hash_file "$prov_file")
 planner_source_sha=$(bootstrap_planner_v2_hash_file "$planner_source")
 
-stage=$(mktemp -d "${TMPDIR:-/tmp}/simple-admission.XXXXXX")
+stage=$(mktemp -d "${SIMPLE_BOOTSTRAP_TMP_ROOT}/simple-admission.XXXXXX")
 trap 'rm -rf -- "$stage"; rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
 
 # Runtime snapshot: sorted relative-path + sha256 over every runtime file, so
 # the digest names content rather than a directory mtime.
 ( cd "$adm_runtime" && find . -type f ! -path './vendor/*' -print0 |
     LC_ALL=C sort -z |
-    xargs -0 -r sha256sum -- ) >"$stage/runtime.snapshot"
+    xargs -0 -r sh -c '. "$1"; shift; bootstrap_planner_v2_sha256 -- "$@"' \
+        sh "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs" \
+    ) >"$stage/runtime.snapshot" || adm_fail runtime-snapshot-unavailable
 runtime_sha=$(bootstrap_planner_v2_hash_file "$stage/runtime.snapshot")
 
 # Source closure: the planner imports no modules (only externs), so its closure
@@ -196,7 +250,7 @@ closure_sha=$(bootstrap_planner_v2_hash_file "$stage/planner-source-closure.snap
     ( cd "$adm_root" && git status --porcelain 2>/dev/null || true )
 } >"$stage/git-state.txt"
 
-scope_key=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha" | sha256sum | awk '{print $1}')
+scope_key=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha" | bootstrap_planner_v2_hash_stdin) || adm_fail scope-key-unavailable
 adm_dir=$(bootstrap_planner_v2_admission_dir "$adm_bootstrap_output" "$scope_key")
 rm -rf -- "$adm_dir"
 mkdir -p "$adm_dir"

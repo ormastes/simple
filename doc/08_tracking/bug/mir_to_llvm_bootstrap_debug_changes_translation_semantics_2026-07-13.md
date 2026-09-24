@@ -1,4 +1,8 @@
 # MIR-to-LLVM bootstrap debug changes translation semantics
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -19,3 +23,4 @@ translation mode behind a separately named, explicit mode flag.
 Translate the same MIR module with diagnostics off and on. Require identical
 LLVM IR after removing diagnostic output, and require the same function count
 and body sources in both runs.
+

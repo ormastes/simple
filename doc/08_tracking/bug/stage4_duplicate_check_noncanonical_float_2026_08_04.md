@@ -1,4 +1,8 @@
 # Stage 4 duplicate checker uses unresolved `float` conversion
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -31,3 +35,4 @@ malformed split/equal forms. The focused native shard crossed parsing, HIR, and
 object generation, then stopped only at the deliberately narrow core bundle's
 unrelated `rt_http_request` link boundary. Production Phase 4 cycle 1 crossed
 all four sites and advanced to `test_runner_main.spl`.
+

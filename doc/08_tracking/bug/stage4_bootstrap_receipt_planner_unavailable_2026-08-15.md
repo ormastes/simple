@@ -1,4 +1,8 @@
 # Stage 4 bootstrap receipt planner unavailable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open preflight defect; bootstrap transaction not started by the
 planner failures. **Observed:** 2026-08-15.
@@ -29,3 +33,4 @@ broken planner produced the receipt and does not resolve the planner crash.
 
 The follow-up owner must reproduce the full-CLI SIGSEGV with an exact System
 case and a smallest Integration case at the failing runtime/dispatcher owner.
+

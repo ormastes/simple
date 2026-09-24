@@ -1,4 +1,8 @@
 # Interpreter extern dispatch gap: rt_serial_*, tcp_listener_*/tcp_stream_*, rt_io_file_*
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** interpreter_serial_net_sffi_dispatch_gap
 **Severity:** P2
@@ -55,3 +59,4 @@ implementations the native runtime uses), or invert the lib wrappers
 names so both modes share one path (pattern: invert rather than
 dual-maintain). Requires seed rebuild + bootstrap redeploy per
 `.claude/memory` extern-rebuild rule.
+

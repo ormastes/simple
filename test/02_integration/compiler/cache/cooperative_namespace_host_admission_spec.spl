@@ -1,0 +1,374 @@
+# G4 component/integration contract.  This exercises the frozen diagnostic
+# prerequisite and selected-head/recovery seams without fabricating host
+# descriptors.  Physical provider admission remains MissingEvidence until the
+# host supplies one combined namespace capability.
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-012
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.gateway.cooperative_namespace_host_prerequisite_v1.*
+
+fn digest(value: text) -> text:
+    sha256_text(value)
+
+fn head(revision: i64, journal_bytes: i64, writer: i64) -> CacheCooperativeSelectedHeadV1:
+    head_full(revision, 9, digest("a"), journal_bytes, digest("b"),
+        digest("operation"), writer, digest("c"), digest("d"))
+
+fn head_full(
+    revision: i64, generation: i64, manifest_digest: text,
+    journal_bytes: i64, journal_digest: text, operation_digest: text,
+    writer: i64, closure_digest: text, verifier_digest: text,
+) -> CacheCooperativeSelectedHeadV1:
+    cache_cooperative_selected_head_v1(revision, generation, manifest_digest,
+        journal_bytes, journal_digest, operation_digest, writer,
+        closure_digest, verifier_digest)
+
+fn prefix_head() -> CacheCooperativeSelectedHeadV1:
+    head_full(3, 9, digest("a"), 4, digest("abcd"), digest("operation"),
+        5, digest("c"), digest("d"))
+
+fn complete_inventory() -> CacheCooperativeNamespaceHostApiInventoryV1:
+    CacheCooperativeNamespaceHostApiInventoryV1(
+        cross_process_per_root_gate_api_present: true,
+        opaque_writer_receipt_api_present: true,
+        writer_revalidation_api_present: true,
+        descriptor_bound_head_read_api_present: true,
+        descriptor_bound_immutable_sync_api_present: true,
+        descriptor_bound_journal_admission_api_present: true,
+        descriptor_bound_selected_head_replace_api_present: true,
+        selected_head_directory_sync_api_present: true,
+        exact_operation_recovery_api_present: true,
+        complete_namespace_union_api_present: true,
+        qualified_physical_scope: true)
+
+fn empty_trace() -> CacheCooperativeDurabilityTraceV1:
+    CacheCooperativeDurabilityTraceV1(
+        writer_revalidated: false, head_revalidated: false,
+        immutable_blobs_synced: false, immutable_directories_synced: false,
+        journal_admitted: false, head_replace_started: false,
+        head_replace_confirmed: false, head_directory_synced: false)
+
+describe "G4 cooperative namespace host admission":
+    it "should report every missing prerequisite branch independently":
+        step("Turn off one prerequisite at a time and preserve first-missing order")
+        var inventory = complete_inventory()
+        inventory.cross_process_per_root_gate_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.RootGateUnavailable)
+        inventory = complete_inventory()
+        inventory.opaque_writer_receipt_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.OpaqueWriterReceiptUnavailable)
+        inventory = complete_inventory()
+        inventory.writer_revalidation_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.WriterRevalidationUnavailable)
+        inventory = complete_inventory()
+        inventory.descriptor_bound_head_read_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.SelectedHeadReadUnavailable)
+        inventory = complete_inventory()
+        inventory.descriptor_bound_immutable_sync_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.ImmutableSyncUnavailable)
+        inventory = complete_inventory()
+        inventory.descriptor_bound_journal_admission_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.JournalAdmissionUnavailable)
+        inventory = complete_inventory()
+        inventory.descriptor_bound_selected_head_replace_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.SelectedHeadReplaceUnavailable)
+        inventory = complete_inventory()
+        inventory.selected_head_directory_sync_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.SelectedHeadDirectorySyncUnavailable)
+        inventory = complete_inventory()
+        inventory.exact_operation_recovery_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.RestartReissueUnavailable)
+        inventory = complete_inventory()
+        inventory.complete_namespace_union_api_present = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.NamespaceUnionUnavailable)
+        inventory = complete_inventory()
+        inventory.qualified_physical_scope = false
+        expect(cache_cooperative_namespace_host_next_missing_v1(inventory)).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.QualifiedEvidenceUnavailable)
+        expect(cache_cooperative_namespace_host_next_missing_v1(complete_inventory())).to_equal(
+            CacheCooperativeNamespaceHostPrerequisiteStateV1.Ready)
+        expect(cache_cooperative_namespace_host_api_complete_v1(complete_inventory())).to_equal(true)
+        var incomplete = complete_inventory()
+        incomplete.cross_process_per_root_gate_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.opaque_writer_receipt_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.writer_revalidation_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.descriptor_bound_head_read_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.descriptor_bound_immutable_sync_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.descriptor_bound_journal_admission_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.descriptor_bound_selected_head_replace_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.selected_head_directory_sync_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.exact_operation_recovery_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.complete_namespace_union_api_present = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+        incomplete = complete_inventory()
+        incomplete.qualified_physical_scope = false
+        expect(cache_cooperative_namespace_host_api_complete_v1(incomplete)).to_equal(false)
+
+    it "should classify closed admission without constructing host receipts":
+        step("Validate copied head values before the physical issuer boundary")
+        expect(cache_cooperative_namespace_host_admission_preflight_v1(
+            head(-1, 4, 5), 5)).to_equal(
+            Err(CacheCooperativeNamespaceHostAdmissionFailureV1.InvalidExpectedHead))
+        expect(cache_cooperative_namespace_host_admission_preflight_v1(
+            head(3, 4, 5), -1)).to_equal(
+            Err(CacheCooperativeNamespaceHostAdmissionFailureV1.InvalidWriterIncarnation))
+        expect(cache_cooperative_namespace_host_admission_preflight_v1(
+            head(3, 4, 5), 5)).to_equal(
+            Err(CacheCooperativeNamespaceHostAdmissionFailureV1.MissingPrerequisite(
+                CacheCooperativeNamespaceHostPrerequisiteStateV1.ImmutableSyncUnavailable)))
+
+    it "should reject selected-head limits, prefixes, and malformed canonical encodings":
+        step("Check zero, negative, maximum, and maximum-plus-one journal bounds")
+        expect(cache_cooperative_selected_head_valid_v1(head(0, 0, 0))).to_equal(true)
+        expect(cache_cooperative_selected_head_valid_v1(head(0, -1, 0))).to_equal(false)
+        expect(cache_cooperative_selected_head_valid_v1(head(-1, 0, 0))).to_equal(false)
+        expect(cache_cooperative_selected_head_valid_v1(head(0, 16777216, 0))).to_equal(true)
+        expect(cache_cooperative_selected_head_valid_v1(head(0, 16777217, 0))).to_equal(false)
+        expect(cache_cooperative_selected_head_valid_v1(head(0, 0, -1))).to_equal(false)
+        val invalid_generation = head_full(0, -1, digest("a"), 0, digest("b"),
+            digest("operation"), 0, digest("c"), digest("d"))
+        expect(cache_cooperative_selected_head_valid_v1(invalid_generation)).to_equal(false)
+        val invalid_manifest = head_full(0, 0, "bad", 0, digest("b"),
+            digest("operation"), 0, digest("c"), digest("d"))
+        expect(cache_cooperative_selected_head_valid_v1(invalid_manifest)).to_equal(false)
+        expect(cache_cooperative_selected_head_valid_v1(head_full(0, 0,
+            digest("a"), 0, "bad", digest("operation"), 0,
+            digest("c"), digest("d")))).to_equal(false)
+        expect(cache_cooperative_selected_head_valid_v1(head_full(0, 0,
+            digest("a"), 0, digest("b"), "bad", 0,
+            digest("c"), digest("d")))).to_equal(false)
+        expect(cache_cooperative_selected_head_valid_v1(head_full(0, 0,
+            digest("a"), 0, digest("b"), digest("operation"), 0,
+            "bad", digest("d")))).to_equal(false)
+        expect(cache_cooperative_selected_head_valid_v1(head_full(0, 0,
+            digest("a"), 0, digest("b"), digest("operation"), 0,
+            digest("c"), "bad"))).to_equal(false)
+        val checksum_head = head(0, 0, 0)
+        val invalid_checksum = cache_cooperative_selected_head_encode_v1(checksum_head).unwrap()
+        expect(cache_cooperative_selected_head_decode_v1(invalid_checksum.replace(
+            "\n" + checksum_head.checksum, "\nbad")).is_err()).to_equal(true)
+        val prefix = prefix_head()
+        expect(cache_cooperative_selected_prefix_matches_journal_v1(prefix, "abcd")).to_equal(true)
+        expect(cache_cooperative_selected_prefix_v1(prefix, "abcd").unwrap()).to_equal("abcd")
+        expect(cache_cooperative_selected_prefix_matches_journal_v1(prefix, "abc")).to_equal(false)
+        expect(cache_cooperative_selected_prefix_v1(prefix, "abc").is_err()).to_equal(true)
+        expect(cache_cooperative_selected_prefix_matches_journal_v1(prefix, "abce")).to_equal(false)
+        expect(cache_cooperative_selected_head_matches_operation_and_prefix_v1(
+            prefix, 3, digest("operation"), "abcd")).to_equal(true)
+        expect(cache_cooperative_selected_head_matches_operation_and_prefix_v1(
+            prefix, 4, digest("operation"), "abcd")).to_equal(false)
+        expect(cache_cooperative_selected_head_matches_operation_and_prefix_v1(
+            prefix, 3, digest("other-operation"), "abcd")).to_equal(false)
+        val encoded = cache_cooperative_selected_head_encode_v1(head(3, 4, 5)).unwrap()
+        expect(cache_cooperative_selected_head_decode_v1("wrong-magic\n" + encoded).is_err()).to_equal(true)
+        expect(cache_cooperative_selected_head_decode_v1(encoded + "\n").is_err()).to_equal(true)
+        expect(cache_cooperative_selected_head_decode_v1(encoded.replace("\n3\n", "\n-3\n")).is_err()).to_equal(true)
+        expect(cache_cooperative_selected_head_decode_v1(encoded.replace("\n9\n", "\n+9\n")).is_err()).to_equal(true)
+        expect(cache_cooperative_selected_head_decode_v1(encoded.replace("\n9\n", "\n9\u0000\n")).is_err()).to_equal(true)
+        expect(cache_cooperative_selected_head_decode_v1(encoded.replace(
+            "\n3\n", "\n03\n")).is_err()).to_equal(true)
+        var oversized = encoded
+        while oversized.len() <= 1024: oversized = oversized + "x"
+        expect(cache_cooperative_selected_head_decode_v1(oversized).is_err()).to_equal(true)
+
+    it "should distinguish stale writers and heads before physical mutation":
+        step("Compare whole selected-head identity and writer incarnation")
+        val expected = head(3, 4, 5)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head(4, 4, 5), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, expected, 5, 6)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleWriter)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, expected, 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.Current)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            head(-1, 4, 5), expected, 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.InvalidHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head(-1, 4, 5), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.InvalidHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, expected, -1, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleWriter)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, expected, 5, -1)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleWriter)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 10, digest("a"), 4, digest("b"),
+                digest("operation"), 5, digest("c"), digest("d")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 9, digest("changed"), 4, digest("b"),
+                digest("operation"), 5, digest("c"), digest("d")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 9, digest("a"), 4, digest("changed"),
+                digest("operation"), 5, digest("c"), digest("d")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 9, digest("a"), 4, digest("b"),
+                digest("changed"), 5, digest("c"), digest("d")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 9, digest("a"), 4, digest("b"),
+                digest("operation"), 5, digest("changed"), digest("d")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 9, digest("a"), 4, digest("b"),
+                digest("operation"), 5, digest("c"), digest("changed")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 9, digest("a"), 5, digest("b"),
+                digest("operation"), 5, digest("c"), digest("d")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+        expect(cache_cooperative_namespace_revalidation_v1(
+            expected, head_full(3, 9, digest("a"), 4, digest("b"),
+                digest("operation"), 6, digest("c"), digest("d")), 5, 5)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+
+    it "should classify each legal durability prefix and every replacement uncertainty":
+        step("Require ordered durability, then retain uncertainty after replacement starts")
+        val empty = empty_trace()
+        expect(cache_cooperative_durability_trace_valid_v1(empty)).to_equal(true)
+        expect(cache_cooperative_durability_outcome_v1(empty)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.RejectedBeforeHeadReplacement)
+        val writer = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: false,
+            immutable_blobs_synced: false, immutable_directories_synced: false,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(writer)).to_equal(true)
+        expect(cache_cooperative_durability_outcome_v1(writer)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.RejectedBeforeHeadReplacement)
+        val head_only = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: false, immutable_directories_synced: false,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(head_only)).to_equal(true)
+        val blobs = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: false,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(blobs)).to_equal(true)
+        val dirs = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(dirs)).to_equal(true)
+        expect(cache_cooperative_durability_outcome_v1(dirs)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.RejectedBeforeHeadReplacement)
+        val invalid_head_order = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: false, head_revalidated: true,
+            immutable_blobs_synced: false, immutable_directories_synced: false,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(invalid_head_order)).to_equal(false)
+        expect(cache_cooperative_durability_outcome_v1(invalid_head_order)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.InvalidOrder)
+        val invalid_blobs_order = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: false,
+            immutable_blobs_synced: true, immutable_directories_synced: false,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(invalid_blobs_order)).to_equal(false)
+        val invalid_dirs_order = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: false, immutable_directories_synced: true,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(invalid_dirs_order)).to_equal(false)
+        val invalid_journal_order = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: false,
+            journal_admitted: true, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(invalid_journal_order)).to_equal(false)
+        val invalid_start_order = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: false, head_replace_started: true,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(invalid_start_order)).to_equal(false)
+        expect(cache_cooperative_durability_outcome_v1(invalid_start_order)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Indeterminate)
+        val journal = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(journal)).to_equal(true)
+        expect(cache_cooperative_durability_outcome_v1(journal)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.RejectedBeforeHeadReplacement)
+        val started = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: true,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_outcome_v1(started)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Indeterminate)
+        val confirmed_only = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: false,
+            head_replace_confirmed: true, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(confirmed_only)).to_equal(false)
+        expect(cache_cooperative_durability_outcome_v1(confirmed_only)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Indeterminate)
+        val confirmed_unsynced = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: true,
+            head_replace_confirmed: true, head_directory_synced: false)
+        expect(cache_cooperative_durability_trace_valid_v1(confirmed_unsynced)).to_equal(true)
+        expect(cache_cooperative_durability_outcome_v1(confirmed_unsynced)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Indeterminate)
+        val directory_only = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: true)
+        expect(cache_cooperative_durability_trace_valid_v1(directory_only)).to_equal(false)
+        expect(cache_cooperative_durability_outcome_v1(directory_only)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Indeterminate)
+        val committed = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: true,
+            head_replace_confirmed: true, head_directory_synced: true)
+        expect(cache_cooperative_durability_outcome_v1(committed)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Committed)

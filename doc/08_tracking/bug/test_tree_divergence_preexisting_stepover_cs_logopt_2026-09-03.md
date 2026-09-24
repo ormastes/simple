@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence stepped over by the cs / log-opt landing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > Recorded 2026-09-03 to satisfy the scoped-delta escape in
 > `.claude/rules/vcs.md` — landing on a delta-PASS REQUIRES recording the
@@ -65,3 +69,4 @@ invisible.
 
 OPEN (the pre-existing red is not this lane's to fix). The step-over itself is
 closed by this record.
+

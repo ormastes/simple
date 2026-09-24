@@ -338,19 +338,77 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
 /// reparse-point and directory attributes from that handle. Unsupported hosts
 /// fail closed. `NIL` denotes every admission/read/UTF-8 failure, while an
 /// allocated empty text remains a successful empty-file result.
+/// Why the last `rt_file_read_regular_no_follow_bounded` call returned `NIL`.
+///
+/// That function has eight indistinguishable `NIL` returns, and its Simple
+/// caller can only report "returned nil". The Stage 2 bootstrap failure stayed
+/// unexplainable across many sessions for exactly that reason: the AOT
+/// diagnostic was written successfully, read back as nil, and nothing could say
+/// which admission arm rejected it. `rt_secure_temp_dir_diag` solved the same
+/// problem for the staging directory; this is its counterpart for the reader.
+/// Starts at a sentinel rather than zero so a readout is never ambiguous:
+/// `READ_NF_NEVER_CALLED` means the reader never ran, `READ_NF_OK` means it
+/// succeeded, 1..=10 name a rejected arm, and a literal 0 means this diagnostic
+/// extern is itself unresolved in the lane that read it. Zero used to collapse
+/// all three of those onto one number, which is how a readout of "arm 0" got
+/// read as a success it was not.
+/// Thread-local, NOT a global. A process-wide cell is worthless here: the
+/// bootstrap reads with 24 jobs in flight, so a concurrent successful read on
+/// another thread overwrites the code before the failing caller can report it.
+/// Measured — the first cut was a global atomic and answered "read succeeded"
+/// for a call that had plainly returned nil.
+thread_local! {
+    static READ_NO_FOLLOW_LAST_FAILURE: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(READ_NF_NEVER_CALLED) };
+}
+
+// Failure-arm codes. Small integers so the value crosses the SFFI boundary
+// without allocating inside a path that is already failing.
+const READ_NF_NEVER_CALLED: i64 = 77;
+const READ_NF_OK: i64 = 100;
+const READ_NF_CAPABILITY: i64 = 1;
+const READ_NF_BAD_ARGS: i64 = 2;
+const READ_NF_BAD_UTF8_PATH: i64 = 3;
+const READ_NF_OPEN: i64 = 4;
+const READ_NF_METADATA: i64 = 5;
+const READ_NF_NOT_REGULAR: i64 = 6;
+const READ_NF_TOO_LARGE: i64 = 7;
+const READ_NF_REPARSE: i64 = 8;
+const READ_NF_READ: i64 = 9;
+const READ_NF_BAD_UTF8_CONTENT: i64 = 10;
+/// Created, but the value did not decode as a heap string on the way out.
+/// This separates "the string was born bad" from "it went bad after crossing
+/// into Simple" -- the caller sees a present-but-undecodable text? and cannot
+/// tell those apart, and they have completely different owners.
+const READ_NF_BORN_UNDECODABLE: i64 = 101;
+
+fn read_no_follow_fail(code: i64) -> RuntimeValue {
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(code));
+    RuntimeValue::NIL
+}
+
+/// Read the arm code recorded by the most recent bounded no-follow read.
+#[no_mangle]
+pub extern "C" fn rt_file_read_regular_no_follow_last_failure() -> i64 {
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.get())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     path_ptr: *const u8,
     path_len: u64,
     max_bytes: i64,
 ) -> RuntimeValue {
-    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) || path_ptr.is_null() || max_bytes < 0 {
-        return RuntimeValue::NIL;
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return read_no_follow_fail(READ_NF_CAPABILITY);
+    }
+    if path_ptr.is_null() || max_bytes < 0 {
+        return read_no_follow_fail(READ_NF_BAD_ARGS);
     }
     let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
     let path_str = match std::str::from_utf8(path_bytes) {
         Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
-        _ => return RuntimeValue::NIL,
+        _ => return read_no_follow_fail(READ_NF_BAD_UTF8_PATH),
     };
     let path = Path::new(path_str);
     let mut options = OpenOptions::new();
@@ -363,33 +421,116 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     return RuntimeValue::NIL;
     let mut file = match options.open(path) {
         Ok(file) => file,
-        Err(_) => return RuntimeValue::NIL,
+        Err(_) => return read_no_follow_fail(READ_NF_OPEN),
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(_) => return RuntimeValue::NIL,
+        Err(_) => return read_no_follow_fail(READ_NF_METADATA),
     };
-    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
-        return RuntimeValue::NIL;
+    if !metadata.is_file() {
+        return read_no_follow_fail(READ_NF_NOT_REGULAR);
+    }
+    if metadata.len() > max_bytes as u64 {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
     }
     #[cfg(windows)]
     if metadata.file_attributes() & 0x0000_0400 != 0 {
         // FILE_ATTRIBUTE_REPARSE_POINT
-        return RuntimeValue::NIL;
+        return read_no_follow_fail(READ_NF_REPARSE);
     }
     let read_limit = match (max_bytes as u64).checked_add(1) {
         Some(limit) => limit,
-        None => return RuntimeValue::NIL,
+        None => return read_no_follow_fail(READ_NF_TOO_LARGE),
     };
     let mut raw = Vec::new();
     let mut bounded = file.take(read_limit);
-    if bounded.read_to_end(&mut raw).is_err() || raw.len() as i64 > max_bytes {
-        return RuntimeValue::NIL;
+    if bounded.read_to_end(&mut raw).is_err() {
+        return read_no_follow_fail(READ_NF_READ);
+    }
+    if raw.len() as i64 > max_bytes {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
     }
     if std::str::from_utf8(&raw).is_err() {
-        return RuntimeValue::NIL;
+        return read_no_follow_fail(READ_NF_BAD_UTF8_CONTENT);
     }
-    rt_string_new(raw.as_ptr(), raw.len() as u64)
+    let value = rt_string_new(raw.as_ptr(), raw.len() as u64);
+    let born_len = crate::value::collections::rt_string_len(value);
+    let code = if born_len == raw.len() as i64 {
+        READ_NF_OK
+    } else {
+        READ_NF_BORN_UNDECODABLE
+    };
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(code));
+    value
+}
+
+/// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
+/// payloads (images, archives). Identical admission arms and bound (O_NOFOLLOW
+/// open, regular-file check via metadata, hard byte cap, EINTR-safe bounded
+/// read via `Read::take`); the content is returned as a `[u8]` byte-array
+/// RuntimeValue instead of being UTF-8 decoded, which the text form must
+/// reject. Second lane of the C `rt_file_read_regular_no_follow_bounded_bytes`
+/// in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded_bytes(
+    path_ptr: *const u8,
+    path_len: u64,
+    max_bytes: i64,
+) -> RuntimeValue {
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return read_no_follow_fail(READ_NF_CAPABILITY);
+    }
+    if path_ptr.is_null() || max_bytes < 0 {
+        return read_no_follow_fail(READ_NF_BAD_ARGS);
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
+        _ => return read_no_follow_fail(READ_NF_BAD_UTF8_PATH),
+    };
+    let path = Path::new(path_str);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    #[cfg(not(any(unix, windows)))]
+    return RuntimeValue::NIL;
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(_) => return read_no_follow_fail(READ_NF_OPEN),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return read_no_follow_fail(READ_NF_METADATA),
+    };
+    if !metadata.is_file() {
+        return read_no_follow_fail(READ_NF_NOT_REGULAR);
+    }
+    if metadata.len() > max_bytes as u64 {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        return read_no_follow_fail(READ_NF_REPARSE);
+    }
+    let read_limit = match (max_bytes as u64).checked_add(1) {
+        Some(limit) => limit,
+        None => return read_no_follow_fail(READ_NF_TOO_LARGE),
+    };
+    let mut raw = Vec::new();
+    let mut bounded = file.take(read_limit);
+    if bounded.read_to_end(&mut raw).is_err() {
+        return read_no_follow_fail(READ_NF_READ);
+    }
+    if raw.len() as i64 > max_bytes {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
+    }
+    let value = bytes_to_runtime_array(&raw);
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(READ_NF_OK));
+    value
 }
 
 /// Read entire file as text (RuntimeValue wrapper)
@@ -537,6 +678,259 @@ pub unsafe extern "C" fn rt_file_write_text(
     std::fs::write(path_str, content_str).is_ok()
 }
 
+/// Copy `source` to `destination`, refusing to overwrite an existing
+/// destination and refusing to follow a symlink at either path.
+///
+/// Rust twin of `rt_file_copy_create_excl_no_follow` in
+/// `src/runtime/runtime.c` — that giant monolithic C runtime is NOT compiled
+/// into this crate (see the file whitelist in `runtime/build.rs`'s
+/// `compile_c_runtime_sources`), so a native build needs a real definition of
+/// this symbol here too, or linking fails with `undefined symbol`.
+///
+/// Mirrors the C function's semantics exactly: `source` is opened with
+/// `O_RDONLY|O_NOFOLLOW` and must stat as a regular file (a symlinked or
+/// missing source fails); `destination` is opened with
+/// `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` at mode `0600` (an existing path —
+/// regular file or symlink — fails with `EEXIST`/`ELOOP` before any data is
+/// touched); the bytes are copied and `fsync`ed; any failure along the way
+/// removes the partially-written destination before returning `false`.
+/// Unsupported on Windows, matching the C `#if defined(_WIN32)` branch.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
+    source_ptr: *const u8,
+    source_len: u64,
+    destination_ptr: *const u8,
+    destination_len: u64,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (source_ptr, source_len, destination_ptr, destination_len);
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        if source_ptr.is_null() || destination_ptr.is_null() || source_len == 0 || destination_len == 0 {
+            return false;
+        }
+        let source_bytes = std::slice::from_raw_parts(source_ptr, source_len as usize);
+        let destination_bytes = std::slice::from_raw_parts(destination_ptr, destination_len as usize);
+        if source_bytes.contains(&0) || destination_bytes.contains(&0) {
+            return false;
+        }
+        let source_path = Path::new(std::ffi::OsStr::from_bytes(source_bytes));
+        let destination_path = Path::new(std::ffi::OsStr::from_bytes(destination_bytes));
+
+        let mut input = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        match input.metadata() {
+            Ok(m) if m.is_file() => {}
+            _ => return false,
+        }
+
+        let mut output = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(destination_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        let ok = std::io::copy(&mut input, &mut output).is_ok() && output.sync_all().is_ok();
+        drop(output);
+        drop(input);
+        if !ok {
+            let _ = std::fs::remove_file(destination_path);
+        }
+        ok
+    }
+}
+
+/// Hard-link `source` to `destination`, refusing to replace an existing
+/// destination and refusing to follow a symlink at either path.
+///
+/// Rust twin of `rt_file_link_create_excl_no_follow` in
+/// `src/runtime/runtime.c` — same "not compiled into this crate" gap as
+/// `rt_file_copy_create_excl_no_follow` above.
+///
+/// Mirrors the C function's semantics exactly: `source` is opened with
+/// `O_RDONLY|O_NOFOLLOW` and must stat as a regular file; `link(2)` itself
+/// refuses an existing `destination` (`EEXIST`, whether that path is a
+/// regular file or a symlink); after linking, the destination is re-stat'd
+/// (`lstat`, i.e. `symlink_metadata`, never following) and must be a regular
+/// file with the SAME device/inode as the originally-opened source — a
+/// mismatch (e.g. `source` was swapped between the open and the link) removes
+/// the destination and fails. Unsupported on Windows, matching the C `#if`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
+    source_ptr: *const u8,
+    source_len: u64,
+    destination_ptr: *const u8,
+    destination_len: u64,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (source_ptr, source_len, destination_ptr, destination_len);
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt as UnixMetadataExt;
+
+        if source_ptr.is_null() || destination_ptr.is_null() || source_len == 0 || destination_len == 0 {
+            return false;
+        }
+        let source_bytes = std::slice::from_raw_parts(source_ptr, source_len as usize);
+        let destination_bytes = std::slice::from_raw_parts(destination_ptr, destination_len as usize);
+        if source_bytes.contains(&0) || destination_bytes.contains(&0) {
+            return false;
+        }
+        let source_path = Path::new(std::ffi::OsStr::from_bytes(source_bytes));
+        let destination_path = Path::new(std::ffi::OsStr::from_bytes(destination_bytes));
+
+        let input = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let source_meta = match input.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => return false,
+        };
+
+        if std::fs::hard_link(source_path, destination_path).is_err() {
+            drop(input);
+            return false;
+        }
+
+        let ok = match std::fs::symlink_metadata(destination_path) {
+            Ok(dest_meta) => {
+                dest_meta.file_type().is_file()
+                    && dest_meta.dev() == source_meta.dev()
+                    && dest_meta.ino() == source_meta.ino()
+            }
+            Err(_) => false,
+        };
+        if !ok {
+            let _ = std::fs::remove_file(destination_path);
+        }
+        drop(input);
+        ok
+    }
+}
+
+/// Widen a UTF-8 path to a NUL-terminated UTF-16 buffer and, once it is long
+/// enough to hit the MAX_PATH ceiling, fully qualify it and add the
+/// extended-length ("\\?\") prefix so a WIDE Win32 call is not itself capped
+/// at MAX_PATH -- a wide call is not exempt on its own, only the prefix lifts
+/// the ceiling (to ~32,767 characters). Twin of the C runtime's
+/// `rt_widen_long_path_rc` (src/runtime/runtime.c, runtime_native.c) and
+/// `spl_secure_widen_long_path` (src/runtime/runtime_secure_staging.c):
+/// `rt_file_fsync`/`rt_file_rename` are implemented HERE, in Rust, not in
+/// those C twins, which is why fixing only the C side left this bug live --
+/// see the "generation-publication-failed" incident this fixes. Returns
+/// `None` when the path is short enough that no widening is needed, or when
+/// widening fails for any reason; callers fall back to the original path.
+#[cfg(windows)]
+fn win_widen_long_path(path: &str) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetFullPathNameW;
+
+    let mut wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().collect();
+    if wide.len() < 248 {
+        return None;
+    }
+    for unit in wide.iter_mut() {
+        if *unit == b'/' as u16 {
+            *unit = b'\\' as u16;
+        }
+    }
+    // Already extended-length or a UNC path: hand it back unchanged (just
+    // NUL-terminated) rather than double-prefixing it.
+    if wide.len() >= 2 && wide[0] == b'\\' as u16 && wide[1] == b'\\' as u16 {
+        wide.push(0);
+        return Some(wide);
+    }
+    wide.push(0);
+    unsafe {
+        let needed = GetFullPathNameW(PCWSTR(wide.as_ptr()), None, None);
+        if needed == 0 {
+            return None;
+        }
+        let mut full = vec![0u16; needed as usize];
+        let written = GetFullPathNameW(PCWSTR(wide.as_ptr()), Some(&mut full), None);
+        if written == 0 || written as usize >= full.len() {
+            return None;
+        }
+        full.truncate(written as usize);
+        let mut out: Vec<u16> = vec![b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        out.extend_from_slice(&full);
+        out.push(0);
+        Some(out)
+    }
+}
+
+/// CreateFileW + FlushFileBuffers over a widened path, for a durability sync
+/// on Windows. `FILE_FLAG_BACKUP_SEMANTICS` is required even for the common
+/// regular-file case here: `native_noop_admission.spl` also fsyncs the
+/// PARENT DIRECTORY after a rename (the POSIX fsync-the-parent-dir idiom via
+/// this same `rt_file_fsync` extern), and `CreateFile` refuses to open a
+/// directory handle at all without that flag (`ERROR_ACCESS_DENIED`); the
+/// flag is harmless on a regular file.
+#[cfg(windows)]
+unsafe fn win_fsync_path(path_str: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FlushFileBuffers, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
+        OPEN_EXISTING,
+    };
+
+    let widened = win_widen_long_path(path_str);
+    let narrow_fallback;
+    let wide_ptr: PCWSTR = match &widened {
+        Some(w) => PCWSTR(w.as_ptr()),
+        None => {
+            let mut w: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(path_str)).collect();
+            w.push(0);
+            narrow_fallback = w;
+            PCWSTR(narrow_fallback.as_ptr())
+        }
+    };
+    let flags = FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0 | FILE_FLAG_BACKUP_SEMANTICS.0);
+    let handle = match CreateFileW(
+        wide_ptr,
+        FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+        FILE_SHARE_MODE(0x1 | 0x2 | 0x4), /* FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE */
+        None,
+        OPEN_EXISTING,
+        flags,
+        None,
+    ) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let ok = FlushFileBuffers(handle).is_ok();
+    let _ = CloseHandle(handle);
+    ok
+}
+
 /// Synchronize file contents and metadata with durable storage.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bool {
@@ -550,6 +944,20 @@ pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bo
         Err(_) => return false,
     };
 
+    #[cfg(windows)]
+    {
+        // `OpenOptions::open` below encodes the path to UTF-16 and calls
+        // CreateFileW directly with no widening -- Rust's std does not
+        // auto-prefix long paths (rust-lang/rust#38909) -- so a bootstrap
+        // generation path that exceeds MAX_PATH (260 chars) failed
+        // identically here even after the C-side rt_file_fsync twins were
+        // fixed, because THIS is the definition that actually links: the
+        // runtime crate provides a strong `rt_file_fsync`, and
+        // runtime_native.c's copy is `SPL_CORE_C_WEAK` specifically so the
+        // Rust one wins when both are linked.
+        return win_fsync_path(path_str);
+    }
+    #[cfg(not(windows))]
     match OpenOptions::new().read(true).open(Path::new(path_str)) {
         Ok(file) => file.sync_all().is_ok(),
         Err(_) => false,
@@ -722,8 +1130,81 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
 
     #[cfg(not(unix))]
     {
-        let _ = (path, timeout_secs);
-        -1
+        // Windows: LockFileEx on the opened file, mirroring the C runtime
+        // (src/runtime/platform/platform_win.h). The previous stub returned
+        // -1 unconditionally, which made every compiled-code file_lock call
+        // fail on Windows -- in particular the SCV source-inventory
+        // publication lock, whose failure blocked release legs with
+        // SCV-E-ADMISSION git-event-apply:inventory-publication-failed.
+        use windows::Win32::Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileA, LockFileEx, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_SHARE_MODE, LOCK_FILE_FLAGS, LOCKFILE_EXCLUSIVE_LOCK,
+            LOCKFILE_FAIL_IMMEDIATELY, OPEN_ALWAYS,
+        };
+        use windows::Win32::System::IO::OVERLAPPED;
+
+        let handle = match unsafe {
+            CreateFileA(
+                windows::core::PCSTR(path.as_ptr() as *const u8),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_MODE(0x1 | 0x2), /* FILE_SHARE_READ | FILE_SHARE_WRITE */
+                None,
+                OPEN_ALWAYS,
+                FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0),
+                None,
+            )
+        } {
+            Ok(h) if h != INVALID_HANDLE_VALUE => h,
+            _ => return -1,
+        };
+
+        let mut overlapped = OVERLAPPED::default();
+        if timeout_secs <= 0 {
+            // Blocking lock.
+            let locked = unsafe {
+                LockFileEx(
+                    handle,
+                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0),
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut overlapped,
+                )
+            }
+            .is_ok();
+            if locked {
+                return handle.0 as i64;
+            }
+            unsafe { let _ = CloseHandle(handle); };
+            return -1;
+        }
+
+        let timeout = std::time::Duration::from_secs(timeout_secs as u64);
+        let deadline = std::time::Instant::now().checked_add(timeout);
+        loop {
+            let locked = unsafe {
+                LockFileEx(
+                    handle,
+                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0 | LOCKFILE_FAIL_IMMEDIATELY.0),
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut overlapped,
+                )
+            }
+            .is_ok();
+            if locked {
+                return handle.0 as i64;
+            }
+            if deadline.is_none_or(|limit| std::time::Instant::now() >= limit) {
+                unsafe { let _ = CloseHandle(handle); };
+                return -1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -745,8 +1226,18 @@ pub unsafe extern "C" fn rt_file_unlock(handle: i64) -> bool {
 
     #[cfg(not(unix))]
     {
-        let _ = handle;
-        false
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Storage::FileSystem::UnlockFileEx;
+        use windows::Win32::System::IO::OVERLAPPED;
+
+        if handle <= 0 {
+            return false;
+        }
+        let file = HANDLE(handle as *mut core::ffi::c_void);
+        let mut overlapped = OVERLAPPED::default();
+        let unlocked = unsafe { UnlockFileEx(file, 0, u32::MAX, u32::MAX, &mut overlapped) }.is_ok();
+        let closed = unsafe { CloseHandle(file) }.is_ok();
+        unlocked && closed
     }
 }
 
@@ -1072,7 +1563,82 @@ pub extern "C" fn rt_mmap(path: i64, size: i64, offset: i64, readonly: i64) -> i
     }
 }
 
-#[cfg(not(unix))]
+/// Windows twin of the unix `rt_mmap`: same bounds and capability contract,
+/// CreateFileMappingW + MapViewOfFile instead of mmap(2). The view keeps the
+/// file and section alive, so both handles are closed before returning.
+/// Released by `rt_munmap` (UnmapViewOfFile). The CACHING op is a no-op on
+/// Windows at the SOSIX facade and never reaches this symbol.
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_mmap(path: i64, size: i64, offset: i64, readonly: i64) -> i64 {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE, PAGE_READONLY, PAGE_READWRITE,
+        UnmapViewOfFile,
+    };
+
+    let Some(path) = tagged_text_to_str(path) else {
+        return 0;
+    };
+    if size <= 0 || offset < 0 {
+        return 0;
+    }
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID)
+        || (readonly == 0 && !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID))
+    {
+        return 0;
+    }
+    let Ok(size) = usize::try_from(size) else {
+        return 0;
+    };
+    let Some(end) = (offset as u64).checked_add(size as u64) else {
+        return 0;
+    };
+    let file = if readonly != 0 {
+        File::open(path)
+    } else {
+        OpenOptions::new().read(true).write(true).open(path)
+    };
+    let Ok(file) = file else {
+        return 0;
+    };
+    if file.metadata().map_or(true, |metadata| metadata.len() < end) {
+        return 0;
+    }
+    let (protect, access) = if readonly != 0 {
+        (PAGE_READONLY, FILE_MAP_READ)
+    } else {
+        (PAGE_READWRITE, FILE_MAP_WRITE)
+    };
+    let address = unsafe {
+        let mapping = CreateFileMappingW(file.as_raw_handle() as HANDLE, std::ptr::null(), protect, 0, 0, std::ptr::null());
+        if mapping.is_null() {
+            return 0;
+        }
+        let view = MapViewOfFile(
+            mapping,
+            access,
+            ((offset as u64) >> 32) as u32,
+            ((offset as u64) & 0xFFFF_FFFF) as u32,
+            size,
+        );
+        CloseHandle(mapping);
+        view.Value
+    };
+    if address.is_null() {
+        0
+    } else if (address as usize) > i64::MAX as usize {
+        unsafe {
+            UnmapViewOfFile(windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS { Value: address })
+        };
+        0
+    } else {
+        address as usize as i64
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) -> i64 {
     0
@@ -1087,7 +1653,18 @@ pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::munmap(addr as usize as *mut libc::c_void, size) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
+    use windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
+    addr > 0
+        && size > 0
+        && unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: addr as usize as *mut std::ffi::c_void }) != 0
+        }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_munmap(_addr: i64, _size: i64) -> bool {
     false
@@ -1110,7 +1687,15 @@ pub extern "C" fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::madvise(addr as usize as *mut libc::c_void, size, advice) == 0 }
 }
 
-#[cfg(not(unix))]
+/// Windows has no madvise; mirror the C twin: validate the arguments and the
+/// advice code, report success for a known code (advice is a hint everywhere).
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool {
+    addr > 0 && size > 0 && (0..=4).contains(&advice)
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_madvise(_addr: i64, _size: i64, _advice: i64) -> bool {
     false
@@ -1125,7 +1710,17 @@ pub extern "C" fn rt_msync(addr: i64, size: i64) -> bool {
     addr > 0 && size > 0 && unsafe { libc::msync(addr as usize as *mut libc::c_void, size, libc::MS_SYNC) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rt_msync(addr: i64, size: i64) -> bool {
+    use windows_sys::Win32::System::Memory::FlushViewOfFile;
+    let Ok(size) = usize::try_from(size) else {
+        return false;
+    };
+    addr > 0 && size > 0 && unsafe { FlushViewOfFile(addr as usize as *const std::ffi::c_void, size) != 0 }
+}
+
+#[cfg(not(any(unix, windows)))]
 #[no_mangle]
 pub extern "C" fn rt_msync(_addr: i64, _size: i64) -> bool {
     false
@@ -1155,6 +1750,47 @@ pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_p
         Err(_) => return false,
     };
 
+    #[cfg(windows)]
+    {
+        // std::fs::rename encodes to UTF-16 and calls MoveFileExW with no
+        // widening, same MAX_PATH-capped defect as rt_file_fsync above (and
+        // the same reason fixing only the C-side rt_file_rename twin did not
+        // clear the bootstrap blocker: this Rust definition is the one that
+        // links). Prefer the widened, extended-length-prefixed call with no
+        // replace flag -- matching std::fs::rename's Windows behavior of
+        // failing when the destination already exists -- falling back to the
+        // original (possibly un-widened) path only when a path cannot be
+        // widened.
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+
+        let from_wide = win_widen_long_path(from_str);
+        let to_wide = win_widen_long_path(to_str);
+        let from_narrow;
+        let to_narrow;
+        let from_ptr: PCWSTR = match &from_wide {
+            Some(w) => PCWSTR(w.as_ptr()),
+            None => {
+                let mut w: Vec<u16> =
+                    std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(from_str)).collect();
+                w.push(0);
+                from_narrow = w;
+                PCWSTR(from_narrow.as_ptr())
+            }
+        };
+        let to_ptr: PCWSTR = match &to_wide {
+            Some(w) => PCWSTR(w.as_ptr()),
+            None => {
+                let mut w: Vec<u16> =
+                    std::os::windows::ffi::OsStrExt::encode_wide(std::ffi::OsStr::new(to_str)).collect();
+                w.push(0);
+                to_narrow = w;
+                PCWSTR(to_narrow.as_ptr())
+            }
+        };
+        return MoveFileExW(from_ptr, to_ptr, MOVE_FILE_FLAGS(0)).is_ok();
+    }
+    #[cfg(not(windows))]
     std::fs::rename(from_str, to_str).is_ok()
 }
 
@@ -1658,6 +2294,83 @@ mod tests {
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {
         (s.as_ptr(), s.len() as u64)
+    }
+
+    /// Runnable proof for `rt_file_copy_create_excl_no_follow`'s exclusive
+    /// -create and no-follow guarantees: success on a fresh destination,
+    /// refusal of an already-existing destination, refusal of a symlinked
+    /// destination (left untouched), and refusal of a symlinked source.
+    #[cfg(unix)]
+    #[test]
+    fn file_copy_create_excl_no_follow_refuses_existing_and_symlinked_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.txt");
+        fs::write(&source_path, b"hello").unwrap();
+        let (sp, sl) = str_to_ptr(source_path.to_str().unwrap());
+
+        // Success: destination does not exist yet.
+        let dest_path = temp_dir.path().join("dest.txt");
+        let (dp, dl) = str_to_ptr(dest_path.to_str().unwrap());
+        assert!(unsafe { rt_file_copy_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination already exists (would overwrite).
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination is a symlink, and leaves it untouched.
+        let symlink_dest = temp_dir.path().join("dest_symlink.txt");
+        std::os::unix::fs::symlink(temp_dir.path().join("nonexistent"), &symlink_dest).unwrap();
+        let (sdp, sdl) = str_to_ptr(symlink_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(sp, sl, sdp, sdl) });
+        assert!(symlink_dest.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Refuses: source is a symlink, and creates nothing at the destination.
+        let symlink_source = temp_dir.path().join("source_symlink.txt");
+        std::os::unix::fs::symlink(&source_path, &symlink_source).unwrap();
+        let (ssp, ssl) = str_to_ptr(symlink_source.to_str().unwrap());
+        let fresh_dest = temp_dir.path().join("dest2.txt");
+        let (fdp, fdl) = str_to_ptr(fresh_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(ssp, ssl, fdp, fdl) });
+        assert!(!fresh_dest.exists());
+    }
+
+    /// Runnable proof for `rt_file_link_create_excl_no_follow`'s exclusive
+    /// -create and no-follow guarantees: success on a fresh destination,
+    /// refusal of an already-existing destination, refusal of a symlinked
+    /// destination (left untouched), and refusal of a symlinked source.
+    #[cfg(unix)]
+    #[test]
+    fn file_link_create_excl_no_follow_refuses_existing_and_symlinked_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.txt");
+        fs::write(&source_path, b"hello").unwrap();
+        let (sp, sl) = str_to_ptr(source_path.to_str().unwrap());
+
+        // Success: destination does not exist yet.
+        let dest_path = temp_dir.path().join("dest.txt");
+        let (dp, dl) = str_to_ptr(dest_path.to_str().unwrap());
+        assert!(unsafe { rt_file_link_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination already exists (now hard-linked to source).
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(sp, sl, dp, dl) });
+
+        // Refuses: destination is a symlink, and leaves it untouched.
+        let symlink_dest = temp_dir.path().join("dest_symlink.txt");
+        std::os::unix::fs::symlink(temp_dir.path().join("nonexistent"), &symlink_dest).unwrap();
+        let (sdp, sdl) = str_to_ptr(symlink_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(sp, sl, sdp, sdl) });
+        assert!(symlink_dest.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Refuses: source is a symlink, and creates nothing at the destination.
+        let symlink_source = temp_dir.path().join("source_symlink.txt");
+        std::os::unix::fs::symlink(&source_path, &symlink_source).unwrap();
+        let (ssp, ssl) = str_to_ptr(symlink_source.to_str().unwrap());
+        let fresh_dest = temp_dir.path().join("dest2.txt");
+        let (fdp, fdl) = str_to_ptr(fresh_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(ssp, ssl, fdp, fdl) });
+        assert!(!fresh_dest.exists());
     }
 
     #[cfg(unix)]

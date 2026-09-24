@@ -124,18 +124,23 @@ fn core64_imac_atomic_write_value(funct5: u32, dec: DecodeResult64,
     val old_word = old_value & 0xFFFF_FFFF
     val rs2_word = rs2_value & 0xFFFF_FFFF
     var value = old_word
-    if funct5 == AMO_SWAP: value = rs2_word
-    else if funct5 == AMO_ADD: value = old_word + rs2_word
-    else if funct5 == AMO_XOR: value = old_word ^ rs2_word
-    else if funct5 == AMO_AND: value = old_word & rs2_word
-    else if funct5 == AMO_OR: value = old_word | rs2_word
-    else if funct5 == AMO_MIN:
+    if funct5 == AMO_SWAP:
+        value = rs2_word
+    elif funct5 == AMO_ADD:
+        value = old_word + rs2_word
+    elif funct5 == AMO_XOR:
+        value = old_word ^ rs2_word
+    elif funct5 == AMO_AND:
+        value = old_word & rs2_word
+    elif funct5 == AMO_OR:
+        value = old_word | rs2_word
+    elif funct5 == AMO_MIN:
         if sign_extend_to_64(rs2_word, 32) < sign_extend_to_64(old_word, 32): value = rs2_word
-    else if funct5 == AMO_MAX:
+    elif funct5 == AMO_MAX:
         if sign_extend_to_64(rs2_word, 32) > sign_extend_to_64(old_word, 32): value = rs2_word
-    else if funct5 == AMO_MINU:
+    elif funct5 == AMO_MINU:
         if rs2_word < old_word: value = rs2_word
-    else if funct5 == AMO_MAXU:
+    elif funct5 == AMO_MAXU:
         if rs2_word > old_word: value = rs2_word
     value & 0xFFFF_FFFF
 
@@ -263,7 +268,9 @@ fn core64_imac_begin_instruction(state: CoreImacState64, instruction: u32,
     var out = state
     out.instruction = instruction
     out.instruction_bytes = instruction_bytes
-    out.rvfi_insn = if instruction_bytes == 2: trap_value as u32 else: instruction
+    out.rvfi_insn = instruction
+    if instruction_bytes == 2:
+        out.rvfi_insn = trap_value as u32
     val interrupt = trap64_check_interrupt_deleg(out.priv_mode, out.csr_m,
         out.csr_s)
     if interrupt.pending:
@@ -294,7 +301,9 @@ fn core64_imac_begin_instruction(state: CoreImacState64, instruction: u32,
         not comb.dec.is_mret and not comb.dec.is_sret and
         not comb.dec.is_sfence_vma and not comb.dec.is_wfi and not semihost_break):
         val cause = if instruction == 0x00000073:
-            if out.priv_mode == 0: 8 else if out.priv_mode == 1: 9 else: 11
+            if out.priv_mode == 0: 8
+            elif out.priv_mode == 1: 9
+            else: 11
         else: CAUSE_BREAKPOINT
         return core64_imac_raise_sync_exception(out, cause, 0, out.rvfi_insn)
 
@@ -310,7 +319,9 @@ fn core64_imac_begin_instruction(state: CoreImacState64, instruction: u32,
         out.csr_m = csr64_retire(out.csr_m)
         out.rvfi_valid = true
         out.rvfi_trap = false
-        out.rvfi_insn = if instruction_bytes == 2: trap_value as u32 else: instruction
+        out.rvfi_insn = instruction
+        if instruction_bytes == 2:
+            out.rvfi_insn = trap_value as u32
         out.rvfi_pc_wdata = out.pc
         out.rvfi_order = state.rvfi_order + 1
         out.rvfi_intr_pending = false
@@ -526,9 +537,11 @@ fn core64_imac_cycle(state: CoreImacState64, msip: bool, mtip: bool,
     out.mmu = mem.mmu
     if mem.done:
         if mem.fault:
-            val fault_insn = if state.pipeline_phase == CORE64_FETCH_HIGH:
-                state.fetch_low else if state.pipeline_phase == CORE64_FETCH_LOW:
-                0 else: state.instruction
+            var fault_insn = state.instruction
+            if state.pipeline_phase == CORE64_FETCH_HIGH:
+                fault_insn = state.fetch_low
+            elif state.pipeline_phase == CORE64_FETCH_LOW:
+                fault_insn = 0
             out = core64_imac_raise_sync_exception(out, mem.fault_cause,
                 mem.fault_tval, fault_insn)
         else if state.pipeline_phase == CORE64_ATOMIC_LOAD:

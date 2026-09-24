@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/admit-stage2-parent.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage2-parent-admission.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+make_runtime() {
+    path=$1
+    version=$2
+    cat >"$path" <<EOF
+#!/bin/sh
+[ "\${1:-}" = --version ] && { echo '$version'; exit 0; }
+exit 0
+EOF
+    chmod +x "$path"
+}
+
+hash() { shasum -a 256 "$1" | awk '{print $1}'; }
+write_receipt() {
+    candidate=$1
+    implementation=$2
+    receipt="${candidate}.provenance.env"
+    cat >"$receipt" <<EOF
+schema=simple-runtime-provenance-v1
+status=admitted
+implementation=$implementation
+artifact_sha256=$(hash "$candidate")
+target_triple=aarch64-apple-darwin
+version_output=Simple v1.test
+producer=unit-test
+evidence=unit-test
+EOF
+}
+
+export SIMPLE_RUNTIME_HOST_ARCH=arm64 SIMPLE_RUNTIME_HOST_OS=Darwin
+runtime="$work/simple"
+make_runtime "$runtime" 'Simple v1.test'
+write_receipt "$runtime" pure-simple
+bootstrap_stage2_parent_admit "$runtime" "$root"
+runtime_canonical=$(CDPATH= cd -- "$(dirname -- "$runtime")" && pwd -P)/simple
+[ "$BOOTSTRAP_STAGE2_PARENT_PATH" = "$runtime_canonical" ]
+[ "$BOOTSTRAP_STAGE2_PARENT_SHA256" = "$(hash "$runtime")" ]
+[ "$BOOTSTRAP_STAGE2_PARENT_AUTHORITY" = \
+    admitted-pure-simple-runtime-stage2-trust-root ]
+
+printf '# stale\n' >>"$runtime"
+if bootstrap_stage2_parent_admit "$runtime" "$root"; then
+    echo 'error: stale runtime digest was admitted' >&2
+    exit 1
+fi
+
+make_runtime "$runtime" 'Simple v1.test'
+write_receipt "$runtime" rust-seed
+if bootstrap_stage2_parent_admit "$runtime" "$root"; then
+    echo 'error: seed runtime was admitted' >&2
+    exit 1
+fi
+
+rm -f "${runtime}.provenance.env"
+if bootstrap_stage2_parent_admit "$runtime" "$root"; then
+    echo 'error: path-only runtime was admitted' >&2
+    exit 1
+fi
+
+echo 'STAGE2_PARENT_ADMISSION: PASS admitted=pure-simple seed=reject stale=reject path-only=reject'

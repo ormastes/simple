@@ -187,6 +187,54 @@ describe "AdviceBindingRegistry", fn():
 
 describe "join-point refusals (fail-closed)", fn():
 
+    it "rejects capacity multiplication overflow before native allocation", fn():
+        step("rejects capacity multiplication overflow before native allocation")
+        var rejected = false
+        match JoinpointSlotTable.alloc(1152921504606846976):
+            case Ok(_): rejected = false
+            case Err(e):
+                rejected = e.contains("overflows")
+        assert_true(rejected)
+
+    it "clears live slot metadata and refuses every access after free", fn():
+        step("clears live slot metadata and refuses every access after free")
+        var table = ok_table(2)
+        val key = joinpoint_key("m", "freed", 0)
+        val slot = ok_i64(table.reserve(key, UNADVISED))
+        _ = table.seal()
+        assert_true(table.free())
+        assert_eq(table.base, 0)
+        assert_eq(table.capacity, 0)
+        assert_eq(table.used, 0)
+        assert_eq(table.by_key.len(), 0)
+        assert_eq(table.slots.len(), 0)
+        assert_eq(table.cell_address(slot), 0)
+        assert_true(is_err_i64(table.lookup(key)))
+        assert_true(is_err_i64(table.read_cell_raw(slot)))
+        assert_true(is_err_i64(table.dispatch_target(slot)))
+        assert_true(is_err_i64(table.patch_cell(slot, ADVICE_A)))
+        assert_true(is_err_i64(table.call_through_0(slot)))
+        assert_true(is_err_i64(table.reserve(key, UNADVISED)))
+        assert_true(is_err_i64(table.seal()))
+        assert_false(table.free())
+
+    it "clears registry bindings and refuses routing after free", fn():
+        step("clears registry bindings and refuses routing after free")
+        var reg = ok_reg(2)
+        val key = ok_key(reg.register("m", "freed", 0, UNADVISED))
+        _ = reg.seal()
+        _ = reg.bind(key, ADVICE_A)
+        assert_true(reg.free())
+        assert_eq(reg.bindings.len(), 0)
+        assert_false(reg.is_active(key))
+        assert_eq(reg.rebind_count(key), -1)
+        assert_true(is_err_i64(reg.slot_of(key)))
+        assert_true(is_err_i64(reg.dispatch_target(key)))
+        assert_true(is_err_i64(reg.bind(key, ADVICE_B)))
+        assert_true(is_err_i64(reg.unbind(key)))
+        assert_true(is_err_i64(reg.call_through_0(key)))
+        assert_false(reg.free())
+
     it "refuses an out-of-range slot id instead of silently ignoring it", fn():
         # @req REQ-SSPEC-UNIT
         step("refuses an out-of-range slot id instead of silently ignoring it")

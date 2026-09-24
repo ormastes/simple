@@ -1,4 +1,8 @@
 # effect_engine_compare_spec / glass_pipeline_screenshot_spec exceed even a 1800s SOLO run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-19
 - Status: OPEN (perf, slow-not-hung — proven)
@@ -38,3 +42,4 @@ proves forward progress and correct output).
    (preferred; cost drops orders of magnitude).
 2. Reduce spec capture size (e.g. 100x75) — weakens pixel-diff coverage;
    needs owner approval.
+

@@ -1,4 +1,9 @@
 # Bootstrap native convergence accepted unequal compiler artifacts
+## Closed 2026-09-16 — Filed/fixed 2026-08-12; fix section: unequal bytes now fail; specs invoke real verifier
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed/fixed:** 2026-08-12
 **Severity:** critical — release/bootstrap authority
@@ -19,3 +24,4 @@ only in the error diagnostic. Both integration-spec locations invoke the real
 verifier over temporary retained blobs and cover identity, mismatch at byte
 zero, mismatch later in the file, and unequal ELF-shaped inputs with equal
 symbol counts.
+

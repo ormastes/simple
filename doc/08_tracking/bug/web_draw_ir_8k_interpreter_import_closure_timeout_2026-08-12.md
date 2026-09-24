@@ -1,4 +1,8 @@
 # Web DrawIR 8K interpreter import-closure timeout — 2026-08-12
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/os/compositor/compositor_engine2d.spl:193
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -55,3 +59,4 @@ Unexpected token: expected expression, found Newline
 The active uncommitted Vulkan-present lane splits the right-hand side of an
 assignment onto the next line there. This is now the first native gate. The
 benchmark has not executed and still provides no 8K timing row.
+

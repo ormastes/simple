@@ -1,4 +1,8 @@
 # The whole P-256 stack imports `std.common.math.field.fe_p256`, which was never written
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -69,3 +73,4 @@ tree already carries at least two recorded instances of a *fabricated* KAT
 P-256 field implementation must land with real FIPS 186-4 / RFC 5903 test
 vectors transcribed from the standard and a constant-time review, which is its
 own lane.
+

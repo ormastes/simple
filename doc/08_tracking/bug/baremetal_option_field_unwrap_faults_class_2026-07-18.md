@@ -1,4 +1,8 @@
 # CLASS: Option-unwrap / if-val field access faults on baremetal native codegen
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-18
 **Status:** Per-site workarounds LANDED across the font lane (SHAs below). **Root
@@ -105,3 +109,4 @@ the logic, not just patch the instance), this class needs:
 - Related but distinct compiler workaround:
   `fontrenderconfig_entry_closure_receiver_binding_miscompile_2026-07-18.md`
   (method receiver-binding, not Option unwrap).
+

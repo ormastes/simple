@@ -1,4 +1,8 @@
 # Pure-Simple frontend parser rejects `actor` declarations (Rust seed accepts them)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 2 (modernizing `test/unit/compiler/parser/parser_actor_spec.spl`)
@@ -38,3 +42,4 @@ flip the three `rejects … actor …` scenarios in
 
 Pure-Simple `parse_module` accepts `actor`, `pub actor`, and `actor T<...>`
 forms without errors; spec twins updated to assert the positive contract.
+

@@ -1,4 +1,8 @@
 # SimpleOS focused compiler target closure remains overbroad
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -104,3 +108,35 @@ failures), and disassembly proves `rt_set_args` stores through the C owner while
 `rt_cli_get_args` reloads argc/argv. New ELF SHA-256 is
 `7859f1522e587765409dd8655b572ac76a392f8b609cde8cdae0ed1a3bb61b98`.
 The three-run cap prevents another QEMU claim this cycle.
+
+## 2026-09-22 strict-GC regression follow-up
+
+The root fix is present in every Cranelift AOT construction path: the native
+backend constructors and the pure-Simple Cranelift SFFI constructor enable
+per-function and per-data-object sections.  The native regression now proves
+the behavior that the focused SimpleOS closure needs, rather than merely
+counting `.text` sections: an object containing a live function plus a dead
+function that calls an undefined symbol must link under strict
+`--gc-sections` when the live function is selected, and must fail when the dead
+function is selected.  The SFFI emit-object regression continues to verify
+that its constructor emits distinct discardable function sections.
+
+A 12-job focused Cargo run reached the compiler crate but was blocked before
+the regression executable by unrelated interpreter-registry declarations that
+refer to absent `rt_process_owned_v3_adapter_unavailable` and
+`rt_cpu_affinity_avx2_unavailable_*` definitions.  The failed build took
+70.73 seconds elapsed and 2,553,956 KiB maximum RSS.  This does not reopen the
+sectioning root fix, but the bug remains open until the strengthened regression
+and a fresh focused target closure both pass on a coherent compiler baseline.
+
+The emit-object Stage-4 MIR issue is not the same root cause: it concerns
+typed-array/enum payload preservation after object sectioning has already
+succeeded, so it remains tracked separately.
+
+### Deferred target verification
+
+TODO(SimpleOS phase environment): after the admitted phase compiler and QEMU
+image are available, run the focused strict entry-closure build in SimpleOS,
+confirm the target ELF links with zero weak/placeholder stubs, boot it through
+the production FAT/NVMe loader, and record the ELF hash plus serial receipt.
+Host-only section and linker regressions do not satisfy this target gate.

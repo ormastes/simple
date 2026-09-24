@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+CHECKER="$ROOT/scripts/check/check-stage4-runtime-abi-gate.shs"
+SPEC="$ROOT/test/00_unit/scripts/stage4_runtime_abi_provenance_wiring_spec.shs"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/stage4-runtime-abi-provenance-mutation.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+sed 's/stage4_verify_candidate_provenance "$provenance" "$candidate" "$REPO_ROOT" || {/true || {/' \
+    "$CHECKER" >"$WORK/checker.shs"
+
+if STAGE4_RUNTIME_ABI_CHECKER="$WORK/checker.shs" sh "$SPEC" >"$WORK/output" 2>&1; then
+    echo 'stage4_runtime_abi_provenance_mutation=fail:bypass_survived' >&2
+    exit 1
+fi
+
+grep -F 'canonical_verifier_not_enforced' "$WORK/output" >/dev/null || {
+    cat "$WORK/output" >&2
+    echo 'stage4_runtime_abi_provenance_mutation=fail:wrong_failure' >&2
+    exit 1
+}
+
+echo 'stage4_runtime_abi_provenance_mutation=pass'

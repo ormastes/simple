@@ -1,4 +1,8 @@
 # SimpleOS x86 VmFlags property-style lowering failure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -32,3 +36,4 @@ fresh Stage 2 compiler were rebuilt; Stage 2 SHA-256 is
 `1f784c159f755efdc125e9339f26b1eab839ff4ff67f4a97771c6be34bb26049`.
 The next x86 build must report zero failed/skipped files before the ELF or QEMU
 evidence is accepted.
+

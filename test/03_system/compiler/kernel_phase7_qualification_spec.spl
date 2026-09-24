@@ -1,0 +1,122 @@
+# @req KPM-REQ-001 KPM-REQ-004 KPM-REQ-006 KPM-REQ-008 KPM-REQ-009 KPM-REQ-010 KPM-REQ-011 KPM-REQ-012 KPM-REQ-013 KPM-NFR-001 KPM-NFR-004 KPM-NFR-005 KPM-NFR-006
+use std.spec.*
+use std.io.{file_read}
+use std.io_runtime.{process_run}
+
+describe "kernel migration Phase 7 qualification matrix":
+    it "binds LLVM plus Cranelift, ABI v1, simple.sdn, and atomic APK-only":
+        val authority = file_read("doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn") ?? ""
+        expect(authority).to_contain("k1_policy: llvm-cranelift")
+        expect(authority).to_contain("simple_abi_policy: v1")
+        expect(authority).to_contain("plugin_manifest_policy: simple-sdn")
+        expect(authority).to_contain("coverage_cutover_policy: atomic-apk-only")
+        expect(authority).to_contain("coverage_implementation: apk-only")
+
+    it "records the selected one-binary row as BLOCKED without runtime evidence":
+        step("Run the selected row without --execute so structural admission cannot become runtime PASS")
+        val script = "set -eu\nTMP=$(mktemp -d /tmp/simple-phase7-selected.XXXXXX)\ntrap 'rm -rf \"$TMP\"' EXIT\n" +
+            "SIMPLE_PHASE7_RECEIPT_DIR=\"$TMP\" sh scripts/check/check-kernel-phase7-matrix.shs " +
+            "--policy=llvm-cranelift --coverage=atomic-apk-only --mode=one-binary --abi=v1 --manifest=simple-sdn\n" +
+            "cat \"$TMP/llvm-cranelift__atomic-apk-only__one-binary__v1__simple-sdn.env\"\n"
+        val (stdout, stderr, status) = process_run("/bin/sh", ["-c", script])
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("STATUS: BLOCKED")
+        expect(stdout).to_contain("coverage_cutover=atomic-apk-only")
+        expect(stdout).to_contain("simple_abi_policy=v1")
+        expect(stdout).to_contain("plugin_manifest_policy=simple-sdn")
+        expect(stdout).to_contain("evidence_class=NON_AUTHORIZING_SUMMARY")
+        expect(stdout).to_contain("deployment_authorization=DENY")
+        expect(stdout).to_contain("native_pass_receipt=blocked")
+
+    it "refuses a BLOCKED summary as a deployment prerequisite":
+        step("Prove the bootstrap-facing consumer admits only the immutable native PASS schema")
+        val script = "set -eu\nTMP=$(mktemp -d /tmp/simple-phase7-consumer.XXXXXX)\ntrap 'rm -rf \"$TMP\"' EXIT\n" +
+            "SIMPLE_PHASE7_RECEIPT_DIR=\"$TMP\" sh scripts/check/check-kernel-phase7-matrix.shs " +
+            "--policy=llvm-cranelift --coverage=atomic-apk-only --mode=one-binary --abi=v1 --manifest=simple-sdn >/dev/null\n" +
+            "chmod 0444 \"$TMP/llvm-cranelift__atomic-apk-only__one-binary__v1__simple-sdn.env\"\n" +
+            "sh scripts/check/check-kernel-phase7-deployment-prerequisite.shs " +
+            "--receipt=\"$TMP/llvm-cranelift__atomic-apk-only__one-binary__v1__simple-sdn.env\" " +
+            "--candidate=scripts/check/check-kernel-phase7-matrix.shs " +
+            "--composition-receipt=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn --mode=one-binary\n"
+        val (_, stderr, status) = process_run("/bin/sh", ["-c", script])
+        expect(status).to_equal(1)
+        expect(stderr).to_contain("field-mismatch:schema")
+
+    it "keeps both selected build modes without restoring rejected policy alternatives":
+        val checker = file_read("scripts/check/check-kernel-phase7-matrix.shs") ?? ""
+        val workflow = file_read(".github/workflows/kernel-phase7-qualification.yml") ?? ""
+        expect(checker).to_contain("one-binary|dynload")
+        expect(checker).to_contain("status=BLOCKED")
+        expect(checker).to_contain("--ci")
+        expect(workflow).to_contain("policy: [llvm-cranelift]")
+        expect(workflow).to_contain("coverage: [atomic-apk-only]")
+        expect(workflow).to_contain("abi: [v1]")
+        expect(workflow).to_contain("manifest: [simple-sdn]")
+        expect(workflow).to_contain("mode: [one-binary, dynload]")
+
+    it "rejects legacy coverage ABI and manifest policy inputs":
+        val script = "scripts/check/check-kernel-phase7-matrix.shs"
+        val (_, _, dual_status) = process_run("/bin/sh", [script,
+            "--policy=llvm-cranelift", "--mode=one-binary",
+            "--coverage=dual", "--abi=v1", "--manifest=simple-sdn"])
+        val (_, _, deferred_status) = process_run("/bin/sh", [script,
+            "--policy=llvm-cranelift", "--mode=one-binary",
+            "--coverage=atomic-apk-only", "--abi=deferred", "--manifest=simple-sdn"])
+        val (_, _, plugin_manifest_status) = process_run("/bin/sh", [script,
+            "--policy=llvm-cranelift", "--mode=one-binary",
+            "--coverage=atomic-apk-only", "--abi=v1", "--manifest=plugin-sdn"])
+        expect(dual_status).to_equal(2)
+        expect(deferred_status).to_equal(2)
+        expect(plugin_manifest_status).to_equal(2)
+
+    it "uses production bootstrap, parity, hash, and strict startup gates":
+        val checker = file_read("scripts/check/check-kernel-phase7-matrix.shs") ?? ""
+        expect(checker).to_contain("bootstrap-from-scratch.sh")
+        expect(checker).to_contain("check-bootstrap-kernel-inputs.shs")
+        expect(checker).to_contain("generate-phase5-backend-relocation-audit.shs")
+        expect(checker).to_contain("stage2-stage3-k1-composition.env")
+        expect(checker).to_contain("check-k1-composition-modules.shs")
+        val receipt_writer = file_read("scripts/bootstrap/write-k1-composition-receipt.shs") ?? ""
+        expect(receipt_writer).to_contain("phase1:load_sources:closure:scan path=")
+        expect(receipt_writer).to_contain("kernel policy authority drifted")
+        expect(checker).to_contain("check-startup-budget.shs")
+        expect(checker).to_contain("SIMPLE_PLUGIN_STARTUP_DELTA_MS=2")
+        expect(checker).to_contain("^Results:")
+        expect(checker).to_contain("phase7_coverage_probe_spec.spl")
+        expect(checker).to_contain("phase7-apk-child-startup: pid=")
+        expect(checker).to_contain("SIMPLE_BINARY=\"$candidate_binary\"")
+        expect(checker).to_contain("child_binary_sha256=$child_binary_sha256")
+        expect(checker).to_contain("schema=simple-kernel-phase7-native-pass-v1")
+        expect(checker).to_contain("evidence_class=NATIVE_EXECUTION")
+        expect(checker).to_contain("deployment_authorization=ALLOW")
+        expect(checker).to_contain("SIMPLE_PHASE7_PERFORMANCE_RECEIPT")
+        expect(checker).to_contain("phase7-coverage-source-rewrite=0")
+        expect(checker).to_contain("atomic APK-only cutover did not prove zero coverage source rewriting")
+        expect(checker).to_contain("legacy_policy_rejected=pass")
+        expect(checker).to_contain("missing_explicit_dynload_config")
+        expect(checker).to_contain("one-binary candidate retains an external backend/dynload dependency")
+        val consumer = file_read("scripts/check/check-kernel-phase7-deployment-prerequisite.shs") ?? ""
+        expect(consumer).to_contain("simple-kernel-phase7-native-pass-v1")
+        expect(consumer).to_contain("translated-execution-is-not-native-authority")
+        expect(consumer).to_contain("phase7_deployment_prerequisite=PASS")
+
+    it "retains admitted runtime observations without authorizing Phase 7 deployment":
+        step("Inspect the bounded observational lane used when a produced Phase 7 candidate is unavailable")
+        val checker = (file_read("scripts/check/check-kernel-phase7-matrix.shs") ?? "") +
+            (file_read("scripts/check/lib/kernel-phase7-runtime-observation.shs") ?? "")
+        expect(checker).to_contain("--observe-admitted-runtime")
+        expect(checker).to_contain("simple_runtime_provenance_admits")
+        expect(checker).to_contain("simple-kernel-phase7-admitted-runtime-observation-v1")
+        expect(checker).to_contain("deployment_authorization=DENY")
+        expect(checker).to_contain("one_binary_observation=$one_binary_observation")
+        expect(checker).to_contain("backend_parity_observation=$backend_parity_observation")
+        expect(checker).to_contain("dynload_observation=$dynload_observation")
+        expect(checker).to_contain("startup_sample_count=20")
+        expect(checker).to_contain("rss_scope=twenty-independent-native-processes-not-resident-server")
+        expect(checker).to_contain("phase7-produced-candidate-and-resident-baseline-unavailable")
+        expect(checker).to_contain("native-build \"$parity_source\" --backend=\"$backend\"")
+        val cli = file_read("src/app/cli/_CliMain/main_and_help.spl") ?? ""
+        expect(cli).to_contain("run_product_dynsmf_status(raw_args, \"full-cli\")")
+        val dynsmf_status = file_read("src/app/startup/dynsmf_status.spl") ?? ""
+        expect(dynsmf_status).to_contain("pub fn run_product_dynsmf_status")

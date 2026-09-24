@@ -1,4 +1,8 @@
 # Browser HSTS persistence owner is missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -29,3 +33,4 @@ The file-backed integration scenario proves reopen persistence, subdomain
 upgrade, corrupt-row rejection, expiry/removal, and durable removal. Existing
 BrowserSession security evidence proves HTTPS-only acquisition. A real
 target-process restart remains required before claiming runtime PASS.
+

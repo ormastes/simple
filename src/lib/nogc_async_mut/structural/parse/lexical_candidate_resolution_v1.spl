@@ -1,0 +1,165 @@
+# Candidate-byte classification plus scalar state resolution for the sealed
+# 22-state lexical transition table. Classification is the part a SIMD provider
+# may lower; state resolution stays scalar and is compared against the oracle.
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.nogc_async_mut.structural.parse.lexical_transition_table_v1.*
+
+pub const LEX_CAND_SINGLE_QUOTE_V1: u32 = 1u32
+pub const LEX_CAND_DOUBLE_QUOTE_V1: u32 = 2u32
+pub const LEX_CAND_BACKSLASH_V1: u32 = 4u32
+pub const LEX_CAND_HASH_V1: u32 = 8u32
+pub const LEX_CAND_NEWLINE_V1: u32 = 16u32
+pub const LEX_CAND_SLASH_V1: u32 = 32u32
+pub const LEX_CAND_STAR_V1: u32 = 64u32
+pub const LEX_CAND_BRACES_V1: u32 = 128u32
+pub const LEX_CAND_STRUCTURAL_V1: u32 = 256u32
+
+pub enum LexicalCandidateErrorV1:
+    BlockTooWide
+    StateNotAdmitted
+    InvalidTable
+
+# The nine published candidate classes the transition table consumes. These are
+# raw byte-equality facts only; no lexical state is implied by any of them.
+pub struct LexicalCandidateMasksV1:
+    byte_count: u32
+    single_quote: u32
+    double_quote: u32
+    backslash: u32
+    hash: u32
+    newline: u32
+    slash: u32
+    star: u32
+    braces: u32
+    structural_delimiters: u32
+
+pub fn lexical_candidate_class_of_byte_v1(b: u8) -> u32:
+    var cls = 0u32
+    if b == 39u8: cls = cls | LEX_CAND_SINGLE_QUOTE_V1
+    if b == 34u8: cls = cls | LEX_CAND_DOUBLE_QUOTE_V1
+    if b == 92u8: cls = cls | LEX_CAND_BACKSLASH_V1
+    if b == 35u8: cls = cls | LEX_CAND_HASH_V1
+    if b == 10u8: cls = cls | LEX_CAND_NEWLINE_V1
+    if b == 47u8: cls = cls | LEX_CAND_SLASH_V1
+    if b == 42u8: cls = cls | LEX_CAND_STAR_V1
+    if b == 123u8 or b == 125u8: cls = cls | LEX_CAND_BRACES_V1 | LEX_CAND_STRUCTURAL_V1
+    if b == 40u8 or b == 41u8 or b == 91u8 or b == 93u8 or b == 44u8 or b == 58u8:
+        cls = cls | LEX_CAND_STRUCTURAL_V1
+    cls
+
+fn _width_mask_lcr(byte_count: u32) -> u32:
+    if byte_count as u64 >= LEXICAL_BLOCK_WIDTH_V1: return 4294967295u32
+    (1u32 << byte_count) - 1u32
+
+fn _needle_lcr(bytes: [u8], needle: u8) -> u32:
+    var result = 0u32; var i = 0
+    while i < bytes.len():
+        if bytes[i] == needle: result = result | (1u32 << (i as u32))
+        i = i + 1
+    result
+
+# Reference classifier over a partial or complete block, shaped exactly like the
+# native one-needle-per-call primitive: each published field is one byte-equality
+# mask, and the derived fields are unions of their components. A SIMD provider
+# must reproduce this; divergence is advisory evidence, never a new result.
+pub fn lexical_candidate_masks_scalar_v1(bytes: [u8]
+) -> Result<LexicalCandidateMasksV1, LexicalCandidateErrorV1>:
+    if bytes.len() as u64 > LEXICAL_BLOCK_WIDTH_V1: return Err(LexicalCandidateErrorV1.BlockTooWide)
+    val braces = _needle_lcr(bytes, 123u8) | _needle_lcr(bytes, 125u8)
+    Ok(LexicalCandidateMasksV1(byte_count: bytes.len() as u32,
+        single_quote: _needle_lcr(bytes, 39u8), double_quote: _needle_lcr(bytes, 34u8),
+        backslash: _needle_lcr(bytes, 92u8), hash: _needle_lcr(bytes, 35u8),
+        newline: _needle_lcr(bytes, 10u8), slash: _needle_lcr(bytes, 47u8),
+        star: _needle_lcr(bytes, 42u8), braces: braces,
+        structural_delimiters: braces | _needle_lcr(bytes, 40u8) | _needle_lcr(bytes, 41u8) |
+            _needle_lcr(bytes, 91u8) | _needle_lcr(bytes, 93u8) | _needle_lcr(bytes, 44u8) |
+            _needle_lcr(bytes, 58u8)))
+
+# The same masks folded from the per-byte class bitset instead of per-needle
+# scans, so classification and mask production cannot drift apart silently.
+pub fn lexical_candidate_masks_from_classes_v1(bytes: [u8]
+) -> Result<LexicalCandidateMasksV1, LexicalCandidateErrorV1>:
+    if bytes.len() as u64 > LEXICAL_BLOCK_WIDTH_V1: return Err(LexicalCandidateErrorV1.BlockTooWide)
+    var m = LexicalCandidateMasksV1(byte_count: bytes.len() as u32, single_quote: 0u32,
+        double_quote: 0u32, backslash: 0u32, hash: 0u32, newline: 0u32, slash: 0u32,
+        star: 0u32, braces: 0u32, structural_delimiters: 0u32)
+    var i = 0
+    while i < bytes.len():
+        val cls = lexical_candidate_class_of_byte_v1(bytes[i]); val bit = 1u32 << (i as u32)
+        if (cls & LEX_CAND_SINGLE_QUOTE_V1) != 0u32: m.single_quote = m.single_quote | bit
+        if (cls & LEX_CAND_DOUBLE_QUOTE_V1) != 0u32: m.double_quote = m.double_quote | bit
+        if (cls & LEX_CAND_BACKSLASH_V1) != 0u32: m.backslash = m.backslash | bit
+        if (cls & LEX_CAND_HASH_V1) != 0u32: m.hash = m.hash | bit
+        if (cls & LEX_CAND_NEWLINE_V1) != 0u32: m.newline = m.newline | bit
+        if (cls & LEX_CAND_SLASH_V1) != 0u32: m.slash = m.slash | bit
+        if (cls & LEX_CAND_STAR_V1) != 0u32: m.star = m.star | bit
+        if (cls & LEX_CAND_BRACES_V1) != 0u32: m.braces = m.braces | bit
+        if (cls & LEX_CAND_STRUCTURAL_V1) != 0u32:
+            m.structural_delimiters = m.structural_delimiters | bit
+        i = i + 1
+    Ok(m)
+
+pub fn lexical_candidate_masks_valid_v1(m: LexicalCandidateMasksV1) -> bool:
+    if m.byte_count as u64 > LEXICAL_BLOCK_WIDTH_V1: return false
+    val w = _width_mask_lcr(m.byte_count)
+    for mask in [m.single_quote, m.double_quote, m.backslash, m.hash, m.newline,
+                 m.slash, m.star, m.braces, m.structural_delimiters]:
+        if (mask & w) != mask: return false
+    (m.braces & m.structural_delimiters) == m.braces
+
+fn _map_err_lcr(e: LexicalTransitionTableErrorV1) -> LexicalCandidateErrorV1:
+    if e == LexicalTransitionTableErrorV1.BlockTooWide: return LexicalCandidateErrorV1.BlockTooWide
+    if e == LexicalTransitionTableErrorV1.StateNotAdmitted:
+        return LexicalCandidateErrorV1.StateNotAdmitted
+    LexicalCandidateErrorV1.InvalidTable
+
+# Unsealed resolution: for exhaustive differential testing against the oracle
+# without re-hashing a table per input state.
+pub fn lexical_resolve_state_unsealed_v1(rows: LexicalTransitionRowsV1,
+    input: LexicalBlockStateV1) -> Result<LexicalBlockStateV1, LexicalCandidateErrorV1>:
+    match lexical_transition_rows_select_unsealed_v1(rows, input):
+        case Err(e): Err(_map_err_lcr(e))
+        case Ok(row): Ok(row.output_state)
+
+# Batch unsealed form: validate the row shape once, then read the resolved state
+# for every admitted input state in admitted-state order. Shape validity is what
+# guarantees row i carries admitted state i, so identity lookup per state is not
+# repeated; exhaustive differential runs use this and cross-check the identity
+# path separately.
+pub fn lexical_resolve_states_unsealed_v1(rows: LexicalTransitionRowsV1
+) -> Result<[LexicalBlockStateV1], LexicalCandidateErrorV1>:
+    val states = lexical_transition_admitted_states_v1()
+    match lexical_transition_rows_select_unsealed_v1(rows, states[0]):
+        case Err(e): return Err(_map_err_lcr(e))
+        case Ok(_): 0
+    var out: [LexicalBlockStateV1] = []
+    for row in rows.rows: out.push(row.output_state)
+    Ok(out)
+
+# Sealed resolution: the only form allowed to cross a trust boundary.
+pub fn lexical_resolve_state_sealed_v1(bytes: [u8], input: LexicalBlockStateV1
+) -> Result<LexicalBlockStateV1, LexicalCandidateErrorV1>:
+    if bytes.len() as u64 > LEXICAL_BLOCK_WIDTH_V1: return Err(LexicalCandidateErrorV1.BlockTooWide)
+    if not lexical_block_state_valid_v1(input): return Err(LexicalCandidateErrorV1.StateNotAdmitted)
+    match lexical_transition_table_build_v1(bytes):
+        case Err(e): Err(_map_err_lcr(e))
+        case Ok(table):
+            match lexical_transition_table_select_v1(table, input):
+                case Err(e): Err(_map_err_lcr(e))
+                case Ok(row): Ok(row.output_state)
+
+# Batch form: one sealed build and one digest validation for the whole block,
+# returning the resolved state for every admitted input state in the order of
+# lexical_transition_admitted_states_v1(). Table validity is what guarantees
+# row i carries admitted state i, so no per-state re-validation is needed.
+pub fn lexical_resolve_states_sealed_v1(bytes: [u8]
+) -> Result<[LexicalBlockStateV1], LexicalCandidateErrorV1>:
+    if bytes.len() as u64 > LEXICAL_BLOCK_WIDTH_V1: return Err(LexicalCandidateErrorV1.BlockTooWide)
+    match lexical_transition_table_build_v1(bytes):
+        case Err(e): Err(_map_err_lcr(e))
+        case Ok(table):
+            if not lexical_transition_table_valid_v1(table):
+                return Err(LexicalCandidateErrorV1.InvalidTable)
+            var out: [LexicalBlockStateV1] = []
+            for row in table.rows: out.push(row.output_state)
+            Ok(out)

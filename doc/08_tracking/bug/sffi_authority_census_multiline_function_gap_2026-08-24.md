@@ -1,4 +1,9 @@
 # SFFI authority census skips multiline function bodies
+## Closed 2026-09-16 — Status Resolved; scanner handles multiline signatures; corrected scan includes the Cranelift call
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved
 
@@ -39,3 +44,4 @@ full scan includes the Cranelift unsupported-MIR call as `lexical_unsafe`.
 
 Performance acceptance remains separate and open in
 `sffi_authority_multiline_scan_perf_regression_2026-08-24.md`.
+

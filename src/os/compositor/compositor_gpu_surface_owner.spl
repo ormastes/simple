@@ -1,0 +1,464 @@
+#![allow(large_file)]
+# O1 compositor-owned GPU surface boundary.
+#
+# The host compositor is the owner of the visible output surface.  This
+# capsule records the producer/resource lifetime around the existing
+# synchronous Vulkan receipt; it does not manufacture an async token or
+# presenter-release receipt.  The runtime-owned B/N2 session can be connected
+# here once the provider exposes a distinct presenter-release operation.
+
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanFrameReceipt}
+
+val COMPOSITOR_GPU_SURFACE_READY: i64 = 0
+val COMPOSITOR_GPU_SURFACE_OFFERED: i64 = 1
+val COMPOSITOR_GPU_SURFACE_PROVIDER_ATTEMPT: i64 = 2
+val COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE: i64 = 3
+val COMPOSITOR_GPU_SURFACE_QUARANTINED: i64 = 4
+val COMPOSITOR_GPU_SURFACE_CLOSED: i64 = 5
+val COMPOSITOR_GPU_SURFACE_SUBMITTED: i64 = 6
+val _COMPOSITOR_GPU_MAX_GENERATION: i64 = 9223372036854775807
+val _COMPOSITOR_GPU_MAX_RETAINED_RESOURCES: i64 = 64
+val _COMPOSITOR_GPU_MAX_RETAINED_PIXELS: i64 = 67108864
+
+class CompositorGpuSurfaceOwner:
+    # This identity is local to one HostCompositor owner.  It is never passed
+    # to Vulkan as a provider handle and therefore cannot authorize work by
+    # itself.
+    surface_id: i64
+    surface_epoch: i64
+    device_generation: i64
+    provider_generation: i64
+    width: i32
+    height: i32
+    bound_framebuffer_identity: i64
+    bound_device_identity: i64
+    bound_swapchain_identity: i64
+    state: i64
+    next_frame_generation: i64
+    accepted_frame_generation: i64
+    submitted_frame_generation: i64
+    completed_frame_generation: i64
+    present_receipt_frame_generation: i64
+    last_device_submit_count: i64
+    last_device_fence_count: i64
+    offer_provider_frame_index: i64
+    offer_device_submit_count: i64
+    offer_device_fence_count: i64
+    offer_surface_epoch: i64
+    offer_device_generation: i64
+    offer_provider_generation: i64
+    compute_finalize_frame_index: i64
+    retained_frame_generation: i64
+    retained_resources: [SimpleOsHostGpuImageResource]
+    retained_resource_revision: i64
+    retained_resource_count: i64
+    last_reason: text
+    # A synchronous receipt is the strongest current provider boundary.  It
+    # is intentionally not named presenter-release: scanout/release is not
+    # separately observable in the current SFFI.
+    async_present_release_available: bool
+    last_release_boundary: text
+
+    static fn create(surface_id: i64, width: i32, height: i32) -> CompositorGpuSurfaceOwner:
+        val valid = surface_id > 0 and width > 0 and height > 0
+        CompositorGpuSurfaceOwner(
+            surface_id: surface_id,
+            surface_epoch: if valid then 1 else 0,
+            device_generation: if valid then 1 else 0,
+            provider_generation: if valid then 1 else 0,
+            width: width,
+            height: height,
+            bound_framebuffer_identity: 0,
+            bound_device_identity: 0,
+            bound_swapchain_identity: 0,
+            state: if valid then COMPOSITOR_GPU_SURFACE_READY else COMPOSITOR_GPU_SURFACE_CLOSED,
+            next_frame_generation: 1,
+            accepted_frame_generation: 0,
+            submitted_frame_generation: 0,
+            completed_frame_generation: 0,
+            present_receipt_frame_generation: 0,
+            last_device_submit_count: 0,
+            last_device_fence_count: 0,
+            offer_provider_frame_index: 0,
+            offer_device_submit_count: 0,
+            offer_device_fence_count: 0,
+            offer_surface_epoch: 0,
+            offer_device_generation: 0,
+            offer_provider_generation: 0,
+            compute_finalize_frame_index: 0,
+            retained_frame_generation: 0,
+            retained_resources: [],
+            retained_resource_revision: 0,
+            retained_resource_count: 0,
+            last_reason: if valid then "ready" else "invalid-surface",
+            async_present_release_available: false,
+            last_release_boundary: "none"
+        )
+
+    fn is_open() -> bool:
+        self.state != COMPOSITOR_GPU_SURFACE_CLOSED and self.surface_id > 0
+
+    fn has_retained_resources() -> bool:
+        self.retained_resource_count > 0
+
+    fn has_pending_frame() -> bool:
+        (self.state != COMPOSITOR_GPU_SURFACE_READY and
+         self.state != COMPOSITOR_GPU_SURFACE_CLOSED)
+
+    fn retained_count() -> i64:
+        self.retained_resource_count
+
+    fn current_surface_epoch() -> i64:
+        self.surface_epoch
+
+    fn current_device_generation() -> i64:
+        self.device_generation
+
+    fn current_frame_generation() -> i64:
+        self.present_receipt_frame_generation
+
+    fn release_boundary() -> text:
+        self.last_release_boundary
+
+    fn blocker_reason() -> text:
+        if self.async_present_release_available:
+            ""
+        else:
+            "provider-present-release-unavailable"
+
+    # The presenting host must reserve a new provider lifetime before it
+    # destroys/recreates the executor. Raw Vulkan handles may all be reused;
+    # this local generation, rather than pointer inequality, authorizes a new
+    # frame-counter baseline. A pending offer can never enter this transition.
+    me prepare_provider_replacement() -> bool:
+        if not self.is_open() or self.state != COMPOSITOR_GPU_SURFACE_READY:
+            self.last_reason = "replace-with-pending-frame"
+            return false
+        if self.provider_generation >= _COMPOSITOR_GPU_MAX_GENERATION:
+            self.last_reason = "provider-generation-exhausted"
+            return false
+        self.provider_generation += 1
+        self.bound_framebuffer_identity = 0
+        self.bound_swapchain_identity = 0
+        self.submitted_frame_generation = 0
+        self.completed_frame_generation = 0
+        self.present_receipt_frame_generation = 0
+        self.last_device_submit_count = 0
+        self.last_device_fence_count = 0
+        self.last_reason = "provider-replacement-prepared"
+        true
+
+    # Synchronize target dimensions and all provider identities before the
+    # next offer. A local resize or backing/swapchain replacement advances one
+    # surface epoch. A physical device change additionally advances the
+    # separate device generation. Raw-handle ABA fails closed because an
+    # unchanged identity with a reset provider frame cursor is rejected by
+    # offer_frame().
+    me sync_target(width: i32, height: i32, framebuffer_identity: i64,
+                   device_identity: i64, swapchain_identity: i64) -> bool:
+        if (not self.is_open() or self.state != COMPOSITOR_GPU_SURFACE_READY or
+            width <= 0 or height <= 0 or framebuffer_identity <= 0 or
+            device_identity <= 0 or swapchain_identity <= 0):
+            self.last_reason = "invalid-target"
+            return false
+        val device_changed = (
+            self.bound_device_identity > 0 and
+            device_identity != self.bound_device_identity)
+        val surface_changed = (
+            width != self.width or height != self.height or
+            (self.bound_framebuffer_identity > 0 and
+             framebuffer_identity != self.bound_framebuffer_identity) or
+            (self.bound_swapchain_identity > 0 and
+             swapchain_identity != self.bound_swapchain_identity) or
+            device_changed)
+        if (surface_changed and
+            self.surface_epoch >= _COMPOSITOR_GPU_MAX_GENERATION):
+            self.last_reason = "surface-epoch-exhausted"
+            return false
+        if (device_changed and
+            self.device_generation >= _COMPOSITOR_GPU_MAX_GENERATION):
+            self.last_reason = "device-generation-exhausted"
+            return false
+        if surface_changed:
+            self.surface_epoch += 1
+        if device_changed:
+            self.device_generation += 1
+            # Provider frame/counter cursors are scoped to a physical device
+            # generation. A new device starts a fresh exact receipt chain.
+            self.submitted_frame_generation = 0
+            self.completed_frame_generation = 0
+            self.present_receipt_frame_generation = 0
+            self.last_device_submit_count = 0
+            self.last_device_fence_count = 0
+        self.width = width
+        self.height = height
+        self.bound_framebuffer_identity = framebuffer_identity
+        self.bound_device_identity = device_identity
+        self.bound_swapchain_identity = swapchain_identity
+        self.last_reason = "target-synchronized"
+        true
+
+    # Offer owns a stable copy of the resource snapshot until the receipt
+    # boundary.  The producer cannot mutate a submitted slot through this
+    # owner, and a second offer is rejected while the first snapshot remains
+    # live.
+    me offer_frame(resources: [SimpleOsHostGpuImageResource],
+                   prior_receipt: VulkanFrameReceipt) -> bool:
+        if not self.is_open():
+            self.last_reason = "surface-closed"
+            return false
+        if self.state != COMPOSITOR_GPU_SURFACE_READY:
+            self.last_reason = "surface-not-ready"
+            return false
+        if (self.bound_framebuffer_identity <= 0 or
+            self.bound_device_identity <= 0 or
+            self.bound_swapchain_identity <= 0):
+            self.last_reason = "offer-target-unbound"
+            return false
+        if (prior_receipt.frame_index != self.present_receipt_frame_generation or
+            prior_receipt.frame_index < 0 or
+            prior_receipt.frame_index > _COMPOSITOR_GPU_MAX_GENERATION - 2 or
+            prior_receipt.framebuffer_width != self.width or
+            prior_receipt.framebuffer_height != self.height or
+            prior_receipt.backend_handle != self.bound_framebuffer_identity or
+            prior_receipt.device_identity != self.bound_device_identity or
+            prior_receipt.swapchain_identity != self.bound_swapchain_identity or
+            prior_receipt.device_submit_count != self.last_device_submit_count or
+            prior_receipt.device_fence_count != self.last_device_fence_count or
+            prior_receipt.device_submit_count < 0 or
+            prior_receipt.device_fence_count != prior_receipt.device_submit_count or
+            not prior_receipt.completion_known or
+            prior_receipt.cpu_fallback_used):
+            self.last_reason = "offer-baseline-receipt-mismatch"
+            return false
+        if resources.len().to_i64() > _COMPOSITOR_GPU_MAX_RETAINED_RESOURCES:
+            self.last_reason = "too-many-retained-resources"
+            return false
+        var retained_pixels: i64 = 0
+        for resource in resources:
+            val rw = resource.width.to_i64()
+            val rh = resource.height.to_i64()
+            if (resource.image_uri == "" or rw <= 0 or rh <= 0 or
+                rw > _COMPOSITOR_GPU_MAX_RETAINED_PIXELS / rh or
+                rw * rh != resource.pixels.len().to_i64() or
+                resource.pixel_checksum <= 0 or
+                retained_pixels > _COMPOSITOR_GPU_MAX_RETAINED_PIXELS - rw * rh):
+                self.last_reason = "invalid-retained-resource"
+                return false
+            retained_pixels += rw * rh
+        val frame = self.next_frame_generation
+        if frame <= self.accepted_frame_generation:
+            self.last_reason = "frame-generation-exhausted"
+            return false
+        self.accepted_frame_generation = frame
+        if frame < _COMPOSITOR_GPU_MAX_GENERATION:
+            self.next_frame_generation = frame + 1
+        self.retained_frame_generation = frame
+        self.retained_resources = resources
+        self.retained_resource_revision = frame
+        self.retained_resource_count = resources.len().to_i64()
+        self.offer_provider_frame_index = prior_receipt.frame_index
+        self.offer_device_submit_count = prior_receipt.device_submit_count
+        self.offer_device_fence_count = prior_receipt.device_fence_count
+        self.offer_surface_epoch = self.surface_epoch
+        self.offer_device_generation = self.device_generation
+        self.offer_provider_generation = self.provider_generation
+        self.compute_finalize_frame_index = 0
+        self.state = COMPOSITOR_GPU_SURFACE_OFFERED
+        self.last_reason = "frame-offered"
+        true
+
+    # A failed DrawIR attempt occurred before a provider submission.  It is
+    # safe to release this unsubmitted snapshot, while preserving the host's
+    # dirty region for its retry path.
+    me abort_offer() -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_OFFERED:
+            self.last_reason = "no-offer-to-abort"
+            return false
+        if self.submitted_frame_generation > self.completed_frame_generation:
+            self.last_reason = "submitted-frame-must-retire"
+            return false
+        self.retained_resources = []
+        self.retained_resource_revision = 0
+        self.retained_resource_count = 0
+        self.retained_frame_generation = 0
+        self.offer_surface_epoch = 0
+        self.offer_device_generation = 0
+        self.offer_provider_generation = 0
+        self.state = COMPOSITOR_GPU_SURFACE_READY
+        self.last_reason = "offer-aborted-before-submit"
+        true
+
+    # The owner records the call boundary before control enters the provider.
+    # From this point onward abort_offer() is impossible: a false return or
+    # missing receipt must quarantine because submission may have been
+    # accepted.
+    me begin_provider_attempt() -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_OFFERED:
+            self.last_reason = "provider-attempt-without-offer"
+            return false
+        self.state = COMPOSITOR_GPU_SURFACE_PROVIDER_ATTEMPT
+        self.last_reason = "provider-attempt-begun"
+        true
+
+    # Damaged DrawIR execution finalizes its compute frame before the window
+    # present. Validate that exact intermediate receipt instead of allowing an
+    # arbitrary skipped frame counter. Full/idle paths have no intermediate.
+    me observe_compute_finalize(receipt: VulkanFrameReceipt) -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_PROVIDER_ATTEMPT:
+            self.last_reason = "compute-finalize-without-provider-attempt"
+            return false
+        if (self.compute_finalize_frame_index != 0 or
+            self.offer_surface_epoch != self.surface_epoch or
+            self.offer_device_generation != self.device_generation or
+            self.offer_provider_generation != self.provider_generation or
+            receipt.frame_index != self.offer_provider_frame_index + 1 or
+            receipt.framebuffer_width != self.width or
+            receipt.framebuffer_height != self.height or
+            receipt.backend_handle != self.bound_framebuffer_identity or
+            receipt.device_identity != self.bound_device_identity or
+            receipt.swapchain_identity != self.bound_swapchain_identity or
+            receipt.device_submit_count < self.offer_device_submit_count or
+            receipt.device_fence_count != receipt.device_submit_count or
+            not receipt.completion_known or receipt.cpu_fallback_used or
+            receipt.present_mode != "device-retained" or
+            receipt.present_attempted or receipt.present_completed or
+            receipt.device_present or not receipt.no_readback or
+            receipt.readback_requested or receipt.readback_completed or
+            receipt.host_cache_refresh_completed or
+            receipt.readback_bytes != 0):
+            self.last_reason = "compute-finalize-receipt-mismatch"
+            self.state = COMPOSITOR_GPU_SURFACE_QUARANTINED
+            return false
+        self.compute_finalize_frame_index = receipt.frame_index
+        self.last_device_submit_count = receipt.device_submit_count
+        self.last_device_fence_count = receipt.device_fence_count
+        self.last_reason = "compute-finalize-observed"
+        true
+
+    # The provider's existing receipt is the authority for submit identity.
+    # `frame_index` is observed, never manufactured as a Vulkan handle.
+    me observe_submission(receipt: VulkanFrameReceipt) -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_PROVIDER_ATTEMPT:
+            self.last_reason = "submission-without-provider-attempt"
+            return false
+        val prior_frame = if self.compute_finalize_frame_index > 0:
+            self.compute_finalize_frame_index
+        else:
+            self.offer_provider_frame_index
+        if (self.offer_surface_epoch != self.surface_epoch or
+            self.offer_device_generation != self.device_generation or
+            self.offer_provider_generation != self.provider_generation or
+            receipt.frame_index != prior_frame + 1 or
+            receipt.framebuffer_width != self.width or
+            receipt.framebuffer_height != self.height or
+            receipt.backend_handle != self.bound_framebuffer_identity or
+            receipt.device_identity != self.bound_device_identity or
+            receipt.swapchain_identity != self.bound_swapchain_identity or
+            receipt.device_submit_count < self.last_device_submit_count or
+            receipt.device_fence_count < self.last_device_fence_count):
+            self.last_reason = "submission-receipt-mismatch"
+            self.state = COMPOSITOR_GPU_SURFACE_QUARANTINED
+            return false
+        self.submitted_frame_generation = receipt.frame_index
+        self.last_device_submit_count = receipt.device_submit_count
+        self.state = COMPOSITOR_GPU_SURFACE_SUBMITTED
+        self.last_reason = "submission-observed"
+        true
+
+    # The current Vulkan receipt combines compute completion with the present
+    # call.  Keep the state transition separate so a future provider can
+    # replace this with a real poll receipt without changing the owner.
+    me observe_compute_completion(receipt: VulkanFrameReceipt) -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_SUBMITTED:
+            self.last_reason = "compute-completion-without-submission"
+            return false
+        if receipt.frame_index != self.submitted_frame_generation:
+            self.last_reason = "compute-completion-frame-mismatch"
+            self.state = COMPOSITOR_GPU_SURFACE_QUARANTINED
+            return false
+        if (not receipt.completion_known or
+            receipt.framebuffer_width != self.width or
+            receipt.framebuffer_height != self.height or
+            receipt.backend_handle != self.bound_framebuffer_identity or
+            receipt.device_identity != self.bound_device_identity or
+            receipt.swapchain_identity != self.bound_swapchain_identity or
+            receipt.device_submit_count != self.last_device_submit_count or
+            receipt.device_fence_count != receipt.device_submit_count or
+            receipt.device_fence_count < self.last_device_fence_count):
+            self.last_reason = "compute-completion-unproven"
+            self.state = COMPOSITOR_GPU_SURFACE_QUARANTINED
+            return false
+        self.completed_frame_generation = receipt.frame_index
+        self.last_device_fence_count = receipt.device_fence_count
+        self.state = COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE
+        self.last_reason = "compute-complete"
+        true
+
+    # Present completion is the strongest current boundary.  Since the
+    # provider has no distinct release receipt, this records the limitation
+    # and releases only after the exact synchronous receipt is validated.
+    me observe_present_receipt(receipt: VulkanFrameReceipt) -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE:
+            self.last_reason = "present-without-compute-completion"
+            return false
+        if receipt.frame_index != self.completed_frame_generation:
+            self.last_reason = "present-frame-mismatch"
+            self.state = COMPOSITOR_GPU_SURFACE_QUARANTINED
+            return false
+        if (not receipt.present_attempted or not receipt.present_completed or
+            receipt.present_mode != "window-swapchain" or
+            not receipt.device_present or not receipt.no_readback or
+            receipt.readback_requested or receipt.readback_completed or
+            receipt.host_cache_refresh_completed or
+            receipt.readback_bytes != 0 or
+            receipt.cpu_fallback_used or not receipt.completion_known or
+            receipt.framebuffer_width != self.width or
+            receipt.framebuffer_height != self.height or
+            receipt.backend_handle != self.bound_framebuffer_identity or
+            receipt.device_identity != self.bound_device_identity or
+            receipt.swapchain_identity != self.bound_swapchain_identity or
+            receipt.device_submit_count != self.last_device_submit_count or
+            receipt.device_fence_count != self.last_device_fence_count):
+            self.last_reason = "present-receipt-rejected"
+            self.state = COMPOSITOR_GPU_SURFACE_QUARANTINED
+            return false
+        self.present_receipt_frame_generation = receipt.frame_index
+        self.last_release_boundary = "synchronous-present-receipt"
+        self.retained_resources = []
+        self.retained_resource_revision = 0
+        self.retained_resource_count = 0
+        self.retained_frame_generation = 0
+        self.offer_surface_epoch = 0
+        self.offer_device_generation = 0
+        self.offer_provider_generation = 0
+        self.state = COMPOSITOR_GPU_SURFACE_READY
+        self.last_reason = "present-receipt-accepted;provider-present-release-unavailable"
+        true
+
+    # Once a provider call has begun, a false/missing receipt cannot prove
+    # that work was never accepted. Quarantine the one bounded snapshot and
+    # refuse reuse; only process/provider teardown may ultimately release it.
+    me quarantine_after_provider_attempt(reason: text) -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_PROVIDER_ATTEMPT:
+            self.last_reason = "provider-attempt-without-offer"
+            return false
+        self.state = COMPOSITOR_GPU_SURFACE_QUARANTINED
+        self.last_reason = reason
+        true
+
+    me close() -> bool:
+        if self.state != COMPOSITOR_GPU_SURFACE_READY:
+            self.last_reason = "close-with-pending-frame"
+            return false
+        self.state = COMPOSITOR_GPU_SURFACE_CLOSED
+        self.last_reason = "closed"
+        true
+
+export CompositorGpuSurfaceOwner
+export COMPOSITOR_GPU_SURFACE_READY, COMPOSITOR_GPU_SURFACE_OFFERED
+export COMPOSITOR_GPU_SURFACE_PROVIDER_ATTEMPT
+export COMPOSITOR_GPU_SURFACE_SUBMITTED
+export COMPOSITOR_GPU_SURFACE_COMPUTE_COMPLETE
+export COMPOSITOR_GPU_SURFACE_QUARANTINED, COMPOSITOR_GPU_SURFACE_CLOSED

@@ -1,4 +1,8 @@
 # native-build: `.unwrap()`/`.unwrap_or()` on `Result` silently returns 161
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** RESOLVED 2026-07-15
 
@@ -94,3 +98,4 @@ second (cranelift) loop iteration — so every `*_llvm_cranelift` leg
 deterministically fails with `invalid --mode 'strict-llvm'` after the llvm
 leg's `record` call. Pre-existing (reproduces at de7cb5a238a); needs a distinct
 local variable name in one of the two functions.
+

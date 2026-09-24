@@ -1,4 +1,8 @@
 # `ec6a500b42` breaks every Stage-2 build: `&mut` out-param fails the capability checker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-27
 **Area:** `src/lib/nogc_sync_mut/sffi/dynamic.spl`
@@ -68,3 +72,4 @@ same shape as the 2026-08-11 seed incident, one layer up.
 
 Option 2 is proven to build. Option 1 preserves the perf intent but is unproven
 — do not assume it type-checks without running a full Stage-2 build.
+

@@ -1,0 +1,356 @@
+"""Executable lifecycle checks for the retained GPU render-surface owner."""
+# @cover src/lib/gc_async_mut/gpu/session/render_surface_state.spl 90%
+
+use std.spec.*
+use std.common.gpu.render_surface_contract.*
+use std.gc_async_mut.gpu.session.render_surface_state.*
+
+fn device_token(generation: i64, submission: i64) -> GpuSubmissionToken:
+    GpuSubmissionToken(surface_id: 8, device_generation: generation,
+        submission_id: submission, fence_value: submission + 100,
+        backend: "vulkan", device_identity: "device-0", submitted_ns: 9)
+
+fn capture_mismatch_tokens() -> [GpuSubmissionToken]:
+    [
+        GpuSubmissionToken(surface_id: 9, device_generation: 1,
+            submission_id: 1, fence_value: 101, backend: "vulkan",
+            device_identity: "device-0", submitted_ns: 9),
+        device_token(2, 1),
+        GpuSubmissionToken(surface_id: 8, device_generation: 1,
+            submission_id: 2, fence_value: 101, backend: "vulkan",
+            device_identity: "device-0", submitted_ns: 9),
+        GpuSubmissionToken(surface_id: 8, device_generation: 1,
+            submission_id: 1, fence_value: 102, backend: "vulkan",
+            device_identity: "device-0", submitted_ns: 9),
+        GpuSubmissionToken(surface_id: 8, device_generation: 1,
+            submission_id: 1, fence_value: 101, backend: "metal",
+            device_identity: "device-0", submitted_ns: 9),
+        GpuSubmissionToken(surface_id: 8, device_generation: 1,
+            submission_id: 1, fence_value: 101, backend: "vulkan",
+            device_identity: "device-1", submitted_ns: 9),
+        GpuSubmissionToken(surface_id: 8, device_generation: 1,
+            submission_id: 1, fence_value: 101, backend: "vulkan",
+            device_identity: "device-0", submitted_ns: 8),
+    ]
+
+describe "retained GPU render surface state":
+    it "allocates a bounded retained ring once":
+        # @req REQ-GPUUI-003
+        val state = gpu_render_surface_create(8, 3840, 2160, 3, 4096, 1024)
+        expect(state.alive).to_be(true)
+        expect(state.slots.len()).to_equal(3)
+        expect(state.allocation_count).to_equal(3)
+        expect(gpu_surface_memory_receipt_admitted(
+            gpu_render_surface_memory_receipt(state, "create"))).to_be(true)
+
+    it "keeps three frames in flight and applies backpressure to a fourth":
+        # @req REQ-GPUUI-004
+        # @req NFR-GPUUI-005
+        var state = gpu_render_surface_create(8, 3840, 2160, 3, 4096, 1024)
+        var i: i64 = 1
+        while i <= 3:
+            val (recording, slot, begin_reason) = gpu_render_surface_begin(state, i, 100, 400)
+            expect(begin_reason).to_equal("recording")
+            val (submitted, submit_reason) = gpu_render_surface_submit(recording, slot, device_token(1, i))
+            expect(submit_reason).to_equal("submitted")
+            state = submitted
+            i = i + 1
+        val (_full, slot, reason) = gpu_render_surface_begin(state, 4, 100, 400)
+        expect(slot).to_equal(-1)
+        expect(reason).to_equal("frame-ring-full")
+
+    it "retires only the matching device fence and presents without readback":
+        # @req REQ-GPUUI-002
+        # @req REQ-GPUUI-004
+        var state = gpu_render_surface_create(8, 3840, 2160, 2, 4096, 1024)
+        val (recording, slot, _) = gpu_render_surface_begin(state, 1, 50, 200)
+        val (submitted, _) = gpu_render_surface_submit(recording, slot, device_token(1, 1))
+        val (unchanged, mismatch) = gpu_render_surface_complete(submitted, slot, 1, 999)
+        expect(mismatch).to_equal("completion-token-mismatch")
+        expect(unchanged.slots[slot].state).to_equal(GPU_FRAME_SUBMITTED)
+        val (complete, reason) = gpu_render_surface_complete(submitted, slot, 1, 101)
+        expect(reason).to_equal("device-complete")
+        val (presented, receipt, present_reason) = gpu_render_surface_present(complete, slot)
+        expect(present_reason).to_equal("presented")
+        expect(gpu_present_receipt_admitted(receipt)).to_be(true)
+        expect(receipt.readback_bytes).to_equal(0)
+        expect(presented.slots[slot].state).to_equal(GPU_FRAME_FREE)
+
+    it "keeps ordinary presentation on the zero-readback path":
+        # @req REQ-GPUUI-002
+        # @req NFR-GPUUI-004
+        step("Present a completed frame without requesting capture")
+        var state = gpu_render_surface_create(8, 64, 64, 2, 1024, 256)
+        val (recording, slot, _) = gpu_render_surface_begin(state, 1, 16, 64)
+        val (submitted, _) = gpu_render_surface_submit(recording, slot, device_token(1, 1))
+        val (complete, _) = gpu_render_surface_complete(submitted, slot, 1, 101)
+        val (presented, receipt, reason) = gpu_render_surface_present(complete, slot)
+        expect(reason).to_equal("presented")
+        expect(gpu_present_receipt_admitted(receipt)).to_be(true)
+        expect(receipt.readback_bytes).to_equal(0)
+        expect(presented.slots[slot].state).to_equal(GPU_FRAME_FREE)
+
+    it "admits one explicit capture only after the matching fence completes":
+        # @req REQ-GPUUI-002
+        # @req REQ-GPUUI-004
+        step("Capture exactly one completed generation, then release its slot")
+        var state = gpu_render_surface_create(8, 64, 64, 2, 1024, 256)
+        val (recording, slot, _) = gpu_render_surface_begin(state, 1, 16, 64)
+        val (submitted, _) = gpu_render_surface_submit(recording, slot, device_token(1, 1))
+        val (complete, _) = gpu_render_surface_complete(submitted, slot, 1, 101)
+        val (bad_time, _, _, time_reason) = gpu_render_surface_capture_request(
+            complete, slot, "argb8888", 64 * 4, 8)
+        expect(time_reason).to_equal("invalid-capture-request-timestamp")
+        expect(bad_time.slots[slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+        val (bad_format, _, _, format_reason) = gpu_render_surface_capture_request(
+            complete, slot, "rgba8888", 64 * 4, 10)
+        expect(format_reason).to_equal("unsupported-capture-format")
+        expect(bad_format.slots[slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+        val (bad_stride, _, _, stride_reason) = gpu_render_surface_capture_request(
+            complete, slot, "argb8888", 64 * 4 + 1, 10)
+        expect(stride_reason).to_equal("capture-stride-mismatch")
+        expect(bad_stride.slots[slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+        var exhausted = complete
+        exhausted.next_capture_generation = 9223372036854775807
+        val (not_requested, _, _, exhausted_reason) =
+            gpu_render_surface_capture_request(
+                exhausted, slot, "argb8888", 64 * 4, 10)
+        expect(exhausted_reason).to_equal("capture-generation-exhausted")
+        expect(not_requested.slots[slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+        val (pending, capture_generation, request_token, request_reason) =
+            gpu_render_surface_capture_request(
+                complete, slot, "argb8888", 64 * 4, 10)
+        expect(request_reason).to_equal("capture-pending")
+        expect(pending.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        expect(capture_generation).to_equal(1)
+        expect(pending.slots[slot].capture_generation).to_equal(1)
+        expect(pending.slots[slot].capture_requested_ns).to_equal(10)
+        expect(request_token.surface_id).to_equal(8)
+        expect(request_token.device_generation).to_equal(1)
+        expect(request_token.submission_id).to_equal(1)
+        expect(request_token.fence_value).to_equal(101)
+        expect(request_token.backend).to_equal("vulkan")
+        expect(request_token.device_identity).to_equal("device-0")
+        expect(request_token.submitted_ns).to_equal(9)
+        val capture = GpuCaptureReceipt(token: device_token(1, 1),
+            readback_source: "device_readback", readback_bytes: 64 * 64 * 4,
+            pixel_checksum: 91, fallback_used: false,
+            capture_generation: capture_generation,
+            capture_requested_ns: 10, capture_completed_ns: 11,
+            pixel_width: 64, pixel_height: 64,
+            row_stride_bytes: 64 * 4, pixel_format: "argb8888")
+        val (captured, reason) = gpu_render_surface_capture(pending, slot, capture)
+        expect(reason).to_equal("captured")
+        expect(captured.slots[slot].state).to_equal(GPU_FRAME_FREE)
+        val (_again, again_reason) = gpu_render_surface_capture(captured, slot, capture)
+        expect(again_reason).to_equal("capture-not-pending")
+
+        # The fixed tightly-packed ARGB byte contract rejects dimensions whose
+        # row stride cannot be represented before any capture becomes pending.
+        val huge = gpu_render_surface_create(
+            8, 2305843009213693952, 1, 2, 1024, 256)
+        val (huge_recording, huge_slot, _) = gpu_render_surface_begin(huge, 1, 1, 4)
+        val (huge_submitted, _) = gpu_render_surface_submit(
+            huge_recording, huge_slot, device_token(1, 2))
+        val (huge_complete, _) = gpu_render_surface_complete(
+            huge_submitted, huge_slot, 2, 102)
+        val (overflowed, _, _, overflow_reason) = gpu_render_surface_capture_request(
+            huge_complete, huge_slot, "argb8888", 0, 10)
+        expect(overflow_reason).to_equal("capture-size-overflow")
+        expect(overflowed.slots[huge_slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+
+    it "rejects a capture from a stale device generation without consuming the slot":
+        # @req REQ-GPUUI-003
+        # @req REQ-GPUUI-004
+        step("Reject stale readback evidence after a generation change")
+        var state = gpu_render_surface_create(8, 64, 64, 2, 1024, 256)
+        val (recording, slot, _) = gpu_render_surface_begin(state, 1, 16, 64)
+        val (submitted, _) = gpu_render_surface_submit(recording, slot, device_token(1, 1))
+        val (complete, _) = gpu_render_surface_complete(submitted, slot, 1, 101)
+        val (pending, capture_generation, request_token, request_reason) =
+            gpu_render_surface_capture_request(
+                complete, slot, "argb8888", 64 * 4, 10)
+        expect(request_reason).to_equal("capture-pending")
+        for mismatched_token in capture_mismatch_tokens():
+            val stale = GpuCaptureReceipt(token: mismatched_token,
+                readback_source: "device_readback", readback_bytes: 64 * 64 * 4,
+                pixel_checksum: 91, fallback_used: false,
+                capture_generation: capture_generation,
+                capture_requested_ns: 10, capture_completed_ns: 11,
+                pixel_width: 64, pixel_height: 64,
+                row_stride_bytes: 64 * 4, pixel_format: "argb8888")
+            val (unchanged, reason) = gpu_render_surface_capture(pending, slot, stale)
+            expect(reason).to_equal("capture-token-mismatch")
+            expect(unchanged.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        val (still_pending, stale_cancel_reason) =
+            gpu_render_surface_capture_abandon(
+                pending, slot, capture_generation, device_token(2, 1))
+        expect(stale_cancel_reason).to_equal("capture-token-mismatch")
+        expect(still_pending.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        val (recoverable, abandon_reason) =
+            gpu_render_surface_capture_abandon(
+                still_pending, slot, capture_generation, request_token)
+        expect(abandon_reason).to_equal("capture-abandoned")
+        expect(recoverable.slots[slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+        val (retry, retry_generation, _, retry_reason) =
+            gpu_render_surface_capture_request(
+                recoverable, slot, "argb8888", 64 * 4, 12)
+        expect(retry_reason).to_equal("capture-pending")
+        expect(retry_generation).to_equal(2)
+        val delayed = GpuCaptureReceipt(token: request_token,
+            readback_source: "device_readback", readback_bytes: 64 * 64 * 4,
+            pixel_checksum: 91, fallback_used: false,
+            capture_generation: capture_generation,
+            capture_requested_ns: 10, capture_completed_ns: 13,
+            pixel_width: 64, pixel_height: 64,
+            row_stride_bytes: 64 * 4, pixel_format: "argb8888")
+        val (retry_unchanged, delayed_reason) =
+            gpu_render_surface_capture(retry, slot, delayed)
+        expect(delayed_reason).to_equal("capture-generation-mismatch")
+        expect(retry_unchanged.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        val (retry_complete, retry_abandon_reason) =
+            gpu_render_surface_capture_abandon(
+                retry_unchanged, slot, retry_generation, request_token)
+        expect(retry_abandon_reason).to_equal("capture-abandoned")
+        expect(retry_complete.slots[slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+
+    it "keeps the completed slot recoverable after capture errors":
+        # @req REQ-GPUUI-002
+        step("Clean up an invalid capture by falling back to ordinary present")
+        var state = gpu_render_surface_create(8, 64, 64, 2, 1024, 256)
+        val (recording, slot, _) = gpu_render_surface_begin(state, 1, 16, 64)
+        val (submitted, _) = gpu_render_surface_submit(recording, slot, device_token(1, 1))
+        val (complete, _) = gpu_render_surface_complete(submitted, slot, 1, 101)
+        val (pending, capture_generation, request_token, request_reason) =
+            gpu_render_surface_capture_request(
+                complete, slot, "argb8888", 64 * 4, 10)
+        expect(request_reason).to_equal("capture-pending")
+        val invalid = GpuCaptureReceipt(token: device_token(1, 1),
+            readback_source: "host_cache_after_device_present", readback_bytes: 64 * 64 * 4,
+            pixel_checksum: 91, fallback_used: false,
+            capture_generation: capture_generation,
+            capture_requested_ns: 10, capture_completed_ns: 11,
+            pixel_width: 64, pixel_height: 64,
+            row_stride_bytes: 64 * 4, pixel_format: "argb8888")
+        val (invalid_pending, reason) = gpu_render_surface_capture(pending, slot, invalid)
+        expect(reason).to_equal("invalid-capture-receipt")
+        expect(invalid_pending.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        val wrong_request_time = GpuCaptureReceipt(token: device_token(1, 1),
+            readback_source: "device_readback", readback_bytes: 64 * 64 * 4,
+            pixel_checksum: 91, fallback_used: false,
+            capture_generation: capture_generation,
+            capture_requested_ns: 11, capture_completed_ns: 12,
+            pixel_width: 64, pixel_height: 64,
+            row_stride_bytes: 64 * 4, pixel_format: "argb8888")
+        val (time_pending, time_reason) =
+            gpu_render_surface_capture(invalid_pending, slot, wrong_request_time)
+        expect(time_reason).to_equal("capture-request-timestamp-mismatch")
+        expect(time_pending.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        val early_completion = GpuCaptureReceipt(token: device_token(1, 1),
+            readback_source: "device_readback", readback_bytes: 64 * 64 * 4,
+            pixel_checksum: 91, fallback_used: false,
+            capture_generation: capture_generation,
+            capture_requested_ns: 10, capture_completed_ns: 9,
+            pixel_width: 64, pixel_height: 64,
+            row_stride_bytes: 64 * 4, pixel_format: "argb8888")
+        val (early_pending, early_reason) =
+            gpu_render_surface_capture(time_pending, slot, early_completion)
+        expect(early_reason).to_equal("invalid-capture-receipt")
+        expect(early_pending.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        val wrong_size = GpuCaptureReceipt(token: device_token(1, 1),
+            readback_source: "device_readback", readback_bytes: 1,
+            pixel_checksum: 91, fallback_used: false,
+            capture_generation: capture_generation,
+            capture_requested_ns: 10, capture_completed_ns: 11,
+            pixel_width: 64, pixel_height: 64,
+            row_stride_bytes: 64 * 4, pixel_format: "argb8888")
+        val (size_pending, size_reason) =
+            gpu_render_surface_capture(early_pending, slot, wrong_size)
+        expect(size_reason).to_equal("capture-size-mismatch")
+        expect(size_pending.slots[slot].state).to_equal(GPU_FRAME_CAPTURE_PENDING)
+        val (_not_presented, _, present_pending_reason) =
+            gpu_render_surface_present(size_pending, slot)
+        expect(present_pending_reason).to_equal("slot-not-device-complete")
+        val (_not_resized, resize_pending_reason) = gpu_render_surface_resize(
+            size_pending, 32, 32, 1024, 256)
+        expect(resize_pending_reason).to_equal("frames-still-in-flight")
+        val (_not_lost, loss_pending_reason) =
+            gpu_render_surface_device_loss(size_pending)
+        expect(loss_pending_reason).to_equal("frames-still-in-flight")
+        val (_not_stopped, shutdown_pending_reason) =
+            gpu_render_surface_shutdown(size_pending)
+        expect(shutdown_pending_reason).to_equal("frames-still-in-flight")
+        val (recoverable, abandon_reason) =
+            gpu_render_surface_capture_abandon(
+                size_pending, slot, capture_generation, request_token)
+        expect(abandon_reason).to_equal("capture-abandoned")
+        expect(recoverable.slots[slot].state).to_equal(GPU_FRAME_DEVICE_COMPLETE)
+        val (_late_capture, late_capture_reason) =
+            gpu_render_surface_capture(recoverable, slot, wrong_size)
+        expect(late_capture_reason).to_equal("capture-not-pending")
+        val (cleaned, present_receipt, present_reason) = gpu_render_surface_present(recoverable, slot)
+        expect(present_reason).to_equal("presented")
+        expect(gpu_present_receipt_admitted(present_receipt)).to_be(true)
+        expect(cleaned.slots[slot].state).to_equal(GPU_FRAME_FREE)
+
+    it "rejects stale events and stale device generations":
+        # @req REQ-GPUUI-005
+        var state = gpu_render_surface_create(8, 640, 480, 2, 1024, 256)
+        val (recording, slot, _) = gpu_render_surface_begin(state, 7, 10, 40)
+        val (_stale, stale_slot, stale_reason) = gpu_render_surface_begin(recording, 7, 10, 40)
+        expect(stale_slot).to_equal(-1)
+        expect(stale_reason).to_equal("stale-event-generation")
+        val (_bad, bad_reason) = gpu_render_surface_submit(recording, slot, device_token(2, 1))
+        expect(bad_reason).to_equal("invalid-submission-token")
+
+    it "requires retirement before resize and invalidates the old generation":
+        # @req REQ-GPUUI-003
+        var state = gpu_render_surface_create(8, 640, 480, 2, 1024, 256)
+        val (recording, slot, _) = gpu_render_surface_begin(state, 1, 10, 40)
+        val (_busy, busy_reason) = gpu_render_surface_resize(recording, 800, 600, 2048, 512)
+        expect(busy_reason).to_equal("frames-still-in-flight")
+        val (cancelled, _) = gpu_render_surface_submit(recording, slot, device_token(1, 1))
+        val (complete, _) = gpu_render_surface_complete(cancelled, slot, 1, 101)
+        val (presented, _, _) = gpu_render_surface_present(complete, slot)
+        val (resized, resize_reason) = gpu_render_surface_resize(presented, 800, 600, 2048, 512)
+        expect(resize_reason).to_equal("resized")
+        expect(resized.surface.device_generation).to_equal(2)
+        expect(resized.retained_bytes).to_equal(2048)
+
+    it "releases all retained state on an idle shutdown":
+        # @req REQ-GPUUI-003
+        # @req NFR-GPUUI-006
+        val state = gpu_render_surface_create(8, 640, 480, 2, 1024, 256)
+        val (stopped, reason) = gpu_render_surface_shutdown(state)
+        expect(reason).to_equal("shutdown")
+        expect(stopped.alive).to_be(false)
+        expect(stopped.slots.len()).to_equal(0)
+        expect(stopped.allocation_count).to_equal(0)
+        expect(stopped.retained_bytes).to_equal(0)
+        expect(stopped.staging_bytes).to_equal(0)
+        val (stopped_again, again_reason) = gpu_render_surface_shutdown(stopped)
+        expect(again_reason).to_equal("shutdown")
+        expect(stopped_again.alive).to_be(false)
+
+    it "keeps duplicate resize stable and loss transitions monotonic":
+        # @req REQ-GPUUI-003
+        # @req REQ-GPUUI-005
+        val state = gpu_render_surface_create(8, 640, 480, 2, 1024, 256)
+        val (same, same_reason) = gpu_render_surface_resize(
+            state, 640, 480, 1024, 256)
+        expect(same_reason).to_equal("unchanged")
+        expect(same.surface.device_generation).to_equal(1)
+        val (lost, loss_reason) = gpu_render_surface_device_loss(same)
+        expect(loss_reason).to_equal("device-loss")
+        expect(lost.surface.device_generation).to_equal(2)
+        expect(lost.surface.width).to_equal(640)
+        expect(lost.surface.height).to_equal(480)
+
+    it "rejects loss while a frame is in flight":
+        # @req REQ-GPUUI-004
+        val state = gpu_render_surface_create(8, 640, 480, 2, 1024, 256)
+        val (recording, _, _) = gpu_render_surface_begin(state, 1, 10, 40)
+        val (unchanged, reason) = gpu_render_surface_device_loss(recording)
+        expect(reason).to_equal("frames-still-in-flight")
+        expect(unchanged.surface.device_generation).to_equal(1)
+        expect(unchanged.slots[0].state).to_equal(GPU_FRAME_RECORDING)

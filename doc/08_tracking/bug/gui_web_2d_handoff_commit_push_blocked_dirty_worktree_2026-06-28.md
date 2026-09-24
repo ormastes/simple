@@ -1,5 +1,10 @@
 # GUI/Web/2D Handoff Commit Push Blocked By Dirty Worktree
 
+## Closed 2026-09-13 — the blocked commit landed on origin/main
+- **measured**: `git log --all --grep=...handoff contract` finds `5efec791397` (2026-06-28) and `git merge-base --is-ancestor 5efec791397 origin/main` reports ON_MAIN.
+- **measured**: the jj revision this entry names, `9396eebc3b79`, is not a valid object here (`git cat-file -t` -> "Not a valid object name") — it was rewritten into the landed sha above.
+- **inferred**: the blocker was transient worktree state in a session that no longer exists, and the landing policy is now PR-only (.claude/rules/vcs.md, ruleset since 2026-09-05), superseding the sync file-count guard path described here.
+
 Date: 2026-06-28
 
 ## Summary

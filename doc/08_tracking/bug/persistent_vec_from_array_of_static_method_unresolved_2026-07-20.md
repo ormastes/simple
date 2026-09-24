@@ -1,4 +1,8 @@
 # `PersistentVec.from_array` / `.of` unresolved as static methods (works for `.empty`/`.range`/`.repeat`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
@@ -120,3 +124,4 @@ either. Root cause not isolated further this pass.
 
 No Rust seed source fix attempted (out of scope for this triage pass per the
 fix-guide; needs a rebuild). Left as GENUINE-BUG, both specs unmodified.
+

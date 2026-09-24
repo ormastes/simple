@@ -1,4 +1,9 @@
 # spipe plugin/MCP surface: e274cd33719 clobbered the modular MCP entrypoint, the plugin descriptor, and the 0.2.0 version bump
+## Closed 2026-09-16 — ...on bump **Status:** §1-§4 + §3b RESOLVED 2026-09-05. §5, §6, §7-invariant, §8, §9, §10 OPE
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** §1-§4 + §3b RESOLVED 2026-09-05. §5, §6, §7-invariant, §8, §9, §10 OPEN (need an owner).
 **Filed:** 2026-09-05 (rewritten same day once git evidence settled the open questions)
@@ -182,3 +187,4 @@ session was given, and the whole-module diff against `0fce018eda3` shows HEAD is
 of that parent by 99 files / +5719 lines (the squash also landed the wave4/wave5 work), so
 these files cannot be restored wholesale from the parent — each needs a per-file de-dup
 against its pre-squash content.
+

@@ -1,4 +1,8 @@
 # NEON and RVV ML-KEM NTT candidates are declared but have no vector kernel
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — fail-closed; do not promote ARM or RISC-V SIMD.
 
@@ -34,3 +38,8 @@ completion checklist (byte-identical NEON/RVV kernels, VLEN-aware chunk
 counts, same-fixture scalar-vs-vector tests, physical-host runs before
 promotion) is unchanged and remains genuinely out of scope for this
 environment. No fix attempted; status remains OPEN/fail-closed as filed.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: missing NEON/RVV vector-kernel feature work, not a bounded bug fix. No change made.
+

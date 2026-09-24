@@ -4,9 +4,10 @@
 #
 # Master plan slot A5. What is present: model residency (load once, serve many),
 # admission control against the host memory budget, and request-level
-# generation. What is deliberately absent: continuous batching, chunked prefill
-# and prefix caching, which are the rest of A5 and need the A4 paged KV cache
-# underneath them. Requests are therefore served one at a time.
+# generation, independently owned request contexts, bounded serial prefix
+# snapshots, and optional physical paged-KV ownership. Continuous batching,
+# chunked prefill, and parallel execution remain absent. Requests are still
+# advanced by one serial owner at a time.
 #
 # RESIDENCY IS THE WHOLE POINT. These models are 46-78 GB; loading per request
 # would take minutes and, on a machine whose memory is unified with the GPU,
@@ -14,7 +15,9 @@
 # one model and refuses a switch it cannot afford, rather than letting an HTTP
 # handler decide.
 
-use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, backend_error_text, open_backend, load_model, open_context, generate, close_backend}
+use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, BackendError, BackendGenerationRequest, PrefixCacheStats, INVALID_NONNEGATIVE_I64_TEXT, parse_nonnegative_i64_text_exact, backend_error_text, open_backend, load_model, configure_matched_cpu_context, open_context, generate_observed_request, configure_prefix_cache, prefix_cache_stats, physical_page_provider_status, physical_page_allocated_bytes, physical_page_bytes, close_backend}
+use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text, physical_page_activation_text}
+use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
 use std.io_runtime.{file_exists}
@@ -25,12 +28,75 @@ var ENGINE_LOADED_ID = ""
 var ENGINE_BACKEND: GgmlBackend? = nil
 var ENGINE_LIB_PATH = "build/sffi/libslang_ggml.so"
 var ENGINE_N_CTX = 4096
+var ENGINE_MATCHED_CPU_THREADS = -1
+var ENGINE_PREFIX_CACHE_ENTRIES = 4
+var ENGINE_PREFIX_CACHE_BYTES = 2147483648
+var ENGINE_PHYSICAL_PAGES_ENABLED = false
+var ENGINE_PHYSICAL_PAGE_TOKENS = 256
+var ENGINE_PHYSICAL_PAGE_CAPACITY = 128
+var ENGINE_PHYSICAL_REQUEST_CAPACITY = 1
+var ENGINE_PHYSICAL_PREFIX_CAPACITY = 4
+var ENGINE_PHYSICAL_BYTE_LIMIT = 2147483648
+
+struct EngineKvReadiness:
+    mode: KvExecutionMode
+    cache_ready: bool
+    physical_activation: PhysicalPageActivation
+
+struct EngineGenerationObservation:
+    generated_tokens: text
+    output: text
+
+struct EngineGenerationRequest:
+    prompt: text
+    max_tokens: text
 
 fn engine_set_lib_path(path: text):
     ENGINE_LIB_PATH = path
 
-fn engine_set_n_ctx(n: i64):
-    ENGINE_N_CTX = n
+fn engine_set_n_ctx_text(value: text) -> bool:
+    val parsed = parse_nonnegative_i64_text_exact(value)
+    if parsed <= 0:
+        return false
+    ENGINE_N_CTX = parsed
+    true
+
+fn engine_set_matched_cpu_threads_text(value: text) -> bool:
+    val threads = parse_nonnegative_i64_text_exact(value)
+    if ENGINE_BACKEND != nil or threads <= 0:
+        return false
+    ENGINE_MATCHED_CPU_THREADS = threads
+    true
+
+fn engine_set_physical_pages_config(config: text) -> bool:
+    val fields = config.split("|")
+    if fields.len() != 5:
+        return false
+    val enabled = fields[0] == "true"
+    if fields[0] != "true" and fields[0] != "false":
+        return false
+    if ENGINE_BACKEND != nil:
+        return false
+    if enabled and (parse_nonnegative_i64_text_exact(fields[1]) <= 0 or
+                    parse_nonnegative_i64_text_exact(fields[2]) <= 0 or
+                    parse_nonnegative_i64_text_exact(fields[3]) <= 0 or
+                    parse_nonnegative_i64_text_exact(fields[4]) <= 0):
+        return false
+    ENGINE_PHYSICAL_PAGES_ENABLED = enabled
+    ENGINE_PHYSICAL_PAGE_TOKENS = parse_nonnegative_i64_text_exact(fields[1])
+    ENGINE_PHYSICAL_PAGE_CAPACITY = parse_nonnegative_i64_text_exact(fields[2])
+    ENGINE_PHYSICAL_PREFIX_CAPACITY = parse_nonnegative_i64_text_exact(fields[3])
+    ENGINE_PHYSICAL_BYTE_LIMIT = parse_nonnegative_i64_text_exact(fields[4])
+    true
+
+fn engine_set_prefix_cache_limits(entries: i64, bytes: i64) -> bool:
+    if entries < 0 or entries > 8 or bytes < 0:
+        return false
+    ENGINE_PREFIX_CACHE_ENTRIES = entries
+    ENGINE_PREFIX_CACHE_BYTES = bytes
+    if ENGINE_BACKEND == nil:
+        return true
+    configure_prefix_cache(ENGINE_BACKEND!, entries, bytes)
 
 fn engine_lib_path() -> text:
     ENGINE_LIB_PATH
@@ -43,6 +109,73 @@ fn engine_backend_available() -> bool:
 fn engine_loaded_model() -> text:
     ENGINE_LOADED_ID
 
+fn engine_prefix_cache_stats() -> PrefixCacheStats?:
+    if ENGINE_BACKEND == nil:
+        return nil
+    if paged_executor_active():
+        val physical = paged_executor_telemetry()
+        if physical == nil:
+            return nil
+        val backend_stats = prefix_cache_stats(ENGINE_BACKEND!)
+        return PrefixCacheStats(
+            capabilities: backend_stats.capabilities,
+            hits: physical!.prefix_hits.to_i64(),
+            misses: physical!.prefix_misses.to_i64(),
+            tokens_reused: physical!.reused_tokens.to_i64(),
+            tokens_prefilled: physical!.prefilled_tokens.to_i64(),
+            admissions: physical!.prefix_admissions.to_i64(),
+            evictions: physical!.prefix_evictions.to_i64(),
+            resident_entries: physical!.active_prefixes,
+            resident_bytes: physical!.allocated_bytes,
+            rejected_bytes: physical!.busy_rejects.to_i64(),
+            restore_failures: physical!.generation_failures.to_i64())
+    prefix_cache_stats(ENGINE_BACKEND!)
+
+fn engine_physical_page_allocated_bytes() -> Result<i64, text>:
+    if ENGINE_BACKEND == nil or not paged_executor_active():
+        return Err("physical page executor is inactive")
+    match physical_page_allocated_bytes(ENGINE_BACKEND!, paged_executor_pool()):
+        Err(e): Err(backend_error_text(e))
+        Ok(bytes): Ok(bytes)
+
+fn engine_physical_page_bytes() -> Result<i64, text>:
+    if ENGINE_BACKEND == nil or not paged_executor_active():
+        return Err("physical page executor is inactive")
+    match physical_page_bytes(ENGINE_BACKEND!, paged_executor_pool()):
+        Err(e): Err(backend_error_text(e))
+        Ok(bytes): Ok(bytes)
+
+# Physical-page ABI discovery is not activation. Until a model-specific tensor
+# provider creates a pool and connects the owner dispatch, generation must stay
+# on the proven snapshot path.
+fn engine_physical_page_activation() -> PhysicalPageActivation:
+    if ENGINE_BACKEND == nil:
+        return PhysicalPageActivation.ProviderUnavailable
+    if paged_executor_active():
+        return physical_page_activation(
+            physical_page_provider_status(ENGINE_BACKEND!),
+            PhysicalModelSupport.Supported, paged_executor_pool(), true)
+    physical_page_activation(physical_page_provider_status(ENGINE_BACKEND!),
+        PhysicalModelSupport.Unknown, 0, false)
+
+fn engine_kv_readiness() -> EngineKvReadiness:
+    val context_ready = ENGINE_BACKEND != nil and ENGINE_LOADED_ID != ""
+    val activation = engine_physical_page_activation()
+    val mode = kv_execution_mode(context_ready, activation)
+    EngineKvReadiness(
+        mode: mode,
+        cache_ready: mode != KvExecutionMode.Unavailable,
+        physical_activation: activation)
+
+fn engine_kv_execution_mode() -> KvExecutionMode:
+    engine_kv_readiness().mode
+
+fn engine_kv_execution_mode_text() -> text:
+    kv_execution_mode_text(engine_kv_execution_mode())
+
+fn engine_physical_page_reason() -> text:
+    physical_page_activation_text(engine_physical_page_activation())
+
 # KV cache and activations for a context of this size. A per-token-per-layer
 # estimate would need the model's own hyperparameters, which are not read until
 # the backend opens the file; this is a deliberately conservative flat figure
@@ -50,11 +183,18 @@ fn engine_loaded_model() -> text:
 fn _runtime_overhead_bytes() -> i64:
     6 * 1024 * 1024 * 1024
 
-fn engine_unload():
+fn engine_unload() -> Result<(), text>:
     if ENGINE_BACKEND != nil:
-        close_backend(ENGINE_BACKEND!)
+        if paged_executor_active():
+            match paged_executor_shutdown():
+                Err(error): return Err(paged_executor_error_text(error))
+                Ok(_): ()
+        match close_backend(ENGINE_BACKEND!):
+            Err(e): return Err(backend_error_text(e))
+            Ok(_): ()
         ENGINE_BACKEND = nil
     ENGINE_LOADED_ID = ""
+    Ok(())
 
 # Makes `model` the resident model, unloading whatever was resident first.
 # Err carries a caller-facing reason; every failure path leaves the engine with
@@ -69,7 +209,9 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
     # Unload BEFORE the fit check: the memory the outgoing model holds is
     # memory the incoming one can have, and checking first would refuse a swap
     # that actually fits.
-    engine_unload()
+    match engine_unload():
+        Err(reason): return Err("resident model is busy: " + reason)
+        Ok(_): ()
     val fit = check_fit(model.bytes, _runtime_overhead_bytes(), default_headroom_bytes())
     if not fit.fits:
         return Err("refusing to load '" + model.id + "': " + fit.reason)
@@ -77,31 +219,91 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
         Err(e):
             return Err("backend unavailable at " + ENGINE_LIB_PATH + ": " + backend_error_text(e))
         Ok(b):
-            match load_model(b, model.entry_path, -1):
+            val gpu_layers = if ENGINE_PHYSICAL_PAGES_ENABLED or ENGINE_MATCHED_CPU_THREADS > 0: 0 else: -1
+            match load_model(b, model.entry_path, gpu_layers):
                 Err(e):
                     close_backend(b)
                     return Err("load failed for '" + model.id + "': " + backend_error_text(e))
                 Ok(_):
+                    if ENGINE_MATCHED_CPU_THREADS > 0:
+                        match configure_matched_cpu_context(b, ENGINE_MATCHED_CPU_THREADS):
+                            Err(e):
+                                close_backend(b)
+                                return Err("matched CPU context failed for '" + model.id + "': " + backend_error_text(e))
+                            Ok(_): ()
+                    if ENGINE_PHYSICAL_PAGES_ENABLED:
+                        if not paged_executor_bind_backend(b):
+                            close_backend(b)
+                            return Err("physical page backend binding failed for '" + model.id + "'")
+                        val physical_config = ENGINE_N_CTX.to_text() + "|" +
+                            ENGINE_PHYSICAL_PAGE_TOKENS.to_text() + "|" +
+                            ENGINE_PHYSICAL_PAGE_CAPACITY.to_text() + "|" +
+                            ENGINE_PHYSICAL_REQUEST_CAPACITY.to_text() + "|" +
+                            ENGINE_PHYSICAL_PREFIX_CAPACITY.to_text() + "|" +
+                            ENGINE_PHYSICAL_BYTE_LIMIT.to_text()
+                        val activated = paged_executor_activate_config(physical_config)
+                        match activated:
+                            Err(error):
+                                paged_executor_clear_pending_backend()
+                                val activation_reason = paged_executor_error_text(error)
+                                match close_backend(b):
+                                    Err(close_error):
+                                        # Retain ownership so engine_unload can retry teardown.
+                                        ENGINE_BACKEND = b
+                                        ENGINE_LOADED_ID = model.id
+                                        return Err("physical page activation failed for '" +
+                                            model.id + "': " + activation_reason +
+                                            "; cleanup failed: " + backend_error_text(close_error))
+                                    Ok(_):
+                                        return Err("physical page activation failed for '" +
+                                            model.id + "': " + activation_reason)
+                            Ok(_):
+                                ENGINE_BACKEND = b
+                                ENGINE_LOADED_ID = model.id
+                                return Ok(())
                     match open_context(b, ENGINE_N_CTX):
                         Err(e):
                             close_backend(b)
                             return Err("context failed for '" + model.id + "': " + backend_error_text(e))
                         Ok(_):
+                            configure_prefix_cache(b, ENGINE_PREFIX_CACHE_ENTRIES, ENGINE_PREFIX_CACHE_BYTES)
                             ENGINE_BACKEND = b
                             ENGINE_LOADED_ID = model.id
                             Ok(())
 
-fn engine_generate(prompt: text, max_tokens: i64) -> Result<text, text>:
+fn engine_generate_observed_request(input: EngineGenerationRequest) -> Result<EngineGenerationObservation, text>:
+    val prompt = input.prompt
+    val max_tokens = parse_nonnegative_i64_text_exact(input.max_tokens)
+    if max_tokens == INVALID_NONNEGATIVE_I64_TEXT:
+        return Err("max_tokens must be a nonnegative signed 64-bit integer")
     if ENGINE_BACKEND == nil:
         return Err("no model is resident")
     var budget = max_tokens
     if budget <= 0:
         budget = 256
-    match generate(ENGINE_BACKEND!, prompt, budget):
+    if paged_executor_active():
+        match paged_executor_generate_observed_request(PagedGenerationRequest(
+              max_tokens: budget.to_text(), prompt: prompt)):
+            Err(error): return Err(paged_executor_error_text(error))
+            Ok(observed): return Ok(EngineGenerationObservation(
+                output: observed.output, generated_tokens: observed.generated_tokens))
+    match generate_observed_request(BackendGenerationRequest(
+          max_tokens: budget.to_text(), prompt: prompt, backend: ENGINE_BACKEND!)):
         Err(e):
             Err(backend_error_text(e))
-        Ok(txt):
-            Ok(txt)
+        Ok(observed):
+            Ok(EngineGenerationObservation(
+                output: observed.output, generated_tokens: observed.generated_tokens))
+
+fn engine_generate(prompt: text, max_tokens: i64) -> Result<text, text>:
+    match engine_generate_observed_request(EngineGenerationRequest(
+          prompt: prompt, max_tokens: max_tokens.to_text())):
+        Err(reason): Err(reason)
+        Ok(observed): Ok(observed.output)
+
+fn engine_generate_observed(prompt: text, max_tokens: i64) -> Result<EngineGenerationObservation, text>:
+    engine_generate_observed_request(EngineGenerationRequest(
+        prompt: prompt, max_tokens: max_tokens.to_text()))
 
 # Load-and-generate in one step, which is what an HTTP handler wants: it has a
 # model name and a prompt and no business knowing whether a load is needed.
@@ -118,5 +320,11 @@ fn engine_complete(model_root: text, model_id: text, prompt: text, max_tokens: i
         Ok(_):
             engine_generate(prompt, max_tokens)
 
-export engine_set_lib_path, engine_set_n_ctx, engine_lib_path, engine_backend_available
-export engine_loaded_model, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
+export engine_set_lib_path, engine_set_n_ctx_text, engine_set_matched_cpu_threads_text, engine_set_physical_pages_config, engine_set_prefix_cache_limits, engine_lib_path, engine_backend_available
+export engine_loaded_model, engine_prefix_cache_stats, engine_unload, engine_ensure_loaded, engine_generate, engine_complete
+export EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed, engine_generate_observed_request
+export engine_physical_page_allocated_bytes, engine_physical_page_bytes
+export paged_executor_configuration_text
+export engine_physical_page_activation, engine_kv_execution_mode
+export engine_kv_execution_mode_text, engine_physical_page_reason
+export EngineKvReadiness, engine_kv_readiness

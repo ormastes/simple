@@ -1,4 +1,8 @@
 # Bug: native struct-field Dict copy nil-fills nested Dicts in Map values (HirLowering.modules_by_name)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-27
 **Status:** invalid — not reproducible; see CORRECTION
@@ -115,3 +119,4 @@ deep-copy bug.
   implementation.
 - `src/compiler/20.hir/hir_lowering/types.spl` `hirlowering_for_module` — site
   of the corrupting copy.
+

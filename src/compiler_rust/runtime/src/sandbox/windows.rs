@@ -170,6 +170,41 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// These tests must NEVER call [`apply_sandbox`].
+    ///
+    /// `apply_sandbox` ends in `assign_to_job(GetCurrentProcess())`, and a
+    /// Windows Job Object assignment is IRREVOCABLE for the life of the
+    /// process (the job handle is deliberately leaked so the limits persist).
+    /// Calling it from a unit test therefore caps the whole `cargo test`
+    /// harness process at the configured `ProcessMemoryLimit` for every test
+    /// that runs afterwards. Once a later test crosses that cap, Windows fails
+    /// every subsequent commit — including the commit of a thread's stack
+    /// guard page, which it reports as `STATUS_STACK_OVERFLOW`. Rust's
+    /// stack-overflow handler then prints "has overflowed its stack" and calls
+    /// `__fastfail`, aborting the whole run with `0xC0000409`
+    /// (`STATUS_STACK_BUFFER_OVERRUN`) roughly 400 tests in, with no
+    /// `test result:` line. It is not a stack-size problem and widening the
+    /// stack does not help.
+    ///
+    /// So exercise creation + configuration — the parts that actually encode
+    /// the policy — and close the handle instead of assigning to it.
+    fn configure_only(config: &SandboxConfig) -> SandboxResult<()> {
+        apply_network_isolation(&config.network.mode)?;
+        apply_filesystem_isolation(
+            &config.filesystem.mode,
+            &config.filesystem.read_paths,
+            &config.filesystem.write_paths,
+        )?;
+        limits::apply_resource_limits(&config.limits)?;
+
+        let job = create_job_object()?;
+        let configured = configure_job_limits(&job, config);
+        unsafe {
+            let _ = CloseHandle(job);
+        }
+        configured
+    }
+
     #[test]
     fn test_basic_sandbox() {
         let config = SandboxConfig::new()
@@ -177,7 +212,7 @@ mod tests {
             .with_memory(1024 * 1024 * 1024); // 1 GB (safe for tests)
 
         // This should succeed on Windows
-        let result = apply_sandbox(&config);
+        let result = configure_only(&config);
         assert!(result.is_ok());
     }
 
@@ -198,7 +233,7 @@ mod tests {
     fn test_memory_limit() {
         let config = SandboxConfig::new().with_memory(512 * 1024 * 1024); // 512 MB (safe for tests)
 
-        let result = apply_sandbox(&config);
+        let result = configure_only(&config);
         assert!(result.is_ok());
     }
 }

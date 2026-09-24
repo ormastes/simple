@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence stepped over by the unstable_test_mode lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > Recorded 2026-08-17 to satisfy the scoped-delta escape in
 > `.claude/rules/vcs.md` — landing on a delta-PASS REQUIRES recording the
@@ -44,3 +48,4 @@ NOT this lane. The 64 new divergences need whoever authored them to either fix
 the pairs or deliberately re-baseline via `--generate-baseline` after reading
 the diff. This record exists only to make the step-over visible, not to claim
 or close the underlying red.
+

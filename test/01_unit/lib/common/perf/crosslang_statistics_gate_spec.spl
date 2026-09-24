@@ -1,0 +1,159 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# plan: doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md (L10, rows 735-769 / 1038-1057 / 1280 / 1303-1305)
+
+# @cover src/lib/common/perf/crosslang_statistics_gate.spl 80%
+# @tag: unit, perf, cross_language, l10, statistics
+
+# L10 recorded rejection cause 4 — INCOMPLETE-COVERAGE CLAIMS.
+# The plan records "thirteen checks remain explicitly pending", that Go and Bun
+# are absent from this host, and the binding rule that "pending markers and
+# unavailable peers cannot be converted into substituted results". It also
+# fixes the retained-sample floor at 15. This spec pins a statistics layer that
+# REFUSES to emit a comparison whenever any peer is pending or unavailable, or
+# any peer has fewer than 15 samples — and that emits exact p50/p95 from the
+# fixture numbers when every peer is complete.
+#
+# Synthetic fixture numbers only. No peer is executed and no peer is
+# substituted (no fourth collector cycle).
+
+use std.spec
+use std.spec.step
+use common.perf.crosslang_statistics_gate.{
+    PeerSamples,
+    crosslang_min_samples,
+    crosslang_emit_comparison,
+}
+
+fn steady_15() -> [i64]:
+    """15 samples, deliberately shaped so p50, p95 and the mean are all
+    different: sorted, idx 7 = 107 and idx 14 = 900, while the mean is 159."""
+    [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 900]
+
+fn shuffled_15() -> [i64]:
+    """The same multiset in a different order — the gate must sort, so p50/p95
+    are identical to steady_15()."""
+    [900, 107, 100, 113, 105, 101, 112, 108, 102, 111, 106, 103, 110, 104, 109]
+
+describe "crosslang statistics gate — no comparison while coverage is incomplete":
+    # @manual_section L10 rejection cause 4
+
+    it "emits a row per peer with exact p50/p95 when every peer is complete":
+        """Two available peers with 15 samples each yield two rows whose
+        percentiles are computed from the fixture numbers, not averaged."""
+        # @req REQ-SSPEC-UNIT
+        step("emit a comparison over two complete peers")
+        val report = crosslang_emit_comparison([
+            PeerSamples(peer_id: "simple", state: "available", unit: "us", values: steady_15()),
+            PeerSamples(peer_id: "rust", state: "available", unit: "us", values: shuffled_15()),
+        ])
+        assert_true(report.emitted)
+        assert_equal(report.refusal, "")
+        assert_true(report.rows.len() == 2)
+        # Nearest rank over n=15: p50 -> index 7, p95 -> index 14.
+        assert_equal(report.rows[0].peer_id, "simple")
+        assert_true(report.rows[0].p50 == 107)
+        assert_true(report.rows[0].p95 == 900)
+        assert_true(report.rows[0].sample_count == 15)
+        assert_equal(report.rows[0].unit, "us")
+        # Same multiset, different order: the gate sorts, so the row matches.
+        assert_true(report.rows[1].p50 == 107)
+        assert_true(report.rows[1].p95 == 900)
+        # Neither percentile is the mean (159) — this is not an average in disguise.
+        assert_true(report.rows[0].p50 != 159)
+        assert_true(report.rows[0].p95 != 159)
+        # Every peer's state is recorded, emitted or not.
+        assert_true(report.peer_states.len() == 2)
+        assert_contains(report.peer_states[0], "simple=available")
+
+    it "refuses the whole comparison when any peer is pending":
+        """A pending peer is an incomplete-coverage claim. The gate emits NO
+        rows at all — a partial matrix is the defect, not a lesser result."""
+        # @req REQ-SSPEC-UNIT
+        step("emit a comparison with one pending peer")
+        val report = crosslang_emit_comparison([
+            PeerSamples(peer_id: "simple", state: "available", unit: "us", values: steady_15()),
+            PeerSamples(peer_id: "go", state: "pending", unit: "us", values: []),
+        ])
+        assert_false(report.emitted)
+        assert_true(report.rows.len() == 0)
+        # The refusal is explicit, so an empty row list can never pass vacuously.
+        assert_contains(report.refusal, "refused")
+        assert_contains(report.refusal, "go")
+        assert_contains(report.refusal, "pending")
+        # The peer is still reported as pending — never dropped, never substituted.
+        assert_true(report.peer_states.len() == 2)
+        assert_contains(report.peer_states[1], "go=pending")
+
+    it "refuses the whole comparison when any peer is unavailable":
+        """Go and Bun are absent from this host. They stay `unavailable`; no row
+        is fabricated and no other language's number is put in their place."""
+        # @req REQ-SSPEC-UNIT
+        step("emit a comparison with an unavailable peer")
+        val report = crosslang_emit_comparison([
+            PeerSamples(peer_id: "simple", state: "available", unit: "us", values: steady_15()),
+            PeerSamples(peer_id: "rust", state: "available", unit: "us", values: shuffled_15()),
+            PeerSamples(peer_id: "bun", state: "unavailable", unit: "us", values: []),
+        ])
+        assert_false(report.emitted)
+        assert_true(report.rows.len() == 0)
+        assert_contains(report.refusal, "bun")
+        assert_contains(report.refusal, "unavailable")
+        assert_true(report.peer_states.len() == 3)
+        assert_contains(report.peer_states[2], "bun=unavailable")
+
+    it "refuses at 14 samples and emits at 15":
+        """The retained-sample floor is 15. One short is a refusal naming the
+        count, so the boundary is pinned in both directions."""
+        # @req REQ-SSPEC-UNIT
+        step("emit a comparison where one peer has 14 samples")
+        assert_true(crosslang_min_samples() == 15)
+        var fourteen: [i64] = []
+        var i: i64 = 0
+        val full = steady_15()
+        while i < 14:
+            fourteen.push(full[i.to_i32()])
+            i = i + 1
+        assert_true(fourteen.len() == 14)
+        val short = crosslang_emit_comparison([
+            PeerSamples(peer_id: "simple", state: "available", unit: "us", values: steady_15()),
+            PeerSamples(peer_id: "python", state: "available", unit: "us", values: fourteen),
+        ])
+        assert_false(short.emitted)
+        assert_true(short.rows.len() == 0)
+        assert_contains(short.refusal, "python")
+        assert_contains(short.refusal, "insufficient_samples")
+        assert_contains(short.refusal, "14")
+
+        step("emit the same comparison once that peer reaches 15 samples")
+        val ok = crosslang_emit_comparison([
+            PeerSamples(peer_id: "simple", state: "available", unit: "us", values: steady_15()),
+            PeerSamples(peer_id: "python", state: "available", unit: "us", values: steady_15()),
+        ])
+        assert_true(ok.emitted)
+        assert_true(ok.rows.len() == 2)
+        assert_true(ok.rows[1].p50 == 107)
+
+    it "refuses when peers disagree on the unit":
+        """Comparing a millisecond row against a microsecond row is the
+        `warm_ms` defect again, at the statistics layer."""
+        # @req REQ-SSPEC-UNIT
+        step("emit a comparison whose peers report different units")
+        val report = crosslang_emit_comparison([
+            PeerSamples(peer_id: "simple", state: "available", unit: "us", values: steady_15()),
+            PeerSamples(peer_id: "go", state: "available", unit: "ms", values: shuffled_15()),
+        ])
+        assert_false(report.emitted)
+        assert_true(report.rows.len() == 0)
+        assert_contains(report.refusal, "unit_mismatch")
+
+    it "refuses an empty peer set instead of emitting an empty comparison":
+        """Vacuity gate: zero peers checked is a refusal, not a clean comparison
+        with no rows."""
+        # @req REQ-SSPEC-UNIT
+        step("emit a comparison over no peers")
+        val report = crosslang_emit_comparison([])
+        assert_false(report.emitted)
+        assert_true(report.rows.len() == 0)
+        assert_contains(report.refusal, "no_peers")
+        assert_true(report.peer_states.len() == 0)

@@ -214,3 +214,7 @@ faults instead of failing the build":
 - `native_build_llvm_explicit_return_lost_every_call_returns_zero` — the
   "every call returns zero" symptom is the *observable* of this family whenever
   the fabricated body is reached rather than the null address.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a fresh bootstrap-produced stage2/stage3 artifact and relocation-level binary patching, not source-level and not runnable here. No change made.

@@ -1,0 +1,178 @@
+use compiler.core.parser.{
+    parse_module_silent_checked, parser_has_errors, parser_set_had_error}
+use compiler.core.ast.{
+    DECL_CLASS, DECL_STRUCT, decl_get_fields, decl_get_field_types,
+    decl_get_name, decl_get_span, decl_get_tag, module_get_decls}
+use compiler.core.ast_expr.{
+    EXPR_CALL, EXPR_IDENT, EXPR_STRING_LIT, expr_get_args, expr_get_left,
+    expr_get_span, expr_get_str, expr_get_tag}
+use compiler.core.ast_traversal.{
+    flat_decl_child_decls, flat_decl_child_exprs, flat_decl_child_stmts,
+    flat_expr_child_arms, flat_expr_child_exprs, flat_expr_child_stmts,
+    flat_stmt_child_arms, flat_stmt_child_exprs, flat_stmt_child_stmts,
+    flat_arm_child_exprs, flat_arm_child_stmts}
+use compiler.core.types.{
+    array_generic_tag_to_id, array_generic_type_get_elem,
+    is_array_generic_tag, span_is_valid, span_line, type_tag_name}
+
+pub struct ParamObjectFinding:
+    code: text
+    message: text
+    hint: text
+    line_num: i64
+
+pub struct ParamObjectSchema:
+    name: text
+    fields: [text]
+    field_types: [text]
+    line_num: i64
+
+fn _param_type_text(type_id: i64) -> text:
+    if is_array_generic_tag(type_id):
+        val element = array_generic_type_get_elem(array_generic_tag_to_id(type_id))
+        return "[" + _param_type_text(element) + "]"
+    type_tag_name(type_id)
+
+pub fn param_object_schemas_from_source(source: text, path: text) -> [ParamObjectSchema]:
+    val previous_parse_error = parser_has_errors()
+    val parse_failed = parse_module_silent_checked(source, path)
+    parser_set_had_error(previous_parse_error)
+    if parse_failed:
+        return []
+    var result: [ParamObjectSchema] = []
+    for declaration in module_get_decls():
+        val tag = decl_get_tag(declaration)
+        if tag != DECL_STRUCT and tag != DECL_CLASS:
+            continue
+        val fields = decl_get_fields(declaration)
+        val raw_types = decl_get_field_types(declaration)
+        var field_types: [text] = []
+        for raw_type in raw_types:
+            field_types.push(_param_type_text(raw_type))
+        val span = decl_get_span(declaration)
+        result.push(ParamObjectSchema(
+            decl_get_name(declaration), fields, field_types,
+            if span_is_valid(span): span_line(span) else: 0))
+    result
+
+fn _version_base(name: text) -> (text, i64):
+    val marker = name.rfind("V")
+    if marker < 1 or marker + 1 >= name.len():
+        return ("", -1)
+    val version_text = name.slice(marker + 1, name.len())
+    val version = version_text.to_i64()
+    if version < 1:
+        return ("", -1)
+    (name.slice(0, marker), version)
+
+pub fn param_object_schema_prefix_compatible(
+    previous: ParamObjectSchema, current: ParamObjectSchema
+) -> bool:
+    var previous_fixed_len = previous.fields.len()
+    if previous_fixed_len > 0 and previous.fields[previous_fixed_len - 1] == "ext":
+        previous_fixed_len = previous_fixed_len - 1
+    var current_fixed_len = current.fields.len()
+    if current_fixed_len > 0 and current.fields[current_fixed_len - 1] == "ext":
+        current_fixed_len = current_fixed_len - 1
+    if current_fixed_len < previous_fixed_len:
+        return false
+    var index = 0
+    while index < previous_fixed_len:
+        if (current.fields[index] != previous.fields[index] or
+                current.field_types[index] != previous.field_types[index]):
+            return false
+        index = index + 1
+    true
+
+fn _param_env_name(value: text) -> bool:
+    value.starts_with("SIMPLE_AOP_") or value.starts_with("SIMPLE_MCDC_")
+
+fn _param_env_reader(value: text) -> bool:
+    value == "env_get" or value == "env_get_opt" or value == "env_get_i64" or
+        value == "rt_env_get" or value == "rt_env_get_i64"
+
+fn _param_env_expr(expr: i64, mut findings: [ParamObjectFinding]):
+    if expr < 0:
+        return
+    if expr_get_tag(expr) == EXPR_CALL:
+        val callee = expr_get_left(expr)
+        val args = expr_get_args(expr)
+        if (callee >= 0 and expr_get_tag(callee) == EXPR_IDENT and
+                _param_env_reader(expr_get_str(callee)) and args.len() > 0 and
+                expr_get_tag(args[0]) == EXPR_STRING_LIT and
+                _param_env_name(expr_get_str(args[0]))):
+            val span = expr_get_span(expr)
+            findings.push(ParamObjectFinding(
+                "PARAM-003",
+                "AOP and MC/DC environment reads belong at the app boundary",
+                "Decode the environment once into AspectParamsV1",
+                if span_is_valid(span): span_line(span) else: 0))
+    for child in flat_expr_child_exprs(expr):
+        _param_env_expr(child, findings)
+    for statement in flat_expr_child_stmts(expr):
+        _param_env_stmt(statement, findings)
+    for arm in flat_expr_child_arms(expr):
+        _param_env_arm(arm, findings)
+
+fn _param_env_stmt(statement: i64, mut findings: [ParamObjectFinding]):
+    for expr in flat_stmt_child_exprs(statement):
+        _param_env_expr(expr, findings)
+    for child in flat_stmt_child_stmts(statement):
+        _param_env_stmt(child, findings)
+    for arm in flat_stmt_child_arms(statement):
+        _param_env_arm(arm, findings)
+
+fn _param_env_arm(arm: i64, mut findings: [ParamObjectFinding]):
+    for expr in flat_arm_child_exprs(arm):
+        _param_env_expr(expr, findings)
+    for statement in flat_arm_child_stmts(arm):
+        _param_env_stmt(statement, findings)
+
+fn _param_env_decl(declaration: i64, mut findings: [ParamObjectFinding]):
+    for expr in flat_decl_child_exprs(declaration):
+        _param_env_expr(expr, findings)
+    for statement in flat_decl_child_stmts(declaration):
+        _param_env_stmt(statement, findings)
+    for child in flat_decl_child_decls(declaration):
+        _param_env_decl(child, findings)
+
+pub fn check_param_object_rules(source: text, path: text) -> [ParamObjectFinding]:
+    var findings: [ParamObjectFinding] = []
+    val structs = param_object_schemas_from_source(source, path)
+    for item in structs:
+        val hdr_index = item.fields.index_of("hdr") ?? -1
+        val ext_index = item.fields.index_of("ext") ?? -1
+        val is_param_object = hdr_index >= 0 or ext_index >= 0 or
+            item.name.contains("ParamsV") or item.name.contains("PortV")
+        if is_param_object and (item.fields.len() == 0 or
+                item.field_types.len() == 0 or item.fields[0] != "hdr" or
+                item.field_types[0] != "ParamHeader" or
+                item.fields[item.fields.len() - 1] != "ext" or
+                item.field_types[item.field_types.len() - 1] != "[ParamExt]"):
+            findings.push(ParamObjectFinding(
+                "PARAM-001", "{item.name} must start with hdr: ParamHeader and end with ext: [ParamExt]",
+                "Keep hdr first and ext last", item.line_num))
+        val (base, version) = _version_base(item.name)
+        if base != "" and version > 1:
+            for previous in structs:
+                val (previous_base, previous_version) = _version_base(previous.name)
+                if (previous_base == base and previous_version == version - 1 and
+                        not param_object_schema_prefix_compatible(previous, item)):
+                    findings.push(ParamObjectFinding(
+                        "PARAM-002",
+                        "{item.name} reorders, removes, or changes a field from {previous.name}",
+                        "Preserve all prior ordinals and append new fields", item.line_num))
+        if item.name.ends_with("PortV1") and item.fields.len() > 0:
+            val ext_index = item.fields.index_of("ext") ?? -1
+            if ext_index < 0 or ext_index != item.fields.len() - 1:
+                findings.push(ParamObjectFinding(
+                    "PLUG-001", "{item.name} must evolve through its trailing ext field",
+                    "Keep ext: [ParamExt] as the final field", item.line_num))
+    if not path.starts_with("src/app/cli/") and not path.starts_with("src/app/io/"):
+        val previous_parse_error = parser_has_errors()
+        val parse_failed = parse_module_silent_checked(source, path)
+        parser_set_had_error(previous_parse_error)
+        if not parse_failed:
+            for declaration in module_get_decls():
+                _param_env_decl(declaration, findings)
+    findings

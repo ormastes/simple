@@ -1,4 +1,8 @@
 # `--mem-infra=guard` is a silent no-op on native backends (matrix claims support)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-31
 **Status:** OPEN — capability matrix asserts a capability that does not exist
@@ -73,3 +77,4 @@ Until one lands, the matrix overstates native coverage.
 - No `test/03_system/runtime/memory_analysis/*.spl` seeded-fault spec exists for
   any model, so nothing currently catches this end-to-end. Existing specs assert
   counters and bookkeeping, not a triggered-and-caught fault.
+

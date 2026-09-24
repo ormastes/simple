@@ -1,0 +1,79 @@
+# PR fast check — remote half (goal items 4 and 5).
+#
+# The check itself is scripts/check/check-pr-fast.shs, one script run
+# identically locally and here. The GitHub runner has no bin/simple (the
+# `publish` job fails on every PR for that reason), so it cannot compile or run
+# specs; instead the developer runs the check locally with
+#   sh scripts/check/check-pr-fast.shs --sign-key <key> --sign-identity <id> --publish origin
+# which signs a `pr`-tier receipt over the exact head tree and change set and
+# publishes it on refs/notes/pr-fast-receipts. This job runs the SAME script in
+# `--verify-receipt` mode. No check logic lives in this file: it only fetches
+# the PR endpoints, materializes the script from the BASE ref, and runs it.
+#
+# Trust (same model as code-idiom-gates.yml): `pull_request_target`, so this
+# YAML comes from BASE; the script, the verifier and the allowed-signers file
+# are read from BASE with `git show`; the head checkout only provides git
+# objects and nothing from it executes. Read-only token, no persisted
+# credentials, no secrets, fork PRs skipped. Fails closed: no receipt, an
+# unverifiable one, or a BASE without the script is a failure.
+#
+# NOT a required check yet, for reasons unrelated to signer enrollment:
+# config/check/ci_receipt_allowed_signers already carries one registered key
+# (ormastes@simple-ci-receipt, added in #442, present at this workflow's own
+# base) and a receipt signed with it verifies. The blockers are practicality
+# ones: a PR that touches no .spl file ERRORs (nothing to check), a changed
+# src file with no mapped unit or feature spec FAILs absolutely rather than as
+# a ratchet, the 60s budget does not scale with the size of the change set,
+# and a fork PR's job is skipped by design (line 39) — a skipped check
+# satisfies the branch-protection ruleset just like a passing one. Promote to
+# required only once those four are addressed.
+name: PR Fast Check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: pr-fast-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-fast-check:
+    name: PR fast check (signed local receipt)
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify the pr-fast receipt for the PR head
+        shell: sh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 1 ))" origin "$BASE_SHA" "$HEAD_SHA"
+          fetch_rc=$?
+          if [ "$fetch_rc" -ne 0 ]; then
+              echo "ERROR — nothing was checked (could not fetch the PR endpoints, git exit $fetch_rc)"
+              exit 2
+          fi
+          git show "$BASE_SHA:scripts/check/check-pr-fast.shs" > "$RUNNER_TEMP/check-pr-fast.shs"
+          show_rc=$?
+          if [ "$show_rc" -ne 0 ]; then
+              echo "FAIL — base $BASE_SHA carries no scripts/check/check-pr-fast.shs"
+              exit 1
+          fi
+          sh "$RUNNER_TEMP/check-pr-fast.shs" --verify-receipt --root "$GITHUB_WORKSPACE" \
+              --base "$BASE_SHA" --head "$HEAD_SHA" --notes-remote origin
+          rc=$?
+          exit "$rc"

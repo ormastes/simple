@@ -1,4 +1,8 @@
 # Membership queries (.contains/.has/in): untagged needle in the seed LLVM backend
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02 · **Severity:** medium (latent — lane not currently shipped) · **Area:** seed LLVM codegen
 
@@ -36,3 +40,4 @@ release seed ships without the `llvm` feature, `native-build` delegates to
 the pure-Simple worker, and the `SIMPLE_BOOTSTRAP=1` replay dies on an
 unrelated `'span'` semantic error. Behavioral proof needs an llvm-feature
 seed build.
+

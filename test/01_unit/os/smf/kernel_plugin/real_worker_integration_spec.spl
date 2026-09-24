@@ -1,0 +1,70 @@
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use std.nogc_sync_mut.io.thread.thread_native_sleep_ms
+use os.smf.kernel_plugin.real_worker_process.KpfRealWorkerProcessV1
+use os.smf.kernel_plugin.real_worker_transport.KpfRealWorkerTransportV1
+use os.smf.kernel_plugin.worker_protocol.*
+
+fn fake_process(mode: text) -> KpfRealWorkerProcessV1:
+    KpfRealWorkerProcessV1.spawn_fixture_unisolated("/bin/sh",
+        ["test/01_unit/os/smf/kernel_plugin/fake_real_worker.shs", mode],
+        64, 4096, 5)
+
+fn poll_nonempty(transport: KpfRealWorkerTransportV1,
+        now_ns: i64) -> KpfWorkerResultV1:
+    var result = transport.poll(now_ns)
+    var attempts = 0
+    while result.outcome == KpfWorkerOutcome.Empty and attempts < 1000:
+        thread_native_sleep_ms(1)
+        result = transport.poll(now_ns)
+        attempts = attempts + 1
+    result
+
+describe "real KPF worker process placement":
+    it "handshakes cancels quiesces and closes a real child cleanly":
+        step("retain one child session across the complete lifecycle")
+        val process = fake_process("normal")
+        assert_true(process.alive)
+        val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+        assert_equal(transport.handshake(5, 1000), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 1).outcome, KpfWorkerOutcome.Accepted)
+        val request = KpfRequestHandleV1(generation: 7, session_slot: 2,
+            request_slot: 4, request_epoch: 9)
+        assert_equal(transport.submit(request, 5, [1u8, 2u8], 1000),
+            KpfWorkerOutcome.Accepted)
+        assert_equal(transport.cancel(request), KpfWorkerOutcome.Accepted)
+        val completion = poll_nonempty(transport, 2)
+        assert_equal(completion.outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(completion.request.request_epoch, 9)
+        assert_equal(completion.payload, [1u8, 2u8])
+        assert_equal(transport.quiesce(), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 3).outcome, KpfWorkerOutcome.Quiescing)
+        assert_equal(transport.close(), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 4).outcome, KpfWorkerOutcome.Closed)
+        assert_true(process.exit_status().clean_protocol_close)
+
+    it "fails closed on malformed child output":
+        step("terminate the child after a non-protocol stdout line")
+        val process = fake_process("malformed")
+        val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+        assert_equal(transport.handshake(5, 1000), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(transport, 1).outcome,
+            KpfWorkerOutcome.MalformedFrame)
+        assert_true(process.terminated)
+
+    it "distinguishes deadline termination from child crash":
+        step("terminate a timed-out child and observe an unexpected exit separately")
+        val timed_process = fake_process("timeout")
+        val timed_transport = KpfRealWorkerTransportV1.create(timed_process, 7, 2, 3, 5)
+        assert_equal(timed_transport.handshake(5, 10), KpfWorkerOutcome.Accepted)
+        assert_equal(timed_transport.poll(10).outcome, KpfWorkerOutcome.TimedOut)
+        assert_equal(timed_process.exit_status().outcome, KpfWorkerOutcome.TimedOut)
+
+        val crashed_process = fake_process("crash")
+        val crashed_transport = KpfRealWorkerTransportV1.create(crashed_process, 7, 2, 3, 5)
+        assert_equal(crashed_transport.handshake(5, 1000), KpfWorkerOutcome.Accepted)
+        assert_equal(poll_nonempty(crashed_transport, 1).outcome,
+            KpfWorkerOutcome.WorkerCrashed)
+        assert_equal(crashed_process.exit_status().outcome,
+            KpfWorkerOutcome.WorkerCrashed)

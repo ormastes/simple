@@ -1,4 +1,8 @@
 # `resume-stage3-from-admitted.sh` exits SILENTLY (rc=1, zero output) when sources drift
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. scripts/bootstrap/resume-stage3-from-admitted.sh:262-264
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Status:** OPEN
 **Filed:** 2026-09-02
@@ -75,3 +79,4 @@ Verified by `sh -x` trace showing the abort at the `cmp -s "$source_before"` lin
 a direct run producing a 0-byte log with rc=1 (exit status read into a variable on the
 line after the invocation, not through a pipe). The `:543-544` post-build pair is the
 same shape by inspection; it was not separately triggered.
+

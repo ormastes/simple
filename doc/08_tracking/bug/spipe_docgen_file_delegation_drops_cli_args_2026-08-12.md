@@ -1,4 +1,8 @@
 # spipe_docgen delegated CLI loses program arguments
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -39,3 +43,4 @@ In a fresh verification turn, run the canonical delegated command once and
 require a valid receipt whose binary hash matches the executing file. Then run
 it with an admitted pure-Simple binary. Do not synthesize a receipt or promote
 the Rust bootstrap seed to release evidence.
+

@@ -1268,6 +1268,25 @@ impl CompilerPipeline {
         value: &HirExpr,
         len_aliases: &[(usize, HirExpr)],
     ) -> Option<HIRSimdLoopCandidate> {
+        // Reduction lowering replaces a plain accumulation loop with a call to
+        // an `rt_numeric_*` runtime kernel. Those kernels exist only in the
+        // Rust runtime, so on a lane that does not link it (notably
+        // `--runtime-bundle core-c-bootstrap`) the rewrite is unsatisfiable and
+        // the link fails with "requested symbols have no archive owner".
+        //
+        // Refusing the rewrite is the correct answer there: the original loop
+        // is kept and computes the same result, just without the vectorised
+        // kernel. The alternative — a C reimplementation — was tried and
+        // rejected: the call ABI is not the Rust RuntimeValue one, and a
+        // near-miss silently corrupts every f64 reduction rather than failing.
+        //
+        // TODO(bundle-aware): derive this from the selected NativeRuntimeLane
+        // (native_project/config.rs `runtime_bundle_prefers_core_lane`) instead
+        // of an env knob, so a core-C build gets it without being told. The
+        // lane is not threaded into HIR lowering today.
+        if std::env::var("SIMPLE_NO_RUNTIME_NUMERIC_KERNELS").as_deref() == Ok("1") {
+            return None;
+        }
         let HirExprKind::Local(target_idx) = target.kind else {
             return None;
         };

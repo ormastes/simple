@@ -1,4 +1,9 @@
 # Stage4 runtime-native legacy compatibility owner gap
+## Closed 2026-09-16 — ...icate and invalid ABI definitions. ## Fix The hosted pure-Simple runtime-object path now a
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -56,3 +61,4 @@ archive and object tools rather than `lib.exe`. The broader hosted architecture
 surface is Linux x86_64/AArch64/RISC-V64, macOS x86_64/AArch64, FreeBSD
 x86_64/AArch64, and Windows x86_64; x86, ARM32, and RISC-V32 are not claimed
 for Stage4.
+

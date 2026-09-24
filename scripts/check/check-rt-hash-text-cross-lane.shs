@@ -1,0 +1,126 @@
+#!/bin/sh
+# check-rt-hash-text-cross-lane.shs — fail-closed gate proving rt_hash_text
+# computes the SAME value in every execution lane of a single `simple`
+# binary: the tree-walking interpreter (SIMPLE_EXECUTION_MODE=interpret),
+# the in-process Cranelift JIT (SIMPLE_EXECUTION_MODE=jit and the untouched
+# default), and a genuine compiled native binary linking the Rust runtime
+# (native-build --backend cranelift with SIMPLE_NATIVE_BUILD_RUST=1).
+#
+# Filed after a real two-day bootstrap block: the interpreter extern
+# (src/compiler_rust/compiler/src/interpreter_extern/conversion.rs) computed
+# DJB2 while the C/Rust native runtimes computed FNV-1a, and a since-removed
+# Cranelift inline fast path (compile_inline_hash_text) additionally
+# fell back to a content-independent 0 whenever its hand-rolled string-heap
+# preconditions failed — which they always did. See
+# doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md.
+#
+# CONVENTION (matches sibling scripts/check/*.shs gates): verdict is the LAST
+# line of stdout:
+#   PASS  — <n> lane(s) checked, <m> input(s), 0 divergent   exit 0
+#   FAIL  — ...                                               exit 1
+#   ERROR — nothing was checked                               exit 2
+#
+# Usage: sh scripts/check/check-rt-hash-text-cross-lane.shs [--simple-bin PATH]
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN="$REPO_ROOT/bin/simple"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --simple-bin) SIMPLE_BIN=$2; shift 2 ;;
+        *) echo "usage: $0 [--simple-bin PATH]"; exit 2 ;;
+    esac
+done
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no executable simple binary at $SIMPLE_BIN)"
+    exit 2
+fi
+
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+PROBE="$WORK_DIR/probe.spl"
+cat > "$PROBE" <<'EOF'
+extern fn rt_hash_text(content: text) -> i64
+fn main():
+    print "empty={rt_hash_text("")}"
+    print "abc={rt_hash_text("abc")}"
+    print "hello={rt_hash_text("hello world")}"
+    print "long={rt_hash_text("fn main(): print 1")}"
+EOF
+
+checked=0
+divergent=0
+baseline=""
+baseline_lane=""
+report=""
+
+run_lane() {
+    lane_name=$1
+    shift
+    out=$(SIMPLE_BOOTSTRAP=1 "$@" run "$PROBE" 2>/dev/null | grep -E '^(empty|abc|hello|long)=')
+    if [ -z "$out" ]; then
+        echo "ERROR — nothing was checked (lane $lane_name produced no output)"
+        exit 2
+    fi
+    checked=$((checked + 1))
+    if [ -z "$baseline" ]; then
+        baseline=$out
+        baseline_lane=$lane_name
+    elif [ "$out" != "$baseline" ]; then
+        divergent=$((divergent + 1))
+        report="$report
+  MISMATCH: lane '$lane_name' disagrees with lane '$baseline_lane':
+$baseline_lane:
+$baseline
+$lane_name:
+$out"
+    fi
+}
+
+run_lane "interpret" env SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BIN"
+run_lane "jit" env SIMPLE_EXECUTION_MODE=jit "$SIMPLE_BIN"
+run_lane "default" "$SIMPLE_BIN"
+
+NATIVE_OUT="$WORK_DIR/native_probe"
+native_stdout=""
+if SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 \
+    "$SIMPLE_BIN" native-build --backend cranelift "$PROBE" -o "$NATIVE_OUT" \
+    > "$WORK_DIR/native_build.log" 2>&1; then
+    if [ -x "$NATIVE_OUT" ]; then
+        native_stdout=$("$NATIVE_OUT" 2>/dev/null | grep -E '^(empty|abc|hello|long)=')
+    fi
+fi
+if [ -n "$native_stdout" ]; then
+    checked=$((checked + 1))
+    if [ -z "$baseline" ]; then
+        baseline=$native_stdout
+        baseline_lane="native-rust-runtime"
+    elif [ "$native_stdout" != "$baseline" ]; then
+        divergent=$((divergent + 1))
+        report="$report
+  MISMATCH: lane 'native-rust-runtime' disagrees with lane '$baseline_lane':
+$baseline_lane:
+$baseline
+native-rust-runtime:
+$native_stdout"
+    fi
+else
+    echo "  (native-build lane skipped — native-build failed or produced no runnable binary; see $WORK_DIR/native_build.log)" >&2
+fi
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$divergent" -gt 0 ]; then
+    echo "$report"
+    echo "FAIL — $checked lane(s) checked, $divergent divergent"
+    exit 1
+fi
+
+echo "PASS — $checked lane(s) checked, 4 input(s) each, 0 divergent"

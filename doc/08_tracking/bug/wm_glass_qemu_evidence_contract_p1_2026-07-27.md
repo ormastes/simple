@@ -1,4 +1,8 @@
 # WM Glass QEMU Evidence Contract P1 Gaps
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open / fail-closed
 **Isolated reviewed base:** `a296e5f5a6`
@@ -174,3 +178,4 @@ sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs
 
 No bootstrap, Rust seed, stale artifact, direct-kernel shortcut, source-only
 contract, or screenshot alone may close either row.
+

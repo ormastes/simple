@@ -1,0 +1,93 @@
+use app.io.context_ops.{context_sql_get_pack, context_sql_put_pack}
+use app.io.context_pure_database_importer.{context_sql_import_facade_to_pure_v2}
+use std.database.pure_sql.{PureDatabase}
+use std.io_runtime.{file_delete, file_exists, file_read, file_write}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn importer_path(kind: text) -> text:
+    "build/context_import_{rt_getpid()}_{rt_time_now_unix_micros()}_{kind}.db"
+
+fn remove_if_present(path: text):
+    if file_exists(path):
+        file_delete(path)
+
+describe "context PureDatabase one-way importer":
+    it "publishes only exact v3 stage bytes with matching ordered rows":
+        val source_path = importer_path("source")
+        val stage_path = importer_path("stage")
+        val destination_path = importer_path("destination")
+        val content = "left|right\tline1\r\nline2%tail"
+        remove_if_present(source_path)
+        remove_if_present(stage_path)
+        remove_if_present(destination_path)
+        expect(context_sql_put_pack(
+            "src/a.spl", "alpha", content, source_path, "text")).to_contain("status: ready")
+        expect(context_sql_put_pack(
+            "src/b.spl", "beta", "second", source_path, "text")).to_contain("status: ready")
+        val source_before = file_read(source_path)
+
+        val receipt = context_sql_import_facade_to_pure_v2(
+            source_path, stage_path, destination_path)
+        expect(receipt.status).to_equal("ready")
+        expect(receipt.reason).to_equal("verified")
+        expect(receipt.row_count).to_equal(2)
+        expect(receipt.source_rows_digest).to_equal(receipt.stage_rows_digest)
+        expect(receipt.source_rows_digest).to_equal(receipt.destination_rows_digest)
+        expect(receipt.stage_bytes_digest).to_equal(receipt.destination_bytes_digest)
+        expect(receipt.source_bytes_digest_before).to_equal(receipt.source_bytes_digest_after)
+        expect(file_read(source_path)).to_equal(source_before)
+        expect(file_exists(stage_path)).to_equal(false)
+        expect(file_read(destination_path)).to_start_with("simple-pure-db-v3\n")
+
+        val reopened = PureDatabase.open_deferred(destination_path).unwrap()
+        val rows = reopened.query(
+            "SELECT id, source, target, status, lines, token_estimate, content FROM context_packs ORDER BY id", []).unwrap()
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].values[1].to_text()).to_equal("src/a.spl")
+        expect(rows[0].values[6].to_text()).to_equal(content)
+        expect(rows[1].values[1].to_text()).to_equal("src/b.spl")
+
+        # The importer never changes normal backend selection.
+        val default_read = context_sql_get_pack("src/a.spl", source_path, "text")
+        expect(default_read).to_contain("backend: sqlite")
+        expect(default_read).to_contain(content)
+
+        remove_if_present(source_path)
+        remove_if_present(stage_path)
+        remove_if_present(destination_path)
+
+    it "refuses existing outputs and leaves source destination and stage untouched":
+        val source_path = importer_path("refusal-source")
+        val stage_path = importer_path("refusal-stage")
+        val destination_path = importer_path("refusal-destination")
+        remove_if_present(source_path)
+        remove_if_present(stage_path)
+        remove_if_present(destination_path)
+        expect(context_sql_put_pack(
+            "src/refusal.spl", "refusal", "unchanged", source_path, "text")).to_contain("status: ready")
+        val source_before = file_read(source_path)
+        expect(file_write(stage_path, "owned-stage")).to_equal(true)
+        expect(file_write(destination_path, "owned-destination")).to_equal(true)
+
+        val stage_refusal = context_sql_import_facade_to_pure_v2(
+            source_path, stage_path, destination_path)
+        expect(stage_refusal.status).to_equal("failed")
+        expect(stage_refusal.reason).to_equal("stage_already_exists")
+        expect(file_read(source_path)).to_equal(source_before)
+        expect(file_read(stage_path)).to_equal("owned-stage")
+        expect(file_read(destination_path)).to_equal("owned-destination")
+
+        remove_if_present(stage_path)
+        val destination_refusal = context_sql_import_facade_to_pure_v2(
+            source_path, stage_path, destination_path)
+        expect(destination_refusal.status).to_equal("failed")
+        expect(destination_refusal.reason).to_equal("destination_already_exists")
+        expect(file_exists(stage_path)).to_equal(false)
+        expect(file_read(source_path)).to_equal(source_before)
+        expect(file_read(destination_path)).to_equal("owned-destination")
+
+        remove_if_present(source_path)
+        remove_if_present(stage_path)
+        remove_if_present(destination_path)

@@ -1,0 +1,68 @@
+# @req REQ-KPF-008
+# @cover src/tool/kernel_plugin_schema/generate_worker_wire.spl
+
+use std.spec.step
+use tool.kernel_plugin_schema.compiler.{compile_kpf_schema}
+use tool.kernel_plugin_schema.generate_worker_wire.{generate_worker_wire_module}
+
+fn schema_ab() -> text:
+    """package: example.echo
+version: 1.0
+interfaces:
+  - name: Query
+    major: 1
+    operations:
+      - name: submit
+        required: true
+      - name: poll
+        required: false
+  - name: Admin
+    major: 2
+    operations:
+      - name: close
+        required: true
+"""
+
+fn schema_ba() -> text:
+    """version: 1.0
+package: example.echo
+interfaces:
+  - operations:
+      - required: true
+        name: close
+    major: 2
+    name: Admin
+  - operations:
+      - required: false
+        name: poll
+      - required: true
+        name: submit
+    major: 1
+    name: Query
+"""
+
+describe "KPF worker-wire generator":
+    it "is deterministic under canonical schema reordering":
+        step("generate worker-wire modules from equivalent schemas")
+        val first = generate_worker_wire_module(compile_kpf_schema(schema_ab()).unwrap())
+        val second = generate_worker_wire_module(compile_kpf_schema(schema_ba()).unwrap())
+        expect(first).to_equal(second)
+
+    it "projects fixed envelope bounds and schema identity":
+        step("inspect the generated fixed worker envelope contract")
+        val package_ir = compile_kpf_schema(schema_ab()).unwrap()
+        val generated = generate_worker_wire_module(package_ir)
+        expect(generated).to_contain("KPF_WORKER_WIRE_HEADER_SIZE_V1: i64 = 112")
+        expect(generated).to_contain("KPF_WORKER_WIRE_MAX_FRAME_BYTES_V1: i64 = 4194304")
+        expect(generated).to_contain("KPF_WORKER_WIRE_SCHEMA_DIGEST: text = \"{package_ir.schema_digest}\"")
+        expect(generated).to_contain("reserved_zero == 0u64")
+        expect(generated).to_contain("payload_length <= frame_length - payload_offset")
+
+    it "projects canonical interface and operation slots":
+        step("inspect generated worker dispatch validation")
+        val generated = generate_worker_wire_module(compile_kpf_schema(schema_ab()).unwrap())
+        expect(generated).to_contain("KPF_WORKER_INTERFACE_Admin_SLOT: i64 = 0")
+        expect(generated).to_contain("KPF_WORKER_INTERFACE_Query_SLOT: i64 = 1")
+        expect(generated).to_contain("KPF_WORKER_INTERFACE_Query_OPERATION_poll_SLOT: i64 = 0")
+        expect(generated).to_contain("KPF_WORKER_INTERFACE_Query_OPERATION_submit_SLOT: i64 = 1")
+        expect(generated).to_contain("if interface_slot == 1 and operation_slot == 1: return true")

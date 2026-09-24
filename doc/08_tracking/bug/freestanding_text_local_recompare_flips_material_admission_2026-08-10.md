@@ -674,3 +674,7 @@ external CPU/wall-time watchdog before the ~14-minute worst-case capture
 sequence can finish, then confirm `[engine2d-glass]` appears, capture
 succeeds (`scanout_capture_size>0`, all four PPMs present and non-uniform),
 and the verdict string itself (not just absence of PANIC) says pass.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: SimpleOS x86_64 freestanding WM codegen defect chain, needs QEMU boot evidence to verify. No change made.

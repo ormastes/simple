@@ -1,4 +1,9 @@
 # Engine2D SIMD C gate extraction is broken
+## Closed 2026-09-16 — ... blend-span implementation. ## Resolution The extractor now emits the Engine2D receipt/box
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-11
 
@@ -27,3 +32,4 @@ The extractor now emits the Engine2D receipt/boxing prelude, skips the complete
 declarations. The standalone test supplies the same per-function AVX2 target
 macro used by the runtime translation unit. Canonical rerun passes both raw
 kernel and in-place ABI tests, then reports the 4K/8K row-scheduling evidence.
+

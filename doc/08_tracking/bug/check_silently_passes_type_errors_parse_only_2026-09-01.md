@@ -1,4 +1,8 @@
 # `simple check` silently passes type errors and undefined variables — it is parse-only (OPEN, structural)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom (measured 2026-09-01, seed md5 `f9bf124d933a0de0af5d999444234996`)
 
@@ -175,3 +179,4 @@ diagnostics. `check` was NOT narrowed, aliased, or turned into a no-op.
 Cross-platform: no source change was made for this defect, so there is no
 Unix/Windows impact. All measurement was on Windows; the code paths named are
 platform-neutral `.spl`.
+

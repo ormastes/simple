@@ -1,4 +1,9 @@
 # Bug: composite type registries cross encoded tag ranges
+## Closed 2026-09-16 — Status: Source-fixed; LLVM probe passed and canonical spec compiled clean
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -24,3 +29,4 @@ added.
 The focused regression fills every range to its last valid slot, rejects the
 next unique payload, checks fresh-literal interning and negative getters, then
 resets and requires every first tag to return to its family base.
+

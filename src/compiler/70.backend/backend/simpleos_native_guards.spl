@@ -23,7 +23,7 @@ use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
-use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
@@ -273,6 +273,9 @@ fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
     names
 
 fn simpleos_module_init_caller_source(init_names: [text]) -> text:
+    simpleos_module_init_caller_source_for_symbol(init_names, "__simple_call_module_inits")
+
+fn simpleos_module_init_caller_source_for_symbol(init_names: [text], caller_symbol: text) -> text:
     """Generate the freestanding C source defining `__simple_call_module_inits`,
     which calls every discovered `__module_init_*` function.
 
@@ -288,7 +291,14 @@ fn simpleos_module_init_caller_source(init_names: [text]) -> text:
     var code = "// Auto-generated: calls all __module_init_* functions\n"
     for name in init_names:
         code = code + "extern void __attribute__((weak)) {name}(void);\n"
-    code = code + "void __simple_call_module_inits(void) {\n"
+    code = code + "void {caller_symbol}(void) {\n"
+    # Startup owners currently call the aggregator once, but keeping the
+    # generated boundary idempotent prevents a second handoff (or recursive
+    # initializer) from replaying module-global side effects.  Set the guard
+    # before dispatch so recursion also observes initialization in progress.
+    code = code + "    static unsigned char initialized;\n"
+    code = code + "    if (initialized) return;\n"
+    code = code + "    initialized = 1;\n"
     for name in init_names:
         code = code + "    if ({name}) {name}();\n"
     code = code + "}\n"

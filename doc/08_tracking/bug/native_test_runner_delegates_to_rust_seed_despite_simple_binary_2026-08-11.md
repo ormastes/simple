@@ -1,4 +1,8 @@
 # Native test runner delegates to Rust seed despite `SIMPLE_BINARY`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -39,3 +43,4 @@ in `src/compiler/80.driver/driver_aot_vhdl_output.spl`, so no refreshed
 pure-Simple CLI could be produced in this verification cycle. Native admission
 therefore remains open until the repaired runner is rebuilt and the live
 sabotage test proves the seed is never executed.
+

@@ -1,4 +1,8 @@
 # `rt_time_now_micros()` deltas print as tagbox garbage — in-language microbenchmarking is unusable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN
 - Found: 2026-08-02, while A/B-measuring a CPU-lane hot-path fix
@@ -65,3 +69,4 @@ larger run.
 - Whether the corruption is in `rt_time_now_micros()`'s return typing, in `i64`
   subtraction, or in string interpolation of the result. The three-way split
   should be resolved by printing each of `a0`, `a1`, and `a1 - a0` separately.
+

@@ -1,3 +1,8 @@
+---
+name: lang-python
+description: "Python agent with pylsp"
+---
+
 # Python Language Agent
 
 **Language:** Python

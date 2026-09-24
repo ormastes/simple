@@ -270,7 +270,13 @@ impl CommonMistake {
             Self::DictInsteadOfStruct => "Use struct literal: Type(field: value) or Type { field: value }".to_string(),
             Self::MissingIndentAfterColon => "Add indentation after colon".to_string(),
             Self::WrongIndentLevel => "Fix indentation level".to_string(),
-            _ => "See error message for details".to_string(),
+            Self::RustLifetime => "Remove the lifetime annotation ('a) — Simple has no lifetime syntax".to_string(),
+            Self::RustTurbofish => "Use <T> directly instead of ::<T>".to_string(),
+            Self::CppTemplate => "Put generic parameters after the name: Name<T>, not template<T>".to_string(),
+            Self::CppNamespace => "Use 'mod' instead of 'namespace'".to_string(),
+            Self::TsArrowFunction => "Use ':' for function bodies; '=>' is for lambdas only".to_string(),
+            Self::CSemicolon => "Remove the semicolon (optional in Simple except for same-line statements)".to_string(),
+            Self::SemicolonAfterBlock => "Remove the semicolon after the closing brace".to_string(),
         }
     }
 
@@ -419,7 +425,12 @@ pub fn detect_common_mistake_lookahead(
     // - Variable names in patterns (e.g., val (saved_path, new, diff) = ...)
     // - After comma in destructuring (e.g., val (x, new, y) = ...)
     // - After opening paren in patterns (e.g., val (new, ...) = ...)
-    // - After operators (e.g., is_new or new)
+    // - After operators (e.g., is_new or new), comparison operators included
+    //   (e.g. `old.raw == new.raw`) — this allow-list previously carried the
+    //   arithmetic/logical operators only and missed every comparison, so
+    //   `x == new.y` (and !=, <, >, <=, >=) raised a bogus JavaNew hint even
+    //   though `x + new.y` did not. See
+    //   doc/08_tracking/bug/java_new_hint_fires_after_comparison_operators_2026-09-13.md.
     // Only flag standalone 'new Type()' pattern as a mistake
     if matches!(current.kind, TokenKind::New)
         && !matches!(
@@ -438,6 +449,12 @@ pub fn detect_common_mistake_lookahead(
                 | TokenKind::Minus
                 | TokenKind::Star
                 | TokenKind::Slash
+                | TokenKind::Eq
+                | TokenKind::NotEq
+                | TokenKind::Lt
+                | TokenKind::Gt
+                | TokenKind::LtEq
+                | TokenKind::GtEq
         )
     {
         return Some(CommonMistake::JavaNew);
@@ -744,6 +761,109 @@ mod tests {
             detect_common_mistake(&void, &nl, Some(&name)),
             Some(CommonMistake::JavaVoid)
         );
+    }
+
+    /// `new` is a legal Simple identifier after a comparison operator, not just
+    /// after the arithmetic/logical ones. Regression for the suite rows on
+    /// `if old.raw == new.raw:` in
+    /// src/lib/nogc_async_mut/fs_driver/fat32_stub.spl, which turned a style
+    /// hint into a hard parse ERROR and cost every importing spec its whole
+    /// run. See
+    /// doc/08_tracking/bug/java_new_hint_fires_after_comparison_operators_2026-09-13.md.
+    #[test]
+    fn test_new_after_comparison_operator_is_not_a_java_mistake() {
+        let new_tok = Token::new(TokenKind::New, Span::new(0, 3, 1, 1), "new".to_string());
+        let name = ident_token("raw");
+
+        for prev_kind in [
+            TokenKind::Eq,
+            TokenKind::NotEq,
+            TokenKind::Lt,
+            TokenKind::Gt,
+            TokenKind::LtEq,
+            TokenKind::GtEq,
+        ] {
+            let prev = Token::new(prev_kind, Span::new(0, 1, 1, 1), "".to_string());
+            assert_eq!(
+                detect_common_mistake(&new_tok, &prev, Some(&name)),
+                None,
+                "`new` after a comparison operator must not be flagged"
+            );
+        }
+    }
+
+    /// The positive case must keep firing — the fix above narrows the
+    /// allow-list, it must not disable the rule for the pattern it exists to
+    /// catch.
+    #[test]
+    fn test_java_new_declaration_still_detected() {
+        let new_tok = Token::new(TokenKind::New, Span::new(0, 3, 1, 1), "new".to_string());
+        let nl = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
+        let name = ident_token("Foo");
+        assert_eq!(
+            detect_common_mistake(&new_tok, &nl, Some(&name)),
+            Some(CommonMistake::JavaNew)
+        );
+    }
+
+    /// `suggestion()` is what the compiler actually prints — `format!("Common
+    /// mistake detected: {}", mistake.suggestion())` at
+    /// parser_helpers.rs:92 and parser_impl/core.rs:157 — so a variant with no
+    /// explicit arm in `suggestion()`'s match silently produced "Common
+    /// mistake detected: See error message for details": an ERROR-severity
+    /// diagnostic that names no mistake at all. 7 of 32 variants
+    /// (RustLifetime, RustTurbofish, CppTemplate, CppNamespace,
+    /// TsArrowFunction, CSemicolon, SemicolonAfterBlock) fell through the old
+    /// `_ => "See error message for details"` wildcard. The wildcard is now
+    /// removed entirely, so a FUTURE variant added without a `suggestion()`
+    /// arm fails to COMPILE (match no longer exhaustive) rather than
+    /// silently producing the useless generic text again — this test is a
+    /// second, explicit guard for the same property. See
+    /// doc/08_tracking/bug/common_mistake_generic_suggestion_fallback_2026-09-14.md.
+    #[test]
+    fn test_no_common_mistake_variant_has_the_generic_suggestion() {
+        let all = [
+            CommonMistake::PythonDef,
+            CommonMistake::PythonTrue,
+            CommonMistake::PythonFalse,
+            CommonMistake::PythonElif,
+            CommonMistake::RustLetMut,
+            CommonMistake::RustFnMut,
+            CommonMistake::RustLifetime,
+            CommonMistake::RustMacro,
+            CommonMistake::RustTurbofish,
+            CommonMistake::JavaPublicClass,
+            CommonMistake::JavaVoid,
+            CommonMistake::JavaNew,
+            CommonMistake::JavaThis,
+            CommonMistake::CppTemplate,
+            CommonMistake::CppNamespace,
+            CommonMistake::TsFunction,
+            CommonMistake::TsConst,
+            CommonMistake::TsLet,
+            CommonMistake::TsInterface,
+            CommonMistake::TsArrowFunction,
+            CommonMistake::CSemicolon,
+            CommonMistake::CTypeFirst,
+            CommonMistake::MissingColon,
+            CommonMistake::WrongBrackets,
+            CommonMistake::ExplicitSelf,
+            CommonMistake::VerboseReturnType,
+            CommonMistake::SemicolonAfterBlock,
+            CommonMistake::MissingCommaInArgs,
+            CommonMistake::MissingColonBeforeBlock,
+            CommonMistake::DictInsteadOfStruct,
+            CommonMistake::MissingIndentAfterColon,
+            CommonMistake::WrongIndentLevel,
+        ];
+        for m in &all {
+            let s = m.suggestion();
+            assert_ne!(
+                s, "See error message for details",
+                "{:?} has no specific suggestion() arm",
+                m
+            );
+        }
     }
 
     #[test]

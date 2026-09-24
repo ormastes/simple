@@ -1,4 +1,13 @@
 # Self-host bootstrap broken: stage4 (seed-built) has 548 unresolved symbols
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — left OPEN: fix blocked by the concurrent bootstrap
+- **inferred**: the remedy named in this entry lands in `src/compiler/**` and/or `src/compiler_rust/**`. A bootstrap is running concurrently in this workspace, so editing either tree would desync it; no repair was attempted.
+- **measured**: the referenced product paths still exist, so there is no removed-code basis for a stale closure.
+- **inferred**: `bin/simple` on this host is the Rust seed (v1.0.0-rc.1), not the self-hosted binary; and `bin/simple test` is broken here (a trivial spec returns a false `outer-bound-timeout`), so neither arm of a verification is available.
 
 **Date:** 2026-06-24
 **Area:** bootstrap / self-hosting / native-build (cranelift) codegen
@@ -176,3 +185,4 @@ exit 0 even when it prints a diagnostic.
   `cargo +nightly --features wasm-wasi` (LLVM path) — see
   `wasm_cli_emit_no_artifact_2026-05-30.md` — but that is the Rust seed, not the
   pure-Simple compiler.
+

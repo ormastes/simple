@@ -1,4 +1,8 @@
 # Host toolchain seed-pinned: lint/fmt/doc-coverage/test (and .spl-only CLI surface) unrunnable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** high (four tooling lanes dead on the host; masked by the seed-stopgap deploy)
@@ -320,3 +324,4 @@ bug's title.
 ## Status (2026-07-18)
 
 OPEN. Redeploy path advanced: stage1-3 GREEN (cargo bootstrap clean), stage4 blocked by flat-AST-bridge/cranelift issue (cross-ref stage3_selfhost_parser_case_multielem_pattern doc). Pure-Simple fmt/lint/doc-coverage paths confirmed runnable via standalone entry points; 3 root-cause bugs fixed in those tools (read_file collision, cli_run_* collision, missing run_lint_file). Self-hosted redeploy remains the strategic fix; do not race it.
+

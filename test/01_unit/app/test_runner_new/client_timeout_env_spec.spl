@@ -55,8 +55,11 @@ use std.spec.*
 
 use app.test_runner_new.timeout_budget.{
     CLIENT_DEFAULT_TIMEOUT_SECS,
+    TIMEOUT_UNLIMITED_SECS,
     client_default_timeout_secs,
-    parse_env_timeout_secs
+    parse_env_timeout_secs,
+    resolve_timeout_secs,
+    timeout_value_is_well_formed
 }
 
 use std.io_runtime.{env_set}
@@ -136,3 +139,65 @@ describe "The environment-value parser, in isolation":
         expect(parse_env_timeout_secs("800s")).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(parse_env_timeout_secs("-5")).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(parse_env_timeout_secs(" 800")).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+describe "Zero means unlimited, and the flag outranks the environment":
+
+    it "reads SIMPLE_TIMEOUT_SECONDS=0 as unlimited, not as the 900s default":
+        # @req: REQ-TESTRUNNER-TIMEOUT-BUDGET
+        # @req: REQ-SSPEC-APP
+        step("Verify: SIMPLE_TIMEOUT_SECONDS=0 means unlimited")
+        """`0` is the documented way to ask for no limit and is the incantation
+        used across this repo. Until 2026-09-13 it parsed to 0, was
+        indistinguishable from a malformed value, and silently became the 900s
+        default — so the escape hatch requested exactly the budget it was
+        trying to escape, and two GPU showcase specs never reached a verdict.
+        Bug: web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13."""
+
+        step("Export the documented unlimited value and read the budget back")
+        env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+        expect(client_default_timeout_secs()).to_equal(TIMEOUT_UNLIMITED_SECS)  # oracle: TIMEOUT_UNLIMITED_SECS — the unlimited budget named by the contract
+        expect(client_default_timeout_secs() > CLIENT_DEFAULT_TIMEOUT_SECS).to_equal(true)  # oracle: true — unlimited must never resolve to the 900s default
+
+        step("Leave the environment clean for any later example")
+        env_set("SIMPLE_TIMEOUT_SECONDS", "")
+
+    it "lets an explicit flag outrank the environment, at every rung":
+        # @req: REQ-TESTRUNNER-TIMEOUT-BUDGET
+        # @req: REQ-SSPEC-APP
+        step("Verify: flag > environment > built-in default")
+        """The class of defect is a source being silently dropped, or a less
+        specific source silently winning. All three rungs are pinned here in
+        one pure function so a regression names itself."""
+
+        step("An explicit flag wins over a set environment value")
+        expect(resolve_timeout_secs("2700", "900")).to_equal(2700)  # oracle: 2700 — the explicit flag value
+        expect(resolve_timeout_secs("3000", "")).to_equal(3000)  # oracle: 3000 — the explicit flag value
+
+        step("`--timeout 0` is unlimited too")
+        expect(resolve_timeout_secs("0", "900")).to_equal(TIMEOUT_UNLIMITED_SECS)  # oracle: TIMEOUT_UNLIMITED_SECS — zero means unlimited at the flag rung as well
+
+        step("The environment is consulted only when no usable flag was given")
+        expect(resolve_timeout_secs("", "1800")).to_equal(1800)  # oracle: 1800 — the environment value
+        expect(resolve_timeout_secs("junk", "1800")).to_equal(1800)  # oracle: 1800 — a malformed flag is ignored, not read as a 0-second budget
+
+        step("With nothing usable anywhere, the built-in default stands")
+        expect(resolve_timeout_secs("", "")).to_equal(CLIENT_DEFAULT_TIMEOUT_SECS)  # oracle: CLIENT_DEFAULT_TIMEOUT_SECS — the built-in default
+        expect(resolve_timeout_secs("-5", "800s")).to_equal(CLIENT_DEFAULT_TIMEOUT_SECS)  # oracle: CLIENT_DEFAULT_TIMEOUT_SECS — malformed at both rungs falls through
+
+    it "separates a supplied value from an absent or malformed one":
+        # @req: REQ-TESTRUNNER-TIMEOUT-BUDGET
+        # @req: REQ-SSPEC-APP
+        step("Verify: well-formedness is decided independently of the value")
+        """This predicate is what makes `0` expressible at all: the old parser
+        returned 0 for both `"0"` and `"abc"`, so the resolver could not tell
+        "the caller asked for no limit" from "the caller wrote junk"."""
+
+        step("Digits, including a bare zero, are well formed")
+        expect(timeout_value_is_well_formed("0")).to_equal(true)  # oracle: true — a bare zero is a supplied value
+        expect(timeout_value_is_well_formed("900")).to_equal(true)  # oracle: true — a plain budget
+
+        step("Empty, signed, suffixed and non-numeric values are not")
+        expect(timeout_value_is_well_formed("")).to_equal(false)  # oracle: false — absent
+        expect(timeout_value_is_well_formed("-5")).to_equal(false)  # oracle: false — signed
+        expect(timeout_value_is_well_formed("800s")).to_equal(false)  # oracle: false — suffixed
+        expect(timeout_value_is_well_formed("abc")).to_equal(false)  # oracle: false — non-numeric

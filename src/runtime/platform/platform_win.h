@@ -37,6 +37,8 @@
     /* No need to redefine strdup, popen, pclose */
 #endif
 
+#include "windows_raw_mapping.h"
+
 /* ----------------------------------------------------------------
  * Directory Operations
  * ---------------------------------------------------------------- */
@@ -462,6 +464,9 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     int64_t path_len = rt_string_len(path_value);
     const uint8_t* path_ptr = rt_string_data(path_value);
     if (!path_ptr || path_len <= 0 || size <= 0 || offset < 0) return 0;
+    /* Bounds contract shared with the Rust owner and runtime_native.c. */
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
     char* path = (char*)malloc((size_t)path_len + 1);
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
@@ -475,6 +480,12 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     HANDLE hFile = CreateFileA(path, access, share, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     free(path);  /* only CreateFileA needed the C string */
     if (hFile == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(hFile, &file_size) || file_size.QuadPart < 0 ||
+        (uint64_t)file_size.QuadPart < end) {
+        CloseHandle(hFile);
+        return 0;
+    }
 
     HANDLE hMapping = CreateFileMappingA(hFile, NULL, protect, 0, 0, NULL);
     if (!hMapping) {
@@ -490,6 +501,11 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     CloseHandle(hMapping);
     CloseHandle(hFile);
 
+    if (!addr) return 0;
+    if ((uintptr_t)addr > (uintptr_t)INT64_MAX) {
+        UnmapViewOfFile(addr);
+        return 0;
+    }
     return (int64_t)(intptr_t)addr;
 }
 
@@ -520,30 +536,11 @@ bool rt_msync(int64_t addr, int64_t size) {
  * ---------------------------------------------------------------- */
 
 int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset) {
-    (void)flags;
-    if (length <= 0 || offset < 0) return -1;
-    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
-    /* Windows doesn't have mmap — use VirtualAlloc for anonymous mappings */
-    if (fd == -1) {
-        DWORD alloc_type = MEM_COMMIT | MEM_RESERVE;
-        DWORD protect;
-        if (prot == 0x0) protect = PAGE_NOACCESS;
-        else if (prot == 0x1) protect = PAGE_READONLY;
-        else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-        else if (prot == 0x4) protect = PAGE_EXECUTE;
-        else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-        else return -1;
-        void* result = VirtualAlloc((void*)(uintptr_t)addr, (SIZE_T)length, alloc_type, protect);
-        if (!result) return -1;
-        return (int64_t)(uintptr_t)result;
-    }
-    return -1;  /* File-backed mmap not supported via raw API on Windows */
+    return spl_windows_mmap_raw(addr, length, prot, flags, fd, offset);
 }
 
 int64_t rt_munmap_raw(int64_t addr, int64_t length) {
-    (void)length;
-    if (!addr || length <= 0) return -1;
-    return VirtualFree((void*)(uintptr_t)addr, 0, MEM_RELEASE) ? 0 : -1;
+    return spl_windows_munmap_raw(addr, length);
 }
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
@@ -777,6 +774,22 @@ bool rt_process_is_running(int64_t pid) {
     }
 
     return exit_code == STILL_ACTIVE;
+}
+
+int64_t rt_process_start_identity(int64_t pid) {
+    if (pid <= 0) return 0;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) return 0;
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        CloseHandle(process);
+        return 0;
+    }
+    CloseHandle(process);
+    ULARGE_INTEGER value;
+    value.LowPart = created.dwLowDateTime;
+    value.HighPart = created.dwHighDateTime;
+    return value.QuadPart > INT64_MAX ? 0 : (int64_t)value.QuadPart;
 }
 
 bool rt_process_kill(int64_t pid) {

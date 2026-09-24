@@ -14,6 +14,8 @@
 # 2. SIMPLE_LIB environment variable path
 # 3. Fallback to src/lib/ (standard library)
 
+use std.common.path_pure.to_slash
+
 @unsafe(reason: "raw platform path-join ABI", capabilities: [ffi])
 extern fn rt_path_join(base: text, rel: text) -> text
 @unsafe(reason: "raw platform dirname ABI", capabilities: [ffi])
@@ -21,8 +23,19 @@ extern fn rt_path_dirname(path: text) -> text
 
 @always_inline
 fn _sffi_path_join(base: text, rel: text) -> text:
-    unsafe(capabilities: [ffi]):
-        rt_path_join(base, rel)
+    # rt_path_join (Rust's std::path::Path::join) inserts the PLATFORM
+    # separator between components -- on Windows that is `\`, even when the
+    # inputs already use `/`. Every caller in this module, every test
+    # fixture, and every path literal elsewhere in the tree assume `/`
+    # (interp_module_resolve_windows_backslash_mix_2026-09-20), so a Windows
+    # host silently returns mixed-separator paths ("caller-b\file.spl")
+    # that fail plain `==` comparison against a `/`-built expectation.
+    # Normalize the join result to `/` here so this resolver's output is
+    # platform-independent without touching the native extern.
+    val joined =
+        unsafe(capabilities: [ffi]):
+            rt_path_join(base, rel)
+    to_slash(joined)
 
 @always_inline
 fn _sffi_path_dirname(path: text) -> text:
@@ -41,14 +54,21 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # ===== Module Path Resolution =====
 
 # Cache resolved module paths to avoid repeated filesystem probing.
-# Fast cache: module_name → resolved path (for stdlib modules resolved identically regardless of caller)
-# Full cache: "module_name|current_file" → resolved path (for relative imports)
-var _interp_module_fast_cache: {text: text} = {}
+# Cache: "len(module_name):module_name|current_file" -> resolved path.
+#
+# There used to also be a module-name-only "fast cache" for std./lib./
+# compiler./app./unit.-prefixed names, on the assumption that those resolve
+# identically regardless of caller. That assumption is false: a caller-local
+# override candidate (e.g. a sibling `io.spl` shadowing `std.io`) is checked
+# ahead of the stdlib fallback in `_resolve_module_path_uncached`, so caching
+# by module name alone let caller A's stdlib hit leak into caller B's lookup
+# even when caller B has its own local override
+# (interp_module_resolve_cache_key_collision_2026-09-20). Removed rather than
+# scoped, since the whole premise of a caller-independent fast path is wrong.
 var _interp_module_cache: {text: text} = {}
 var _interp_module_uncached_count: i64 = 0
 
 fn module_resolve_cache_reset():
-    _interp_module_fast_cache = {}
     _interp_module_cache = {}
     _interp_module_uncached_count = 0
 
@@ -56,19 +76,19 @@ fn module_resolve_uncached_count() -> i64:
     _interp_module_uncached_count
 
 fn resolve_module_path(module_name: text, current_file: text) -> text:
-    # Fast path: check module-only cache first (no string concat needed)
-    if _interp_module_fast_cache.has(module_name):
-        return _interp_module_fast_cache[module_name] ?? ""
-    # Full path: composite key for relative imports
-    val cache_key = module_name + "|" + current_file
+    # Full path: composite key for relative imports.
+    # NOTE: a bare `module_name + "|" + current_file` join is not injective --
+    # ("left|right", CALLER_A) and ("left", "right|" + CALLER_A) both produce
+    # "left|right|" + CALLER_A, aliasing two distinct lookups onto one cache
+    # entry (interp_module_resolve_cache_key_collision_2026-09-20). Prefixing
+    # with module_name's length pins the split point unambiguously, so no
+    # separator choice can be smuggled across the boundary by either operand.
+    val cache_key = module_name.len().to_text() + ":" + module_name + "|" + current_file
     if _interp_module_cache.has(cache_key):
         return _interp_module_cache[cache_key] ?? ""
     _interp_module_uncached_count = _interp_module_uncached_count + 1
     val result = _resolve_module_path_uncached(module_name, current_file)
     _interp_module_cache[cache_key] = result
-    # Cache in fast path if it's a stdlib/lib import (not relative)
-    if module_name.starts_with("std.") or module_name.starts_with("lib.") or module_name.starts_with("compiler.") or module_name.starts_with("app.") or module_name.starts_with("unit."):
-        _interp_module_fast_cache[module_name] = result
     result
 
 fn _replace_text(value: text, from: text, to: text) -> text:

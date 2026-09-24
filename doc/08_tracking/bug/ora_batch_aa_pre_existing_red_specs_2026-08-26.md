@@ -1,4 +1,8 @@
 # ora_batch_aa specs RED at pre-edit baseline (sspec modernization batch)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-26
 - Discovered during: sspec-maintain modernization of `/tmp/sspec_census/ora_batch_aa`
@@ -85,3 +89,4 @@ to the baseline's. Structural modernization was still applied (scores in
 (This record is appended as the batch progresses; see also
 `wine_vm_write_readback_token_renamed_specs_red_2026-08-26.md` for the Wine
 evidence-token family.)
+

@@ -1,4 +1,8 @@
 # Window Scene Draw IR Focused Spec Timeout — 2026-07-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -20,3 +24,4 @@ Profile discovery/interpretation for this single spec with a fresh pure-Simple
 product runner. Split the focused material scenarios into a smaller spec if
 the existing broad file is the source of the timeout. Do not raise the timeout
 or claim production evidence from the bootstrap driver.
+

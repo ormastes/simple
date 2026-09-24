@@ -1,4 +1,8 @@
 # RV64 inline-assembly immediate becomes an AST debug string
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Claimed:** 2026-08-12, Codex `/root/rv64_inline_asm_immediate`
 
@@ -40,3 +44,4 @@ index and unwraps signed `Integer(<i64>)` literals. Focused verification is in
 progress. Complex expression debug forms remain deliberately unsupported; the
 legacy colon parser's discarded-constraint defect is a separate prerequisite
 before this firmware can be considered successfully lowered end to end.
+

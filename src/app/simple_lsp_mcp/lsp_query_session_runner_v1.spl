@@ -1,0 +1,208 @@
+# Session-level owned-process reuse for the persistent LSP query path (L9 G4).
+#
+# This module is the join between the two halves that already exist:
+#
+#   * `lsp_query_session_v1` — the pure lifecycle planner (G2).  It decides
+#     whether a request is admissible, whether it starts or reuses the worker,
+#     and it holds the request_id / execution_generation identity that every
+#     completion, failure, reap and fallback must match exactly.
+#   * `lsp_query_owned_process_v1` — the owned-process launcher (G3).  It runs
+#     one child under a bounded observation sequence and always reaps it.
+#
+# What "reuse" honestly means here.  The owned-process ABI has no post-start
+# stdin write — `rt_process_owned_v3_input_value(handle)` is a RECEIPT, not a
+# write — so one child cannot serve two requests.  The reusable worker is
+# therefore the open `OwnedExecutablePin`: it is opened once (Dormant -> Ready)
+# and every later request starts a pinned, sha256-revalidated child against
+# that same pin instead of re-resolving and re-hashing the executable.  The
+# counters below keep that distinction visible: `pin_open_count` is the reuse
+# metric, `child_start_count` is the per-request cost.  A persistent request
+# protocol on one long-lived child needs an ABI write path that does not exist
+# yet; see the lane receipt.
+#
+# The ABI has no cwd argument either, so "pinned cwd" is realized as the
+# planner's existing workspace-root authority: a request naming any other root
+# is refused before a child is started, and the launcher additionally refuses
+# an executable outside that root.
+
+use app.simple_lsp_mcp.lsp_query_session_v1.{LspQuerySessionV1,
+    LspQuerySessionPhaseV1, lsp_query_session_initial_v1,
+    lsp_query_session_plan_request_v1, lsp_query_session_note_request_success_v1,
+    lsp_query_session_note_worker_failure_v1, lsp_query_session_note_worker_reaped_v1,
+    lsp_query_session_plan_fallback_v1}
+use app.simple_lsp_mcp.lsp_query_owned_process_v1.{LspQueryOwnedLaunchV1,
+    LspQueryOwnedObservationV1, LspQueryOwnedOutcomeV1, LspQueryOwnedProviderV1,
+    LspQueryOwnedRunV1, lsp_query_owned_unavailable_v1,
+    lsp_query_owned_run_observations_v1}
+
+struct LspQuerySessionRunnerV1:
+    session: LspQuerySessionV1
+    provider: LspQueryOwnedProviderV1
+    launch: LspQueryOwnedLaunchV1
+    pin_open_count: i64
+    child_start_count: i64
+    completed_count: i64
+    failed_count: i64
+    unavailable_count: i64
+    refused_count: i64
+
+struct LspQuerySessionRunnerStepV1:
+    runner: LspQuerySessionRunnerV1
+    accepted: bool
+    start_worker: bool
+    reuse_worker: bool
+    effective_timeout_ms: i64
+    run: LspQueryOwnedRunV1
+    reason: text
+
+struct LspQuerySessionRunnerFallbackV1:
+    runner: LspQuerySessionRunnerV1
+    allowed: bool
+    remaining_deadline_ms: i64
+    reason: text
+
+fn lsp_query_session_runner_new_v1(
+    workspace_root: text,
+    provider: LspQueryOwnedProviderV1,
+    launch: LspQueryOwnedLaunchV1,
+) -> LspQuerySessionRunnerV1:
+    LspQuerySessionRunnerV1(
+        session: lsp_query_session_initial_v1(workspace_root),
+        provider: provider,
+        launch: launch,
+        pin_open_count: 0,
+        child_start_count: 0,
+        completed_count: 0,
+        failed_count: 0,
+        unavailable_count: 0,
+        refused_count: 0,
+    )
+
+fn _with_counts(
+    runner: LspQuerySessionRunnerV1,
+    session: LspQuerySessionV1,
+    pins: i64,
+    starts: i64,
+    completed: i64,
+    failed: i64,
+    unavailable: i64,
+    refused: i64,
+) -> LspQuerySessionRunnerV1:
+    LspQuerySessionRunnerV1(
+        session: session, provider: runner.provider, launch: runner.launch,
+        pin_open_count: pins, child_start_count: starts, completed_count: completed,
+        failed_count: failed, unavailable_count: unavailable, refused_count: refused)
+
+fn _step(
+    runner: LspQuerySessionRunnerV1,
+    accepted: bool,
+    start_worker: bool,
+    reuse_worker: bool,
+    effective_timeout_ms: i64,
+    run: LspQueryOwnedRunV1,
+    reason: text,
+) -> LspQuerySessionRunnerStepV1:
+    LspQuerySessionRunnerStepV1(
+        runner: runner, accepted: accepted, start_worker: start_worker,
+        reuse_worker: reuse_worker, effective_timeout_ms: effective_timeout_ms,
+        run: run, reason: reason)
+
+# Serve one request end to end: plan it, start or reuse the pinned worker, drive
+# the launcher over the supplied observation sequence, and settle the session.
+#
+# An unavailable owned-process provider is answered BEFORE the planner runs, so
+# the session stays dormant and reusable and the caller can fall back to the
+# existing one-shot route.  That is the typed degrade this lane needs: it never
+# burns the session's single fallback on a provider that was never there.
+fn lsp_query_session_runner_serve_v1(
+    runner: LspQuerySessionRunnerV1,
+    request_id: text,
+    workspace_root: text,
+    execution_generation: text,
+    absolute_deadline_ms: i64,
+    observed_now_ms: i64,
+    observations: [LspQueryOwnedObservationV1],
+) -> LspQuerySessionRunnerStepV1:
+    if not runner.provider.available:
+        val degraded = _with_counts(runner, runner.session, runner.pin_open_count,
+            runner.child_start_count, runner.completed_count, runner.failed_count,
+            runner.unavailable_count + 1, runner.refused_count)
+        return _step(degraded, false, false, false, 0,
+            lsp_query_owned_unavailable_v1(runner.provider.reason),
+            "owned_process_provider_unavailable")
+
+    val plan = lsp_query_session_plan_request_v1(
+        runner.session, request_id, workspace_root, execution_generation,
+        absolute_deadline_ms, observed_now_ms)
+    if not plan.accepted:
+        val refused = _with_counts(runner, runner.session, runner.pin_open_count,
+            runner.child_start_count, runner.completed_count, runner.failed_count,
+            runner.unavailable_count, runner.refused_count + 1)
+        return _step(refused, false, false, false, 0,
+            lsp_query_owned_unavailable_v1(plan.reason), plan.reason)
+
+    # The child never outlives the request's deadline.
+    val effective_timeout = if plan.remaining_deadline_ms < runner.launch.timeout_ms:
+        plan.remaining_deadline_ms
+    else:
+        runner.launch.timeout_ms
+    val launch = LspQueryOwnedLaunchV1(
+        executable: runner.launch.executable,
+        args: runner.launch.args,
+        workspace_root: runner.launch.workspace_root,
+        timeout_ms: effective_timeout,
+        term_grace_ms: runner.launch.term_grace_ms,
+        max_output_bytes: runner.launch.max_output_bytes,
+        poll_wait_ms: runner.launch.poll_wait_ms,
+    )
+    val pins = if plan.start_worker:
+        runner.pin_open_count + 1
+    else:
+        runner.pin_open_count
+    val run = lsp_query_owned_run_observations_v1(runner.provider, launch, observations)
+
+    if run.outcome == LspQueryOwnedOutcomeV1.Completed:
+        val settled = lsp_query_session_note_request_success_v1(
+            plan.session, request_id, execution_generation)
+        val next = _with_counts(runner, settled.session, pins,
+            runner.child_start_count + 1, runner.completed_count + 1,
+            runner.failed_count, runner.unavailable_count, runner.refused_count)
+        return _step(next, true, plan.start_worker, plan.reuse_worker,
+            effective_timeout, run, "")
+
+    # Failure and timeout both reach here with the child already reaped by the
+    # launcher, so the session is walked all the way to ReapedFailure and the
+    # one-shot fallback becomes available.
+    val failed = lsp_query_session_note_worker_failure_v1(
+        plan.session, request_id, execution_generation)
+    val reaped = lsp_query_session_note_worker_reaped_v1(
+        failed.session, request_id, execution_generation)
+    val next = _with_counts(runner, reaped.session, pins,
+        runner.child_start_count + 1, runner.completed_count,
+        runner.failed_count + 1, runner.unavailable_count, runner.refused_count)
+    _step(next, true, plan.start_worker, plan.reuse_worker, effective_timeout,
+        run, run.reason)
+
+# Ask for the one-shot fallback that a reaped worker failure earns.  The
+# planner grants it at most once per failed request, and only against the exact
+# failed identity and the deadline authority it recorded.
+fn lsp_query_session_runner_fallback_v1(
+    runner: LspQuerySessionRunnerV1,
+    request_id: text,
+    execution_generation: text,
+    observed_now_ms: i64,
+) -> LspQuerySessionRunnerFallbackV1:
+    val plan = lsp_query_session_plan_fallback_v1(
+        runner.session, request_id, execution_generation,
+        runner.session.request_deadline_ms, observed_now_ms)
+    val next = _with_counts(runner, plan.session, runner.pin_open_count,
+        runner.child_start_count, runner.completed_count, runner.failed_count,
+        runner.unavailable_count, runner.refused_count)
+    LspQuerySessionRunnerFallbackV1(
+        runner: next, allowed: plan.allowed,
+        remaining_deadline_ms: plan.remaining_deadline_ms, reason: plan.reason)
+
+export LspQuerySessionRunnerV1, LspQuerySessionRunnerStepV1
+export LspQuerySessionRunnerFallbackV1
+export lsp_query_session_runner_new_v1, lsp_query_session_runner_serve_v1
+export lsp_query_session_runner_fallback_v1

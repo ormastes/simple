@@ -1,0 +1,185 @@
+# Bounded LLVM readobj JSON relocation/symbol codec for ELF64 ET_REL. This
+# resolves relocation-section sh_info to the patched section and symbol index
+# to its declared section. It decodes data only and issues no authority.
+use std.common.json.parser.json_parse
+use std.common.json.object_ops.json_object_get
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_get_type, json_to_number, json_to_string}
+
+pub const PARSER_LLVM_RELOCATION_MAX_SECTIONS_V1: i64 = 4096
+pub const PARSER_LLVM_RELOCATION_MAX_SYMBOLS_V1: i64 = 1048576
+pub const PARSER_LLVM_RELOCATION_MAX_ROWS_V1: i64 = 1048576
+
+pub enum ParserLlvmRelocationCodecErrorV1:
+    InvalidJson
+    SchemaMismatch
+    WrongObject
+    ResourceLimit
+    InvalidSection
+    InvalidSymbol
+    InvalidRelocation
+    NoncanonicalOrder
+
+pub struct ParserLlvmSymbolV1:
+    symbol_index: i64
+    name: text
+    section_index: i64
+    value: i64
+    byte_count: i64
+
+pub struct ParserLlvmRelocationV1:
+    relocation_section_index: i64
+    patched_section_index: i64
+    section_offset: i64
+    relocation_type: text
+    symbol_index: i64
+    symbol_name: text
+    symbol_section_index: i64
+    addend: i64
+
+pub struct ParserLlvmRelocationProjectionV1:
+    known_section_indices: [i64]
+    symbols: [ParserLlvmSymbolV1]
+    relocations: [ParserLlvmRelocationV1]
+
+fn _field_lrr(value: any, key: text) -> any?:
+    if json_get_type(value) != "object": return nil
+    json_object_get(value, key)
+fn _required_lrr(value: any, key: text) -> Result<any, ParserLlvmRelocationCodecErrorV1>:
+    val found = _field_lrr(value, key)
+    if found == nil: return Err(ParserLlvmRelocationCodecErrorV1.SchemaMismatch)
+    Ok(found.unwrap())
+fn _text_value_lrr(value: any) -> text?:
+    if json_get_type(value) != "string": return nil
+    json_to_string(value)
+fn _int_value_lrr(value: any) -> i64?:
+    if json_get_type(value) != "number": return nil
+    val raw = json_to_number(value)
+    if raw == nil: return nil
+    val number = raw as f64; val integer = number as i64
+    if integer as f64 == number: integer else: nil
+fn _text_lrr(value: any, key: text) -> Result<text, ParserLlvmRelocationCodecErrorV1>:
+    val parsed = _text_value_lrr(_required_lrr(value, key)?)
+    if parsed == nil: return Err(ParserLlvmRelocationCodecErrorV1.SchemaMismatch)
+    Ok(parsed.unwrap())
+fn _int_lrr(value: any, key: text) -> Result<i64, ParserLlvmRelocationCodecErrorV1>:
+    val parsed = _int_value_lrr(_required_lrr(value, key)?)
+    if parsed == nil: return Err(ParserLlvmRelocationCodecErrorV1.SchemaMismatch)
+    Ok(parsed.unwrap())
+fn _named_text_lrr(value: any, key: text) -> Result<text, ParserLlvmRelocationCodecErrorV1>:
+    _text_lrr(_required_lrr(value, key)?, "Name")
+fn _named_int_lrr(value: any, key: text) -> Result<i64, ParserLlvmRelocationCodecErrorV1>:
+    _int_lrr(_required_lrr(value, key)?, "Value")
+fn _array_len_lrr(value: any) -> i64:
+    if json_get_type(value) == "array": json_array_length(value) else: -1
+fn _contains_index_lrr(values: [i64], wanted: i64) -> bool:
+    for value in values:
+        if value == wanted: return true
+    false
+
+pub fn parser_llvm_readobj_relocations_decode_v1(json: text, expected_file_label: text
+) -> Result<ParserLlvmRelocationProjectionV1, ParserLlvmRelocationCodecErrorV1>:
+    val parsed = json_parse(json)
+    if parsed == nil: return Err(ParserLlvmRelocationCodecErrorV1.InvalidJson)
+    if _array_len_lrr(parsed) != 1:
+        return Err(ParserLlvmRelocationCodecErrorV1.SchemaMismatch)
+    val root = json_array_get(parsed, 0)
+    val summary = _required_lrr(root, "FileSummary")?
+    if (_text_lrr(summary, "File")? != expected_file_label or
+        _text_lrr(summary, "Format")? != "elf64-x86-64" or
+        _text_lrr(summary, "Arch")? != "x86_64"):
+        return Err(ParserLlvmRelocationCodecErrorV1.WrongObject)
+
+    val section_wrappers = _required_lrr(root, "Sections")?
+    val section_count = _array_len_lrr(section_wrappers)
+    if section_count <= 0 or section_count > PARSER_LLVM_RELOCATION_MAX_SECTIONS_V1:
+        return Err(ParserLlvmRelocationCodecErrorV1.ResourceLimit)
+    var known: [i64] = []
+    var section_types: [text] = []
+    var section_infos: [i64] = []
+    var section_links: [i64] = []
+    var section_sizes: [i64] = []
+    var symbol_table_count = 0
+    for position in 0..section_count:
+        val section = _required_lrr(json_array_get(section_wrappers, position), "Section")?
+        val index = _int_lrr(section, "Index")?
+        if index != position: return Err(ParserLlvmRelocationCodecErrorV1.InvalidSection)
+        known.push(index)
+        val section_type = _named_text_lrr(section, "Type")?
+        val section_size = _int_lrr(section, "Size")?
+        if section_size < 0: return Err(ParserLlvmRelocationCodecErrorV1.InvalidSection)
+        section_types.push(section_type)
+        section_infos.push(_int_lrr(section, "Info")?)
+        section_links.push(_int_lrr(section, "Link")?)
+        section_sizes.push(section_size)
+        if section_type == "SHT_SYMTAB": symbol_table_count = symbol_table_count + 1
+    if symbol_table_count != 1:
+        return Err(ParserLlvmRelocationCodecErrorV1.InvalidSymbol)
+
+    val symbol_wrappers = _required_lrr(root, "Symbols")?
+    val symbol_count = _array_len_lrr(symbol_wrappers)
+    if symbol_count < 0 or symbol_count > PARSER_LLVM_RELOCATION_MAX_SYMBOLS_V1:
+        return Err(ParserLlvmRelocationCodecErrorV1.ResourceLimit)
+    var symbols: [ParserLlvmSymbolV1] = []
+    for index in 0..symbol_count:
+        val symbol = _required_lrr(json_array_get(symbol_wrappers, index), "Symbol")?
+        val section_index = _named_int_lrr(symbol, "Section")?
+        if section_index < 0 or (section_index > 0 and not _contains_index_lrr(known, section_index)):
+            return Err(ParserLlvmRelocationCodecErrorV1.InvalidSymbol)
+        val name = _named_text_lrr(symbol, "Name")?
+        val value = _int_lrr(symbol, "Value")?
+        val size = _int_lrr(symbol, "Size")?
+        if (value < 0 or size < 0 or
+            (section_index > 0 and (value > section_sizes[section_index] or
+             size > section_sizes[section_index] - value))):
+            return Err(ParserLlvmRelocationCodecErrorV1.InvalidSymbol)
+        symbols.push(ParserLlvmSymbolV1(symbol_index: index, name: name,
+            section_index: section_index, value: value, byte_count: size))
+
+    val groups = _required_lrr(root, "Relocations")?
+    val group_count = _array_len_lrr(groups)
+    if group_count < 0 or group_count > section_count:
+        return Err(ParserLlvmRelocationCodecErrorV1.ResourceLimit)
+    var relocations: [ParserLlvmRelocationV1] = []
+    var prior_group = -1
+    for group_position in 0..group_count:
+        val group = json_array_get(groups, group_position)
+        val relocation_section = _int_lrr(group, "SectionIndex")?
+        if (relocation_section <= prior_group or relocation_section < 0 or
+            relocation_section >= section_count or
+            (section_types[relocation_section] != "SHT_REL" and
+             section_types[relocation_section] != "SHT_RELA")):
+            return Err(ParserLlvmRelocationCodecErrorV1.NoncanonicalOrder)
+        val patched_section = section_infos[relocation_section]
+        val symbol_table = section_links[relocation_section]
+        if (patched_section <= 0 or patched_section >= section_count or symbol_table <= 0 or
+            symbol_table >= section_count or section_types[symbol_table] != "SHT_SYMTAB"):
+            return Err(ParserLlvmRelocationCodecErrorV1.InvalidRelocation)
+        val rows = _required_lrr(group, "Relocs")?
+        val row_count = _array_len_lrr(rows)
+        if row_count < 0 or row_count > PARSER_LLVM_RELOCATION_MAX_ROWS_V1 - relocations.len():
+            return Err(ParserLlvmRelocationCodecErrorV1.ResourceLimit)
+        var prior_offset = -1
+        for row_position in 0..row_count:
+            val relocation = _required_lrr(json_array_get(rows, row_position), "Relocation")?
+            val offset = _int_lrr(relocation, "Offset")?
+            val symbol_index = _named_int_lrr(relocation, "Symbol")?
+            val symbol_name = _named_text_lrr(relocation, "Symbol")?
+            if offset <= prior_offset or offset >= section_sizes[patched_section] or
+                symbol_index < 0 or symbol_index >= symbols.len():
+                return Err(ParserLlvmRelocationCodecErrorV1.InvalidRelocation)
+            val symbol_matches = symbols[symbol_index].name == symbol_name or
+                (symbol_index == 0 and symbols[symbol_index].name == "" and symbol_name == "-")
+            if not symbol_matches or _named_text_lrr(relocation, "Type")? == "":
+                return Err(ParserLlvmRelocationCodecErrorV1.InvalidRelocation)
+            relocations.push(ParserLlvmRelocationV1(
+                relocation_section_index: relocation_section,
+                patched_section_index: patched_section, section_offset: offset,
+                relocation_type: _named_text_lrr(relocation, "Type")?,
+                symbol_index: symbol_index, symbol_name: symbol_name,
+                symbol_section_index: symbols[symbol_index].section_index,
+                addend: _int_lrr(relocation, "Addend")?))
+            prior_offset = offset
+        prior_group = relocation_section
+    Ok(ParserLlvmRelocationProjectionV1(known_section_indices: known,
+        symbols: symbols, relocations: relocations))

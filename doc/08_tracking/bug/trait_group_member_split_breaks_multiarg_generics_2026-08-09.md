@@ -1,4 +1,9 @@
 # `parse_trait_group_members` splits on `,` naively — multi-arg generic members break
+## Closed 2026-09-16 — ...e moment a generic member appears. ## Fix Split on top-level commas only — track `<`/`>` d
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-09) — see commit 40d36dceba0289b112cb166a90da64786a953dc2, which added split_top_level_commas() and a regression spec in test/01_unit/app/desugar/trait_group_spec.spl.
 **Found:** 2026-08-09, during P0 (trait `with` groups + `.from()` sugar, landed as `50f06dcdd56`)
@@ -48,3 +53,4 @@ No spec covers it — that absence is part of the defect. A negative fixture in
 - `doc/02_requirements/language/trait_group_with_clause.md` — feature request
 - `src/compiler_rust/parser/src/types_def/trait_impl_parsing.rs` — the correct
   parse, for reference
+

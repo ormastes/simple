@@ -1,4 +1,8 @@
 # Silent interpreter fallback poisons entire callee tree when engine is called from gui_window frame
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-06 (updated 2026-08-07, 2026-08-09)
 **Status:** PARTIALLY RESOLVED — visibility CONFIRMED, perf-cliff root cause
@@ -252,3 +256,4 @@ above:**
 REFUTED for the confirmed trigger (loud, both modes). Remaining open work is
 the perf-cliff root cause (item 2), which is unchanged from 2026-08-06 and
 is architectural, not a visibility gap.
+

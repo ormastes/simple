@@ -1,4 +1,8 @@
 # Cranelift miscompiles zero-arg method access without parentheses on structs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -25,3 +29,4 @@ Any bit-flag struct using zero-arg method access for bit tests may silently prod
 
 ## Next Step
 Investigate cranelift lowering of property-syntax method calls (no parens). Compare generated code vs. explicit-paren version. File cranelift issue or fix in Simple compiler's HIR→MIR lowering for property-access desugaring.
+

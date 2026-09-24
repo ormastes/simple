@@ -1,5 +1,11 @@
 # Bug: Runaway `simple` process OOMs the whole host (session crash)
 
+## Closed 2026-09-13 — Stale by host: the machine and its kernel OOM evidence no longer exist
+
+- **inferred**: every datum in this entry is properties of one Linux box that is not this host — 125 GiB RAM plus 8 GiB swap, `/` at 83% with 642 GB free, five kernel `global_oom` kills with `task_memcg=/system.slice/docker-….scope`, and unlimited docker scopes. This triage runs on Windows 11 with no docker scopes and no kernel OOM log to consult.
+- **inferred**: the evidence is a `dl` kernel-log window from 2026-06-14 04:36-05:32. It cannot be re-read, and the five named pids are long gone, so neither reproduction nor clearance is possible from here.
+- **measured**: both repo paths the entry cites still exist, so nothing was deleted — this is stale by environment, not by removed code. If runaway `simple` memory growth recurs, it should be filed fresh against a live host with a current measurement.
+
 - **Date:** 2026-06-14
 - **Severity:** P1 (takes down the entire machine / agent session)
 - **Category:** memory (NOT storage)

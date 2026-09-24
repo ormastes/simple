@@ -1,4 +1,8 @@
 # `on` is a hard keyword — using it as a parameter name fails the whole file with a pointcut error
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-25
 - **Area:** parser / AOP pointcut grammar
@@ -99,3 +103,4 @@ Adding a level-gated stage trace to
 `examples/06_io/ui/graphics_2d_showcase.spl` while root-causing the
 2D x headless showcase cell. Recorded per the project rule that a short, safe
 form which fails must be fixed or filed rather than silently worked around.
+

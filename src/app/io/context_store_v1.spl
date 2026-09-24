@@ -1,0 +1,420 @@
+"""Context store over the pure-Simple database engine.
+
+`memory` owns ephemeral use. `open` owns a persistent, v3-only context image;
+publication/recovery of migration sources remains outside this adapter. The
+image is a rebuildable PureDatabase projection: it does not authenticate any
+namespace selected-head, root/lock/writer tuple, or acceptance receipt.
+"""
+
+use std.database.pure_sql.{PureDatabase, PureColumnTypeV1, PureTableSchemaV1}
+use std.database.sql.types.{DbValue, DbRow}
+use std.io_runtime.{file_exists, file_read}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+
+pub struct ContextPackV1:
+    id: i64
+    source: text
+    target: text
+    status: text
+    lines: i64
+    token_estimate: i64
+    content: text
+
+pub enum ContextStoreErrorV1:
+    Database
+    InvalidIdentity
+    DuplicateIdentity
+    Closed
+
+pub class ContextStoreV1:
+    _db: PureDatabase
+    _closed: bool
+    _path: text
+    _lock_handle: i64
+
+    static fn memory() -> Result<ContextStoreV1, ContextStoreErrorV1>:
+        var db = match PureDatabase.memory():
+            case Ok(created): created
+            case Err(_): return Err(ContextStoreErrorV1.Database)
+        if not _context_store_initialize_schema_v1(db):
+            match db.close():
+                case Ok(_): return Err(ContextStoreErrorV1.Database)
+                case Err(_): return Err(ContextStoreErrorV1.Database)
+        Ok(ContextStoreV1(_db: db, _closed: false, _path: "", _lock_handle: -1))
+
+    # Open an already-admitted pure-Simple v3 image, or create a new image at
+    # a missing path. Persistent construction is deliberately separate from
+    # `memory`: callers cannot accidentally claim disk durability while using
+    # the in-memory owner. PureDatabase owns v3 envelope validation, atomic
+    # publication, and the inter-process commit-generation check; this adapter
+    # rejects an empty/foreign image before PureDatabase can treat it as new.
+    static fn open(path: text) -> Result<ContextStoreV1, ContextStoreErrorV1>:
+        val normalized = path.trim()
+        if normalized == "":
+            return Err(ContextStoreErrorV1.InvalidIdentity)
+        # Keep one owner for a persistent ContextStore. PureDatabase's commit
+        # lock protects its publication critical section, while this longer
+        # lived lease prevents a second stale handle from reopening the same
+        # image and later overwriting a newer generation. This is the first
+        # persistent-path operation: even existence/header/schema inspection
+        # is inside the same lease, so a concurrent creator or rewriter cannot
+        # race the admission decision.
+        val lock_handle = file_lock(normalized + ".context.lock", 0)
+        if lock_handle < 0:
+            return Err(ContextStoreErrorV1.Database)
+        val was_existing = file_exists(normalized)
+        if was_existing:
+            val image = file_read(normalized)
+            if image == "" or not image.starts_with("simple-pure-db-v3\n"):
+                file_unlock(lock_handle)
+                return Err(ContextStoreErrorV1.Database)
+        var db = match PureDatabase.open(normalized):
+            case Ok(created): created
+            case Err(_):
+                file_unlock(lock_handle)
+                return Err(ContextStoreErrorV1.Database)
+        # Never repair an existing image. Its sole table, ordered declared
+        # schema, row value types, and positive unique identities must all
+        # agree before this adapter accepts it. Do not
+        # call close on refusal: close can checkpoint in another provider
+        # revision, while a malformed image must receive no writer operation.
+        if was_existing:
+            if not _context_store_schema_valid_v1(db):
+                file_unlock(lock_handle)
+                return Err(ContextStoreErrorV1.Database)
+        elif not _context_store_initialize_schema_v1(db):
+            db.close()
+            file_unlock(lock_handle)
+            return Err(ContextStoreErrorV1.Database)
+        Ok(ContextStoreV1(_db: db, _closed: false, _path: normalized,
+            _lock_handle: lock_handle))
+
+    me replace_all(packs: [ContextPackV1]) -> Result<(), ContextStoreErrorV1>:
+        if self._closed:
+            return Err(ContextStoreErrorV1.Closed)
+        val current = self._read_all_v1()?
+        val resolved = _context_store_resolve_replacement_v1(packs, current)?
+        if self._db.exec("BEGIN", []).is_err():
+            return Err(ContextStoreErrorV1.Database)
+        # Rebuild the owned table inside the transaction instead of issuing a
+        # keyed/whole-table delete. PureDatabase keeps typed rows alongside
+        # MVCC tuples; dropping and recreating this owner-local table prevents
+        # deleted typed rows from becoming visible again when the checkpoint
+        # marks the table all-visible.
+        if self._db.exec("DROP TABLE context_packs", []).is_err():
+            return self._rollback_database_v1()
+        if self._db.exec_sql(_context_store_schema_v1()).is_err():
+            return self._rollback_database_v1()
+        for pack in resolved:
+            if self._db.put("context_packs", _context_store_values_v1(pack)).is_err():
+                return self._rollback_database_v1()
+        if self._db.exec("COMMIT", []).is_err():
+            return self._rollback_database_v1()
+        Ok(())
+
+    me put(pack: ContextPackV1) -> Result<(), ContextStoreErrorV1>:
+        if self._closed:
+            return Err(ContextStoreErrorV1.Closed)
+        if not _context_store_pack_valid_v1(pack):
+            return Err(ContextStoreErrorV1.InvalidIdentity)
+        val current = self._read_all_v1()?
+        var max_id: i64 = 0
+        for row in current:
+            if row.id > max_id:
+                max_id = row.id
+            if pack.id > 0 and row.id == pack.id and row.source != pack.source:
+                return Err(ContextStoreErrorV1.DuplicateIdentity)
+        var resolved = pack
+        if pack.id == 0:
+            if max_id == 9223372036854775807:
+                return Err(ContextStoreErrorV1.InvalidIdentity)
+            resolved = ContextPackV1(
+                id: max_id + 1,
+                source: pack.source,
+                target: pack.target,
+                status: pack.status,
+                lines: pack.lines,
+                token_estimate: pack.token_estimate,
+                content: pack.content)
+        # Build the complete post-image and use the same DELETE/PUT transaction
+        # as replace_all.  PureDatabase's keyed-delete path can leave its scan
+        # cache populated; routing source replacement through this owner-local
+        # post-image keeps reads and durable bytes aligned without depending on
+        # that lower-level cache detail.
+        var next: [ContextPackV1] = []
+        for row in current:
+            if row.source != resolved.source:
+                next.push(row)
+        next.push(resolved)
+        self.replace_all(next)
+
+    me get_exact(source: text) -> Result<[ContextPackV1], ContextStoreErrorV1>:
+        if self._closed:
+            return Err(ContextStoreErrorV1.Closed)
+        val all_rows = self._read_all_v1()?
+        var selected: [ContextPackV1] = []
+        for pack in all_rows:
+            if pack.source == source:
+                selected.push(pack)
+        Ok(selected)
+
+    me query_literal(query: text) -> Result<[ContextPackV1], ContextStoreErrorV1>:
+        if self._closed:
+            return Err(ContextStoreErrorV1.Closed)
+        val all_rows = self._read_all_v1()?
+        var selected: [ContextPackV1] = []
+        for pack in all_rows:
+            if pack.source.contains(query) or pack.target.contains(query) or pack.content.contains(query):
+                selected.push(pack)
+        Ok(selected)
+
+    me close() -> Result<(), ContextStoreErrorV1>:
+        if self._closed:
+            return Ok(())
+        match self._db.close():
+            case Ok(_):
+                if self._lock_handle >= 0:
+                    file_unlock(self._lock_handle)
+                    self._lock_handle = -1
+                self._closed = true
+                Ok(())
+            case Err(_): Err(ContextStoreErrorV1.Database)
+
+    me _read_all_v1() -> Result<[ContextPackV1], ContextStoreErrorV1>:
+        val db_rows = match self._db.scan_all("context_packs"):
+            case Ok(rows): rows
+            case Err(_): return Err(ContextStoreErrorV1.Database)
+        var packs: [ContextPackV1] = []
+        for row in db_rows:
+            val pack = _context_store_pack_from_row_v1(row)?
+            packs.push(pack)
+        Ok(_context_store_sort_by_id_v1(packs))
+
+    me _rollback_database_v1() -> Result<(), ContextStoreErrorV1>:
+        match self._db.exec("ROLLBACK", []):
+            case Ok(_): Err(ContextStoreErrorV1.Database)
+            case Err(_): Err(ContextStoreErrorV1.Database)
+
+fn _context_store_schema_v1() -> text:
+    "CREATE TABLE context_packs (id INTEGER PRIMARY KEY, source TEXT, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)"
+
+fn _context_store_expected_columns_v1() -> [text]:
+    ["id", "source", "target", "status", "lines", "token_estimate", "content"]
+
+fn _context_store_expected_column_types_v1() -> [PureColumnTypeV1]:
+    [
+        PureColumnTypeV1.Integer,
+        PureColumnTypeV1.Text,
+        PureColumnTypeV1.Text,
+        PureColumnTypeV1.Text,
+        PureColumnTypeV1.Integer,
+        PureColumnTypeV1.Integer,
+        PureColumnTypeV1.Text
+    ]
+
+fn _context_store_schema_declaration_valid_v1(
+    actual: PureTableSchemaV1,
+    expected_columns: [text],
+    expected_types: [PureColumnTypeV1],
+    expected_primary_key_index: i32
+) -> bool:
+    if (actual.primary_key_index != expected_primary_key_index or
+            actual.columns.len() != expected_columns.len() or
+            actual.columns.len() != expected_types.len()):
+        return false
+    var i = 0
+    while i < expected_columns.len():
+        val column = actual.columns[i]
+        if column.name != expected_columns[i] or column.declared_type != expected_types[i]:
+            return false
+        i = i + 1
+    true
+
+fn _context_store_initialize_schema_v1(db: PureDatabase) -> bool:
+    db.exec_sql(_context_store_schema_v1()).is_ok()
+
+fn _context_store_columns_equal_v1(actual: [text], expected: [text]) -> bool:
+    if actual.len() != expected.len():
+        return false
+    var i = 0
+    while i < expected.len():
+        if actual[i] != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn _context_store_schema_valid_v1(db: PureDatabase) -> bool:
+    val table_names = match db.table_names():
+        case Ok(names): names
+        case Err(_): return false
+    if not _context_store_columns_equal_v1(table_names, ["context_packs"]):
+        return false
+    val packs_schema = match db.describe_table("context_packs"):
+        case Ok(Some(schema)): schema
+        case _: return false
+    if not _context_store_schema_declaration_valid_v1(packs_schema,
+            _context_store_expected_columns_v1(), _context_store_expected_column_types_v1(), 0):
+        return false
+    val packs_rows = match db.scan_all("context_packs"):
+        case Ok(rows): rows
+        case Err(_): return false
+    var identities: Dict<i64, bool> = {}
+    for row in packs_rows:
+        if not _context_store_columns_equal_v1(row.columns, _context_store_expected_columns_v1()):
+            return false
+        val pack = match _context_store_pack_from_row_v1(row):
+            case Ok(value): value
+            case Err(_): return false
+        if pack.id <= 0 or not _context_store_pack_valid_v1(pack) or identities.has(pack.id):
+            return false
+        identities[pack.id] = true
+    true
+
+fn _context_store_pack_valid_v1(pack: ContextPackV1) -> bool:
+    pack.id >= 0 and pack.lines >= 0 and pack.token_estimate >= 0
+
+fn _context_store_values_v1(pack: ContextPackV1) -> [DbValue]:
+    [
+        DbValue.Integer(value: pack.id),
+        DbValue.Text(value: pack.source),
+        DbValue.Text(value: pack.target),
+        DbValue.Text(value: pack.status),
+        DbValue.Integer(value: pack.lines),
+        DbValue.Integer(value: pack.token_estimate),
+        DbValue.Text(value: pack.content)
+    ]
+
+fn _context_store_pack_from_row_v1(row: DbRow) -> Result<ContextPackV1, ContextStoreErrorV1>:
+    if row.values.len() != 7:
+        return Err(ContextStoreErrorV1.Database)
+    val id = match row.values[0]:
+        case DbValue.Integer(value): value
+        case _: return Err(ContextStoreErrorV1.Database)
+    val source = match row.values[1]:
+        case DbValue.Text(value): value
+        case _: return Err(ContextStoreErrorV1.Database)
+    val target = match row.values[2]:
+        case DbValue.Text(value): value
+        case _: return Err(ContextStoreErrorV1.Database)
+    val status = match row.values[3]:
+        case DbValue.Text(value): value
+        case _: return Err(ContextStoreErrorV1.Database)
+    val lines = match row.values[4]:
+        case DbValue.Integer(value): value
+        case _: return Err(ContextStoreErrorV1.Database)
+    val token_estimate = match row.values[5]:
+        case DbValue.Integer(value): value
+        case _: return Err(ContextStoreErrorV1.Database)
+    val content = match row.values[6]:
+        case DbValue.Text(value): value
+        case _: return Err(ContextStoreErrorV1.Database)
+    Ok(ContextPackV1(
+        id: id,
+        source: source,
+        target: target,
+        status: status,
+        lines: lines,
+        token_estimate: token_estimate,
+        content: content))
+
+fn _context_store_sort_by_id_v1(rows: [ContextPackV1]) -> [ContextPackV1]:
+    val count = rows.len()
+    if count <= 1:
+        return rows
+    var sorted = rows
+    var scratch = rows
+    var sorted_is_source = true
+    var width = 1
+    while width < count:
+        var run_start = 0
+        while run_start < count:
+            val remaining = count - run_start
+            val left_length = if remaining < width: remaining else: width
+            val right_remaining = remaining - left_length
+            val right_length = if right_remaining < width: right_remaining else: width
+            val middle = run_start + left_length
+            val run_end = middle + right_length
+            var left = run_start
+            var right = middle
+            var output = run_start
+            if sorted_is_source:
+                while left < middle and right < run_end:
+                    if sorted[left].id <= sorted[right].id:
+                        scratch[output] = sorted[left]
+                        left = left + 1
+                    else:
+                        scratch[output] = sorted[right]
+                        right = right + 1
+                    output = output + 1
+                while left < middle:
+                    scratch[output] = sorted[left]
+                    left = left + 1
+                    output = output + 1
+                while right < run_end:
+                    scratch[output] = sorted[right]
+                    right = right + 1
+                    output = output + 1
+            else:
+                while left < middle and right < run_end:
+                    if scratch[left].id <= scratch[right].id:
+                        sorted[output] = scratch[left]
+                        left = left + 1
+                    else:
+                        sorted[output] = scratch[right]
+                        right = right + 1
+                    output = output + 1
+                while left < middle:
+                    sorted[output] = scratch[left]
+                    left = left + 1
+                    output = output + 1
+                while right < run_end:
+                    sorted[output] = scratch[right]
+                    right = right + 1
+                    output = output + 1
+            run_start = run_end
+        sorted_is_source = not sorted_is_source
+        if width >= count - width:
+            width = count
+        else:
+            width = width + width
+    if sorted_is_source: sorted else: scratch
+
+fn _context_store_resolve_replacement_v1(
+    packs: [ContextPackV1], current: [ContextPackV1]
+) -> Result<[ContextPackV1], ContextStoreErrorV1>:
+    var max_id: i64 = 0
+    var explicit_ids: Dict<i64, bool> = {}
+    var current_sources: Dict<i64, text> = {}
+    for row in current:
+        current_sources[row.id] = row.source
+        if row.id > max_id:
+            max_id = row.id
+    for pack in packs:
+        if not _context_store_pack_valid_v1(pack):
+            return Err(ContextStoreErrorV1.InvalidIdentity)
+        if pack.id > 0:
+            if explicit_ids.has(pack.id):
+                return Err(ContextStoreErrorV1.DuplicateIdentity)
+            if current_sources.has(pack.id) and current_sources[pack.id] != pack.source:
+                return Err(ContextStoreErrorV1.DuplicateIdentity)
+            explicit_ids[pack.id] = true
+            if pack.id > max_id:
+                max_id = pack.id
+    var resolved: [ContextPackV1] = []
+    var next_id = max_id
+    for pack in packs:
+        if pack.id > 0:
+            resolved.push(pack)
+        else:
+            if next_id == 9223372036854775807:
+                return Err(ContextStoreErrorV1.InvalidIdentity)
+            next_id = next_id + 1
+            resolved.push(ContextPackV1(
+                id: next_id,
+                source: pack.source,
+                target: pack.target,
+                status: pack.status,
+                lines: pack.lines,
+                token_estimate: pack.token_estimate,
+                content: pack.content))
+    Ok(resolved)

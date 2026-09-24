@@ -87,7 +87,7 @@ impl Lowerer {
     }
 
     pub(super) fn resolve_global_field_info(&mut self, field: &str) -> Option<(usize, TypeId, usize, String)> {
-        let mut best_global: Option<(usize, Type, usize, String)> = None;
+        let mut candidate: Option<(usize, Type, usize, String)> = None;
         let global_defs = self.global_struct_defs.clone()?;
         for (struct_name, fields) in global_defs.iter() {
             for (idx, (field_name, field_type)) in fields.iter().enumerate() {
@@ -95,22 +95,112 @@ impl Lowerer {
                     continue;
                 }
                 let count = fields.len();
-                // Smallest index wins (memory-safe: see the proof on the
-                // TypeId::ANY branch of `get_field_info`). Count breaks ties
-                // between candidates that agree on the index, which produce
-                // an identical byte offset either way.
-                if best_global.as_ref().is_some_and(|(best_idx, _, best_count, _)| {
-                    idx > *best_idx || (idx == *best_idx && count <= *best_count)
-                }) {
-                    continue;
+                // A receiver-blind lookup may lower a field load only when
+                // every candidate has the same slot and type. Choosing the
+                // smallest slot avoids an OOB read, but can still read an
+                // unrelated in-bounds field from a wider actual receiver.
+                if let Some((known_idx, known_type, _, _)) = candidate.as_ref() {
+                    if *known_idx != idx || known_type != field_type {
+                        return None;
+                    }
+                } else {
+                    candidate = Some((idx, field_type.clone(), count, struct_name.clone()));
                 }
-                best_global = Some((idx, field_type.clone(), count, struct_name.clone()));
             }
         }
 
-        let (idx, field_type, count, struct_name) = best_global?;
+        let (idx, field_type, count, struct_name) = candidate?;
         let field_ty = self.resolve_type(&field_type).unwrap_or(TypeId::ANY);
         Some((idx, field_ty, count, struct_name))
+    }
+
+    /// Resolve a field without a nominal receiver only when every local
+    /// candidate has the same physical slot and static type. `None` means
+    /// either no candidate or an ambiguous layout; callers must then fail
+    /// closed or use a receiver-aware recovery path.
+    fn resolve_unambiguous_local_field_info(
+        &self,
+        field: &str,
+        include_bitfields: bool,
+    ) -> Option<(usize, TypeId, usize)> {
+        let mut candidate: Option<(usize, TypeId, usize)> = None;
+        for (_, hir_ty) in self.module.types.iter() {
+            match hir_ty {
+                HirType::Struct { fields, .. } => {
+                    for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
+                        if field_name != field {
+                            continue;
+                        }
+                        let count = fields.len();
+                        if let Some((known_idx, known_ty, _)) = candidate {
+                            if known_idx != idx || known_ty != *field_ty {
+                                return None;
+                            }
+                        } else {
+                            candidate = Some((idx, *field_ty, count));
+                        }
+                    }
+                }
+                HirType::Bitfield { fields, .. } if include_bitfields => {
+                    for (idx, field_info) in fields.iter().enumerate() {
+                        if field_info.name != field {
+                            continue;
+                        }
+                        let count = fields.len();
+                        if let Some((known_idx, known_ty, _)) = candidate {
+                            if known_idx != idx || known_ty != field_info.ty {
+                                return None;
+                            }
+                        } else {
+                            candidate = Some((idx, field_info.ty, count));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        candidate
+    }
+
+    pub(super) fn has_local_field_candidate(&self, field: &str, include_bitfields: bool) -> bool {
+        self.module.types.iter().any(|(_, hir_ty)| match hir_ty {
+            HirType::Struct { fields, .. } => fields.iter().any(|(name, _)| name == field),
+            HirType::Bitfield { fields, .. } if include_bitfields => {
+                fields.iter().any(|field_info| field_info.name == field)
+            }
+            _ => false,
+        })
+    }
+
+    fn has_global_field_candidate(&self, field: &str) -> bool {
+        self.global_struct_defs
+            .as_ref()
+            .is_some_and(|defs| defs.values().any(|fields| fields.iter().any(|(name, _)| name == field)))
+    }
+
+    /// Resolve a receiver-blind field only when every local and imported
+    /// candidate agrees on the physical slot and field type. Each scope can
+    /// be internally unambiguous while still conflicting with the other.
+    pub(super) fn resolve_unambiguous_receiver_blind_field_info(
+        &mut self,
+        field: &str,
+        include_bitfields: bool,
+    ) -> Option<(usize, TypeId)> {
+        let local = self.resolve_unambiguous_local_field_info(field, include_bitfields);
+        let global = self.resolve_global_field_info(field);
+        let has_local = self.has_local_field_candidate(field, include_bitfields);
+        let has_global = self.has_global_field_candidate(field);
+
+        match (local, global) {
+            (Some((local_idx, local_ty, _)), Some((global_idx, global_ty, _, _)))
+                if local_idx == global_idx && local_ty == global_ty =>
+            {
+                Some((local_idx, local_ty))
+            }
+            (Some((idx, ty, _)), None) if !has_global => Some((idx, ty)),
+            (None, Some((idx, ty, _, _))) if !has_local => Some((idx, ty)),
+            _ => None,
+        }
     }
 
     fn instantiate_builtin_generic_enum(&mut self, family: &str, args: &[Type]) -> Option<LowerResult<TypeId>> {
@@ -651,45 +741,12 @@ impl Lowerer {
     pub(super) fn get_field_info(&mut self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
         // Handle built-in ANY type - search all known structs for the field.
         //
-        // The receiver type erased to ANY, so we cannot know which struct this
-        // actually is; every candidate that declares `field` is equally likely.
-        // The choice is therefore between wrong-but-in-bounds and wrong-and-
-        // out-of-bounds, and only one of those is a memory-safety defect.
-        //
-        // Field slots are a uniform 8 bytes (`byte_offset = field_index * 8`,
-        // mir/lower/lowering_expr_struct.rs:328, lowering_stmt.rs:539,
-        // lowering_expr_method.rs:1421), so picking the SMALLEST index among
-        // the candidates is in bounds for every one of them: for any candidate
-        // C that declares `field` at index i_C, we pick i <= i_C < len(C), so
-        // the load at 8*i never leaves C's allocation.
-        //
-        // The previous rule ("prefer the struct with the most fields") has the
-        // opposite property: it picks the LARGEST index, which is out of bounds
-        // for every candidate smaller than the winner. That is the
-        // `stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30`
-        // defect -- a 1-field receiver was read at byte_offset 32.
-        //
-        // Count is retained only as a tie-break between candidates that agree
-        // on the index; those produce an identical byte offset, so the choice
-        // there is behaviour-preserving.
+        // An erased receiver has no nominal layout. A receiver-blind field
+        // load is valid only when all candidates agree on both slot and type;
+        // otherwise it must fail closed rather than read a wrong in-bounds
+        // slot. This closes the Stage 2 field-offset corruption class.
         if struct_ty == TypeId::ANY {
-            let mut best: Option<(usize, TypeId, usize)> = None; // (idx, ty, field_count)
-            for (_, hir_ty) in self.module.types.iter() {
-                if let HirType::Struct { fields, .. } = hir_ty {
-                    for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
-                        if field_name == field {
-                            let count = fields.len();
-                            if best
-                                .as_ref()
-                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                            {
-                                best = Some((idx, *field_ty, count));
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some((idx, ty, count)) = best {
+            if let Some((idx, ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, false) {
                 if crate::hir::lower::trace_field_get_enabled() {
                     let fpath = self
                         .current_file
@@ -697,32 +754,9 @@ impl Lowerer {
                         .and_then(|p| p.file_name())
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown");
-                    eprintln!("[FIELD-TRACE] ANY/{field} -> LOCAL-BEST idx={idx} count={count} in {fpath}");
+                    eprintln!("[FIELD-TRACE] ANY/{field} -> UNAMBIGUOUS idx={idx} in {fpath}");
                 }
                 return Ok((idx, ty));
-            }
-            // Search global struct definitions from other compilation units.
-            // Skip names that are known to be ambiguous across multiple
-            // structs — those must fall back to method-call resolution so
-            // we don't silently pick the wrong byte offset.
-            if self.is_ambiguous_global_field(field) {
-                return Err(LowerError::CannotInferFieldType {
-                    struct_name: "ANY".to_string(),
-                    field: field.to_string(),
-                    available_fields: vec![],
-                });
-            }
-            if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                if crate::hir::lower::trace_field_get_enabled() {
-                    let fpath = self
-                        .current_file
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown");
-                    eprintln!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
-                }
-                return Ok((idx, field_ty));
             }
             return Err(LowerError::CannotInferFieldType {
                 struct_name: "ANY".to_string(),
@@ -733,28 +767,10 @@ impl Lowerer {
 
         if let Some(hir_ty) = self.module.types.get(struct_ty).cloned() {
             match hir_ty {
-                // Any type - search all known structs for the field.
-                // Smallest index wins: see the proof in the TypeId::ANY branch
-                // above. Most-fields-wins picked an offset past the end of
-                // every smaller candidate.
+                // Any type may use receiver-blind lookup only for an
+                // unambiguous local field layout.
                 HirType::Any => {
-                    let mut best: Option<(usize, TypeId, usize)> = None;
-                    for (_, search_ty) in self.module.types.iter() {
-                        if let HirType::Struct { fields, .. } = search_ty {
-                            for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
-                                if field_name == field {
-                                    let count = fields.len();
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
-                                        best = Some((idx, *field_ty, count));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some((idx, ty, count)) = best {
+                    if let Some((idx, ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, false) {
                         if crate::hir::lower::trace_field_get_enabled() {
                             let fpath = self
                                 .current_file
@@ -762,14 +778,9 @@ impl Lowerer {
                                 .and_then(|p| p.file_name())
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("unknown");
-                            eprintln!("[FIELD-TRACE] AnyTy/{field} -> LOCAL-BEST idx={idx} count={count} in {fpath}");
+                            eprintln!("[FIELD-TRACE] AnyTy/{field} -> UNAMBIGUOUS idx={idx} in {fpath}");
                         }
                         return Ok((idx, ty));
-                    }
-                    if !self.is_ambiguous_global_field(field) {
-                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
-                            return Ok((idx, field_ty));
-                        }
                     }
                     Err(LowerError::CannotInferFieldType {
                         struct_name: "Any".to_string(),
@@ -821,35 +832,20 @@ impl Lowerer {
                         }
                         return Ok((variant_idx, variant_field_ty));
                     }
-                    if let Some((idx, owner_field_ty)) = self.try_resolve_current_owner_field(field) {
-                        if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self
-                                .current_file
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("[FT2] S-OWNER/{field} struct={name} idx={idx} in {fpath}");
-                        }
-                        return Ok((idx, owner_field_ty));
-                    }
-                    // Receiver-BLIND last resort: `resolve_global_field_info`
-                    // ignores `name` entirely and returns "the struct with the
-                    // most fields that happens to declare this field name".
-                    // Every attempt above is receiver-scoped; this one is not,
-                    // so it must obey the same ambiguity veto the ANY branches
-                    // at the top of this function already apply. Without the
-                    // veto it silently emits a wrong byte offset AND a wrong
-                    // field type — see
-                    // `driver_native_capsule_result_invalid_reason_v1`, where
-                    // `fp.size`/`fp.content_hash` on a `FileFingerprint`
-                    // (size@3:i64, content_hash@1:text) compiled to
-                    // `ldr [ptr,#56]`/`ldr [ptr,#88]` past the end of a
-                    // 32-byte allocation, printed as raw u64/i64, and wrote a
-                    // capsule receipt reading `size=16 content_hash=129` for a
-                    // 1032-byte object.
+                    // Language leniency, mirroring the HirType::Any branch
+                    // above: the self-hosted reference compiler and the
+                    // interpreter accept a field access on a nominal struct
+                    // that does not declare the field when the field
+                    // resolves globally UNAMBIGUOUSLY (observed live in the
+                    // full-bootstrap closure: CompileOptions.target_opt_ctx
+                    // sets, SymbolId.name / Template.name reads in
+                    // debug-identity helpers, where the local registry view
+                    // of the struct is incomplete). The Any branch already
+                    // carries this risk class for dynamic receivers;
+                    // globally-unresolvable fields (pure typos) still fail
+                    // closed below.
                     if !self.is_ambiguous_global_field(field) {
-                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                        if let Some((idx, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
                             if crate::hir::lower::trace_field_get_enabled() {
                                 let fpath = self
                                     .current_file
@@ -857,44 +853,32 @@ impl Lowerer {
                                     .and_then(|p| p.file_name())
                                     .and_then(|n| n.to_str())
                                     .unwrap_or("unknown");
-                                eprintln!("[FT2] S-GLOBALINFO/{field} struct={name} idx={idx} in {fpath}");
+                                eprintln!("[FT2] S-RECEIVER-BLIND/{field} struct={name} idx={idx} in {fpath}");
                             }
                             return Ok((idx, field_ty));
                         }
+                    } else {
+                        // The field is real but globally AMBIGUOUS (declared
+                        // on several structs), so no static offset is
+                        // trustworthy -- the same best-effort situation the
+                        // Any branch faces for dynamic receivers. Degrade to
+                        // slot 0 with ANY rather than reject programs the
+                        // self-hosted compiler and the interpreter accept
+                        // (observed live: `name` reads on SymbolId/Template
+                        // in debug-identity helpers). Proper fix is dynamic
+                        // field-access nodes in the seed, matching the
+                        // self-hosted lowering.
+                        eprintln!(
+                            "warning: field '{field}' not declared on struct '{name}' and is globally ambiguous; degrading to slot 0 (ANY) -- best-effort, matching the dynamic-receiver risk class"
+                        );
+                        return Ok((0, TypeId::ANY));
                     }
-                    let mut best: Option<(usize, TypeId, usize)> = None;
-                    for (_, search_ty) in self.module.types.iter() {
-                        if let HirType::Struct {
-                            fields: search_fields, ..
-                        } = search_ty
-                        {
-                            for (idx, (field_name, field_ty)) in search_fields.iter().enumerate() {
-                                if field_name == field {
-                                    let count = search_fields.len();
-                                    // Smallest index wins -- memory-safe, see
-                                    // the proof on the TypeId::ANY branch.
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
-                                        best = Some((idx, *field_ty, count));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some((idx, field_ty, _)) = best {
-                        if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self
-                                .current_file
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("[FT2] S-BEST/{field} struct={name} idx={idx} in {fpath}");
-                        }
-                        return Ok((idx, field_ty));
-                    }
+                    // A nominal receiver is authoritative.  If `name` does not
+                    // declare `field` in any same-name definition, borrowing a
+                    // slot from an unrelated struct fabricates a field and can
+                    // emit the wrong offset.  Receiver-blind lookup belongs only
+                    // to the explicit dynamic (`Any`) branches above and to the
+                    // unambiguous-global leniency immediately above.
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
                         struct_name: name,
@@ -961,78 +945,18 @@ impl Lowerer {
                     // failed to load, so guessing "the largest struct that
                     // declares this name" is guessing with no receiver
                     // information at all.
-                    if !self.is_ambiguous_global_field(field) {
-                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
-                            return Ok((idx, field_ty));
-                        }
+                    if let Some((idx, field_ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, false) {
+                        return Ok((idx, field_ty));
                     }
                     // For VOID, Pointer, or other non-struct types (often caused by
                     // cross-module imports where field types resolve to VOID because
                     // the dependency wasn't loaded yet), search known structs for
                     // a matching field name — same heuristic as the ANY case.
                     if self.lenient_types {
-                        // First: search local type registry
-                        let mut best: Option<(usize, TypeId, usize)> = None;
-                        for (_, hty) in self.module.types.iter() {
-                            match hty {
-                                HirType::Struct { fields, .. } => {
-                                    for (idx, (fname, fty)) in fields.iter().enumerate() {
-                                        if fname == field {
-                                            let count = fields.len();
-                                            // Smallest index wins -- memory-safe, see
-                                            // the proof on the TypeId::ANY branch.
-                                            if best
-                                                .as_ref()
-                                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                            {
-                                                best = Some((idx, *fty, count));
-                                            }
-                                        }
-                                    }
-                                }
-                                HirType::Bitfield { fields, .. } => {
-                                    for (idx, f) in fields.iter().enumerate() {
-                                        if f.name == field {
-                                            let count = fields.len();
-                                            // Smallest index wins -- memory-safe, see
-                                            // the proof on the TypeId::ANY branch.
-                                            if best
-                                                .as_ref()
-                                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                            {
-                                                best = Some((idx, f.ty, count));
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Some((idx, ty, _)) = best {
+                        // An unresolved receiver has no layout proof. Reuse
+                        // the same unambiguous-slot rule as TypeId::ANY.
+                        if let Some((idx, ty)) = self.resolve_unambiguous_receiver_blind_field_info(field, true) {
                             return Ok((idx, ty));
-                        }
-                        // Search global struct definitions from other modules.
-                        // Skip ambiguous names — see the ANY branch above.
-                        if self.is_ambiguous_global_field(field) {
-                            return Err(LowerError::CannotInferFieldType {
-                                struct_name: "wildcard".to_string(),
-                                field: field.to_string(),
-                                available_fields: vec![],
-                            });
-                        }
-                        if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
-                            if crate::hir::lower::trace_field_get_enabled() {
-                                let fpath = self
-                                    .current_file
-                                    .as_ref()
-                                    .and_then(|p| p.file_name())
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown");
-                                eprintln!(
-                                    "[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}"
-                                );
-                            }
-                            return Ok((idx, field_ty));
                         }
                     }
                     Err(LowerError::CannotInferFieldType {

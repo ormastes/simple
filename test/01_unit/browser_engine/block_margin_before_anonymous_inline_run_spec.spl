@@ -1,0 +1,90 @@
+"""
+A block box's bottom margin was DROPPED whenever its next sibling started an
+anonymous inline run.
+
+CSS 2.2 8.3.1 collapses vertical margins only between BLOCK boxes. Inline
+content that follows a block sibling is wrapped in an ANONYMOUS block box,
+which has no margins of its own, so the preceding block's bottom margin cannot
+collapse away — it must still separate the two boxes. The block loop in
+`simple_web_html_layout_renderer_layout.spl` started the inline run without
+flushing the pending `prev_margin_b` into `cy`, and the inline branch then
+zeroed it, so the margin was lost outright.
+
+The defect was the top TWO attributed roots of the 8-page Chrome parity
+catalog at round 24's baseline, and they are the SAME defect seen twice:
+
+* `html.html` `<hr>` sample (`li` 39): Chrome's `x<hr>y` demo box is 66 px
+  (24 line + 8 margin + 2 border-box rule + 8 margin + 24 line); Simple made
+  it 58, losing the rule's bottom margin, and the 8 px shortfall dragged 67
+  later root rows up behind it (~544 attributed).
+* `animation.html` page head: Chrome puts the anonymous line holding
+  `<canvas>/<svg>/<audio>/<video>` at the preceding `<p>`'s bottom + its 16 px
+  margin; Simple butted it straight against the `<p>`, shifting the whole page
+  by 16 (~352 attributed).
+
+Every number below is HARVESTED from Chrome 152 `--headless=new
+--window-size=900,20000` over byte-identical markup, not predicted:
+
+| case                                        | Chrome h | Simple before |
+|---------------------------------------------|----------|---------------|
+| `<p>A</p>bare text`                          | 64       | 48            |
+| `<p>A</p><p>B</p>`  (control)                | 64       | 64            |
+| `<p>A</p><span>t</span>`                     | 64       | 48            |
+| `x<hr>y`                                     | 66       | 58            |
+| `x` (control)                                | 24       | 24            |
+| `<p>A</p><b style=display:inline-block>B</b>` | 64       | 48            |
+| `t<p>A</p>`  (control)                       | 64       | 64            |
+
+The controls carry the argument. `<p>A</p><p>B</p>` is the collapsing case that
+must NOT gain 16 px, `t<p>A</p>` is the same boundary in the other direction
+(already correct, because the inline branch left `prev_margin_b` at 0 and
+`max(0,16)` is 16), and `<div>x</div>` pins that a run with no preceding block
+gains nothing. `<span>` beside `inline-block` shows the rule is about the
+anonymous block, not about replaced or atomic inlines.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LAYOUT-016 — the bottom margin of a block box separates it from a following anonymous inline run instead of collapsing away.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+fn probe(inner: text, id: text) -> text:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + "</body></html>", VW, VH, id, "h")
+
+describe "a block's bottom margin survives in front of an anonymous inline run":
+    it "AC-1: a <p> followed by bare text keeps the 16 px margin between them":
+        step("Chrome 64 = 24 line + 16 margin + 24 anonymous line; the engine returned 48")
+        expect(probe("<div id=\"o\"><p>A</p>bare text</div>", "o")).to_equal("64")
+
+    it "AC-2: the same holds when the run starts with an inline ELEMENT":
+        step("Chrome 64 — a <span> is inline content, so it too sits in the anonymous block")
+        expect(probe("<div id=\"o\"><p>A</p><span>t</span></div>", "o")).to_equal("64")
+
+    it "AC-3: the catalog's x<hr>y demo box is 66, not 58":
+        step("Chrome 66 = 24 + 8 margin + 2 border-box rule + 8 margin + 24")
+        step("this is html.html li 39, the largest attributed root of round 24's baseline")
+        expect(probe("<div id=\"o\">x<hr>y</div>", "o")).to_equal("66")
+
+    it "AC-4: an inline-block after a block also gets the margin":
+        step("Chrome 64 — an atomic inline still lives in the anonymous block box")
+        expect(probe("<div id=\"o\"><p>A</p><b style=\"display:inline-block\">B</b></div>", "o")).to_equal("64")
+
+    it "AC-5 (control): two block siblings still COLLAPSE to one 16 px gap":
+        step("Chrome 64, not 80 — this row fails the moment the flush is applied to block siblings too")
+        expect(probe("<div id=\"o\"><p>A</p><p>B</p></div>", "o")).to_equal("64")
+
+    it "AC-6 (control): the other side of the boundary is unchanged":
+        step("Chrome 64 — text then a <p>: the block's TOP margin already separated them")
+        expect(probe("<div id=\"o\">t<p>A</p></div>", "o")).to_equal("64")
+
+    it "AC-7 (control): an inline run with no block before it gains nothing":
+        step("Chrome 24 — the flush must be conditional on a pending margin, not unconditional")
+        expect(probe("<div id=\"o\">x</div>", "o")).to_equal("24")

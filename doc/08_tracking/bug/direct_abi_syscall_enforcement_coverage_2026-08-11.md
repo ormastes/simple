@@ -1,4 +1,8 @@
 # Incomplete direct ABI syscall enforcement coverage
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open — blocks `simple_os_enhance` AC-2 and AC-5 whole-surface claim
 
@@ -36,3 +40,4 @@ separate isolation issue.
    and a missing object capability both fail before side effects.
 4. Run the target QEMU syscall-entry path; host interpreter tests alone do not
    prove the C/assembly trap route.
+

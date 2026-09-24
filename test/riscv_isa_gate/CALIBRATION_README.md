@@ -43,7 +43,7 @@ This calibration suite proves that qualification gates actually detect non-execu
 ## Running the Calibration Suite
 
 ```bash
-cd /home/ormastes/dev/pub/simple/test/riscv_isa_gate
+cd $repo/test/riscv_isa_gate
 ./run_calibration.sh
 ```
 

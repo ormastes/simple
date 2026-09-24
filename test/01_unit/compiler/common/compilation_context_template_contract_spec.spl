@@ -1,0 +1,68 @@
+# `load_template` must answer the Option contract its trait declares.
+#
+# Bug: doc/08_tracking/bug/option_pattern_against_result_value_matches_nothing_2026-09-19.md
+#
+# `CompilationContext.load_template` is declared `-> GenericTemplate?`, and the
+# one call site (`40.mono/instantiation.spl`) matches `case Some(value)` /
+# `case nil`. Both implementations, however, were declared `-> text` and
+# returned `Ok(...)` / `Err(...)`: three different types for one method.
+#
+# That is not a type error anyone sees. Measured 2026-09-19 on the deployed
+# seed, matching an `Ok(...)` value against `case Some(v)` / `case nil` hits
+# NEITHER arm:
+#
+#   interpret lane   the bound variable keeps its prior value; exit 0, no warning
+#   default (JIT)    the statement emits a blank line and the process exits 2
+#                    with NOTHING on stderr
+#
+# So on the linker's lazy-instantiation path a template that exists was neither
+# returned nor reported missing, and the `_drop_in_progress` cleanup in the
+# `nil` arm never ran.
+#
+# These examples pin the shape the fix relies on -- that an Option-returning
+# function is matched correctly by `Some`/`nil`, in both the hit and miss
+# directions. They deliberately do NOT assert what an Option pattern does to a
+# Result value: that is the defect, and asserting the broken answer would bless
+# it. It is measured in the record instead.
+
+use std.spec
+
+struct FakeTemplate:
+    name: text
+
+fn lookup(present: bool) -> FakeTemplate?:
+    if present:
+        Some(FakeTemplate(name: "collections"))
+    else:
+        nil
+
+describe "an Option-returning lookup is matched by Some and nil":
+    it "binds the payload on a hit":
+        var seen = "unset"
+        match lookup(true):
+            case Some(t):
+                seen = t.name
+            case nil:
+                seen = "missed"
+        expect(seen).to_equal("collections")
+
+    it "takes the nil arm on a miss":
+        var seen = "unset"
+        match lookup(false):
+            case Some(t):
+                seen = t.name
+            case nil:
+                seen = "missed"
+        expect(seen).to_equal("missed")
+
+    it "reaches neither arm's fallback value, so the match really ran":
+        # Guards the exact failure mode the defect produced: both arms skipped,
+        # leaving the variable at its initialiser. If that ever happens here,
+        # `unset` survives and this fails.
+        var seen = "unset"
+        match lookup(true):
+            case Some(t):
+                seen = t.name
+            case nil:
+                seen = "missed"
+        expect(seen == "unset").to_equal(false)

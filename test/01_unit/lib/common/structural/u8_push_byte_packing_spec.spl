@@ -1,0 +1,79 @@
+# @tag:in-development
+"""
+## Purpose and audience
+Reproducing and generalization oracles for
+doc/08_tracking/bug/u8_cast_push_yields_unpacked_byte_array_2026-09-06.md: a
+`[u8]` grown with `push(<expr> as u8)` is not byte-packed on the interpreter
+path, so a packed reader such as `wire_get_u64` sees byte 0 followed by zeros.
+## Operator workflow
+bin/simple test test/01_unit/lib/common/structural/u8_push_byte_packing_spec.spl
+## Compatibility and limitations
+Tagged in-development: these fail until the compiler defect closes. The
+`sha256_text` import is load-bearing -- it drags in `std.common.crypto.types`,
+whose HIR lowering error drops this module to the interpreter, which is the
+only path on which the defect appears.
+"""
+# @req REQ-U8-PACK-001
+
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.structural.wire.{wire_put_u64, wire_get_u64, wire_put_u32, wire_get_u32}
+
+describe "[u8] byte packing is independent of how an element was pushed":
+
+    it "an array grown with `push(x as u8)` reads back through wire_get_u64 like the masked-push array":
+        step("Build the reference array with the masked-i64 push wire_put_u64 uses")
+        # @req REQ-U8-PACK-001
+        # @capture: the two wire_get_u64 readings are the retained evidence.
+        val original = 1788684218584431
+        var packed: [u8] = []
+        packed = wire_put_u64(packed, original)
+
+        step("Rebuild the identical bytes with an `as u8` cast push")
+        var cast_built: [u8] = []
+        var i = 0
+        while i < packed.len():
+            cast_built.push((packed[i] as i64) as u8)
+            i = i + 1
+
+        step("Assert the two arrays are element-wise identical")
+        # If this ever fails the defect has changed shape: the observed one
+        # leaves every element individually correct.
+        val expected_len = packed.len()
+        expect(cast_built.len()).to_equal(expected_len)
+        var mismatches = 0
+        var k = 0
+        while k < packed.len():
+            if packed[k] != cast_built[k]:
+                mismatches = mismatches + 1
+            k = k + 1
+        val expected_mismatches = 0
+        expect(mismatches).to_equal(expected_mismatches)
+
+        step("Assert a packed reader agrees with itself on both arrays")
+        # Observed 2026-09-06: packed reads back 1788684218584431 and
+        # cast_built reads back 111 -- byte 0 (0x6f) followed by seven zeros,
+        # i.e. one element per machine word rather than one per byte.
+        val expected_roundtrip = original
+        expect(wire_get_u64(packed, 0)).to_equal(expected_roundtrip)
+        expect(wire_get_u64(cast_built, 0)).to_equal(expected_roundtrip)
+
+    it "the same `push(x as u8)` pattern survives a 32-bit packed read":
+        step("Build a u32 record both ways")
+        # @req REQ-U8-PACK-001
+        # Generalization: the defect is in the pushed value's representation,
+        # not in any one reader width, so a narrower packed reader over the
+        # same construction must agree too. This is the shape
+        # src/lib/common/structural/parse/parse_types.spl:122 uses.
+        # @capture: the two wire_get_u32 readings are the retained evidence.
+        val original = 305419896
+        var packed: [u8] = []
+        packed = wire_put_u32(packed, original)
+        var cast_built: [u8] = []
+        var i = 0
+        while i < packed.len():
+            cast_built.push((packed[i] as i64) as u8)
+            i = i + 1
+        val expected_roundtrip = original
+        expect(wire_get_u32(packed, 0)).to_equal(expected_roundtrip)
+        expect(wire_get_u32(cast_built, 0)).to_equal(expected_roundtrip)

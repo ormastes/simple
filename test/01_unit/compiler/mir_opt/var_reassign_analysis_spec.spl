@@ -23,7 +23,9 @@ use compiler.mir_opt.mir_opt.var_reassign_ssa.{
     ssa_materialize_phi_plans_for_blocks,
     ssa_phi_lowering_kind_name,
     ssa_phi_lowering_policy_for_backend,
-    ssa_phi_backend_can_lower
+    ssa_phi_backend_can_lower,
+    ssa_cross_block_live_locals,
+    ssa_reassigned_param_locals
 }
 use compiler.interp.execution.tiered_jit.{
 
@@ -126,6 +128,46 @@ fn expect_optional_dest_alloca_rewrite(kind: MirInstKind, expected_present: bool
                 case _: pass_do_nothing
 
 describe "var reassignment analysis":
+    it "keeps cached alloca liveness exact for duplicate, sparse, and zero local ids":
+        # The old predicates scan locals and instructions for every use. This
+        # pins the cache's observable membership and source-order semantics.
+        val entry = MirBlock(
+            id: BlockId.new(0), label: "entry", instructions: [],
+            terminator: MirTerminator.Goto(BlockId.new(1)))
+        val next = MirBlock(
+            id: BlockId.new(1), label: "next",
+            instructions: [
+                # Definition follows the use: existing whole-block semantics
+                # still classify 17 as defined here.
+                inst(MirInstKind.BinOp(local(18), MirBinOp.Add, copy_operand(17), copy_operand(1000000))),
+                inst(MirInstKind.BinOp(local(19), MirBinOp.Add, copy_operand(2000000), copy_operand(1000000))),
+                inst(MirInstKind.Const(local(17), MirConstValue.Int(1), MirType.i64()))
+            ],
+            terminator: MirTerminator.Ret(Some(copy_operand(0))))
+        val locals = [
+            MirLocal(id: local(0), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false),
+            MirLocal(id: local(0), name: nil, type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false),
+            MirLocal(id: local(1000000), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false),
+            MirLocal(id: local(2000000), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false),
+            MirLocal(id: local(1000001), name: nil, type_: MirType.i64(), kind: LocalKind.Arg(1), is_ghost: false),
+            MirLocal(id: local(1000001), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false)
+        ]
+        val live = ssa_cross_block_live_locals([entry, next], locals)
+        # 17 is defined anywhere in the same block; duplicate Arg local 0 is
+        # excluded; sparse non-param 1000000 retains first-use order.
+        expect(live).to_equal([1000000, 2000000])
+
+        val zero_locals = [MirLocal(id: local(0), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false)]
+        expect(ssa_cross_block_live_locals([entry, MirBlock(id: BlockId.new(3), label: "zero", instructions: [], terminator: MirTerminator.Ret(Some(copy_operand(0)))], zero_locals)).to_equal([0])
+
+        val writes = MirBlock(
+            id: BlockId.new(2), label: "writes",
+            instructions: [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Const(local(1000001), MirConstValue.Int(2), MirType.i64()))
+            ], terminator: MirTerminator.Ret(nil))
+        expect(ssa_reassigned_param_locals([writes], locals)).to_equal([0, 1000001])
+
     it "keeps intrinsics while lowering reassigned locals through stack slots":
         val entry = MirBlock(
             id: BlockId.new(0),
@@ -285,6 +327,28 @@ describe "var reassignment analysis":
         expect(analysis.borrow_reassign_safe).to_equal(false)
         expect(analysis.ssa_transform_safe).to_equal(false)
         expect(analysis.reason).to_equal("borrow.reassign_unsafe")
+
+    it "preserves alias and count state across many distinct MIR locals":
+        # @req REQ-SSPEC-COMPILER
+        step("preserves alias and count state across many distinct MIR locals")
+        var instructions: [MirInst] = []
+        for id in 0..256:
+            instructions.push(inst(MirInstKind.Const(
+                local(id), MirConstValue.Int(id), MirType.i64())))
+            instructions.push(inst(MirInstKind.Copy(local(id + 256), local(id))))
+            instructions.push(inst(MirInstKind.Const(
+                local(id), MirConstValue.Int(id + 1), MirType.i64())))
+        val analysis = analyze_var_reassign_blocks(
+            one_block(instructions, MirTerminator.Ret(nil)))
+        expect(analysis.reassignment_count).to_equal(256)
+        expect(analysis.no_escape).to_equal(true)
+        expect(analysis.borrow_reassign_safe).to_equal(true)
+        expect(analysis.ssa_transform_safe).to_equal(true)
+        expect(var_reassign_analysis_hotspot_facts(
+            ["typed_mir", "safe_deopt"], analysis)).to_equal([
+            "typed_mir", "safe_deopt", "var.reassignment",
+            "ssa.var_transform", "escape.analyzed", "escape.no_escape",
+            "borrow.reassign_safe"])
 
     it "feeds analyzer output into JIT var hotspot planning":
         # @req REQ-SSPEC-COMPILER

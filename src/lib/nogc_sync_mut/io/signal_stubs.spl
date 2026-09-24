@@ -22,7 +22,27 @@ fn _store_signal_handler(signal: i64, handler: fn()) -> bool:
     _signal_handlers.push((signal, handler))
     true
 
+# Signals whose delivery is SYNCHRONOUS with the faulting instruction. This
+# module's contract is a latch that sets a flag and RETURNS, which for a fault
+# signal returns straight back to the instruction that faulted — an unbreakable
+# fault loop. Worse, rt_signal_install would sigaction-replace the C runtime's
+# crash handler (rt_install_crash_handler, src/runtime/runtime.c), losing the
+# faulting address, the si_code classification and the backtrace. Registering a
+# latch for these is never correct, so it is refused rather than accepted and
+# silently made unsafe.
+#
+# Only the three numbers POSIX fixes identically on every host this tree builds
+# for are listed: SIGILL=4, SIGFPE=8, SIGSEGV=11. SIGBUS is deliberately NOT
+# listed — it is 7 on Linux but 10 on macOS/BSD, where 7 is SIGEMT and 10 is
+# SIGUSR1, so a hardcoded number would refuse a legitimate SIGUSR1 latch on one
+# platform. Closing that hole needs a platform-aware signal-number table, which
+# this module does not have; it is recorded here rather than guessed.
+fn _is_synchronous_fault_signal(signal: i64) -> bool:
+    signal == 4 or signal == 8 or signal == 11
+
 fn signal_handler_install(signal: i64, handler: fn()) -> bool:
+    if _is_synchronous_fault_signal(signal):
+        return false
     var installed: i64 = 0
     unsafe(capabilities: [ffi]):
         installed = rt_signal_install(signal)

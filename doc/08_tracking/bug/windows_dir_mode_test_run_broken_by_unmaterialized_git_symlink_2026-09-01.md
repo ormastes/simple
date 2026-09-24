@@ -1,4 +1,8 @@
 # Windows: `simple test <directory>` fails entirely — test daemon import chain hits an unmaterialized git symlink
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED 2026-09-06 — see "Fix 2026-09-06" below.
 **Filed:** 2026-09-01
@@ -262,3 +266,4 @@ dir-mode-detection half added here.
 - The daemon-import-graph half of the original symptom is fixed only by running
   the materialiser; nothing yet runs it automatically on an ordinary developer
   checkout. Candidate follow-up: call it from `scripts/setup/setup.shs`.
+

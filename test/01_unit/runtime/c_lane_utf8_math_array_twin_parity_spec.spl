@@ -1,0 +1,128 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Simple-side half of the Rust-vs-C twin parity check for the six runtime
+# kernels that the C-only CoreCBootstrap lane could not link until 2026-09-13
+# (rt_math_sqrt, rt_utf8_validate, rt_utf8_find_invalid,
+# rt_utf8_count_codepoints, rt_numeric_dot_f64, rt_array_remove) -- the `link`
+# class of doc/10_metrics/infra/native_interp_differential_2026-09-13.md and of
+# doc/08_tracking/bug/
+# core_c_bootstrap_runtime_lane_missing_rt_utf8_math_array_symbols_2026-09-13.md.
+#
+# HOW THE TWO LANES ARE COMPARED
+# The Rust runtime and the C runtime are never linked into one process, so a
+# same-process A/B is impossible. Both halves instead assert the SAME absolute
+# oracles -- values fixed by IEEE-754, RFC 3629 and arithmetic, not by either
+# implementation. Run on the seed interpreter this file exercises the RUST
+# twins; src/runtime/test/rt_core_c_utf8_math_array_twin_parity_selfcheck.c
+# asserts the identical oracle set against the C twins, linked the way the
+# CoreCBootstrap archive links them. Agreement with one written-down oracle is
+# a stronger statement than agreement with each other.
+#
+# Every `first invalid` offset below is the offset of the FIRST BYTE of the
+# offending sequence, which is the convention both twins implement.
+#
+# NOT COVERED HERE, deliberately and stated rather than implied:
+# rt_numeric_dot_f64 has no interpreter extern registration (it is reached only
+# through the native lane's kernel lowering), so an `extern fn` declaration for
+# it in this file would silently return nil and assert nothing. Its oracles live
+# in the C selfcheck beside the others and in the Rust crate's own
+# numeric_kernels.rs unit tests. rt_math_hypot, rt_math_min and rt_math_max are
+# the same case: declared here first, they made the interpreter answer
+# `semantic: unknown extern function` -- the honest, loud failure -- so the
+# declarations were removed rather than left asserting nothing. Their oracles,
+# including the IEEE minNum/maxNum NaN cases, are in the C selfcheck.
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.encoding.utf8.{utf8_is_valid, utf8_find_invalid, rt_utf8_count_codepoints}
+
+@unsafe(reason: "parity oracle for the rt_math_sqrt twin", capabilities: [ffi])
+extern fn rt_math_sqrt(x: f64) -> f64
+
+@unsafe(reason: "parity oracles for the libm passthrough twins", capabilities: [ffi])
+extern fn rt_math_exp(x: f64) -> f64
+extern fn rt_math_cbrt(x: f64) -> f64
+extern fn rt_math_sin(x: f64) -> f64
+extern fn rt_math_cos(x: f64) -> f64
+extern fn rt_math_tan(x: f64) -> f64
+
+describe "core-C lane twin parity oracles":
+    # @manual scenario evidence
+    it "computes the correctly-rounded square root":
+        # @req REQ-SSPEC-UNIT
+        step("computes the correctly-rounded square root")
+        assert_equal(rt_math_sqrt(2.0), 1.4142135623730951)
+        assert_equal(rt_math_sqrt(4.0), 2.0)
+        assert_equal(rt_math_sqrt(0.0), 0.0)
+        assert_equal(rt_math_sqrt(1e100), 1e50)
+
+    it "passes libm through unchanged at exactly representable arguments":
+        # @req REQ-SSPEC-UNIT
+        step("passes libm through unchanged at exactly representable arguments")
+        assert_equal(rt_math_exp(0.0), 1.0)
+        assert_equal(rt_math_cbrt(8.0), 2.0)
+        assert_equal(rt_math_cbrt(-27.0), -3.0)
+        assert_equal(rt_math_sin(0.0), 0.0)
+        assert_equal(rt_math_cos(0.0), 1.0)
+        assert_equal(rt_math_tan(0.0), 0.0)
+
+    it "accepts well-formed UTF-8":
+        # @req REQ-SSPEC-UNIT
+        step("accepts well-formed UTF-8")
+        assert_true(utf8_is_valid([]))
+        assert_true(utf8_is_valid([0x61, 0x62, 0x63]))
+        assert_true(utf8_is_valid([0x68, 0xC3, 0xA9, 0x6C, 0x6C, 0x6F]))
+        assert_true(utf8_is_valid([0xE2, 0x82, 0xAC]))
+        assert_true(utf8_is_valid([0xF4, 0x8F, 0xBF, 0xBF]))
+
+    it "rejects every RFC 3629 malformation":
+        # @req REQ-SSPEC-UNIT
+        step("rejects every RFC 3629 malformation")
+        assert_false(utf8_is_valid([0x61, 0xFF]))
+        assert_false(utf8_is_valid([0xC3, 0x28]))
+        assert_false(utf8_is_valid([0xE2, 0x82]))
+        assert_false(utf8_is_valid([0xED, 0xA0, 0x80]))
+        assert_false(utf8_is_valid([0xC0, 0xAF]))
+        assert_false(utf8_is_valid([0xF0, 0x82, 0x82, 0xAC]))
+        assert_false(utf8_is_valid([0xF4, 0x90, 0x80, 0x80]))
+        assert_false(utf8_is_valid([0x80]))
+
+    it "reports the first invalid sequence at its starting byte":
+        # @req REQ-SSPEC-UNIT
+        step("reports the first invalid sequence at its starting byte")
+        assert_equal(utf8_find_invalid([0x61, 0x62, 0x63]), -1)
+        assert_equal(utf8_find_invalid([0x68, 0xC3, 0xA9]), -1)
+        assert_equal(utf8_find_invalid([0x61, 0xFF]), 1)
+        assert_equal(utf8_find_invalid([0xC3, 0x28]), 0)
+        assert_equal(utf8_find_invalid([0xE2, 0x82]), 0)
+        assert_equal(utf8_find_invalid([0xED, 0xA0, 0x80]), 0)
+        assert_equal(utf8_find_invalid([0x61, 0xC3, 0xA9, 0xC3, 0x28]), 3)
+
+    it "counts codepoints by lead-byte walk, including on malformed input":
+        # @req REQ-SSPEC-UNIT
+        step("counts codepoints by lead-byte walk, including on malformed input")
+        assert_equal(rt_utf8_count_codepoints([]), 0)
+        assert_equal(rt_utf8_count_codepoints([0x61, 0x62, 0x63]), 3)
+        assert_equal(rt_utf8_count_codepoints([0x68, 0xC3, 0xA9, 0x6C, 0x6C, 0x6F]), 5)
+        assert_equal(rt_utf8_count_codepoints([0xE2, 0x82, 0xAC]), 1)
+        assert_equal(rt_utf8_count_codepoints([0xF0, 0x90, 0x8D, 0x88]), 1)
+        assert_equal(rt_utf8_count_codepoints([0x61, 0xFF]), 2)
+        assert_equal(rt_utf8_count_codepoints([0xC3, 0x28]), 1)
+        assert_equal(rt_utf8_count_codepoints([0x80]), 1)
+
+    it "removes an element and returns it, at the head, middle and tail":
+        # @req REQ-SSPEC-UNIT
+        step("removes an element and returns it, at the head, middle and tail")
+        head = [10, 20, 30, 40]
+        assert_equal(head.remove(0), 10)
+        assert_equal(head, [20, 30, 40])
+
+        middle = [10, 20, 30, 40]
+        assert_equal(middle.remove(1), 20)
+        assert_equal(middle, [10, 30, 40])
+
+        tail = [10, 20, 30, 40]
+        assert_equal(tail.remove(3), 40)
+        assert_equal(tail, [10, 20, 30])

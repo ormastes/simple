@@ -1,5 +1,17 @@
 # Bug: interpreted `parse_module` + arena decl access crashes (convert_decl_visibility / array-bounds)
 
+## Triage 2026-09-13 — STILL OPEN: could not be reproduced or refuted here
+- **measured** — `src/app/cli/query_lint.spl` no longer parses under the Rust seed
+  `bin/simple` v1.0.0-rc.1 on Windows: `bin/simple run src/app/cli/query_lint.spl <file>`
+  fails with `Unexpected token: expected identifier, found Assign`, so the arena/lint path
+  cannot be driven at all from this host.
+- **measured** — the file has moved on: line 18 now imports
+  `parse_module_silent_checked` / `parser_has_errors` / `parser_set_had_error` and calls
+  `parse_module_silent_checked(source, file)` at :697, rather than the bare
+  `parse_module` this entry describes.
+- **inferred** — the underlying arena/visibility crash is neither confirmed nor cleared.
+  Left OPEN.
+
 - **ID:** interp_parse_module_arena_visibility_crash_2026-06-16
 - **Severity:** P2 (blocks running any arena-AST lint pass from interpreted app code; blocks reliable-mode R2 wiring and the dormant `_run_ast_lint_passes` suite in the LSP/query path)
 - **Area:** interpreter / compiler.core (parse + AST arena, HIR lowering)

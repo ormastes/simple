@@ -1,4 +1,8 @@
 # sspec resid6_part_04: pre-existing red specs and blocked classifications
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Batch: /tmp/sspec_census/resid6_part_04 (64 entries; all entered at effective=49 via blocker cap).
@@ -81,3 +85,4 @@
   `expect(...)` lines were being converted (comment text became code), and `)`-dropping
   when an expected string literal contained `), `. A literal-preservation checker
   (comparing quoted-segment multisets vs HEAD) was run over every edited file; all clean.
+

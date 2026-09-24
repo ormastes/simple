@@ -19,7 +19,103 @@ entries:
   - P_STATIC|src/compiler/70.backend/backend/*vulkan*.spl
   - P_STATIC|src/compiler/70.backend/backend/*llvm_lib*.spl
   - P_STATIC|src/compiler/70.backend/backend/c_backend*.spl
+  # --- 90.tools file-level corrections (2026-09-07) --------------------------
+  # `src/compiler/90.tools/` is a directory of convenience, not a partition
+  # boundary: a handful of files under it are kernel components by the
+  # partition table in kernel_pluggable_partition.md §3. These rows precede the
+  # blanket P_STATIC row below because the first matching glob wins. Each is
+  # cited to §3; do NOT add a row here without one. Justification comments must
+  # sit on their OWN line — `manifest_rows` captures the glob to end-of-line, so
+  # a trailing `#` comment would become part of the glob and match nothing.
+  #
+  # §3 "Interface/ABI digest computation (35.semantics/interface/
+  # compile_interface.spl) — K0 — Identity must be computed by the party it
+  # protects." api_surface.spl is the ApiSurface record that computation is
+  # taken over; it has ZERO imports (pure data, no I/O, no plugin surface).
+  - K0|src/compiler/90.tools/api_surface.spl
+  # §3 "Compile-time weaver ... K0 ... Advice *bodies* are P; the weaver is
+  # K0", and §3.1 lists "the weaver" among what can NEVER leave the kernel.
+  # This file defines AopWeaver, which is a FIELD of the driver's core types
+  # (driver_types.spl:494, pipeline/compiler_context.spl:21) — structurally
+  # mandatory, not selected. Its own imports are compiler.core.aop (00.common,
+  # K0) and compiler.frontend.core.aop_debug_log (10.frontend, K0).
+  # PROVISIONAL: LogAspect/TracingAspect/ContractAspect (advice BODIES, P by
+  # §3) are co-located in this same file. Phase 7 of the migration plan must
+  # split them out into an aspect pack; until then this row classifies the
+  # file by its kernel half. See doc/08_tracking/bug/
+  # kernel_closure_k0_to_p_static_residual_2026-09-07.md.
+  - K0|src/compiler/90.tools/aop.spl
+  # §3 "Frontend..MIR ... K0 — HIR/MIR stay internal; exposing them as plugin
+  # interfaces freezes internals (Hyrum)." async_integration.spl takes MIR in
+  # and MIR out (imports only compiler.mir.* / compiler.hir.*) and runs as a
+  # default pipeline pass (driver_pipeline_passes.spl:32 process_async()).
+  # A module whose entire signature is internal MIR cannot be a plugin seam.
+  - K0|src/compiler/90.tools/async_integration.spl
+  # §3 "Linker wrappers mold/lld/flavor/sysroot — K1 — env-selected at run
+  # time already." shared_lib_flags.spl is exactly that: host-OS shared-library
+  # compile/link flag selection (env_get + process_run, no compiler types).
+  # K1, not K0: it is link policy behind the driver, not kernel identity.
+  - K1|src/compiler/90.tools/header_gen/shared_lib_flags.spl
   - P_STATIC|src/compiler/90.tools/**
+  # --- kernel_plugin_adapter file-level classification (2026-09-07) ---------
+  # Arrived unclassified with the PR #319 kernel-plugin migration. This is a
+  # plugin ADAPTER directory, i.e. a boundary: the interface half is kernel,
+  # the implementation half is not, so the five files do NOT share a tier.
+  # Cited to kernel_pluggable_partition.md §3 per file, #481's convention.
+  # Comments sit on their OWN lines — `manifest_rows` captures the glob to
+  # end-of-line, so a trailing `#` would become part of the glob.
+  #
+  # §3 "`BackendPort` (the codegen interface) — K0 — The interface is K0;
+  # implementations are not", and §1 leg 1 "Interface identity is
+  # `(name, major, abi_digest)`". contract.spl IS that identity for the
+  # CompilerDriverV1 seam: COMPILER_DRIVER_KPF_{INTERFACE,PROVIDER}_ID +
+  # COMPILER_DRIVER_KPF_SCHEMA_DIGEST plus the versioned param objects
+  # (Request/Result/ReceiptV1, §4.2). Its only import is
+  # common.kernel_plugin.ids (not under src/compiler); no plugin surface.
+  - K0|src/compiler/kernel_plugin_adapter/contract.spl
+  # §3 "Interface/ABI digest computation — K0 — Identity must be computed by
+  # the party it protects." codec.spl fixes the exact byte layout that
+  # COMPILER_DRIVER_KPF_SCHEMA_DIGEST names (16-byte request, 40-byte result,
+  # fail-closed on length and on an unknown status ordinal). §3 Value ABI row
+  # applies too: "the surface every param object crosses; nothing sits under
+  # it." Imports only its own contract (K0).
+  - K0|src/compiler/kernel_plugin_adapter/codec.spl
+  # §3 "Non-bootstrap backends ... P-static — Same `BackendPort`; not needed
+  # for the fixpoint; statically linked for the reasons in §3.2."
+  # session.spl is the IMPLEMENTATION side of the seam above: two coexisting
+  # placements (CompilerDriverKpfStaticSessionV1 over the in-process driver
+  # provider, CompilerDriverKpfWorkerSessionV1 over the SMF worker transport).
+  # Not K0 by the §2 membership test — a KPF host loads it and checks it, not
+  # itself. Not K1 either: K1 requires "exactly one implementation must be
+  # present for the fixpoint", and both placements are linked while neither is
+  # on the bootstrap path (nothing under src/ imports this module; only
+  # test/03_system/compiler/feature/kernel_plugin/
+  # compiler_driver_kpf_adapter_spec.spl does). §3.2 reason 1 is why it stays
+  # static rather than P-dyn.
+  - P_STATIC|src/compiler/kernel_plugin_adapter/session.spl
+  # §3 "Target descriptors ... P-static (data) — Descriptor records, not code."
+  # startup_proof.spl is a zero-import table asserting that the root CLI's
+  # Help/Version intents load no provider and only Compile dispatches (§6
+  # startup budget). Deliberately NOT the api_surface.spl precedent: that file
+  # is K0 because a K0 computation (the interface digest) is taken OVER it,
+  # whereas nothing in the kernel consumes this table — its only reader is the
+  # system spec above. §6 says "Plan Phase 7 pins this with a startup-time
+  # gate"; when that gate lands in K0 and imports this module, KERNEL-CLOSURE-
+  # 003 will force the K0 question then, which is the correct time to ask it.
+  - P_STATIC|src/compiler/kernel_plugin_adapter/startup_proof.spl
+  # The package barrel; it re-exports all four modules above, so its honest
+  # floor is the weakest member (P_STATIC). Note the checker cannot see this:
+  # its import scan matches `use`/`pub use` only, and `export use` is invisible
+  # to it, so a K0 row here would launder the P_STATIC re-exports rather than
+  # be caught. Classified by inspection, not by what the scan can prove.
+  - P_STATIC|src/compiler/kernel_plugin_adapter/__init__.spl
+  # NOTE: the `rules:` projection lower in this file is a SEPARATE parser
+  # (sh `case`, where `*` crosses `/`), so its catch-all
+  # `K0|src/compiler/*.spl` already classifies these five and reports no
+  # unclassified input. It is deliberately left alone: the two blocks already
+  # diverge for aop.spl, weaving/** and driver_aot_vhdl_output.spl, and
+  # editing it changes the bootstrap kernel-inputs hash, which cannot be
+  # verified without a bootstrap run.
   - K0|src/compiler/00.common/**
   - K0|src/compiler/10.frontend/**
   - K0|src/compiler/15.blocks/**
@@ -41,3 +137,100 @@ entries:
   - P_STATIC|src/compiler/test_pkg/**
   - P_STATIC|src/compiler/weaving/**
   - K0|src/compiler/*.spl
+
+# Kernel-plugin-fabric authority + rule projection (schema simple-kernel-closure-v1),
+# consumed by scripts/lib/kernel-closure-inputs.shs and its callers. Kept alongside the
+# entries: rows above, which check-kernel-closure.shs reads; neither parser reads the
+# other lines.
+
+authority:
+  k1_policy: llvm-cranelift
+  simple_abi_policy: v1
+  plugin_manifest_policy: simple-sdn
+  coverage_cutover_policy: atomic-apk-only
+  coverage_implementation: apk-only
+  performance_threshold_mode: baseline-relative-10-percent
+  performance_threshold_status: selected
+  performance_baseline_scope: admitted-per-architecture-receipt
+  performance_steady_rss_percent: 110
+  performance_growth_percent: 10
+  performance_warm_request_count: 20
+
+rules:
+  - class: K1
+    path: src/compiler/90.tools/verify/allocator_symbol_scan.spl
+  - class: K1
+    path: src/compiler/90.tools/aop.spl
+  - class: P-static
+    path: src/plugins/backend_*/**
+  - class: P-static
+    path: src/compiler/90.tools/**
+  - class: P-static
+    path: src/compiler/test/**
+  - class: P-static
+    path: src/compiler/test_module/**
+  - class: P-static
+    path: src/compiler/test_pkg/**
+  - class: K1
+    path: src/compiler/60.mir_opt/**
+  # Phase 5 authority: non-bootstrap backend implementation closures are
+  # P-static even while compatibility modules remain under 70.backend.
+  # LLVM, Cranelift, and Interpreter stay K1 through the catch-all below.
+  - class: P-static
+    path: src/compiler/70.backend/backend/_VhdlProcess/**
+  - class: P-static
+    path: src/compiler/70.backend/backend/c_codegen_adapter.spl
+  - class: P-static
+    path: src/compiler/70.backend/backend/common/mod.spl
+  - class: P-static
+    path: src/compiler/70.backend/backend/cuda_backend.spl
+  - class: P-static
+    path: src/compiler/70.backend/backend/vhdl/**
+  - class: P-static
+    path: src/compiler/70.backend/backend/vhdl_backend.spl
+  - class: P-static
+    path: src/compiler/70.backend/backend/vulkan_backend.spl
+  - class: P-static
+    path: src/compiler/70.backend/backend/vhdl_process.spl
+  - class: P-static
+    path: src/compiler/70.backend/mir_test_builder.spl
+  - class: K1
+    path: src/compiler/70.backend/**
+  - class: K1
+    path: src/compiler/95.interp/**
+  - class: K0
+    path: src/compiler/00.common/**
+  - class: K0
+    path: src/compiler/10.frontend/**
+  - class: K0
+    path: src/compiler/15.blocks/**
+  - class: K0
+    path: src/compiler/20.hir/**
+  - class: K0
+    path: src/compiler/25.traits/**
+  - class: K0
+    path: src/compiler/30.types/**
+  - class: K0
+    path: src/compiler/35.semantics/**
+  - class: K0
+    path: src/compiler/40.mono/**
+  - class: K0
+    path: src/compiler/50.mir/**
+  - class: K0
+    path: src/compiler/55.borrow/**
+  - class: P-static
+    path: src/compiler/80.driver/driver_aot_vhdl_output.spl
+  - class: K0
+    path: src/compiler/80.driver/**
+  - class: K0
+    path: src/compiler/85.mdsoc/**
+  - class: K0
+    path: src/compiler/99.loader/**
+  - class: K0
+    path: src/compiler/weaving/**
+  - class: K0
+    path: src/compiler/*.spl
+  - class: K0
+    path: src/compiler/*.sdn
+  - class: K0
+    path: src/compiler/*.md

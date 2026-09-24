@@ -1,4 +1,8 @@
 # BUG: `native-build` fails with "MIR module has no functions" for extern/return-typed probes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ALREADY-FIXED (re-verified 2026-08-10 — see re-verification section at end)
 **Found:** 2026-07-25
@@ -202,3 +206,4 @@ fix already landed in the Rust seed sometime between 2026-07-25 and
 2026-08-09 (no specific commit identified; `git log` on this doc shows only
 doc/chore syncs, so the fix landed as part of ordinary seed work without a
 doc update). Marking ALREADY-FIXED and closing.
+

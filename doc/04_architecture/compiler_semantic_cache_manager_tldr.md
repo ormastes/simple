@@ -2,6 +2,8 @@
 
 # Compiler Semantic Cache Manager — TLDR
 
+**Implementation status:** proposed target contract. The current resolver and incremental builder do not yet implement the admitted `.tld`/`__init__.tld`/semantic-`.rr` path, so the Go-like read count and latency thresholds are not current performance claims.
+
 ## Decision
 
 Use a verified, schema-versioned CAS keyed by frozen semantic inputs. `ActionRootJournalV1` is authority for admitted action/root mappings; PureDatabase is a rebuildable projection. A per-user daemon accelerates access but compilation remains correct and byte/diagnostic-identical after bounded failover to an in-process client.
@@ -43,6 +45,18 @@ Tree-private under an explicit dependency DAG: raw layers may use immutable comm
 - Simple compiler/CLI, MCP, LSP MCP and SPipe use one `VirtualSourceStoreV1` facade backed by `SummaryStoreV1`. Its bounded `list/stat/read/page` operations require an exact frozen snapshot plus session/capability/path/visibility authorization and explicit generated provenance.
 - The cache adapter alone accesses `SummaryStoreV1`; consumers cannot parse source or generate summaries. Absence is only `SummaryLookupV1(present=false)`, never an error.
 - Cache absence is only `CacheLookupV1(present=false)`. A hit is returned only after its generation pin is atomically extended with action/root/object digests and the same journal generation is reverified.
+
+## Physical metadata and portable compile
+
+- The admitted catalog opens `package/__init__.tld` first, then only selected module `.tld` summaries and exceptional bodies. Unchanged validated dependencies require no `.spl` or private-AST read.
+- After catalog/snapshot pinning, eligible `three_payload_compile_v2` strict-profile recompilation is sealed by `ThreePayloadClosureSealV2` and has changed `.spl`, optional prior `.tld`, and closure-complete `__init__.tld`. `ThreePayloadCompileV1` retains only its V1 compatibility/model meaning. Referenced features may originate elsewhere: executable macro content is embedded when required, aspects normally contribute typed function/object references rather than bodies, and traits contribute signatures plus candidate/coherence facets. Any external open is a typed fallback; first build has no prior `.tld`.
+- Eligible `.tld` files are single verified indexed containers; readable output is an inspection rendering of their canonical sections, not another sidecar or semantic owner.
+- Physical `.tld` and indexed `.rr` are rebuildable projections; neither enters source import resolution, and `.rr` is not an ordinary compile input.
+- `.rr` is coordinator-only and never supplies header content. It derives from `SemanticQueryReadManifestV1`, not the external-effect read set: changed existing facets follow reverse edges, while new/deleted aspects, impls, overloads, imports, macros and files invalidate membership/candidate/absence roots in `__init__.tld`. Missing shards rebuild; corrupt/incomplete coverage fails closed and widens recomputation.
+- `.sio` has separately keyed verified base and composed profiles; advice selection/common optimization precede final publication. Target layout/ABI/runtime choices remain symbolic, and native loaders reject both profiles.
+- The v1 aspect fast path lowers only complete, generation-fixed typed `before`/`after` advice to ordinary calls. Around/structural/incomplete selectors fail closed; dynloaded aspects retain typed-facet admission, dispatch, leases, and revocation.
+- `CacheServiceCore` is pure Simple over SOSIX, CAS/journal, PureDatabase, the daemon, and Simple HTTP. Optional native providers cannot replace its correctness route.
+- Performance acceptance has independent verdicts: `JavaClassParityV1` compares matched Simple `.sio` emission with Java `.class` emission, while `GoTargetObjectParityV1` compares selected Simple target-object/package generation with Go package compilation. For the matched plain typed-package class, each gate targets median <=1.10x, p95 <=1.15x, and peak RSS <=1.25x of its own reference. Macro/AOP/trait-coherence extensions and native LLVM/LTO/link remain separate evidence.
 
 Frozen enums:
 

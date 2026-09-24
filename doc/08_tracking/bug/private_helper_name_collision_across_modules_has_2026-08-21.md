@@ -1,4 +1,9 @@
 # Private module helper `_has` resolves across modules — RESOLVED 2026-08-21
+## Closed 2026-09-16 — RESOLVED 2026-08-21: renames landed, spec 3/3 green, neighbours green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-21
 - Status: **RESOLVED** (product renames; the compiler-side scoping defect is
@@ -51,3 +56,4 @@ updated. No behaviour change in any of the three bodies.
 The language-level defect — make `_`-prefixed top-level functions resolve
 module-locally — is unchanged and lives in the Rust seed's function-lookup
 path. Renaming is a mitigation per collision, not a fix for the class.
+

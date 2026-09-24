@@ -1,4 +1,8 @@
 # Stage4 test-runner main HIR names
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Reproduction
 
@@ -219,3 +223,4 @@ payload types against the current child's filename. The compiler fix and
 behavioral regression are tracked in
 `hir_package_sibling_imported_enum_surface_leak_2026-08-02.md`. No fourth build
 was attempted.
+

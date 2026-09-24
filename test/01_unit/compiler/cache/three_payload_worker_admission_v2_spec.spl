@@ -1,0 +1,48 @@
+# codex-system-test
+# Purpose: fail-closed L7 worker admission evidence until restricted descriptors exist.
+# @req REQ-CSM-006 REQ-CSM-017 REQ-CSM-024 REQ-CSM-027
+
+use std.spec.*
+use std.spec.step
+use compiler.driver.cache.worker.three_payload_worker_admission_v2.{
+    three_payload_worker_admission_available_v2,
+    three_payload_worker_parse_slice_available_v2,
+    three_payload_worker_admission_blocker_v2,
+    three_payload_worker_admission_contract_v2,
+    three_payload_worker_admission_contract_valid_v2,
+}
+use compiler.driver.cache.gateway.three_payload_compile_coordinator_v2.{
+    three_payload_compile_coordinator_recovery_available_v2,
+}
+
+describe "L7 three-payload worker admission V2":
+    it "should retain the one-run and one-publication lifecycle contract":
+        step("Read the owner-bound worker lifecycle contract")
+        val contract = three_payload_worker_admission_contract_v2()
+        expect(three_payload_worker_admission_contract_valid_v2(contract)).to_equal(true)
+        expect(contract.maximum_runs_per_grant).to_equal(1)
+        expect(contract.maximum_publications_per_grant).to_equal(1)
+        expect(contract.validation_repeatable_while_reserved).to_equal(true)
+        expect(contract.successful_publication_consumes_grant).to_equal(true)
+        expect(contract.durable_retry_relaunches_worker).to_equal(false)
+
+    it "should advertise only the sealed physical parse slice, not full worker capability":
+        step("Distinguish the implemented bounded parse transition from full compilation authority")
+        expect(three_payload_worker_parse_slice_available_v2()).to_equal(true)
+        expect(three_payload_worker_admission_available_v2()).to_equal(false)
+        expect(three_payload_worker_admission_blocker_v2()).to_equal(
+            "restricted_descriptor_and_executor_authority_unavailable")
+
+    it "should keep reverse references coordinator-only while admission is closed":
+        step("Inspect the admission contract before any worker can reserve inputs")
+        val contract = three_payload_worker_admission_contract_v2()
+        expect(contract.reverse_reference_coordinator_only).to_equal(true)
+        expect(contract.requires_live_scope_owner).to_equal(true)
+        expect(contract.requires_restricted_physical_descriptors).to_equal(true)
+        expect(contract.sealed_physical_parse_slice_available).to_equal(true)
+        expect(contract.full_type_hir_native_available).to_equal(false)
+        expect(contract.authority_available).to_equal(false)
+
+    it "should refuse prepare and publish before guarded host recovery is available":
+        step("Check the coordinator recovery boundary before publication mutation")
+        expect(three_payload_compile_coordinator_recovery_available_v2()).to_equal(false)

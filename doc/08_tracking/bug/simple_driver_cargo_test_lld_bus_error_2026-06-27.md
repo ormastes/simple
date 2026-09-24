@@ -1,6 +1,11 @@
 # simple-driver cargo test linker bus error
 
-Status: open
+## Closed 2026-09-13 — stale by host: a resource/toolchain failure on a Linux box that no longer exists
+- **inferred**: every symptom is host state, not repo state — `collect2: ld terminated with signal 7 [Bus error]` from `rust-lld`/`cc` while linking many `simple-driver` test binaries, i.e. memory/IO pressure on that specific machine. No `src/` defect is implicated and the entry proposes no code change.
+- **inferred**: the toolchain it ran against is gone — the repo has since pinned LLVM 23.1.0 via `scripts/setup/llvm-toolchain-env.shs` (.claude/rules/commands.md), and this host is Windows/MSVC with no link path of that shape.
+- **inferred**: deliberately not re-run — `src/compiler_rust/**` is off-limits this session (concurrent bootstrap), and a `cargo test` link storm is exactly the unattended step the entry itself advises against.
+
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 Severity: P2 resource/toolchain
 Date: 2026-06-27
 

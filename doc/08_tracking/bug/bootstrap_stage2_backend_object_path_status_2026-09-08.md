@@ -1,10 +1,20 @@
 # Bootstrap Stage 2 backend object-path failure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
-Open. Reproduced after two intervening module-surface freeze defects were fixed.
-The mandatory three-cycle fix/verify budget is exhausted; do not retry this
-rollout without a fresh scoped session.
+Fix implemented; native wrapper differential verification pending. PR #1072
+merged the nullable diagnostic-reader transport repair on 2026-09-18. The
+2026-09-22 focused audit recovered a concrete LLVM failure through an admitted
+Windows Stage 2 driver, but the full wrapper probe crashed after HIR before an
+executable was produced. This is not a fixed verdict. See
+`doc/09_report/stage2_object_path_diagnostic_evidence_2026-09-22.md`.
+
+The original three-cycle budget below describes the 2026-09-08 session. The
+2026-09-22 session also stops after three native compile attempts.
 
 ## Reproduction
 
@@ -60,3 +70,370 @@ same file-writing path, then run one isolated cached sanity cycle.
 No admitted self-hosted runtime is available for compiling or executing the
 image-to-Markdown feature tests. This was the third and final bootstrap
 verification cycle for the feature session, so it was not retried.
+
+---
+
+## Re-verified 2026-09-13 — now the FIRST blocker, after the staging defect was fixed
+
+This record is no longer behind another failure. The Windows/MSVC Stage 2 lane
+reached it again today after a long chain of fixes, and it is now the frontier.
+
+What changed since 2026-09-08, all landed on `main` today:
+
+- Stage 2 link went from **33 unresolved externals to 0** (sqlite closure cut,
+  `S_ISDIR`/`S_ISREG`/`__builtin_popcount`, four unimplemented `rt_file_*`
+  externs implemented, and two Simple methods that were called but defined
+  nowhere).
+- The Stage 2 compiler is **built and runs** — `simple-bootstrap 1.0.1-beta.1` —
+  and natively builds a hello world by hand (rc=0, exe produced).
+- `diagnostic staging unavailable` is **fixed**: `rt_secure_temp_dir` was hitting
+  `CreateDirectoryA`'s 248-char directory limit (`ERROR_FILENAME_EXCED_RANGE`,
+  206) on a 258-char staging path; it now uses `CreateDirectoryW` with the
+  extended-length prefix.
+
+Evidence that this record's failure is what remains, and is distinct:
+
+```
+reason-len=30  ->  "diagnostic staging unavailable"   (before, now fixed)
+reason-len=28  ->  "backend object-path status 1"     (now)
+```
+
+and the staging diagnostic no longer fires at all (0 occurrences of
+`rt_secure_temp_dir:` in the smoke log), confirming staging now succeeds.
+
+## What is still missing, and it is the same complaint as 2026-09-08
+
+The reason delivered is still opaque: `backend object-path status 1` is a status
+code with no message. `compile_aot_into_path` is handed a `diagnostic_path` to
+write a reason into, and that file is either empty or unread — so the caller can
+only report the number.
+
+The staging defect above was solved in one run once the failing call was made to
+say `GetLastError` and the path it tried. The same move is the obvious next step
+here: make the backend write, and the driver surface, whatever it knows before
+returning 1. Note the trap that cost time on the staging fix —
+`rt_secure_temp_dir` has three byte-identical copies and only
+`runtime_secure_staging.c` is the one that links, so instrument the copy that is
+actually in the artifact and verify with `strings` on the binary rather than
+assuming.
+
+## 2026-09-13: narrowed to "write reports success, file is empty"
+
+Three instrumentation passes landed today moved this from an opaque status code
+to a specific, reproducible contradiction. Current state:
+
+```
+backend object-path status 1 (diagnostic file empty; path <266 chars>)
+```
+
+and **no** `AOT diagnostic write failed` warning, which is now emitted whenever
+`file_atomic_write` returns false. So:
+
+- the backend DOES reach a failure path and DOES call the diagnostic writer
+  (every one of the twelve failure returns across `compile_ir_to_object_path`,
+  `DynamicBackendAdapter.compile_aot_into_path` and
+  `dynamic_backend_publish_object_v1` writes one);
+- `file_atomic_write` returns **true**;
+- the driver then reads the file successfully and finds it **empty**
+  (`Ok(message)` with `message.len() == 0`, not `Err`);
+- both writer and reader normalise through `host_path_native`, so they agree on
+  the path, and both now get the extended-length prefix (the path is 266 chars,
+  past the 247 ceiling).
+
+A write that reports success and leaves a zero-byte file is the contradiction to
+chase. Candidates not yet eliminated, in the order I would take them:
+
+1. `rt_file_atomic_write` writes to a temp file and publishes by rename. If the
+   temp write succeeds and the publish silently no-ops, the destination exists
+   and is empty and the function still returns success. Instrument the publish
+   step specifically — the temp path is also long.
+2. The content argument arriving empty. `backend_aot_write_diagnostic` bounds
+   the message with a slice before writing; verify the bounded value is
+   non-empty at the call, not just the source message.
+3. A cleanup racing the read: `llvm_object_stage_fail` removes its stage dir,
+   and the driver removes `diagnostic_dir` after reading. Ordering has been
+   reasoned about but not traced.
+
+### Verified NOT the cause (do not re-chase)
+
+- Not MAX_PATH on the directory: `CreateDirectoryA` at 258 chars was real and is
+  fixed (`CreateDirectoryW` + extended-length prefix).
+- Not MAX_PATH on the file open: a 278-char absolute path round-trips correctly
+  through `file_atomic_write` + `file_read_regular_no_follow_bounded` today.
+- Not a missing extern registration, not `SystemRoot`, not `--entry-closure`,
+  not `--mode one-binary`, not the harness argv — the rejected Stage 2 binary
+  hand-builds a hello world at rc=0 under all of those.
+- Not a stale object cache: reproduced with `stage2-native-cache` and
+  `native-objects-*` deleted.
+
+### Note for the next session
+
+`rt_secure_temp_dir` exists in three byte-identical copies and only
+`runtime_secure_staging.c` is the one that links. Instrument the copy that is
+actually in the artifact and confirm with `strings` on the binary before
+concluding a diagnostic is silent — that mistake cost a full cycle here.
+
+## 2026-09-13, later: the failure is NAMED — `llc not found`
+
+Four rounds of inference failed on this. A temporary unconditional trace on
+`backend_aot_write_diagnostic` settled it in one run:
+
+```
+aot-diag: called msg_len=13 bounded_len=13
+```
+
+`"llc not found"` is exactly 13 characters. That is
+`llvm_backend_tools.spl:317`, reached when `find_llc()` returns empty.
+
+So the backend failure is **not** a codegen or object-emission defect at all —
+the LLVM object stage cannot locate the `llc` executable. Everything downstream
+("backend object-path status 1", "diagnostic file empty") was noise generated by
+that one missing tool plus a diagnostic that could not be read back.
+
+### Why it stayed hidden
+
+`find_tool_portable` (`llvm_capability.spl:177`) resolves LLVM tools BY NAME at
+run time — `where llc` on Windows, `command -v` elsewhere. The message it
+produces on failure was written correctly every time, but the driver read the
+file as empty, so only the generic status ever surfaced. The read-back problem
+is real and still unexplained (see below); it is what made a one-line cause take
+four cycles.
+
+### What was tried and did NOT fix it
+
+`PATH` was added to the Stage 2 canonical env allowlist and passed at the stage
+build (this was a genuine gap — the allowlist is the child's entire environment).
+The symptom did not change, and `bootstrap_stage_sanity` already receives
+`${stage_build_path}` and exports it, so the smoke should have had a PATH. `llc`
+itself is present and on PATH for an interactive shell:
+`/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin/llc.exe`.
+
+### Where to go next, in order
+
+1. **Find out what `where llc` actually sees inside the smoke.** The tool lookup
+   goes through `backend_shell_tuple`, i.e. it spawns a shell. If that spawn does
+   not inherit the exported PATH, or `where.exe` itself is unreachable because
+   System32 is missing from the passed PATH, the lookup fails regardless of the
+   allowlist. Trace the lookup, not the environment.
+2. **Give `llc` an explicit override.** `find_nm_portable` already honours
+   `SIMPLE_NM`; there is no `SIMPLE_LLC` equivalent. Adding one, and passing it
+   through the allowlist, removes the run-time name lookup from the bootstrap
+   path entirely — which is the more robust fix regardless of what (1) finds.
+3. **Separately**: the diagnostic file reads back empty even though the writer
+   reports writing 13 bytes to it. That is its own defect and is what hid this
+   for four cycles. Worth fixing on its own merits.
+
+The trace that produced this answer has been removed; re-add it in one line if
+needed (`print` the message length on entry to `backend_aot_write_diagnostic`).
+
+## 2026-09-13, final state of this session
+
+`llc not found` is the confirmed failure (13-byte diagnostic, traced). Two
+attempts to fix it did NOT change the symptom, and both are landed because each
+closed a real gap regardless:
+
+1. **`PATH` added to the Stage 2 allowlist.** A genuine hole — the allowlist is
+   the child's whole environment — but `bootstrap_stage_sanity` already exports
+   `${stage_build_path}`, so the smoke likely had a PATH already.
+2. **`SIMPLE_LLVM_BIN` / `LLVM_SYS_180_PREFIX` added to the allowlist.** The
+   backend's finder consults these BEFORE any PATH lookup (`_env_tool_dirs`), and
+   the MSVC lane exports the prefix. Symptom unchanged.
+
+### The lead I would take next
+
+`LLVM_SYS_180_PREFIX` is set to an **MSYS-style** path:
+`/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc`. `_env_tool_dirs`
+appends `/bin` and hands that to `file_exists`, from a process that is a NATIVE
+Windows binary. Whether `/c/...` survives depends on `host_path_native`'s
+`_mingw_drive_to_windows` running on that path. If it does not, the directory
+probe fails, the finder falls through to `where llc`, and the result is
+identical to having no configuration at all — which is exactly what we observe.
+
+Cheapest decisive test: set `SIMPLE_LLVM_BIN` to a **native** path
+(`C:/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin`) in the lane and
+re-run. If that clears it, the defect is MSYS-vs-native path form in
+`_env_tool_dirs`, not the allowlist at all.
+
+### Re-tracing
+
+The trace that named this was one line in `backend_aot_write_diagnostic`
+printing `message.len()`. It was removed to keep `main` clean. Re-add it before
+the next attempt — without it, every one of these runs is indistinguishable.
+
+### Honest note on effort
+
+This single defect consumed many bootstrap cycles in one session. Each cycle is
+~40 minutes and the reason string is the ONLY signal, so guessing is expensive
+and measuring is cheap. The trace answered in one run what four rounds of
+inference could not. Start there.
+
+## 2026-09-13 session close: what is fixed, what remains
+
+### Fixed and landed (each verified)
+
+- **`llc not found`** — the real backend failure. `find_llc` consults
+  `_env_tool_dirs` (SIMPLE_LLVM_BIN / LLVM_SYS_180_PREFIX) before any PATH
+  lookup, but `bootstrap_stage_sanity` scrubs the environment and re-exports
+  only a fixed set, so those two were stripped exactly where needed. Carried
+  through the scrub. Measured before: `find_llc: env_dirs=0 resolved=[]`;
+  after: `env_dirs=1 resolved=[C:/dev/install/clang+llvm-18.1.8-.../bin]`.
+- **Four nil-vs-empty defects**, all of which converted a real fault into an
+  invisible one: the secure-temp-dir guard (`== ""` misses nil), the provider
+  diagnostic guard, the discarded `file_atomic_write` result, and
+  `file_read_regular_no_follow_bounded` returning `Ok(<nil>)` on a failed read.
+  That last one is why this defect read as "diagnostic file empty" for many
+  cycles: the message WAS written, the READ failed, and the failure was
+  laundered into an empty success that pointed suspicion at the writer.
+
+### The current, honest frontier
+
+The failure is now reported truthfully:
+
+```
+backend object-path status 1 (diagnostic unreadable:
+  regular no-follow bounded file read returned nil: <path>)
+AOT diagnostic wrote 29 bytes but is unreadable
+```
+
+So the backend produces a 29-byte reason that still cannot be read back. The
+write reports success; the read returns nil. Both go through `host_path_native`,
+and host detection and separator normalisation are confirmed working
+(`host_is_windows_host=true`).
+
+### Methodology traps that cost real time here — read before continuing
+
+1. **`src/runtime/*.c` is COMPILED INTO the binary; `src/lib/**` is read as
+   source.** A probe run with the deployed `bin/simple.exe` (dated 2026-09-02)
+   exercises the OLD C runtime and says nothing about a runtime change. Only a
+   bootstrap run, or a locally rebuilt seed, tests those.
+2. **Backslashes do not survive into heredocs reliably here.** Three separate
+   probes and two C edits were corrupted by `\` collapsing to `\`, once
+   silently turning `C:\Users\...` into escape sequences and producing a
+   completely bogus "mixed separators fail" conclusion. Build path separators
+   from a numeric code point, or avoid literals entirely by obtaining paths from
+   the runtime (e.g. `secure_temp_dir`).
+3. **`timeout` is not available under `env -i`.** Two readings of `rc=127`/`rc=1`
+   were `timeout` failing, not the program under test. Read stderr.
+
+### Next step
+
+Instrument `rt_file_read_regular_no_follow_bounded` on the Windows branch the
+same way `rt_secure_temp_dir` was instrumented (report `GetLastError` and the
+path), then run ONE bootstrap. The reason string is the only signal a cycle
+produces, and a one-line trace has out-performed every round of inference in
+this investigation.
+
+## 2026-09-13 — the read was never the fault (measured, not inferred)
+
+`rt_file_read_regular_no_follow_bounded` now records which of its eleven exits
+it took, in an atomic read back through
+`rt_file_read_regular_no_follow_last_failure` and named in the Simple `Err`
+text. The atomic starts at a sentinel (77) and stores a distinct value on
+success (100), so a readout separates four states that all used to read as
+zero: never called, succeeded, a named rejection arm, and "this diagnostic
+extern is itself unresolved in the lane that read it".
+
+Stage 2 sanity now reports:
+
+    backend object-path status 1 (diagnostic unreadable:
+    regular no-follow bounded file read returned nil (read succeeded): <path>)
+
+**The reader ran and returned a real 29-byte heap string.** The nil is created
+after the extern returns, between the `RuntimeValue` and the Simple `text?`
+binding: `content.?` is TRUE (so the Optional is present and non-NIL) while
+`content.unwrap().len()` is -1 (so the word inside does not decode as a heap
+string). This is the force-unwrap Option-wrapper family, not file I/O.
+
+### Hypotheses this retires, each with the measurement that killed it
+
+- **MAX_PATH / extended-length paths.** `LongPathsEnabled` is `0x1` on this
+  host and Rust's std already applies `maybe_verbatim`. A write+read probe at
+  the exact failing path (267 chars) through the seed returns `write true /
+  read ok len 26`. The Rust-side `long_path` helper written for this was
+  reverted as dead code; the C-side widening in `runtime_native.c` and
+  `runtime.c` is correct but was never on this path.
+- **Mixed separators under a verbatim prefix.** Reproduced with the exact
+  backslash/forward-slash mix from the log: still `read ok`. Both C helpers
+  (`rt_widen_long_path`, `rt_secure_create_directory_long`) normalise `/` to
+  the separator before `GetFullPathNameW` anyway.
+- **The capability sandbox.** The gate is symmetric across read and write and
+  returns true with no active sandbox; the write in the same process succeeded.
+- **A C/Rust split of the reader.** Measured per archive: the C
+  `runtime_sffi_c.lib` defines `rt_secure_temp_dir` and **not** the reader;
+  `simple_native_all.lib` carries both. Staging is C, the reader is Rust, and
+  they share one archive — no split-representation problem.
+- **The `file_read_regular_no_follow_bounded` name collision.** Real (two
+  co-compiled definitions, `(i64,i64,i64)->i64` in `sffi/fs.spl` vs
+  `(text,i64)->Result<text,text>` in `io/file_ops.spl`, and the raw one breaks
+  its own file's `_raw`/`_unchecked` convention) but **not this defect**: the
+  warning does not appear in `stage2-sanity.env.frontend-failure.log`. Worth
+  fixing as the hygiene the compiler asks for, separately.
+
+### Methodology trap this run added
+
+`arm 0` was read as "the reader succeeded" when zero was simultaneously the
+atomic's initial value, the success code, and what an unresolved extern returns.
+Three states on one number is not a measurement. A diagnostic code space must
+make "I was never set" distinguishable from every real answer before its
+readout is worth anything.
+
+## 2026-09-22 — merged fix audited; native diagnostic recovery observed
+
+PR [#1072](https://github.com/ormastes/simple/pull/1072), merge
+`585b5799baed2292b294fb6b26391b3a63f6e909`, changes the bounded reader to
+`== nil` plus `??`. Its native A/B leg was explicitly left pending. The clean
+`origin/main` database already agrees; the old "Open" heading above did not.
+PR [#748](https://github.com/ormastes/simple/pull/748) separately repaired the
+stale object destination and reported both AArch64 Linux sanity passes green.
+
+An admitted Windows x86_64 Stage 2 compiler with SHA-256
+`be0ad06d6a68b466785eae2c1cb966f61c7026dd5fae8242591353760d72c7c2`
+successfully built and ran the hello-world fixture. A focused rejected LLVM
+compile surfaced the concrete `error: redefinition of global` diagnostic,
+rather than the opaque object-path status. The reader and AOT driver bytes
+match this compiler's admitted source snapshot and current main.
+
+This does **not** prove the wrapper A/B criterion: the driver has a raw-reader
+recovery branch as well. The existing whole-module wrapper probe failed with
+access violation `0xC0000005` immediately after HIR (18.656 s; sampled peak
+process-tree RSS 761,593,856 bytes). Missing-file, long-path and old-wrapper
+mutation runtime assertions were therefore not reached. Keep the pending
+status and use the report's bounded commands and retained evidence for the
+next scoped session; do not repeat the already-green hello and recovery checks.
+
+
+## Triage 2026-09-20 (Windows worktree, no new fix cycle run)
+
+Re-read this record plus the current source before touching anything. The
+"opacity" complaint this record opens with is **already resolved in source**,
+matching the `bug_db.sdn` row's `2026-09-18: fix landed (unwrap transport
+rewrite + 2 val-to-var blocker repairs)` note:
+
+- `src/lib/nogc_sync_mut/io/file_ops.spl:100-128`
+  (`file_read_regular_no_follow_bounded`) now distinguishes "extern reported
+  nil" from "payload decoded to len -1" and names the admission arm via
+  `_read_no_follow_failure_name()`, instead of the force-unwrap
+  (`content.?` / `.unwrap()`) pattern this record traced as miscompiling the
+  nullable-text transport.
+- `src/compiler/80.driver/driver_aot_native_output.spl:2525-2550` now chains
+  through `diagnostic file empty` / `diagnostic <n> bytes on disk, payload
+  lost on read` / `diagnostic unreadable: <reason>` before falling back to the
+  bare `backend object-path status {status}`, so a caller no longer sees only
+  a number.
+
+No fresh `bootstrap-from-scratch --full-bootstrap --stop-after-stage2` run was
+attempted in this lane (a full cycle here is ~40 min per this record's own
+"Honest note on effort", and the mandate for this session was diagnosis/small
+fix, not a fresh bootstrap rollout). The remaining open item is exactly what
+`cad6eb16550` ("fix(compiler,io): route stage2 AOT diagnostic read off the
+miscompiled unwrap shape") states in its own commit body: the **native AOT
+A/B differential** (old force-unwrap wrapper reproducing `PROBE-ERR` vs the
+fixed transport reproducing `PROBE-OK`, run through an actual native AOT
+build, not the interpreter/JIT lane that already went green twice) "was
+prepared but the local builds deadlocked under load; that leg rides CI / a
+re-run". That native build is the single missing piece to flip this row to
+`fixed` — it was explicitly out of scope for this session (heavy native
+build, already reported as deadlocking under load elsewhere), so it was not
+attempted here either. No code change made in this session; status left as
+`fix-implemented-verification-pending` for the owning lane to close once that
+differential lands.

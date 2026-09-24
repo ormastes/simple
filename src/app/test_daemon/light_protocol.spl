@@ -9,6 +9,20 @@ val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
 val LIGHT_REQUEST_MAX_TIMEOUT_MS: i64 = 2400000
 val LIGHT_REQUEST_RESPONSE_GRACE_MS: i64 = 2000
 val LIGHT_REQUEST_V1_HEADER: text = "simple-test-daemon-request-v1"
+val LIGHT_REQUEST_V2_HEADER: text = "simple-test-daemon-request-v2"
+val LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE: i64 = 75
+val LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER: text =
+    "TEST_DAEMON_REROUTE_ENVIRONMENT"
+val LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT: i64 = -750075
+
+fn light_response_is_environment_reroute(code: i64, body: text) -> bool:
+    code == LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE and
+        body.trim() == LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER
+
+fn light_response_client_result(code: i64, body: text) -> i64:
+    if light_response_is_environment_reroute(code, body):
+        return LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT
+    code
 
 fn light_request_clamp_timeout_ms(timeout_ms: i64) -> i64:
     if timeout_ms <= 0:
@@ -29,6 +43,33 @@ fn light_request_expiry_micros(now_micros: i64, timeout_ms: i64) -> i64:
 
 fn light_request_encode(path: text, expiry_micros: i64) -> text:
     "{LIGHT_REQUEST_V1_HEADER}\n{expiry_micros}\n{path}"
+
+fn light_request_encode_v2(path: text, expiry_micros: i64,
+        environment_digest: text, daemon_generation: text) -> text:
+    "{LIGHT_REQUEST_V2_HEADER}\n{expiry_micros}\n{environment_digest}\n{daemon_generation}\n{path}"
+
+fn light_request_parse_v2(content: text) -> (text, i64, text, text):
+    val lines = content.split("\n")
+    if lines.len() == 0 or lines[0] != LIGHT_REQUEST_V2_HEADER:
+        val legacy = light_request_parse(content)
+        return (legacy.0, legacy.1, "", "")
+    if lines.len() < 5:
+        return ("", -1, "", "")
+    val parsed_expiry_micros = lines[1].trim().to_i64() ?? -1
+    val expiry_micros = if parsed_expiry_micros > 0: parsed_expiry_micros else: -1
+    var path_parts: [text] = []
+    var i = 4
+    while i < lines.len():
+        path_parts.push(lines[i])
+        i = i + 1
+    (path_parts.join("\n"), expiry_micros, lines[2].trim(), lines[3].trim())
+
+fn light_request_matches_daemon_v2(request_environment_digest: text,
+        request_generation: text, daemon_environment_digest: text,
+        daemon_generation: text) -> bool:
+    request_environment_digest.len() == 64 and
+        request_environment_digest == daemon_environment_digest and
+        request_generation != "" and request_generation == daemon_generation
 
 fn light_request_parse(content: text) -> (text, i64):
     val lines = content.split("\n")
@@ -63,6 +104,37 @@ fn light_request_parse(content: text) -> (text, i64):
 fn timeout_verdict_line(path: text, reason: text, budget_ms: i64) -> text:
     "SPEC FILE VERDICT: {path} declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason={reason} budget_ms={budget_ms}"
 
+# A child that died long BEFORE its budget did not time out, however much its
+# exit code resembles a kill. -1/124/143/255 are ambiguous: each is produced
+# both by a bounded-wait kill and by an ordinary early failure (255 in
+# particular is any worker error). Reporting such a death as
+# `reason=outer-bound-timeout budget_ms=<budget>` states two things that are
+# measurably false — that the run lasted the budget, and that the cause was a
+# timeout — and sends triage to the timeout owner instead of the real fault.
+# Keep it machine-visible and fail-closed without fabricating either claim:
+# `inconclusive=1`, the reason, and the MEASURED elapsed time.
+# See doc/08_tracking/bug/test_runner_reports_early_child_death_as_outer_bound_timeout_2026-09-12.md
+#
+# Classify a bounded-wait outcome from its exit code and MEASURED duration.
+# Returns "ran" (the child produced its own outcome), "timeout" (it really did
+# reach the outer bound) or "early-death" (a kill-shaped exit code far inside
+# the budget). The elapsed time is the only evidence that separates the last
+# two, so it is a required argument and never defaulted.
+pub fn bounded_run_classification(code: i64, elapsed_ms: i64, outer_timeout_ms: i64) -> text:
+    val kill_shaped = code == -1 or code == 124 or code == 143 or code == 255
+    if not kill_shaped:
+        return "ran"
+    # The client grants the inner runner 30s of grace on top of the child
+    # budget so the inner timeout handler wins the race. A death before that
+    # grace window opens cannot be the outer bound firing.
+    val timeout_floor_ms = outer_timeout_ms - 30000
+    if elapsed_ms < timeout_floor_ms:
+        return "early-death"
+    "timeout"
+
+pub fn early_death_verdict_line(path: text, code: i64, elapsed_ms: i64, budget_ms: i64) -> text:
+    "SPEC FILE VERDICT: {path} declared>=1 executed=0 passed=0 failed=0 dropped=1 timeout=0 inconclusive=1 reason=child-died-early exit_code={code} elapsed_ms={elapsed_ms} budget_ms={budget_ms}"
+
 # A client-side response deadline proves only that the daemon did not answer.
 # It does not prove that the spec started, executed an example, or failed an
 # assertion. Keep that infrastructure outcome machine-visible without
@@ -94,8 +166,15 @@ fn has_verdict_line(output: text) -> bool:
 # which refuses to treat any verdict with dropped>0 as positive evidence of
 # completion. `unrun=1` and `reason=` are appended AFTER dropped= so no
 # existing parser is disturbed.
+# `outcome=ERROR` sits in the same position the driver's own
+# report_spec_file_verdict puts it (immediately after the path), so the line
+# stays byte-compatible while carrying the one field every outcome-reading
+# sweep looks at first. Without it a spec that executed NOTHING printed a
+# verdict line with no outcome at all, and
+# scripts/check/check-test-runner-executes-bodies.shs (assert_zero) correctly
+# refused to accept it as an error report.
 fn unrun_verdict_line(path: text, reason: text) -> text:
-    "SPEC FILE VERDICT: {path} declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason={reason}"
+    "SPEC FILE VERDICT: {path} outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason={reason}"
 
 # Classify WHY a spec executed nothing, from the child's combined output. The
 # reason is a grep-able token on the verdict line so a sweep can separate a
@@ -164,10 +243,22 @@ fn verdict_outcome_token(executed: i64, failed: i64) -> text:
 # deliberately NOT counted here -- folding those in would turn a file whose
 # examples all skipped for a missing dependency into `outcome=OK`, which is
 # the greenwash this field exists to avoid.
-fn ran_verdict_line(path: text, passed: i64, failed: i64, in_development: i64 = 0) -> text:
+#
+# `degraded` (2026-09-12) names the reason this file was NOT run the way the
+# lane intended -- today, that its standalone-SMF compile failed and it ran on
+# the interpreter instead. Appended as a trailing `degraded=<token>` ONLY when
+# non-empty, so every existing reader and every existing verdict line is
+# byte-identical to before. It is deliberately on this line rather than in a
+# side channel: a degrade that is stated only in a `[mcdc-fallback]` print is
+# invisible to every sweep that parses verdict lines, which is how a file that
+# never compiled read as an ordinary red. The token carries no whitespace (see
+# `verdict_degrade_token_field` in test_runner_execute.spl) so a reader
+# splitting this line on whitespace still sees exactly one token per key.
+fn ran_verdict_line(path: text, passed: i64, failed: i64, in_development: i64 = 0, degraded: text = "") -> text:
     val executed = passed + failed + in_development
     val outcome = verdict_outcome_token(executed, failed)
-    "SPEC FILE VERDICT: {path} outcome={outcome} declared>={executed} executed={executed} passed={passed} failed={failed} in_development={in_development} dropped=0"
+    val base = "SPEC FILE VERDICT: {path} outcome={outcome} declared>={executed} executed={executed} passed={passed} failed={failed} in_development={in_development} dropped=0"
+    if degraded == "": base else: base + " degraded={degraded}"
 
 # Human-readable gloss for a process exit status seen on the test lane. Exit
 # codes here have repeatedly been misread (144 was chased as a spec defect when
@@ -199,3 +290,30 @@ fn light_request_deadline(expiry_micros: i64, now_micros: i64) -> (bool, i64):
         return (false, LIGHT_REQUEST_MAX_TIMEOUT_MS)
     val remaining_micros = expiry_micros - now_micros
     (false, (remaining_micros + 999) / 1000)
+
+# ---------------------------------------------------------------------------
+# Request claiming (bug: web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13)
+# ---------------------------------------------------------------------------
+# A request must be CLAIMED — moved out of the pollable name space — before its
+# spec is executed, not after the response is written. Until 2026-09-13 the
+# `<id>.req` file stayed in place for the whole run, so a worker (or the daemon
+# itself) killed at the budget left the request re-servable: the next poll, or a
+# successor daemon spawned by another client, started the SAME spec again, and
+# again, indefinitely. An over-budget spec then looked "still running" instead
+# of failing once. These two helpers are the whole protocol: a claimed name is
+# derived from the request name and is deliberately NOT pollable, so no amount
+# of re-listing can resurrect a run that was already attempted.
+fn light_request_inflight_path(req_path: text) -> text:
+    """The claimed name for a request. Derived, never guessed, so the daemon
+    and anyone auditing the request directory agree on which files are runs
+    already attempted."""
+    "{req_path}.inflight"
+
+fn light_request_is_pollable(name: text) -> bool:
+    """True when a request-directory entry is a request the daemon may serve.
+    A claimed (`.req.inflight`) entry is NOT pollable — that is what bounds the
+    retry count of a killed run to exactly one attempt. Neither are the
+    `.req.tmp` files of an in-flight atomic write."""
+    if not name.ends_with(".req"):
+        return false
+    true

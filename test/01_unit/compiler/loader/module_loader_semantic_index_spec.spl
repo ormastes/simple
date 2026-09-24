@@ -1,0 +1,87 @@
+use std.spec.{describe, it, expect, step}
+use compiler.loader.loader.module_loader_semantic.{
+    _semantic_dependents_from_paths,
+    _semantic_fingerprint_dependents_from_paths,
+    _semantic_cache_is_fresh_from_maps
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "canonical loader semantic reverse index":
+    it "propagates keys through exports and module paths in stable order":
+        step("Build a chain whose later keys require transitive propagation")
+        val paths = ["A.smf", "B.smf", "C.smf"]
+        val exports: Dict<text, [text]> = {"A.smf": ["A.api"]}
+        val dependencies: Dict<text, [text]> = {
+            "A.smf": ["root.key"],
+            "B.smf": ["A.api"],
+            "C.smf": ["B.smf"]
+        }
+        val affected = _semantic_dependents_from_paths(
+            paths, exports, dependencies, "root.key")
+        expect(affected).to_equal(["A.smf", "B.smf", "C.smf"])
+
+    it "revisits earlier modules without duplicating cycle members":
+        step("Use reverse path order and a dependency cycle")
+        val paths = ["B.smf", "A.smf"]
+        val dependencies: Dict<text, [text]> = {
+            "A.smf": ["root.key", "B.api"],
+            "B.smf": ["A.api"]
+        }
+        val cycle_exports: Dict<text, [text]> = {
+            "A.smf": ["A.api"], "B.smf": ["B.api"]}
+        val affected = _semantic_dependents_from_paths(
+            paths, cycle_exports, dependencies, "root.key")
+        expect(affected).to_equal(["A.smf", "B.smf"])
+
+    it "does not retain superseded intersection helpers":
+        val semantic = rt_file_read_text(
+            "src/compiler/99.loader/loader/module_loader_semantic.spl")
+        val canonical = rt_file_read_text(
+            "src/compiler/99.loader/loader/module_loader.spl")
+        val compat = rt_file_read_text(
+            "src/compiler/99.loader/module_loader_compat.spl")
+        expect(semantic.contains("fn text_array_intersects(")).to_equal(false)
+        expect(semantic.contains("fn text_array_intersects_key_set(")).to_equal(false)
+        expect(canonical.contains("text_array_intersects")).to_equal(false)
+        expect(compat.contains("fn _any_name_in(")).to_equal(false)
+        expect(compat.contains("fn _push_unique(")).to_equal(false)
+        expect(compat.contains("fn _name_in(")).to_equal(false)
+        expect(compat.contains("fn _metadata_instantiation_symbols(")).to_equal(false)
+        expect(compat.contains("fn _jit_cache_owner(")).to_equal(false)
+        expect(compat.contains("fn _moduleloader_semantic_dependents(")).to_equal(false)
+        expect(compat.contains("fn _moduleloader_semantic_fingerprint_dependents(")).to_equal(false)
+        expect(compat.contains("fn _path_tag(")).to_equal(false)
+        expect(compat.contains("fn _symbol_matches_path(")).to_equal(false)
+        expect(compat).to_contain("text_array_push_unique")
+        expect(compat).to_contain("text_array_contains")
+
+    it "shares ordered fingerprint traversal across dependency cycles":
+        val paths = ["B.smf", "A.smf", "C.smf"]
+        val fingerprints: Dict<text, Dict<text, text>> = {
+            "A.smf": {"root.smf": "root:v1", "B.smf": "B:v1"},
+            "B.smf": {"A.smf": "A:v1"},
+            "C.smf": {"B.smf": "B:v1"}
+        }
+        val affected = _semantic_fingerprint_dependents_from_paths(
+            paths, fingerprints, "root.smf")
+        expect(affected).to_equal(["A.smf", "B.smf", "C.smf"])
+
+    it "shares one fail-closed semantic freshness decision":
+        val fingerprints: Dict<text, text> = {
+            "A.smf": "A:v1", "Leaf.smf": "Leaf:v1"}
+        val dependencies: Dict<text, Dict<text, text>> = {
+            "A.smf": {"B.smf": "B:v1"}}
+        expect(_semantic_cache_is_fresh_from_maps(
+            fingerprints, dependencies, "missing.smf", "missing:v1", {})).to_be(false)
+        expect(_semantic_cache_is_fresh_from_maps(
+            fingerprints, dependencies, "Leaf.smf", "Leaf:v1", {})).to_be(true)
+        expect(_semantic_cache_is_fresh_from_maps(
+            fingerprints, dependencies, "A.smf", "A:v1",
+            {"B.smf": "B:v1"})).to_be(true)
+        expect(_semantic_cache_is_fresh_from_maps(
+            fingerprints, dependencies, "A.smf", "A:v2",
+            {"B.smf": "B:v1"})).to_be(false)
+        expect(_semantic_cache_is_fresh_from_maps(
+            fingerprints, dependencies, "A.smf", "A:v1",
+            {"B.smf": "B:v1", "C.smf": "C:v1"})).to_be(false)

@@ -1,0 +1,224 @@
+"""Transfer-aware ordering for resident environment-selected tasks.
+
+EGL package 7. The routing-only queue seam (`engine2d_gpu_epoch_admit`) decides
+one epoch at a time and never weighs what crossing the host/device boundary
+costs. This module is the pure half of the remaining package-7 work: given the
+transfer cost each task DECLARES, it produces one deterministic plan under a
+byte budget.
+
+It owns no device, no queue, no fence and no lease. Every byte here is a
+declared number supplied by the caller, which is what lets the plan be proven
+on a host with no usable device lane. A plan is an ordering decision, never
+execution evidence.
+
+Two facts make the ordering "transfer-aware" rather than merely "cheapest
+first":
+
+- tasks sharing a `residency_class` are batched, and their upload is charged
+  ONCE, because after the first task the class is already resident;
+- a class deferred `TRANSFER_SCHEDULER_STARVATION_BOUND_V1` times is admitted
+  even when it does not fit, and is named in `forced` so the plan stays
+  truthful about having exceeded its budget.
+"""
+
+pub const TRANSFER_SCHEDULER_SCHEMA_V1: u16 = 1u16
+pub const TRANSFER_SCHEDULER_MAX_TASKS_V1: i64 = 256
+# Deferral count at which a class stops waiting for budget. Three rounds is
+# the same "a handful is routine, more is a defect" threshold the repo's other
+# ratchets use; the bound exists so no declared cost can starve a task forever.
+pub const TRANSFER_SCHEDULER_STARVATION_BOUND_V1: i64 = 3
+
+pub enum TransferScheduleErrorV1:
+    EmptyPlan
+    TooManyTasks
+    InvalidBudget
+    DuplicateInvocation
+    InvalidTask
+
+pub struct TransferCostV1:
+    host_to_device_bytes: u64
+    device_to_host_bytes: u64
+
+pub struct TransferTaskV1:
+    invocation_id: u64
+    residency_class: u64
+    cost: TransferCostV1
+    # How many previous plans deferred this task. The caller carries it; the
+    # scheduler only reads it.
+    deferrals: i64
+
+pub struct TransferBatchV1:
+    residency_class: u64
+    invocation_ids: [u64]
+    upload_bytes: u64
+    readback_bytes: u64
+
+pub struct TransferPlanV1:
+    schema_version: u16
+    plan_identity: text
+    budget_bytes: u64
+    # Total crossing bytes the plan admits, forced classes included.
+    planned_bytes: u64
+    # Crossing bytes admitted under the budget; forced classes are excluded so
+    # one starving class cannot evict everything that does fit.
+    budgeted_bytes: u64
+    batches: [TransferBatchV1]
+    deferred: [u64]
+    forced: [u64]
+    budget_exceeded_by_forced: bool
+
+struct _ClassCostV1:
+    residency_class: u64
+    invocation_ids: [u64]
+    upload_bytes: u64
+    readback_bytes: u64
+    total_bytes: u64
+    starved: bool
+
+fn _class_index(classes: [_ClassCostV1], residency_class: u64) -> i64:
+    var i: i64 = 0
+    while i < classes.len():
+        if classes[i].residency_class == residency_class:
+            return i
+        i = i + 1
+    -1
+
+fn _sorted_u64(values: [u64]) -> [u64]:
+    var out: [u64] = []
+    for value in values:
+        out.push(value)
+    var i: i64 = 1
+    while i < out.len():
+        val key = out[i]
+        var j = i - 1
+        while j >= 0 and out[j] > key:
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = key
+        i = i + 1
+    out
+
+fn _orders_before(left: _ClassCostV1, right: _ClassCostV1) -> bool:
+    """Starved classes first, then cheapest crossing, then class identity.
+
+    The final tiebreak on `residency_class` is what makes a plan independent of
+    the order tasks arrived in.
+    """
+    if left.starved != right.starved:
+        return left.starved
+    if left.total_bytes != right.total_bytes:
+        return left.total_bytes < right.total_bytes
+    left.residency_class < right.residency_class
+
+fn _sorted_classes(classes: [_ClassCostV1]) -> [_ClassCostV1]:
+    var out: [_ClassCostV1] = []
+    for entry in classes:
+        out.push(entry)
+    var i: i64 = 1
+    while i < out.len():
+        val key = out[i]
+        var j = i - 1
+        while j >= 0 and _orders_before(left: key, right: out[j]):
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = key
+        i = i + 1
+    out
+
+fn _fits(budgeted: u64, cost: u64, budget: u64) -> bool:
+    # Written as a subtraction so a declared cost near the u64 ceiling cannot
+    # wrap an addition into a false "fits".
+    if cost > budget:
+        return false
+    budgeted <= budget - cost
+
+fn _join_u64(values: [u64]) -> text:
+    var parts: [text] = []
+    for value in values:
+        parts.push(value.to_text())
+    parts.join(",")
+
+pub fn transfer_aware_plan_v1(
+    tasks: [TransferTaskV1],
+    budget_bytes: u64
+) -> Result<TransferPlanV1, TransferScheduleErrorV1>:
+    """One deterministic transfer-ordered plan for a bounded resident task set."""
+    if tasks.len() == 0:
+        return Err(TransferScheduleErrorV1.EmptyPlan)
+    if tasks.len() > TRANSFER_SCHEDULER_MAX_TASKS_V1:
+        return Err(TransferScheduleErrorV1.TooManyTasks)
+    if budget_bytes == 0u64:
+        return Err(TransferScheduleErrorV1.InvalidBudget)
+
+    var seen: [u64] = []
+    var classes: [_ClassCostV1] = []
+    for task in tasks:
+        if task.invocation_id == 0u64 or task.residency_class == 0u64 or task.deferrals < 0:
+            return Err(TransferScheduleErrorV1.InvalidTask)
+        for previous in seen:
+            if previous == task.invocation_id:
+                return Err(TransferScheduleErrorV1.DuplicateInvocation)
+        seen.push(task.invocation_id)
+        val starved = task.deferrals >= TRANSFER_SCHEDULER_STARVATION_BOUND_V1
+        val at = _class_index(classes: classes, residency_class: task.residency_class)
+        if at < 0:
+            classes.push(_ClassCostV1(residency_class: task.residency_class,
+                invocation_ids: [task.invocation_id],
+                upload_bytes: task.cost.host_to_device_bytes,
+                readback_bytes: task.cost.device_to_host_bytes,
+                total_bytes: 0u64, starved: starved))
+        else:
+            var entry = classes[at]
+            entry.invocation_ids.push(task.invocation_id)
+            # The class is resident once the largest upload has landed; the
+            # rest of the batch reuses it and is charged nothing.
+            if task.cost.host_to_device_bytes > entry.upload_bytes:
+                entry.upload_bytes = task.cost.host_to_device_bytes
+            # Readback is per task: every task hands its own output back.
+            entry.readback_bytes = entry.readback_bytes + task.cost.device_to_host_bytes
+            if starved:
+                entry.starved = true
+            classes[at] = entry
+
+    var i: i64 = 0
+    while i < classes.len():
+        var entry = classes[i]
+        entry.invocation_ids = _sorted_u64(entry.invocation_ids)
+        entry.total_bytes = entry.upload_bytes + entry.readback_bytes
+        classes[i] = entry
+        i = i + 1
+
+    val ordered = _sorted_classes(classes)
+    var batches: [TransferBatchV1] = []
+    var deferred: [u64] = []
+    var forced: [u64] = []
+    var planned: u64 = 0u64
+    var budgeted: u64 = 0u64
+    var admitted_classes: [u64] = []
+    for entry in ordered:
+        val fits = _fits(budgeted: budgeted, cost: entry.total_bytes, budget: budget_bytes)
+        if not fits and not entry.starved:
+            for id in entry.invocation_ids:
+                deferred.push(id)
+            continue
+        batches.push(TransferBatchV1(residency_class: entry.residency_class,
+            invocation_ids: entry.invocation_ids, upload_bytes: entry.upload_bytes,
+            readback_bytes: entry.readback_bytes))
+        admitted_classes.push(entry.residency_class)
+        planned = planned + entry.total_bytes
+        if fits:
+            budgeted = budgeted + entry.total_bytes
+        else:
+            # Admitted only because it hit the starvation bound. It is kept out
+            # of `budgeted` so the classes that genuinely fit still get in.
+            for id in entry.invocation_ids:
+                forced.push(id)
+
+    val identity = "transfer-plan/v1 schema={TRANSFER_SCHEDULER_SCHEMA_V1.to_text()} " +
+        "budget={budget_bytes.to_text()} planned={planned.to_text()} " +
+        "budgeted={budgeted.to_text()} classes={_join_u64(admitted_classes)} " +
+        "forced={_join_u64(forced)} deferred={_join_u64(_sorted_u64(deferred))}"
+    Ok(TransferPlanV1(schema_version: TRANSFER_SCHEDULER_SCHEMA_V1,
+        plan_identity: identity, budget_bytes: budget_bytes, planned_bytes: planned,
+        budgeted_bytes: budgeted, batches: batches, deferred: _sorted_u64(deferred),
+        forced: _sorted_u64(forced), budget_exceeded_by_forced: forced.len() > 0))

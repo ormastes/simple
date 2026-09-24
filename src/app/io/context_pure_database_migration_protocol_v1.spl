@@ -1,0 +1,165 @@
+"""Pure state model for a future context-store migration publisher.
+
+This module performs no I/O and is not imported by `context_ops` or the
+explicit importer. It makes the missing handle-pinned source identity and
+destination lease rules executable before any automatic migration is enabled.
+"""
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+struct ContextMigrationSourceIdentityV1:
+    source_key: text
+    object_nonce: text
+    object_generation: i64
+    byte_length: i64
+    bytes_digest: text
+    rows_digest: text
+    source_format: text
+
+struct ContextMigrationLeaseV1:
+    lease_id: text
+    owner_nonce: text
+    destination_key: text
+    source_identity_digest: text
+    stage_bytes_digest: text
+    stage_byte_length: i64
+
+struct ContextMigrationStageObservationV1:
+    exists: bool
+    owner_nonce: text
+    bytes_digest: text
+    byte_length: i64
+    rows_digest: text
+    image_format: text
+
+struct ContextMigrationDestinationObservationV1:
+    exists: bool
+    bytes_digest: text
+    byte_length: i64
+
+struct ContextMigrationDecisionV1:
+    status: text
+    may_publish_noreplace: bool
+    destination_committed: bool
+    source_still_pinned: bool
+
+fn _context_migration_frame_v1(values: [text]) -> text:
+    var encoded = "{values.len()}:"
+    for value in values:
+        encoded = encoded + "{value.len()}:" + value
+    encoded
+
+fn context_migration_source_identity_valid_v1(
+    identity: ContextMigrationSourceIdentityV1
+) -> bool:
+    (identity.source_key != "" and identity.object_nonce != "" and
+        identity.object_generation > 0 and
+        identity.byte_length >= 0 and
+        sha256_lower_hex_valid(identity.bytes_digest) and
+        sha256_lower_hex_valid(identity.rows_digest) and
+        identity.source_format == "sqlite-facade")
+
+fn context_migration_source_identity_digest_v1(
+    identity: ContextMigrationSourceIdentityV1
+) -> text:
+    if not context_migration_source_identity_valid_v1(identity):
+        return ""
+    sha256_text(_context_migration_frame_v1([
+        "context-migration-source-v1", identity.source_key,
+        identity.object_nonce,
+        "{identity.object_generation}", "{identity.byte_length}",
+        identity.bytes_digest, identity.rows_digest, identity.source_format]))
+
+fn context_migration_source_matches_v1(
+    pinned: ContextMigrationSourceIdentityV1,
+    observed: ContextMigrationSourceIdentityV1
+) -> bool:
+    val pinned_digest = context_migration_source_identity_digest_v1(pinned)
+    pinned_digest != "" and
+        pinned_digest == context_migration_source_identity_digest_v1(observed)
+
+fn context_migration_lease_valid_v1(
+    lease: ContextMigrationLeaseV1,
+    pinned: ContextMigrationSourceIdentityV1
+) -> bool:
+    val pinned_digest = context_migration_source_identity_digest_v1(pinned)
+    (context_migration_source_identity_valid_v1(pinned) and
+        pinned_digest != "" and
+        lease.lease_id != "" and lease.owner_nonce != "" and
+        lease.destination_key != "" and lease.stage_byte_length >= 0 and
+        sha256_lower_hex_valid(lease.stage_bytes_digest) and
+        lease.source_identity_digest == pinned_digest)
+
+fn _context_migration_stage_matches_v1(
+    lease: ContextMigrationLeaseV1,
+    pinned: ContextMigrationSourceIdentityV1,
+    stage: ContextMigrationStageObservationV1
+) -> bool:
+    (stage.exists and stage.owner_nonce == lease.owner_nonce and
+        stage.bytes_digest == lease.stage_bytes_digest and
+        stage.byte_length == lease.stage_byte_length and
+        stage.rows_digest == pinned.rows_digest and
+        stage.image_format == "simple-pure-db-v3")
+
+fn _context_migration_destination_matches_v1(
+    lease: ContextMigrationLeaseV1,
+    destination: ContextMigrationDestinationObservationV1
+) -> bool:
+    (destination.exists and
+        destination.bytes_digest == lease.stage_bytes_digest and
+        destination.byte_length == lease.stage_byte_length)
+
+fn _context_migration_decision_v1(status: text, may_publish: bool,
+        committed: bool, source_pinned: bool) -> ContextMigrationDecisionV1:
+    ContextMigrationDecisionV1(
+        status: status, may_publish_noreplace: may_publish,
+        destination_committed: committed,
+        source_still_pinned: source_pinned)
+
+fn context_migration_recovery_decision_v1(
+    lease: ContextMigrationLeaseV1,
+    pinned: ContextMigrationSourceIdentityV1,
+    observed_source: ContextMigrationSourceIdentityV1,
+    stage: ContextMigrationStageObservationV1,
+    destination: ContextMigrationDestinationObservationV1
+) -> ContextMigrationDecisionV1:
+    """Classify pre-publish and recovery state without mutating any path.
+
+    `retry_publish_noreplace` is permission only for the lease owner to invoke
+    the existing atomic no-replace host operation. No status permits replace.
+    """
+    if not context_migration_lease_valid_v1(lease, pinned):
+        return _context_migration_decision_v1(
+            "lease_invalid", false, false, false)
+    val source_pinned = context_migration_source_matches_v1(
+        pinned, observed_source)
+    if destination.exists:
+        if not _context_migration_destination_matches_v1(lease, destination):
+            return _context_migration_decision_v1(
+                "destination_conflict", false, false, source_pinned)
+        if source_pinned:
+            return _context_migration_decision_v1(
+                "committed_recovered", false, true, true)
+        return _context_migration_decision_v1(
+            "committed_source_changed", false, true, false)
+    if not source_pinned:
+        return _context_migration_decision_v1(
+            "source_identity_changed", false, false, false)
+    if not stage.exists:
+        return _context_migration_decision_v1(
+            "stage_missing", false, false, true)
+    if not _context_migration_stage_matches_v1(lease, pinned, stage):
+        return _context_migration_decision_v1(
+            "stage_invalid", false, false, true)
+    _context_migration_decision_v1(
+        "retry_publish_noreplace", true, false, true)
+
+export ContextMigrationSourceIdentityV1, ContextMigrationLeaseV1
+export ContextMigrationStageObservationV1
+export ContextMigrationDestinationObservationV1, ContextMigrationDecisionV1
+export context_migration_source_identity_valid_v1
+export context_migration_source_identity_digest_v1
+export context_migration_source_matches_v1
+export context_migration_lease_valid_v1
+export context_migration_recovery_decision_v1

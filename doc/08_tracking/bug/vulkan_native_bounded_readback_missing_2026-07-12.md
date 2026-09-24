@@ -1,4 +1,8 @@
 # Vulkan native bounded readback API is missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Problem
 
@@ -27,3 +31,4 @@ Then remove the pointer shim and TODO from
 The x86 QEMU host-GPU daemon backtrace stopped at
 `vulkan_sffi_read_buffer_bytes -> 0x0`. `nm` showed the symbol undefined while
 `rt_vulkan_copy_from_buffer` was strongly defined in the Vulkan runtime archive.
+

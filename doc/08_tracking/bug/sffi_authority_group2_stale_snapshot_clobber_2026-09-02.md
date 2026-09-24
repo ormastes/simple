@@ -1,4 +1,9 @@
 # SFFI-authority group 2: five guards RED from a stale-snapshot clobber
+## Closed 2026-09-16 — Status FIXED for these 5 guards; restored sources + verdict guards, RED-before/GREEN-after proven
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-09-02
 - Gate: `scripts/check/check-sffi-v2-authority.shs` (blocking push gate)
@@ -100,3 +105,4 @@ more; the remaining 13 are other agents' concurrent lanes.
 The clobber merge `e274cd33719` reverted these five files. It very likely
 reverted others outside this group's scope — the remaining 13 failing guards
 should be checked against the same commit before their counts are touched.
+

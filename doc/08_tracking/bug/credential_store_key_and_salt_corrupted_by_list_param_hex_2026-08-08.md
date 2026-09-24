@@ -1,4 +1,9 @@
 # The stored AES-256 credential key was neither the derived key nor full-entropy — `bytes_to_hex` took a `list`-spelled param
+## Closed 2026-09-16 — Status: FIXED; bytes_to_hex respelled, identity probe and round-trip verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (at-rest key material corrupted and entropy-reduced)
@@ -170,3 +175,4 @@ toolchain.
 - `doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md` (root cause, OPEN)
 - `doc/08_tracking/bug/credential_key_generate_random_hex_length_reads_shifted_2026-08-08.md`
 - `doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md`
+

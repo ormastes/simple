@@ -1,4 +1,8 @@
 # Windows Phase 3 blocked: planner-admission-v2 producer refuses any bootstrap output outside `<repo>/build/`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-02
 **Status:** OPEN — blocks W2 (Phase 3) on the Windows MSVC lane
@@ -154,3 +158,4 @@ independent, pre-existing, **not** fixed here.
 
 Until then, **Windows Phase 3 cannot be attempted honestly.** No Stage 3
 receipt exists and none is claimed.
+

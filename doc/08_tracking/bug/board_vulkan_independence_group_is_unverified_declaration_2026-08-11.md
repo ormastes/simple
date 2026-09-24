@@ -93,3 +93,7 @@ Open. Not blocking lane L4's inventory delivery (the inventory's own
 `independence_group` values were independently verified via `dpkg -S` at
 authoring time, see the plan doc's "Provider inventory" section), but blocking
 any FUTURE manifest whose author does not do that verification by hand.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs real Vulkan-capable GPU hardware to verify device independence; unavailable on this host. No change made.

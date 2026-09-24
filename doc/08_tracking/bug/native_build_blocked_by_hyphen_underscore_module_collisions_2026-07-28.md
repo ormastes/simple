@@ -1,4 +1,8 @@
 # native-build is blocked from inside the repo by 91 hyphen/underscore module-name collisions
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28
 **Status:** FIXED (re-confirmed 2026-08-09 — see bottom of doc) — was blocking the native smoke matrix on the pure-Simple compiler
@@ -179,3 +183,4 @@ bootstrap-tier check that the sanitized module-name set over `src/**/*.spl` is
 injective, which is why a whole-worktree merge could re-introduce 99
 collisions silently. A ratchet in the shape of the other
 `scripts/check/check-*-push.shs` guards would have caught both occurrences.
+

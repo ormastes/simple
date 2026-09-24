@@ -1,0 +1,87 @@
+# Lexical-specific authority layered over the generic authenticated whole-artifact
+# authorization. It binds the exact callable ABI, mask schema, and tail policy;
+# it does not create a second trust decision.
+use std.common.crypto.sha256.sha256_text
+use compiler.backend.native.parser_lexical_avx2_classifier_v1.{
+    PARSER_LEXICAL_CLASSIFIER_ABI_V1, PARSER_LEXICAL_CLASSIFIER_INTERFACE_HANDLE_V1,
+    PARSER_LEXICAL_CLASSIFIER_CODE_SIZE_V1}
+use compiler.loader.parser_structural_mask_mapping_authorization_v1.{
+    ParserStructuralMappingAuthorizationV1, ParserStructuralMappingAuthorizationErrorV1,
+    parser_structural_mapping_authorize_v1}
+use compiler.driver.environment_variant_composite_publication_v1.EnvironmentCompositePublicationV1
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.EnvironmentVariantReceiptV1
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+fn _mask_schema_text_lma() -> text:
+    "block:32;lanebit:lsb-byte0;classes:squote,dquote,backslash,hash,nl,slash,star,lbrace,rbrace,lparen,rparen,lbracket,rbracket,comma,colon;outputs:sq,dq,bs,hash,nl,slash,star,braces,structural"
+fn _tail_policy_text_lma() -> text:
+    "classifier:exact-32-only;tail:canonical-scalar-no-overread"
+
+pub enum ParserLexicalMappingAuthorizationErrorV1:
+    GenericRejected
+    WrongInterface
+    WrongCodeSize
+    IdentitySubstituted
+
+pub struct ParserLexicalMappingAuthorizationV1:
+    structural: ParserStructuralMappingAuthorizationV1
+    abi_identity: EnvironmentDigest256V1
+    mask_schema_identity: EnvironmentDigest256V1
+    tail_policy_identity: EnvironmentDigest256V1
+    lifecycle_receipt: EnvironmentVariantReceiptV1
+    authority_identity: EnvironmentDigest256V1
+
+fn _word_lma(raw: [i64], at: i64) -> u64:
+    var value = 0u64
+    for i in 0..8:
+        value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    value
+fn _digest_lma(text_value: text) -> EnvironmentDigest256V1:
+    val raw = sha256_text(text_value)
+    EnvironmentDigest256V1(w0: _word_lma(raw, 0), w1: _word_lma(raw, 8),
+        w2: _word_lma(raw, 16), w3: _word_lma(raw, 24))
+
+pub fn parser_lexical_abi_identity_v1() -> EnvironmentDigest256V1:
+    _digest_lma(PARSER_LEXICAL_CLASSIFIER_ABI_V1)
+pub fn parser_lexical_mask_schema_identity_v1() -> EnvironmentDigest256V1:
+    _digest_lma(_mask_schema_text_lma())
+pub fn parser_lexical_tail_policy_identity_v1() -> EnvironmentDigest256V1:
+    _digest_lma(_tail_policy_text_lma())
+
+fn _authority_lma(g: ParserStructuralMappingAuthorizationV1,
+    abi_id: EnvironmentDigest256V1, schema_id: EnvironmentDigest256V1,
+    tail_id: EnvironmentDigest256V1, lifecycle: EnvironmentVariantReceiptV1
+) -> EnvironmentDigest256V1:
+    _digest_lma("lexical-auth-v1:{g.provider_identity}:{g.variant_identity}:{g.artifact_digest}:" +
+        "{g.plan_digest}:{g.environment_identity}:{g.environment_generation}:" +
+        "{g.provider_generation}:{g.code_size}:{g.provider_interface_handle}:" +
+        "{abi_id}:{schema_id}:{tail_id}:{lifecycle}")
+
+pub fn parser_lexical_mapping_authorization_valid_v1(a: ParserLexicalMappingAuthorizationV1) -> bool:
+    a.structural.provider_interface_handle == PARSER_LEXICAL_CLASSIFIER_INTERFACE_HANDLE_V1 and
+    a.structural.code_size == PARSER_LEXICAL_CLASSIFIER_CODE_SIZE_V1 and
+    a.abi_identity == parser_lexical_abi_identity_v1() and
+    a.mask_schema_identity == parser_lexical_mask_schema_identity_v1() and
+    a.tail_policy_identity == parser_lexical_tail_policy_identity_v1() and
+    a.lifecycle_receipt == a.structural.eligible_receipt and
+    a.authority_identity == _authority_lma(a.structural, a.abi_identity,
+        a.mask_schema_identity, a.tail_policy_identity, a.lifecycle_receipt)
+
+pub fn parser_lexical_mapping_authorize_v1(publication: EnvironmentCompositePublicationV1,
+    lifecycle: EnvironmentVariantReceiptV1, artifact_bytes: [i64]
+) -> Result<ParserLexicalMappingAuthorizationV1, ParserLexicalMappingAuthorizationErrorV1>:
+    val generic = parser_structural_mapping_authorize_v1(publication, lifecycle, artifact_bytes)
+    if generic.is_err(): return Err(ParserLexicalMappingAuthorizationErrorV1.GenericRejected)
+    val g = generic.unwrap()
+    if g.provider_interface_handle != PARSER_LEXICAL_CLASSIFIER_INTERFACE_HANDLE_V1:
+        return Err(ParserLexicalMappingAuthorizationErrorV1.WrongInterface)
+    if g.code_size != PARSER_LEXICAL_CLASSIFIER_CODE_SIZE_V1:
+        return Err(ParserLexicalMappingAuthorizationErrorV1.WrongCodeSize)
+    val abi_id = parser_lexical_abi_identity_v1()
+    val schema_id = parser_lexical_mask_schema_identity_v1()
+    val tail_id = parser_lexical_tail_policy_identity_v1()
+    val eligible = g.eligible_receipt
+    Ok(ParserLexicalMappingAuthorizationV1(structural: g, abi_identity: abi_id,
+        mask_schema_identity: schema_id, tail_policy_identity: tail_id,
+        lifecycle_receipt: eligible,
+        authority_identity: _authority_lma(g, abi_id, schema_id, tail_id, eligible)))

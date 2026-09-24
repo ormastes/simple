@@ -1,0 +1,239 @@
+"""P0 byte-layout and inactive P1 route-policy evidence for native-build."""
+
+use std.spec.*
+use std.nogc_sync_mut.composition.native_build_provider_v1.*
+
+fn read_u32(bytes: [u8], offset: i64) -> u32:
+    var value: u32 = 0u32
+    var index: i64 = 0
+    while index < 4:
+        value = value | ((bytes[offset + index] as u32) << ((index * 8) as u32))
+        index = index + 1
+    value
+
+fn read_u64(bytes: [u8], offset: i64) -> u64:
+    var value: u64 = 0u64
+    var index: i64 = 0
+    while index < 8:
+        value = value | ((bytes[offset + index] as u64) << ((index * 8) as u64))
+        index = index + 1
+    value
+
+fn session() -> SimpleNativeBuildSessionV1:
+    SimpleNativeBuildSessionV1(manager_id: 11u64, provider_instance: 22u64,
+        provider_generation: 33u64, session_nonce: 44u64)
+
+fn request(operation: u32) -> SimpleNativeBuildRequestV1:
+    SimpleNativeBuildRequestV1(descriptor_size: 96u32, operation: operation,
+        session: session(), payload_offset: 96u32, payload_length: 0u32,
+        section: 0u32, output_page_capacity: 0u32, section_offset: 0u64,
+        max_retained_result_bytes: 0u64, max_work_units: 0u64,
+        max_items: 0u32, max_text_field_bytes: 0u32,
+        max_wall_time_ms: 0u32, reserved: 0u32)
+
+fn open_request(payload_length: u32) -> SimpleNativeBuildRequestV1:
+    SimpleNativeBuildRequestV1(descriptor_size: 96u32,
+        operation: SIMPLE_NATIVE_BUILD_OPEN_V1,
+        session: simple_native_build_session_zero_v1(),
+        payload_offset: 96u32, payload_length: payload_length,
+        section: 0u32, output_page_capacity: 0u32, section_offset: 0u64,
+        max_retained_result_bytes: 4096u64, max_work_units: 1000u64,
+        max_items: 32u32, max_text_field_bytes: 2048u32,
+        max_wall_time_ms: 1000u32, reserved: 0u32)
+
+fn read_result(payload_length: u32) -> SimpleNativeBuildResultV1:
+    SimpleNativeBuildResultV1(descriptor_size: 96u32,
+        status: SIMPLE_NATIVE_BUILD_OK_V1, command_exit_status: 0,
+        terminal_state: SIMPLE_NATIVE_BUILD_TERMINAL_SUCCEEDED_V1,
+        session: session(), section: 3u32, flags: SIMPLE_NATIVE_BUILD_RESULT_EOF_V1,
+        section_length: payload_length as u64, page_offset: 0u64,
+        payload_offset: 96u32, payload_length: payload_length,
+        required_capacity: 96u32 + payload_length,
+        cleanup_state: SIMPLE_NATIVE_BUILD_CLEANUP_NOT_REQUESTED_V1,
+        reserved: 0u64)
+
+describe "native-build outer ABI":
+    it "encodes the exact descriptor offsets and decodes an unaligned copy":
+        val encoded = simple_native_build_descriptor_encode_v1(
+            simple_native_build_descriptor_v1(false))
+        expect(encoded.len()).to_equal(96)
+        expect(read_u32(encoded, 0)).to_equal(96u32)
+        expect(read_u32(encoded, 4)).to_equal(1u32)
+        expect(read_u32(encoded, 8)).to_equal(0u32)
+        expect(read_u32(encoded, 12)).to_equal(3u32)
+        expect(read_u64(encoded, 16)).to_equal(6002808248662896896u64)
+        expect(read_u32(encoded, 24)).to_equal(1u32)
+        expect(read_u32(encoded, 28)).to_equal(96u32)
+        expect(read_u32(encoded, 32)).to_equal(96u32)
+        expect(read_u32(encoded, 36)).to_equal(32u32)
+        expect(read_u32(encoded, 40)).to_equal(1u32)
+        expect(read_u32(encoded, 44)).to_equal(2u32)
+        expect(read_u32(encoded, 48)).to_equal(3u32)
+        expect(read_u32(encoded, 52)).to_equal(4u32)
+        expect(read_u32(encoded, 56)).to_equal(16777216u32)
+        expect(read_u32(encoded, 60)).to_equal(1048576u32)
+        expect(read_u64(encoded, 64)).to_equal(268435456u64)
+        expect(read_u32(encoded, 72)).to_equal(1048576u32)
+        expect(read_u32(encoded, 76)).to_equal(1048576u32)
+        expect(read_u32(encoded, 80)).to_equal(8u32)
+        expect(read_u32(encoded, 84)).to_equal(32u32)
+        expect(read_u64(encoded, 88)).to_equal(0u64)
+        var prefixed: [u8] = [255u8]
+        for byte in encoded: prefixed.push(byte)
+        expect(simple_native_build_descriptor_decode_v1(
+            prefixed[1..prefixed.len()]).ok).to_equal(true)
+
+    it "rejects wrong descriptor size version flags and reserved bytes":
+        val encoded = simple_native_build_descriptor_encode_v1(
+            simple_native_build_descriptor_v1(false))
+        expect(simple_native_build_descriptor_decode_v1(encoded[0..95]).error).to_equal(
+            "native_build_descriptor_size")
+        var wrong_version = encoded.copy()
+        wrong_version[4] = 2u8
+        expect(simple_native_build_descriptor_decode_v1(wrong_version).error).to_equal(
+            "native_build_descriptor_identity")
+        var wrong_flags = encoded.copy()
+        wrong_flags[12] = 11u8
+        expect(simple_native_build_descriptor_decode_v1(wrong_flags).error).to_equal(
+            "native_build_descriptor_flags")
+        var wrong_reserved = encoded.copy()
+        wrong_reserved[88] = 1u8
+        expect(simple_native_build_descriptor_decode_v1(wrong_reserved).error).to_equal(
+            "native_build_descriptor_contract")
+
+    it "accepts outer request shapes but grants no session or execution authority":
+        val payload: [u8] = [1u8, 2u8, 3u8]
+        val opened = simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(open_request(3u32), payload))
+        expect(opened.ok).to_equal(true)
+        expect(opened.authority_available).to_equal(false)
+        expect(opened.execution_available).to_equal(false)
+        expect(opened.payload).to_equal(payload)
+        val run = simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(request(SIMPLE_NATIVE_BUILD_RUN_V1), []))
+        expect(run.ok).to_equal(true)
+        expect(run.authority_available).to_equal(false)
+        var read = request(SIMPLE_NATIVE_BUILD_READ_V1)
+        read.section = 3u32
+        read.output_page_capacity = 4096u32
+        read.section_offset = 17u64
+        expect(simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(read, [])).ok).to_equal(true)
+        expect(simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(request(SIMPLE_NATIVE_BUILD_CLOSE_V1), [])).ok).to_equal(true)
+
+    it "rejects malformed ranges budgets sessions operations and reserved sections":
+        var malformed = open_request(4u32)
+        expect(simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(malformed, [1u8])).error).to_equal(
+                "native_build_request_payload_range")
+        malformed = open_request(1u32)
+        malformed.max_work_units = 0u64
+        expect(simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(malformed, [1u8])).error).to_equal(
+                "native_build_open_budget")
+        var invalid_session = request(SIMPLE_NATIVE_BUILD_RUN_V1)
+        invalid_session.session = simple_native_build_session_zero_v1()
+        expect(simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(invalid_session, [])).error).to_equal(
+                "native_build_session_shape")
+        expect(simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(request(99u32), [])).error).to_equal(
+                "native_build_operation_unknown")
+        var reserved_section = request(SIMPLE_NATIVE_BUILD_READ_V1)
+        reserved_section.section = 7u32
+        reserved_section.output_page_capacity = 1u32
+        expect(simple_native_build_request_decode_outer_v1(
+            simple_native_build_request_encode_v1(reserved_section, [])).error).to_equal(
+                "native_build_read_shape")
+
+    it "roundtrips result pages without granting publication authority":
+        val payload: [u8] = [9u8, 8u8]
+        val encoded = simple_native_build_result_encode_v1(read_result(2u32), payload)
+        expect(encoded.len()).to_equal(98)
+        expect(read_u32(encoded, 0)).to_equal(96u32)
+        expect(read_u64(encoded, 16)).to_equal(11u64)
+        expect(read_u32(encoded, 48)).to_equal(3u32)
+        expect(read_u64(encoded, 56)).to_equal(2u64)
+        expect(read_u32(encoded, 72)).to_equal(96u32)
+        val decoded = simple_native_build_result_decode_outer_v1(encoded)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.authority_available).to_equal(false)
+        expect(decoded.publication_available).to_equal(false)
+        expect(decoded.payload).to_equal(payload)
+        var invalid = read_result(2u32)
+        invalid.section = 7u32
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(invalid, payload)).error).to_equal(
+                "native_build_read_result_shape")
+        invalid = read_result(2u32)
+        invalid.reserved = 1u64
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(invalid, payload)).error).to_equal(
+                "native_build_result_header")
+
+    it "bounds retained sections and requires EOF exactly at the checked page end":
+        val payload: [u8] = [9u8, 8u8]
+        var invalid = read_result(2u32)
+        invalid.section_length = SIMPLE_NATIVE_BUILD_MAX_RETAINED_RESULT_BYTES_V1 + 1u64
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(invalid, payload)).error).to_equal(
+                "native_build_read_result_bounds")
+        invalid = read_result(2u32)
+        invalid.page_offset = 0u64 - 1u64
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(invalid, payload)).error).to_equal(
+                "native_build_read_result_bounds")
+        invalid = read_result(2u32)
+        invalid.section_length = 1u64
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(invalid, payload)).error).to_equal(
+                "native_build_read_result_bounds")
+        invalid = read_result(2u32)
+        invalid.flags = 0u32
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(invalid, payload)).error).to_equal(
+                "native_build_read_result_eof")
+        invalid = read_result(2u32)
+        invalid.section_length = 3u64
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(invalid, payload)).error).to_equal(
+                "native_build_read_result_eof")
+        var empty_at_end = read_result(0u32)
+        empty_at_end.section_length = 2u64
+        empty_at_end.page_offset = 2u64
+        empty_at_end.required_capacity = 96u32
+        expect(simple_native_build_result_decode_outer_v1(
+            simple_native_build_result_encode_v1(empty_at_end, [])).ok).to_equal(true)
+
+describe "native-build route policy":
+    it "keeps local commands provider-free and normal builds pure-Simple only":
+        val local = native_build_route_policy_v1(NativeBuildCommandProfileV1.LocalOnly,
+            false, true, true, true)
+        expect(local.route).to_equal(NativeBuildProviderRouteV1.LocalNoProvider)
+        expect(local.provider_mapping_authorized).to_equal(false)
+        val normal = native_build_route_policy_v1(NativeBuildCommandProfileV1.NormalProduct,
+            true, true, true, false)
+        expect(normal.route).to_equal(NativeBuildProviderRouteV1.PureSimple)
+        expect(normal.provider_mapping_authorized).to_equal(false)
+        val missing = native_build_route_policy_v1(NativeBuildCommandProfileV1.NormalProduct,
+            false, true, true, false)
+        expect(missing.route).to_equal(NativeBuildProviderRouteV1.Refused)
+        expect(missing.reason).to_equal("pure_simple_provider_required")
+        val forbidden = native_build_route_policy_v1(NativeBuildCommandProfileV1.NormalProduct,
+            false, true, true, true)
+        expect(forbidden.route).to_equal(NativeBuildProviderRouteV1.Refused)
+        expect(forbidden.reason).to_equal("bootstrap_forbidden_for_normal")
+
+    it "allows compatibility only when explicit admitted staged bootstrap requests it":
+        val staged = native_build_route_policy_v1(NativeBuildCommandProfileV1.StagedBootstrap,
+            false, true, true, true)
+        expect(staged.route).to_equal(NativeBuildProviderRouteV1.BootstrapCompatibility)
+        expect(staged.provider_mapping_authorized).to_equal(false)
+        val unadmitted = native_build_route_policy_v1(NativeBuildCommandProfileV1.StagedBootstrap,
+            false, true, false, true)
+        expect(unadmitted.route).to_equal(NativeBuildProviderRouteV1.Refused)
+        val stage4 = native_build_route_policy_v1(NativeBuildCommandProfileV1.Stage4,
+            false, true, true, true)
+        expect(stage4.route).to_equal(NativeBuildProviderRouteV1.Refused)
+        expect(stage4.reason).to_equal("bootstrap_forbidden_for_stage4")

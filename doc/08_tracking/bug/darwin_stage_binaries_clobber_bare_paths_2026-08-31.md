@@ -1,4 +1,8 @@
 # Darwin Mach-O stage binaries clobber the bare bootstrap stage paths
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** ROOT CAUSE FIXED (deploy path); tracked artifacts still wrong at
@@ -76,3 +80,4 @@ Linux redeploy lands triple-scoped artifacts.
 
 Related: `doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`
 (carries the darwin-blob class split from this session).
+

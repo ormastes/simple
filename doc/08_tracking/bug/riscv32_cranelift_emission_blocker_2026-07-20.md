@@ -1,4 +1,9 @@
 # Bug: RISC-V 32 (rv32) — no native-build emission path; serial shell unverifiable
+## Closed 2026-09-16 — ...rv64 in `freestanding_runtime.c`). ## Fix direction 1. Add a cranelift rv32 codegen path (
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **ID:** riscv32-cranelift-emission-blocker-2026-07-20
 **Domain:** compiler/backend, os/simpleos
@@ -60,3 +65,4 @@ rv64 in `freestanding_runtime.c`).
 
 - rv64 serial shell + login + ls: commit 6b87d996bf62
 - rv64+rv32 launch command: commits cc5256812d48 / 8ef6c4c8a11a
+

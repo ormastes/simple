@@ -26,26 +26,43 @@
 #             |      |           |                      | for static SMF links
 #             |      |           |                      | (reloc_engine.spl:17
 #             |      |           |                      | note, :144-145, DEAD)
-#   GotRel32  |  4   | S + A - P | signed 32-bit        | psABI R_X86_64_
-#             |      |           | [-2^31, 2^31 - 1]    | GOTPCREL "G + GOT +
-#             |      |           |                      | A - P"; caller passes
-#             |      |           |                      | s = GOT-entry address
-#             |      |           |                      | (= G + GOT), matching
-#             |      |           |                      | reloc_engine.spl:156-
-#             |      |           |                      | 157 (DEAD)
+#   GotRel32  |  4   | G + A - P | signed 32-bit        | psABI R_X86_64_
+#             |      | (S == G,  | [-2^31, 2^31 - 1]    | GOTPCREL "G + GOT +
+#             |      | the GOT-  |                      | A - P"; caller MUST
+#             |      | entry     |                      | pass s = GOT-entry
+#             |      | address,  |                      | address, never the
+#             |      | never the |                      | symbol's own address
+#             |      | symbol's  |                      | — reloc_engine.spl's
+#             |      | address)  |                      | R_X86_64_GOTPCREL case
+#             |      |           |                      | now routes here (live)
+#
+#   PINNED WIRE-4 RULE (design §4, doc/08_tracking/bug/
+#   smf_gotrel32_applied_as_symbol_value_2026-09-18.md): `80.driver/
+#   smf_elf_parser.spl:246` maps LLVM R_X86_64_GOTPCREL to this wire value.
+#   A GOTPCREL site loads *through* a GOT slot, so `s` in the formula above
+#   is the address of that slot (S == G), not the symbol's address — the two
+#   are architecturally distinct memory locations. Both live loaders
+#   (`99.loader/module_loader_compat.spl:1324-1370`,
+#   `os/smf/smf_dynlib.spl:759`) currently pass the symbol's own address
+#   instead, which is the open defect the bug doc and
+#   `T/compiler/loader/loader_reloc_wire4_spec.spl` (lane A4a, in-development
+#   until A4b) pin. This oracle's `s` parameter contract does not change —
+#   only callers must be fixed to supply the right address.
 #   Abs32     |  5   | S + A     | unsigned 32-bit      | psABI R_X86_64_32
 #             |      |           | [0, 2^32 - 1]        | "S + A" zero-extended;
 #             |      |           |                      | reloc_engine.spl:18
 #             |      |           |                      | comments "truncated
 #             |      |           |                      | u32" (DEAD)
 #
-# No LIVE in-repo code applies SMF relocation formulas today: smf_writer.spl
-# only records SmfRelocation entries (smf_writer.spl:148-152, :215-216) and
-# reloc_engine.spl is known DEAD code (cited above as reference only). Where
-# reloc_engine.spl silently masks (`v & 0xffffffff`, reloc_engine.spl:150),
-# this oracle instead REJECTS out-of-width values (ok: false) — silent
-# truncation is exactly the class of defect the GPU/CPU L8 comparison must
-# surface, so the oracle must never hide it.
+# reloc_engine.spl (dead code — no caller wires it into a live link path yet,
+# see lane A4a) now calls smf_reloc_compute directly for its S+A / S+A-P
+# formulas and adopted reject semantics: it used to silently mask
+# (`v & 0xffffffff`) on R_X86_64_32 overflow; it now rejects (ok: false) via
+# this oracle instead, matching the rule below — silent truncation is
+# exactly the class of defect the GPU/CPU L8 comparison must surface, so the
+# oracle must never hide it. smf_writer.spl still only records
+# SmfRelocation entries (smf_writer.spl:148-152, :215-216); it does not
+# apply them.
 # ============================================================================
 
 use compiler.backend.linker.smf_writer.{RelocationType}

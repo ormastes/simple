@@ -1,5 +1,14 @@
 # simple-mcp broken in Claude Code + bootstrap stage4 produces broken full CLI (2026-06-16)
 
+## Triage 2026-09-13 — STILL OPEN: bootstrap-scoped, cannot be touched or exercised now
+- **measured** — Stage 4 artifacts do exist on this host
+  (`build/bootstrap/full/x86_64-pc-windows-msvc/{simple.exe,simple_mcp_server.exe,simple_lsp_mcp_server.exe}`),
+  but a bootstrap is running concurrently in this workspace, so those files are being
+  written and must not be executed or judged mid-run.
+- **inferred** — the remaining defects this entry names are in `scripts/bootstrap/**` and
+  seed/cranelift codegen, both off-limits to this triage pass. Left OPEN; re-verify after
+  the in-flight bootstrap finishes.
+
 Status: OPEN (bootstrap defect C and portability defect D remain)
 Severity: P1 (self-hosted bootstrap deploy); native simple-mcp path resolved 2026-07-15
 Owned-code scope: src/app/mcp, src/lib/nogc_sync_mut/mcp_sdk, seed/cranelift codegen, scripts/bootstrap

@@ -1,4 +1,8 @@
 # Stage-3 primary import resolution aggregate corruption (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -101,3 +105,4 @@ cycle still failed convergence: HIR recorded 15 unresolved `Span` errors in
 `driver_pipeline_passes.spl` and 19 in `driver_pipeline_aop.spl`. The scan was
 terminated once failure was certain; no Stage 4, deployment, hook PASS, or push
 is claimed.
+

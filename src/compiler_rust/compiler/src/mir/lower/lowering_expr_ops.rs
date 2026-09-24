@@ -553,7 +553,7 @@ impl<'a> MirLowerer<'a> {
         // copy in codegen, so a raw int/float would masquerade as a STRING
         // pointer — rt_string_concat then sees len=-1 and returns NIL,
         // dropping the whole concat to empty (#66). Convert for real.
-        if target == TypeId::STRING && Self::is_native_scalar(inner.ty) {
+        if target == TypeId::STRING && (Self::is_native_scalar(inner.ty) || inner.ty == TypeId::ANY) {
             return self.emit_to_string(source_reg, inner.ty);
         }
 
@@ -586,13 +586,31 @@ impl<'a> MirLowerer<'a> {
                 | TypeId::F32
                 | TypeId::F64
                 | TypeId::BOOL
+                | TypeId::CHAR
         )
     }
 
     /// Emit a to-string conversion for `reg` of type `ty`, boxing native
     /// scalars into RuntimeValues first (mirrors the rt_value_to_string
     /// builtin lowering in lowering_expr_builtin.rs).
-    fn emit_to_string(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<VReg> {
+    pub(super) fn emit_to_string(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<VReg> {
+        // `char` is a raw Unicode scalar (i32), not a tagged RuntimeValue.
+        // Sending it through rt_value_to_string makes the code point's low
+        // bits masquerade as a runtime tag (`123 as char` became
+        // `<special:15>`). Build the one-code-point UTF-8 string directly;
+        // the runtime helper also rejects invalid Unicode scalar values.
+        if ty == TypeId::CHAR {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::CallTarget::from_name("rt_char_from_code"),
+                    args: vec![reg],
+                });
+                dest
+            });
+        }
+
         // U64 must not go through BoxInt (sign issues); use the raw helper.
         //
         // I64 must not either, for the SAME reason and via the signed

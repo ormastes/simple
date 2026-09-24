@@ -1,4 +1,9 @@
 # Transport-profile checks fail silently-plausibly when run from any cwd but the repo root
+## Closed 2026-09-16 — ...s.sdn" ``` A **relative** path, resolved against the process cwd. `file_read_text` at `:96
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-01
 **Found by:** parent session, while (incorrectly) investigating a suspected regression.
@@ -53,3 +58,4 @@ a profile. The defect is that the *reason* is invisible at the point of failure.
 
 Measured on the Rust bootstrap seed; the behaviour is a path-resolution property
 and is not seed-specific.
+

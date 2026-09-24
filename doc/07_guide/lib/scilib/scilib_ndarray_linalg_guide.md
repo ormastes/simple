@@ -30,8 +30,8 @@ use std.linalg.*           # BLAS/LAPACK facade: solve, gemm, axpy, dot, norm, .
 For direct access to provider traits or low-level BLAS bindings:
 
 ```simple
-use std.common.science_math.blas.*           # BlasHandle, NormOrd, LinalgError
-use std.common.science_math.blas_provider.*  # BlasProvider trait
+use std.common.science_math.types.*          # BlasHandle, NormOrd, LinalgError
+use std.common.linalg.blas_provider.*        # BlasProvider trait
 use std.common.science_math.lapack.*         # LapackInfo, LinalgError (6 variants)
 use std.common.science_math.lapack_provider.* # LapackProvider trait
 use std.common.science_math.linalg.*         # mat_mul, dot, mat_zeros, mat_identity
@@ -129,8 +129,9 @@ val c = mat_mul(a_mat, b_mat)   # Matrix multiply; rows/cols checked internally
 
 ## 5. BLAS Operations
 
-All Layer-C BLAS functions work on `[f64]` flat buffers and return `Result`.
-Import: `use std.linalg.*`
+The public `std.linalg` facade uses typed `NDArray` and scalar wrappers.
+The `blas_*_f64` helpers below are Layer-B buffer bindings, useful for provider
+implementers and tests; callers should prefer the typed facade when possible.
 
 ### 5.1 axpy — scaled vector add
 

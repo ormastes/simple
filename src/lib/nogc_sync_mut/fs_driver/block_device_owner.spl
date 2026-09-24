@@ -9,13 +9,82 @@ use std.fs_driver.block_device.{BlockDevice}
 
 var _fs_block_device_store: [BlockDevice] = []
 var _fs_block_device_ready: bool = false
+var _fs_block_device_next_identity: u64 = 1u64
+var _fs_block_device_mirror_identity: u64 = 0u64
+var _fs_block_device_mirror_highest_identity: u64 = 0u64
+var _fs_block_device_mirror_capacity: u64 = 0u64
+var _fs_block_device_mirror_sector_size: u32 = 0u32
+var _fs_block_device_mirror_next_block: u64 = 64u64
+
+fn fs_block_device_owner_new_identity() -> u64:
+    if _fs_block_device_next_identity == 0u64 or _fs_block_device_next_identity == 0xFFFFFFFFFFFFFFFFu64:
+        return 0u64
+    val identity = _fs_block_device_next_identity
+    _fs_block_device_next_identity = identity + 1u64
+    identity
 
 fn fs_block_device_owner_set(device: BlockDevice):
+    val identity = device.mirror_identity()
+    val capacity = device.sector_count()
+    val sector_size = device.sector_size()
+    if identity == 0u64:
+        _fs_block_device_mirror_identity = 0u64
+    else:
+        if identity != _fs_block_device_mirror_identity:
+            # A prior device may still contain live mirror sectors. Without a
+            # persistent per-device cursor, reactivation must fail closed.
+            if identity <= _fs_block_device_mirror_highest_identity:
+                _fs_block_device_mirror_identity = 0u64
+            else:
+                _fs_block_device_mirror_highest_identity = identity
+                _fs_block_device_mirror_identity = identity
+                _fs_block_device_mirror_next_block = 64u64
+    _fs_block_device_mirror_capacity = capacity
+    _fs_block_device_mirror_sector_size = sector_size
     if _fs_block_device_ready:
         _fs_block_device_store[0] = device
     else:
         _fs_block_device_store.push(device)
         _fs_block_device_ready = true
+
+fn fs_block_device_owner_mirror_write(data: [u8]) -> Result<u64, text>:
+    if not _fs_block_device_ready or _fs_block_device_mirror_identity == 0u64:
+        return Err("mirror device identity unavailable")
+    val sector_size = _fs_block_device_mirror_sector_size as u64
+    if sector_size == 0u64 or sector_size > 65536u64:
+        return Err("mirror device sector size unavailable")
+    val base = _fs_block_device_mirror_next_block
+    if base > 0xFFFFFFFFFFFFFFFFu64 - 32u64 or base + 32u64 > _fs_block_device_mirror_capacity:
+        return Err("mirror device capacity exhausted")
+    if data.len() as u64 > 31u64 * sector_size:
+        return Err("mirror data exceeds arena capacity")
+    val identity = _fs_block_device_mirror_identity
+    _fs_block_device_mirror_next_block = base + 32u64
+    val sector_size_i64 = sector_size as i64
+    val data_len = data.len() as i64
+    var offset: i64 = 0
+    var lba = base + 1u64
+    while offset < data_len:
+        if identity != _fs_block_device_mirror_identity:
+            return Err("mirror device changed during write")
+        var sector = match fs_block_device_owner_read(lba):
+            Ok(bytes): bytes
+            Err(_): return Err("mirror device read failed")
+        if sector.len() as i64 != sector_size_i64:
+            return Err("mirror device sector size mismatch")
+        var i: i64 = 0
+        while i < sector_size_i64 and offset < data_len:
+            sector[i as i32] = data[offset as i32]
+            i = i + 1
+            offset = offset + 1
+        if identity != _fs_block_device_mirror_identity:
+            return Err("mirror device changed during write")
+        match fs_block_device_owner_write(lba, sector):
+            Ok(true):
+                lba = lba + 1u64
+            _:
+                return Err("mirror device write failed")
+    Ok(base)
 
 fn fs_block_device_owner_ready() -> bool:
     _fs_block_device_ready
@@ -61,3 +130,4 @@ export fs_block_device_owner_set, fs_block_device_owner_ready
 export fs_block_device_owner_sector_size, fs_block_device_owner_read
 export fs_block_device_owner_write, fs_block_device_owner_flush
 export fs_block_device_owner_flush_acknowledged
+export fs_block_device_owner_new_identity, fs_block_device_owner_mirror_write

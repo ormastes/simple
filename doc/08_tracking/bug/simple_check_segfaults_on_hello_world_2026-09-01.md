@@ -1,4 +1,8 @@
 # `simple check` SEGVs on a two-line hello world
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Status:** OPEN — measured, not fixed
@@ -56,3 +60,4 @@ successfully on this chain today. Compare the `check` entry path against
 Unknown — reproduced only on Windows. Worth checking whether `check` crashes
 on Linux/macOS too before assuming it is platform-specific; nothing in the
 symptom suggests a Windows-only cause.
+

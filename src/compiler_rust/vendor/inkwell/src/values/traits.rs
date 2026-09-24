@@ -1,3 +1,4 @@
+use llvm_sys::core::LLVMIsConstant;
 use llvm_sys::prelude::LLVMValueRef;
 
 #[llvm_versions(12..)]
@@ -6,10 +7,13 @@ use llvm_sys::core::LLVMIsPoison;
 use std::fmt::Debug;
 
 use crate::support::LLVMString;
-use crate::types::{FloatMathType, FloatType, IntMathType, IntType, PointerMathType, PointerType, VectorType};
+use crate::types::{
+    FloatMathType, FloatType, IntMathType, IntType, PointerMathType, PointerType, ScalableVectorType, VectorType,
+};
 use crate::values::{
     AggregateValueEnum, AnyValueEnum, ArrayValue, BasicValueEnum, BasicValueUse, CallSiteValue, FloatValue,
-    FunctionValue, GlobalValue, InstructionValue, IntValue, PhiValue, PointerValue, StructValue, Value, VectorValue,
+    FunctionValue, GlobalValue, InstructionValue, IntValue, PhiValue, PointerValue, ScalableVectorValue, StructValue,
+    Value, VectorValue,
 };
 
 use super::{BasicMetadataValueEnum, MetadataValue};
@@ -37,6 +41,20 @@ macro_rules! math_trait_value_set {
         $(
             unsafe impl<'ctx> $trait_name<'ctx> for $value_type<'ctx> {
                 type BaseType = $base_type<'ctx>;
+                unsafe fn new(value: LLVMValueRef) -> $value_type<'ctx> {
+                    unsafe {
+                        $value_type::new(value)
+                    }
+                }
+            }
+        )*
+    )
+}
+
+macro_rules! base_trait_value_set {
+    ($trait_name:ident: $($value_type:ident),*) => (
+        $(
+            unsafe impl<'ctx> $trait_name<'ctx> for $value_type<'ctx> {
                 unsafe fn new(value: LLVMValueRef) -> $value_type<'ctx> {
                     unsafe {
                         $value_type::new(value)
@@ -105,13 +123,18 @@ pub unsafe trait BasicValue<'ctx>: AnyValue<'ctx> {
         unsafe { Some(InstructionValue::new(self.as_value_ref())) }
     }
 
-    fn get_first_use(&self) -> Option<BasicValueUse> {
+    fn get_first_use(&self) -> Option<BasicValueUse<'ctx>> {
         unsafe { Value::new(self.as_value_ref()).get_first_use() }
     }
 
     /// Sets the name of a `BasicValue`. If the value is a constant, this is a noop.
     fn set_name(&self, name: &str) {
         unsafe { Value::new(self.as_value_ref()).set_name(name) }
+    }
+
+    /// Returns true if this value is a constant.
+    fn is_const(&self) -> bool {
+        unsafe { LLVMIsConstant(self.as_value_ref()) == 1 }
     }
 
     // REVIEW: Possible encompassing methods to implement:
@@ -132,6 +155,11 @@ pub unsafe trait FloatMathValue<'ctx>: BasicValue<'ctx> {
 
 pub unsafe trait PointerMathValue<'ctx>: BasicValue<'ctx> {
     type BaseType: PointerMathType<'ctx>;
+    unsafe fn new(value: LLVMValueRef) -> Self;
+}
+
+/// Represents a value which is permitted in vector operations, either fixed or scalable
+pub unsafe trait VectorBaseValue<'ctx>: BasicValue<'ctx> {
     unsafe fn new(value: LLVMValueRef) -> Self;
 }
 
@@ -156,8 +184,9 @@ pub unsafe trait AnyValue<'ctx>: AsValueRef + Debug {
 }
 
 trait_value_set! {AggregateValue: ArrayValue, AggregateValueEnum, StructValue}
-trait_value_set! {AnyValue: AnyValueEnum, BasicValueEnum, BasicMetadataValueEnum, AggregateValueEnum, ArrayValue, IntValue, FloatValue, GlobalValue, PhiValue, PointerValue, FunctionValue, StructValue, VectorValue, InstructionValue, CallSiteValue, MetadataValue}
-trait_value_set! {BasicValue: ArrayValue, BasicValueEnum, AggregateValueEnum, IntValue, FloatValue, GlobalValue, StructValue, PointerValue, VectorValue}
-math_trait_value_set! {IntMathValue: (IntValue => IntType), (VectorValue => VectorType), (PointerValue => IntType)}
-math_trait_value_set! {FloatMathValue: (FloatValue => FloatType), (VectorValue => VectorType)}
-math_trait_value_set! {PointerMathValue: (PointerValue => PointerType), (VectorValue => VectorType)}
+trait_value_set! {AnyValue: AnyValueEnum, BasicValueEnum, BasicMetadataValueEnum, AggregateValueEnum, ArrayValue, IntValue, FloatValue, GlobalValue, PhiValue, PointerValue, FunctionValue, StructValue, VectorValue, ScalableVectorValue, InstructionValue, CallSiteValue, MetadataValue}
+trait_value_set! {BasicValue: ArrayValue, BasicValueEnum, AggregateValueEnum, IntValue, FloatValue, GlobalValue, StructValue, PointerValue, VectorValue, ScalableVectorValue}
+math_trait_value_set! {IntMathValue: (IntValue => IntType), (VectorValue => VectorType), (ScalableVectorValue => ScalableVectorType), (PointerValue => IntType)}
+math_trait_value_set! {FloatMathValue: (FloatValue => FloatType), (VectorValue => VectorType), (ScalableVectorValue => ScalableVectorType)}
+math_trait_value_set! {PointerMathValue: (PointerValue => PointerType), (VectorValue => VectorType), (ScalableVectorValue => ScalableVectorType)}
+base_trait_value_set! {VectorBaseValue: VectorValue, ScalableVectorValue}

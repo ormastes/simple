@@ -1,4 +1,8 @@
 # Array `.at(i)` returns `nil` for EVERY index — all Option call sites take the None branch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** interpreter lane FIXED; **JIT lane FIXED**; **native LLVM (Rust seed
@@ -420,3 +424,4 @@ evidence about the native or JIT lanes — which is exactly why
 close this bug. Native must be verified by `simple compile --native` plus
 running the produced binary, and JIT by a default `simple foo.spl` run, as done
 in the transcripts above.
+

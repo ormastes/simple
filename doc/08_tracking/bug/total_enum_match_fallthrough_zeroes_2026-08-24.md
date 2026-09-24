@@ -1,4 +1,8 @@
 # A TOTAL enum match falls through to `const 0` instead of trapping (2026-08-24)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status: FIXED (pure-Simple MIR lowering). Rust-seed HIR lowering gap REPORTED, not fixed.**
 
@@ -208,3 +212,4 @@ valid value can reach.
   call that precedes it, not from the terminator.
 - `-fsyntax-only`-style static proof is not claimed: the evidence above is a
   built-and-executed binary.
+

@@ -1,0 +1,65 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+# macOS Stage 2 site 13 (doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md,
+# run 25; doc/08_tracking/bug/stage2_cross_module_call_mangling_asymmetry_undefined_symbol_2026-09-13.md):
+# the Stage-3 route's 2-module fixture linked with
+#   Undefined symbols: "_compiler.common.module_path_naming.module_logical_name_from_path"
+# because the CALL side emits the fully-qualified dotted name while the
+# provider module emitted `define ptr @module_logical_name_from_path`.
+# The absolute oracle is the spelling every cross-module call site already
+# uses: "<logical module>.<function>".
+
+val provider_src = "fn module_logical_name_from_path(path: text) -> text:\n    path\n"
+val intra_call_src = "fn helper(a: i64) -> i64:\n    a + 1\n\nfn outer(a: i64) -> i64:\n    helper(a) + 1\n"
+
+val provider_module = "compiler.common.module_path_naming"
+val expected_symbol = "compiler.common.module_path_naming.module_logical_name_from_path"
+
+fn lower_source(src: text, module_name: text) -> MirModule:
+    val ast = parse_full_frontend(src, "mangle.spl", "mangle.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("mangle.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var mir = mir_lowering.lower_module(hir)
+    mir.name = module_name
+    mir
+
+fn emit(src: text, module_name: text, is_entry: bool) -> text:
+    MirToLlvm.create(module_name, CodegenTarget.X86_64, nil)
+        .translate_module_with_entry(lower_source(src, module_name), is_entry)
+
+describe "cross-module function symbols agree between definition and call", tag: ["only-compiled"]:
+    it "defines a non-entry module's function under its module-qualified name":
+        # @req REQ-SSPEC-UNIT
+        step("defines a non-entry module's function under its module-qualified name")
+        expect(emit(provider_src, provider_module, false).contains("@{expected_symbol}(")).to_equal(true)
+
+    it "never leaves the bare definition a cross-module caller cannot reach":
+        # @req REQ-SSPEC-UNIT
+        step("never leaves the bare definition a cross-module caller cannot reach")
+        expect(emit(provider_src, provider_module, false).contains("@module_logical_name_from_path(")).to_equal(false)
+
+    it "keeps the entry module's own functions unqualified":
+        # @req REQ-SSPEC-UNIT
+        step("keeps the entry module's own functions unqualified")
+        expect(emit(provider_src, provider_module, true).contains("@module_logical_name_from_path(")).to_equal(true)
+
+    it "moves an intra-module call with the definition it targets":
+        # @req REQ-SSPEC-UNIT
+        step("moves an intra-module call with the definition it targets")
+        val ir = emit(intra_call_src, "compiler.common.probe", false)
+        expect(ir.contains("define i64 @compiler.common.probe.helper(")).to_equal(true)
+        expect(ir.contains("@compiler.common.probe.helper(i64")).to_equal(true)

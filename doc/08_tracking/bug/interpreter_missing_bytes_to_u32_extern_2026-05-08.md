@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: FIXED 2026-05-10 -- verified by interpreter repro (all bytes_to_u16/u32/u64 le/be externs registered
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Bug — Interpreter missing `bytes_to_u32_le`/`bytes_to_u32_be` externs
 
 Status: FIXED 2026-05-10 -- verified by interpreter repro (all bytes_to_u16/u32/u64 le/be externs registered

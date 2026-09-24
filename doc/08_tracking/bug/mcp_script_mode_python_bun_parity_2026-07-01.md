@@ -1,4 +1,9 @@
 # MCP script-mode Python/Bun parity gap
+## Closed 2026-09-16 — in-body follow-up: strict parity gate passes (simple 29ms vs python 35ms)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-07-01
 
@@ -74,3 +79,4 @@ After the SMF relocation blocker is fixed, also run:
 ```bash
 MCP_SCRIPT_PERF_USE_SMF=1 MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
 ```
+

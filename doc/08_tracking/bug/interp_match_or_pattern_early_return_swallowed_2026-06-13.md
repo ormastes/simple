@@ -1,8 +1,15 @@
 # Interpreter: `return` inside if-block under or-pattern match arm is swallowed
 
+## Closed 2026-09-13 — Already fixed; or-pattern arm returns are honoured
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): a standalone repro of the exact shape (enum `Landscape|Portrait|Square`, `match o: Landscape | Square:` with a nested `if ...: return`) prints `landscape / landscape / portrait / default` — the or-pattern arm's `return` is taken, and the post-match `return` is reached only when no arm returns.
+- **measured**: `bin/simple run test/01_unit/app/ui/profile_spec.spl` → `declared>=54 executed=54 passed=53 failed=1`; the three landscape/portrait/Square profile examples this bug was tracked by all pass.
+- **inferred**: the single remaining failure in that spec is unrelated to this defect — `returns Regular below 840` / `expected SizeClass::Expanded to equal SizeClass::Regular`, a size-class boundary, not a match-arm control-flow bug. Not filed here; it belongs to whoever owns `profile_spec`.
+
+- **measured** (interpreter lane, forced): re-run with a JIT-poison helper so the module falls back — log shows `JIT compilation failed, falling back to interpreter` — and the or-pattern repro still prints `landscape / landscape / portrait / default`. The earlier figure was the Cranelift JIT lane; both lanes agree.
 **Date:** 2026-06-13
 **Severity:** medium (silent wrong value, no error)
-**Status:** FIXED 2026-06-13 — root cause found and fixed; regression tests added
+**Status:** CLOSED 2026-09-13 (re-verified). Originally: FIXED 2026-06-13 — root cause found and fixed; regression tests added
 
 ## Symptom
 

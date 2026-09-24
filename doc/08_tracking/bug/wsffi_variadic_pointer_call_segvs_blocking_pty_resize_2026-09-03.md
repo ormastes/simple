@@ -1,4 +1,9 @@
 # The SFFI facade cannot call a variadic libc function with a pointer — it SEGVs
+## Closed 2026-09-16 — ...en`/`spl_dlsym`) transmutes the resolved symbol to a **fixed, non-variadic** function poin
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Filed 2026-09-03. Status: OPEN.
 
@@ -59,3 +64,4 @@ better reason — a PTY stack already exists at `origin/main`
 `lib/std/src/sys/pty.spl`). This record exists because the facade limitation is
 independent of that decision and will block the next caller who needs a
 variadic libc function.
+

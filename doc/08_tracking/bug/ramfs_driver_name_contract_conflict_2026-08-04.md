@@ -1,4 +1,8 @@
 # BUG: `RamFsDriver.name` — two hand-written spec suites assert contradictory values for the same field
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (2026-08-09)
 **Found:** 2026-08-04
@@ -108,3 +112,4 @@ call, not a test-fixing one. Filing instead of guessing.
 i.e. make `name` the mount-type identifier consistently, then update the 4
 dbfs assertions plus their generated/legacy mirrors in the same change. That
 makes the field mean one thing across all drivers instead of two.
+

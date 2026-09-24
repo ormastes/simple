@@ -1,4 +1,8 @@
 # Lint profile optional assertion runner failure — 2026-07-19
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** REPRODUCED / OPEN
 
@@ -9,3 +13,4 @@ optional access, the nil matcher, and explicit nil comparison were not stable
 under the temporary Rust-hosted interpreter. The three-cycle cap was reached;
 fix the Option matcher/interpreter contract before changing this assertion
 again.
+

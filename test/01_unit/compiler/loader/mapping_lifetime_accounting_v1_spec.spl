@@ -1,0 +1,287 @@
+"""Provider-neutral mapping lifetime accounting contracts.
+
+These scenarios execute only the pure owner state machine.  They do not claim
+that a kernel mapping was created, munmap ran, or process RSS changed.
+"""
+
+use std.spec.*
+use compiler.loader.loader.mapping_lifetime_accounting_v1.{
+    MappingLifetimePhaseV1,
+    MappingLifetimeFailureV1,
+    MappingClosePermitV1,
+    MappingLifetimeLedgerV1,
+    mapping_lifetime_ledger_v1,
+    mapping_lifetime_check_v1,
+    mapping_lifetime_pin_count_v1,
+    mapping_lifetime_admit_v1,
+    mapping_lifetime_pin_v1,
+    mapping_lifetime_unpin_v1,
+    mapping_lifetime_begin_close_v1,
+    mapping_lifetime_finish_close_v1,
+}
+
+fn one_mapping(max_records: i64, max_bytes: i64) -> MappingLifetimeLedgerV1:
+    val admitted = mapping_lifetime_admit_v1(
+        mapping_lifetime_ledger_v1("l4-test-owner", 7, max_records, max_bytes),
+        "module-a@generation-7",
+        4096,
+    )
+    admitted.ledger
+
+describe "mapping lifetime accounting v1":
+    it "retires before refusing a pinned close and blocks new pins":
+        step("pin a live mapping and request close")
+        var ledger = one_mapping(2, 8192)
+        val pinned = mapping_lifetime_pin_v1(ledger, "module-a@generation-7")
+        ledger = pinned.ledger
+
+        val refused = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7")
+        expect(refused.ok).to_equal(false)
+        expect(refused.failure).to_equal(MappingLifetimeFailureV1.MappingPinned)
+        expect(refused.close_permit_present).to_equal(false)
+        expect(refused.ledger.records[0].phase).to_equal(MappingLifetimePhaseV1.Retiring)
+        expect(mapping_lifetime_pin_count_v1(
+            refused.ledger, "module-a@generation-7")).to_equal(1)
+        expect(refused.ledger.resident_bytes).to_equal(4096)
+        expect(refused.ledger.pin_refusals).to_equal(1)
+
+        step("prove retirement prevents a new pin from starving close")
+        val repin = mapping_lifetime_pin_v1(
+            refused.ledger, "module-a@generation-7")
+        expect(repin.ok).to_equal(false)
+        expect(repin.failure).to_equal(MappingLifetimeFailureV1.MappingNotLive)
+        expect(mapping_lifetime_pin_count_v1(
+            repin.ledger, "module-a@generation-7")).to_equal(1)
+
+    it "issues a close permit only after the last pin drains":
+        step("enter retiring state while one pin remains")
+        var ledger = one_mapping(1, 4096)
+        val pinned = mapping_lifetime_pin_v1(ledger, "module-a@generation-7")
+        ledger = pinned.ledger
+        ledger = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7").ledger
+
+        step("drain the pin, then begin the provider close")
+        ledger = mapping_lifetime_unpin_v1(
+            ledger, pinned.pin_receipt).ledger
+        val begun = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7")
+        expect(begun.ok).to_equal(true)
+        expect(begun.close_permit_present).to_equal(true)
+        expect(begun.ledger.records[0].phase).to_equal(MappingLifetimePhaseV1.Closing)
+        expect(mapping_lifetime_pin_count_v1(
+            begun.ledger, "module-a@generation-7")).to_equal(0)
+        expect(begun.ledger.resident_bytes).to_equal(4096)
+
+    it "retains ownership bytes and capacity after provider close failure":
+        step("fail a permitted provider close")
+        val ledger = one_mapping(1, 4096)
+        val begun = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7")
+        val failed = mapping_lifetime_finish_close_v1(
+            begun.ledger, begun.close_permit, false)
+        expect(failed.ok).to_equal(false)
+        expect(failed.failure).to_equal(MappingLifetimeFailureV1.CloseFailed)
+        expect(failed.ledger.records.len()).to_equal(1)
+        expect(failed.ledger.records[0].phase).to_equal(MappingLifetimePhaseV1.Retryable)
+        expect(failed.ledger.resident_bytes).to_equal(4096)
+        expect(failed.ledger.close_failures).to_equal(1)
+        expect(failed.ledger.releases_completed).to_equal(0)
+
+        step("prove the retained mapping still consumes the only slot and byte budget")
+        val over_capacity = mapping_lifetime_admit_v1(
+            failed.ledger, "module-b@generation-1", 1)
+        expect(over_capacity.ok).to_equal(false)
+        expect(over_capacity.failure).to_equal(MappingLifetimeFailureV1.CapacityExceeded)
+        expect(over_capacity.ledger.resident_bytes).to_equal(4096)
+
+    it "requires a fresh retry token and rejects the stale close result":
+        step("fail the first close and issue a distinct retry permit")
+        val ledger = one_mapping(1, 4096)
+        val first = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7")
+        val failed = mapping_lifetime_finish_close_v1(
+            first.ledger, first.close_permit, false)
+        val retry = mapping_lifetime_begin_close_v1(
+            failed.ledger, "module-a@generation-7")
+        expect(retry.close_permit.close_token).to_be_greater_than(
+            first.close_permit.close_token)
+
+        step("reject a delayed success for the failed attempt without freeing bytes")
+        val stale = mapping_lifetime_finish_close_v1(
+            retry.ledger, first.close_permit, true)
+        expect(stale.ok).to_equal(false)
+        expect(stale.failure).to_equal(MappingLifetimeFailureV1.StaleClosePermit)
+        expect(stale.ledger.records.len()).to_equal(1)
+        expect(stale.ledger.resident_bytes).to_equal(4096)
+
+        step("accept only the current permit and release accounting exactly once")
+        val released = mapping_lifetime_finish_close_v1(
+            stale.ledger, retry.close_permit, true)
+        expect(released.ok).to_equal(true)
+        expect(released.ledger.records.len()).to_equal(0)
+        expect(released.ledger.resident_bytes).to_equal(0)
+        expect(released.ledger.close_attempts).to_equal(2)
+        expect(released.ledger.close_failures).to_equal(1)
+        expect(released.ledger.releases_completed).to_equal(1)
+
+        val duplicate = mapping_lifetime_finish_close_v1(
+            released.ledger, retry.close_permit, true)
+        expect(duplicate.ok).to_equal(false)
+        expect(duplicate.failure).to_equal(MappingLifetimeFailureV1.MappingMissing)
+        expect(duplicate.ledger.resident_bytes).to_equal(0)
+        expect(duplicate.ledger.releases_completed).to_equal(1)
+
+    it "rejects a forged permit without changing resident accounting":
+        step("alter the authoritative byte extent in a pending close permit")
+        val ledger = one_mapping(1, 4096)
+        val begun = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7")
+        val forged = MappingClosePermitV1(
+            ledger_owner: begun.close_permit.ledger_owner,
+            ledger_epoch: begun.close_permit.ledger_epoch,
+            mapping_id: begun.close_permit.mapping_id,
+            mapping_sequence: begun.close_permit.mapping_sequence,
+            close_token: begun.close_permit.close_token,
+            mapped_bytes: 2048,
+        )
+        val rejected = mapping_lifetime_finish_close_v1(
+            begun.ledger, forged, true)
+        expect(rejected.ok).to_equal(false)
+        expect(rejected.failure).to_equal(MappingLifetimeFailureV1.StaleClosePermit)
+        expect(rejected.ledger.records.len()).to_equal(1)
+        expect(rejected.ledger.resident_bytes).to_equal(4096)
+        expect(rejected.ledger.releases_completed).to_equal(0)
+
+    it "frees capacity only after an acknowledged close success":
+        step("complete close, then reuse the released byte and record budgets")
+        val ledger = one_mapping(1, 4096)
+        val begun = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7")
+        val released = mapping_lifetime_finish_close_v1(
+            begun.ledger, begun.close_permit, true)
+        val replacement = mapping_lifetime_admit_v1(
+            released.ledger, "module-b@generation-1", 4096)
+        expect(replacement.ok).to_equal(true)
+        expect(replacement.ledger.records.len()).to_equal(1)
+        expect(replacement.ledger.records[0].mapping_id).to_equal("module-b@generation-1")
+        expect(replacement.ledger.resident_bytes).to_equal(4096)
+        expect(replacement.ledger.releases_completed).to_equal(1)
+        expect(mapping_lifetime_check_v1(replacement.ledger).ok).to_equal(true)
+
+    it "rejects pin and close receipts from another ledger owner or epoch":
+        step("issue receipts in the first immutable ledger identity")
+        val source = one_mapping(1, 4096)
+        val source_pin = mapping_lifetime_pin_v1(
+            source, "module-a@generation-7")
+        val source_unpinned = mapping_lifetime_unpin_v1(
+            source_pin.ledger, source_pin.pin_receipt)
+        val source_close = mapping_lifetime_begin_close_v1(
+            source_unpinned.ledger, "module-a@generation-7")
+
+        step("reject both receipt classes at a different owner")
+        val other_owner = mapping_lifetime_admit_v1(
+            mapping_lifetime_ledger_v1("other-owner", 7, 1, 4096),
+            "module-a@generation-7", 4096)
+        val cross_pin = mapping_lifetime_unpin_v1(
+            other_owner.ledger, source_pin.pin_receipt)
+        expect(cross_pin.failure).to_equal(MappingLifetimeFailureV1.LedgerIdentityMismatch)
+        val other_close = mapping_lifetime_begin_close_v1(
+            other_owner.ledger, "module-a@generation-7")
+        val cross_close = mapping_lifetime_finish_close_v1(
+            other_close.ledger, source_close.close_permit, true)
+        expect(cross_close.failure).to_equal(MappingLifetimeFailureV1.LedgerIdentityMismatch)
+        expect(cross_close.ledger.resident_bytes).to_equal(4096)
+
+        step("reject a close receipt at the same owner but a different epoch")
+        val other_epoch = mapping_lifetime_admit_v1(
+            mapping_lifetime_ledger_v1("l4-test-owner", 8, 1, 4096),
+            "module-a@generation-7", 4096)
+        val epoch_close = mapping_lifetime_begin_close_v1(
+            other_epoch.ledger, "module-a@generation-7")
+        val cross_epoch = mapping_lifetime_finish_close_v1(
+            epoch_close.ledger, source_close.close_permit, true)
+        expect(cross_epoch.failure).to_equal(MappingLifetimeFailureV1.LedgerIdentityMismatch)
+        expect(cross_epoch.ledger.resident_bytes).to_equal(4096)
+
+    it "rejects a delayed unpin after the same text id is re-admitted":
+        step("consume the old generation pin and release that mapping")
+        val old_ledger = one_mapping(1, 4096)
+        val old_pin = mapping_lifetime_pin_v1(
+            old_ledger, "module-a@generation-7")
+        val old_retiring = mapping_lifetime_begin_close_v1(
+            old_pin.ledger, "module-a@generation-7")
+        val old_unpinned = mapping_lifetime_unpin_v1(
+            old_retiring.ledger, old_pin.pin_receipt)
+        val old_close = mapping_lifetime_begin_close_v1(
+            old_unpinned.ledger, "module-a@generation-7")
+        val old_released = mapping_lifetime_finish_close_v1(
+            old_close.ledger, old_close.close_permit, true)
+
+        step("reuse the text id under a new mapping sequence and pin it")
+        val readmitted = mapping_lifetime_admit_v1(
+            old_released.ledger, "module-a@generation-7", 4096)
+        val new_pin = mapping_lifetime_pin_v1(
+            readmitted.ledger, "module-a@generation-7")
+        expect(new_pin.pin_receipt.mapping_sequence).to_be_greater_than(
+            old_pin.pin_receipt.mapping_sequence)
+
+        step("prove delayed and duplicate receipts cannot consume the new pin")
+        val delayed = mapping_lifetime_unpin_v1(
+            new_pin.ledger, old_pin.pin_receipt)
+        expect(delayed.failure).to_equal(MappingLifetimeFailureV1.StalePinReceipt)
+        expect(mapping_lifetime_pin_count_v1(
+            delayed.ledger, "module-a@generation-7")).to_equal(1)
+        val consumed = mapping_lifetime_unpin_v1(
+            delayed.ledger, new_pin.pin_receipt)
+        expect(consumed.ok).to_equal(true)
+        val duplicate = mapping_lifetime_unpin_v1(
+            consumed.ledger, new_pin.pin_receipt)
+        expect(duplicate.failure).to_equal(MappingLifetimeFailureV1.StalePinReceipt)
+        expect(mapping_lifetime_pin_count_v1(
+            duplicate.ledger, "module-a@generation-7")).to_equal(0)
+
+    it "keeps pin and release accounting isolated across multiple mappings":
+        step("admit and independently pin two mappings")
+        var ledger = mapping_lifetime_ledger_v1("multi-owner", 11, 2, 8192)
+        ledger = mapping_lifetime_admit_v1(ledger, "mapping-a", 4096).ledger
+        ledger = mapping_lifetime_admit_v1(ledger, "mapping-b", 4096).ledger
+        val pin_a = mapping_lifetime_pin_v1(ledger, "mapping-a")
+        val pin_b = mapping_lifetime_pin_v1(pin_a.ledger, "mapping-b")
+
+        step("retire and release only mapping a")
+        val retire_a = mapping_lifetime_begin_close_v1(pin_b.ledger, "mapping-a")
+        expect(retire_a.failure).to_equal(MappingLifetimeFailureV1.MappingPinned)
+        val unpin_a = mapping_lifetime_unpin_v1(retire_a.ledger, pin_a.pin_receipt)
+        val close_a = mapping_lifetime_begin_close_v1(unpin_a.ledger, "mapping-a")
+        val released_a = mapping_lifetime_finish_close_v1(
+            close_a.ledger, close_a.close_permit, true)
+        expect(released_a.ledger.records.len()).to_equal(1)
+        expect(released_a.ledger.records[0].mapping_id).to_equal("mapping-b")
+        expect(released_a.ledger.resident_bytes).to_equal(4096)
+        expect(mapping_lifetime_pin_count_v1(released_a.ledger, "mapping-b")).to_equal(1)
+
+        step("consume mapping b's original receipt exactly once")
+        val unpin_b = mapping_lifetime_unpin_v1(released_a.ledger, pin_b.pin_receipt)
+        expect(unpin_b.ok).to_equal(true)
+        expect(mapping_lifetime_pin_count_v1(unpin_b.ledger, "mapping-b")).to_equal(0)
+        expect(mapping_lifetime_check_v1(unpin_b.ledger).ok).to_equal(true)
+
+    it "detects resident-byte and closing-pin invariant corruption":
+        step("make aggregate resident bytes disagree with the retained record")
+        var bad_resident = one_mapping(1, 4096)
+        bad_resident.resident_bytes = 0
+        expect(mapping_lifetime_check_v1(bad_resident).ok).to_equal(false)
+        expect(mapping_lifetime_check_v1(bad_resident).reason).to_equal("resident-mismatch")
+
+        step("make an in-flight close claim a live pin")
+        val ledger = one_mapping(1, 4096)
+        val begun = mapping_lifetime_begin_close_v1(
+            ledger, "module-a@generation-7")
+        var bad_closing = begun.ledger
+        var bad_record = bad_closing.records[0]
+        bad_record.live_pin_tokens = [999]
+        bad_closing.records[0] = bad_record
+        expect(mapping_lifetime_check_v1(bad_closing).ok).to_equal(false)
+        expect(mapping_lifetime_check_v1(bad_closing).reason).to_equal("record-field")

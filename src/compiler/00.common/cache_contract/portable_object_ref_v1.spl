@@ -1,0 +1,139 @@
+#![allow(primitive_api)]
+
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_magic,
+    wire_put_envelope, wire_put_u8, wire_put_u64}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractBudgetV1,
+    ThreePayloadContractReaderV1, three_payload_contract_budget_v1,
+    three_payload_contract_digest_valid_v1, three_payload_contract_put_digest_v1,
+    three_payload_contract_max_payload_bytes_v1, three_payload_contract_put_optional_digest_v1}
+
+pub enum PortableObjectStageV1:
+    Base
+    Composed
+
+pub enum PortablePortabilityV1:
+    Portable
+    TargetFamily
+    TargetExact
+
+pub struct PortableObjectRefV1:
+    content_digest: text
+    stage: PortableObjectStageV1
+    portability: PortablePortabilityV1
+    ir_schema: i64
+    required_semantics_digest: text
+    target_contract_digest: text?
+    verification_receipt_digest: text
+
+pub struct PortableObjectRefDecodeV1:
+    ok: bool
+    value: PortableObjectRefV1?
+    error: text
+
+fn _stage_tag_v1(value: PortableObjectStageV1) -> i64:
+    match value:
+        case Base: 1
+        case Composed: 2
+
+fn _stage_from_tag_v1(tag: i64) -> PortableObjectStageV1?:
+    if tag == 1: return Some(PortableObjectStageV1.Base)
+    if tag == 2: return Some(PortableObjectStageV1.Composed)
+    nil
+
+fn _portability_tag_v1(value: PortablePortabilityV1) -> i64:
+    match value:
+        case Portable: 1
+        case TargetFamily: 2
+        case TargetExact: 3
+
+fn _portability_from_tag_v1(tag: i64) -> PortablePortabilityV1?:
+    if tag == 1: return Some(PortablePortabilityV1.Portable)
+    if tag == 2: return Some(PortablePortabilityV1.TargetFamily)
+    if tag == 3: return Some(PortablePortabilityV1.TargetExact)
+    nil
+
+pub fn portable_object_ref_valid_v1(value: PortableObjectRefV1) -> bool:
+    if not three_payload_contract_digest_valid_v1(value.content_digest) or value.ir_schema <= 0 or
+            not three_payload_contract_digest_valid_v1(value.required_semantics_digest) or
+            not three_payload_contract_digest_valid_v1(value.verification_receipt_digest): return false
+    val target_valid = match value.portability:
+        case Portable: value.target_contract_digest == nil
+        case TargetFamily:
+            match value.target_contract_digest:
+                case Some(digest): three_payload_contract_digest_valid_v1(digest)
+                case nil: false
+        case TargetExact:
+            match value.target_contract_digest:
+                case Some(digest): three_payload_contract_digest_valid_v1(digest)
+                case nil: false
+    if not target_valid: return false
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len())
+    portable_object_ref_budget_v1(budget, value)
+    budget.ok
+
+pub fn portable_object_ref_budget_v1(budget: ThreePayloadContractBudgetV1,
+        value: PortableObjectRefV1):
+    budget.add_digest(value.content_digest)
+    budget.add_bytes(1 + 1 + 8)
+    budget.add_digest(value.required_semantics_digest)
+    budget.add_optional_digest(value.target_contract_digest)
+    budget.add_digest(value.verification_receipt_digest)
+
+pub fn portable_object_ref_key_v1(value: PortableObjectRefV1) -> text:
+    val stage = _stage_tag_v1(value.stage).to_string()
+    val portability = _portability_tag_v1(value.portability).to_string()
+    val target = match value.target_contract_digest:
+        case Some(digest): digest
+        case nil: ""
+    value.content_digest + "\u0000" + stage + "\u0000" + portability +
+        "\u0000" + value.ir_schema.to_string() + "\u0000" + target
+
+pub fn portable_object_ref_put_v1(out: [u8], value: PortableObjectRefV1) -> [u8]:
+    var bytes = three_payload_contract_put_digest_v1(out, value.content_digest)
+    bytes = wire_put_u8(bytes, _stage_tag_v1(value.stage))
+    bytes = wire_put_u8(bytes, _portability_tag_v1(value.portability))
+    bytes = wire_put_u64(bytes, value.ir_schema)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.required_semantics_digest)
+    bytes = three_payload_contract_put_optional_digest_v1(bytes, value.target_contract_digest)
+    three_payload_contract_put_digest_v1(bytes, value.verification_receipt_digest)
+
+pub fn portable_object_ref_read_v1(reader: ThreePayloadContractReaderV1) -> PortableObjectRefV1:
+    val content = reader.read_digest()
+    val stage = _stage_from_tag_v1(reader.read_u8())
+    if stage == nil: reader.reject("unknown_portable_stage")
+    val portability = _portability_from_tag_v1(reader.read_u8())
+    if portability == nil: reader.reject("unknown_portability")
+    val ir_schema = reader.read_u64_nonnegative()
+    val semantics = reader.read_digest()
+    val target = reader.read_optional_digest()
+    val verification = reader.read_digest()
+    val decoded_stage = match stage:
+        case Some(value): value
+        case nil: PortableObjectStageV1.Base
+    val decoded_portability = match portability:
+        case Some(value): value
+        case nil: PortablePortabilityV1.Portable
+    PortableObjectRefV1(content_digest: content, stage: decoded_stage,
+        portability: decoded_portability, ir_schema: ir_schema,
+        required_semantics_digest: semantics, target_contract_digest: target,
+        verification_receipt_digest: verification)
+
+pub fn portable_object_ref_encode_v1(value: PortableObjectRefV1) -> [u8]:
+    if not portable_object_ref_valid_v1(value): return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("POR1"), 1)
+    portable_object_ref_put_v1(out, value)
+
+fn _portable_ref_failure_v1(error: text) -> PortableObjectRefDecodeV1:
+    PortableObjectRefDecodeV1(ok: false, value: nil, error: error)
+
+pub fn portable_object_ref_decode_v1(bytes: [u8]) -> PortableObjectRefDecodeV1:
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _portable_ref_failure_v1("portable_ref_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("POR1"), 1): return _portable_ref_failure_v1("portable_ref_v1_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val value = portable_object_ref_read_v1(reader)
+    if not reader.finished(): return _portable_ref_failure_v1(if reader.error == "": "trailing_portable_ref_bytes" else: reader.error)
+    if not portable_object_ref_valid_v1(value): return _portable_ref_failure_v1("noncanonical_portable_ref")
+    PortableObjectRefDecodeV1(ok: true, value: Some(value), error: "")

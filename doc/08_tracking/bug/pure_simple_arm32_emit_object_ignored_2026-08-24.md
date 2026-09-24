@@ -1,4 +1,8 @@
 # Pure-Simple ARM32 `--emit-object` is ignored
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -70,3 +74,4 @@ normally exiting process. That preserves test isolation without `fork` plus
 `_exit` and allows an enabled per-process coverage handler to flush. Coverage
 file naming and cross-process merge policy remain the responsibility of the
 selected coverage runner.
+

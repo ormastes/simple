@@ -147,3 +147,7 @@ filed separately:
 `doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md`.
 The `rt_io_file_*` AOT stub question is STILL UNDETERMINED — the real
 fixture never reaches codegen.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs an actual native-build compile of the reported fixture to reproduce, which per sibling native-build bug records in this shard requires multi-GB/multi-thousand-second builds out of budget for a shared host. No change made.

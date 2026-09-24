@@ -68,6 +68,7 @@ export class WorkspaceRegistry {
     this._projects = new Map();
     this._relations = new Map();
     this._worktrees = new Map();
+    this._authoritySnapshots = new Map();
     WORKSPACE_REGISTRY_V1_BRAND.add(this);
   }
 
@@ -293,15 +294,8 @@ export class WorkspaceRegistry {
 
 }
 
-/** Internal composition-root identity; structural lookalikes are not registries. */
-export function isWorkspaceRegistryV1(value) { return WORKSPACE_REGISTRIES.has(value); }
-
 export function createWorkspaceRegistry(options) {
   return new WorkspaceRegistry(options);
-}
-
-export function isWorkspaceRegistryV1(value) {
-  return REGISTRY_V1.has(value);
 }
 
 export function registryRecord(registry) {

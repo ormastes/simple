@@ -1,0 +1,112 @@
+"""Fail-closed, lease-aware cleanup planning for Simple-owned storage."""
+
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.migration.{StorageOwnershipMarker}
+
+pub struct CleanupObservedEntry:
+    path: CanonicalPath
+    byte_count: u64
+    storage_class: StorageClass
+    is_symlink: bool
+    is_state: bool
+    is_credentials: bool
+    is_signing_material: bool
+    is_source: bool
+    is_vcs: bool
+    is_managed_worktree: bool
+
+pub struct CleanupObservation:
+    canonical_target: CanonicalPath
+    marker: StorageOwnershipMarker?
+    live_lease_count: u64
+    entries: [CleanupObservedEntry]
+
+pub struct AuthorizedCleanup:
+    plan: CleanupPlan
+    removable_paths: [CanonicalPath]
+    receipt: StorageReceipt
+
+fn _root_for_cleanup(roots: StorageRoots, kind: StorageRootKind) -> CanonicalPath:
+    if kind == StorageRootKind.User: roots.user_root else: roots.worktree_root
+
+fn _same_digest_cleanup(left: Digest256, right: Digest256) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+fn _strict_descendant_cleanup(path: text, root: text) -> bool:
+    path.len() > root.len() and path.starts_with(if root.ends_with("/"): root else: root + "/")
+
+fn _within_cleanup(path: text, root: text) -> bool:
+    path == root or _strict_descendant_cleanup(path, root)
+
+fn _protected_cleanup(entry: CleanupObservedEntry) -> bool:
+    entry.is_state or entry.is_credentials or entry.is_signing_material or entry.is_source or entry.is_vcs or entry.is_managed_worktree or entry.storage_class == StorageClass.ManagedWorktree
+
+pub fn plan_safe_cleanup(
+    roots: StorageRoots,
+    request: CleanupRequest,
+    observed: CleanupObservation,
+) -> Result<AuthorizedCleanup, CleanupError>:
+    val selected_root = _root_for_cleanup(roots, request.root_kind)
+    if request.target.value == "/" or request.target.value == "" or observed.canonical_target.value != request.target.value:
+        return Err(CleanupError.UnsafeRoot)
+    if not _within_cleanup(request.target.value, selected_root.value):
+        return Err(CleanupError.OutsideRoot)
+    if not _same_digest_cleanup(request.expected_root_identity, roots.worktree_identity):
+        return Err(CleanupError.RootIdentityMismatch)
+    if request.target.value == selected_root.value and request.intent != CleanupIntent.RemoveRoot:
+        return Err(CleanupError.UnsafeRoot)
+    if observed.marker == nil:
+        return Err(CleanupError.MarkerMissing)
+    val marker = observed.marker!
+    if marker.schema_version != roots.policy_version or marker.root_kind != request.root_kind or not _same_digest_cleanup(marker.root_identity, request.expected_root_identity) or not marker.cleanup_managed:
+        return Err(CleanupError.MarkerMismatch)
+    if marker.storage_class == StorageClass.ManagedWorktree:
+        return Err(CleanupError.ProtectedData)
+    if observed.live_lease_count > 0u64:
+        return Err(CleanupError.LiveLease)
+    var byte_count = 0u64
+    var removable: [CanonicalPath] = []
+    for entry in observed.entries:
+        if not _within_cleanup(entry.path.value, request.target.value):
+            return Err(CleanupError.OutsideRoot)
+        if entry.is_symlink:
+            return Err(CleanupError.SymlinkEscape)
+        if _protected_cleanup(entry):
+            return Err(CleanupError.ProtectedData)
+        byte_count = byte_count + entry.byte_count
+        removable.push(entry.path)
+    val plan = CleanupPlan(
+        root_kind: request.root_kind,
+        target: request.target,
+        intent: request.intent,
+        expected_root_identity: request.expected_root_identity,
+        item_count: removable.len().to_u64(),
+        byte_count: byte_count,
+    )
+    val receipt = StorageReceipt(
+        kind: if request.intent == CleanupIntent.DryRun: StorageReceiptKind.Reused else: StorageReceiptKind.Cleaned,
+        root_kind: request.root_kind,
+        path: request.target,
+        operation: OperationId(value: "storage-cleanup-v1"),
+        detail: "intent=" + (if request.intent == CleanupIntent.DryRun: "dry-run" else: "remove") + ";items=" + removable.len().to_text() + ";bytes=" + byte_count.to_text() + ";authorized=true",
+    )
+    Ok(AuthorizedCleanup(plan: plan, removable_paths: removable, receipt: receipt))
+
+pub fn cleanup_receipt_after_removal(authorized: AuthorizedCleanup, removed_item_count: u64, reclaimed_byte_count: u64) -> Result<CleanupReceipt, CleanupError>:
+    if authorized.plan.intent == CleanupIntent.DryRun:
+        return Ok(CleanupReceipt(
+            root_kind: authorized.plan.root_kind,
+            target: authorized.plan.target,
+            intent: authorized.plan.intent,
+            removed_item_count: 0u64,
+            reclaimed_byte_count: 0u64,
+        ))
+    if removed_item_count != authorized.plan.item_count or reclaimed_byte_count != authorized.plan.byte_count:
+        return Err(CleanupError.ProtectedData)
+    Ok(CleanupReceipt(
+        root_kind: authorized.plan.root_kind,
+        target: authorized.plan.target,
+        intent: authorized.plan.intent,
+        removed_item_count: removed_item_count,
+        reclaimed_byte_count: reclaimed_byte_count,
+    ))

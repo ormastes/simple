@@ -21,16 +21,18 @@ use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, ho
 use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.env.paths.{which}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace, file_is_regular_no_follow}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
-use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_hash_sha256_or_empty, file_size_raw, remove_file_if_exists, process_run, process_run_timeout, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
-use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, compile_simpleos_arm64, simpleos_spl_start_symbol}
-use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source}
+use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, simpleos_x86_64_c_flags, compile_simpleos_arm64, simpleos_spl_start_symbol}
+use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     val pid = getpid()
     val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
@@ -99,6 +101,69 @@ fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
         return Err("SimpleOS x86_64 asm compile failed for {src}: {err}")
     Ok(obj)
 
+# The key hashes the executable bytes and the exact shared compile flags, not a
+# manually maintained flag version. Generated callers contain no includes.
+fn simpleos_x86_64_user_module_init_cache_key(source: text, cc: text, compiler_digest: text, flags: [text]) -> text:
+    var identity = "simpleos-user-init-v2;{cc.len()}:{cc};{compiler_digest.len()}:{compiler_digest};{source.len()}:{source}"
+    for flag in flags:
+        identity = identity + ";{flag.len()}:{flag}"
+    sha256_u8_hex(identity.bytes())
+
+fn simpleos_x86_64_cached_user_module_init(source: text, opt_level: i64) -> Result<text, text>:
+    val configured_cc = env_get("SIMPLE_CC") ?? ""
+    val cc_name = if configured_cc != "": configured_cc else: "clang"
+    var cc = cc_name
+    if not cc_name.contains("/") and not cc_name.contains("\\"):
+        cc = which(cc_name)
+        if cc == "" and _is_windows() and not cc_name.ends_with(".exe"):
+            cc = which("{cc_name}.exe")
+    if cc == "" or not cc_name.contains("clang"):
+        return Err("initializer compilation requires a resolved Clang executable")
+    if (env_get("CCC_OVERRIDE_OPTIONS") ?? "") != "":
+        return Err("initializer cache rejects CCC_OVERRIDE_OPTIONS")
+    val compiler_digest = file_hash_sha256_or_empty(cc)
+    if compiler_digest.len() != 64:
+        return Err("cannot hash initializer compiler {cc}")
+    var flags = simpleos_x86_64_c_flags(opt_level)
+    # Disable implicit .cfg files; the generated source has no header inputs.
+    flags.push("--no-default-config")
+    val key = simpleos_x86_64_user_module_init_cache_key(source, cc, compiler_digest, flags)
+    val init_o = "build/os/simpleos_x86_64_user_module_init_{key}.o"
+    if file_is_regular_no_follow(init_o) and file_size_raw(init_o) > 0:
+        return Ok(init_o)
+    # The runtime atomically reserves a private directory for EACH invocation,
+    # including overlapping calls in one PID. One reservation, no retry loop.
+    val stage_dir = match secure_temp_dir("build/os", "simpleos-user-init"):
+        case Ok(path): path
+        case Err(e): return Err(e)
+    val source_tmp = "{stage_dir}/module_init.c"
+    val object_tmp = "{stage_dir}/module_init.o"
+    if not file_write(source_tmp, source):
+        dir_remove_all(stage_dir)
+        return Err("cannot stage initializer source")
+    var args = flags
+    args.push("-o")
+    args.push(object_tmp)
+    args.push(source_tmp)
+    # Bound compilation to 60 seconds; ordinary errors/timeouts clean private
+    # staging. Forced process termination can leave an orphan private directory,
+    # which later invocations never reuse. Cleanup never deletes the cache.
+    val (_, compile_err, compile_code) = process_run_timeout(cc, args, 60000)
+    if (compile_code != 0 or not file_is_regular_no_follow(object_tmp)
+        or file_size_raw(object_tmp) <= 0 or file_hash_sha256_or_empty(cc) != compiler_digest):
+        dir_remove_all(stage_dir)
+        return Err("initializer compile failed or compiler changed: {compile_err}")
+    # The first completed invocation publishes once; losers accept that
+    # immutable destination. Never unlink or overwrite a published object.
+    val published = file_publish_noreplace(object_tmp, init_o)
+    dir_remove_all(stage_dir)
+    match published:
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    if not file_is_regular_no_follow(init_o) or file_size_raw(init_o) <= 0:
+        return Err("initializer publication has no complete object")
+    Ok(init_o)
+
 fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf":
@@ -117,11 +182,43 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
             case Ok(path): path
             case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
 
+        # The SimpleOS userspace CRT calls this symbol through a weak reference
+        # after the heap is available.  The legacy freestanding branch below
+        # already supplies a concrete caller, but this canonical userspace
+        # branch returned before doing so.  That left every heap-backed module
+        # global (including `[text]` literals) at raw zero under --gc-sections:
+        # no `__module_init_*` body was retained or called.  Discover the
+        # emitted initializer symbols from the user's objects and compile the
+        # same aggregator used by the legacy x86 and RV64 paths.
+        val module_init_names = simpleos_module_init_symbols(user_objects)
+        var init_o = ""
+        # Avoid a compiler subprocess and temporary object for the common
+        # scalar-only case.  The CRT's weak reference is intentionally absent
+        # there; when a module initializer exists, the concrete caller below
+        # keeps it live through --gc-sections.
+        if module_init_names.len() > 0:
+            if not dir_create_all("build/os"):
+                file_delete(entry_object)
+                return Err("SimpleOS x86_64 userspace module-init staging directory creation failed")
+            # The compatibility runtime archive exports an empty strong
+            # __simple_call_module_inits stub. --wrap redirects the CRT's
+            # reference to this generated implementation without admitting a
+            # second strong definition from the archive.
+            val init_source = simpleos_module_init_caller_source_for_symbol(module_init_names, "__wrap___simple_call_module_inits")
+            match simpleos_x86_64_cached_user_module_init(init_source, opt_level):
+                case Err(e):
+                    file_delete(entry_object)
+                    return Err("SimpleOS x86_64 userspace module-init caller compilation failed: {e}")
+                case Ok(path): init_o = path
+
         val support0 = support[0]
         var user_args: [text] = [
             "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
             "-o", output, support0, entry_object
         ]
+        if init_o != "":
+            user_args.push("--wrap=__simple_call_module_inits")
+            user_args.push(init_o)
         for obj in user_objects:
             user_args.push(obj)
         user_args.push("--start-group")
@@ -131,6 +228,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
         val (_user_out, user_err, user_code) = process_run(linker, user_args)
         file_delete(entry_object)
+        # The content-keyed initializer object is immutable and survives links.
         if user_code != 0:
             return Err("SimpleOS x86_64 user executable link failed: {user_err}")
         if verbose:

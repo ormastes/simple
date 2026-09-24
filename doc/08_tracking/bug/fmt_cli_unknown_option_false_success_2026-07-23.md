@@ -1,4 +1,9 @@
 # fmt CLI unknown options could succeed
+## Closed 2026-09-16 — Fix landed; 3 focused contracts pass; Stage-4 evidence pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -20,3 +25,4 @@ options, accepted `--check`/`--write` forms against a missing path (no
 mutation), and help's zero exit before file work. All three focused contracts
 pass through the temporary bootstrap interpreter; pure-Simple/Stage 4 evidence
 remains pending the fresh deployed runtime.
+

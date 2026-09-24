@@ -1,0 +1,276 @@
+use std.spec.*
+use compiler.driver.action_graph.build_action_v1.{
+    BuildActionPoolV1, BuildActionStateV1, BuildActionV1
+}
+use compiler.driver.action_graph.coordinator.{
+    BuildActionCoordinatorV1, BuildPoolBudgetV1, coordinator_cancel_v1,
+    coordinator_claim_v1, coordinator_complete_v1, coordinator_new_v1
+}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.demand_compile_integration.{
+    DemandCompileExecutionV1, demand_compile_begin_v1, demand_compile_complete_action_v1,
+    demand_compile_complete_scc_outputs_v1
+}
+use compiler.driver.action_graph.scc_compile_outputs.{
+    SccCompileOutputsV1, SccModuleCompileOutputV1
+}
+use compiler.driver.backend.demand_backend_plan.{
+    DemandBackendIdentityV1, ForegroundBackendBudgetV1,
+    PrecompiledPlatformIdentityV1
+}
+use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
+use compiler.driver.cache.package_index_route.{PackageIndexRouteV1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}
+use compiler.driver.perf.demand_compile_counters.{
+    demand_compile_counter_add_phase_owned_v1, demand_compile_counters_empty_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn action(action_id: text, dependencies: [text], memory: i64) -> BuildActionV1:
+    BuildActionV1(
+        action_id, "compile:{action_id}", [], dependencies, ["{action_id}.out"],
+        BuildActionPoolV1.semantic, 1, "snapshot-1", memory, "")
+
+fn coordinator(actions: [BuildActionV1], max_running: i64, memory: i64) -> BuildActionCoordinatorV1:
+    coordinator_new_v1(
+        PersistedBuildGraphV1("generation-1", "", "snapshot-1", actions),
+        [BuildPoolBudgetV1(BuildActionPoolV1.semantic, max_running, memory)])
+
+fn demand_execution(source_path: text) -> DemandCompileExecutionV1:
+    demand_compile_begin_v1(
+        PackageIndexRouteV1(true, "ok", [source_path], [], [], []),
+        DemandBackendIdentityV1(
+            sha256_text("revision"), sha256_text("tree"),
+            sha256_text("inventory"), sha256_text("semantic"),
+            "host", sha256_text("variant"),
+            PrecompiledPlatformIdentityV1(
+                sha256_text("runtime-action"), sha256_text("runtime-abi"),
+                sha256_text("std-action"), sha256_text("std-abi"))),
+        ForegroundBackendBudgetV1(1, 64, 1000, false),
+        true, false, false, 7)
+
+fn publication_authority() -> PackageArchiveAuthorityV1:
+    PackageArchiveAuthorityV1(
+        sha256_text("producer"), "generation", sha256_text("variant"),
+        sha256_text("revision"), sha256_text("tree"), sha256_text("inventory"))
+
+fn publication_admission() -> MirAdmissionV1:
+    MirAdmissionV1(
+        1, sha256_text("revision"), sha256_text("tree"),
+        sha256_text("inventory"), sha256_text("closure"),
+        sha256_text("dependencies"), 0)
+
+fn publication_outputs(source_path: text) -> SccCompileOutputsV1:
+    val action_content = "compiled-action"
+    val interface_content = "compiled-interface"
+    val package_image = "compiled-package-image"
+    val baseline_digest = sha256_text("baseline")
+    val entry = PackageModuleIndexEntryV1(
+        "pkg", "pkg.main", source_path, sha256_text("source"),
+        sha256_text(interface_content), sha256_text("export"),
+        sha256_text("abi"), sha256_text("initializer"),
+        sha256_text("provider"), sha256_text(action_content),
+        sha256_text("manifest"), "scc", [], [])
+    SccCompileOutputsV1("scc", ["pkg.main"], [SccModuleCompileOutputV1(
+        entry, package_image, sha256_text(package_image),
+        interface_content, sha256_text(interface_content),
+        action_content, sha256_text(action_content), [],
+        sha256_text("dependency-receipt"), sha256_text("read-set"),
+        sha256_text("dependencies"), "baseline", baseline_digest, [],
+        "source:{source_path}", true, "/tmp/pkg-main.o", "")])
+
+fn link_elapsed(execution: DemandCompileExecutionV1) -> i64:
+    for phase in execution.counters.phases:
+        if phase.phase == "link":
+            return phase.elapsed_ns
+    -1
+
+describe "Demand compile owner-result completion":
+    it "should restore the counter owner across failure retry and sequential updates":
+        step("Reject an unknown phase without losing the counter owner")
+        val rejected = demand_compile_counter_add_phase_owned_v1(
+            demand_compile_counters_empty_v1(), "unknown-phase", 1)
+        expect(rejected.accepted).to_equal(false)
+        expect(rejected.counters.phases[6].phase).to_equal("baseline-backend")
+        expect(rejected.counters.phases[6].elapsed_ns).to_equal(0)
+        step("Retry using the exact owner returned by the failed transfer")
+        val baseline_counter = demand_compile_counter_add_phase_owned_v1(
+            rejected.counters, "baseline-backend", 1)
+        expect(baseline_counter.accepted).to_equal(true)
+        expect(baseline_counter.counters.phases[6].elapsed_ns >= 0).to_equal(true)
+        step("Consume that returned owner in the sequential total update")
+        val total_counter = demand_compile_counter_add_phase_owned_v1(
+            baseline_counter.counters, "total", 1)
+        expect(total_counter.accepted).to_equal(true)
+        expect(total_counter.counters.phases[9].phase).to_equal("total")
+        expect(total_counter.counters.phases[9].elapsed_ns >= 0).to_equal(true)
+
+    it "should publish successfully before recording the link counter":
+        val source_path = "snapshot/pkg/main.spl"
+        val execution = demand_execution(source_path)
+        val completed = demand_compile_complete_action_v1(
+            execution, "source:{source_path}", "source-owner",
+            true, false, "object", [], 32)
+        expect(completed.accepted).to_equal(true)
+        expect(link_elapsed(completed.execution)).to_equal(0)
+        val published = demand_compile_complete_scc_outputs_v1(
+            completed.execution, "/tmp/simple-demand-scc-owner-success-v1",
+            publication_authority(), publication_admission(),
+            publication_outputs(source_path), "baseline", sha256_text("baseline"))
+        expect(published.accepted).to_equal(true)
+        expect(published.reason).to_equal("ok")
+        expect(published.execution.coordinator == nil).to_equal(false)
+        expect(link_elapsed(published.execution) >= 0).to_equal(true)
+
+    it "should return the owner and leave counters unchanged after publication failure":
+        val source_path = "snapshot/pkg/failure.spl"
+        val execution = demand_execution(source_path)
+        val completed = demand_compile_complete_action_v1(
+            execution, "source:{source_path}", "source-owner",
+            true, false, "object", [], 32)
+        val before_link = link_elapsed(completed.execution)
+        val rejected = demand_compile_complete_scc_outputs_v1(
+            completed.execution, "/dev/null/unwritable-cache",
+            publication_authority(), publication_admission(),
+            publication_outputs(source_path), "baseline", sha256_text("baseline"))
+        expect(rejected.accepted).to_equal(false)
+        expect(rejected.reason).to_equal("publication-rejected")
+        expect(rejected.execution.coordinator == nil).to_equal(false)
+        expect(link_elapsed(rejected.execution)).to_equal(before_link)
+
+    it "should return the execution owner when SCC publication is rejected":
+        step("Create a valid demand execution owner")
+        val execution = demand_compile_begin_v1(
+            PackageIndexRouteV1(true, "ok", [], [], [], []),
+            DemandBackendIdentityV1(
+                "revision", "tree", "inventory", "semantic", "host", "variant",
+                PrecompiledPlatformIdentityV1(
+                    "runtime-action", "runtime-abi", "std-action", "std-abi")),
+            ForegroundBackendBudgetV1(1, 64, 1000, false),
+            true, false, false, 7)
+        expect(execution.valid).to_equal(true)
+        expect(execution.coordinator == nil).to_equal(false)
+        val baseline_action_id = execution.baseline_action_id
+        step("Reject an empty SCC publication through the owned transfer")
+        val rejected = demand_compile_complete_scc_outputs_v1(
+            execution, "/tmp/cache",
+            PackageArchiveAuthorityV1(
+                "producer", "generation", "variant", "revision", "tree", "inventory"),
+            MirAdmissionV1(1, "revision", "tree", "inventory", "closure", "deps", 0),
+            SccCompileOutputsV1("scc", [], []), "artifact", "digest")
+        expect(rejected.accepted).to_equal(false)
+        expect(rejected.reason).to_equal("publication-input-invalid")
+        expect(rejected.execution.valid).to_equal(true)
+        expect(rejected.execution.coordinator == nil).to_equal(false)
+        expect(rejected.execution.baseline_action_id).to_equal(baseline_action_id)
+        expect(rejected.execution.build_ordinal).to_equal(7)
+        step("Consume the returned owner again without aliasing")
+        val retried = demand_compile_complete_scc_outputs_v1(
+            rejected.execution, "/tmp/cache",
+            PackageArchiveAuthorityV1(
+                "producer", "generation", "variant", "revision", "tree", "inventory"),
+            MirAdmissionV1(1, "revision", "tree", "inventory", "closure", "deps", 0),
+            SccCompileOutputsV1("scc", [], []), "artifact", "digest")
+        expect(retried.reason).to_equal("publication-input-invalid")
+        expect(retried.execution.baseline_action_id).to_equal(baseline_action_id)
+
+    it "should preserve a running reservation and its owner after validation failure":
+        step("Claim an action for its original owner")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        step("Submit an invalid result that exceeds the reserved memory")
+        val rejected = coordinator_complete_v1(
+            claimed.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 65)
+        expect(rejected.commit.accepted).to_equal(false)
+        expect(rejected.commit.reason).to_equal("memory-budget-exceeded")
+        expect(rejected.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(rejected.coordinator.runtime[0].owner_token).to_equal("owner-a")
+        expect(rejected.coordinator.runtime[0].memory_reserved_bytes).to_equal(64)
+
+    it "should let the original running owner retry and complete exactly once":
+        step("Leave the action running after a rejected completion")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        val rejected = coordinator_complete_v1(
+            claimed.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 65)
+        step("Retry with a valid result using the same owner")
+        val completed = coordinator_complete_v1(
+            rejected.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 64)
+        expect(completed.commit.accepted).to_equal(true)
+        expect(completed.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.succeeded)
+        expect(completed.coordinator.runtime[0].memory_reserved_bytes).to_equal(0)
+        step("Reject a duplicate completion after the terminal commit")
+        val duplicate = coordinator_complete_v1(
+            completed.coordinator, "compile", "owner-a", true, false,
+            "artifact", [], 64)
+        expect(duplicate.commit.accepted).to_equal(false)
+        expect(duplicate.commit.reason).to_equal("not-ready")
+        expect(duplicate.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.succeeded)
+
+    it "should preserve dependency and pool admission rejection":
+        step("Try to complete an action whose dependency is unfinished")
+        val dependency_rejected = coordinator_complete_v1(
+            coordinator([
+                action("dependency", [], 32),
+                action("dependent", ["dependency"], 32)], 2, 64),
+            "dependent", "owner-a", true, false, "artifact", [], 32)
+        expect(dependency_rejected.commit.accepted).to_equal(false)
+        expect(dependency_rejected.commit.reason).to_equal("not-ready")
+        expect(dependency_rejected.coordinator.runtime[1].state)
+            .to_equal(BuildActionStateV1.pending)
+        step("Fill the pool and verify another action remains pending")
+        val first = coordinator_claim_v1(
+            coordinator([action("first", [], 32), action("second", [], 32)], 1, 64),
+            "first", "owner-a")
+        val pool_rejected = coordinator_complete_v1(
+            first.coordinator, "second", "owner-b", true, false,
+            "artifact", [], 32)
+        expect(pool_rejected.commit.accepted).to_equal(false)
+        expect(pool_rejected.commit.reason).to_equal("not-ready")
+        expect(pool_rejected.coordinator.runtime[1].state)
+            .to_equal(BuildActionStateV1.pending)
+
+    it "should require cancellation parity and accept the running owners cancellation":
+        step("Claim an action and cancel the coordinator")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        var cancelled_owner = claimed.coordinator
+        coordinator_cancel_v1(&mut cancelled_owner)
+        step("Reject a non-cancelled result without losing the reservation")
+        val mismatch = coordinator_complete_v1(
+            cancelled_owner, "compile", "owner-a", false, false,
+            "", [], 32)
+        expect(mismatch.commit.reason).to_equal("cancelled-result-required")
+        expect(mismatch.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(mismatch.coordinator.runtime[0].owner_token).to_equal("owner-a")
+        step("Accept a cancellation result from that same owner")
+        val cancelled = coordinator_complete_v1(
+            mismatch.coordinator, "compile", "owner-a", false, true,
+            "", [], 32)
+        expect(cancelled.commit.accepted).to_equal(true)
+        expect(cancelled.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.cancelled)
+
+    it "should reject a different owner without changing the running owner":
+        step("Claim an action for one owner and submit from another")
+        val claimed = coordinator_claim_v1(
+            coordinator([action("compile", [], 64)], 1, 64),
+            "compile", "owner-a")
+        val rejected = coordinator_complete_v1(
+            claimed.coordinator, "compile", "owner-b", true, false,
+            "artifact", [], 32)
+        expect(rejected.commit.reason).to_equal("owner-mismatch")
+        expect(rejected.coordinator.runtime[0].state)
+            .to_equal(BuildActionStateV1.running)
+        expect(rejected.coordinator.runtime[0].owner_token).to_equal("owner-a")

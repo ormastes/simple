@@ -1,5 +1,10 @@
 # Variant Overlay — compiler/linker reloc_engine: No Active Callers (Seam Not Integrated)
 
+## Closed 2026-09-13 — stale: this is a rejected overlay CANDIDATE record, not a defect
+
+- **inferred** The entry's own verdict rejects the candidate: the per-arch encoders are a deliberate RUNTIME multi-target dispatch (`src/compiler/70.backend/backend/native/mod.spl` imports all four encoders and calls each through a separate function), so baking one at build time would break cross-compilation.
+- **inferred** Nothing here is broken or actionable — no seam qualifies, and the reloc overlay was never integrated by design. Kept for the analysis record.
+
 Date: 2026-06-29
 Candidate: `variants/compiler/reloc/` overlay keyed on target arch
 (x86_64 / aarch64 / riscv32 / riscv64)

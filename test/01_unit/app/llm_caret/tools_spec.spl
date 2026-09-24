@@ -7,9 +7,10 @@
 use app.llm_caret.types.{Message, new_user_message}
 use app.llm_caret.tools.{
     PermissionPolicy, ToolCall, ToolResult, ModelResponse,
-    run_tool, permission_decision, guard_path, parse_tool_use_blocks,
+    run_tool, permission_decision, guard_path, parse_tool_use_blocks, parse_tool_use_tags,
     default_policy, allow_all_policy, policy_with_allow,
-    new_tool_call, new_model_text, new_model_tools
+    new_tool_call, new_model_text, new_model_tools,
+    exec_glob, exec_list_dir
 }
 use app.llm_caret.chat.{AgentResult, run_agent_loop}
 use app.io.mod.{
@@ -43,6 +44,24 @@ fn _tu_block(id: text, name: text, inp: text) -> text:
 
 fn _setup():
     rt_dir_create_all(WS_ROOT)
+
+# Fixtures for the glob/list_dir executors (dropped by the wave-3A spec
+# modernize, which left the calls behind -- 4 examples failed at origin/main).
+val LIST_FIXTURE = WS_ROOT + "/lane_c_list"
+
+fn _setup_glob_fixture() -> bool:
+    rt_dir_create_all(WS_ROOT + "/lane_c_glob")
+    rt_file_write_text(WS_ROOT + "/lane_c_glob/alpha.spl", "alpha body")
+    rt_file_write_text(WS_ROOT + "/lane_c_glob/beta.spl", "beta body")
+    rt_file_write_text(WS_ROOT + "/lane_c_glob/alpha.txt", "alpha body")
+    true
+
+fn _setup_list_fixture() -> bool:
+    rt_dir_create_all(LIST_FIXTURE)
+    rt_dir_create_all(LIST_FIXTURE + "/empty")
+    rt_file_write_text(LIST_FIXTURE + "/first.txt", "first payload")
+    rt_file_write_text(LIST_FIXTURE + "/second.log", "second payload")
+    true
 
 fn _clean(marker: text):
     if rt_file_exists(marker):
@@ -374,6 +393,30 @@ describe "Anthropic tool_use parsing":
         # The extracted input must still carry the escaped-quote bytes intact
         # (a pre-strip of \" -> " would drop the backslash here).
         assert_true(calls[0].input.contains(esc_q))
+
+describe "text-protocol tool_use tags (local providers)":
+    # Nested braces in literals collapse (`}}`), so JSON bodies are built by
+    # concatenation exactly like _tu_block above.
+    it "should parse <tool_use> tags from plain content":
+        val body = "{\"name\": \"bash\", \"input\": {\"command\": \"ls\"}" + "}"
+        val content = "Let me check.\n<tool_use>" + body + "</tool_use>\ndone?"
+        val calls = parse_tool_use_tags(content)
+        expect(calls.len()).to_equal(1)
+        expect(calls[0].name).to_equal("bash")
+        expect(calls[0].id).to_equal("tag_1")
+        expect(calls[0].input).to_contain("ls")
+
+    it "should parse multiple tags and skip a nameless one":
+        val nameless = "<tool_use>{\"input\": {\"path\": \"x\"}" + "}</tool_use>"
+        val reader = "<tool_use>{\"name\": \"read_file\", \"input\": {\"path\": \"a.txt\"}" + "}</tool_use>"
+        val bashy = "<tool_use>{\"name\": \"bash\", \"input\": {\"command\": \"pwd\"}" + "}</tool_use>"
+        val calls = parse_tool_use_tags(nameless + reader + bashy)
+        expect(calls.len()).to_equal(2)
+        expect(calls[0].name).to_equal("read_file")
+        expect(calls[1].id).to_equal("tag_2")
+
+    it "should return empty for plain prose":
+        expect(parse_tool_use_tags("just an answer, no tags").len()).to_equal(0)
 
 describe "Agent loop":
     it "should stop at end-turn when the model requests no tools":

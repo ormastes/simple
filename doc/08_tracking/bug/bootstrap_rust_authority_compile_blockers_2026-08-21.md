@@ -1,4 +1,9 @@
 # Bootstrap Rust authority compile blockers (2026-08-21)
+## Closed 2026-09-16 — Fixed upstream; focused cargo check passed; next run reached Stage 2
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -37,3 +42,4 @@ isolated verification worktree.
 Rerun the measured Stage-2 command once, then produce a planner receipt and
 continue through Stage 3/4. Do not substitute the Rust seed for normal Simple
 checks and do not hand-write Stage-2 receipts.
+

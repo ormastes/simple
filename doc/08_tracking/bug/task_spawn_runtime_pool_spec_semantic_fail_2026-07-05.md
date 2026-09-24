@@ -1,4 +1,8 @@
 # task_spawn_runtime_pool_spec.spl: semantic error — cannot assign field on non-object value
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-05
 **Area:** lib/nogc_async_mut task_spawn, interpreter semantics
@@ -32,3 +36,4 @@ struct (arrays and structs are value types — see
 `.claude/memory/feedback_arrays_value_types.md` pattern) or whether the
 interpreter mis-types the runtime-pool object. Fix spec or interpreter at root
 cause, then add this spec back to the async hardening evidence list.
+

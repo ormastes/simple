@@ -1,4 +1,8 @@
 # Windows pane backend is stubbed — the repo has no PTY layer to build it on
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-03. Status: OPEN (gap, not a regression).
 
@@ -68,3 +72,4 @@ a chat message into an agent pane, because all four are tmux operations.
 
 That a pure-Simple ConPTY binding is infeasible. It is ordinary work; it simply
 has not been started, and nothing in this lane depends on pretending otherwise.
+

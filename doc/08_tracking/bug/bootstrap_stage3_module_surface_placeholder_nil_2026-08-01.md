@@ -1,9 +1,21 @@
 # Bootstrap Stage 3 module-surface placeholder nil trap (2026-08-01)
+## Closed 2026-09-16 — Root cause confirmed fixed; fresh Stage 3 no longer traps at original boundary
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
-Open. Stage 4 is blocked because a fresh admitted Stage 3 compiler cannot yet
-be produced from the main working copy.
+Status: FIXED — original module-surface nil failure boundary.
+
+The fix is in `f7b1e508e892ad99a3a13c8e556926b69ec56406`, authored on 2026-08-01.
+The source audit on 2026-09-22 confirmed that current main retains the scalar
+open-addressed index and boxed parsed modules. The historical successful Stage 3
+boundary evidence appears below; this status does not claim Stage 4 admission
+or a fresh cross-platform bootstrap pass.
+
+Audit: [source attribution and execution limits](../../09_report/bootstrap_stage3_placeholder_nil_source_audit_2026-09-22.md).
 
 ## Reproduction authority
 
@@ -37,7 +49,7 @@ runtime error: field access on nil receiver
 The third result reached the mandatory verify/fix cap. Do not repeat the same
 Stage 2/3 commands unchanged.
 
-## Required next investigation
+## Historical next investigation (superseded by the confirmed fix below)
 
 Instrument the bootstrap-only `parse_all_impl` placeholder population and
 `module_surfaces_from_modules` handoff with the source module name, canonical

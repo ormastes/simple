@@ -627,3 +627,9 @@ correctly refusing to serve SSH with a runtime/pure signing mismatch.
 Added `test/01_unit/os/crypto/sha512_direct_kat_spec.spl` coverage for the
 RFC8032 seed hash so the OS-local SHA-512 implementation has the exact live
 seed vector in addition to empty and `abc`.
+
+## Triage 2026-09-13 — LEFT OPEN (not verifiable on this host)
+
+- **inferred**: the only reproduction is `SIMPLEOS_RV64_SSH_LIVE=1 ... test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl`, a live RISC-V QEMU SimpleOS+OpenSSH lane. This triage host is Windows with no riscv64 QEMU lane and no `src/compiler_rust/target/release/simple`; nothing here can execute it.
+- **measured**: 14 of the 16 repo paths this entry cites still exist, so it is not stale-by-removal. The two missing (`examples/09_embedded/simple_os/arch/riscv64/ed25519_probe_entry.spl`, `src/os/qemu_runner_part5.spl`) are the focused probe and a since-refactored runner split, not the subject code.
+- Verdict: still OPEN — a real runtime/pure Ed25519 signature mismatch, needing the Linux RV64 QEMU lane to confirm or clear.

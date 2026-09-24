@@ -1,4 +1,9 @@
 # Stage 4 full CLI second-module call-argument SIGSEGV
+## Closed 2026-09-16 — ...sts without the test-ABI fallback. ## Fix verification - GDB showed `_hir_expr_symbol` ret
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -83,3 +88,4 @@ the test-ABI fallback.
 - The new bounded failure is
   `Module surface/source fingerprint mismatch for
   src/lib/nogc_async_mut/cli/log_modes.spl`, after lowering, not a signal.
+

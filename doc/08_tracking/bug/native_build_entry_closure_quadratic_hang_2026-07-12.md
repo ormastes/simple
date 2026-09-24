@@ -1,4 +1,8 @@
 # native-build --entry-closure: O(n²) line scan deterministically hangs (compute spin)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED 2026-07-12, corrected 2026-07-13 — `_nb_line_end` and
 char-by-char `substring` scans use native single-pass `split("\n")` and
@@ -154,3 +158,4 @@ change.
 - `test/01_unit/app/cli_native_build_main_contract_spec.spl` updated to
   assert the new implementation (and the absence of the old O(n²) patterns)
   instead of the old (buggy) structure it previously locked in.
+

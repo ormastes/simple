@@ -1,4 +1,8 @@
 # Query lint remaining nested-scan hotspots
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -28,3 +32,4 @@ Each rule consumes shared indexed source or typed-HIR facts; generated cardinali
 fixtures bound work and allocations; exact diagnostic order, code, severity, and source
 span are preserved or a deliberate semantic correction is documented. Unknown typed
 facts fail closed rather than upgrading textual heuristics.
+

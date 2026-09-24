@@ -51,6 +51,10 @@ Glob imports include macros only if they are listed in `auto import` in the modu
 
 - **Imports must be at module level** (top of file). Imports inside functions or blocks will not work.
 - **Use specific names** rather than glob imports for better dependency tracking.
+- An explicitly aliased enum remains authoritative in qualified patterns even
+  when a later glob exports a different enum with the same canonical source
+  name; `case Alias.Variant(...)` resolves `Alias` before comparing the runtime
+  enum identity.
 - **Bare imports don't expose functions**: `use app.io` loads the module but does not make its functions callable.
 
 ```simple

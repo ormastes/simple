@@ -1,4 +1,33 @@
 # JIT: cross-module tuple `.0` read returns nil
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Re-verified 2026-09-13 — STILL REPRODUCES exactly as reported; stays OPEN
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows). The entry's own
+example, unmodified, against the real `std.common.yaml.types` module:
+
+```
+use std.common.yaml.types.*
+print "tup0={yaml_string("hi").0}"
+print "pred={is_yaml_scalar(yaml_string("hi"))}"
+```
+
+| lane | `yaml_string("hi").0` | `is_yaml_scalar(yaml_string("hi"))` |
+|---|---|---|
+| default (Cranelift JIT) | **`nil`** — WRONG | `true` ✓ |
+| `SIMPLE_EXECUTION_MODE=interpret` | `string` ✓ | `true` ✓ |
+
+Unchanged after six weeks, and the reported diagnosis holds precisely: the
+tuple's data is intact (the same-module predicate reads it correctly), only the
+cross-module positional read through the JIT is wrong, and the tree-walking
+interpreter is unaffected. Still a silent `nil` with no diagnostic.
+
+Not fixed here — the site is `src/compiler_rust/**`, off-limits during this pass
+(concurrent bootstrap).
+
 
 **Status:** OPEN — found 2026-08-01 while fixing
 `common_encoding_yaml_broken_cross_submodule_import_2026-07-20`.
@@ -112,3 +141,4 @@ blanket-claim error (which was about the *interpreter*, not the JIT). Status
 unchanged: **OPEN — ARCHITECTURAL (Cranelift JIT codegen,
 `src/compiler_rust/compiler/src/codegen/**`, re-confirmed by fresh repro
 2026-08-10, unchanged output `field0=nil`)**.
+

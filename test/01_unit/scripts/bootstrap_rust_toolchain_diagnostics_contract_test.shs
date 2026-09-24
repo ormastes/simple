@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+authority="$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+wiring="$root/scripts/bootstrap/bootstrap-authority-wiring.shs"
+checked=0
+
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+check() { checked=$((checked + 1)); "$@" || fail "check $checked: $*"; }
+
+check grep -Fq 'BOOTSTRAP_STAGE3_FINGERPRINT_TRACE=1' "$wiring"
+check grep -Fq "printf 'rust-toolchain-check=%s\\n' \"\$1\" >&2" "$authority"
+for marker in \
+  layout=rustup \
+  rustup-home=pass \
+  settings-host=pass \
+  toolchain-directory=pass \
+  installed-binaries=pass \
+  rustc-sysroot-command=pass \
+  rustc-sysroot-match=pass \
+  rustc-version-host=pass \
+  cargo-version-command=pass \
+  rust-toolchain-resolver-returned \
+  rust-toolchain-fields-parsed \
+  rust-toolchain-binaries-executable \
+  hash-rust-toolchain
+do
+  check grep -Fq "$marker" "$authority"
+done
+
+# Diagnostics may emit only fixed atom labels. Paths and command output remain
+# in the already-hashed authority result rather than leaking through stderr.
+check grep -Fq '*[!A-Za-z0-9._=-]*) return 1' "$authority"
+
+# Consumer milestones must advance monotonically from resolver return through
+# parsed identities and executable checks to hashing.
+check awk '
+  /bootstrap_stage3_seed_trace rust-toolchain-resolver-returned/ { a=NR }
+  /bootstrap_stage3_seed_trace rust-toolchain-fields-parsed/ { b=NR }
+  /bootstrap_stage3_seed_trace rust-toolchain-binaries-executable/ { c=NR }
+  /bootstrap_stage3_seed_trace hash-rust-toolchain/ { d=NR }
+  END { exit !(a && a < b && b < c && c < d) }
+' "$authority"
+
+printf 'PASS: %s bounded Rust toolchain diagnostic contract checks\n' "$checked"

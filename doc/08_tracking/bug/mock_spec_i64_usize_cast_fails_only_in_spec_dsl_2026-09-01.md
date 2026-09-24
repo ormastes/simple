@@ -1,4 +1,8 @@
 # `mock_spec.spl`: `i64 as usize` cast fails inside a spec `it` block but works in compiled `fn main()`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-01
@@ -83,3 +87,4 @@ for a stdlib-spec triage pass.
 B=src/compiler_rust/target/release/simple.exe
 SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/testing/mock_spec.spl
 ```
+

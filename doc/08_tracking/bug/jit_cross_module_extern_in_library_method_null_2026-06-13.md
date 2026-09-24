@@ -1,8 +1,15 @@
 # JIT: undefined cross-module symbol binds NULL and SIGSEGVs (crash FIXED via guard)
 
+## Closed 2026-09-13 — Crash fixed and stays fixed; the minimal repro runs clean
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows, default JIT lane): the entry's minimal repro no longer SIGSEGVs. `use std.common.string_builder.{StringBuilder, RtStringBuilder}` then `StringBuilder.new().push("hi") / .build()` prints `hi`, and the extern-backed `RtStringBuilder.new().push("rt-ok") / .finish()` prints `rt-ok`. Exit 0, not 139.
+- **measured**: the extern-backed path specifically works, which is the case the original (later disproven) diagnosis blamed — so neither the extern nor the non-extern class method binds NULL.
+- **inferred**: `src/backend.rs` and `src/exec_core.rs` cited in the entry are crate-relative shorthands, not repo paths; their absence is not evidence of removal.
+- Residual: the entry's "native-codegen feature gaps" follow-ups are separate feature work, not this crash, and are not closed by this note.
+
 - **Date:** 2026-06-13
 - **Severity:** P1 crash — **FIXED** (JIT now falls back to interpreter instead of crashing). Native-codegen *feature* gaps remain (see Follow-ups).
-- **Status:** Crash guarded/fixed; feature follow-ups Open.
+- **Status:** CLOSED 2026-09-13 (crash re-verified fixed). Feature follow-ups tracked separately.
 - **Area:** codegen / cranelift JIT symbol binding; module import flattening.
 
 > **NOTE — original diagnosis was WRONG.** This file first blamed a runtime

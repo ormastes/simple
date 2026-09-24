@@ -1,4 +1,8 @@
 # Browser jail: seccomp is a deny-list and in-process browsers are unjailed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date**: 2026-08-15
 - **Status**: OPEN (tracked; out of scope of the 2026-08-15 engine-gate change)
@@ -38,3 +42,4 @@ Engine-level capability gate: untrusted page script
 `process.exit/cwd/nextTick` at native dispatch —
 `src/lib/{gc_async_mut,nogc_sync_mut}/js/engine/interpreter_native.spl`,
 spec `test/01_unit/lib/js/js_native_confinement_spec.spl`.
+

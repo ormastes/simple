@@ -95,6 +95,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_dict_values"
         | "rt_is_none"
         | "rt_is_some"
+        | "rt_is_present"
         | "rt_enum_payload" => Some(1),
         "rt_string_starts_with"
         | "rt_string_ends_with"
@@ -109,6 +110,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_index_set"
         | "rt_enum_check_discriminant"
         | "lib__common__string_core__str_repeat" => Some(2),
+        "rt_enum_check_variant" => Some(3),
         _ if matches!(method, "slice" | "substring") => Some(2),
         _ => None,
     }
@@ -493,7 +495,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
                 let ptr = ptr_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
                 let len_call = builder
@@ -501,7 +503,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
                 let len = len_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
                 expanded.push(ptr.into());
@@ -2032,7 +2034,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
                 len_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into())
             };
             let step_val = i64_type.const_int(1, false);
@@ -2057,7 +2059,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
             };
             if let Some(d) = dest {
-                if let Some(ret_val) = slice_call.try_as_basic_value().left() {
+                if let Some(ret_val) = slice_call.try_as_basic_value().basic() {
                     vreg_map.insert(d, ret_val);
                 } else {
                     vreg_map.insert(d, i64_type.const_int(0, false).into());
@@ -2075,7 +2077,9 @@ impl LlvmBackend {
             "ends_with" => Some("rt_string_ends_with"),
             "contains" => Some("rt_contains"),
             "split" => Some("rt_string_split"),
-            "trim" => Some("rt_string_trim"),
+            // "strip"/"trimmed" synonyms for "trim" — see interpreter_method/
+            // string.rs; missing here left bare `.strip()` unresolved.
+            "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
             "trim_start" => Some("rt_string_trim_start"),
             "trim_end" => Some("rt_string_trim_end"),
             "replace" => Some("rt_string_replace"),
@@ -2103,7 +2107,22 @@ impl LlvmBackend {
             "set" => Some("rt_index_set"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
-            "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+            // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+            // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+            // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+            // the representation `rt_is_some`/`rt_is_none` already accept) is not
+            // one -- so every `.unwrap()` on a flat optional silently produced nil
+            // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+            // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+            // implements the flat-nullable convention ("not a boxed enum: return
+            // the value unchanged") and traps only on a genuine None/Err.
+            // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+            // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+            // exported err-trap twin, and routing it through the Ok-trap helper
+            // would abort on the very receiver it exists to read.
+            "unwrap" => Some("rt_unwrap_or_trap"),
+            "unwrap_or" => Some("rt_unwrap_or_value"),
+            "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
         }
         .or(exact_string_bytes_runtime)
@@ -2152,7 +2171,7 @@ impl LlvmBackend {
                 .build_call(rt_func, &arg_vals, "rt_redirect")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt redirect call", &e))?;
             if let Some(d) = dest {
-                if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                     let ret_val = if returns_bool {
                         self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
                     } else {
@@ -2208,7 +2227,7 @@ impl LlvmBackend {
                         crate::error::factory::llvm_build_failed("qualified text_dot_from_char_code call", &e)
                     })?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     }
                 }
@@ -2227,7 +2246,7 @@ impl LlvmBackend {
                     .build_call(rt_func, &[recv.into(), zero.into()], "qualified_ord")
                     .map_err(|e| crate::error::factory::llvm_build_failed("qualified ord call", &e))?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     }
                 }
@@ -2252,7 +2271,10 @@ impl LlvmBackend {
                 "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
                 "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
                 "is_whitespace" => Some("rt_string_is_whitespace"),
-                "trim" => Some("rt_string_trim"),
+                // "strip"/"trimmed" synonyms for "trim" — the qualified
+                // (`str.strip`) path had no entry, leaving the Stage-4 macOS
+                // final link with undefined `_str.strip` (2026-09-07).
+                "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),
                 "repeat" => Some("lib__common__string_core__str_repeat"),
@@ -2283,10 +2305,25 @@ impl LlvmBackend {
                 "set" => Some("rt_index_set"),
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),
-                "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+                // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+                // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+                // the representation `rt_is_some`/`rt_is_none` already accept) is not
+                // one -- so every `.unwrap()` on a flat optional silently produced nil
+                // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+                // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+                // implements the flat-nullable convention ("not a boxed enum: return
+                // the value unchanged") and traps only on a genuine None/Err.
+                // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+                // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+                // exported err-trap twin, and routing it through the Ok-trap helper
+                // would abort on the very receiver it exists to read.
+                "unwrap" => Some("rt_unwrap_or_trap"),
+                "unwrap_or" => Some("rt_unwrap_or_value"),
+                "unwrap_err" => Some("rt_enum_payload"),
                 "is_none" => Some("rt_is_none"),
                 "is_some" => Some("rt_is_some"),
-                "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
+                "is_ok" | "is_err" => Some("rt_enum_check_variant"),
                 _ => None,
             };
 
@@ -2303,7 +2340,7 @@ impl LlvmBackend {
                 let len_call = builder
                     .build_call(len_func, &[other.into()], "array_merge_len")
                     .map_err(|e| crate::error::factory::llvm_build_failed("array merge len call", &e))?;
-                let count = len_call.try_as_basic_value().left().ok_or_else(|| {
+                let count = len_call.try_as_basic_value().basic().ok_or_else(|| {
                     crate::error::factory::llvm_build_failed("array merge len value", "rt_len returned no value")
                 })?;
 
@@ -2360,7 +2397,9 @@ impl LlvmBackend {
                                 | "rt_contains"
                                 | "rt_is_none"
                                 | "rt_is_some"
+                                | "rt_is_present"
                                 | "rt_enum_check_discriminant"
+                                | "rt_enum_check_variant"
                         );
                         let fn_type = if returns_bool {
                             self.context_ref().bool_type().fn_type(&param_types, false)
@@ -2374,7 +2413,7 @@ impl LlvmBackend {
                             .build_call(rt_func, &arg_vals, "qualified_rt_redirect")
                             .map_err(|e| crate::error::factory::llvm_build_failed("qualified rt redirect call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 let ret_val = if returns_bool {
                                     self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
                                 } else {
@@ -2401,9 +2440,13 @@ impl LlvmBackend {
 
         if let Some(method_name) = direct_method_name {
             if matches!(method_name, "unwrap" | "unwrap_err") && args.len() == 1 {
-                let rt_func = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                // See the redirect table above: `rt_enum_payload` returns NIL
+                // for a FLAT nullable, so `.unwrap()` must go to
+                // `rt_unwrap_or_trap`. `unwrap_err` keeps the raw reader.
+                let helper = if method_name == "unwrap" { "rt_unwrap_or_trap" } else { "rt_enum_payload" };
+                let rt_func = module.get_function(helper).unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    module.add_function("rt_enum_payload", fn_type, None)
+                    module.add_function(helper, fn_type, None)
                 });
                 let recv = self.get_vreg(&args[0], vreg_map)?;
                 let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
@@ -2411,7 +2454,7 @@ impl LlvmBackend {
                     .build_call(rt_func, &[recv.into()], "direct_enum_payload")
                     .map_err(|e| crate::error::factory::llvm_build_failed("direct enum payload call", &e))?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     } else {
                         vreg_map.insert(d, i64_type.const_int(0, false).into());
@@ -2421,12 +2464,12 @@ impl LlvmBackend {
             }
 
             if matches!(method_name, "is_ok" | "is_err") && args.len() == 1 {
-                let rt_func = module.get_function("rt_enum_check_discriminant").unwrap_or_else(|| {
+                let rt_func = module.get_function("rt_enum_check_variant").unwrap_or_else(|| {
                     let fn_type = self
                         .context_ref()
                         .bool_type()
-                        .fn_type(&[i64_type.into(), i64_type.into()], false);
-                    module.add_function("rt_enum_check_discriminant", fn_type, None)
+                        .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+                    module.add_function("rt_enum_check_variant", fn_type, None)
                 });
                 let recv = self.get_vreg(&args[0], vreg_map)?;
                 let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
@@ -2434,12 +2477,13 @@ impl LlvmBackend {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 use std::hash::{Hash, Hasher};
                 variant.hash(&mut hasher);
+                let enum_id = i64_type.const_zero();
                 let disc = i64_type.const_int(hasher.finish() & 0xFFFF_FFFF, false);
                 let call_site = builder
-                    .build_call(rt_func, &[recv.into(), disc.into()], "direct_enum_disc")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("direct enum discriminant call", &e))?;
+                    .build_call(rt_func, &[recv.into(), enum_id.into(), disc.into()], "direct_enum_variant")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("direct enum variant call", &e))?;
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         let ret_val = self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?;
                         vreg_map.insert(d, ret_val);
                     } else {
@@ -2612,7 +2656,20 @@ impl LlvmBackend {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         args.iter().map(|_| i64_type.into()).collect();
                     let fn_type = i64_type.fn_type(&param_types, false);
-                    module.add_function(&resolved_dotted, fn_type, None)
+                    // Declare using `resolved_name` (the already-correct,
+                    // fully-mangled cross-module symbol), NOT `resolved_dotted`.
+                    // Every prior lookup in this chain already tried the dotted
+                    // spelling and failed to find it IN-MODULE (expected: the
+                    // real definition lives in a different LLVM module/.o and
+                    // must be an extern declaration) -- reaching here means "no
+                    // RUNTIME_FUNCS spec matched", not "the dotted spelling was
+                    // ever confirmed correct". Blindly declaring `resolved_dotted`
+                    // corrupted any real symbol that merely CONTAINS "_dot_" as
+                    // ordinary text (e.g. `cosine_from_dot_and_magnitudes` ->
+                    // `cosine_from.and_magnitudes`), producing an undefined
+                    // symbol at the Stage-4 macOS final link (2026-09-07) even
+                    // though the correct name was available the whole time.
+                    module.add_function(resolved_name, fn_type, None)
                 }
             });
 
@@ -2687,21 +2744,21 @@ impl LlvmBackend {
                             .build_call(rt_string_data, &[(*val).into()], "boxed_text_ptr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap()
                             .into_int_value();
                         let len = builder
                             .build_call(rt_string_len, &[(*val).into()], "boxed_text_len")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap()
                             .into_int_value();
                         let value = builder
                             .build_call(rt_string_new, &[ptr.into(), len.into()], "boxed_text_value")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap();
                         boxed.push(value.into());
                     } else {
@@ -2730,14 +2787,14 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?;
                         let ptr_val = ptr_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         let len_call = builder
                             .build_call(rt_string_len, &[(*val).into()], "str_len")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?;
                         let len_val = len_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         expanded.push(ptr_val.into());
                         expanded.push(len_val.into());
@@ -2767,6 +2824,8 @@ impl LlvmBackend {
             for (arg, target_ty) in arg_vals.into_iter().zip(declared_param_types) {
                 let value = inkwell::values::BasicValueEnum::try_from(arg)
                     .map_err(|_| CompileError::semantic("metadata value used as a runtime call argument"))?;
+                let target_ty = inkwell::types::BasicTypeEnum::try_from(target_ty)
+                    .map_err(|_| CompileError::semantic("metadata type used as a runtime call parameter"))?;
                 adapted_args.push(self.coerce_value_to_type(value, Some(target_ty), builder)?.into());
             }
             builder
@@ -2776,7 +2835,7 @@ impl LlvmBackend {
 
         // Store result if there's a destination
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 let final_ret = if sffi_name == "rt_pool_join" {
                     let raw = self
                         .coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
@@ -2884,6 +2943,9 @@ impl LlvmBackend {
                         inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(t) => {
+                            t.fn_type(&llvm_param_types, false)
+                        }
                     }
                 };
 
@@ -2892,7 +2954,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("indirect call", &e))?;
 
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(d, ret_val);
                     } else {
                         let default_val = self.runtime_int_type().const_int(0, false);
@@ -2958,7 +3020,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
             let argv_raw = alloc_call
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?
                 .into_int_value();
             let argv_ptr = builder
@@ -2982,7 +3044,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(bool_fn, &[value.into()], "boxed_bool")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_bool call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed(
                                     "rt_value_bool result",
                                     &"missing return value",
@@ -3001,7 +3063,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[extended.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
                             })?;
                         }
@@ -3017,7 +3079,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[extended.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
                             })?;
                         }
@@ -3030,7 +3092,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(int_fn, &[value.into()], "boxed_int")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
                             })?;
                         }
@@ -3043,7 +3105,7 @@ impl LlvmBackend {
                             let call_result = builder
                                 .build_call(float_fn, &[value.into()], "boxed_float")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_float call", &e))?;
-                            value = call_result.try_as_basic_value().left().ok_or_else(|| {
+                            value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed(
                                     "rt_value_float result",
                                     &"missing return value",
@@ -3086,7 +3148,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 vreg_map.insert(d, ret_val);
             } else {
                 let default_val = self.runtime_int_type().const_int(0, false);
@@ -3120,7 +3182,7 @@ impl LlvmBackend {
             .build_call(interp_eval, &[expr_index_val.into()], "eval")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             vreg_map.insert(dest, ret_val);
         } else {
             let default_val = self.runtime_int_type().const_int(0, false);

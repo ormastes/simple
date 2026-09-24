@@ -135,7 +135,7 @@ fn avx2_pressure_function() -> MirFunction:
         is_generic_template: false, specialization_of: nil, type_bindings: {})
 
 fn avx2_multiblock_function() -> MirFunction:
-    val base = avx2_test_module().functions[0]
+    val base = avx2_test_module().functions[SymbolId.new(0)]
     val second = MirBlock(
         id: BlockId.new(1), label: Some("second"), instructions: [],
         terminator: MirTerminator.Ret(nil))
@@ -163,7 +163,52 @@ fn avx2_capability():
 fn selected_module():
     isel_module_with_avx2_capability(avx2_test_module(), avx2_capability())
 
+fn concrete_add_module() -> MirModule:
+    val base = avx2_test_module()
+    val function = base.functions[SymbolId.new(0)]
+    val block = function.blocks[0]
+    val concrete = MirInst(
+        kind: MirInstKind.SimdAddF32x8(
+            LocalId(id: 5), MirOperand.copy(LocalId(id: 3)),
+            MirOperand.copy(LocalId(id: 4))), span: nil)
+    val instructions = [block.instructions[0], block.instructions[1], concrete, block.instructions[3]]
+    val replaced_block = MirBlock(
+        id: block.id, label: block.label, instructions: instructions,
+        terminator: block.terminator)
+    val replaced_function = MirFunction(
+        symbol: function.symbol, name: "concrete_add_f32x8",
+        signature: function.signature, locals: function.locals,
+        blocks: [replaced_block], entry_block: function.entry_block,
+        span: function.span, generic_params: function.generic_params,
+        is_generic_template: function.is_generic_template,
+        specialization_of: function.specialization_of,
+        type_bindings: function.type_bindings)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = replaced_function
+    MirModule(name: "concrete_avx2_route", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn scalar_add_f32x8(left: [f32], right: [f32]) -> [f32]:
+    [left[0] + right[0], left[1] + right[1],
+     left[2] + right[2], left[3] + right[3],
+     left[4] + right[4], left[5] + right[5],
+     left[6] + right[6], left[7] + right[7]]
+
 describe "x86 AVX2 typed MIR route":
+    it "selects concrete SimdAddF32x8 with scalar-defined lane semantics":
+        # @req REQ-SIMD-002 REQ-SIMD-004
+        step("selects concrete SimdAddF32x8 with scalar-defined lane semantics")
+        val left: [f32] = [1.0, -2.0, 3.5, 0.0, 100.0, -0.0, 7.0, -8.0]
+        val right: [f32] = [2.0, 2.0, -0.5, 0.0, -40.0, 0.0, -7.0, 10.0]
+        assert_equal(scalar_add_f32x8(left, right),
+            [3.0, 0.0, 3.0, 0.0, 60.0, 0.0, 0.0, 2.0])
+        val module = isel_module_with_avx2_capability(concrete_add_module(), avx2_capability())
+        val block = module.functions[0].blocks[1]
+        var add_count = 0
+        for inst in block.insts:
+            if inst.opcode == X86_OP_VADDPS_YMM: add_count = add_count + 1
+        assert_equal(add_count, 1)
+
     # @manual scenario evidence
     it "reuses YMM registers for more than eight sequential destinations":
         # @req REQ-SSPEC-UNIT

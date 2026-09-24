@@ -1,4 +1,9 @@
 # Seed JIT: unresolved symbols SIGSEGV or silently pass instead of diagnosing
+## Closed 2026-09-16 — CLOSED FIXED verified by execution 2026-08-17; fence GREEN 6/6
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status: CLOSED — FIXED, verified by execution 2026-08-17.**
 
@@ -172,3 +177,4 @@ JIT concern, and nothing in `jit.rs` addresses it. The fence script
 `scripts/check/check-jit-unresolved-symbol-guard.shs` exists but was not run
 here (host load 60-90; a run would not have been trustworthy). Keep this doc
 open for the undefined-variable half only.
+

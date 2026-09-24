@@ -1,4 +1,8 @@
 # Stage4 Hazard Audit: int(text) & Bare Enum-Variant Patterns
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 **Date:** 2026-07-03  
 **Scope:** Audit sweeps per iteration-18 hazard list (mechanical portion only)
 
@@ -89,4 +93,5 @@ Fix: Qualify to `case EnumName.Bare:` using enum name obvious from match scrutin
 1. **int(text) sites:** Defer mass-rewrite pending stage4 fix; may be safer to add compiler guard or use workaround where critical
 2. **Bare patterns in excluded dirs:** Handled by owning lane (20.hir/80.driver owners)
 3. **Follow-up:** Run full lint pass after stage4 fixes to catch any codegen fallout
+
 

@@ -1,4 +1,8 @@
 # Test runner: file-level `Failed` count includes a phantom +1 after all `it` examples pass
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `bin/simple test` (SSpec runner), file-level result aggregation
@@ -90,3 +94,4 @@ already covered elsewhere, stop double-counting it into the file's
 `Failed` tally. Whichever direction, the fix belongs in the test-runner
 source (interpreter/tooling), not in these five spec files, which are
 correct as written.
+

@@ -1,4 +1,9 @@
 # sspec documentization: analyzer and generator disagree on the step form
+## Closed 2026-09-16 — .../documentize.spl` - Status: **FIXED 2026-08-24** (see Resolution) ## Correction to two ear
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Filed: 2026-08-24
 - Components: `src/app/sspec_maintain/source_facts.spl`,
@@ -94,3 +99,4 @@ something to fake with a capture.
 (45 passed / 16 failed before this change, 48 / 16 after — the 3 added examples
 all pass and no existing example regressed). They belong to the capture/evidence
 metadata family and are out of scope here.
+

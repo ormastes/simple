@@ -1,4 +1,8 @@
 # BUG: freestanding rt_mmio_read_u8 returns 0 at addresses a C load reads correctly (address/layout-dependent)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open (latent at origin tip; reproduces only when .bss layout shifts the FAT buffer to ~0x0D5Dxxxx)
 **Severity:** high (silently corrupts any pure-Simple raw-buffer readback; masqueraded as an "NVMe DMA failure" and misdirected a whole roadmap)
@@ -34,3 +38,4 @@ Regression: read back a raw buffer at a `0x0D5Dxxxx`-class address via `rt_mmio_
 
 - `doc/03_plan/os/in_guest_clang_streaming_loader_roadmap.md` — blocker section corrected (was misattributed to DMA).
 - `doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md` — earlier sighting of the same family.
+

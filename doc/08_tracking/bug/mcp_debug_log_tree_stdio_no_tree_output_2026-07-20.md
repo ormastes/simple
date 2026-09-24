@@ -1,4 +1,8 @@
 # MCP `debug_log_tree` tool call produces no matching response for either JSON or LLM-text mode
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** MCP stdio server `debug_log_tree`/`debug_log_enable` tool
@@ -39,3 +43,4 @@ into the tool dispatch table under this server.
 Spec left unmodified — no evidence found that the tool names/params are
 stale; flagged as a genuine gap for someone with more context on the debug
 MCP stdio handler to investigate.
+

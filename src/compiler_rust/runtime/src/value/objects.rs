@@ -307,6 +307,19 @@ pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64)
         .is_some_and(|p| unsafe { (*p).discriminant as i64 == expected })
 }
 
+/// Check an enum's runtime identity and discriminant.
+///
+/// Runtime ID zero is the legacy untyped lane, so either a legacy value or a
+/// legacy expected ID retains the historical discriminant-only behavior.
+#[no_mangle]
+pub extern "C" fn rt_enum_check_variant(value: RuntimeValue, expected_enum_id: i64, expected_discriminant: i64) -> bool {
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
+        let actual_enum_id = (*p).enum_id as i64;
+        (*p).discriminant as i64 == expected_discriminant
+            && (expected_enum_id == 0 || actual_enum_id == 0 || actual_enum_id == expected_enum_id)
+    })
+}
+
 /// Unwrap an optional value: if it's a Some enum, return its payload; otherwise return as-is.
 /// Used by the `??` operator's then-branch to unwrap Option values.
 #[no_mangle]
@@ -544,6 +557,43 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
 #[no_mangle]
 pub extern "C" fn rt_is_some(value: RuntimeValue) -> bool {
     !rt_is_none(value)
+}
+
+/// Presence predicate for the postfix `.?` operator.
+///
+/// This is `.?`'s ONE semantic definition on the native/JIT lane, and it
+/// mirrors the tree-walk interpreter's `Expr::ExistsCheck` arm
+/// (`compiler/src/interpreter/expr.rs`) exactly: unwrap any Option/Result
+/// layer first, then a value is PRESENT unless it is nil/None or an **empty**
+/// array, dict, or string.
+///
+/// `rt_is_some` is NOT that predicate — it is pure nil/None presence, so an
+/// empty-but-allocated array is `Some` and `while arr.?:` never terminated
+/// under native codegen while the same source was correct interpreted
+/// (doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md).
+/// `rt_is_some` is kept for the raw optional/pointer-slot probes that really do
+/// mean "not the nil sentinel"; only `.?` routes here.
+///
+/// Note what is deliberately NOT empty-tested, because the interpreter does not
+/// test it either: `Int(0)`, `Bool(false)`, `0.0`, tuples, closures, structs and
+/// every other object are present. Re-deciding presence by generic truthiness is
+/// the "0 is falsy" landmine
+/// (doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md).
+#[no_mangle]
+pub extern "C" fn rt_is_present(value: RuntimeValue) -> bool {
+    if rt_is_none(value) {
+        return false;
+    }
+    let payload = rt_unwrap_or_self(value);
+    if payload.is_nil() {
+        return false;
+    }
+    match payload.heap_type() {
+        Some(HeapObjectType::Array) => super::collections::rt_array_len(payload) > 0,
+        Some(HeapObjectType::String) => super::collections::rt_string_len(payload) > 0,
+        Some(HeapObjectType::Dict) => super::dict::rt_dict_len(payload) > 0,
+        _ => true,
+    }
 }
 
 /// Map over an Option value: if Some(x), apply closure to x and return Some(result).

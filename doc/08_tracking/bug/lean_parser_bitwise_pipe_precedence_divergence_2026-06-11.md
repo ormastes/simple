@@ -1,4 +1,21 @@
 # Bug: Lean Parser Bitwise/Pipe Precedence Divergence
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Not closed 2026-09-13 — STILL REAL; fix blocked by a concurrent bootstrap
+
+- **measured** `grep "fn parse_bitwise" src/compiler/10.frontend/core/parser_expr.spl` → no
+  matches. The leveled chain is still `parse_multiplication` (line 413) → `parse_comparison`
+  (line 292) with no bitwise levels in between.
+- **measured** PIPE (kind 121) is still consumed at multiplication level:
+  `parser_expr.spl:437` and `:524` both do `elif par_kind_get() == 121: ... expr_binary(121, ...)`.
+- **measured** The Rust seed evaluates `12 & 10 + 1` as `8` (= `a & (b + c)`), i.e. the
+  *intended* precedence, so the seed/lean divergence the entry describes persists.
+- Left OPEN: the fix edits `src/compiler/10.frontend/core/parser_expr.spl`; a bootstrap is
+  running concurrently in this workspace and a compiler-source edit would desync it.
+
 
 **Date:** 2026-06-11
 **Component:** src/compiler/10.frontend/core/parser_expr.spl
@@ -44,3 +61,4 @@ in the leveled chain: `parse_multiplication` → `parse_bitwise_and` → `parse_
 - tok_precedence (dead code, spec reference only): src/compiler/10.frontend/core/tokens.spl
 - M1 parser fix commit: landed infix &/^ + prefix ~ at multiplication level as deliberate
   short-term placement matching existing PIPE placement (1ea5249607 + follow-up fix commit).
+

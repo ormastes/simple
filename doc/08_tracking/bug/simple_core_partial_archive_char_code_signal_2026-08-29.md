@@ -1,4 +1,8 @@
 # Simple-core partial archive probe signals in managed `char_code_at`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -50,3 +54,4 @@ must retain all of the following in a single run:
    is not sufficient admission evidence.
 
 Retained logs are under `build/test-logs/simple-core-missing-six/`.
+

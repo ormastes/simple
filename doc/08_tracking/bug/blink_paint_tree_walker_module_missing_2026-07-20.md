@@ -1,4 +1,8 @@
 # Bug: `src/lib/blink/paint/paint_tree_walker.spl` and `src/lib/blink/layout/block_flow.spl` do not exist — spec targets an unimplemented module
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-20
 
@@ -73,3 +77,4 @@ for a test-shard fix.
 ## Affected
 
 - `test/01_unit/lib_standalone/blink/.spipe_matchers_image_paint_spec.spl` (whole file, 0 examples executed)
+

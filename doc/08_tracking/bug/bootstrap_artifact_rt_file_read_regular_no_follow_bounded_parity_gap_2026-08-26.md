@@ -1,4 +1,8 @@
 # Deployed bootstrap registry parity gap for bounded no-follow file reads
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -53,3 +57,4 @@ The active raw owner exposes `file_lock`/`file_unlock`; the distinct legacy
 either import its actual resource owner or be replaced by a file-ops contract
 spec. This is likewise pre-existing and not evidence that a false/zero result
 should be fabricated.
+

@@ -24,14 +24,16 @@ echo "PASS: required fields present"
 
 # 3. Check skill paths resolve
 SKILL_COUNT=$(python3 -c "import json; d=json.load(open('$MANIFEST')); print(len(d.get('skills',[])))")
-for i in $(seq 0 $((SKILL_COUNT - 1))); do
-    SKILL_PATH=$(python3 -c "import json; d=json.load(open('$MANIFEST')); print(d['skills'][$i]['path'])")
-    RESOLVED="$PLUGIN_DIR/$SKILL_PATH"
-    if [ ! -f "$RESOLVED" ]; then
-        echo "FAIL: skill path '$SKILL_PATH' does not resolve to a file (tried $RESOLVED)"
-        exit 1
-    fi
-done
+if [ "$SKILL_COUNT" -gt 0 ]; then
+    for i in $(seq 0 $((SKILL_COUNT - 1))); do
+        SKILL_PATH=$(python3 -c "import json; d=json.load(open('$MANIFEST')); print(d['skills'][$i]['path'])")
+        RESOLVED="$PLUGIN_DIR/$SKILL_PATH"
+        if [ ! -f "$RESOLVED" ]; then
+            echo "FAIL: skill path '$SKILL_PATH' does not resolve to a file (tried $RESOLVED)"
+            exit 1
+        fi
+    done
+fi
 echo "PASS: all skill paths resolve"
 
 echo "=== dev plugin OK ==="

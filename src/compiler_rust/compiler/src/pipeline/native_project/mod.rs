@@ -13,6 +13,7 @@ mod compiler;
 mod discovery;
 pub(crate) mod inline_asm_emit;
 mod linker;
+mod linker_env;
 /// Re-exported so `tests/simple_linker_preference.rs` can pin the
 /// `SIMPLE_LINKER` alias contract. The crate's `--lib` test target does not
 /// compile at present (three pre-existing errors in
@@ -235,6 +236,7 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
                 out.push(c);
                 if out.is_symlink() {
                     if let Ok(target) = std::fs::read_link(&out) {
+                        let target = normalize_unix_style_target(target);
                         if target.is_absolute() {
                             out = target;
                         } else {
@@ -247,6 +249,49 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Git-Bash/MSYS/Cygwin `ln -s` writes symlink targets in Unix form
+/// (`/c/Users/...` or `/cygdrive/c/Users/...`). Windows `Path::is_absolute`
+/// rejects those (no drive prefix), so safe_canonicalize used to push them as
+/// relative components and produced a nonexistent path — which made
+/// `deduplicate_for_compilation` keep every aliased source file twice (e.g.
+/// `src/compiler/frontend` and `src/compiler/10.frontend`), and HIR then
+/// rejected the dual-loaded modules with "invalid export origin". Translate
+/// the leading `/X/` (or `/cygdrive/X/`) into `X:/` so dedup keys match.
+#[cfg(windows)]
+fn normalize_unix_style_target(target: PathBuf) -> PathBuf {
+    let s = target.to_string_lossy().replace('\\', "/");
+    let mut rest: Option<&str> = None;
+    let mut drive: Option<char> = None;
+    if let Some(tail) = s.strip_prefix("/cygdrive/") {
+        let mut chars = tail.chars();
+        if let Some(d) = chars.next() {
+            if chars.next() == Some('/') {
+                drive = Some(d);
+                rest = Some(chars.as_str());
+            }
+        }
+    } else if let Some(tail) = s.strip_prefix('/') {
+        let mut chars = tail.chars();
+        if let Some(d) = chars.next() {
+            if chars.next() == Some('/') {
+                drive = Some(d);
+                rest = Some(chars.as_str());
+            }
+        }
+    }
+    match (drive, rest) {
+        (Some(d), Some(r)) if d.is_ascii_alphabetic() => {
+            PathBuf::from(format!("{}:/{}", d.to_ascii_uppercase(), r))
+        }
+        _ => target,
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_unix_style_target(target: PathBuf) -> PathBuf {
+    target
 }
 
 /// CLI-provided runtime library directory override.
@@ -1014,7 +1059,9 @@ impl NativeProjectBuilder {
         let effective_backend = self.config.backend.as_str();
 
         // Determine which files need recompilation via content hash
-        let mut to_compile: Vec<(usize, PathBuf, String, Option<PathBuf>)> = Vec::new();
+        // `Arc<str>` so the dirty-set shares source text with `file_sources`
+        // instead of cloning every module's source again.
+        let mut to_compile: Vec<(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)> = Vec::new();
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
 
         if use_incremental {
@@ -1062,7 +1109,7 @@ impl NativeProjectBuilder {
                     // inline-asm sidecars remain excluded above.
                     immediate_cache = Some(cached_o);
                 }
-                to_compile.push((i, path.clone(), source.clone(), immediate_cache));
+                to_compile.push((i, path.clone(), std::sync::Arc::from(source.as_str()), immediate_cache));
             }
         } else {
             for (i, (path, source)) in file_sources.iter().enumerate() {
@@ -1070,7 +1117,7 @@ impl NativeProjectBuilder {
                 if !compile_indices.contains(&i) {
                     continue;
                 }
-                to_compile.push((i, path.clone(), source.clone(), None));
+                to_compile.push((i, path.clone(), std::sync::Arc::from(source.as_str()), None));
             }
         }
 
@@ -1136,6 +1183,26 @@ impl NativeProjectBuilder {
 
         let compiled = object_paths.len();
         let failed = failures.len();
+
+        // Always print compiled/reused/failed counts, unconditionally and on
+        // BOTH the success and failure paths — previously this only appeared
+        // with SIMPLE_NATIVE_INCREMENTAL=1 and after the failure early-return
+        // below, so a failed build never showed counts (see rebuild_separation
+        // measurement, gap G3). Print-only; no logic change.
+        // `compiled` (object_paths.len()) is cached ∪ freshly-compiled, so the
+        // "compiled" field here is freshly_compiled.len() specifically —
+        // reused=cached_count, compiled=freshly_compiled.len() do not overlap.
+        // `scope=` names the seed-keyed cache directory (cache_scope_segment())
+        // so the bootstrap script can tell which scope a run actually used,
+        // without recomputing the hash itself.
+        let native_build_scope_name = cache_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        eprintln!(
+            "[native-build] compiled={} reused={cached_count} failed={failed} scope={native_build_scope_name}",
+            freshly_compiled.len()
+        );
 
         // Always log individual failures when present (bootstrap visibility).
         if failed > 0 {
@@ -1296,31 +1363,38 @@ impl NativeProjectBuilder {
             return Ok(None);
         };
 
-        let cxx = tools::find_cxx_compiler();
-        let is_clang_cl = cxx.contains("clang-cl");
-        let escaped = cxx_raw_string_literal(&registry_sdn);
+        let target = effective_target();
+        let compiler = security_registry_c_source_compiler(target);
+        let is_clang_cl = compiler.contains("clang-cl");
+        let escaped = c_string_literal(&registry_sdn);
         let loader_decl = if is_clang_cl {
-            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long);"#
+            r#"extern unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long);"#
         } else {
-            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));"#
+            r#"extern unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));"#
         };
         let source = format!(
             r#"
+#ifdef __cplusplus
+extern "C" {{
+#endif
 {loader_decl}
-static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = R"SECURITY_SDN({escaped})SECURITY_SDN";
-extern "C" void __module_init_security_registry(void) {{
+static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = "{escaped}";
+void __module_init_security_registry(void) {{
     if (rt_security_load_registry_sdn) {{
         rt_security_load_registry_sdn(SIMPLE_SECURITY_REGISTRY_SDN, sizeof(SIMPLE_SECURITY_REGISTRY_SDN) - 1);
     }}
 }}
+#ifdef __cplusplus
+}}
+#endif
 "#
         );
-        let source_path = temp_dir.join("_security_registry_init.cpp");
+        let source_path = temp_dir.join("_security_registry_init.c");
         std::fs::write(&source_path, source).map_err(|e| format!("write security registry init: {e}"))?;
 
         let object_path = temp_dir.join("_security_registry_init.o");
         let status = if is_clang_cl {
-            std::process::Command::new(&cxx)
+            std::process::Command::new(&compiler)
                 .arg("/c")
                 .arg("/O2")
                 .arg("/Gy")
@@ -1329,15 +1403,21 @@ extern "C" void __module_init_security_registry(void) {{
                 .status()
                 .map_err(|e| format!("compile security registry init: {e}"))?
         } else {
-            std::process::Command::new(&cxx)
-                .args(["-c", "-O2", "-ffunction-sections", "-fdata-sections", "-o"])
+            let mut cmd = std::process::Command::new(&compiler);
+            cmd.args(["-c", "-O2", "-ffunction-sections", "-fdata-sections"]);
+            if target.os == simple_common::target::TargetOS::Windows
+                && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+            {
+                cmd.arg("--target=x86_64-w64-windows-gnu");
+            }
+            cmd.arg("-o")
                 .arg(&object_path)
                 .arg(&source_path)
                 .status()
                 .map_err(|e| format!("compile security registry init: {e}"))?
         };
         if !status.success() {
-            return Err(format!("compile security registry init failed ({})", cxx));
+            return Err(format!("compile security registry init failed ({})", compiler));
         }
         Ok(Some(object_path))
     }
@@ -1440,8 +1520,20 @@ fn source_may_declare_security(source: &str) -> bool {
     })
 }
 
-fn cxx_raw_string_literal(value: &str) -> String {
-    value.replace(")SECURITY_SDN\"", ")SECURITY_SDN_\"")
+fn c_string_literal(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n\"\n\"")
+}
+
+fn security_registry_c_source_compiler(target: simple_common::target::Target) -> String {
+    if target.os == simple_common::target::TargetOS::Windows {
+        tools::target_c_compiler(target)
+    } else {
+        tools::find_cxx_compiler()
+    }
 }
 
 /// Check if a file path matches the canonical entry file path.
@@ -1823,11 +1915,6 @@ pub(crate) fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
                 out.push(path);
             }
         } else if path.extension().is_some_and(|e| e == "spl") {
-            if let Some(p) = path.to_str() {
-                if p.contains("check.spl") {
-                    continue;
-                }
-            }
             if path.is_file() {
                 out.push(path);
             }

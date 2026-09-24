@@ -1,4 +1,8 @@
 # E-MIR-TYPE-ZeroKind is a CORRUPT AGGREGATE, not an unset field
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — root cause characterised, fix not yet identified
 **Filed:** 2026-09-03
@@ -489,3 +493,4 @@ specified rather than assumed away.
 - Stage 3 takes ~57-65 min of single-core worker time here. It is invoked with
   `--threads 20` and runs at `cpu_pct=100`; see
   `doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md`.
+

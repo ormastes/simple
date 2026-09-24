@@ -1,4 +1,8 @@
 # Aliased `use ... { x as y }` (and qualified `use m` + `m.f()`) do not bind in the CODEGEN lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** PARTIALLY FIXED 2026-08-10 — codegen now consumes the alias map;
 `check-import-alias-codegen.shs` PASSes 5/5 and the `--expect-fail` negative
@@ -216,3 +220,4 @@ All five rows of the family table bind in the codegen lane.
 Do not close this by converting the remaining aliased imports to plain imports.
 That hides the defect; the alias form is valid grammar and must work. Equally, do
 not "fix" the qualified row by rewriting `m.f()` call sites.
+

@@ -1,0 +1,399 @@
+# Fixed-width owner-backed leases for structural-mask parser kernels.
+# This layer maps no memory and calls no native address.  Executable mappings
+# remain loader-owned; this owner only accepts an address already published by
+# and pinned in ProviderGenerationManagerV1.
+
+use std.nogc_sync_mut.composition.provider_generation.{
+    ProviderGenerationManagerV1, ProviderGenerationPinV1,
+    provider_generation_active_matches_v1, provider_generation_pin_active_v1,
+    provider_generation_pin_is_live_v1, provider_generation_release_v1,
+    SIMPLE_GENERATION_OK
+}
+
+pub const STRUCTURAL_MASK_LEASE_OK_V1: i32 = 0
+pub const STRUCTURAL_MASK_LEASE_INVALID_V1: i32 = 1
+pub const STRUCTURAL_MASK_LEASE_CAPABILITY_UNAVAILABLE_V1: i32 = 2
+pub const STRUCTURAL_MASK_LEASE_STALE_GENERATION_V1: i32 = 3
+pub const STRUCTURAL_MASK_LEASE_RETIRED_V1: i32 = 4
+pub const STRUCTURAL_MASK_LEASE_RANGE_V1: i32 = 5
+pub const STRUCTURAL_MASK_LEASE_SESSION_MISMATCH_V1: i32 = 6
+pub const STRUCTURAL_MASK_LEASE_IN_USE_V1: i32 = 7
+pub const STRUCTURAL_MASK_LEASE_CAPACITY_V1: i32 = 8
+pub const STRUCTURAL_MASK_MAX_RECORDS_V1: u64 = 256u64
+pub const STRUCTURAL_MASK_MAX_COUNTER_V1: u64 = 0xffffffffffffffffu64
+
+pub struct ExecutableKernelLeaseV1:
+    lease_id: u64
+    provider_handle: u64
+    provider_generation: u64
+    provider_identity_digest: u64
+    code_size: u64
+    pin_id: u64
+
+pub struct StableSourceBufferLeaseV1:
+    lease_id: u64
+    lease_generation: u64
+    snapshot_identity_digest: u64
+    byte_length: u64
+    readable_padding: u32
+
+pub struct StableSourceBufferTransferV1:
+    transfer_id: u64
+    source_lease: StableSourceBufferLeaseV1
+    bytes: [u8]
+
+pub struct StructuralMaskSessionV1:
+    session_id: u64
+    session_generation: u64
+    kernel_lease_id: u64
+    source_lease_id: u64
+    source_lease_generation: u64
+    first_delimiter: u8
+    second_delimiter: u8
+
+pub struct StructuralMaskBatchValidationV1:
+    status: i32
+    block_count: u64
+    tail_count: u32
+    reason: text
+
+pub struct StructuralMaskBatchResultV1:
+    status: i32
+    session_id: u64
+    offset: u64
+    count: u64
+    masks: [u32]
+    positions: [u64]
+    executed_provider: bool
+    reason: text
+
+struct _KernelRecordV1:
+    lease: ExecutableKernelLeaseV1
+    pin: ProviderGenerationPinV1
+    callable_address: i64
+    live: bool
+
+struct _SourceRecordV1:
+    lease: StableSourceBufferLeaseV1
+    bytes: [u8]
+    live: bool
+    transfer_id: u64
+    transfer_consumed: bool
+
+struct _SessionRecordV1:
+    session: StructuralMaskSessionV1
+    live: bool
+
+pub class StructuralMaskLeaseOwnerV1:
+    var kernels: [_KernelRecordV1]
+    var sources: [_SourceRecordV1]
+    var sessions: [_SessionRecordV1]
+    var next_lease_id: u64
+    var next_source_generation: u64
+    var next_session_id: u64
+    var next_session_generation: u64
+
+    pub static fn create() -> StructuralMaskLeaseOwnerV1:
+        StructuralMaskLeaseOwnerV1(kernels: [], sources: [], sessions: [],
+            next_lease_id: 1u64, next_source_generation: 1u64,
+            next_session_id: 1u64, next_session_generation: 1u64)
+
+fn _kernel_index(owner: StructuralMaskLeaseOwnerV1, lease_id: u64) -> i64:
+    var i = 0
+    while i < owner.kernels.len():
+        if owner.kernels[i].lease.lease_id == lease_id: return i
+        i = i + 1
+    -1
+
+fn _source_index(owner: StructuralMaskLeaseOwnerV1, lease_id: u64) -> i64:
+    var i = 0
+    while i < owner.sources.len():
+        if owner.sources[i].lease.lease_id == lease_id: return i
+        i = i + 1
+    -1
+
+fn _session_index(owner: StructuralMaskLeaseOwnerV1, session_id: u64) -> i64:
+    var i = 0
+    while i < owner.sessions.len():
+        if owner.sessions[i].session.session_id == session_id: return i
+        i = i + 1
+    -1
+
+fn _counter_available(value: u64) -> bool:
+    value != 0u64 and value != STRUCTURAL_MASK_MAX_COUNTER_V1
+
+fn _kernel_equal(a: ExecutableKernelLeaseV1, b: ExecutableKernelLeaseV1) -> bool:
+    a.lease_id == b.lease_id and a.provider_handle == b.provider_handle and
+        a.provider_generation == b.provider_generation and
+        a.provider_identity_digest == b.provider_identity_digest and
+        a.code_size == b.code_size and a.pin_id == b.pin_id
+
+fn _source_equal(a: StableSourceBufferLeaseV1, b: StableSourceBufferLeaseV1) -> bool:
+    a.lease_id == b.lease_id and a.lease_generation == b.lease_generation and
+        a.snapshot_identity_digest == b.snapshot_identity_digest and
+        a.byte_length == b.byte_length and a.readable_padding == b.readable_padding
+
+fn _session_equal(a: StructuralMaskSessionV1, b: StructuralMaskSessionV1) -> bool:
+    a.session_id == b.session_id and a.session_generation == b.session_generation and
+        a.kernel_lease_id == b.kernel_lease_id and a.source_lease_id == b.source_lease_id and
+        a.source_lease_generation == b.source_lease_generation and
+        a.first_delimiter == b.first_delimiter and a.second_delimiter == b.second_delimiter
+
+pub fn executable_kernel_lease_issue_v1(
+    owner: StructuralMaskLeaseOwnerV1, manager: ProviderGenerationManagerV1,
+    provider_handle: u64, provider_generation: u64, provider_identity_digest: u64,
+    callable_address: i64, code_size: u64, capability_usable: bool
+) -> Result<ExecutableKernelLeaseV1, i32>:
+    if not capability_usable:
+        return Err(STRUCTURAL_MASK_LEASE_CAPABILITY_UNAVAILABLE_V1)
+    if owner.kernels.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
+       not _counter_available(owner.next_lease_id):
+        return Err(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+    if provider_handle == 0u64 or provider_generation == 0u64 or
+       provider_identity_digest == 0u64 or callable_address <= 0 or code_size == 0u64:
+        return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if not provider_generation_active_matches_v1(manager, provider_handle,
+            provider_generation, provider_identity_digest):
+        return Err(STRUCTURAL_MASK_LEASE_STALE_GENERATION_V1)
+    # The generation owner is also the callable-address authority.
+    var address_matches = false
+    var i = 0
+    while i < manager.generations.len():
+        val generation = manager.generations[i]
+        if generation.provider_handle == provider_handle and
+           generation.generation == provider_generation and generation.active and
+           generation.query_symbol_address == callable_address:
+            address_matches = true
+        i = i + 1
+    if not address_matches: return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    val pin = provider_generation_pin_active_v1(manager, provider_handle)
+    if pin.status != SIMPLE_GENERATION_OK or pin.generation != provider_generation:
+        return Err(STRUCTURAL_MASK_LEASE_STALE_GENERATION_V1)
+    val lease = ExecutableKernelLeaseV1(lease_id: owner.next_lease_id,
+        provider_handle: provider_handle, provider_generation: provider_generation,
+        provider_identity_digest: provider_identity_digest, code_size: code_size,
+        pin_id: pin.pin_id)
+    owner.next_lease_id = owner.next_lease_id + 1u64
+    owner.kernels.push(_KernelRecordV1(lease: lease, pin: pin,
+        callable_address: callable_address, live: true))
+    Ok(lease)
+
+pub fn stable_source_buffer_lease_create_v1(
+    owner: StructuralMaskLeaseOwnerV1, snapshot_identity_digest: u64,
+    bytes: [u8], readable_padding: u32
+) -> Result<StableSourceBufferLeaseV1, i32>:
+    if snapshot_identity_digest == 0u64 or readable_padding != 0u32:
+        return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if owner.sources.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
+       not _counter_available(owner.next_lease_id) or
+       not _counter_available(owner.next_source_generation):
+        return Err(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+    var copied: [u8] = []
+    var i = 0
+    while i < bytes.len():
+        copied.push(bytes[i])
+        i = i + 1
+    val lease = StableSourceBufferLeaseV1(lease_id: owner.next_lease_id,
+        lease_generation: owner.next_source_generation,
+        snapshot_identity_digest: snapshot_identity_digest,
+        byte_length: copied.len() as u64, readable_padding: 0u32)
+    owner.next_lease_id = owner.next_lease_id + 1u64
+    owner.next_source_generation = owner.next_source_generation + 1u64
+    owner.sources.push(_SourceRecordV1(lease: lease, bytes: copied, live: true,
+        transfer_id: 0u64, transfer_consumed: false))
+    Ok(lease)
+
+pub fn stable_source_buffer_transfer_issue_v1(owner: StructuralMaskLeaseOwnerV1,
+    lease: StableSourceBufferLeaseV1) -> Result<StableSourceBufferTransferV1, i32>:
+    val index = _source_index(owner, lease.lease_id)
+    if index < 0 or not owner.sources[index].live or
+       not _source_equal(owner.sources[index].lease, lease):
+        return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if owner.sources[index].transfer_id != 0u64:
+        return Err(STRUCTURAL_MASK_LEASE_IN_USE_V1)
+    var copied: [u8] = []
+    for byte in owner.sources[index].bytes: copied.push(byte)
+    var record = owner.sources[index]
+    record.transfer_id = owner.next_lease_id
+    owner.next_lease_id = owner.next_lease_id + 1u64
+    owner.sources[index] = record
+    Ok(StableSourceBufferTransferV1(transfer_id: record.transfer_id,
+        source_lease: lease, bytes: copied))
+
+pub fn stable_source_buffer_transfer_validate_v1(owner: StructuralMaskLeaseOwnerV1,
+    transfer: StableSourceBufferTransferV1) -> bool:
+    val index = _source_index(owner, transfer.source_lease.lease_id)
+    if index < 0 or not owner.sources[index].live or
+       owner.sources[index].transfer_id == 0u64 or
+       owner.sources[index].transfer_consumed or
+       owner.sources[index].transfer_id != transfer.transfer_id or
+       not _source_equal(owner.sources[index].lease, transfer.source_lease) or
+       owner.sources[index].bytes.len() != transfer.bytes.len():
+        return false
+    var i = 0
+    while i < transfer.bytes.len():
+        if owner.sources[index].bytes[i] != transfer.bytes[i]: return false
+        i = i + 1
+    true
+
+pub fn stable_source_buffer_transfer_consume_v1(owner: StructuralMaskLeaseOwnerV1,
+    transfer: StableSourceBufferTransferV1) -> bool:
+    if not stable_source_buffer_transfer_validate_v1(owner, transfer): return false
+    val index = _source_index(owner, transfer.source_lease.lease_id)
+    var record = owner.sources[index]
+    record.transfer_consumed = true
+    owner.sources[index] = record
+    true
+
+# Owner-authorized immutable range copy. No source pointer or mutable backing
+# storage escapes this composition layer.
+pub fn stable_source_buffer_range_copy_v1(owner: StructuralMaskLeaseOwnerV1,
+    lease: StableSourceBufferLeaseV1, offset: u64, count: u64) -> Result<[u8], i32>:
+    val index = _source_index(owner, lease.lease_id)
+    if index < 0 or not owner.sources[index].live or
+       not _source_equal(owner.sources[index].lease, lease):
+        return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if offset > lease.byte_length or count > lease.byte_length - offset:
+        return Err(STRUCTURAL_MASK_LEASE_RANGE_V1)
+    var copied: [u8] = []
+    var i = 0u64
+    while i < count:
+        copied.push(owner.sources[index].bytes[(offset + i) as i64]); i = i + 1u64
+    Ok(copied)
+
+# Scalar-only sessions intentionally carry no executable kernel. They are
+# valid only for batches with zero complete 32-byte blocks.
+pub fn structural_mask_scalar_session_create_v1(owner: StructuralMaskLeaseOwnerV1,
+    source: StableSourceBufferLeaseV1, first_delimiter: u8, second_delimiter: u8
+) -> Result<StructuralMaskSessionV1, i32>:
+    val si = _source_index(owner, source.lease_id)
+    if si < 0 or not owner.sources[si].live or
+       not _source_equal(owner.sources[si].lease, source):
+        return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if owner.sessions.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
+       not _counter_available(owner.next_session_id) or
+       not _counter_available(owner.next_session_generation):
+        return Err(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+    val session = StructuralMaskSessionV1(session_id: owner.next_session_id,
+        session_generation: owner.next_session_generation, kernel_lease_id: 0u64,
+        source_lease_id: source.lease_id, source_lease_generation: source.lease_generation,
+        first_delimiter: first_delimiter, second_delimiter: second_delimiter)
+    owner.next_session_id = owner.next_session_id + 1u64
+    owner.next_session_generation = owner.next_session_generation + 1u64
+    owner.sessions.push(_SessionRecordV1(session: session, live: true))
+    Ok(session)
+
+pub fn structural_mask_scalar_session_range_valid_v1(owner: StructuralMaskLeaseOwnerV1,
+    session: StructuralMaskSessionV1, source: StableSourceBufferLeaseV1,
+    offset: u64, count: u64) -> bool:
+    val xi = _session_index(owner, session.session_id)
+    xi >= 0 and owner.sessions[xi].live and _session_equal(owner.sessions[xi].session, session) and
+    session.kernel_lease_id == 0u64 and session.source_lease_id == source.lease_id and
+    session.source_lease_generation == source.lease_generation and count < 32u64 and
+    offset <= source.byte_length and count <= source.byte_length - offset
+
+pub fn structural_mask_session_source_range_valid_v1(owner: StructuralMaskLeaseOwnerV1,
+    session: StructuralMaskSessionV1, source: StableSourceBufferLeaseV1,
+    offset: u64, count: u64) -> bool:
+    val xi = _session_index(owner, session.session_id)
+    xi >= 0 and owner.sessions[xi].live and _session_equal(owner.sessions[xi].session, session) and
+    session.source_lease_id == source.lease_id and
+    session.source_lease_generation == source.lease_generation and
+    offset <= source.byte_length and count <= source.byte_length - offset
+
+pub fn structural_mask_session_create_v1(
+    owner: StructuralMaskLeaseOwnerV1, manager: ProviderGenerationManagerV1,
+    kernel: ExecutableKernelLeaseV1, source: StableSourceBufferLeaseV1,
+    first_delimiter: u8, second_delimiter: u8
+) -> Result<StructuralMaskSessionV1, i32>:
+    if owner.sessions.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
+       not _counter_available(owner.next_session_id) or
+       not _counter_available(owner.next_session_generation):
+        return Err(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+    val ki = _kernel_index(owner, kernel.lease_id)
+    val si = _source_index(owner, source.lease_id)
+    if ki < 0 or si < 0 or not owner.kernels[ki].live or not owner.sources[si].live or
+       not _kernel_equal(owner.kernels[ki].lease, kernel) or
+       not _source_equal(owner.sources[si].lease, source):
+        return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if not provider_generation_pin_is_live_v1(manager, owner.kernels[ki].pin):
+        return Err(STRUCTURAL_MASK_LEASE_STALE_GENERATION_V1)
+    val session = StructuralMaskSessionV1(session_id: owner.next_session_id,
+        session_generation: owner.next_session_generation,
+        kernel_lease_id: kernel.lease_id, source_lease_id: source.lease_id,
+        source_lease_generation: source.lease_generation,
+        first_delimiter: first_delimiter, second_delimiter: second_delimiter)
+    owner.next_session_id = owner.next_session_id + 1u64
+    owner.next_session_generation = owner.next_session_generation + 1u64
+    owner.sessions.push(_SessionRecordV1(session: session, live: true))
+    Ok(session)
+
+pub fn structural_mask_batch_validate_v1(
+    owner: StructuralMaskLeaseOwnerV1, manager: ProviderGenerationManagerV1,
+    session: StructuralMaskSessionV1, offset: u64, count: u64
+) -> StructuralMaskBatchValidationV1:
+    val xi = _session_index(owner, session.session_id)
+    if xi < 0 or not owner.sessions[xi].live or
+       not _session_equal(owner.sessions[xi].session, session):
+        return StructuralMaskBatchValidationV1(status: STRUCTURAL_MASK_LEASE_SESSION_MISMATCH_V1,
+            block_count: 0u64, tail_count: 0u32, reason: "session-invalid-or-retired")
+    val ki = _kernel_index(owner, session.kernel_lease_id)
+    val si = _source_index(owner, session.source_lease_id)
+    if ki < 0 or si < 0 or not owner.kernels[ki].live or not owner.sources[si].live:
+        return StructuralMaskBatchValidationV1(status: STRUCTURAL_MASK_LEASE_RETIRED_V1,
+            block_count: 0u64, tail_count: 0u32, reason: "lease-retired")
+    if not provider_generation_pin_is_live_v1(manager, owner.kernels[ki].pin):
+        return StructuralMaskBatchValidationV1(status: STRUCTURAL_MASK_LEASE_STALE_GENERATION_V1,
+            block_count: 0u64, tail_count: 0u32, reason: "provider-pin-stale")
+    val length = owner.sources[si].lease.byte_length
+    if offset > length or count > length - offset:
+        return StructuralMaskBatchValidationV1(status: STRUCTURAL_MASK_LEASE_RANGE_V1,
+            block_count: 0u64, tail_count: 0u32, reason: "source-range-invalid")
+    StructuralMaskBatchValidationV1(status: STRUCTURAL_MASK_LEASE_OK_V1,
+        block_count: count / 32u64, tail_count: (count % 32u64) as u32, reason: "validated")
+
+pub fn structural_mask_session_release_v1(owner: StructuralMaskLeaseOwnerV1,
+    session: StructuralMaskSessionV1) -> i32:
+    val index = _session_index(owner, session.session_id)
+    if index < 0 or not owner.sessions[index].live or
+       not _session_equal(owner.sessions[index].session, session):
+        return STRUCTURAL_MASK_LEASE_RETIRED_V1
+    var record = owner.sessions[index]
+    record.live = false
+    owner.sessions[index] = record
+    STRUCTURAL_MASK_LEASE_OK_V1
+
+pub fn stable_source_buffer_lease_release_v1(owner: StructuralMaskLeaseOwnerV1,
+    lease: StableSourceBufferLeaseV1) -> i32:
+    val index = _source_index(owner, lease.lease_id)
+    if index < 0 or not owner.sources[index].live or
+       not _source_equal(owner.sources[index].lease, lease):
+        return STRUCTURAL_MASK_LEASE_RETIRED_V1
+    var s = 0
+    while s < owner.sessions.len():
+        if owner.sessions[s].live and owner.sessions[s].session.source_lease_id == lease.lease_id:
+            return STRUCTURAL_MASK_LEASE_IN_USE_V1
+        s = s + 1
+    var record = owner.sources[index]
+    record.live = false
+    record.bytes = []
+    owner.sources[index] = record
+    STRUCTURAL_MASK_LEASE_OK_V1
+
+pub fn executable_kernel_lease_release_v1(owner: StructuralMaskLeaseOwnerV1,
+    manager: ProviderGenerationManagerV1, lease: ExecutableKernelLeaseV1) -> i32:
+    val index = _kernel_index(owner, lease.lease_id)
+    if index < 0 or not owner.kernels[index].live or
+       not _kernel_equal(owner.kernels[index].lease, lease):
+        return STRUCTURAL_MASK_LEASE_RETIRED_V1
+    var s = 0
+    while s < owner.sessions.len():
+        if owner.sessions[s].live and owner.sessions[s].session.kernel_lease_id == lease.lease_id:
+            return STRUCTURAL_MASK_LEASE_IN_USE_V1
+        s = s + 1
+    val released = provider_generation_release_v1(manager, owner.kernels[index].pin)
+    if released != SIMPLE_GENERATION_OK: return STRUCTURAL_MASK_LEASE_STALE_GENERATION_V1
+    var record = owner.kernels[index]
+    record.live = false
+    owner.kernels[index] = record
+    STRUCTURAL_MASK_LEASE_OK_V1

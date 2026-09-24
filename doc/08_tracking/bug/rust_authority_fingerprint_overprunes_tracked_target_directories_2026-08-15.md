@@ -1,4 +1,8 @@
 # Rust authority fingerprint over-prunes tracked `target` directories
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open follow-up; pre-existing provenance coverage gap, not the
 current Stage-2 publication blocker.
@@ -17,3 +21,4 @@ alter the authority fingerprint, while the top-level Cargo target output does
 not.
 
 Provider token usage and comparable completed-bug average: unavailable.
+

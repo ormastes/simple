@@ -1,4 +1,8 @@
 # Inline `| pattern -> body` match arms parse only as the LAST arm
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-05
@@ -157,3 +161,4 @@ as the match arms: the guide recommends the form that does not work.
 Note that `\x:` closures, while they parse and interpret correctly, **SEGV under
 Stage-2 native codegen** — that is a separate defect, tracked as Defect 3 in
 `stage2_native_codegen_silent_wrong_values_aarch64_2026-09-05.md`.
+

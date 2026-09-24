@@ -1,4 +1,8 @@
 # Theme package transaction sync-owner blocker — TLDR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Candidate `4f84131c55` is rejected and unintegrated.
 - Cycle 2 stopped without edits; cycle 3 tested the explicit-store boundary,
@@ -21,3 +25,4 @@
 process entry -> persistent hosted theme session -> worker/backend consumers
               -> canonical wire store -> copy under lock -> decode privately
 ```
+

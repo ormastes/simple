@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+
+[ "$(uname -s)" = Darwin ] || {
+    echo 'SKIP: Darwin case-folded marker test requires macOS'
+    exit 0
+}
+
+storage_roots_init
+fixture=$(storage_roots_mktemp darwin-case-marker-test)
+trap 'find "$fixture" -depth -delete' EXIT HUP INT TERM
+mkdir -p "$fixture/Simple/storage"
+canonical="$fixture/Simple/storage"
+legacy="$fixture/simple/storage"
+
+legacy_digest=$(storage_roots_digest "simple-storage-root-v1
+$legacy")
+cat >"$canonical/.simple-storage-root-v1" <<EOF
+magic=simple-storage-root-v1
+root_kind=user
+canonical_root_digest=$legacy_digest
+policy_version=1
+EOF
+
+storage_roots_repair_darwin_case_marker "$canonical" "$legacy" user
+canonical_digest=$(storage_roots_digest "simple-storage-root-v1
+$canonical")
+grep -Fqx "canonical_root_digest=$canonical_digest" \
+    "$canonical/.simple-storage-root-v1"
+
+printf 'canonical_root_digest=%064d\n' 0 >"$canonical/.simple-storage-root-v1"
+storage_roots_repair_darwin_case_marker "$canonical" "$legacy" user
+grep -Fqx "canonical_root_digest=$(printf '%064d' 0)" \
+    "$canonical/.simple-storage-root-v1"
+
+echo 'PASS: Darwin case-only legacy marker is repaired; unrelated marker is untouched'

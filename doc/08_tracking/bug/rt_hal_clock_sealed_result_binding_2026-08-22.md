@@ -1,4 +1,8 @@
 # `rt(hal)` clock sealed-result binding gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Current bounded production slice
 
@@ -68,3 +72,4 @@ Compile-time cost is O(manifest bytes) once per tagged declaration (bounded by
 2,048 bytes) plus O(1) closed-row selection and signature validation.  Runtime
 cost, allocation count, and dispatch overhead remain exactly unchanged because
 the new checks emit no hot-path instruction, collection, copy, or lookup.
+

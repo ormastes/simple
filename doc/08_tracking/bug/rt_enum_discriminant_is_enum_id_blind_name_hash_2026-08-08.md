@@ -119,3 +119,22 @@ change across the Rust runtime, the Cranelift/LLVM backends, and the `.spl` back
 - **Pure-Simple self-hosted binary:** UNMEASURED. `bin/simple` currently resolves to the
   Rust bootstrap **seed** (it prints the seed warning on every run). Redeploying the
   self-hosted binary was out of scope for this lane.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Re-read in full. This is a latent-risk record whose own analysis concludes
+"No code fix is warranted" (unverifiable blanket rewrite; zero live
+cross-family comparison sites found in a ~230-site audit) and whose
+suggested hardening is an ABI change across the Rust runtime plus every
+codegen backend — outside a pure-Simple bugfix-lane change and outside the
+45-minute budget even if pursued. No new cross-family comparison site found
+in this pass. Leaving OPEN as filed; no action taken.
+## Triage 2026-09-13
+
+Re-confirmed the record's own conclusion: this is a documented latent
+risk class with "No code fix is warranted" -- a site audit already
+found zero cross-family discriminant comparisons in the current tree,
+so there is no live defect to fix, only a documented trap for future
+code. Nothing to do here. Leaving OPEN as an intentional latent-risk
+record, matching its own stated status.
+

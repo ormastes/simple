@@ -1,4 +1,8 @@
 # `@lint_profile(critical)` file header cannot be placed in any product file
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-25  **Severity:** medium  **Area:** parser / lint tier selection
 **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed)
@@ -29,3 +33,4 @@ Either the parser accepts a standalone module-level `@lint_profile(...)` attribu
 `use`/`val`), or the semantic pass whitelists `@lint_profile` as a file-scope, non-function
 attribute. Regression spec to add with the fix: a module carrying the header on line 1 must
 import cleanly and `simple lint` must report the `critical` tier for it.
+

@@ -1,0 +1,252 @@
+# macOS system faces load, and their hmtx advances are the ones Chrome measured.
+#
+# Round 9 found `try_load_runtime_ttf` rejecting every macOS system TTF in the
+# same process that loaded a bundled Noto asset, and read that as a format
+# problem. It is not: `FontRasterizer.load_selected` answers `invalid()` for any
+# path with no entry in the pinned registry allowlist, WITHOUT opening the file.
+# Round 11 adds an explicitly unmanaged lane beside it, plus `ttcf` collection
+# support, because Menlo and Helvetica ship only as collections.
+#
+# The numbers below are the ground truth this whole parity lane rests on:
+# Menlo `M` is 1233/2048 em = 9.633 px at 16, exactly Chrome's measured
+# 9.63 px/char, and Arial/Helvetica's regular-vs-bold `abcdefg` delta is
+# +4.41 px at 16, exactly Chrome's measured +4.
+use std.spec.*
+use std.common.encoding.sfnt.{
+    sfnt_is_ttc, sfnt_ttc_face_count, sfnt_face_blob,
+    font_runtime_ttf_default_supported, font_face_spec_path, font_face_spec_index,
+    font_unmanaged_face_identity, font_unmanaged_identity_face_spec,
+    parse_offset_table, find_table, read_u16_be, read_u32_be, OtFont
+}
+use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.io_runtime.{env_get, env_set}
+
+val MENLO = "/System/Library/Fonts/Menlo.ttc"
+val ARIAL = "/System/Library/Fonts/Supplemental/Arial.ttf"
+val ARIAL_BOLD = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+val BUNGEE = "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+
+fn _face(path: text, index: i64) -> [u8]:
+    if not file_exists(path): return []
+    sfnt_face_blob(file_read_bytes(path), index)
+
+# hmtx advance for a codepoint, in 1/1000 of a pixel at `size_px`, so the
+# assertion can name a fractional value without a float comparison.
+fn _advance_milli_px(blob: [u8], codepoint: i64, size_px: i64) -> i64:
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return -1
+    val head = match find_table(font, 1751474532u32):
+        Some(value): value
+        None: return -1
+    val hhea = match find_table(font, 1751672161u32):
+        Some(value): value
+        None: return -1
+    val hmtx = match find_table(font, 1752003704u32):
+        Some(value): value
+        None: return -1
+    val cmap = match find_table(font, 1668112752u32):
+        Some(value): value
+        None: return -1
+    val units_per_em = read_u16_be(blob, (head.offset as i64) + 18) as i64
+    if units_per_em <= 0: return -1
+    val long_metrics = read_u16_be(blob, (hhea.offset as i64) + 34) as i64
+    if long_metrics <= 0: return -1
+    val glyph = _cmap4_glyph(blob, cmap.offset as i64, codepoint)
+    if glyph <= 0: return -1
+    val row = if glyph < long_metrics: glyph else: long_metrics - 1
+    val advance_units = read_u16_be(blob, (hmtx.offset as i64) + row * 4) as i64
+    advance_units * size_px * 1000 / units_per_em
+
+# Format-4 subtable lookup. Every macOS face here carries one; a face that does
+# not simply yields 0 and the caller reports -1 rather than a wrong number.
+fn _cmap4_glyph(blob: [u8], cmap_offset: i64, codepoint: i64) -> i64:
+    val table_count = read_u16_be(blob, cmap_offset + 2) as i64
+    var subtable: i64 = -1
+    var i: i64 = 0
+    while i < table_count:
+        val record = cmap_offset + 4 + i * 8
+        val candidate = cmap_offset + (read_u32_be(blob, record + 4) as i64)
+        if read_u16_be(blob, candidate) as i64 == 4:
+            subtable = candidate
+        i = i + 1
+    if subtable < 0: return 0
+    val seg_x2 = read_u16_be(blob, subtable + 6) as i64
+    val segments = seg_x2 / 2
+    var seg: i64 = 0
+    while seg < segments:
+        val end_code = read_u16_be(blob, subtable + 14 + seg * 2) as i64
+        val start_code = read_u16_be(blob, subtable + 16 + seg_x2 + seg * 2) as i64
+        if start_code <= codepoint and codepoint <= end_code:
+            val delta = read_u16_be(blob, subtable + 16 + seg_x2 * 2 + seg * 2) as i64
+            val range_base = subtable + 16 + seg_x2 * 3
+            val range_offset = read_u16_be(blob, range_base + seg * 2) as i64
+            if range_offset == 0:
+                return (codepoint + delta) % 65536
+            val at = range_base + seg * 2 + range_offset + (codepoint - start_code) * 2
+            val raw = read_u16_be(blob, at) as i64
+            if raw == 0: return 0
+            return (raw + delta) % 65536
+        seg = seg + 1
+    0
+
+fn _run_milli_px(blob: [u8], run: text, size_px: i64) -> i64:
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < run.len():
+        val one = _advance_milli_px(blob, run.char_code_at(i), size_px)
+        if one < 0: return -1
+        total = total + one
+        i = i + 1
+    total
+
+describe "macOS system faces load and carry Chrome's metrics":
+    it "recognises a TrueType collection and reports its faces":
+        # Sabotaged by dropping the `ttcf` tag check, this reports 0 faces.
+        expect(sfnt_is_ttc(file_read_bytes(MENLO))).to_be_true()
+        expect(sfnt_ttc_face_count(file_read_bytes(MENLO)) >= 4).to_be_true()
+
+    it "repacks collection face 0 into a blob the sfnt validator accepts":
+        # This is the whole point of the repack: a face sliced out of a .ttc
+        # without rewriting its table offsets validates as garbage.
+        expect(font_runtime_ttf_default_supported(_face(MENLO, 0))).to_be_true()
+
+    it "rejects a face index the collection does not have":
+        expect(_face(MENLO, 9999).len()).to_equal(0)
+
+    it "measures Menlo M at Chrome's 9.63 px per char at 16 px":
+        # 1233/2048 em * 16 px = 9.6328 px. Chrome measured 9.63.
+        expect(_advance_milli_px(_face(MENLO, 0), 77, 16)).to_equal(9632)
+
+    it "measures Menlo i at the same advance — it is a fixed-pitch face":
+        expect(_advance_milli_px(_face(MENLO, 0), 105, 16))
+            .to_equal(_advance_milli_px(_face(MENLO, 0), 77, 16))
+
+    it "measures the Arial regular-to-bold abcdefg delta as Chrome's +4 px":
+        # 61.341 - 56.935 = 4.406 px at 16 px (per-glyph milli-px truncation costs
+        # 2 milli over the 7 glyphs against the exact 61.344); Chrome showed 64
+        # against 60, i.e. the same +4.
+        val regular = _run_milli_px(_face(ARIAL, 0), "abcdefg", 16)
+        val bold = _run_milli_px(_face(ARIAL_BOLD, 0), "abcdefg", 16)
+        expect(regular).to_equal(56935)
+        expect(bold).to_equal(61341)
+        expect((bold - regular + 500) / 1000).to_equal(4)
+
+describe "face specs and weight routing":
+    it "splits a path#N face spec":
+        expect(font_face_spec_path("/a/b/Menlo.ttc#3")).to_equal("/a/b/Menlo.ttc")
+        expect(font_face_spec_index("/a/b/Menlo.ttc#3")).to_equal(3)
+
+    it "leaves a bare path alone at face 0":
+        expect(font_face_spec_path("/a/b/Arial.ttf")).to_equal("/a/b/Arial.ttf")
+        expect(font_face_spec_index("/a/b/Arial.ttf")).to_equal(0)
+
+    it "does not read a non-numeric # suffix as a face index":
+        expect(font_face_spec_path("/a/b/We#ird.ttf")).to_equal("/a/b/We#ird.ttf")
+
+    it "routes a bold run to a different face than a regular one":
+        # Sabotaged by returning `family` unconditionally, these are equal and
+        # the +4 px bold delta above can never reach the page.
+        expect(browser_font_family_for_weight("sans-serif", true))
+            .to_not_equal(browser_font_family_for_weight("sans-serif", false))
+
+    it "leaves a regular run's family untouched":
+        expect(browser_font_family_for_weight("sans-serif", false)).to_equal("sans-serif")
+
+describe "the loader accepts a platform face — round 9's exact defect":
+    it "loads a plain macOS system TTF":
+        # This is the round 9 reproduction verbatim: it answered FALSE, in the
+        # same process that loaded a bundled Noto asset, because the managed
+        # lane never opened the file.
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(ARIAL))
+        assert_true(renderer.current_font_identity() != "")
+
+    it "loads the bold sibling as a separate face identity":
+        var regular = FontRenderer.new()
+        assert_true(regular.try_load_runtime_ttf(ARIAL))
+        var bold = FontRenderer.new()
+        assert_true(bold.try_load_runtime_ttf(ARIAL_BOLD))
+        expect(bold.current_font_identity()).to_not_equal(regular.current_font_identity())
+
+    it "loads a named face out of a collection":
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+
+    it "gives two faces of one collection different identities":
+        # A repack that ignored the face index would hand both the same blob,
+        # and one metrics cache would serve regular and bold alike.
+        var face0 = FontRenderer.new()
+        assert_true(face0.try_load_runtime_ttf(MENLO + "#0"))
+        var face1 = FontRenderer.new()
+        assert_true(face1.try_load_runtime_ttf(MENLO + "#1"))
+        expect(face1.current_font_identity()).to_not_equal(face0.current_font_identity())
+
+    it "rasterizes a glyph from the repacked collection face":
+        # Geometry parity with blank glyphs would be a regression, not a fix:
+        # prove the atlas path really builds pixels from the new face.
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+        val glyph = renderer.get_glyph(77, 16)
+        assert_true(glyph.width > 0)
+        assert_true(glyph.height > 0)
+        assert_true(glyph.advance > 0)
+
+    it "still refuses a path that is not a font":
+        # The unmanaged lane widens WHICH files are accepted, never WHETHER a
+        # file is validated.
+        var renderer = FontRenderer.new()
+        assert_false(renderer.try_load_runtime_ttf("/nonexistent/none.ttf"))
+
+    it "still refuses a face index the collection does not have":
+        var renderer = FontRenderer.new()
+        assert_false(renderer.try_load_runtime_ttf(MENLO + "#99"))
+
+describe "bold routing never swaps the typeface":
+    it "leaves a serif stack on its own face":
+        # Round 9 refused to land a bold list that fell back to an unrelated
+        # family. A serif run has no platform bold face here, so it stays.
+        expect(browser_font_family_for_weight("serif", true)).to_equal("serif")
+
+    it "leaves an explicitly named family alone":
+        expect(browser_font_family_for_weight("Bungee", true)).to_equal("Bungee")
+
+    it "leaves an @font-face-decorated value alone":
+        val decorated = "__simple_font_face__|/tmp/x.ttf|MyFace"
+        expect(browser_font_family_for_weight(decorated, true)).to_equal(decorated)
+
+describe "an unmanaged identity round-trips back to its face":
+    it "reverses the identity the loader built":
+        # The paint path re-resolves a face from the identity the LAYOUT
+        # recorded. An identity it cannot reverse drops the run to the vector
+        # fallback — measured against Helvetica, drawn as something else.
+        val identity = font_unmanaged_face_identity("/System/Library/Fonts/Menlo.ttc#1", 630420)
+        expect(font_unmanaged_identity_face_spec(identity))
+            .to_equal("/System/Library/Fonts/Menlo.ttc#1")
+
+    it "does not claim a managed registry identity":
+        expect(font_unmanaged_identity_face_spec("sha256=abc;axes=wght=400")).to_equal("")
+
+    it "reloads a platform face from a live renderer's own identity":
+        var first = FontRenderer.new()
+        assert_true(first.try_load_runtime_ttf(MENLO + "#0"))
+        val identity = first.current_font_identity()
+        var second = FontRenderer.new()
+        assert_true(second.try_load_registered_identity(identity))
+        expect(second.current_font_identity()).to_equal(identity)
+
+describe "the unmanaged lane is not a second chance for a registry asset":
+    it "still refuses a registry-owned path the managed lane rejected":
+        # Asset-root enforcement lives in the MANAGED lane. A registry path the
+        # managed lane refused must not be re-opened as a plain file, or the
+        # unmanaged lane quietly becomes a bypass for the pinned bundle.
+        # `font_renderer_bungee_native_probe.spl` pins the same invariant end
+        # to end; this is its unit-level twin.
+        val previous = env_get("SIMPLE_ASSET_ROOT")
+        assert_true(env_set("SIMPLE_ASSET_ROOT", "/dev/null"))
+        var renderer = FontRenderer.new()
+        val loaded = renderer.try_load_runtime_ttf(BUNGEE)
+        assert_true(env_set("SIMPLE_ASSET_ROOT", previous))
+        assert_false(loaded)

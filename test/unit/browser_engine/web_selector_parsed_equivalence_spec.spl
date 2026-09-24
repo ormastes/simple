@@ -1,0 +1,173 @@
+"""
+## Purpose and audience
+Purpose: Prove the pre-parsed selector path (`ParsedSel` /
+`simple_match_parsed` / `_pseudo_ctx_matches_parsed` /
+`selector_group_matches_node_parsed`) is byte-for-byte equivalent to the
+selector-TEXT path it replaced (`simple_match` / `_pseudo_ctx_matches` /
+`selector_group_matches_node_parts`).
+Audience: browser-engine maintainers.
+
+Web-perf round 9 (doc/10_metrics/ui/web_perf_round9_2026-09-13.md) moved
+selector parsing out of the per-node match path: every selector part is now
+parsed ONCE, where `build_rule_buckets` runs, into a `ParsedSel` record, and
+the per-node path consumes only the record. That removed 39% of `sel_match`
+(1009-1016 ms -> 613-638 ms across the eight-page catalog, 4/4 A/B pairs),
+but it is only safe if the two paths agree on EVERY selector and EVERY node.
+
+The oracle is `simple_web_layout_debug_selector_parse_equivalence(html,
+max_nodes)`, which runs BOTH paths for
+  - every distinct selector part of the document's stylesheets x every node,
+    for the base match AND the full-context match, and
+  - every real candidate rule-group the renderer would evaluate for that node
+and returns `ok checked=<n> ...` only when every comparison agreed.
+
+Coverage is two-tier because the eight shared catalog pages exercise only 25
+distinct selectors between them: the catalog gives real documents at real
+scale (178,000+ comparisons over 3,419 nodes), and the adversarial fixture
+below gives the shapes the catalog never contains -- `::before`, an unbalanced
+bracket and an unbalanced paren, more than 16 `:not()` options, `:root[lang]`,
+`:disabled` with and without the attribute, `[x="y" i]`, `:nth-child` in its
+odd/even/an+b/literal forms, `:is()`/`:where()`/`:has()`, `:empty`,
+`:first-child`/`:last-child`/`:only-child`, `:hover`, `tag#id.class`,
+`[role][hidden]` compounds, `*`, and `>` combinator chains.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-SELECTOR-PARSED-EQUIVALENCE-001 — the pre-parsed selector matcher must agree with the selector-text matcher for every selector and every node.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 4%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    simple_web_layout_debug_selector_parse_equivalence
+}
+use std.nogc_sync_mut.fs.{read_file}
+
+val CATALOG = "examples/06_io/ui/web_catalog/"
+
+# Every comparison agreed <=> the verdict starts with "ok ". A MISMATCH names
+# the node, the selector, and the two disagreeing answers.
+fn agrees(html: text) -> bool:
+    simple_web_layout_debug_selector_parse_equivalence(html, 0 - 1).starts_with("ok ")
+
+fn catalog_verdict(page: text) -> text:
+    val v = simple_web_layout_debug_selector_parse_equivalence(
+        read_file(CATALOG + page + ".html"), 0 - 1
+    )
+    if v.starts_with("ok "): "ok" else: v
+
+# Adversarial selector shapes the catalog stylesheets do not contain. Every
+# rule here is exercised against every node of the body below, on both paths.
+val ADVERSARIAL_CSS =
+    "*\{box-sizing:border-box}" +
+    "div::before\{color:#111111}" +
+    "p::first-line\{color:#121212}" +
+    "section[data-open\{color:#131313}" +
+    "span:not(\{color:#141414}" +
+    "li:not(.a,.b,.c,.d,.e,.f,.g,.h,.i,.j,.k,.l,.m,.n,.o,.p,.q)\{color:#151515}" +
+    "li:not(.skip)\{color:#161616}" +
+    "li:is(.one,.two)\{color:#171717}" +
+    "li:where(.two,.three)\{color:#181818}" +
+    ":root[lang]\{color:#191919}" +
+    ":root[lang=en]\{color:#1a1a1a}" +
+    ":root\{color:#1b1b1b}" +
+    "input:disabled\{color:#1c1c1c}" +
+    "input:enabled\{color:#1d1d1d}" +
+    "a:hover\{color:#1e1e1e}" +
+    "a:focus-visible\{color:#1f1f1f}" +
+    "a:visited\{color:#202020}" +
+    "[data-tone=\"WARM\" i]\{color:#212121}" +
+    "[data-tone=\"WARM\" s]\{color:#222222}" +
+    "[data-tone^=wa]\{color:#232323}" +
+    "[data-tone$=rm]\{color:#242424}" +
+    "[data-tone]\{color:#252525}" +
+    "[role=\"tabpanel\"][hidden]\{color:#262626}" +
+    "li:nth-child(odd)\{color:#272727}" +
+    "li:nth-child(even)\{color:#282828}" +
+    "li:nth-child(2n+1)\{color:#292929}" +
+    "li:nth-child(-n+2)\{color:#2a2a2a}" +
+    "li:nth-child(3)\{color:#2b2b2b}" +
+    "li:nth-child(nonsense)\{color:#2c2c2c}" +
+    "li:first-child\{color:#2d2d2d}" +
+    "li:last-child\{color:#2e2e2e}" +
+    "li:only-child\{color:#2f2f2f}" +
+    "div:empty\{color:#303030}" +
+    "ul:has(.one)\{color:#313131}" +
+    "ul:has(> li.two)\{color:#323232}" +
+    "ul:has(.nope,.one)\{color:#333333}" +
+    "nav#main.bar\{color:#343434}" +
+    "nav#main\{color:#353535}" +
+    "#main.bar.baz\{color:#363636}" +
+    ".bar.baz\{color:#373737}" +
+    "nav > ul > li\{color:#383838}" +
+    "nav li span\{color:#393939}" +
+    "nav > ul li:first-child span\{color:#3a3a3a}" +
+    "li.one:not(.two):nth-child(1)\{color:#3b3b3b}" +
+    "li:unknown-pseudo\{color:#3c3c3c}" +
+    # `:has` with an argument the splitter REJECTS. The text `simple_match`
+    # never inspects a `:has` argument (its elif-chain excludes `has`), so it
+    # passes these through as matching and only `_pseudo_ctx_matches` rejects
+    # them -- which matters for an ANCESTOR part, where only `simple_match`
+    # runs. These rows caught the parsed path killing them at parse time.
+    "ul:has()\{color:#3d3d3d}" +
+    "ul:has(,)\{color:#3e3e3e}" +
+    "ul:has\{color:#3f3f3f}" +
+    "ul:has(a,,b) > li\{color:#404040}" +
+    "ul:has(.a,.b,.c,.d,.e,.f,.g,.h,.i,.j,.k,.l,.m,.n,.o,.p,.q) li\{color:#414141}" +
+    "ul:has() > li\{color:#424242}" +
+    # A FUNCTIONAL argument on `:root`, which the text path parses and then
+    # ignores (the `root` arm checks only `tag != "html"`). Only `:root[...]`
+    # carries an attribute test.
+    ":root(x)\{color:#434343}" +
+    ":root(x) body\{color:#444444}"
+
+val ADVERSARIAL_BODY =
+    "<nav id=\"main\" class=\"bar baz\">" +
+    "<ul><li class=\"one\">" +
+    "<span data-tone=\"warm\">a</span></li>" +
+    "<li class=\"two\"><span>b</span></li>" +
+    "<li class=\"three\"><a href=\"#x\">c</a></li></ul></nav>" +
+    "<section data-open><p>para</p></section>" +
+    "<div></div><div> </div><div><em>e</em></div>" +
+    "<form><input disabled><input></form>" +
+    "<article role=\"tabpanel\" hidden>hidden panel</article>" +
+    "<article role=\"tabpanel\">visible panel</article>"
+
+val ADVERSARIAL_HTML =
+    "<html lang=\"en\"><head><style>" + ADVERSARIAL_CSS +
+    "</style></head><body>" + ADVERSARIAL_BODY + "</body></html>"
+
+describe "pre-parsed selector matcher — catalog equivalence":
+    it "AC-1: agrees with the text matcher on every node of overview":
+        expect(catalog_verdict("overview")).to_equal("ok")
+
+    it "AC-1: agrees with the text matcher on every node of html":
+        expect(catalog_verdict("html")).to_equal("ok")
+
+    it "AC-1: agrees with the text matcher on every node of css-layout":
+        expect(catalog_verdict("css-layout")).to_equal("ok")
+
+    it "AC-1: agrees with the text matcher on every node of css-paint":
+        expect(catalog_verdict("css-paint")).to_equal("ok")
+
+    it "AC-1: agrees with the text matcher on every node of forms-media":
+        expect(catalog_verdict("forms-media")).to_equal("ok")
+
+    it "AC-1: agrees with the text matcher on every node of animation":
+        expect(catalog_verdict("animation")).to_equal("ok")
+
+    it "AC-1: agrees with the text matcher on every node of evidence":
+        expect(catalog_verdict("evidence")).to_equal("ok")
+
+    it "AC-1: agrees with the text matcher on every node of tab-bar":
+        expect(catalog_verdict("tab-bar")).to_equal("ok")
+
+describe "pre-parsed selector matcher — adversarial selector shapes":
+    it "AC-2: agrees on pseudo-elements, malformed selectors, attribute operators, positional and functional pseudos":
+        expect(agrees(ADVERSARIAL_HTML)).to_equal(true)
+
+    it "AC-2: the adversarial fixture really exercises the matcher (non-vacuous)":
+        # A vacuous run would report zero comparisons; the verdict carries the
+        # count, so assert the oracle actually compared something.
+        val v = simple_web_layout_debug_selector_parse_equivalence(ADVERSARIAL_HTML, 0 - 1)
+        expect(v.starts_with("ok checked=0 ")).to_equal(false)
+        expect(v.starts_with("ok ")).to_equal(true)

@@ -1,0 +1,68 @@
+#!/usr/bin/env sh
+
+ddsm_root() {
+    CDPATH= cd -- "$(dirname -- "$1")/../../.." && pwd
+}
+
+ddsm_hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+ddsm_value() {
+    key=$1
+    file=$2
+    awk -F= -v key="$key" '$1 == key { count += 1; value = substr($0, index($0, "=") + 1) } END { if (count == 1) print value }' "$file"
+}
+
+ddsm_require_unique_field() {
+    key=$1
+    file=$2
+    count=$(awk -F= -v key="$key" '$1 == key { count += 1 } END { print count + 0 }' "$file")
+    [ "$count" -eq 1 ] || return 1
+    [ -n "$(ddsm_value "$key" "$file")" ]
+}
+
+ddsm_validate_receipt() {
+    receipt=$1
+    expected_schema=$2
+    expected_scenario=$3
+    expected_authority=$4
+    expected_class=$5
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    for field in schema scenario authority_id evidence_class result source_revision scv_revision scv_tree_digest scv_inventory_digest compiler_path compiler_sha256 fixture_path fixture_sha256 command_sha256 producer_path producer_sha256 receipt_sha256; do
+        ddsm_require_unique_field "$field" "$receipt" || return 1
+    done
+    [ "$(ddsm_value schema "$receipt")" = "$expected_schema" ] || return 1
+    [ "$(ddsm_value scenario "$receipt")" = "$expected_scenario" ] || return 1
+    [ "$(ddsm_value authority_id "$receipt")" = "$expected_authority" ] || return 1
+    [ "$(ddsm_value evidence_class "$receipt")" = "$expected_class" ] || return 1
+    [ "$(ddsm_value result "$receipt")" = pass ] || return 1
+    for pair in compiler fixture producer; do
+        path=$(ddsm_value "${pair}_path" "$receipt")
+        expected=$(ddsm_value "${pair}_sha256" "$receipt")
+        [ -f "$path" ] && [ ! -L "$path" ] || return 1
+        [ "$(ddsm_hash_file "$path")" = "$expected" ] || return 1
+    done
+    canonical=$(mktemp "${TMPDIR:-/tmp}/ddsm-receipt.XXXXXX") || return 1
+    trap 'rm -f "$canonical"' EXIT HUP INT TERM
+    awk -F= '$1 != "receipt_sha256" { print }' "$receipt" > "$canonical"
+    [ "$(ddsm_hash_file "$canonical")" = "$(ddsm_value receipt_sha256 "$receipt")" ] || return 1
+    rm -f "$canonical"
+    trap - EXIT HUP INT TERM
+}
+
+ddsm_require_metric_fields() {
+    receipt=$1
+    for field in samples semantic_equivalence p50_ms p95_ms p99_ms mean_ms stddev_ms confidence_interval_95_ms raw_samples_path raw_samples_sha256 host_identity command_line source_open_count mapped_bytes peak_rss_bytes; do
+        ddsm_require_unique_field "$field" "$receipt" || return 1
+    done
+    [ "$(ddsm_value samples "$receipt")" = 100 ] || return 1
+    [ "$(ddsm_value semantic_equivalence "$receipt")" = true ] || return 1
+    raw=$(ddsm_value raw_samples_path "$receipt")
+    [ -f "$raw" ] && [ ! -L "$raw" ] || return 1
+    [ "$(ddsm_hash_file "$raw")" = "$(ddsm_value raw_samples_sha256 "$receipt")" ]
+}

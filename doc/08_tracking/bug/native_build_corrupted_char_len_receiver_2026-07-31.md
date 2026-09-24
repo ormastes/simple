@@ -1,4 +1,8 @@
 # `native-build` phase2:parse: `.len()` on identifier `c` receives a corrupted `str` (renders as U+FFFD) — localized, not fixed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** file-6 (`io_runtime.spl`) blocker CLEARED by `6d9c78d9902` (see
 "Update 2026-07-31: file-6 blocker cleared" below) — measured on a fresh
@@ -277,3 +281,4 @@ the time across two independent runs. Whether it clears the *entire*
 phase2:parse run and lets `native-build` reach a later phase or emit a
 binary is a separate, larger question this doc's original reproduction
 never reached (it hard-stopped at file 6) — see the follow-up report.
+

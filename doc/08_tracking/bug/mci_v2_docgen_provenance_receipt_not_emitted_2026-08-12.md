@@ -1,4 +1,8 @@
 # MCI-v2 docgen provenance receipt is not emitted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -40,3 +44,4 @@ exact-current pure-Simple CLI, run docgen once with `--provenance-receipt`,
 then run
 `test/01_unit/scripts/mci_v2_traceability_contract_test.shs` and the live
 traceability producer.
+

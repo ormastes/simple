@@ -1,4 +1,9 @@
 # Deployed `bin/simple` refuses `test`/`lint`/`fmt` — all spec verification blocked
+## Closed 2026-09-16 — RESOLVED/not reproducible 2026-07-30; mem_cli_spec 7/7 verified normally
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found:** 2026-07-30 ~12:30 UTC, mid-session, on a shared working copy.
 **RESOLVED / NOT REPRODUCIBLE as of 2026-07-30 ~15:20 UTC.** Plain
@@ -213,3 +218,4 @@ Held back pending a working runner, because it must not land unverified:
    the one tool that still dispatches).
 2. Produce a genuine pure-Simple binary via bootstrap and deploy it.
 3. Re-verify the held changes above before landing them.
+

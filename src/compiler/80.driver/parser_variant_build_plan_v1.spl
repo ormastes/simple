@@ -1,0 +1,174 @@
+# Pure planning contract for baseline and x86-64-v3 parser siblings. It records
+# host execution authority separately and makes no compilation/emission claim.
+use std.common.crypto.sha256.{sha256_text, sha256_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentSnapshotV1, ENV_ARCH_X86_64_V1,
+    ENV_PLACEMENT_NATIVE_DYNLIB_V1, ENV_PLACEMENT_SMF_V1, ENV_PLACEMENT_JIT_V1}
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.{
+    TargetCodegenProfileV1, target_codegen_profile_validate_v1}
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.{
+    ENV_FEATURE_X86_64_BASELINE_V1, ENV_FEATURE_X86_64_V3_V1,
+    environment_feature_registry_lookup_v1}
+
+pub const PARSER_VARIANT_BUILD_PLAN_SCHEMA_V1: u16 = 1u16
+pub enum ParserVariantTierV1:
+    Baseline
+    X86_64V3Avx2
+    X86_64V4
+pub enum ParserVariantBuildUnsupportedReasonV1:
+    InvalidRequest
+    UnsupportedTierV4
+    UnsupportedTargetArchitecture
+    UnsupportedPlacement
+    BackendMissingExactFeatures
+    DuplicateTier
+    BaselineRequired
+pub struct ParserVariantBuildRequestV1:
+    tier: ParserVariantTierV1
+    placement: u16
+    target_triple: text
+    target_profile: TargetCodegenProfileV1
+    target_feature_words: [u64]
+    backend_supported_feature_mask: u64
+    parser_abi_identity: EnvironmentDigest256V1
+    parser_schema_identity: EnvironmentDigest256V1
+    grammar_identity: EnvironmentDigest256V1
+    program_identity: EnvironmentDigest256V1
+    optimization_policy_identity: EnvironmentDigest256V1
+    backend_identity: EnvironmentDigest256V1
+    toolchain_identity: EnvironmentDigest256V1
+    source_ir_identity: EnvironmentDigest256V1
+    dependency_lock_identity: EnvironmentDigest256V1
+pub struct ParserVariantArtifactPlanV1:
+    tier: ParserVariantTierV1
+    placement: u16
+    target_triple: text
+    target_triple_identity: EnvironmentDigest256V1
+    required_feature_mask: u64
+    artifact_identity: EnvironmentDigest256V1
+    cache_identity: EnvironmentDigest256V1
+    compilation_executed: bool
+pub struct ParserVariantBuildPlanV1:
+    schema_version: u16
+    host_environment_identity: EnvironmentDigest256V1
+    host_environment_generation: u64
+    artifacts: [ParserVariantArtifactPlanV1]
+    plan_identity: EnvironmentDigest256V1
+
+fn _digest_pvb(text_value: text) -> EnvironmentDigest256V1:
+    val raw = sha256_text(text_value)
+    fn read_word(at: i64) -> u64:
+        var value = 0u64
+        for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+        value
+    EnvironmentDigest256V1(w0: read_word(0), w1: read_word(8),
+        w2: read_word(16), w3: read_word(24))
+fn _push64_pvb(out: [i64], value: u64):
+    for i in 0..8: out.push(((value >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _pushd_pvb(out: [i64], value: EnvironmentDigest256V1):
+    _push64_pvb(out, value.w0); _push64_pvb(out, value.w1)
+    _push64_pvb(out, value.w2); _push64_pvb(out, value.w3)
+fn _hash_pvb(bytes: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(bytes)
+    fn word(at: i64) -> u64:
+        var value = 0u64
+        for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+        value
+    EnvironmentDigest256V1(w0: word(0), w1: word(8), w2: word(16), w3: word(24))
+fn _less_pvb(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    if a.w3 != b.w3: return a.w3 < b.w3
+    if a.w2 != b.w2: return a.w2 < b.w2
+    if a.w1 != b.w1: return a.w1 < b.w1
+    a.w0 < b.w0
+fn _declared_pvb(d: EnvironmentDigest256V1) -> bool:
+    d.w0 != 0u64 or d.w1 != 0u64 or d.w2 != 0u64 or d.w3 != 0u64
+fn _placement_pvb(v: u16) -> bool:
+    v == ENV_PLACEMENT_NATIVE_DYNLIB_V1 or v == ENV_PLACEMENT_SMF_V1 or
+    v == ENV_PLACEMENT_JIT_V1
+fn _required_mask_pvb(tier: ParserVariantTierV1) -> u64:
+    var feature = ENV_FEATURE_X86_64_V3_V1
+    if tier == ParserVariantTierV1.Baseline:
+        feature = ENV_FEATURE_X86_64_BASELINE_V1
+    environment_feature_registry_lookup_v1(feature).unwrap().feature_mask
+
+pub fn parser_variant_build_plan_v1(host: EnvironmentSnapshotV1,
+    requests: [ParserVariantBuildRequestV1]
+) -> Result<ParserVariantBuildPlanV1, ParserVariantBuildUnsupportedReasonV1>:
+    if not _declared_pvb(host.snapshot_identity) or host.snapshot_generation == 0u64 or
+       requests.len() == 0:
+        return Err(ParserVariantBuildUnsupportedReasonV1.InvalidRequest)
+    var artifacts: [ParserVariantArtifactPlanV1] = []; var baseline_seen = false
+    for request in requests:
+        if request.tier == ParserVariantTierV1.X86_64V4:
+            return Err(ParserVariantBuildUnsupportedReasonV1.UnsupportedTierV4)
+        if request.target_profile.target_architecture != ENV_ARCH_X86_64_V1:
+            return Err(ParserVariantBuildUnsupportedReasonV1.UnsupportedTargetArchitecture)
+        if not _placement_pvb(request.placement):
+            return Err(ParserVariantBuildUnsupportedReasonV1.UnsupportedPlacement)
+        if request.target_triple.len() == 0 or
+           target_codegen_profile_validate_v1(request.target_profile,
+               request.target_feature_words) != Ok(()) or
+           request.target_profile.target_abi_id == 0u32 or
+           request.target_profile.target_object_format_id == 0u32:
+            return Err(ParserVariantBuildUnsupportedReasonV1.InvalidRequest)
+        for identity in [request.parser_abi_identity, request.parser_schema_identity,
+                request.grammar_identity, request.program_identity,
+                request.optimization_policy_identity, request.backend_identity,
+                request.toolchain_identity, request.source_ir_identity,
+                request.dependency_lock_identity]:
+            if not _declared_pvb(identity):
+                return Err(ParserVariantBuildUnsupportedReasonV1.InvalidRequest)
+        for existing in artifacts:
+            if existing.tier == request.tier and existing.placement == request.placement and
+               existing.target_triple_identity == _digest_pvb(request.target_triple):
+                return Err(ParserVariantBuildUnsupportedReasonV1.DuplicateTier)
+        val required = _required_mask_pvb(request.tier)
+        if request.target_feature_words.len() != 1 or request.target_feature_words[0] != required:
+            return Err(ParserVariantBuildUnsupportedReasonV1.InvalidRequest)
+        if required & request.backend_supported_feature_mask != required:
+            return Err(ParserVariantBuildUnsupportedReasonV1.BackendMissingExactFeatures)
+        if request.tier == ParserVariantTierV1.Baseline: baseline_seen = true
+        val triple_id = _digest_pvb(request.target_triple)
+        var material: [i64] = []; _push64_pvb(material, PARSER_VARIANT_BUILD_PLAN_SCHEMA_V1 as u64)
+        _push64_pvb(material, request.tier as u64); _push64_pvb(material, request.placement as u64)
+        for identity in [triple_id, request.target_profile.profile_identity,
+                request.target_profile.target_identity, request.target_profile.backend_identity,
+                request.target_profile.semantic_identity, request.parser_abi_identity,
+                request.parser_schema_identity, request.grammar_identity, request.program_identity,
+                request.optimization_policy_identity, request.backend_identity,
+                request.toolchain_identity, request.source_ir_identity,
+                request.dependency_lock_identity]: _pushd_pvb(material, identity)
+        for value in [request.target_profile.target_architecture as u64,
+                request.target_profile.target_abi_id as u64,
+                request.target_profile.target_object_format_id as u64,
+                request.target_profile.target_endian_id as u64,
+                request.target_profile.target_pointer_width_bits as u64,
+                request.target_profile.numerical_contract_id as u64, required]: _push64_pvb(material, value)
+        val cache_id = _hash_pvb([1] + material)
+        var artifact_material = [2] + material; _pushd_pvb(artifact_material, cache_id)
+        artifacts.push(ParserVariantArtifactPlanV1(tier: request.tier,
+            placement: request.placement, target_triple: request.target_triple,
+            target_triple_identity: triple_id, required_feature_mask: required,
+            artifact_identity: _hash_pvb(artifact_material),
+            cache_identity: cache_id, compilation_executed: false))
+    if not baseline_seen: return Err(ParserVariantBuildUnsupportedReasonV1.BaselineRequired)
+    # Host identity is provenance only. Artifact/cache identities above depend
+    # exclusively on generated-target and build inputs.
+    var ordered = artifacts; var x = 1
+    while x < ordered.len():
+        var y = x
+        while y > 0 and _less_pvb(ordered[y].artifact_identity, ordered[y - 1].artifact_identity):
+            val previous = ordered[y - 1]
+            ordered[y - 1] = ordered[y]
+            ordered[y] = previous
+            y = y - 1
+        x = x + 1
+    var plan_material: [i64] = []; _push64_pvb(plan_material, PARSER_VARIANT_BUILD_PLAN_SCHEMA_V1 as u64)
+    for artifact in ordered:
+        _pushd_pvb(plan_material, artifact.artifact_identity)
+        _pushd_pvb(plan_material, artifact.cache_identity)
+    val plan_id = _hash_pvb(plan_material)
+    Ok(ParserVariantBuildPlanV1(schema_version: PARSER_VARIANT_BUILD_PLAN_SCHEMA_V1,
+        host_environment_identity: host.snapshot_identity,
+        host_environment_generation: host.snapshot_generation,
+        artifacts: ordered, plan_identity: plan_id))

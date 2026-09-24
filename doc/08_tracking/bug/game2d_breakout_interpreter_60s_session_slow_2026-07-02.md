@@ -1,4 +1,8 @@
 # Game2D Breakout Rendered 60s Interpreter Session Is Too Slow
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -22,3 +26,4 @@ Open. G3.2 has a passing 3600-step logic session in
 
 Make the native/JIT Game2D path reliable, then restore the 3600-frame rendered
 session as an affordable gate.
+

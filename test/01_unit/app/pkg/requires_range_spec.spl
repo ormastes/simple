@@ -1,0 +1,156 @@
+# @req KPM-REQ-009 KPM-REQ-011 KPM-REQ-012 KPM-REQ-014
+use std.spec.*
+use std.sdn.{parse}
+use compiler.common.assurance.package_pins.{DepEdge}
+use compiler.common.assurance.package_pins.{PackagePin}
+use app.pkg.requires_range.{classify_manifest_interface_ranges, resolve_requires_ranges,
+    generate_requires_lock, phase8_policy_receipt}
+
+fn edge(name: text, provides: [text], requires: [text]) -> DepEdge:
+    DepEdge(project_path: "", package_name: name, provided_ifaces: provides,
+        required_ifaces: requires, link: "static")
+
+describe "package interface requires ranges":
+    it "emits deterministic SDN accepted by the canonical parser":
+        val dependencies = [
+            edge("backend", ["simple.codegen.BackendPort@1.2.0"], []),
+            edge("compiler", [], ["simple.codegen.BackendPort@^1.0.0"])
+        ]
+        val pin = PackagePin(package: "fixture", dir: ".", profile: "default",
+            explicit: false, waivers: [], dependencies: dependencies)
+        val result = resolve_requires_ranges(dependencies)
+        val policy = phase8_policy_receipt("simple-sdn", "v1").ok.unwrap()
+        val first = generate_requires_lock(pin, result, policy)
+        val second = generate_requires_lock(pin, result, policy)
+        expect(first).to_equal(second)
+        val parsed_ok = match parse(first):
+            case Ok(_): true
+            case Err(_): false
+        expect(parsed_ok).to_equal(true)
+        expect(first).to_contain("plugin_manifest_policy: \"simple-sdn\"")
+        expect(first).to_contain("plugin_manifest_location: \"simple.sdn\"")
+        expect(first).to_contain("simple_abi_policy: \"v1\"")
+
+    it "binds selected simple.sdn and ABI v1 when overrides are absent":
+        val policy = phase8_policy_receipt("", "").ok.unwrap()
+        expect(policy.plugin_manifest_policy).to_equal("simple-sdn")
+        expect(policy.plugin_manifest_location).to_equal("simple.sdn")
+        expect(policy.simple_abi_policy).to_equal("v1")
+
+    it "rejects legacy and unknown policy state":
+        val manifest_error = phase8_policy_receipt("plugin-sdn", "v1")
+        val abi_error = phase8_policy_receipt("simple-sdn", "deferred")
+        expect(manifest_error.err.unwrap()[0]).to_contain("selected plugin manifest policy")
+        expect(abi_error.err.unwrap()[0]).to_contain("selected Simple ABI policy")
+
+    it "selects the highest caret-compatible provider without backtracking":
+        val result = resolve_requires_ranges([
+            edge("backend-v1", ["simple.codegen.BackendPort@1.2.0"], []),
+            edge("backend-v2", ["simple.codegen.BackendPort@2.0.0"], []),
+            edge("compiler", [], ["simple.codegen.BackendPort@^1.1.0"])
+        ])
+        expect(result.errors.len()).to_equal(0)
+        expect(result.resolutions.len()).to_equal(1)
+        expect(result.resolutions[0].provider).to_equal("backend-v1")
+        expect(result.resolutions[0].version_text).to_equal("1.2.0")
+
+    it "uses existing tilde satisfaction semantics":
+        val result = resolve_requires_ranges([
+            edge("patch-a", ["simple.lint.LintRule@1.4.2"], []),
+            edge("patch-b", ["simple.lint.LintRule@1.5.0"], []),
+            edge("lint-host", [], ["simple.lint.LintRule@~1.4.0"])
+        ])
+        expect(result.errors.len()).to_equal(0)
+        expect(result.resolutions[0].provider).to_equal("patch-a")
+
+    it "keeps caret and tilde branches live after manifest classification":
+        val result = resolve_requires_ranges([
+            edge("caret-ok", ["simple.codegen.BackendPort@1.8.0"], []),
+            edge("caret-wrong", ["simple.codegen.BackendPort@2.0.0"], []),
+            edge("tilde-ok", ["simple.lint.LintRule@3.4.9"], []),
+            edge("tilde-wrong", ["simple.lint.LintRule@3.5.0"], []),
+            edge("host", [], ["simple.codegen.BackendPort@^1.7.0", "simple.lint.LintRule@~3.4.0"])
+        ])
+        expect(result.errors.len()).to_equal(0)
+        expect(result.resolutions.len()).to_equal(2)
+        expect(result.resolutions[0].provider).to_equal("caret-ok")
+        expect(result.resolutions[1].provider).to_equal("tilde-ok")
+
+    it "uses lexical provider identity to break equal-version ties independent of input order":
+        print("KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=lexical-tie-break state=BEGIN expected=provider-a")
+        val forward = resolve_requires_ranges([
+            edge("provider-z", ["simple.codegen.BackendPort@1.4.0"], []),
+            edge("provider-a", ["simple.codegen.BackendPort@1.4.0"], []),
+            edge("host", [], ["simple.codegen.BackendPort@^1.0.0"])
+        ])
+        val reversed = resolve_requires_ranges([
+            edge("provider-a", ["simple.codegen.BackendPort@1.4.0"], []),
+            edge("provider-z", ["simple.codegen.BackendPort@1.4.0"], []),
+            edge("host", [], ["simple.codegen.BackendPort@^1.0.0"])
+        ])
+        if forward.resolutions[0].provider != "provider-a" or reversed.resolutions[0].provider != "provider-a":
+            print("KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=lexical-tie-break state=FAIL expected=provider-a actual={forward.resolutions[0].provider},{reversed.resolutions[0].provider}")
+        expect(forward.resolutions[0].provider).to_equal("provider-a")
+        expect(reversed.resolutions[0].provider).to_equal("provider-a")
+        print("KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=lexical-tie-break state=PASS expected=provider-a")
+
+    it "fails closed when no provider satisfies the range":
+        print("KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=unsatisfied-range state=BEGIN expected=reject")
+        val result = resolve_requires_ranges([
+            edge("backend-v2", ["simple.codegen.BackendPort@2.0.0"], []),
+            edge("compiler", [], ["simple.codegen.BackendPort@^1.0.0"])
+        ])
+        expect(result.resolutions.len()).to_equal(0)
+        expect(result.errors.len()).to_equal(1)
+        expect(result.errors[0]).to_contain("no provider satisfies")
+        print("KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=unsatisfied-range state=PASS expected=reject")
+
+    it "is mutation-red if caret acceptance crosses a major boundary":
+        val result = resolve_requires_ranges([
+            edge("wrong-major", ["simple.codegen.BackendPort@2.0.0"], []),
+            edge("host", [], ["simple.codegen.BackendPort@^1.9.0"])
+        ])
+        expect(result.has_errors()).to_equal(true)
+
+    it "rejects malformed provides and requires":
+        val result = resolve_requires_ranges([
+            edge("provider", ["simple.codegen.BackendPort"], []),
+            edge("host", [], ["simple.codegen.BackendPort@not-semver"])
+        ])
+        expect(result.errors.len()).to_equal(2)
+
+    it "does not classify comments strings or unrelated nested keys as interface ranges":
+        val source = "project:\n  name: legacy\n  note: \"provides: requires:\"\nmetadata:\n  provides:\n    - unrelated\n# requires:\ndependencies:\n  alpha: ^1.0.0\n"
+        val classified = classify_manifest_interface_ranges(source, "simple.sdn")
+        expect(classified.is_ok()).to_be(true)
+        expect(classified.ok.unwrap()).to_equal(false)
+
+    it "classifies parsed dependency interface keys":
+        val source = "project:\n  name: ranged\n  dependencies:\n    - package: backend\n      provides:\n        - simple.codegen.BackendPort@1.0.0\n      requires: []\n"
+        val classified = classify_manifest_interface_ranges(source, "simple.sdn")
+        expect(classified.is_ok()).to_be(true)
+        expect(classified.ok.unwrap()).to_equal(true)
+
+    it "fails closed for malformed parsed interface declarations":
+        val source = "project:\n  name: malformed\n  dependencies:\n    - package: backend\n      provides: simple.codegen.BackendPort@1.0.0\n"
+        val classified = classify_manifest_interface_ranges(source, "simple.sdn")
+        expect(classified.is_err()).to_be(true)
+        expect(classified.err.unwrap()[0]).to_contain("must be a sequence of strings")
+
+    it "fails closed for malformed dependency sequence entries":
+        val source = "project:\n  name: malformed\n  dependencies:\n    - \"not-a-mapping\"\n"
+        val classified = classify_manifest_interface_ranges(source, "simple.sdn")
+        expect(classified.is_err()).to_be(true)
+        expect(classified.err.unwrap()[0]).to_contain("entry must be a mapping")
+
+    it "classifies dependency sequences even before interface keys are added":
+        val source = "project:\n  name: ranged\n  dependencies:\n    - package: backend\n      link: static\n"
+        val classified = classify_manifest_interface_ranges(source, "simple.sdn")
+        expect(classified.is_ok()).to_be(true)
+        expect(classified.ok.unwrap()).to_equal(true)
+
+    it "rejects the legacy plugin.sdn manifest path":
+        val classified = classify_manifest_interface_ranges(
+            "project:\n  name: legacy-path\n", "plugin.sdn")
+        expect(classified.is_err()).to_be(true)
+        expect(classified.err.unwrap()[0]).to_contain("requires `simple.sdn`")

@@ -1,4 +1,9 @@
 # Pre-existing test-tree divergence stepped over on 2026-08-16
+## Closed 2026-09-16 — ...t_spec.spl ``` This was **not** fixed by the recording landing and is left as-is — `--gene
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** open (pre-existing; NOT introduced by the landing that records it)
 **Recorded because:** `.claude/rules/vcs.md` requires the pre-existing offender list to be
@@ -1711,3 +1716,4 @@ unit:test_runner/mode_filter_spec.spl
 unit:tools/cat_spec.spl
 unit:tools/simple_os_primary_spec.spl
 ```
+

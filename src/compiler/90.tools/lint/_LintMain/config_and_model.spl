@@ -129,96 +129,49 @@ fn parse_lint_profile(profile_str: String) -> Option<LintProfile>:
 
 # All configurable lint names.
 fn all_lint_names() -> [text]:
-    ["primitive_api", "bare_bool", "simple_script_required", "print_in_test_spec", "todo_format",
-     "spipe_no_print_based_tests", "spipe_missing_docstrings",
-     "spipe_minimal_docstrings", "spipe_manual_assertions",
-     "spipe_placeholder_tests", "spipe_empty_examples",
-     "spipe_boolean_wrapper_assertions", "spipe_false_boolean_wrapper_assertions",
-     "unnamed_duplicate_typed_args", "resource_leak",
-     "wildcard_match", "non_exhaustive_match",
-     "export_outside_init", "init_boundary_violation",
-     "bypass_with_code_files", "unknown_annotation", "unknown_decorator", "stub_impl",
-     "unknown_attribute", "too_many_arguments", "dummy_accessor",
-     "parser_contextual_keyword", "deprecated_if_let",
-     "struct_construction_parens", "short_grammar_refactor",
-     "raw_unit_postfix", "simd_opportunity",
-     "similar_parent_method_name", "nonexistent_type",
-     "required_comment",
-     "ui_no_raw_widget_kind", "ui_no_raw_variant", "ui_no_raw_theme_name",
-     "stale_md_diagrams", "hash_bracket_attribute", "llvm_backend_type_safety",
-     # Newly-configurable families (previously unmapped — see
-     # map_lint_code_to_config_name). Default warn (regression-safe).
-     "unused_code", "style_convention", "unsafe_pattern", "concurrency_misuse",
-     "closure_capture", "ignored_return", "multiline_bool", "memory_safety",
-     "collection_performance",
-     "visibility_boundary", "database_integrity", "tracking_traceability",
-     # Freestanding/kernel-risk entry-closure codegen defect avoidance
-     # (C1/C4/C5/C7) — scoped to src/os/** and examples/09_embedded/**.
-     "freestanding_enum_eq", "freestanding_anon_tuple_return",
-     "freestanding_bare_conversion", "freestanding_global_call_init",
-     "module_init_literal", "raw_rt_access",
-     # Const-by-default references (W-MC-REF-001) — warn in ALL tiers
-     # including robust; deny escalation is a later profile-v2 change.
-     "const_ref_default",
-     # Bare-primitive internal bindings (W-MC-VAL-001, REQ-MC-011) — allow by
-     # default (would flood non-MC code); warn under the critical tier.
-     "bare_primitive_internal",
-     # Unwrapped foreign resource escape (W-MC-RES-001, REQ-MC-023) — allow
-     # by default (would flood non-MC FFI glue); warn under the critical
-     # tier. Deny at profile v2 (deliberately not implemented here).
-     "unwrapped_foreign_resource",
-     "raw_sffi_call",
-     # Silent-default / fail-open (W-MC-DEF-001/002/003) — WARN by default so
-     # existing code keeps compiling. PROMOTION TO A HARD ERROR IS THE ONE-LINE
-     # CHANGE `levels["silent_default"] = "deny"` below, and nothing else.
-     "silent_default",
-     # WM/GUI/web/2D portable-lane dependency boundary (WML001/WML002) — allow
-     # by default because it walks every import line; --wm-lane or --warn-all
-     # turns it on. See wm_lane_boundary_lints.spl.
-     "wm_lane_boundary",
-     # Simple 2D/GPU per-frame cost (G2DP001/G2DP002) — allow by default,
-     # same reasoning as wm_lane_boundary; --gpu-2d-perf or --warn-all turns
-     # it on. See gpu_2d_perf_lints.spl.
-     "gpu_2d_perf"]
+    # The default-level catalog is the single authoritative list. This
+    # projection replaces the formerly independent hand-maintained name array.
+    build_default_levels().keys()
 
-# Allocation-free membership for config and attribute parsing. Keep enumeration
-# in `all_lint_names`; hot membership must not rebuild and scan that array for
-# every authored lint name.
+pub struct CanonicalLintRuleDescriptor:
+    name: text
+    default_level: text
+
+pub struct CanonicalLintRuleProfileDescriptor:
+    name: text
+    moderate_level: text
+    strict_level: text
+    robust_level: text
+    critical_level: text
+
+pub fn canonical_lint_rule_descriptors() -> [CanonicalLintRuleDescriptor]:
+    val levels = build_default_levels()
+    var descriptors: [CanonicalLintRuleDescriptor] = []
+    for name in levels.keys():
+        descriptors.push(CanonicalLintRuleDescriptor(
+            name: name, default_level: levels[name]))
+    descriptors
+
+pub fn canonical_lint_rule_profile_descriptors() -> [CanonicalLintRuleProfileDescriptor]:
+    val moderate = profile_default_levels(LintProfile.Moderate)
+    val strict = profile_default_levels(LintProfile.Strict)
+    val robust = profile_default_levels(LintProfile.Robust)
+    val critical = profile_default_levels(LintProfile.Critical)
+    var descriptors: [CanonicalLintRuleProfileDescriptor] = []
+    for rule in canonical_lint_rule_descriptors():
+        descriptors.push(CanonicalLintRuleProfileDescriptor(
+            name: rule.name,
+            moderate_level: moderate[rule.name],
+            strict_level: strict[rule.name],
+            robust_level: robust[rule.name],
+            critical_level: critical[rule.name]))
+    descriptors
+
+# Membership is projected from the same generated default catalog used by
+# enumeration and profile descriptors. This removes the former second manual
+# match table, which had already drifted by omitting `nonexistent_type`.
 fn lint_name_is_known(name: text) -> bool:
-    match name:
-        case "primitive_api" | "bare_bool" | "simple_script_required" |
-             "print_in_test_spec" | "todo_format" |
-             "spipe_no_print_based_tests" | "spipe_missing_docstrings" |
-             "spipe_minimal_docstrings" | "spipe_manual_assertions" |
-             "spipe_placeholder_tests" | "spipe_empty_examples" |
-             "spipe_boolean_wrapper_assertions" |
-             "spipe_false_boolean_wrapper_assertions" |
-             "unnamed_duplicate_typed_args" | "resource_leak" |
-             "wildcard_match" | "non_exhaustive_match" |
-             "export_outside_init" | "init_boundary_violation" |
-             "bypass_with_code_files" | "unknown_annotation" |
-             "unknown_decorator" | "stub_impl" |
-             "unknown_attribute" | "too_many_arguments" | "dummy_accessor" |
-             "parser_contextual_keyword" | "deprecated_if_let" |
-             "struct_construction_parens" | "short_grammar_refactor" |
-             "raw_unit_postfix" | "simd_opportunity" |
-             "similar_parent_method_name" | "required_comment" |
-             "ui_no_raw_widget_kind" | "ui_no_raw_variant" |
-             "ui_no_raw_theme_name" | "stale_md_diagrams" |
-             "hash_bracket_attribute" | "llvm_backend_type_safety" |
-             "unused_code" | "style_convention" | "unsafe_pattern" |
-             "concurrency_misuse" | "closure_capture" | "ignored_return" |
-             "multiline_bool" | "memory_safety" | "collection_performance" |
-             "visibility_boundary" | "database_integrity" |
-             "tracking_traceability" | "freestanding_enum_eq" |
-             "freestanding_anon_tuple_return" |
-             "freestanding_bare_conversion" |
-             "freestanding_global_call_init" | "module_init_literal" |
-             "raw_rt_access" | "const_ref_default" |
-             "bare_primitive_internal" | "unwrapped_foreign_resource" |
-             "raw_sffi_call" | "silent_default" | "wm_lane_boundary"
-             | "gpu_2d_perf": true
-        case _: false
+    build_default_levels().contains_key(name)
 
 # Build the default levels dict for all configurable lint names.
 # Most are Warn; exceptions: spipe_no_print_based_tests=Deny,
@@ -1256,6 +1209,10 @@ class Linter:
     manifest_dir_cache: Dict<String, String>
     manifest_dir_cache_count: i64
     prepared_config_path: String
+    last_diagnostic_count: i64
+    last_error_count: i64
+    last_warning_count: i64
+    last_not_analyzed: bool
 
 fn linter_find_project_sdn(linter: Linter, file_path: String) -> String:
     """Resolve one source's project manifest with a bounded command cache."""

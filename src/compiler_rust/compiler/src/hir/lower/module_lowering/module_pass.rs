@@ -462,11 +462,24 @@ impl Lowerer {
             }
             Node::Function(f) => {
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
-                self.globals.insert(f.name.clone(), ret_ty);
-                self.local_globals.insert(f.name.clone());
+                // Same symbol `lower_function` emits the body under, so a
+                // cross-module same-named function keeps its own return type.
+                let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+                let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
+                self.globals.insert(symbol.clone(), ret_ty);
+                self.local_globals.insert(symbol.clone());
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
-                    self.pure_functions.insert(f.name.clone());
+                    self.pure_functions.insert(symbol.clone());
+                }
+                if ret_ty != TypeId::ANY
+                    && !self.is_reference_type(ret_ty)
+                    && f.body
+                        .statements
+                        .iter()
+                        .all(|statement| matches!(statement, Node::Pass(_)))
+                {
+                    self.proven_nonescaping_functions.insert(symbol);
                 }
             }
             Node::Class(c) => {
@@ -637,6 +650,10 @@ impl Lowerer {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                // Calls consult the callable return-type table before falling
+                // back to the ABI-sized value type. Preserve the declaration's
+                // semantic return type just as imported externs do.
+                self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.local_globals.insert(e.name.clone());
                 // Track as extern function for codegen (BSS slot initialization)
                 self.extern_fn_names.insert(e.name.clone());
@@ -676,6 +693,8 @@ impl Lowerer {
                 // Otherwise still ANY for dynamic typing.
                 let ty = if let Some(ref t) = s.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if matches!(&s.value, Expr::Bool(_)) {
+                    TypeId::BOOL
                 } else if try_const_eval(&s.value).is_some() {
                     TypeId::I64
                 } else if matches!(&s.value, Expr::String(_) | Expr::FString { .. }) {
@@ -747,6 +766,8 @@ impl Lowerer {
                 // Register constant
                 let ty = if let Some(ref t) = c.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if matches!(&c.value, Expr::Bool(_)) {
+                    TypeId::BOOL
                 } else if try_const_eval(&c.value).is_some() {
                     // Unannotated integer literal const → infer i64 so comparisons
                     // against it don't fall into the ANY boxing path (bug: stage4_imported_const_compare)
@@ -835,6 +856,10 @@ impl Lowerer {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
                     } else if let Some(ref t) = extract_pattern_type(&l.pattern) {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
+                    } else if matches!(&l.value, Some(Expr::Bool(_))) {
+                        // Match raw 0/1 global initialization and later typed
+                        // stores; ANY would box assignments but not reads.
+                        TypeId::BOOL
                     } else if l.value.as_ref().and_then(try_const_eval).is_some() {
                         TypeId::I64
                     } else if matches!(&l.value, Some(Expr::String(_)) | Some(Expr::FString { .. })) {
@@ -1374,16 +1399,67 @@ impl Lowerer {
         }
     }
 
-    /// M12 3b: record each free function's parameter default-value expressions
+    /// Record callable parameter defaults under the spelling used at each HIR
+    /// call site.  Impl methods must be qualified: a bare method name collides
+    /// across owners and would make an omitted argument select another type's
+    /// default.
     /// so omitted trailing arguments can be filled at call sites (`lower_call`).
     /// Captured here (from the AST) because the HIR function *type* carries only
     /// parameter TypeIds, not the default exprs.
     fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
-                if f.params.iter().any(|p| p.default.is_some()) {
-                    self.fn_param_defaults
-                        .insert(f.name.clone(), f.params.iter().map(|p| p.default.clone()).collect());
+                let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+                let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
+                // An all-None vector is authoritative too: a declaration with
+                // no defaults must not borrow an imported namesake's defaults.
+                self.fn_param_defaults
+                    .insert(symbol, f.params.iter().map(|p| p.default.clone()).collect());
+            }
+            if let Node::Impl(impl_block) = item {
+                let owner = match &impl_block.target_type {
+                    simple_parser::ast::Type::Simple(name) => Some(name),
+                    simple_parser::ast::Type::Generic { name, .. } => Some(name),
+                    _ => None,
+                };
+                if let Some(owner) = owner {
+                    for method in &impl_block.methods {
+                        let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                            &method.params[1..]
+                        } else { &method.params[..] };
+                        if user_params.iter().any(|p| p.default.is_some()) {
+                            self.fn_param_defaults.insert(
+                                format!("{}.{}", owner, method.name),
+                                user_params.iter().map(|p| p.default.clone()).collect(),
+                            );
+                        }
+                    }
+                }
+            }
+            if let Node::Class(class) = item {
+                for method in &class.methods {
+                    let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                        &method.params[1..]
+                    } else { &method.params[..] };
+                    if user_params.iter().any(|p| p.default.is_some()) {
+                        self.fn_param_defaults.insert(
+                            format!("{}.{}", class.name, method.name),
+                            user_params.iter().map(|p| p.default.clone()).collect(),
+                        );
+                    }
+                }
+            }
+            if let Node::Struct(struct_) = item {
+                for method in &struct_.methods {
+                    let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                        &method.params[1..]
+                    } else { &method.params[..] };
+                    if user_params.iter().any(|p| p.default.is_some()) {
+                        self.fn_param_defaults.insert(
+                            format!("{}.{}", struct_.name, method.name),
+                            user_params.iter().map(|p| p.default.clone()).collect(),
+                        );
+                    }
                 }
             }
         }
@@ -1429,11 +1505,11 @@ impl Lowerer {
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
 
         self.module.name = ast_module.name.clone();
-        self.collect_fn_param_defaults(ast_module);
         // Codegen-side consumer of the flattened import-binding markers, so
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
@@ -2113,11 +2189,11 @@ impl Lowerer {
 
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
-        self.collect_fn_param_defaults(ast_module);
         // Codegen-side consumer of the flattened import-binding markers, so
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_fn_param_defaults(ast_module);
         self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types

@@ -3,6 +3,7 @@ import { open, mkdir, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { canonicalBytes } from "../model/identity.js";
 import { searchFail } from "../index/contracts.js";
+import { isUnsupportedDirectoryFsyncError } from "../storage/directory_fsync.js";
 
 const HASH = /^sha256:[a-f0-9]{64}$/;
 const domainInput = (domain, bytes) => { const length = Buffer.alloc(8); length.writeBigUInt64BE(BigInt(bytes.length)); return Buffer.concat([Buffer.from(`${domain}\0`), length, bytes]); };
@@ -18,7 +19,13 @@ export class FileLifecycleOwner {
     const handle = await open(temporary, "wx", 0o600);
     try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
     await rename(temporary, this.file);
-    const directory = await open(this.directory, "r"); try { await directory.sync(); } finally { await directory.close(); }
+    const directory = await open(this.directory, "r");
+    try {
+      try { await directory.sync(); }
+      catch (error) {
+        if (!isUnsupportedDirectoryFsyncError(error)) throw error;
+      }
+    } finally { await directory.close(); }
   }
   async transaction(work) {
     await mkdir(this.directory, { recursive: true });

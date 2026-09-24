@@ -1,0 +1,67 @@
+# Model-free reproducer for generation-tagged handle transport through a
+# direct global manager. Keep this independent of ggml and dynamic loading.
+
+use std.gc_async_mut.slang.core.page_manager.{KvPageManager, KvRequestId}
+
+var REPRO_MANAGER = KvPageManager.create(17u64, 4, 64, 4, 1, 2, 4, 256).unwrap()
+
+fn through_helper() -> KvRequestId:
+    REPRO_MANAGER.sole_active_request().unwrap()
+
+fn create_through_result_helper() -> Result<(), text>:
+    val created = REPRO_MANAGER.create_request("scope-a").unwrap()
+    val page = REPRO_MANAGER.reserve_page("scope-a", 101u64).unwrap()
+    if REPRO_MANAGER.update_writable(page, 2, 19u64).is_err():
+        return Err("page update failed")
+    if REPRO_MANAGER.seal_page(page).is_err():
+        return Err("page seal failed")
+    if REPRO_MANAGER.attach_sealed(created, page).is_err():
+        return Err("page attach failed")
+    if REPRO_MANAGER.request_page_count(created).is_err():
+        return Err("created request is invalid inside helper")
+    Ok(())
+
+fn main() -> i64:
+    # Exact production shape: a manager mutation precedes a helper that mutates
+    # the same global aggregate from inside the selected match-expression arm.
+    val prefix_result = REPRO_MANAGER.find_prefix("scope-a", 7u64, [1, 2])
+    val helper_result = match prefix_result:
+        Err(_): create_through_result_helper()
+        Ok(_): Err("unexpected prefix hit")
+    match helper_result:
+        Err(message):
+            print "FAIL result_helper_inside " + message
+            return 1
+        Ok(_): ()
+    val created = match REPRO_MANAGER.sole_active_request():
+        Err(_):
+            print "FAIL result_helper_lost_mutation"
+            return 1
+        Ok(value): value
+    if REPRO_MANAGER.request_page_count(created).is_err():
+        print "FAIL created_handle"
+        return 1
+    val selected = REPRO_MANAGER.sole_active_request().unwrap()
+    print "FIELDS created=" + created.pool_generation.to_string() + ":" +
+        created.slot_generation.to_string() + ":" + created.slot.to_string() +
+        " selected=" + selected.pool_generation.to_string() + ":" +
+        selected.slot_generation.to_string() + ":" + selected.slot.to_string()
+    if REPRO_MANAGER.request_page_count(selected).is_err():
+        print "FAIL selected_handle"
+        return 1
+    val crossed = through_helper()
+    if REPRO_MANAGER.request_page_count(crossed).is_err():
+        print "FAIL helper_handle"
+        return 1
+    if REPRO_MANAGER.close_request(crossed).is_err():
+        print "FAIL close_handle"
+        return 1
+    if REPRO_MANAGER.request_page_count(crossed).is_ok():
+        print "FAIL stale_handle_accepted"
+        return 1
+    val recreated = REPRO_MANAGER.create_request("scope-a").unwrap()
+    if REPRO_MANAGER.request_page_count(recreated).is_err():
+        print "FAIL recreated_handle"
+        return 1
+    print "PASS request_handle_boundary"
+    0

@@ -1,0 +1,77 @@
+# Fixed-width, allocation-free capture control wire for the x86 SimpleOS guest.
+#
+# The host sends `BRC1 A <boot> <frame>`.  The guest accepts only the exact
+# identity it announced with `BRC1 W` and then emits the corresponding `K`.
+
+pub val RENDER_CAPTURE_CONTROL_WIRE_BYTES: i64 = 41
+
+fn _capture_hex_byte(value: u64, digit_index: i64) -> u8:
+    val shift = (15 - digit_index) * 4
+    val nibble = ((value >> shift) & 15u64).to_u8()
+    if nibble < 10u8: 48u8 + nibble else: 87u8 + nibble
+
+pub fn render_capture_control_wire_byte_count() -> i64:
+    RENDER_CAPTURE_CONTROL_WIRE_BYTES
+
+pub fn render_capture_control_wire_byte_at(
+    kind: u8,
+    boot_id: u64,
+    frame_id: u64,
+    index: i64
+) -> u8:
+    if index < 0 or index >= RENDER_CAPTURE_CONTROL_WIRE_BYTES:
+        return 0u8
+    if index == 0: return 66u8  # B
+    if index == 1: return 82u8  # R
+    if index == 2: return 67u8  # C
+    if index == 3: return 49u8  # 1
+    if index == 4 or index == 6 or index == 23: return 32u8
+    if index == 5:
+        if kind == 87u8 or kind == 65u8 or kind == 75u8:
+            return kind
+        return 0u8
+    if index >= 7 and index < 23:
+        return _capture_hex_byte(boot_id, index - 7)
+    if index >= 24 and index < 40:
+        return _capture_hex_byte(frame_id, index - 24)
+    10u8
+
+pub class RenderCaptureAckV1:
+    boot_id: u64
+    frame_id: u64
+    next_index: i64
+    accepted: bool
+    rejected: bool
+
+    pub static fn create(boot_id: u64, frame_id: u64) -> RenderCaptureAckV1:
+        RenderCaptureAckV1(
+            boot_id: boot_id,
+            frame_id: frame_id,
+            next_index: 0,
+            accepted: false,
+            rejected: boot_id == 0u64 or frame_id == 0u64)
+
+    pub me feed(byte: u8) -> bool:
+        if self.accepted or self.rejected:
+            return false
+        val expected = render_capture_control_wire_byte_at(
+            65u8, self.boot_id, self.frame_id, self.next_index)
+        if byte != expected:
+            self.rejected = true
+            return false
+        self.next_index = self.next_index + 1
+        if self.next_index == RENDER_CAPTURE_CONTROL_WIRE_BYTES:
+            self.accepted = true
+            return true
+        false
+
+    pub fn ack_accepted() -> bool:
+        self.accepted
+
+    pub fn failed() -> bool:
+        self.rejected
+
+    pub fn confirmation_wire_byte_at(index: i64) -> u8:
+        if not self.accepted:
+            return 0u8
+        render_capture_control_wire_byte_at(75u8, self.boot_id, self.frame_id, index)

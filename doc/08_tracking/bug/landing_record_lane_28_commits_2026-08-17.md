@@ -1,4 +1,8 @@
 # Landing record — 28-commit lane sync to origin/main (2026-08-17)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Range
 
@@ -384,3 +388,4 @@ time, but two of its conclusions no longer describe reality: the pushed tip is
 not reachable from origin/main, and the CORRECTION-1 forward-fix is not present
 either upstream or locally. Close it only after a per-file content audit of the
 27 replayed commits against `origin/main`.
+

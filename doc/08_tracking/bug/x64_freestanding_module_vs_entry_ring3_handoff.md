@@ -1,4 +1,9 @@
 # BUG: [BOTH premises DISPROVEN] clang aborts 134 during static-libc init in ring-3 — genuine unimplemented frontier, not a regression
+## Closed 2026-09-16 — ..._breaks_128mb_base_kernels.md` — RESOLVED (bound raised to 0x18000000). ## Note on the sta
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** open — NOT a seed regression, NOT module-vs-entry; the abort is clang's own
 static libc calling abort()/SIGABRT during process init in ring-3.
@@ -57,3 +62,4 @@ The gates' release seed (src/compiler_rust/target/release/simple) was stale at 2
 2026-07-12; this fixed the unrelated process_queue.spl "function too large" phantom (see
 memory) but did NOT change the clang abort. Always verify seed provenance before trusting a
 kernel-gate result.
+

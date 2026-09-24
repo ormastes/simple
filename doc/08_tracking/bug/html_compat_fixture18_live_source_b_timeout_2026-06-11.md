@@ -1,6 +1,14 @@
 # HTML Compat Fixture 18 Live Source-B Timeout
 
-- **Status:** closed — all AC verified 2026-06-12
+## Closed 2026-09-13 — all acceptance criteria verified 2026-06-12 in-entry
+
+- **inferred** Entry status: `closed — all AC verified 2026-06-12`.
+- **measured** The fixture-18 artifacts it gated now exist complete:
+  `test/09_baselines/html_compat/18_flex_grow_weights/` contains `chrome.ppm`,
+  `simple.ppm` and `report.sdn`.
+
+
+Status: closed 2026-09-13 (was: - **Status:** closed — all AC verified 2026-06-12)
 - **Date:** 2026-06-11
 - **Lane:** Simple Web / Chromium HTML pixel parity
 

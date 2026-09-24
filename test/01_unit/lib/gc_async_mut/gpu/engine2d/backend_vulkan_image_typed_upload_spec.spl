@@ -1,0 +1,224 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing the TYPED image-composite upload
+(`SIMPLE_VK_IMAGE_UPLOAD=u32` -> `vulkan_sffi_copy_to_buffer_u32` ->
+`rt_vulkan_copy_to_buffer_u32`), the image half of
+`doc/08_tracking/bug/vulkan_image_composite_interpreted_pack_2026-09-12.md`.
+
+`_draw_image_composite_native_impl` took a caller's `[u32]` image and packed it
+to `[u8]` in interpreted Simple -- four array stores per pixel, 2.7M stores for
+one 900x760 full-surface composite -- purely because the byte marshaller masks
+each element to one byte. The typed lane hands the caller's OWN words over and
+lets the runtime widen them, so it packs nothing at all. This file answers the
+question that change cannot answer by looking at wall-clock: does the typed
+upload put exactly the same bytes on the device as the hand-rolled pack?
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ <vulkan-capable simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_image_typed_upload_spec.spl`
+
+The typed lane is OPT-IN. Every pixel expectation here must hold under BOTH
+`SIMPLE_VK_IMAGE_UPLOAD=u32` and the default (unset, or any other value),
+because the typed upload is a cost change and not a behaviour change -- running
+this file twice, once per setting, IS the A/B. The default is opt-in rather
+than opt-out because the typed lane calls an extern that a binary built before
+`rt_vulkan_copy_to_buffer_u32` existed does not recognise at all, and the
+interpreter's unknown-extern path aborts the process before any guard in this
+tree could decline; see
+`doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md`.
+
+## Compatibility and limitations
+REQUIRES a real Vulkan device and says so by FAILING, never skipping: the first
+expectation asserts `backend_name() == "vulkan"`. A CPU fallback would paint
+plausible pixels through `emu_draw_image_blend` and prove nothing about the
+upload path -- and the CPU fallback is a live risk here specifically, because
+`_draw_image_composite_native_impl` has ten `return 0` exits that each drop to
+exactly that host path.
+
+NOT covered, deliberately and not by oversight: an upload CACHE keyed on image
+identity. A sound key needs either a producer-supplied generation or an O(1)
+array identity, and this tree has neither; hashing the pixels in interpreted
+Simple is the same O(n) cost class the typed upload removes (the font atlas's
+own `font_atlas_payload_sha256` measures 8.3 s for exactly that walk). See the
+bug record's "Cache: not implemented, and why" section.
+
+## Verification guidance and troubleshooting
+The oracle is a 4x4 image whose every pixel carries a DIFFERENT opaque colour,
+composited at a known offset. That shape is chosen so a widening defect cannot
+hide: a byte-swap shows as wrong channels, a dropped element shows as a shifted
+image, a truncated payload shows as a black tail. The sabotage that proves it
+discriminates is to byte-swap each word in the typed branch of
+`_draw_image_composite_native_impl` before handing it over -- every one of the
+16 pixels then mismatches. If instead the evidence line reads
+`bytes reason=typed-declined` while pixels stay correct, the typed lane never
+ran and the run measured the byte path twice.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_image_composite_interpreted_pack_2026-09-12.md
+# @manual_section: vulkan_image_typed_upload
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 4%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 3%
+# @tag: unit, gpu, engine2d, vulkan, image, perf
+
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val FB: i32 = 64
+val IMG: i32 = 4
+val AT_X: i32 = 12
+val AT_Y: i32 = 20
+val GROUND: u32 = 0xFF101010u32
+
+fn image_color(k: i64) -> u32:
+    """Oracle colour for source pixel k, computed without the renderer.
+
+    Every one of the 16 pixels differs in ALL THREE channels, so a channel
+    swap, a big-endian widening and a dropped element are three distinguishable
+    failures rather than one indistinguishable "wrong colour". Alpha is opaque:
+    a non-opaque source would blend against the ground and stop being an exact
+    oracle.
+    """
+    (4278190080 + (k + 1) * 0x0F0703).to_i32().to_u32()
+
+fn oracle_image() -> [u32]:
+    var out: [u32] = [0u32; IMG.to_i64() * IMG.to_i64()]
+    var k: i64 = 0
+    while k < out.len().to_i64():
+        out[k] = image_color(k)
+        k = k + 1
+    out
+
+fn dst_index(k: i64) -> i64:
+    """Framebuffer index of source pixel k once composited at (AT_X, AT_Y)."""
+    val sx = k % IMG.to_i64()
+    val sy = k / IMG.to_i64()
+    (AT_Y.to_i64() + sy) * FB.to_i64() + AT_X.to_i64() + sx
+
+describe "A typed [u32] image upload composites the known pixel oracle exactly":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        # PRECONDITION. Every claim below is about DEVICE pixels. The host
+        # fallback would paint this same image correctly through
+        # `emu_draw_image_blend`, so a skip here would turn the whole file into
+        # a test of the CPU emulator.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "places every source pixel at its own destination with its own colour":
+        # REPRODUCING. 16 independent point checks: a byte-swapped widening, an
+        # off-by-one stride and a truncated payload each produce a different,
+        # readable failure pattern rather than one lump.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image(AT_X, AT_Y, IMG, IMG, oracle_image())
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        var k: i64 = 0
+        while k < IMG.to_i64() * IMG.to_i64():
+            if px[dst_index(k)] != image_color(k):
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+
+    it "leaves the pixel just outside the composite untouched":
+        # BOUNDARY. An upload that wrote one element too many, or a dispatch
+        # that covered one row too many, would be invisible to the 16 checks
+        # above -- they only look INSIDE the image.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image(AT_X, AT_Y, IMG, IMG, oracle_image())
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        val right_of = AT_Y.to_i64() * FB.to_i64() + AT_X.to_i64() + IMG.to_i64()
+        val above = (AT_Y.to_i64() - 1) * FB.to_i64() + AT_X.to_i64()
+        expect(px[right_of]).to_equal(GROUND)
+        expect(px[above]).to_equal(GROUND)
+
+    it "composites a single-pixel image, the smallest payload the lane sees":
+        # BOUNDARY at the real lower edge. The 900x760 catalog frame issues 261
+        # composites of roughly this size, so a one-element payload is the
+        # COMMON case on that page, not an exotic one.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        var one: [u32] = [0u32; 1]
+        one[0] = image_color(7)
+        e.draw_image(AT_X, AT_Y, 1i32, 1i32, one)
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        expect(px[AT_Y.to_i64() * FB.to_i64() + AT_X.to_i64()]).to_equal(image_color(7))
+
+    it "composites a FULL-SURFACE image, the population that motivated the change":
+        # GENERALIZATION at the size that matters. The 443 s this change targets
+        # is three composites whose source covers the whole destination; a
+        # payload that is correct at 16 elements and truncated at FB*FB would
+        # pass every example above.
+        val n = FB.to_i64() * FB.to_i64()
+        var full: [u32] = [0u32; n]
+        var k: i64 = 0
+        while k < n:
+            full[k] = image_color(k % 16)
+            k = k + 1
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image(0i32, 0i32, FB, FB, full)
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        k = 0
+        while k < n:
+            if px[k] != image_color(k % 16):
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+
+    it "paints two composites in one frame in painter order":
+        # GENERALIZATION. Two uploads in one frame must land in DISTINCT pooled
+        # source slots: if the second overwrote the first's buffer before the
+        # first dispatch ran, the earlier region would carry the later colours.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image(AT_X, AT_Y, IMG, IMG, oracle_image())
+        var second: [u32] = [0u32; IMG.to_i64() * IMG.to_i64()]
+        var k: i64 = 0
+        while k < second.len().to_i64():
+            second[k] = image_color(k + 32)
+            k = k + 1
+        e.draw_image(AT_X + IMG, AT_Y, IMG, IMG, second)
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        k = 0
+        while k < IMG.to_i64() * IMG.to_i64():
+            if px[dst_index(k)] != image_color(k):
+                wrong = wrong + 1
+            if px[dst_index(k) + IMG.to_i64()] != image_color(k + 32):
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+
+    it "records which payload shape the last image upload actually used":
+        # ABSOLUTE ORACLE, and the reason this getter exists at all. The typed
+        # and byte lanes produce identical device bytes by construction, so no
+        # pixel can witness which one ran -- without this field an
+        # extern-unavailable fallback and a genuine typed upload are the same
+        # observation, and a perf A/B could measure the byte path twice.
+        val requested_u32 = (env_get("SIMPLE_VK_IMAGE_UPLOAD") ?? "") == "u32"
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image(AT_X, AT_Y, IMG, IMG, oracle_image())
+        e.finalize_compute_frame_no_readback()
+        val evidence = e.vulkan_image_upload_evidence()
+        e.shutdown()
+        if requested_u32:
+            expect(evidence).to_equal("u32 reason=typed-requested")
+        else:
+            expect(evidence).to_equal("bytes reason=typed-not-requested")

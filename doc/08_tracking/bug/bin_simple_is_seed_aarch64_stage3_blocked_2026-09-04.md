@@ -1,4 +1,8 @@
 # `bin/simple` on this aarch64 host is the Rust seed, deliberately
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — stopgap in place, removal blocked on Stage 3
 **Filed:** 2026-09-04
@@ -51,3 +55,4 @@ and `--version` reports `Simple Language v1.0.0-rc.1` behind that banner.
 Delete the seed copy and re-run
 `scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy` once
 Stage 3 self-host is green on aarch64. That is the only exit condition.
+

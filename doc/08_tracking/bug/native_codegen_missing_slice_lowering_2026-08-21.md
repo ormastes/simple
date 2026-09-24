@@ -1,4 +1,8 @@
 # Native codegen has no lowering for `Expr::Slice` — functions using `a[i:j]` silently emit nothing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
 - Area: compiler / native codegen (AOT `--native`)
@@ -143,3 +147,4 @@ arm, `rt_contains` ships only because it was verified against an oracle, while
 `rt_index_of` on a text receiver was verified WRONG and deliberately kept
 failing loudly. Slice lowering must clear the same bar rather than being wired
 up because it links.
+

@@ -42,6 +42,15 @@
 int64_t rt_cache_host_open_root_v1(const uint8_t *, int64_t);
 int64_t rt_cache_daemon_route_v1(const uint8_t *, int64_t);
 int64_t rt_cache_daemon_serve_v1(const uint8_t *, int64_t);
+int64_t rt_cache_host_capture_durable_head_v2(int64_t,int64_t,int64_t,const uint8_t*,int64_t,int64_t,int64_t,const uint8_t*,int64_t,int64_t,int64_t,const uint8_t*,int64_t,int64_t);
+int64_t rt_cache_host_gc_begin_v2(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t);
+int64_t rt_cache_host_gc_root_page_v2(int64_t,int64_t,uint8_t*,int64_t);
+int64_t rt_cache_host_gc_pin_page_v2(int64_t,int64_t,uint8_t*,int64_t);
+int64_t rt_cache_host_gc_open_candidate_v2(int64_t,const uint8_t*,int64_t,const uint8_t*,int64_t);
+int64_t rt_cache_host_gc_unlink_candidate_v2(int64_t,int64_t);
+int64_t rt_cache_host_gc_finish_v2(int64_t,int64_t);
+int64_t rt_cache_host_gc_abort_v2(int64_t,int64_t);
+int64_t rt_cache_host_release_durable_head_v2(int64_t);
 
 /* Protocol constants, asserted here so a silent reframing of the wire format
  * breaks this file rather than only breaking interop at runtime. */
@@ -213,6 +222,23 @@ static int check_route_rejects_bad_input(void) {
     return 0;
 }
 
+static int check_gc_v2_is_explicitly_unsupported(void) {
+    uint8_t byte = 0;
+    if (rt_cache_host_capture_durable_head_v2(1,1,1,&byte,1,1,0,&byte,1,0,0,&byte,1,0) != -1
+        || rt_cache_host_gc_begin_v2(1,1,0,0,1,0) != -1
+        || rt_cache_host_gc_root_page_v2(1,0,&byte,1) != -1
+        || rt_cache_host_gc_pin_page_v2(1,0,&byte,1) != -1
+        || rt_cache_host_gc_open_candidate_v2(1,&byte,1,&byte,1) != -1
+        || rt_cache_host_gc_unlink_candidate_v2(1,1) != -1
+        || rt_cache_host_gc_finish_v2(1,1) != -1
+        || rt_cache_host_gc_abort_v2(1,1) != -1
+        || rt_cache_host_release_durable_head_v2(1) != -1) {
+        fprintf(stderr, "native-C host GC v2 fabricated authority\n");
+        return 1;
+    }
+    return 0;
+}
+
 /* The provider's daemon lane is #if defined(__linux__) only (see
  * runtime_cache_host_authority_v1.c), and these two groups exercise it through
  * SO_PEERCRED / struct ucred / SOCK_CLOEXEC. They are compiled only there. */
@@ -374,14 +400,15 @@ int main(void) {
     if (check_noncanonical_roots()) return 1;
     if (check_sha256_kat()) return 1;
     if (check_route_rejects_bad_input()) return 1;
+    if (check_gc_v2_is_explicitly_unsupported()) return 1;
 #if defined(__linux__)
     if (check_spool_fallback_under_held_lock()) return 1;
     if (check_hostile_socket_and_handshake()) return 1;
-    printf("rt_cache_host_authority_v1_selfcheck: 5 check group(s) passed\n");
+    printf("rt_cache_host_authority_v1_selfcheck: 6 check group(s) passed\n");
 #else
     /* Say what was NOT run. A count that silently drops two groups would read
      * as a full pass on a host that never exercised the daemon lane. */
-    printf("rt_cache_host_authority_v1_selfcheck: 3 check group(s) passed; "
+    printf("rt_cache_host_authority_v1_selfcheck: 4 check group(s) passed; "
            "2 daemon group(s) NOT exercised on this host (the provider's "
            "daemon lane is #if defined(__linux__) only)\n");
 #endif

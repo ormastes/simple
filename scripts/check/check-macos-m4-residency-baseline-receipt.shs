@@ -1,0 +1,102 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+receipt=
+requested_arch=
+expected_producer_sha256=
+expected_server_sha256=
+
+die() { echo "M4 BASELINE RECEIPT FAIL: $*" >&2; exit 1; }
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+value() {
+  key=$1
+  count=$(awk -F= -v key="$key" '$1 == key { n++ } END { print n + 0 }' "$receipt")
+  [ "$count" -eq 1 ] || die "receipt has missing or duplicate $key"
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$receipt"
+}
+require_digest() {
+  label=$1 value=$2
+  printf '%s' "$value" | grep -Eq '^[0-9a-f]{64}$' || die "$label is malformed"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --receipt=*) receipt=${arg#*=} ;;
+    --arch=*) requested_arch=${arg#*=} ;;
+    --producer-sha256=*) expected_producer_sha256=${arg#*=} ;;
+    --server-sha256=*) expected_server_sha256=${arg#*=} ;;
+    *) die "unknown option $arg" ;;
+  esac
+done
+
+[ "$requested_arch" = arm64 ] || [ "$requested_arch" = x86_64 ] ||
+  die "architecture must be arm64 or x86_64"
+require_digest "expected producer digest" "$expected_producer_sha256"
+require_digest "expected server digest" "$expected_server_sha256"
+[ -n "$receipt" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] ||
+  die "admitted per-architecture baseline receipt is unavailable"
+[ "$(wc -l <"$receipt" | tr -d ' ')" -eq 13 ] || die "receipt does not match the exact schema"
+[ "$(awk 'NF == 0 || $0 !~ /^[A-Za-z0-9_]+=[^\r\n]+$/ { bad=1 } END { print bad + 0 }' "$receipt")" -eq 0 ] ||
+  die "receipt contains malformed lines"
+
+allowed='schema status requirement_id selection_policy decision_source architecture request_count baseline_rss_kib baseline_evidence_sha256 producer_sha256 server_sha256 authority_document authority_document_sha256'
+for key in $(awk -F= 'NF { print $1 }' "$receipt"); do
+  case " $allowed " in *" $key "*) ;; *) die "receipt contains unknown key $key" ;; esac
+done
+for key in $allowed; do value "$key" >/dev/null; done
+
+[ "$(value schema)" = macos-m4-residency-baseline-v1 ] || die "schema mismatch"
+[ "$(value status)" = ADMITTED ] || die "baseline is not admitted"
+[ "$(value requirement_id)" = MBH-NFR-003 ] || die "requirement mismatch"
+[ "$(value selection_policy)" = baseline-relative-10-percent ] || die "selection policy mismatch"
+[ "$(value decision_source)" = user-final-performance-authority-2026-09-02 ] || die "decision source mismatch"
+[ "$(value architecture)" = "$requested_arch" ] || die "architecture binding mismatch"
+[ "$(value request_count)" = 20 ] || die "baseline request count mismatch"
+
+baseline_rss_kib=$(value baseline_rss_kib)
+printf '%s' "$baseline_rss_kib" | grep -Eq '^[1-9][0-9]*$' || die "positive measured baseline_rss_kib is required"
+baseline_evidence_sha256=$(value baseline_evidence_sha256)
+producer_sha256=$(value producer_sha256)
+server_sha256=$(value server_sha256)
+require_digest "baseline evidence digest" "$baseline_evidence_sha256"
+require_digest "producer digest" "$producer_sha256"
+require_digest "server digest" "$server_sha256"
+[ "$producer_sha256" = "$expected_producer_sha256" ] || die "producer digest binding mismatch"
+[ "$server_sha256" = "$expected_server_sha256" ] || die "server digest binding mismatch"
+
+authority_document=$(value authority_document)
+case "$authority_document" in /*|../*|*/../*|*/..|.|..) die "authority document must be repository-relative" ;; esac
+[ ! -L "$root/$authority_document" ] || die "authority document must not be a symlink"
+authority_directory=$(CDPATH= cd -- "$(dirname -- "$root/$authority_document")" && pwd -P) || die "authority document directory unavailable"
+case "$authority_directory/" in "$root/"*) ;; *) die "authority document escapes repository" ;; esac
+authority_document_path="$authority_directory/$(basename -- "$authority_document")"
+[ -f "$authority_document_path" ] || die "authority document unavailable"
+authority_document_sha256=$(value authority_document_sha256)
+require_digest "authority document digest" "$authority_document_sha256"
+[ "$(sha256_file "$authority_document_path")" = "$authority_document_sha256" ] || die "authority document digest mismatch"
+grep -Fq 'MBH-NFR-003' "$authority_document_path" || die "authority document does not govern MBH-NFR-003"
+grep -Fxq 'Decision source: user-final-performance-authority-2026-09-02' "$authority_document_path" || die "authority document does not bind the decision source"
+authority_policy=$(tr '\n\t' '  ' <"$authority_document_path" | tr -s ' ')
+printf '%s\n' "$authority_policy" | grep -Fq 'maximum steady RSS shall be at most 110% of baseline RSS' || die "authority document lacks steady RSS policy"
+printf '%s\n' "$authority_policy" | grep -Fq 'nonnegative RSS growth shall be at most 10% of baseline RSS' || die "authority document lacks growth policy"
+
+cat <<EOF
+schema=macos-m4-residency-baseline-validation-v1
+status=VALIDATED
+requirement_id=MBH-NFR-003
+selection_policy=baseline-relative-10-percent
+decision_source=user-final-performance-authority-2026-09-02
+architecture=$requested_arch
+request_count=20
+baseline_rss_kib=$baseline_rss_kib
+baseline_evidence_sha256=$baseline_evidence_sha256
+producer_sha256=$producer_sha256
+server_sha256=$server_sha256
+authority_document=$authority_document
+authority_document_sha256=$authority_document_sha256
+baseline_receipt_sha256=$(sha256_file "$receipt")
+EOF

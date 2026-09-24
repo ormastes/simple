@@ -1,8 +1,14 @@
 # Bug: Generic struct type parameter not resolved in impl block
 
+## Closed 2026-09-13 — Fixed: a struct type parameter resolves inside its `impl` block
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's minimal repro compiles and runs. `struct Digest<N>: payload: [u8]` with `impl Digest<N>: fn len() -> i64: self.payload.len()`, called as `Digest<i64>(payload: [1u8, 2u8]).len()`, prints `2`. No `Unknown type: N`, no `Unknown type: Id`.
+- **inferred**: the sibling shapes the entry names (`PostingList<Id>`, `Embedding<D>`) are the same construct — a type parameter referenced from the `impl` — so they are covered by the same resolution; they were not separately exercised.
+- Note: `<>` is the sanctioned generic syntax per CLAUDE.md, and that is what was tested.
+
 **ID:** crypto_digest_generic_struct_2026-06-15
 **Date:** 2026-06-15
-**Severity:** P2 (language limitation, workaround exists)
+**Status:** CLOSED 2026-09-13 (fixed). **Severity:** P2 (language limitation, workaround exists)
 **Component:** Compiler / Type system — generics on struct definitions
 
 ## Summary

@@ -1,11 +1,18 @@
 ---
 id: release_binary_compile_broken_2026-06-02
-status: RESOLVED-BY-REDEPLOY (2026-06-11) — bin/simple now runs the rebuilt Rust seed; compile works (print "hello" -> .smf OK), \x hex escapes decode, stdin extern present. Working SELF-HOSTED deploy remains tracked by the bootstrap-deploy effort (stage4 chain fixed 2026-06-11, deploy pending broader validation)
+status: CLOSED (2026-09-13 triage)
 severity: critical
 discovered: 2026-06-02
 discovered_by: MCP source fallback investigation
 related: bin/release/x86_64-unknown-linux-gnu/simple
 ---
+
+## Closed 2026-09-13 — Confirmed resolved: the deployed seed compiles and runs Simple sources
+
+- **measured** `bin/simple --version` -> `Simple Language v1.0.0-rc.1`; `bin/simple run <hello-ish repro>` executes and prints program output (e.g. an array-push loop repro printing `100`).
+- **measured** `bin/simple run` on a fresh 5-line source (`type Alias<T> = ...` + `print("ok")`) printed `ok`, so parse -> compile -> execute is intact end to end.
+- **inferred** The entry's own frontmatter already recorded `RESOLVED-BY-REDEPLOY (2026-06-11)`; this run re-confirms it on the current binary. The separate self-hosted deploy remains tracked by the bootstrap effort, not by this entry.
+
 
 # Release binary `compile` subcommand completely non-functional
 

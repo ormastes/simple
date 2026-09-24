@@ -1,4 +1,8 @@
 # Bootstrap "determinism check" compares builds of DIFFERENT source trees; PARTIAL then deploys
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
 - Status: OPEN
@@ -153,3 +157,4 @@ Steps 1 and 2 landed in `src/compiler_rust/driver/src/cli/commands/misc_commands
 - **`PARTIAL` -> deploy left in place**, with a `TODO(bootstrap-determinism)` naming this record and the
   removal precondition (one VERIFIED run on a pinned snapshot). Step 3 of this record — the actual
   re-run — is still outstanding; a bootstrap was in flight and was not disturbed.
+

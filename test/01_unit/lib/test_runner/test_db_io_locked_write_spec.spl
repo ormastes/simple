@@ -1,0 +1,144 @@
+# Path-parameterized test-database I/O - regression spec
+#
+# Background: `std.test_runner.test_db_io` exposes the only path-parameterized
+# write path for the test database (`write_db_file_locked`, `update_db_file`).
+# Both matched the result of `TestDbFileLock.acquire(path, LOCK_TIMEOUT)` --
+# which returns `TestDbFileLock?`, an Option -- against `Ok(..)` / `Err(..)`
+# arms. Every call therefore aborted at runtime with
+#
+#   error: semantic: invalid pattern: match expression exhausted without
+#   matching any pattern for enum value Option::Some(TestDbFileLock(...))
+#
+# so no caller could ever write a database at an isolated path. That is the
+# blocker cited by the "Implement after isolated DB path support" stubs in
+# test/01_unit/app/tooling/test_db_concurrency_spec.spl.
+#
+# @manual_section Test result recording
+
+use std.spec.*
+use std.test_runner.test_db_io.{read_db_file, write_db_file_locked, update_db_file}
+use std.io.{file_exists, file_read, file_delete, dir_create}
+
+fn scratch_path(name: text) -> text:
+    dir_create("build/test/test_db_io_locked_write", recursive: true)
+    "build/test/test_db_io_locked_write/{name}.sdn"
+
+fn reset(path: text):
+    if file_exists(path):
+        file_delete(path)
+    if file_exists("{path}.bak"):
+        file_delete("{path}.bak")
+    # A writer that aborts mid-lock leaves `{path}.lock` behind, and a later
+    # run that inherits that stale sidecar gets Ok from write_db_file_locked
+    # while no file is produced at all -- see
+    # doc/08_tracking/bug/test_db_stale_lock_silent_no_write_2026-09-12.md.
+    # Clearing it keeps this spec deterministic instead of order-dependent.
+    if file_exists("{path}.lock"):
+        file_delete("{path}.lock")
+
+describe "path-parameterized test database writes":
+    """
+    As a spec author who must not touch the repository's real
+    doc/08_tracking/test/test_db.sdn, I want the locked write and
+    read-modify-write helpers to work against any path I hand them, so that
+    concurrency and integrity specs can run against isolated fixtures.
+    """
+
+    it "writes content at an isolated path instead of aborting on the lock match":
+        # @req REQ-TESTDB-ISOLATED-PATH-001
+        step("choose a scratch path with no database file present")
+        val path = scratch_path("write")
+        reset(path)
+        assert_false(file_exists(path))
+
+        step("write through the locked writer")
+        # This is the exact regression: the Option-vs-Result match made every
+        # call abort here, never returning Ok or Err at all.
+        val outcome = write_db_file_locked(path, "alpha\n")
+        match outcome:
+            case Ok(_): assert_true(true)
+            case Err(reason): fail("write_db_file_locked returned Err: {reason}")
+
+        step("the file exists and carries exactly the bytes written")
+        assert_true(file_exists(path))
+        val written = file_read(path)
+        # Fail closed on a vacuous read: an empty string here is a failure,
+        # never a pass.
+        assert_true(written.len() > 0)
+        assert_eq(written, "alpha\n")
+
+    it "reads back what the locked writer wrote":
+        # @req REQ-TESTDB-ISOLATED-PATH-002
+        step("write a known payload")
+        val path = scratch_path("read")
+        reset(path)
+        match write_db_file_locked(path, "beta-line\n"):
+            case Ok(_): assert_true(true)
+            case Err(reason): fail("write failed: {reason}")
+
+        step("read it back through read_db_file")
+        match read_db_file(path):
+            case Ok(content):
+                assert_true(content.len() > 0)
+                assert_eq(content, "beta-line\n")
+            case Err(reason): fail("read_db_file returned Err: {reason}")
+
+    it "applies a read-modify-write updater under the lock":
+        # @req REQ-TESTDB-ISOLATED-PATH-003
+        step("seed the file")
+        val path = scratch_path("update")
+        reset(path)
+        match write_db_file_locked(path, "one\n"):
+            case Ok(_): assert_true(true)
+            case Err(reason): fail("seed write failed: {reason}")
+
+        step("append a second line through update_db_file")
+        match update_db_file(path, fn(current: text) -> text: current + "two\n"):
+            case Ok(_): assert_true(true)
+            case Err(reason): fail("update_db_file returned Err: {reason}")
+
+        step("both lines are present, in order")
+        val content = file_read(path)
+        assert_true(content.len() > 0)
+        assert_eq(content, "one\ntwo\n")
+
+    it "creates a backup of the previous content before overwriting":
+        # @req REQ-TESTDB-ISOLATED-PATH-004
+        step("write an initial revision")
+        val path = scratch_path("backup")
+        reset(path)
+        match write_db_file_locked(path, "rev-one\n"):
+            case Ok(_): assert_true(true)
+            case Err(reason): fail("first write failed: {reason}")
+        assert_false(file_exists("{path}.bak"))
+
+        step("overwrite it with a second revision")
+        match write_db_file_locked(path, "rev-two\n"):
+            case Ok(_): assert_true(true)
+            case Err(reason): fail("second write failed: {reason}")
+
+        step("the sidecar backup holds the first revision, the file the second")
+        assert_true(file_exists("{path}.bak"))
+        assert_eq(file_read("{path}.bak"), "rev-one\n")
+        assert_eq(file_read(path), "rev-two\n")
+
+    it "refuses to overwrite non-empty content with an empty payload":
+        # @req REQ-TESTDB-ISOLATED-PATH-005
+        step("write a non-empty revision")
+        val path = scratch_path("empty_guard")
+        reset(path)
+        match write_db_file_locked(path, "keep-me\n"):
+            case Ok(_): assert_true(true)
+            case Err(reason): fail("seed write failed: {reason}")
+
+        step("attempt to blank it")
+        # The refusal is the library's only implemented write-failure vector;
+        # it must surface as Err, not as a silent truncation.
+        var refused = false
+        match write_db_file_locked(path, ""):
+            case Ok(_): refused = false
+            case Err(_): refused = true
+        assert_true(refused)
+
+        step("the original content survives the refused write")
+        assert_eq(file_read(path), "keep-me\n")

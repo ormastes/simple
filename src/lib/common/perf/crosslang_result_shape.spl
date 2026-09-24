@@ -1,0 +1,160 @@
+# crosslang_result_shape — the canonical result schema every cross-language
+# adapter maps into, plus the equivalence and rejection rules over it.
+#
+# Gap this fills (L10 recorded rejection cause 3, plan
+# doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+# lines 735-769 and 1303-1305): each adapter emitted its own result shape, so
+# "equivalent" rows were compared by eye. The benchmark inventory records that
+# the historical matrices contain missing and unequal-work rows as a direct
+# result.
+#
+# The schema here is CLOSED and ORDERED: exactly eight named fields in a fixed
+# order. An adapter emission is mapped into it or typed-rejected — missing
+# field, unknown field, non-integer numeric field, empty emission — each naming
+# the offending field. Nothing is defaulted in.
+#
+# The canonical key order is a literal list, never a sort: `[text].sort()` is a
+# no-op on this toolchain, so a sort-based canonicalization would silently
+# compare in emission order.
+#
+# Work equivalence deliberately EXCLUDES p50/p95: two adapters for the same
+# fixture must agree on the work they did (fixture, unit, produced output,
+# item count, sample count), not on how long it took. That is the whole point
+# of the comparison.
+#
+# Pure: no adapter is executed here (the plan forbids a fourth collector cycle).
+
+pub struct AdapterField:
+    key: text
+    value: text
+
+pub struct CanonicalResult:
+    fixture_id: text
+    adapter_id: text
+    unit: text
+    p50: i64
+    p95: i64
+    sample_count: i64
+    output_checksum: text
+    item_count: i64
+
+pub struct ShapeMapping:
+    ok: bool
+    deviation_kind: text
+    detail: text
+    result: CanonicalResult
+
+pub struct EquivalenceVerdict:
+    equal: bool
+    reason: text
+
+pub fn crosslang_canonical_keys() -> [text]:
+    """The closed, ordered field list of the canonical result schema."""
+    ["fixture_id", "adapter_id", "unit", "p50", "p95", "sample_count", "output_checksum", "item_count"]
+
+fn _empty_result() -> CanonicalResult:
+    CanonicalResult(
+        fixture_id: "", adapter_id: "", unit: "",
+        p50: -1, p95: -1, sample_count: -1,
+        output_checksum: "", item_count: -1,
+    )
+
+fn _deviation(kind: text, detail: text) -> ShapeMapping:
+    ShapeMapping(ok: false, deviation_kind: kind, detail: detail, result: _empty_result())
+
+fn _is_declared(key: text) -> bool:
+    for declared in crosslang_canonical_keys():
+        if declared == key:
+            return true
+    false
+
+fn _lookup(fields: [AdapterField], key: text) -> text:
+    for field in fields:
+        if field.key == key:
+            return field.value
+    ""
+
+fn _has_key(fields: [AdapterField], key: text) -> bool:
+    for field in fields:
+        if field.key == key:
+            return true
+    false
+
+fn _all_digits(value: text) -> bool:
+    val cs = value.chars()
+    if cs.len() == 0:
+        return false
+    for ch in cs:
+        if ch < "0" or ch > "9":
+            return false
+    true
+
+pub fn crosslang_map_adapter_result(fields: [AdapterField]) -> ShapeMapping:
+    """Map one adapter's emission into the canonical schema, or typed-reject it."""
+    if fields.len() == 0:
+        return _deviation("empty_emission", "adapter emitted no fields")
+    for field in fields:
+        if not _is_declared(field.key):
+            return _deviation("unknown_field", "undeclared field: {field.key}")
+    for key in crosslang_canonical_keys():
+        if not _has_key(fields, key):
+            return _deviation("missing_field", "absent field: {key}")
+    for numeric in ["p50", "p95", "sample_count", "item_count"]:
+        val raw = _lookup(fields, numeric)
+        if not _all_digits(raw):
+            return _deviation("not_an_integer", "field {numeric} is not an integer: \"{raw}\"")
+    val mapped = CanonicalResult(
+        fixture_id: _lookup(fields, "fixture_id"),
+        adapter_id: _lookup(fields, "adapter_id"),
+        unit: _lookup(fields, "unit"),
+        p50: _parse_declared(_lookup(fields, "p50")),
+        p95: _parse_declared(_lookup(fields, "p95")),
+        sample_count: _parse_declared(_lookup(fields, "sample_count")),
+        output_checksum: _lookup(fields, "output_checksum"),
+        item_count: _parse_declared(_lookup(fields, "item_count")),
+    )
+    ShapeMapping(ok: true, deviation_kind: "", detail: "", result: mapped)
+
+fn _parse_declared(value: text) -> i64:
+    # Only ever reached after _all_digits has accepted the text, so a None here
+    # would be a toolchain fault, not adapter data — surface it as -1 rather
+    # than as a plausible-looking 0.
+    match value.to_i64():
+        case Some(v):
+            v
+        case None:
+            -1
+
+pub fn crosslang_results_work_equal(a: CanonicalResult, b: CanonicalResult) -> EquivalenceVerdict:
+    """Two adapters' canonical results for the same fixture are work-equivalent
+    when they agree on everything except their timings and their own identity."""
+    if a.fixture_id != b.fixture_id:
+        return EquivalenceVerdict(equal: false, reason: "fixture_id differs: {a.fixture_id} vs {b.fixture_id}")
+    if a.unit != b.unit:
+        return EquivalenceVerdict(equal: false, reason: "unit differs: {a.unit} vs {b.unit}")
+    if a.output_checksum != b.output_checksum:
+        return EquivalenceVerdict(equal: false,
+            reason: "output_checksum differs: {a.output_checksum} vs {b.output_checksum}")
+    if a.item_count != b.item_count:
+        return EquivalenceVerdict(equal: false,
+            reason: "item_count differs: {a.item_count.to_text()} vs {b.item_count.to_text()}")
+    if a.sample_count != b.sample_count:
+        return EquivalenceVerdict(equal: false,
+            reason: "sample_count differs: {a.sample_count.to_text()} vs {b.sample_count.to_text()}")
+    EquivalenceVerdict(equal: true, reason: "")
+
+fn _crosslang_sdn_field(value: text) -> text:
+    val escaped_slashes = value.replace("\\", "\\\\")
+    val escaped_quotes = escaped_slashes.replace("\"", "\\\"")
+    "\"{escaped_quotes}\""
+
+pub fn crosslang_results_sdn(results: [CanonicalResult]) -> text:
+    """Serialize canonical results in the fixed column order. An empty input
+    yields the header alone — never a document that looks like it carried rows."""
+    var lines: [text] = [
+        "# version: crosslang-result-v1",
+        "results |fixture_id, adapter_id, unit, p50, p95, sample_count, output_checksum, item_count|",
+    ]
+    for r in results:
+        lines.push("    {_crosslang_sdn_field(r.fixture_id)}, {_crosslang_sdn_field(r.adapter_id)}, {_crosslang_sdn_field(r.unit)}, {r.p50.to_text()}, {r.p95.to_text()}, {r.sample_count.to_text()}, {_crosslang_sdn_field(r.output_checksum)}, {r.item_count.to_text()}")
+    lines.join("\n") + "\n"

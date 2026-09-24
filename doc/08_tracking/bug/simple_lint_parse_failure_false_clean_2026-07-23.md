@@ -1,4 +1,8 @@
 # Simple lint parser failure returned clean — 2026-07-23
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED / PURE-SIMPLE QUALIFICATION PENDING
 
@@ -19,3 +23,4 @@ and proves both clean and pre-existing parser error state are restored.
 
 A fresh pure-Simple Stage 4 CLI must run the focused contract and public JSONL
 lint smoke before qualification.
+

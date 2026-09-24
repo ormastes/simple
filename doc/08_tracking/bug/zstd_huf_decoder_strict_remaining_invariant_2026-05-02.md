@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: RESOLVED (W14-A, 2026-05-02) — see Resolution section below. Original framing falsified by W13-B; en
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Zstd HUF decoder strict `remaining != 0` invariant — incompatible with mixed-length encoder
 
 Status: RESOLVED (W14-A, 2026-05-02) — see Resolution section below. Original framing falsified by W13-B; en

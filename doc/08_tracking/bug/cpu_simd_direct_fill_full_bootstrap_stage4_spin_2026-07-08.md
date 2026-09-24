@@ -1,4 +1,8 @@
 # CPU SIMD Direct Fill Full Bootstrap Stage 4 Spin
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-08
 
@@ -60,3 +64,4 @@ Focused evidence:
 Rebuild/deploy a pure-Simple `bin/simple` and rerun the retained 4K/8K SIMD
 performance evidence. Keep `build/bootstrap/native_cache` and use isolated mini
 caches for any further bootstrap probes.
+

@@ -18,6 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
@@ -285,6 +286,7 @@ fn compile_c_runtime_sources() {
         "runtime_rocm.c",
         "runtime_hosted_signal.c",
         "runtime_hosted_fs.c",
+        "runtime_file_view.c",
         "runtime_font.c",
         "runtime_memtrack.c",
         "runtime_simd_dispatch.c",
@@ -367,6 +369,20 @@ fn compile_c_runtime_sources() {
         // exact-equivalent since every value it deep-frees is a string.
         // Re-added after the tree-wipe restore ae55a746719 dropped it again.
         "runtime_process_owned.c",
+        // Env-gated SIGPROF PC sampler (diagnostic tooling; see the TU header).
+        // This list is NOT interpreter-only: the cc archive below is bundled
+        // WHOLESALE into this crate's staticlib/cdylib outputs, and the
+        // bootstrap stage2/stage3 link selects libsimple_native_all.a -- which
+        // embeds those objects -- as its runtime. Without this row the sampler
+        // silently vanishes from every bootstrap-produced compiler binary even
+        // though the seed-lane (tools.rs) and pure-Simple (runtime_compiler.spl)
+        // lists both carry it (measured 2026-09-19: stage2 at 12:47 had zero
+        // prof symbols and no SIMPLE_PROF_SAMPLE_FILE string; the archive
+        // member only survives the link because native_project/linker.rs
+        // forces prof_sample_force_link as a retention root). Zero-cost
+        // unless SIMPLE_PROF_SAMPLE_FILE is set; empty TU off Linux
+        // x86_64/aarch64; no symbol overlap with this crate's Rust rt_* owners.
+        "runtime_prof_sample.c",
         // Narrow Stage2 provider: runtime.c/runtime_native.c cannot be linked
         // into this Rust archive without colliding with Rust-owned rt_* APIs.
         "runtime_secure_staging.c",
@@ -375,8 +391,31 @@ fn compile_c_runtime_sources() {
         c_sources.push("hosted_win32.c");
     }
 
+    // Linux SOSIX owns a real io_uring provider in the runtime C layer.  Keep
+    // the dependency hermetic: the small liburing subset is vendored in this
+    // repository, so discovery must never consult system pkg-config or link
+    // a host liburing that can disagree with the headers.  The Rust facade
+    // below remains the owner of the rt_driver_* ABI; the C layer contributes
+    // only the spl_driver vtable and backend implementation.
+    let linux_uring = target_os == "linux";
+    if linux_uring {
+        c_sources.push("platform/async_driver.c");
+        c_sources.push("platform/async_linux_uring.c");
+        c_sources.push("vendor/liburing/src/queue.c");
+        c_sources.push("vendor/liburing/src/register.c");
+        c_sources.push("vendor/liburing/src/setup.c");
+        c_sources.push("vendor/liburing/src/syscall.c");
+    }
+
     let mut build = cc::Build::new();
     build.opt_level(2).warnings(false).cargo_metadata(false);
+    if linux_uring {
+        build.include(runtime_c_dir.join("platform"));
+        build.include(runtime_c_dir.join("vendor/liburing/include"));
+        build.define("SPL_HAS_IO_URING", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_EPOLL", None);
+    }
     build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
     // See the runtime_audio.c comment above: this crate doesn't compile
     // runtime.c, so spl_array_get/spl_as_float are unavailable here.
@@ -390,6 +429,7 @@ fn compile_c_runtime_sources() {
     // See the runtime_process.c comment above: the Rust runtime crate already
     // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
     build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
+    build.define("SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER", None);
     let target_os_for_heap_counters = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os_for_heap_counters == "windows" {
         // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks
@@ -420,6 +460,15 @@ fn compile_c_runtime_sources() {
         // the condition is the OS. Unix GNU and Darwin still take the weak
         // branch and are unaffected.
         build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
+        // Same reasoning, same precedent, for rt_simd_aes_round_u8x16 /
+        // rt_simd_aes_round_last_u8x16: runtime_simd_dispatch.c's GNU/Clang
+        // weak definitions already yield to
+        // value/simd_aes_ops.rs's `#[no_mangle]` ones on Unix/Darwin. MSVC
+        // has no weak attribute and Windows-GNU drops a weak COFF alias under
+        // --gc-sections (see runtime_memtrack.c's identical note), so both
+        // Windows ABIs need the C definitions suppressed outright rather than
+        // relying on weak-symbol precedence.
+        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16", None);
     }
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");

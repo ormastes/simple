@@ -1,0 +1,110 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.native_object_identity_codec_v1.{
+    NativeObjectScopeV1, NativeObjectActionV1,
+    native_object_scope_encode_v1, native_object_action_encode_v1,
+    native_object_scope_digest_v1}
+use compiler.driver.cache.native_object_publication_decision_v1.{
+    NativeObjectIdentityDecisionKindV1,
+    native_object_identity_decide_v1, native_object_prepare_result_v1}
+
+fn validation_scope(format: text = "elf") -> NativeObjectScopeV1:
+    NativeObjectScopeV1(
+        compiler_executable_digest: sha256_text("compiler"),
+        compiler_semantics_manifest_digest: sha256_text("semantics"),
+        runtime_contract_manifest_digest: sha256_text("runtime"),
+        backend_provider_manifest_digest: sha256_text("provider"),
+        toolchain_manifest_digest: sha256_text("toolchain"),
+        target_contract_digest: sha256_text("target"),
+        isa_tuning_manifest_digest: sha256_text("isa"),
+        codegen_options_manifest_digest: sha256_text("options"),
+        pass_pipeline_manifest_digest: sha256_text("passes"),
+        object_format: format, object_semantics_schema: 1,
+        required_capabilities_manifest_digest: sha256_text("capabilities"))
+
+fn validation_action(scope_digest: text) -> NativeObjectActionV1:
+    NativeObjectActionV1(
+        scope_digest: scope_digest, module_id: "demo.main",
+        frozen_source_digest: sha256_text("source"),
+        mir_digest: sha256_text("mir"), storage_digest: sha256_text("storage"),
+        module_witness_digest: sha256_text("witness"),
+        observed_inputs_manifest_digest: sha256_text("observed"))
+
+fn validation_decision(scope: NativeObjectScopeV1):
+    val action = validation_action(native_object_scope_digest_v1(scope))
+    native_object_identity_decide_v1(
+        "/tmp/native-object-validation-v1",
+        Some(native_object_scope_encode_v1(scope)),
+        Some(native_object_action_encode_v1(action)), "nonce", "unit")
+
+describe "native object publication validation v1":
+    it "rejects every malformed supplied record before missing fallback":
+        val scope = validation_scope()
+        val action = validation_action(native_object_scope_digest_v1(scope))
+
+        val malformed_scope = native_object_identity_decide_v1(
+            "/tmp/native-object-validation-v1", Some([1u8, 2u8]), nil,
+            "nonce", "unit")
+        expect(malformed_scope.kind).to_equal(
+            NativeObjectIdentityDecisionKindV1.InvalidInput)
+        expect(malformed_scope.reason).to_equal("malformed NOS1 input")
+
+        val malformed_action = native_object_identity_decide_v1(
+            "/tmp/native-object-validation-v1", nil, Some([1u8, 2u8]),
+            "nonce", "unit")
+        expect(malformed_action.kind).to_equal(
+            NativeObjectIdentityDecisionKindV1.InvalidInput)
+        expect(malformed_action.reason).to_equal("malformed NOA1 input")
+
+        val valid_scope_malformed_action = native_object_identity_decide_v1(
+            "/tmp/native-object-validation-v1",
+            Some(native_object_scope_encode_v1(scope)), Some([1u8, 2u8]),
+            "nonce", "unit")
+        expect(valid_scope_malformed_action.kind).to_equal(
+            NativeObjectIdentityDecisionKindV1.InvalidInput)
+        expect(valid_scope_malformed_action.object_format).to_equal("elf")
+
+        val valid_action_missing_scope = native_object_identity_decide_v1(
+            "/tmp/native-object-validation-v1", nil,
+            Some(native_object_action_encode_v1(action)), "nonce", "unit")
+        expect(valid_action_missing_scope.kind).to_equal(
+            NativeObjectIdentityDecisionKindV1.Private)
+
+    it "preserves private fallback and carries only a validated NOS1 format":
+        val scope = validation_scope()
+        val action = validation_action(native_object_scope_digest_v1(scope))
+        val valid_scope_missing_action = native_object_identity_decide_v1(
+            "/tmp/native-object-validation-v1",
+            Some(native_object_scope_encode_v1(scope)), nil, "nonce", "unit")
+        expect(valid_scope_missing_action.kind).to_equal(
+            NativeObjectIdentityDecisionKindV1.Private)
+        expect(valid_scope_missing_action.object_format).to_equal("elf")
+
+        val both_missing = native_object_identity_decide_v1(
+            "/tmp/native-object-validation-v1", nil, nil, "nonce", "unit")
+        expect(both_missing.kind).to_equal(NativeObjectIdentityDecisionKindV1.Private)
+        expect(both_missing.object_format).to_equal("")
+
+        val shared = validation_decision(scope)
+        expect(shared.kind).to_equal(NativeObjectIdentityDecisionKindV1.Shared)
+        expect(shared.object_format).to_equal("elf")
+
+        val missing_scope_valid_action = native_object_identity_decide_v1(
+            "/tmp/native-object-validation-v1", nil,
+            Some(native_object_action_encode_v1(action)), "nonce", "unit")
+        expect(missing_scope_valid_action.object_format).to_equal("")
+
+    it "requires NOS1 caller and staged byte formats to agree":
+        val identity = validation_decision(validation_scope("elf"))
+        val wasm_bytes = [0u8, 0x61u8, 0x73u8, 0x6Du8, 1u8]
+        val elf_bytes = [0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 1u8]
+        val receipt = sha256_text("receipt")
+
+        expect(native_object_prepare_result_v1(
+            identity, wasm_bytes, "wasm", receipt).is_err()).to_equal(true)
+        expect(native_object_prepare_result_v1(
+            identity, wasm_bytes, "elf", receipt).is_err()).to_equal(true)
+
+        val prepared = native_object_prepare_result_v1(
+            identity, elf_bytes, "elf", receipt).ok().unwrap()
+        expect(prepared.object_format).to_equal(identity.object_format)

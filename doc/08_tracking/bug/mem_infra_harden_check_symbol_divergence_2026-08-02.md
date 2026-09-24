@@ -1,4 +1,9 @@
 # `rt_mem_harden_check` silently returns 0 under cranelift — the check symbol diverges per backend
+## Closed 2026-09-16 — Status FIXED, re-verified 2026-08-17; alias registered, cranelift silent-0 gone
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-02
 - Status: FIXED
@@ -112,3 +117,4 @@ program (`semantic: unknown extern function`) and the native linker fails loudly
 too (`undefined symbol`), so cranelift is the only backend that turns a missing
 symbol into a plausible-looking value. Any extern whose "nothing wrong" answer is
 0, false, or empty is silently unsafe on cranelift for this reason.
+

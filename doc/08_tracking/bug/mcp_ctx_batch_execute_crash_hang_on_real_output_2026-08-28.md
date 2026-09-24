@@ -1,4 +1,9 @@
 # `simple_ctx_batch_execute` crashes (`StrBytes`) or hangs on real command output
+## Closed 2026-09-16 — Status FIXED (this change); per-char loops removed, reproduce spec cited
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-28 · **Status:** FIXED (this change) · **Found by:** token A/B lane (`mcp_token_ab_REPORT.md` §2.2/§2.3)
 
@@ -75,3 +80,4 @@ including against the same 9,729-chunk store. This is NOT the fixed defect
 (no crash, no CPU burn, child exited): it looks like a child-reaping /
 readers-finished race in the runtime wait loop under a loaded box. Filed here
 as residual; needs its own reproduce effort at the seed level.
+

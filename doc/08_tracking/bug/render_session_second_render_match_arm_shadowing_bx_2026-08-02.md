@@ -1,4 +1,9 @@
 # Second full-layout render on one SimpleWebRenderSession dies: "WebLayoutManager has no field bx"
+## Closed 2026-09-16 — ... one session (documented in-spec). ## Fix directions Either rename the arm binding (cheap,
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** browser_engine render session / interpreter match-arm binding
 
@@ -31,3 +36,4 @@ Either rename the arm binding (cheap, local, unblocks multi-render sessions
 now) or fix the interpreter's arm-binding scope leak (family fix; several
 prior instances). Renaming in `simple_web_render_session.spl` should be done
 regardless — same-named arm bindings over live outers are a known trap.
+

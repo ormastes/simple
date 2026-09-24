@@ -1,4 +1,8 @@
 # `.?` cannot distinguish an ABSENT key from a key present with an empty `text`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** CLOSED — NOT A DEFECT. Misdiagnosis: `.?` folding empty
 `text`/`[T]`/`{K:V}` into `nil` is DOCUMENTED, INTENTIONAL behavior, consistent
@@ -144,3 +148,4 @@ numeric `0` and `false`." Superseded: `.?` returning `nil` for empty
 changed. Numeric `0` / `false` are already verified always-present, matching
 spec (`syntax_quick_reference.md:570-571`) and the `expr.rs` `_ => true`
 fallthrough.
+

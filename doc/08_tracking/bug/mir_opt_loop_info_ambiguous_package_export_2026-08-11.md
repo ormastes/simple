@@ -1,4 +1,8 @@
 # MIR optimizer `LoopInfo` ambiguous package export
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -40,3 +44,4 @@ Regression coverage:
 The regression imports both types through the real package surface, which makes
 package resolution itself part of the check, and separately verifies that the
 vectorizer declaration no longer provides the bare `LoopInfo` name.
+

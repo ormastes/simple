@@ -1,4 +1,8 @@
 # CLI Global Flags Check Timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -19,3 +23,4 @@ Open.
 ## Next Step
 
 Minimize the backend-branch repro, then fix the parser/checker path or replace the manual flag parser with the already-planned `cli` declaration once that language support is available.
+

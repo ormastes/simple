@@ -1,4 +1,8 @@
 # Native-project aliased `src.std.platform` facade owner loss
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-03
 - Status: open
@@ -73,3 +77,4 @@ leading `src.std` is supported import syntax that native-project must normalize,
 or whether both filesystem variants should use their direct family platform
 facades. Either choice must keep exact owner selection and the strict runtime
 regressions above.
+

@@ -1,4 +1,9 @@
 # Bug: Vulkan/SPIR-V backend struct+function type-key cache emits nothing
+## Closed 2026-09-16 — Status FIXED; repro example now passes, root cause confirmed fixed in tree
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 (expected cached `OpTypeStruct`/`OpTypeFunction` declarations, got `[]`)
 
 **Status:** FIXED — confirmed resolved 2026-08-06 (already fixed by an
@@ -119,3 +124,4 @@ verified the fix is real (not a weakened assertion: the spec still asserts
 the exact expected 2-line SPIR-V text and exact `%N` numbering) and that the
 whole spec file has no regression attributable to this path (39/42 passing,
 remaining 3 failures unrelated per above).
+

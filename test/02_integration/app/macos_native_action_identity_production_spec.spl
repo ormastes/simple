@@ -1,0 +1,138 @@
+# @req MBH-REQ-001 MBH-REQ-002 MBH-REQ-004 MBH-REQ-009
+use std.spec.*
+use std.spec.step
+use app.io.cli_compile.{cli_native_build}
+use app.io.env_ops.{env_get, env_set}
+use app.io.sysinfo_ops.{getpid}
+use std.io.{file_exists, file_read, file_write}
+use std.io_runtime.{cwd, dir_create_all}
+use app.build.targets.action_identity.{
+    parse_native_action_input_receipt_v1, load_current_native_action_input_v1
+}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn darwin_build_args(source: text, output: text, cache: text,
+        runtime_dir: text = "") -> [text]:
+    var args = [
+        "native-build", "--backend=llvm", "--entry-closure",
+        "--target=aarch64-apple-darwin", "--cache-dir=" + cache,
+        "--entry=" + source, "--output=" + output
+    ]
+    if runtime_dir != "": args.push("--runtime-path=" + runtime_dir)
+    args
+
+fn thin_macho64_header(cpu: u8) -> [u8]:
+    [
+        0xcfu8, 0xfau8, 0xedu8, 0xfeu8, cpu, 0x00u8, 0x00u8, 0x01u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+    ]
+
+describe "native-build Darwin action identity production path":
+    slow_it "publishes and admits the real CLI writer output, then rejects a changed SDK":
+        step("Run native-build through its production success funnel with explicit Darwin inputs")
+        val root = "build/tmp/macos_native_action_identity_{getpid()}"
+        val cache = root + "/cache"
+        val source = root + "/main.spl"
+        val output = root + "/main"
+        expect(dir_create_all(root)).to_be(true)
+        expect(file_write(source, "fn main(): 0\n")).to_be(true)
+        val old_sdk = env_get("SDKROOT") ?? ""
+        val old_deployment = env_get("MACOSX_DEPLOYMENT_TARGET") ?? ""
+        val runtime_dir = env_get("SIMPLE_RUNTIME_PATH") ?? ""
+        expect(old_sdk == "").to_equal(false)
+        expect(runtime_dir == "").to_equal(false)
+        expect(file_exists(runtime_dir + "/libsimple_native_all.a")).to_be(true)
+        env_set("MACOSX_DEPLOYMENT_TARGET", "13.0")
+        val result = cli_native_build(darwin_build_args(source, output, cache, runtime_dir))
+        env_set("MACOSX_DEPLOYMENT_TARGET", old_deployment)
+        expect(result).to_equal(0)
+        expect(file_exists(output)).to_be(true)
+        val receipt_path = cache + "/inputs/current.receipt"
+        expect(file_exists(receipt_path)).to_be(true)
+        val produced = parse_native_action_input_receipt_v1(file_read(receipt_path))
+        expect(produced.errors.len()).to_equal(0)
+        expect(produced.target_triple).to_equal("aarch64-apple-darwin")
+        expect(produced.object_format).to_equal("mach-o")
+        expect(produced.linker_policy).to_equal("darwin-dead-strip-v1")
+        expect(produced.linker_tool_identity.len()).to_equal(64)
+        expect(file_exists(cache + "/native_link_tool_identity.receipt")).to_be(true)
+        val runtime_manifest = file_read(cache + "/native_runtime_provider_manifest.receipt")
+        expect(runtime_manifest).to_contain(
+            "|path=" + (runtime_dir + "/libsimple_native_all.a").len().to_text() +
+            ":" + runtime_dir + "/libsimple_native_all.a|digest="
+        )
+        expect(runtime_manifest).to_contain("member=")
+        expect(runtime_manifest).to_contain("content-identity=" + produced.runtime_artifact_digest)
+        expect(runtime_manifest.contains(
+            "artifact=" + runtime_dir.len().to_text() + ":" + runtime_dir + "|digest="
+        )).to_equal(false)
+
+        step("Load that production receipt through the reuse admission boundary")
+        val admitted = load_current_native_action_input_v1(
+            cwd(), cache, produced.target, "native", produced.backend,
+            produced.entry, "binary", produced.tool_artifact_digest,
+            produced.target_triple, produced.architecture,
+            produced.deployment_target, produced.sdk_identity,
+            produced.runtime_provider_receipt, produced.runtime_artifact_digest,
+            old_sdk, ""
+        )
+        expect(admitted.errors.len()).to_equal(0)
+        val wrong_sdk = load_current_native_action_input_v1(
+            cwd(), cache, produced.target, "native", produced.backend,
+            produced.entry, "binary", produced.tool_artifact_digest,
+            produced.target_triple, produced.architecture,
+            produced.deployment_target,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            produced.runtime_provider_receipt, produced.runtime_artifact_digest,
+            old_sdk, ""
+        )
+        expect(wrong_sdk.errors[0]).to_equal("target-identity-error: sdk-identity-mismatch")
+
+    slow_it "rejects a non-Mach-O runtime artifact through the production success funnel":
+        step("Build a Darwin object with an explicit invalid runtime provider artifact")
+        val root = "build/tmp/macos_native_action_non_macho_{getpid()}"
+        val cache = root + "/cache"
+        val source = root + "/main.spl"
+        val provider = root + "/not-provider.o"
+        expect(dir_create_all(root)).to_be(true)
+        expect(file_write(source, "fn main(): 0\n")).to_be(true)
+        expect(file_write(provider, "not-mach-o\n")).to_be(true)
+        val old_sdk = env_get("SDKROOT") ?? ""
+        val old_deployment = env_get("MACOSX_DEPLOYMENT_TARGET") ?? ""
+        val old_link_objects = env_get("SIMPLE_LINK_OBJECTS") ?? ""
+        expect(old_sdk == "").to_equal(false)
+        env_set("MACOSX_DEPLOYMENT_TARGET", "13.0")
+        env_set("SIMPLE_LINK_OBJECTS", provider)
+        val result = cli_native_build(darwin_build_args(source, root + "/main", cache))
+        env_set("MACOSX_DEPLOYMENT_TARGET", old_deployment)
+        env_set("SIMPLE_LINK_OBJECTS", old_link_objects)
+        expect(result).to_equal(1)
+        expect(file_read(cache + "/native_runtime_provider_manifest.failure")).to_contain(
+            "reason=provider-artifact-not-mach-o:" + provider
+        )
+
+    slow_it "rejects a runtime artifact with the wrong Mach-O slice":
+        step("Build an arm64 Darwin object while supplying an x86_64 runtime provider")
+        val root = "build/tmp/macos_native_action_wrong_slice_{getpid()}"
+        val cache = root + "/cache"
+        val source = root + "/main.spl"
+        val provider = root + "/wrong-slice-provider.o"
+        expect(dir_create_all(root)).to_be(true)
+        expect(file_write(source, "fn main(): 0\n")).to_be(true)
+        expect(rt_file_write_bytes(provider, thin_macho64_header(0x07u8))).to_be(true)
+        val old_sdk = env_get("SDKROOT") ?? ""
+        val old_deployment = env_get("MACOSX_DEPLOYMENT_TARGET") ?? ""
+        val old_link_objects = env_get("SIMPLE_LINK_OBJECTS") ?? ""
+        expect(old_sdk == "").to_equal(false)
+        env_set("MACOSX_DEPLOYMENT_TARGET", "13.0")
+        env_set("SIMPLE_LINK_OBJECTS", provider)
+        val result = cli_native_build(darwin_build_args(source, root + "/main", cache))
+        env_set("MACOSX_DEPLOYMENT_TARGET", old_deployment)
+        env_set("SIMPLE_LINK_OBJECTS", old_link_objects)
+        expect(result).to_equal(1)
+        expect(file_read(cache + "/native_runtime_provider_manifest.failure")).to_contain(
+            "reason=provider-artifact-architecture-mismatch:" + provider
+        )

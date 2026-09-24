@@ -1,5 +1,48 @@
 # BUG: the `parse_*` text-method family silently strips the Option on JIT and native
 
+## Re-measured 2026-09-13 — BOTH silent-wrong-answer modes are GONE; only the representation divergence remains
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows), same
+`SIMPLE_EXECUTION_MODE` knob. Program:
+
+```
+val a = "12".parse_int()
+val b = "abc".parse_int()
+val c = "3".parse_int() ?? -1
+print "p1={a} p2={b} p3={c}"
+```
+
+| | JIT (default) | interpret |
+|---|---|---|
+| `"12".parse_int()` | `12` | `Option::Some(12)` |
+| `"abc".parse_int()` | **`nil`** | `Option::None` |
+| `"3".parse_int() ?? -1` | **`3`** | `3` |
+
+Against the two failure modes this entry was filed on:
+
+- **"Absence → 0" — FIXED.** A failed parse now yields `nil` on the JIT, not `0`.
+  It is no longer indistinguishable from a successful parse of `"0"`.
+- **"Present 3 → absent" — FIXED.** `"3".parse_int() ?? -1` gives `3`, not `-1`.
+  This follows from the `??` sentinel fix recorded in
+  `coalesce_raw_i64_sentinel_collision_2026-08-02.md` (re-verified closed the
+  same day), which removed the `TAG_SPECIAL == 3` collision that made this the
+  "more dangerous and invisible" mode.
+
+**What is still true:** the JIT prints `12` / `nil` where the interpreter prints
+`Option::Some(12)` / `Option::None`. The Option wrapper is still stripped, so
+the two lanes still disagree on the *type* of the result and any code that
+pattern-matches the Option or calls a method on it will behave differently
+across lanes. That is a real cross-lane divergence and the staged migration
+below is still the right fix.
+
+**Severity should be downgraded**, though: this is no longer a silent wrong
+*value*, it is a wrong *representation* that presents as `nil` — which fails
+visibly at the next use — rather than as a plausible-looking `0`. Anyone
+scheduling the staged migration should reprice it accordingly.
+
+Native column not re-measured (no `compile --native` run in this pass).
+
+
 - **Status:** OPEN — measured, staged migration designed, stage 0 (measurement) landed
 - **Filed:** 2026-08-02
 - **Base sha measured:** `a788a2a3e5c68ef1736401428397b5bf950d3a67`
@@ -275,3 +318,31 @@ PARSE_BAD_IS_NONE=true    # "zz".parse_i64().is_none()
 (identical on interpret and jit). Probe `_scratch/p_opt.spl`. The **native**
 half of this record's title is UNTESTED: `native-build` is unreachable on this
 host, failing with `native-capsule-receipt-invalid` for the unmodified seed too.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: JIT/native seed defect with a staged migration plan already designed; fix surface is the Rust seed. No change made.
+
+## Cross-platform confirmation 2026-09-18 (Linux aarch64)
+
+The 2026-09-13 re-measurement above was taken on a Windows seed. Repeating it on
+Linux aarch64 with the binary redeployed today (`308de6af84db5c26e2c0`, built
+from `origin/main`) gives the same answers, so that pass was not a
+platform-specific or single-build artifact:
+
+| | interpret | JIT (default) |
+|---|---|---|
+| `"12".parse_i64()` | `Option::Some(12)` | `12` |
+| `"abc".parse_i64()` | `Option::None` | `nil` |
+| `"3".parse_i64() ?? -1` | `3` | `3` |
+| `"2.5".parse_f64()` | `Option::Some(2.5)` | `2.5` |
+
+- Both silent-wrong-**value** modes stay FIXED on this platform too: a failed
+  parse is `nil`, not `0`, and a present `3` survives `??`.
+- The representation divergence stands, and the fourth row extends it beyond
+  `parse_i64`: **`parse_f64` strips the Option the same way**, which the earlier
+  table did not cover. Any staged migration should treat the family as a family.
+
+Native column still not re-measured: `native-build` on this host is blocked
+before codegen by the persistent package index (`scv-authority-missing`), so a
+native row would be manufactured rather than observed.

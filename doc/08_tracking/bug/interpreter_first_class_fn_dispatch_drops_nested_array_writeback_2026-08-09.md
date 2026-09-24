@@ -227,3 +227,22 @@ consistent with the original investigation's conclusion not to attempt a
 partial/wrong fix. Status unchanged: **OPEN — ARCHITECTURAL (Rust seed
 interpreter, no pure-Simple first-class-fn dispatch implementation exists to
 fix instead, verified 2026-08-10)**.
+
+## Re-check 2026-09-13
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared main worktree), sha256 `3d120a6f9ab5`, `Simple Language v1.0.0-rc.1`.
+
+Reproduced the exact filed program verbatim (including the bare top-level
+`dispatch(route_create)` / `dispatch(route_execute)` calls and the
+old-style `print "..."` statement, not just an equivalent `fn main()`
+wrapper):
+
+```
+SIMPLE_EXECUTION_MODE=interpreter bin/simple run <probe>
+-> events_len=2
+```
+
+Expected 2, filed as observing 1 (one write silently dropped). Now
+correctly 2 — both `push_event` writes land. Closing as not reproducible;
+if this regresses again a fresh report should include the current binary
+sha and a bisection range.

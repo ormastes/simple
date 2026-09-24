@@ -1,4 +1,8 @@
 # Phase-1 entry closure never loads a facade's re-export OWNER modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
 - Status: OPEN (compiler fix not landed — see "Why not fixed here")
@@ -116,3 +120,4 @@ Nothing platform-specific: this is the shared driver closure walk. Both landed
 data fixes are stdlib content with no platform code, and the interpreter lane
 was re-verified after each (`bin/simple run src/app/devhub/main.spl --version`
 -> `devhub 0.1.0`).
+

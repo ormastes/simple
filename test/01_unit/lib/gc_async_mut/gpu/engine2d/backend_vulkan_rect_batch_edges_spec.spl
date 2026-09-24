@@ -1,0 +1,106 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing `draw_rect_list_filled`
+(`doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md`).
+The sibling file proves the happy path pixel-for-pixel; this one asks whether
+the batch still behaves at the edges the happy path never touches: an empty
+list, a malformed pair, rects that OVERLAP (so painter order is observable), and
+a rect that a live clip must cut.
+## Operator workflow
+`SIMPLE_LIB=src VK_ICD_FILENAMES=<icd>.json SIMPLE_EXECUTION_MODE=interpreter \
+ SIMPLE_TIMEOUT_SECONDS=0 src/compiler_rust/target/bootstrap/simple run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_edges_spec.spl`
+## Compatibility and limitations
+Requires a real Vulkan device and FAILS rather than skips without one, for the
+same reason as the sibling: a CPU fallback would paint plausible pixels and
+prove nothing about the batch lane. The clip scenario asserts the clipped-out
+region keeps the CLEAR colour; it does not assert the SPIR-V kernel's edge
+rounding, which the single-rect path already owns.
+## Verification guidance and troubleshooting
+Painter order is the load-bearing property: two overlapping rects are batched
+LAST-WINS, so the overlap pixel must carry the second colour. If it carries the
+first, the batch loop is iterating in the wrong direction or the command buffer
+is not preserving record order — that is the exact sabotage recorded in the bug
+file. A failure in the empty/malformed scenarios means the batch painted
+something for input that specifies nothing, which would let a length bug paint a
+guessed prefix instead of failing loudly.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md
+# @manual_section: vulkan_rect_batch_edges
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 10%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend.spl 10%
+# @tag: unit, gpu, engine2d, vulkan, batching
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val FB: i32 = 128
+val CLEAR: u32 = 0xFF101010u32
+val RED: u32 = 0xFFCC3333u32
+val BLUE: u32 = 0xFF3366CCu32
+
+fn px_at(pixels: [u32], x: i64, y: i64) -> u32:
+    val i = y * FB.to_i64() + x
+    if i < 0 or i >= pixels.len():
+        return 0u32
+    pixels[i]
+
+fn fresh() -> Engine2D:
+    val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+    e.clear(CLEAR)
+    e
+
+fn finish(e: Engine2D) -> [u32]:
+    e.finalize_compute_frame_no_readback()
+    val px = e.read_pixels_with_source().pixels
+    e.shutdown()
+    px
+
+describe "The Vulkan rect batch holds at its edges":
+
+    it "leaves the framebuffer untouched for an empty rect list":
+        # GENERALIZING. Zero rects is a legitimate frame (nothing to draw), not
+        # an error, and must not disturb the clear.
+        val e = fresh()
+        e.draw_rect_list_filled([], [])
+        val px = finish(e)
+        expect(px_at(px, 10, 10)).to_equal(CLEAR)
+        expect(px_at(px, 64, 64)).to_equal(CLEAR)
+
+    it "paints nothing at all when the packed lengths disagree":
+        # GENERALIZING. `rects.len()` must be exactly 4x `colors.len()`. A
+        # mismatch is a caller bug; painting the consistent PREFIX would hide it
+        # behind a picture that looks nearly right, so the lane paints nothing.
+        val e = fresh()
+        # Three colours but only two rects' worth of geometry.
+        e.draw_rect_list_filled([0, 0, 20, 20, 30, 30, 20, 20], [RED, BLUE, RED])
+        val px = finish(e)
+        expect(px_at(px, 10, 10)).to_equal(CLEAR)
+        expect(px_at(px, 40, 40)).to_equal(CLEAR)
+
+    it "resolves overlapping rects in painter order, last one winning":
+        # GENERALIZING, and the order oracle. RED covers 0,0..40,40; BLUE covers
+        # 20,20..60,60 and is SECOND, so the shared quadrant must be BLUE while
+        # each rect keeps its own exclusive corner. Reversing the batch loop
+        # turns the overlap pixel RED -- the sabotage in the bug record.
+        val e = fresh()
+        e.draw_rect_list_filled([0, 0, 40, 40, 20, 20, 40, 40], [RED, BLUE])
+        val px = finish(e)
+        expect(px_at(px, 10, 10)).to_equal(RED)
+        expect(px_at(px, 30, 30)).to_equal(BLUE)
+        expect(px_at(px, 50, 50)).to_equal(BLUE)
+        expect(px_at(px, 100, 100)).to_equal(CLEAR)
+
+    it "applies an armed clip to every rect in the batch":
+        # GENERALIZING. Clip is frame state hoisted OUT of the per-rect loop as
+        # a cost optimisation, so it is exactly the thing a batch could drop.
+        # With the clip armed to 0,0..32,32 the part of the rect beyond x=32
+        # must keep the clear colour while the part inside is painted.
+        val e = fresh()
+        e.set_clip(0, 0, 32, 32)
+        e.draw_rect_list_filled([0, 0, 64, 64], [RED])
+        e.clear_clip()
+        val px = finish(e)
+        expect(px_at(px, 10, 10)).to_equal(RED)
+        expect(px_at(px, 48, 10)).to_equal(CLEAR)
+        expect(px_at(px, 10, 48)).to_equal(CLEAR)

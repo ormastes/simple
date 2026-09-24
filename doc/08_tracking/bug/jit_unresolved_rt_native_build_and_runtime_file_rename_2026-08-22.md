@@ -1,4 +1,8 @@
 # JIT de-JITs whole stage1: `rt_native_build` + `runtime_file_rename` unresolved (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED
 **Class:** unresolved `Linkage::Import` de-JITs the whole module — the same
@@ -297,3 +301,4 @@ successfully rewritten. Its write (`test_runner_main.spl:1193`) sits under
 report with no diagnostic. That silent skip is its own defect and needs its own
 fix; a swallowed write failure is exactly how this whole situation stayed
 invisible for a day.
+

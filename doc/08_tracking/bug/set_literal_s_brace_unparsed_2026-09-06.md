@@ -1,4 +1,8 @@
 # `s{...}` set literal is unparsed — seed has no production, self-hosted frontend has half
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Status:** OPEN (feature gap, not a defect in landed code)
@@ -89,3 +93,4 @@ where the lexer is already in string context.
   its `Map<T, bool>` index needed `T: Hash` and `Map` aborts on `i64` keys.
   Membership is now an O(n) scan of `items`. Restoring a hash index depends on
   fixing `Map` for primitive keys, which is a separate open item.
+

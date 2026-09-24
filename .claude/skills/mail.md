@@ -33,7 +33,7 @@ Argument: `$ARGUMENTS`
 ### Route
 
 **`setup`:**
-Read `tools/claude-plugin/repo-and-pull-req/skills/mail/mail_setup.md` and follow.
+Read `tools/claude-plugin/repo-and-pull-req/skills/mail_setup/SKILL.md` and follow.
 
 **`inbox`:**
 Run `bin/mail inbox` with any extra flags.
@@ -42,7 +42,7 @@ Run `bin/mail inbox` with any extra flags.
 Run `bin/mail read <uid>`.
 
 **`send`:**
-Read and follow `tools/claude-plugin/repo-and-pull-req/skills/mail/mail_send.md`.
+Read and follow `tools/claude-plugin/repo-and-pull-req/skills/mail_send/SKILL.md`.
 
 **`reply <uid>`:**
 Run `bin/mail reply <uid>` (or follow mail_send.md for AI-assisted reply).
@@ -51,10 +51,10 @@ Run `bin/mail reply <uid>` (or follow mail_send.md for AI-assisted reply).
 Run `bin/mail search <query>`.
 
 **`review`:**
-Read and follow `tools/claude-plugin/repo-and-pull-req/skills/mail/mail_review.md`.
+Read and follow `tools/claude-plugin/repo-and-pull-req/skills/mail_review/SKILL.md`.
 
 **`notify <pr#>`:**
-Read and follow `tools/claude-plugin/repo-and-pull-req/skills/mail/mail_notify.md`.
+Read and follow `tools/claude-plugin/repo-and-pull-req/skills/mail_notify/SKILL.md`.
 
 ## Prerequisite Checks
 

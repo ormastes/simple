@@ -4,12 +4,20 @@
 
 ## Status and scope
 
+Mutation authority addendum: the local/untracked historical
+`cache_writer_mutation_scope.md` is unavailable as repository evidence. The
+essential proposed contract is stated here: only the private lock owner may
+consume a verified `CacheCommitFrameV1`, durably journal it, and then return a
+`CacheCommitReceiptV1`; readiness, caller-filled receipts, and the legacy
+`result_manifest_put` sequence confer no authority. The host capability remains
+unavailable, so this model does not enable publication.
+
 Proposed architecture for the selected requirement bundle **B + S1 + D1 + A1 + V1 + L1 + C1 + NFR2** in:
 
 - `doc/02_requirements/feature/compiler_semantic_cache_daemon_virtual_summary.md`
 - `doc/02_requirements/nfr/compiler_semantic_cache_daemon_virtual_summary.md`
 
-The cache is a verified content-addressed store (CAS). A checksummed journal is authority for admitted action/root mappings; PureDatabase is a rebuildable projection. A per-user daemon is an optimization, never a correctness dependency. Compilation consumes a frozen snapshot, regardless of daemon availability. Virtual `_tldr.spl` summaries and stable-index ASTs are reusable across branches and worktrees when their complete semantic identities match.
+The cache is a verified content-addressed store (CAS). A checksummed journal is authority for admitted action/root mappings; PureDatabase is a rebuildable projection. A per-user daemon is an optimization, never a correctness dependency. Compilation consumes a frozen snapshot, regardless of daemon availability. Physical indexed `.tld` summaries, their compatibility `_tldr.spl` renderings, and stable-index ASTs are reusable across branches and worktrees when their complete semantic identities match.
 
 ## Current-state map
 
@@ -19,6 +27,7 @@ The design extends these real owners rather than adding parallel implementations
 |---|---|---|
 | Driver cache | `src/compiler/80.driver/cache/` | CAS, action keys, leases, GC, promotion and shadow-mode pieces exist; no single coherent snapshot/journal/daemon authority yet. |
 | Frontend cache | `src/compiler/10.frontend/frontend_parse_cache.spl` | Parse reuse exists but is not yet the cross-worktree `FileAstV1` contract. |
+| Physical metadata | Resolver `__init__.spl` handling and `src/compiler/80.driver/incremental_builder.spl` | No production `.tld`/`__init__.tld` reader or persisted semantic `.rr` projection is admitted yet; current incremental extraction is not complete for trait, macro, and aspect semantics. The three-payload path below is a target contract, not current measured behavior. |
 | HIR/code cache | `src/compiler/80.driver/driver_hir_cache.spl`, `src/compiler/80.driver/cache/persistent_code_cache.spl` | Phase-local caches; must consume the shared snapshot/read-set identity. |
 | AOP cache | `src/compiler/85.mdsoc/aop_cache/` | Group manifests and invalidation exist; must become a semantic read-set input rather than hidden ambient state. |
 | MDSOC | `src/compiler/85.mdsoc/types/`, `src/compiler/85.mdsoc/construct_types/construct_capsule.spl` | Virtual-capsule vocabulary exists; startup capsule admission/effect contracts are incomplete. |
@@ -175,6 +184,15 @@ Transforms are deterministic compile-time graph rewrites whose input and output 
 
 - `DaemonCacheAdapter` and `InProcessCacheAdapter` sit behind the eager `CacheGatewayV1` client; identical requests must yield byte/diagnostic-identical results. Neither exposes `CacheWriterV1`.
 - One cache-owned `VirtualSourceStoreAdapter` alone accesses `SummaryStoreV1` and implements `VirtualSourceStoreV1`. Simple compiler/CLI, MCP, LSP MCP and SPipe receive only request/result DTOs; their transport adapters cannot access AST/summary production or storage.
+- LSP semantic queries use one lazily started, sequential worker per MCP session,
+  not one compiler process per request. The first worker profile rereads declared
+  query inputs for every request and reuses only process/module startup state;
+  it does not cache cross-file answers. Requests bind schema, request ID,
+  canonical workspace root, execution generation and options. Responses are
+  length-framed and byte-bounded. Timeout, malformed/flooding output, EOF, or
+  worker death retires and reaps the worker before at most one bounded one-shot
+  fallback. Final answer caching is admitted only after the normal snapshot,
+  membership, absence-witness and editor-overlay closure is complete.
 - `InterpreterTaskAdapter`, `LoaderTaskAdapter` and `NativeTaskAdapter` consume the same snapshot/common nodes while keeping execution state private.
 - Weaving produces a signed/digested `StartupPlanV1` receipt. The candidate generation is invisible until all manifests, effects and closure gates validate; the previous generation remains authoritative.
 
@@ -290,3 +308,66 @@ Compute median and 20%-trimmed mean of paired ratios. With CV <= 5%, fail only w
 - Shared interface names: exactly those listed in “Shared interface contracts,” including the selected-requirement `VirtualSourceStoreV1` facade.
 - Merge owner: compiler cache-manager integration owner.
 - Final reviewer: independent normal/highest-capability architecture and verification reviewer.
+
+## Metadata-first portable compile extension (2026-09-08)
+
+This extension adopts physical metadata and a portable compiled-object boundary without creating a second compiler, CAS, database authority, or import system.
+
+```text
+frozen snapshot
+  -> generation catalog -> package/__init__.tld
+  -> selected module .tld + exceptional body refs
+  -> portable HIR/common IR -> verified base .sio
+  -> typed advice calls -> common optimization -> verified composed .sio
+  -> target-qualified MIR/backend/native or device artifact
+```
+
+### Physical metadata boundary
+
+`PublicSummaryV1` remains the canonical semantic record. A physical `.tld` is its single self-indexed projection payload; `simple tld show` and the existing `simple-summary://.../_tldr.spl` view are readable renderings, not additional compiler inputs or authorities. `__init__.tld` names package membership, effective aspect/trait/macro/extension scope roots, and selected module-summary records. The compiler opens the generation catalog and package initializer once, then lazily decodes only selected sections and exceptional bodies. It does not recursively scan `.tld` files or reparse dependency source after the summary closure validates.
+
+One versioned projection contract owns `PublicSummaryV1 -> module .tld -> simple-summary://.../_tldr.spl` and `PackageInitTldV1 -> __init__.tld`. Canonical binary summary bytes remain authoritative; readable projections preserve unknown optional fields on lossless re-emission, reject unknown mandatory semantics, and never become a downgrade authority. Golden vectors must round-trip declarations, membership, independent scope roots, and initializer order before a schema is admitted.
+
+Metadata-first loading does not suppress language initialization semantics. `__init__.tld` carries ordered initializer contracts and immutable body refs; the selected execution task loads and runs every required initializer through its normal owner. Zero private-body reads is a check/query fast-path property, not permission to omit execution effects.
+
+`.rr` is a generation-bound, indexed reverse projection derived from ordered `SemanticQueryReadManifestV1` edges. The existing `SemanticReadSetV1` remains the authority for external-effect reads and is not reinterpreted. The query manifest records producer/consumer query keys, facet/dimension, read ordinal, membership/absence evidence, partition, and coverage. `.rr` supports invalidation explanation and impact lookup, but is not an input to producer semantic identity and is not required on an ordinary hit. The outer generation manifest binds summary, scope, reverse-reference, portable-object, target-artifact, and diagnostic roots without digest cycles. New consumers update reverse projections without changing producer summaries.
+
+#### Qualified three-payload compile path
+
+The `three_payload_compile_v2` strict profile begins only after the catalog, frozen inventory, and generation pin are validated, with `ThreePayloadClosureSealV2` binding the closure. It is an **at-most-three data-payload** contract: a warm edit decodes the changed module `.spl`, the prior-generation module `.tld` used for facet cutoff, and the sealed effective package `__init__.tld`; a cold/new-file compile has two because the prior `.tld` does not exist yet. `ThreePayloadCompileV1` remains a compatibility/model surface and cannot satisfy this strict profile. Control-plane reads are measured separately. The prior header is an output, never a self-key. The sealed initializer binds complete membership, candidate-set and absence witnesses for parents, imports/reexports, traits/impls, extensions/overloads, macros/CTFE, templates, static aspects and initializer order. When a required imported facet or exceptional body is not an indexed section of one of these payloads, the profile returns a typed fallback reason and performs the explicit additional read. The count ends at frontend semantic/common-object production; target lowering, linking, and runtime initialization consume separately counted target artifacts, objects, and libraries.
+
+For this profile, each physical `.tld` is one bounded indexed container whose canonical summary/scope records and optional embedded dependency sections are verified directly; its human-readable presentation is an inspection rendering of those same records, not a second file or authority. Packing never duplicates semantic ownership: sections retain their original `PublicSummaryV1`, `PackageInitTldV1`, body and manifest identities. A projection that only points to external canonical objects is valid generally but is not eligible for the exact three-payload claim.
+
+Three-payload eligibility is closure-based, not source-folder locality. Referenced aspects, macros, traits, impls, extensions, templates, and imports may originate elsewhere, but every consumed facet, positive/negative resolution witness, candidate/absence root, activation/configuration value, and required exceptional body must be present as an indexed section of the admitted module/package projection. Any external semantic-object open selects a typed multi-payload fallback and cannot be reported as a three-payload hit.
+
+The existing catalog/codec owner produces `ThreePayloadClosureSealV2` and private `PreparedThreePayloadV2` by enumerating the required logical closure, packing canonical indexed sections, validating inventory/witness/scope completeness, and enforcing section-count, byte, and decode-RSS bounds. The compile worker is capability-restricted to the three payload handles and seal. A missing facet/body, incomplete witness, scope drift, unsupported semantic form, or bound violation returns a typed preparation/fallback receipt; it never triggers a hidden worker read. Packaging generation is admission provenance, while consumed semantic facet fingerprints determine caller invalidation.
+
+Ordinary forward compilation never reads `.rr`. The change coordinator reads only relevant reverse shards before worker admission; those reads are control-plane counters and are never smuggled through the worker's admitted payload handles. It maps changed facets to consumer queries and owning files, deduplicates the dirty queue, and applies transitive green cutoff. It retains the old outgoing read set until successful reevaluation, then commits inserted and removed edges with `.tld`, scope and object roots in one generation. New/deleted/renamed aspects, impls, overloads, imports, macros or generated members first change an authoritative membership/candidate/absence root in the old/new `__init__.tld`; this schedules affected queries even when no old reverse edge exists. Watcher events are hints until inventory reconciliation. Selector changes use the union of old/new candidate domains, and removed matches undo prior weaving. SCCs recompute to a fixed point and publish atomically.
+
+Missing `.rr` rebuilds from authoritative forward `SemanticQueryReadManifestV1` manifests; external-effect `SemanticReadSetV1` entries alone are insufficient. Corrupt, unknown-coverage or incomplete shards are quarantined and trigger conservative bounded scope recomputation, widening to the workspace when scope completeness cannot be proven. Failed compilation retains the prior admitted edges and cannot publish mixed generations. Static fixed aspects use this invalidation path; dynloaded aspects preserve their guarded registry generation, leases and revocation and do not silently rewrite static artifacts.
+
+`.rr` only identifies affected semantic owners and schedules projection refresh; it never injects or owns header content. A module `.tld` embeds a macro's portable body when expansion/CTFE must execute it. Ordinary concrete trait calls and call-only aspect references embed complete callable signature/effects/selection facts plus a symbolic immutable function/object digest, so the frontend can emit a dependency/relocation without opening implementation bytes. A consumed generic/default trait body, inlining, body-observing analysis, CTFE, or local code generation requires the body to be embedded in an admitted payload or selects a typed multi-payload fallback.
+
+`ReverseReferenceShardV1` is the causal semantic projection. Existing folder-navigation `smf.reverse_references.v1` and loader/MIR/object/relocation `ReverseReferenceKeyV1` records remain distinct owner-specific views. Adapters project outward from admitted semantic reads or target/publication receipts through shared stable-ID framing; navigation and loader indexes never flow back into semantic action keys or acquire a second mutable lifecycle.
+
+### Portable-object and aspect boundary
+
+The `.sio` family is an SMF content family, not a second executable format or IR hierarchy. `PortableBaseSioV1` contains verified pre-composition semantics and stable joinpoints. `PortableComposedSioV1` has a separate action/profile identity and is published only after advice selection, call-plan validation, and common optimization are complete. Neither advice nor a required read may change after final verification. Both reuse existing HIR codecs after a portability audit and retain layout, ABI, runtime-service, pointer-width, atomics, and target capability decisions symbolically. The verifier classifies objects as `portable`, `target_family`, or `target_exact`; the native loader rejects all non-native profiles.
+
+The first metadata-fast AOP profile is deliberately call-only: admitted `before` and `after` advice becomes an ordinary typed function call at a stable logical joinpoint. Advice interface, effects, ordering, captures, and normal/error/cancellation exit policy are hashed inputs. `around`, structural transforms, post-weave selectors, or incomplete helper dependencies do not receive this fast path; they conservatively invalidate and use a separately qualified composition route. Common optimization may inline an advice call only after composition and under normal effect/alias rules.
+
+Runtime-enabled and dynloaded aspects retain the existing typed-facet admission, generation lease, dispatch, replacement, and revocation owners. A static call plan may bind only an aspect proven fixed for the artifact generation; dynamic activation is never rewritten into an unguarded direct call. This extension preserves the specialist aspect-dynload objects and does not establish a second loader lifecycle.
+
+Static selection records aspect-pack catalog generation, typed-facet ABI, activation mode, selector/advice identities, and complete reads in `PortableComposedSioV1`. Dynamic activation keeps guarded dispatch: its catalog/registry generation is bound only by the target/runtime publication action and lease, never by `PortableBaseSioV1`.
+
+Target fan-out is a named projection from `PortableComposedSioV1` into the existing `BinaryObjectActionV1`/build-plan authority. Its key binds the portable digest, exact target mapping, ISA/features, ABI, object format, numeric policy, backend/toolchain identity, dependency lock, and accepted-feature receipt. Only the verified target result may join dynlib/runtime publication; the portable digest remains build-host neutral.
+
+### Pure-Simple cache service
+
+`CacheServiceCore` is a private composition behind the existing public `CacheGatewayV1`; it is not a parallel consumer API. It composes verified CAS, `ActionRootJournalV1`, PureDatabase projection, daemon lifecycle, SOSIX persistence, and the Simple HTTP host. PureDatabase gains a typed streaming immutable-blob capability; large artifacts never traverse SQL text/JSON/base64. Journal/CAS admission remains compiler-cache authority and DB rows remain rebuildable. Direct, local IPC, and authenticated HTTP adapters share identical admission and typed-error semantics. Remote results may be staged, but cannot be published locally until local journal/CAS admission succeeds. Streaming reads pin generation and object leases through completion. Remote execution/prewarming is a separate authorized service.
+
+Startup loads only the gateway interface and generation catalog. DB, HTTP, compression, GC, GPU, and backend implementations remain lazy task capsules. Hot lookup performs bounded indexed reads, no full-tree scan, no dependency source parse, no environment check per token, and no per-request subprocess.
+
+### Compile-parity evidence
+
+Parity uses two non-interchangeable product classes: composed Simple `.sio` versus Java `.class`, and Simple target-object/package generation versus Go package compilation, excluding final link from both. Cross-product rows remain descriptive and explicitly unequal-work; they cannot pass a gate. Report startup, snapshot, metadata decode, parse, semantics, AOP, common optimization, emission, target codegen, CPU, RSS, bytes read, and output size separately. The NFR-CSM-013 ratios are release targets, not claims of current performance; final native link and LTO remain separate rows.

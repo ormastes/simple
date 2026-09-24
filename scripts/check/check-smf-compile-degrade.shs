@@ -1,0 +1,152 @@
+#!/bin/sh
+# check-smf-compile-degrade.shs
+#
+# End-to-end fence for the rule that a spec whose standalone-SMF compile FAILS
+# is degraded to the interpreter and still runs, with the degrade recorded on
+# its `SPEC FILE VERDICT:` line.
+#
+# Why this is a gate and not (only) a spec. The behaviour only exists on the
+# DIRECTORY lane -- that is the lane that compiles each spec to SMF at all; a
+# single-file run is the interpreter and hides the defect completely. Asserting
+# it from inside a spec therefore means running `bin/simple test <dir>` from
+# within a spec child, and that cannot be done on this runner: measured
+# 2026-09-12, a nested full runner inside a directory-lane child dies with
+# `innerrc=134` (SIGABRT) having written zero bytes, and driving
+# `run_test_file_native` in-process instead makes the nested `bin/simple
+# compile` child panic in tracing-appender. The companion spec
+# test/01_unit/app/test_runner_new/smf_compile_error_degrades_spec.spl pins the
+# pure halves (the degrade token and the verdict-line format); this gate pins
+# the end-to-end behaviour, from outside the runner, where it is reproducible.
+#
+# Three fixtures, so a pass cannot be vacuous:
+#   a_clean_spec.spl              control        -> outcome=OK executed=2 passed=2 failed=0
+#   b_hard_compile_error_spec.spl reproducer     -> outcome=OK executed=3 passed=3 failed=0
+#                                                   and degraded=smf-compile-error:...print_raw
+#   c_real_failure_spec.spl       fail-closed    -> outcome=ERROR failed=1
+# b is the whole point: before the fix it reported `executed=1 passed=0 failed=1`
+# and lost all three of its examples. c is the guard against the fix being a
+# licence to green: it also fails to compile, also degrades, and must STAY red.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md convention:
+#   PASS  - <n> fixture verdict(s) checked, ...   exit 0
+#   FAIL  - ...                                   exit 1
+#   ERROR - nothing was checked                   exit 2
+# A run that checked 0 verdict lines is an ERROR, never a pass, and a missing
+# or unrunnable `bin/simple` is an ERROR too: absence of a runner is absence of
+# evidence.
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root" || { echo "ERROR — nothing was checked (cannot enter repo root)"; exit 2; }
+
+FIXTURE_DIR=test/fixtures/runner_degrade
+SIMPLE_BIN=${SIMPLE_BINARY:-bin/simple}
+
+# --- selftest: the verdict matcher must discriminate ------------------------
+# Runs before every scan and is fatal. Without it a matcher that accidentally
+# accepts everything would turn this gate into a rubber stamp.
+verdict_field() {
+    # $1 = verdict line, $2 = key. Prints the value or nothing.
+    printf '%s\n' "$1" | tr ' ' '\n' | while IFS= read -r tok; do
+        case "$tok" in
+            "$2"=*) printf '%s\n' "${tok#*=}" ;;
+        esac
+    done
+}
+
+selftest() {
+    good='SPEC FILE VERDICT: x_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 in_development=0 dropped=0 degraded=smf-compile-error:Undefined(undefined_identifier:_print_raw)'
+    bad='SPEC FILE VERDICT: x_spec.spl outcome=ERROR declared>=1 executed=1 passed=0 failed=1 in_development=0 dropped=0'
+    [ "$(verdict_field "$good" outcome)" = "OK" ] || return 1
+    [ "$(verdict_field "$good" passed)" = "3" ] || return 1
+    [ "$(verdict_field "$good" degraded)" = "smf-compile-error:Undefined(undefined_identifier:_print_raw)" ] || return 1
+    [ "$(verdict_field "$bad" outcome)" = "ERROR" ] || return 1
+    [ "$(verdict_field "$bad" failed)" = "1" ] || return 1
+    # A line with no degraded= token must yield the empty string, not the
+    # previous line's value: that is how a silent degrade would be laundered
+    # into a pass.
+    [ -z "$(verdict_field "$bad" degraded)" ] || return 1
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed: the verdict matcher does not discriminate)"
+    exit 2
+fi
+
+if [ ! -x "$SIMPLE_BIN" ] && [ ! -L "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no runnable $SIMPLE_BIN; absence of a runner is absence of evidence)"
+    exit 2
+fi
+for f in a_clean_spec.spl b_hard_compile_error_spec.spl c_real_failure_spec.spl; do
+    if [ ! -f "$FIXTURE_DIR/$f" ]; then
+        echo "ERROR — nothing was checked (missing fixture $FIXTURE_DIR/$f)"
+        exit 2
+    fi
+done
+
+log=$(mktemp) || { echo "ERROR — nothing was checked (cannot create a log file)"; exit 2; }
+trap 'rm -f "$log"' EXIT INT TERM
+
+# The runner exits non-zero because fixture c fails ON PURPOSE, so its status is
+# read but never treated as the verdict; the verdict lines are.
+"$SIMPLE_BIN" test "$FIXTURE_DIR/" > "$log" 2>&1
+run_status=$?
+
+checked=0
+offenders=""
+
+check_line() {
+    # $1 = fixture file name, $2.. = key=value expectations
+    fixture=$1
+    shift
+    line=$(grep "^SPEC FILE VERDICT: .*$fixture" "$log" | tail -n 1)
+    if [ -z "$line" ]; then
+        offenders="$offenders $fixture(no-verdict-line)"
+        return
+    fi
+    checked=$((checked + 1))
+    for expect in "$@"; do
+        key=${expect%%=*}
+        want=${expect#*=}
+        got=$(verdict_field "$line" "$key")
+        case "$want" in
+            '~'*)   # prefix match, for the degraded token
+                case "$got" in
+                    "${want#\~}"*) ;;
+                    *) offenders="$offenders $fixture($key=$got,want~${want#\~})" ;;
+                esac
+                ;;
+            *)
+                [ "$got" = "$want" ] || offenders="$offenders $fixture($key=$got,want=$want)"
+                ;;
+        esac
+    done
+    printf '  %s\n' "$line"
+}
+
+check_line a_clean_spec.spl outcome=OK executed=2 passed=2 failed=0
+check_line b_hard_compile_error_spec.spl outcome=OK executed=3 passed=3 failed=0 degraded=~smf-compile-error:
+check_line c_real_failure_spec.spl outcome=ERROR failed=1
+
+# The reproducer's degrade must name its CAUSE, not just its kind: a token that
+# said only "smf-compile-error" would leave the next occurrence undiagnosable.
+hard_line=$(grep '^SPEC FILE VERDICT: .*b_hard_compile_error_spec.spl' "$log" | tail -n 1)
+case "$hard_line" in
+    *print_raw*) ;;
+    *) offenders="$offenders b_hard_compile_error_spec.spl(degrade-token-lost-its-cause)" ;;
+esac
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (the runner emitted no verdict line for any fixture; runner exit $run_status)"
+    exit 2
+fi
+
+if [ -n "$offenders" ]; then
+    echo "FAIL — $checked fixture verdict(s) checked, offender(s):$offenders (runner exit $run_status)"
+    exit 1
+fi
+
+echo "PASS — $checked fixture verdict(s) checked, hard SMF-compile failure degraded and was recorded, genuine failure stayed red (runner exit $run_status)"
+exit 0

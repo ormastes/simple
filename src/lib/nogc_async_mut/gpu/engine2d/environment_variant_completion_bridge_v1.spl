@@ -1,0 +1,197 @@
+# codex-impl
+# Truth-preserving bridge from Engine2D epoch/device evidence into the generic
+# environment-variant completion contract. Provider-supplied fence identities
+# remain explicit because an epoch receipt does not retain them.
+
+use common.gpu.engine2d.gpu_epoch.{
+    Engine2dGpuEpochReceipt, Engine2dGpuDeviceEvidence,
+    ENGINE2D_GPU_PHASE_GPU_FINISHED, ENGINE2D_GPU_PHASE_COMPLETED,
+    ENGINE2D_GPU_PHASE_RETIRED, engine2d_gpu_device_evidence_qualifies
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+use std.nogc_async_mut.gpu.environment_variant_adapter_v1.{
+    GpuHostControlProviderV1, GpuDeviceProgramImageV1, GpuEnabledDeviceAuthorityV1,
+    GpuResourceLeaseV1, GpuSubmissionEvidenceV1, GpuEnvironmentVariantErrorV1,
+    GPU_ENV_EVIDENCE_FENCE_SIGNALED_V1, GPU_ENV_EVIDENCE_COMPLETED_V1,
+    GPU_ENV_EVIDENCE_RETIRED_V1,
+    gpu_environment_variant_execution_validate_v1
+}
+use std.nogc_async_mut.gpu.engine2d.packed_completion_proof_v1.*
+
+pub enum Engine2dEnvironmentCompletionBridgeErrorV1:
+    EpochNotDeviceProven
+    EpochAuthorityMismatch
+    MissingProviderCompletionIdentity
+    VariantCompletionRejected
+    BackendCompletionUnavailable
+    BackendAuthorityRejected
+
+pub struct Engine2dProviderCompletionAuthorityV1:
+    queue_handle: i64
+    backend_handle: i64
+    queue_generation: u64
+    operation_generation: u64
+    submission_identity: EnvironmentDigest256V1
+    fence_identity: EnvironmentDigest256V1
+    completion_identity: EnvironmentDigest256V1
+    retirement_identity: EnvironmentDigest256V1
+
+pub enum Engine2dBackendCallbackStateV1:
+    Unavailable
+    FenceCompleted
+    CompletedAndLeaseRetired
+pub struct Engine2dBackendCompletionPortV1:
+    port_handle: u64
+    owner_identity: u64
+pub struct Engine2dBackendCompletionAuthorityV1:
+    completion_handle: u64
+    owner_identity: u64
+struct _Engine2dBackendPortRecordV1:
+    handle: Engine2dBackendCompletionPortV1
+    provider_adapter_identity: EnvironmentDigest256V1
+    live: bool
+struct _Engine2dBackendCompletionRecordV1:
+    handle: Engine2dBackendCompletionAuthorityV1
+    port: Engine2dBackendCompletionPortV1
+    state: Engine2dBackendCallbackStateV1
+    epoch: u64
+    packed_digest: EnvironmentDigest256V1
+    lease_generation: u64
+    fence_identity: EnvironmentDigest256V1
+    cancelled: bool
+    readback_digest: EnvironmentDigest256V1
+    retirement_generation: u64
+var _next_backend_port_owner_v1: u64 = 1u64
+pub class Engine2dBackendCompletionPortOwnerV1:
+    var owner_identity: u64
+    var next_handle: u64
+    var ports: [_Engine2dBackendPortRecordV1]
+    var completions: [_Engine2dBackendCompletionRecordV1]
+    pub static fn create() -> Engine2dBackendCompletionPortOwnerV1:
+        val identity = _next_backend_port_owner_v1
+        if identity != 0u64 and identity != 0xffffffffffffffffu64:
+            _next_backend_port_owner_v1 = identity + 1u64
+        Engine2dBackendCompletionPortOwnerV1(owner_identity: identity, next_handle: 1u64,
+            ports: [], completions: [])
+
+fn _declared(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+pub fn engine2d_backend_completion_port_register_v1(owner: Engine2dBackendCompletionPortOwnerV1,
+    provider_adapter_identity: EnvironmentDigest256V1
+) -> Result<Engine2dBackendCompletionPortV1, Engine2dEnvironmentCompletionBridgeErrorV1>:
+    if not _declared(provider_adapter_identity) or owner.ports.len() >= 256 or
+       owner.next_handle == 0u64 or owner.next_handle == 0xffffffffffffffffu64:
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected)
+    val port = Engine2dBackendCompletionPortV1(port_handle: owner.next_handle,
+        owner_identity: owner.owner_identity); owner.next_handle = owner.next_handle + 1u64
+    owner.ports.push(_Engine2dBackendPortRecordV1(handle: port,
+        provider_adapter_identity: provider_adapter_identity, live: true)); Ok(port)
+
+# Called by a registered backend adapter after its native callback. These are
+# adapter assertions, not independent proof of device execution.
+pub fn engine2d_backend_completion_callback_record_v1(owner: Engine2dBackendCompletionPortOwnerV1,
+    port: Engine2dBackendCompletionPortV1, state: Engine2dBackendCallbackStateV1,
+    epoch: u64, packed_digest: EnvironmentDigest256V1, lease_generation: u64,
+    fence_identity: EnvironmentDigest256V1, cancelled: bool,
+    readback_digest: EnvironmentDigest256V1, retirement_generation: u64
+) -> Result<Engine2dBackendCompletionAuthorityV1, Engine2dEnvironmentCompletionBridgeErrorV1>:
+    var found = false
+    for record in owner.ports:
+        if record.handle == port and port.owner_identity == owner.owner_identity and record.live: found = true
+    if not found: return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected)
+    if state == Engine2dBackendCallbackStateV1.Unavailable:
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendCompletionUnavailable)
+    if epoch == 0u64 or lease_generation == 0u64 or not _declared(packed_digest) or
+       not _declared(fence_identity) or owner.completions.len() >= 256:
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected)
+    if state == Engine2dBackendCallbackStateV1.CompletedAndLeaseRetired and retirement_generation == 0u64:
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected)
+    val handle = Engine2dBackendCompletionAuthorityV1(completion_handle: owner.next_handle,
+        owner_identity: owner.owner_identity); owner.next_handle = owner.next_handle + 1u64
+    owner.completions.push(_Engine2dBackendCompletionRecordV1(handle: handle, port: port,
+        state: state, epoch: epoch, packed_digest: packed_digest,
+        lease_generation: lease_generation, fence_identity: fence_identity,
+        cancelled: cancelled, readback_digest: readback_digest,
+        retirement_generation: retirement_generation)); Ok(handle)
+
+pub fn engine2d_environment_packed_completion_bridge_v1(
+    callback_owner: Engine2dBackendCompletionPortOwnerV1,
+    callback: Engine2dBackendCompletionAuthorityV1,
+    proof_owner: Engine2dPackedProofOwnerV1,
+    provider_authority: Engine2dPackedProviderAuthorityV1
+) -> Result<Engine2dPackedRetirementProofV1, Engine2dEnvironmentCompletionBridgeErrorV1>:
+    var index: i64 = -1; var i = 0
+    while i < callback_owner.completions.len():
+        if callback_owner.completions[i].handle == callback and
+           callback.owner_identity == callback_owner.owner_identity: index = i
+        i = i + 1
+    if index < 0: return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected)
+    val record = callback_owner.completions[index]
+    if record.state != Engine2dBackendCallbackStateV1.CompletedAndLeaseRetired:
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendCompletionUnavailable)
+    val submitted = engine2d_packed_submission_proof_v1(proof_owner, provider_authority,
+        record.epoch, record.packed_digest, record.lease_generation,
+        record.fence_identity, false)
+    if submitted.is_err(): return Err(Engine2dEnvironmentCompletionBridgeErrorV1.BackendAuthorityRejected)
+    val readback_present = _declared(record.readback_digest)
+    val completed = engine2d_packed_completion_proof_v1(proof_owner, provider_authority,
+        submitted.unwrap(), record.packed_digest, true, record.cancelled,
+        readback_present, record.readback_digest)
+    if completed.is_err(): return Err(Engine2dEnvironmentCompletionBridgeErrorV1.VariantCompletionRejected)
+    val retired = engine2d_packed_retirement_proof_v1(proof_owner, provider_authority,
+        completed.unwrap(), true, record.retirement_generation)
+    if retired.is_err(): return Err(Engine2dEnvironmentCompletionBridgeErrorV1.VariantCompletionRejected)
+    var kept: [_Engine2dBackendCompletionRecordV1] = []; i = 0
+    while i < callback_owner.completions.len():
+        if i != index: kept.push(callback_owner.completions[i])
+        i = i + 1
+    callback_owner.completions = kept; Ok(retired.unwrap())
+
+pub fn engine2d_environment_variant_completion_bridge_v1(
+    receipt: Engine2dGpuEpochReceipt, device_evidence: Engine2dGpuDeviceEvidence,
+    completion: Engine2dProviderCompletionAuthorityV1,
+    provider: GpuHostControlProviderV1, image: GpuDeviceProgramImageV1,
+    device: GpuEnabledDeviceAuthorityV1, lease: GpuResourceLeaseV1
+) -> Result<GpuSubmissionEvidenceV1, Engine2dEnvironmentCompletionBridgeErrorV1>:
+    if receipt.routing_evidence_only or not receipt.device_execution_proven or
+       not engine2d_gpu_device_evidence_qualifies(device_evidence) or
+       (receipt.phase != ENGINE2D_GPU_PHASE_GPU_FINISHED and
+        receipt.phase != ENGINE2D_GPU_PHASE_COMPLETED and receipt.phase != ENGINE2D_GPU_PHASE_RETIRED):
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.EpochNotDeviceProven)
+    if receipt.queue_handle != completion.queue_handle or
+       receipt.backend_handle != completion.backend_handle or
+       receipt.queue_generation != completion.queue_generation or
+       receipt.operation_generation != completion.operation_generation or
+       completion.queue_handle <= 0 or completion.backend_handle <= 0:
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.EpochAuthorityMismatch)
+    if not _declared(completion.submission_identity) or not _declared(completion.fence_identity) or
+       (receipt.phase != ENGINE2D_GPU_PHASE_GPU_FINISHED and not _declared(completion.completion_identity)) or
+       (receipt.phase == ENGINE2D_GPU_PHASE_RETIRED and not _declared(completion.retirement_identity)):
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.MissingProviderCompletionIdentity)
+    val state = if receipt.phase == ENGINE2D_GPU_PHASE_RETIRED:
+        GPU_ENV_EVIDENCE_RETIRED_V1
+    elif receipt.phase == ENGINE2D_GPU_PHASE_GPU_FINISHED:
+        GPU_ENV_EVIDENCE_FENCE_SIGNALED_V1
+    else:
+        GPU_ENV_EVIDENCE_COMPLETED_V1
+    val bridged = GpuSubmissionEvidenceV1(evidence_state: state,
+        submission_identity: completion.submission_identity,
+        provider_identity: provider.provider_identity, provider_generation: provider.provider_generation,
+        program_identity: image.program_identity, image_digest: image.image_digest,
+        device_identity: device.device_identity, lease_identity: lease.lease_identity,
+        fence_identity: completion.fence_identity, completion_identity: completion.completion_identity,
+        retirement_identity: completion.retirement_identity)
+    val validated = gpu_environment_variant_execution_validate_v1(provider, image, device, lease, bridged)
+    if receipt.phase == ENGINE2D_GPU_PHASE_RETIRED:
+        if validated != Ok(()):
+            return Err(Engine2dEnvironmentCompletionBridgeErrorV1.VariantCompletionRejected)
+    elif receipt.phase == ENGINE2D_GPU_PHASE_GPU_FINISHED:
+        if validated != Err(GpuEnvironmentVariantErrorV1.MissingCompletionEvidence):
+            return Err(Engine2dEnvironmentCompletionBridgeErrorV1.VariantCompletionRejected)
+    elif validated != Err(GpuEnvironmentVariantErrorV1.MissingRetirementEvidence):
+        return Err(Engine2dEnvironmentCompletionBridgeErrorV1.VariantCompletionRejected)
+    # Intermediate epochs deliberately fail the generic final-state validator
+    # at the next missing lifecycle fact: completion after gpu_finished, and
+    # retirement after completed.
+    Ok(bridged)

@@ -1,4 +1,8 @@
 # riscv64 freestanding: `text != ""` is TRUE for a zero-length text
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: **OPEN** — codegen defect, not fixed. One call site was repaired
   (see below); the comparison itself is still wrong everywhere else.
@@ -56,3 +60,4 @@ missing `main` several stages downstream.
 loss and preserves hosted semantics exactly, but it does not fix the
 comparison, and every other `!= ""` in the tree is still affected on this
 target.
+

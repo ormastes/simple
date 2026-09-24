@@ -1,8 +1,62 @@
 # Bug: JIT boxes i64 as `(value << 3) | TAG_INT` — drops the top 3 bits (bit-63 loss); miscompiles RV64 SoC
 
+## Closed 2026-09-13 — fixed, re-verified by running the entry repro on both lanes
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran the minimal reproducer shape from this entry (the array-in-struct boxed
+path it isolates as the ONLY corrupting shape), plus the bare-local control
+and the bootrom `slli sp,sp,32` roundtrip:
+
+```spl
+struct Outer:
+    arr: [i64]
+
+fn shifty(v: i64, n: i64) -> i64:
+    v << n
+
+fn main():
+    var o = Outer(arr: [0, 0, 0])
+    o.arr[2] = 0x8010000000000000
+    print("{o.arr[2]}")
+    o.arr[0] = shifty(1, 63)
+    o.arr[1] = shifty(1, 62)
+    print("{o.arr[0]} {o.arr[1]}")
+    var sp = shifty(0x80100000, 32)
+    print("{sp} {sp >> 32}")
+```
+
+Seed JIT lane and tree-walk lane produce **identical, correct** output:
+
+```
+-9218868437227405312          # o.arr[2] == 0x8010000000000000, bit 63 intact
+-9223372036854775808          # 1 << 63, was reported to box to 0
+4611686018427387904           # 1 << 62, was reported to box to 0
+-9218868437227405312 -2146435072   # slli sp,32 roundtrip, no 0x100000 derail
+```
+
+The three failure signatures this entry names — bit-63 loss through the
+struct-field `[i64]` boxed path, `1<<63`/`1<<62` boxing to `0`, and the
+`0x8010000000000000 -> 0x0010000000000000` `sp` corruption — none reproduce.
+The boxed integer channel is 64-bit clean on this binary; the JIT no longer
+diverges from the interpreter on any of them (measured, both lanes).
+
+Cross-reference: a **different** defect in the same tagged-value scheme is
+still live and was found while re-verifying this one — `Some(x)` pattern
+destructuring on the JIT lane binds `payload << 3` (the still-tagged word,
+i.e. a missing unbox rather than a lossy box). Filed as
+`doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md`.
+That the general channel is now 64-bit clean while `Some(x)` is still shifted
+shows the two are separate sites, not one root cause.
+
 - **ID:** seed_jit_boxed_int_61bit_drops_high_bits
 - **Date:** 2026-07-22
-- **Status:** OPEN — ROOT CAUSE FULLY BISECTED; fix is a core value-representation change (awaiting go-ahead)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed) — CLOSED 2026-09-13 (see top section)
 - **Severity:** high — root cause of the soc_top_64 JIT miscompile (57 probe failures) and the OpenSBI-banner block
 - **Component:** seed JIT value boxing (`src/compiler_rust/compiler/src/codegen`)
 
@@ -178,3 +232,6 @@ them under a "boxed-int fixed" message would be a false-green. The `copy`/
 `concat` packing-preserve edits are correct in isolation and are preserved in
 worktree `/tmp/wt_heapint` should Option-B-complete or Option-A ever be
 authorized.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

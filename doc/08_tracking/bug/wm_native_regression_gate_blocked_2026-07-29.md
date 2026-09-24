@@ -1,4 +1,8 @@
 # WM Native Regression Gate Blockers — 2026-07-29
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Self-hosted source closure
 
@@ -434,3 +438,4 @@ authoritative, not only at recursive argument or `WidgetRect[]` return
 boundaries. The stack and diagnostic hooks were reverted. The retained oracle
 does keep one independent correction: a bordered 480-wide Panel has a
 478-wide client row, so `demo-button.w` must be `478`, not `480`.
+

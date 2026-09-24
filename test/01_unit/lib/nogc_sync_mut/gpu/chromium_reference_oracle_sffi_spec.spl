@@ -1,8 +1,9 @@
 use std.spec
 use std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi.{
     ChromiumOracleAbi, ChromiumOracleLoadRequest, ChromiumOracleResolvedSymbols,
-    ChromiumOracleLibraryProbe, ChromiumOracleGpuReceipt,
+    ChromiumOracleLibraryProbe, ChromiumOracleHandle, ChromiumOracleGpuReceipt,
     chromium_oracle_validate_library_probe, chromium_oracle_gpu_receipt_valid,
+    chromium_oracle_load, chromium_oracle_run, chromium_oracle_release,
 }
 
 fn request() -> ChromiumOracleLoadRequest:
@@ -21,6 +22,12 @@ fn probe() -> ChromiumOracleLibraryProbe:
         abi: ChromiumOracleAbi(version: 1, bridge_id: "libsimple_chromium_primitive_oracle", chromium_revision: "pinned"),
         symbols: ChromiumOracleResolvedSymbols(abi_version: 1, create: 2, run_json_into: 3, last_error_into: 4, destroy: 5),
     )
+
+fn released_handle() -> ChromiumOracleHandle:
+    ChromiumOracleHandle(library_handle: 0, session_handle: 0,
+        library_path: "/test/already-released.so", abi_version: 1,
+        symbols: ChromiumOracleResolvedSymbols(abi_version: 0, create: 0,
+            run_json_into: 0, last_error_into: 0, destroy: 0), released: true)
 
 describe "Chromium primitive oracle SFFI boundary":
     it "accepts only the complete pinned ABI v1 probe":
@@ -59,3 +66,18 @@ describe "Chromium primitive oracle SFFI boundary":
         var host_copy = receipt
         host_copy.readback_source = "host_synthetic"
         expect(chromium_oracle_gpu_receipt_valid(host_copy)).to_equal(false)
+
+    it "fails closed before dynload when the admitted artifact digest is absent":
+        val result = unsafe(capabilities: [ffi, raw_ptr]):
+            chromium_oracle_load(request())
+        expect(result.ok).to_equal(false)
+        expect(result.status).to_equal("manifest-mismatch")
+
+    it "refuses calls and duplicate release after native ownership ended":
+        val call = unsafe(capabilities: [ffi, raw_ptr]):
+            chromium_oracle_run(released_handle(), "{}", 128)
+        expect(call.status).to_equal("released-handle")
+        val release = unsafe(capabilities: [ffi, raw_ptr]):
+            chromium_oracle_release(released_handle())
+        expect(release.ok).to_equal(false)
+        expect(release.status).to_equal("released-handle")

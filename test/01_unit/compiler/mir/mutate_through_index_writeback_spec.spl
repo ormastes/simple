@@ -1,0 +1,93 @@
+# Mutating a container reached through an index must write back to the stored
+# value — dict values and struct/tuple fields.
+#
+# Bug: doc/08_tracking/bug/mutate_through_index_loses_write_2026-07-31.md
+#
+# A mutating method call (`push` and siblings in `is_mutating_method`) on an
+# indexed lvalue must reach the stored slot. The pure-Simple MIR lowering
+# (src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl) implements
+# the post-call store-back in `emit_method_writeback`; the dict-value and
+# tuple-field receiver shapes needed their own slot kinds:
+#
+#   - dict value (`c["k"].push(x)`): the receiver is a Dict slot, not an array
+#     element. The write-back now loads through rt_dict_get (tagged key via
+#     lower_dict_key) and stores back through rt_dict_set (wb_kind 3). The old
+#     raw GEP+load / rt_array_set path treated the hash table as an element
+#     array, so the write never reached the stored value.
+#   - tuple field (`a[0].1.push(x)`, `.N` desugared to Index on a Tuple-typed
+#     base): tuple storage is a raw rt_alloc block with no SplArray header, so
+#     rt_array_get/rt_array_set cannot address it. The write-back now uses
+#     plain GEP+load and a GEP slot store (wb_kind 4).
+#   - struct field (`s[0].items.push(x)`) and array-of-arrays (`b[0].push(x)`)
+#     already worked: the receiver load yields a stable heap handle and the
+#     write-back is an idempotent re-store. They are pinned here as controls.
+#
+# The tuple-field shape is deliberately NOT asserted: on the lane this spec
+# executes under (`bin/simple test`, which runs each spec through the deployed
+# compiler binary) the tuple-field write is still lost on the interpreter lane
+# while kept on the JIT lane — the lane split owned by the bug record. The
+# dict-value and struct-field shapes have production callers and no other
+# coverage under test/01_unit/compiler/mir/, so they are pinned here.
+#
+# Cross-engine evidence (measured 2026-09-19, pure-Simple self-hosted binary
+# predating the fix): dict-value probe prints len=1 (write lost), tuple-field
+# probe prints len=1 (write lost), struct-field and array-of-arrays probes
+# print len=2 (kept).
+
+use std.spec
+
+describe "mutating method call through an index writes back to the container":
+    it "pushes through an array of arrays (control)":
+        var b: [[i64]] = [[10]]
+        b[0].push(99)
+        expect(b[0].len()).to_equal(2)
+
+    it "keeps the pushed element's value through an array of arrays (control)":
+        var b: [[i64]] = [[10]]
+        b[0].push(99)
+        expect(b[0][1]).to_equal(99)
+
+    it "pushes through a dict value":
+        var c: {text: [i64]} = {}
+        c["k"] = [10]
+        c["k"].push(99)
+        expect(c["k"].len()).to_equal(2)
+
+    it "keeps the pushed element's value through a dict value":
+        var c: {text: [i64]} = {}
+        c["k"] = [10]
+        c["k"].push(99)
+        expect(c["k"][1]).to_equal(99)
+
+    it "pushes through a dict value twice":
+        var c: {text: [i64]} = {}
+        c["k"] = []
+        c["k"].push(1)
+        c["k"].push(2)
+        expect(c["k"].len()).to_equal(2)
+
+    it "leaves a sibling dict key untouched":
+        var c: {text: [i64]} = {}
+        c["a"] = [1]
+        c["b"] = [2]
+        c["a"].push(3)
+        expect(c["b"].len()).to_equal(1)
+
+    it "pushes through a struct field reached by array index":
+        var s: [WritebackBucket] = [WritebackBucket(items: [10])]
+        s[0].items.push(99)
+        expect(s[0].items.len()).to_equal(2)
+
+    it "keeps the pushed element's value through a struct field":
+        var s: [WritebackBucket] = [WritebackBucket(items: [10])]
+        s[0].items.push(99)
+        expect(s[0].items[1]).to_equal(99)
+
+    it "accepts the explicit write-back form":
+        var d: {text: [i64]} = {}
+        d["k"] = [10]
+        d["k"] = d["k"].push(99)
+        expect(d["k"].len()).to_equal(2)
+
+struct WritebackBucket:
+    items: [i64]

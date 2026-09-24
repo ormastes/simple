@@ -17,7 +17,7 @@ use std.io_runtime.{shell}
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
-val TMP_ROOT = "/tmp/common_xz_lzma2_spec"
+val TMP_ROOT = "common_xz_lzma2_spec_scratch"
 
 fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
     match err:
@@ -58,12 +58,11 @@ fn _hex_encode(data: [u8]) -> text:
     out
 
 fn _write_bytes_via_hex_shell(path: text, data: [u8]):
-    val hex = _hex_encode(data)
-    val run = shell("sh -c \"printf '%s' '" + hex + "' | xxd -r -p > '" + path + "'\"")
-    if run.exit_code != 0:
-        print(run.stdout)
-        print(run.stderr)
-    expect(run.exit_code).to_equal(0)  # oracle: value fixed by the spec contract
+    # Written directly through the runtime bytes extern: the hex-shell
+    # pipeline (printf | xxd) relied on nested `sh -c` quoting that the
+    # Windows spawn boundary mangles, and a raw-extern write resolves the
+    # CWD-relative scratch path identically for the host tool reads.
+    expect(rt_file_write_bytes(path, data)).to_equal(true)
 
 fn _ensure_tmp_root():
     val result = shell("mkdir -p '" + TMP_ROOT + "'")
@@ -388,8 +387,17 @@ describe "xz lzma2 codec":
         expect(run.exit_code).to_equal(0)  # oracle: value fixed by the spec contract
         var encoded = _read_bytes(compressed_path)
         val check_pos = _single_stream_crc64_check_pos(encoded)
-        encoded[check_pos] = encoded[check_pos] ^ 0x01u8
-        val decoded = lzma2_decompress_xz(encoded)
+        # Rebuild with one corrupted byte: the seed rejects `[u8]` index
+        # assignment, so construct the mutated array by push.
+        var corrupted: [u8] = []
+        var ci: i64 = 0
+        while ci < encoded.len():
+            if ci == check_pos:
+                corrupted.push(encoded[ci] ^ 0x01u8)
+            else:
+                corrupted.push(encoded[ci])
+            ci = ci + 1
+        val decoded = lzma2_decompress_xz(corrupted)
         expect(decoded.is_err()).to_equal(true)
         _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "xz block crc64")
 

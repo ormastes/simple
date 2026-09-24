@@ -1,3 +1,9 @@
+## Closed 2026-09-16 — spec-violating families B/C fixed w/ from-source proof; D/E left as record
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
+
 ## 2026-08-17 — the two SPEC-VIOLATING families are fixed; the rest stays a record
 
 The triage note below is right that families D and E are a substrate/typing

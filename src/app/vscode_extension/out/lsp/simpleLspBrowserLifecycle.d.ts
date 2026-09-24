@@ -1,8 +1,6 @@
 import * as vscode from 'vscode';
 import { ExtensionHostServices } from '../services/extensionHostServices';
-export interface BrowserLspFallbackControl {
-    setEnabled(enabled: boolean): void;
-}
+import { SimpleLspFallbackControl } from './simpleLspCapabilityReceipt';
 export interface BrowserLspOperationResult {
     ok: boolean;
     message: string;
@@ -11,7 +9,7 @@ export interface BrowserLspOperationResult {
 export interface CreateSimpleBrowserLspControllerOptions {
     context: vscode.ExtensionContext;
     services: ExtensionHostServices;
-    fallbackControls?: BrowserLspFallbackControl[];
+    fallbackControls?: SimpleLspFallbackControl[];
 }
 export interface SimpleBrowserLspController extends vscode.Disposable {
     bootstrapClient(): Promise<BrowserLspOperationResult>;

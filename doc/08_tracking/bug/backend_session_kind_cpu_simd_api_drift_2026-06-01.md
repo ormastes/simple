@@ -1,7 +1,15 @@
 # Bug: BackendSessionKind CPU SIMD API Drift
 
+## Closed 2026-09-13 — API drift resolved: the nogc_sync_mut class was renamed `ComputeSessionKind`, so only one `BackendSessionKind` remains
+
+- **measured** `grep -rn 'BackendSessionKind' src/lib/nogc_sync_mut/gpu/engine2d/` returns zero hits today; the reported clash is gone.
+- **measured** `src/lib/nogc_sync_mut/gpu/engine2d/backend_session.spl:42` now reads `static fn cpu_simd() -> ComputeSessionKind`, and `cpu_simd_session.spl:112-113` returns `ComputeSessionKind.cpu_simd()`.
+- **measured** `src/lib/gc_async_mut/gpu/engine2d/backend_session.spl:24` still declares `enum BackendSessionKind` with `CpuSimd` — now the single canonical name.
+- **inferred** With the two names disjoint, the reported `struct BackendSessionKind has no field named CpuSimd` failure can no longer arise from this pair.
+
+
 Date: 2026-06-01
-Status: open (triaged 2026-06-11)
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

@@ -1,6 +1,13 @@
 # Web Infra Interpreter Blockers — 2026-06-04
 
-Status: likely-fixed (triaged 2026-06-11, evidence: Fixed This Session section in body)
+## Closed 2026-09-13 — Recorded fixed in the entry's own "Fixed This Session" section
+
+- **inferred** The body carries a Fixed-This-Session section covering the reported interpreter blockers; the 2026-06-11 triage sweep already classified it `likely-fixed`.
+- **measured** Path-survival scan finds the concrete product paths it names still present; the three "missing" hits are prose fragments (`controller.spl`, `main.spl`, a brace-expansion `{nogc_sync_mut,...}` glob), not real deleted files.
+- **inferred** The web-infra spec lane cannot be executed here (`bin/simple test` is killed at its outer bound on this Windows host for every spec), so closure rests on the recorded fixes.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 Discovered while running `examples/06_io/webapp/main.spl` and building the
 restaurant webapp infra test vehicle.

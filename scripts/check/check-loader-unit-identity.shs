@@ -1,0 +1,214 @@
+#!/bin/sh
+# Loader unit identity: one physical file must be ONE loader unit.
+#
+# The repo reaches a single physical `.spl` file through several spellings --
+# `src/std` is a symlink to `lib`, `src/compiler/common` to `00.common`, and the
+# module resolver emits both relative and absolute forms of the same path. A
+# loader cache keyed by the raw spelling therefore turns one file into several
+# units: an extra read + full re-parse per alias, and the same definitions
+# registered more than once.
+#
+# The observable is the call-site read trace (`SIMPLE_READ_TRACE=1`, one
+# `[read] <file>:<line> <path>` line per source read). A site that reads TWO
+# DIFFERENT SPELLINGS of one realpath is keying by spelling; a site that reads
+# one spelling many times is a missing memo, which is a different defect and is
+# reported but not failed here.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> read(s) checked across <k> site(s), 0 alias-duplicate unit(s)  exit 0
+#   FAIL  — ... naming every offending site and file                           exit 1
+#   ERROR — nothing was checked (<reason>)                                     exit 2
+# A run that examined 0 reads is an ERROR, never a pass -- and neither is a run
+# that never reached the loader caches at all. `SIMPLE_EXECUTION_MODE=interpreter`
+# (which the spec runner exports) skips HIR lowering, so only the interpreter's
+# own module cache is exercised: 1 traced site, 128 reads, 0 offenders. That is a
+# vacuous green over the exact cache the defect lives in, so the mode is cleared
+# for the traced run and a scan that saw fewer than MIN_SITES loader sites is an
+# ERROR.
+#
+# Usage: sh scripts/check/check-loader-unit-identity.shs [--selftest] [entry.spl]
+#   SIMPLE_BINARY   binary to exercise (default: bin/simple)
+#   LOADER_TRACE_IN analyse an existing trace file instead of running anything
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+binary=${SIMPLE_BINARY:-bin/simple}
+entry=${1:-src/app/mcp/main.spl}
+# Non-vacuity floor on loader READ SITES. A trace with zero sites never reached
+# the loader, so there is nothing to check and the answer is ERROR.
+#
+# This defaulted to 2 until 2026-09-12, on the reasoning that BOTH unit caches
+# had to be reached: the HIR lowerer's parse memo and the interpreter's module
+# cache. That reasoning is now wrong in the one direction that matters. With
+# the cross-lane parsed-source cache (module_cache.rs PARSED_SOURCE_CACHE) both
+# lanes read through ONE shared site, and the only thing still holding the
+# count at 2 is module_resolver/var_overlay.rs:110, which re-reads a single
+# 1,309-byte file 49 times for want of a memo. Give that site its memo and the
+# count drops to 1 -- on a strictly HEALTHIER tree -- and a floor of 2 would
+# answer `ERROR — nothing was checked`, i.e. punish the fix.
+#
+# The real non-vacuity signal is SCAN_READS > 0, which is asserted separately
+# and unconditionally below: a trace that carries reads has exercised the
+# loader by construction, however few sites those reads came from. So the floor
+# is 1 and the gate stays fail-closed on 0. A caller that genuinely wants the
+# old two-lane assertion -- pinning a pre-cache binary, say -- sets
+# LOADER_MIN_SITES=2 explicitly, and gets exactly the previous behaviour.
+MIN_SITES=${LOADER_MIN_SITES:-1}
+[ "$entry" = "--selftest" ] && entry=src/app/mcp/main.spl
+
+# Emit one "SPELLING <site> <raw path>" record per distinct (site, spelling) the
+# trace shows, then "READS <n>". Spellings stay raw: they are the cache keys.
+analyse_trace() {
+    trace=$1
+    awk '
+        /^\[read\] / {
+            site = $2
+            path = $3
+            for (i = 4; i <= NF; i++) path = path " " $i
+            # The RAW spelling is the cache key the loader actually used, so a
+            # relative and an absolute form of one file must stay distinct here.
+            reads++
+            seen[site SUBSEP path] = 1
+        }
+        END {
+            for (k in seen) {
+                split(k, p, SUBSEP)
+                print "SPELLING", p[1], p[2]
+            }
+            print "READS", reads + 0
+        }
+    ' "$trace"
+}
+
+scan() {
+    trace=$1
+    root=$2
+    reads=0
+    offenders=0
+    sites=0
+    tmp_pairs=$(mktemp)
+    analyse_trace "$trace" > "$tmp_pairs"
+    reads=$(awk '$1 == "READS" { print $2 }' "$tmp_pairs")
+    # Map each (site, spelling) to (site, realpath); a site that ends up with
+    # two spellings for one realpath is keying by spelling.
+    tmp_real=$(mktemp)
+    : > "$tmp_real"
+    awk '$1 == "SPELLING" { site = $2; $1 = ""; $2 = ""; sub(/^  /, ""); print site "\t" $0 }' "$tmp_pairs" |
+    while IFS="$(printf '\t')" read -r site spelling; do
+        real=$(cd "$root" 2>/dev/null && readlink -f "$spelling" 2>/dev/null)
+        [ -n "$real" ] || real=$spelling
+        printf '%s\t%s\t%s\n' "$site" "$real" "$spelling" >> "$tmp_real"
+    done
+    sites=$(cut -f1 "$tmp_real" | sort -u | wc -l | tr -d ' ')
+    tmp_off=$(mktemp)
+    sort "$tmp_real" | awk -F"$(printf '\t')" '
+        { key = $1 SUBSEP $2; count[key]++; spellings[key] = spellings[key] " " $3; site[key] = $1; file[key] = $2 }
+        END { for (k in count) if (count[k] > 1) print site[k] "\t" file[k] "\t" spellings[k] }
+    ' | sort > "$tmp_off"
+    offenders=$(wc -l < "$tmp_off" | tr -d ' ')
+    while IFS="$(printf '\t')" read -r site file spellings; do
+        [ -n "$site" ] || continue
+        printf 'alias-duplicate unit: %s reads %s under:%s\n' "$site" "$file" "$spellings"
+    done < "$tmp_off"
+    rm -f "$tmp_pairs" "$tmp_real" "$tmp_off"
+    SCAN_READS=$reads
+    SCAN_SITES=$sites
+    SCAN_OFFENDERS=$offenders
+}
+
+selftest() {
+    fixdir=$(mktemp -d)
+    trap 'rm -rf "$fixdir"' EXIT
+    mkdir -p "$fixdir/pkg"
+    printf 'pub struct A:\n    id: i64\n' > "$fixdir/pkg/types.spl"
+    ln -s pkg "$fixdir/pkg_alias"
+
+    # 1. clean: one site, two DIFFERENT files -> PASS
+    printf '[read] a.rs:1 %s/pkg/types.spl\n[read] a.rs:1 %s/pkg/other.spl\n' "$fixdir" "$fixdir" > "$fixdir/clean.trace"
+    scan "$fixdir/clean.trace" "$fixdir" >/dev/null
+    [ "$SCAN_OFFENDERS" = "0" ] || { echo "selftest FAIL: clean trace reported $SCAN_OFFENDERS offender(s)"; return 1; }
+    [ "$SCAN_READS" = "2" ] || { echo "selftest FAIL: clean trace counted $SCAN_READS reads, expected 2"; return 1; }
+
+    # 2. symlink alias, one site -> FAIL (the real defect's exact shape)
+    printf '[read] a.rs:1 %s/pkg/types.spl\n[read] a.rs:1 %s/pkg_alias/types.spl\n' "$fixdir" "$fixdir" > "$fixdir/alias.trace"
+    scan "$fixdir/alias.trace" "$fixdir" >/dev/null
+    [ "$SCAN_OFFENDERS" = "1" ] || { echo "selftest FAIL: symlink alias reported $SCAN_OFFENDERS offender(s), expected 1"; return 1; }
+
+    # 3. relative vs absolute spelling of one file, one site -> FAIL
+    printf '[read] a.rs:1 %s/pkg/types.spl\n[read] a.rs:1 pkg/types.spl\n' "$fixdir" > "$fixdir/relabs.trace"
+    scan "$fixdir/relabs.trace" "$fixdir" >/dev/null
+    [ "$SCAN_OFFENDERS" = "1" ] || { echo "selftest FAIL: rel-vs-abs reported $SCAN_OFFENDERS offender(s), expected 1"; return 1; }
+
+    # 4. same spelling read many times is a MISSING MEMO, not an alias -> PASS
+    printf '[read] a.rs:1 %s/pkg/types.spl\n[read] a.rs:1 %s/pkg/types.spl\n' "$fixdir" "$fixdir" > "$fixdir/repeat.trace"
+    scan "$fixdir/repeat.trace" "$fixdir" >/dev/null
+    [ "$SCAN_OFFENDERS" = "0" ] || { echo "selftest FAIL: repeated same spelling reported $SCAN_OFFENDERS offender(s), expected 0"; return 1; }
+
+    # 5. two DIFFERENT sites reading one file under different spellings is not an
+    #    alias defect within a unit cache -> PASS (cross-lane parsing, filed apart)
+    printf '[read] a.rs:1 %s/pkg/types.spl\n[read] b.rs:9 pkg/types.spl\n' "$fixdir" > "$fixdir/crosslane.trace"
+    scan "$fixdir/crosslane.trace" "$fixdir" >/dev/null
+    [ "$SCAN_OFFENDERS" = "0" ] || { echo "selftest FAIL: cross-site read reported $SCAN_OFFENDERS offender(s), expected 0"; return 1; }
+
+    # 6. a trace that reached only ONE loader site must report 1 site, so the
+    #    caller is forced to ERROR rather than passing vacuously
+    printf '[read] a.rs:1 %s/pkg/types.spl\n[read] a.rs:1 %s/pkg/other.spl\n' "$fixdir" "$fixdir" > "$fixdir/onesite.trace"
+    scan "$fixdir/onesite.trace" "$fixdir" >/dev/null
+    [ "$SCAN_SITES" = "1" ] || { echo "selftest FAIL: one-site trace reported $SCAN_SITES site(s), expected 1"; return 1; }
+
+    # 7. empty trace must count 0 reads so the caller is forced to ERROR
+    : > "$fixdir/empty.trace"
+    scan "$fixdir/empty.trace" "$fixdir" >/dev/null
+    [ "$SCAN_READS" = "0" ] || { echo "selftest FAIL: empty trace counted $SCAN_READS reads, expected 0"; return 1; }
+    [ "$SCAN_SITES" = "0" ] || { echo "selftest FAIL: empty trace reported $SCAN_SITES site(s), expected 0"; return 1; }
+
+    rm -rf "$fixdir"
+    trap - EXIT
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 7 selftest fixture(s) checked, 0 failures"; exit 0; }
+
+cd "$repo_root" || { echo "ERROR — nothing was checked (cannot enter $repo_root)"; exit 2; }
+
+trace_file=${LOADER_TRACE_IN:-}
+if [ -z "$trace_file" ]; then
+    [ -x "$binary" ] || { echo "ERROR — nothing was checked (no runnable binary at $binary)"; exit 2; }
+    [ -f "$entry" ] || { echo "ERROR — nothing was checked (entry $entry not found)"; exit 2; }
+    trace_file=$(mktemp)
+    # See the header: the interpreter-only lane never reaches the HIR parse memo.
+    env -u SIMPLE_EXECUTION_MODE SIMPLE_READ_TRACE=1 \
+        "$binary" run "$entry" --help >/dev/null 2>"$trace_file" </dev/null
+    run_rc=$?
+    if [ "$run_rc" -ne 0 ]; then
+        rm -f "$trace_file"
+        echo "ERROR — nothing was checked ($binary run $entry exited $run_rc)"
+        exit 2
+    fi
+    cleanup_trace=1
+else
+    cleanup_trace=0
+fi
+
+scan "$trace_file" "$repo_root"
+[ "$cleanup_trace" = "1" ] && rm -f "$trace_file"
+
+if [ "${SCAN_READS:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 source reads traced for $entry)"
+    exit 2
+fi
+if [ "${SCAN_SITES:-0}" -lt "$MIN_SITES" ]; then
+    echo "ERROR — nothing was checked (only ${SCAN_SITES:-0} loader site(s) traced for $entry, need $MIN_SITES; a count of 0 means the loader was never reached, while a count below an explicitly-raised LOADER_MIN_SITES means this run does not match the multi-site shape the caller asked for)"
+    exit 2
+fi
+if [ "${SCAN_OFFENDERS:-0}" -ne 0 ]; then
+    echo "FAIL — $SCAN_READS read(s) checked across $SCAN_SITES site(s), $SCAN_OFFENDERS alias-duplicate unit(s) for $entry"
+    exit 1
+fi
+echo "PASS — $SCAN_READS read(s) checked across $SCAN_SITES site(s), 0 alias-duplicate unit(s) for $entry"
+exit 0

@@ -1,4 +1,8 @@
 # char_code_at scans are quadratic (non-ASCII), and core_string's ASCII fast path is itself O(index)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open — measured/read baseline for the CHARACTER-alignment
 campaign. Must be fixed as the Stage 1 perf prerequisite in
@@ -806,3 +810,4 @@ O(index) scan — the quadratic term when a caller walks a string — is unfixed
 
 **What was NOT proven.** No timing re-measurement. The quadratic *magnitude* in
 the doc's baseline table is unre-run; only the code shape was verified.
+

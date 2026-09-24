@@ -1,4 +1,9 @@
 # HIR: imported callable signature has no package-sibling fallback (2026-08-22)
+## Closed 2026-09-16 — RESOLVED same day; 56->0 hir-fatals; spec 26/26 post-fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status: RESOLVED** (same day). Class 2 of the stage1-closure HIR fatals.
 
@@ -49,3 +54,4 @@ With HIR clean, the same build now stops in MIR:
 `MIR lowering error: undefined variable CompletionKind` —
 `builtin_blocks_data.spl` uses `CompletionKind.Keyword` through
 directory-sibling visibility and MIR has no sibling enum binding for it.
+

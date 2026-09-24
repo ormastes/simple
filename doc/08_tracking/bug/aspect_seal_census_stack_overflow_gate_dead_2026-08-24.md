@@ -1,4 +1,8 @@
 # Aspect-seal census stack-overflows — Phase 6 exit gate is dead, not green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24
 **Severity:** HIGH (a hardening exit gate reports ERROR, and its last recorded PASS is unreproducible)
@@ -169,3 +173,4 @@ rc=1
 
 Before the fix that same sequence left the seal green. The remaining `missing`
 entries are the pre-existing Phase 9 backlog, unrelated to this change.
+

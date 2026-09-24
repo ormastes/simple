@@ -108,50 +108,6 @@ independent-region work with safe tails/guard pages. Unsupported regions emit
 typed CPU work tags. GPU execution stages private output and emits actual device
 completion evidence before commit.
 
-The source-landed compiler adapter exposes `ParserProviderV1`,
-`ParserProviderAdmissionV1`, and `ParserProviderReceiptV1` in
-`compiler.frontend.core.frontend`. The default
-facade selects `LegacyReference`; the explicit execution entrypoint rejects
-canonical scalar, SIMD, and GPU candidates with
-`parser_provider_unqualified` before invoking the parser. The receipt names
-only the provider actually executed. Focused differential coverage compares
-the retained direct legacy entrypoint with the default facade. Runtime
-qualification remains pending until an admitted self-hosted runner executes
-that coverage.
-
-The next scalar phase is intentionally fail-closed. Repository inspection
-found a shared scalar `ParseRuntime`, but it is a lexical DFA only: it has no
-generated Simple `GrammarProgram` or `ActionProgram` and cannot emit the
-compiler's AST/HIR, region, mapping, diagnostic, or invalidation semantics.
-`parser_provider_v1_canonical_scalar_required_cases()` therefore freezes a
-four-case ordered prerequisite (valid reset, invalid reset, valid append after
-the valid reset, and isolated invalid after the valid reset). Every case
-requires exact token, region, action/HIR, source-mapping, diagnostic,
-invalidation, and deterministic-hash comparison. The accompanying receipt
-truthfully reports no candidate engine, no execution, zero compared cases, and
-no qualification; it grants no admission and leaves `LegacyReference` as the
-default. A later generated Simple grammar/action engine must replace that
-negative evidence with real corpus execution before the candidate can enter
-the admission path.
-
-Each prerequisite row binds its literal source bytes, path, stable fixture
-identity, initial parser-error state, expected preserved state, and predecessor
-ordinal. Qualification replay starts from a fresh process/state arena for each
-provider: execute rows 0 and 1 independently, replay row 0 before row 2 and
-append row 2 without reset, then replay row 0, set the pinned initial error
-state, and execute row 3 with isolated-state preservation. A comparison that
-changes this order or substitutes source/path bytes is not this prerequisite.
-
-The native FlatAstBridge module-assembly entry uses the same admission
-function before its existing parser setup and transformation sequence. A
-provider-explicit entry exists for qualification tests and later selection
-wiring; it rejects every unqualified candidate before observable parser or
-diagnostic mutation. The enclosing native frontend performs the same admission
-before cache lookup, restore, counter changes, or capture arming. The normal
-entry requests the central default and retains
-the legacy bridge's output, diagnostics, spans, interpolation, placeholder,
-collection-desugar, cache-capture, and transient-scope behavior.
-
 ### JIT/AOT/native artifacts
 
 Generated-code requests take `TargetCodegenProfile`, never the host parser
@@ -318,6 +274,30 @@ The bridge cannot be invoked by the compatibility queue until a real backend
 supplies qualifying device timestamps, negative-control evidence, and stable
 provider tokens. This preserves current routing-only behavior.
 
+`environment_variant_native_task_bridge_v1` is the native capability
+consumption seam. It reprojects provider, resource and terminal completion
+tokens before comparing backend/session/generation, exact provider artifact,
+device, canonical resource-lease identity, invocation, and readback length
+against the retained task's output capacity. Standalone admission repeats task
+layout, effect, numerical,
+lease-capacity and enabled-device-capacity checks rather than trusting prior
+task preparation. The task owner calls that seam using its retained task
+record; a caller-shaped bridge receipt alone is never accepted as authority.
+
+Device-program images remain a separate capability. The runtime exports a
+typed image-authority projection, but every word currently returns zero because
+no exact-byte image owner is installed. Consequently admission cannot cross
+the image gate, completion remains routing evidence only, and
+`FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE` remains false. Installing an image owner
+must bind retained bytes and program identity to the same provider generation;
+it must not be enabled by changing a Boolean without that issuer and its
+negative-control evidence.
+
+The current native completion projection binds resource, correlation and
+readback length but not the submitted output offset/range or exact image token.
+That join remains an activation prerequisite in the GPU qualification TODO;
+the physical-execution gate cannot open before it is owner-issued and tested.
+
 ## Parser SIMD artifact qualification refinement
 
 Parser SIMD promotion consumes three distinct identities:
@@ -474,6 +454,40 @@ must be consumed atomically: applying only the legacy catalog's singular MAX
 mode drops preference, while applying only PREFER/REQUIRE drops the ceiling.
 The next composition change is a composite selector that filters all candidates
 through hard caps before ranking the retained set.
+
+### Native-build parent-to-worker policy handoff
+
+The native-build parent is the sole ambient source owner. It snapshots CLI and
+environment inputs once, reads project `simple.sdn`, and reads the explicitly
+new feature-specific user source `~/.config/simple/config.sdn`. The latter is
+not an alias for `~/.config/itf/config.sdn` and is not reconstructed from a
+merged `CompilerConfig`. Both files use bounded regular no-follow reads.
+
+The parent resolves the collected layers, serializes the complete typed
+collection (normalized layers, source-presence receipt, source selection, and
+separate generated target CPU/features) into a fixed-order bounded V1 wire, and
+appends exactly one internal base64url argv value. Parse shards, HIR shards, and
+the real worker receive the same value. The worker rejects a missing,
+duplicate, corrupt, noncanonical, or oversized value and removes only that
+internal argument before invoking native-build; public target flags retain
+their exact bytes and order. Policy is not transported by rewriting process
+environment variables.
+
+The wire integrity digest detects mutation but conveys no administrator
+authority. Until an authenticated administrator source owner is introduced,
+the production application owner supplies empty administrator restrictions.
+The warm artifact key includes the handoff cache identity, which binds resolved
+policy digest and the separate generated target CPU/feature inputs.
+
+Both full and parse-shard worker entrypoints validate/remove the handoff and
+pass its exact `EnvironmentVariantPolicyCollectionV1` to a typed driver entry
+before source loading. The full worker uses
+`compiler_driver_create_with_environment_variant_policy_v1`; the slim shard
+uses an adjacent lightweight projector so it does not import the full driver.
+Selected callable sessions are process-local and are deliberately not
+serialized: a parse shard applies only the reference policy and keeps
+owner/session/generation at zero. Legacy in-process callers retain their
+existing driver constructors.
 
 ## Prepare/commit coordinator for composite publication
 
@@ -907,30 +921,66 @@ canonical authority digest. Passing this gate establishes internally consistent
 historical advisory evidence; it still does not establish parser, AST, or HIR
 equivalence.
 
-Layer 10 owns the actual dependency-inversion seam: one typed function-valued
-advisory slot, initialized to the lazy reference provider. Only a strictly newer
-driver generation may bind a provider; reset cannot roll the generation back.
-The dispatcher validates the common receipt and falls back to the reference
-implementation if a bound provider returns inconsistent evidence. The shared
-frontend invokes this dispatcher after conditional/domain transformations and
-before cache lookup and full parsing. Driver and loader modules may bind down
-through this port, while layer 10 imports neither of them.
+Layer 10 owns the dependency-inversion seam but does not yet own authenticated
+typed provider-execution authority. Its numeric owner/session/generation slot
+therefore records startup correlation only and never stores or selects a
+function. The checked dispatcher always emits truthful reference/unavailable
+evidence; it rejects `AdvisoryExecuted`, loaded, or executed claims before
+receipt-digest validation, so even a correctly hashed caller-built receipt is
+not authority. `RequireSimd` fails before cache lookup or full parsing. The
+shared frontend invokes this gate after conditional/domain transformations.
+The exact startup policy/provider/variant/artifact/environment identity remains
+folded into the frontend cache key. A future executable seam must consume an
+authenticated owner-issued typed capability or a downward-facing contract
+implemented by the provider-execution owner; numeric coordinates cannot gain
+that meaning.
 
-The loader binding adapter owns the configured sealed activation, package
-session, execution snapshot, feature arena, and initial lexical state. Its
-function-valued projection invokes and validates the rich lexical result, then
-issues the smaller canonical frontend receipt. The common receipt distinguishes
+`environment_variant_startup_cache_identity_v1` is the canonical pure cache
+projection. It hashes the binary policy digest, exact provider, variant,
+artifact, environment identity and environment generation, plus selected versus
+reference status and the bounded rejection code. Owner/session/generation
+coordinates authorize the live dispatch scope but are intentionally excluded
+from reusable parse-result content identity. Generated-output target CPU and
+feature strings are likewise excluded because they do not authorize the host
+parser implementation.
+
+The loader binding adapter owns the configured sealed activation and a typed
+per-source activation factory. The fixed package-session draft was rejected:
+one startup session serves many immutable source snapshots, so a package
+session cannot be captured once and reused across them. For each transformed
+source, the loader acquires and projects a sealed build-use and invokes only an
+owner-internal typed provider adapter while that use is live. A generic facet
+interface handle is not itself typed lexical callable authority. Until the
+sealed provider-execution owner issues that authority, the internal adapter
+fails closed; callers cannot register a function or manufacture successful
+advisory evidence. The factory owner issues an opaque token derived from the
+provider, variant, artifact, environment, policy, interface-handle, and
+provider-context projection. Startup contexts carry that owner/token pair, and
+invocation reprojects the exact sealed build use before attempting provider
+execution. The selected sealed binding-policy digest must equal the exact
+startup request digest. A selected startup receipt proves candidate selection
+and lifetime only, not provider execution. The factory
+will own creation and terminal cleanup of its source-specific package session,
+execution snapshot, feature arena, and initial lexical state; the build-use
+authority itself never crosses that owner boundary. Its future typed projection
+will issue the smaller canonical frontend receipt. The common receipt distinguishes
 reference no-op, unavailable advisory execution, completed advisory execution,
 and scalar fallback; its digest binds provider and GPU execution flags and
 counts as well as status. Uninstall first restores the layer-10 reference slot,
-then discards loader context. Startup composition must still supply and retire
-this context, and required-policy failure needs an explicit compiler error path
-before automatic selection is enabled.
+then discards loader context. The startup receipt transports only copied
+owner/session/generation coordinates and canonical identities into the driver;
+the sealed owner and build-use remain loader-private. Before driver mutation,
+the application asks the startup owner to project the exact receipt retained
+for the live handle and request; copied or modified receipts are rejected.
+Startup composition must
+still supply and retire this context, and required-policy failure closes any
+active transient parser scope before it travels through every driver phase-2
+parse route.
 
-Callers that enforce `RequireSimd` use checked dispatch. It returns typed
-unavailable unless the validated common status is completed advisory execution,
-and distinguishes malformed provider evidence. The compatibility dispatcher
-may still fall back for reference/prefer callers. Automatic selection is gated
+Callers use checked dispatch. `RequireSimd` returns typed unavailable unless the
+validated common status is completed advisory execution, and distinguishes
+malformed or request-substituted provider evidence; reference/prefer may consume
+the checked reference result. Automatic selection is gated
 on proving that function-slot replacement changes the actual indirect target;
 the slot is therefore stored in a stable reference-semantics object rather than
 as a bare mutable global function value. A focused interpreter regression proves

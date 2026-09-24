@@ -1,11 +1,15 @@
 # Bug: Free-function generic `T?` return wraps values in `Option::Some`
 
+## Closed 2026-09-13 — both arms correct with a sound JIT witness
+- **measured** (Windows Rust seed v1.0.0-rc.1): this entry's own reproducer (`box_get(Box(item: 42))`) printed `v=42` / `pow=1152921504606846976` under BOTH `SIMPLE_EXECUTION_MODE=interpreter` and `=jit`, rc=0.
+- **measured**: the version-independent witness `SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE=jit` emitted 2 `[jit-addr]` lines (`box_get`, `main`) and 0 fallback lines — the JIT arm genuinely compiled, so this is not a repeat of the 2026-08-17 unpinned-engine mistake.
+- **measured**: `pow` is NOT negated, so the int61 truncation defect that made the old witness ambiguous is also absent here.
+- **inferred**: this is a Rust-seed binary on Windows, not the Linux seed the entry measured; the defect class is the same binary class, but a Linux re-run would strengthen it.
+
 **Date:** 2026-06-26  
 **Severity:** P2 — affects usability of generic helper free functions  
-**Status:** REOPENED 2026-08-17 — the 2026-08-17 "already-fixed" re-verification
-ran on an UNPINNED engine and therefore measured only the interpreter arm. With
-the engine pinned, the JIT arm is wrong. (~~RESOLVED — ALREADY-FIXED,
-re-verified 2026-08-17.~~)
+**Status:** CLOSED 2026-09-13 (see Closed section above)
+(Prior status text, superseded 2026-09-13: the 2026-08-17 re-verification ran on an UNPINNED engine; that concern is answered by the JIT-witness measurement in the Closed section above.)
 
 ## Measured arms 2026-08-17 (engine PINNED, both arms executed)
 

@@ -1,45 +1,60 @@
 # simple_runner.spl
 #
-# Simple web renderer fixture runner.
-# Drives the Simple browser/renderer pipeline over each HTML fixture, collects
-# per-stage timings (parse, style, layout, paint, composite, present), and
-# writes per-fixture JSON artifacts.
+# Simple web renderer fixture runner — real, fail-closed.
 #
-# Pipeline stages:
-#   parse_ms      — HTML tokenise + DOM tree build
-#   style_ms      — CSS cascade + selector match + computed style
-#   layout_ms     — block/flex/grid box tree + geometry
-#   paint_ms      — display list recording (background/border/text/image)
-#   composite_ms  — layer merge / GPU blit
-#   present_ms    — swap buffer / OS present call
-#   total_frame_ms — sum of above
+# Drives the production Simple browser/renderer pipeline
+# (simple_web_layout_render_html_software_result, the same entry the
+# test/01_unit/lib/gc_async_mut/gpu/browser_engine specs drive) over each HTML
+# fixture at the SAME viewport the Chrome runner captures at (3840x2160), and
+# writes one JSON artifact per fixture.
 #
-# When the renderer library is not linked, the runner writes source="synthetic"
-# artifacts so report_spec.spl can accept them as PENDING.
+# Fail-closed contract, mirroring chrome_runner.spl:
+#   chrome_runner admits a row only when a real Chrome process returned a
+#   3840x2160 PNG with a 64-hex digest. This runner admits a row only when a
+#   real render returned a full-size framebuffer that the renderer itself
+#   reports presentable — i.e. NOT budget-degraded — and that actually carries
+#   non-background pixels. A degraded render is a correctly-sized uniform
+#   buffer (see the SimpleWebLayoutPixelResult class comment in
+#   src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl)
+#   and is therefore NOT a measurement; such a row stays source="synthetic"
+#   with every timing at 0 and the reason recorded in `note`.
 #
-# Output: test/perf/web_render_chrome/artifacts/simple_<fixture>.json
+# Phase fields (parse_ms/style_ms/layout_ms/paint_ms/composite_ms/present_ms)
+# are all 0.0 and stay 0.0: the public renderer API exposes no per-stage
+# timings. The only stage-timed entry,
+# simple_web_layout_render_html_software_pixels_traced
+# (simple_web_html_layout_renderer.spl:2269), PRINTS its stage times to stdout
+# and returns only [u32], so an in-process caller cannot read them; the
+# stage-splitting primitives it uses (parse_html, extract_css_vw, layout, ...)
+# are module-private. Splitting the measured total across those fields would be
+# fabrication, so they are left at 0 instead.
+#
+# Budget note: budget_ms is deliberately NOT passed. Supplying that explicit
+# i64 default-arg is a known seed-interpreter defect that poisons render output
+# (doc/08_tracking/bug/seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11.md,
+# cited at simple_web_html_layout_renderer_foundation.spl:187-194). The
+# sanctioned override is the SIMPLE_WEB_RENDER_BUDGET_MS environment variable.
+#
+# Output: test/05_perf/web_render_chrome/artifacts/simple_<fixture>.json
 #
 # Usage:
-#   bin/simple run test/perf/web_render_chrome/simple_runner.spl [base_dir]
+#   SIMPLE_LIB=src <simple> run test/05_perf/web_render_chrome/simple_runner.spl
 
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-
-use perf.graphics_2d.bench_harness.{BenchFrameRecord, make_bench_frame_record, write_report}
+use std.io_runtime.{dir_create_all, file_exists, file_read, file_write, time_now_unix_micros}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_software_pixels_presentable}
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants — viewport matches chrome_runner.spl exactly so the two sides are
+# comparable at all.
 # ---------------------------------------------------------------------------
 
-val WARMUP_FRAMES  = 5
-val MEASURE_FRAMES = 30
+val VIEWPORT_WIDTH: i32 = 3840
+val VIEWPORT_HEIGHT: i32 = 2160
+val WARMUP_FRAMES = 1
+val MEASURE_FRAMES = 3
 val FIXTURES = ["static_page", "scroll_heavy", "layout_stress", "paint_heavy"]
-
-# Rendering mode: "gpu" uses GPU backend when available; "cpu" forces software.
-# Override at runtime by passing --mode=gpu or --mode=cpu.
-val DEFAULT_RENDER_MODE = "gpu"
 
 # ---------------------------------------------------------------------------
 # SimpleFrameRecord: per-fixture collected timings
@@ -57,6 +72,11 @@ class SimpleFrameRecord:
     total_frame_ms: f64
     frame_ms_p50:   f64
     frame_ms_p95:   f64
+    warm_sample_count: i64
+    pixel_count:       i64
+    nonbackground_pixels: i64
+    render_degraded:   bool
+    degrade_reason:    text
     pixel_hash:     text
     error_msg:      text
 
@@ -73,8 +93,13 @@ fn make_simple_record(fixture: text) -> SimpleFrameRecord:
         total_frame_ms: 0.0,
         frame_ms_p50:   0.0,
         frame_ms_p95:   0.0,
+        warm_sample_count: 0,
+        pixel_count:       0,
+        nonbackground_pixels: 0,
+        render_degraded:   false,
+        degrade_reason:    "",
         pixel_hash:     "",
-        error_msg:      "",
+        error_msg:      "measurement not attempted",
     )
 
 # ---------------------------------------------------------------------------
@@ -82,7 +107,7 @@ fn make_simple_record(fixture: text) -> SimpleFrameRecord:
 # ---------------------------------------------------------------------------
 
 fn now_ms() -> f64:
-    rt_time_now_unix_micros().to_f64() / 1000.0
+    time_now_unix_micros().to_f64() / 1000.0
 
 fn percentile_f64(values: [f64], pct: f64) -> f64:
     val n = values.len()
@@ -111,75 +136,46 @@ fn percentile_f64(values: [f64], pct: f64) -> f64:
     val frac = idx_f - lo.to_f64()
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 
-fn f64_sum(values: [f64]) -> f64:
-    var s = 0.0
-    var i = 0
-    while i < values.len():
-        s = s + values[i]
-        i = i + 1
-    s
-
-fn f64_avg(values: [f64]) -> f64:
-    if values.len() == 0:
-        return 0.0
-    f64_sum(values) / values.len().to_f64()
-
 # ---------------------------------------------------------------------------
-# Synthetic frame timing simulation
+# Pixel evidence
 #
-# When the actual renderer is not linked, produce stable synthetic timings
-# derived from fixture name so report_spec.spl can validate report shape and
-# threshold math without a live renderer.
+# count_non_background is the analogue of chrome_runner's png_has_4k_ihdr: a
+# framebuffer that is one uniform colour is what a truncated render returns,
+# and must never be admitted as a rendered page.
 # ---------------------------------------------------------------------------
 
-fn synthetic_parse_ms(fixture: text) -> f64:
-    if fixture == "static_page":    return 1.5
-    if fixture == "scroll_heavy":   return 2.2
-    if fixture == "layout_stress":  return 1.8
-    if fixture == "paint_heavy":    return 1.2
-    1.0
+fn count_non_background(pixels: [u32]) -> i64:
+    if pixels.len() == 0:
+        return 0
+    val background = pixels[0]
+    var count: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] != background:
+            count = count + 1
+        i = i + 1
+    count
 
-fn synthetic_style_ms(fixture: text) -> f64:
-    if fixture == "static_page":    return 1.0
-    if fixture == "scroll_heavy":   return 1.8
-    if fixture == "layout_stress":  return 1.5
-    if fixture == "paint_heavy":    return 1.0
-    0.8
+fn hex16(value: i64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 60
+    while shift >= 0:
+        val nibble = ((value >> shift) & 15).to_i64()
+        out = out + digits.substring(nibble, nibble + 1)
+        shift = shift - 4
+    out
 
-fn synthetic_layout_ms(fixture: text) -> f64:
-    if fixture == "static_page":    return 2.5
-    if fixture == "scroll_heavy":   return 3.5
-    if fixture == "layout_stress":  return 5.0
-    if fixture == "paint_heavy":    return 2.8
-    2.0
-
-fn synthetic_paint_ms(fixture: text) -> f64:
-    if fixture == "static_page":    return 3.5
-    if fixture == "scroll_heavy":   return 4.5
-    if fixture == "layout_stress":  return 4.0
-    if fixture == "paint_heavy":    return 6.5
-    3.0
-
-fn synthetic_composite_ms(fixture: text) -> f64:
-    if fixture == "static_page":    return 0.8
-    if fixture == "scroll_heavy":   return 1.2
-    if fixture == "layout_stress":  return 1.0
-    if fixture == "paint_heavy":    return 1.8
-    0.6
-
-fn synthetic_present_ms(fixture: text) -> f64:
-    if fixture == "static_page":    return 0.7
-    if fixture == "scroll_heavy":   return 1.0
-    if fixture == "layout_stress":  return 0.9
-    if fixture == "paint_heavy":    return 1.2
-    0.5
-
-fn synthetic_pixel_hash(fixture: text) -> text:
-    if fixture == "static_page":   return "a1b2c3d4e5f6a7b8"
-    if fixture == "scroll_heavy":  return "b2c3d4e5f6a7b8c9"
-    if fixture == "layout_stress": return "c3d4e5f6a7b8c9d0"
-    if fixture == "paint_heavy":   return "d4e5f6a7b8c9d0e1"
-    "0000000000000000"
+# FNV-1a over the real framebuffer. This is a content digest of the pixels the
+# renderer actually produced — never a per-fixture constant.
+fn pixel_hash_of(pixels: [u32]) -> text:
+    var hash: i64 = 0x1234567890abcdef
+    var i = 0
+    while i < pixels.len():
+        hash = hash ^ pixels[i].to_i64()
+        hash = hash * 1099511628211
+        i = i + 1
+    hex16(hash)
 
 # ---------------------------------------------------------------------------
 # Run one fixture — returns a fully populated SimpleFrameRecord
@@ -189,48 +185,68 @@ fn run_simple_fixture(base_dir: text, fixture: text) -> SimpleFrameRecord:
     var rec = make_simple_record(fixture)
     val html_path = base_dir + "/fixtures/" + fixture + ".html"
 
-    if not rt_file_exists(html_path):
+    if not file_exists(html_path):
         rec.error_msg = "fixture not found: " + html_path
         return rec
 
-    # TODO(renderer-integration): When the Simple renderer library is linked,
-    # replace the synthetic stage below with actual pipeline calls:
-    #   val parse_t0 = now_ms()
-    #   val dom = html_parse(html_path)
-    #   val parse_t1 = now_ms()  =>  rec.parse_ms = parse_t1 - parse_t0
-    # ... and so on through style, layout, paint, composite, present stages.
+    val html = file_read(html_path)
+    if html.len() == 0:
+        rec.error_msg = "fixture is empty: " + html_path
+        return rec
 
-    # Synthetic stage — stable values for harness validation
-    rec.parse_ms     = synthetic_parse_ms(fixture)
-    rec.style_ms     = synthetic_style_ms(fixture)
-    rec.layout_ms    = synthetic_layout_ms(fixture)
-    rec.paint_ms     = synthetic_paint_ms(fixture)
-    rec.composite_ms = synthetic_composite_ms(fixture)
-    rec.present_ms   = synthetic_present_ms(fixture)
-    rec.total_frame_ms = rec.parse_ms + rec.style_ms + rec.layout_ms
-                       + rec.paint_ms + rec.composite_ms + rec.present_ms
-    rec.pixel_hash   = synthetic_pixel_hash(fixture)
+    # Warm-up frames are rendered and discarded, exactly as the measured ones
+    # are rendered; nothing about them is recorded.
+    var warm = 0
+    while warm < WARMUP_FRAMES:
+        val _discarded = simple_web_layout_render_html_software_result(
+            html, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+        warm = warm + 1
 
-    # Simulate MEASURE_FRAMES with small jitter (+/- 5% of total)
-    val base = rec.total_frame_ms
     var frame_times: [f64] = []
-    var fi = 0
-    while fi < MEASURE_FRAMES:
-        # Deterministic jitter: alternate +3%, -2%, +5%, -4%, flat
-        val jitter_idx = fi - (fi / 5) * 5  # fi mod 5
-        val jitter = if jitter_idx == 0 then  0.03
-                     elif jitter_idx == 1 then -0.02
-                     elif jitter_idx == 2 then  0.05
-                     elif jitter_idx == 3 then -0.04
-                     else 0.0
-        frame_times.push(base * (1.0 + jitter))
-        fi = fi + 1
+    var last_pixels: [u32] = []
+    var degraded = false
+    var degrade_reason = ""
+    var measured = 0
+    while measured < MEASURE_FRAMES:
+        val t0 = now_ms()
+        val result = simple_web_layout_render_html_software_result(
+            html, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+        val t1 = now_ms()
+        frame_times.push(t1 - t0)
+        last_pixels = result.pixels
+        if result.render_degraded or not simple_web_layout_software_pixels_presentable(result):
+            degraded = true
+            degrade_reason = result.degrade_reason
+        measured = measured + 1
 
+    rec.warm_sample_count = frame_times.len().to_i64()
+    rec.pixel_count = last_pixels.len().to_i64()
+    rec.render_degraded = degraded
+    rec.degrade_reason = degrade_reason
+
+    val expected_pixels = (VIEWPORT_WIDTH as i64) * (VIEWPORT_HEIGHT as i64)
+
+    # ---- fail-closed gate ---------------------------------------------------
+    if degraded:
+        val viewport_label = VIEWPORT_WIDTH.to_text() + "x" + VIEWPORT_HEIGHT.to_text()
+        rec.error_msg = "render degraded (" + degrade_reason + ") at " + viewport_label + " - a budget-truncated framebuffer is not a rendered page"
+        return rec
+    if rec.pixel_count != expected_pixels:
+        rec.error_msg = "render returned " + rec.pixel_count.to_text() + " pixels, expected " + expected_pixels.to_text()
+        return rec
+    val non_background = count_non_background(last_pixels)
+    rec.nonbackground_pixels = non_background
+    if non_background <= 0:
+        rec.error_msg = "render returned a uniform framebuffer — no page content"
+        return rec
+
+    # ---- admitted -----------------------------------------------------------
     rec.frame_ms_p50 = percentile_f64(frame_times, 50.0)
     rec.frame_ms_p95 = percentile_f64(frame_times, 95.0)
-
-    rec.source    = "synthetic"
-    rec.error_msg = "renderer pipeline not linked — synthetic timings"
+    rec.total_frame_ms = rec.frame_ms_p50
+    rec.pixel_hash = pixel_hash_of(last_pixels)
+    rec.source = "measured"
+    rec.error_msg = "real software render at " + VIEWPORT_WIDTH.to_text() + "x" + VIEWPORT_HEIGHT.to_text() + "; per-stage fields are 0 because the public renderer API exposes no per-stage timings (see file header)"
     rec
 
 # ---------------------------------------------------------------------------
@@ -238,49 +254,29 @@ fn run_simple_fixture(base_dir: text, fixture: text) -> SimpleFrameRecord:
 # ---------------------------------------------------------------------------
 
 fn simple_record_to_json(rec: SimpleFrameRecord) -> text:
-    "{\"source\":\"" + rec.source + "\","
-    + "\"fixture\":\"" + rec.fixture + "\","
-    + "\"runner\":\"simple\","
-    + "\"parse_ms\":" + rec.parse_ms.to_text() + ","
-    + "\"style_ms\":" + rec.style_ms.to_text() + ","
-    + "\"layout_ms\":" + rec.layout_ms.to_text() + ","
-    + "\"paint_ms\":" + rec.paint_ms.to_text() + ","
-    + "\"composite_ms\":" + rec.composite_ms.to_text() + ","
-    + "\"present_ms\":" + rec.present_ms.to_text() + ","
-    + "\"total_frame_ms\":" + rec.total_frame_ms.to_text() + ","
-    + "\"frame_ms_p50\":" + rec.frame_ms_p50.to_text() + ","
-    + "\"frame_ms_p95\":" + rec.frame_ms_p95.to_text() + ","
-    + "\"pixel_hash\":\"" + rec.pixel_hash + "\","
-    + "\"note\":\"" + rec.error_msg + "\"}"
-
-# ---------------------------------------------------------------------------
-# Run all fixtures and write artifacts
-# ---------------------------------------------------------------------------
-
-fn run_all(base_dir: text):
-    val artifact_dir = base_dir + "/artifacts"
-    var i = 0
-    while i < FIXTURES.len():
-        val fx = FIXTURES[i]
-        val out_path = artifact_dir + "/simple_" + fx + ".json"
-
-        # Skip if existing measured artifact is present
-        if rt_file_exists(out_path):
-            val existing = rt_file_read_text(out_path)
-            val src = json_text_field_local(existing, "source")
-            if src == "measured":
-                print "[simple_runner] " + fx + ": using existing measured artifact"
-                i = i + 1
-                continue
-
-        val rec = run_simple_fixture(base_dir, fx)
-        val json = simple_record_to_json(rec)
-        val ok = rt_file_write_text(out_path, json)
-        if ok:
-            print "[simple_runner] " + fx + ": wrote " + out_path
-        else:
-            print "[simple_runner] " + fx + ": ERROR writing " + out_path
-        i = i + 1
+    var out = "{"
+    out = out + "\"source\":\"" + rec.source + "\","
+    out = out + "\"fixture\":\"" + rec.fixture + "\","
+    out = out + "\"runner\":\"simple-software-4k\","
+    out = out + "\"viewport_width\":" + VIEWPORT_WIDTH.to_text() + ","
+    out = out + "\"viewport_height\":" + VIEWPORT_HEIGHT.to_text() + ","
+    out = out + "\"parse_ms\":" + rec.parse_ms.to_text() + ","
+    out = out + "\"style_ms\":" + rec.style_ms.to_text() + ","
+    out = out + "\"layout_ms\":" + rec.layout_ms.to_text() + ","
+    out = out + "\"paint_ms\":" + rec.paint_ms.to_text() + ","
+    out = out + "\"composite_ms\":" + rec.composite_ms.to_text() + ","
+    out = out + "\"present_ms\":" + rec.present_ms.to_text() + ","
+    out = out + "\"total_frame_ms\":" + rec.total_frame_ms.to_text() + ","
+    out = out + "\"frame_ms_p50\":" + rec.frame_ms_p50.to_text() + ","
+    out = out + "\"frame_ms_p95\":" + rec.frame_ms_p95.to_text() + ","
+    out = out + "\"warm_sample_count\":" + rec.warm_sample_count.to_text() + ","
+    out = out + "\"pixel_count\":" + rec.pixel_count.to_text() + ","
+    out = out + "\"nonbackground_pixels\":" + rec.nonbackground_pixels.to_text() + ","
+    out = out + "\"render_degraded\":" + rec.render_degraded.to_text() + ","
+    out = out + "\"degrade_reason\":\"" + rec.degrade_reason + "\","
+    out = out + "\"pixel_hash\":\"" + rec.pixel_hash + "\","
+    out = out + "\"note\":\"" + rec.error_msg + "\"}"
+    out
 
 fn json_text_field_local(json: text, key: text) -> text:
     val search = "\"" + key + "\":"
@@ -309,66 +305,41 @@ fn json_text_field_local(json: text, key: text) -> text:
     result
 
 # ---------------------------------------------------------------------------
-# Convert SimpleFrameRecord to BenchFrameRecord for shared reporting (AC-11)
+# Run all fixtures and write artifacts
+#
+# The shared `perf.graphics_2d.bench_harness` summary writer is deliberately
+# NOT used: that module does not parse on the current seed
+# (test/perf/graphics_2d/bench_harness.spl:40 and its 05_perf twin start
+# continuation lines with `+`, which this binary rejects with
+# "expected expression, found Plus"), so importing it made this runner
+# unloadable rather than merely unmeasured.
 # ---------------------------------------------------------------------------
 
-fn simple_record_to_bench_frame(rec: SimpleFrameRecord, mode: text) -> BenchFrameRecord:
-    var br = make_bench_frame_record(rec.fixture, mode)
-    # frame_ms_p50 is in milliseconds (f64); BenchFrameRecord uses i64 ms
-    br.frame_ms   = rec.frame_ms_p50.to_i64()
-    br.pixel_hash = rec.pixel_hash
-    br.simd_hits  = 0  # populated by SIMD plugin metadata when available
-    br
-
-fn run_all_and_collect(base_dir: text, mode: text) -> [BenchFrameRecord]:
-    """Run all fixtures and return BenchFrameRecord list for report writing."""
+fn run_all(base_dir: text):
     val artifact_dir = base_dir + "/artifacts"
-    var bench_records: [BenchFrameRecord] = []
+    val _created = dir_create_all(artifact_dir)
     var i = 0
     while i < FIXTURES.len():
         val fx = FIXTURES[i]
         val out_path = artifact_dir + "/simple_" + fx + ".json"
 
-        var rec = make_simple_record(fx)
-
-        if rt_file_exists(out_path):
-            val existing = rt_file_read_text(out_path)
-            val src = json_text_field_local(existing, "source")
-            if src == "measured":
+        if file_exists(out_path):
+            val existing = file_read(out_path)
+            if json_text_field_local(existing, "source") == "measured":
                 print "[simple_runner] " + fx + ": using existing measured artifact"
-                # Build a minimal record from cached JSON for BenchFrameRecord
-                rec.fixture    = fx
-                rec.source     = "measured"
-                rec.pixel_hash = json_text_field_local(existing, "pixel_hash")
                 i = i + 1
-                bench_records.push(simple_record_to_bench_frame(rec, mode))
                 continue
 
-        rec = run_simple_fixture(base_dir, fx)
-        val json = simple_record_to_json(rec)
-        val ok = rt_file_write_text(out_path, json)
+        val rec = run_simple_fixture(base_dir, fx)
+        val ok = file_write(out_path, simple_record_to_json(rec))
         if ok:
-            print "[simple_runner] " + fx + ": wrote " + out_path
+            val summary = rec.source + " p50=" + rec.frame_ms_p50.to_text() + "ms nonbg=" + rec.nonbackground_pixels.to_text()
+            print "[simple_runner] " + fx + ": " + summary + " " + rec.error_msg
         else:
             print "[simple_runner] " + fx + ": ERROR writing " + out_path
 
-        bench_records.push(simple_record_to_bench_frame(rec, mode))
         i = i + 1
-    bench_records
 
 fn main() -> i64:
-    # Parse --mode=gpu|cpu and optional base_dir argument
-    var mode = DEFAULT_RENDER_MODE
-    var base_dir = "test/perf/web_render_chrome"
-
-    # Note: args_get not available in all interpreter modes; guard absent.
-    # When invoked as: bin/simple run simple_runner.spl [base_dir] [--mode=X]
-    # positional arg 0 = base_dir override, flag --mode= sets render mode.
-    # Simple interpreter doesn't support args_get in all contexts; use
-    # module-level defaults and fall through gracefully.
-
-    run_all(base_dir)
-
-    val bench_records = run_all_and_collect(base_dir, mode)
-    write_report(bench_records, base_dir + "/artifacts/simple_bench_summary.json")
+    run_all("test/05_perf/web_render_chrome")
     0

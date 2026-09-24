@@ -1,4 +1,8 @@
 # `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` has never compiled
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed** 2026-09-01 · **Status** partly addressed · **Severity** high
 
@@ -41,3 +45,4 @@ networking, sandbox) are still uncompilable and unreached by any lane. Either
 fix them or delete them -- as of this record nobody can tell which of those 240
 symbols are real. A tree-scoped compile guard over `src/os/kernel/**/boot/*.c`,
 in the style of `check-c-runtime-compiles-push.shs`, would prevent a recurrence.
+

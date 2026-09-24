@@ -232,3 +232,8 @@ exists (378 lines). `reproducible_by` is NONE and the finding is a counted-viola
 delta (389 vs 387), i.e. a policy backlog needing a human decision on whether to gate.
 No spec can settle it; not actionable by an automated bug-fixing lane. Recommend
 re-routing to an architecture decision (ADR) rather than the bug queue.
+
+## Triage 2026-09-13
+Reconfirmed: this is an audit-window record (structure/architecture rule
+compliance over a specific commit range on origin/main), not a single
+fixable defect. Left as-is, no code change attempted.

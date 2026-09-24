@@ -1,4 +1,9 @@
 # `ElfObject.relocations` merges every SHT_RELA section without recording its target section
+## Closed 2026-09-16 — RESOLVED 2026-08-17; sh_info parsed, reproducing + class specs 4/4 green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED 2026-08-17 (fix + reproducing spec + class-detection spec landed).
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -108,3 +113,4 @@ When a consumer of `ElfObject.relocations` is added:
    section, and do not assume they're contiguous per section in the merged
    list (they are grouped by section-loop order today, but that's incidental,
    not a documented invariant).
+

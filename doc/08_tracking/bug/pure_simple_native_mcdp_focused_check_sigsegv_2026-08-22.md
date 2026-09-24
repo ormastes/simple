@@ -1,4 +1,8 @@
 # Pure-Simple native MCDP focused check/test SIGSEGV
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -118,3 +122,4 @@ Unblock condition: a source/runtime-matched admitted pure-Simple compiler whose
 four-word environment ABI smoke and focused standalone MCDP check pass.  Until
 then, native MCDP Simple execution and its performance evidence remain
 unverified.
+

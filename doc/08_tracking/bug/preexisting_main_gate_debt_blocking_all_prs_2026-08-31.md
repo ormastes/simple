@@ -1,4 +1,8 @@
 # Pre-existing main gate debt blocking every PR (recorded offender list)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** OPEN — main's debt, not any one PR's
@@ -125,3 +129,4 @@ unrecorded step-over to be treated as a violation even when the delta is clean.
 **Not fixed by this session.** The ledger/manifest staleness is `main`'s debt and
 needs an owner; regenerating it from a shared, concurrently-edited tree would
 risk baselining other sessions' in-flight changes.
+

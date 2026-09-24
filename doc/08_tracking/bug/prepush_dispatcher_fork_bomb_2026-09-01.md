@@ -1,4 +1,9 @@
 # pre-push dispatcher fork bomb: launcher-shaped `pre-push.local` recursed until pid exhaustion (2026-09-01)
+## Closed 2026-09-16 — Fix section: two fuses added; gate 3/3 fixtures PASS vs rc=124 unfixed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 A running test suite began reporting spec failures whose only error was:
@@ -64,3 +69,4 @@ This is the mechanism behind the recurring
 error that has been forcing `--no-verify` on routine pushes. That message was
 the recursion protection firing, i.e. a symptom of this cycle — with the cycle
 removed, pushes should no longer need to route around the guards.
+

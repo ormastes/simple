@@ -1,4 +1,9 @@
 # BUG: CudaVmExecutor D3 conformance vectors hit `array index out of bounds: index is 0 but length is 0`
+## Closed 2026-09-16 — RESOLVED 2026-08-08; conformance spec 2/2 and notebook spec 4/4 verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED
 **Date filed:** 2026-08-08
@@ -91,3 +96,4 @@ Results: 4 total, 4 passed, 0 failed
 No assertions were weakened — the `budget_exhaustion_timeout` vector's real
 `ok:false` timeout outcome and the session's real cleanup-pending latch
 message are asserted directly, not hidden.
+

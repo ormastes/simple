@@ -1,4 +1,42 @@
-# Bootstrap Stage 3 self-host fails — stage2 `bootstrap_main` binary can only emit a seed-wrapper, not real native code
+# Bootstrap Stage 3 self-host convergence — historical seed-wrapper mechanism removed
+
+## Current scope — 2026-09-22
+
+**Open for self-host convergence; the historical seed-wrapper mechanism is
+removed.** The title and historical root-cause narrative below no longer
+describe the current implementation. This update does not claim a successful
+Stage 3 build, Stage 2/3 hash equality, a usable Stage 4 CLI, or cross-host
+execution.
+
+At `origin/main` `e0dd873da1b7828389db4eb60e82972cc8245313`, the exact Stage 3
+entry routes to `run_exact_stage3_focused_capsule`; the legacy
+`bootstrap_emit_seed_wrapper` returns `CompileResult.CodegenError`. The common
+launcher leaves `stage_for_build` empty when Stage 3 is unavailable and exits
+2 before a full CLI build. Its remaining capability warning saying “using seed
+for stage 4” is misleading text, not a reachable selection of the seed in that
+selector.
+
+The integration guard had a separate false positive: it treated the harmless
+`src/compiler_rust/native_all/src/lib.rs` parser citation in
+`bootstrap_main.spl` as wrapper generation. The guard now matches the existing
+unit contract: reject `execv`, `SIMPLE_BOOTSTRAP_SEED`, and `ret i64 0`, with
+individual rejection controls and an accepted source-citation control.
+
+[Scoped evidence and limitations](../../09_report/bootstrap_stage3_seed_wrapper_scope_2026-09-22.md)
+record the five-case launcher replay, two detected mutations, source-audit
+timing/memory, and the unexecuted SSpec gate. The historical 2026-08-17 stale
+error-message assertion was already repaired before this change. Historical
+host observations below retain their original dates and are not current host
+claims.
+
+## Triage 2026-09-13 — STILL OPEN: bootstrap-scoped, cannot be touched or exercised now
+- **measured** — Stage 4 artifacts do exist on this host
+  (`build/bootstrap/full/x86_64-pc-windows-msvc/{simple.exe,simple_mcp_server.exe,simple_lsp_mcp_server.exe}`),
+  but a bootstrap is running concurrently in this workspace, so those files are being
+  written and must not be executed or judged mid-run.
+- **inferred** — the remaining defects this entry names are in `scripts/bootstrap/**` and
+  seed/cranelift codegen, both off-limits to this triage pass. Left OPEN; re-verify after
+  the in-flight bootstrap finishes.
 
 - **Id:** bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17
 - **Status:** Open
@@ -330,3 +368,11 @@ staged artifact; argv read through `rt_cli_get_args` rather than a same-named
 import). Ablation-verified: neutralising the native_build_main.spl guard takes
 that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
 
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

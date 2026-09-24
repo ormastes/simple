@@ -1,4 +1,8 @@
 # `list[idx] = value` bracket-assignment boxing mechanism — differential findings
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — one distinct, reproducible defect confirmed and localized
 (callee-parameter-type-driven corruption); sha3.spl's continuing corruption is
@@ -221,3 +225,4 @@ this session).
    `sha3_256_bytes` in the real `use std.crypto.sha3.{...}` invocation —
    not conclusively determined this session (no fallback message printed,
    unlike several of the synthetic probes).
+

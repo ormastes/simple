@@ -1,4 +1,8 @@
 # NVFS stack: a family of functions that are CALLED and never DEFINED (2026-09-01)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -287,3 +291,4 @@ rung asserting that no load-bearing NVFS symbol appears in the build's
 prevented this record from asserting a green L4/L5. Do NOT baseline the 77
 fabricated stubs to silence the warning — that converts the only surviving
 signal into noise.
+

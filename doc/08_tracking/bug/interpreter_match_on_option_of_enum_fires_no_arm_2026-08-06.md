@@ -1,4 +1,8 @@
 # Interpreter: `match` on an `Option<Enum>` value directly fires no arm
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-06
 - Status (re-measured 2026-09-06, **both halves**, and the old header was
@@ -173,3 +177,4 @@ Results: 7 total, 7 passed, 0 failed          # rc=0
 
 `match` on an `Option<Enum>` value now fires the correct arm. Closing as
 already fixed; no source change was made by this lane.
+

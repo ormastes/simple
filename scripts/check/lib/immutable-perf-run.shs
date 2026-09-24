@@ -1,0 +1,159 @@
+#!/bin/sh
+# Immutable run-directory helpers for performance evidence producers.
+#
+# This file is sourced by check scripts.  A run directory is published once
+# under runs/<run_id>; a repeated run_id is a hard collision.  The optional
+# latest pointer is a convenience index only and is never an evidence input.
+
+perf_immutable_valid_run_id() {
+    case "${1:-}" in
+        ''|.|..|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 96 ]
+}
+
+perf_immutable_prepare_run() {
+    perf_immutable_root=$1
+    perf_immutable_requested_id=${2:-}
+    if [ -z "$perf_immutable_requested_id" ]; then
+        perf_immutable_requested_id="run-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+    fi
+    perf_immutable_valid_run_id "$perf_immutable_requested_id" || return 1
+
+    [ -n "$perf_immutable_root" ] && [ ! -L "$perf_immutable_root" ] || return 1
+    mkdir -p "$perf_immutable_root" || return 1
+    [ ! -L "$perf_immutable_root" ] && [ -d "$perf_immutable_root" ] || return 1
+    perf_immutable_root=$(CDPATH= cd -- "$perf_immutable_root" && pwd -P) || return 1
+    if [ ! -d "$perf_immutable_root/runs" ]; then
+        (umask 077 && mkdir "$perf_immutable_root/runs") ||
+            { [ -d "$perf_immutable_root/runs" ] && [ ! -L "$perf_immutable_root/runs" ]; } || return 1
+    fi
+    [ ! -L "$perf_immutable_root/runs" ] || return 1
+
+    perf_immutable_final_dir="$perf_immutable_root/runs/$perf_immutable_requested_id"
+    if [ -e "$perf_immutable_final_dir" ] || [ -L "$perf_immutable_final_dir" ]; then
+        return 2
+    fi
+
+    # The deterministic private stage is also the per-run reservation.  Only
+    # one producer can own a run id, so the final same-directory rename cannot
+    # collide with another conforming publisher.  An orphan from an untrappable
+    # crash reserves the id rather than allowing evidence to be overwritten.
+    perf_immutable_stage_dir="$perf_immutable_root/runs/.$perf_immutable_requested_id.stage"
+    if ! (umask 077 && mkdir "$perf_immutable_stage_dir"); then
+        return 2
+    fi
+    if [ -e "$perf_immutable_final_dir" ] || [ -L "$perf_immutable_final_dir" ]; then
+        rmdir "$perf_immutable_stage_dir" 2>/dev/null || true
+        return 2
+    fi
+    perf_immutable_started_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || {
+        rmdir "$perf_immutable_stage_dir" 2>/dev/null || true
+        return 1
+    }
+    perf_immutable_started_epoch=$(date -u '+%s') || {
+        rmdir "$perf_immutable_stage_dir" 2>/dev/null || true
+        return 1
+    }
+    case "$perf_immutable_started_epoch" in
+        ''|*[!0-9]*)
+            rmdir "$perf_immutable_stage_dir" 2>/dev/null || true
+            return 1
+            ;;
+    esac
+    # Reserve a distinct producer nonce inside the already-private stage.  The
+    # mktemp suffix prevents two sequential preparations in the same process
+    # and second from receiving the same nonce; no eval or shell $RANDOM is
+    # involved.  The directory is only a reservation and is removed before the
+    # caller receives the stage.
+    perf_immutable_nonce_dir=$(mktemp -d "$perf_immutable_stage_dir/.nonce.XXXXXX") || {
+        rmdir "$perf_immutable_stage_dir" 2>/dev/null || true
+        return 1
+    }
+    perf_immutable_nonce_suffix=${perf_immutable_nonce_dir##*/.nonce.}
+    rmdir "$perf_immutable_nonce_dir" || {
+        rm -rf "$perf_immutable_stage_dir"
+        return 1
+    }
+    case "$perf_immutable_nonce_suffix" in
+        ''|*[!A-Za-z0-9]*)
+            rmdir "$perf_immutable_stage_dir" 2>/dev/null || true
+            return 1
+            ;;
+    esac
+    perf_immutable_run_nonce="${perf_immutable_started_epoch}-${PPID:-0}-$$-${perf_immutable_nonce_suffix}"
+    PERF_IMMUTABLE_RUN_ID=$perf_immutable_requested_id
+    PERF_IMMUTABLE_ROOT=$perf_immutable_root
+    PERF_IMMUTABLE_FINAL_DIR=$perf_immutable_final_dir
+    PERF_IMMUTABLE_STAGE_DIR=$perf_immutable_stage_dir
+    PERF_IMMUTABLE_STARTED_UTC=$perf_immutable_started_utc
+    PERF_IMMUTABLE_STARTED_EPOCH=$perf_immutable_started_epoch
+    PERF_IMMUTABLE_RUN_NONCE=$perf_immutable_run_nonce
+    export PERF_IMMUTABLE_RUN_ID PERF_IMMUTABLE_ROOT PERF_IMMUTABLE_FINAL_DIR PERF_IMMUTABLE_STAGE_DIR
+    export PERF_IMMUTABLE_STARTED_UTC PERF_IMMUTABLE_STARTED_EPOCH PERF_IMMUTABLE_RUN_NONCE
+}
+
+perf_immutable_publish_run() {
+    perf_immutable_stage=$1
+    perf_immutable_final=$2
+    perf_immutable_run_id=${perf_immutable_final##*/}
+    perf_immutable_parent=${perf_immutable_final%/*}
+    perf_immutable_valid_run_id "$perf_immutable_run_id" || return 1
+    [ "$perf_immutable_stage" = "$perf_immutable_parent/.$perf_immutable_run_id.stage" ] || return 1
+    [ ! -L "$perf_immutable_parent" ] && [ -d "$perf_immutable_parent" ] || return 1
+    [ ! -L "$perf_immutable_stage" ] && [ -d "$perf_immutable_stage" ] || return 1
+    [ ! -e "$perf_immutable_final" ] && [ ! -L "$perf_immutable_final" ] || return 2
+    # -n is supported by both BSD and GNU mv and prevents a final directory
+    # that appears after the check above from turning this rename into a move
+    # beneath an attacker/racing directory.
+    mv -n "$perf_immutable_stage" "$perf_immutable_final" || return 1
+    [ ! -e "$perf_immutable_stage" ] && [ ! -L "$perf_immutable_stage" ] || return 2
+    [ ! -e "$perf_immutable_stage" ] && [ ! -L "$perf_immutable_stage" ] &&
+        [ ! -L "$perf_immutable_final" ] && [ -d "$perf_immutable_final" ]
+}
+
+perf_immutable_publish_latest_pointer() {
+    perf_immutable_root=$1
+    perf_immutable_final=$2
+    perf_immutable_pointer="$perf_immutable_root/latest"
+    perf_immutable_run_id=${perf_immutable_final##*/}
+    perf_immutable_valid_run_id "$perf_immutable_run_id" || return 1
+    [ "$perf_immutable_final" = "$perf_immutable_root/runs/$perf_immutable_run_id" ] || return 1
+    [ ! -L "$perf_immutable_root" ] && [ -d "$perf_immutable_root" ] || return 1
+    [ ! -L "$perf_immutable_final" ] && [ -d "$perf_immutable_final" ] || return 1
+    [ ! -L "$perf_immutable_pointer" ] && [ ! -d "$perf_immutable_pointer" ] || return 1
+    perf_immutable_tmp_dir=$(mktemp -d "$perf_immutable_root/.latest.tmp.XXXXXX") || return 1
+    perf_immutable_tmp="$perf_immutable_tmp_dir/pointer"
+    # This pointer is explicitly non-authoritative.  Replace it atomically so
+    # readers see either the previous complete pointer or the new complete one.
+    (umask 077 && {
+        printf '%s\n' 'schema=immutable-perf-latest-pointer-v1'
+        printf 'authoritative=false\n'
+        printf 'run_id=%s\n' "$perf_immutable_run_id"
+        printf 'relative_path=runs/%s\n' "$perf_immutable_run_id"
+    } >"$perf_immutable_tmp") || {
+        rm -rf "$perf_immutable_tmp_dir"
+        return 1
+    }
+    mv -f "$perf_immutable_tmp" "$perf_immutable_pointer" || {
+        rm -rf "$perf_immutable_tmp_dir"
+        return 1
+    }
+    rmdir "$perf_immutable_tmp_dir" || return 1
+}
+
+perf_immutable_remove_stage() {
+    perf_immutable_stage=${1:-}
+    perf_immutable_stage_name=${perf_immutable_stage##*/}
+    case "$perf_immutable_stage_name" in .*.stage) ;; *) return 0 ;; esac
+    perf_immutable_stage_id=${perf_immutable_stage_name#.}
+    perf_immutable_stage_id=${perf_immutable_stage_id%.stage}
+    perf_immutable_valid_run_id "$perf_immutable_stage_id" || return 0
+    [ "${perf_immutable_stage%/*}" != "$perf_immutable_stage" ] || return 0
+    case "${perf_immutable_stage%/*}" in */runs) ;; *) return 0 ;; esac
+    if [ -L "$perf_immutable_stage" ]; then
+        rm -f "$perf_immutable_stage"
+    elif [ -d "$perf_immutable_stage" ]; then
+        rm -rf "$perf_immutable_stage"
+    fi
+}

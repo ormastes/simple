@@ -1,5 +1,12 @@
 # Bug: `bin/simple run` corrupts single-field enum payload values
 
+## Closed 2026-09-13 — does not reproduce: single-field enum payload extracts correctly
+- **measured** — `enum E: A(n: i64) / B`; `E.A(65)` matched via `case A(n) => print(n)`
+  under `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) prints `65`, not the filed
+  `8` (`65 >> 3`).
+- **inferred** — filed against the same `bin/simple run` JIT/interpreter driver, so the
+  driver matches; only the host OS differs.
+
 **ID:** interp_run_enum_single_field_payload_corrupt_2026-06-15
 **Severity:** P1 (data corruption, silent)
 **Affected path:** `bin/simple run` (default JIT/interpreter driver, not seed-driven test runner)

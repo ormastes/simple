@@ -1,4 +1,8 @@
 # Module-global write inside a `fn` is invisible to every callee (interpreter)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** module_global_write_invisible_to_callee_2026-07-27
 **Status:** FIXED 2026-07-28 (lane GFIX) — see §Fix applied
@@ -500,3 +504,4 @@ bug — it is this defect, and the repairs above cannot reach it.
 | `src/lib/nogc_sync_mut/spec.spl` | every spec run | sound — post-edit run still enumerates all 20 fd_table examples |
 | `src/lib/nogc_sync_mut/db/dbfs_engine/superblock.spl` | **no covering spec exists** | repaired by inspection only |
 | `src/os/gui/render.spl` | **no covering spec exists** | repaired by inspection only |
+

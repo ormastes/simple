@@ -1,4 +1,8 @@
 # `doc-coverage` calls `load_sdoctest_blocks` and `compute_sdoctest_coverage`, which are defined nowhere
+## Obsolete 2026-09-16 — dupe of doc_coverage_command_broken_missing_load_sdoctest_blocks_2026-09-05.md (same missing fns, grep-verified)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Date: 2026-09-02
 - Status: OPEN
@@ -59,3 +63,4 @@ return an empty list would produce a `doc-coverage` that exits 0 and reports
 coverage numbers derived from no sdoctest data at all — a tool that reports
 success without doing its job. Implement the two functions against the real
 sdoctest block format, or delete the sdoctest arms of the command.
+

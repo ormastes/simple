@@ -1,3 +1,7 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 /*
  * Piped-process support for the editor LSP transport.
  *
@@ -36,6 +40,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <mach-o/dyld.h>
+#endif
+#if defined(__FreeBSD__)
+#include <sys/sysctl.h>
+#endif
 
 #if defined(SIMPLE_CORE_C_STANDALONE)
 #ifdef _WIN32
@@ -70,6 +82,56 @@ bool rt_process_is_running(int64_t pid) {
     if (waited == (pid_t)pid) return false;
     if (errno == ECHILD) return kill((pid_t)pid, 0) == 0 || errno == EPERM;
     return false;
+#endif
+}
+
+int64_t rt_process_start_identity(int64_t pid) {
+    if (pid <= 0) return 0;
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) return 0;
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        CloseHandle(process);
+        return 0;
+    }
+    CloseHandle(process);
+    ULARGE_INTEGER value;
+    value.LowPart = created.dwLowDateTime;
+    value.HighPart = created.dwHighDateTime;
+    return value.QuadPart > INT64_MAX ? 0 : (int64_t)value.QuadPart;
+#elif defined(__linux__)
+    char path[64], line[2048];
+    snprintf(path, sizeof(path), "/proc/%lld/stat", (long long)pid);
+    FILE* file = fopen(path, "r");
+    if (!file) return 0;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    char* cursor = strrchr(line, ')');
+    if (!cursor || cursor[1] != ' ') return 0;
+    cursor += 2;
+    for (int field = 3; field < 22; field++) {
+        cursor = strchr(cursor, ' ');
+        if (!cursor) return 0;
+        cursor++;
+    }
+    errno = 0;
+    char* end = NULL;
+    unsigned long long value = strtoull(cursor, &end, 10);
+    return errno == 0 && end != cursor && value <= INT64_MAX ? (int64_t)value : 0;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return 0;
+    uint64_t seconds = (uint64_t)info.pbi_start_tvsec;
+    uint64_t micros = (uint64_t)info.pbi_start_tvusec;
+    if (seconds > (uint64_t)INT64_MAX / 1000000ULL) return 0;
+    return (int64_t)(seconds * 1000000ULL + micros);
+#else
+    return 0;
 #endif
 }
 
@@ -901,6 +963,10 @@ bool rt_browser_renderer_sandbox_enter(void) {
     return false;
 }
 
+bool rt_browser_renderer_sandbox_netns_active(void) {
+    return false;
+}
+
 const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
     win_browser_renderer_stdin_buf[0] = '\0';
     if (max_bytes <= 0) return win_browser_renderer_stdin_buf;
@@ -990,6 +1056,10 @@ int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args)
 
 #else /* POSIX */
 
+static int64_t rt_process_spawn_piped_argv(
+    const char* cmd, char** argv, bool sandboxed_renderer,
+    int pinned_executable_fd);
+
 #include "runtime_fork.h"
 
 #include <unistd.h>
@@ -1005,9 +1075,9 @@ static int64_t rt_process_spawn_piped_argv(
         int pinned_executable_fd);
 #include <pthread.h>
 #include <poll.h>
+#include <spawn.h>
 #ifdef __APPLE__
 #include <crt_externs.h>
-#include <spawn.h>
 #endif
 #ifdef __linux__
 #include <elf.h>
@@ -1310,7 +1380,7 @@ static bool rt_hal_static_elf_fd(int fd, off_t size) {
     return false;
 }
 
-static int64_t rt_pinned_handle_install(int fd) {
+static int64_t pinned_handle_install(int fd) {
     if (pthread_mutex_lock(&s_pinned_executables_lock) != 0) return -1;
     int free_slot = -1;
     for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
@@ -1515,7 +1585,7 @@ int64_t rt_process_pin_executable_owned(const char* canonical_path) {
     if (raw_fd < 0) return -1;
     int owner_fd = fcntl(raw_fd, F_DUPFD_CLOEXEC, 3);
     if (owner_fd < 0) { close(raw_fd); return -1; }
-    int64_t handle = rt_pinned_handle_install(owner_fd);
+    int64_t handle = pinned_handle_install(owner_fd);
     if (handle < 0) close(owner_fd);
     close(raw_fd);
     return handle;
@@ -2310,6 +2380,23 @@ static bool browser_renderer_write_proc(const char* path, const char* data) {
     return written == (ssize_t)len;
 }
 
+static bool browser_renderer_sysctl_enabled(const char* path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char value[8] = {0};
+    ssize_t count = read(fd, value, sizeof(value) - 1);
+    close(fd);
+    if (count <= 0) return false;
+    for (ssize_t i = 0; i < count; i++) {
+        if (value[i] == ' ' || value[i] == '\t' ||
+            value[i] == '\r' || value[i] == '\n') {
+            continue;
+        }
+        return value[i] == '1';
+    }
+    return false;
+}
+
 /* Unshare the user, network and IPC namespaces and drop to an unprivileged
    identity inside the new user namespace.
 
@@ -2330,36 +2417,72 @@ static bool browser_renderer_write_proc(const char* path, const char* data) {
    for children created after the unshare, so it would change nothing for a
    worker that never forks (and the jail sets RLIMIT_NPROC=0 precisely so it
    cannot). Claiming it here would be theatre. */
-static bool browser_renderer_enter_namespaces(void) {
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+static bool s_browser_renderer_force_partial_namespace_failure_for_test;
+#endif
+
+static int browser_renderer_enter_namespaces(void) {
 #if !defined(SYS_unshare)
-    return false;
+    return 0;
 #else
     uid_t uid = getuid();
     gid_t gid = getgid();
+    uid_t euid = geteuid();
+    gid_t egid = getegid();
+
+    /* A one-entry mapping cannot preserve distinct real/effective identities.
+       Refuse before unshare rather than silently turning either effective ID
+       into the overflow identity. */
+    if (uid != euid || gid != egid) return 0;
+
+    /* Ubuntu's AppArmor restriction can allow CLONE_NEWUSER while denying the
+       mapping/setup operations that must follow it.  Once unshare succeeds it
+       cannot be rolled back, so reject that known policy before mutating the
+       process.  Root is not subject to the unprivileged-userns restriction. */
+    if (uid != 0 &&
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+        !s_browser_renderer_force_partial_namespace_failure_for_test &&
+#endif
+        browser_renderer_sysctl_enabled(
+            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns")) {
+        return 0;
+    }
 
     /* The user namespace must come first and alone: it is what grants the
        privilege needed to unshare the remaining namespaces unprivileged. */
-    if (syscall(SYS_unshare, CLONE_NEWUSER) != 0) return false;
+    if (syscall(SYS_unshare, CLONE_NEWUSER) != 0) {
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+        if (s_browser_renderer_force_partial_namespace_failure_for_test) {
+            return -1;
+        }
+#endif
+        return 0;
+    }
+#ifdef BROWSER_RENDERER_NAMESPACE_SELFCHECK
+    if (s_browser_renderer_force_partial_namespace_failure_for_test) return -1;
+#endif
 
     /* setgroups must be denied BEFORE gid_map is writable, otherwise the
-       kernel rejects the gid mapping for an unprivileged writer. */
+       kernel rejects the gid mapping for an unprivileged writer.  Failures
+       from here are fatal: the process is already in an irreversible user
+       namespace and must never continue with an overflow identity. */
     if (!browser_renderer_write_proc("/proc/self/setgroups", "deny\n")) {
-        return false;
+        return -1;
     }
 
     char map[64];
     int n = snprintf(map, sizeof map, "%u %u 1\n", (unsigned)gid, (unsigned)gid);
-    if (n <= 0 || (size_t)n >= sizeof map) return false;
-    if (!browser_renderer_write_proc("/proc/self/gid_map", map)) return false;
+    if (n <= 0 || (size_t)n >= sizeof map) return -1;
+    if (!browser_renderer_write_proc("/proc/self/gid_map", map)) return -1;
 
     n = snprintf(map, sizeof map, "%u %u 1\n", (unsigned)uid, (unsigned)uid);
-    if (n <= 0 || (size_t)n >= sizeof map) return false;
-    if (!browser_renderer_write_proc("/proc/self/uid_map", map)) return false;
+    if (n <= 0 || (size_t)n >= sizeof map) return -1;
+    if (!browser_renderer_write_proc("/proc/self/uid_map", map)) return -1;
 
     /* Now unprivileged inside the new user namespace: take the rest. */
-    if (syscall(SYS_unshare, CLONE_NEWNET | CLONE_NEWIPC) != 0) return false;
+    if (syscall(SYS_unshare, CLONE_NEWNET | CLONE_NEWIPC) != 0) return -1;
 
-    return true;
+    return 1;
 #endif
 }
 
@@ -2371,6 +2494,13 @@ static bool s_browser_renderer_namespaces_active = false;
    sandbox_enter(). */
 bool rt_browser_renderer_namespaces_active(void) {
     return s_browser_renderer_namespaces_active;
+}
+
+/* Public runtime.h compatibility accessor.  The sandbox-facing name is kept
+ * stable for native callers; its value is the measured namespace posture,
+ * never an inferred result from successful stage-two entry. */
+bool rt_browser_renderer_sandbox_netns_active(void) {
+    return rt_browser_renderer_namespaces_active();
 }
 
 typedef void (*BrowserRendererPreinitFn)(int, char**, char**);
@@ -2390,15 +2520,16 @@ static void browser_renderer_preinit(int argc, char** argv, char** envp) {
        writes die) before seccomp (allow-list contains neither unshare nor
        openat).
 
-       Namespace loss is recorded, not fatal. Ubuntu 24.04 ships
-       kernel.apparmor_restrict_unprivileged_userns=1, which lets an unconfined
-       binary create a user namespace but strips its capabilities, so the
-       follow-up CLONE_NEWNET returns EPERM. Treating that as fatal would turn
-       a working seccomp+landlock jail into NO jail on every default Ubuntu
-       host — strictly worse security for a stricter-looking check. The honest
-       posture is: enter the strongest jail available and publish which layers
-       were obtained via rt_browser_renderer_namespaces_active(). */
-    s_browser_renderer_namespaces_active = browser_renderer_enter_namespaces();
+       Namespace unavailability detected before CLONE_NEWUSER is recorded, not
+       fatal. Ubuntu 24.04's AppArmor restriction is checked before that
+       irreversible mutation, preserving a working seccomp+landlock jail. A
+       failure after CLONE_NEWUSER is fatal because continuing could strand
+       the worker under an overflow identity. The honest posture is: enter the
+       strongest intact jail available and publish which layers were obtained
+       via rt_browser_renderer_namespaces_active(). */
+    int namespace_state = browser_renderer_enter_namespaces();
+    if (namespace_state < 0) _exit(126);
+    s_browser_renderer_namespaces_active = namespace_state > 0;
 
     if (!browser_renderer_apply_landlock() ||
         !browser_renderer_apply_startup_seccomp()) {
@@ -2620,24 +2751,342 @@ bool rt_browser_renderer_sandbox_enter(void) {
     return false;
 }
 
+bool rt_browser_renderer_sandbox_netns_active(void) {
+    return false;
+}
+
 #endif
 
 #endif /* POSIX */
+
+/* The MCP CLI delegates to the installed wrapper while preserving protocol
+ * stdin/stdout/stderr. The wrapper selection matches the Rust runtime: look
+ * two directories above the executable directory, then beside the executable. */
+#ifdef _WIN32
+static bool rt_mcp_parent_w(wchar_t* path) {
+    wchar_t* slash = wcsrchr(path, L'\\');
+    wchar_t* forward = wcsrchr(path, L'/');
+    if (forward && (!slash || forward > slash)) slash = forward;
+    if (!slash) return false;
+    if (slash == path + 2 && path[1] == L':') {
+        if (path[3] == L'\0') return false;
+        path[3] = L'\0';
+    } else if (slash == path) {
+        if (path[1] == L'\0') return false;
+        path[1] = L'\0';
+    } else {
+        *slash = L'\0';
+    }
+    return true;
+}
+
+static bool rt_mcp_regular_w(const wchar_t* path) {
+    DWORD attrs = GetFileAttributesW(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static bool rt_mcp_wrapper_w(wchar_t* wrapper, size_t capacity) {
+    wchar_t exe[32768];
+    DWORD length = GetModuleFileNameW(NULL, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+    if (length == 0 || length >= sizeof(exe) / sizeof(exe[0])) return false;
+    if (!rt_mcp_parent_w(exe)) return false;
+    wchar_t bin[32768];
+    wcscpy(bin, exe);
+    if (!rt_mcp_parent_w(bin) || !rt_mcp_parent_w(bin)) wcscpy(bin, exe);
+    const wchar_t* name = L"simple_mcp_server.cmd";
+    int written = swprintf(wrapper, capacity, L"%ls\\%ls", bin, name);
+    if (written < 0 || (size_t)written >= capacity) return false;
+    if (!rt_mcp_regular_w(wrapper)) {
+        written = swprintf(wrapper, capacity, L"%ls\\%ls", exe, name);
+        if (written < 0 || (size_t)written >= capacity) return false;
+    }
+    return rt_mcp_regular_w(wrapper);
+}
+
+static wchar_t* rt_mcp_environment_w(const wchar_t* wrapper) {
+    LPWCH source = GetEnvironmentStringsW();
+    if (!source) return NULL;
+    static const wchar_t hidden[] = L"_SIMPLE_STACK_SET=";
+    static const wchar_t route[] = L"_SIMPLE_MCP_WRAPPER_PATH=";
+    size_t count = 2 + wcslen(route) + wcslen(wrapper) + 1;
+    for (const wchar_t* entry = source; *entry; entry += wcslen(entry) + 1) {
+        if (_wcsnicmp(entry, hidden, sizeof(hidden) / sizeof(hidden[0]) - 1) == 0 ||
+            _wcsnicmp(entry, route, sizeof(route) / sizeof(route[0]) - 1) == 0) continue;
+        count += wcslen(entry) + 1;
+    }
+    wchar_t* result = (wchar_t*)malloc(count * sizeof(wchar_t));
+    if (!result) {
+        FreeEnvironmentStringsW(source);
+        return NULL;
+    }
+    wchar_t* out = result;
+    bool inserted = false;
+    size_t route_length = wcslen(route);
+    size_t wrapper_length = wcslen(wrapper);
+    for (const wchar_t* entry = source; *entry; entry += wcslen(entry) + 1) {
+        if (_wcsnicmp(entry, hidden, sizeof(hidden) / sizeof(hidden[0]) - 1) == 0 ||
+            _wcsnicmp(entry, route, sizeof(route) / sizeof(route[0]) - 1) == 0) continue;
+        if (!inserted && _wcsicmp(entry, route) > 0) {
+            memcpy(out, route, route_length * sizeof(wchar_t));
+            out += route_length;
+            memcpy(out, wrapper, wrapper_length * sizeof(wchar_t));
+            out += wrapper_length;
+            *out++ = L'\0';
+            inserted = true;
+        }
+        size_t length = wcslen(entry) + 1;
+        memcpy(out, entry, length * sizeof(wchar_t));
+        out += length;
+    }
+    if (!inserted) {
+        memcpy(out, route, route_length * sizeof(wchar_t));
+        out += route_length;
+        memcpy(out, wrapper, wrapper_length * sizeof(wchar_t));
+        out += wrapper_length;
+        *out++ = L'\0';
+    }
+    *out++ = L'\0';
+    FreeEnvironmentStringsW(source);
+    return result;
+}
+
+struct RtMcpChild {
+    DWORD pid;
+    HANDLE process;
+    bool waiting;
+    struct RtMcpChild* next;
+};
+
+static SRWLOCK rt_mcp_children_lock = SRWLOCK_INIT;
+static struct RtMcpChild* rt_mcp_children = NULL;
+
+static bool rt_mcp_duplicate_std(DWORD which, HANDLE* duplicate) {
+    HANDLE source = GetStdHandle(which);
+    *duplicate = NULL;
+    return source && source != INVALID_HANDLE_VALUE &&
+        DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
+                        duplicate, 0, TRUE, DUPLICATE_SAME_ACCESS) != 0;
+}
+
+int64_t rt_process_spawn_inherit(void) {
+    wchar_t wrapper[32768];
+    if (!rt_mcp_wrapper_w(wrapper, sizeof(wrapper) / sizeof(wrapper[0]))) return -1;
+    wchar_t shell[32768];
+    UINT shell_length = GetSystemDirectoryW(shell, (UINT)(sizeof(shell) / sizeof(shell[0])));
+    if (shell_length == 0 || shell_length >= sizeof(shell) / sizeof(shell[0])) return -1;
+    if (swprintf(shell + shell_length, sizeof(shell) / sizeof(shell[0]) - shell_length,
+                 L"\\cmd.exe") < 0) return -1;
+    /* Expand one child-only variable into the quoted command. cmd's /S
+     * removes the outer pair while preserving the inner path quotes; /D and
+     * /V:OFF exclude AutoRun and delayed-expansion surprises. */
+    size_t line_capacity = wcslen(shell) + 96;
+    wchar_t* line = (wchar_t*)malloc(line_capacity * sizeof(wchar_t));
+    if (!line) return -1;
+    if (swprintf(line, line_capacity,
+                 L"\"%ls\" /D /V:OFF /S /C \"\"%%_SIMPLE_MCP_WRAPPER_PATH%%\"\"",
+                 shell) < 0) {
+        free(line);
+        return -1;
+    }
+    wchar_t* environment = rt_mcp_environment_w(wrapper);
+    struct RtMcpChild* owner = (struct RtMcpChild*)calloc(1, sizeof(*owner));
+    if (!environment || !owner) {
+        free(line);
+        free(environment);
+        free(owner);
+        return -1;
+    }
+    HANDLE streams[3] = {NULL, NULL, NULL};
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
+    SIZE_T attributes_size = 0;
+    bool attributes_initialized = false;
+    STARTUPINFOEXW startup = {0};
+    PROCESS_INFORMATION child = {0};
+    bool ready = rt_mcp_duplicate_std(STD_INPUT_HANDLE, &streams[0]) &&
+                 rt_mcp_duplicate_std(STD_OUTPUT_HANDLE, &streams[1]) &&
+                 rt_mcp_duplicate_std(STD_ERROR_HANDLE, &streams[2]);
+    if (ready) {
+        (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attributes_size);
+        attributes = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attributes_size);
+        attributes_initialized = attributes &&
+            InitializeProcThreadAttributeList(attributes, 1, 0, &attributes_size);
+        ready = attributes_initialized;
+    }
+    if (ready) ready = UpdateProcThreadAttribute(attributes, 0,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, streams, sizeof(streams), NULL, NULL) != 0;
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = streams[0];
+    startup.StartupInfo.hStdOutput = streams[1];
+    startup.StartupInfo.hStdError = streams[2];
+    startup.lpAttributeList = attributes;
+    BOOL started = FALSE;
+    if (ready) started = CreateProcessW(shell, line, NULL, NULL, TRUE,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+        environment, NULL, &startup.StartupInfo, &child);
+    if (attributes) {
+        if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
+        free(attributes);
+    }
+    for (size_t i = 0; i < 3; i++) if (streams[i]) CloseHandle(streams[i]);
+    free(environment);
+    free(line);
+    if (!started) {
+        free(owner);
+        return -1;
+    }
+    CloseHandle(child.hThread);
+    owner->pid = child.dwProcessId;
+    owner->process = child.hProcess;
+    DWORD published_pid = owner->pid;
+    AcquireSRWLockExclusive(&rt_mcp_children_lock);
+    owner->next = rt_mcp_children;
+    rt_mcp_children = owner;
+    ReleaseSRWLockExclusive(&rt_mcp_children_lock);
+    return (int64_t)published_pid;
+}
+#else
+static bool rt_mcp_parent(const char* path, char* output, size_t capacity) {
+    const char* slash = strrchr(path, '/');
+    if (!slash) return false;
+    if (slash == path && path[1] == '\0') return false;
+    size_t length = slash == path ? 1 : (size_t)(slash - path);
+    if (length + 1 > capacity) return false;
+    memcpy(output, path, length);
+    output[length] = '\0';
+    return true;
+}
+
+static bool rt_mcp_regular(const char* path) {
+    struct stat info;
+    return stat(path, &info) == 0 && S_ISREG(info.st_mode);
+}
+
+static bool rt_mcp_wrapper(char* wrapper, size_t capacity) {
+    char exe[32768];
+#if defined(__linux__)
+    ssize_t length = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (length <= 0 || (size_t)length >= sizeof(exe) - 1) return false;
+    exe[length] = '\0';
+#elif defined(__APPLE__)
+    uint32_t length = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &length) != 0) return false;
+#elif defined(__FreeBSD__)
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+    size_t length = sizeof(exe);
+    if (sysctl(mib, 4, exe, &length, NULL, 0) != 0 || length == 0 || length >= sizeof(exe)) return false;
+#else
+    return false;
+#endif
+    char exe_dir[32768], bin_dir[32768], parent[32768];
+    if (!rt_mcp_parent(exe, exe_dir, sizeof(exe_dir))) return false;
+    if (!rt_mcp_parent(exe_dir, parent, sizeof(parent)) ||
+        !rt_mcp_parent(parent, bin_dir, sizeof(bin_dir))) strcpy(bin_dir, exe_dir);
+    int written = snprintf(wrapper, capacity, "%s/simple_mcp_server", bin_dir);
+    if (written < 0 || (size_t)written >= capacity) return false;
+    if (!rt_mcp_regular(wrapper)) {
+        written = snprintf(wrapper, capacity, "%s/simple_mcp_server", exe_dir);
+        if (written < 0 || (size_t)written >= capacity) return false;
+    }
+    return rt_mcp_regular(wrapper);
+}
+
+extern char** environ;
+int64_t rt_process_spawn_inherit(void) {
+    char wrapper[32768];
+    if (!rt_mcp_wrapper(wrapper, sizeof(wrapper)) || access(wrapper, X_OK) != 0) return -1;
+    static const char hidden[] = "_SIMPLE_STACK_SET=";
+    size_t capacity = 16;
+    char** environment = (char**)calloc(capacity, sizeof(char*));
+    if (!environment) return -1;
+    size_t used = 0;
+    bool complete = true;
+    for (char** entry = environ; *entry; entry++) {
+        if (strncmp(*entry, hidden, sizeof(hidden) - 1) == 0) continue;
+        if (used + 1 >= capacity) {
+            if (capacity > SIZE_MAX / 2 / sizeof(char*)) {
+                complete = false;
+                break;
+            }
+            size_t next_capacity = capacity * 2;
+            char** grown = (char**)realloc(environment, next_capacity * sizeof(char*));
+            if (!grown) {
+                complete = false;
+                break;
+            }
+            environment = grown;
+            capacity = next_capacity;
+        }
+        environment[used] = strdup(*entry);
+        if (!environment[used]) {
+            complete = false;
+            break;
+        }
+        used++;
+    }
+    if (!complete) {
+        for (size_t i = 0; i < used; i++) free(environment[i]);
+        free(environment);
+        return -1;
+    }
+    environment[used] = NULL;
+    char* argv[] = {wrapper, NULL};
+    pid_t child = 0;
+    int error = posix_spawn(&child, wrapper, NULL, NULL, argv, environment);
+    for (size_t i = 0; i < used; i++) free(environment[i]);
+    free(environment);
+    if (error != 0) return -1;
+    return (int64_t)child;
+}
+#endif
 
 /* Backfill: runtime.h prototype with no C definition (caught by the Stage4
    runtime-capsule gate). Mirrors env_process.rs rt_process_wait semantics:
    returns child exit code, -1 on error, -2 on timeout (child keeps running). */
 #ifdef _WIN32
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
-    (void)pid; (void)timeout_ms;
-    return -1;
+    if (pid <= 0 || pid > UINT32_MAX) return -1;
+    AcquireSRWLockExclusive(&rt_mcp_children_lock);
+    struct RtMcpChild* child = rt_mcp_children;
+    while (child && child->pid != (DWORD)pid) child = child->next;
+    if (!child || child->waiting) {
+        ReleaseSRWLockExclusive(&rt_mcp_children_lock);
+        return -1;
+    }
+    child->waiting = true;
+    HANDLE process = child->process;
+    ReleaseSRWLockExclusive(&rt_mcp_children_lock);
+
+    DWORD limit = timeout_ms <= 0 ? INFINITE :
+        timeout_ms >= (int64_t)(INFINITE - 1) ? INFINITE - 1 : (DWORD)timeout_ms;
+    DWORD result = WaitForSingleObject(process, limit);
+    if (result == WAIT_TIMEOUT) {
+        AcquireSRWLockExclusive(&rt_mcp_children_lock);
+        child->waiting = false;
+        ReleaseSRWLockExclusive(&rt_mcp_children_lock);
+        return -2;
+    }
+    DWORD exit_code = 0;
+    bool completed = result == WAIT_OBJECT_0 && GetExitCodeProcess(process, &exit_code);
+    AcquireSRWLockExclusive(&rt_mcp_children_lock);
+    struct RtMcpChild** link = &rt_mcp_children;
+    while (*link && *link != child) link = &(*link)->next;
+    if (*link == child) *link = child->next;
+    ReleaseSRWLockExclusive(&rt_mcp_children_lock);
+    CloseHandle(process);
+    free(child);
+    return completed ? (int64_t)(int32_t)exit_code : -1;
 }
 #else
 int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
     if (timeout_ms <= 0) {
         int status = 0;
-        if (waitpid((pid_t)pid, &status, 0) < 0) return -1;
+        pid_t waited;
+        do {
+            waited = waitpid((pid_t)pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited < 0) return -1;
         if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
         /* Same rule as the WNOHANG path below, which is where this was fixed
            first: a bare -1 here discards WTERMSIG and renders every signal
@@ -2653,6 +3102,7 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     for (;;) {
         int status = 0;
         pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
+        if (r < 0 && errno == EINTR) continue;
         if (r < 0) {
             /* A failed wait is NOT a signal death, and collapsing it to -1 made
                the two indistinguishable: the caller renders both as 255 and the

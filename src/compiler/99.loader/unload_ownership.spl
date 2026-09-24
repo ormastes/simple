@@ -1,10 +1,15 @@
 # Shared unload-ownership helpers for loader refactors.
 
-fn _name_in(list: [text], name: text) -> bool:
-    for n in list:
-        if n == name:
-            return true
-    false
+fn symbol_matches_owner_path(symbol: text, path: text) -> bool:
+    val base = path.split("/").last() ?? path
+    val stem = base.split(".").first() ?? base
+    val tag = if stem.contains("_"):
+        stem.split("_").first() ?? stem
+    else:
+        stem
+    if tag == "":
+        return false
+    symbol.starts_with(tag + "_") or symbol.contains("_" + tag + "_")
 
 fn owned_global_symbol_names<T>(
     global_symbols: Dict<text, (text, T)>,
@@ -19,14 +24,41 @@ fn owned_global_symbol_names<T>(
             names.push(sym_name)
     names
 
-fn global_symbols_without_names<T>(
+fn partition_global_symbols_by_owner<T>(
     global_symbols: Dict<text, (text, T)>,
-    names: [text]
-) -> Dict<text, (text, T)>:
+    path: text
+) -> ([text], Dict<text, (text, T)>):
+    if global_symbols.is_empty():
+        return ([], global_symbols)
+    var owned: [text] = []
     var kept: Dict<text, (text, T)> = {}
     for item in global_symbols:
         val sym_name = item[0]
         val owner_pair = item[1]
-        if not _name_in(names, sym_name):
+        if owner_pair[0] == path:
+            owned.push(sym_name)
+        else:
+            kept[sym_name] = owner_pair
+    (owned, kept)
+
+fn global_symbols_without_names<T>(
+    global_symbols: Dict<text, (text, T)>,
+    names: [text]
+) -> Dict<text, (text, T)>:
+    if names.is_empty():
+        return global_symbols
+    var removal_set: Dict<text, bool> = {}
+    var removes_any = false
+    for name in names:
+        removal_set[name] = true
+        if global_symbols.has(name):
+            removes_any = true
+    if not removes_any:
+        return global_symbols
+    var kept: Dict<text, (text, T)> = {}
+    for item in global_symbols:
+        val sym_name = item[0]
+        val owner_pair = item[1]
+        if not removal_set.has(sym_name):
             kept[sym_name] = owner_pair
     kept

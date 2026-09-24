@@ -1,4 +1,8 @@
 # Task #170: interpreter `Ok(v)` extraction divides multiples-of-8 by 8 -- VERIFIED, SOURCE-FIXED, DEPLOYED-STALE
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Component:** Rust seed, JIT-first Cranelift codegen path (`bin/simple run`
 without `SIMPLE_BOOTSTRAP`) -- this is the seed's default execution path, not
@@ -152,3 +156,4 @@ further stash operations, to avoid further collisions. This is an
 orchestration-level hazard (worktree reuse/sharing across concurrently
 running lanes) that the parent/orchestrator should be aware of
 independent of this bug's resolution.
+

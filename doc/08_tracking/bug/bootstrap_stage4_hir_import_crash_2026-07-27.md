@@ -1,4 +1,8 @@
 # Stage 4 HIR Import Crash
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -170,3 +174,4 @@ core-C-bootstrap ABI (`Dict.has`, `rt_is_debug_mode_enabled`,
 `rt_array_extend_i64`, and `rt_option_map` are absent). That is not execution
 proof; TODO592 remains open for the fresh admitted self-hosted runner. No full
 Stage 4 was rerun.
+

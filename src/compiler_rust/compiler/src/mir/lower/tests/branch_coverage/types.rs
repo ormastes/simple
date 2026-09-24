@@ -666,3 +666,56 @@ fn global_declared_enum_variant_still_lowers() {
         );
     }
 }
+
+#[test]
+fn global_enum_variant_uses_resolved_type_when_bare_names_collide() {
+    let mut registry = hir::TypeRegistry::new();
+    let scoped_http_method = registry.register_named(
+        "HttpMethod".to_string(),
+        hir::HirType::Enum {
+            name: "HttpMethod".to_string(),
+            variants: vec![("Get".to_string(), None), ("Post".to_string(), None)],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: Default::default(),
+        },
+    );
+    let global_bare_name_winner = registry.register_named(
+        "HttpMethod".to_string(),
+        hir::HirType::Enum {
+            name: "HttpMethod".to_string(),
+            variants: vec![("GET".to_string(), None), ("POST".to_string(), None)],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: Default::default(),
+        },
+    );
+    assert_eq!(registry.lookup("HttpMethod"), Some(global_bare_name_winner));
+
+    let mut lowerer = MirLowerer::new();
+    lowerer.type_registry = Some(&registry);
+    let mut func = MirFunction::new(
+        "t".to_string(),
+        hir::TypeId::I64,
+        simple_parser::ast::Visibility::Private,
+    );
+    func.new_block();
+    lowerer.begin_function(func, "t", false).unwrap();
+
+    let valid_scoped_variant = hir::HirExpr {
+        kind: hir::HirExprKind::Global("HttpMethod::Get".to_string()),
+        ty: scoped_http_method,
+    };
+    assert!(
+        lowerer.lower_expr(&valid_scoped_variant).is_ok(),
+        "the HIR-resolved enum must win over an unrelated last-wins bare-name entry"
+    );
+
+    let wrong_for_scoped_enum = hir::HirExpr {
+        kind: hir::HirExprKind::Global("HttpMethod::GET".to_string()),
+        ty: scoped_http_method,
+    };
+    let error = lowerer.lower_expr(&wrong_for_scoped_enum).unwrap_err().to_string();
+    assert!(error.contains("unknown variant or method 'GET' on enum HttpMethod"));
+    assert!(error.contains("declared variants: Get, Post"));
+}

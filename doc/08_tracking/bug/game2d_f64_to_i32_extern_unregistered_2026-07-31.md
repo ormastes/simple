@@ -1,4 +1,9 @@
 # game2d `_f64_to_i32`/`_i32_to_f64`/`_i32_to_u32` externs return `nil` under the tree-walk interpreter (2026-07-31)
+## Closed 2026-09-16 — ALREADY-FIXED reverified 2026-08-09 (commit b9ae3d91c077); status changed to FIXED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **ALREADY-FIXED, reverified 2026-08-09.** Commit `b9ae3d91c077` ("fix(game2d):
 > replace unregistered _f64_to_i32/_i32_to_f64/_i32_to_u32 externs with real
@@ -99,3 +104,4 @@ exact multi-sprite screen position. Recommend the same `.to_i32()`/
 `.to_f64()` swap there in a follow-up lane, plus a position-asserting spec
 addition (e.g. two sprites at two known screen coordinates, assert both
 colors at their expected offsets, not just "somewhere in the canvas").
+

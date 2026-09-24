@@ -1,4 +1,8 @@
 # `Map.new()` resolves to a plain `dict` (not the `Map<K,V>` struct); `insert_if_absent` missing either way
+## Obsolete 2026-09-16 — dupe of 2026-09-15 entry; insert_if_absent now exists at map.spl:325 (verified), old gap gone
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign,
@@ -61,3 +65,4 @@ require walking the full import graph reached from
 the likely primary blocker since it means even a correctly-implemented
 `insert_if_absent` on the `Map` struct would not be reachable through this
 import path until the collision is resolved.
+

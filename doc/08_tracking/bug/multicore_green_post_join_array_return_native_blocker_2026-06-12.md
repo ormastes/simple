@@ -1,7 +1,20 @@
 # Multicore Green Post-Join Array Return Native Blocker
 
+## Closed 2026-09-13 — already closed in-entry; native boundary recorded as crossed
+
+- **inferred** The entry's own `Status: closed` line is backed by an in-file "Fixed
+  Behavior" / "now closed" section naming what changed, not a bare status flip.
+- **measured** The general hosted-native closure family this blocker belongs to behaves
+  correctly on the current Rust seed (v1.0.0-rc.1, Windows): a function-value array walked
+  by `for f in fns` and called per element prints `total=23`, and `me fn` methods mutating
+  an array field accumulate correctly (`mefn=2`).
+- **inferred** Standalone-native re-confirmation is not possible on this host: `native-build`
+  aborts with `SCV-E-SNAPSHOT: snapshot-cache-root-not-owned` / `unknown extern function:
+  rt_env_vars` before codegen, for reasons unrelated to this bug.
+
+
 Date: 2026-06-12
-Status: closed
+Status: closed 2026-09-13 (was: Status: closed)
 Owner: multicore-green lane
 
 ## Summary

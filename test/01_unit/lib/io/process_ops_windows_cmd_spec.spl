@@ -1,0 +1,53 @@
+# @cover src/lib/nogc_sync_mut/io/process_ops.spl
+#
+# process_run command resolution. On Windows a bare name must resolve
+# through PATH x %PATHEXT% (fallback .COM;.EXE;.BAT;.CMD), so a `.cmd` shim
+# runs and receives a spaced argument intact. POSIX lookup stays `which`.
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+
+val CMD_DIR = "build\\test-process-cmd"
+
+
+fn is_windows() -> bool:
+    (rt_env_get("OS") ?? "").lower().contains("windows")
+
+
+fn run_echoargs_with_pathext(pathext: text) -> text:
+    """Write CMD_DIR\\echoargs.cmd, put CMD_DIR first on PATH, set PATHEXT,
+    run `echoargs "a b" c` by bare name, restore env, return stdout."""
+    val _mk = rt_dir_create_all(CMD_DIR)
+    val _w = rt_file_write_text("{CMD_DIR}\\echoargs.cmd", "@echo off\r\necho ONE=[%~1] TWO=[%~2]\r\n")
+    val original_path = rt_env_get("PATH") ?? ""
+    val original_pathext = rt_env_get("PATHEXT") ?? ""
+    val _p = rt_env_set("PATH", "{CMD_DIR};{original_path}")
+    val _e = rt_env_set("PATHEXT", pathext)
+    val (stdout, _stderr, _code) = process_run("echoargs", ["a b", "c"])
+    val _rp = rt_env_set("PATH", original_path)
+    val _re = rt_env_set("PATHEXT", original_pathext)
+    stdout
+
+
+describe "process_run command resolution":
+
+    it "Windows: bare name resolves to a .cmd on PATH and keeps a spaced arg":
+        if is_windows():
+            val out = run_echoargs_with_pathext(".COM;.EXE;.BAT;.CMD")
+            expect(out.contains("ONE=[a b] TWO=[c]")).to_equal(true)
+        else:
+            val (out, _err, code) = process_run("echo", ["a b"])
+            expect(code).to_equal(0)
+            expect(out.trim()).to_equal("a b")
+
+    it "Windows: empty PATHEXT falls back to .COM;.EXE;.BAT;.CMD":
+        if is_windows():
+            val out = run_echoargs_with_pathext("")
+            expect(out.contains("ONE=[a b] TWO=[c]")).to_equal(true)
+        else:
+            val (_out, _err, code) = process_run("true", [])
+            expect(code).to_equal(0)

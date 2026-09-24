@@ -1,0 +1,293 @@
+#!/bin/sh
+# check-cross-unit-user-to-text-not-hijacked.shs
+#
+# A user-defined `fn to_text()` on a type declared in ANOTHER compilation unit
+# must actually be CALLED by the multi-unit (project) native-build lane — the
+# lane that emits Stage 2.
+#
+# Why no existing guard could have caught this
+# -------------------------------------------
+# Every pre-push guard checks trees, ranges, source text, or symbol SETS; the
+# two that run a compiler run it over source, and the one that executes a stage
+# binary only asserts it does not crash. This defect produces a binary that is
+# correctly sized, non-conflicted, forward-moving, symbol-preserving, links
+# clean, runs clean, and quietly answers `<value:0x...>` where the user's own
+# method should have run. Measured 2026-09-07 on the aarch64 Stage-2 candidate:
+# 218 `fn to_text` definitions in source, 4 `.to_text` symbols in the whole
+# 152 MB binary, and `BuiltinBackendCompileAdapter.compile_aot_into_path`
+# calling `rt_to_string` instead of `BackendKind.to_text` — so
+# `native-build --backend cranelift` saw the backend NAME `<enum@0x2ced1710>`,
+# silently defaulted to LLVM, and invoked `llc` with
+# `-mtriple=<invalid-heap:0x13dedef1>`, which `/bin/sh -c` parses as an input
+# REDIRECT (`cannot open invalid-heap:0x...: No such file`, exit 2). The probe
+# reported only `backend object-path status 1`.
+#
+# Mechanism: build a two-file fixture through the PROJECT lane
+# (`--source <dir> --entry <file>`, `SIMPLE_NATIVE_BUILD_RUST=1`) — a
+# single-file `native-build` does NOT exercise the defect, because the callee is
+# then in the same LLVM module and the `direct_func` fast path resolves it.
+# Run the binary and require the exact expected text. A `dup_text` twin (same
+# receiver, non-builtin leaf name) is required in the SAME run: it proves the
+# lane resolves cross-unit user methods at all, so a FAIL is specifically the
+# builtin-leaf hijack and not a broken fixture.
+#
+# The compiler's exit status is read DIRECTLY into a variable on the line after
+# the invocation, never through a pipe — a pipeline's `$?` is the last command's
+# status and has produced false greens in this repo before.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> cross-unit user method call(s) checked, 0 hijacked   exit 0
+#   FAIL  — ... naming each hijacked call and what it returned       exit 1
+#   ERROR — nothing was checked (<reason>)                           exit 2
+# A run that checked 0 calls is ERROR, never a pass. No compiler is ERROR,
+# never a pass: absence of a compiler is absence of evidence.
+#
+# Usage:
+#   sh scripts/check/check-cross-unit-user-to-text-not-hijacked.shs [--simple <binary>]
+#   sh scripts/check/check-cross-unit-user-to-text-not-hijacked.shs --selftest
+
+set -u
+
+SELFTEST_ONLY=0
+SIMPLE_BIN=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest) SELFTEST_ONLY=1 ;;
+    --simple) shift; SIMPLE_BIN="${1:-}" ;;
+    *) echo "unknown argument: $1" >&2
+       echo "ERROR — nothing was checked (unknown argument $1)"
+       exit 2 ;;
+  esac
+  shift
+done
+
+repo_root=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || repo_root=""
+if [ -z "$repo_root" ]; then
+  echo "ERROR — nothing was checked (cannot resolve repo root)"
+  exit 2
+fi
+
+if [ -z "$SIMPLE_BIN" ]; then
+  SIMPLE_BIN="${SIMPLE_TO_TEXT_GUARD_BIN:-}"
+fi
+if [ -z "$SIMPLE_BIN" ]; then
+  for cand in \
+    "$repo_root/src/compiler_rust/target/bootstrap/simple" \
+    "$repo_root/build/seed-target/bootstrap/simple" \
+    "$repo_root/bin/simple"
+  do
+    if [ -x "$cand" ]; then SIMPLE_BIN="$cand"; break; fi
+  done
+fi
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+  echo "ERROR — nothing was checked (no runnable simple binary; pass --simple <path>)"
+  exit 2
+fi
+
+work=$(mktemp -d) || {
+  echo "ERROR — nothing was checked (cannot create temp dir)"
+  exit 2
+}
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT INT TERM
+
+# write_fixture <dir> <hijack_expected: 0|1>
+# When hijack_expected=1 the fixture declares to_text in the SAME unit as the
+# caller, which the lane has always compiled correctly — that is the selftest's
+# must-PASS control. The real scan always uses the cross-unit shape.
+write_fixture() {
+  fx_dir="$1"
+  fx_same_unit="$2"
+  mkdir -p "$fx_dir/probe" || return 1
+  if [ "$fx_same_unit" = "1" ]; then
+    cat > "$fx_dir/probe/types_p.spl" <<'EOF'
+struct PMarker:
+    tag: text
+
+export PMarker
+EOF
+    cat > "$fx_dir/probe/main.spl" <<'EOF'
+use probe.types_p.{PMarker}
+
+struct PTri:
+    arch: text
+
+    fn to_text() -> text:
+        "TRI-{self.arch}"
+
+    fn dup_text() -> text:
+        "DUP-{self.arch}"
+
+fn main() -> i64:
+    val m = PMarker(tag: "m")
+    print "marker={m.tag}"
+    val t = PTri(arch: "aarch64")
+    val a = t.to_text()
+    print "to_text={a}"
+    val b = t.dup_text()
+    print "dup_text={b}"
+    0
+EOF
+  else
+    cat > "$fx_dir/probe/types_p.spl" <<'EOF'
+struct PTri:
+    arch: text
+
+    fn to_text() -> text:
+        "TRI-{self.arch}"
+
+    fn dup_text() -> text:
+        "DUP-{self.arch}"
+
+export PTri
+EOF
+    cat > "$fx_dir/probe/main.spl" <<'EOF'
+use probe.types_p.{PTri}
+
+fn main() -> i64:
+    val t = PTri(arch: "aarch64")
+    val a = t.to_text()
+    print "to_text={a}"
+    val b = t.dup_text()
+    print "dup_text={b}"
+    0
+EOF
+  fi
+  return 0
+}
+
+# run_fixture <dir> <outfile>; echoes nothing, sets RUN_STATUS / RUN_OUT
+RUN_STATUS=0
+RUN_OUT=""
+run_fixture() {
+  rf_dir="$1"
+  rf_cache="$rf_dir/cache"
+  rf_bin="$rf_dir/probe.bin"
+  rm -rf "$rf_cache"
+  mkdir -p "$rf_cache"
+  (
+    cd "$rf_dir" || exit 90
+    SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 \
+      timeout 900 "$SIMPLE_BIN" native-build \
+      --backend llvm --runtime-bundle core-c-bootstrap \
+      --source probe --entry-closure --threads 1 --mode one-binary \
+      --cache-dir "$rf_cache" --entry probe/main.spl -o "$rf_bin"
+  ) > "$rf_dir/build.log" 2>&1
+  rf_build_rc=$?
+  if [ "$rf_build_rc" -ne 0 ]; then
+    RUN_STATUS=$rf_build_rc
+    RUN_OUT=""
+    return 1
+  fi
+  timeout 120 "$rf_bin" > "$rf_dir/run.log" 2>&1
+  RUN_STATUS=$?
+  RUN_OUT=$(cat "$rf_dir/run.log" 2>/dev/null)
+  [ "$RUN_STATUS" -eq 0 ]
+}
+
+# evaluate <output>; prints offender lines on stdout, returns count via EV_*
+EV_CHECKED=0
+EV_BAD=""
+evaluate() {
+  ev_out="$1"
+  EV_CHECKED=0
+  EV_BAD=""
+  for pair in "to_text=TRI-aarch64" "dup_text=DUP-aarch64"; do
+    ev_key=${pair%%=*}
+    ev_want=${pair#*=}
+    ev_line=$(printf '%s\n' "$ev_out" | grep "^${ev_key}=" | head -1)
+    if [ -z "$ev_line" ]; then
+      EV_BAD="${EV_BAD}${EV_BAD:+, }${ev_key} (no output line)"
+      EV_CHECKED=$((EV_CHECKED + 1))
+      continue
+    fi
+    ev_got=${ev_line#*=}
+    EV_CHECKED=$((EV_CHECKED + 1))
+    if [ "$ev_got" != "$ev_want" ]; then
+      EV_BAD="${EV_BAD}${EV_BAD:+, }${ev_key} returned '${ev_got}' (expected '${ev_want}')"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------- selftest
+# Fatal and unconditional, exactly like the other guards.
+#  1. same-unit fixture must PASS   (proves the harness can report a pass, and
+#     that the lane compiles a user to_text at all)
+#  2. an evaluator fed the observed hijack output must FAIL naming to_text
+#  3. an evaluator fed empty output must report checked>0 with offenders, so a
+#     silent build can never be mistaken for a pass
+selftest() {
+  st_dir="$work/selftest"
+  mkdir -p "$st_dir/control" || return 1
+
+  write_fixture "$st_dir/control" 1 || {
+    echo "selftest: cannot write control fixture" >&2
+    return 1
+  }
+  if ! run_fixture "$st_dir/control"; then
+    echo "selftest: control fixture failed to build or run (rc=$RUN_STATUS)" >&2
+    tail -5 "$st_dir/control/build.log" >&2 2>/dev/null
+    return 1
+  fi
+  evaluate "$RUN_OUT"
+  if [ "$EV_CHECKED" -eq 0 ] || [ -n "$EV_BAD" ]; then
+    echo "selftest: control fixture must PASS but reported: ${EV_BAD:-0 calls checked}" >&2
+    return 1
+  fi
+
+  evaluate "to_text=<value:0x2d54bbe1>
+dup_text=DUP-aarch64"
+  case "$EV_BAD" in
+    *to_text*) : ;;
+    *) echo "selftest: hijack replay must FAIL naming to_text" >&2; return 1 ;;
+  esac
+  case "$EV_BAD" in
+    *dup_text*) echo "selftest: hijack replay must not blame dup_text" >&2; return 1 ;;
+    *) : ;;
+  esac
+
+  evaluate ""
+  if [ "$EV_CHECKED" -eq 0 ] || [ -z "$EV_BAD" ]; then
+    echo "selftest: empty output must yield checked>0 with offenders" >&2
+    return 1
+  fi
+  return 0
+}
+
+if ! selftest; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+  echo "PASS — selftest only: 3 fixture(s) checked, 0 unexpected"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- real scan
+scan_dir="$work/scan"
+mkdir -p "$scan_dir" || {
+  echo "ERROR — nothing was checked (cannot stage fixture)"
+  exit 2
+}
+write_fixture "$scan_dir" 0 || {
+  echo "ERROR — nothing was checked (cannot write fixture)"
+  exit 2
+}
+if ! run_fixture "$scan_dir"; then
+  echo "ERROR — nothing was checked (cross-unit fixture failed to build or run, rc=$RUN_STATUS)"
+  tail -5 "$scan_dir/build.log" 2>/dev/null
+  exit 2
+fi
+
+evaluate "$RUN_OUT"
+if [ "$EV_CHECKED" -eq 0 ]; then
+  echo "ERROR — nothing was checked (fixture produced no comparable output)"
+  exit 2
+fi
+if [ -n "$EV_BAD" ]; then
+  echo "FAIL — $EV_CHECKED cross-unit user method call(s) checked, hijacked: $EV_BAD"
+  exit 1
+fi
+echo "PASS — $EV_CHECKED cross-unit user method call(s) checked, 0 hijacked"
+exit 0

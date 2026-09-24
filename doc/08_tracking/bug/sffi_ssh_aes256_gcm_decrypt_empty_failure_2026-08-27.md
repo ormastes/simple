@@ -1,4 +1,8 @@
 # SSH AES-256-GCM SFFI decrypt collapses failure into an empty byte array
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: PARTIALLY FIXED — v2 contract contained; cross-lane runtime proof blocked
 - Filed: 2026-08-27
@@ -96,3 +100,4 @@ throughput or peak-RSS claim.
    auxiliary allocation.
 5. The provider remains unsigned/unverified until its exact artifact, ABI
    registry, and evidence manifest are admitted by the SFFI v2 loader policy.
+

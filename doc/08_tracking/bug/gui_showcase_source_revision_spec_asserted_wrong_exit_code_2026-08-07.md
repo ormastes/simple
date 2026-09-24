@@ -1,4 +1,9 @@
 # O0/O1 source-revision contract spec asserted the wrong process exit code
+## Closed 2026-09-16 — Status FIXED; both specs 3 passed 0 failed after fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-07 (T9, `render_perf_replan_parallel_teams_2026-08-07.md`)
 - Status: FIXED
@@ -57,3 +62,4 @@ bootstrap seed, `bin/simple test ... --mode=interpreter`)
 
 O0/O1 (revisions + property trees source-revision contract family) status:
 **DONE.**
+

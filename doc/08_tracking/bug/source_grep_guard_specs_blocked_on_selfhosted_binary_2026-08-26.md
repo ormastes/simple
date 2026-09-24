@@ -1,4 +1,8 @@
 # Source-grep guard specs un-modernizable until a self-hosted binary is deployed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-26
 - Found via: sspec modernization residual wave (batch ba, ~56 specs scoring 49 /
@@ -115,3 +119,4 @@ pending/KAT scaffolds, GPU-device evidence, and SimpleOS/QEMU/board lanes — fu
 with one-line reasons in /tmp/sspec_census/p02_log.txt. New evidence: pre-existing RED
 `test/01_unit/multi_mode_test_runner_spec.spl` (34/34 fail, TestExecutionMode unresolvable from
 test/01_unit, API drift vs std.nogc_sync_mut.test_runner).
+

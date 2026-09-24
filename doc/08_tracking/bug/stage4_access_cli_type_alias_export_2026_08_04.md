@@ -1,4 +1,8 @@
 # Stage 4 access CLI alias export and WM text boundary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -42,3 +46,4 @@ The strengthened contract imports and executes `wm_access_operation`, so the
 real WM module and its hub/grammar topology are compiled. It linked 44 modules
 and exited 30. Full Phase 4 cycle 3 then crossed the WM adapter and stopped
 later in `app.mcp_t32.session_tools`, proving the original blocker is cleared.
+

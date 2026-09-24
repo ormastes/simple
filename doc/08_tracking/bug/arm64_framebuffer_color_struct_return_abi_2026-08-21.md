@@ -196,3 +196,7 @@ session: port the existing `need_comma` ratchet to
 `comparison_chain_then_paren_group_spec.spl` plus the real
 `flat_pool_codec.spl` parse, rebuild/admit Phase 2, regenerate the Phase-3
 receipt, and resume. QEMU evidence remains pending and unclaimed.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

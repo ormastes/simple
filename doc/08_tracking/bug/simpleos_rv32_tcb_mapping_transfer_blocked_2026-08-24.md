@@ -1,4 +1,8 @@
 # RV32 TCB mapping transfer remains blocked (2026-08-24)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The canonical TCB now has an appended, opaque slot/generation locator, but no
 present locator is constructed. A reviewed draft tried to bind the existing
@@ -19,3 +23,4 @@ must be one publication protocol with rollback, and task exit/reap must resolve
 the locator under the exact task lifecycle before teardown. SATP activation is
 also separately owned. Until those are implemented, canonical RV32 dispatch
 must keep the locator absent and process-image readiness false.
+

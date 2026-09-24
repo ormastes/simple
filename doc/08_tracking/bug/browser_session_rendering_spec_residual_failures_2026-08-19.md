@@ -1,4 +1,8 @@
 # Residual failures in browser_session dom-input / script-css-animation specs (post interpreter-collision fixes)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-19
 - Status: OPEN — diagnosed, not yet fixed
@@ -43,3 +47,4 @@ lives in `interpreter_eval_member.spl` (`_host_dom_style_assignment_changes`);
 the flush into the session document is where the writes vanish. Overlaps the
 open inline-handler-title bug and the in-flight (uncommitted) JS-engine work in
 this worktree — coordinate before fixing.
+

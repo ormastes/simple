@@ -1,4 +1,8 @@
 # Stage 4 T32 MCP thread-sleep owner
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/app/mcp_t32/session_tools.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -35,3 +39,4 @@ module's two free `rt_file_read_text` calls. Both reads now use the existing
 `read_file` facade. The strengthened 41-module contract reads a deliberately
 missing CMM path, returns an empty warning set, and exits 30. The following full
 cycle crossed the entire T32 module.
+

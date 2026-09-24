@@ -1,4 +1,8 @@
 # `case Some(` on plain-nullable slots — classified sweep of src/compiler
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Static analysis only. Nothing was edited, built, or bootstrapped.
 Baseline: working tree at the commit after 6d3856e6b4b.
@@ -384,3 +388,4 @@ The corrections are to *scope*: the defect is repo-wide, not 50.mir-local
 (50.mir is 36 of 218 B sites; 80.driver at 46 and 70.backend at 40 are larger),
 and 218 of 467 sites could not be classified either way — bucket C is as large
 as bucket B, so this sweep bounds the problem, it does not close it.
+

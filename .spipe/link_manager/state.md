@@ -180,3 +180,8 @@ implement-apply-layout-stylercpt-freezeprop-done
   the §6 amendment and freeze batch layouts; wire layout+apply+receipts
   into an end-to-end smf_link pipeline slice (L2–L8 on CPU) behind one
   driver function with per-stage receipts.
+- 2026-09-18 handoff: the "wire L2–L8 behind one driver" step above is now
+  owned by mold-MDSOC++ linker plan lane A6 (`L/gpu_smf/smf_link_driver.spl`),
+  per `doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md`
+  and `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` §10 row 7.
+  No parallel lane should pick up this step.

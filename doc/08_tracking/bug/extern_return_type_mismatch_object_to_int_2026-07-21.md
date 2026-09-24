@@ -1,4 +1,8 @@
 # Extern Call Return Type Mismatch: "object to int"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-21
 **Severity:** P1 (blocks rv64 serial_shell_entry compilation)
@@ -91,3 +95,4 @@ fn test3() -> i64:
 1. Fix MIR lowering to preserve extern function return type through inline_call pass
 2. Add regression test: function returning extern call result with --emit-object on riscv64
 3. Re-enable rv64 serial_shell_entry helper function pattern after fix
+

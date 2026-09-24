@@ -10,9 +10,9 @@
 # Rule 4: @bypass attribute for container directories
 
 use compiler.dependency.visibility.{
-    Visibility, SymbolId, Symbol, ModDecl,
+    Visibility, SymbolName, DepSymbol, ModDecl,
     DirManifest, ModuleContents,
-    effective_visibility, visibility_meet, ancestor_visibility,
+    dir_effective_visibility, visibility_meet, ancestor_visibility,
     AccessPolicy, effective_access_policy, check_access
 }
 
@@ -73,26 +73,26 @@ describe "check_access":
     context "Open policy":
         it "allows any symbol access":
             val manifest = DirManifest.new("test")
-            val sym = SymbolId.new("anything")
+            val sym = SymbolName.new("anything")
             expect check_access(manifest, AccessPolicy.Open, sym)
 
     context "Bypass policy":
         it "allows any symbol access (transparent)":
             val manifest = DirManifest.new("test")
-            val sym = SymbolId.new("anything")
+            val sym = SymbolName.new("anything")
             expect check_access(manifest, AccessPolicy.Bypass, sym)
 
     context "Boundary policy":
         it "allows access to exported symbols":
             var manifest = DirManifest.new("test")
-            val sym = SymbolId.new("PublicApi")
+            val sym = SymbolName.new("PublicApi")
             manifest.add_export(sym)
 
             expect check_access(manifest, AccessPolicy.Boundary, sym)
 
         it "denies access to non-exported symbols":
             val manifest = DirManifest.new("test")
-            val sym = SymbolId.new("InternalHelper")
+            val sym = SymbolName.new("InternalHelper")
 
             expect not check_access(manifest, AccessPolicy.Boundary, sym)
 
@@ -101,14 +101,14 @@ describe "Rule 1: __init__.spl boundary enforcement":
     it "exported symbol through boundary is accessible":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.pub_decl("router"))
-        val sym = SymbolId.new("Router")
+        val sym = SymbolName.new("Router")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("Router"))
+        mc.add_symbol(DepSymbol.pub_symbol("Router"))
 
         # Symbol is public, module is public, and it's exported
-        val vis = effective_visibility(manifest, "router", mc, sym)
+        val vis = dir_effective_visibility(manifest, "router", mc, sym)
         expect vis.is_public()
 
         # Access through boundary is allowed
@@ -120,7 +120,7 @@ describe "Rule 1: __init__.spl boundary enforcement":
         manifest.add_child(ModDecl.pub_decl("internal"))
         # NOT exporting InternalHelper
 
-        val sym = SymbolId.new("InternalHelper")
+        val sym = SymbolName.new("InternalHelper")
         val policy = effective_access_policy(true, false)
         expect not check_access(manifest, policy, sym)
 
@@ -128,14 +128,14 @@ describe "Rule 4: bypass directory validation":
     # Bypass directories are transparent and must only contain subdirectories.
     it "bypass directory allows pass-through access":
         val manifest = DirManifest.new("lib")
-        val sym = SymbolId.new("anything")
+        val sym = SymbolName.new("anything")
         val policy = effective_access_policy(true, true)
         expect check_access(manifest, policy, sym)
 
     it "bypass directory ignores export list":
         var manifest = DirManifest.new("lib")
         # Even without exports, bypass allows access
-        val sym = SymbolId.new("SomeType")
+        val sym = SymbolName.new("SomeType")
         val policy = effective_access_policy(true, true)
         expect check_access(manifest, policy, sym)
 
@@ -148,46 +148,46 @@ describe "Rule 6: bloodline restriction (model level)":
         # NOT adding export
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("Helper"))
-        val sym = SymbolId.new("Helper")
+        mc.add_symbol(DepSymbol.pub_symbol("Helper"))
+        val sym = SymbolName.new("Helper")
 
-        val vis = effective_visibility(manifest, "mymod", mc, sym)
+        val vis = dir_effective_visibility(manifest, "mymod", mc, sym)
         expect vis.is_private()
 
     it "public symbol in private module with export is private":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.priv_decl("mymod"))
-        val sym = SymbolId.new("Helper")
+        val sym = SymbolName.new("Helper")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("Helper"))
+        mc.add_symbol(DepSymbol.pub_symbol("Helper"))
 
-        val vis = effective_visibility(manifest, "mymod", mc, sym)
+        val vis = dir_effective_visibility(manifest, "mymod", mc, sym)
         expect vis.is_private()
 
     it "private symbol in public module with export is private":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.pub_decl("mymod"))
-        val sym = SymbolId.new("Secret")
+        val sym = SymbolName.new("Secret")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.priv_symbol("Secret"))
+        mc.add_symbol(DepSymbol.priv_symbol("Secret"))
 
-        val vis = effective_visibility(manifest, "mymod", mc, sym)
+        val vis = dir_effective_visibility(manifest, "mymod", mc, sym)
         expect vis.is_private()
 
     it "private symbol in private module with export is private":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.priv_decl("mymod"))
-        val sym = SymbolId.new("Secret")
+        val sym = SymbolName.new("Secret")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.priv_symbol("Secret"))
+        mc.add_symbol(DepSymbol.priv_symbol("Secret"))
 
-        val vis = effective_visibility(manifest, "mymod", mc, sym)
+        val vis = dir_effective_visibility(manifest, "mymod", mc, sym)
         expect vis.is_private()
 
 # =========================================================================
@@ -199,8 +199,8 @@ describe "Boundary with multiple exports":
     it "allows access to first of multiple exports":
         var manifest = DirManifest.new("api")
         manifest.add_child(ModDecl.pub_decl("handlers"))
-        val sym_a = SymbolId.new("GetHandler")
-        val sym_b = SymbolId.new("PostHandler")
+        val sym_a = SymbolName.new("GetHandler")
+        val sym_b = SymbolName.new("PostHandler")
         manifest.add_export(sym_a)
         manifest.add_export(sym_b)
 
@@ -210,8 +210,8 @@ describe "Boundary with multiple exports":
     it "allows access to second of multiple exports":
         var manifest = DirManifest.new("api")
         manifest.add_child(ModDecl.pub_decl("handlers"))
-        val sym_a = SymbolId.new("GetHandler")
-        val sym_b = SymbolId.new("PostHandler")
+        val sym_a = SymbolName.new("GetHandler")
+        val sym_b = SymbolName.new("PostHandler")
         manifest.add_export(sym_a)
         manifest.add_export(sym_b)
 
@@ -221,12 +221,12 @@ describe "Boundary with multiple exports":
     it "denies access to symbol not in multi-export list":
         var manifest = DirManifest.new("api")
         manifest.add_child(ModDecl.pub_decl("handlers"))
-        val sym_a = SymbolId.new("GetHandler")
-        val sym_b = SymbolId.new("PostHandler")
+        val sym_a = SymbolName.new("GetHandler")
+        val sym_b = SymbolName.new("PostHandler")
         manifest.add_export(sym_a)
         manifest.add_export(sym_b)
 
-        val sym_internal = SymbolId.new("InternalMiddleware")
+        val sym_internal = SymbolName.new("InternalMiddleware")
         val policy = effective_access_policy(true, false)
         expect not check_access(manifest, policy, sym_internal)
 
@@ -236,81 +236,81 @@ describe "Boundary with multiple child modules":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.pub_decl("public_mod"))
         manifest.add_child(ModDecl.priv_decl("private_mod"))
-        val sym = SymbolId.new("PubType")
+        val sym = SymbolName.new("PubType")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("PubType"))
+        mc.add_symbol(DepSymbol.pub_symbol("PubType"))
 
-        val vis = effective_visibility(manifest, "public_mod", mc, sym)
+        val vis = dir_effective_visibility(manifest, "public_mod", mc, sym)
         expect vis.is_public()
 
     it "public symbol in private child module is hidden":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.pub_decl("public_mod"))
         manifest.add_child(ModDecl.priv_decl("private_mod"))
-        val sym = SymbolId.new("PrivType")
+        val sym = SymbolName.new("PrivType")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("PrivType"))
+        mc.add_symbol(DepSymbol.pub_symbol("PrivType"))
 
-        val vis = effective_visibility(manifest, "private_mod", mc, sym)
+        val vis = dir_effective_visibility(manifest, "private_mod", mc, sym)
         expect vis.is_private()
 
     it "symbol in non-existent module is private":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.pub_decl("existing"))
-        val sym = SymbolId.new("Ghost")
+        val sym = SymbolName.new("Ghost")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("Ghost"))
+        mc.add_symbol(DepSymbol.pub_symbol("Ghost"))
 
-        val vis = effective_visibility(manifest, "nonexistent", mc, sym)
+        val vis = dir_effective_visibility(manifest, "nonexistent", mc, sym)
         expect vis.is_private()
 
 describe "Open policy edge cases":
     # Tests Open directories (no __init__.spl).
     it "Open allows access even with empty manifest":
         val manifest = DirManifest.new("utils")
-        val sym = SymbolId.new("Helper")
+        val sym = SymbolName.new("Helper")
         expect check_access(manifest, AccessPolicy.Open, sym)
 
     it "Open allows access to any symbol name":
         val manifest = DirManifest.new("utils")
-        val sym1 = SymbolId.new("")
-        val sym2 = SymbolId.new("a")
-        val sym3 = SymbolId.new("very_long_symbol_name_here")
+        val sym1 = SymbolName.new("")
+        val sym2 = SymbolName.new("a")
+        val sym3 = SymbolName.new("very_long_symbol_name_here")
         expect check_access(manifest, AccessPolicy.Open, sym1)
         expect check_access(manifest, AccessPolicy.Open, sym2)
         expect check_access(manifest, AccessPolicy.Open, sym3)
 
     it "Open ignores export list even if populated":
         var manifest = DirManifest.new("utils")
-        manifest.add_export(SymbolId.new("Exported"))
+        manifest.add_export(SymbolName.new("Exported"))
 
         # Non-exported symbol still accessible under Open policy
-        val sym = SymbolId.new("NotExported")
+        val sym = SymbolName.new("NotExported")
         expect check_access(manifest, AccessPolicy.Open, sym)
 
 describe "Bypass policy edge cases":
     # Tests Bypass directories (@bypass).
     it "Bypass allows access with empty manifest":
         val manifest = DirManifest.new("lib")
-        val sym = SymbolId.new("Anything")
+        val sym = SymbolName.new("Anything")
         expect check_access(manifest, AccessPolicy.Bypass, sym)
 
     it "Bypass allows access even if exports are defined":
         var manifest = DirManifest.new("lib")
-        manifest.add_export(SymbolId.new("Something"))
+        manifest.add_export(SymbolName.new("Something"))
 
-        val sym = SymbolId.new("SomethingElse")
+        val sym = SymbolName.new("SomethingElse")
         expect check_access(manifest, AccessPolicy.Bypass, sym)
 
     it "Bypass allows access to exports too":
         var manifest = DirManifest.new("lib")
-        val sym = SymbolId.new("ExportedToo")
+        val sym = SymbolName.new("ExportedToo")
         manifest.add_export(sym)
 
         expect check_access(manifest, AccessPolicy.Bypass, sym)
@@ -319,22 +319,22 @@ describe "Boundary policy edge cases":
     # Edge cases for Boundary policy (strict __init__.spl enforcement).
     it "Boundary with empty exports denies all":
         val manifest = DirManifest.new("sealed")
-        val sym = SymbolId.new("Anything")
+        val sym = SymbolName.new("Anything")
         expect not check_access(manifest, AccessPolicy.Boundary, sym)
 
     it "Boundary with matching export name allows":
         var manifest = DirManifest.new("pkg")
-        val sym = SymbolId.new("Api")
+        val sym = SymbolName.new("Api")
         manifest.add_export(sym)
 
         expect check_access(manifest, AccessPolicy.Boundary, sym)
 
     it "Boundary distinguishes different symbol names":
         var manifest = DirManifest.new("pkg")
-        manifest.add_export(SymbolId.new("Router"))
+        manifest.add_export(SymbolName.new("Router"))
 
-        val sym_ok = SymbolId.new("Router")
-        val sym_bad = SymbolId.new("router")
+        val sym_ok = SymbolName.new("Router")
+        val sym_bad = SymbolName.new("router")
         expect check_access(manifest, AccessPolicy.Boundary, sym_ok)
         expect not check_access(manifest, AccessPolicy.Boundary, sym_bad)
 
@@ -344,7 +344,7 @@ describe "Nested boundary simulation":
     it "inner boundary blocks even if outer allows":
         # Outer: boundary that exports InnerPkg
         var outer = DirManifest.new("outer")
-        val inner_sym = SymbolId.new("InnerPkg")
+        val inner_sym = SymbolName.new("InnerPkg")
         outer.add_export(inner_sym)
 
         # Inner: boundary that does NOT export DeepSecret
@@ -352,7 +352,7 @@ describe "Nested boundary simulation":
         inner.add_child(ModDecl.pub_decl("deep"))
         # NOT exporting DeepSecret
 
-        val deep_sym = SymbolId.new("DeepSecret")
+        val deep_sym = SymbolName.new("DeepSecret")
         val outer_policy = effective_access_policy(true, false)
         val inner_policy = effective_access_policy(true, false)
 
@@ -363,24 +363,24 @@ describe "Nested boundary simulation":
 
     it "inner open allows even if outer is boundary":
         var outer = DirManifest.new("outer")
-        val utils_sym = SymbolId.new("Utils")
+        val utils_sym = SymbolName.new("Utils")
         outer.add_export(utils_sym)
 
         # Inner has no __init__.spl (Open policy)
         val inner_policy = effective_access_policy(false, false)
-        val any_sym = SymbolId.new("AnyHelper")
+        val any_sym = SymbolName.new("AnyHelper")
 
         # Inner is open, so access is allowed
         expect check_access(DirManifest.new("inner"), inner_policy, any_sym)
 
     it "bypass within boundary passes through":
         var outer = DirManifest.new("outer")
-        val lib_sym = SymbolId.new("Lib")
+        val lib_sym = SymbolName.new("Lib")
         outer.add_export(lib_sym)
 
         # Inner has bypass
         val inner_policy = effective_access_policy(true, true)
-        val deep_sym = SymbolId.new("DeepModule")
+        val deep_sym = SymbolName.new("DeepModule")
 
         # Bypass is transparent
         expect check_access(DirManifest.new("lib"), inner_policy, deep_sym)
@@ -390,13 +390,13 @@ describe "effective_visibility with ancestor_visibility combination":
     it "fully public path with all conditions met":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.pub_decl("mymod"))
-        val sym = SymbolId.new("Widget")
+        val sym = SymbolName.new("Widget")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("Widget"))
+        mc.add_symbol(DepSymbol.pub_symbol("Widget"))
 
-        val eff_vis = effective_visibility(manifest, "mymod", mc, sym)
+        val eff_vis = dir_effective_visibility(manifest, "mymod", mc, sym)
         val ancestor_path = [Visibility.Public, Visibility.Public, eff_vis]
         val final_vis = ancestor_visibility(ancestor_path)
         expect final_vis.is_public()
@@ -404,13 +404,13 @@ describe "effective_visibility with ancestor_visibility combination":
     it "private ancestor overrides public effective visibility":
         var manifest = DirManifest.new("pkg")
         manifest.add_child(ModDecl.pub_decl("mymod"))
-        val sym = SymbolId.new("Widget")
+        val sym = SymbolName.new("Widget")
         manifest.add_export(sym)
 
         var mc = ModuleContents.new()
-        mc.add_symbol(Symbol.pub_symbol("Widget"))
+        mc.add_symbol(DepSymbol.pub_symbol("Widget"))
 
-        val eff_vis = effective_visibility(manifest, "mymod", mc, sym)
+        val eff_vis = dir_effective_visibility(manifest, "mymod", mc, sym)
         # Even though effective visibility is public, a private ancestor overrides
         val ancestor_path = [Visibility.Private, eff_vis]
         val final_vis = ancestor_visibility(ancestor_path)
@@ -434,33 +434,33 @@ describe "check_access all policy-export combinations":
     # Cross-product of all policies with exported/non-exported symbols.
     it "Open + exported -> allowed":
         var manifest = DirManifest.new("d")
-        val sym = SymbolId.new("X")
+        val sym = SymbolName.new("X")
         manifest.add_export(sym)
         expect check_access(manifest, AccessPolicy.Open, sym)
 
     it "Open + non-exported -> allowed":
         val manifest = DirManifest.new("d")
-        val sym = SymbolId.new("X")
+        val sym = SymbolName.new("X")
         expect check_access(manifest, AccessPolicy.Open, sym)
 
     it "Bypass + exported -> allowed":
         var manifest = DirManifest.new("d")
-        val sym = SymbolId.new("X")
+        val sym = SymbolName.new("X")
         manifest.add_export(sym)
         expect check_access(manifest, AccessPolicy.Bypass, sym)
 
     it "Bypass + non-exported -> allowed":
         val manifest = DirManifest.new("d")
-        val sym = SymbolId.new("X")
+        val sym = SymbolName.new("X")
         expect check_access(manifest, AccessPolicy.Bypass, sym)
 
     it "Boundary + exported -> allowed":
         var manifest = DirManifest.new("d")
-        val sym = SymbolId.new("X")
+        val sym = SymbolName.new("X")
         manifest.add_export(sym)
         expect check_access(manifest, AccessPolicy.Boundary, sym)
 
     it "Boundary + non-exported -> denied":
         val manifest = DirManifest.new("d")
-        val sym = SymbolId.new("X")
+        val sym = SymbolName.new("X")
         expect not check_access(manifest, AccessPolicy.Boundary, sym)

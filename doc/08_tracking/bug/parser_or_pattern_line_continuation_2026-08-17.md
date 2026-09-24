@@ -1,4 +1,8 @@
 # Parser: a `|` or-pattern continued onto the next line does not parse
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (P2)
 **Filed:** 2026-08-17
@@ -66,3 +70,4 @@ pattern, mirroring how other continued expressions are handled.
   positions (e.g. `if let`, destructuring binds) — only the `case` arm was
   measured.
 - Whether a leading `|` on the continuation line (rather than trailing) parses.
+

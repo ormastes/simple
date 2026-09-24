@@ -17,26 +17,64 @@ use compiler.backend.common.mir_text_codegen.MirTextCodegen
 
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_new() -> i64
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_push(handle: i64, value: text) -> i64
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_finish(handle: i64) -> text
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_len(handle: i64) -> i64
+@unsafe(reason: "raw append-only IR accumulator release ABI", capabilities: [ffi])
+extern fn rt_string_builder_free(handle: i64)
 
-# One decl per element; joined with "\n" ONCE at emission. The previous
-# `text = "{text}\n{decl}"` accumulator copied the whole accumulated text on
-# every add: O(n^2) bytes over the whole-program bootstrap IR (one IR for all
-# functions, so n = every string literal in the closure). Measured on the
-# stage2 binary (_perf_mb_text, load 38): 2k decls 414ms, 4k 2294ms, 8k
-# 10335ms vs 7-20ms for push+join at the same n. The joined text is
-# byte-identical to the old accumulator (decls are never empty).
-# Straight-line `g = g.push(x)` reassign, as in bootstrap_globals.spl: bare
-# `.push()` on a module global drops elements under the seed (rMCP17).
-var _llvm_bootstrap_string_global_decls: [text] = []
+# Append each declaration to a mutable builder. The former `text =
+# "{text}\n{decl}"` accumulator copied all prior declarations on every add,
+# which is O(n^2) across a whole-program bootstrap IR. `finish` consumes the
+# builder, so retain its output until reset: callers historically may read the
+# accumulator more than once.
+var _llvm_bootstrap_string_globals_handle: i64 = 0
+var _llvm_bootstrap_string_globals_text_cache: text = ""
 
-fn llvm_bootstrap_string_globals_reset():
-    _llvm_bootstrap_string_global_decls = []
+pub fn llvm_bootstrap_string_globals_reset():
+    if _llvm_bootstrap_string_globals_handle != 0:
+        rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+    _llvm_bootstrap_string_globals_handle = 0
+    _llvm_bootstrap_string_globals_text_cache = ""
 
-fn llvm_bootstrap_string_globals_text() -> text:
-    _llvm_bootstrap_string_global_decls.join("\n")
+pub fn llvm_bootstrap_string_globals_text() -> text:
+    if _llvm_bootstrap_string_globals_handle == 0:
+        return _llvm_bootstrap_string_globals_text_cache
+    val out = rt_string_builder_finish(_llvm_bootstrap_string_globals_handle)
+    _llvm_bootstrap_string_globals_handle = 0
+    if out.len() < 0:
+        panic("compile error: could not finish LLVM bootstrap string globals")
+    _llvm_bootstrap_string_globals_text_cache = out
+    out
 
-fn llvm_bootstrap_string_globals_add(decl: text):
-    _llvm_bootstrap_string_global_decls = _llvm_bootstrap_string_global_decls.push(decl)
+pub fn llvm_bootstrap_string_globals_add(decl: text):
+    if _llvm_bootstrap_string_globals_handle == 0:
+        _llvm_bootstrap_string_globals_handle = rt_string_builder_new()
+        if _llvm_bootstrap_string_globals_handle == 0:
+            panic("compile error: could not allocate LLVM bootstrap string-global builder")
+        # `text()` consumed a prior builder. Restore that completed module
+        # before accepting a late declaration, rather than silently dropping
+        # the declarations already returned to a caller.
+        if _llvm_bootstrap_string_globals_text_cache != "":
+            if rt_string_builder_push(_llvm_bootstrap_string_globals_handle, _llvm_bootstrap_string_globals_text_cache) == 0:
+                rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+                _llvm_bootstrap_string_globals_handle = 0
+                panic("compile error: could not restore LLVM bootstrap string globals")
+            _llvm_bootstrap_string_globals_text_cache = ""
+    if rt_string_builder_len(_llvm_bootstrap_string_globals_handle) > 0:
+        if rt_string_builder_push(_llvm_bootstrap_string_globals_handle, "\n") == 0:
+            rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+            _llvm_bootstrap_string_globals_handle = 0
+            panic("compile error: could not append LLVM bootstrap string-global separator")
+    if rt_string_builder_push(_llvm_bootstrap_string_globals_handle, decl) == 0:
+        rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+        _llvm_bootstrap_string_globals_handle = 0
+        panic("compile error: could not append LLVM bootstrap string global")
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -199,6 +237,7 @@ impl MirToLlvm:
         self.builder.emit("declare i64 @rt_enum_id(i64)")
         self.builder.emit("declare i64 @rt_enum_discriminant(i64)")
         self.builder.emit("declare i8 @rt_enum_check_discriminant(i64, i64)")
+        self.builder.emit("declare i8 @rt_enum_check_variant(i64, i64, i64)")
         self.builder.emit("declare i64 @rt_enum_payload(i64)")
         # Dict runtime (tagged i64 handle; keys/values are the flat i64 ABI).
         # rt_dict_set/rt_dict_contains return int8_t in C, declared i64 here to
@@ -390,6 +429,7 @@ impl MirToLlvm:
         self.defined_func_names["rt_enum_id"] = true
         self.defined_func_names["rt_enum_discriminant"] = true
         self.defined_func_names["rt_enum_check_discriminant"] = true
+        self.defined_func_names["rt_enum_check_variant"] = true
         self.defined_func_names["rt_enum_payload"] = true
         self.defined_func_names["rt_dict_new"] = true
         self.defined_func_names["rt_dict_get"] = true
@@ -410,12 +450,10 @@ impl MirToLlvm:
         val escaped = escape_llvm_string(value)
         val str_len = escaped_string_byte_len(value) + 1
         val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{escaped}\\00\""
-        if self.bootstrap_mode_enabled():
+        if self.bootstrap_string_globals_active:
             llvm_bootstrap_string_globals_add(decl)
-        # `string_global_text` is no longer accumulated eagerly (O(n^2) copy
-        # per add, see llvm_bootstrap_string_globals_add); readers join
-        # `string_globals` once at emission.
-        self.string_globals = self.string_globals.push(decl)
+        else:
+            self.string_globals = self.string_globals.push(decl)
         global_name
 
     me emit_unsupported_panic(message: text):

@@ -1,4 +1,8 @@
 # Stage 4 CLI handler self-facade leaves callables unresolved
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -24,3 +28,4 @@ physical run-command sibling, `cli_compile` from its compile implementation,
 and `check_file` plus `CompileResult` from their driver owners. Four unused
 formatter/fix/lint imports are removed. The focused native handler contract
 imports the physical handler module and executes its bounded web-handler path.
+

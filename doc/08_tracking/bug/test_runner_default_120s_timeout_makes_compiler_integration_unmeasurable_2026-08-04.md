@@ -1,4 +1,8 @@
 # `test/02_integration/compiler/` was unmeasurable: the runner's 120 s default per-file timeout kills a 152 s spec
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (parser half) / OPEN (timeout default + import cost)
 **Found:** 2026-08-04
@@ -71,3 +75,4 @@ Raising the global default trades one failure mode (unmeasurable directories)
 for another (real hangs taking 800 s to surface); the right fix is to make the
 `app.io` import cheap, which is a module-loading lane. Until then, measuring
 `test/02_integration/compiler/` requires an explicit `--timeout 800`.
+

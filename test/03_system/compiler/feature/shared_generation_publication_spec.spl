@@ -1,0 +1,204 @@
+use std.spec.*
+use std.io_runtime.{env_get}
+use compiler.driver.cache.shared_generation_store.{
+    shared_generation_publish_v1, shared_generation_publish_fault_v1,
+    shared_generation_pin_current_v1, shared_generation_pin_current_owned_v1,
+    shared_generation_release_v1, shared_generation_gc_v1,
+    shared_generation_reclaim_dead_leases_v1, shared_generation_delete_v1,
+    shared_generation_publish_bounded_v1
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_start_identity(pid: i64) -> i64
+
+fn shared_generation_test_root(name: text) -> text:
+    var root = env_get("SIMPLE_WORKTREE_STORAGE_ROOT").trim()
+    if root == "":
+        root = ".simple/storage"
+    if root.ends_with("/"):
+        root = root.substring(0, root.len() - 1)
+    "{root}/test/compiler/shared-generation/{name}"
+
+describe "MBH-NFR-006 shared publication lifecycle":
+    it "pins a reader across publication and deterministic bounded GC":
+        print("MBH-NFR006-BEGIN:gc-protection")
+        val root = shared_generation_test_root("lifecycle")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val first_payload = "payload-one-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz"
+        val second_payload = "payload-two-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz"
+        val first = shared_generation_publish_v1(root, "", 1, first_payload)
+        expect(first.len()).to_equal(64)
+        val reader = shared_generation_pin_current_v1(root, "reader-1")
+        expect(reader.valid).to_equal(true)
+        expect(reader.payload).to_equal(first_payload)
+        val second = shared_generation_publish_v1(root, first, 2, second_payload)
+        expect(second.len()).to_equal(64)
+        val pinned_gc = shared_generation_gc_v1(root, 400, 1)
+        expect(pinned_gc.valid).to_equal(false)
+        expect(pinned_gc.reason).to_equal("protected-generations-exceed-bound")
+        expect(shared_generation_release_v1(root, "reader-1")).to_equal(true)
+        val released_gc = shared_generation_gc_v1(root, 400, 1)
+        expect(released_gc.valid).to_equal(true)
+        expect(released_gc.retained).to_contain(second)
+        expect(released_gc.removed).to_contain(first)
+        print("MBH-NFR006-PASS:gc-protection")
+
+    it "rejects conflicting writers and ignores crash orphans":
+        val root = shared_generation_test_root("crash")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all("{root}/generations")).to_equal(true)
+        expect(rt_file_write("{root}/generations/orphan.tmp.77", "partial")).to_equal(true)
+        expect(rt_file_write("{root}/CURRENT.tmp.77", "partial")).to_equal(true)
+        val winner = shared_generation_publish_v1(root, "", 1, "winner")
+        expect(winner.len()).to_equal(64)
+        expect(shared_generation_publish_v1(root, "", 1, "loser")).to_equal(
+            "parent-generation-changed")
+        val read = shared_generation_pin_current_v1(root, "reader-after-crash")
+        expect(read.valid).to_equal(true)
+        expect(read.payload).to_equal("winner")
+        expect(rt_file_exists("{root}/generations/orphan.tmp.77")).to_equal(true)
+        expect(shared_generation_release_v1(root, "reader-after-crash")).to_equal(true)
+
+    it "treats an identical writer retry as idempotent publication":
+        print("MBH-NFR006-BEGIN:identical-writer")
+        val root = shared_generation_test_root("identical-writer")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val first = shared_generation_publish_v1(root, "", 1, "same-payload")
+        expect(first.len()).to_equal(64)
+        expect(shared_generation_publish_v1(
+            root, "", 1, "same-payload")).to_equal(first)
+        expect(shared_generation_publish_v1(
+            root, "", 1, "different-payload")).to_equal(
+            "parent-generation-changed")
+        print("MBH-NFR006-PASS:identical-writer")
+
+    it "keeps the admitted generation across rename and fsync crash points":
+        val root = shared_generation_test_root("fsync")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val stable = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(stable.len()).to_equal(64)
+        for fault in ["generation-fsync", "generation-rename", "before-pointer",
+                "pointer-fsync", "pointer-rename", "directory-fsync"]:
+            val result = shared_generation_publish_fault_v1(
+                root, stable, 2, "candidate-{fault}", fault)
+            expect(result.len() == 64).to_equal(false)
+            val reader = shared_generation_pin_current_v1(
+                root, "reader-{fault}")
+            expect(reader.valid).to_equal(true)
+            if fault == "directory-fsync":
+                expect(reader.payload).to_equal("candidate-directory-fsync")
+            else:
+                expect(reader.generation).to_equal(stable)
+                expect(reader.payload).to_equal("stable")
+            expect(shared_generation_release_v1(
+                root, "reader-{fault}")).to_equal(true)
+
+    it "reclaims only expired leases whose owners are proven dead":
+        val root = shared_generation_test_root("owner-expiry")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val generation = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(generation.len()).to_equal(64)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "dead", "pid:99999991:boot-a", 100).valid).to_equal(true)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "live", "pid:99999992:boot-a", 100).valid).to_equal(true)
+        val reclaimed = shared_generation_reclaim_dead_leases_v1(
+            root, 101, ["pid:99999992:boot-a"])
+        expect(reclaimed.unwrap()).to_equal(1)
+        expect(rt_file_exists("{root}/leases/dead.lease")).to_equal(false)
+        expect(rt_file_exists("{root}/leases/live.lease")).to_equal(true)
+        expect(shared_generation_release_v1(root, "live")).to_equal(true)
+
+    it "rejects PID reuse by comparing process start identity":
+        val root = shared_generation_test_root("pid-reuse")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val generation = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(generation.len()).to_equal(64)
+        val pid = rt_getpid()
+        val start = rt_process_start_identity(pid)
+        expect(start > 0).to_equal(true)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "reused", "pid:{pid}:{start + 1}", 1).valid).to_equal(true)
+        expect(shared_generation_reclaim_dead_leases_v1(
+            root, 2, []).unwrap()).to_equal(1)
+        expect(rt_file_exists("{root}/leases/reused.lease")).to_equal(false)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "same-process", "pid:{pid}:{start}", 1).valid).to_equal(true)
+        expect(shared_generation_reclaim_dead_leases_v1(
+            root, 2, []).unwrap()).to_equal(0)
+        expect(shared_generation_release_v1(root, "same-process")).to_equal(true)
+
+    it "fails closed on lease overflow and deleted current or pinned generations":
+        print("MBH-NFR006-BEGIN:overflow-current-pin")
+        val root = shared_generation_test_root("overflow")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val generation = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(generation.len()).to_equal(64)
+        var index = 0
+        while index < 4097:
+            expect(rt_file_write("{root}/leases/overflow-{index}.lease",
+                "simple-shared-generation-lease-v1\ngeneration={generation}\nowner=owner-{index}\nexpires-ns=999999")).to_equal(true)
+            index = index + 1
+        val overflow = shared_generation_gc_v1(root, 1000000, 1)
+        expect(overflow.valid).to_equal(false)
+        expect(overflow.reason).to_equal("lease-count-unbounded")
+
+        expect(shared_generation_delete_v1(root, generation)).to_equal(
+            "current-generation-protected")
+
+        val pinned_root = shared_generation_test_root("missing-pin")
+        val _removed_pinned = rt_dir_remove_all(pinned_root)
+        expect(rt_dir_create_all(pinned_root)).to_equal(true)
+        val pinned_generation = shared_generation_publish_v1(
+            pinned_root, "", 1, "stable")
+        expect(shared_generation_pin_current_owned_v1(
+            pinned_root, "reader", "pid:12:boot-a", 999999).valid).to_equal(true)
+        val next = shared_generation_publish_v1(
+            pinned_root, pinned_generation, 2, "next")
+        expect(next.len()).to_equal(64)
+        expect(shared_generation_delete_v1(
+            pinned_root, pinned_generation)).to_equal("pinned-generation-protected")
+        expect(shared_generation_release_v1(pinned_root, "reader")).to_equal(true)
+        expect(shared_generation_delete_v1(pinned_root, pinned_generation)).to_equal("ok")
+        print("MBH-NFR006-PASS:overflow-current-pin")
+
+    it "rejects publication before commit when the host bound would be exceeded":
+        print("MBH-NFR006-BEGIN:prepublication-bound")
+        val root = shared_generation_test_root("publication-bound")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        expect(shared_generation_publish_bounded_v1(
+            root, "", 1, "payload-that-exceeds-a-tiny-bound", 8)).to_equal(
+            "publication-exceeds-bound")
+        expect(rt_file_exists("{root}/CURRENT")).to_equal(false)
+        print("MBH-NFR006-PASS:prepublication-bound")
+
+    it "reclaims crash staging and counts every regular store file":
+        val root = shared_generation_test_root("complete-accounting")
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all("{root}/generations")).to_equal(true)
+        expect(rt_dir_create_all("{root}/leases")).to_equal(true)
+        expect(rt_file_write(
+            "{root}/generations/old.generation.tmp.crashed",
+            "crash-orphan-that-must-not-charge-the-next-publication")).to_equal(true)
+        val generation = shared_generation_publish_bounded_v1(
+            root, "", 1, "small", 512)
+        expect(generation.len()).to_equal(64)
+        expect(rt_file_exists(
+            "{root}/generations/old.generation.tmp.crashed")).to_equal(false)
+        expect(rt_file_write("{root}/unclassified-store-bytes",
+            "this-file-must-count-against-the-host-wide-bound")).to_equal(true)
+        expect(shared_generation_publish_bounded_v1(
+            root, generation, 2, "next", 64)).to_equal(
+            "publication-exceeds-bound")

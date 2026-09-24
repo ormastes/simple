@@ -1,4 +1,8 @@
 # Pre-existing product defects surfaced during sspec modernization (group B, 2026-09-06)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 While modernizing three system specs to raw=100/blockers=0
 (`test/03_system/check/core_c_bootstrap_runtime_capsule_contract_spec.spl`,
@@ -79,3 +83,4 @@ working copy shortly after the first modernization pass completed and was
 verified. Both were reapplied identically from the verified content. If this
 happens again, reapply from this record (it documents the exact intended
 end-state) rather than re-deriving the fix from scratch.
+

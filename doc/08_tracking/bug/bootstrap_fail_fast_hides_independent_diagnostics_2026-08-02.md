@@ -1,4 +1,8 @@
 # Bootstrap fail-fast hides independent compiler diagnostics
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED — owner `codex-bootstrap-diagnostic-sweep` resolved 2026-08-02
 **Area:** bootstrap diagnostics / compiler process isolation
@@ -43,3 +47,4 @@ The integration contract covers exact and adjacent failures, an ordinary exit
 nonzero aggregate status, deterministic terminal rows, parallel cache
 separation, and cache preservation. Canonical build/admission behavior remains
 fail-fast; this diagnostic mode still has no artifact output path.
+

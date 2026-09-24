@@ -1,4 +1,8 @@
 # Network stack works; its "e2e" coverage is an illusion, and the spec tree is duplicated 5,591x
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (findings; nothing deleted)
 
@@ -269,3 +273,14 @@ grep -cE 'tcp_|connect|bind|listen'     test/02_integration/app/ui.web/ws_e2e_sp
 comm -12 <(cd test/unit && find . -name '*_spec.spl'|sort) \
          <(cd test/01_unit && find . -name '*_spec.spl'|sort) | wc -l                    # 5005
 ```
+
+## Triage 2026-09-13
+Reconfirmed: measurement/characterization record, not a single localized
+code defect, per its own 2026-08-09 re-confirmation. Left as-is, no code
+change attempted.
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still a characterization record, not a point code defect; remedy (rewriting
+illusory specs, deduplicating test/unit vs test/01_unit) is a scoped
+follow-up project out of a shard triage pass. No change made. Leaving OPEN.
+

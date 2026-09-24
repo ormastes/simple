@@ -1,4 +1,9 @@
 # `.unwrap()`/`.expect()` on Result/Option returned the boxed enum wrapper, not the payload — JIT/native only
+## Closed 2026-09-16 — Status FIXED with red/green evidence on JIT and native lanes; regression fence PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-11
 **Status:** FIXED (unwrap payload extraction + Err/None trap + `unwrap_or(default)` follow-up fix; `.expect()` dynamic-dispatch "Function 'expect' not found" gap and custom-message threading are now also fixed — see "Update 2026-08-11: `.expect()` dynamic-dispatch gap + message threading" below)
@@ -410,3 +415,4 @@ detecting the clobber (verified via `git diff` and binary
 `strings`/symbol-table inspection showing `rt_unwrap_or_trap` had vanished
 from both source and the newly-built binary) and landed promptly to reduce
 the clobber window.
+

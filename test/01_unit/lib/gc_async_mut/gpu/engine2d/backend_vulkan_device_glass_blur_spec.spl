@@ -1,0 +1,215 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing the DEVICE-side backdrop blur and
+glass material, the readback half of
+`doc/08_tracking/bug/vulkan_glass_seed_host_roundtrip_2026-09-12.md`. Before
+this change, painting a blurred backdrop on the Vulkan lane read the ENTIRE
+framebuffer back to the host, blurred one rect with an interpreted scalar loop,
+and uploaded that rect again -- 900x760 = 684,000 words off the device per
+blurred rect per frame, and the second of the two full-surface readbacks the
+GPU-boundary audit counts. This file answers the only question that matters
+about moving that work onto the device: does the kernel paint EXACTLY the same
+pixels the host twin did?
+
+## Operator workflow
+`SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_2D_BACKEND=vulkan \
+ SIMPLE_VK_READBACK=native SIMPLE_VK_IMAGE_UPLOAD=u32 SIMPLE_VK_RECT_UPLOAD=u32 \
+ <vulkan-capable simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_device_glass_blur_spec.spl`
+
+## Compatibility and limitations
+This file REQUIRES a real Vulkan device and says so by FAILING, never skipping:
+the first expectation asserts `backend_name() == "vulkan"`. A CPU fallback
+would paint correct-looking pixels through the very host path this change
+exists to remove, and would therefore prove the opposite of what is claimed.
+
+The oracle is the CPU backend running the SAME public call, not a
+reimplementation of the algorithm inside this file. That is deliberate: both
+kernels are exact integer twins of `emu_draw_blur_rect` /
+`engine2d_draw_ir_glass_material_pixels`, so the only honest oracle is those
+functions themselves. A hand-written expectation would drift from them, and the
+whole claim is byte-equality, not approximate similarity.
+
+## Verification guidance and troubleshooting
+The sabotage that proves this file discriminates is to re-enable the host path:
+make `_draw_blur_rect_device` return `false` unconditionally and the pixel
+expectations still PASS (they must -- the host twin is the oracle) while
+`blur_device_rect_count` drops to 0 and `cpu_fallback_reason` becomes
+`glass-device-unavailable`. That pair is what separates "the device did the
+work" from "something painted the right pixels".
+
+If pixels differ by exactly one in a channel, suspect the truncation shape: the
+blur kernel keeps RAW sums and divides ONCE, while the glass kernel packs each
+row average to 8 bits BEFORE the vertical pass. Swapping those two conventions
+is the single most likely way to break parity while still looking correct.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_glass_seed_host_roundtrip_2026-09-12.md
+# @manual_section: vulkan_device_glass_blur
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 4%
+# @cover src/lib/gc_async_mut/gpu/engine2d/shaders/blur_rect.comp 90%
+# @cover src/lib/gc_async_mut/gpu/engine2d/shaders/glass_material.comp 90%
+# @tag: unit, gpu, engine2d, vulkan, glass, perf
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassMaterialConfig, engine2d_draw_ir_glass_material_pixels}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
+    vulkan_readback_count, vulkan_device_blur_rect_count,
+    vulkan_device_material_census_reset}
+
+val FB_W: i32 = 160
+val FB_H: i32 = 120
+
+fn paint_backdrop(mut e: Engine2D) -> Engine2D:
+    """A backdrop with two hard colour edges and one translucent rect.
+
+    Hard edges matter: a blur whose window is off by one pixel, or whose
+    out-of-bounds sample count is wrong, changes the colour AT an edge and
+    nowhere else, so a flat backdrop would hide exactly the defects this file
+    is looking for.
+    """
+    e.clear(0xFF102030u32)
+    e.draw_rect_filled(0, 0, 80, 120, 0xFFC04020u32)
+    e.draw_rect_filled(40, 20, 30, 30, 0xFF20FF60u32)
+    e.draw_rect_filled(100, 60, 55, 55, 0x8000FFFFu32)
+    e
+
+fn glass_config() -> Engine2dGlassMaterialConfig:
+    Engine2dGlassMaterialConfig(
+        framebuffer_width: FB_W, framebuffer_height: FB_H,
+        x: 20, y: 10, width: 100, height: 80,
+        radius: 12, blur_radius: 4, saturation_milli: 1400,
+        surface_alpha_milli: 300, surface_color: 0xFFFFFFFFu32,
+        gradient_from: 0x40FFFFFFu32, gradient_to: 0x10202020u32,
+        gradient_enabled: true, gradient_layered_over_surface: true)
+
+fn mismatch_count(want: [u32], got: [u32]) -> i64:
+    if want.len() != got.len():
+        return -1
+    var wrong: i64 = 0
+    var i: i64 = 0
+    while i < want.len():
+        if want[i] != got[i]:
+            wrong = wrong + 1
+        i = i + 1
+    wrong
+
+describe "The Vulkan backdrop blur and glass material run on the device, pixel-for-pixel":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        # PRECONDITION. Every claim below is about DEVICE pixels; a CPU
+        # fallback would exercise the host round trip this change removes.
+        val e = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "blurs a rect on the device byte-identically to the CPU backend":
+        # The core parity claim. Both engines run the SAME public call on the
+        # SAME backdrop; the CPU one is the frozen oracle.
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_backdrop(dev)
+        dev.draw_blur_rect(20, 10, 100, 80, 4)
+        val got = dev.read_pixels()
+        dev.shutdown()
+
+        var cpu = Engine2D.create_with_backend_fast(FB_W, FB_H, "cpu_simd")
+        cpu = paint_backdrop(cpu)
+        cpu.draw_blur_rect(20, 10, 100, 80, 4)
+        val want = cpu.read_pixels()
+        cpu.shutdown()
+
+        expect(mismatch_count(want, got)).to_equal(0)
+
+    it "leaves every pixel outside the blurred rect untouched":
+        # A kernel that wrote outside its rect would still match the oracle
+        # inside it, so this is a separate claim, not a restatement.
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_backdrop(dev)
+        val before = dev.read_pixels()
+        dev.draw_blur_rect(20, 10, 100, 80, 4)
+        val after = dev.read_pixels()
+        dev.shutdown()
+        var changed_outside: i64 = 0
+        var py: i32 = 0
+        while py < FB_H:
+            var px: i32 = 0
+            while px < FB_W:
+                val inside = px >= 20 and px < 120 and py >= 10 and py < 90
+                val idx = py.to_i64() * FB_W.to_i64() + px.to_i64()
+                if not inside and before[idx] != after[idx]:
+                    changed_outside = changed_outside + 1
+                px = px + 1
+            py = py + 1
+        expect(changed_outside).to_equal(0)
+
+    it "counts the blur as device work and records no CPU fallback":
+        # Pixels alone cannot tell the two lanes apart -- that is the whole
+        # point of the parity above. This is the counter that can.
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_backdrop(dev)
+        vulkan_device_material_census_reset()
+        dev.draw_blur_rect(20, 10, 100, 80, 4)
+        val painted_on_device = vulkan_device_blur_rect_count()
+        val fallback = dev.vulkan_cpu_fallback_reason()
+        dev.shutdown()
+        expect(painted_on_device).to_equal(1)
+        expect(fallback).to_equal("")
+
+    it "declines a degenerate blur exactly as the host twin does":
+        # A zero radius is a no-op for the CPU reference; the device path must
+        # not paint one either, or the two lanes disagree on an edge case.
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_backdrop(dev)
+        val before = dev.read_pixels()
+        vulkan_device_material_census_reset()
+        dev.draw_blur_rect(20, 10, 100, 80, 0)
+        val after = dev.read_pixels()
+        val painted_on_device = vulkan_device_blur_rect_count()
+        dev.shutdown()
+        expect(mismatch_count(before, after)).to_equal(0)
+        expect(painted_on_device).to_equal(0)
+
+    it "applies the glass material on the device byte-identically to its CPU twin":
+        # Same parity claim for the richer kernel: box blur, saturation,
+        # rounded corners, surface tint and a vertical gradient, all integer.
+        val config = glass_config()
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_backdrop(dev)
+        val want_region = engine2d_draw_ir_glass_material_pixels(
+            dev.read_pixels(), config)
+        val outcome = dev.draw_ir_apply_glass_material(config)
+        val after = dev.read_pixels()
+        dev.shutdown()
+
+        expect(outcome.applied).to_equal(true)
+        expect(outcome.execution_target).to_equal("vulkan-device-glass-v1")
+
+        var wrong: i64 = 0
+        var py: i32 = 0
+        while py < config.height:
+            var px: i32 = 0
+            while px < config.width:
+                val want = want_region[py.to_i64() * config.width.to_i64() + px.to_i64()]
+                val got = after[(config.y + py).to_i64() * FB_W.to_i64()
+                    + (config.x + px).to_i64()]
+                if want != got:
+                    wrong = wrong + 1
+                px = px + 1
+            py = py + 1
+        expect(wrong).to_equal(0)
+
+    it "reads the framebuffer zero times while painting the glass material":
+        # The invariant the GPU-boundary audit enforces, asserted here at the
+        # backend rather than through a whole page render: the glass pass must
+        # not move the surface across the PCIe boundary at all.
+        val config = glass_config()
+        var dev = Engine2D.create_with_backend_fast(FB_W, FB_H, "vulkan")
+        dev = paint_backdrop(dev)
+        val before = vulkan_readback_count()
+        val outcome = dev.draw_ir_apply_glass_material(config)
+        val after = vulkan_readback_count()
+        dev.shutdown()
+        expect(outcome.applied).to_equal(true)
+        expect(after - before).to_equal(0)

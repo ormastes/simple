@@ -1,4 +1,9 @@
 # Bug: legacy word-infix `expect X to_equal Y` not preprocessed on some test paths
+## Closed 2026-09-16 — FIXED on pure-Simple interpreter path; previously false-red groups verified passing
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-06-29
 **Severity:** High — produces BOTH false-reds and (worse) silent false-greens.
@@ -91,3 +96,4 @@ The 2026-06-29 full-suite sweep used `bin/simple run` per file → over-reports
 word-infix falsy-subject specs as failures AND under-reports word-infix
 non-falsy specs (hollow greens). Real pass/fail must be measured with the
 preprocessing `test` path.
+

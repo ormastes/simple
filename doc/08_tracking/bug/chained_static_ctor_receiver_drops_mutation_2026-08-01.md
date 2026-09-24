@@ -1,5 +1,69 @@
 # A mutating method chained directly off a static constructor call silently does nothing
 
+## Closed 2026-09-13 — FIXED; the ORIGINAL probe was replayed and all three forms are now correct
+
+**Status: CLOSED (fixed).** This is a replay of the entry's own probe against
+the real `MirToWat` / `WatBuilder`, not a reconstruction.
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows), 16,453,120 bytes,
+sha256 `dc138d50276d…`.
+
+```
+use plugins.backend_wasm.wasm.wat_codegen.{MirToWat}
+use plugins.backend_wasm.wasm_backend.{WatBuilder}
+use compiler.mir.mir_instruction_support.{mir_operand_const_int}
+
+fn mk() -> MirToWat:
+    MirToWat.create("m")
+
+fn main():
+    val op = mir_operand_const_int(7)
+    val a = WatBuilder.create()
+    MirToWat.create("m").emit_operand(a, op)   # A
+    val b = WatBuilder.create()
+    mk().emit_operand(b, op)                   # B
+    val c = WatBuilder.create()
+    val t = MirToWat.create("m")
+    t.emit_operand(c, op)                      # C
+```
+
+| form | reported | measured 2026-09-13 |
+|---|---|---|
+| A static-ctor chained | `[]` | `[i64.const 7]` |
+| B plain-fn chained | `[i64.const 7]` | `[i64.const 7]` |
+| C bound receiver | `[i64.const 7]` | `[i64.const 7]` |
+
+The reported asymmetry is gone: how the receiver is obtained no longer changes
+whether the mutation lands. `me emit_operand` still lives at
+`src/plugins/backend_wasm/wasm/wat_codegen.spl:798` and its `Const(value,
+type_)` -> `Int(n)` -> `i64.const {n}` arm now fires, and `WatBuilder.emit`
+(`wasm_backend.spl:256`) still mutates through `self.lines = self.lines.push(...)`
+— the same shapes as when the bug was filed. Corroborated by an independent
+minimal reconstruction (a static-ctor-chained method pushing into a `Sink`
+passed as an argument): `A=1 B=1 C=1` on both the default JIT lane and
+`SIMPLE_EXECUTION_MODE=interpret`.
+
+### Trap for the next person: run the probe INSIDE a function
+
+Running the identical probe as **top-level statements** instead of inside
+`fn main()` prints `[]` for **all three** forms, which looks like a worse
+version of this bug and is not this bug at all. It is the module-scope
+mutation defect tracked in
+`top_level_array_index_assign_in_loop_silently_dropped_2026-08-25.md` — at
+module scope the seed runs statements against a discarded copy of the scope, so
+every mutation vanishes regardless of receiver form. That entry was
+re-characterised the same day and is still OPEN. Any future probe of
+receiver-form semantics must be wrapped in a function or it measures that defect
+instead.
+
+### One correction to the report
+
+The original entry recorded the mechanism as **NOT proven** and noted the module
+"drops to the interpreter" on `unresolved external symbol 'MirToWat_dot_create'`.
+That unresolved-symbol fallback is the more likely original cause of the empty
+`[]` than any receiver-form defect in the language — the probe above resolves
+`MirToWat.create` cleanly today.
+
 **Date:** 2026-08-01
 **Status:** OPEN — reproduced and measured, mechanism NOT yet proven
 **Severity:** Silent no-op. No diagnostic, no error, no warning. Generates

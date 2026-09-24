@@ -32,8 +32,8 @@
 # This file does NOT modify main.spl, output.spl, config.spl, or any other
 # existing src/app/devhub file — the orchestrator wires dispatch in main.spl.
 
-use std.nogc_sync_mut.env.{env_get}
-use std.nogc_sync_mut.file_system.file_ops.{file_exists, file_read_text}
+use app.io.mod.{file_exists, file_read}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{time_now_unix_micros}
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_get_type, json_serialize, json_object, json_string, json_array, json_boolean, json_pretty}
@@ -88,10 +88,14 @@ class EmailConfig:
 
 
 fn email_config_dir() -> text:
-    """~/.config/devhub (separate from itf's ~/.config/itf, per doc §7)."""
-    val home = env_get("HOME")
+    """~/.config/devhub (separate from itf's ~/.config/itf, per doc §7).
+
+    Reads through env_get_opt, not env_get: env_get has co-compiled
+    Optional/text variants on this seed and a wrong dispatch turns the home
+    path into garbage, which makes the config file unreadable."""
+    val home = env_get_opt("HOME") ?? ""
     if home == "":
-        val userprofile = env_get("USERPROFILE")
+        val userprofile = env_get_opt("USERPROFILE") ?? ""
         if userprofile != "":
             return "{userprofile}/.config/devhub"
     "{home}/.config/devhub"
@@ -101,14 +105,14 @@ fn email_config_path() -> text:
     "{email_config_dir()}/email.sdn"
 
 
-fn _leading_spaces(line: text) -> i64:
+fn _email_cfg_leading_spaces(line: text) -> i64:
     var i = 0
     while i < line.len() and line[i:i + 1] == " ":
         i = i + 1
     i
 
 
-fn _strip_sdn_value(raw: text) -> text:
+fn _email_cfg_strip_value(raw: text) -> text:
     val v = raw.trim()
     if v.starts_with("\"") and v.ends_with("\"") and v.len() >= 2:
         return v[1:v.len() - 1]
@@ -152,10 +156,19 @@ fn load_email_config() -> EmailConfig:
     val path = email_config_path()
     if not file_exists(path):
         return EmailConfig.default()
-    val content = file_read_text(path)
-    if content == nil:
+    # file_read, not file_read_text: file_read_text has co-compiled
+    # Optional/text variants on this seed and a wide-closure dispatch can land
+    # on a raw rt_* reader that yields nil for a normal existing file. The
+    # facade below returns "" on error, never nil.
+    val content = file_read(path)
+    if content == "":
         return EmailConfig.default()
+    _parse_email_config_content(content)
 
+fn _parse_email_config_content(content: text) -> EmailConfig:
+    """Loop body of load_email_config, kept in its own function so the
+    file-read indirection (and its seed-dispatch caveats) stays in one
+    place."""
     var default_account = ""
     var accounts: [EmailAccount] = []
     var current = EmailAccount.empty()
@@ -164,14 +177,17 @@ fn load_email_config() -> EmailConfig:
     for line in content.split("\n"):
         val trimmed = line.trim()
         if trimmed == "" or trimmed.starts_with("#"):
-            pass_dn
+            # `pass`, not `pass_dn`: in this wide module the seed mis-dispatches
+            # `pass_dn` and aborts the loop at the first blank line, so no
+            # account block is ever parsed (config-parsing spec evidence).
+            pass
         else:
-            val indent = _leading_spaces(line)
+            val indent = _email_cfg_leading_spaces(line)
             if indent == 0 and trimmed.contains(":"):
                 val parts = trimmed.split(":", 2)
                 val key = parts[0].trim()
                 if key == "default_account":
-                    default_account = _strip_sdn_value(parts[1])
+                    default_account = _email_cfg_strip_value(parts[1])
             else if indent > 0 and trimmed.ends_with(":") and not trimmed.contains(" "):
                 if have_current:
                     accounts = accounts + [current]
@@ -180,7 +196,7 @@ fn load_email_config() -> EmailConfig:
             else if indent > 0 and have_current and trimmed.contains(":"):
                 val parts = trimmed.split(":", 2)
                 val key = parts[0].trim()
-                current = _apply_account_field(current, key, _strip_sdn_value(parts[1]))
+                current = _apply_account_field(current, key, _email_cfg_strip_value(parts[1]))
 
     if have_current:
         accounts = accounts + [current]
@@ -320,7 +336,7 @@ fn _resolve_mail_bin() -> text:
     itf-adapter binary path (acli_path/mc_path). DEVHUB_MAIL_BIN overrides
     it — used by specs to point at a fake script instead of PATH-prepend
     trickery, and by real deployments that install mail-cli elsewhere."""
-    val override_bin = env_get("DEVHUB_MAIL_BIN")
+    val override_bin = env_get_opt("DEVHUB_MAIL_BIN") ?? ""
     if override_bin != "":
         return override_bin
     "tools/mail-cli/bin/mail"
@@ -765,8 +781,8 @@ fn _mailcli_reply(account: EmailAccount, args: [text]) -> i64:
         if not file_exists(input_file):
             print_error("--input file not found: {input_file}")
             return 1
-        val content = file_read_text(input_file)
-        if content == nil:
+        val content = file_read(input_file)
+        if content == "":
             print_error("could not read --input file: {input_file}")
             return 1
         body = content

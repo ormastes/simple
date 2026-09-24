@@ -1,3 +1,52 @@
+## Re-verified 2026-09-13 — seed lane clean; pure-Simple lane still unverified (LEFT OPEN)
+
+**Lane caveat (added in the same 2026-09-13 pass, after review):** this entry is
+filed against the **pure-Simple / self-hosted** lane, which the run recorded
+below does NOT exercise. No self-hosted binary is deployed on this host —
+`bin/release/simple.exe`, `bin/release/x86_64-pc-windows-msvc/simple.exe` and
+`bin/release/x86_64-pc-windows-gnu/simple.exe` all print the Rust
+bootstrap-seed banner. Running the repro through the pure-Simple CLI on the
+seed (`simple run src/app/cli/main.spl -- run <repro>`) emitted only lint
+diagnostics and never executed the program, so that substitute lane does not
+work either. The seed result below therefore shows only that the **seed** does
+not exhibit the defect; it does NOT discharge the pure-Simple fix.
+**This entry stays OPEN pending a deployed self-hosted binary.**
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran the constructor-pattern binding form this entry says failed to parse:
+
+```spl
+fn get(f: bool) -> i64?:
+    if f:
+        return 5
+    nil
+
+fn main():
+    if val Some(x) = get(true):
+        print("bound {x}")
+    else:
+        print("no match")
+```
+
+It parses and the match arm is taken on both lanes. The parse regression
+this entry tracked — "status: FIXED (source; deployed binary pending
+bootstrap)" — is now confirmed in execution, not just in source (measured).
+
+**However**, the bound VALUE is wrong on the seed JIT lane: `x` comes out as
+`40` for a payload of `5` and `56` for a payload of `7`, i.e. `payload << 3`.
+The tree-walk lane binds correctly. That is a different defect from the parse
+regression this entry is about — it affects `match ... case Some(x)` equally,
+and the plain `if val x = ...` form is unaffected — so it is filed separately
+rather than reopening this entry:
+
+`doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md`
+
 id: if_val_some_constructor_pattern_parser_regression_2026-07-02
 status: FIXED (source; deployed binary pending bootstrap — stage2 blocked by unrelated rt_cranelift_new_aot_module extern error)
 fixed: 2026-07-02

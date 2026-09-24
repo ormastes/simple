@@ -1,4 +1,9 @@
 # Parse-shard work queue: a dead shard's claims are orphaned (2026-08-22)
+## Closed 2026-09-16 — Status FIXED; claim-release + respawn fix, spec 5/5 post-fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED
 **Area:** `src/app/cli/native_build_main.spl` (orchestrator), `src/app/cli/parse_shard_queue.spl` (new, std-only)
@@ -67,3 +72,4 @@ shard legitimately runs at 100% CPU for many minutes, so stage orchestrators
 `SIMPLE_TIMEOUT_SECONDS=0` (disables the CPU guard) before spawning
 `native-build --threads N`; otherwise the monitor will keep killing the
 slowest shard at 900s and the reclaim round only halves the damage.
+

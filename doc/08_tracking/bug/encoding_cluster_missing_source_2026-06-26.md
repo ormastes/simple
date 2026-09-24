@@ -1,5 +1,11 @@
 # Bug: std.common.encoding — entire library unimplemented
 
+## Closed 2026-09-13 — encoding sources and specs restored; no `.smf` stubs remain
+- **measured**: `ls src/lib/common/encoding/` lists 29 real `.spl` sources (utf8, utf16, utf32, codec, base58, bencode, bson, ini, msgpack, cbor, protobuf, reed_solomon, yaml, ...).
+- **measured**: `find src/lib -name '*.smf'` returns nothing — the three 179-byte stubs named in this entry are gone.
+- **measured**: `ls test/01_unit/lib/common/encoding/` lists 40+ ordinary `*_spec.spl` files (not dotfile overlays), so the runner-discovery premise no longer holds.
+- **measured** (`bin/simple run`): `use std.common.encoding.utf8.{text_codepoint_len, utf8_count_codepoints}` + `std.common.encoding.base58` resolve and execute.
+
 **Date:** 2026-06-26  
 **ID:** encoding_cluster_missing_source  
 **Severity:** P2 (cluster of 10+ spec files blocked)

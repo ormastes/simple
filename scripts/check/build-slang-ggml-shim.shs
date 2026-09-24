@@ -17,6 +17,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
 LLAMA_ROOT=${LLAMA_ROOT:-/home/yoon/dev/llama.cpp}
+LLAMA_BUILD_DIR=${LLAMA_BUILD_DIR:-$LLAMA_ROOT/build}
 OUT_DIR=${SLANG_SHIM_OUT_DIR:-$ROOT/build/sffi}
 OUT=$OUT_DIR/libslang_ggml.so
 SRC=$ROOT/src/runtime/slang_ggml_shim.c
@@ -25,7 +26,7 @@ SRC=$ROOT/src/runtime/slang_ggml_shim.c
 # external SDK is absence of evidence, not evidence of success.
 [ -f "$SRC" ] || { echo "ERROR -- nothing was built (missing $SRC)"; exit 2; }
 [ -f "$LLAMA_ROOT/include/llama.h" ] || { echo "ERROR -- nothing was built (no llama.h under LLAMA_ROOT=$LLAMA_ROOT)"; exit 2; }
-[ -f "$LLAMA_ROOT/build/bin/libllama.so" ] || { echo "ERROR -- nothing was built (no libllama.so under $LLAMA_ROOT/build/bin)"; exit 2; }
+[ -f "$LLAMA_BUILD_DIR/bin/libllama.so" ] || { echo "ERROR -- nothing was built (no libllama.so under $LLAMA_BUILD_DIR/bin)"; exit 2; }
 
 CC=${CC:-cc}
 command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no C compiler: $CC)"; exit 2; }
@@ -37,8 +38,8 @@ mkdir -p "$OUT_DIR"
 # greens in this repo before.
 "$CC" -O2 -fPIC -shared -o "$OUT" "$SRC" \
     -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
-    -L"$LLAMA_ROOT/build/bin" -lllama \
-    -Wl,-rpath,"$LLAMA_ROOT/build/bin" 2>"$OUT_DIR/build.log"
+    -L"$LLAMA_BUILD_DIR/bin" -lllama \
+    -Wl,-rpath,"$LLAMA_BUILD_DIR/bin" 2>"$OUT_DIR/build.log"
 cc_rc=$?
 if [ "$cc_rc" -ne 0 ]; then
     echo "compile output:" >&2
@@ -53,5 +54,64 @@ fi
 # happens to link, which is exactly the shape a symbol-count check catches.
 n_sym=$(nm -D --defined-only "$OUT" 2>/dev/null | grep -c ' T slang_ggml_' || true)
 [ "$n_sym" -gt 0 ] || { echo "FAIL -- built $OUT but it exports 0 slang_ggml_* symbols"; exit 1; }
+
+symbols=$OUT_DIR/slang_ggml_symbols.txt
+nm -D --defined-only "$OUT" 2>/dev/null >"$symbols"
+for required in \
+    slang_ggml_request_configure slang_ggml_request_create \
+    slang_ggml_request_close slang_ggml_request_cancel \
+    slang_ggml_request_str_reset slang_ggml_request_str_push \
+    slang_ggml_request_out_len slang_ggml_request_out_byte \
+    slang_ggml_request_n_ctx slang_ggml_request_tokenize \
+    slang_ggml_request_token_at slang_ggml_request_prefix_prepare \
+    slang_ggml_request_eval_prompt slang_ggml_request_eval \
+    slang_ggml_request_sample slang_ggml_request_piece \
+    slang_ggml_request_kv_clear
+do
+    grep -q " T $required\$" "$symbols" || {
+        echo "FAIL -- built $OUT but required S3 symbol $required is absent"
+        exit 1
+    }
+done
+
+if [ -f "$LLAMA_ROOT/include/llama-slang-paged.h" ]; then
+    native_symbols=$OUT_DIR/llama_slang_paged_symbols.txt
+    nm -D --defined-only "$LLAMA_BUILD_DIR/bin/libllama.so" 2>/dev/null >"$native_symbols"
+    for required_native in \
+        llama_slang_paged_abi_version llama_slang_paged_page_seal \
+        llama_slang_paged_fail llama_slang_paged_commit_and_copy \
+        llama_slang_paged_page_bytes
+    do
+        grep -q " T $required_native\$" "$native_symbols" || {
+            echo "FAIL -- compatible header found but native symbol $required_native is absent"
+            exit 1
+        }
+    done
+    for required in \
+        slang_ggml_page_abi_version slang_ggml_page_execution_namespace \
+        slang_ggml_page_pool_create slang_ggml_page_pool_destroy \
+        slang_ggml_page_reserve slang_ggml_page_release slang_ggml_page_seal \
+        slang_ggml_page_copy_tail slang_ggml_page_table_begin \
+        slang_ggml_page_table_push slang_ggml_page_prefill \
+        slang_ggml_page_decode slang_ggml_page_boundary_logits \
+        slang_ggml_page_table_commit slang_ggml_page_table_abort \
+        slang_ggml_page_allocated_bytes slang_ggml_page_bytes \
+        slang_ggml_page_request_create
+    do
+        grep -q " T $required\$" "$symbols" || {
+            echo "FAIL -- compatible paged llama.cpp found but required symbol $required is absent"
+            exit 1
+        }
+    done
+    ldd_output=$OUT_DIR/slang_ggml_ldd.txt
+    if ! ldd -r "$OUT" >"$ldd_output" 2>&1; then
+        echo "FAIL -- unable to resolve paged shim runtime dependencies"
+        exit 1
+    fi
+    if grep -q 'undefined symbol:' "$ldd_output"; then
+        echo "FAIL -- paged shim has unresolved runtime symbols"
+        exit 1
+    fi
+fi
 
 echo "PASS -- $n_sym symbol(s) exported, $OUT"

@@ -75,6 +75,26 @@ int8_t rt_array_push(SplArray* array, int64_t value) {
     if (!array || array->len >= array->cap) return 0;
     array->items[array->len++].as_int = value; return 1;
 }
+/* The opaque V3 bridge uses the production checked-byte helpers.  This
+ * existing wrapper selfcheck keeps a small equivalent owner so including the
+ * complete provider remains link-complete. */
+int64_t rt_array_bytes_validate(int64_t value) {
+    SplArray* array = (SplArray*)(uintptr_t)value;
+    if (!array || array->len < 0) return -1;
+    for (int64_t i = 0; i < array->len; i++) {
+        int64_t byte = rt_array_get(array, i);
+        if (byte < 0 || byte > 255) return -1;
+    }
+    return array->len;
+}
+int64_t rt_array_bytes_copy_checked(int64_t value, uint8_t* out, int64_t capacity) {
+    int64_t length = rt_array_bytes_validate(value);
+    if (length < 0 || length > capacity || (length && !out)) return -1;
+    SplArray* array = (SplArray*)(uintptr_t)value;
+    for (int64_t i = 0; i < length; i++) out[i] = (uint8_t)rt_array_get(array, i);
+    return length;
+}
+int64_t rt_process_acquire_pinned_executable(int64_t handle) { (void)handle; return -1; }
 int64_t rt_value_int(int64_t value) { return value; }
 void* rt_alloc(int64_t size) {
     if (++runtime_alloc_call == runtime_fail_at) return NULL;
@@ -100,6 +120,72 @@ int main(void) {
     const uint8_t script[] = "printf ok";
     int64_t values[] = {test_text(dash_c, 2), test_text(script, 9)};
     SplArray* args = args_of(values, 2);
+
+    /* The observation facade may advertise only a host that has the complete
+     * opaque lifecycle, PID, cancellation, independent capture, and wait4
+     * rusage projections.  The query itself never starts a child. */
+    SplArray* capabilities = rt_process_owned_v3_capabilities_value();
+    assert(capabilities && rt_array_len(capabilities) == 3);
+    assert(rt_array_get(capabilities, 0) == RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION);
+    assert(rt_array_get(capabilities, 1) == 1);
+    assert((rt_array_get(capabilities, 2) & RT_PROCESS_OBSERVATION_CAP_REQUIRED) ==
+           RT_PROCESS_OBSERVATION_CAP_REQUIRED);
+
+    /* Exercise the new projection through a real owned child.  Capture limits
+     * are independent even though the older V3 API retains one global bound. */
+    const uint8_t observed_script[] = "printf abcd; printf efgh >&2";
+    int64_t observed_values[] = {test_text(dash_c, 2),
+                                 test_text(observed_script,
+                                           (int64_t)sizeof(observed_script) - 1)};
+    SplArray* empty_input = args_of(NULL, 0);
+    SplArray* observed_start = rt_process_owned_v3_start_value(
+        "/bin/sh", 7, args_of(observed_values, 2), empty_input,
+        2000, 20, 6);
+    assert(observed_start && rt_array_len(observed_start) == 4);
+    assert(rt_array_get(observed_start, 1) == RT_OWNED_PROCESS_OPAQUE_V3_VERSION);
+    assert(rt_array_get(observed_start, 2) == 1);
+    int64_t observed_handle = rt_array_get(observed_start, 0);
+    assert(observed_handle > 0);
+    SplArray* limit_receipt = rt_process_owned_v3_set_capture_limits_value(
+        observed_handle, 2, 4);
+    assert(limit_receipt && rt_array_len(limit_receipt) == 3);
+    assert(rt_array_get(limit_receipt, 0) == RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION);
+    assert(rt_array_get(limit_receipt, 1) == 1 && rt_array_get(limit_receipt, 2) == 0);
+
+    SplArray* live_metadata = rt_process_owned_v3_observation_value(observed_handle);
+    assert(live_metadata && rt_array_len(live_metadata) == 15);
+    assert(rt_array_get(live_metadata, 0) == RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION);
+    assert(rt_array_get(live_metadata, 1) > 1);
+    assert(rt_array_get(live_metadata, 14) == EAGAIN ||
+           rt_array_get(live_metadata, 14) == 0);
+
+    SplArray* observed_poll = NULL;
+    for (int i = 0; i < 100; i++) {
+        observed_poll = rt_process_owned_v3_poll_value(observed_handle, 20, 8, 8);
+        assert(observed_poll && rt_array_len(observed_poll) == 3);
+        SplArray* poll_words = (SplArray*)(uintptr_t)rt_array_get(observed_poll, 2);
+        assert(poll_words && rt_array_len(poll_words) == 17);
+        if (rt_array_get(poll_words, 2) == 1) break;
+    }
+    SplArray* terminal_metadata = rt_process_owned_v3_observation_value(observed_handle);
+    assert(terminal_metadata && rt_array_len(terminal_metadata) == 15);
+    assert(rt_array_get(terminal_metadata, 2) >= 0); /* same-owner wall ms */
+    assert(rt_array_get(terminal_metadata, 3) == RT_OWNED_PROCESS_OBSERVATION_VERSION);
+    assert(rt_array_get(terminal_metadata, 4) & RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE);
+    assert(rt_array_get(terminal_metadata, 4) & RT_PROCESS_EVIDENCE_OUTPUT_EOF);
+    assert(rt_array_get(terminal_metadata, 7) > 0);
+    assert(rt_array_get(terminal_metadata, 12) == 0);
+    assert(rt_array_get(terminal_metadata, 14) == 0);
+    SplArray* observed_result = rt_process_owned_v3_result_value(observed_handle);
+    assert(observed_result && rt_array_len(observed_result) == 15);
+    assert(rt_array_get(observed_result, 10) == 4);
+    assert(rt_array_get(observed_result, 11) == 4);
+    assert(rt_array_get(observed_result, 12) == 2);
+    assert(rt_array_get(observed_result, 13) == 4);
+    assert(rt_process_owned_v3_collect_value(observed_handle));
+    SplArray* stale_metadata = rt_process_owned_v3_observation_value(observed_handle);
+    assert(stale_metadata && rt_array_get(stale_metadata, 14) == ESTALE);
+
     int64_t* tuple = rt_process_run_owned_bounded_value("/bin/sh", 7, args, 2000, 32);
     assert(tuple);
     assert(rt_string_len(tuple[0]) == 2);

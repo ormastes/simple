@@ -200,6 +200,14 @@ int main(int argc, char **argv)
                 browser_demo_path);
         return 1;
     }
+    const char *kernel_admission_path = getenv("SIMPLEOS_KERNEL_ADMISSION");
+    struct bytes kernel_admission = read_file(kernel_admission_path);
+    if (kernel_admission_path && kernel_admission_path[0] != '\0' &&
+        (!kernel_admission.len || kernel_admission.len > 4096)) {
+        fprintf(stderr, "SIMPLEOS_KERNEL_ADMISSION must be a readable record of at most 4096 bytes: %s\n",
+                kernel_admission_path);
+        return 1;
+    }
     struct bytes font_payloads[FONT_ASSET_COUNT];
     struct bytes font_metadata_payloads[FONT_ASSET_COUNT];
     struct bytes font_license_payloads[FONT_ASSET_COUNT];
@@ -468,6 +476,7 @@ int main(int argc, char **argv)
     int cfat4k_cluster = cfat4k.len ? alloc_clusters(cfat4k.data, cfat4k.len) : 0;
     int fat4k_cluster = alloc_clusters(fat4k.data, fat4k.len);
     int theme_cluster = theme_payload.len ? alloc_clusters(theme_payload.data, theme_payload.len) : 0;
+    int kernel_admission_cluster = kernel_admission.len ? alloc_clusters(kernel_admission.data, kernel_admission.len) : 0;
 
     /* `tmp` was once the one directory given a cluster and a root entry but NO
      * content buffer, so its cluster was never written and fsck reported
@@ -585,6 +594,8 @@ int main(int argc, char **argv)
     put_dir_entry(sys, &sys_n, "APPS       ", apps_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "PERF       ", perf_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
+    if (kernel_admission_cluster)
+        put_dir_entry(sys, &sys_n, "KERNEL  ADM", kernel_admission_cluster, kernel_admission.len, 0x20);
     if (servers_payload.len) {
         put_dir_entry(sys, &sys_n, "SERVER  HTM", server_document_cluster, server_document.len, 0x20);
         put_dir_entry(sys, &sys_n, "SRVDB   KEY", server_credential_cluster, server_credential.len, 0x20);

@@ -1,4 +1,8 @@
 # `src/lib/gc_sync_mut/` exists (869 files) despite being documented as "not a public variant directory"
+## Obsolete 2026-09-16 — duplicate of gc_sync_mut_directory_violates_not_implemented_invariant (same spec failure, same date)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-20
 **Scope:** `src/lib/gc_sync_mut/**` (existence itself)
@@ -64,3 +68,4 @@ docstring/assertion to match.
 Not fixed (spec still red on the deployed binary). Left as-is per "never
 weaken/delete the assertion to force green" — the assertion is correct per
 the documented architecture; the source tree is the thing that's wrong.
+

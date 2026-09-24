@@ -1,4 +1,9 @@
 # BUG: x64 freestanding if-EXPRESSION phi-merge corrupts extern-`[u8]` branch handle
+## Closed 2026-09-16 — ...anch handle **Status:** ROOT-FIXED 2026-07-10 (see "Root cause + fix" below). Workaround a
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** ROOT-FIXED 2026-07-10 (see "Root cause + fix" below). Workaround at
 ssh_session_kex.spl:565 is now removable.
@@ -102,3 +107,4 @@ memory (packed, `gc_flags=0x08`, correct data 0x94,0x48,0x8f…).
 **Gate result:** `ssh -p 2222 root@127.0.0.1 true` (password `simpleos`)
 completes full KEX → NEWKEYS both ways → password auth → channel → command →
 `debug1: Exit status 0`. No `incorrect signature`.
+

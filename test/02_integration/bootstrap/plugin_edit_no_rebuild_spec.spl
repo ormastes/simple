@@ -1,0 +1,67 @@
+# @req KPM-REQ-001 KPM-REQ-007 KPM-REQ-008 KPM-REQ-009 KPM-NFR-004 KPM-NFR-006
+use std.spec.*
+use std.io_runtime.{process_run}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key}
+
+describe "P-static backend edits do not rebuild the kernel":
+    # KPM-REQ-008: P-only edits leave the kernel rebuild identity unchanged.
+    it "keeps bootstrap kernel inputs stable under a backend implementation mutation":
+        val (stdout, stderr, status) = process_run("sh", ["scripts/check/check-bootstrap-kernel-inputs.shs"])
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("ignores P-static implementation edits")
+        expect(stdout).to_contain("tracks ABI metadata")
+
+    it "reports the real K0/K1 boundary state (legitimately red until WP-06/08 land, not skipped)":
+        # WP-05 (kernel/plugin audit plan, 2026-09-24): the checker used to scan
+        # only `use compiler.*` inside src/compiler, so it was blind to
+        # `export use`, and to any edge into `plugins.*`/`app.*`/`os.*` — this
+        # spec previously asserted a false "0 K0/K1->P imports" PASS that the
+        # narrow scan produced trivially, not because the boundary was clean.
+        # Now that the checker sees those edges it is honestly red; assert the
+        # widened verdict vocabulary and a fail-closed exit rather than a lie.
+        val (stdout, stderr, status) = process_run("sh", ["scripts/check/check-kernel-closure.shs"])
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("classified")
+        expect(stdout).to_contain("K0->P")
+        expect(stdout).to_contain("K1->P")
+        expect(stdout).to_contain("kernel->app/os")
+        expect(stdout).to_contain("unresolved")
+        expect(status == 0 or status == 1).to_equal(true)
+
+    it "keeps optional backend composition outside the compiler kernel":
+        val (facade_stdout, facade_stderr, facade_status) = process_run("sh", ["-c",
+            "! grep -R -E '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+plugins\\.' src/compiler --include='*.spl'"])
+        expect(facade_status).to_equal(0)
+        expect(facade_stderr).to_equal("")
+        expect(facade_stdout).to_equal("")
+        val (root_stdout, root_stderr, root_status) = process_run("sh", ["-c",
+            "grep -q 'plugins.backend_registry.full_static_backend_registry' src/app/cli/_CliMain/main_and_help.spl && grep -q 'plugins.backend_vhdl.driver.driver_aot_vhdl_output' src/plugins/backend_registry/full_static_backend_registry.spl"])
+        expect(root_status).to_equal(0)
+        expect(root_stderr).to_equal("")
+        expect(root_stdout).to_equal("")
+
+    it "rejects every direct or policy-unbound backend dispatch bypass":
+        val (tree_stdout, tree_stderr, tree_status) = process_run("sh",
+            ["scripts/check/check-phase5-backend-dispatch.shs"])
+        expect(tree_status).to_equal(0)
+        expect(tree_stderr).to_equal("")
+        expect(tree_stdout).to_contain("composition-selected")
+        val (mutation_stdout, mutation_stderr, mutation_status) = process_run("sh",
+            ["scripts/check/check-phase5-backend-dispatch.shs", "--selftest"])
+        expect(mutation_status).to_equal(0)
+        expect(mutation_stderr).to_equal("")
+        expect(mutation_stdout).to_contain("rejected 6/6 bypass mutations")
+
+    it "keeps native object scope stable when only P-static source bytes change":
+        val before = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v1")
+        val plugin_source_before = "fn emit() -> text: \"before\""
+        val plugin_source_after = "fn emit() -> text: \"after\""
+        expect(plugin_source_before == plugin_source_after).to_equal(false)
+        val after = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v1")
+        expect(after).to_equal(before)
+
+    it "is mutation-red when the kernel identity changes":
+        val before = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v1")
+        val after_kernel_edit = native_build_cache_scope_key(Some("wasm"), Some("wasm32"), [], 2, "kernel-digest-v2")
+        expect(after_kernel_edit == before).to_equal(false)

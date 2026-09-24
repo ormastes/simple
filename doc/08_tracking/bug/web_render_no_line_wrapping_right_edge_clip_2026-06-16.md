@@ -1,7 +1,15 @@
 # Bug: web renderer does not soft-wrap long lines (right-edge clipping)
 
+## Closed 2026-09-13 — confirmed: the entry already records RESOLVED (2026-06-16) with its fix in-document
+- **inferred** — the entry's own `Status: RESOLVED (2026-06-16)` line, together with the
+  code change described in its Fix section, is the primary evidence; nothing found in the
+  tree contradicts it.
+- **inferred** — the original oracle was a PPM render inspected by eye on the filing host.
+  Re-running it needs the `browser_engine` render lane, which does not run from this
+  Windows triage host, so this is a records-consistency close, not a re-measurement.
+
 - **Id:** web_render_no_line_wrapping_right_edge_clip_2026-06-16
-- **Status:** RESOLVED (2026-06-16)
+- **Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 - **Priority:** P2
 - **Area:** `lib/gc_async_mut/gpu/browser_engine` (web HTML layout renderer)
 - **Found via:** rendering `md_wysiwyg_graphical_render_tldr.md` to a 480-wide PPM

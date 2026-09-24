@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || fail "run inside the Simple repository"
+cd "$ROOT"
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+MODEL_PATH=${SLANG_KV_MODEL_PATH:-}
+MODEL_ID=${SLANG_KV_MODEL_ID:-}
+SLANG_LIB=${SLANG_KV_LIB:-build/sffi/libslang_ggml.so}
+TOKENS=${SLANG_KV_TOKENS:-8}
+THREADS=${SLANG_KV_THREADS:-1}
+N_CTX=${SLANG_KV_N_CTX:-4096}
+OUT=${SLANG_KV_EVIDENCE_DIR:-build/perf/slang-kv-cache}
+DRIVER=test/05_perf/slang_kv_cache/slang_kv_workload.spl
+
+[[ -x "$SIMPLE_BIN" ]] || fail "SIMPLE_BIN is not executable: $SIMPLE_BIN"
+[[ -n "$MODEL_PATH" && -f "$MODEL_PATH" ]] || fail "set SLANG_KV_MODEL_PATH to a GGUF model file"
+[[ -n "$MODEL_ID" ]] || fail "set SLANG_KV_MODEL_ID"
+[[ -f "$SLANG_LIB" ]] || fail "Slang ggml library not found: $SLANG_LIB"
+[[ "$TOKENS" =~ ^[1-9][0-9]*$ ]] || fail "SLANG_KV_TOKENS must be a positive integer"
+[[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || fail "SLANG_KV_THREADS must be a positive integer"
+[[ "$N_CTX" =~ ^[1-9][0-9]*$ ]] || fail "SLANG_KV_N_CTX must be a positive integer"
+(( N_CTX % 64 == 0 )) || fail "SLANG_KV_N_CTX must be divisible by 64 for an exact matched physical pool"
+[[ -x /usr/bin/time ]] || fail "/usr/bin/time is required for raw maximum-RSS receipts"
+
+mkdir -p "$OUT/raw"
+RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+MANIFEST="$OUT/manifest-$RUN_ID.tsv"
+IDENTITY="$OUT/identity-$RUN_ID.tsv"
+SUMMARY_TSV="$OUT/summary-$RUN_ID.tsv"
+SUMMARY_MD="$OUT/summary-$RUN_ID.md"
+[[ -z $(git status --porcelain) ]] || fail "benchmark source tree must be clean so HEAD identifies the measured implementation"
+SOURCE_HEAD=$(git rev-parse HEAD)
+SIMPLE_REAL=$(realpath "$SIMPLE_BIN")
+MODEL_REAL=$(realpath "$MODEL_PATH")
+LIB_REAL=$(realpath "$SLANG_LIB")
+LLAMA_LIB=$(ldd "$LIB_REAL" | awk '/libllama\.so/{print $3; exit}')
+[[ -n "$LLAMA_LIB" && -f "$LLAMA_LIB" ]] || fail "unable to resolve the measured libllama provider"
+WORKLOAD_SHA=$(printf '%s\n' 'cold|exact_repeat|prefix_extension|alternating_prefix|eviction_pressure' | sha256sum | awk '{print $1}')
+CPU_MODELS=$(LC_ALL=C lscpu | awk -F: '/^Model name:/{gsub(/^[[:space:]]+/,"",$2);print $2}' | sort -u | paste -sd, -)
+[[ -n "$CPU_MODELS" ]] || fail "unable to identify CPU model through lscpu"
+CPU_IDENTITY_SHA=$(LC_ALL=C lscpu | sha256sum | awk '{print $1}')
+{
+    printf 'field\tvalue\n'
+    printf 'source_head\t%s\n' "$SOURCE_HEAD"
+    printf 'source_tree\tclean\n'
+    printf 'simple_path\t%s\n' "$SIMPLE_REAL"
+    printf 'simple_sha256\t%s\n' "$(sha256sum "$SIMPLE_REAL" | awk '{print $1}')"
+    printf 'driver_sha256\t%s\n' "$(sha256sum "$DRIVER" | awk '{print $1}')"
+    printf 'backend_path\t%s\n' "$LIB_REAL"
+    printf 'backend_sha256\t%s\n' "$(sha256sum "$LIB_REAL" | awk '{print $1}')"
+    printf 'llama_path\t%s\n' "$(realpath "$LLAMA_LIB")"
+    printf 'llama_sha256\t%s\n' "$(sha256sum "$LLAMA_LIB" | awk '{print $1}')"
+    printf 'model_id\t%s\nmodel_path\t%s\nmodel_bytes\t%s\nmodel_sha256\t%s\n' \
+        "$MODEL_ID" "$MODEL_REAL" "$(stat -c %s "$MODEL_REAL")" "$(sha256sum "$MODEL_REAL" | awk '{print $1}')"
+    printf 'workload_manifest_sha256\t%s\n' "$WORKLOAD_SHA"
+    printf 'tokens\t%s\nthreads\t%s\nn_ctx\t%s\nsampler\tgreedy\ngpu_layers\t0\n' "$TOKENS" "$THREADS" "$N_CTX"
+    printf 'kv_type\tF32\nflash_attention\tdisabled\nkqv_offload\tfalse\n'
+    printf 'snapshot_entries\t4\nsnapshot_byte_limit\t2147483648\n'
+    printf 'physical_page_tokens\t64\nphysical_page_capacity\t%s\nphysical_prefix_capacity\t4\nphysical_byte_limit\t2147483648\n' "$((N_CTX / 64))"
+    printf 'repetitions\t5\npair_order\talternating\nclock\tSimple monotonic milliseconds\n'
+    printf 'architecture\t%s\nkernel\t%s\ncpu_models\t%s\ncpu_identity_sha256\t%s\n' \
+        "$(uname -m)" "$(uname -sr)" "$CPU_MODELS" "$CPU_IDENTITY_SHA"
+    printf 'observer\t%s\nrun_id\t%s\n' "$(/usr/bin/time --version 2>&1 | head -1)" "$RUN_ID"
+} > "$IDENTITY"
+printf 'run_id\tpair\torder\tworkload\tlane\tstatus\texit_code\trealtime_observer_elapsed_ns\tresident_elapsed_ms\tmax_rss_kib\toutput_digest\tgenerated_token_vector\tgenerated_tokens_total\tstdout_sha256\tstderr_sha256\ttime_sha256\targv_sha256\teffective_n_ctx\teffective_n_batch\teffective_n_ubatch\ttime_receipt\tstdout_receipt\tstderr_receipt\n' > "$MANIFEST"
+
+workloads=(cold exact_repeat prefix_extension alternating_prefix eviction_pressure)
+lanes_for_pair() {
+    if (( $1 % 2 == 1 )); then printf '%s\n' snapshot physical_pages
+    else printf '%s\n' physical_pages snapshot
+    fi
+}
+
+expected_requests() {
+    case "$1" in
+        cold) printf '1\n' ;;
+        exact_repeat|prefix_extension) printf '2\n' ;;
+        alternating_prefix) printf '4\n' ;;
+        eviction_pressure) printf '7\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_sample() {
+    local workload=$1 lane=$2 result=$3 vector=$4 total=$5 resident_ms=$6 digest=$7
+    local expected sum=0 value field key
+    local -a values fields
+    local -A metrics=()
+    read -r -a fields <<< "$result"
+    for field in "${fields[@]:1}"; do
+        [[ "$field" == *=* ]] || return 1
+        key=${field%%=*}
+        [[ -n "$key" && ! -v "metrics[$key]" ]] || return 1
+        metrics[$key]=${field#*=}
+    done
+    [[ ${metrics[lane]:-} == "$lane" && ${metrics[workload]:-} == "$workload" ]] || return 1
+    [[ ${metrics[requested_tokens]:-} == "$TOKENS" && ${metrics[threads]:-} == "$THREADS" && ${metrics[n_ctx]:-} == "$N_CTX" ]] || return 1
+    [[ "$resident_ms" =~ ^[1-9][0-9]*$ ]] || return 1
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$vector" =~ ^[0-9]+(,[0-9]+)*$ && "$total" =~ ^[0-9]+$ ]] || return 1
+    expected=$(expected_requests "$workload") || return 1
+    IFS=',' read -r -a values <<< "$vector"
+    (( ${#values[@]} == expected )) || return 1
+    for value in "${values[@]}"; do
+        (( value >= 0 && value <= TOKENS )) || return 1
+        sum=$((sum + value))
+    done
+    (( sum == total )) || return 1
+    for key in hits misses reused_tokens prefilled_tokens evictions restore_failures; do
+        [[ ${metrics[$key]:-} =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    done
+    [[ ${metrics[restore_failures]} == 0 ]] || return 1
+    [[ ${metrics[cleanup_active]:-} == false && ${metrics[cleanup_telemetry]:-} == nil ]] || return 1
+    if [[ "$lane" == physical_pages ]]; then
+        [[ ${metrics[physical_telemetry]:-} == available ]] || return 1
+        for key in effective_page_capacity effective_request_capacity effective_prefix_capacity effective_byte_limit allocated_pages allocated_bytes provider_allocated_bytes provider_page_bytes page_high_water active_requests request_references active_reservations generation_failures committed_prefix_restores boundary_evaluations copied_tail_rows; do
+            [[ ${metrics[$key]:-} =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+        done
+        (( metrics[effective_page_capacity] == N_CTX / 64 &&
+           metrics[effective_request_capacity] == 1 &&
+           metrics[effective_prefix_capacity] == 4 &&
+           metrics[effective_byte_limit] == 2147483648 )) || return 1
+        (( metrics[provider_page_bytes] > 0 &&
+           metrics[allocated_pages] <= metrics[page_high_water] &&
+           metrics[page_high_water] <= metrics[effective_page_capacity] &&
+           metrics[allocated_bytes] == metrics[provider_allocated_bytes] &&
+           metrics[allocated_bytes] == metrics[allocated_pages] * metrics[provider_page_bytes] &&
+           metrics[allocated_bytes] <= metrics[effective_byte_limit] )) || return 1
+        (( metrics[active_requests] == 0 && metrics[request_references] == 0 &&
+           metrics[active_reservations] == 0 && metrics[generation_failures] == 0 )) || return 1
+        case "$workload" in
+            cold)
+                (( metrics[hits] == 0 && metrics[reused_tokens] == 0 &&
+                   metrics[committed_prefix_restores] == 0 && metrics[prefilled_tokens] > 0 )) || return 1 ;;
+            exact_repeat)
+                (( metrics[hits] >= 1 && metrics[reused_tokens] > 0 &&
+                   metrics[committed_prefix_restores] >= 1 && metrics[boundary_evaluations] >= 1 )) || return 1 ;;
+            prefix_extension)
+                (( metrics[hits] >= 1 && metrics[reused_tokens] > 0 &&
+                   metrics[committed_prefix_restores] >= 1 && metrics[prefilled_tokens] > 0 )) || return 1 ;;
+            alternating_prefix)
+                (( metrics[hits] >= 2 && metrics[reused_tokens] > 0 &&
+                   metrics[committed_prefix_restores] >= 2 )) || return 1 ;;
+            eviction_pressure)
+                (( metrics[evictions] >= 1 && metrics[misses] >= 7 &&
+                   metrics[prefilled_tokens] > 0 )) || return 1 ;;
+        esac
+    else
+        [[ ${metrics[physical_telemetry]:-} == unavailable ]] || return 1
+    fi
+}
+
+effective_config_reference=
+for workload in "${workloads[@]}"; do
+    for pair in 1 2 3 4 5; do
+        order=0
+        while IFS= read -r lane; do
+            order=$((order + 1))
+            stem="$RUN_ID-$workload-pair$pair-order$order-$lane"
+            stdout="$OUT/raw/$stem.stdout"
+            stderr="$OUT/raw/$stem.stderr"
+            timing="$OUT/raw/$stem.time-v"
+            start_ns=$(date +%s%N)
+            set +e
+            /usr/bin/time -v -o "$timing" env SIMPLE_LIB=src "$SIMPLE_BIN" run "$DRIVER" \
+                --model-path="$MODEL_PATH" --model-id="$MODEL_ID" --lib="$SLANG_LIB" \
+                --lane="$lane" --workload="$workload" --tokens="$TOKENS" \
+                --threads="$THREADS" --n-ctx="$N_CTX" \
+                >"$stdout" 2>"$stderr"
+            code=$?
+            set -e
+            end_ns=$(date +%s%N)
+            elapsed_ns=$((end_ns - start_ns))
+            max_rss=$(awk -F: '/Maximum resident set size \(kbytes\)/ {gsub(/^[[:space:]]+/, "", $2); print $2}' "$timing")
+            [[ "$max_rss" =~ ^[0-9]+$ ]] || max_rss=0
+            status=FAIL
+            result=$(grep '^SLANG_KV_RESULT status=PASS ' "$stdout" | tail -1 || true)
+            resident_ms=$(printf '%s\n' "$result" | sed -n 's/.* resident_elapsed_ms=\([0-9][0-9]*\).*/\1/p')
+            output_digest=$(printf '%s\n' "$result" | sed -n 's/.* output_digest=\([0-9a-f][0-9a-f]*\).*/\1/p')
+            generated_vector=$(printf '%s\n' "$result" | sed -n 's/.* generated_token_vector=\([0-9][0-9,]*\).*/\1/p')
+            generated_total=$(printf '%s\n' "$result" | sed -n 's/.* generated_tokens_total=\([0-9][0-9]*\).*/\1/p')
+            [[ "$resident_ms" =~ ^[0-9]+$ ]] || resident_ms=0
+            [[ "$output_digest" =~ ^[0-9a-f]{64}$ ]] || output_digest=missing
+            [[ "$generated_vector" =~ ^[0-9]+(,[0-9]+)*$ ]] || generated_vector=missing
+            [[ "$generated_total" =~ ^[0-9]+$ ]] || generated_total=missing
+            effective_n_ctx=$(awk -F'= ' '/llama_context: n_ctx                 =/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
+            effective_n_batch=$(awk -F'= ' '/llama_context: n_batch/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
+            effective_n_ubatch=$(awk -F'= ' '/llama_context: n_ubatch/{gsub(/ /,"",$2);value=$2} END{print value}' "$stderr")
+            effective_config="$effective_n_ctx:$effective_n_batch:$effective_n_ubatch"
+            if [[ -z "$effective_config_reference" && "$effective_config" =~ ^[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$ ]]; then
+                effective_config_reference=$effective_config
+            fi
+            if (( code == 0 )) && [[ -n "$result" ]] && \
+               [[ "$effective_n_ctx" =~ ^[1-9][0-9]*$ ]] && \
+               [[ "$effective_n_batch" =~ ^[1-9][0-9]*$ ]] && \
+               [[ "$effective_n_ubatch" =~ ^[1-9][0-9]*$ ]] && \
+               [[ "$effective_config" == "$effective_config_reference" ]] && \
+               validate_sample "$workload" "$lane" "$result" "$generated_vector" \
+                   "$generated_total" "$resident_ms" "$output_digest"; then
+                status=PASS
+            fi
+            digest=$(sha256sum "$stdout" | awk '{print $1}')
+            stderr_digest=$(sha256sum "$stderr" | awk '{print $1}')
+            time_digest=$(sha256sum "$timing" | awk '{print $1}')
+            argv_digest=$(printf '%s\0' "$SIMPLE_REAL" run "$DRIVER" "$MODEL_REAL" "$MODEL_ID" "$LIB_REAL" "$lane" "$workload" "$TOKENS" "$THREADS" "$N_CTX" | sha256sum | awk '{print $1}')
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$RUN_ID" "$pair" "$order" "$workload" "$lane" "$status" "$code" \
+                "$elapsed_ns" "$resident_ms" "$max_rss" "$output_digest" "$generated_vector" "$generated_total" "$digest" \
+                "$stderr_digest" "$time_digest" "$argv_digest" "$effective_n_ctx" "$effective_n_batch" "$effective_n_ubatch" \
+                "$timing" "$stdout" "$stderr" >> "$MANIFEST"
+        done < <(lanes_for_pair "$pair")
+    done
+done
+
+PARITY="$OUT/parity-$RUN_ID.tsv"
+awk -F '\t' 'BEGIN {OFS="\t"; print "workload","pair","snapshot_digest","physical_digest","snapshot_tokens","physical_tokens","status","snapshot_effective_config","physical_effective_config"}
+NR>1 {key=$4 SUBSEP $2 SUBSEP $5; d[key]=$11; v[key]=$12 ":" $13; c[key]=$18 ":" $19 ":" $20; ok[key]=($6=="PASS"); count[key]++}
+END {for(w=1;w<=5;w++){names[1]="cold";names[2]="exact_repeat";names[3]="prefix_extension";names[4]="alternating_prefix";names[5]="eviction_pressure";for(p=1;p<=5;p++){sk=names[w] SUBSEP p SUBSEP "snapshot";qk=names[w] SUBSEP p SUBSEP "physical_pages";s=d[sk];q=d[qk];sv=v[sk];qv=v[qk];sc=c[sk];qc=c[qk];valid=(count[sk]==1&&count[qk]==1&&ok[sk]&&ok[qk]&&s!=""&&s!="missing"&&s==q&&sv!=""&&sv!~"missing"&&sv==qv&&sc~/^[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$/&&sc==qc);print names[w],p,s,q,sv,qv,(valid?"PASS":"FAIL"),sc,qc}}}' "$MANIFEST" > "$PARITY"
+
+awk -F '\t' 'BEGIN {OFS="\t"; print "workload","lane","samples","passed","min_resident_ms","median_resident_ms","p95_resident_ms","max_resident_ms","max_rss_kib"}
+NR > 1 {key=$4 SUBSEP $5; n[key]++; if ($6=="PASS") pass[key]++; t[key,n[key]]=$9+0; if (($10+0)>rss[key]) rss[key]=$10+0}
+END {for(w=1;w<=5;w++){names[1]="cold";names[2]="exact_repeat";names[3]="prefix_extension";names[4]="alternating_prefix";names[5]="eviction_pressure";for(l=1;l<=2;l++){lanes[1]="snapshot";lanes[2]="physical_pages";key=names[w] SUBSEP lanes[l];for(i=1;i<=n[key];i++)a[i]=t[key,i];for(i=1;i<=n[key];i++)for(j=i+1;j<=n[key];j++)if(a[i]>a[j]){x=a[i];a[i]=a[j];a[j]=x}print names[w],lanes[l],n[key]+0,pass[key]+0,a[1]+0,a[3]+0,a[5]+0,a[5]+0,rss[key]+0;delete a}}}' "$MANIFEST" > "$SUMMARY_TSV"
+
+{
+    printf '# Slang KV-cache matched benchmark — %s\n\n' "$RUN_ID"
+    printf 'Immutable evidence manifest: `%s`; identity receipt: `%s`\n\n' "$MANIFEST" "$IDENTITY"
+    printf '| Workload | Lane | Passed | Min ms | Median ms | p95 ms | Max ms | Max RSS KiB |\n|---|---|---:|---:|---:|---:|---:|---:|\n'
+    awk -F '\t' 'NR>1 {printf "| %s | %s | %s/%s | %s | %s | %s | %s | %s |\n",$1,$2,$4,$3,$5,$6,$7,$8,$9}' "$SUMMARY_TSV"
+    printf '\nTiming is monotonic resident-request time; model load and disjoint warmup are excluded. p95 with five samples is the nearest-rank fifth sample. Whole-process GNU `time -v`, stdout, and stderr remain raw per-sample receipts. CPU threads=%s and n_ctx=%s are identical across lanes. Output digest parity is required within every pair (`%s`). TTFT is truthfully unavailable because the backend API exposes only completed generation.\n' "$THREADS" "$N_CTX" "$PARITY"
+} > "$SUMMARY_MD"
+
+if awk -F '\t' 'NR>1 && $4 != 5 {bad=1} END {exit bad}' "$SUMMARY_TSV" && \
+   awk -F '\t' 'NR>1 && $7 != "PASS" {bad=1} END {exit bad}' "$PARITY"; then
+    printf 'STATUS: PASS slang-kv-cache-matched-evidence\nsummary: %s\n' "$SUMMARY_MD"
+else
+    printf 'STATUS: BLOCKED slang-kv-cache-matched-evidence (inspect %s)\n' "$MANIFEST" >&2
+    exit 1
+fi

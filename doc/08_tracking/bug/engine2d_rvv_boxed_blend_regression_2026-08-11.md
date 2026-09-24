@@ -1,4 +1,8 @@
 # Engine2D RVV boxed opaque blend candidates regress under QEMU
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-11
 
@@ -21,3 +25,4 @@ per-block mask reductions. Physical RISC-V hardware evidence is still missing.
 Opaque constant blend is excluded from this blocker: it now delegates directly
 to RVV fill and measures 2.053x its scalar src-over oracle under the same QEMU
 configuration. The open defect concerns image spans and mixed alpha.
+

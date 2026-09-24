@@ -1,0 +1,226 @@
+# codex-system-test
+"""Native-handoff contract for executable-mapping cleanup v1.
+
+## Overview
+
+The mapping owner holds a reservation from RW allocation through the RX seal and
+only transfers or releases it after an authenticated mailbox completion. This
+test isolates that handoff boundary: it covers post-RX success, an unfinished
+older action, constructor failures, single-use release acknowledgement, and
+bounded retry dispatch.
+
+## Scope
+
+This is a receipt/mailbox contract test, not a syscall fault-injection test.
+The production native owner maps short-copy, RW-to-RX protection, and null
+function-address failures to `ConstructFailed` before publishing the
+authenticated outcome here. The assertions verify that this outcome cannot
+discard ownership before a separately acknowledged release outcome arrives.
+It does not claim a kernel mapping, `mprotect`, `munmap`, or RSS observation.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+**Design:** N/A
+**Research:** N/A
+
+## Examples
+
+The individual scenarios below are executable examples of each named
+handoff outcome. Their fault labels describe the native event being reported;
+they do not replace the production native event with a test-only implementation.
+"""
+
+use std.spec.*
+use compiler.loader.loader.exec_mapping_cleanup_v1.{
+    EXEC_CLEANUP_RETRY_DRAIN_LIMIT_V1,
+    ExecCleanupStateV1, ExecCleanupCompletionMailboxV1,
+    ExecCleanupNativeDispatchV1,
+    ExecCleanupNativeOutcomeKindV1,
+    exec_cleanup_state_v1, exec_cleanup_completion_mailbox_v1,
+    exec_cleanup_reserve_v1, exec_cleanup_begin_construct_v1,
+    exec_cleanup_construct_dispatch_v1, exec_cleanup_release_dispatch_v1,
+    exec_cleanup_arm_native_dispatch_v1,
+    exec_cleanup_publish_native_outcome_v1,
+    exec_cleanup_drain_native_outcomes_v1,
+    exec_cleanup_retry_at_map_entry_v1,
+}
+
+struct NativeHandoffFixtureV1:
+    state: ExecCleanupStateV1
+    mailbox: ExecCleanupCompletionMailboxV1
+    dispatch: ExecCleanupNativeDispatchV1
+
+fn constructing_fixture_v1(
+        mapping_id: text = "native-handoff-a",
+        address: i64 = 4096) -> NativeHandoffFixtureV1:
+    val reserved = exec_cleanup_reserve_v1(
+        exec_cleanup_state_v1(), mapping_id, 4096)
+    val constructing = exec_cleanup_begin_construct_v1(
+        reserved.state, reserved.token, address)
+    NativeHandoffFixtureV1(
+        state: constructing.state,
+        mailbox: exec_cleanup_completion_mailbox_v1(),
+        dispatch: exec_cleanup_construct_dispatch_v1(constructing))
+
+fn retained_after_native_construct_failure_v1() -> ExecCleanupStateV1:
+    val fixture = constructing_fixture_v1()
+    val armed = exec_cleanup_arm_native_dispatch_v1(
+        fixture.mailbox, fixture.dispatch)
+    if not armed:
+        return fixture.state
+    val published = exec_cleanup_publish_native_outcome_v1(
+        fixture.mailbox, fixture.dispatch.ticket,
+        ExecCleanupNativeOutcomeKindV1.ConstructFailed)
+    if not published:
+        return fixture.state
+    val construction = exec_cleanup_drain_native_outcomes_v1(
+        fixture.state, fixture.mailbox)
+    if not construction.dispatch_present:
+        return construction.state
+    val release_armed = exec_cleanup_arm_native_dispatch_v1(
+        fixture.mailbox, construction.dispatch)
+    if not release_armed:
+        return construction.state
+    val release_published = exec_cleanup_publish_native_outcome_v1(
+        fixture.mailbox, construction.dispatch.ticket,
+        ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)
+    if not release_published:
+        return construction.state
+    exec_cleanup_drain_native_outcomes_v1(
+        construction.state, fixture.mailbox).state
+
+describe "exec mapping cleanup native handoff v1":
+    it "should transfer a post-RX success after the native action returns without reacquiring the gate":
+        step("Arm the construction receipt before the native RW-to-RX work")
+        val fixture = constructing_fixture_v1("post-rx-success")
+        expect(exec_cleanup_arm_native_dispatch_v1(
+            fixture.mailbox, fixture.dispatch)).to_equal(true)
+
+        step("Publish the post-RX outcome through the lock-free completion mailbox")
+        expect(exec_cleanup_publish_native_outcome_v1(
+            fixture.mailbox, fixture.dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructSucceeded)).to_equal(true)
+        val completed = exec_cleanup_drain_native_outcomes_v1(
+            fixture.state, fixture.mailbox)
+        expect(completed.reason).to_equal("construction-transferred")
+        expect(completed.state.slots.len()).to_equal(0)
+        expect(completed.state.reserved_bytes).to_equal(0)
+
+    it "should allow a later ready outcome to progress when an older native action is still incomplete":
+        step("Arm two generations while only the later native action reports completion")
+        val first = exec_cleanup_reserve_v1(
+            exec_cleanup_state_v1(), "older-incomplete", 4096)
+        val second = exec_cleanup_reserve_v1(first.state, "later-ready", 4096)
+        val first_bound = exec_cleanup_begin_construct_v1(
+            second.state, first.token, 4096)
+        val second_bound = exec_cleanup_begin_construct_v1(
+            first_bound.state, second.token, 8192)
+        val older = exec_cleanup_construct_dispatch_v1(first_bound)
+        val later = exec_cleanup_construct_dispatch_v1(second_bound)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, older)).to_equal(true)
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, later)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, later.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructSucceeded)).to_equal(true)
+
+        step("Drain a ready completion without waiting for the older unfinished action")
+        val drained = exec_cleanup_drain_native_outcomes_v1(
+            second_bound.state, mailbox)
+        expect(drained.reason).to_equal("construction-transferred")
+        expect(drained.drained).to_equal(1)
+        expect(drained.state.slots.len()).to_equal(1)
+        expect(drained.state.slots[0].mapping_id).to_equal("older-incomplete")
+
+    it "should retain ownership after an injected short native copy failure":
+        step("Publish the production ConstructFailed receipt for a short copy")
+        val fixture = constructing_fixture_v1("short-copy")
+        expect(exec_cleanup_arm_native_dispatch_v1(
+            fixture.mailbox, fixture.dispatch)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            fixture.mailbox, fixture.dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructFailed)).to_equal(true)
+        val retained = exec_cleanup_drain_native_outcomes_v1(
+            fixture.state, fixture.mailbox)
+        expect(retained.reason).to_equal("construction-failure-retained")
+        expect(retained.dispatch_present).to_equal(true)
+        expect(retained.state.reserved_bytes).to_equal(4096)
+        expect(retained.state.slots.len()).to_equal(1)
+
+    it "should retain ownership after an injected RW-to-RX protection failure":
+        step("Publish the production ConstructFailed receipt for an RX protection refusal")
+        val fixture = constructing_fixture_v1("protect-refused")
+        expect(exec_cleanup_arm_native_dispatch_v1(
+            fixture.mailbox, fixture.dispatch)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            fixture.mailbox, fixture.dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructFailed)).to_equal(true)
+        val retained = exec_cleanup_drain_native_outcomes_v1(
+            fixture.state, fixture.mailbox)
+        expect(retained.reason).to_equal("construction-failure-retained")
+        expect(retained.state.reserved_bytes).to_equal(4096)
+        expect(retained.state.slots[0].address).to_equal(4096)
+        expect(retained.state.slots[0].outcome_pending).to_equal(true)
+
+    it "should retain ownership after an injected null executable-address failure":
+        step("Publish the production ConstructFailed receipt for a null function address")
+        val fixture = constructing_fixture_v1("null-function-address")
+        expect(exec_cleanup_arm_native_dispatch_v1(
+            fixture.mailbox, fixture.dispatch)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            fixture.mailbox, fixture.dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructFailed)).to_equal(true)
+        val retained = exec_cleanup_drain_native_outcomes_v1(
+            fixture.state, fixture.mailbox)
+        expect(retained.reason).to_equal("construction-failure-retained")
+        expect(retained.state.reserved_bytes).to_equal(4096)
+        expect(retained.state.slots[0].mapping_id).to_equal("null-function-address")
+        expect(retained.dispatch.ticket.mapping_id).to_equal("null-function-address")
+
+    it "should release immediately once and reject a duplicate native free acknowledgement":
+        step("Fail construction and arm its authoritative release dispatch")
+        val fixture = constructing_fixture_v1("free-once")
+        expect(exec_cleanup_arm_native_dispatch_v1(
+            fixture.mailbox, fixture.dispatch)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            fixture.mailbox, fixture.dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructFailed)).to_equal(true)
+        val failed = exec_cleanup_drain_native_outcomes_v1(
+            fixture.state, fixture.mailbox)
+        expect(failed.dispatch_present).to_equal(true)
+        expect(exec_cleanup_arm_native_dispatch_v1(
+            fixture.mailbox, failed.dispatch)).to_equal(true)
+
+        step("Acknowledge the one native free and reject its stale duplicate")
+        expect(exec_cleanup_publish_native_outcome_v1(
+            fixture.mailbox, failed.dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)).to_equal(true)
+        val released = exec_cleanup_drain_native_outcomes_v1(
+            failed.state, fixture.mailbox)
+        expect(released.reason).to_equal("released")
+        expect(released.state.reserved_bytes).to_equal(0)
+        expect(released.state.slots.len()).to_equal(0)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            fixture.mailbox, failed.dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)).to_equal(false)
+        expect(exec_cleanup_drain_native_outcomes_v1(
+            released.state, fixture.mailbox).reason).to_equal("native-outcome-empty")
+
+    it "should cap retries at four and refuse a duplicate in-flight retry dispatch":
+        step("Retain a failed native release and arm its next retry exactly once")
+        val retained = retained_after_native_construct_failure_v1()
+        expect(retained.reserved_bytes).to_equal(4096)
+        val retry = exec_cleanup_retry_at_map_entry_v1(retained, [])
+        expect(retry.reason).to_equal("retry_failed_receipts")
+        val dispatch = exec_cleanup_release_dispatch_v1(
+            retry, ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, dispatch)).to_equal(true)
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, dispatch)).to_equal(false)
+
+        step("Refuse a fifth retry attempt in the bounded map-entry drain")
+        expect(EXEC_CLEANUP_RETRY_DRAIN_LIMIT_V1).to_equal(4)
+        val bounded = exec_cleanup_retry_at_map_entry_v1(
+            retained, [1, 2, 3, 4])
+        expect(bounded.reason).to_equal("retry-drain-limit")
+        expect(bounded.state.reserved_bytes).to_equal(4096)

@@ -7,26 +7,36 @@
 # so a caller could receive the wrong shape. Pre-fix this spec fails:
 # `file_ops.file_read_lines` returns Some([...]) (no `.len()` == 2) and
 # `ffi.io.path_join2` does not exist.
+#
+# UPDATED 2026-09-20: the unified signature landed on `Result<[text], text>`,
+# not bare `[text]` -- every `file_read_lines` definition in the tree
+# (io/file_ops.spl:254, file_system/file_ops.spl:43/42, sffi/io.spl:76, which
+# ffi/io.spl re-exports) now agrees on `Result<[text], text>`. That is a
+# stronger fix for the SAME nil-vs-empty defect class this spec's own header
+# calls out (see file_ops.spl's "REAL DEFECT FOUND AND FIXED via nil-vs-empty"
+# note): an explicit Err distinguishes "missing file" from "empty file"
+# instead of overloading an empty array for both. Unwrap with `.unwrap()`
+# here since both calls are expected to succeed / explicitly checked below.
 use std.spec
 use std.nogc_sync_mut.io.file_ops.{file_read_lines as file_ops_read_lines, file_write, file_delete}
 use std.nogc_sync_mut.ffi.io.{file_read_lines as ffi_read_lines, path_join2}
 use std.path.{path_join}
 
 describe "file_read_lines unified signature":
-    it "file_ops and ffi variants both return [text] with the same lines":
+    it "file_ops and ffi variants both return Result<[text], text> with the same lines":
         val p = "/tmp/file_read_lines_unified_spec.txt"
         file_write(p, "a\nb")
-        val a: [text] = file_ops_read_lines(p)
-        val b: [text] = ffi_read_lines(p)
+        val a: [text] = file_ops_read_lines(p).unwrap()
+        val b: [text] = ffi_read_lines(p).unwrap()
         file_delete(p)
         expect a.len() == 2
         expect b.len() == 2
         expect a[0] == "a"
         expect b[1] == "b"
 
-    it "missing file yields an empty [text], not nil":
-        val a: [text] = file_ops_read_lines("/tmp/file_read_lines_unified_spec_missing.txt")
-        expect a.len() == 0
+    it "missing file yields an Err, not a nil or an empty [text]":
+        val result = file_ops_read_lines("/tmp/file_read_lines_unified_spec_missing.txt")
+        expect result.is_err() == true
 
 describe "path_join unified signature":
     it "std.path path_join takes [text]; two-segment form is path_join2":

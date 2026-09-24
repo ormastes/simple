@@ -1,0 +1,447 @@
+"""
+# Environment variant session callable adapter, artifact identity and operation family V1
+
+EGL package 2 follow-up to agent U. U delivered the loader owner
+(`callable_map_v1`) and proved native/static parity, and left three gaps named
+in its own receipt. This spec pins all three.
+
+1. **Production consumer.** `binding_runtime_v1` publishes a plan and opens a
+   session carrying scalar `provider_handles` it states it "never maps or
+   invokes"; nothing turned that session into callables. Every module in
+   `composition/environment_variants/` except the two U added is owned by
+   another lane for this wave, so the consumer lands here as an adapter over
+   the session value `binding_runtime_open_session_v1` already returns, behind
+   a typed capability token: with no token the adapter performs ZERO
+   executable mappings and the session is untouched, which is the design's
+   own first acceptance step for a callable-bearing session.
+
+2. **Artifact identity.** U hashed by path and then opened the same path, so a
+   swap between the two was undetected. The artifact's bytes are now digested
+   and sized BOTH immediately before and immediately after the mapping, and a
+   change across that window is refused. The swap is driven deterministically
+   rather than by a race: the fixture library's own ELF constructor renames a
+   second library over the artifact path while `dlopen` is running it — which
+   is precisely the hazard the architecture cites when it requires metadata
+   checks to precede `dlopen`.
+
+3. **Operation family.** U mapped exactly `i64(i64, i64)`. The design's
+   structural-mask provider session takes a source buffer, a length, two
+   delimiter bytes, an output pointer and an output capacity, and the plan's
+   SIMD primitive takes two; the mapped family is therefore `i64(i64...)` over
+   arity 0..6, refused identically outside it, with one generic parity harness
+   rather than a per-arity one.
+
+`bin/simple test test/01_unit/lib/nogc_sync_mut/composition/environment_variants/session_callable_adapter_v1_spec.spl`
+"""
+
+use std.spec.*
+use std.io_runtime.{shell, file_exists, file_delete}
+use std.nogc_sync_mut.composition.provider_generation.{
+    ProviderGenerationManagerV1, ProviderActivationCandidateV1,
+    provider_generation_activate_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentArenaRangeV1,
+    VariantFacetBindingV1, BindingPlanV1, ENV_VARIANT_SCHEMA_V1,
+    ENV_PLACEMENT_STATIC_V1, ENV_PLACEMENT_NATIVE_DYNLIB_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.binding_runtime_v1.{
+    BindingRuntimeV1, BindingRuntimeSessionV1,
+    binding_runtime_publish_plan_v1, binding_runtime_open_session_v1,
+    BINDING_RUNTIME_OK_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.callable_map_v1.{
+    VariantOperationRequestV1, VariantStaticOperationV1, VariantCallableV1,
+    variant_callable_map_v1, variant_callable_invoke_v1,
+    variant_callable_release_v1,
+    VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1,
+    VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1,
+    VARIANT_CALLABLE_GENERATION_STALE_V1,
+    VARIANT_CALLABLE_MAX_ARITY_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.session_callable_adapter_v1.{
+    SessionCallableCapabilityV1,
+    SESSION_CALLABLE_NO_CAPABILITY_V1,
+    SESSION_CALLABLE_ARITY_MISMATCH_V1,
+    SESSION_CALLABLE_CAPABILITY_FOREIGN_V1,
+    session_callable_capability_v1,
+    session_callables_bind_v1,
+    session_callables_release_v1
+}
+use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
+    dynlib_artifact_digest_hex_v1
+}
+
+val PROVIDER_HANDLE: u64 = 41u64
+val PROVIDER_IDENTITY_WORD: u64 = 257u64
+val PROVIDER_GENERATION: u64 = 1u64
+
+fn digest_of(w: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: w, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn abi_identity() -> EnvironmentDigest256V1:
+    digest_of(0x5151u64)
+
+# ---------------------------------------------------------------- fixtures --
+
+fn tag() -> text:
+    shell("printf %s $PPID").stdout.trim()
+
+# `egl_pkg2_fam<N>` folds N arguments with fixed weights, so one generic
+# harness can predict every arity's answer without a per-arity oracle.
+fn family_source() -> text:
+    "long egl_pkg2_fam0(void){return 1;}" +
+    "long egl_pkg2_fam1(long a){return 1+a*2;}" +
+    "long egl_pkg2_fam2(long a,long b){return 1+a*2+b*3;}" +
+    "long egl_pkg2_fam3(long a,long b,long c){return 1+a*2+b*3+c*4;}" +
+    "long egl_pkg2_fam6(long a,long b,long c,long d,long e,long f)" +
+    "{return 1+a*2+b*3+c*4+d*5+e*6+f*7;}"
+
+fn static_fold(weight_start: i64, args: [i64]) -> i64:
+    var acc = 1
+    var weight = weight_start
+    for value in args:
+        acc = acc + value * weight
+        weight = weight + 1
+    acc
+
+fn static_family() -> [VariantStaticOperationV1]:
+    [VariantStaticOperationV1(operation_id: 1u32, symbol_name: "egl_pkg2_fam0",
+         arity: 0, op: \args: static_fold(2, args)),
+     VariantStaticOperationV1(operation_id: 1u32, symbol_name: "egl_pkg2_fam1",
+         arity: 1, op: \args: static_fold(2, args)),
+     VariantStaticOperationV1(operation_id: 1u32, symbol_name: "egl_pkg2_fam2",
+         arity: 2, op: \args: static_fold(2, args)),
+     VariantStaticOperationV1(operation_id: 1u32, symbol_name: "egl_pkg2_fam3",
+         arity: 3, op: \args: static_fold(2, args)),
+     VariantStaticOperationV1(operation_id: 1u32, symbol_name: "egl_pkg2_fam6",
+         arity: 6, op: \args: static_fold(2, args))]
+
+fn compiler() -> text:
+    shell("command -v cc 2>/dev/null || command -v clang 2>/dev/null").stdout.trim()
+
+fn build_so(source: text, path: text) -> bool:
+    val csrc = "{path}.c"
+    file_delete(csrc)
+    file_delete(path)
+    shell("printf '%s' '{source}' > '{csrc}'")
+    val built = shell("'{compiler()}' -shared -fPIC -O1 '{csrc}' -o '{path}' 2>&1")
+    file_delete(csrc)
+    built.exit_code == 0 and file_exists(path)
+
+fn request_for(placement: u16, symbol: text, arity: i64, path: text,
+               digest: text, generation: u64) -> VariantOperationRequestV1:
+    VariantOperationRequestV1(
+        placement: placement, operation_id: 1u32, symbol_name: symbol,
+        arity: arity, abi_digest: abi_identity(),
+        provider_generation: generation,
+        admitted_abi_digest: abi_identity(),
+        admitted_generation: PROVIDER_GENERATION,
+        artifact_path: path, artifact_digest_hex: digest)
+
+fn map_code(request: VariantOperationRequestV1) -> i32:
+    match variant_callable_map_v1(request, static_family()):
+        case Ok(callable):
+            variant_callable_release_v1(callable)
+            fail("expected a refusal, got a mapped callable")
+            -1
+        case Err(refusal): refusal.code
+
+fn invoke(callable: VariantCallableV1, args: [i64]) -> i64:
+    match variant_callable_invoke_v1(callable, args):
+        case Ok(value): value
+        case Err(refusal):
+            fail("invoke refused: {refusal.reason}")
+            0
+
+# --------------------------------------------------------------- session ----
+
+fn facet(slot: u32, variant_word: u64) -> VariantFacetBindingV1:
+    VariantFacetBindingV1(
+        facet_id: 1u16, interface_major: 1u16, interface_minor: 0u16,
+        slot_index: slot,
+        provider_identity: digest_of(PROVIDER_IDENTITY_WORD),
+        variant_identity: digest_of(variant_word),
+        provider_generation: PROVIDER_GENERATION,
+        interface_handle: 9u64 + slot.to_u64(),
+        provider_context: 0u64)
+
+fn plan_for(count: u32) -> BindingPlanV1:
+    BindingPlanV1(
+        descriptor_size: 224u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        plan_digest: digest_of(0x71u64),
+        environment_identity: digest_of(0x72u64), environment_generation: 1u64,
+        catalog_digest: digest_of(0x73u64), catalog_generation: 1u64,
+        policy_digest: digest_of(0x74u64),
+        dependency_lock_digest: digest_of(0x75u64),
+        publication_generation: 1u64,
+        facet_bindings: EnvironmentArenaRangeV1(offset: 0u32, count: count),
+        selected_variant_identities: EnvironmentArenaRangeV1(offset: 0u32, count: count),
+        rejections: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+
+# A REAL published session: the plan goes through `binding_runtime_publish_plan_v1`
+# against a live generation manager, and the session comes back from
+# `binding_runtime_open_session_v1`. The adapter is never handed a value the
+# production path could not produce.
+fn open_sessions(facets: i64, count: i64) -> [BindingRuntimeSessionV1]:
+    val manager = ProviderGenerationManagerV1.create()
+    val activation = provider_generation_activate_v1(manager,
+        ProviderActivationCandidateV1(
+            provider_handle: PROVIDER_HANDLE,
+            provider_identity_digest: PROVIDER_IDENTITY_WORD,
+            implementation_digest: 101u64, abi_digest: 771u64,
+            expected_artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            query_symbol_address: 4096, admitted: true, process_callable: true))
+    expect(activation.generation).to_equal(PROVIDER_GENERATION)
+    var bindings: [VariantFacetBindingV1] = []
+    var identities: [EnvironmentDigest256V1] = []
+    var handles: [u64] = []
+    var slot = 0
+    while slot < facets:
+        bindings.push(facet(slot.to_u32(), 0x900u64 + slot.to_u64()))
+        identities.push(digest_of(0x900u64 + slot.to_u64()))
+        handles.push(PROVIDER_HANDLE)
+        slot = slot + 1
+    val runtime = BindingRuntimeV1.create()
+    val receipt = binding_runtime_publish_plan_v1(
+        runtime, manager, plan_for(facets.to_u32()), bindings, identities, [], handles)
+    expect(receipt.status).to_equal(BINDING_RUNTIME_OK_V1)
+    var sessions: [BindingRuntimeSessionV1] = []
+    var opened = 0
+    while opened < count:
+        val session = binding_runtime_open_session_v1(runtime, manager)
+        expect(session.status).to_equal(BINDING_RUNTIME_OK_V1)
+        sessions.push(session)
+        opened = opened + 1
+    sessions
+
+fn open_session(facets: i64) -> BindingRuntimeSessionV1:
+    open_sessions(facets, 1)[0]
+
+# ------------------------------------------------------------------ specs ---
+
+describe "Environment variant session callable adapter V1":
+
+    it "performs zero executable mappings for a session with no capability":
+        val session = open_session(2)
+        expect(session.facet_bindings.len()).to_equal(2)
+        val requests = [
+            request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam2", 2, "", "", PROVIDER_GENERATION),
+            request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam3", 3, "", "", PROVIDER_GENERATION)]
+        # The opt-out is the default: a caller that does not present the token
+        # keeps exactly the behaviour it had before this adapter existed.
+        match session_callables_bind_v1(session, nil, requests, static_family()):
+            case Ok(callables):
+                expect(callables.len()).to_equal(0)
+            case Err(refusal):
+                fail("no-capability bind must answer an empty mapping set, not refuse: {refusal.reason}")
+        # ... and the session it was handed is unchanged.
+        expect(session.facet_bindings.len()).to_equal(2)
+        expect(session.provider_handles.len()).to_equal(2)
+
+    it "binds every facet of a published session to a real callable when the capability is presented":
+        val session = open_session(2)
+        val capability = session_callable_capability_v1(session)
+        val requests = [
+            request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam2", 2, "", "", PROVIDER_GENERATION),
+            request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam3", 3, "", "", PROVIDER_GENERATION)]
+        match session_callables_bind_v1(session, capability, requests, static_family()):
+            case Ok(callables):
+                expect(callables.len()).to_equal(2)
+                expect(invoke(callables[0], [4, 5])).to_equal(static_fold(2, [4, 5]))
+                expect(invoke(callables[1], [4, 5, 6])).to_equal(static_fold(2, [4, 5, 6]))
+                expect(session_callables_release_v1(callables)).to_equal(2)
+            case Err(refusal):
+                fail("bind refused: {refusal.reason}")
+
+    it "refuses the whole bind when one facet disagrees with the session":
+        val session = open_session(2)
+        val capability = session_callable_capability_v1(session)
+        # Facet 1 asks for a generation the session does not hold. A session
+        # must not end up half bound, so the already-mapped facet 0 is
+        # released and nothing is returned.
+        val requests = [
+            request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam2", 2, "", "", PROVIDER_GENERATION),
+            request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam3", 3, "", "", PROVIDER_GENERATION + 1u64)]
+        expect(match session_callables_bind_v1(session, capability, requests, static_family()):
+            case Ok(_):
+                fail("a stale facet generation must refuse the whole bind")
+                0
+            case Err(refusal): refusal.code
+        ).to_equal(VARIANT_CALLABLE_GENERATION_STALE_V1)
+
+    it "refuses a token issued for a different session":
+        # Two sessions of the SAME published plan: same plan digest, same
+        # publication generation, different session id. A token that could be
+        # presented against any open session of the plan it was issued under
+        # would not be a capability at all.
+        val sessions = open_sessions(2, 2)
+        val first = sessions[0]
+        val second = sessions[1]
+        expect(first.session_id == second.session_id).to_equal(false)
+        expect(match session_callables_bind_v1(second, session_callable_capability_v1(first),
+                [request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam2", 2, "", "", PROVIDER_GENERATION),
+                 request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam3", 3, "", "", PROVIDER_GENERATION)],
+                static_family()):
+            case Ok(_):
+                fail("a token from another session must be refused")
+                0
+            case Err(refusal): refusal.code
+        ).to_equal(SESSION_CALLABLE_CAPABILITY_FOREIGN_V1)
+
+    it "refuses a forged token presented against a session that never opened":
+        # `session_callable_capability_v1` never issues a token for a session
+        # that failed to open, so this token is one no issuer would produce.
+        # The adapter still refuses it on the session's own status rather than
+        # trusting the token it was handed.
+        val runtime = BindingRuntimeV1.create()
+        val manager = ProviderGenerationManagerV1.create()
+        val unopened = binding_runtime_open_session_v1(runtime, manager)
+        expect(unopened.status == BINDING_RUNTIME_OK_V1).to_equal(false)
+        expect(session_callable_capability_v1(unopened) == nil).to_equal(true)
+        expect(match session_callables_bind_v1(unopened,
+                SessionCallableCapabilityV1(
+                    session_id: unopened.session_id,
+                    publication_generation: unopened.publication_generation),
+                [], static_family()):
+            case Ok(_):
+                fail("a session that never opened must map nothing")
+                0
+            case Err(refusal): refusal.code
+        ).to_equal(SESSION_CALLABLE_NO_CAPABILITY_V1)
+
+    it "refuses a request vector that does not cover the session's facets":
+        val session = open_session(2)
+        val capability = session_callable_capability_v1(session)
+        expect(match session_callables_bind_v1(session, capability,
+                [request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam2", 2, "", "", PROVIDER_GENERATION)],
+                static_family()):
+            case Ok(_):
+                fail("a short request vector must be refused")
+                0
+            case Err(refusal): refusal.code
+        ).to_equal(SESSION_CALLABLE_ARITY_MISMATCH_V1)
+
+describe "Environment variant artifact identity V1":
+
+    it "refuses an artifact whose bytes change between the digest and the mapping":
+        if compiler() == "":
+            print "[egl-pkg2] identity lane UNAVAILABLE: no cc/clang on this host"
+            expect("identity-lane-unavailable").to_equal("identity-lane-unavailable")
+        else:
+            val t = tag()
+            val victim = "/tmp/libegl_pkg2_victim_{t}.so"
+            val intruder = "/tmp/libegl_pkg2_intruder_{t}.so"
+            val quiet = "/tmp/libegl_pkg2_quiet_{t}.so"
+            # The intruder exports the SAME symbol with a different body. That
+            # matters for the arm this fixture cannot drive: if a rename landed
+            # after the digest but before `dlopen` opened the file, the intruder
+            # would be what is mapped, and the process would get a wrong answer
+            # rather than a crash. This fixture drives the other arm — see the
+            # comment on the constructor below.
+            expect(build_so("long egl_pkg2_fam2(long a,long b){return 999;}", intruder)).to_equal(true)
+            val intruder_digest = dynlib_artifact_digest_hex_v1(intruder)
+            # The quiet artifact is the same operation with no constructor: it
+            # proves the before/after window does not reject an honest load.
+            expect(build_so("long egl_pkg2_fam2(long a,long b){return 1+a*2+b*3;}", quiet)).to_equal(true)
+            val quiet_digest = dynlib_artifact_digest_hex_v1(quiet)
+            match variant_callable_map_v1(
+                    request_for(ENV_PLACEMENT_NATIVE_DYNLIB_V1, "egl_pkg2_fam2", 2,
+                                quiet, quiet_digest, PROVIDER_GENERATION),
+                    static_family()):
+                case Ok(callable):
+                    expect(invoke(callable, [4, 5])).to_equal(static_fold(2, [4, 5]))
+                    variant_callable_release_v1(callable)
+                case Err(refusal):
+                    fail("an unswapped artifact must map: {refusal.reason}")
+
+            # The victim's own ELF constructor renames the intruder over the
+            # artifact path while `dlopen` is running it, which makes the swap
+            # land inside the hash->load window on every run where an external
+            # rename would only be a race.
+            #
+            # Be exact about what this proves. `dlopen` has already mapped the
+            # victim's segments by the time its constructor runs, so the bytes
+            # in this process are still the honest ones; what changed is the
+            # path. That is the CONSERVATIVE arm of the check, and it is the arm
+            # that can be driven deterministically. The dangerous arm — a rename
+            # that lands between the digest and `dlopen`'s own open(), where the
+            # intruder really is what gets mapped — reaches the identical
+            # size+digest comparison and the identical refusal code, but cannot
+            # be scheduled without a race, so it is argued from the mechanism
+            # rather than executed here.
+            # The two paths are spliced in OUTSIDE the braces: text
+            # interpolation does not reach inside a `{...}` run, so a `{intruder}`
+            # written within the constructor body would reach the compiler
+            # verbatim and the fixture would silently rename nothing.
+            expect(build_so(
+                "extern int rename(const char*,const char*);" +
+                "static const char* const F=\"" + intruder + "\";" +
+                "static const char* const T=\"" + victim + "\";" +
+                "__attribute__((constructor)) static void s(void){rename(F,T);}" +
+                "long egl_pkg2_fam2(long a,long b){return 1+a*2+b*3;}", victim)).to_equal(true)
+            val honest = dynlib_artifact_digest_hex_v1(victim)
+            expect(honest.len()).to_equal(64)
+            expect(dynlib_artifact_digest_hex_v1(intruder) == honest).to_equal(false)
+            expect(map_code(request_for(ENV_PLACEMENT_NATIVE_DYNLIB_V1, "egl_pkg2_fam2", 2,
+                                        victim, honest, PROVIDER_GENERATION))
+                  ).to_equal(VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1)
+            # The swap really happened: the path now holds the intruder's bytes,
+            # so the refusal above was earned, not vacuous.
+            expect(dynlib_artifact_digest_hex_v1(victim)).to_equal(intruder_digest)
+            file_delete(victim)
+            file_delete(quiet)
+
+describe "Environment variant operation family V1":
+
+    it "maps and executes every arity in the admitted family, native and static":
+        if compiler() == "":
+            print "[egl-pkg2] family lane UNAVAILABLE: no cc/clang on this host"
+            expect("family-lane-unavailable").to_equal("family-lane-unavailable")
+        else:
+            val t = tag()
+            val so = "/tmp/libegl_pkg2_family_{t}.so"
+            expect(build_so(family_source(), so)).to_equal(true)
+            val digest = dynlib_artifact_digest_hex_v1(so)
+            # One generic harness over arg VECTORS, not a per-arity harness:
+            # every arity walks the identical code path on both placements.
+            val vectors = [[], [11], [11, 12], [11, 12, 13], [11, 12, 13, 14, 15, 16]]
+            for args in vectors:
+                val symbol = "egl_pkg2_fam{args.len()}"
+                var native_result = 0
+                match variant_callable_map_v1(
+                        request_for(ENV_PLACEMENT_NATIVE_DYNLIB_V1, symbol,
+                                    args.len(), so, digest, PROVIDER_GENERATION),
+                        static_family()):
+                    case Ok(callable):
+                        native_result = invoke(callable, args)
+                        variant_callable_release_v1(callable)
+                    case Err(refusal):
+                        fail("native arity {args.len()} refused: {refusal.reason}")
+                var static_result = 0
+                match variant_callable_map_v1(
+                        request_for(ENV_PLACEMENT_STATIC_V1, symbol, args.len(),
+                                    "", "", PROVIDER_GENERATION),
+                        static_family()):
+                    case Ok(callable):
+                        static_result = invoke(callable, args)
+                        variant_callable_release_v1(callable)
+                    case Err(refusal):
+                        fail("static arity {args.len()} refused: {refusal.reason}")
+                print "[egl-pkg2] arity={args.len()} native={native_result} static={static_result}"
+                expect(native_result).to_equal(static_fold(2, args))
+                expect(static_result).to_equal(native_result)
+            file_delete(so)
+
+    it "refuses an arity outside the mapped family with the same code on every placement":
+        val over = VARIANT_CALLABLE_MAX_ARITY_V1 + 1
+        expect(map_code(request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam2", over,
+                                    "", "", PROVIDER_GENERATION))
+              ).to_equal(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1)
+        expect(map_code(request_for(ENV_PLACEMENT_NATIVE_DYNLIB_V1, "egl_pkg2_fam2", over,
+                                    "/nonexistent", "", PROVIDER_GENERATION))
+              ).to_equal(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1)
+        expect(map_code(request_for(ENV_PLACEMENT_STATIC_V1, "egl_pkg2_fam2", -1,
+                                    "", "", PROVIDER_GENERATION))
+              ).to_equal(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1)

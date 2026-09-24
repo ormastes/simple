@@ -1,0 +1,47 @@
+# Caret TUI workbench — live entry point (lane A8, seam 3).
+#
+# `tui_layout.compute_layout` + `tui_view.render_workbench` were written to
+# take real state and had no caller. This is that caller: it reads the live
+# roster published by `session_source` (from `multi_caret_manager`) and the
+# live pane output published by `pane_source` (from the smux terminal
+# service), and renders one frame of the workbench grid.
+#
+# Deliberately frame-at-a-time and free of I/O: the event loop that owns the
+# terminal calls this and writes the lines. That keeps the whole path testable
+# without a tty, which is what makes the end-to-end capture a real grid.
+
+use app.llm_caret.workbench.session_contract.{SessionId, SessionView,
+    ComposerDraft, InputMode, new_draft}
+use app.llm_caret.workbench.tui_layout.{CompactView, compute_layout}
+use app.llm_caret.workbench.tui_view.{new_render_input_with_output,
+    render_workbench}
+use app.llm_caret.workbench.session_source.{live_sessions, live_selected,
+    live_pane_id, live_pane_lines}
+
+fn _preview_hint(sessions: [SessionView], selected: SessionId) -> i64:
+    var n: i64 = 0
+    for view in sessions:
+        if view.id.value != selected.value:
+            n = n + 1
+    n
+
+# Renders one frame from live state. `draft` stays a caller-owned value so a
+# composer draft survives a redraw and keeps its OWN captured target -- the
+# contract invariant a re-derived draft would quietly break.
+pub fn render_live_workbench_with_draft(width: i64, height: i64,
+        compact: CompactView, draft: ComposerDraft) -> [text]:
+    val sessions = live_sessions()
+    val selected = live_selected()
+    val layout = compute_layout(width, height, compact,
+        _preview_hint(sessions, selected))
+    val input = new_render_input_with_output(sessions, selected, draft,
+        selected.value, live_pane_id(), live_pane_lines())
+    render_workbench(layout, input)
+
+# Convenience for a freshly-opened workbench: an empty Message draft aimed at
+# the currently selected session.
+pub fn render_live_workbench(width: i64, height: i64, compact: CompactView) -> [text]:
+    render_live_workbench_with_draft(width, height, compact,
+        new_draft(live_selected(), InputMode.Message))
+
+export render_live_workbench, render_live_workbench_with_draft

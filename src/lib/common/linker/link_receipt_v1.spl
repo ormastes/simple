@@ -1,0 +1,109 @@
+"""LinkReceiptV1 — what a link job reports back (design §6.2, §8, D8).
+
+`accounting_class` names which of the three §8 mechanisms produced
+`measured_peak_bytes` (`QualifiedJobScope` cgroup-judged, `MeasuredOnly`
+best-effort, or `NotCertified` — no mechanism on this platform yet).
+`engine_id` is the external linker's resolved path name (`mold`, `ld.lld`,
+`ld`, `cc`, `link.exe`) or, once the internal engine ships, its capsule id.
+
+`MdsocppGenerationReceiptV1` (`src/lib/mdsocpp/model.spl`) is deliberately
+**not** embedded here: `mdsocpp` sits outside `common`, and `common` must not
+import a higher family (CLAUDE.md Owned-Code Scope / layering). Embedding it
+is left to whichever lane first wires the sealer into a real link (design §7,
+"first production caller of the sealer").
+"""
+
+use std.common.kernel_plugin.ids.{KpfDigest256}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1, kpf_validate_schema_header_v1}
+use std.common.linker.link_request_v1.{LinkTargetV1, link_target_v1_validate}
+
+pub enum LinkAccountingClassV1:
+    QualifiedJobScope
+    MeasuredOnly
+    NotCertified
+
+impl LinkAccountingClassV1:
+    pub fn name() -> text:
+        match self:
+            case QualifiedJobScope: "QualifiedJobScope"
+            case MeasuredOnly: "MeasuredOnly"
+            case NotCertified: "NotCertified"
+
+pub fn link_accounting_class_v1_from_name(name: text) -> Option<LinkAccountingClassV1>:
+    if name == "QualifiedJobScope":
+        return Some(LinkAccountingClassV1.QualifiedJobScope)
+    if name == "MeasuredOnly":
+        return Some(LinkAccountingClassV1.MeasuredOnly)
+    if name == "NotCertified":
+        return Some(LinkAccountingClassV1.NotCertified)
+    nil
+
+export LinkAccountingClassV1, link_accounting_class_v1_from_name
+
+pub enum LinkOutcomeV1:
+    Success
+    UnsupportedFeature
+    UnsupportedBudget
+    IncompleteDebugOutput
+    InputError
+    ResourceFailure
+    Cancelled
+
+impl LinkOutcomeV1:
+    pub fn name() -> text:
+        match self:
+            case Success: "Success"
+            case UnsupportedFeature: "UnsupportedFeature"
+            case UnsupportedBudget: "UnsupportedBudget"
+            case IncompleteDebugOutput: "IncompleteDebugOutput"
+            case InputError: "InputError"
+            case ResourceFailure: "ResourceFailure"
+            case Cancelled: "Cancelled"
+
+pub fn link_outcome_v1_from_name(name: text) -> Option<LinkOutcomeV1>:
+    if name == "Success":
+        return Some(LinkOutcomeV1.Success)
+    if name == "UnsupportedFeature":
+        return Some(LinkOutcomeV1.UnsupportedFeature)
+    if name == "UnsupportedBudget":
+        return Some(LinkOutcomeV1.UnsupportedBudget)
+    if name == "IncompleteDebugOutput":
+        return Some(LinkOutcomeV1.IncompleteDebugOutput)
+    if name == "InputError":
+        return Some(LinkOutcomeV1.InputError)
+    if name == "ResourceFailure":
+        return Some(LinkOutcomeV1.ResourceFailure)
+    if name == "Cancelled":
+        return Some(LinkOutcomeV1.Cancelled)
+    nil
+
+export LinkOutcomeV1, link_outcome_v1_from_name
+
+pub struct LinkReceiptV1:
+    header: KpfSchemaHeaderV1
+    engine_id: text
+    host: LinkTargetV1
+    target: LinkTargetV1
+    policy_digest: KpfDigest256
+    accounting_class: LinkAccountingClassV1
+    measured_peak_bytes: u64
+    outcome: LinkOutcomeV1
+
+export LinkReceiptV1
+
+pub fn link_receipt_v1_validate(receipt: LinkReceiptV1, requirement: KpfSchemaRequirementV1) -> text:
+    """Return "" when `receipt` is well-formed against `requirement`, else the rejection reason."""
+    val header_status = kpf_validate_schema_header_v1(receipt.header, requirement)
+    if not header_status.accepted():
+        return "schema header invalid: code={header_status.code()}"
+    val host_reason = link_target_v1_validate(receipt.host)
+    if host_reason != "":
+        return "host.{host_reason}"
+    val target_reason = link_target_v1_validate(receipt.target)
+    if target_reason != "":
+        return "target.{target_reason}"
+    if receipt.engine_id == "":
+        return "engine_id must not be empty"
+    ""
+
+export link_receipt_v1_validate

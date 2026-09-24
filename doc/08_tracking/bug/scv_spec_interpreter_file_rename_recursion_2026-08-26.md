@@ -1,4 +1,8 @@
 # SCV specs fail on test-runner interpreter: `file_rename` recursion depth 1000
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-26
 - Found via: sspec wave-2 dual check (batch D), `/tmp/sspec_census/w2_03`
@@ -24,3 +28,4 @@ stack overflow: recursion depth 1000 exceeded in function 'file_rename'
 Pre-existing lane failure at the time of the sspec modernization pass; assertions left
 untouched, spec scores 95 with 0 blockers. Unblock condition: fix/land the `file_rename`
 interpreter recursion handling or the owning scv WIP session lands its tree.
+

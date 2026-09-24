@@ -1,4 +1,8 @@
 # SOSIX bootstrap blocked by btrfs metadata reserve
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** open; no compiler verdict
@@ -24,3 +28,4 @@ Resume after an operator safely reclaims or migrates data and the mandatory
 preflight is green. Recheck the tracked Rust input fingerprint, retain
 `SIMPLE_NO_STUB_FALLBACK=1`, and use the hot bootstrap cache for one admitted
 full deploy.
+

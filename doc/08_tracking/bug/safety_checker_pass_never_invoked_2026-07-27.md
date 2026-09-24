@@ -1,4 +1,9 @@
 # Bug: `safetychecker_check_module` (unsafe-context safety pass) has zero callers — no unsafe-boundary enforcement exists anywhere
+## Closed 2026-09-16 — Status: fixed at warn level 2026-07-28; pass now runs by default on every compile
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-27
 **Status:** fixed at warn level (2026-07-28, lane SF2) — the pass now runs BY
@@ -137,3 +142,4 @@ making it fatal. Separately, implement the two missing rule constructions
 - `src/compiler/80.driver/driver.spl:970-989` — the existing repo convention
   for landing a fully-implemented, never-run checker as warn-only + env-gated
   instead of fatal.
+

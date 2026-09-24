@@ -1,4 +1,9 @@
 # A multi-line loop/match HEADER silently swallows every following declaration
+## Closed 2026-09-16 — Status FIXED with gates, corpus A/B byte-identical, full parser suite green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** FIXED (parser + run-path diagnostic), gates landed
@@ -365,3 +370,4 @@ still rejects the leading-operator form outright (follow-up 1). **Condition for
 adding one:** when follow-up 1 lands and the pure-Simple parser accepts the
 leading-operator continuation, add a spec covering the `if`/`elif`/`else if`/
 match-arm-guard equal-column shapes and delete this note.
+

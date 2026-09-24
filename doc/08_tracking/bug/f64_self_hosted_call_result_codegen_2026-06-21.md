@@ -1,5 +1,16 @@
 # f64 call-result corrupted in self-hosted (production) codegen
 
+## Triage 2026-09-13 — STILL OPEN: seed half confirmed fixed, self-hosted half still blocked
+- **measured** — the seed fix holds: `fn half(x: f64) -> f64: return x / 2.0` called from
+  `main` prints `3.5` for `half(7.0)` and `2.5` for `half(3.0) + 1.0` under
+  `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) — an f64 call result used both
+  directly and as an operand.
+- **inferred** — that is exactly the half this entry already records as fixed and landed.
+  The open half is the port into
+  `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`, which needs a working
+  self-hosted build; a bootstrap is running concurrently and `src/compiler/**` is off-limits
+  to this pass. Left OPEN.
+
 - **Status:** OPEN (seed fixed & landed; self-hosted port blocked by bootstrap breakage)
 - **Severity:** High — any f64 returned from a non-inlined function is wrong in `bin/simple` compiled/JIT mode
 - **Date:** 2026-06-21
@@ -53,6 +64,21 @@ the port is deferred until the bootstrap/stage4 path produces a runnable binary.
 - **Production (pending):** `scripts/check/check-f64-call-abi.shs` runs against
   `bin/simple`; reports PENDING now and flips to PASS automatically once a
   working self-hosted build with the port is deployed.
+
+## 2026-09-21 guard admission false-success
+
+**Status: OPEN for the underlying codegen defect.** Before the 2026-09-21 guard
+repair, the production guard categorized the known-bad self-hosted JIT value
+`0.0` as `XFAIL` and exited `0`. A release or bootstrap caller observing only
+the process status could therefore admit the exact defect this guard is meant
+to block. This evidence-contract defect belongs to the existing bug, so it was
+fixed here rather than creating a duplicate DB row.
+
+The repaired guard reserves exit `0` for a measured correct JIT result. A known-bad
+development result remains visibly categorized as `XFAIL`, but returns a
+distinct nonzero status. Missing authority and Rust-seed targets remain
+`UNTESTABLE`, also nonzero. Canonical shell fixtures must prove all categories
+without claiming Stage 4 authority.
 
 ## Fix checklist
 

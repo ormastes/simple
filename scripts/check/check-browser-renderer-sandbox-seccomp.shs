@@ -120,7 +120,11 @@ set -e
 cat "$WORK/ns.log"
 
 case "$NS_EXIT" in
-    0) : ;;
+    0)
+        grep -q 'rt_browser_renderer_namespace_selfcheck: PASS' \
+            "$WORK/ns.log" ||
+            err "namespace self-check exited 0 without emitting its PASS marker"
+        ;;
     77) err "kernel lacks the seccomp/Landlock preinit, so the namespace layer was never reached" ;;
     *)
         echo "FAIL — browser renderer namespace self-check failed (exit $NS_EXIT)"
@@ -139,7 +143,10 @@ else
     POSTURE=unavailable
 fi
 echo "sandbox_namespaces=$POSTURE"
-CHECKS=$((CHECKS + 1))
+# Three assertions: the reported network-namespace posture matches the observed
+# identity, fallback preserves effective credentials, and an injected partial
+# namespace failure exits closed rather than continuing a damaged worker.
+CHECKS=$((CHECKS + 3))
 
 # --- SANDBOX startup failure -------------------------------------------------
 # The two checks above both assert behaviour of a jail that is already UP. This
@@ -180,5 +187,5 @@ CHECKS=$((CHECKS + 2))
 # Non-vacuity: a run that verified nothing is an ERROR, never a pass.
 [ "$CHECKS" -gt 0 ] || err "no checks were executed"
 
-echo "PASS — $CHECKS check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS through the real rt_browser_renderer_sandbox_enter, the namespace posture ($POSTURE) matches the observed /proc/self/ns/net identity, a non-empty envp is refused with exit 126, and sandbox_enter fails closed without preinit"
+echo "PASS — $CHECKS check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS through the real rt_browser_renderer_sandbox_enter, the namespace posture ($POSTURE) matches the observed /proc/self/ns/net identity without changing effective credentials, an injected partial namespace failure exits 126, a non-empty envp is refused with exit 126, and sandbox_enter fails closed without preinit"
 exit 0

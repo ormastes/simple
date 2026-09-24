@@ -1,4 +1,9 @@
 # `simple fix` failed-write false-green
+## Closed 2026-09-16 — SOURCE FIXED; regression + focused checks PASS; Stage-4 admission pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
 **Severity:** P1 — a failed persistence was reported as an applied fix
@@ -29,3 +34,4 @@ is unchanged.
 
 Formatter `--write` checks failure but still uses delete-first `file_write`.
 Route it through the same atomic provider in a separate bounded item.
+

@@ -1,4 +1,8 @@
 # `text.char_code_at(i)` is O(i) on any string containing a non-ASCII byte at or before `i`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open, recorded during the 2026-08-28 loader profile (not fixed there: the
 runtime is outside that lane's edit scope, and no loader hot loop currently trips it).
@@ -37,3 +41,4 @@ Keep `rt_string_byte_at` as the documented O(1) byte primitive.
 A spec that times `char_code_at` over a 256 KB string whose first byte is `é`
 against the same string prefixed with an ASCII byte; the ratio must stay bounded
 (< 3x), not grow with length.
+

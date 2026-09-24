@@ -1,4 +1,9 @@
 # SOSIX cancel of a committed submission leaked the ring lease
+## Closed 2026-09-16 — ... and `release` was refused forever. ## Fix `fs.spl` `take_next` answers a cancel-requested
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-05 · **Status:** CLOSED (same day) · **Lane:** `.spipe/sosix_runtime_unification/state.md`
 
@@ -24,3 +29,4 @@ canceled native wait to `SOSIX_ERROR_CANCELED` (was reported as a timeout).
   released" (6/7 before, 7/7 after; sabotage arm with the branch disabled: 6/7).
 - Generalization: `fs_sync_spec` "reports a canceled native wait as canceled, not
   as a timeout" (adjacent path: the sync leg's outcome mapping).
+

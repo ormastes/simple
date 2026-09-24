@@ -38,8 +38,41 @@ sha256_file() {
   fi
 }
 
-has_winit_marker() {
+# Where the dlopen route looks for the winit shared object. GuiRenderer resolves
+# `libspl_winit.<ext>` through SIMPLE_SPL_WINIT_PATH, then DYLD_LIBRARY_PATH,
+# then the repo-relative `build/sffi` candidate.
+winit_dylib_available() {
+  local d
+  if [ -n "${SIMPLE_SPL_WINIT_PATH:-}" ] && [ -f "${SIMPLE_SPL_WINIT_PATH}" ]; then
+    return 0
+  fi
+  local IFS=:
+  for d in ${DYLD_LIBRARY_PATH:-} "$repo_root/build/sffi"; do
+    [ -n "$d" ] || continue
+    if [ -f "$d/libspl_winit.dylib" ] || [ -f "$d/libspl_winit.so" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# A GUI driver qualifies when it can reach winit EITHER way:
+#   - baked in: the binary carries the winit runtime symbols, or
+#   - dlopen route: GuiRenderer loads libspl_winit.<ext> at runtime, in which
+#     case the binary legitimately carries no `rt_winit_*` symbol at all.
+# Grepping the binary alone is fail-closed against the dlopen route and refused
+# every current seed (bug macos_gui_run_sigpipe_141_and_stale_winit_marker_gate).
+# This is a capability-PRESENCE probe, not a call probe: it proves the dylib is
+# resolvable on the path GuiRenderer searches, not that dlopen will succeed.
+has_baked_winit_marker() {
   LC_ALL=C grep -aq -e "rt_winit_event_loop_new" -e "window_winitmodule.smf" "$1"
+}
+
+has_winit_marker() {
+  if has_baked_winit_marker "$1"; then
+    return 0
+  fi
+  winit_dylib_available
 }
 
 is_forbidden_strict_binary() {
@@ -150,7 +183,9 @@ resolve_gui_binary() {
     [[ "$(sha256_file "$override_candidate")" = \
         "$strict_admitted_gui_driver_hash" ]] || return 1
     is_forbidden_strict_binary "$override_candidate" && return 1
-    has_winit_marker "$override_candidate" || return 1
+    # Strict evidence keeps the BAKED-symbol requirement: the admitted driver is
+    # hash-pinned, so a runtime dlopen route would not be covered by that hash.
+    has_baked_winit_marker "$override_candidate" || return 1
     echo "$override_candidate"
     return 0
   fi
@@ -303,17 +338,33 @@ fi
 # This lookup only connects the LaunchServices bundle to its visible window for
 # capture ownership.  Delegation/non-delegation evidence is established earlier
 # by the EndpointSecurity execution-history receipt, never by this ps query.
+# `ps | awk '...exit'` is a SIGPIPE trap: awk's early `exit` closes the pipe,
+# ps dies with SIGPIPE (141), and under `set -o pipefail` + `set -e` the whole
+# script exits 141 AFTER `open -n` already launched the bundle -- a real window
+# reported as a failed run (bug macos_gui_run_sigpipe_141_and_stale_winit_marker_gate).
+# The ps output is captured into a variable first, so no pipe exists to break,
+# and ps's own status is read on the line after the invocation rather than
+# through a pipeline.
 find_exact_app_pid() {
-  ps -axo pid=,command= | awk -v executable="$app_executable" '
-    {
+  local ps_out ps_rc
+  ps_out="$(ps -axo pid=,command= 2>/dev/null)"
+  ps_rc=$?
+  if [ "$ps_rc" -ne 0 ]; then
+    return 1
+  fi
+  # awk consumes its whole input -- no early `exit`, so the writer is never
+  # handed a closed pipe. The first match is latched and printed at END.
+  printf '%s\n' "$ps_out" | awk -v executable="$app_executable" '
+    found == 0 {
       pid = $1
       $1 = ""
       sub(/^[[:space:]]+/, "")
       if ($0 == executable || index($0, executable " ") == 1) {
-        print pid
-        exit
+        found = 1
+        match_pid = pid
       }
     }
+    END { if (found) print match_pid }
   '
 }
 

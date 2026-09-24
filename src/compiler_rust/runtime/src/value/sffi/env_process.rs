@@ -8,7 +8,9 @@
 //! - Platform detection (OS name)
 
 use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_path_probe};
-use crate::value::collections::{rt_array_get, rt_array_len, rt_string_new, rt_tuple_new, rt_tuple_set};
+use crate::value::collections::{
+    rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_string_new, rt_tuple_new, rt_tuple_set,
+};
 use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::{RuntimeString, RuntimeValue};
 use std::sync::{OnceLock, RwLock};
@@ -874,33 +876,157 @@ pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u
     }
 }
 
+/// Second lane (rt-dual-implementation ratchet) of the C `rt_mcp_parent`
+/// static helper in `src/runtime/runtime_process.c`: the parent directory of
+/// a path, or `None` at a root that cannot be truncated further (mirrors the
+/// C helper's `strrchr` refusing an already-root path).
+#[cfg(not(windows))]
+fn rt_mcp_parent(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// Second lane of the C `rt_mcp_regular` static helper: true when `path`
+/// exists and is a regular file (not a directory).
+#[cfg(not(windows))]
+fn rt_mcp_regular(path: &std::path::Path) -> bool {
+    path.metadata().map(|meta| meta.is_file()).unwrap_or(false)
+}
+
+/// Second lane of the C `rt_mcp_wrapper` static helper: locate the
+/// `simple_mcp_server` wrapper two directories above the current executable
+/// (the installed-package layout), falling back to beside the executable
+/// (the dev-checkout layout).
+#[cfg(not(windows))]
+fn rt_mcp_wrapper() -> Option<std::path::PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    let exe_dir = current_exe.parent()?.to_path_buf();
+    let bin_dir = rt_mcp_parent(&exe_dir)
+        .and_then(|parent| rt_mcp_parent(&parent))
+        .unwrap_or_else(|| exe_dir.clone());
+    let bin_wrapper = bin_dir.join("simple_mcp_server");
+    Some(if rt_mcp_regular(&bin_wrapper) {
+        bin_wrapper
+    } else {
+        exe_dir.join("simple_mcp_server")
+    })
+}
+
+/// Second lane of the C `rt_mcp_parent_w` static helper: the parent
+/// directory of a Windows path, refusing to truncate past a root (mirrors
+/// the C helper's drive-letter/UNC-root handling).
+#[cfg(windows)]
+fn rt_mcp_parent_w(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        None
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+/// Second lane of the C `rt_mcp_regular_w` static helper: true when `path`
+/// exists and is a regular file (not a directory), via `GetFileAttributesW`.
+#[cfg(windows)]
+fn rt_mcp_regular_w(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, INVALID_FILE_ATTRIBUTES,
+    };
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+    attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY.0) == 0
+}
+
+/// Second lane of the C `rt_mcp_wrapper_w` static helper: locate the
+/// `simple_mcp_server.cmd` wrapper two directories above the current
+/// executable, falling back to beside the executable.
+#[cfg(windows)]
+fn rt_mcp_wrapper_w() -> Option<std::path::PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    let exe_dir = current_exe.parent()?.to_path_buf();
+    let bin_dir = rt_mcp_parent_w(&exe_dir)
+        .and_then(|parent| rt_mcp_parent_w(&parent))
+        .unwrap_or_else(|| exe_dir.clone());
+    let bin_wrapper = bin_dir.join("simple_mcp_server.cmd");
+    Some(if rt_mcp_regular_w(&bin_wrapper) {
+        bin_wrapper
+    } else {
+        exe_dir.join("simple_mcp_server.cmd")
+    })
+}
+
+/// Second lane of the C `rt_mcp_environment_w` static helper: the child
+/// environment with `_SIMPLE_STACK_SET` cleared and `_SIMPLE_MCP_WRAPPER_PATH`
+/// pointing at the resolved wrapper. The C lane hand-builds a sorted
+/// `GetEnvironmentStringsW` block for `CreateProcessW`; the Rust lane
+/// returns the equivalent (name, value) pairs for
+/// `std::process::Command::envs`, which the Rust spawn path already uses.
+#[cfg(windows)]
+#[allow(dead_code)]
+fn rt_mcp_environment_w(wrapper: &std::path::Path) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(name, _)| {
+            let name = name.to_string_lossy();
+            !name.eq_ignore_ascii_case("_SIMPLE_STACK_SET")
+                && !name.eq_ignore_ascii_case("_SIMPLE_MCP_WRAPPER_PATH")
+        })
+        .collect();
+    vars.push((
+        std::ffi::OsString::from("_SIMPLE_MCP_WRAPPER_PATH"),
+        wrapper.as_os_str().to_owned(),
+    ));
+    vars
+}
+
+/// Second lane of the C `rt_mcp_duplicate_std` static helper: duplicate one
+/// of the current process's standard handles so a spawned child can inherit
+/// it explicitly via an attribute list, matching the C lane's
+/// `DuplicateHandle(..., DUPLICATE_SAME_ACCESS)` contract.
+#[cfg(windows)]
+#[allow(dead_code)]
+fn rt_mcp_duplicate_std(
+    which: windows::Win32::System::Console::STD_HANDLE,
+) -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+    use windows::Win32::System::Console::GetStdHandle;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let source = GetStdHandle(which).ok()?;
+        if source.is_invalid() {
+            return None;
+        }
+        let mut duplicate = windows::Win32::Foundation::HANDLE::default();
+        let current = GetCurrentProcess();
+        DuplicateHandle(current, source, current, &mut duplicate, 0, true, DUPLICATE_SAME_ACCESS).ok()?;
+        Some(duplicate)
+    }
+}
+
 /// Spawn a child that transparently inherits the current process stdio.
 #[no_mangle]
 pub extern "C" fn rt_process_spawn_inherit() -> i64 {
     use std::process::{Command, Stdio};
-    let wrapper_name = if cfg!(windows) {
-        "simple_mcp_server.cmd"
-    } else {
-        "simple_mcp_server"
-    };
-    let current_exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("failed to resolve current executable for MCP: {err}");
+    #[cfg(not(windows))]
+    let wrapper = match rt_mcp_wrapper() {
+        Some(path) => path,
+        None => {
+            eprintln!("failed to resolve current executable for MCP: no simple_mcp_server wrapper found");
             return -1;
         }
     };
-    let exe_dir = match current_exe.parent() {
+    #[cfg(windows)]
+    let wrapper = match rt_mcp_wrapper_w() {
         Some(path) => path,
-        None => return -1,
-    };
-    let bin_dir = exe_dir.parent().and_then(|path| path.parent()).unwrap_or(exe_dir);
-    let wrapper = {
-        let bin_wrapper = bin_dir.join(wrapper_name);
-        if bin_wrapper.is_file() {
-            bin_wrapper
-        } else {
-            exe_dir.join(wrapper_name)
+        None => {
+            eprintln!("failed to resolve current executable for MCP: no simple_mcp_server.cmd wrapper found");
+            return -1;
         }
     };
     #[cfg(windows)]
@@ -1475,6 +1601,192 @@ pub extern "C" fn rt_get_host_target_code() -> i64 {
     }
 }
 
+/// Read an x86 extended-control register after the caller has proved OSXSAVE.
+#[no_mangle]
+pub extern "C" fn rt_xgetbv(index: i32) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: the Simple capability probe checks CPUID.OSXSAVE before calling.
+        unsafe { std::arch::x86_64::_xgetbv(index as u32) as i64 }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = index;
+        0
+    }
+}
+
+/// Raw CPUID leaf/subleaf registers. `#[repr(C)]` and the field ORDER match the
+/// C twin's `RtCpuidResult` in `src/runtime/runtime_native.c` exactly, because
+/// the same Simple declaration
+/// (`src/compiler/30.types/simd_capabilities.spl`, `-> (i32, i32, i32, i32)`)
+/// is linked against whichever lane the build selected.
+#[repr(C)]
+pub struct RtCpuidResult {
+    pub a: i32,
+    pub b: i32,
+    pub c: i32,
+    pub d: i32,
+}
+
+/// Raw CPUID. A non-x86 host reports all-zero — the C twin's behaviour — so a
+/// caller's feature bits read as "absent" instead of as uninitialised memory.
+#[no_mangle]
+pub extern "C" fn rt_cpuid(leaf: i32, subleaf: i32) -> RtCpuidResult {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: __cpuid_count is unconditionally available on x86_64, and an
+        // unsupported leaf returns zeros rather than faulting.
+        let r = unsafe { std::arch::x86_64::__cpuid_count(leaf as u32, subleaf as u32) };
+        RtCpuidResult {
+            a: r.eax as i32,
+            b: r.ebx as i32,
+            c: r.ecx as i32,
+            d: r.edx as i32,
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (leaf, subleaf);
+        RtCpuidResult {
+            a: 0,
+            b: 0,
+            c: 0,
+            d: 0,
+        }
+    }
+}
+
+/// 1 when this runtime was built for x86_64, else 0 (C twin: `rt_cpu_is_x86_64`).
+#[no_mangle]
+pub extern "C" fn rt_cpu_is_x86_64() -> i32 {
+    if cfg!(target_arch = "x86_64") {
+        1
+    } else {
+        0
+    }
+}
+
+/// 1 when this runtime was built for aarch64, else 0 (C twin: `rt_cpu_is_aarch64`).
+#[no_mangle]
+pub extern "C" fn rt_cpu_is_aarch64() -> i32 {
+    if cfg!(target_arch = "aarch64") {
+        1
+    } else {
+        0
+    }
+}
+
+/// 1 when this runtime was built for 64-bit RISC-V, else 0
+/// (C twin: `rt_cpu_is_riscv64`).
+#[no_mangle]
+pub extern "C" fn rt_cpu_is_riscv64() -> i32 {
+    if cfg!(target_arch = "riscv64") {
+        1
+    } else {
+        0
+    }
+}
+
+/// Read a Linux auxiliary-vector entry; unsupported hosts report zero.
+#[no_mangle]
+pub extern "C" fn rt_getauxval(key: i64) -> i64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: getauxval accepts any key and returns zero when it is absent.
+        unsafe { libc::getauxval(key as libc::c_ulong) as i64 }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = key;
+        0
+    }
+}
+
+/// Report whether this runtime is executing on Darwin arm64.
+#[no_mangle]
+pub extern "C" fn rt_is_darwin_arm64() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+/// Read a 32-bit Darwin sysctl value by Simple string name.
+#[no_mangle]
+pub extern "C" fn rt_sysctlbyname_i32(name: RuntimeValue) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        let len = rt_string_len(name);
+        let data = rt_string_data(name);
+        if data.is_null() || len <= 0 || len >= 128 {
+            return 0;
+        }
+
+        let mut key = [0u8; 128];
+        // SAFETY: len was bounded to the local buffer and data is non-null.
+        unsafe { std::ptr::copy_nonoverlapping(data, key.as_mut_ptr(), len as usize) };
+        let mut value = 0i32;
+        let mut value_len = std::mem::size_of::<i32>();
+        // SAFETY: key is NUL-terminated and both output pointers reference valid storage.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                key.as_ptr().cast(),
+                (&mut value as *mut i32).cast(),
+                &mut value_len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && value_len == std::mem::size_of::<i32>() {
+            value
+        } else {
+            0
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = name;
+        0
+    }
+}
+
+/// Read the RISC-V vector-register byte width when compiled for V support.
+#[no_mangle]
+pub extern "C" fn rt_riscv_read_vlenb() -> i32 {
+    #[cfg(all(target_arch = "riscv64", target_feature = "v"))]
+    {
+        let value: usize;
+        // SAFETY: this block is compiled only for targets with the V extension.
+        unsafe { core::arch::asm!("csrr {value}, vlenb", value = out(reg) value) };
+        i32::try_from(value).unwrap_or(0)
+    }
+    #[cfg(not(all(target_arch = "riscv64", target_feature = "v")))]
+    {
+        0
+    }
+}
+
+/// Report the Linux RISC-V V-extension bit from AT_HWCAP.
+#[no_mangle]
+pub extern "C" fn rt_riscv_has_v_ext() -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
+    {
+        const AT_HWCAP: libc::c_ulong = 16;
+        const RISCV_HWCAP_V: libc::c_ulong = 1 << (b'V' - b'A');
+        // SAFETY: getauxval accepts AT_HWCAP and returns zero when unavailable.
+        unsafe { libc::getauxval(AT_HWCAP) & RISCV_HWCAP_V != 0 }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "riscv64")))]
+    {
+        false
+    }
+}
+
+/// CUDA SM discovery remains unavailable until a provider owns the query.
+#[no_mangle]
+pub extern "C" fn rt_cuda_sm_version(device: i32) -> i32 {
+    let _ = device;
+    0
+}
+
 /// Enable ANSI virtual terminal processing on Windows console.
 /// No-op on non-Windows platforms.
 /// Callable from Simple as: `rt_term_enable_ansi()`
@@ -2037,6 +2349,76 @@ mod tests {
     }
 
     #[test]
+    fn architecture_probe_exports_match_host_or_fail_closed() {
+        assert_eq!(
+            rt_is_darwin_arm64(),
+            cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        );
+        assert_eq!(rt_cuda_sm_version(0), 0);
+        assert_eq!(rt_getauxval(0), 0);
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(rt_sysctlbyname_i32(RuntimeValue::NIL), 0);
+        #[cfg(not(all(target_arch = "riscv64", target_feature = "v")))]
+        assert_eq!(rt_riscv_read_vlenb(), 0);
+        #[cfg(not(all(target_os = "linux", target_arch = "riscv64")))]
+        assert!(!rt_riscv_has_v_ext());
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // CPUID.OSXSAVE proves xgetbv is legal before exercising the export.
+            let cpuid = unsafe { std::arch::x86_64::__cpuid(1) };
+            if cpuid.ecx & (1 << 27) != 0 {
+                assert_ne!(rt_xgetbv(0), 0);
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        assert_eq!(rt_xgetbv(0), 0);
+    }
+
+    /// The three CPU predicates are a PARTITION of the architectures the
+    /// runtime is built for: exactly one answers 1 on any supported host, and
+    /// the answer must agree with the `cfg!` the rest of the runtime uses.
+    /// A stub that returned 0 everywhere (which is what an all-zero fallback
+    /// would look like) fails the sum assertion, so this discriminates.
+    #[test]
+    fn test_cpu_arch_gates_partition_the_host() {
+        let x86 = rt_cpu_is_x86_64();
+        let arm = rt_cpu_is_aarch64();
+        let riscv = rt_cpu_is_riscv64();
+        for value in [x86, arm, riscv] {
+            assert!(value == 0 || value == 1, "gate must be 0 or 1, got {value}");
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+        assert_eq!(x86 + arm + riscv, 1, "exactly one architecture gate may be 1");
+
+        assert_eq!(x86, i32::from(cfg!(target_arch = "x86_64")));
+        assert_eq!(arm, i32::from(cfg!(target_arch = "aarch64")));
+        assert_eq!(riscv, i32::from(cfg!(target_arch = "riscv64")));
+    }
+
+    /// CPUID leaf 0 returns the vendor string in ebx/edx/ecx on every x86 part
+    /// ever made, so a non-zero ebx is a real oracle rather than "it returned
+    /// something". Off x86 the C twin returns all-zero and so must this.
+    #[test]
+    fn test_rt_cpuid_matches_the_c_twin_contract() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let vendor = rt_cpuid(0, 0);
+            assert_ne!(vendor.b, 0, "CPUID.0 must report a vendor string in ebx");
+            // "GenuineIntel" / "AuthenticAMD" both put ASCII letters in ebx.
+            assert!(vendor.a >= 0, "max leaf is a small non-negative number");
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let zero = rt_cpuid(0, 0);
+            assert_eq!((zero.a, zero.b, zero.c, zero.d), (0, 0, 0, 0));
+            let also_zero = rt_cpuid(7, 1);
+            assert_eq!((also_zero.a, also_zero.b, also_zero.c, also_zero.d), (0, 0, 0, 0));
+        }
+    }
+
+    #[test]
     fn test_env_vars() {
         unsafe {
             // Set a test environment variable
@@ -2119,4 +2501,86 @@ mod tests {
             assert!(std::path::Path::new(&temp).exists());
         }
     }
+}
+// The sealed executable owner is currently implemented only by the admitted C
+// runtime.  Keep the Rust runtime lane explicit and fail closed until it owns
+// an equivalent sealed-image table and digest implementation.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_pin_executable_owned(_path: *const std::ffi::c_char) -> i64 {
+    -1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_pin_executable_owned_value(_path: *const u8, _path_len: u64) -> i64 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_close_pinned_executable_owned(_handle: i64) -> bool {
+    false
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_close_pinned_executable_owned_value(_handle: i64) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_acquire_pinned_executable(_handle: i64) -> i64 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_pinned_executable_sha256_value(_handle: i64) -> RuntimeValue {
+    RuntimeValue::NIL
+}
+
+/// Rust-lane counterpart for platforms where the canonical C OwnedProcess V3
+/// owner is unavailable. These functions are deliberately Rust-mangled: the C
+/// owner alone exports the public ABI, avoiding duplicate linker definitions.
+#[cfg(windows)]
+const OWNED_PROCESS_ENOTSUP: i64 = 129;
+
+#[cfg(not(windows))]
+const OWNED_PROCESS_ENOTSUP: i64 = libc::ENOTSUP as i64;
+
+unsafe fn owned_process_v3_unsupported_words(count: u64, error_index: u64) -> RuntimeValue {
+    use crate::value::collections::{rt_array_new, rt_array_push};
+
+    const OPAQUE_V3_VERSION: i64 = 3;
+    let values = rt_array_new(count);
+    for index in 0..count {
+        let value = if index == 0 {
+            OPAQUE_V3_VERSION
+        } else if index == error_index {
+            OWNED_PROCESS_ENOTSUP
+        } else {
+            0
+        };
+        if !rt_array_push(values, RuntimeValue::from_int(value)) {
+            return RuntimeValue::NIL;
+        }
+    }
+    values
+}
+
+pub unsafe fn rt_process_owned_v3_input_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(39, 6)
+}
+
+pub unsafe fn rt_process_owned_v3_cancel_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(4, 3)
+}
+
+pub unsafe fn rt_process_owned_v3_result_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(15, 14)
+}
+
+pub unsafe fn rt_process_owned_v3_collect_value(_handle: i64) -> RuntimeValue {
+    owned_process_v3_unsupported_words(15, 14)
+}
+
+pub fn rt_process_owned_v3_release_value(_handle: i64) -> i32 {
+    // A platform without an OwnedProcess V3 table owns no lease to release.
+    0
 }

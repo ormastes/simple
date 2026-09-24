@@ -1,4 +1,8 @@
 # query_visibility / lsp_query CLIs crash: `Option<i64>` match exhausted on a raw i64
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** identifier/char-boundary resolution helper shared by
@@ -85,3 +89,4 @@ not `.?`) was not root-caused further; out of scope for this triage pass
 
 Left the 3 spec files unmodified — they are correct as written and
 correctly detect this defect; nothing to fix on the test side.
+

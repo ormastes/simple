@@ -17,6 +17,14 @@ use app.io.mod.{file_atomic_write}
 fn test_box() -> SourceBoundsV1:
     SourceBoundsV1(page_index: 0, x: 10, y: 20, width: 30, height: 40)
 
+fn reference_document() -> ExtractionDocumentV1:
+    ExtractionDocumentV1(
+        schema_version: IMAGE_TO_MARKDOWN_SCHEMA_VERSION_V1,
+        source_artifact_id: "fixture.png",
+        source_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        width: 100, height: 80, categories: [], regions: [], text_spans: [],
+        tables: [], charts: [], unresolved: [], warnings: [])
+
 fn local_vision_profile() -> ModelProfileV1:
     ModelProfileV1(
         profile_id: "local-vision", provider: "slang", endpoint: "http://localhost:8721",
@@ -24,6 +32,7 @@ fn local_vision_profile() -> ModelProfileV1:
         vision: true, structured_output: true, remote_egress: false,
         fallback_provider: "", max_images: 4, max_pixels: 40000000,
         max_request_bytes: 20971520, max_output_tokens: 8192,
+        max_working_set_bytes: 402653184,
         timeout_ms: 30000, max_concurrency: 1, trust_scope: "test"
     )
 
@@ -47,10 +56,13 @@ describe "REQ-001/003 multimodal contracts":
         expect(path_within_allowed_root_v1("test/fixture/io/../secret.png",
             "test/fixture/io")).to_be(false)
         expect(admit_local_image_with_limits_v1("test/fixture/io/tiny_1x1.png",
-            "test/fixture/io", 1, 100, "high").error_code).to_equal("read_failed")
+            "test/fixture/io", 1, 100, 1024, "high").error_code).to_equal("read_failed")
         expect(admit_local_image_with_limits_v1("src/app/image_to_markdown/input.spl",
-            "src/app/image_to_markdown", 20971520, 100, "high").error_code).to_equal(
+            "src/app/image_to_markdown", 20971520, 100, 1024, "high").error_code).to_equal(
             "unsupported_or_malformed_image")
+        expect(admit_local_image_with_limits_v1("test/fixture/io/tiny_1x1.png",
+            "test/fixture/io", 20971520, 100, 1, "high").error_code).to_equal(
+            "memory_limit_exceeded")
 
     it "requires JPEG scan framing and rejects metadata-only WebP":
         val jpeg: [u8] = [255u8, 216u8, 255u8, 192u8, 0u8, 17u8, 8u8,
@@ -231,7 +243,11 @@ describe "REQ-006/007/008/009/010 deterministic Markdown":
         expect(ordered[2].region_id).to_equal("b")
 
     it "decodes an audited document before rendering it":
-        val json = "{\"schema_version\":\"simple.image-extraction.v2\",\"source_artifact_id\":\"fixture.png\",\"source_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"width\":100,\"height\":80,\"categories\":[\"handwriting\"],\"regions\":[],\"text_spans\":[{\"text_content\":\"메모\",\"language\":\"ko\",\"script\":\"Hangul\",\"confidence_milli\":900,\"highlighted\":true,\"handwritten\":true,\"source_box\":{\"page_index\":0,\"x\":1,\"y\":2,\"width\":3,\"height\":4}}],\"tables\":[],\"charts\":[],\"unresolved\":[],\"warnings\":[]}"
+        # The document travels through a fixture file rather than an inline
+        # literal: seed string-literal length is one short for values ending
+        # in `"}}` (filed separately), which truncated the JSON and emptied
+        # the decoded spans when inlined.
+        val json = file_read("test/fixture/image_to_markdown/audited_document.v2.json")
         val decoded = decode_extraction_document_v1(json)
         expect(decoded.error).to_equal("")
         expect(decoded.document.text_spans[0].text_content).to_equal("메모")
@@ -242,7 +258,8 @@ describe "REQ-006/007/008/009/010 deterministic Markdown":
         expect(decoded.error == "").to_be(false)
 
     it "rejects missing numeric chart fields instead of manufacturing zero":
-        val json = "{\"schema_version\":\"simple.image-extraction.v2\",\"source_artifact_id\":\"fixture.png\",\"source_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"width\":100,\"height\":80,\"categories\":[],\"regions\":[],\"text_spans\":[],\"tables\":[],\"charts\":[{\"panel_id\":\"p\",\"chart_type\":\"line\",\"title\":\"\",\"x_axis\":\"x\",\"y_axis\":\"y\",\"x_scale\":\"linear\",\"y_scale\":\"linear\",\"x_min\":0,\"x_max\":1,\"x_range_present\":true,\"y_min\":0,\"y_max\":2,\"y_range_present\":true,\"x_ticks\":[],\"y_ticks\":[],\"shared_legend_id\":\"\",\"legend_entries\":[],\"annotations\":[],\"series\":[{\"name\":\"s\",\"unit\":\"\",\"points\":[{\"x_lexeme\":\"1\",\"y_lexeme\":\"2\",\"y_value\":2,\"x_present\":true,\"y_present\":true,\"status\":\"observed\",\"uncertainty_milli\":0,\"uncertainty_low\":2,\"uncertainty_high\":2,\"calibration_method\":\"\",\"source_box\":{\"page_index\":0,\"x\":1,\"y\":1,\"width\":2,\"height\":2}}]}],\"source_box\":{\"page_index\":0,\"x\":1,\"y\":1,\"width\":2,\"height\":2}}],\"unresolved\":[],\"warnings\":[]}"
+        # Fixture file for the same seed literal-length reason as above.
+        val json = file_read("test/fixture/image_to_markdown/chart_missing_x_value.v2.json")
         expect(decode_extraction_document_v1(json).error).to_contain("x_value must be numeric")
 
     it "preserves English Japanese and Chinese scripts without translation":

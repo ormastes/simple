@@ -1,0 +1,563 @@
+#!/bin/sh
+# check-mir-transient-scope-boundary.shs
+#
+# Gate the MIR-lane half of transient-scope reclamation.
+#
+# WHY THIS EXISTS, and why check-transient-scope-reclaims.shs does not cover it.
+# That gate proves the RUNTIME mechanism reclaims: it builds two natively
+# compiled fixtures that differ only in whether they open a transient scope, and
+# gates the ratio. It says nothing about whether the COMPILER opens one. The
+# compiler is the process that leaks -- a Stage-3 worker was measured with a
+# 37,171,428 kB [heap] Rss mapping -- and until 2026-09-06 every scope in the
+# tree sat at the HIR boundary (80.driver x2, 10.frontend x1) while 50.mir had
+# none at all. A working mechanism that nothing on the hot path calls reclaims
+# nothing, and the reclaim gate stays green through exactly that state.
+#
+# So this gate checks the CALL SITE and its pairing discipline, which is the
+# property that was actually missing, and it is a ratchet: it FAILS on the
+# pre-fix shape (the driver's per-module MIR loop calling `lower_module`
+# directly).
+#
+# Scope discipline being enforced, from the HIR template
+# (80.driver/driver_hir_pipeline_lowering.spl lower_streaming_surface_source):
+#   begin -> work -> pause -> promote EVERY escaping root -> end
+# and, because `end` FREES the arena, every exit path after `begin` must close
+# the scope, and any path that closes it without a successful promotion must
+# refuse to return the value it would otherwise hand back.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  -- <n> invariant(s) checked, ...        exit 0
+#   FAIL  -- ...                                  exit 1
+#   ERROR -- nothing was checked (<reason>)       exit 2
+# A run that checked 0 invariants is ERROR, never a pass.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+[ -n "${REPO_ROOT}" ] || { echo "ERROR — nothing was checked (cannot locate repo root)"; exit 2; }
+
+DRIVER_REL="src/compiler/80.driver/driver_pipeline_lowering.spl"
+LOWER_REL="src/compiler/50.mir/_MirLowering/module_lowering.spl"
+OWNER_REL="src/compiler/50.mir/_MirLowering/transient_owner.spl"
+SFFI_REL="src/compiler/50.mir/_MirLowering/transient_owner_sffi.spl"
+TYPES_REL="src/compiler/50.mir/mir_lowering_types.spl"
+BUILDER_REL="src/compiler/50.mir/mir_data.spl"
+MODULE_REL="src/compiler/50.mir/mir_instruction_graph.spl"
+SYMBOLS_REL="src/compiler/20.hir/hir_types.spl"
+TARGET_REL="src/compiler/00.common/mir_target_context.spl"
+
+CHECKED=0
+FAILURES=""
+
+fail() { FAILURES="${FAILURES}${FAILURES:+; }$1"; }
+
+# ---------------------------------------------------------------------------
+# The scanner. Operates on a ROOT directory so --selftest can point it at a
+# fixture tree, and so a caller can point it at a `git worktree`/export rather
+# than the shared, concurrently-written working copy.
+# ---------------------------------------------------------------------------
+scan_tree() {
+    _root="$1"
+    _driver="${_root}/${DRIVER_REL}"
+    _lower="${_root}/${LOWER_REL}"
+    _owner="${_root}/${OWNER_REL}"
+    _sffi="${_root}/${SFFI_REL}"
+    _checked=0
+    _fails=""
+
+    for _rel in "$DRIVER_REL" "$LOWER_REL" "$OWNER_REL" "$SFFI_REL" "$TYPES_REL" "$BUILDER_REL" "$MODULE_REL" "$SYMBOLS_REL" "$TARGET_REL"; do
+        if [ ! -f "${_root}/${_rel}" ]; then
+            echo "SCAN_RESULT 0 missing-source-files:${_rel}"
+            return 0
+        fi
+    done
+
+    # (1) The per-module MIR loop must go through the scoped wrapper. This is
+    #     the invariant that is false in the pre-fix tree.
+    _checked=$((_checked + 1))
+    if ! grep -q 'lower_module_transient_scoped(direct_hir)' "${_driver}"; then
+        _fails="${_fails}${_fails:+; }driver-entry-closure-loop-not-scoped"
+    fi
+
+    # (2) ... and it must not ALSO retain a bare per-module call on that path.
+    #     `grep -c` over the whole file would be fooled by the bootstrap-fixed
+    #     branch, which legitimately calls lower_module directly, so key on the
+    #     exact receiver of the entry-closure loop.
+    _checked=$((_checked + 1))
+    if grep -q 'direct_lowering\.lower_module(direct_hir)' "${_driver}"; then
+        _fails="${_fails}${_fails:+; }driver-still-calls-unscoped-lower_module"
+    fi
+
+    # (2b) The non-entry-closure fallback loop (self.ctx.sources.len() <= 0,
+    #      shared `lowering` instance over self.ctx.hir_modules) must ALSO go
+    #      through the scoped wrapper. Landed alongside this check: before,
+    #      only the --entry-closure loop was scoped and this second loop
+    #      called lower_module directly.
+    _checked=$((_checked + 1))
+    if ! grep -q 'lowering\.lower_module_transient_scoped(hir_module)' "${_driver}"; then
+        _fails="${_fails}${_fails:+; }driver-fallback-loop-not-scoped"
+    fi
+
+    # (2c) ... and it must not ALSO retain the bare call. Key on the exact
+    #      receiver/argument pair of the fallback loop (`lowering.lower_module
+    #      (hir_module)`) so this does not false-positive on the legitimate
+    #      bare call in the bootstrap-fixed branch (`bootstrap_lowering.
+    #      lower_module(bootstrap_hir)`, a different receiver and argument).
+    _checked=$((_checked + 1))
+    if grep -q 'lowering\.lower_module(hir_module)' "${_driver}"; then
+        _fails="${_fails}${_fails:+; }driver-fallback-still-calls-unscoped-lower_module"
+    fi
+
+    # (3) The wrapper exists.
+    _checked=$((_checked + 1))
+    if ! grep -q 'me lower_module_transient_scoped' "${_lower}"; then
+        _fails="${_fails}${_fails:+; }wrapper-missing"
+        echo "SCAN_RESULT ${_checked} ${_fails}"
+        return 0
+    fi
+
+    # Body of the wrapper: from its `me` line to the next `    me ` at the same
+    # indentation. Everything below is evaluated over that body ALONE, so an
+    # unrelated scope elsewhere in the file cannot make this pass.
+    _body=$(awk '
+        /^    me lower_module_transient_scoped/ { inbody = 1; print; next }
+        inbody && /^    me / { exit }
+        inbody { print }
+    ' "${_lower}")
+    if [ -z "${_body}" ]; then
+        _fails="${_fails}${_fails:+; }wrapper-body-unreadable"
+        echo "SCAN_RESULT ${_checked} ${_fails}"
+        return 0
+    fi
+
+    # (4) Exactly one begin. Two begins in one function is a nested-scope bug:
+    #     the scope is non-reentrant and the second returns false.
+    _checked=$((_checked + 1))
+    _begins=$(printf '%s\n' "${_body}" | grep -c 'transient_array_scope_begin_v1()')
+    [ "${_begins}" = "1" ] || _fails="${_fails}${_fails:+; }begin-count=${_begins}(want 1)"
+
+    # (5) It must pause before promoting -- the runtime promotion primitive returns
+    #     false unless the scope is paused.
+    _checked=$((_checked + 1))
+    printf '%s\n' "${_body}" | grep -q 'transient_array_scope_pause_v1()' \
+        || _fails="${_fails}${_fails:+; }pause-missing"
+
+    # (6) Retain the returned module and every lowering field. The lowering's
+    #     old raw aggregate itself is NOT a traversable root in this scope.
+    _checked=$((_checked + 1))
+    printf '%s\n' "${_body}" | grep -q 'transient_heap_promote_v1(lowered)' \
+        || _fails="${_fails}${_fails:+; }module-root-not-promoted"
+    _checked=$((_checked + 1))
+    printf '%s\n' "${_body}" | grep -q 'promote_transient_owner()' \
+        || _fails="${_fails}${_fails:+; }owner-root-not-promoted"
+
+    # Derive the inventory from declarations, including nested carriers whose
+    # raw allocation can also predate the current scope. Include scalar and
+    # optional fields: a managed array accepts them, whereas promoting nil or
+    # an integer directly fails. Requiring every field also makes new fields
+    # fail closed instead of depending on a stale hard-coded field count.
+    _field_roots() {
+        awk -v owner="$2" -v prefix="$3" '
+            $0 ~ "^(struct|class) " owner ":" { inowner = 1; next }
+            inowner && /^[^ #]/ { exit }
+            inowner && /^    [A-Za-z_][A-Za-z_0-9]*:/ {
+                field = $1; sub(/:$/, "", field)
+                print prefix "." field
+            }
+        ' "$1"
+    }
+    _expected=$(
+        _field_roots "${_root}/${TYPES_REL}" MirLowering self
+        _field_roots "${_root}/${BUILDER_REL}" MirBuilder self.builder
+        _field_roots "${_root}/${MODULE_REL}" MirModule self.builder.module
+        _field_roots "${_root}/${SYMBOLS_REL}" SymbolTable self.symbols
+        _field_roots "${_root}/${TARGET_REL}" MirTargetContext self.target_context
+    )
+    _owner_code=$(awk '
+        /^    me promote_transient_owner/ { inbody = 1; next }
+        inbody && /^    (me|fn|static fn) / { exit }
+        !inbody { next }
+        /"""/ { doc = !doc; next }
+        doc || /^[[:space:]]*(#|$)/ { next }
+        { sub(/^[[:space:]]*/, ""); print }
+    ' "${_owner}")
+    _actual=$(printf '%s\n' "${_owner_code}" | sed -n 's/^roots\.push(\(self\.[A-Za-z_0-9.]*\))$/\1/p')
+    _checked=$((_checked + 1))
+    if [ -z "${_expected}" ] || [ "$(printf '%s\n' "${_expected}" | sort)" != "$(printf '%s\n' "${_actual}" | sort)" ]; then
+        _fails="${_fails}${_fails:+; }owner-field-inventory-drift"
+    fi
+    # Match a deliberately small straight-line helper grammar: allocate one
+    # managed inventory, populate it, promote it once, release only the array,
+    # and return the promotion result. Reject whole-owner promotion, early
+    # success, ignored promotion failure, and roots added after promotion.
+    _checked=$((_checked + 1))
+    if ! printf '%s\n' "${_owner_code}" | awk '
+        NR == 1 && $0 == "var roots: [Any] = []" { state = 1; next }
+        state == 1 && /^roots\.push\(self\.[A-Za-z_0-9.]*\)$/ { count++; next }
+        state == 1 && count > 0 && $0 == "promote_and_release_transient_owner_roots(roots)" { state = 4; next }
+        { bad = 1 }
+        END { exit (bad || state != 4) }
+    '; then
+        _fails="${_fails}${_fails:+; }owner-inventory-promotion-lifecycle-invalid"
+    fi
+    _checked=$((_checked + 1))
+    grep -q '^use compiler\.mir\._MirLowering\.transient_owner\.\*' "${_lower}" \
+        || _fails="${_fails}${_fails:+; }owner-helper-not-imported"
+
+    # (6b) Product code calls semantic operations, but the sanctioned SFFI
+    # provider must retain exact one-step forwarding to the runtime ABI. This
+    # keeps the boundary checker useful after raw calls leave product code.
+    _checked=$((_checked + 1))
+    _sffi_forwarding_ok=1
+    for _pair in \
+        'transient_array_scope_begin_v1:rt_transient_array_scope_begin()' \
+        'transient_array_scope_pause_v1:rt_transient_array_scope_pause()' \
+        'transient_array_scope_end_v1:rt_transient_array_scope_end()' \
+        'transient_heap_promote_v1:rt_transient_heap_promote(value)'; do
+        _semantic=${_pair%%:*}
+        _raw=${_pair#*:}
+        _semantic_body=$(awk -v name="${_semantic}" '
+            $0 ~ "^fn " name "\\(" { inbody = 1; next }
+            inbody && /^fn / { exit }
+            inbody && /^[^ #]/ { exit }
+            inbody && /^[[:space:]]*(#|$)/ { next }
+            inbody { sub(/^[[:space:]]*/, ""); print }
+        ' "${_sffi}")
+        _expected_forwarding=$(printf 'unsafe(capabilities: [ffi]):\n%s' "${_raw}")
+        [ "${_semantic_body}" = "${_expected_forwarding}" ] || _sffi_forwarding_ok=0
+    done
+    [ "${_sffi_forwarding_ok}" = "1" ] \
+        || _fails="${_fails}${_fails:+; }sffi-scope-forwarding-invalid"
+
+    _checked=$((_checked + 1))
+    _release_body=$(awk '
+        /^fn promote_and_release_transient_owner_roots\(/ { inbody = 1; next }
+        inbody && /^fn / { exit }
+        inbody && /^[^ #]/ { exit }
+        inbody && /^[[:space:]]*(#|$)/ { next }
+        inbody { sub(/^[[:space:]]*/, ""); print }
+    ' "${_sffi}")
+    _expected_release=$(printf '%s\n' \
+        'unsafe(capabilities: [ffi]):' \
+        'val promoted = rt_transient_heap_promote(roots)' \
+        'rt_array_free(roots)' \
+        'promoted')
+    [ "${_release_body}" = "${_expected_release}" ] \
+        || _fails="${_fails}${_fails:+; }sffi-owner-release-forwarding-invalid"
+
+    # (7) PAIRING. Every `return Err(` after the begin must be preceded, within
+    #     the two lines above it, by a scope end -- otherwise that path leaks
+    #     the scope and the NEXT module's begin returns false, silently
+    #     disabling reclamation for the rest of the build. The final
+    #     `return Err` (end itself failed) is exempt by construction because it
+    #     is the one whose preceding line IS the end call.
+    _checked=$((_checked + 1))
+    _unpaired=$(printf '%s\n' "${_body}" | awk '
+        /transient_array_scope_begin_v1\(\)/ { started = 1 }
+        {
+            if (started && $0 ~ /return Err\(/) {
+                if (prev1 !~ /transient_array_scope_end_v1\(\)/ &&
+                    prev2 !~ /transient_array_scope_end_v1\(\)/) {
+                    bad++
+                }
+            }
+            prev2 = prev1; prev1 = $0
+        }
+        END { print bad + 0 }
+    ')
+    [ "${_unpaired}" = "0" ] || _fails="${_fails}${_fails:+; }unpaired-error-returns=${_unpaired}"
+
+    # (8) The ambient-bootstrap path is no longer excluded (see the census in
+    #     doc/08_tracking/bug/native_build_worker_interpreter_heap_grows_unbounded_2026-08-17.md),
+    #     but that is safe ONLY because the flat `_bootstrap_mir_*` /
+    #     `_bootstrap_fn_*` registries those modules write are now promoted
+    #     out of the scope before it ends. A tree that dropped the exclusion
+    #     WITHOUT adding both promotions is the exact use-after-free shape the
+    #     exclusion used to guard against, so both calls are mandatory.
+    _checked=$((_checked + 1))
+    printf '%s\n' "${_body}" | grep -q 'bootstrap_mir_registries_promote()' \
+        || _fails="${_fails}${_fails:+; }bootstrap-mir-registries-not-promoted"
+    _checked=$((_checked + 1))
+    printf '%s\n' "${_body}" | grep -q 'bootstrap_fn_registries_promote()' \
+        || _fails="${_fails}${_fails:+; }bootstrap-fn-registries-not-promoted"
+
+    echo "SCAN_RESULT ${_checked} ${_fails}"
+}
+
+# ---------------------------------------------------------------------------
+# Selftest. Runs before every scan and is FATAL. Fixtures are real trees run
+# through the real scanner -- a scanner that cannot tell the pre-fix shape from
+# the fixed one is worthless as a ratchet, so that is the first thing proven.
+# ---------------------------------------------------------------------------
+selftest() {
+    _tmp=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    _st_fail=""
+
+    _mk() {
+        _d="$1"
+        mkdir -p "${_d}/src/compiler/80.driver" "${_d}/src/compiler/50.mir/_MirLowering" \
+            "${_d}/src/compiler/20.hir" "${_d}/src/compiler/00.common"
+        cat > "${_d}/${TYPES_REL}" <<'EOF'
+struct MirLowering:
+    builder: MirBuilder
+    symbols: SymbolTable
+    target_context: MirTargetContext
+    current_module_id: text
+    errors: [MirError]
+EOF
+        cat > "${_d}/${BUILDER_REL}" <<'EOF'
+struct MirBuilder:
+    module: MirModule
+    locals: [MirLocal]
+EOF
+        cat > "${_d}/${MODULE_REL}" <<'EOF'
+struct MirModule:
+    functions: Dict<SymbolId, MirFunction>
+EOF
+        cat > "${_d}/${SYMBOLS_REL}" <<'EOF'
+class SymbolTable:
+    symbols: Dict<i64, HirSymbol>
+EOF
+        cat > "${_d}/${TARGET_REL}" <<'EOF'
+struct MirTargetContext:
+    arch: text
+EOF
+        cat > "${_d}/${OWNER_REL}" <<'EOF'
+impl MirLowering:
+    me promote_transient_owner() -> bool:
+        var roots: [Any] = []
+        roots.push(self.builder)
+        roots.push(self.symbols)
+        roots.push(self.target_context)
+        roots.push(self.current_module_id)
+        roots.push(self.errors)
+        roots.push(self.builder.module)
+        roots.push(self.builder.locals)
+        roots.push(self.builder.module.functions)
+        roots.push(self.symbols.symbols)
+        roots.push(self.target_context.arch)
+        promote_and_release_transient_owner_roots(roots)
+EOF
+        cat > "${_d}/${SFFI_REL}" <<'EOF'
+@unsafe(reason: "fixture", capabilities: [ffi])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "fixture", capabilities: [ffi])
+extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "fixture", capabilities: [ffi])
+extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "fixture", capabilities: [ffi])
+extern fn rt_transient_heap_promote(value: Any) -> bool
+@unsafe(reason: "fixture", capabilities: [ffi])
+extern fn rt_array_free(array: [Any])
+
+fn transient_array_scope_begin_v1() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_begin()
+
+fn transient_array_scope_pause_v1() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_pause()
+
+fn transient_array_scope_end_v1() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_end()
+
+fn transient_heap_promote_v1(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
+
+fn promote_and_release_transient_owner_roots(roots: [Any]) -> bool:
+    unsafe(capabilities: [ffi]):
+        val promoted = rt_transient_heap_promote(roots)
+        rt_array_free(roots)
+        promoted
+EOF
+    }
+
+    # Fixture A: the FIXED shape. Must PASS.
+    _mk "${_tmp}/fixed"
+    cat > "${_tmp}/fixed/${DRIVER_REL}" <<'EOF'
+                    val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir)
+                    var lowered_entry = scoped_entry.unwrap()
+                    val scoped_fallback = lowering.lower_module_transient_scoped(hir_module)
+                    var mir_module = scoped_fallback.unwrap()
+EOF
+    cat > "${_tmp}/fixed/${LOWER_REL}" <<'EOF'
+use compiler.mir._MirLowering.transient_owner.*
+use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1, transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1}
+impl MirLowering:
+    me lower_module_transient_scoped(module: HirModule) -> Result<MirModule, text>:
+        if not transient_array_scope_begin_v1():
+            return Ok(self.lower_module(module))
+        val lowered: MirModule = self.lower_module(module)
+        if not transient_array_scope_pause_v1():
+            val _e1 = transient_array_scope_end_v1()
+            return Err("pause failed")
+        if not transient_heap_promote_v1(lowered):
+            val _e2 = transient_array_scope_end_v1()
+            return Err("module promote failed")
+        if not self.promote_transient_owner():
+            val _e3 = transient_array_scope_end_v1()
+            return Err("owner promote failed")
+        if not bootstrap_mir_registries_promote():
+            val _e4 = transient_array_scope_end_v1()
+            return Err("mir registries promote failed")
+        if not bootstrap_fn_registries_promote():
+            val _e5 = transient_array_scope_end_v1()
+            return Err("fn registries promote failed")
+        if not transient_array_scope_end_v1():
+            return Err("end failed")
+        Ok(lowered)
+
+    me lower_module(module: HirModule) -> MirModule:
+        module
+EOF
+
+    # Fixture B: the PRE-FIX shape -- no wrapper, driver calls lower_module
+    # directly. This is the exact tree state before 2026-09-06. Must FAIL.
+    _mk "${_tmp}/prefix"
+    cat > "${_tmp}/prefix/${DRIVER_REL}" <<'EOF'
+                    var lowered_entry = direct_lowering.lower_module(direct_hir)
+EOF
+    cat > "${_tmp}/prefix/${LOWER_REL}" <<'EOF'
+    me lower_module(module: HirModule) -> MirModule:
+        module
+EOF
+
+    # Fixture C: wrapper present but ONE error path forgets to close the scope.
+    # Must FAIL -- this is the leak that silently disables every later module.
+    _mk "${_tmp}/unpaired"
+    cp "${_tmp}/fixed/${DRIVER_REL}" "${_tmp}/unpaired/${DRIVER_REL}"
+    sed 's/            val _e2 = transient_array_scope_end_v1()//' \
+        "${_tmp}/fixed/${LOWER_REL}" > "${_tmp}/unpaired/${LOWER_REL}"
+
+    # Fixture D: the owner root is not promoted. Must FAIL -- this is the
+    # use-after-free shape (MirLowering fields accumulate across modules).
+    _mk "${_tmp}/noowner"
+    cp "${_tmp}/fixed/${DRIVER_REL}" "${_tmp}/noowner/${DRIVER_REL}"
+    sed 's/self\.promote_transient_owner()/true/' \
+        "${_tmp}/fixed/${LOWER_REL}" > "${_tmp}/noowner/${LOWER_REL}"
+
+    # Fixture E: the ambient-bootstrap exclusion is gone (as intended, per the
+    # 2026-08-17 bug's census) but the bootstrap MIR/fn registries the
+    # exclusion used to protect are NOT promoted before scope end. This is
+    # the exact use-after-free shape: the flat `_bootstrap_mir_*`/
+    # `_bootstrap_fn_*` accumulators get freed with the arena, then read by a
+    # later module or by 70.backend after the loop ends. Must FAIL.
+    _mk "${_tmp}/noambient"
+    cp "${_tmp}/fixed/${DRIVER_REL}" "${_tmp}/noambient/${DRIVER_REL}"
+    grep -v 'bootstrap_mir_registries_promote()\|bootstrap_fn_registries_promote()\|mir registries promote failed\|fn registries promote failed\|val _e4 = transient_array_scope_end_v1()\|val _e5 = transient_array_scope_end_v1()' \
+        "${_tmp}/fixed/${LOWER_REL}" > "${_tmp}/noambient/${LOWER_REL}"
+
+    # Fixture G: the entry-closure loop is fixed but the fallback loop
+    # (self.ctx.sources.len() <= 0 branch) still calls lower_module directly.
+    # Must FAIL -- this is the exact pre-fix shape of the fallback loop that
+    # this session's change closes, isolated from fixture B so a scanner that
+    # only checks the entry-closure loop cannot pass it by accident.
+    _mk "${_tmp}/fallback_prefix"
+    cat > "${_tmp}/fallback_prefix/${DRIVER_REL}" <<'EOF'
+                    val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir)
+                    var lowered_entry = scoped_entry.unwrap()
+                for hir_module in self.ctx.hir_modules:
+                    var mir_module = lowering.lower_module(hir_module)
+EOF
+    cp "${_tmp}/fixed/${LOWER_REL}" "${_tmp}/fallback_prefix/${LOWER_REL}"
+
+    # Owner-inventory regressions: helper presence alone cannot prove escape
+    # safety. These fixtures isolate the failing whole-owner shape, forgotten
+    # scalar/nested children, field drift, and dropped failure propagation.
+    for _shape in rawowner missingtext missingnested newfield earlysuccess nofree latepush broken_sffi; do
+        _mk "${_tmp}/${_shape}"
+        cp "${_tmp}/fixed/${DRIVER_REL}" "${_tmp}/${_shape}/${DRIVER_REL}"
+        cp "${_tmp}/fixed/${LOWER_REL}" "${_tmp}/${_shape}/${LOWER_REL}"
+    done
+    cat > "${_tmp}/rawowner/${OWNER_REL}" <<'EOF'
+impl MirLowering:
+    me promote_transient_owner() -> bool:
+        transient_heap_promote_v1(self)
+EOF
+    sed '/roots.push(self.current_module_id)/d' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/missingtext/${OWNER_REL}"
+    sed '/roots.push(self.builder.locals)/d' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/missingnested/${OWNER_REL}"
+    printf '    retained_diagnostic: text\n' >> "${_tmp}/newfield/${TYPES_REL}"
+    sed 's/promote_and_release_transient_owner_roots(roots)/true/' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/earlysuccess/${OWNER_REL}"
+    sed '/rt_array_free(roots)/d' "${_tmp}/fixed/${SFFI_REL}" > "${_tmp}/nofree/${SFFI_REL}"
+    sed '/roots.push(self.errors)/d; /promote_and_release_transient_owner_roots(roots)/a\
+        roots.push(self.errors)
+' "${_tmp}/fixed/${OWNER_REL}" > "${_tmp}/latepush/${OWNER_REL}"
+    sed 's/rt_transient_array_scope_pause()/rt_transient_array_scope_end()/' \
+        "${_tmp}/fixed/${SFFI_REL}" > "${_tmp}/broken_sffi/${SFFI_REL}"
+
+    # Fixture F: empty tree. Must check 0 invariants so the caller ERRORs.
+    _mk "${_tmp}/empty"
+    rm -f "${_tmp}/empty/${DRIVER_REL}" "${_tmp}/empty/${LOWER_REL}"
+
+    _expect() {
+        _name="$1"; _want="$2"
+        _res=$(scan_tree "${_tmp}/${_name}")
+        _n=$(printf '%s' "${_res}" | awk '{print $2}')
+        _msg=$(printf '%s' "${_res}" | cut -d' ' -f3-)
+        case "${_want}" in
+            pass)
+                if [ "${_n}" -le 0 ] || [ -n "${_msg}" ]; then
+                    _st_fail="${_st_fail}${_st_fail:+; }fixture-${_name}-should-pass(n=${_n} msg=${_msg})"
+                fi ;;
+            fail)
+                if [ -z "${_msg}" ]; then
+                    _st_fail="${_st_fail}${_st_fail:+; }fixture-${_name}-should-fail"
+                fi ;;
+            vacuous)
+                if [ "${_n}" != "0" ]; then
+                    _st_fail="${_st_fail}${_st_fail:+; }fixture-${_name}-should-check-0(n=${_n})"
+                fi ;;
+        esac
+    }
+
+    _expect fixed           pass
+    _expect prefix          fail
+    _expect unpaired        fail
+    _expect noowner         fail
+    _expect noambient       fail
+    _expect fallback_prefix fail
+    _expect empty           vacuous
+    for _shape in rawowner missingtext missingnested newfield earlysuccess nofree latepush broken_sffi; do
+        _expect "${_shape}" fail
+    done
+
+    rm -rf "${_tmp}"
+    if [ -n "${_st_fail}" ]; then
+        echo "ERROR — nothing was checked (selftest failed: ${_st_fail})"
+        exit 2
+    fi
+}
+
+ROOT="${REPO_ROOT}"
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+# Selftest is unconditional and fatal, exactly like the sibling guards.
+selftest
+if [ "${SELFTEST_ONLY}" = "1" ]; then
+    echo "PASS — 15 selftest fixture(s) checked, scanner rejects unscoped lowering, invalid SFFI forwarding, and incomplete owner inventories"
+    exit 0
+fi
+
+RESULT=$(scan_tree "${ROOT}")
+CHECKED=$(printf '%s' "${RESULT}" | awk '{print $2}')
+FAILURES=$(printf '%s' "${RESULT}" | cut -d' ' -f3-)
+
+if [ "${CHECKED}" -le 0 ] 2>/dev/null; then
+    echo "ERROR — nothing was checked (no MIR lowering sources found under ${ROOT})"
+    exit 2
+fi
+if [ -n "${FAILURES}" ]; then
+    echo "FAIL — ${CHECKED} invariant(s) checked in ${ROOT}: ${FAILURES}"
+    exit 1
+fi
+echo "PASS — ${CHECKED} invariant(s) checked, paired MIR scope and complete retained-field inventory (static evidence; native execution not run)"
+exit 0

@@ -1,4 +1,8 @@
 # BUG: `FontRenderBatch.transform_identity` default field value not applied — reads as empty string, blocking all glyph compositing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open (2026-07-19, GLYPH-FIX-8 campaign). Root-cause LOCALIZED, not fixed
@@ -227,3 +231,4 @@ Re-add the `[glyphfix8-diag]` print above (temporarily) at
 - `src/lib/gc_async_mut/gpu/engine2d/engine.spl:918-1099` (`_draw_font_batch`,
   `_draw_font_batch_cpu_suffix`, `_draw_font_batch_plan` — the compositing
   choke point)
+

@@ -1,4 +1,8 @@
 # AOP hart hooks: no in-tree path executes woven advice for lib-module hardware code
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-22
 **Severity:** High (blocks Phase-3 "AOP hart hooks" from being AOP-carried end-to-end)
@@ -120,3 +124,4 @@ bin/simple run test/01_unit/lib/hardware/debug_hooks/hart_debug_probe.spl
 All 16 gates pass today: seam behavior (trace/halt-freeze/single-step/resume,
 rv64+rv32) green, weave accounting >0 via bare-name rule, tokenized
 execution-form rule pinned at 0/fail-closed, interp gap printed explicitly.
+

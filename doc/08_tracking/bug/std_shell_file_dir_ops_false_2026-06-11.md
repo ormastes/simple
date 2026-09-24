@@ -1,6 +1,17 @@
 # std.shell file/dir ops: existence checks return false after create operations
 
-- **Status:** FIXED 2026-06-11
+## Closed 2026-09-13 — fixed 2026-06-11; the seed defect behind it is also gone
+
+- **inferred** Entry status: FIXED 2026-06-11, with the S1 reshape of `class dir` recorded
+  in-file and `test/01_unit/lib/std/shell/file_system_spec.spl` at 9/9.
+- **measured** The seed bug that forced the 1-param workaround
+  (`seed_static_method_default_params_unreachable_2026-06-11.md`) no longer reproduces: a
+  static method with a default parameter is reachable with fewer args on the current seed.
+  (A separate value-correctness defect in default fill was found and filed today; it does
+  not affect the 1-param shapes shipped in `shell.spl`.)
+
+
+Status: closed 2026-09-13 (was: - **Status:** FIXED 2026-06-11)
 - **Found:** 2026-06-11 by the hollow-assert sweep (SPIPE006 de-hollowing) —
   one of these failures was previously HIDDEN by a bare `expect(...)` no-op;
   the other three already failed at tip on neighbouring assertions.

@@ -1,4 +1,8 @@
 # native (entry-closure): class static-method calls silently lower to 0; class constructors never emitted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-23  **Status:** OPEN (worked around in apps; structs fine)
 - **Severity:** critical for any native app using `class` — silent nil at
@@ -40,3 +44,4 @@ never `const 0`.
 Related: text.from_char_code static-call gap
 (text_static_method_hir_lowering_2026-07-23.md) — same
 "static call on type name" family.
+

@@ -1,3 +1,8 @@
+---
+name: lang-c-cpp
+description: "C/C++ agent with clangd LSP"
+---
+
 # C/C++ Language Agent
 
 **Language:** C, C++

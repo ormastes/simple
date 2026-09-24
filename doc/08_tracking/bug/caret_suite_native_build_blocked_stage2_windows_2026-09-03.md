@@ -1,4 +1,8 @@
 # Caret suite cannot native-build with the Phase-2 (Stage-2-admitted) Windows compiler
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-03
 Binary: `build/bootstrap/stage3/x86_64-pc-windows-msvc/stage2-admitted/simple.exe`
@@ -85,3 +89,4 @@ attribute-directly-before-method, so this is not reachable today.
   Exit 127, crash report written. `rt_stdin_read_line() -> text?` returns a
   boxed optional that the JIT call path unboxes as i64.
   Related: `doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`.
+

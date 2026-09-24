@@ -1,5 +1,11 @@
 # Lean frontend: default-param call-site application NOT implemented (DEPLOY-BLOCKER)
 
+## Closed 2026-09-13 — Already resolved on the active frontend; regression spec green
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple run test/01_unit/compiler/default_param_call_fill_spec.spl` → `declared>=6 executed=6 passed=6 failed=0`, outcome=OK. Omitted trailing default arguments are filled, not zeroed.
+- **inferred**: this matches the entry's own Resolution (commit `4e151c2649b`, Rust HIR frontend). The deploy-blocker framing was conditional on deploying the lean self-hosted frontend delegation-free, which has not happened — no self-hosted full-CLI binary is deployed.
+- Residual, deliberately not closed over: the `.spl` `20.hir`/`35.semantics` parity work (`MethodResolver.fill_call_defaults`, inert, blocked by LIM-010) is a self-hosted-frontend prerequisite tracked with that lane, not an outstanding miscompile in any shipped path.
+
 - **ID:** lean_parser_default_param_call_fill
 - **Severity:** P1 — **DEPLOY-BLOCKER** for removing the self-hosted-frontend
   delegation. NOT a soft deferral: if the lean frontend is deployed (delegation
@@ -9,7 +15,7 @@
 - **Date:** 2026-06-13
 - **Component:** `src/compiler/20.hir` / `src/compiler/30.types` — call lowering /
   call-signature resolution (self-hosted pipeline).
-- **Status:** RESOLVED on the active (Rust) frontend 2026-06-14 (commit 4e151c2649b).
+- **Status:** CLOSED 2026-09-13 (re-verified). Originally: RESOLVED on the active (Rust) frontend 2026-06-14 (commit 4e151c2649b).
   The deployed compiler's `run`/`jit`/`aot` path uses the Rust HIR frontend, and
   that path now fills omitted trailing default args (verified: `greet("hi")`→103,
   `multi(1)`→31, no-default `add(2,3)`→5; regression spec

@@ -16,7 +16,7 @@ use simple_parser::Parser;
 use std::path::{Path, PathBuf};
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::stdlib_variant::stdlib_root_candidates;
+use crate::stdlib_variant::stdlib_root_candidates_present;
 
 const STDLIB_FAMILY_DIRS: &[&str] = &[
     "nogc_async_mut",
@@ -256,6 +256,21 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
             is_directory: false,
             manifest: None,
         });
+    }
+
+    // The directory itself may BE the numbered module named `last` (segment
+    // `mir_opt` -> `60.mir_opt`): after the same-named file marker, prefer
+    // the directory's own package marker over a same-named CHILD package
+    // inside it. Without this, `compiler.mir_opt` resolved into the
+    // subpackage `60.mir_opt/mir_opt/` whenever one existed, and every name
+    // the outer package re-exported (optimizationconfig_debug and friends)
+    // silently resolved to nothing in entry-closure builds.
+    let dir_name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let dir_module_name = dir_name.split_once('.').map_or(dir_name, |(_, rest)| rest);
+    if dir_module_name == last {
+        if let Some(resolved) = resolve_exact_directory_module(dir, original_path) {
+            return Some(resolved);
+        }
     }
 
     let dir_path = dir.join(last);
@@ -745,7 +760,7 @@ impl ModuleResolver {
                     for root in stdlib_roots {
                         if p_is_dir(&root) {
                             if stdlib_segments.is_empty() {
-                                for candidate in stdlib_root_candidates(&root) {
+                                for candidate in stdlib_root_candidates_present(&root) {
                                     if let Ok(resolved) = resolve_stdlib_namespace_from_root(&candidate, path) {
                                         return Ok(resolved);
                                     }
@@ -761,7 +776,7 @@ impl ModuleResolver {
                                         }
                                     }
                                 }
-                                for candidate in stdlib_root_candidates(&root) {
+                                for candidate in stdlib_root_candidates_present(&root) {
                                     if let Ok(resolved) =
                                         resolve_stdlib_from_root(self, &candidate, stdlib_segments, path)
                                     {
@@ -990,7 +1005,7 @@ impl ModuleResolver {
         let manifest = if let Some(manifest) = &resolved.manifest {
             Some(manifest.clone())
         } else if resolved.is_directory && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
-            let mut source = std::fs::read_to_string(&resolved.path)
+            let mut source = crate::read_trace::rts(file!(), line!(), &resolved.path)
                 .map_err(|e| crate::error::factory::failed_to_read_file(&resolved.path, &e))?;
             if source.contains('\r') {
                 source = source.replace('\r', "");

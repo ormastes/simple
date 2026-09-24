@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d "$root/build/native_probe/phase1-current-authority.XXXXXX")
+fail() { echo "FAIL: $1; evidence=$work" >&2; exit 1; }
+. "$root/test/01_unit/scripts/fixtures/phase1_authority_fixture.shs"
+. "$root/scripts/bootstrap/bootstrap-phase1-authority.shs"
+mkdir -p "$work/source" "$work/phase"
+printf '#!/bin/sh\nexit 0\n' >"$work/seed"
+chmod +x "$work/seed"
+phase1_authority_fixture "$root" "$work/source" "$work/seed"
+expected=$(bootstrap_stage3_hash_file "$work/seed")
+bootstrap_phase1_authority_init "$root" "$work/source" "$work/seed" "$expected" "$work/phase" || fail 'valid current generation rejected'
+cp "$work/seed" "$work/phase/compiler.snapshot"
+bootstrap_phase1_register_tool "$work/phase/compiler.snapshot" "$expected"
+bootstrap_phase1_validate_invocation "$work/phase/compiler.snapshot" version "$work/phase/before.env" || fail 'current snapshot rejected'
+grep -qx "generation=$p1a_generation" "$work/phase/before.env" || fail 'generation omitted'
+grep -qx "admission_sha256=$p1a_marker_sha" "$work/phase/before.env" || fail 'admission receipt omitted'
+
+if bootstrap_phase1_validate_invocation simple version "$work/path.env" 2>"$work/path.log"; then fail 'PATH-resolved compiler admitted'; fi
+if bootstrap_phase1_validate_invocation "$work/seed" version "$work/unregistered.env" 2>"$work/unregistered.log"; then fail 'unregistered executable admitted'; fi
+printf '# stale producer\n' >>"$work/seed"
+if bootstrap_phase1_validate_invocation "$work/phase/compiler.snapshot" version "$work/stale.env" 2>"$work/stale.log"; then fail 'mutated producer admitted'; fi
+cp "$work/phase/compiler.snapshot" "$work/seed"
+printf '# mutated snapshot\n' >>"$work/phase/compiler.snapshot"
+if bootstrap_phase1_validate_invocation "$work/phase/compiler.snapshot" version "$work/mutated.env" 2>"$work/mutated.log"; then fail 'mutated snapshot admitted'; fi
+cp "$work/seed" "$work/phase/compiler.snapshot"
+
+cp "$p1a_marker" "$work/current.saved"
+printf '\n' >>"$p1a_marker"
+if bootstrap_phase1_validate_invocation "$work/phase/compiler.snapshot" version "$work/changed-marker.env" 2>"$work/changed-marker.log"; then fail 'changed current admission admitted'; fi
+cp "$work/current.saved" "$p1a_marker"
+: >"$p1a_marker.transaction"
+if bootstrap_phase1_validate_invocation "$work/phase/compiler.snapshot" version "$work/pending.env" 2>"$work/pending.log"; then fail 'in-progress publication admitted'; fi
+rm "$p1a_marker.transaction"
+
+printf '#!/bin/sh\nexit 7\n' >"$work/phase/mcp"
+chmod +x "$work/phase/mcp"
+bootstrap_phase1_register_tool "$work/phase/mcp" "$(bootstrap_stage3_hash_file "$work/phase/mcp")"
+bootstrap_phase1_validate_invocation "$work/phase/mcp" mcp_help "$work/phase/mcp.env" || fail 'phase-produced tool rejected'
+printf '# replaced tool\n' >>"$work/phase/mcp"
+if bootstrap_phase1_validate_invocation "$work/phase/mcp" mcp_help "$work/tool-mutated.env" 2>"$work/tool-mutated.log"; then fail 'replaced phase tool admitted'; fi
+printf 'PASS: current Phase1 generation, exact tools, stale/PATH/mutation/pending rejection; evidence=%s\n' "$work"

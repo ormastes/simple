@@ -1,34 +1,59 @@
+"""
+## Purpose and audience
+Purpose: Verify LLM Caret OpenCode CLI owner.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-LLMCARET-001
+doc/01_research/local/REQ-APP-LLMCARET-001.md
+doc/03_plan/sys_test/REQ-APP-LLMCARET-001.md
+doc/04_architecture/REQ-APP-LLMCARET-001.md
+doc/05_design/REQ-APP-LLMCARET-001.md
+"""
+# @req: REQ-APP-LLMCARET-001
+
 # codex-system-test
 """
 # LLM Caret OpenCode CLI Owner
 
-describe "OpenCode CLI wrapper":
-    it "builds a non-interactive json run command":
-        val args = build_opencode_args("fix the test", "anthropic/claude", "sess-1", "", "", true, ["--dir", "."])
+Checks the shipped OpenCode invocation builder, response/completion boundary,
+credential-free process fixture, and safe lifecycle guards.
 
-        expect(args[0]).to_equal("run")
-        expect(args[arg_at(args, "--format") + 1]).to_equal("json")
-        expect(args[arg_at(args, "--model") + 1]).to_equal("anthropic/claude")
-        expect(args[arg_at(args, "--session") + 1]).to_equal("sess-1")
-        expect(args[arg_at(args, "--auto")]).to_equal("--auto")
-        expect(args[args.len() - 1]).to_equal("fix the test")
+Requirements: REQ-001, REQ-002, REQ-003, NFR-001, NFR-002, NFR-003.
+No scenario invokes a provider or network endpoint. No scenario positively
+kills a process.
+"""
 
-    it "builds attach arguments without shell kill shortcuts":
-        val args = build_opencode_args("continue", "github-copilot/gpt-5", "sess-2", "json", "http://127.0.0.1:4096", false, ["", "--dir", "."])
+use std.spec.*
+use std.io_runtime.{file_read}
+use app.llm_caret.opencode_cli.*
 
-        expect(args[arg_at(args, "--attach") + 1]).to_equal("http://127.0.0.1:4096")
-        expect(arg_at(args, "--auto")).to_equal(-1)
-        expect(arg_at(args, "kill")).to_equal(-1)
-        expect(arg_at(args, "pkill")).to_equal(-1)
-        expect(args[args.len() - 1]).to_equal("continue")
+val MOCK_OPENCODE_CLI = "test/fixtures/llm_caret/mock_opencode_cli.shs"
 
-    it "parses json content without requiring the OpenCode binary":
-        val resp = parse_opencode_response("{\"content\":\"done\",\"sessionID\":\"abc\"}", "anthropic/claude")
+fn count_opencode_source_occurrences(source: text, needle: text) -> i64:
+    var count = 0
+    var position = 0
+    while position + needle.len() <= source.len():
+        if source.substring(position, position + needle.len()) == needle:
+            count = count + 1
+            position = position + needle.len()
+        else:
+            position = position + 1
+    count
 
 fn opencode_source_position_after(source: text, needle: text, start: i64) -> i64:
     if start < 0 or start >= source.len():
         return -1
-    val relative: i64 = source.substring(start).find(needle)
+    # Two-step form: `.find` on a nested `substring()` result fails on the
+    # seed (doc/08_tracking/bug/seed_method_find_on_nested_substring_call_2026-08-25.md).
+    val tail: text = source.substring(start)
+    val relative: i64 = tail.find(needle)
     if relative < 0:
         return -1
     start + relative
@@ -36,6 +61,8 @@ fn opencode_source_position_after(source: text, needle: text, start: i64) -> i64
 describe "LLM Caret OpenCode CLI owner":
     describe "invocation construction":
         it "should build the exact default production invocation":
+            # @req: REQ-001
+            step("Verify: should build the exact default production invocation")
             step("Prepare OpenCode CLI inputs")
             val expected = [
                 "run", "--format", "json", "--model", "anthropic/claude",
@@ -50,6 +77,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(invocation.args).to_equal(expected)
 
         it "should preserve shell-sensitive values as exact argv entries":
+            # @req: REQ-002
+            step("Verify: should preserve shell-sensitive values as exact argv entries")
             step("Prepare OpenCode CLI inputs")
             val prompt = "line one; $(touch nope) \"quoted\"\nnext"
             val customPath = "tools/OpenCode CLI"
@@ -70,6 +99,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(invocation.args[invocation.args.len() - 1]).to_equal(prompt)
 
         it "should honor explicit format auto approval and nonempty extras":
+            # @req: REQ-003
+            step("Verify: should honor explicit format auto approval and nonempty extras")
             step("Prepare OpenCode CLI inputs")
             val prompt = "continue"
             step("Run the production invocation or completion owner")
@@ -84,6 +115,8 @@ describe "LLM Caret OpenCode CLI owner":
 
     describe "response parsing":
         it "should parse content session and escaped JSON string values":
+            # @req: REQ-APP-LLMCARET-001
+            step("Verify: should parse content session and escaped JSON string values")
             step("Prepare OpenCode CLI inputs")
             val raw = "{\"content\":\"line\\nquote\\\"slash\\\\\",\"sessionID\":\"session-out\"}"
             step("Run the production invocation or completion owner")
@@ -97,6 +130,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(response.raw).to_equal(raw)
 
         it "should apply message then text parser fallbacks":
+            # @req: REQ-001
+            step("Verify: should apply message then text parser fallbacks")
             step("Prepare OpenCode CLI inputs")
             val messageRaw = "{\"content\":\"\",\"message\":\"message fallback\"}"
             val textRaw = "{\"message\":\"\",\"text\":\"text fallback\"}"
@@ -110,6 +145,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(textResponse.is_error).to_equal(false)
 
         it "should preserve a plain text response as the explicit raw fallback":
+            # @req: REQ-002
+            step("Verify: should preserve a plain text response as the explicit raw fallback")
             step("Prepare OpenCode CLI inputs")
             val raw = "  plain OpenCode response  "
             step("Run the production invocation or completion owner")
@@ -121,6 +158,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(response.raw).to_equal(raw)
 
         it "should reject empty output while preserving its raw bytes":
+            # @req: REQ-003
+            step("Verify: should reject empty output while preserving its raw bytes")
             step("Prepare OpenCode CLI inputs")
             val raw = " \n\t"
             step("Run the production invocation or completion owner")
@@ -133,6 +172,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(response.raw).to_equal(raw)
 
         it "should reject malformed fieldless and wrong-type JSON":
+            # @req: REQ-APP-LLMCARET-001
+            step("Verify: should reject malformed fieldless and wrong-type JSON")
             step("Prepare OpenCode CLI inputs")
             val malformedRaw = "{\"content\":\"unterminated}"
             val fieldlessRaw = "{}"
@@ -166,6 +207,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(trailingGarbage.error).to_equal("malformed response")
 
         it "should expose a provider error string and session":
+            # @req: REQ-001
+            step("Verify: should expose a provider error string and session")
             step("Prepare OpenCode CLI inputs")
             val raw = "{\"error\":\"permission denied\",\"sessionID\":\"session-error\"}"
             step("Run the production invocation or completion owner")
@@ -180,6 +223,8 @@ describe "LLM Caret OpenCode CLI owner":
 
     describe "process completion":
         it "should preserve success fields and use the requested session fallback":
+            # @req: REQ-002
+            step("Verify: should preserve success fields and use the requested session fallback")
             step("Prepare OpenCode CLI inputs")
             val raw = "{\"message\":\"completed\"}"
             step("Run the production invocation or completion owner")
@@ -196,6 +241,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(response.raw).to_equal(raw)
 
         it "should prefer the provider session over the requested fallback":
+            # @req: REQ-003
+            step("Verify: should prefer the provider session over the requested fallback")
             step("Prepare OpenCode CLI inputs")
             val raw = "{\"content\":\"completed\",\"sessionID\":\"session-out\"}"
             step("Run the production invocation or completion owner")
@@ -208,6 +255,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(response.raw).to_equal(raw)
 
         it "should preserve failed process diagnostics and raw stdout":
+            # @req: REQ-APP-LLMCARET-001
+            step("Verify: should preserve failed process diagnostics and raw stdout")
             step("Prepare OpenCode CLI inputs")
             val stdout = "{\"partial\":\"response\"}"
             step("Run the production invocation or completion owner")
@@ -228,6 +277,8 @@ describe "LLM Caret OpenCode CLI owner":
 
     describe "production delegation and lifecycle":
         it "should execute the credential-free fixture through the production send owner":
+            # @req: REQ-001
+            step("Verify: should execute the credential-free fixture through the production send owner")
             step("Prepare OpenCode CLI inputs")
             val path = MOCK_OPENCODE_CLI
             step("Run the production invocation or completion owner")
@@ -243,6 +294,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(response.is_error).to_equal(false)
 
         it "should build then run once and complete while spawn reuses the builder":
+            # @req: REQ-002
+            step("Verify: should build then run once and complete while spawn reuses the builder")
             step("Prepare OpenCode CLI inputs")
             val source = file_read("src/app/llm_caret/opencode_cli.spl")
             step("Run the production invocation or completion owner")
@@ -264,9 +317,9 @@ describe "LLM Caret OpenCode CLI owner":
                 source, "val pid = process_spawn_async(", spawnBuildPosition
             )
             step("Check exact process response and lifecycle effects")
-            expect(count_opencode_source_occurrences(source, "process_run(")).to_equal(1)
-            expect(count_opencode_source_occurrences(source, "process_spawn_async(")).to_equal(1)
-            expect(count_opencode_source_occurrences(source, "build_opencode_invocation(")).to_equal(3)
+            expect(count_opencode_source_occurrences(source, "process_run(")).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            expect(count_opencode_source_occurrences(source, "process_spawn_async(")).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            expect(count_opencode_source_occurrences(source, "build_opencode_invocation(")).to_equal(3)  # oracle: 3 — named expected value from the requirement
             expect(sendBuildPosition).to_be_greater_than(sendPosition)
             expect(runPosition).to_be_greater_than(sendBuildPosition)
             expect(completePosition).to_be_greater_than(runPosition)
@@ -274,6 +327,8 @@ describe "LLM Caret OpenCode CLI owner":
             expect(spawnCallPosition).to_be_greater_than(spawnBuildPosition)
 
         it "should reject invalid running and kill PIDs before signalling":
+            # @req: REQ-003
+            step("Verify: should reject invalid running and kill PIDs before signalling")
             step("Prepare OpenCode CLI inputs")
             val zeroPid: i64 = 0
             val negativePid: i64 = -9

@@ -1,5 +1,12 @@
 # Comment-cheat vacuity family #2 — ABSENT capabilities (stream Q5, 2026-08-10)
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: doc's own 2026-08-17 re-verification
+already confirms STILL-OPEN -- src/os/kernel/arch/arm64/user_entry.spl still
+carries the comment documenting the missing PID-keyed handoff capability. A
+real OS/kernel concurrency feature, not a contained bugfix. Left OPEN.
+
+
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 

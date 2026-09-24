@@ -1,4 +1,8 @@
 # `parse_markdown_document` accesses named fields on an unlabeled tuple return
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -78,3 +82,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 
 - `test/01_unit/app/office/odf_ooxml_spec.spl` (2 of 10 examples; both trace
   to the same `_md_block` call site)
+

@@ -1,4 +1,8 @@
 # Tier-less `use std.X` imports resolve by registration order, not by tier
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** stage 1 landed — the resolver now emits a default-on, NON-FATAL
 warning when a tier-less `use std.<path>` resolves via the `lib/*/` tier
@@ -132,3 +136,4 @@ directories in the multiplicity map, not just the five tiers.
 
 `src/lib/common/js/**` has been drained (30 files, 52 import lines) as part of
 that work.
+

@@ -1,0 +1,239 @@
+use compiler.driver.action_graph.build_action_v1.{BuildActionPoolV1, BuildActionResultV1, BuildActionStateV1, BuildActionV1, build_action_result_validate_v1, build_action_validate_v1}
+use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1, persisted_graph_validate_v1}
+
+struct BuildPoolBudgetV1:
+    pool: BuildActionPoolV1
+    max_running: i64
+    memory_bytes: i64
+
+struct BuildActionRuntimeV1:
+    action_id: text
+    state: BuildActionStateV1
+    owner_token: text
+    memory_reserved_bytes: i64
+    result: BuildActionResultV1?
+
+struct BuildDiagnosticFrameV1:
+    action_id: text
+    ordinal: i64
+    payload: text
+
+struct BuildActionCoordinatorV1:
+    graph: PersistedBuildGraphV1
+    runtime: [BuildActionRuntimeV1]
+    budgets: [BuildPoolBudgetV1]
+    cancelled: bool
+
+struct BuildActionClaimV1:
+    valid: bool
+    reason: text
+    action: BuildActionV1?
+    owner_token: text
+
+struct BuildActionCommitV1:
+    accepted: bool
+    reason: text
+    restat_unchanged: bool
+
+struct BuildActionClaimTransferV1:
+    coordinator: BuildActionCoordinatorV1
+    claim: BuildActionClaimV1
+
+struct BuildActionCommitTransferV1:
+    coordinator: BuildActionCoordinatorV1
+    commit: BuildActionCommitV1
+
+struct BuildActionCompletionTransferV1:
+    coordinator: BuildActionCoordinatorV1
+    commit: BuildActionCommitV1
+
+fn coordinator_action_v1(graph: PersistedBuildGraphV1, action_id: text) -> BuildActionV1?:
+    for action in graph.actions:
+        if action.action_id == action_id:
+            return Some(action)
+    nil
+
+fn coordinator_runtime_index_v1(coordinator: BuildActionCoordinatorV1, action_id: text) -> i64:
+    var index = 0
+    while index < coordinator.runtime.len():
+        if coordinator.runtime[index].action_id == action_id:
+            return index
+        index = index + 1
+    -1
+
+fn coordinator_reaches_v1(
+    graph: PersistedBuildGraphV1, from_action: text, to_action: text
+) -> bool:
+    var pending = [from_action]
+    var visited: [text] = []
+    while pending.len() > 0:
+        val current = pending[pending.len() - 1]
+        pending.pop()
+        if current == to_action:
+            return true
+        if visited.contains(current):
+            continue
+        visited = visited.push(current)
+        val action = coordinator_action_v1(graph, current)
+        if action != nil:
+            for edge in action!.dynamic_edges:
+                if not visited.contains(edge):
+                    pending = pending.push(edge)
+    false
+
+fn coordinator_same_scc_v1(
+    graph: PersistedBuildGraphV1, left: text, right: text
+) -> bool:
+    coordinator_reaches_v1(graph, left, right) and
+        coordinator_reaches_v1(graph, right, left)
+
+fn coordinator_dependencies_done_v1(coordinator: BuildActionCoordinatorV1, action: BuildActionV1) -> bool:
+    for edge in action.dynamic_edges:
+        if coordinator_same_scc_v1(coordinator.graph, action.action_id, edge):
+            continue
+        val index = coordinator_runtime_index_v1(coordinator, edge)
+        if index < 0 or coordinator.runtime[index].state != BuildActionStateV1.succeeded:
+            return false
+    true
+
+fn coordinator_pool_budget_v1(coordinator: BuildActionCoordinatorV1, pool: BuildActionPoolV1) -> BuildPoolBudgetV1?:
+    for budget in coordinator.budgets:
+        if budget.pool == pool:
+            return Some(budget)
+    nil
+
+fn coordinator_pool_available_v1(coordinator: BuildActionCoordinatorV1, action: BuildActionV1) -> bool:
+    val budget = coordinator_pool_budget_v1(coordinator, action.pool)
+    if budget == nil or budget!.max_running <= 0 or budget!.memory_bytes <= 0:
+        return false
+    var running = 0
+    var reserved = 0
+    for entry in coordinator.runtime:
+        if entry.state != BuildActionStateV1.running:
+            continue
+        val running_action = coordinator_action_v1(coordinator.graph, entry.action_id)
+        if running_action != nil and running_action!.pool == action.pool:
+            running = running + 1
+            reserved = reserved + entry.memory_reserved_bytes
+    running < budget!.max_running and reserved + action.memory_budget_bytes <= budget!.memory_bytes
+
+fn coordinator_new_v1(graph: PersistedBuildGraphV1, budgets: [BuildPoolBudgetV1]) -> BuildActionCoordinatorV1:
+    if persisted_graph_validate_v1(graph) != "ok":
+        panic("ACTION-GRAPH-E-INVALID-GRAPH")
+    var runtime: [BuildActionRuntimeV1] = []
+    for action in graph.actions:
+        runtime = runtime.push(BuildActionRuntimeV1(action.action_id, BuildActionStateV1.pending, "", 0, nil))
+    BuildActionCoordinatorV1(graph, runtime, budgets, false)
+
+fn coordinator_ready_actions_v1(coordinator: BuildActionCoordinatorV1) -> [text]:
+    if coordinator.cancelled:
+        return []
+    var ready: [BuildActionV1] = []
+    for action in coordinator.graph.actions:
+        val index = coordinator_runtime_index_v1(coordinator, action.action_id)
+        if index >= 0 and coordinator.runtime[index].state == BuildActionStateV1.pending and coordinator_dependencies_done_v1(coordinator, action) and coordinator_pool_available_v1(coordinator, action):
+            ready = ready.push(action)
+    var result: [text] = []
+    while ready.len() > 0:
+        var selected = 0
+        var index = 1
+        while index < ready.len():
+            if ready[index].priority > ready[selected].priority or (ready[index].priority == ready[selected].priority and ready[index].action_id < ready[selected].action_id):
+                selected = index
+            index = index + 1
+        result = result.push(ready[selected].action_id)
+        ready.remove(selected)
+    result
+
+fn coordinator_claim_v1(coordinator: BuildActionCoordinatorV1, action_id: text, owner_token: text) -> BuildActionClaimTransferV1:
+    var owned = coordinator
+    if owned.cancelled:
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "cancelled", nil, ""))
+    val action = coordinator_action_v1(owned.graph, action_id)
+    val index = coordinator_runtime_index_v1(owned, action_id)
+    if action == nil or index < 0 or owner_token == "":
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "claim-invalid", nil, ""))
+    if owned.runtime[index].state == BuildActionStateV1.running:
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "single-flight", nil, ""))
+    if owned.runtime[index].state != BuildActionStateV1.pending or not coordinator_dependencies_done_v1(owned, action!) or not coordinator_pool_available_v1(owned, action!):
+        return BuildActionClaimTransferV1(owned, BuildActionClaimV1(false, "not-ready", nil, ""))
+    owned.runtime[index] = BuildActionRuntimeV1(action_id, BuildActionStateV1.running, owner_token, action!.memory_budget_bytes, nil)
+    BuildActionClaimTransferV1(owned, BuildActionClaimV1(true, "ok", action, owner_token))
+
+fn coordinator_commit_v1(coordinator: BuildActionCoordinatorV1, owner_token: text, result: BuildActionResultV1) -> BuildActionCommitTransferV1:
+    var owned = coordinator
+    val index = coordinator_runtime_index_v1(owned, result.action_id)
+    val action = coordinator_action_v1(owned.graph, result.action_id)
+    if index < 0 or action == nil:
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, "action-missing", false))
+    val current = owned.runtime[index]
+    if current.state != BuildActionStateV1.running or current.owner_token != owner_token:
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, "owner-mismatch", false))
+    if owned.cancelled and not result.cancelled:
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, "cancelled-result-required", false))
+    val validity = build_action_result_validate_v1(action!, result)
+    if validity != "ok":
+        return BuildActionCommitTransferV1(owned, BuildActionCommitV1(false, validity, false))
+    val restat_unchanged = result.success and action!.restat_identity != "" and result.restat_identity == action!.restat_identity
+    val next_state = if result.cancelled: BuildActionStateV1.cancelled else: if result.success: BuildActionStateV1.succeeded else: BuildActionStateV1.failed
+    owned.runtime[index] = BuildActionRuntimeV1(result.action_id, next_state, "", 0, Some(result))
+    BuildActionCommitTransferV1(owned, BuildActionCommitV1(true, "ok", restat_unchanged))
+
+fn coordinator_complete_v1(
+    coordinator: BuildActionCoordinatorV1, action_id: text,
+    owner_token: text, success: bool, cancelled: bool,
+    output_identity: text, diagnostics: [text], memory_peak_bytes: i64
+) -> BuildActionCompletionTransferV1:
+    var owned = coordinator
+    val index = coordinator_runtime_index_v1(owned, action_id)
+    val action = coordinator_action_v1(owned.graph, action_id)
+    if index < 0 or action == nil or owner_token == "":
+        return BuildActionCompletionTransferV1(
+            owned, BuildActionCommitV1(false, "claim-invalid", false))
+    if owned.runtime[index].state == BuildActionStateV1.running:
+        if owned.runtime[index].owner_token != owner_token:
+            return BuildActionCompletionTransferV1(
+                owned, BuildActionCommitV1(false, "owner-mismatch", false))
+    else:
+        val claim_transfer = coordinator_claim_v1(owned, action_id, owner_token)
+        owned = claim_transfer.coordinator
+        if not claim_transfer.claim.valid:
+            return BuildActionCompletionTransferV1(
+                owned, BuildActionCommitV1(
+                    false, claim_transfer.claim.reason, false))
+    val commit_transfer = coordinator_commit_v1(
+        owned, owner_token, BuildActionResultV1(
+            action_id, action!.snapshot_revision, success, cancelled,
+            output_identity, action!.restat_identity,
+            diagnostics, memory_peak_bytes))
+    BuildActionCompletionTransferV1(
+        commit_transfer.coordinator, commit_transfer.commit)
+
+fn coordinator_cancel_v1(coordinator: &mut BuildActionCoordinatorV1):
+    coordinator.cancelled = true
+    var index = 0
+    while index < coordinator.runtime.len():
+        if coordinator.runtime[index].state == BuildActionStateV1.pending:
+            coordinator.runtime[index] = BuildActionRuntimeV1(coordinator.runtime[index].action_id, BuildActionStateV1.cancelled, "", 0, nil)
+        index = index + 1
+
+fn coordinator_diagnostics_v1(coordinator: BuildActionCoordinatorV1) -> [BuildDiagnosticFrameV1]:
+    var frames: [BuildDiagnosticFrameV1] = []
+    for action_id in coordinator.graph.actions.map(\action: action.action_id).sorted():
+        val index = coordinator_runtime_index_v1(coordinator, action_id)
+        if index < 0 or coordinator.runtime[index].result == nil:
+            continue
+        var ordinal = 0
+        for payload in coordinator.runtime[index].result!.diagnostic_frames:
+            frames = frames.push(BuildDiagnosticFrameV1(action_id, ordinal, payload))
+            ordinal = ordinal + 1
+    frames
+
+export BuildPoolBudgetV1, BuildActionRuntimeV1, BuildDiagnosticFrameV1
+export BuildActionCoordinatorV1, BuildActionClaimV1, BuildActionCommitV1
+export BuildActionClaimTransferV1, BuildActionCommitTransferV1
+export BuildActionCompletionTransferV1
+export coordinator_new_v1, coordinator_ready_actions_v1
+export coordinator_claim_v1, coordinator_commit_v1, coordinator_cancel_v1
+export coordinator_complete_v1
+export coordinator_diagnostics_v1

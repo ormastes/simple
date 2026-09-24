@@ -1,4 +1,8 @@
 # `rt_host_gpu_queue_emit_payload_text` unregistered in self-hosted runner — payload-carrying host↔GPU queue round-trip aborts
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -69,3 +73,4 @@ phase accepts them, matching the seed's `runtime_symbols.rs`. Then re-enable the
 live payload round-trip assertions (backend-handle 7 echo + `schema=simple-draw-ir-v2`
 + payload-hash) in `host_gpu_queue_roundtrip_spec.spl` and un-regress the three
 specs above.
+

@@ -1,4 +1,9 @@
 # `SymbolTable.get_symbol(SymbolId(id: 0))` returns nil for a validly-registered symbol
+## Closed 2026-09-16 — fixed 2026-07-29; half-landed twin completed 2026-08-10, spec evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed 2026-07-29 (lane SYM0 get-symbol-id-zero-nil)
 **Found:** 2026-07-29 (lane RIS1, `resolve_import_symbols_spec.spl` repair)
@@ -150,3 +155,4 @@ Completed 2026-08-10 in commit `6f66d2a6c9885c70fd8fb0163e445cadd0881e1c`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+

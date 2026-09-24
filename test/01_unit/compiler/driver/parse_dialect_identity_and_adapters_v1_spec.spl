@@ -1,0 +1,253 @@
+"""Computed dialect identity, and the SDN dialect through the seam.
+
+EGL package 4 follow-up. Package 4 shipped the parse-result provider seam with
+grammar/actions/schema/semantic digests as DECLARED labels derived from the
+dialect id, and recorded computing real ones as remaining work. These examples
+pin that the four digests are now computed from the tables a provider actually
+executes, so a provider carrying a mutated table cannot claim another provider's
+dialect, and that the SDN parser reaches the same seam with its own normalized
+projection.
+
+The sosh dialect is NOT exercised: `os.apps.shell.shell_script.StmtKind` is
+shadowed by the frontend's own `StmtKind` under co-compilation, so importing the
+seam and `ScriptEngine` into one spec breaks `ScriptEngine.parse` outright --
+doc/08_tracking/bug/shell_stmtkind_collides_with_frontend_stmtkind_2026-09-12.md
+carries the six-line reproduction.
+
+Corpora: `test/fixtures/parse_result_provider_seam_v1/*.spl` (Simple, frozen by
+package 4) and `test/fixtures/parse_dialect_adapters_v1/*.sdn`.
+"""
+
+# @req REQ-009
+
+use std.spec.{describe, it, assert_true, assert_false, expect}
+
+use compiler.driver.parse_result_provider_seam_v1.{
+    PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+    PARSE_DIALECT_SIMPLE_V1,
+    ParseRequestV1,
+    ParseResultRefusalV1,
+    parse_dialect_tables_simple_v1,
+    parse_result_provider_scalar_v1,
+    parse_result_seam_request_v1,
+    parse_result_normalize_module_v1,
+    parse_result_normalized_output_same_v1
+}
+use compiler.driver.parse_dialect_identity_v1.{
+    DialectTablesV1,
+    parse_dialect_identity_of_v1,
+    parse_dialect_identity_same_v1,
+    parse_dialect_probe_words_v1
+}
+use compiler.driver.parse_dialect_adapters_v1.{
+    PARSE_DIALECT_SDN_V1,
+    parse_dialect_tables_sdn_v1,
+    parse_dialect_normalize_sdn_v1,
+    parse_result_provider_sdn_v1
+}
+use compiler.core.tokens.{keyword_lookup}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val SIMPLE_CORPUS: [text] = ["f01_functions.spl", "f04_traits_consts.spl"]
+val SDN_CORPUS: [text] = ["d01_config.sdn", "d02_table.sdn"]
+
+fn simple_source(name: text) -> text:
+    rt_file_read_text("test/fixtures/parse_result_provider_seam_v1/{name}") ?? ""
+
+fn dialect_source(name: text) -> text:
+    rt_file_read_text("test/fixtures/parse_dialect_adapters_v1/{name}") ?? ""
+
+fn request_for(source: text, path: text, dialect: u32) -> ParseRequestV1:
+    ParseRequestV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+        source_text: source, source_path: path, dialect_id: dialect)
+
+# The mutated table: one keyword classifies to a different kind. Everything else
+# about the provider -- its id, its callable, its claimed dialect identity -- is
+# the real scalar provider's.
+fn mutated_keyword_lookup(name: text) -> i64:
+    if name == "fn":
+        return 0
+    keyword_lookup(name)
+
+fn mutated_simple_tables() -> DialectTablesV1:
+    val base = parse_dialect_tables_simple_v1()
+    DialectTablesV1(dialect_id: base.dialect_id, kind_limit: base.kind_limit,
+        kind_name: base.kind_name, classify: mutated_keyword_lookup,
+        action_bits: base.action_bits, probe_units: base.probe_units,
+        probe_output: base.probe_output)
+
+describe "computed dialect identity":
+    it "computes the same identity for two independently built table values":
+        # @req REQ-009
+        val first = parse_dialect_identity_of_v1(parse_dialect_tables_simple_v1())
+        val second = parse_dialect_identity_of_v1(parse_dialect_tables_simple_v1())
+        assert_true(parse_dialect_identity_same_v1(first, second))
+        # A computed digest is not a placeholder: every component is set.
+        assert_true(first.grammar_digest.w0 != 0u64 or first.grammar_digest.w1 != 0u64)
+        assert_true(first.actions_digest.w0 != 0u64 or first.actions_digest.w1 != 0u64)
+        assert_true(first.schema_digest.w0 != 0u64 or first.schema_digest.w1 != 0u64)
+        assert_true(first.semantic_profile_digest.w0 != 0u64 or
+            first.semantic_profile_digest.w1 != 0u64)
+        # The four components are independent material, not one digest copied.
+        assert_false(first.grammar_digest.w0 == first.actions_digest.w0)
+        assert_false(first.schema_digest.w0 == first.semantic_profile_digest.w0)
+
+    it "gives each dialect a different identity":
+        # @req REQ-009
+        val simple = parse_dialect_identity_of_v1(parse_dialect_tables_simple_v1())
+        val sdn = parse_dialect_identity_of_v1(parse_dialect_tables_sdn_v1())
+        assert_false(parse_dialect_identity_same_v1(simple, sdn))
+        assert_false(simple.grammar_digest.w0 == sdn.grammar_digest.w0)
+        assert_false(simple.actions_digest.w0 == sdn.actions_digest.w0)
+        expect(sdn.dialect_id).to_equal(PARSE_DIALECT_SDN_V1)
+
+    it "moves the grammar digest when one table entry changes":
+        # @req REQ-009
+        val canonical = parse_dialect_identity_of_v1(parse_dialect_tables_simple_v1())
+        val mutated = parse_dialect_identity_of_v1(mutated_simple_tables())
+        assert_false(parse_dialect_identity_same_v1(canonical, mutated))
+        assert_false(canonical.grammar_digest.w0 == mutated.grammar_digest.w0)
+        # Only the grammar table was touched, so the other three components must
+        # NOT move -- otherwise the split into four components is decorative.
+        expect(mutated.actions_digest.w0).to_equal(canonical.actions_digest.w0)
+        expect(mutated.schema_digest.w0).to_equal(canonical.schema_digest.w0)
+        expect(mutated.semantic_profile_digest.w0).to_equal(
+            canonical.semantic_profile_digest.w0)
+
+    it "refuses a provider whose tables no longer produce its claimed dialect":
+        # @req REQ-009
+        var provider = parse_result_provider_scalar_v1()
+        provider.tables = mutated_simple_tables()
+        val outcome = parse_result_seam_request_v1(provider,
+            request_for(simple_source("f01_functions.spl"), "f01_functions.spl",
+                PARSE_DIALECT_SIMPLE_V1))
+        match outcome:
+            case Ok(result):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.ProviderSchemaMismatch)
+
+    it "stamps the computed identity onto every admitted seam result":
+        # @req REQ-009
+        val provider = parse_result_provider_scalar_v1()
+        val canonical = parse_dialect_identity_of_v1(parse_dialect_tables_simple_v1())
+        val outcome = parse_result_seam_request_v1(provider,
+            request_for(simple_source("f01_functions.spl"), "f01_functions.spl",
+                PARSE_DIALECT_SIMPLE_V1))
+        match outcome:
+            case Ok(result):
+                expect(result.grammar_digest.w0).to_equal(canonical.grammar_digest.w0)
+                expect(result.actions_digest.w0).to_equal(canonical.actions_digest.w0)
+                expect(result.schema_digest.w0).to_equal(canonical.schema_digest.w0)
+                expect(result.semantic_profile_digest.w0).to_equal(
+                    canonical.semantic_profile_digest.w0)
+            case Err(refusal):
+                assert_true(false)
+
+    it "derives probe words from the source rather than a declared list":
+        # @req REQ-009
+        val words = parse_dialect_probe_words_v1("fn probe(a: i64) -> i64:\n    a\n")
+        assert_true(words.len() >= 5)
+        expect(words[0]).to_equal("fn")
+        expect(words[1]).to_equal("probe")
+
+describe "the SDN dialect through the seam":
+    it "is byte-identical for the same source through the seam twice":
+        # @req REQ-009
+        val sdn = parse_result_provider_sdn_v1()
+        for name in SDN_CORPUS:
+            val first = parse_result_seam_request_v1(sdn,
+                request_for(dialect_source(name), name, PARSE_DIALECT_SDN_V1))
+            val second = parse_result_seam_request_v1(sdn,
+                request_for(dialect_source(name), name, PARSE_DIALECT_SDN_V1))
+            match first:
+                case Ok(a):
+                    match second:
+                        case Ok(b):
+                            assert_true(parse_result_normalized_output_same_v1(
+                                a.output, b.output))
+                            expect(b.source_identity.w0).to_equal(a.source_identity.w0)
+                            expect(b.token_count).to_equal(a.token_count)
+                            assert_true(a.token_count > 0u64)
+                        case Err(e):
+                            assert_true(false)
+                case Err(e):
+                    assert_true(false)
+
+    it "discriminates distinct sources instead of always agreeing":
+        # @req REQ-009
+        val sdn = parse_result_provider_sdn_v1()
+        val a = parse_result_seam_request_v1(sdn,
+            request_for(dialect_source("d01_config.sdn"), "d01_config.sdn",
+                PARSE_DIALECT_SDN_V1))
+        val b = parse_result_seam_request_v1(sdn,
+            request_for(dialect_source("d02_table.sdn"), "d02_table.sdn",
+                PARSE_DIALECT_SDN_V1))
+        match a:
+            case Ok(ra):
+                match b:
+                    case Ok(rb):
+                        assert_false(parse_result_normalized_output_same_v1(
+                            ra.output, rb.output))
+                    case Err(e):
+                        assert_true(false)
+            case Err(e):
+                assert_true(false)
+
+    it "matches the direct dialect parser after normalization":
+        # @req REQ-009
+        val sdn = parse_result_provider_sdn_v1()
+        for name in SDN_CORPUS:
+            val direct = parse_dialect_normalize_sdn_v1(dialect_source(name), name)
+            match parse_result_seam_request_v1(sdn,
+                request_for(dialect_source(name), name, PARSE_DIALECT_SDN_V1)):
+                case Ok(result):
+                    assert_true(parse_result_normalized_output_same_v1(
+                        result.output, direct))
+                case Err(e):
+                    assert_true(false)
+
+    it "refuses a Simple-dialect request to the SDN provider":
+        # @req REQ-009
+        val simple_src = simple_source("f01_functions.spl")
+        match parse_result_seam_request_v1(parse_result_provider_sdn_v1(),
+            request_for(simple_src, "f01_functions.spl", PARSE_DIALECT_SIMPLE_V1)):
+            case Ok(result):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.UnsupportedDialect)
+        # ... and the Simple provider refuses an SDN request, symmetrically.
+        match parse_result_seam_request_v1(parse_result_provider_scalar_v1(),
+            request_for(dialect_source("d01_config.sdn"), "d01_config.sdn",
+                PARSE_DIALECT_SDN_V1)):
+            case Ok(result):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.UnsupportedDialect)
+
+describe "frontend public-entry compatibility":
+    it "agrees with the frontend's public parse entry for the Simple dialect":
+        # @req REQ-009
+        # `frontend.spl` is owned by a concurrent lane and is NOT rewired here.
+        # This example calls its public entry as any consumer would and checks
+        # the seam result is the same after normalization, so the one-line hook
+        # recorded in the package 4 receipt is a behaviour-preserving edit.
+        val provider = parse_result_provider_scalar_v1()
+        val log = Logger(level: 0)
+        for name in SIMPLE_CORPUS:
+            val source = simple_source(name)
+            val module = parse_full_frontend(source, name, "seam.compat", log)
+            val diagnostics = if parser_has_errors(): parser_get_errors() else: []
+            val direct = parse_result_normalize_module_v1(
+                module, source, name, diagnostics)
+            match parse_result_seam_request_v1(provider,
+                request_for(source, name, PARSE_DIALECT_SIMPLE_V1)):
+                case Ok(result):
+                    assert_true(parse_result_normalized_output_same_v1(
+                        result.output, direct))
+                case Err(e):
+                    assert_true(false)

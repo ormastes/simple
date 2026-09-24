@@ -1,4 +1,8 @@
 # Transfer object-handle capability registry blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## 2026-08-12 owner-scoped registry slice
 
@@ -27,3 +31,4 @@ prevent replay. This patch intentionally does not invent a global registry.
 Until that owner-side validation exists, process/remote object handles remain
 admission-safe but not fully lifecycle-verified; inline and encoded-copy
 payloads remain available.
+

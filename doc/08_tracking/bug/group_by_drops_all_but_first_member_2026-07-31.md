@@ -1,4 +1,9 @@
 # `pure.collections.group_by` silently drops every member after the first
+## Closed 2026-09-16 — Status fixed; rewritten with parallel arrays, spec 10 examples 0 failures
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-31
 **Component:** `src/lib/gc_async_mut/pure/collections.spl:73` (`group_by`)
@@ -96,3 +101,4 @@ today. Audit before the fix lands.
 - `.claude/memory/feedback_arrays_value_types.md` — arrays are passed by copy
 - `doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md`
   §8.3 (grouped hash join) and Wave 2 STD-UNIQ in the parallel plan
+

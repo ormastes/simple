@@ -25,11 +25,13 @@ the observed process alone -- --pid is typically a wrapper shell that sleeps
 while its child builds. Linux uses /proc and FreeBSD/macOS use ps; CPU is
 instantaneous cumulative-time delta between samples, never a lifetime average.
 
-status is `alive`, `alive-no-progress`, `exited`, or `stale`.
+status is `alive`, `alive-no-progress`, `unknown`, `exited`, or `stale`.
 `alive-no-progress` is REPORTED, never acted on: it means the tree burned
 <BOOTSTRAP_WATCH_STALL_CPU_PCT (default 3) percent CPU with no main-log growth
 and no build_progress change for BOOTSTRAP_WATCH_STALL_SAMPLES (default 4)
 consecutive samples. This watcher never kills anything.
+`unknown` means the watched PID was live but the process snapshot could not
+observe it. It is not evidence that the build is idle.
 EOF
 }
 
@@ -82,10 +84,63 @@ stall_cpu_pct=${BOOTSTRAP_WATCH_STALL_CPU_PCT:-3}
 stall_samples=${BOOTSTRAP_WATCH_STALL_SAMPLES:-4}
 case "$stall_samples" in ''|*[!0-9]*|0) stall_samples=4 ;; esac
 
-process_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
-if [ -n "$expected_start" ] && [ "$process_start" != "$expected_start" ]; then
+watch_platform=$(uname -s)
+native_observer=
+if [ "$watch_platform" = Darwin ]; then
+  native_observer=${SIMPLE_BOOTSTRAP_PROCESS_OBSERVER:-}
+  native_observer_sha=${SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256:-}
+  if [ -z "$native_observer" ]; then
+    # Standalone progress-watch also works outside the RSS guard. Compile once
+    # into a private directory, with a bounded compiler and no shared cache.
+    observer_dir=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-progress-observer.XXXXXXXX")
+    trap 'rm -f "$observer_dir/observer"; rmdir "$observer_dir"' EXIT
+    native_observer=$observer_dir/observer
+    observer_source=$(dirname -- "$0")/../resource/macos-process-observer.c
+    perl -e 'alarm 30; exec @ARGV; exit 127' /usr/bin/clang -O2 "$observer_source" -o "$native_observer"
+    chmod 0500 "$native_observer"
+    native_observer_sha=$(shasum -a 256 "$native_observer" | awk '{print $1}')
+  fi
+fi
+
+native_observe() {
+  # Refuse replacement or privilege-bearing executables BEFORE exec. The
+  # watchdog supplies its admitted helper/hash; standalone uses its private one.
+  perl -MDigest::SHA -MFcntl=O_RDONLY,O_NOFOLLOW -e '
+    alarm 5;
+    my ($path, $sha, @args) = @ARGV;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or exit 89;
+    my @st = stat($fh); my @entry = lstat($path);
+    -f $fh && @entry && !-l $path && $st[0] == $entry[0] && $st[1] == $entry[1] &&
+      !($st[2] & 06000) && Digest::SHA->new(256)->addfile($fh)->hexdigest eq $sha or exit 89;
+    exec {$path} $path, @args; exit 127;
+  ' "$native_observer" "$native_observer_sha" "$@"
+}
+
+read_process_identity() {
+  if [ "$watch_platform" = Darwin ]; then
+    identity_row=$(native_observe --identity "$watch_pid") || return 1
+    set -- $identity_row
+    current_start=${1:-}
+    elapsed_seconds=${2:-unknown}
+    current_start_text=$(printf '%s\n' "$identity_row" | cut -d ' ' -f 3-)
+    process_elapsed=$(awk -v s="$elapsed_seconds" 'BEGIN {
+      if (s == "unknown") {print s; exit}
+      d=int(s/86400); h=int(s/3600)%24; m=int(s/60)%60;
+      if(d) printf "%d-%02d:%02d:%02d\n",d,h,m,s%60;
+      else if(h) printf "%02d:%02d:%02d\n",h,m,s%60;
+      else printf "%02d:%02d\n",m,s%60;
+    }')
+  else
+    current_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
+    current_start_text=$current_start
+    process_elapsed=$(ps -o etime= -p "$watch_pid" 2>/dev/null | awk 'NF {print $1; exit}')
+  fi
+}
+read_process_identity || { echo 'error: progress identity unavailable' >&2; exit 89; }
+process_start=$current_start
+if [ -n "$expected_start" ] && [ "$current_start_text" != "$expected_start" ]; then
   printf 'event=sample status=stale pid=%s expected_start=%s actual_start=%s\n' \
-    "$watch_pid" "$expected_start" "${process_start:-absent}" >>"$progress_log"
+    "$watch_pid" "$expected_start" "${current_start_text:-absent}" >>"$progress_log"
   exit 3
 fi
 
@@ -121,6 +176,18 @@ cpu_state_tmp="${cpu_state_file}.tmp"
 process_tree_metrics_proc() {
   metrics_root=$1
   metrics_exclude=$2
+  # Darwin/BSD and the injected-snapshot regressions have no usable procfs
+  # sample. Keep main's fail-closed routing: an explicit snapshot command is
+  # dependency injection for the bounded process-table regressions and must
+  # select the process-table backend even on a Linux host with procfs.
+  if [ "$watch_platform" = Darwin ] || [ -n "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+    process_tree_metrics_ps_table "$metrics_root" "$metrics_exclude"
+    return
+  fi
+  if [ ! -r "/proc/$metrics_root/stat" ]; then
+    process_tree_metrics_ps "$metrics_root" "$metrics_exclude"
+    return
+  fi
   : >"$cpu_state_tmp"
   proc_metrics=$(awk -v root="$metrics_root" -v exclude="$metrics_exclude" \
       -v state="$cpu_state_file" -v next_state="$cpu_state_tmp" \
@@ -170,6 +237,13 @@ process_tree_metrics_proc() {
           if (excluded[parent[pid]] && !excluded[pid]) { excluded[pid] = 1; changed = 1 }
         }
       }
+
+      # The caller checked kill -0 immediately before sampling. If its live
+      # root is absent from this snapshot, metrics are incomplete even when no
+      # individual /proc read happened to fail. Without this accounting a
+      # failed /proc enumeration yields nproc=0, cpu=0.0 and a fabricated
+      # alive-no-progress verdict for a still-running worker.
+      if (!(root in parent)) misses++
 
       prev_when = ""
       while ((getline line < state) > 0) {
@@ -372,17 +446,144 @@ process_tree_metrics_ps() {
 process_tree_metrics() {
   metrics_root=$1
   metrics_exclude=$2
+  # Two portable backends survive the merge because they answer two different
+  # process tables. `process_tree_metrics_ps_table` consumes the injected
+  # `BOOTSTRAP_WATCH_PS_COMMAND` snapshot (and macOS `native_observe`);
+  # `process_tree_metrics_ps` reads FreeBSD/BSD `ps -ww -axo` directly and is
+  # the one that publishes the `tree_cpu_basis` field. Route the injected and
+  # Darwin cases first so a DI regression can never fall through to a real
+  # process table.
   case "$process_source" in
     proc) process_tree_metrics_proc "$metrics_root" "$metrics_exclude" ;;
-    ps) process_tree_metrics_ps "$metrics_root" "$metrics_exclude" ;;
+    ps)
+      if [ "$watch_platform" = Darwin ] || [ -n "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+        process_tree_metrics_ps_table "$metrics_root" "$metrics_exclude"
+      else
+        process_tree_metrics_ps "$metrics_root" "$metrics_exclude"
+      fi
+      ;;
     auto)
-      if [ -r "/proc/${metrics_root}/stat" ]; then
+      if [ "$watch_platform" = Darwin ] || [ -n "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+        process_tree_metrics_ps_table "$metrics_root" "$metrics_exclude"
+      elif [ -r "/proc/${metrics_root}/stat" ]; then
         process_tree_metrics_proc "$metrics_root" "$metrics_exclude"
       else
         process_tree_metrics_ps "$metrics_root" "$metrics_exclude"
       fi
       ;;
   esac
+}
+
+# Darwin and the BSDs have no procfs by default.  Keep the same output contract
+# using one process-table snapshot.  `time` is cumulative CPU time; differencing
+# it against the prior sample gives the same instantaneous tree CPU statistic as
+# the Linux tick backend.  RSS is already reported by ps in KiB on these hosts.
+process_table_snapshot() {
+  if [ "$watch_platform" = Darwin ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+    # Buffer until success: a failed/partial native scan must never look like
+    # a healthy, smaller tree to the progress/stall classifier.
+    native_rows=$(native_observe --progress "$metrics_root") || return 1
+    printf '%s\n' "$native_rows"
+  else
+    snapshot_ps=${BOOTSTRAP_WATCH_PS_COMMAND:-ps}
+    BOOTSTRAP_WATCH_METRICS_ROOT=$metrics_root \
+      BOOTSTRAP_WATCH_METRICS_EXCLUDE=$metrics_exclude \
+      "$snapshot_ps" -axo pid=,ppid=,pgid=,rss=,lstart=,time=,comm=
+  fi
+}
+
+process_tree_metrics_ps_table() {
+  metrics_root=$1
+  metrics_exclude=$2
+  process_table_snapshot 2>/dev/null | awk \
+      -v root="$metrics_root" -v exclude="$metrics_exclude" \
+      -v state="$cpu_state_file" -v now="$(date +%s)" '
+    function cpu_seconds(value,   day_parts, clock, n, a, days) {
+      days = 0
+      clock = value
+      if (index(value, "-") > 0) {
+        split(value, day_parts, "-")
+        days = day_parts[1] + 0
+        clock = day_parts[2]
+      }
+      n = split(clock, a, ":")
+      if (n == 3) return days * 86400 + a[1] * 3600 + a[2] * 60 + a[3]
+      if (n == 2) return days * 86400 + a[1] * 60 + a[2]
+      return days * 86400 + a[1]
+    }
+    {
+      pid = $1
+      if (pid !~ /^[0-9]+$/ || NF < 11) next
+      pids[++n] = pid
+      parent[pid] = $2
+      pgrp[pid] = $3
+      rss[pid] = $4 + 0
+      # lstart is five fixed fields on Darwin/BSD. It is the process birth
+      # identity: a recycled PID must never inherit the prior process CPU base.
+      birth[pid] = $5 "_" $6 "_" $7 "_" $8 "_" $9
+      ticks[pid] = cpu_seconds($10)
+      name = $11
+      sub(/^.*\//, "", name)
+      gsub(/[[:space:]]+/, "_", name)
+      comm[pid] = (name == "" ? "unknown" : name)
+    }
+    END {
+      # An empty/partial ps snapshot is unavailable evidence, not a zero-sized
+      # process tree. Do not touch the state file: the next healthy sample must
+      # establish a fresh baseline rather than delta against a failed scan.
+      if (!(root in parent)) {
+        printf "unknown unknown unknown none unknown none unknown unknown 1 unknown\n"
+        exit
+      }
+      included[root] = 1
+      excluded[exclude] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= n; i++) {
+          pid = pids[i]
+          if (included[parent[pid]] && !included[pid]) { included[pid] = 1; changed = 1 }
+          if (excluded[parent[pid]] && !excluded[pid]) { excluded[pid] = 1; changed = 1 }
+        }
+      }
+
+      prev_when = ""
+      while ((getline line < state) > 0) {
+        split(line, s, " ")
+        if (s[1] == "when") { prev_when = s[2]; continue }
+        prev_birth[s[1]] = s[2]; prev_ticks[s[1]] = s[3]
+      }
+      close(state)
+      printf "when %s\n", now > state
+
+      root_pg = (root in pgrp) ? pgrp[root] : ""
+      total_rss = 0; nproc = 0; cpu_delta = 0; root_rss = 0
+      pg_rss = 0; pg_nproc = 0
+      top_pid = "none"; top_rss = 0; top_comm = "none"
+      for (i = 1; i <= n; i++) {
+        pid = pids[i]
+        if (!excluded[pid] && root_pg != "" && pgrp[pid] == root_pg) {
+          pg_nproc++; pg_rss += rss[pid]
+        }
+        if (!included[pid] || excluded[pid]) continue
+        nproc++; total_rss += rss[pid]
+        if (pid == root) root_rss = rss[pid]
+        if (rss[pid] > top_rss) { top_rss = rss[pid]; top_pid = pid; top_comm = comm[pid] }
+        printf "%s %s %.3f\n", pid, birth[pid], ticks[pid] > state
+        if (pid in prev_ticks && prev_birth[pid] == birth[pid]) {
+          d = ticks[pid] - prev_ticks[pid]
+          if (d > 0) cpu_delta += d
+        } else {
+          cpu_delta += ticks[pid]
+        }
+      }
+      close(state)
+      if (prev_when == "" || now - prev_when < 1) cpu = "unknown"
+      else cpu = sprintf("%.1f", cpu_delta * 100.0 / (now - prev_when))
+      printf "%s %d %d %s %d %s %d %d %d %d\n", cpu, total_rss, nproc, \
+        top_pid, top_rss, top_comm, pg_rss, pg_nproc, 0, root_rss
+    }
+  '
 }
 
 load_progress_event() {
@@ -475,7 +676,7 @@ while :; do
     exit 0
   fi
 
-  current_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
+  read_process_identity || { current_start=; process_elapsed=unknown; }
   if [ -n "$process_start" ] && [ "$current_start" != "$process_start" ]; then
     printf 'event=sample timestamp=%s status=stale pid=%s elapsed_s=%s milestone=%s\n' \
       "$now" "$watch_pid" "$((now - started_at))" "$milestone" >>"$progress_log"
@@ -483,9 +684,6 @@ while :; do
     exit 3
   fi
 
-  metrics=$(ps -o etime= -p "$watch_pid" 2>/dev/null | awk 'NF {print $1; exit}')
-  set -- $metrics
-  process_elapsed=${1:-unknown}
   # rss_kb is the ROOT process only, and for a wrapper shell that is ~3MB of
   # sleeping shell. Kept for continuity, but it is NOT the build's footprint --
   # tree_rss_kb is. Do not read rss_kb as "how big is the build".
@@ -540,7 +738,15 @@ while :; do
   prev_log_bytes=$log_bytes
   prev_progress_sig=$progress_sig
   status=alive
-  [ "$stall_streak" -lt "$stall_samples" ] || status=alive-no-progress
+  # A live watched PID with no observed process tree is a sampling failure,
+  # not an idle build. Keep the counters for diagnosis but do not advance to a
+  # stall verdict that invites somebody to kill healthy work.
+  if [ "$tree_processes" = "0" ]; then
+    status=unknown
+    stall_streak=0
+  elif [ "$stall_streak" -ge "$stall_samples" ]; then
+    status=alive-no-progress
+  fi
 
   printf 'event=sample timestamp=%s status=%s pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s tree_cpu_pct=%s tree_cpu_basis=%s tree_rss_kb=%s tree_processes=%s top_pid=%s top_rss_kb=%s top_comm=%s tree_rss_pgroup_kb=%s tree_pgroup_processes=%s tree_scan_misses=%s stall_streak=%s milestone=%s main_log_bytes=%s phase=%s unit_kind=%s done=%s total=%s remaining=%s tasks_done=%s tasks_total=%s tasks_remaining=%s failed=%s cached=%s current=%s terminal=%s\n' \
     "$now" "$status" "$watch_pid" "$((now - started_at))" "$process_elapsed" \

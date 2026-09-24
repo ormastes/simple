@@ -1,0 +1,296 @@
+#!/bin/sh
+# Microsoft Defender exclusions for Simple's own build and deploy outputs.
+#
+# Why: Defender real-time protection scans every file a compiler writes and
+# every binary it launches. A bootstrap writes tens of thousands of objects,
+# and each freshly built, unsigned simple.exe is scanned again on every run.
+# That scanning is a large, repeatable slowdown on Windows.
+#
+# Scope is deliberately NARROW: only generated build OUTPUT — this checkout's
+# build/, src/compiler_rust/target/, bin/release/, the worktree storage root
+# (.simple/storage: bootstrap stage compilers, native caches, tmp, test,
+# evidence), and the compiler cache subtree of the user storage root
+# (<user storage>/cache/compiler) — plus the bootstrap stage compilers and
+# deployed simple*.exe as PROCESSES. The source tree is NOT excluded, and this
+# must never be widened to a drive root, a whole user profile, or a download
+# directory; the one user-level entry is a single named cache subdirectory.
+#
+# Security trade-off, stated rather than hidden: a file under an excluded
+# path is not scanned, so anything dropped there is not scanned either. That
+# is why the list is limited to output the build recreates from source.
+#
+# Distribution note: this is for a DEVELOPER machine that builds Simple. An
+# end-user installer should not silently add antivirus exclusions — that is
+# a behaviour malware uses, and Defender may flag the installer for it. For
+# end users the fix is Authenticode-signing simple.exe. If an installer does
+# call this, it must ask the user first and offer `remove`.
+#
+# Needs Administrator. When not elevated, the Defender step is relaunched ONCE
+# through UAC (Start-Process -Verb RunAs); nothing changes without consent.
+#
+# Usage:
+#   sh scripts/setup/windows-defender-exclusions.shs list     # show the plan, change nothing
+#   sh scripts/setup/windows-defender-exclusions.shs add      # add, then verify
+#   sh scripts/setup/windows-defender-exclusions.shs remove   # remove exactly these, then verify
+#
+# Verdict (last stdout line): PASS — <n> exclusion(s) verified / FAIL — ... (exit 1)
+# / ERROR — nothing was checked (exit 2).
+#
+# Cost: 2-3 powershell.exe starts (~0.5 s each), one-time setup, not on any
+# build or push path.
+
+set -eu
+
+usage() {
+    echo "usage: sh $0 {list|add|remove} [--dev-tools]" >&2
+    exit 2
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+action=$1
+dev_tools=0
+if [ "$#" -eq 2 ]; then
+    [ "$2" = --dev-tools ] || usage
+    dev_tools=1
+fi
+case "$action" in
+    list|add|remove) ;;
+    *) usage ;;
+esac
+
+fail_error() {
+    echo "windows-defender-exclusions: $1" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) fail_error "not a Windows host; Defender exclusions only apply on Windows" ;;
+esac
+command -v powershell.exe >/dev/null 2>&1 ||
+    fail_error "powershell.exe not found; it ships with Windows — check that System32\\WindowsPowerShell\\v1.0 is on PATH"
+command -v cygpath >/dev/null 2>&1 ||
+    fail_error "cygpath not found; run this from Git Bash or MSYS2"
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+
+# Single-quote a value for PowerShell (a literal ' is doubled).
+ps_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+# Resolve the storage roots the build ACTUALLY writes to, rather than guessing
+# directories. Bootstrap stages 1-3 put their compilers, native caches, homes
+# and temp dirs under the worktree storage root (build/, tmp/, test/, evidence/
+# per scripts/bootstrap/lib/centralized-storage.shs); the compiler bootstrap and
+# native-build caches live under the user storage root.
+STORAGE_ROOTS_REPO_ROOT=$repo_root
+. "$repo_root/scripts/lib/storage-roots.shs" ||
+    fail_error "cannot load scripts/lib/storage-roots.shs"
+storage_roots_init >/dev/null 2>&1 ||
+    fail_error "storage roots unavailable; cannot tell where the build writes"
+bootstrap_root="$SIMPLE_WORKTREE_STORAGE_ROOT/build/bootstrap"
+platform="$(uname -m 2>/dev/null || echo x86_64)-pc-windows-msvc"
+
+# Exclusion set: generated output only. Paths are included even when absent,
+# so a fresh clone's first bootstrap is already fast.
+ps_paths=""
+path_count=0
+for abs in \
+    "$repo_root/build" \
+    "$SIMPLE_WORKTREE_STORAGE_ROOT" \
+    "$SIMPLE_USER_STORAGE_ROOT/cache/compiler" \
+    "$repo_root/src/compiler_rust/target" \
+    "$repo_root/bin/release"; do
+    win_path=$(cygpath -w "$abs")
+    ps_paths="${ps_paths:+$ps_paths,}$(ps_quote "$win_path")"
+    path_count=$((path_count + 1))
+    [ "$action" = list ] && echo "path     $win_path"
+done
+
+# --dev-tools: also exclude the files these developer tools OPEN. Opt-in, never
+# the default, because it is a real trade-off: git clone, gh release download,
+# cargo fetch and the AI agents all write content fetched from the network, and
+# that content is then not scanned as they write it.
+#
+# The list is evidence-based, not guessed. File READERS are what matter — a
+# process exclusion only skips scanning files the process opens — so it holds
+# the tools that open file contents heavily. Call-site counts across scripts/
+# (2026-09-24): grep 10,780, sh 4,672, sed 3,682, awk 3,401, cat 2,487, git
+# 2,099, tail 1,959, sha256sum 1,146, clang 301, cargo 234, jj 175. Defender's
+# own profiler caught grep.exe spending 27 s of every 30 s scanning .spl files.
+# Tools that rarely open file contents (rm, mkdir, dirname, date, kill) are
+# left out: excluding them buys nothing. The general-purpose language runtimes
+# node and python ARE included, at the owner's explicit request (2026-09-24),
+# with the risk stated: interpreters are where script malware runs, so this
+# is a broader hole than excluding grep. perl is not included.
+#
+# Each tool is resolved on PATH, and shims are followed to the binary that does
+# the work: scoop shims (jj), rustup proxies (cargo, rustc), and the native
+# codex.exe inside its npm package.
+# Missing tools are skipped. Source the toolchain env first (e.g.
+# scripts/setup/windows-msvc-bootstrap-env.shs) so the toolchain the build
+# really uses is on PATH. Cost measured ~10 s, mostly `npm root -g` starting
+# Node; one-time setup, not on any build or push path.
+dev_tool_paths() {
+    for t in claude codex kimi gemini \
+        git gh jj \
+        clang clang-cl clang++ lld-link ld.lld llvm-ar llvm-lib llvm-nm llvm-objcopy \
+        cargo rustc rustup cmake ninja make \
+        node python \
+        sh bash grep sed awk gawk cat head tail sort cut tr wc xargs find tee cmp diff sha256sum; do
+        # Every match on PATH, not just the first: several LLVM installs can
+        # coexist, and the toolchain a build actually uses may not be first.
+        which -a "$t" 2>/dev/null | while IFS= read -r p; do
+            case "$p" in *.exe) ;; *) p="$p.exe" ;; esac
+            # Only real executables are processes; a script shim is not.
+            [ -f "$p" ] && printf '%s\n' "$p"
+            shim="${p%.exe}.shim"
+            [ -f "$shim" ] &&
+                sed -n 's/^path *= *"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$shim" |
+                head -n 1 | while IFS= read -r real; do cygpath -u "$real"; done
+            # A missing .shim leaves the && list returning 1 as the loop body's
+            # last status; under `set -e` that would abandon the resolver.
+            :
+        done
+    done
+    # The bootstrap reaches its LLVM through these variables, not PATH, so the
+    # toolchain it really runs is invisible to `which`. Resolve them directly.
+    for llvm_root in "${SIMPLE_LLVM_WIN_ROOT_23:-}" "${LLVM_SYS_231_PREFIX:-}"; do
+        [ -n "$llvm_root" ] || continue
+        llvm_bin="$(cygpath -u "$llvm_root")/bin"
+        for t in clang clang-cl clang++ lld-link ld.lld llvm-ar llvm-lib llvm-nm llvm-objcopy; do
+            [ -f "$llvm_bin/$t.exe" ] && printf '%s\n' "$llvm_bin/$t.exe"
+        done
+    done
+    if command -v rustup >/dev/null 2>&1; then
+        for t in cargo rustc; do
+            rustup which "$t" 2>/dev/null | tr -d '\r' |
+                while IFS= read -r real; do cygpath -u "$real"; done
+        done
+    fi
+    if command -v npm >/dev/null 2>&1; then
+        npm_root=$(npm root -g 2>/dev/null | tr -d '\r') &&
+            [ -d "$(cygpath -u "$npm_root")/@openai/codex" ] &&
+            find "$(cygpath -u "$npm_root")/@openai/codex" -maxdepth 8 -iname 'codex*.exe' 2>/dev/null
+    fi
+    return 0
+}
+
+# Process exclusions cover the files a compiler OPENS (sources it reads), which
+# path exclusions do not. Stage 2/3 compilers and the stage-2 seed are listed
+# at their expected paths even before they exist, because they are created
+# mid-bootstrap; deployed simple*.exe binaries are listed when present.
+# One bounded `find`, ~1 s; not on any build or push path.
+proc_list=$(
+    {
+        printf '%s\n' \
+            "$bootstrap_root/stage2/$platform/simple.exe" \
+            "$bootstrap_root/stage3/$platform/simple.exe" \
+            "$bootstrap_root/stage3/$platform/stage2-runtime-authority/simple.exe"
+        for exe in "$repo_root"/bin/release/*/simple*.exe; do
+            [ -f "$exe" ] && printf '%s\n' "$exe"
+        done
+        [ -d "$bootstrap_root" ] &&
+            find "$bootstrap_root" -maxdepth 5 -name 'simple*.exe' 2>/dev/null
+        [ "$dev_tools" -eq 1 ] && dev_tool_paths
+    } | sort -u
+)
+ps_procs=""
+proc_count=0
+while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
+    win_exe=$(cygpath -w "$exe")
+    # /bin and /usr/bin name the same file under MSYS; de-duplicate on the
+    # Windows path, which is what Defender stores.
+    case ",$ps_procs," in *",$(ps_quote "$win_exe"),"*) continue ;; esac
+    ps_procs="${ps_procs:+$ps_procs,}$(ps_quote "$win_exe")"
+    proc_count=$((proc_count + 1))
+    [ "$action" = list ] && echo "process  $win_exe"
+done <<EOF
+$proc_list
+EOF
+
+if [ "$action" = list ]; then
+    echo "PASS — $((path_count + proc_count)) exclusion(s) planned, nothing changed"
+    exit 0
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+ps1="$tmp/defender.ps1"
+result="$tmp/result.txt"
+ps1_w=$(cygpath -w "$ps1")
+result_w=$(cygpath -w "$result")
+
+if [ "$action" = add ]; then
+    ps_verb=Add-MpPreference
+    ps_want=present
+else
+    ps_verb=Remove-MpPreference
+    ps_want=absent
+fi
+
+# The elevated child cannot hand stdout back through UAC, so it writes its
+# verification to a result file that this script reads afterwards.
+{
+    echo "\$ErrorActionPreference = 'Stop'"
+    echo "\$paths = @($ps_paths)"
+    echo "\$procs = @($ps_procs)"
+    echo "\$out = @()"
+    echo "try {"
+    echo "    $ps_verb -ExclusionPath \$paths"
+    echo "    if (\$procs.Count -gt 0) { $ps_verb -ExclusionProcess \$procs }"
+    echo "    \$pref = Get-MpPreference"
+    echo "    foreach (\$x in \$paths) { \$state = if (\$pref.ExclusionPath -contains \$x) { 'present' } else { 'absent' }; \$out += \"path \$state \$x\" }"
+    echo "    foreach (\$x in \$procs) { \$state = if (\$pref.ExclusionProcess -contains \$x) { 'present' } else { 'absent' }; \$out += \"process \$state \$x\" }"
+    echo "} catch {"
+    echo "    \$out += \"error \$(\$_.Exception.Message)\""
+    echo "}"
+    echo "\$out | Set-Content -Encoding ascii -Path $(ps_quote "$result_w")"
+} >"$ps1"
+
+elevated=$(powershell.exe -NoProfile -Command \
+    "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)" \
+    2>/dev/null | tr -d '\r')
+
+rc=0
+if [ "$elevated" = True ]; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ps1_w" || rc=$?
+else
+    echo "windows-defender-exclusions: not elevated; requesting Administrator via UAC (one prompt)..." >&2
+    powershell.exe -NoProfile -Command \
+        "try { \$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$(ps_quote "$ps1_w"); exit \$p.ExitCode } catch { Write-Output ('UAC: ' + \$_.Exception.Message); exit 3 }" \
+        || rc=$?
+fi
+
+if [ ! -s "$result" ]; then
+    if [ "$rc" -eq 3 ]; then
+        echo "windows-defender-exclusions: UAC elevation was declined or failed; nothing was changed" >&2
+    else
+        echo "windows-defender-exclusions: the Defender step produced no result (exit $rc)" >&2
+    fi
+    echo "FAIL — $action not applied"
+    exit 1
+fi
+
+bad=0
+checked=0
+while IFS= read -r line; do
+    line=$(printf '%s' "$line" | tr -d '\r')
+    [ -n "$line" ] || continue
+    echo "$line"
+    case "$line" in
+        error\ *) bad=$((bad + 1)) ;;
+        *" $ps_want "*) checked=$((checked + 1)) ;;
+        *) bad=$((bad + 1)) ;;
+    esac
+done <"$result"
+
+if [ "$bad" -eq 0 ] && [ "$checked" -gt 0 ]; then
+    echo "PASS — $checked exclusion(s) verified $ps_want"
+    exit 0
+fi
+echo "FAIL — $bad of $((checked + bad)) exclusion(s) not $ps_want"
+exit 1

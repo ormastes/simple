@@ -1,0 +1,69 @@
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use std.nogc_sync_mut.io.thread.thread_native_sleep_ms
+use os.smf.kernel_plugin.real_worker_process.KpfRealWorkerProcessV1
+use os.smf.kernel_plugin.real_worker_transport.KpfRealWorkerTransportV1
+use os.smf.kernel_plugin.worker_protocol.*
+
+fn probe_process(mode: text) -> KpfRealWorkerProcessV1:
+    KpfRealWorkerProcessV1.spawn_fixture_unisolated("/bin/sh",
+        ["test/01_unit/os/smf/kernel_plugin/fake_real_worker.shs", mode],
+        64, 4096, 5)
+
+fn probe_poll(transport: KpfRealWorkerTransportV1,
+        now_ns: i64) -> KpfWorkerResultV1:
+    var result = transport.poll(now_ns)
+    var attempts = 0
+    while result.outcome == KpfWorkerOutcome.Empty and attempts < 1000:
+        thread_native_sleep_ms(1)
+        result = transport.poll(now_ns)
+        attempts = attempts + 1
+    result
+
+fn probe_clean() -> bool:
+    val process = probe_process("normal")
+    if not process.alive: return false
+    val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+    if transport.handshake(5, 1000) != KpfWorkerOutcome.Accepted: return false
+    if probe_poll(transport, 1).outcome != KpfWorkerOutcome.Accepted: return false
+    val request = KpfRequestHandleV1(generation: 7, session_slot: 2,
+        request_slot: 4, request_epoch: 9)
+    if transport.submit(request, 5, [1u8, 2u8], 1000) != KpfWorkerOutcome.Accepted:
+        return false
+    if transport.cancel(request) != KpfWorkerOutcome.Accepted: return false
+    val completion = probe_poll(transport, 2)
+    if (completion.outcome != KpfWorkerOutcome.Accepted or
+            completion.payload != [1u8, 2u8]):
+        return false
+    if transport.quiesce() != KpfWorkerOutcome.Accepted: return false
+    if probe_poll(transport, 3).outcome != KpfWorkerOutcome.Quiescing: return false
+    if transport.close() != KpfWorkerOutcome.Accepted: return false
+    if probe_poll(transport, 4).outcome != KpfWorkerOutcome.Closed: return false
+    process.exit_status().clean_protocol_close
+
+fn probe_malformed() -> bool:
+    val process = probe_process("malformed")
+    val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+    if transport.handshake(5, 1000) != KpfWorkerOutcome.Accepted: return false
+    probe_poll(transport, 1).outcome == KpfWorkerOutcome.MalformedFrame and process.terminated
+
+fn probe_timeout() -> bool:
+    val process = probe_process("timeout")
+    val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+    if transport.handshake(5, 10) != KpfWorkerOutcome.Accepted: return false
+    (transport.poll(10).outcome == KpfWorkerOutcome.TimedOut and
+        process.exit_status().outcome == KpfWorkerOutcome.TimedOut)
+
+fn probe_crash() -> bool:
+    val process = probe_process("crash")
+    val transport = KpfRealWorkerTransportV1.create(process, 7, 2, 3, 5)
+    if transport.handshake(5, 1000) != KpfWorkerOutcome.Accepted: return false
+    (probe_poll(transport, 1).outcome == KpfWorkerOutcome.WorkerCrashed and
+        process.exit_status().outcome == KpfWorkerOutcome.WorkerCrashed)
+
+fn main() -> i64:
+    if not probe_clean(): return 10
+    if not probe_malformed(): return 11
+    if not probe_timeout(): return 12
+    if not probe_crash(): return 13
+    print "real worker Simple process probe: PASS"
+    0

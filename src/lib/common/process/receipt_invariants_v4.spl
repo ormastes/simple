@@ -1,0 +1,86 @@
+"""Pure, reusable receipt invariants for Process Observation V4.
+
+This module validates an already-decoded receipt.  It deliberately has no host
+authority.  The schema owner can call it at any admission boundary without
+reconstructing payload lengths, event presence, or terminal ordering.
+"""
+
+use std.common.process.deadline_v4.{ProcessObservationPhaseV4}
+use std.common.process.observation_v4.{
+    PROCESS_OBSERVATION_V4_DIGEST_BYTES, POV4_VALID_EXEC_CONFIRMED,
+    POV4_VALID_FROZEN, ProcessObservationPacketKindV4,
+    ProcessObservationStatusV4, ProcessObservationExecStateV4,
+    ProcessObservationReceiptV4
+}
+
+fn pov4_receipt_event_presence_valid(
+    receipt: ProcessObservationReceiptV4
+) -> Result<bool, text>:
+    val packet = receipt.packet
+    val exec_confirmed = (packet.validity_bits & POV4_VALID_EXEC_CONFIRMED) != 0
+    val exec_present = packet.exec_confirmed_ns >= 0
+    val reaped_present = packet.leader_waited_ns >= 0
+    val tree_empty_present = packet.tree_empty_ns >= 0
+    if exec_confirmed != exec_present or
+            exec_confirmed != (packet.exec_state == ProcessObservationExecStateV4.Confirmed):
+        return Err("process observation V4 exec confirmation flag and event presence disagree")
+    if packet.leader_reaped != reaped_present:
+        return Err("process observation V4 leader-reaped flag and event presence disagree")
+    if packet.tree_empty != tree_empty_present:
+        return Err("process observation V4 tree-empty flag and event presence disagree")
+    if (exec_confirmed or packet.leader_reaped or packet.tree_empty) and
+            packet.process_started_ns < 0:
+        return Err("process observation V4 observed lifecycle fact requires process start")
+    Ok(true)
+
+fn pov4_receipt_event_order_valid(
+    receipt: ProcessObservationReceiptV4
+) -> Result<bool, text>:
+    val packet = receipt.packet
+    if packet.request_started_ns < 0 or packet.prepared_ns < packet.request_started_ns:
+        return Err("process observation V4 request event order is invalid")
+    if packet.process_started_ns >= 0 and packet.process_started_ns < packet.prepared_ns:
+        return Err("process observation V4 process start precedes preparation")
+    if packet.exec_confirmed_ns >= 0 and
+            packet.exec_confirmed_ns < packet.process_started_ns:
+        return Err("process observation V4 exec confirmation precedes process start")
+    if packet.leader_waited_ns >= 0 and
+            packet.leader_waited_ns < packet.process_started_ns:
+        return Err("process observation V4 leader reap precedes process start")
+    if packet.tree_empty_ns >= 0 and packet.tree_empty_ns < packet.process_started_ns:
+        return Err("process observation V4 tree empty precedes process start")
+    if packet.exec_confirmed_ns >= 0 and packet.leader_waited_ns >= 0 and
+            packet.leader_waited_ns < packet.exec_confirmed_ns:
+        return Err("process observation V4 leader reap precedes exec confirmation")
+    Ok(true)
+
+fn pov4_receipt_frozen_terminal_valid(
+    receipt: ProcessObservationReceiptV4
+) -> Result<bool, text>:
+    val packet = receipt.packet
+    if packet.packet_kind != ProcessObservationPacketKindV4.Frozen:
+        return Ok(true)
+    if packet.status != ProcessObservationStatusV4.Terminal or
+            packet.phase != ProcessObservationPhaseV4.Frozen or
+            (packet.validity_bits & POV4_VALID_FROZEN) == 0 or
+            packet.exec_state != ProcessObservationExecStateV4.Confirmed or
+            not packet.leader_reaped or not packet.tree_empty:
+        return Err("process observation V4 frozen receipt lacks terminal completion authority")
+    if receipt.stdout.len() != packet.stdout.delivered_bytes or
+            receipt.stderr.len() != packet.stderr.delivered_bytes:
+        return Err("process observation V4 frozen receipt does not preserve delivered payloads")
+    if receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        return Err("process observation V4 frozen receipt lacks an exact binding digest")
+    if packet.tree_empty_ns < packet.leader_waited_ns:
+        return Err("process observation V4 frozen tree-empty event precedes leader reap")
+    Ok(true)
+
+pub fn process_observation_receipt_invariants_valid_v4(
+    receipt: ProcessObservationReceiptV4
+) -> Result<bool, text>:
+    pov4_receipt_event_presence_valid(receipt)?
+    pov4_receipt_event_order_valid(receipt)?
+    pov4_receipt_frozen_terminal_valid(receipt)?
+    Ok(true)
+
+export process_observation_receipt_invariants_valid_v4

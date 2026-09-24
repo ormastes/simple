@@ -1,0 +1,56 @@
+"""Bootstrap HIR/MIR regression for declared boolean return preservation.
+
+This unit isolates the producer-side declaration boundary. The native
+cross-module fixture is the separate integration proof for imported call
+destination materialization. Neither test claims a native binary was built by
+the source-incompatible Stage2 compiler available to this repair session.
+"""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirTypeKind}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+describe "bootstrap declared boolean return type":
+    it "preserves a declared bool from HIR through the MIR function signature":
+        step("Lower a helper declaration in bootstrap mode")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val source = "fn imported_bool_helper() -> bool:\n    true\n"
+        val parsed = parse_full_frontend(
+            source, "imported_bool_helper.spl", "imported_bool_helper", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("imported_bool_helper.spl")
+        val hir = hir_lowering.lower_module(parsed)
+
+        var found = false
+        var hir_bool = false
+        var mir_bool = false
+        var mir_clean = false
+        for function_ in hir.functions.values():
+            if function_.name == "imported_bool_helper":
+                found = true
+                hir_bool = function_.return_type.kind == HirTypeKind.Bool
+                var mir_lowering = MirLowering.new(hir.symbols)
+                val mir_function = mir_lowering.lower_function(function_)
+                mir_bool = mir_function.signature.return_type.kind == MirTypeKind.Bool
+                mir_clean = mir_lowering.errors.len() == 0
+
+        if val prior_value = prior_bootstrap:
+            rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+        else:
+            rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require the scalar return type at both lowering boundaries")
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(found).to_equal(true)
+        expect(hir_bool).to_equal(true)
+        expect(mir_bool).to_equal(true)
+        expect(mir_clean).to_equal(true)

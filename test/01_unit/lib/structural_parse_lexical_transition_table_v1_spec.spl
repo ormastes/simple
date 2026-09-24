@@ -1,0 +1,68 @@
+use std.spec.*
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.nogc_async_mut.structural.parse.lexical_transition_table_v1.*
+
+describe "finite lexical transition table V1":
+    it "enumerates a fixed admitted state space and has a valid identity":
+        val states = lexical_transition_admitted_states_v1()
+        expect(states.len()).to_equal(LEXICAL_TRANSITION_STATE_COUNT_V1 as i64)
+        val identity = lexical_transition_table_identity_v1()
+        expect(lexical_transition_table_valid_v1(identity)).to_equal(true)
+        val table = lexical_transition_table_build_v1([40u8, 41u8]).unwrap()
+        expect(lexical_transition_table_compose_v1(identity, table).unwrap()).to_equal(table)
+        expect(lexical_transition_table_compose_v1(table, identity).unwrap()).to_equal(table)
+
+    it "composes independently built tables associatively":
+        val a = lexical_transition_table_build_v1([40u8, 34u8]).unwrap()
+        val b = lexical_transition_table_build_v1([97u8, 92u8]).unwrap()
+        val c = lexical_transition_table_build_v1([34u8, 41u8]).unwrap()
+        val left = lexical_transition_table_compose_v1(
+            lexical_transition_table_compose_v1(a, b).unwrap(), c).unwrap()
+        val right = lexical_transition_table_compose_v1(a,
+            lexical_transition_table_compose_v1(b, c).unwrap()).unwrap()
+        expect(left).to_equal(right)
+        expect(lexical_transition_table_valid_v1(left)).to_equal(true)
+
+    it "selected initial row matches sequential scalar scans for every 33 byte partition":
+        val bytes = [97u8 for _ in 0..15] + [35u8] + [98u8 for _ in 0..15] + [10u8, 40u8]
+        var split = 1
+        while split < 33:
+            val left_bytes = [for i in 0..split: bytes[i]]
+            val right_bytes = [for i in split..bytes.len(): bytes[i]]
+            val composed = lexical_transition_rows_compose_unsealed_v1(
+                lexical_transition_rows_build_unsealed_v1(left_bytes).unwrap(),
+                lexical_transition_rows_build_unsealed_v1(right_bytes).unwrap()).unwrap()
+            val selected = lexical_transition_rows_select_unsealed_v1(composed,
+                lexical_block_initial_state_v1()).unwrap()
+            val first = lexical_block_summary_scalar_v1(left_bytes,
+                lexical_block_initial_state_v1()).unwrap()
+            val second = lexical_block_summary_scalar_v1(right_bytes, first.output_state).unwrap()
+            expect(selected.output_state).to_equal(second.output_state)
+            expect(selected.blocks).to_equal([first, second])
+            split = split + 1
+
+    it "rejects unbounded blocks and validates canonical digest":
+        expect(lexical_transition_table_build_v1([0u8 for _ in 0..33])).to_equal(
+            Err(LexicalTransitionTableErrorV1.BlockTooWide))
+        val table = lexical_transition_table_build_v1([97u8]).unwrap()
+        expect(table.digest.w0 != 0u64 or table.digest.w1 != 0u64 or
+            table.digest.w2 != 0u64 or table.digest.w3 != 0u64).to_equal(true)
+
+    it "keeps every admitted row in-domain for boundary-ending bytes":
+        val endings = [[34u8], [39u8], [35u8], [10u8], [114u8], [47u8]]
+        for bytes in endings:
+            val table = lexical_transition_table_build_v1(bytes).unwrap()
+            expect(lexical_transition_table_valid_v1(table)).to_equal(true)
+            for row in table.rows:
+                expect(lexical_block_state_valid_v1(row.input_state)).to_equal(true)
+                expect(lexical_block_state_valid_v1(row.output_state)).to_equal(true)
+
+    it "unsealed computation rows preserve associative transition semantics":
+        val a = lexical_transition_rows_build_unsealed_v1([40u8]).unwrap()
+        val b = lexical_transition_rows_build_unsealed_v1([97u8]).unwrap()
+        val c = lexical_transition_rows_build_unsealed_v1([41u8]).unwrap()
+        val left = lexical_transition_rows_compose_unsealed_v1(
+            lexical_transition_rows_compose_unsealed_v1(a, b).unwrap(), c).unwrap()
+        val right = lexical_transition_rows_compose_unsealed_v1(a,
+            lexical_transition_rows_compose_unsealed_v1(b, c).unwrap()).unwrap()
+        expect(left).to_equal(right)

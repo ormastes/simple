@@ -1,4 +1,9 @@
 # SOSIX/QEMU External-Host Admission and Collector Gaps
+## Closed 2026-09-16 — ... 2026-08-11 **Status:** PARTIALLY RESOLVED **Acceptance criteria:** AC-3, AC-7, AC-8, AC-1
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-11  
 **Status:** PARTIALLY RESOLVED  
@@ -29,3 +34,4 @@ receipts. Never promote Linux relabeling, TCG, or historical GPU reports.
 
 - Owner: SOSIX/QEMU external-host integration lane
 - Final reviewer: independent normal/highest-capability reviewer
+

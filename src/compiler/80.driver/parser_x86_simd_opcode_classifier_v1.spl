@@ -1,0 +1,71 @@
+# Fail-closed classifier for the initial parser-kernel x86 SIMD opcode
+# whitelist. It consumes exact separated bytes and validates encoding fields.
+# The table digest identifies this data mapping; it is not owner authority.
+use std.common.crypto.sha256.sha256_text
+use compiler.driver.parser_x86_encoding_envelope_v1.*
+
+pub enum ParserX86SimdClassifierErrorV1:
+    InvalidEnvelope
+    TruncatedInstruction
+    UnsupportedOpcode
+
+pub struct ParserX86SimdClassificationV1:
+    instruction_identity: text
+    required_features: [text]
+    encoded_vector_bits: i64
+    classifier_digest: text
+
+const _TABLE_TEXT_PXC: text = "parser-x86-simd-opcodes/v1\n" +
+    "vex.128.66.0f.ef=VPXOR:avx\n" +
+    "vex.256.66.0f.ef=VPXOR:avx2\n" +
+    "vex.128.66.0f38.00=VPSHUFB:avx\n" +
+    "vex.256.66.0f38.00=VPSHUFB:avx2\n" +
+    "evex.128.66.0f3a.w0.25=VPTERNLOGD:avx512f,avx512vl\n" +
+    "evex.256.66.0f3a.w0.25=VPTERNLOGD:avx512f,avx512vl\n" +
+    "evex.512.66.0f3a.w0.25=VPTERNLOGD:avx512f"
+
+fn _result_pxc(identity: text, features: [text], bits: i64
+) -> ParserX86SimdClassificationV1:
+    ParserX86SimdClassificationV1(instruction_identity: identity,
+        required_features: features, encoded_vector_bits: bits,
+        classifier_digest: sha256_text(_TABLE_TEXT_PXC))
+
+pub fn parser_x86_simd_opcode_classify_v1(bytes: [u8]
+) -> Result<ParserX86SimdClassificationV1, ParserX86SimdClassifierErrorV1>:
+    val envelope_result = parser_x86_encoding_envelope_v1(bytes)
+    if envelope_result.is_err(): return Err(ParserX86SimdClassifierErrorV1.InvalidEnvelope)
+    val envelope = envelope_result.unwrap()
+    if envelope.family == ParserX86EncodingFamilyV1.Legacy:
+        return Err(ParserX86SimdClassifierErrorV1.UnsupportedOpcode)
+    if envelope.opcode_offset + 1 >= bytes.len():
+        return Err(ParserX86SimdClassifierErrorV1.TruncatedInstruction)
+    val opcode = bytes[envelope.opcode_offset]
+    if envelope.family == ParserX86EncodingFamilyV1.Vex2:
+        val vex = bytes[1]
+        if vex & 3 == 1 and opcode == 0xef:
+            if envelope.encoded_vector_bits == 256:
+                return Ok(_result_pxc("VPXOR", ["avx2"], 256))
+            return Ok(_result_pxc("VPXOR", ["avx"], 128))
+    elif envelope.family == ParserX86EncodingFamilyV1.Vex3:
+        val map = bytes[1] & 0x1f
+        val vex = bytes[2]
+        val w = vex & 0x80 != 0
+        if map == 1 and vex & 3 == 1 and not w and opcode == 0xef:
+            if envelope.encoded_vector_bits == 256:
+                return Ok(_result_pxc("VPXOR", ["avx2"], 256))
+            return Ok(_result_pxc("VPXOR", ["avx"], 128))
+        if map == 2 and vex & 3 == 1 and not w and opcode == 0x00:
+            if envelope.encoded_vector_bits == 256:
+                return Ok(_result_pxc("VPSHUFB", ["avx2"], 256))
+            return Ok(_result_pxc("VPSHUFB", ["avx"], 128))
+    elif envelope.family == ParserX86EncodingFamilyV1.Evex:
+        val map = bytes[1] & 3
+        val evex_p1 = bytes[2]
+        val w = evex_p1 & 0x80 != 0
+        if (map == 3 and evex_p1 & 3 == 1 and not w and opcode == 0x25 and
+            envelope.opcode_offset + 2 < bytes.len()):
+            if envelope.encoded_vector_bits == 512:
+                return Ok(_result_pxc("VPTERNLOGD", ["avx512f"], 512))
+            return Ok(_result_pxc("VPTERNLOGD", ["avx512f", "avx512vl"],
+                envelope.encoded_vector_bits))
+    Err(ParserX86SimdClassifierErrorV1.UnsupportedOpcode)

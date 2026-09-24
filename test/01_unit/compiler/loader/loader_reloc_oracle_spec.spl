@@ -1,0 +1,87 @@
+# loader_reloc_oracle_spec — drives the REAL loader relocation-value helper
+# (`loader_smf_reloc_value`, module_loader_compat.spl), not a hand
+# reproduction. This is lane A4b's convergence proof:
+# doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md (lane
+# A4b row), design doc §4
+# (doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md), and
+# doc/08_tracking/bug/smf_gotrel32_applied_as_symbol_value_2026-09-18.md.
+#
+# History: `loader_smf_reloc_value` used to replicate the loader's inline
+# `(s - p + a) as i32` cast, which SILENTLY TRUNCATED an out-of-i32-range
+# delta. It has been converged onto the shared value oracle
+# (`smf_reloc_compute_wire`, gpu_smf/smf_reloc_formulas.spl): an
+# out-of-range Rel32/PltRel32/GotRel32/Abs32 delta now REJECTS (Err) instead
+# of truncating. This spec pins the CONVERGED (post-fix) behaviour -- it is
+# the "then expects LoadResult.Error" half of the lane's red-then-green
+# checkpoint (the red half -- the same assertions failing against the
+# pre-convergence truncating implementation -- is recorded in this lane's
+# report, not committed here, since only the converged behaviour ships).
+# module_loader_relocation_spec.spl exercises the in-range (no rejection
+# needed) wire-1 path end to end through a real compiled object;
+# `loader_reloc_wire4_spec.spl` drives the GOT-synthesis caller
+# (`apply_smf_relocations`) end to end for wire 4.
+
+use std.spec
+use compiler.loader.module_loader_compat.{loader_smf_reloc_value}
+
+describe "loader_smf_reloc_value (the real runtime-loader relocation-value helper)":
+    it "Abs64 (wire 1) computes S + A with no width check":
+        val result = loader_smf_reloc_value(1, 0x0000000100000000, 0, 4)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(0x0000000100000004)
+
+    it "Rel32 (wire 2) computes S + A - P when the delta fits i32":
+        # S=0x2000, P=0x1000, A=4 -> delta = 0x1004, well within i32 range
+        val result = loader_smf_reloc_value(2, 0x2000, 0x1000, 4)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(0x1004)
+
+    it "Rel32 (wire 2) REJECTS a delta greater than 2^31 - 1 instead of truncating":
+        # This is the exact defect doc/08_tracking/bug/
+        # smf_gotrel32_applied_as_symbol_value_2026-09-18.md and the linker
+        # plan's A4b row describe: "loader type-2 (Rel32) with delta > 2^31
+        # truncates silently today". Before convergence this returned
+        # Ok(...) with a wrapped-around i32 value; after convergence it
+        # rejects instead.
+        val s = 3000000000  # > 2^31 - 1 (2147483647)
+        val p = 0
+        val a = 0
+        val result = loader_smf_reloc_value(2, s, p, a)
+        expect(result.is_err()).to_equal(true)
+
+    it "PltRel32 (wire 3) rejects a delta greater than 2^31 - 1":
+        val result = loader_smf_reloc_value(3, 3000000000, 0, 0)
+        expect(result.is_err()).to_equal(true)
+
+    it "Abs32 (wire 5) accepts the full unsigned 32-bit range":
+        # 0xFFFFFFFF fits u32 (Abs32's width check per smf_reloc_formulas.spl)
+        # even though it does not fit a signed i32.
+        val result = loader_smf_reloc_value(5, 0xFFFFFFFF, 0, 0)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(0xFFFFFFFF)
+
+    it "Abs32 (wire 5) rejects a value beyond the unsigned 32-bit range":
+        val result = loader_smf_reloc_value(5, 0x100000000, 0, 0)
+        expect(result.is_err()).to_equal(true)
+
+    it "unknown wire types reject rather than defaulting to a formula":
+        val result = loader_smf_reloc_value(99, 0, 0, 0)
+        expect(result.is_err()).to_equal(true)
+
+    it "GotRel32 (wire 4) computes G + A - P where the caller passes the GOT-slot address as S":
+        # The contract (design §4): the CALLER (the loader's relocation loop,
+        # which owns GOT synthesis) must pass the address of the per-module
+        # GOT slot, not the symbol's own address, as this helper's `s`
+        # parameter. This test proves the formula side of that contract;
+        # `loader_reloc_wire4_spec.spl` drives the real GOT-synthesizing
+        # caller (`apply_smf_relocations`) end to end with real memory.
+        val got_slot_address = 0x00500000
+        val place = 0x00400020
+        val addend = 4
+        val result = loader_smf_reloc_value(4, got_slot_address, place, addend)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(got_slot_address - place + addend)
+
+    it "GotRel32 (wire 4) rejects an out-of-range delta exactly like Rel32/PltRel32":
+        val result = loader_smf_reloc_value(4, 3000000000, 0, 0)
+        expect(result.is_err()).to_equal(true)

@@ -1,4 +1,8 @@
 # Pure-Simple Cranelift CLI corrupts lexer tokens
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -43,3 +47,4 @@ Add a focused native regression that tokenizes `for arg in raw:` and requires
 `TOK_KW_FOR`, `TOK_IDENT`, `TOK_KW_IN`, `TOK_IDENT`, `TOK_COLON` before
 rebuilding the full CLI. Do not deploy a version-only binary or fall back to
 the Rust seed.
+

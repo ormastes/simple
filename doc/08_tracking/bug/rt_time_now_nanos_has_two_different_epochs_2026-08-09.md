@@ -1,4 +1,8 @@
 # `rt_time_now_nanos` has two different epochs in two implementations
+## Obsolete 2026-09-16 — self-declared DUPLICATE of rt_time_now_nanos_interpreter_uses_wall_clock_epoch doc (primary, FIXED)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Status:** OPEN
 **Found:** 2026-08-09, during P4 (host `ProfileTarget`)
@@ -66,3 +70,4 @@ DUPLICATE-of that one. Confirmed still OPEN in this pass — no code changed,
 per the explicit "owned by another lane, do not fix as a side effect"
 in-tree note. See the primary doc for the suggested fix (name split into
 `rt_time_monotonic_nanos` / `rt_time_unix_nanos`).
+

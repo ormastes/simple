@@ -1,4 +1,8 @@
 # `mcpgdb` app MCP server: `ping` now returns JSON-RPC "Method not found" instead of empty result
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/mcpgdb/main.spl` MCP JSON-RPC dispatch
@@ -43,3 +47,4 @@ CLI-embedded MCP servers.
 Spec left unmodified — could not confirm from source whether dropping
 `ping` support was intentional; flagging as a genuine gap rather than
 guessing at a test-side fix.
+

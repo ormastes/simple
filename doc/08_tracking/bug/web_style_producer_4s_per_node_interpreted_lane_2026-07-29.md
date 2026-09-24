@@ -1,4 +1,8 @@
 # Web style producer costs ~4 s/node on the interpreted lane — cell cannot go green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open. **Severity:** blocks the web × headless showcase cell on linux-x86_64.
 **Component:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`
@@ -1335,3 +1339,4 @@ SIMPLE_WEB_RENDER_BUDGET_MS=120000 SIMPLE_TIMEOUT_SECONDS=270 \
 SHOWCASE_RESOLUTION=480x360 bin/simple run examples/06_io/ui/web_render_file_gui.spl
 # watch: budget-break at=N of=151 — N ≈ budget_s / 3.2 (post char_at fixes)
 ```
+

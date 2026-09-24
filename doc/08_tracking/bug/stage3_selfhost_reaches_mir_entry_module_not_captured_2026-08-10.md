@@ -1,4 +1,9 @@
 # Stage-3 self-host reaches MIR lowering for the first time — new blocker: entry HIR module not captured in the flat accumulator
+## Closed 2026-09-16 — ...e starting — this may already be fixed by the time this doc is read. ## 2026-08-11 continu
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **ID:** stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10
 - **Status (2026-08-17, W1 source re-check):** the fix is PRESENT in current
@@ -187,3 +192,4 @@ grepping current source.
 `:23`) replaces the name scan, and `:398` `if entry_index < 0:` now guards the
 "was not captured" eprint fail-closed. The `functions > 0` receipt this doc asks
 for still requires one incremental debug bootstrap, which was not run here.
+

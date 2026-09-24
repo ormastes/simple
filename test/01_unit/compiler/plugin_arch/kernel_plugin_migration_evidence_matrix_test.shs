@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../../.." && pwd)
+CHECKER=$ROOT/scripts/check/check-kernel-plugin-migration-evidence-matrix.shs
+
+set +e
+output=$($CHECKER 2>&1)
+status=$?
+set -e
+if [ "$status" -eq 2 ]; then
+    printf '%s\n' "$output" | grep -Eq 'STATUS: BLOCKED phase [1234568] (ABI behavior|parameter evolution|manifest gate|lint table|unchanged backend dispatch|acceptance|range/lock) runtime|STATUS: BLOCKED phase [234568] .*probe|STATUS: BLOCKED phase [34568] private .*workspace'
+    printf '%s\n' "$output" >&2
+    exit 2
+fi
+[ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; exit "$status"; }
+printf '%s\n' "$output" | grep -Fq 'phases 0-8 executable structural probes passed'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE1_FIELD_TYPE_ABI_SENTINEL=KPM_PHASE1_FIELD_TYPE_ABI_COMPARISON_SENTINEL_V1'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE1_FIELD_TYPE_ABI_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE1_BODY_INSENSITIVE_RECEIPT=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE1_FIELD_SENSITIVE_RECEIPT=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE1_ABI_MATRIX_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE2_PARAM_EVOLUTION_SENTINEL=KPM_PHASE2_TYPED_CHECKER_V1'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE2_PARAM_EVOLUTION_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE2_PARAM_EVOLUTION_MUTATION_RECEIPT=FAIL_PARAM_002'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE2_ENV_BOUNDARY_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE3_ABI_MISMATCH_SENTINEL=KPM_PHASE3_ABI_ASSERTION_RECEIPT_V1'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE3_MANIFEST_GATE_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_SENTINEL=KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT_V1'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE4_LINT_TABLE_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE4_BOOTSTRAP_NEGOTIATION_RECEIPT=negotiate:Ok'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE4_ADD_FILE_ROW_RECEIPT=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE4_REMOVE_ROW_MUTATION_RECEIPT=FAIL_AT_DISPATCH_ASSERTION'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE5_BACKEND_DISPATCH_SENTINEL=KPM_PHASE5_POLICY_DISPATCH_RECEIPT_V1'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE5_BACKEND_DISPATCH_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE5_COMPILER_PLUGIN_IMPORT_RECEIPT case=kernel-source state=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE6_ACCEPTANCE_SENTINEL=KPM_PHASE6_NEGOTIATION_APK_SFFI_V1'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE6_ACCEPTANCE_STATUS=PASS'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE8_RANGE_LOCK_SENTINEL=KPM_PHASE8_RANGE_LOCK_ACCEPTANCE_V1'
+printf '%s\n' "$output" | grep -Fq 'KPM_PHASE8_RANGE_LOCK_STATUS=PASS'
+
+selftest_output=$($CHECKER --selftest)
+printf '%s\n' "$selftest_output" | grep -Fq '9/9 implementation/input seam mutations made the same phase probe fail'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE1_FIELD_TYPE_ABI_MUTATION_RECEIPT=FAIL_AT_EXACT_COMPARISON'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE3_MANIFEST_GATE_STATUS=FAIL'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE3_ABI_MISMATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE4_LINT_TABLE_STATUS=FAIL'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE5_BACKEND_DISPATCH_STATUS=FAIL'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE6_ACCEPTANCE_STATUS=FAIL'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE6_DIGEST_MUTATION_RECEIPT=FAIL_AT_ALL_BOUNDARIES'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE8_RANGE_LOCK_STATUS=FAIL'
+printf '%s\n' "$selftest_output" | grep -Fq 'KPM_PHASE8_LEXICAL_TIE_BREAK_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+
+for boundary in NEGOTIATION APK SFFI; do
+    grep -Fq "KPM_PHASE6_${boundary}_ASSERTION_RECEIPT case=digest-refusal state=BEGIN expected=PLUG-E-DIGEST" \
+        "$ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+    grep -Fq "KPM_PHASE6_${boundary}_ASSERTION_RECEIPT case=digest-refusal state=PASS expected=PLUG-E-DIGEST" \
+        "$ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+done
+
+grep -Fq 'rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", unload_marker)' \
+    "$ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+grep -Fq 'expect(rt_file_exists(unload_marker)).to_equal(false)' \
+    "$ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+grep -Fq 'expect(unloaded).to_equal(true)' \
+    "$ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+grep -Fq 'expect(escaped_handle).to_equal(false)' \
+    "$ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+grep -Fq 'expect(loaded_after).to_equal(loaded_before)' \
+    "$ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+
+grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=BEGIN expected=AbiDigestMismatch' \
+    "$ROOT/test/01_unit/compiler/driver/smf_manifest_gate_spec.spl"
+grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=FAIL expected=AbiDigestMismatch actual={verdict}' \
+    "$ROOT/test/01_unit/compiler/driver/smf_manifest_gate_spec.spl"
+grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=PASS expected=AbiDigestMismatch code=SMF-E-ABI-MISMATCH' \
+    "$ROOT/test/01_unit/compiler/driver/smf_manifest_gate_spec.spl"
+grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=BEGIN expected=PLUG-E-DIGEST:fixture_marker' \
+    "$ROOT/test/01_unit/compiler/lint/lint_rule_table_spec.spl"
+grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=FAIL expected=PLUG-E-DIGEST:fixture_marker actual=missing-copied-provider-digest' \
+    "$ROOT/test/01_unit/compiler/lint/lint_rule_table_spec.spl"
+grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=PASS expected=PLUG-E-DIGEST:fixture_marker' \
+    "$ROOT/test/01_unit/compiler/lint/lint_rule_table_spec.spl"
+
+echo 'PASS: kernel plugin migration executable positive/mutation matrix is fail closed'

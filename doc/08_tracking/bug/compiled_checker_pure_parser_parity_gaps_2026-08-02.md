@@ -1,4 +1,8 @@
 # Compiled checker pure-parser parity gaps
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -129,3 +133,4 @@ manifest checker; do not modify invalid source merely to hide a parser gap.
 Batch parser-state leakage was investigated and disproved by a two-file minimal
 pair.  The aggregate checker correctly reports one failing file of two; passing
 members of a nonzero batch are not false positives.
+

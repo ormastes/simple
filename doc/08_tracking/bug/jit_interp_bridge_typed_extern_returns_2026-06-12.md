@@ -1,4 +1,24 @@
 # JIT InterpCall bridge: f64/text extern returns not representable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Not closed 2026-09-13 — half fixed (text/heap returns), the f64 half remains
+
+- **measured** Gap 2 (text returns coerced to 0) is addressed: `MirInst::InterpCall` now
+  carries `boxed_result`, set from a `boxed_return_functions` set, and
+  `src/compiler_rust/compiler/src/mir/hybrid.rs:22-24` documents it as covering names whose
+  declared return type is a heap/composite value (tuple/text/array) — their InterpCall keeps
+  the boxed result instead of unboxing to a raw i64.
+- **measured** Gap 1 (f64 returns truncated by `rt_value_raw_i64`) is NOT covered: that set
+  is composite-only; `f64` appears nowhere in the hybrid transform, and no `return_type:
+  TypeId` field was added to `InterpCall` as the entry proposed.
+- **inferred** No torch-less-build repro is runnable here (native-build is broken on this
+  Windows host), so the residual is established from source, not execution.
+- Left OPEN, narrowed to f64: the fix is a `src/compiler_rust` change, off limits while the
+  bootstrap runs.
+
 
 - **ID**: jit_interp_bridge_typed_extern_returns
 - **Date**: 2026-06-12
@@ -61,3 +81,4 @@ fn main():
 EOF
 src/compiler_rust/target/release/simple run /tmp/r.spl   # null text, not a version string
 ```
+

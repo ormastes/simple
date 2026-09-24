@@ -1,4 +1,8 @@
 # Bug: no genuine self-hosted `simple` binary deployed in this environment — scenario runner can never find a runnable compiler
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** simpleos-scenario-runner-no-selfhosted-binary-deployed-2026-08-06
 **Domain:** os/simpleos build tooling (`src/os/_QemuRunner/os_build_run.spl`, deployment state)
@@ -49,6 +53,26 @@ Once a genuine self-hosted binary is deployed to one of the candidate paths,
 re-run `bin/simple os test --scenario=riscv64-smoke` (or any scenario) and
 confirm it gets past `phase=tooling` — that is the end-to-end confirmation the
 probe-timeout fix could not get today.
+
+TODO: perform that exact command during the post-Linux SimpleOS QEMU phase,
+retain the admitted compiler digest and executed canary receipt, and keep this
+bug open until the runner passes `phase=tooling` without selecting a seed.
+
+## 2026-09-22 source follow-up
+
+The current `origin/main` runner had regressed from the seed-rejecting behavior
+described above: its version check admitted any nonempty output, it preferred
+`src/compiler_rust/target/*` candidates, and its LLVM contract probe passed an
+invalid target while expecting an invalid mode diagnostic. The focused source
+fix rejects seed banners, selects only admitted release candidates, and passes
+an executable `native-build --backend llvm` canary through the requested
+backend, then executes the emitted program and requires byte-exact output `5`.
+It fails at the tooling phase when none qualifies. Focused specs cover seed
+rejection, proof that the LLVM argument reaches the compiler shim, backend
+failure, wrong canary output, and empty candidate selection. This replaces the
+earlier invalid-mode probe, which stopped in generic argument parsing and could
+not prove LLVM support. The deployment/guest verification described above
+remains open.
 
 ## Two smaller findings from the same investigation
 

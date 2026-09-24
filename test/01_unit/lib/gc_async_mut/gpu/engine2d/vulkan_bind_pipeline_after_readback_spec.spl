@@ -1,0 +1,108 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Device evidence for R1: a dispatch that follows a device readback must bind its
+# pipeline successfully on a healthy device.
+#
+# Trigger, measured on Apple M4 / MoltenVK
+# (doc/08_tracking/bug/vulkan_bind_pipeline_refused_after_readback_2026-09-11.md):
+# a pooled Engine2D resumed the next frame with `pending_compute_command` still
+# naming the command buffer the PREVIOUS frame had already submitted and freed.
+# `rt_vulkan_bind_pipeline` refuses a freed handle (its command-buffer slot is
+# `None`), so the frame's first dispatch failed, the backend latched
+# `cpu_fallback`, `gpu_device_proven` dropped false at frame 2 and the Draw IR
+# route was never authorized.
+#
+# These are DEVICE specs: they fail, they do not skip. A machine with no usable
+# Vulkan device cannot produce this evidence, and silence is not a pass.
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.{
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    draw_ir_rect, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_text,
+    DrawIrCommand, DrawIrComposition
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
+    simple_web_render_draw_ir_composition_with_cpu_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_draw_ir_gpu_route_sample,
+    web_draw_ir_gpu_route_last_evidence,
+    web_draw_ir_gpu_route_policy_reset
+}
+
+val R1_WIDTH: i32 = 400
+val R1_HEIGHT: i32 = 300
+
+fn r1_composition(name: text, commands: [DrawIrCommand]) -> DrawIrComposition:
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, R1_WIDTH, R1_HEIGHT, 0, 1000, true)
+    draw_ir_composition(name, "generic-web", "gpu", [
+        draw_ir_batch("body", "gpu", embedding, commands)
+    ])
+
+describe "Vulkan bind_pipeline after a device readback":
+    # @manual scenario evidence
+    it "keeps the device proven across repeated readback -> dispatch frames":
+        # @req REQ-SSPEC-PERF
+        step("keeps the device proven across repeated readback -> dispatch frames")
+        web_draw_ir_gpu_route_policy_reset()
+        val composition = r1_composition("r1-rects", [
+            draw_ir_rect("background", 0, 0, R1_WIDTH, R1_HEIGHT, 0xFF1D4ED8u32),
+            draw_ir_rect("card", 20, 20, 180, 120, 0xFFF59E0Bu32),
+            draw_ir_rect("side", 220, 40, 140, 200, 0xFF10B981u32)
+        ])
+        val oracle = simple_web_render_draw_ir_composition_with_cpu_backend(
+            composition, R1_WIDTH, R1_HEIGHT)
+        var frame = 1
+        while frame <= 8:
+            val pixels = web_draw_ir_gpu_route_sample(
+                composition, R1_WIDTH, R1_HEIGHT, "vulkan")
+            val evidence = web_draw_ir_gpu_route_last_evidence()
+            # The whole point of R1: the SECOND frame -- the first one that
+            # follows a device readback -- must still be device-proven. Before
+            # the fix this dropped false at frame 2 and never recovered.
+            expect(evidence.gpu_device_proven).to_equal(true)
+            expect(evidence.pixels_match).to_equal(true)
+            expect(evidence.reason != "device-lost").to_equal(true)
+            expect(pixels.len()).to_equal(oracle.len())
+            frame = frame + 1
+        val measured = web_draw_ir_gpu_route_last_evidence()
+        expect(measured.available).to_equal(true)
+        expect(measured.should_offload).to_equal(true)
+
+    # @manual scenario evidence
+    it "survives three readback -> dispatch cycles across rect, text and clip":
+        # @req REQ-SSPEC-PERF
+        step("survives three readback -> dispatch cycles across rect, text and clip")
+        val clip = draw_ir_rect_bounds(10, 10, 200, 150)
+        val cases = [
+            r1_composition("r1-rect", [
+                draw_ir_rect("bg", 0, 0, R1_WIDTH, R1_HEIGHT, 0xFF111827u32),
+                draw_ir_rect("tile", 32, 24, 120, 90, 0xFF38BDF8u32)
+            ]),
+            r1_composition("r1-text", [
+                draw_ir_rect("bg", 0, 0, R1_WIDTH, R1_HEIGHT, 0xFF0F172Au32),
+                draw_ir_text("label", 24, 48, "readback then dispatch", 0xFFE2E8F0u32)
+            ]),
+            r1_composition("r1-clip", [
+                draw_ir_rect("bg", 0, 0, R1_WIDTH, R1_HEIGHT, 0xFF052E16u32),
+                draw_ir_rect_clipped("clipped", 0, 0, R1_WIDTH, R1_HEIGHT,
+                    0xFFF43F5Eu32, clip)
+            ])
+        ]
+        for composition in cases:
+            web_draw_ir_gpu_route_policy_reset()
+            var cycle = 1
+            while cycle <= 3:
+                val pixels = web_draw_ir_gpu_route_sample(
+                    composition, R1_WIDTH, R1_HEIGHT, "vulkan")
+                val evidence = web_draw_ir_gpu_route_last_evidence()
+                expect(pixels.len()).to_equal(
+                    (R1_WIDTH * R1_HEIGHT).to_i64())
+                expect(evidence.gpu_device_proven).to_equal(true)
+                expect(evidence.reason != "device-lost").to_equal(true)
+                cycle = cycle + 1

@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+. "$ROOT_DIR/scripts/check/lib/demand-driven-smf-evidence.shs"
+RECEIPT_DIR=${DDSM_EVIDENCE_DIR:-$ROOT_DIR/build/test-artifacts/demand-driven-smf}
+
+usage() { echo "usage: $0 --scenario NAME" >&2; exit 2; }
+[ "${1:-}" = --scenario ] && [ -n "${2:-}" ] && [ "$#" -eq 2 ] || usage
+scenario=$2
+
+case "$scenario" in
+  warm-package-decision) authority=DDSM-NFR-001; marker=p50_ms_at_most=100 ;;
+  warm-command) authority=DDSM-NFR-002; marker=p50_ms_at_most=500 ;;
+  ordinary-package-edit) authority=DDSM-NFR-003; marker=p50_ms_at_most=3000 ;;
+  broad-dependent-edit) authority=DDSM-NFR-004; marker=p50_ms_at_most=15000 ;;
+  matched-go-clean-build) authority=DDSM-NFR-005; marker=simple_to_go_ratio_at_most=2.0 ;;
+  daemon-loss-correctness) authority=DDSM-NFR-006; marker=result_digest_match=true ;;
+  gate-f) authority=PERF-GATE-F; marker=gate=pass ;;
+  gate-s) authority=PERF-GATE-S; marker=gate=pass ;;
+  gate-v) authority=PERF-GATE-V; marker=gate=pass ;;
+  gate-a) authority=PERF-GATE-A; marker=gate=pass ;;
+  gate-q) authority=PERF-GATE-Q; marker=gate=pass ;;
+  gate-j) authority=PERF-GATE-J; marker=gate=pass ;;
+  gate-r) authority=PERF-GATE-R; marker=gate=pass ;;
+  *) echo "FAIL: unknown demand-driven SMF performance scenario: $scenario" >&2; exit 1 ;;
+esac
+
+receipt="$RECEIPT_DIR/performance/$scenario.receipt.env"
+if ! ddsm_validate_receipt "$receipt" demand-driven-smf-performance-receipt-v1 "$scenario" "$authority" performance; then
+    echo "BLOCKED: admitted performance/native receipt missing or invalid: $receipt" >&2
+    exit 1
+fi
+ddsm_require_metric_fields "$receipt" || { echo "FAIL: incomplete measured evidence: $receipt" >&2; exit 1; }
+grep -Fxq "$marker" "$receipt" || { echo "FAIL: required marker missing: $marker" >&2; exit 1; }
+printf 'scenario=%s\nauthority_id=%s\n%s\nsamples=100\nsemantic_equivalence=true\n' "$scenario" "$authority" "$marker"

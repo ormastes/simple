@@ -1,4 +1,9 @@
 # Committed `.spipe/policy/vcs.sdn` is rejected by its own canonical contract
+## Closed 2026-09-16 — Status RESOLVED 2026-09-06; policy-check ok, regression spec 16/16
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-09-06
 **Found:** 2026-09-05
@@ -135,4 +140,5 @@ policy file byte-identical.
 `resolve_protected_target` uses the basic parser. Now that the committed policy
 satisfies both, that split can be collapsed to one validator -- but that is a
 behaviour change to the plan path and belongs in its own change, not this fix.
+
 

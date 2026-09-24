@@ -157,6 +157,10 @@ pub extern "C" fn rt_vulkan_destroy_descriptor_set(_desc_set: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_begin_compute() -> i64 {
     let mut state = STATE.lock();
+    if state.async_compute_session_active {
+        state.set_error("begin_compute: async compute session owns this device".to_string());
+        return 0;
+    }
     if !state.quarantined_compute.is_empty() {
         state.set_error("begin_compute: prior completion is unknown".to_string());
         return 0;
@@ -572,6 +576,10 @@ pub extern "C" fn rt_vulkan_discard_command(cmd: i64) -> i64 {
         return 0;
     }
     let mut state = STATE.lock();
+    if state.async_compute_session_active {
+        state.set_error("discard_command: async compute session owns this command".to_string());
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(device) => device,
         Err(_) => return 0,
@@ -658,6 +666,10 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
         return 0;
     }
     let mut state = STATE.lock();
+    if state.async_compute_session_active {
+        state.set_error("submit_and_wait_fence: async compute session owns direct submission".to_string());
+        return 0;
+    }
     if !state.compute_commands.contains_key(&cmd) {
         state.set_error("submit_and_wait_fence: unknown command handle".to_string());
         return 0;
@@ -697,7 +709,7 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
             let owners = state.compute_commands.remove(&cmd).unwrap_or_default();
             state.quarantined_compute.push(QuarantinedComputeSubmission {
                 device,
-                fence,
+                fence: Arc::new(fence),
                 command_buffer: vk_cmd,
                 owners,
                 wait_handle: 0,
@@ -733,6 +745,10 @@ pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
         return 0;
     }
     let mut state = STATE.lock();
+    if state.async_compute_session_active {
+        state.set_error("submit_no_wait: async compute session owns direct submission".to_string());
+        return 0;
+    }
     if !state.compute_commands.contains_key(&cmd) {
         state.set_error("submit_no_wait: unknown command handle".to_string());
         return 0;
@@ -744,7 +760,7 @@ pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
             return 0;
         }
     };
-    let fence = match Fence::new(device.clone(), false) {
+    let fence = match device.acquire_fence() {
         Ok(fence) => fence,
         Err(e) => {
             device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
@@ -766,7 +782,7 @@ pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
             let handle = alloc_handle();
             state.quarantined_compute.push(QuarantinedComputeSubmission {
                 device,
-                fence,
+                fence: Arc::new(fence),
                 command_buffer: vk_cmd,
                 owners,
                 wait_handle: handle,
@@ -790,7 +806,7 @@ pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
             let owners = state.compute_commands.remove(&cmd).unwrap_or_default();
             state.quarantined_compute.push(QuarantinedComputeSubmission {
                 device,
-                fence,
+                fence: Arc::new(fence),
                 command_buffer: vk_cmd,
                 owners,
                 wait_handle: 0,
@@ -885,7 +901,11 @@ pub extern "C" fn rt_vulkan_submit_graphics_and_wait_fence(_cmd: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
+    if state.async_compute_session_active {
+        state.set_error("wait_idle: use explicit async session recovery".to_string());
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,

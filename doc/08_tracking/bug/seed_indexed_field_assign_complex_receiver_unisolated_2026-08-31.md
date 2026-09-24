@@ -1,4 +1,8 @@
 # New occurrence of the OPEN indexed-field-assignment limitation: FAT32 `file_generations` (2026-08-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. **Not a new defect** — a new occurrence site of the language
 limitation already tracked by
@@ -87,3 +91,4 @@ established workaround), or close the limitation properly by extending Case 2 in
 `node_exec.rs` to resolve a `FieldAccess` indexed receiver through the same
 place-resolution the `self` field path uses. The latter would retire all three
 records above; re-run the spec and expect 16/16.
+

@@ -1,4 +1,8 @@
 # Stage-3 incremental directory import resolution (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -28,3 +32,4 @@ Verify the named-over-glob callable dependency fix recorded in
 symbols remain unresolved after the imported-type cascade is gone, reopen this
 record with the new first-cause log. Do not route fingerprint traversal through
 `std.nogc_sync_mut.io.dir_ops`: its listing implementation shells out to `ls`.
+

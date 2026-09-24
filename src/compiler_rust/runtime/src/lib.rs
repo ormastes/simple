@@ -61,10 +61,14 @@ pub mod cache_daemon_host_authority_v1;
 pub mod cache_daemon_process_v1;
 pub mod cache_host_authority_v1;
 pub mod cuda_runtime;
+pub mod process_observation_v4_twins;
 pub mod debug;
+pub mod directx_submission_twins;
 pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
+pub mod gpu_provider_twins;
+pub mod gui_html_session_twins;
 pub mod host_gpu_lane;
 pub mod memory;
 pub mod mem_snapshot;
@@ -89,6 +93,7 @@ pub mod monoio_waker;
 pub mod vulkan;
 pub mod vulkan_graphics_runtime;
 pub mod metal_graphics_runtime;
+pub mod x86_simd_probe;
 
 /// Stable metadata queried by the core runtime before it admits this artifact
 /// as a dynamically loaded GPU provider. Operation tables are backend-specific
@@ -133,6 +138,7 @@ pub mod security_runtime;
 /// stage 1 of the mid-codepoint-slice rollout and is DEFAULT OFF.
 pub mod text_slice_audit;
 pub mod value;
+mod file_view;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
 // symbol registration is enabled. Tiny standalone binaries do not need these
@@ -906,6 +912,7 @@ pub use value::{
     rt_array_set_len_known_text,
     rt_array_set,
     rt_array_set_text,
+    rt_collection_set,
     rt_typed_bytes_u8_push,
     rt_typed_bytes_u8_data_at,
     rt_typed_words_u32_at,
@@ -949,6 +956,7 @@ pub use value::{
     rt_dict_set_i64_raw,
     // Enum operations
     rt_enum_check_discriminant,
+    rt_enum_check_variant,
     rt_enum_discriminant,
     rt_enum_id,
     rt_enum_new,

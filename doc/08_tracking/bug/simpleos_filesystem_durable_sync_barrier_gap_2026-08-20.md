@@ -1,4 +1,8 @@
 # SimpleOS filesystem durable-sync barrier gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Severity: P1 release blocker (REQ-4, REQ-5)
 - Owner: block-device/VFS durability owner
@@ -111,3 +115,4 @@ tree through real FAT32, DBFS, and NVFS sinks on `FileBlockDevice`. Until those
 owners exist and the required admitted-runtime and reset/remount campaigns pass,
 durability and cross-backend image construction remain unproved. No manual
 verification was run for this update.
+

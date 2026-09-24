@@ -1,4 +1,8 @@
 # SimpleOS: every x86_64 baremetal link broken — `spl_x86_on_kernel_ud2_fault` undefined (2026-07-17)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found by:** release sanity T3 lane (both QEMU x86_64 gates FAIL on this).
 
@@ -83,3 +87,81 @@ build now dies with `Terminated` (`reason=kernel-build`) — host contention
 the gate's budget killed it. Symbol fix plausibly effective; full PASS
 verification deferred to a quiet host. isa-debug-exit rework rides the same
 rerun and is likewise pending a completed boot.
+
+## Current-source repair (2026-09-21; P1 remains OPEN)
+
+The fetched main branch recorded this specific undefined-symbol bug as closed,
+but a later merge removed the C reference to `spl_x86_on_kernel_ud2_fault`
+along with its fatal `ud2` handling. The current generic fault handler had
+returned to advancing RIP by two bytes. This lane restores the intentional
+kernel `ud2` halt and defines a weak C diagnostic fallback in
+`baremetal_stubs.c`; a full kernel can still override it with the strong
+pure-Simple export. The focused link contract compiles the extracted actual C
+handler and fallback, confirms the symbol is defined weakly, then links a
+strong replacement and confirms it wins:
+
+```text
+sh test/01_unit/os/simpleos_ud2_fault_link_contract_test.shs
+ud2_fault_link_contract=pass
+```
+
+This is a symbol and fault-path contract, not a completed QEMU boot. P1 stays
+OPEN until the actual target kernel links and the guest fault behavior passes.
+The full
+baremetal translation unit currently fails a standalone Clang compile earlier
+on unrelated `HeapHeader.gc_flags`/`BYTE_PACKED` and
+`runtime_array_from_abi` errors; the kernel/QEMU gate remains unverified here.
+The fix changes neither SOSIX contracts nor providers or callers: it is the
+x86_64 interrupt-handler C boundary only.
+
+## Fatal-call ABI repair (2026-09-21)
+
+Astra architecture review found a second defect in the restored fatal path:
+`_rich_fault_entry` restores nine scratch registers (72 bytes) before calling
+the C `spl_x86_on_kernel_ud2_fault` hook. That changes `%rsp` alignment relative
+to the preceding `_rich_fault_print` call. The handler now loads the saved RIP,
+reserves one word, and then calls the hook, restoring the SysV AMD64 entry
+alignment. The focused contract asserts the load-before-pad ordering and passes:
+
+```text
+sh test/01_unit/os/simpleos_ud2_fault_link_contract_test.shs
+ud2_fault_link_contract=pass
+```
+
+The canonical QEMU gate was attempted with the bootstrap seed but stopped during
+native kernel compilation at an unrelated unresolved `VirtioGpuDriver` symbol,
+before QEMU launch. A minimal Multiboot fixture linked successfully, but this
+host's QEMU `-kernel` path rejects the ELF64 image and the installed GRUB
+rescue flow lacks `mformat`; no guest-pass receipt is claimed. P1 remains OPEN.
+
+## Astra safety review follow-up (2026-09-22)
+
+Review found that a fixed eight-byte pad only reproduced the alignment of the
+earlier printer call; it did not guarantee the SysV ABI alignment when an
+interrupt arrived with the other stack residue. Because the fatal hook is
+`noreturn`, the handler now loads the saved RIP and dynamically aligns the
+abandoned interrupt stack with `andq $-16, %rsp` before calling C.
+
+The review also found that the two-byte opcode probe could cross into an
+unmapped page and recursively fault. The handler now rejects RIP at page offset
+`0xFFF` before loading the opcode. Because the shared ISR does not receive the
+vector number, that boundary case is ambiguous and fails closed into the fatal
+hook. It cannot silently advance past an intentional cross-page `ud2`, and it
+cannot trigger #PF/#DF by reading the following page.
+
+The focused contract now marks the extracted ISR as used and checks the emitted
+machine code, so its alignment/call assertions cannot pass merely because the
+compiler discarded the static function. It also executes the exact extracted
+opcode-probe instruction sequence against a mapped page boundary followed by a
+`PROT_NONE` page. The boundary must classify fatal without reading across the
+page, an ordinary in-page opcode must classify recoverable, and an in-page
+`ud2` must classify fatal. The extracted x86_64 sequence runs under user-mode
+QEMU on this AArch64 host; deleting the branch around the two-byte load now
+faults the harness instead of leaving a vacuous source-token PASS. It remains a
+link and host code-generation contract, not QEMU guest-kernel evidence. The
+complete focused test passed in 0.11 s wall time with 59,624 KiB maximum RSS.
+The new production instructions execute only on an exception path; no
+steady-state allocation or hot-path work was added.
+
+TODO(deferred-environment): after Linux bootstrap succeeds, run the x86_64
+SimpleOS guest-kernel UD2 scenario in QEMU and retain its serial fault receipt.

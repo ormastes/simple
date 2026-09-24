@@ -27,11 +27,18 @@
 simple_msvc_vc_bin="/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64"
 simple_msvc_sdk_bin="/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
 simple_msvc_msys_bin="/c/dev/tool/msys2/mingw64/bin"
-# MSVC-ABI LLVM 18. This MUST precede the MinGW bin dir: llvm-sys 180's build
-# script runs the first llvm-config on PATH and feeds its --cflags to cl.exe.
-# With MinGW first that is -IC:/dev/tool/msys2/mingw64/include, and cl.exe fails
-# compiling MinGW's stdlib.h (error C2085/C2143 on _exit, _Exit, ecvt, ...).
-simple_msvc_llvm_bin="/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin"
+# LLVM 23.1.1 is the Windows C authority. The MSVC directory below supplies
+# Windows headers/libraries/link.exe; it is not permission to compile with cl.
+# The prefix MUST precede the MinGW bin dir: llvm-sys 231's build script runs the
+# first llvm-config on PATH and feeds its --cflags to the native C driver.  With
+# MinGW first that is -IC:/dev/tool/msys2/mingw64/include, which fails compiling
+# MinGW's stdlib.h (error C2085/C2143 on _exit, _Exit, ecvt, ...).
+# SIMPLE_LLVM_WIN_ROOT_23 is the knob llvm-toolchain-env.shs reads; seed it from
+# a caller-supplied LLVM_SYS_231_PREFIX so this file's PATH entry and the prefix
+# that script prepends can never name two different LLVM installations.
+simple_msvc_llvm_prefix="${LLVM_SYS_231_PREFIX:-${SIMPLE_LLVM_WIN_ROOT_23:-/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc}}"
+simple_msvc_llvm_bin="$simple_msvc_llvm_prefix/bin"
+SIMPLE_LLVM_WIN_ROOT_23="$simple_msvc_llvm_prefix"
 
 for simple_msvc_d in \
   "$simple_msvc_vc_bin" "$simple_msvc_sdk_bin" "$simple_msvc_msys_bin" \
@@ -68,6 +75,13 @@ export PATH
 INCLUDE="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\winrt"
 LIB="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\lib\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64"
 export INCLUDE LIB
+# vcvars64 exports VCToolsInstallDir, and scripts/check/check-bootstrap-preflight.shs
+# resolves the Rust MSVC-target linker from it (VCToolsInstallDir/bin/Hostx64/x64/link.exe).
+# Without it the authoritative preflight fails before any pure-Simple stage starts:
+#   check cargo: x64 MSVC preflight requires vcvars64 VCToolsInstallDir/bin/Hostx64/x64/link.exe
+# link.exe here is the sanctioned Rust MSVC-target LINKER exception, not a C compiler.
+VCToolsInstallDir="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207"
+export VCToolsInstallDir
 export SIMPLE_WINDOWS_ABI=msvc
 # SIMPLE_LINKER_FLAVOR is the repo-wide ABI selector; SIMPLE_WINDOWS_ABI is only
 # read by src/compiler/70.backend/backend/runtime_compiler.spl (C-compiler
@@ -94,6 +108,15 @@ export SIMPLE_WINDOWS_ABI=msvc
 # CROSS-PLATFORM IMPACT: NONE.  This file is Windows-only and is sourced by
 # nothing on Linux/macOS/FreeBSD.  No shared script was modified.
 export SIMPLE_LINKER_FLAVOR=msvc
+
+# CL contains MSVC options, not a POSIX path. Preserve /TC verbatim when MSYS
+# launches native compilers; otherwise it becomes <Git installation>/TC.
+# Keep the caller's other exclusions and leave ordinary path conversion on.
+case ";${MSYS2_ENV_CONV_EXCL:-};" in
+  *';CL;'*) ;;
+  *) MSYS2_ENV_CONV_EXCL="${MSYS2_ENV_CONV_EXCL:+${MSYS2_ENV_CONV_EXCL};}CL" ;;
+esac
+export MSYS2_ENV_CONV_EXCL
 
 # Measured 2026-09-03, same lane.  With SIMPLE_LINKER_FLAVOR=msvc the admitted
 # Stage 2 compiler linked a three-line hello world through clang-cl with
@@ -134,13 +157,26 @@ fi
 unset simple_msvc_vc_bin simple_msvc_sdk_bin simple_msvc_msys_bin \
   simple_msvc_d simple_msvc_c simple_msvc_filtered simple_msvc_oifs
 
-# LLVM 18 for the MSVC ABI. scripts/setup/platform-detect.shs searches PATH for
-# an llvm-config reporting major 18; the MSYS2 llvm-config on this host reports
-# 21.1.1, and the windows well-known-prefix list only covers %ProgramFiles%/LLVM,
-# so detection failed with "error: LLVM not found ... versions: 18". The
-# version-named override prefix is the supported knob (platform-detect.shs:136).
-if [ -z "${LLVM_SYS_180_PREFIX:-}" ] &&
-   [ -f "/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/lib/LLVM-C.lib" ]; then
-  LLVM_SYS_180_PREFIX="/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc"
-  export LLVM_SYS_180_PREFIX
+# Reuse the canonical executable/version validation and target CC binding.
+# Source this bootstrap environment from the repo root, or provide
+# SIMPLE_PROJECT_ROOT. Rust llvm-sys feature pins are a separate backend
+# migration; a historical LLVM18 backend is never Windows C authority.
+unset LLVM_SYS_180_PREFIX
+LLVM_VERSIONS=23
+export LLVM_VERSIONS
+export SIMPLE_LLVM_WIN_ROOT_23
+simple_msvc_repo_root="${SIMPLE_PROJECT_ROOT:-$(pwd -P)}"
+if ! . "$simple_msvc_repo_root/scripts/setup/llvm-toolchain-env.shs"; then
+  echo "windows-msvc-bootstrap-env: LLVM 23.1 C authority could not be established" >&2
+  return 1 2>/dev/null || exit 1
 fi
+# Fallback only: llvm-toolchain-env.shs derives LLVM_SYS_231_PREFIX from
+# `llvm-config --prefix` and that value wins.  This covers a distribution whose
+# llvm-config.exe is absent, where the platform detector and the Rust binding
+# still need the exact LLVM 23.1 prefix.
+if [ -z "${LLVM_SYS_231_PREFIX:-}" ] &&
+   [ -f "$simple_msvc_llvm_prefix/lib/LLVM-C.lib" ]; then
+  LLVM_SYS_231_PREFIX="$simple_msvc_llvm_prefix"
+  export LLVM_SYS_231_PREFIX
+fi
+unset simple_msvc_repo_root simple_msvc_llvm_prefix simple_msvc_llvm_bin

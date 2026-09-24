@@ -1,4 +1,9 @@
 # `char_from_code(0)` returns a NUL byte, spec expected empty text
+## Closed 2026-09-16 — Status FIXED, re-verified 2026-08-17; specs corrected, both engines verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **ID:** char_from_code_zero_returns_nul_not_empty_2026-08-10
 - Status: FIXED
@@ -144,3 +149,4 @@ empty_eq             = false  # char_from_code(0) != ""
 ```
 
 No engine divergence on this primitive.
+

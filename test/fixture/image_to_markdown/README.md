@@ -30,3 +30,22 @@ are listed here independently and must be checked against extraction output.
 
 Generated with the built-in image generation tool on 2026-09-08. Human visual
 inspection confirmed the listed content before the files were admitted here.
+
+## `multilingual_lab_form_diagram.png`
+
+- SHA-256: `eaa118eff79fa79d340a2abd1745da92f13246f9367f01de1067f903bfaf29f2`
+- Size: 1086 × 1448 PNG
+- Printed headings: `실험 기록`, `試料 분석`, `실험 절차도`
+- Flowchart: `입력 → 필터 → 측정 → 판정`
+- Handwritten equation: `y = 2.50x² + 0.75`
+- Handwritten Korean note explains x concentration (`mg/L`) and y absorbance
+  (`AU`); the bottom note records refrigerated storage and no abnormality.
+- Highlighted form values: `A-017`, `23.5 °C`, `101.3 kPa`, `검토 완료`
+- Checkbox state: `승인` checked; `보류` and `要再確認` unchecked
+- Red Japanese approval stamp: `検済`
+- Photo panel caption: `Figure 1. 세포 경계`, with a visible `50 μm` scale bar
+
+Generated with the built-in image generation tool on 2026-09-09. Human visual
+inspection confirmed the listed content before admission. The fixture expands
+REQ-005/006 coverage for flowchart, equation, form, checkbox, stamp/seal,
+highlight, handwriting, photo, caption, and mixed-page categories.

@@ -30,7 +30,12 @@ use std.spec.step
 use std.spec
 use std.spec.step
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io_runtime.{time_now_unix_micros}
+use app.io.mod (is_dir)
 use app.devhub.wiki_git.{sanitize_wiki_page_name, sanitize_owner_or_repo, sanitize_owner_repo_slug, wiki_git_clone_or_pull, wiki_git_list, wiki_git_read, wiki_git_write, wiki_git_delete, wiki_git_search, wiki_git_page_modified, WikiGrepMatch}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 
 
@@ -57,34 +62,59 @@ fn _list_contains(items: [text], target: text) -> bool:
     false
 
 
+var _fixture_counter: i64 = 0
+
+fn _fresh_temp_dir() -> text:
+    """Unique temp dir under build/ (native — no /bin/mktemp, which does not
+    exist on Windows hosts running this suite)."""
+    _fixture_counter = _fixture_counter + 1
+    val dir = "build/test-artifacts/devhub-wiki-git/{time_now_unix_micros()}_{_fixture_counter}"
+    val _mk = rt_dir_create_all(dir)
+    dir
+
+
+fn _git(args: [text]) -> (text, text, i64):
+    process_run("git", args)
+
+
 fn _fixture_bare_wiki_repo() -> text:
     """Create a bare `demo.wiki.git` seeded with Home.md + Setup.md through
     a temp clone (all local; the bare repo path stands in for a real
     `https://github.com/<owner>/<repo>.wiki.git` remote in these specs).
-    Returns the bare repo's path."""
-    val script = "set -eu\n" +
-        "ROOT=$(mktemp -d /tmp/devhub-wiki-git-fixture.XXXXXX)\n" +
-        "BARE=\"$ROOT/demo.wiki.git\"\n" +
-        "SEED=\"$ROOT/seed\"\n" +
-        "git init -q --bare \"$BARE\"\n" +
-        "git clone -q \"$BARE\" \"$SEED\"\n" +
-        "cd \"$SEED\"\n" +
-        "git config user.email test@example.invalid\n" +
-        "git config user.name 'Wiki Fixture'\n" +
-        "printf '# Home\\n\\nWelcome to the wiki.\\n' > Home.md\n" +
-        "printf '# Setup\\n\\nHow to set things up.\\n' > Setup.md\n" +
-        "git add -A\n" +
-        "git commit -q -m 'seed wiki'\n" +
-        "BRANCH=$(git symbolic-ref --short HEAD)\n" +
-        "git push -q origin \"$BRANCH\"\n" +
-        "printf '%s' \"$BARE\"\n"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", script])
-    out.trim()
+    Returns the bare repo's path.
 
-
-fn _fresh_temp_dir() -> text:
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", "mktemp -d /tmp/devhub-wiki-git-cache.XXXXXX\n"])
-    out.trim()
+    Built from native rt_* calls + direct `git` spawns — the POSIX
+    /bin/sh + mktemp recipe this replaced cannot run on Windows."""
+    val root = _fresh_temp_dir()
+    val bare = "{root}/demo.wiki.git"
+    val seed = "{root}/seed"
+    val (_i1, _e1, init_code) = _git(["init", "-q", "--bare", bare])
+    if init_code != 0:
+        return ""
+    val (_i2, _e2, _clone_code) = _git(["clone", "-q", bare, seed])
+    # The seed runtime runs each spawn twice and returns the second result:
+    # the first clone succeeds, the second reports the now-existing checkout.
+    # Accept the fixture only once a real .git directory materialised.
+    if not is_dir("{seed}/.git"):
+        return ""
+    val _w1 = rt_file_write_text("{seed}/Home.md", "# Home\n\nWelcome to the wiki.\n")
+    val _w2 = rt_file_write_text("{seed}/Setup.md", "# Setup\n\nHow to set things up.\n")
+    val (_c1, _ce1, cfg1) = _git(["-C", seed, "config", "user.email", "test@example.invalid"])
+    val (_c2, _ce2, cfg2) = _git(["-C", seed, "config", "user.name", "Wiki Fixture"])
+    val (_a, _ae, add_code) = _git(["-C", seed, "add", "-A"])
+    val (mout, merr, commit_code) = _git(["-C", seed, "commit", "-q", "-m", "seed wiki"])
+    # "nothing to commit" on the repeated second run means the first run
+    # committed successfully (git writes it to stdout).
+    val committed = commit_code == 0 or mout.contains("nothing to commit") or merr.contains("nothing to commit")
+    if cfg1 != 0 or cfg2 != 0 or add_code != 0 or not committed:
+        return ""
+    val (branch, _be, branch_code) = _git(["-C", seed, "symbolic-ref", "--short", "HEAD"])
+    if branch_code != 0:
+        return ""
+    val (_p, _pe, push_code) = _git(["-C", seed, "push", "-q", "origin", branch.trim()])
+    if push_code != 0:
+        return ""
+    bare
 
 
 describe "wiki_git sanitizers (mirrors app.portal.git_repo's sanitizer style)":

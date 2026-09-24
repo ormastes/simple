@@ -83,7 +83,7 @@
 | bootstrap_stage2_capability_log_phantom_2026-08-17 | P3 | open | Warning references stage2-capability.log that is never written when stage2 fails | `scripts/bootstrap/bootstrap-from-scratch.sh:2310` |
 | bootstrap_stage2_empty_mir_bodies_2026-07-05 | P1 | open | Stage-2 bootstrap: function bodies lower to empty ret-0 stubs | `src/compiler/50.mir/_MirLowering/function_lowering.spl:0` |
 | bootstrap_stage2_silent_exit1_empty_log_2026-08-17 | P2 | open | Stage2 silent exit-1 with 0-byte stage2-native-build.log | `scripts/bootstrap/bootstrap-from-scratch.sh:1963` |
-| bootstrap_stage3_module_surface_placeholder_nil_2026-08-01 | P1 | open | Stage 3 module-surface placeholder nil trap | `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:0` |
+| bootstrap_stage3_module_surface_placeholder_nil_2026-08-01 | P1 | fixed | Stage 3 module-surface placeholder nil trap | `src/compiler/80.driver/driver_source_pipeline_parsing.spl:0` |
 | bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17 | P1 | open | Stage3 self-host: stage2 binary emits only a seed-wrapper not native code | `src/app/cli/bootstrap_main.spl:0` |
 | bootstrap_stage4_ast_hir_overlap_memory_2026-07-27 | P1 | open | Stage 4 AST/HIR overlap exhausts the no-GC heap registry | `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:0` |
 | bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21 | P1 | open | Stage4 binary SIGSEGVs at startup via io.cli_ops.get_args recursion | `src/lib/nogc_sync_mut/io_runtime.spl:203` |
@@ -510,7 +510,7 @@
 | lint_reports_clean_on_module_that_fails_to_parse_2026-08-09 | P2 | open | bin/simple lint reports all files clean on a module that does not parse (fail-open) | `src/compiler_rust/parser/src/parser_impl/items.rs:0` |
 | lint_single_file_superlinear_timeout_on_line_count_2026-08-06 | P2 | open | bin/simple lint cost is superlinear in line count (~3.3-4.0s per fn decl), 120-line file ~119s | `src/compiler/90.tools/lint/main.spl:0` |
 | linux_secure_server_perf_runtime_blockers_2026-08-14 | P2 | open | Native PureDatabase fails first post-insert check with invalid-array-handle; HTTP server installs no listener | `src/app/postgres_mimic_server/main.spl:0` |
-| linux_vulkan_renderdoc_reason_forwarding_spec_daemon_timeout_2026-06-28 | P3 | open | Vulkan RenderDoc reason-forwarding spec times out under the test daemon | `test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl:0` |
+| linux_vulkan_renderdoc_reason_forwarding_spec_daemon_timeout_2026-06-28 | P3 | stale assertion fixed / daemon verification pending | Timeout cause unproven; behavioral precedence fixture passes; pure-Simple Linux daemon run pending | `test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl:0` |
 | list_first_returns_raw_value_not_option_2026-07-20 | P2 | open | List<T>.first returns a raw nilable value instead of Option<T> as documented | `src/compiler_rust/compiler/src/interpreter_method/collections.rs:139` |
 | live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11 | P2 | open | Live browser lane measures inline text advance by UTF-8 bytes not codepoints (aeb -> 4 not 3) | `src/lib/blink/layout/inline_text.spl:0` |
 | lld_defsym_symbol_argv_quoting_2026-07-12 | P3 | open | LLD parses unquoted --defsym=spl_start=<symbol> RHS as subtraction when path contains hyphens | `src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl:0` |
@@ -1309,3 +1309,87 @@
 | capsule_immutability_check_fail_open_gnu_find_perm_2026-08-30 | P0 | fixed | Runtime-capsule and stage3-authority immutability checks used GNU-only find -perm /0222; on BSD find it errored to stderr and printed nothing, so the check was FAIL-OPEN | 2026-08-30 |
 | weak_symbol_detection_elf_only_nm_kinds_macho_2026-08-30 | P1 | fixed | Weak-symbol detection used ELF nm kind letters W and V; Mach-O prints weak definitions as T, so every weak fallback looked strong and the Stage-4 capsule guard rejected the build | 2026-08-30 |
 | process_group_setsid_absent_on_macos_2026-08-30 | P1 | fixed | setsid is util-linux and absent on macOS; used by two twin copies of io/process_ops.spl (src/lib and src/app) and by run-process-group-timeout.shs | 2026-08-30 |
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: linux-lane** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:real-gpu]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: hardware** — [env-blocked:hardware]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:real-gpu]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

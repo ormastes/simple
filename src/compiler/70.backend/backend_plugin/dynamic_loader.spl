@@ -4,6 +4,9 @@
 # route through the typed boxed-byte runtime bridge rather than this raw address.
 
 use std.sffi.dynamic.{DynLib}
+use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
+    dynlib_symbol_address_v1
+}
 use std.nogc_sync_mut.io_runtime.{
     file_copy, file_hash_sha256_or_empty, dir_remove_all
 }
@@ -96,6 +99,19 @@ impl DynamicBackendPluginLease:
     fn is_open() -> bool:
         not self.closed and self.entry_symbol_address > 0
 
+    fn admitted_handle() -> i64:
+        """Retained library handle for the transport's tagged-handle packet.
+
+        The runtime bridge casts this back to the loaded library and resolves
+        the v1 entry on it (`runtime_backend_plugin.c`), so it is the dlopen
+        handle, not the entry address. Returns 0 once the lease is closed;
+        transport rejects a non-positive handle as `missing-provider-handle`.
+        """
+        if self.is_open():
+            self.library.handle
+        else:
+            0
+
     me close() -> bool:
         """Release the provider library once without invoking provider code."""
         if self.closed:
@@ -138,18 +154,20 @@ fn load_dynamic_backend_plugin_lease(
         return Err(DynamicBackendPluginLoadError.LoadFailed(
             "dynamic backend staged provider changed while loading"))
 
-    val resolved = unsafe(capabilities: [ffi, raw_ptr]):
-        library.sym_checked(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
-    val entry_symbol = match resolved:
-        case Ok(value): value
-        case Err(detail):
-            unsafe(capabilities: [ffi]):
-                library.close()
-            staged.close()
-            return Err(DynamicBackendPluginLoadError.MissingSymbol(
-                "missing " + DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
-                    + " in staged provider: " + detail
-            ))
+    # The checked `*mut i64` resolver loses out-parameter writeback on older
+    # bootstrap seeds and its direct fallback raises on a normal symbol miss.
+    # This owner returns 0 for a miss, so rejection can close both resources.
+    val entry_symbol = unsafe(capabilities: [ffi, raw_ptr]):
+        dynlib_symbol_address_v1(
+            library.handle, DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+    if entry_symbol <= 0:
+        unsafe(capabilities: [ffi]):
+            library.close()
+        staged.close()
+        return Err(DynamicBackendPluginLoadError.MissingSymbol(
+            "missing " + DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
+                + " in staged provider"
+        ))
 
     Ok(DynamicBackendPluginLease(
         library: library,

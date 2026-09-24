@@ -1,4 +1,8 @@
 # BUG: `native.spl` native-build lane compiles `runtime.c` (legacy, untagged enum/atomic representation) while the Rust core-c-bootstrap lane compiles `runtime_native.c`/`runtime_legacy_core.c` (modern, tagged-heap representation) — same public symbol names, different internal ABI
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — static evidence now points to LATENT (self-consistent, not
 currently live), but not empirically proven by a real native build/run (see
@@ -189,3 +193,4 @@ i.e. the native.spl lane still compiles the legacy `runtime.c`, while the Rust
 core-c-bootstrap lane builds `runtime_native.c` / `runtime_legacy_core.c` (both
 present in tree). The divergence is intact.
 Not proven: any behavioural impact — this doc's own LATENT assessment stands.
+

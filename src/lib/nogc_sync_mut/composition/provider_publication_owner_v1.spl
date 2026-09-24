@@ -1,0 +1,273 @@
+"""Mutex-owned, byte-exact provider publication over the canonical generation manager.
+
+This adapter does not own generation or pin authority. It retains a stable
+whole-pack snapshot under a mutex, then refuses activation until the dynlib
+owner supplies an immutable mapping receipt that binds callable mapping to
+those exact retained bytes.
+"""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.io_runtime.{file_read_bytes}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.nogc_sync_mut.composition.provider_generation.{
+    SIMPLE_GENERATION_OK, SIMPLE_GENERATION_NOT_ACTIVE,
+    ProviderActivationCandidateV1, ProviderActivationReceiptV1,
+    ProviderGenerationManagerV1, ProviderGenerationPinV1,
+    provider_generation_pin_active_v1,
+    provider_generation_pin_is_live_v1, provider_generation_release_v1,
+    provider_generation_available_v1, provider_generation_sweep_v1}
+
+pub val PROVIDER_PUBLICATION_OK: i32 = 0
+pub val PROVIDER_PUBLICATION_INVALID: i32 = 1
+pub val PROVIDER_PUBLICATION_UNSTABLE_DIGEST: i32 = 2
+pub val PROVIDER_PUBLICATION_DIGEST_MISMATCH: i32 = 3
+pub val PROVIDER_PUBLICATION_NOT_ACTIVE: i32 = 4
+pub val PROVIDER_PUBLICATION_PIN_UNKNOWN: i32 = 5
+pub val PROVIDER_PUBLICATION_MAPPING_REQUIRED: i32 = 6
+
+pub struct ProviderPublicationLeaseV1:
+    owner_identity: i64
+    pin: ProviderGenerationPinV1
+    artifact_path: text
+    artifact_digest: text
+    byte_count: i64
+
+pub struct ProviderPublicationReceiptV1:
+    status: i32
+    activation: ProviderActivationReceiptV1
+    observed_digest: text
+    observed_byte_count: i64
+    reason: text
+
+pub struct ProviderPublicationAcquireV1:
+    status: i32
+    lease: ProviderPublicationLeaseV1
+    reason: text
+
+struct _ProviderPublicationBindingV1:
+    provider_handle: u64
+    generation: u64
+    artifact_path: text
+    artifact_digest: text
+    byte_count: i64
+
+struct _ProviderPublicationStateV1:
+    owner_identity: i64
+    manager: ProviderGenerationManagerV1
+    bindings: [_ProviderPublicationBindingV1]
+    active_provider_handle: u64
+    active_generation: u64
+    active_path: text
+    active_digest: text
+    active_byte_count: i64
+    retained_snapshot: [u8]
+    last_receipt: ProviderPublicationReceiptV1
+    last_acquire: ProviderPublicationAcquireV1
+    last_release_status: i32
+    last_lease_live: bool
+
+pub class ProviderPublicationOwnerV1:
+    _state: Mutex
+
+var _next_owner_identity: Mutex = mutex_new(1)
+
+fn _owner_identity_new() -> i64:
+    val next = mutex_with_lock(_next_owner_identity, \current:
+        if current <= 0 or current == 9223372036854775807: 0 else: current + 1)
+    if next <= 1:
+        0
+    else:
+        next - 1
+
+fn _no_activation(reason: text) -> ProviderActivationReceiptV1:
+    ProviderActivationReceiptV1(status: SIMPLE_GENERATION_NOT_ACTIVE,
+        provider_handle: 0u64, generation: 0u64, previous_generation: 0u64,
+        reason: reason)
+
+fn _invalid_lease() -> ProviderPublicationLeaseV1:
+    ProviderPublicationLeaseV1(
+        owner_identity: 0, pin: ProviderGenerationPinV1(status: SIMPLE_GENERATION_NOT_ACTIVE,
+            pin_id: 0u64, provider_handle: 0u64, generation: 0u64,
+            reason: "not-pinned"),
+        artifact_path: "", artifact_digest: "", byte_count: 0)
+
+fn _receipt(status: i32, activation: ProviderActivationReceiptV1,
+    digest: text, byte_count: i64, reason: text) -> ProviderPublicationReceiptV1:
+    ProviderPublicationReceiptV1(status: status, activation: activation,
+        observed_digest: digest, observed_byte_count: byte_count, reason: reason)
+
+fn _acquire(status: i32, lease: ProviderPublicationLeaseV1,
+    reason: text) -> ProviderPublicationAcquireV1:
+    ProviderPublicationAcquireV1(status: status, lease: lease, reason: reason)
+
+fn _state_new(owner_identity: i64) -> _ProviderPublicationStateV1:
+    _ProviderPublicationStateV1(
+        owner_identity: owner_identity, manager: ProviderGenerationManagerV1.create(), bindings: [],
+        active_provider_handle: 0u64, active_generation: 0u64,
+        active_path: "", active_digest: "", active_byte_count: 0,
+        retained_snapshot: [],
+        last_receipt: _receipt(PROVIDER_PUBLICATION_NOT_ACTIVE,
+            _no_activation("not-active"), "", 0, "not-active"),
+        last_acquire: _acquire(PROVIDER_PUBLICATION_NOT_ACTIVE,
+            _invalid_lease(), "not-active"),
+        last_release_status: PROVIDER_PUBLICATION_NOT_ACTIVE,
+        last_lease_live: false)
+
+pub fn provider_publication_owner_new_v1() -> ProviderPublicationOwnerV1:
+    val identity = _owner_identity_new()
+    ProviderPublicationOwnerV1(_state: mutex_new(_state_new(identity)))
+
+fn _binding_exists(state: _ProviderPublicationStateV1,
+    lease: ProviderPublicationLeaseV1) -> bool:
+    var index = 0
+    while index < state.bindings.len():
+        val binding = state.bindings[index]
+        if binding.provider_handle == lease.pin.provider_handle and
+           binding.generation == lease.pin.generation and
+           binding.artifact_path == lease.artifact_path and
+           binding.artifact_digest == lease.artifact_digest and
+           binding.byte_count == lease.byte_count:
+            return true
+        index = index + 1
+    false
+
+fn _retain_live_bindings(state: _ProviderPublicationStateV1) -> _ProviderPublicationStateV1:
+    var next = state
+    var retained: [_ProviderPublicationBindingV1] = []
+    for binding in state.bindings:
+        if provider_generation_available_v1(next.manager, binding.provider_handle,
+            binding.generation):
+            retained.push(binding)
+    next.bindings = retained
+    next
+
+fn _publish_captured_locked(state: _ProviderPublicationStateV1, path: text,
+    before: [u8], after: [u8], candidate: ProviderActivationCandidateV1
+) -> _ProviderPublicationStateV1:
+    var next = _retain_live_bindings(state)
+    val before_digest = sha256_u8_hex(before)
+    val after_digest = sha256_u8_hex(after)
+    if path == "" or before.len() == 0 or after.len() == 0:
+        next.last_receipt = _receipt(PROVIDER_PUBLICATION_INVALID,
+            _no_activation("artifact-missing"), after_digest, after.len(),
+            "artifact-missing")
+        return next
+    if before_digest != after_digest:
+        # The two captures are independently hashed whole images.  Size is
+        # deliberately not an identity: a same-size rewrite takes this branch.
+        next.last_receipt = _receipt(PROVIDER_PUBLICATION_UNSTABLE_DIGEST,
+            _no_activation("whole-pack-digest-unstable"), after_digest,
+            after.len(), "whole-pack-digest-unstable")
+        return next
+    if candidate.expected_artifact_digest != before_digest or
+       candidate.artifact_digest != before_digest:
+        next.last_receipt = _receipt(PROVIDER_PUBLICATION_DIGEST_MISMATCH,
+            _no_activation("candidate-digest-mismatch"), before_digest,
+            before.len(), "candidate-digest-mismatch")
+        return next
+    # Retain an independent immutable byte image under the publication mutex,
+    # but do not activate it. ProviderGenerationManagerV1 has no public
+    # immutable-open/mapping receipt tying its mapped callable to this image;
+    # a path read twice cannot establish that fact after the final read.
+    var frozen: [u8] = []
+    for byte in before:
+        frozen.push(byte)
+    next.retained_snapshot = frozen
+    next.last_receipt = _receipt(PROVIDER_PUBLICATION_MAPPING_REQUIRED,
+        _no_activation("immutable-mapping-receipt-required"), before_digest,
+        before.len(), "immutable-mapping-receipt-required")
+    next
+
+# A caller with an open-file snapshot may supply both captures directly.  This
+# keeps the TOCTOU decision at the publication owner rather than accepting a
+# caller-authored `stable` boolean or a size/mtime receipt.
+pub fn provider_publication_publish_captured_v1(owner: ProviderPublicationOwnerV1,
+    path: text, before: [u8], after: [u8], candidate: ProviderActivationCandidateV1
+) -> ProviderPublicationReceiptV1:
+    val updated = mutex_with_lock(owner._state, \state:
+        _publish_captured_locked(state, path, before, after, candidate))
+    updated.last_receipt
+
+# Mutable-path entry point is intentionally unavailable for activation. It can
+# retain a stable capture, but must not claim path stability without an exact
+# immutable mapping receipt from the dynlib owner.
+pub fn provider_publication_publish_path_v1(owner: ProviderPublicationOwnerV1,
+    path: text, candidate: ProviderActivationCandidateV1
+) -> ProviderPublicationReceiptV1:
+    val before = file_read_bytes(path)
+    val after = file_read_bytes(path)
+    provider_publication_publish_captured_v1(owner, path, before, after, candidate)
+
+fn _acquire_locked(state: _ProviderPublicationStateV1) -> _ProviderPublicationStateV1:
+    var next = state
+    if next.active_provider_handle == 0u64 or next.active_generation == 0u64:
+        next.last_acquire = _acquire(PROVIDER_PUBLICATION_NOT_ACTIVE,
+            _invalid_lease(), "not-active")
+        return next
+    val pin = provider_generation_pin_active_v1(next.manager,
+        next.active_provider_handle)
+    if pin.status != SIMPLE_GENERATION_OK or pin.generation != next.active_generation:
+        next.last_acquire = _acquire(PROVIDER_PUBLICATION_NOT_ACTIVE,
+            _invalid_lease(), "pin-refused:" + pin.reason)
+        return next
+    val lease = ProviderPublicationLeaseV1(pin: pin,
+        owner_identity: next.owner_identity,
+        artifact_path: next.active_path, artifact_digest: next.active_digest,
+        byte_count: next.active_byte_count)
+    next.last_acquire = _acquire(PROVIDER_PUBLICATION_OK, lease, "pinned")
+    next
+
+# The mutex makes each reader acquisition one indivisible observation: it
+# receives either the old fully-published generation or the new fully-published
+# generation, never a mixed path/digest/generation tuple.
+pub fn provider_publication_acquire_v1(owner: ProviderPublicationOwnerV1
+) -> ProviderPublicationAcquireV1:
+    val updated = mutex_with_lock(owner._state, \state: _acquire_locked(state))
+    updated.last_acquire
+
+pub fn provider_publication_lease_live_v1(owner: ProviderPublicationOwnerV1,
+    lease: ProviderPublicationLeaseV1
+) -> bool:
+    val updated = mutex_with_lock(owner._state, \state:
+        var next = state
+        # Both checks must occur inside the same owner turn.  Testing the
+        # manager after releasing this lock would let a concurrent release
+        # turn a successful observation into a stale result.
+        next.last_lease_live = lease.owner_identity == next.owner_identity and
+            _binding_exists(next, lease) and
+            provider_generation_pin_is_live_v1(next.manager, lease.pin)
+        next)
+    updated.last_lease_live
+
+fn _release_locked(state: _ProviderPublicationStateV1,
+    lease: ProviderPublicationLeaseV1) -> _ProviderPublicationStateV1:
+    var next = state
+    if lease.owner_identity != next.owner_identity or not _binding_exists(next, lease) or
+       not provider_generation_pin_is_live_v1(next.manager, lease.pin):
+        next.last_release_status = PROVIDER_PUBLICATION_PIN_UNKNOWN
+        return next
+    val released = provider_generation_release_v1(next.manager, lease.pin)
+    if released != SIMPLE_GENERATION_OK:
+        next.last_release_status = PROVIDER_PUBLICATION_PIN_UNKNOWN
+        return next
+    _ = provider_generation_sweep_v1(next.manager)
+    next = _retain_live_bindings(next)
+    next.last_release_status = PROVIDER_PUBLICATION_OK
+    next
+
+pub fn provider_publication_release_v1(owner: ProviderPublicationOwnerV1,
+    lease: ProviderPublicationLeaseV1
+) -> i32:
+    val updated = mutex_with_lock(owner._state, \state:
+        _release_locked(state, lease))
+    updated.last_release_status
+
+export PROVIDER_PUBLICATION_OK, PROVIDER_PUBLICATION_INVALID
+export PROVIDER_PUBLICATION_UNSTABLE_DIGEST, PROVIDER_PUBLICATION_DIGEST_MISMATCH
+export PROVIDER_PUBLICATION_NOT_ACTIVE, PROVIDER_PUBLICATION_PIN_UNKNOWN
+export PROVIDER_PUBLICATION_MAPPING_REQUIRED
+export ProviderPublicationOwnerV1, ProviderPublicationLeaseV1
+export ProviderPublicationReceiptV1, ProviderPublicationAcquireV1
+export provider_publication_owner_new_v1, provider_publication_publish_captured_v1
+export provider_publication_publish_path_v1, provider_publication_acquire_v1
+export provider_publication_lease_live_v1, provider_publication_release_v1

@@ -1,4 +1,8 @@
 # Flat-AST bridge Phase 3 throughput blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open design; no runtime ABI or Phase 3 candidate change is admitted.
 
@@ -142,3 +146,4 @@ Do not commit an implementation if semantic parity fails, the speedup is below
 3x, memory exceeds the bound, any lane needs an incomplete/noop provider, or
 the canonical codec gates regress. Preserve the current legacy path and record
 the failing evidence instead.
+

@@ -1,0 +1,92 @@
+"""
+A collapsible space between an inline element and the text run after it must
+survive on the SAME line, and must consume advance at the pen.
+
+CSS 2.1 §16.6.1: under `white-space: normal` a run of white space collapses to
+ONE space, and that space is removed only at the START or END of a LINE. A
+space that sits between `</code>` and the following `#text` is therefore real
+and occupies the pen.
+
+This renderer parses a `#text` node into `text_data` (raw) and `text_trimmed`
+(`text_data.trim()`), and the inline formatting path lays a normal-flow `#text`
+out from `text_trimmed`. The trim is unconditional, so a text run placed at a
+NON-ZERO pen lost the one space separating it from its inline sibling: the pen
+advanced by the sibling's width alone, the available width for the run's first
+line was one space too wide, and a run that Chrome wraps fitted on one line.
+
+Measured against headless Chrome (`--headless=new --window-size=900,20000`) on
+a 728 px `<ul>`, 16px/1.5 sans-serif, `<code>` at the UA monospace default —
+the shape every catalog `<li>` on the `css-layout` page has:
+
+| `<li>` content                                   | Chrome | Simple before | after |
+|--------------------------------------------------|--------|---------------|-------|
+| `<code>align-self</code>` + SPACE + `— partial; …` | 88     | 64            | 88    |
+| `<code>align-self</code>` + `— partial; …` (none)  | 64     | 64            | 64    |
+| `— partial; …` alone, i.e. the space at pen 0      | 64     | 64            | 64    |
+
+Row 2 is the SABOTAGE control: delete the space from the markup and Chrome
+itself drops to 64, which is what proves the space — not advance precision, not
+the `<code>` element — is the whole mechanism. Row 3 is the second control: at
+the start of a line the space IS dropped, so a fix that charged for it
+everywhere would break this row. The measured gap is ~4 px, which is exactly
+enough to decide a 631 px run against a 632 px remainder.
+
+Not asserted here, recorded rather than guessed at: lines 2+ of a pen-offset
+run still wrap against the REMAINDER width rather than the full container
+width. No page in the 8-page catalog measures a difference from it (a run long
+enough to expose it does not occur there), so it is named and left.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-005 — a collapsible space between an inline sibling and a following text run consumes pen advance on the same line, and is dropped only at the start of a line.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.{
+    text_starts_with_collapsible_space
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}ul{width:728px;margin:0;padding:0;list-style:none}li{margin:0;padding:0}</style></head><body>"
+val TAIL: text = " — partial; values=keyword-number; owner=simple_web_html_layout_renderer_layout.spl<p>No complete rendering claim for this feature.</p>"
+val TAIL_NO_SPACE: text = "— partial; values=keyword-number; owner=simple_web_html_layout_renderer_layout.spl<p>No complete rendering claim for this feature.</p>"
+
+fn li_height(inner: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + "<ul><li id=\"x\">" + inner + "</li></ul></body></html>",
+        VW, VH, "x", "h")
+
+describe "a collapsible space at a non-zero inline pen consumes advance":
+    it "AC-1: <code> + space + run is Chrome's 88 px, not the 64 the lost space gave":
+        step("the catalog <li> shape; the space pushes the run past 728 px")
+        expect(li_height("<code>align-self</code>" + TAIL)).to_equal("88")
+
+    it "AC-2 (sabotage control): with the space DELETED Chrome is 64 and so are we":
+        step("same markup, no space — the only difference, and it flips Chrome too")
+        expect(li_height("<code>align-self</code>" + TAIL_NO_SPACE)).to_equal("64")
+
+    it "AC-3 (control): a leading space at pen 0 is still dropped, 64 px":
+        step("start of a line — CSS removes the space, so nothing may be charged")
+        expect(li_height(TAIL)).to_equal("64")
+
+    it "AC-4: a longer <code> wrapped before the fix too and must not move":
+        step("align-content is 125 px, already over the limit without the space")
+        expect(li_height("<code>align-content</code>" + TAIL)).to_equal("88")
+
+    it "AC-5: the space is what separates AC-1 from AC-2":
+        step("the two differ by exactly one line box")
+        expect(li_height("<code>align-self</code>" + TAIL))
+            .to_not_equal(li_height("<code>align-self</code>" + TAIL_NO_SPACE))
+
+    it "AC-6: the leading-space test is byte-exact and rejects non-space bytes":
+        step("a UTF-8 continuation byte can never equal an ASCII space")
+        expect(text_starts_with_collapsible_space(" x")).to_equal(true)
+        expect(text_starts_with_collapsible_space("\tx")).to_equal(true)
+        expect(text_starts_with_collapsible_space("\nx")).to_equal(true)
+        expect(text_starts_with_collapsible_space("—x")).to_equal(false)
+        expect(text_starts_with_collapsible_space("x ")).to_equal(false)
+        expect(text_starts_with_collapsible_space("")).to_equal(false)

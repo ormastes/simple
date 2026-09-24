@@ -1,6 +1,8 @@
 # SFFI - I/O Operations
 # Centralized file, directory, and path SFFI wrappers
 
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+
 # ============================================================================
 # File Operations
 # ============================================================================
@@ -342,7 +344,17 @@ extern fn rt_path_join(a: text, b: text) -> text
 @unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
 @always_inline
 fn path_join2(a: text, b: text) -> text:
-    rt_path_join(a, b)
+    # rt_path_join wraps Rust's Path::join, which emits the PLATFORM-NATIVE
+    # separator (backslash on Windows). Every other path helper in this tree
+    # documents forward-slash as the sole canonical INTERNAL form, with native
+    # conversion reserved for the spawn/argv boundary (see
+    # std.platform.to_native_path's docstring and
+    # std.nogc_sync_mut.fs.host_path's file header). Route the raw result
+    # through host_path_canonical so path_join2 honours that same contract
+    # instead of leaking a mixed "/…\…" path on Windows. Identity off
+    # Windows -- a backslash is a legal POSIX filename byte, so it must not
+    # be rewritten there.
+    host_path_canonical(rt_path_join(a, b))
 
 @unsafe(reason: "raw path text and runtime-owned absolute-path ABI", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text

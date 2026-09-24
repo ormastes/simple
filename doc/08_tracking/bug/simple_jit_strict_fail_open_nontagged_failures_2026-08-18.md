@@ -1,4 +1,9 @@
 # SIMPLE_JIT_STRICT=1 was fail-open for every non-tagged JIT failure
+## Closed 2026-09-16 — Status "FIXED 2026-08-18"; fix in exec_core.rs with verification command
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-18 (this session) — `src/compiler_rust/driver/src/exec_core.rs`
 **Filed:** 2026-08-18
@@ -43,3 +48,4 @@ instead of printing `5`.
 The probe also exposed the underlying capability gap that triggered the
 fallback: `print(<int>)` fails JIT compilation — filed separately as
 `jit_cannot_compile_print_int_2026-08-18.md`.
+

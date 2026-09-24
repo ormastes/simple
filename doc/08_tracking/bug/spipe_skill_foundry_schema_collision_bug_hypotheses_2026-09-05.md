@@ -1,4 +1,8 @@
 # Schema collision: foundry doc's "missing" Observation/Hypothesis/Experiment vs. landed `bug_*` tables
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** naming collision, not a real gap. Do not implement.
 
@@ -57,3 +61,4 @@ No code change needed now. If/when `bug_artifacts` is next revised, add
 `parser_uid`, `parser_version`, `trust`, and `derived_from[]` to it rather than
 adopting `EvidenceItemV1`. Everything else in the foundry doc's §6.3/§6.4/§6.5
 schemas is already covered by the landed `bug_*` tables under different names.
+

@@ -1,4 +1,8 @@
 # Bootstrap diagnostic sweep batch barrier and unbounded workers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Fixed
 **Area:** bootstrap diagnostics / scheduler / process isolation
@@ -60,3 +64,4 @@ persistent-worker mode requires evidence that all parser, semantic, driver, and
 runtime globals reset completely between files. A shared-cache mode requires a
 read-only seed format or explicit single-writer publication protocol. Neither
 unsafe optimization is part of this fix.
+

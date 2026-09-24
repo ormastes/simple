@@ -24,7 +24,11 @@ doc/05_design/REQ-APP-TESTRUNNERNE-001.md
 # Note: In interpreter mode, it blocks are closures — runtime behavior
 # is verified by file loading without errors (standard test runner behavior).
 
-use std.test_runner.test_manifest_scanner.{count_sdoctest_blocks, scan_sdoctest_file}
+use std.test_runner.test_manifest.{TestManifestEntry}
+use std.test_runner.test_manifest_scanner.{
+    count_sdoctest_blocks, scan_sdoctest_file, scan_test_file,
+    manifest_entry_fingerprint_matches
+}
 
 use std.spec.step
 
@@ -225,6 +229,20 @@ describe "TestManifest Scanner Logic":
         expect(path.contains("/baremetal/")).to_equal(true)
 
 describe "TestManifest Freshness":
+    it "records real modification time rather than duplicating file size":
+        val entry = scan_test_file("test/01_unit/app/test_runner_new/test_manifest_spec.spl")
+        expect(entry.file_mtime).to_be_greater_than(0)
+        expect(entry.file_mtime == entry.file_size).to_equal(false)
+
+    it "invalidates same-size entries when modification time changes":
+        val old = TestManifestEntry(path: "test/x_spec.spl", file_size: 20, file_mtime: 100, test_level: 1, slow_tag: false, skip_tag: false, pending_tag: false, tags: "", platform_tags: "", is_fuzz: false, is_chaos: false, is_deploy: false, is_security: false, is_baremetal: false, last_duration_ms: 0)
+        expect(manifest_entry_fingerprint_matches(old, 20, 100)).to_equal(true)
+        expect(manifest_entry_fingerprint_matches(old, 20, 101)).to_equal(false)
+
+    it "fails closed when modification time is unavailable":
+        val old = TestManifestEntry(path: "test/x_spec.spl", file_size: 20, file_mtime: 0, test_level: 1, slow_tag: false, skip_tag: false, pending_tag: false, tags: "", platform_tags: "", is_fuzz: false, is_chaos: false, is_deploy: false, is_security: false, is_baremetal: false, last_duration_ms: 0)
+        expect(manifest_entry_fingerprint_matches(old, 20, 0)).to_equal(false)
+
     it "zero timestamp means not fresh":
         # @req: REQ-APP-TESTRUNNERNE-001
         step("Verify: zero timestamp means not fresh")

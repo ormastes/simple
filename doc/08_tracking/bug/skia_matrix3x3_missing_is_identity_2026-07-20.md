@@ -1,4 +1,8 @@
 # Skia Matrix3x3 missing `is_identity()` method
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (missing method, not a rename)
@@ -36,3 +40,4 @@ Trivial to add, but per the cluster-fix guide's hard prohibition
 ("No src/** edits unless the fix is unambiguously a one-line import/rename"),
 adding a brand-new method is out of scope for this pass even though it's
 short — filed here instead.
+

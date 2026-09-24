@@ -42,6 +42,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#endif
 
 /* ----------------------------------------------------------------
  * Directory Operations
@@ -316,6 +319,10 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     char path[4096];
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = 0;  /* NUL-terminate */
+    /* Bounds contract shared with the Rust owner and runtime_native.c: the
+     * region must lie inside the file, else a later access SIGBUSes. */
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
 
     int prot = readonly != 0 ? PROT_READ : (PROT_READ | PROT_WRITE);
     int flags = MAP_SHARED;
@@ -323,6 +330,11 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
 
     int fd = open(path, open_flags);
     if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
+        close(fd);
+        return 0;
+    }
 
     void* addr = mmap(NULL, (size_t)size, prot, flags, fd, (off_t)offset);
     close(fd);
@@ -696,6 +708,44 @@ bool rt_process_is_running(int64_t pid) {
         return true;
     }
     return (errno == EPERM);
+}
+
+int64_t rt_process_start_identity(int64_t pid) {
+    if (pid <= 0) return 0;
+#if defined(__linux__)
+    char path[64], line[2048];
+    snprintf(path, sizeof(path), "/proc/%lld/stat", (long long)pid);
+    FILE* file = fopen(path, "r");
+    if (!file) return 0;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    char* cursor = strrchr(line, ')');
+    if (!cursor || cursor[1] != ' ') return 0;
+    cursor += 2;
+    for (int field = 3; field < 22; field++) {
+        cursor = strchr(cursor, ' ');
+        if (!cursor) return 0;
+        cursor++;
+    }
+    errno = 0;
+    char* end = NULL;
+    unsigned long long value = strtoull(cursor, &end, 10);
+    if (errno != 0 || end == cursor || value > INT64_MAX) return 0;
+    return (int64_t)value;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return 0;
+    uint64_t seconds = (uint64_t)info.pbi_start_tvsec;
+    uint64_t micros = (uint64_t)info.pbi_start_tvusec;
+    if (seconds > (uint64_t)INT64_MAX / 1000000ULL) return 0;
+    return (int64_t)(seconds * 1000000ULL + micros);
+#else
+    return 0;
+#endif
 }
 
 bool rt_process_kill(int64_t pid) {

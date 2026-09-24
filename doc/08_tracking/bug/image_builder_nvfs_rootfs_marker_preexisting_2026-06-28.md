@@ -1,4 +1,13 @@
 # image_builder: nvfs rootfs backend marker assertion fails (pre-existing)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — left OPEN: needs a SimpleOS build/QEMU lane unavailable here
+- **measured**: the referenced product paths still exist, so there is no removed-code basis for a stale closure.
+- **inferred**: reproduction needs the SimpleOS x86_64 build artifacts / QEMU system-test lane (and for the SSP item, a clang hardening-flag build). This triage host is Windows with no such lane, and `bin/simple test` is broken here regardless.
+- **inferred**: no work attempted — the changes would land in `src/compiler/**` or `src/app/compile/**`, and a bootstrap is running concurrently in this workspace.
 
 Date: 2026-06-28
 
@@ -32,3 +41,4 @@ returns before writing), so the nvfs marker file is empty in block 3.
 - `build_install_image_with_rootfs(..., "nvfs")` writes a non-empty
   `SYS/ROOTFS.CFG` containing `rootfs_carrier=fat32` and `rootfs_backend=nvfs`,
   and block 3 passes — without regressing block 1/2.
+

@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createRouter } from "../../mcp/protocol/router.js";
+import { readDoc } from "../../mcp/protocol/tools.js";
 import { createLineHandler } from "../../mcp/transport/stdio.js";
 import { stableJson, stableSdn } from "../../src/format/stable.js";
 
@@ -76,11 +77,11 @@ test("notification namespace remains silent through the transport", () => {
   assert.deepEqual(output, []);
 });
 
-test("transport preserves legacy null ids on handler errors", () => {
+test("transport preserves the request id on handler errors", () => {
   const output = [];
   const handleLine = createLineHandler(route, (line) => output.push(JSON.parse(line)));
   handleLine(JSON.stringify({ jsonrpc: "2.0", id: 91, method: "tools/call", params: { name: "missing" } }));
-  assert.equal(output[0].id, null);
+  assert.equal(output[0].id, 91);
   assert.equal(output[0].error.code, -32000);
   assert.match(output[0].error.message, /unknown tool/);
 });
@@ -95,4 +96,10 @@ test("stable serializers order nested values without collapsing them", () => {
   assert.equal(stableJson({ z: { b: 2, a: 1 }, a: [2, 1] }), '{"a":[2,1],"z":{"a":1,"b":2}}');
   assert.equal(stableSdn({ nested: { b: 2, a: 1 }, ready: true }),
     'nested: "{\\"a\\":1,\\"b\\":2}"\nready: true');
+});
+
+test("MCP documentation paths keep POSIX-relative semantics on Linux", () => {
+  assert.match(readDoc(moduleRoot, "doc/00_llm_process/spipe/skill.md"), /SPipe/);
+  assert.throws(() => readDoc(moduleRoot, "/etc/passwd"), /relative path|allowlist/);
+  assert.throws(() => readDoc(moduleRoot, "doc\\00_llm_process\\spipe\\skill.md"), /relative path|allowlist/);
 });

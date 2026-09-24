@@ -1,4 +1,9 @@
 # Bug: `type X = Y` alias declarations are discarded at parse time — nothing downstream can see them
+## Closed 2026-09-16 — ..._FlatAstBridge` or `35.semantics`. ## Fix direction (prerequisite chain) 1. New arena decl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-29
 - **Severity:** medium (blocks semantic-alias enforcement; silent semantic hole)
@@ -59,3 +64,4 @@ Same defect family as the FlatAstBridge silent-NilLit fallback (fixed loud in
 `147c80f4248`) and the arena tag lossiness A1 proved: the frontend silently
 drops surface syntax, and downstream layers can neither see it nor detect the
 loss.
+

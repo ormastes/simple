@@ -1,4 +1,8 @@
 # MCP SMF script artifact missing `rt_dir_exists`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-01
 
@@ -68,3 +72,4 @@ env SIMPLE_LIB=src bin/simple compile src/app/mcp/main.spl -o build/mcp-script/s
 env SIMPLE_MCP_TOOL_SET=core SIMPLE_LIB=src bin/simple build/mcp-script/simple_mcp_server.smf < framed-init-tools-list.in
 MCP_SCRIPT_PERF_USE_SMF=1 MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
 ```
+

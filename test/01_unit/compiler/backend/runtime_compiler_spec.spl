@@ -1,5 +1,5 @@
 use std.spec.*
-use compiler.backend.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, runtime_abi_policy_v1, runtime_abi_define_args_v1, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
 use app.io.mod.{cwd}
 use std.io_runtime.{file_read_raw, process_run}
 
@@ -13,6 +13,33 @@ fn with_env(key: text, value: text, block: fn()):
     rt_env_set(key, previous)
 
 describe "Runtime Compiler":
+    it "defaults the production runtime ABI policy to selected v1":
+        with_env("SIMPLE_ABI_POLICY", "", fn():
+            val policy = runtime_abi_policy_v1()
+            expect(policy.is_ok()).to_be(true)
+            expect(policy.unwrap()).to_equal("v1")
+        )
+
+    it "rejects deferred and maps selected v1 to both canonical C defines":
+        with_env("SIMPLE_ABI_POLICY", "deferred", fn():
+            val policy = runtime_abi_policy_v1()
+            expect(policy.is_err()).to_be(true)
+            expect(policy.unwrap_err()).to_contain("selected policy is v1")
+        )
+        with_env("SIMPLE_ABI_POLICY", "v1", fn():
+            val policy = runtime_abi_policy_v1()
+            expect(policy.is_ok()).to_be(true)
+            expect(runtime_abi_define_args_v1(policy.unwrap(), true)).to_equal([
+                "/DSIMPLE_ABI_VERSION=1", "/DSIMPLE_ABI_VERSION_DEFERRED=0"])
+        )
+
+    it "rejects an unknown runtime ABI policy before producing defines":
+        with_env("SIMPLE_ABI_POLICY", "automatic", fn():
+            val policy = runtime_abi_policy_v1()
+            expect(policy.is_err()).to_be(true)
+            expect(policy.unwrap_err()).to_contain("selected policy is v1")
+        )
+
     it "recognizes MSVC-compatible driver spellings without classifying GNU clang":
         expect(_is_msvc_cc("cl")).to_be(true)
         expect(_is_msvc_cc("C:\\VS\\BIN\\CL.EXE")).to_be(true)

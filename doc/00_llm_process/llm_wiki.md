@@ -414,6 +414,13 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
   this lane's gates were justified as needing "a real GPU or display"; both were
   measured GREEN on a plain Linux host with neither. Corrected 2026-08-16.
 
+
+## FreeBSD QEMU bootstrap lane
+
+- **Expert note:** `doc/00_llm_process/feature_expert/freebsd_qemu_bootstrap/skill.md`.
+- **Scope:** native FreeBSD x86_64 bootstrap inside QEMU (`check-freebsd-bootstrap-qemu.shs --full`)
+  through Stage 3 PASS, then Stage 4 full CLI and FreeBSD spec runs.
+- **Timeouts:** ssh cap >= bootstrap budget (#1121); Stage 2 per-file cap 1800s under TCG (#1122).
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under
@@ -872,7 +879,7 @@ expiry invalidates the old admission and requires a new exact-state review.
 `--no-verify` only skips local Git hooks and cannot bypass remote checks or
 protection. The operator guides are `doc/07_guide/app/devhub.md` and
 `doc/07_guide/infra/self_review_policy_db.md`; the executable review workflow
-is `tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
+is `tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
 
 - GNU GDB/GDB multiarch, OpenOCD, and picocom are the legitimate free host
   baseline; they do not turn an arbitrary USB cable into Intel DCI.

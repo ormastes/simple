@@ -1,6 +1,6 @@
 # LSP MCP: integer position args (line/character) corrupted in deployed server
 
-- **Status:** Open — root cause is a **`native-build` codegen/runtime bug**, not a `tools.spl` logic bug
+- **Status:** Open (re-triaged 2026-09-13 — see the note at the end of this file) — root cause is a **`native-build` codegen/runtime bug**, not a `tools.spl` logic bug
 - **Severity:** P1 (server currently fully unusable — see 2026-06-14 PM update)
 - **Date:** 2026-06-14
 - **Component:** `bin/simple native-build` codegen+runtime (`text.to_int()`, text `>=`, `str(negative i64)`); surfaces in `src/app/simple_lsp_mcp/`
@@ -119,3 +119,10 @@ bin/simple src/lib/nogc_sync_mut/lsp/lsp_query.spl definition src/lib/common/bas
 bin/simple native-build --runtime-bundle core-c-bootstrap --entry doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl --output /tmp/r && /tmp/r
 bin/simple run doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl
 ```
+
+## Triage 2026-09-13 — LEFT OPEN (the failing lane cannot be built on this host)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the reported lane is unavailable. `bin/simple native-build` fails before producing a binary — `error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary` — so none of the three confirmed codegen bugs (`text.to_int()` tagged garbage, text `>=` miscompiled, `str(negative i64)` corrupted) can be re-run.
+- **inferred**: testing them on the JIT/interpreter would prove nothing. The entry states plainly that the interpreter is correct and that the defects are native-build-only, so a green interpreter run is the expected result either way.
+- **measured**: all three repo paths the entry cites still exist, including the two committed reproducers under `doc/08_tracking/bug/repro/`, so this is not stale by removal.
+- Verdict: OPEN — needs a host where `native-build` works.

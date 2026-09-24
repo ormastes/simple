@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Behavioral specification for the wire-format packers in
+`std.nogc_async_mut.engine.render.gpu_mesh3d`.
+
+The async copy of this module uploaded ZEROED placeholder buffers for both mesh
+vertices and per-instance transforms, so every instanced draw rendered geometry
+at the origin with zero scale. The sync twin already packs real little-endian
+bytes; these cases pin the async packers to the same wire format.
+
+Audience: renderer and runtime developers.
+"""
+# @req: REQ-LIB-RENDER_GPU_MESH3D-002
+
+use std.spec
+use std.nogc_async_mut.engine.render.gpu_mesh3d.{
+    mesh_vertices_to_bytes, mesh_indices_to_bytes, instances_to_bytes
+}
+use std.nogc_async_mut.engine.render.instancing.{InstanceData}
+
+describe "gpu_mesh3d — vertex wire format":
+
+    it "emits four little-endian bytes per f32":
+        val b = mesh_vertices_to_bytes([1.0 as f32])
+        expect(b.len()).to_equal(4)
+
+    it "packs 1.0f32 as 0x3F800000 little-endian":
+        val b = mesh_vertices_to_bytes([1.0 as f32])
+        expect(b[0]).to_equal(0)
+        expect(b[1]).to_equal(0)
+        expect(b[2]).to_equal(128)
+        expect(b[3]).to_equal(63)
+
+    it "packs 2.0f32 as 0x40000000 little-endian":
+        val b = mesh_vertices_to_bytes([2.0 as f32])
+        expect(b[2]).to_equal(0)
+        expect(b[3]).to_equal(64)
+
+    it "packs -1.0f32 with the sign bit set":
+        val b = mesh_vertices_to_bytes([(0.0 - 1.0) as f32])
+        expect(b[3]).to_equal(191)
+
+    it "is not a zero-filled placeholder for a non-zero vertex stream":
+        val b = mesh_vertices_to_bytes([1.0 as f32, 2.0 as f32, 0.5 as f32])
+        var nonzero = 0
+        var i = 0
+        while i < b.len():
+            if b[i] != 0:
+                nonzero = nonzero + 1
+            i = i + 1
+        expect(b.len()).to_equal(12)
+        expect(nonzero > 0).to_equal(true)
+
+describe "gpu_mesh3d — index wire format":
+
+    it "emits four little-endian bytes per index":
+        val b = mesh_indices_to_bytes([258])
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(2)
+        expect(b[1]).to_equal(1)
+        expect(b[2]).to_equal(0)
+        expect(b[3]).to_equal(0)
+
+    it "packs several indices in order":
+        val b = mesh_indices_to_bytes([0, 1, 2])
+        expect(b.len()).to_equal(12)
+        expect(b[4]).to_equal(1)
+        expect(b[8]).to_equal(2)
+
+describe "gpu_mesh3d — per-instance transform wire format":
+
+    it "emits 56 bytes per instance (7 x f64)":
+        val b = instances_to_bytes([InstanceData.new(0.0, 0.0, 0.0)])
+        expect(b.len()).to_equal(56)
+
+    it "packs a 1.0 scale field as 0x3FF0000000000000 little-endian":
+        # InstanceData.new sets scale_x/y/z = 1.0; scale_x is field 4 (offset 24)
+        val b = instances_to_bytes([InstanceData.new(0.0, 0.0, 0.0)])
+        expect(b[30]).to_equal(240)
+        expect(b[31]).to_equal(63)
+
+    it "packs the position fields, not zeroes":
+        val b = instances_to_bytes([InstanceData.new(2.0, 0.0, 0.0)])
+        expect(b[7]).to_equal(64)
+
+    it "concatenates instances at a 56-byte stride":
+        val b = instances_to_bytes([
+            InstanceData.new(0.0, 0.0, 0.0),
+            InstanceData.new(2.0, 0.0, 0.0)
+        ])
+        expect(b.len()).to_equal(112)
+        expect(b[63]).to_equal(64)
+
+    it "is not a zero-filled placeholder":
+        val b = instances_to_bytes([InstanceData.new(1.0, 2.0, 3.0)])
+        var nonzero = 0
+        var i = 0
+        while i < b.len():
+            if b[i] != 0:
+                nonzero = nonzero + 1
+            i = i + 1
+        expect(nonzero > 0).to_equal(true)

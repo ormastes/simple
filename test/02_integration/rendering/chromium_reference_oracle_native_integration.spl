@@ -1,0 +1,50 @@
+"""Hosted fixture integration for the test-only Chromium oracle SFFI owner.
+
+The C provider identifies itself as fixture-not-chromium. Passing this harness
+proves ABI ownership and bounded transport against a native provider only; it
+is never Chrome or GPU evidence and does not claim a native-compiled caller.
+"""
+
+use std.io_runtime.{cwd, file_hash_sha256, host_os}
+use std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi.{
+    ChromiumOracleLoadRequest, chromium_oracle_load, chromium_oracle_run,
+    chromium_oracle_release,
+}
+
+fn require(condition: bool, message: text):
+    if not condition:
+        panic("chromium-oracle-native-integration: {message}")
+
+fn main() -> i64:
+    val suffix = if host_os() == "macos" or host_os() == "darwin": ".dylib" else: ".so"
+    val library_path = "{cwd()}/build/test-fixtures/chromium_primitive_oracle/libsimple_chromium_primitive_oracle{suffix}"
+    val digest = file_hash_sha256(library_path)
+    require(digest.len() == 64, "fixture artifact digest unavailable")
+    val request = ChromiumOracleLoadRequest(
+        library_path: library_path, manifest_sha256: digest,
+        expected_abi_version: 1,
+        required_symbols: ["simple_chromium_oracle_abi_version",
+            "simple_chromium_oracle_create", "simple_chromium_oracle_run_json_into",
+            "simple_chromium_oracle_last_error_into", "simple_chromium_oracle_destroy"],
+        max_request_bytes: 1048576, max_response_bytes: 4194304,
+        test_only: true)
+    val loaded = unsafe(capabilities: [ffi, raw_ptr]):
+        chromium_oracle_load(request)
+    require(loaded.ok and loaded.handle != nil, "load failed: {loaded.status}:{loaded.error}")
+    val fixture_json = "{\"rect\":true,\"text\":true,\"image\":true,\"pointer\":true,\"keyboard\":true,\"scroll\":true,\"resize\":true}"
+    val call = unsafe(capabilities: [ffi, raw_ptr]):
+        chromium_oracle_run(loaded.handle.?, fixture_json, request.max_response_bytes)
+    require(call.ok, "run failed: {call.status}:{call.error}")
+    require(call.response_json.contains("\"oracle_identity\":\"fixture-not-chromium\""),
+        "fixture identity missing")
+    require(call.response_json.contains("\"device_origin_readback\":false"),
+        "fixture incorrectly promoted to device evidence")
+    val released = unsafe(capabilities: [ffi, raw_ptr]):
+        chromium_oracle_release(loaded.handle.?)
+    require(released.ok and released.handle.released, "release failed: {released.status}")
+    val duplicate = unsafe(capabilities: [ffi, raw_ptr]):
+        chromium_oracle_release(released.handle)
+    require(not duplicate.ok and duplicate.status == "released-handle",
+        "duplicate release was not rejected")
+    print "chromium-oracle-native-integration: PASS fixture-only"
+    0

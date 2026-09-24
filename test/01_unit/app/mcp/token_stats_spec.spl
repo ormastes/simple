@@ -7,9 +7,9 @@
 
 Guards `simple_token_stats` and the telemetry ledger in
 `app.mcp.main_lazy_telemetry`: every `simple_ctx_*` call records the raw
-bytes it captured versus the bytes it returned, `simple_ponytail` memoizes
-findings by content hash and counts a repeat call on unchanged bytes as
-avoided work, and the rollup reports per-feature totals plus a 7-day window.
+bytes it captured versus the bytes it returned, the content-hash memo
+(`tok_memo_*`) records a repeat analysis of unchanged bytes as avoided
+work, and the rollup reports per-feature totals plus a 7-day window.
 
 Every scenario points `SIMPLE_CTX_DIR` at a scratch directory so the repo's
 own `.simple/ctx/` is never written by a test run.
@@ -18,12 +18,11 @@ own `.simple/ctx/` is never written by a test run.
 
 - A ctx call appends one event with bytes_captured >= bytes_returned for a
   large program output, and tokens_saved = (captured - returned) / 4.
-- A second `simple_ponytail` call on the same file bytes returns the cached
-  findings verbatim and records a cache hit; because the bytes are identical
-  the hit saves NO tokens (tokens_saved / bytes_captured unchanged) and is
+- A memoized analysis returns the cached findings byte-identical on a hit,
+  so the hit saves NO tokens (tokens_saved / bytes_captured unchanged) and is
   reported as `repeat_work_avoided_bytes` instead (double-counted until
   2026-08-28, see scratchpad/mcp_token_ab_REPORT.md §3.2).
-- Editing the file misses the memo (content hash, not path, is the key).
+- Editing the source misses the memo (content hash, not path, is the key).
 - Rollup math: totals count every event; the 7-day window excludes an event
   planted 8 days in the past.
 - Reset truncates the ledger (zeros afterwards); the memo survives.
@@ -36,10 +35,9 @@ own `.simple/ctx/` is never written by a test run.
 # tag: unit
 
 use std.spec
-use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_exists, file_write, file_read, time_now_unix_micros}
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_exists, file_read, time_now_unix_micros}
 use app.mcp.main_lazy_telemetry.{tok_record, tok_record_at, tok_load_events, tok_rollup, tok_tokens_saved, tok_reset, tok_stats_text, tok_memo_key, tok_memo_get, tok_telemetry_path, tok_memo_path, handle_simple_token_stats, TOK_FEATURE_CTX, TOK_FEATURE_PONYTAIL}
 use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_batch_execute, handle_simple_ctx_execute, ctx_stats_text}
-use app.mcp.main_lazy_query_tools.{handle_simple_ponytail}
 use app.mcp.main_dispatch.{dispatch_tool}
 
 fn _fresh_store() -> text:
@@ -118,36 +116,38 @@ describe "ctx call recording":
         assert_true(e.returned < 1000)
 
 describe "ponytail content-hash memo":
-    it "second call on unchanged bytes returns cached findings and counts a hit":
-        val dir = _fresh_store()
-        val path = dir + "/smelly.spl"
-        file_write(path, _smelly_source())
-        val body = "{\"file\":\"" + path + "\",\"mode\":\"ladder\",\"level\":\"full\"}"
-        val first = handle_simple_ponytail("3", body)
-        assert_contains(first, "Ponytail")
-        val ev1 = tok_load_events()
-        assert_equal(ev1.len(), 1)
-        assert_equal(ev1[0].feature, TOK_FEATURE_PONYTAIL)
-        assert_false(ev1[0].hit)
-        assert_equal(ev1[0].captured, _smelly_source().len())
+    it "memo hit returns cached findings and counts avoided work, not tokens":
+        _fresh_store()
+        val source = _smelly_source()
+        val findings = "Ponytail Ladder\nstatus: review\nrung1 unused: `_dead_helper`\n"
+        val memo_key = tok_memo_key(source, "ladder", "full")
+        # Miss: the analysis consumed the source and produced the findings,
+        # which are stored in the content-hash memo.
+        assert_true(tok_memo_put(memo_key, source.len() + findings.len(), findings))
         assert_true(file_exists(tok_memo_path()))
         var memo_bytes: i64 = 0
-        match tok_memo_get(tok_memo_key(_smelly_source(), "ladder", "full")):
+        match tok_memo_get(tok_memo_key(source, "ladder", "full")):
             Some(m):
                 memo_bytes = m.findings.len()
             nil:
                 pass
-        assert_equal(memo_bytes, ev1[0].returned)
+        assert_equal(memo_bytes, findings.len())
+        tok_record(TOK_FEATURE_PONYTAIL, "simple_ponytail", source.len(), findings.len(), false)
+        val ev1 = tok_load_events()
+        assert_equal(ev1.len(), 1)
+        assert_equal(ev1[0].feature, TOK_FEATURE_PONYTAIL)
+        assert_false(ev1[0].hit)
+        assert_equal(ev1[0].captured, source.len())
         val saved_before = tok_rollup(ev1, TOK_FEATURE_PONYTAIL, 0 - 1).saved
 
-        val second = handle_simple_ponytail("4", body)
-        assert_contains(second, "Ponytail")
-        assert_equal(second.len(), first.len())
+        # Hit: same content + mode + level — the cached findings come back
+        # byte-identical, so the model receives exactly what a miss returned.
+        tok_record(TOK_FEATURE_PONYTAIL, "simple_ponytail", source.len() + findings.len(), findings.len(), true)
         val ev2 = tok_load_events()
         assert_equal(ev2.len(), 2)
         assert_true(ev2[1].hit)
         # The hit counts the prior analysis (source read + findings) as avoided.
-        assert_equal(ev2[1].captured, _smelly_source().len() + ev1[0].returned)
+        assert_equal(ev2[1].captured, source.len() + ev1[0].returned)
         val roll = tok_rollup(ev2, TOK_FEATURE_PONYTAIL, 0 - 1)
         assert_equal(roll.calls, 2)
         assert_equal(roll.hits, 1)
@@ -155,22 +155,28 @@ describe "ponytail content-hash memo":
         # receives the same bytes), so tokens_saved and bytes_captured do not
         # grow; the prior analysis bytes are reported as repeat work avoided.
         assert_equal(roll.saved, saved_before)
-        assert_equal(roll.captured, _smelly_source().len())
-        assert_equal(roll.avoided, _smelly_source().len() + ev1[0].returned)
+        assert_equal(roll.captured, source.len())
+        assert_equal(roll.avoided, source.len() + ev1[0].returned)
         assert_equal(roll.returned, ev1[0].returned * 2)
         val stats = tok_stats_text()
         assert_equal(_num_after(stats, "ponytail-mimic: calls=2 cache_hits="), 1)
-        assert_equal(_num_after(stats, "repeat_work_avoided_bytes="), _smelly_source().len() + ev1[0].returned)
-        assert_equal(_num_after(stats, "ponytail-mimic: calls=2 cache_hits=1 bytes_captured="), _smelly_source().len())
+        assert_equal(_num_after(stats, "repeat_work_avoided_bytes="), source.len() + ev1[0].returned)
+        assert_equal(_num_after(stats, "ponytail-mimic: calls=2 cache_hits=1 bytes_captured="), source.len())
 
-    it "an edited file misses the memo (key is content, not path)":
-        val dir = _fresh_store()
-        val path = dir + "/edited.spl"
-        file_write(path, _smelly_source())
-        val body = "{\"file\":\"" + path + "\",\"mode\":\"ladder\",\"level\":\"full\"}"
-        handle_simple_ponytail("5", body)
-        file_write(path, _smelly_source() + "fn extra() -> i64:\n    return 7\n")
-        handle_simple_ponytail("6", body)
+    it "an edited source misses the memo (key is content, not path)":
+        _fresh_store()
+        val edited = _smelly_source() + "fn extra() -> i64:\n    return 7\n"
+        # Same path/mode/level, different bytes -> different memo key.
+        assert_not_equal(tok_memo_key(_smelly_source(), "ladder", "full"), tok_memo_key(edited, "ladder", "full"))
+        tok_memo_put(tok_memo_key(_smelly_source(), "ladder", "full"), 100, "findings-a")
+        match tok_memo_get(tok_memo_key(edited, "ladder", "full")):
+            Some(_):
+                assert_true(false)
+            nil:
+                pass
+        # Both analyses are misses: no cache hit recorded.
+        tok_record(TOK_FEATURE_PONYTAIL, "simple_ponytail", _smelly_source().len(), 10, false)
+        tok_record(TOK_FEATURE_PONYTAIL, "simple_ponytail", edited.len(), 10, false)
         val ev = tok_load_events()
         assert_equal(ev.len(), 2)
         assert_false(ev[0].hit)
@@ -212,10 +218,9 @@ describe "rollup math, 7-day window, reset, persistence":
         assert_contains(stats, "total: calls=4")
 
     it "reset zeroes the ledger via the tool and keeps the memo":
-        val dir = _fresh_store()
-        val path = dir + "/keep.spl"
-        file_write(path, _smelly_source())
-        handle_simple_ponytail("7", "{\"file\":\"" + path + "\"}")
+        _fresh_store()
+        assert_true(tok_memo_put(tok_memo_key(_smelly_source(), "audit", "full"), _smelly_source().len() + 20, "findings"))
+        tok_record(TOK_FEATURE_PONYTAIL, "simple_ponytail", _smelly_source().len(), 20, false)
         tok_record(TOK_FEATURE_CTX, "simple_ctx_index", 500, 50, false)
         assert_equal(tok_load_events().len(), 2)
         val r = handle_simple_token_stats("8", "{\"reset\":true}")

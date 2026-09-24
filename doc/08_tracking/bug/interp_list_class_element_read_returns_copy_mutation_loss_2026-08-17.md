@@ -183,3 +183,18 @@ must return to `6 total, 6 passed, 0 failed`.
 RED. A defensible interim workaround in office code only would be to have
 `Workbook.active()` callers write the sheet back
 (`wb.sheets[i] = sh`), but that papers over the engine defect and is not the fix.
+
+## 2026-09-20 — flip scoped and declined (census lives in the sibling record)
+
+The `Value::Object` -> `Value::ClassInstance` flip that would fix this whole
+family was scoped and **declined** on 2026-09-20. The reproduction, the
+confirmed root cause (`Value::aggregate` ignoring `_is_value_type`,
+`value.rs:1914`) and the full site census are in
+`interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10.md`
+§ "2026-09-20 — re-reproduced, root cause confirmed, flip scoped and DECLINED".
+
+Headline: 105 production `Value::Object` pattern sites in 37 files have no
+`ClassInstance` arm and fall through a wildcard. Enumerated in
+`class_instance_flip_uncovered_sites_2026-09-20.txt` (repo-root-relative
+paths). The blocker is verifiability, not effort — the tripwire in that
+record's step 1 is the prerequisite for any re-land.

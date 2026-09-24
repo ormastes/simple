@@ -1,4 +1,8 @@
 # MCP core tool set serves 3 tools while its specs require 20
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-25 · **Severity:** MEDIUM (core/auto MCP mode advertises far fewer tools than specified) · **Status:** OPEN · **Pre-existing at origin**
 
@@ -27,3 +31,4 @@ serve — the full-list pin was already drifting for the same reason.
 `mcp_tool_set_spec` and `mcp_dynload_upgrade_spec` report 0 failed with a core
 count that matches a stated requirement, and the full-list pin is regenerated
 from the table rather than hand-maintained.
+

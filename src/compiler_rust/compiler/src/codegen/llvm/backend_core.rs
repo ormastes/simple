@@ -109,6 +109,63 @@ pub(super) fn llvm_memprof_enabled() -> bool {
 }
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
+
+/// Default x86-64 CPU profile for LLVM codegen.
+///
+/// This is the knob that decides whether LLVM's loop and SLP vectorizers --
+/// both enabled in `optimize_module_ir` -- are allowed to emit AVX-512. It was
+/// pinned to `x86-64-v3`, i.e. AVX2, so on a host with full AVX-512 support
+/// every natively built binary (the DB server, the HTTP server, the software
+/// renderer) was vectorized at 256 bits and never 512, with nothing in the
+/// build output saying so.
+///
+/// Widening follows the same discipline as the pure-Simple auto-vectorizer's
+/// planning level (`auto_vectorize_target.spl`), for the same reason: a CPU
+/// name is a REQUEST, not proof about the execution domain.
+///
+///   * the output must target the host -- a cross-compiled artifact must never
+///     be widened from the builder's CPUID, or it will fault on the machine it
+///     was built for;
+///   * AVX-512 F, VL and BW must all be present, VL because LLVM still emits
+///     128/256-bit forms for short trips and BW because byte/word lanes are
+///     otherwise unencodable;
+///   * anything short of that returns the previous `x86-64-v3` baseline, so
+///     this can only widen, never narrow.
+///
+/// `SIMPLE_X86_64_DEFAULT_CPU` overrides the choice outright, which is the
+/// escape hatch for reproducible builds that must not vary with the builder.
+fn default_x86_64_cpu_name(triple: &str) -> &'static str {
+    const BASELINE: &str = "x86-64-v3";
+    const WIDE: &str = "x86-64-v4";
+
+    if let Ok(forced) = std::env::var("SIMPLE_X86_64_DEFAULT_CPU") {
+        return match forced.trim() {
+            "x86-64-v4" => WIDE,
+            "x86-64-v3" => BASELINE,
+            "x86-64-v2" => "x86-64-v2",
+            "x86-64" => "x86-64",
+            _ => BASELINE,
+        };
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Host-targeting only. `triple` is the requested output triple; if it
+        // is not an x86_64 triple the caller is cross-compiling and the host
+        // receipt proves nothing about the target.
+        let targets_host = triple.starts_with("x86_64") || triple.starts_with("amd64");
+        if targets_host
+            && std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512vl")
+            && std::is_x86_feature_detected!("avx512bw")
+        {
+            return WIDE;
+        }
+    }
+    let _ = triple;
+    BASELINE
+}
+
 impl std::fmt::Debug for LlvmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlvmBackend")
@@ -692,7 +749,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed(tag, &e))?;
             Ok(cs
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .map(|v| v.into_int_value())
                 .unwrap_or_else(|| i64_type.const_int(0, false)))
         };
@@ -1005,7 +1062,7 @@ impl LlvmBackend {
             if alias.get_type().get_return_type().is_some() {
                 let ret = call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .ok_or_else(|| CompileError::semantic(format!("alias `{alias_name}` missing return value")))?;
                 builder
                     .build_return(Some(&ret))
@@ -1121,7 +1178,7 @@ impl LlvmBackend {
             self.cpu
                 .llvm_cpu_name(self.target.arch)
                 .unwrap_or(match self.target.arch {
-                    TargetArch::X86_64 => "x86-64-v3",
+                    TargetArch::X86_64 => default_x86_64_cpu_name(&triple),
                     TargetArch::Aarch64 => "generic",
                     TargetArch::X86 => "i686",
                     TargetArch::Arm => "generic",
@@ -1493,7 +1550,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call malloc", &e))?;
         let ptr = call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("call malloc", "no return value"))?
             .into_pointer_value();
         let val = i32t.const_int(42, false);
@@ -1664,6 +1721,33 @@ impl NativeBackend for LlvmBackend {
     fn compile(&mut self, module: &MirModule) -> Result<Vec<u8>, CompileError> {
         let module_name = module.name.as_deref().unwrap_or("module");
         self.create_module(module_name)?;
+
+        // Outline lambda/generator/future body blocks into standalone
+        // top-level MIR functions BEFORE anything else touches
+        // `module.functions`. Without this, a MIR function that assigns a
+        // lambda to a local (`val f: fn(i64) -> i64 = \x: x * 2`) keeps the
+        // lambda's body as an extra, disconnected basic block INSIDE its
+        // parent function (confirmed via `SIMPLE_DUMP_IR`: the dumped IR
+        // showed `bb1: ; No predecessors!` still inside `@spl_main`, and no
+        // `@main_outlined_1` function anywhere in the module) instead of
+        // becoming its own callable function. `compile_closure_create`
+        // (functions/objects.rs) then does `module.get_function(func_name)`
+        // for that never-emitted outlined name, finds nothing, and silently
+        // falls back to `i8_ptr_type.const_null()` as the closure's function
+        // pointer. Every later indirect call through that closure value then
+        // loads and calls a NULL function pointer — measured exit 133
+        // (SIGTRAP) for a plain local closure and exit 139 (SIGSEGV) for one
+        // read back out of a class field, both fixed by this outlining pass
+        // (see doc/08_tracking/bug/native_closure_value_indirect_call_segv_2026-09-07.md).
+        // `codegen::common_backend::compile_all_functions` (the Cranelift/JIT
+        // path) already calls `expand_with_outlined` for exactly this reason;
+        // the LLVM/native backend never did, so a call through a closure
+        // VALUE (as opposed to calling a function by its bare name, which
+        // never goes through ClosureCreate/IndirectCall) always crashed.
+        let outlined_functions = crate::codegen::shared::expand_with_outlined(module);
+        let mut owned_module = module.clone();
+        owned_module.functions = outlined_functions;
+        let module: &MirModule = &owned_module;
 
         // Pre-declare runtime functions with correct signatures.
         // This prevents compile_call from creating wrong declarations when
@@ -1873,5 +1957,96 @@ impl NativeBackend for LlvmBackend {
                 | TargetArch::Wasm32
                 | TargetArch::Wasm64
         )
+    }
+}
+
+#[cfg(test)]
+mod default_x86_64_cpu_tests {
+    use super::default_x86_64_cpu_name;
+
+    // Serialised because these mutate a process-global env var.
+    fn with_forced<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let key = "SIMPLE_X86_64_DEFAULT_CPU";
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let out = f();
+        match prev {
+            Some(p) => std::env::set_var(key, p),
+            None => std::env::remove_var(key),
+        }
+        out
+    }
+
+    #[test]
+    fn cross_compiled_output_is_never_widened_from_the_host() {
+        // The builder's CPUID says nothing about the machine the artifact will
+        // run on. Widening here produces a binary that faults on its target.
+        with_forced(None, || {
+            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64-v3");
+            assert_eq!(default_x86_64_cpu_name("riscv64-unknown-elf"), "x86-64-v3");
+            assert_eq!(default_x86_64_cpu_name("wasm32-unknown-unknown"), "x86-64-v3");
+        });
+    }
+
+    #[test]
+    fn never_narrows_below_the_previous_baseline() {
+        // Whatever the host reports, the answer must be at least the v3 that
+        // was hardcoded before, or this is a regression rather than an upgrade.
+        with_forced(None, || {
+            for triple in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "amd64-foo"] {
+                let got = default_x86_64_cpu_name(triple);
+                assert!(
+                    got == "x86-64-v3" || got == "x86-64-v4",
+                    "{triple} resolved to {got}, which is below the v3 baseline"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn host_targeting_widens_exactly_when_the_host_admits_avx512() {
+        // The decision must track the real capability probe, not a guess.
+        with_forced(None, || {
+            // `cfg!` is a VALUE, not a compilation gate: on aarch64 the
+            // `is_x86_feature_detected!` arms still had to compile and the
+            // macro rejects the target outright ("This macro cannot be used
+            // on the current target"), so the whole `simple-compiler` lib
+            // TEST target failed to build on every non-x86 host -- no Rust
+            // unit test in this crate could run on an arm64 macOS box. A real
+            // `#[cfg]` on the binding keeps the x86_64 probe byte-identical
+            // and gives other architectures the only answer they can have.
+            #[cfg(target_arch = "x86_64")]
+            let expected_wide = std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512vl")
+                && std::is_x86_feature_detected!("avx512bw");
+            #[cfg(not(target_arch = "x86_64"))]
+            let expected_wide = false;
+            let got = default_x86_64_cpu_name("x86_64-unknown-linux-gnu");
+            assert_eq!(got == "x86-64-v4", expected_wide, "got {got}");
+        });
+    }
+
+    #[test]
+    fn the_env_override_wins_over_host_detection() {
+        // Reproducible builds must not vary with whoever ran the compiler.
+        with_forced(Some("x86-64-v3"), || {
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64-v3");
+        });
+        with_forced(Some("x86-64"), || {
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64");
+        });
+        with_forced(Some("x86-64-v4"), || {
+            assert_eq!(default_x86_64_cpu_name("aarch64-unknown-linux-gnu"), "x86-64-v4");
+        });
+    }
+
+    #[test]
+    fn an_unrecognised_override_falls_back_to_the_baseline() {
+        with_forced(Some("znver9-turbo"), || {
+            assert_eq!(default_x86_64_cpu_name("x86_64-unknown-linux-gnu"), "x86-64-v3");
+        });
     }
 }

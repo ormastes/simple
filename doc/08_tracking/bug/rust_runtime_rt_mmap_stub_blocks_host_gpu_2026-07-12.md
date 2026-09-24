@@ -1,4 +1,9 @@
 # Rust runtime rt_mmap stub blocks the host-GPU daemon
+## Closed 2026-09-16 — Resolution 2026-07-13: real mmap impl; cross-process visibility test PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 After a strict no-stub native build linked the current host-GPU daemon with
 zero undefined `rt_*` symbols, its empty 8 MiB one-shot probe returned
@@ -34,3 +39,4 @@ The subsequent HELLO rejection is not an mmap failure. A Vulkan-feature runtime
 returns success from `rt_vulkan_init`, while the current Engine2D Vulkan backend
 still fails later in initialization; that separate backend blocker remains
 tracked rather than being masked with a synthetic receipt.
+

@@ -10,8 +10,12 @@
 # This replaces the pattern of duplicating extern fn declarations in every
 # test file and compiler module that needs I/O.
 
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, _resolve_posix_tool}
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
+# HOST-OS DETECTOR CONSOLIDATION (2026-09-14): the single canonical
+# rt_platform_name wrapper, not a locally re-declared extern. See
+# doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md.
+use std.sffi.platform.{platform_name_raw}
 
 
 # ============================================================================
@@ -30,12 +34,14 @@ extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 fn _io_runtime_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_run(cmd, args)
+        rt_process_run(rcmd, rargs)
 
 fn _io_runtime_process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_async(cmd, args)
+        rt_process_spawn_async(rcmd, rargs)
 
 fn _io_runtime_process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -46,8 +52,9 @@ fn _io_runtime_process_kill_raw(pid: i64) -> bool:
         rt_process_kill(pid)
 
 fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_run_timeout(cmd, args, timeout_ms)
+        rt_process_run_timeout(rcmd, rargs, timeout_ms)
 
 @unsafe(reason: "raw nullable file read; nil is the invalid, unreadable, or runtime-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -106,8 +113,6 @@ extern fn rt_file_write_bytes(path: text, bytes: [u8]) -> bool
 extern fn rt_dir_exists(path: text) -> bool
 @unsafe(reason: "raw character-device predicate; false conflates other type, absence, permission, and runtime failure", capabilities: [ffi])
 extern fn rt_file_is_char_device(path: text) -> bool
-@unsafe(reason: "raw nullable runtime-owned platform text; provider identity is not admitted", capabilities: [ffi])
-extern fn rt_platform_name() -> text?
 @unsafe(reason: "raw blocking thread sleep; unit return has no fabricated value", capabilities: [ffi])
 extern fn rt_thread_sleep(millis: i64)
 @unsafe(reason: "raw runtime hash ABI; algorithm identity and cross-provider stability are unverified", capabilities: [ffi])
@@ -312,7 +317,7 @@ pub fn file_hash_sha256_or_empty(path: text) -> text:
 # archive index) without paging it in. Returns nil when the path is unreadable
 # or the range lies past the end, so a caller can tell "no such range" from an
 # empty one.
-pub fn file_read_text_at(path: text, offset: i64, size: i64) -> text?:
+pub fn file_read_text_at_nullable(path: text, offset: i64, size: i64) -> text?:
     unsafe(capabilities: [ffi]):
         rt_file_read_text_at_checked(host_path_native(path), offset, size)
 
@@ -508,7 +513,17 @@ pub fn mkdir_p(path: text) -> bool:
         rt_dir_create_all(host_path_native(path))
 
 pub fn is_dir(path: text) -> bool:
-    shell_bool("test -d '{path}'")
+    # Was `shell_bool("test -d '{path}'")` -- an unsubstituted `{path}`
+    # placeholder (Simple text literals do not interpolate) that always
+    # checked for a directory literally named "{path}", made worse by
+    # process_run("/bin/sh", ...) also failing outright under the
+    # interpreter/test-runner in some contexts. `rt_dir_exists` is the
+    # real extern already used by `dir_exists` six lines below -- no
+    # shell-out, no placeholder, semantically identical to POSIX `test -d`.
+    # See doc/08_tracking/bug/is_dir_always_false_shell_dependency_2026-09-02.md
+    # (this exact fix, apparently lost/reverted before landing here).
+    unsafe(capabilities: [ffi]):
+        rt_dir_exists(host_path_native(path))
 
 pub fn is_file(path: text) -> bool:
     shell_bool("test -f '{path}'")
@@ -523,7 +538,14 @@ pub fn is_char_device(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_is_char_device(host_path_native(path))
 
+## Prefer the native directory listing (works on hosts without /bin/sh,
+## e.g. Windows); fall back to the shell form only when the native probe
+## cannot read the directory.
 pub fn list_dir(path: text) -> [text]:
+    val native = unsafe(capabilities: [ffi]):
+        rt_dir_list(host_path_native(path))
+    if native != nil:
+        return native
     val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", "ls '{path}'"])
     if code != 0:
         return []
@@ -607,13 +629,12 @@ pub fn host_os() -> text:
         return "windows"
     os_low
 
-# `rt_platform_name` returns a compiled-in platform string and yields nil only
-# if the runtime bridge produced no value at all. TOTAL with the documented
-# default "unknown" — deliberately NOT a real platform name, so a caller that
-# branches on it cannot be silently misrouted to the wrong platform.
+# `rt_platform_name` returns a compiled-in platform string. Delegates to the
+# single canonical wrapper (std.sffi.platform.platform_name_raw) instead of a
+# locally re-declared extern -- see the HOST-OS DETECTOR CONSOLIDATION note
+# above and doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md.
 pub fn platform_name() -> text:
-    unsafe(capabilities: [ffi]):
-        rt_platform_name() ?? "unknown"
+    platform_name_raw()
 
 pub fn time_now_monotonic_ms() -> i64:
     unsafe(capabilities: [ffi]):
@@ -674,7 +695,7 @@ pub fn host_arch() -> text:
 
 export shell, shell_output, shell_bool, shell_output_trimmed, ShellResult, ProcessResult
 export file_read, file_read_nullable, read_file, read_file_text, file_write, write_file, file_write_exact, file_exists
-export file_delete, file_copy, file_read_text_at, file_size, file_size_raw, file_size_signed, file_hash_sha256, file_hash_sha256_or_empty
+export file_delete, file_copy, file_read_text_at_nullable, file_size, file_size_raw, file_size_signed, file_hash_sha256, file_hash_sha256_or_empty
 export file_read_bytes, file_write_bytes, file_append_text, remove_file_if_exists
 export dir_create, dir_create_all, is_dir, is_file, is_char_device, list_dir, mkdir_p
 export dir_list, dir_list_optional, dir_walk, dir_remove, dir_remove_all, dir_exists

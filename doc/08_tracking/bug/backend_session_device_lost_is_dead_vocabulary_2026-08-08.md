@@ -1,4 +1,9 @@
 # `BackendSessionError.device_lost` is dead vocabulary (engine2d GPU lane)
+## Closed 2026-09-16 — ...te:** 2026-08-08 **Status:** FIXED 2026-08-09 — dead vocabulary deleted (option (b) below)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-08
 **Status:** FIXED 2026-08-09 — dead vocabulary deleted (option (b) below)
@@ -92,3 +97,4 @@ every remaining hit belongs to unrelated subsystems (`simple_audio_device`,
 `webgpu_status_errors`), none of them route through `BackendSessionError`, so
 none needed updating. `is_recoverable()` untouched (its `else -> false`
 fallthrough already covers all remaining codes correctly).
+

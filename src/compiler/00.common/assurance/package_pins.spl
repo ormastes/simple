@@ -104,6 +104,9 @@ pub class DepEdge:
     project_path: text
     # package-name form, "" when this edge is a path
     package_name: text
+    provided_ifaces: [text]
+    required_ifaces: [text]
+    link: text
 
 pub class PackagePin:
     package: text
@@ -284,6 +287,46 @@ fn _string_list(v: SdnValue, key: text) -> [text]:
                             case None: out = out
                     out
 
+fn _strict_string_list(v: SdnValue, key: text, path: text,
+        mut errors: [PinDocError]) -> [text]:
+    var out: [text] = []
+    match v.get(key):
+        case None: out
+        case Some(lv):
+            match lv.as_array():
+                case None:
+                    errors.push(PinDocError.WrongShape(path,
+                        "`project.dependencies." + key + "` must be a text sequence"))
+                    out
+                case Some(items):
+                    for item in items:
+                        match item.as_str():
+                            case None:
+                                errors.push(PinDocError.WrongShape(path,
+                                    "`project.dependencies." + key + "` entries must be text"))
+                            case Some(value):
+                                if value == "" or out.contains(value):
+                                    errors.push(PinDocError.WrongShape(path,
+                                        "`project.dependencies." + key + "` entries must be non-empty and unique"))
+                                else:
+                                    out = out + [value]
+                    out
+
+fn _strict_link(v: SdnValue, path: text, mut errors: [PinDocError]) -> text:
+    match v.get("link"):
+        case None: ""
+        case Some(link_value):
+            match link_value.as_str():
+                case Some(link):
+                    if link == "":
+                        errors.push(PinDocError.WrongShape(path,
+                            "`project.dependencies.link` must not be empty when present"))
+                    link
+                case None:
+                    errors.push(PinDocError.WrongShape(path,
+                        "`project.dependencies.link` must be text"))
+                    ""
+
 # Hoist each matched node into a `var` before calling `.get()` on it. Calling a
 # method DIRECTLY on a value bound by a `case Some(x)` arm returns as if the key
 # were absent, and the value stays degraded when passed on to a function — so
@@ -355,7 +398,13 @@ fn _parse_deps(project: SdnValue, path: text, mut errors: [PinDocError]) -> [Dep
                             errors.push(PinDocError.WrongShape(path,
                                 "`project.dependencies` entry declares neither `project:` nor `package:`"))
                         else:
-                            out = out + [DepEdge(project_path: proj, package_name: pkg)]
+                            out = out + [DepEdge(
+                                project_path: proj,
+                                package_name: pkg,
+                                provided_ifaces: _strict_string_list(item, "provides", path, errors),
+                                required_ifaces: _strict_string_list(item, "requires", path, errors),
+                                link: _strict_link(item, path, errors)
+                            )]
                     out
 
 # `dir` is the directory the manifest was read from; it is supplied by the

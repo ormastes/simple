@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, openSync, closeSync, fsyncSync, readFileSync, re
 import { dirname } from "node:path";
 
 import { canonicalJson, freezeDeep, sha256Hex } from "./canonical.js";
+import { fsyncDirectory } from "./directory_fsync.js";
 
 const STORES = new WeakSet();
 function validPolicy(value) {
@@ -66,7 +67,7 @@ export class ReadReceiptPolicyStore {
       const next = record(nextPolicy), temporary = `${this.path}.tmp-${process.pid}-${Date.now()}`;
       durableWrite(temporary, `${canonicalJson(next)}\n`);
       renameSync(temporary, this.path);
-      const directory = openSync(dirname(this.path), "r"); try { fsyncSync(directory); } finally { closeSync(directory); }
+      fsyncDirectory(dirname(this.path));
       return next;
     } catch (error) {
       if (error?.code === "EEXIST") return null;

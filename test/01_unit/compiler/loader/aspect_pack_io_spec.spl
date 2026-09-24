@@ -69,6 +69,20 @@ fn _write_pack():
     file_delete(PACK_PATH)
     _ = file_write_bytes(PACK_PATH, built.bytes)
 
+fn _rewrite_first_module_id_byte(bytes: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < bytes.len():
+        if i == 36:
+            var replacement = 120 as u8
+            if bytes[i] == 120:
+                replacement = 121 as u8
+            out.push(replacement)
+        else:
+            out.push(bytes[i])
+        i = i + 1
+    out
+
 describe("aspect pack I/O policy (design §15)", fn():
 
     it("reads an UNALIGNED range byte-identically to the whole file", fn():
@@ -135,7 +149,7 @@ describe("AspectPackIndexCache (design §14.1)", fn():
         assert_eq(c.payload_bytes_read, 0, "no payload byte was read")
     )
 
-    it("serves a second lookup from cache without re-reading", fn():
+    it("reuses a second lookup after bounded index identity validation", fn():
         val c = pack_index_cache_new()
         val first = pack_index_get(c, PACK_PATH)
         assert_true(first.ok, "first lookup ok: {first.error_code}")
@@ -144,7 +158,48 @@ describe("AspectPackIndexCache (design §14.1)", fn():
         assert_true(second.ok, "second lookup ok")
         assert_eq(c.hits, 1, "second lookup was a cache hit")
         assert_eq(c.misses, 1, "only the first lookup missed")
-        assert_eq(c.index_bytes_read, after_first, "a cache hit reads no further bytes")
+        assert_eq(c.index_bytes_read, after_first + first.index_bytes.len(),
+            "a hit revalidates only the bounded header+directory")
+        assert_eq(c.payload_bytes_read, 0, "identity validation leaves payload cold")
+    )
+
+    it("invalidates a same-length in-place index rewrite", fn():
+        _write_pack()
+        val c = pack_index_cache_new()
+        val first = pack_index_get(c, PACK_PATH)
+        assert_true(first.ok, "first lookup ok: {first.error_code}")
+        val rewritten = _rewrite_first_module_id_byte(file_read_bytes(PACK_PATH))
+        val original_len = rewritten.len()
+        # First directory record begins with u32 module-id length at 32;
+        # byte 36 is the first module-id byte. Change content, not geometry.
+        assert_true(file_write_bytes(PACK_PATH, rewritten), "same-length rewrite committed")
+        assert_eq(pack_file_size(PACK_PATH), original_len, "rewrite preserves file size")
+
+        val second = pack_index_get(c, PACK_PATH)
+        assert_true(second.ok, "rewritten bounded index is readable")
+        assert_true(second.index_sha256 != first.index_sha256,
+            "same-size content change has a distinct index identity")
+        assert_eq(second.index_bytes[36], rewritten[36], "cache returns rewritten directory bytes")
+        assert_eq(c.hits, 0, "changed identity is not counted as a cache hit")
+        assert_eq(c.misses, 2, "same-length rewrite forces a fresh cache entry")
+        assert_eq(c.payload_bytes_read, 0, "rewrite detection never reads payload")
+    )
+
+    it("retains the prior entry when identity validation cannot read", fn():
+        _write_pack()
+        val original = file_read_bytes(PACK_PATH)
+        val c = pack_index_cache_new()
+        val first = pack_index_get(c, PACK_PATH)
+        assert_true(first.ok, "first lookup ok")
+        file_delete(PACK_PATH)
+        val failed = pack_index_get(c, PACK_PATH)
+        assert_true(not failed.ok, "missing validation input fails closed")
+
+        assert_true(file_write_bytes(PACK_PATH, original), "original pack restored")
+        val recovered = pack_index_get(c, PACK_PATH)
+        assert_true(recovered.ok, "restored pack validates")
+        assert_eq(recovered.index_sha256, first.index_sha256, "prior identity survived read failure")
+        assert_eq(c.hits, 1, "restored bytes reuse the retained prior entry")
     )
 
     it("invalidates and evicts", fn():

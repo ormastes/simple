@@ -108,9 +108,19 @@ describe "Metal font atlas companion":
         # @req REQ-GPU-FONT-006
         # @capture(statistics): clamped and rejected destination origins at the i32 boundary
         step("Drive font_destination_origin through valid, clamped, and overflow inputs")
-        expect(font_destination_origin(10, -3, 1).?).to_equal(7)  # oracle: 10 + (-3) scaled by 1 lands at 7
-        expect(font_destination_origin(2147483647, 0, 1).?).to_equal(2147483647)  # oracle: i32 max is the clamped ceiling
-        expect(font_destination_origin(-2147483648, 0, 2).?).to_equal(-2147483648)  # oracle: i32 min is the clamped floor
+        # Oracle derivation (font_atlas_composite.spl:60-67): start = origin + offset,
+        # end = start + extent - 1; nil iff extent <= 0 or either endpoint leaves i32.
+        # Bind before asserting: `f(...).?` in argument position is a nil-CHECK (bool),
+        # not an unwrap, so the old form compared `true` against the expected value.
+        val origin_mixed = font_destination_origin(10, -3, 1)
+        expect(origin_mixed.?).to_be_true()  # oracle: start=7, end=7, both inside i32
+        expect(origin_mixed ?? 0).to_equal(7)  # oracle: 10 + (-3) scaled by 1 lands at 7
+        val origin_ceiling = font_destination_origin(2147483647, 0, 1)
+        expect(origin_ceiling.?).to_be_true()  # oracle: start=end=i32 max, still inside
+        expect(origin_ceiling ?? 0).to_equal(2147483647)  # oracle: i32 max is the clamped ceiling
+        val origin_floor = font_destination_origin(-2147483648, 0, 2)
+        expect(origin_floor.?).to_be_true()  # oracle: start=i32 min, end=i32 min + 1, inside
+        expect(origin_floor ?? 0).to_equal(-2147483648)  # oracle: i32 min is the clamped floor
         expect(font_destination_origin(2147483647, 0, 2)).to_be_nil()
         expect(font_destination_origin(2147483647, 1, 1)).to_be_nil()
         expect(font_destination_origin(-2147483648, -1, 1)).to_be_nil()

@@ -1,0 +1,85 @@
+use app.spipe.testing.*
+use std.io.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.loader.provider_admission.*
+
+val STATE_PATH = "src/compiler/99.loader/provider_admission/state.spl"
+val ADMISSION_PATH = "src/compiler/99.loader/provider_admission/admission.spl"
+
+describe "metadata-only provider admission":
+    it "admits one effect owner and keeps the shadow metadata-only":
+        val descriptor = ProviderDescriptorV1(
+            "pure.provider", "pkg.provider", sha256_text("abi"),
+            [sha256_text("dependency")], ProviderModeV1.shadow_compare,
+            "foreign.provider", true)
+        val policy = provider_admission_policy_v1(descriptor)
+        expect(policy.is_ok()).to_equal(true)
+        expect(policy.unwrap().effect_owner_identity).to_equal("pure.provider")
+        expect(policy.unwrap().shadow_metadata_only).to_equal(true)
+
+    it "rejects a dual mode policy with the same primary and shadow":
+        val descriptor = ProviderDescriptorV1(
+            "same.provider", "pkg.provider", sha256_text("abi"), [],
+            ProviderModeV1.shadow_compare, "same.provider", true)
+        expect(provider_admission_policy_v1(descriptor).is_err()).to_equal(true)
+
+    it "issues an execution ticket only to the admitted effect owner":
+        val policy = ProviderEffectPolicyV1("pure.provider", true)
+        val receipt = ProviderAdmissionReceiptV1(
+            "pure.provider", "pkg.provider", sha256_text("archive"),
+            sha256_text("receipt"), sha256_text("abi"), [],
+            ProviderModeV1.shadow_compare, policy, true, false)
+        val ticket = provider_execution_ticket_v1(receipt)
+        expect(ticket.is_ok()).to_equal(true)
+        expect(ticket.unwrap().effect_owner_identity).to_equal("pure.provider")
+
+    it "uses one atomic owner and caches typed rejection":
+        val state = read_file(STATE_PATH)
+        val admission = read_file(ADMISSION_PATH)
+        expect(state).to_contain("atomic_state.compare_exchange(")
+        expect(state).to_contain("ProviderAdmissionFailureV1?")
+        expect(admission).to_contain("cached_rejection")
+        expect(admission).to_contain("PROVIDER_ADMISSION_WAIT_BUDGET_V1")
+        expect(admission).to_contain("thread_yield()")
+
+    it "binds package image receipt and pinned capability authority":
+        val admission = read_file(ADMISSION_PATH)
+        expect(admission).to_contain("package_image_validate_v1(")
+        expect(admission).to_contain("authority.capability.archive_digest")
+        expect(admission).to_contain("authority.capability.receipt_digest")
+        expect(admission).to_contain("authority.capability.identity.content_digest")
+        expect(admission).to_contain("package_identity_mismatch")
+        expect(admission).to_contain("dependency_mismatch")
+
+    it "keeps admission metadata-only":
+        val admission = read_file(ADMISSION_PATH)
+        expect(admission.contains("pinned_archive_read_member_v1")).to_equal(false)
+        expect(admission.contains("read_file(")).to_equal(false)
+        expect(admission.contains("rt_process_run")).to_equal(false)
+        expect(admission.contains("provider_execute")).to_equal(false)
+        expect(admission.contains("provider_initialize")).to_equal(false)
+
+    it "permits only the primary provider to own effects in dual mode":
+        val state = read_file(STATE_PATH)
+        val admission = read_file(ADMISSION_PATH)
+        expect(state).to_contain("shadow_metadata_only: bool")
+        expect(state).to_contain("effect_owner_identity: text")
+        expect(admission).to_contain("descriptor.provider_identity, true")
+        expect(state).to_contain(
+            "receipt.effect_policy.effect_owner_identity != receipt.provider_identity")
+
+    it "separates execution authority from admission authority":
+        val state = read_file(STATE_PATH)
+        expect(state).to_contain("ProviderExecutionTicketV1")
+        expect(state).to_contain("fn provider_execution_ticket_v1(")
+        expect(state).to_contain("invalid_dual_mode_policy")
+
+    it "has typed rejection for malformed and incompatible authority":
+        val state = read_file(STATE_PATH)
+        for error in [
+                "invalid_descriptor", "invalid_package_image",
+                "invalid_archive_capability", "package_identity_mismatch",
+                "abi_mismatch", "dependency_mismatch",
+                "invalid_dual_mode_policy", "admission_conflict",
+                "wait_exhausted", "cached_rejection"]:
+            expect(state).to_contain(error)

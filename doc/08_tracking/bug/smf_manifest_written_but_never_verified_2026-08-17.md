@@ -1,4 +1,8 @@
 # SmfManifest written but never verified on load
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-17
 **Status:** PARTIALLY FIXED (source_hash verification landed; options/config check still open)
@@ -81,3 +85,4 @@ Spec: `test/01_unit/compiler/cache/smf_manifest_source_hash_verification_spec.sp
   watcher lane's entries are ever seen.
 - Dependency-aware / partial rebuild (`interface_digest_of`, `simple.sdn`
   traversal) remains out of scope and unimplemented.
+

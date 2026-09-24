@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+producer="$root/scripts/bootstrap/publish-stage2-parent-receipts.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage2-parent-receipt.XXXXXX")
+work=$(CDPATH= cd -- "$work" && pwd -P)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+candidate="$work/simple"
+source_snapshot="$work/source.snapshot"
+runtime_snapshot="$work/runtime.snapshot"
+tool_authority="$work/tool.snapshot"
+admission="$work/admission.env"
+printf 'candidate\n' >"$candidate"
+printf 'source\n' >"$source_snapshot"
+printf 'runtime\n' >"$runtime_snapshot"
+printf 'toolchain\n' >"$tool_authority"
+hash() { shasum -a 256 "$1" | awk '{print $1}'; }
+cat >"$admission" <<EOF
+schema=simple-bootstrap-stage2-admission-v2
+status=admitted
+candidate_path=$candidate
+candidate_sha256=$(hash "$candidate")
+source_snapshot_path=$source_snapshot
+source_snapshot_sha256=$(hash "$source_snapshot")
+runtime_snapshot_path=$runtime_snapshot
+runtime_snapshot_sha256=$(hash "$runtime_snapshot")
+tool_authority_path=$tool_authority
+tool_authority_sha256=$(hash "$tool_authority")
+EOF
+
+sanity="$work/stage2-sanity.receipt"
+provenance="$work/stage2-provenance.receipt"
+sh "$producer" "$candidate" "$admission" "$source_snapshot" \
+    "$runtime_snapshot" "$tool_authority" "$sanity" "$provenance" \
+    admitted-pure-simple-runtime-stage2-trust-root
+[ -s "$sanity" ] && [ -s "$provenance" ]
+[ "$(sed -n 's/^candidate_sha256=//p' "$provenance")" = "$(hash "$candidate")" ]
+[ "$(sed -n 's/^source_snapshot_sha256=//p' "$provenance")" = "$(hash "$source_snapshot")" ]
+[ "$(sed -n 's/^runtime_snapshot_sha256=//p' "$provenance")" = "$(hash "$runtime_snapshot")" ]
+[ "$(sed -n 's/^tool_authority_sha256=//p' "$provenance")" = "$(hash "$tool_authority")" ]
+[ "$(sed -n 's/^authority=//p' "$provenance")" = \
+    admitted-pure-simple-runtime-stage2-trust-root ]
+
+chmod 600 "$sanity" "$provenance"
+rm -f "$sanity" "$provenance"
+printf 'mutated\n' >>"$candidate"
+if sh "$producer" "$candidate" "$admission" "$source_snapshot" \
+    "$runtime_snapshot" "$tool_authority" "$sanity" "$provenance" \
+    admitted-pure-simple-runtime-stage2-trust-root; then
+    echo 'error: stale candidate admission was accepted' >&2
+    exit 1
+fi
+[ ! -e "$sanity" ] && [ ! -e "$provenance" ]
+
+printf 'candidate\n' >"$candidate"
+if sh "$producer" "$candidate" "$admission" "$source_snapshot" \
+    "$runtime_snapshot" "$tool_authority" "$sanity" "$provenance" \
+    unverified-path-only-authority; then
+    echo 'error: unverified Stage2 parent authority was accepted' >&2
+    exit 1
+fi
+[ ! -e "$sanity" ] && [ ! -e "$provenance" ]
+echo 'STAGE2_PARENT_RECEIPT_PRODUCER: PASS mutation=reject'

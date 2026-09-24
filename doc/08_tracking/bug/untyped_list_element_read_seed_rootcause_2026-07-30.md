@@ -1,4 +1,8 @@
 # Untyped `list` element-read seed root cause + kafka fallback fix (2026-07-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment (leverage play): root-cause and, if contained, fix the untyped-
 `list` element-read miscompile IN THE SEED — one codegen fix would retire
@@ -396,3 +400,4 @@ above therefore no longer holds.
 
 **Status: CLOSE as already-fixed.** Kept open only if a lane can show a
 `list`-read miscompile on a seed built from current source.
+

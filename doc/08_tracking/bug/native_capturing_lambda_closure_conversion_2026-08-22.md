@@ -1,4 +1,8 @@
 # Native path: capturing lambdas fail closure conversion (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (same day). **Lane:** `native-build` (pure-Simple MIR lowering).
 
@@ -59,3 +63,4 @@ nested capture, closure in struct field + `(h.f)(5)`): interpreter and native bo
   Cranelift JIT lane ("return slot boxes the handle") — JIT-only, not native-build.
 - Linter cannot parse `describe "...", tag: [...]:` (PARSE001) — pre-existing, affects
   every spec using that form.
+

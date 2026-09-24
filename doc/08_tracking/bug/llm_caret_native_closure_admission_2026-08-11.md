@@ -62,3 +62,7 @@ with `expected 1 to equal 0` — check-llm-caret-native-closure.shs exits 1 on
 this host. Proven pre-existing via in-place `git show HEAD:` restore
 (identical Results). Left RED. Mutation check (to_equal(0)->to_equal(7)) also
 reports 0/2 as expected but is weak evidence since the spec already fails.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a self-hosted non-seed runtime and a matching simple-core archive to run the native closure gate; this host only has the Rust seed. No change made.

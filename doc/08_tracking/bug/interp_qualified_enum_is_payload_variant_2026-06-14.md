@@ -1,8 +1,13 @@
 # interp_qualified_enum_is_payload_variant
 
+## Closed 2026-09-13 — Already fixed; qualified enum `is` is correct for payload and unit variants
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `enum E: A(v: i64) / B`, then `a = E.A(v: 1)`, `b = E.B` — `a is E.A` → `true`, `b is E.B` → `true`, `a is E.B` → `false`. Payload-carrying variants no longer compare false, and cross-variant stays false.
+- **inferred**: matches the entry's own Resolution — `BinOp::Is` now lowers to `rt_enum_check_discriminant` in `mir/lower/lowering_expr_ops.rs`, with the matching fix on the tree-walk path. The "requires seed rebuild to deploy" caveat is satisfied: the deployed Windows seed carries it.
+
 - **ID:** interp_qualified_enum_is_payload_variant
 - **Severity:** P1 (silent wrong result)
-- **Status:** resolved (2026-06-14)
+- **Status:** CLOSED 2026-09-13 (resolved 2026-06-14, re-verified)
 - **Date:** 2026-06-14
 - **Component:** interpreter / seed (`src/compiler`)
 

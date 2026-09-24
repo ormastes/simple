@@ -1,6 +1,11 @@
 # Runtime: file read cache returns stale content after out-of-process writes
 
-**Status:** FIXED in seed source; pending seed rebuild + deploy to default `bin/simple`
+## Closed 2026-09-13 — stamp validation is present in the deployed cache lookup
+
+- **inferred** `src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs:278` now reads `if cached.path == path_str && file_stamp(Path::new(path_str)) == Some(cached.stamp)`, i.e. the path-only hit described as the root cause is gone; line 148 carries the explanatory comment about out-of-process writes.
+- **inferred** Runtime re-measurement was not possible: on this Windows host the seed `bin/simple` v1.0.0-rc.1 SEGVs (rc=139) on any script importing `std.io.{file_read_text, file_write_text}`, an unrelated defect that blocks the read-write-read probe.
+
+**Status:** Closed (fixed in deployed source) 2026-09-13
 **Found:** 2026-06-29 (noise sweep → simpleos_nvme_serial_check_spec)
 **Area:** runtime / file IO (`rt_file_read_text`, `rt_file_mmap_len`)
 

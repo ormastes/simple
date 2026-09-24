@@ -1,0 +1,80 @@
+"""
+## Purpose and audience
+Guards the real `compiler.mono.instantiation.TemplateInstantiator` against the
+Option/Result confusion that emitted a call to `GenericTemplate.is_err` — a
+method that exists nowhere, and which left the Stage-2 MSVC link with an
+unresolved external. `CompilationContext.load_template` returns
+`GenericTemplate?`, so a missing template must surface as `Err(...)` from an
+Option match, never through `Result` methods on the Option's payload type.
+
+## Operator workflow
+bin/simple test test/01_unit/compiler/mono/instantiation_missing_template_spec.spl
+
+## Verification guidance and troubleshooting
+A failure here means `instantiate` stopped mapping an absent template onto its
+error channel. Cross-reference `src/compiler/40.mono/instantiation.spl`.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.compilation_context.{CompilationContext, ContractMode,
+    GenericTemplate, InstantiationMode, InstantiationRecord, TemplateCompiledUnit,
+    TemplateConcreteType, TypeRegistry}
+use compiler.mono.instantiation.{TemplateInstantiator}
+
+class AbsentTemplateContext(CompilationContext):
+    """Context whose template source is empty — load_template always yields nil."""
+    records: i64
+
+    fn load_template(name: text) -> GenericTemplate?:
+        nil
+
+    fn has_template(name: text) -> bool:
+        false
+
+    fn type_registry() -> TypeRegistry:
+        TypeRegistry(types: {})
+
+    fn contract_mode() -> ContractMode:
+        ContractMode.Off
+
+    fn di_container() -> Any:
+        nil
+
+    fn aop_weaver() -> Any:
+        nil
+
+    fn coverage_enabled() -> bool:
+        false
+
+    fn compile_template(
+        tmpl: GenericTemplate, type_args: [TemplateConcreteType]
+    ) -> Result<TemplateCompiledUnit, text>:
+        Err("compile_template must not be reached when no template loaded")
+
+    fn instantiation_mode() -> InstantiationMode:
+        InstantiationMode.CompileTime
+
+    me record_instantiation(entry: InstantiationRecord):
+        self.records = self.records + 1
+
+    fn instantiation_count() -> i64:
+        self.records
+
+describe "TemplateInstantiator missing-template channel":
+    it "maps an absent template onto Err and releases the in-progress key":
+        step("Build an instantiator over a context that never loads a template")
+        var inst = TemplateInstantiator(AbsentTemplateContext(0), [], {})
+
+        step("Instantiate a name the context cannot provide")
+        val result = inst.instantiate("Missing", [])
+
+        # @capture(statistics): absent-template error channel
+        step("Verify the Option miss became a typed Err, not a Result call on GenericTemplate")
+        val detail = match result:
+            case Ok(_): "unexpected-ok"
+            case Err(message): message
+        expect(detail).to_equal("Template not found: Missing")
+
+        step("Verify the cycle-detection key was released on the failure path")
+        expect(inst.in_progress.len()).to_equal(0)

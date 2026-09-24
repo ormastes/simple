@@ -66,9 +66,36 @@ fn contract_binary_uses_runner_authority() -> bool:
     val configured = env_get("SIMPLE_TEST_BINARY")
     configured != "" and configured != nil and contract_binary() == configured
 
+# On Windows the test runner exports SIMPLE_TEST_BINARY as a `\\?\`-prefixed
+# extended-length path (e.g. `\\?\D:\wk-comp2\bin\simple.exe`). That prefix
+# is a Win32-API-only spelling of the same path (see the mirrored helper
+# `_strip_extended_length_prefix` in
+# src/lib/nogc_sync_mut/storage_roots/resolver.spl) -- MSYS `sh` cannot
+# resolve it as a command and fails with "No such file or directory". Strip
+# it ONLY for the shelled-out probe command; contract_binary() itself keeps
+# returning the raw override so the runner-authority equality check above
+# stays exact.
+fn _shell_safe_binary(binary: text) -> text:
+    val slashed = binary.replace("\\", "/")
+    if slashed.starts_with("//?/"):
+        return slashed.substring(4)
+    binary
+
 fn run_probe(binary: text, fixture: text) -> (text, text, i64):
-    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '{binary}' run '{fixture}'"
-    process_run("/bin/sh", ["-c", cmd])
+    # NOTE: plain `"..."` text literals in Simple do not interpolate `{name}`
+    # placeholders -- concatenate explicitly, or the shell receives the
+    # literal 4-character string `{binary}` as its argv[0] and every probe
+    # fails identically with a shell "not found" error rather than the
+    # `unknown extern function`/`unknown rt_audio_` text this spec asserts on.
+    val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret '" + _shell_safe_binary(binary) + "' run '" + fixture + "'"
+    # Use a bare "sh" (PATH-resolved) rather than the absolute POSIX path
+    # "/bin/sh": process_run -> host_path_native rewrites an absolute path
+    # that doesn't match the mingw drive-letter grammar (`/d/...`) into a
+    # bogus backslash path (`/bin/sh` -> `\bin\sh`, relative to the current
+    # drive) on a Windows host, so the child process never spawns (empty
+    # stdout/stderr, exit code -1). A bare command name is resolved through
+    # PATH (Git-for-Windows' usr/bin) unmangled on every platform.
+    process_run("sh", ["-c", cmd])
 
 # Self-heals onto the bootstrap seed if the deployed binary predates this
 # lane (extern-arm additions require a rebuild to take effect).
@@ -76,11 +103,11 @@ fn run_probe_child(fixture: text) -> (text, text, i64):
     val (out, err, code) = run_probe(contract_binary(), fixture)
     if out.contains("audio_backend_name_result") or out.contains("unexpected success") or err.contains("unknown rt_audio_") or err.contains("unknown extern function"):
         return (out, err, code)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
+    val (probe, _pe, _pc) = process_run("sh",
         ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
     if probe.contains("yes"):
         return run_probe("src/compiler_rust/target/release/simple", fixture)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
+    val (probe2, _pe2, _pc2) = process_run("sh",
         ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
     if probe2.contains("yes"):
         return run_probe("src/compiler_rust/target/debug/simple", fixture)

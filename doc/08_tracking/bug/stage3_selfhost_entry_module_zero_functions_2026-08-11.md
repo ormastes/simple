@@ -154,3 +154,12 @@ Add the `registry_module_name` / per-module `flat_functions.len()` probe at
 `module_lowering.spl:1877`, rerun Stage 3, and determine which of the two
 candidate faults holds. Everything up to and including Stage 2 is green and
 cached, so the loop is Stage 3 only (~35 min).
+
+## Triage 2026-09-13
+
+Fix already confirmed present in current source per the 2026-08-17
+re-check (module_lowering.spl:1928, :1936-1938). Confirming needs a
+full --full-bootstrap Stage 3 run (~35-50 min total), which this lane
+cannot run (shared/loaded host, no self-hosted binary, budget).
+Leaving OPEN as already noted, no new bootstrap attempt.
+

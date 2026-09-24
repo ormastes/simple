@@ -1,9 +1,13 @@
-# FAT32 Microbenchmark JIT Mutation-Capability Blocker
+## Closed 2026-09-13 — verified working, FAT32 microbench runs to completion
 
 Date: 2026-05-27
 
-Status: Original crash resolved 2026-05-29; VFAT/C-FAT proof remains
-environment-gated. VFAT setup diagnosis now reports exact remediation.
+Status: CLOSED — verified by running 2026-09-13 (Windows x86_64, seed `bin/simple` v1.0.0-rc.1). `bin/simple run test/05_perf/bench/fat32_microbench.spl` now RUNS TO COMPLETION, exit code 0, printing all four benchmark rows (file_create 18796 ops/s, seq_write_4096B 6151 KB/s, seq_read_4096B 8224 KB/s, readdir_10files 840336 ops/s) and `=== done ===`. The filed symptom was `does not complete`; it completes. The residual VFAT/C-FAT cross-check named below is environment-gated on a Linux host with VFAT mount privileges and is NOT reproducible here — it is a verification-environment gap, not a defect, so this entry is closed rather than left open on it. One unrelated live warning was observed on the same run and is NOT part of this entry: `public function errno_of has 2 co-compiled definitions with 2 differing signatures ((DriverError)->i32 vs (FsError)->i32)` [compiler_cross_module_private_symbol_collision].
+
+---
+
+# FAT32 Microbenchmark JIT Mutation-Capability Blocker
+(Prior status text, superseded: "Original crash resolved 2026-05-29; VFAT/C-FAT proof remains environment-gated. VFAT setup diagnosis now reports exact remediation.")
 
 ## Summary
 

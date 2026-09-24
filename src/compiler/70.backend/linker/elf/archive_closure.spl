@@ -1,0 +1,131 @@
+# ELF archive closure — fixpoint member extraction (lane A7 slice 1, design L5).
+#
+# Replaces the single-pass selection of linker_wrapper_lib_support: a member is
+# extracted when it defines a symbol that is still undefined (strong reference)
+# after all objects and previously extracted members are considered. Extraction
+# repeats until a pass extracts nothing, so a member reachable only through
+# another member (A needs B) is pulled on a later pass. Weak undefined
+# references never extract a member (ELF rule). Every member's own symtab is
+# read directly, so no archive symbol index ("/") is required.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, elf_parse_object, elf_symbol_binding,
+    SHN_UNDEF, STB_GLOBAL, STB_WEAK
+}
+use compiler.backend.linker.archive_parser.{ar_parse, ar_member_data}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct ElfArchiveMember:
+    archive_idx: i64
+    name: text
+    obj: ElfObject
+
+struct ElfClosureResult:
+    members: [ElfArchiveMember]   # extracted members, in extraction order
+    passes: i64                   # passes that extracted at least one member
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn elf_closure_is_elf(bytes: [i64]) -> bool:
+    bytes.len() >= 4 and bytes[0] == 0x7f and bytes[1] == 0x45 and bytes[2] == 0x4c and bytes[3] == 0x46
+
+fn elf_closure_add_defs(defined: {text: bool}, obj: ElfObject) -> {text: bool}:
+    var d = defined
+    for sym in obj.symbols:
+        if sym.name != "" and sym.st_shndx != SHN_UNDEF:
+            val bind = elf_symbol_binding(sym)
+            if bind == STB_GLOBAL or bind == STB_WEAK:
+                d[sym.name] = true
+    d
+
+fn elf_closure_add_strong_undefs(undef: {text: bool}, defined: {text: bool}, obj: ElfObject) -> {text: bool}:
+    var u = undef
+    for sym in obj.symbols:
+        if sym.name != "" and sym.st_shndx == SHN_UNDEF and elf_symbol_binding(sym) == STB_GLOBAL:
+            if not defined.has(sym.name):
+                u[sym.name] = true
+    u
+
+fn elf_closure_member_satisfies(obj: ElfObject, undef: {text: bool}) -> bool:
+    for sym in obj.symbols:
+        if sym.name != "" and sym.st_shndx != SHN_UNDEF and undef.has(sym.name):
+            val bind = elf_symbol_binding(sym)
+            if bind == STB_GLOBAL or bind == STB_WEAK:
+                return true
+    false
+
+# ============================================================================
+# Fixpoint
+# ============================================================================
+
+fn elf_archive_members(archives: [[i64]]) -> Result<[ElfArchiveMember], text>:
+    """Parse every ELF member of every archive (special/non-ELF members skipped)."""
+    var out: [ElfArchiveMember] = []
+    var ai: i64 = 0
+    while ai < archives.len():
+        val reader = ar_parse(archives[ai])?
+        for m in reader.members:
+            if m.name == "" or m.name.starts_with("/"):
+                continue
+            val data = ar_member_data(reader, m)
+            if not elf_closure_is_elf(data):
+                continue
+            val parsed = elf_parse_object(data)
+            if parsed.is_err():
+                return Err("archive {ai} member {m.name}: {parsed.unwrap_err()}")
+            out = out.push(ElfArchiveMember(archive_idx: ai, name: m.name, obj: parsed.unwrap()))
+        ai = ai + 1
+    Ok(out)
+
+fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosureResult, text>:
+    """Extract archive members until no still-undefined strong symbol can be resolved."""
+    val members = elf_archive_members(archives)?
+    var taken: [bool] = []
+    for _m in members:
+        taken = taken.push(false)
+
+    var selected: [ElfArchiveMember] = []
+    var passes: i64 = 0
+    var changed = true
+    while changed:
+        changed = false
+        var defined: {text: bool} = {}
+        for obj in roots:
+            defined = elf_closure_add_defs(defined, obj)
+        for sm in selected:
+            defined = elf_closure_add_defs(defined, sm.obj)
+        var undef: {text: bool} = {}
+        for obj in roots:
+            undef = elf_closure_add_strong_undefs(undef, defined, obj)
+        for sm in selected:
+            undef = elf_closure_add_strong_undefs(undef, defined, sm.obj)
+        if undef.len() == 0:
+            break
+
+        var mi: i64 = 0
+        while mi < members.len():
+            if not taken[mi] and elf_closure_member_satisfies(members[mi].obj, undef):
+                taken[mi] = true
+                selected = selected.push(members[mi])
+                changed = true
+                # Its definitions no longer count as undefined for later members.
+                for sym in members[mi].obj.symbols:
+                    if sym.name != "" and sym.st_shndx != SHN_UNDEF and undef.has(sym.name):
+                        undef.remove(sym.name)
+            mi = mi + 1
+        if changed:
+            passes = passes + 1
+
+    Ok(ElfClosureResult(members: selected, passes: passes))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfArchiveMember, ElfClosureResult
+export elf_archive_closure, elf_archive_members

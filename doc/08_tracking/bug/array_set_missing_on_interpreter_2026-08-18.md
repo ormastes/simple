@@ -1,4 +1,8 @@
 # `[T].set(i, v)` is missing on the interpreter (present in codegen)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN
 - Filed: 2026-08-18
@@ -56,3 +60,4 @@ index-set semantics as `rt_index_set`), then revert the helper in
 `test/perf/tauri_equiv/report_spec.spl:61` to the in-place form and confirm it
 still passes. A seed rebuild is required to verify; the lane that found this
 was forbidden from rebuilding `bin/simple`.
+

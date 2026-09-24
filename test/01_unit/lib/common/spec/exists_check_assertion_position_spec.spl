@@ -1,0 +1,75 @@
+# @cover src/lib/common/gpu/font_atlas_composite.spl 10%
+"""
+## Purpose and audience
+Executable contract for what `.?` MEANS inside an assertion. `.?` is the
+existence check: in an `expect(...)` subject, or on either side of a
+comparison inside one, it collapses to a presence bool. It does NOT unwrap.
+Everywhere else — a `val` binding, a condition, a string interpolation — it
+yields the present payload so `if val v = opt.?:` can bind it.
+
+Written for spec authors, because the two readings differ silently: an
+author who wrote `expect(opt.?).to_equal(7)` meaning "unwrap and compare"
+got `expected true to equal 7`, an assertion about presence wearing the
+clothes of an assertion about value. That is the defect this file pins.
+
+## Operator workflow
+Run the file with the seed or the pure-Simple CLI:
+SIMPLE_EXECUTION_MODE=interpreter simple run test/01_unit/lib/common/spec/exists_check_assertion_position_spec.spl
+
+## Compatibility and limitations
+Pure computation over src/lib/common/gpu/font_atlas_composite.spl. No GPU,
+no device, no filesystem.
+
+SCOPE: the assertion-position collapse is implemented in the Rust SEED's BDD
+builtin (interpreter_call/bdd.rs eval_assertion_operand). No pure-Simple
+equivalent exists anywhere under src/compiler or src/lib — grep for
+eval_assertion_operand returns nothing there. So this file pins the SEED
+interpreter's semantics; whether the self-hosted binary agrees is UNVERIFIED
+and unverifiable here, because no full-CLI pure-Simple binary is deployed on
+this host (lane 1). Re-run this file the day one is, and reconcile before
+treating the collapse as a language-wide contract.
+
+## Verification guidance and troubleshooting
+A failure here means the assertion-position contract moved. If `.?` starts
+unwrapping inside `expect(...)`, the presence oracles below go red and every
+spec that relies on the collapse silently changes meaning — audit them
+before adopting the new behaviour.
+"""
+# Lifecycle: doc/08_tracking/bug/backend_metal_font_spec_exists_check_in_assertion_position_2026-09-12.md
+# @manual_section: exists-check-semantics
+
+use std.spec.{describe, it, expect, step}
+use std.common.gpu.font_atlas_composite.{font_destination_origin}
+
+
+describe "Existence check in assertion position":
+    it "collapses a present optional to true inside expect":
+        # @req REQ-SPEC-EXISTS-001
+        # @capture(statistics): the presence bool an in-range origin yields inside expect
+        step("Assert on `.?` of a present optional directly inside expect(...)")
+        expect(font_destination_origin(10, -3, 1).?).to_equal(true)  # oracle: present collapses to the bool true, never to the payload 7
+
+    it "collapses an absent optional to false inside expect":
+        # @req REQ-SPEC-EXISTS-002
+        # @capture(statistics): the presence bool an out-of-range origin yields inside expect
+        step("Assert on `.?` of an absent optional directly inside expect(...)")
+        expect(font_destination_origin(2147483647, 0, 2).?).to_equal(false)  # oracle: absent collapses to the bool false
+
+    it "yields the payload when bound outside the assertion":
+        # @req REQ-SPEC-EXISTS-003
+        # @capture(statistics): payloads recovered by binding before asserting
+        step("Bind the optional to a val, then assert on the recovered payload")
+        val shifted = font_destination_origin(10, -3, 1)
+        expect(shifted ?? 0).to_equal(7)  # oracle: 10 + (-3) over extent 1 lands at 7
+        val ceiling = font_destination_origin(2147483647, 0, 1)
+        expect(ceiling ?? 0).to_equal(2147483647)  # oracle: i32 max is the clamped ceiling
+        val floor_origin = font_destination_origin(-2147483648, 0, 2)
+        expect(floor_origin ?? 0).to_equal(-2147483648)  # oracle: i32 min is the clamped floor
+
+    it "keeps presence and payload disagreeing on the same optional":
+        # @req REQ-SPEC-EXISTS-004
+        # @capture(statistics): presence bool and payload for one optional, side by side
+        step("Read both readings of one present optional and show they differ")
+        val origin = font_destination_origin(10, -3, 1)
+        expect(origin.?).to_equal(true)  # oracle: the assertion-position reading is the presence bool
+        expect(origin ?? 0).to_equal(7)  # oracle: the bound reading is the payload

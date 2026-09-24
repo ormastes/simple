@@ -1,4 +1,8 @@
 # Dynamic Torch facade bypasses lexical raw-SFFI ownership
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN
 - Filed: 2026-08-27
@@ -39,3 +43,4 @@ It cannot be marked signed or verified.
 - Interpreter/JIT/native registrations share the same contract family.
 - A representative tensor-op benchmark shows no new call, copy, allocation,
   lookup, or dispatch overhead.
+

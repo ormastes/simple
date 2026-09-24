@@ -1,4 +1,9 @@
 # CI is red on every branch: untracked `bin/simple` + Apple/BSD `libc` field and variadic errors
+## Closed 2026-09-16 — Status FIXED (defects 1 and 2) with probe-crate evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-31
 **Status:** FIXED (defects 1 and 2). Sibling multiplatform breaks filed separately —
@@ -202,3 +207,4 @@ for the crates that compile without a platform SDK, or add a cheap
 `cargo check`-only cross lane. A full cross-check is blocked by `ring`'s build
 script; a scoped check of the `#[cfg]`-heavy modules is not, as demonstrated
 above. Filed as the concrete follow-up in the sibling record.
+

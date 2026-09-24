@@ -1,4 +1,8 @@
 # Stage 4 full CLI lazy-import closure gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -34,3 +38,4 @@ unresolved/stub symbols.
 - The next bounded exact Phase 4 cycle crosses all ten unresolved names.
 - The exact candidate must still pass the essential test, lint, and duplicate
   command smoke; mere HIR success is not completion.
+

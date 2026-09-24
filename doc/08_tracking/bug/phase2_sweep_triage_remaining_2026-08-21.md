@@ -1,4 +1,8 @@
 # Phase-2 sweep triage — remaining real failures (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Triage of the parallel `test/01_unit` + `test/02_integration` sweep. Scope
 excludes `compiler/mir/**`, `compiler/mir_opt/**` and the
@@ -77,3 +81,4 @@ Filed separately: `doc/08_tracking/bug/map_for_each_missing_on_dict_2026-08-21.m
 `rc` alone was never trusted; every verdict above is the spec run's own
 `Results:` / `SPEC FILE VERDICT` line. Re-runs were capped at 8 concurrent
 `bin/simple` processes.
+

@@ -1,0 +1,138 @@
+use std.common.crypto.sha256.{sha256_text}
+
+val MIR_ADMISSION_SCHEMA_V1: i64 = 1
+
+enum MirDependencyKindV1:
+    type_dependency
+    body_dependency
+    provider_dependency
+
+enum MirDependencyStateV1:
+    concrete
+    unresolved
+    failed
+    virtual_dependency
+
+enum MirAdmissionErrorV1:
+    invalid_snapshot
+    invalid_demand_closure
+    invalid_dependency
+    duplicate_dependency
+    unresolved_dependency
+    failed_dependency
+    stale_dependency
+    virtual_dependency
+
+struct MirDependencyEvidenceV1:
+    identity: text
+    kind: MirDependencyKindV1
+    state: MirDependencyStateV1
+    snapshot_revision: text
+    materialization_digest: text
+
+struct MirAdmissionV1:
+    schema_version: i64
+    snapshot_revision: text
+    snapshot_tree_digest: text
+    snapshot_inventory_digest: text
+    demand_closure_digest: text
+    dependency_set_digest: text
+    dependency_count: i64
+
+fn mir_admission_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn mir_admission_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or
+                (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn mir_dependency_kind_name_v1(kind: MirDependencyKindV1) -> text:
+    match kind:
+        case type_dependency: "type"
+        case body_dependency: "body"
+        case provider_dependency: "provider"
+
+fn mir_dependency_frame_v1(dependency: MirDependencyEvidenceV1) -> text:
+    val kind = mir_dependency_kind_name_v1(dependency.kind)
+    "{dependency.identity.len()}:{dependency.identity}" +
+        "{kind.len()}:{kind}" +
+        "{dependency.snapshot_revision.len()}:{dependency.snapshot_revision}" +
+        "{dependency.materialization_digest.len()}:{dependency.materialization_digest}"
+
+fn mir_admission_sort_dependencies_v1(
+    dependencies: [MirDependencyEvidenceV1]
+) -> [MirDependencyEvidenceV1]:
+    var sorted = dependencies
+    var left = 0
+    while left < sorted.len():
+        var least = left
+        var right = left + 1
+        while right < sorted.len():
+            val right_key = mir_dependency_frame_v1(sorted[right])
+            val least_key = mir_dependency_frame_v1(sorted[least])
+            if right_key < least_key:
+                least = right
+            right = right + 1
+        if least != left:
+            val swap = sorted[left]
+            sorted[left] = sorted[least]
+            sorted[least] = swap
+        left = left + 1
+    sorted
+
+fn mir_admission_prove_v1(
+    snapshot_revision: text,
+    snapshot_tree_digest: text,
+    snapshot_inventory_digest: text,
+    demand_closure_digest: text,
+    dependencies: [MirDependencyEvidenceV1]
+) -> Result<MirAdmissionV1, MirAdmissionErrorV1>:
+    if (not mir_admission_digest_valid_v1(snapshot_revision) or
+            not mir_admission_digest_valid_v1(snapshot_tree_digest) or
+            not mir_admission_digest_valid_v1(snapshot_inventory_digest)):
+        return Err(MirAdmissionErrorV1.invalid_snapshot)
+    if not mir_admission_digest_valid_v1(demand_closure_digest):
+        return Err(MirAdmissionErrorV1.invalid_demand_closure)
+
+    val canonical = mir_admission_sort_dependencies_v1(dependencies)
+    var previous_identity = ""
+    var encoded = "simple/mir-admission/v1"
+    for dependency in canonical:
+        if (not mir_admission_text_valid_v1(dependency.identity) or
+                not mir_admission_digest_valid_v1(
+                    dependency.materialization_digest)):
+            return Err(MirAdmissionErrorV1.invalid_dependency)
+        if dependency.identity == previous_identity:
+            return Err(MirAdmissionErrorV1.duplicate_dependency)
+        previous_identity = dependency.identity
+        match dependency.state:
+            case unresolved:
+                return Err(MirAdmissionErrorV1.unresolved_dependency)
+            case failed:
+                return Err(MirAdmissionErrorV1.failed_dependency)
+            case virtual_dependency:
+                return Err(MirAdmissionErrorV1.virtual_dependency)
+            case concrete:
+                pass_do_nothing("concrete MIR dependency")
+        if dependency.snapshot_revision != snapshot_revision:
+            return Err(MirAdmissionErrorV1.stale_dependency)
+        encoded = encoded + mir_dependency_frame_v1(dependency)
+
+    Ok(MirAdmissionV1(
+        MIR_ADMISSION_SCHEMA_V1,
+        snapshot_revision,
+        snapshot_tree_digest,
+        snapshot_inventory_digest,
+        demand_closure_digest,
+        sha256_text(encoded),
+        canonical.len()))
+
+export MIR_ADMISSION_SCHEMA_V1
+export MirDependencyKindV1, MirDependencyStateV1, MirAdmissionErrorV1
+export MirDependencyEvidenceV1, MirAdmissionV1
+export mir_admission_prove_v1

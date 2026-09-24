@@ -1,4 +1,8 @@
 # Theme IPC K2 hard stop — TLDR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - K1 is landed; K2 remains open and fail-closed.
 - Rejected K2 commits: `235ef0250b`, `41eedf1bf5`, `d9554f91af`.
@@ -13,3 +17,4 @@
 K1 owned bytes -> K2 registered ABI + real entry stability -> ThemeService
 missing architecture/entry path -> fail closed
 ```
+

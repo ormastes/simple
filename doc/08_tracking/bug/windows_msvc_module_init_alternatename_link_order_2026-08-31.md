@@ -2,7 +2,13 @@
 order, so per-module global initializers silently no-op
 
 - **Date:** 2026-08-31
-- **Status:** DIAGNOSED, not yet fixed. Refutes the prior "empty-string
+- **Status:** FIXED (verified in-tree 2026-09-12). The ALTERNATENAME link-order
+  theory named in the title is itself refuted below; the real cause was the
+  missing `__simple_call_module_inits()` call in the MSVC `wmain`. Both fixes
+  are present at HEAD: `linker.rs:881,891` declares and calls it inside the
+  `is_msvc` branch, and `rt_set_args_wide` is defined in
+  `src/runtime/runtime_native.c` and declared in `src/runtime/runtime.h`.
+  Retains the prior diagnosis text below. Refutes the prior "empty-string
   equality is broken in native codegen" hypothesis with direct evidence.
 
 ## Symptom (unchanged from prior sessions)

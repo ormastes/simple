@@ -1,4 +1,8 @@
 # JIT `to_i32()` returns 0 for characters and leaks mis-tagged values for literals
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-26
 **Area:** JIT / codegen dispatch for the `to_int`/`to_i64`/`to_i32`/`to_i16`/`to_i8`
@@ -69,3 +73,4 @@ engine_differential fixture, which is the only place such a divergence can be
 pinned. Note that gate is currently reported BLIND (`ERROR — nothing was
 checked`) on a stale seed, so the fixture will not produce a verdict until a
 redeploy — record the failing-first observation in the fixture header meanwhile.
+

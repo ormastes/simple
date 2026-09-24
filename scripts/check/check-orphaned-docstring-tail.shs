@@ -1,0 +1,103 @@
+#!/bin/sh
+# Fail when a .spl file gains an ORPHANED DOCSTRING TAIL — a `## Heading`,
+# a line of prose, and a bare closing `"""` with no opener.
+#
+# Why this is a gate and not a lint nit: the bare `"""` is parsed as CODE, so
+# the whole file fails to compile, so the spec runs ZERO examples — and the
+# suite reports that as fine rather than as a failure. Measured 2026-09-13,
+# `avx2_fp_emit_spec.spl` and `fma3_emit_spec.spl` had been in this state with
+# 99 AVX2-FP and FMA3 encoder examples never executing. The same edit had also
+# eaten their `use` line, so repairing only the docstring left every example
+# red with `function emit_vaddps_ymm not found`; both had to be restored before
+# the 99 went green. The encoders were correct the whole time.
+#
+# This is the "a scan that finds nothing may have scanned nothing" trap from
+# .claude/rules/testing.md, at suite scale: a spec that cannot parse asserts
+# nothing, and looks exactly like a spec with no findings.
+#
+# RATCHET, not a zero-bar: the tree already carries a backlog (see the
+# baseline), and making it fatal at once would block every push. New
+# occurrences fail; a baselined file that is REPAIRED also fails, because a
+# baseline that no longer describes the tree is how a ratchet silently stops
+# ratcheting. Repair a file, then drop its line from the baseline.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> file(s) scanned, 0 new, 0 stale
+#   FAIL — ... naming each offending file
+#   ERROR — nothing was checked
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+baseline=$root/scripts/check/orphaned_docstring_baseline.txt
+tmp=${TMPDIR:-/tmp}/orphdoc.$$
+trap 'rm -f "$tmp.want" "$tmp.got"; rm -rf "$tmp.sel"' EXIT
+
+# `build/` is pruned deliberately: it holds untracked COPIES of the source tree
+# (PR bundles, origin-main check-outs), so scanning it reports the same defect
+# dozens of times under paths nobody can repair. `vendor/` is out of scope per
+# CLAUDE.md's Owned-Code Scope.
+spl_files() {
+    find "$1" \( -name build -o -name vendor -o -name node_modules -o -name .git \) -prune \
+        -o -name '*.spl' -type f "${2:--print}" 2>/dev/null
+}
+
+scan() {
+    # ONE awk over the whole file list. A per-file shell loop costs many
+    # minutes on this tree (~14k .spl files, and process spawn is expensive on
+    # Windows), which would make the gate unrunnable and therefore routed
+    # around. gawk's ENDFILE gives per-file state without that cost.
+    #
+    # The test is: an ODD number of `"""` OCCURRENCES in the file (not lines —
+    # a one-line docstring has two on one line and is balanced), plus a bare
+    # closing `"""` exactly two lines under a column-0 `## Heading`.
+    ( cd "$1" || return 0
+      spl_files . -print0 | xargs -0 awk '
+        FNR==1 { delete L; nl=0; cnt=0 }
+        { nl++; L[nl]=$0; line=$0; cnt+=gsub(/"""/,"&",line) }
+        ENDFILE {
+          if (cnt%2==1)
+            for (i=1;i<=nl;i++)
+              if (L[i] ~ /^## [A-Z]/ && L[i+2] ~ /^[[:space:]]*"""[[:space:]]*$/) {
+                  f=FILENAME; sub(/^\.\//,"",f); print f; break
+              }
+        }' 2>/dev/null ) | sort -u
+}
+
+selftest() {
+    d=$tmp.sel; rm -rf "$d"; mkdir -p "$d"
+    printf 'import std.spec\n\n## Compatibility and limitations\nExecuted on the test lane.\n"""\n' > "$d/bad.spl"
+    printf 'fn f():\n    """A real docstring."""\n    1\n' > "$d/good.spl"
+    printf 'fn g():\n    """\n    Balanced.\n    """\n    1\n' > "$d/good2.spl"
+    mkdir -p "$d/build"; cp "$d/bad.spl" "$d/build/pruned.spl"
+    got=$(scan "$d")
+    if [ "$got" != "bad.spl" ]; then
+        echo "SELFTEST FAILED — expected exactly 'bad.spl', got: [$got]"
+        exit 2
+    fi
+}
+
+selftest
+
+[ -f "$baseline" ] || { echo "ERROR — nothing was checked (no baseline at $baseline)"; exit 2; }
+
+scan "$root" > "$tmp.got"
+scanned=$(spl_files "$root" | wc -l | tr -d ' ')
+if [ "${scanned:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no .spl files found under $root)"
+    exit 2
+fi
+
+sort -u "$baseline" > "$tmp.want"
+new=$(comm -13 "$tmp.want" "$tmp.got" | tr '\n' ' ' | sed 's/ *$//')
+stale=$(comm -23 "$tmp.want" "$tmp.got" | tr '\n' ' ' | sed 's/ *$//')
+
+if [ -n "$new" ] || [ -n "$stale" ]; then
+    msg="FAIL — $scanned file(s) scanned"
+    [ -n "$new" ] && msg="$msg; NEW orphaned docstring tail: $new"
+    [ -n "$stale" ] && msg="$msg; STALE baseline (repaired — remove from baseline): $stale"
+    echo "$msg"
+    exit 1
+fi
+
+echo "PASS — $scanned file(s) scanned, 0 new, 0 stale ($(wc -l < "$tmp.want" | tr -d ' ') baselined)"
+exit 0

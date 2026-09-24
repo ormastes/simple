@@ -9,7 +9,93 @@
 # Design: doc/01_research/di_composition_root_design.md Option A
 
 # ============================================================================
-# BackendPort
+# Versioned plugin contract
+# ============================================================================
+
+use common.plugin.iface_id.{IfaceId, ParamHeader, ParamExt}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.backend.codegen_types.{CodegenOutput}
+use compiler.backend.backend.backend_types.{CompileError, BackendCompileOptions}
+use std.common.crypto.sha256.{sha256_text}
+
+pub const BACKEND_PORT_IFACE_NAME = "simple.codegen.BackendPort"
+pub const BACKEND_PORT_IFACE_MAJOR = 1
+pub const BACKEND_PORT_IFACE_MINOR = 0
+pub const BACKEND_PORT_IFACE_DIGEST = "38b082183a78e3883524021e40599ca0867617d833b16a778257e50658fe1104"
+pub const BACKEND_PORT_ERROR_MAJOR = "PLUG-E-MAJOR"
+
+pub struct BackendDescV1:
+    hdr: ParamHeader
+    name: text
+    targets: [text]
+    capabilities: [text]
+    cache_id: text
+    ext: [ParamExt]
+
+pub struct CodegenParamsV1:
+    hdr: ParamHeader
+    target: text
+    optimization: text
+    target_cpu: text
+    options: BackendCompileOptions
+    ext: [ParamExt]
+
+pub trait BackendPlugin:
+    fn iface(self) -> IfaceId
+    fn describe(self) -> BackendDescV1
+    fn run(self, params: CodegenParamsV1, mir: MirModule) -> Result<CodegenOutput, CompileError>
+    fn supports(self, capability: text) -> bool
+
+pub struct BackendPortV1:
+    hdr: ParamHeader
+    iface: IfaceId
+    describe_fn: fn() -> BackendDescV1
+    run_fn: fn(CodegenParamsV1, MirModule) -> Result<CodegenOutput, CompileError>
+    supports_fn: fn(text) -> bool
+    ext: [ParamExt]
+
+pub class StaticBackendPluginV1:
+    port: BackendPortV1
+
+impl BackendPlugin for StaticBackendPluginV1:
+    fn iface() -> IfaceId: self.port.iface
+    fn describe() -> BackendDescV1: self.port.describe_fn()
+    fn run(params: CodegenParamsV1, mir: MirModule) -> Result<CodegenOutput, CompileError>:
+        self.port.run_fn(params, mir)
+    fn supports(capability: text) -> bool: self.port.supports_fn(capability)
+
+pub fn backend_plugin_from_port_v1(port: BackendPortV1) -> StaticBackendPluginV1:
+    StaticBackendPluginV1(port)
+
+pub fn backend_port_host_iface() -> IfaceId:
+    IfaceId(BACKEND_PORT_IFACE_NAME, BACKEND_PORT_IFACE_MAJOR,
+        BACKEND_PORT_IFACE_MINOR, BACKEND_PORT_IFACE_DIGEST)
+
+fn _backend_port_abi_frame(value: text) -> text:
+    "{value.len()}:{value}"
+
+pub fn backend_port_iface_digest_v1() -> text:
+    var canonical = "simple/codegen/backend-port-interface/v1"
+    canonical = canonical + _backend_port_abi_frame("hdr:ParamHeader")
+    canonical = canonical + _backend_port_abi_frame("iface:IfaceId")
+    canonical = canonical + _backend_port_abi_frame("describe_fn:fn()->BackendDescV1")
+    canonical = canonical + _backend_port_abi_frame(
+        "run_fn:fn(CodegenParamsV1,MirModule)->Result<CodegenOutput,CompileError>")
+    canonical = canonical + _backend_port_abi_frame("supports_fn:fn(text)->bool")
+    canonical = canonical + _backend_port_abi_frame("ext:[ParamExt]")
+    sha256_text(canonical)
+
+pub fn backend_port_header() -> ParamHeader:
+    ParamHeader("simple.codegen.BackendPortV1", 1, 0, 0)
+
+pub fn codegen_params_v1(target: text, optimization: text, target_cpu: text,
+                         options: BackendCompileOptions) -> CodegenParamsV1:
+    CodegenParamsV1(
+        ParamHeader("simple.codegen.CodegenParamsV1", 1, 0, 0),
+        target, optimization, target_cpu, options, [])
+
+# ============================================================================
+# Legacy HIR composition port
 # ============================================================================
 
 struct BackendPort:

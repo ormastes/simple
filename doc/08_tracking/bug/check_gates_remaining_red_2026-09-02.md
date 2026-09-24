@@ -1,4 +1,8 @@
 # Remaining RED check gates after the 2026-09-02 sanity sweep
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN 2026-09-02 — four guards remain honestly RED after five
 mechanical defects in the guards themselves were fixed.
@@ -106,3 +110,4 @@ the missing-verdict-line defect that lane is already repairing.
 | `check-rules-sdl.shs --group quick` | ERROR — not bound to policy digest | PASS — 11 gates checked |
 | `check-interpreter-extern-registry-gap.shs` | FAIL — 0 new, 3 stale | PASS — 232 checked, 0 new, 0 stale |
 | `check-type-walk-constructor-parity.shs` | FAIL — Function Pointer Union | PASS — 12 constructors, 0 unprojected |
+

@@ -15,10 +15,16 @@ impl<'a> MirLowerer<'a> {
 
     pub(super) fn is_known_enum_type_for_variant(&self, enum_name: &str, fallback_ty: TypeId) -> bool {
         if let Some(registry) = self.type_registry {
+            // HIR has already resolved this expression in its module/import
+            // scope.  Preserve that answer before consulting the registry's
+            // compatibility bare-name index, which is necessarily last-wins
+            // when two imported modules declare the same enum name.
+            if matches!(registry.get(fallback_ty), Some(crate::hir::HirType::Enum { .. })) {
+                return true;
+            }
             if let Some(type_id) = registry.lookup(enum_name) {
                 return matches!(registry.get(type_id), Some(crate::hir::HirType::Enum { .. }));
             }
-            return matches!(registry.get(fallback_ty), Some(crate::hir::HirType::Enum { .. }));
         }
         false
     }
@@ -31,9 +37,18 @@ impl<'a> MirLowerer<'a> {
     /// specialized, no registry at all). Callers MUST treat `None` as
     /// permissive and keep the previous behavior — only `Some(false)` is a
     /// positive "this enum does not have that name".
-    pub(super) fn enum_declares_variant(&self, enum_name: &str, variant_name: &str) -> Option<bool> {
+    pub(super) fn enum_declares_variant(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        resolved_ty: TypeId,
+    ) -> Option<bool> {
         let registry = self.type_registry?;
-        let type_id = registry.lookup(enum_name)?;
+        let type_id = if matches!(registry.get(resolved_ty), Some(HirType::Enum { .. })) {
+            resolved_ty
+        } else {
+            registry.lookup(enum_name)?
+        };
         match registry.get(type_id) {
             Some(HirType::Enum { variants, .. }) => Some(variants.iter().any(|(name, _)| name == variant_name)),
             _ => None,
@@ -54,12 +69,16 @@ impl<'a> MirLowerer<'a> {
     ///     a `TokenKind` that has no `Integer`) exposes a duplicate enum NAME
     ///     across modules, where the guard resolved the wrong definition.
     /// Truncated so a wide enum cannot flood the log.
-    pub(super) fn declared_variants_hint(&self, enum_name: &str) -> String {
+    pub(super) fn declared_variants_hint(&self, enum_name: &str, resolved_ty: TypeId) -> String {
         const MAX_LISTED: usize = 12;
         let Some(registry) = self.type_registry else {
             return String::new();
         };
-        let Some(type_id) = registry.lookup(enum_name) else {
+        let type_id = if matches!(registry.get(resolved_ty), Some(HirType::Enum { .. })) {
+            resolved_ty
+        } else if let Some(type_id) = registry.lookup(enum_name) {
+            type_id
+        } else {
             return String::new();
         };
         let Some(HirType::Enum { variants, .. }) = registry.get(type_id) else {
@@ -276,6 +295,69 @@ impl<'a> MirLowerer<'a> {
         Ok(())
     }
 
+    /// Apply the interpreter's authored bool-parameter boundary before MIR
+    /// optimizations or a native ABI can narrow the argument to an i8.
+    ///
+    /// A declared bool parameter preserves a real bool, maps nil/None to
+    /// false, and maps every other present value (including integer zero and
+    /// empty text) to true. The tree interpreter applies the same rule while
+    /// binding arguments in `present_value_as_bool_arg`.
+    fn coerce_args_for_bool_params(
+        &mut self,
+        callee: &HirExpr,
+        args: &[HirExpr],
+        arg_regs: &mut [VReg],
+    ) -> MirLowerResult<()> {
+        let params = if let Some(registry) = self.type_registry {
+            if let Some(HirType::Function { params, .. }) = registry.get(callee.ty) {
+                params.clone()
+            } else if let HirExprKind::Global(name) = &callee.kind {
+                self.function_param_types.get(name).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else if let HirExprKind::Global(name) = &callee.kind {
+            self.function_param_types.get(name).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        for (index, arg_reg) in arg_regs.iter_mut().enumerate() {
+            if params.get(index) != Some(&TypeId::BOOL) {
+                continue;
+            }
+            let Some(arg) = args.get(index) else {
+                continue;
+            };
+            if arg.ty == TypeId::BOOL || (arg.ty == TypeId::ANY && matches!(arg.kind, HirExprKind::Bool(_))) {
+                continue;
+            }
+
+            *arg_reg = if arg.ty == TypeId::NIL || matches!(arg.kind, HirExprKind::Nil) {
+                self.lower_bool_expr(false)?
+            } else if arg.ty == TypeId::ANY
+                || self
+                    .type_registry
+                    .and_then(|registry| registry.get(arg.ty))
+                    .is_some_and(|ty| matches!(ty, HirType::Pointer { .. }))
+            {
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_is_some"),
+                        args: vec![*arg_reg],
+                    });
+                    dest
+                })?
+            } else {
+                self.lower_bool_expr(true)?
+            };
+        }
+        Ok(())
+    }
+
     pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
         if let HirExprKind::Global(name) = &callee.kind {
             if let Some((receiver_name, method_name)) = name.rsplit_once('.') {
@@ -379,6 +461,7 @@ impl<'a> MirLowerer<'a> {
             }
 
             if self.function_value_globals.contains(name) {
+                self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
                 self.box_args_for_any_params(callee, args, &mut arg_regs)?;
                 let callee_reg = self.lower_global_expr(name.clone(), callee.ty)?;
                 let (param_types, return_type) = self.function_signature_for_callee(callee, args);
@@ -442,9 +525,15 @@ impl<'a> MirLowerer<'a> {
                                     )),
                                     ty: TypeId::I64,
                                 };
-                                let builtin_args = [receiver.clone(), expected];
+                                let expected_enum_id = HirExpr {
+                                    kind: HirExprKind::Integer(i64::from(
+                                        crate::codegen::shared::enum_runtime_type_id(enum_name),
+                                    )),
+                                    ty: TypeId::I64,
+                                };
+                                let builtin_args = [receiver.clone(), expected_enum_id, expected];
                                 return self.lower_builtin_call_expr(
-                                    "rt_enum_check_discriminant",
+                                    "rt_enum_check_variant",
                                     &builtin_args,
                                     TypeId::BOOL,
                                 );
@@ -515,7 +604,7 @@ impl<'a> MirLowerer<'a> {
                 // not positively resolve to a concrete enum, so unresolved and
                 // generic-template heads keep the previous permissive path.
                 if is_enum
-                    && self.enum_declares_variant(enum_name, variant_name) == Some(false)
+                    && self.enum_declares_variant(enum_name, variant_name, callee.ty) == Some(false)
                     && !self.global_types.contains_key(name.as_str())
                     && !self.available_functions.contains(name.as_str())
                 {
@@ -523,7 +612,7 @@ impl<'a> MirLowerer<'a> {
                         "unknown variant or method '{}' on enum {}{}",
                         variant_name,
                         enum_name,
-                        self.declared_variants_hint(enum_name)
+                        self.declared_variants_hint(enum_name, callee.ty)
                     )));
                 }
 
@@ -540,7 +629,7 @@ impl<'a> MirLowerer<'a> {
                 // heads (`None`, kept permissive) are unaffected — they
                 // still fabricate exactly as before.
                 let is_declared_static_fn = is_enum
-                    && self.enum_declares_variant(enum_name, variant_name) == Some(false)
+                    && self.enum_declares_variant(enum_name, variant_name, callee.ty) == Some(false)
                     && (self.global_types.contains_key(name.as_str())
                         || self.available_functions.contains(name.as_str()));
 
@@ -577,14 +666,25 @@ impl<'a> MirLowerer<'a> {
                             arg_regs[0]
                         }
                     } else {
-                        // Create an array with all args as the payload
+                        // The native rt_array_new ABI takes one capacity argument.
+                        // A zero-argument call leaves the platform argument register
+                        // holding a stale value, which can request an impossible
+                        // allocation and turn this enum's payload into nil.
+                        let capacity = i64::try_from(arg_regs.len()).map_err(|_| {
+                            MirLowerError::Unsupported("enum payload exceeds native array capacity".into())
+                        })?;
                         let array_reg = self.with_func(|func, current_block| {
+                            let capacity_reg = func.new_vreg();
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::ConstInt {
+                                dest: capacity_reg,
+                                value: capacity,
+                            });
                             block.instructions.push(MirInst::Call {
                                 dest: Some(dest),
                                 target: CallTarget::from_name("rt_array_new"),
-                                args: vec![],
+                                args: vec![capacity_reg],
                             });
                             dest
                         })?;
@@ -682,6 +782,7 @@ impl<'a> MirLowerer<'a> {
             // NOTE: DI injection at MIR level was causing signature mismatches
             // because functions were registered with all params but calls tried to inject again
 
+            self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
             self.box_args_for_any_params(callee, args, &mut arg_regs)?;
 
             // Colliding private helpers were emitted under mangled names (see

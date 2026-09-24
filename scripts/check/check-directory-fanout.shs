@@ -1,5 +1,5 @@
 #!/bin/sh
-# Directory fan-out guard — enforces .claude/rules/structure.md's
+# Directory fan-out + depth guard — enforces .claude/rules/structure.md's
 # "Rule: <=10 files per directory; max depth 4 (doc/phase/domain/topic)".
 #
 # ---------------------------------------------------------------------------
@@ -50,19 +50,47 @@
 # by any per-agent or per-directory carve-out.
 #
 # ---------------------------------------------------------------------------
+# DEPTH CHECK (added 2026-09-19)
+# ---------------------------------------------------------------------------
+# structure.md's rule has a second half — "max depth 4
+# (doc/phase/domain/topic)" — that had no enforcement at all until now. This
+# runs as a second, independent check, scoped to config/check/doc_layout.sdn's
+# `root` (default "doc"), skipping every top-level phase listed there as
+# `exempt_phase` (the DO-NOT-REFACTOR / auto-generated phases: 06_spec,
+# 08_tracking, 09_report, 10_metrics, 11_archive — their depth grows by
+# design). Same baseline-relative shape as the fanout check above, in a
+# sibling file: scripts/check/doc_depth_baseline.txt. A directory's depth is
+# its path-segment count from the repository root (doc/phase/domain/topic ==
+# depth 4). Run with --depth to check depth only, --fanout to check fan-out
+# only, or nothing for both (the default and what push wiring should use).
+#
+# ---------------------------------------------------------------------------
+# CONFIG (added 2026-09-19)
+# ---------------------------------------------------------------------------
+# config/check/doc_layout.sdn holds `root`, `file_limit`, `max_depth`, and one
+# `exempt_phase` line per exempt phase, in the same simple `key: value` line
+# style already used by other config/check/*.sdn files. --config <path>
+# points at a different config file (e.g. a fixture repo's own copy for
+# --selftest); --root <dir> overrides the config's `root` on the command
+# line, and additionally SCOPES the fan-out check to that root too (the
+# fan-out check otherwise always scans the whole owned-code tree) — this is
+# what lets --selftest point the whole guard at a small fixture tree.
+#
+# ---------------------------------------------------------------------------
 # BASELINE — deliberately NO auto-generate flag
 # ---------------------------------------------------------------------------
 # scripts/check/directory_fanout_baseline.txt records the 1,005 owned-code
 # directories that already exceeded 10 files as of 2026-08-10, one
-# "relative/dir/path<TAB>file-count" line per directory. There is
-# intentionally NO --generate-baseline flag (unlike some other guards) —
-# regenerating this baseline blind would silently launder every fan-out
-# regression landed since. Shrinking or removing an entry is a manual, reviewed
-# edit to the file, done in the same commit as the directory split/cleanup
-# that earns it.
+# "relative/dir/path<TAB>file-count" line per directory. scripts/check/
+# doc_depth_baseline.txt does the same for the depth check. There is
+# intentionally NO --generate-baseline flag for either (unlike some other
+# guards) — regenerating a baseline blind would silently launder every
+# regression landed since. Shrinking or removing an entry is a manual,
+# reviewed edit to the file, done in the same commit as the directory
+# split/cleanup that earns it.
 #
-# EXEMPTIONS. A baseline line may record the literal token EXEMPT in place of a
-# count, followed by a TAB and a mandatory free-text reason:
+# EXEMPTIONS. A baseline line may record the literal token EXEMPT in place of
+# a count, followed by a TAB and a mandatory free-text reason:
 #
 #   doc/09_report<TAB>EXEMPT<TAB>append-only generated tree; see structure.md
 #
@@ -76,13 +104,26 @@
 # A line with EXEMPT and no reason is rejected as a malformed baseline.
 #
 # ---------------------------------------------------------------------------
+# --plan MODE (added 2026-09-19)
+# ---------------------------------------------------------------------------
+# --plan prints a proposed split for every over-limit, non-exempt directory
+# under the fan-out check's scope, as "old_path -> new_path" lines. Files are
+# grouped by a "topic token" — the leading run of the filename up to the
+# first `_` or `.` — into subdirectories capped at file_limit entries each.
+# This is a PROPOSAL ONLY: it never moves a file, never writes outside
+# stdout, and exits 0 regardless of what it prints (it does not participate
+# in the PASS/FAIL/ERROR verdict contract).
+#
+# ---------------------------------------------------------------------------
 # FAIL-CLOSED CONTRACT (see .claude/rules/vcs.md verdict-line convention)
 # ---------------------------------------------------------------------------
 #   * A run that checks 0 directories is an ERROR (exit 2), not a PASS.
 #   * The verdict line is always the LAST line of stdout and always states
 #     how many directories were actually checked.
 #
-# Usage: check-directory-fanout.shs [--ref <commit-ish>]
+# Usage: check-directory-fanout.shs [--ref <commit-ish>] [--config <path>]
+#                                    [--root <dir>] [--depth|--fanout]
+#                                    [--plan] [--selftest]
 #   --ref <commit-ish>   check the COMMITTED tree at this ref (via
 #                        `git ls-tree`) instead of the working copy. Use this
 #                        at push time, scoped to the commit being pushed —
@@ -91,110 +132,473 @@
 #                        every push is cheap enough to always run whole-tree;
 #                        --ref only changes WHERE content is read from, it
 #                        does not narrow the scan to a diff).
+#   --config <path>      doc_layout.sdn to read (default
+#                        config/check/doc_layout.sdn).
+#   --root <dir>         override the config's `root`; also scopes the
+#                        fan-out check to this directory.
+#   --depth              run the depth check only.
+#   --fanout             run the fan-out check only.
+#   --plan               print a proposed split for over-limit directories
+#                        and exit 0. Never moves files. Mutually exclusive
+#                        with the verdict-producing modes above.
+#   --selftest           run the fixed fixture-repo self-test and exit
+#                        (fatal on any failure). Always runs before a normal
+#                        scan too, so a normal invocation cannot silently use
+#                        a broken guard.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-cd "$ROOT_DIR"
 SELF="check-directory-fanout.shs"
-LIMIT=10
-BASELINE="scripts/check/directory_fanout_baseline.txt"
+
 REF=""
+CONFIG=""
+ROOT_OVERRIDE=""
+MODE="both"    # both | depth | fanout
+DO_PLAN=0
+DO_SELFTEST=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --ref) REF="$2"; shift 2 ;;
         --ref=*) REF="${1#--ref=}"; shift ;;
+        --config) CONFIG="$2"; shift 2 ;;
+        --config=*) CONFIG="${1#--config=}"; shift ;;
+        --root) ROOT_OVERRIDE="$2"; shift 2 ;;
+        --root=*) ROOT_OVERRIDE="${1#--root=}"; shift ;;
+        --depth) MODE="depth"; shift ;;
+        --fanout) MODE="fanout"; shift ;;
+        --plan) DO_PLAN=1; shift ;;
+        --selftest) DO_SELFTEST=1; shift ;;
         -h|--help)
-            sed -n '2,90p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,140p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "$SELF: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 
-[ -f "$BASELINE" ] || { echo "$SELF: ERROR — baseline file missing: $BASELINE" >&2; exit 2; }
+# ---------------------------------------------------------------------------
+# Config parsing — simple `key: value` lines, `#` comments, repeated keys
+# accumulate (used for exempt_phase).
+# ---------------------------------------------------------------------------
+read_config() {
+    cfg_file="$1"
+    CFG_ROOT="doc"
+    CFG_FILE_LIMIT=10
+    CFG_MAX_DEPTH=4
+    CFG_EXEMPT_PHASES=""
+    [ -f "$cfg_file" ] || { echo "$SELF: ERROR — config file missing: $cfg_file" >&2; exit 2; }
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) continue ;;
+        esac
+        key="${line%%:*}"
+        val="${line#*:}"
+        key="$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        case "$key" in
+            root) CFG_ROOT="$val" ;;
+            file_limit) CFG_FILE_LIMIT="$val" ;;
+            max_depth) CFG_MAX_DEPTH="$val" ;;
+            exempt_phase) CFG_EXEMPT_PHASES="$CFG_EXEMPT_PHASES $val" ;;
+            *) : ;;
+        esac
+    done < "$cfg_file"
+}
+
+# Normally run from the repo root so relative --config/baseline paths
+# resolve there. A --selftest fixture case sets FANOUT_GUARD_SKIP_SELFTEST=1
+# and cd's into its OWN throwaway repo first — cd-ing to this script's real
+# repo root would silently escape the fixture sandbox, so skip it then.
+[ "${FANOUT_GUARD_SKIP_SELFTEST:-0}" = "1" ] || cd "$ROOT_DIR"
+[ -n "$CONFIG" ] || CONFIG="config/check/doc_layout.sdn"
+read_config "$CONFIG"
+
+DOC_ROOT="$CFG_ROOT"
+[ -z "$ROOT_OVERRIDE" ] || DOC_ROOT="$ROOT_OVERRIDE"
+LIMIT="$CFG_FILE_LIMIT"
+MAX_DEPTH="$CFG_MAX_DEPTH"
+EXEMPT_PHASES="$CFG_EXEMPT_PHASES"
+
+FANOUT_BASELINE="scripts/check/directory_fanout_baseline.txt"
+DEPTH_BASELINE="scripts/check/doc_depth_baseline.txt"
+
+# ---------------------------------------------------------------------------
+# Core scan: populate $work/current_fanout.txt (dir<TAB>filecount) and
+# $work/current_depth.txt (dir<TAB>depth), both scoped to $scan_root when
+# non-empty (empty = whole owned-code tree, the historical fanout behaviour).
+# ---------------------------------------------------------------------------
+run_scan() {
+    scan_work="$1"; scan_ref="$2"; scan_root="$3"
+
+    if [ -n "$scan_ref" ]; then
+        git ls-tree -r --name-only "$scan_ref" > "$scan_work/files.txt" 2>/dev/null || {
+            echo "$SELF: ERROR — could not read tree at ref $scan_ref" >&2
+            exit 2
+        }
+    else
+        git ls-tree -r --name-only HEAD > "$scan_work/files.txt" 2>/dev/null || {
+            echo "$SELF: ERROR — could not read HEAD tree" >&2
+            exit 2
+        }
+    fi
+    [ -s "$scan_work/files.txt" ] || { echo "$SELF: ERROR — nothing was checked (empty tree listing)" >&2; exit 2; }
+
+    grep -vE '(^|/)vendor(/|$)|^src/runtime/(miniaudio|stb_image|stb_truetype)\.h$' "$scan_work/files.txt" > "$scan_work/owned.txt" || true
+    [ -s "$scan_work/owned.txt" ] || { echo "$SELF: ERROR — nothing was checked (owned-code filter emptied the tree)" >&2; exit 2; }
+
+    if [ -n "$scan_root" ]; then
+        grep -E "^${scan_root}/" "$scan_work/owned.txt" > "$scan_work/scoped.txt" || true
+    else
+        cp "$scan_work/owned.txt" "$scan_work/scoped.txt"
+    fi
+    [ -s "$scan_work/scoped.txt" ] || { echo "$SELF: ERROR — nothing was checked (root '$scan_root' matched no files)" >&2; exit 2; }
+
+    awk '
+        { n = split($0, a, "/"); d = a[1]; for (i = 2; i < n; i++) d = d "/" a[i]; if (n == 1) d = "."; print d }
+    ' "$scan_work/scoped.txt" | sort | uniq -c | awk '{cnt=$1; $1=""; sub(/^ /,""); print $0"\t"cnt}' > "$scan_work/current_fanout.txt"
+}
+
+# ---------------------------------------------------------------------------
+# Baseline validation — shared shape for both baseline files.
+# ---------------------------------------------------------------------------
+validate_baseline() {
+    bfile="$1"; badfile="$2"
+    awk -F'\t' '
+        NF >= 2 && $2 == "EXEMPT" { if (NF < 3 || $3 == "") { print NR": "$0; bad=1 } ; next }
+        NF == 2 && $2 ~ /^[0-9]+$/ { next }
+        { print NR": "$0; bad=1 }
+        END { exit 0 }
+    ' "$bfile" > "$badfile"
+}
+
+# ---------------------------------------------------------------------------
+# Fan-out check
+# ---------------------------------------------------------------------------
+check_fanout() {
+    work="$1"
+    [ -f "$FANOUT_BASELINE" ] || { echo "$SELF: ERROR — baseline file missing: $FANOUT_BASELINE" >&2; exit 2; }
+
+    total_checked=$(wc -l < "$work/current_fanout.txt" | tr -d ' ')
+    [ "$total_checked" -gt 0 ] || { echo "$SELF: ERROR — nothing was checked (0 directories enumerated)" >&2; exit 2; }
+
+    validate_baseline "$FANOUT_BASELINE" "$work/fanout_badlines.txt"
+    if [ -s "$work/fanout_badlines.txt" ]; then
+        echo "$SELF: ERROR — malformed baseline line(s) in $FANOUT_BASELINE:" >&2
+        sed 's/^/  ? /' "$work/fanout_badlines.txt" >&2
+        FANOUT_STATUS=2
+        return
+    fi
+
+    : > "$work/new_over.txt"
+    : > "$work/grown_over.txt"
+
+    while IFS='	' read -r dir cnt; do
+        [ "$cnt" -gt "$LIMIT" ] || continue
+        baseline_cnt=$(awk -F'\t' -v d="$dir" '$1==d{print $2; found=1} END{if(!found) print ""}' "$FANOUT_BASELINE")
+        if [ "$baseline_cnt" = "EXEMPT" ]; then
+            continue
+        elif [ -z "$baseline_cnt" ]; then
+            printf '%s\t%s\n' "$dir" "$cnt" >> "$work/new_over.txt"
+        elif [ "$cnt" -gt "$baseline_cnt" ]; then
+            printf '%s\t%s (baseline %s)\n' "$dir" "$cnt" "$baseline_cnt" >> "$work/grown_over.txt"
+        fi
+    done < "$work/current_fanout.txt"
+
+    n_new=$(wc -l < "$work/new_over.txt" | tr -d ' ')
+    n_grown=$(wc -l < "$work/grown_over.txt" | tr -d ' ')
+    FANOUT_OVER=$((n_new + n_grown))
+    FANOUT_CHECKED="$total_checked"
+
+    FANOUT_STATUS=0
+    if [ "$n_new" -gt 0 ]; then
+        echo "$SELF: NEW director(ies) exceeding $LIMIT files, not in $FANOUT_BASELINE:" >&2
+        sed 's/^/  + /' "$work/new_over.txt" >&2
+        FANOUT_STATUS=1
+    fi
+    if [ "$n_grown" -gt 0 ]; then
+        echo "$SELF: baselined director(ies) that GREW past their recorded baseline count:" >&2
+        sed 's/^/  ! /' "$work/grown_over.txt" >&2
+        FANOUT_STATUS=1
+    fi
+    FANOUT_NAMES=$(cut -f1 "$work/new_over.txt" "$work/grown_over.txt" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+}
+
+# ---------------------------------------------------------------------------
+# Depth check — scoped to $DOC_ROOT, skipping exempt phases (the top-level
+# dir directly under $DOC_ROOT).
+# ---------------------------------------------------------------------------
+check_depth() {
+    work="$1"
+    [ -f "$DEPTH_BASELINE" ] || { echo "$SELF: ERROR — baseline file missing: $DEPTH_BASELINE" >&2; exit 2; }
+
+    # Build the awk exempt-phase membership test.
+    exempt_pattern=""
+    for p in $EXEMPT_PHASES; do
+        exempt_pattern="${exempt_pattern}${exempt_pattern:+ }$p"
+    done
+
+    awk -F'\t' -v root="$DOC_ROOT" -v exempt="$exempt_pattern" '
+        BEGIN {
+            n = split(exempt, ex, " ");
+            for (i = 1; i <= n; i++) exset[ex[i]] = 1;
+            rootn = split(root, rp, "/");
+        }
+        {
+            dir = $1;
+            m = split(dir, a, "/");
+            # only directories under root
+            if (m < rootn) next;
+            ok = 1;
+            for (i = 1; i <= rootn; i++) if (a[i] != rp[i]) ok = 0;
+            if (!ok) next;
+            phase = a[rootn + 1];
+            if (phase == "" ) next;
+            if (phase in exset) next;
+            print dir "\t" m;
+        }
+    ' "$work/current_fanout.txt" > "$work/current_depth_scoped.txt"
+
+    total_checked=$(wc -l < "$work/current_depth_scoped.txt" | tr -d ' ')
+    [ "$total_checked" -gt 0 ] || { echo "$SELF: ERROR — nothing was checked (0 non-exempt directories under $DOC_ROOT)" >&2; exit 2; }
+
+    validate_baseline "$DEPTH_BASELINE" "$work/depth_badlines.txt"
+    if [ -s "$work/depth_badlines.txt" ]; then
+        echo "$SELF: ERROR — malformed baseline line(s) in $DEPTH_BASELINE:" >&2
+        sed 's/^/  ? /' "$work/depth_badlines.txt" >&2
+        DEPTH_STATUS=2
+        return
+    fi
+
+    : > "$work/depth_new_over.txt"
+    : > "$work/depth_grown_over.txt"
+    : > "$work/depth_stale.txt"
+
+    while IFS='	' read -r dir depth; do
+        [ "$depth" -gt "$MAX_DEPTH" ] || continue
+        baseline_d=$(awk -F'\t' -v d="$dir" '$1==d{print $2; found=1} END{if(!found) print ""}' "$DEPTH_BASELINE")
+        if [ "$baseline_d" = "EXEMPT" ]; then
+            continue
+        elif [ -z "$baseline_d" ]; then
+            printf '%s\t%s\n' "$dir" "$depth" >> "$work/depth_new_over.txt"
+        elif [ "$depth" -gt "$baseline_d" ]; then
+            printf '%s\t%s (baseline %s)\n' "$dir" "$depth" "$baseline_d" >> "$work/depth_grown_over.txt"
+        fi
+    done < "$work/current_depth_scoped.txt"
+
+    # Stale baseline entries: recorded but no longer over max_depth (either
+    # shallower now, or gone entirely) — mirrors the divergence guard's
+    # "stale allowlist" rule.
+    while IFS='	' read -r braw; do
+        case "$braw" in ''|'#'*) continue ;; esac
+        bdir=$(printf '%s' "$braw" | cut -f1)
+        bval=$(printf '%s' "$braw" | cut -f2)
+        [ "$bval" = "EXEMPT" ] && continue
+        cur=$(awk -F'\t' -v d="$bdir" '$1==d{print $2; found=1} END{if(!found) print ""}' "$work/current_depth_scoped.txt")
+        if [ -z "$cur" ]; then
+            printf '%s\t(no longer present or now exempt)\n' "$bdir" >> "$work/depth_stale.txt"
+        elif [ "$cur" -le "$MAX_DEPTH" ]; then
+            printf '%s\tdepth now %s (baseline %s)\n' "$bdir" "$cur" "$bval" >> "$work/depth_stale.txt"
+        fi
+    done < "$DEPTH_BASELINE"
+
+    n_new=$(wc -l < "$work/depth_new_over.txt" | tr -d ' ')
+    n_grown=$(wc -l < "$work/depth_grown_over.txt" | tr -d ' ')
+    n_stale=$(wc -l < "$work/depth_stale.txt" | tr -d ' ')
+    DEPTH_OVER=$((n_new + n_grown))
+    DEPTH_CHECKED="$total_checked"
+
+    DEPTH_STATUS=0
+    if [ "$n_new" -gt 0 ]; then
+        echo "$SELF: NEW director(ies) under $DOC_ROOT exceeding depth $MAX_DEPTH, not in $DEPTH_BASELINE:" >&2
+        sed 's/^/  + /' "$work/depth_new_over.txt" >&2
+        DEPTH_STATUS=1
+    fi
+    if [ "$n_grown" -gt 0 ]; then
+        echo "$SELF: baselined director(ies) that GREW deeper than their recorded baseline depth:" >&2
+        sed 's/^/  ! /' "$work/depth_grown_over.txt" >&2
+        DEPTH_STATUS=1
+    fi
+    if [ "$n_stale" -gt 0 ]; then
+        echo "$SELF: STALE $DEPTH_BASELINE entries (no longer over depth $MAX_DEPTH):" >&2
+        sed 's/^/  ~ /' "$work/depth_stale.txt" >&2
+        DEPTH_STATUS=1
+    fi
+    DEPTH_NAMES=$(cut -f1 "$work/depth_new_over.txt" "$work/depth_grown_over.txt" "$work/depth_stale.txt" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+}
+
+# ---------------------------------------------------------------------------
+# --plan mode
+# ---------------------------------------------------------------------------
+run_plan() {
+    work="$1"
+    while IFS='	' read -r dir cnt; do
+        [ "$cnt" -gt "$LIMIT" ] || continue
+        baseline_cnt=$(awk -F'\t' -v d="$dir" '$1==d{print $2; found=1} END{if(!found) print ""}' "$FANOUT_BASELINE" 2>/dev/null)
+        [ "$baseline_cnt" = "EXEMPT" ] && continue
+        [ -d "$dir" ] || continue
+        # Group files by leading topic token (run of alnum up to the first
+        # '_' or '.'), capped at $LIMIT files per proposed subdir.
+        find "$dir" -maxdepth 1 \( -type f -o -type l \) | sort | awk -v dir="$dir" -v limit="$LIMIT" -F/ '
+            {
+                file = $0;
+                n = split(file, parts, "/");
+                base = parts[n];
+                tok = base;
+                sub(/[._].*/, "", tok);
+                if (tok == "") tok = "misc";
+                idx[tok]++;
+                order[++total] = tok "\x1e" base;
+            }
+            END {
+                for (i = 1; i <= total; i++) {
+                    split(order[i], kv, "\x1e");
+                    tok = kv[1]; base = kv[2];
+                    seen[tok]++;
+                    grp = int((seen[tok]-1) / limit) + 1;
+                    subdir = (grp > 1) ? dir "/" tok "_" grp : dir "/" tok;
+                    print dir "/" base " -> " subdir "/" base;
+                }
+            }
+        '
+    done < "$work/current_fanout.txt"
+}
+
+# ---------------------------------------------------------------------------
+# --selftest — fixed fixture repo
+# ---------------------------------------------------------------------------
+run_selftest() {
+    st_root="$(mktemp -d)"
+    trap 'rm -rf "$st_root"' EXIT
+    fx="$st_root/fixture"
+    mkdir -p "$fx"
+    ( cd "$fx" && git init -q && git config user.email t@t && git config user.name t )
+
+    mkdir -p "$fx/doc/07_guide/app/clean"
+    for i in 1 2 3; do : > "$fx/doc/07_guide/app/clean/f$i.md"; done
+
+    mkdir -p "$fx/config/check"
+    cat > "$fx/config/check/doc_layout.sdn" <<'EOF'
+root: doc
+file_limit: 10
+max_depth: 4
+exempt_phase: 06_spec
+EOF
+    mkdir -p "$fx/scripts/check"
+    : > "$fx/scripts/check/directory_fanout_baseline.txt"
+    : > "$fx/scripts/check/doc_depth_baseline.txt"
+
+    ( cd "$fx" && git add -A && git commit -q -m base )
+
+    run_case() {
+        desc="$1"; expect_exit="$2"; shift 2
+        # The `if` condition exempts a failing command substitution from
+        # `set -e` (POSIX errexit does not fire for a command that is the
+        # test of an if statement), so `rc` reliably captures the real exit
+        # code instead of silently killing this whole selftest.
+        if out=$(cd "$fx" && FANOUT_GUARD_SKIP_SELFTEST=1 sh "$ROOT_DIR/scripts/check/check-directory-fanout.shs" \
+            --config config/check/doc_layout.sdn "$@" 2>/tmp/st_err.$$); then
+            rc=0
+        else
+            rc=$?
+        fi
+        rm -f "/tmp/st_err.$$"
+        if [ "$rc" != "$expect_exit" ]; then
+            echo "$SELF: SELFTEST FAIL — $desc (expected exit $expect_exit, got $rc)" >&2
+            echo "$out" >&2
+            exit 2
+        fi
+    }
+
+    # 1. clean fixture passes.
+    run_case "clean fixture passes" 0 --root doc
+
+    # 2. a new over-limit dir fails.
+    mkdir -p "$fx/doc/07_guide/app/toomany"
+    for i in $(seq 1 11); do : > "$fx/doc/07_guide/app/toomany/f$i.md"; done
+    ( cd "$fx" && git add -A && git commit -q -m toomany )
+    run_case "new over-limit dir fails" 1 --root doc --fanout
+    rm -rf "$fx/doc/07_guide/app/toomany"
+    ( cd "$fx" && git add -A && git commit -q -m revert-toomany )
+
+    # 3. a too-deep dir fails (depth 5 under doc/07_guide/app/deep/sub).
+    mkdir -p "$fx/doc/07_guide/app/deep/sub"
+    : > "$fx/doc/07_guide/app/deep/sub/f1.md"
+    ( cd "$fx" && git add -A && git commit -q -m toodeep )
+    run_case "too-deep dir fails" 1 --root doc --depth
+    rm -rf "$fx/doc/07_guide/app/deep"
+    ( cd "$fx" && git add -A && git commit -q -m revert-toodeep )
+
+    # 4. exempt phase ignored even when deep.
+    mkdir -p "$fx/doc/06_spec/app/deep/sub"
+    : > "$fx/doc/06_spec/app/deep/sub/f1.md"
+    ( cd "$fx" && git add -A && git commit -q -m exempt-deep )
+    run_case "exempt phase ignored" 0 --root doc --depth
+    rm -rf "$fx/doc/06_spec"
+    ( cd "$fx" && git add -A && git commit -q -m revert-exempt-deep )
+
+    # 5. --root override honoured: point at a non-doc root and confirm a
+    #    deep dir THERE is caught (proves --root actually changes scope,
+    #    not just cosmetics).
+    mkdir -p "$fx/other/p/q/r/s"
+    : > "$fx/other/p/q/r/s/f1.md"
+    ( cd "$fx" && git add -A && git commit -q -m other-root )
+    run_case "--root override honoured" 1 --root other --depth
+    rm -rf "$fx/other"
+    ( cd "$fx" && git add -A && git commit -q -m revert-other-root )
+
+    # 6. zero dirs scanned = ERROR (root matches nothing).
+    run_case "no matching root is ERROR" 2 --root does_not_exist --fanout
+
+    trap - EXIT
+    rm -rf "$st_root"
+    echo "$SELF: selftest OK (6 fixtures)"
+}
+
+if [ "$DO_SELFTEST" -eq 1 ]; then
+    run_selftest
+    exit 0
+fi
+# Selftest always runs first so a normal scan can't run on a broken guard,
+# unless this invocation IS a selftest fixture case (FANOUT_GUARD_SKIP_SELFTEST
+# is set by run_selftest itself before recursing) — otherwise each fixture
+# case would recursively re-run the whole selftest suite.
+[ "${FANOUT_GUARD_SKIP_SELFTEST:-0}" = "1" ] || run_selftest
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-if [ -n "$REF" ]; then
-    git ls-tree -r --name-only "$REF" > "$work/files.txt" 2>/dev/null || {
-        echo "$SELF: ERROR — could not read tree at ref $REF" >&2
-        exit 2
-    }
-else
-    git ls-tree -r --name-only HEAD > "$work/files.txt" 2>/dev/null || {
-        echo "$SELF: ERROR — could not read HEAD tree" >&2
-        exit 2
-    }
+scan_root_for_scan=""
+[ -z "$ROOT_OVERRIDE" ] || scan_root_for_scan="$ROOT_OVERRIDE"
+run_scan "$work" "$REF" "$scan_root_for_scan"
+
+if [ "$DO_PLAN" -eq 1 ]; then
+    run_plan "$work"
+    exit 0
 fi
 
-[ -s "$work/files.txt" ] || { echo "$SELF: ERROR — nothing was checked (empty tree listing)" >&2; exit 2; }
+FANOUT_STATUS=0; FANOUT_CHECKED=0; FANOUT_OVER=0; FANOUT_NAMES=""
+DEPTH_STATUS=0; DEPTH_CHECKED=0; DEPTH_OVER=0; DEPTH_NAMES=""
 
-# Exclude vendored third-party source per CLAUDE.md's Owned-Code Scope.
-grep -vE '(^|/)vendor(/|$)|^src/runtime/(miniaudio|stb_image|stb_truetype)\.h$' "$work/files.txt" > "$work/owned.txt" || true
-[ -s "$work/owned.txt" ] || { echo "$SELF: ERROR — nothing was checked (owned-code filter emptied the tree)" >&2; exit 2; }
+case "$MODE" in
+    both) check_fanout "$work"; check_depth "$work" ;;
+    fanout) check_fanout "$work" ;;
+    depth) check_depth "$work" ;;
+esac
 
-awk '
-    { n = split($0, a, "/"); d = a[1]; for (i = 2; i < n; i++) d = d "/" a[i]; if (n == 1) d = "."; print d }
-' "$work/owned.txt" | sort | uniq -c | awk '{cnt=$1; $1=""; sub(/^ /,""); print $0"\t"cnt}' > "$work/current.txt"
-
-total_checked=$(wc -l < "$work/current.txt" | tr -d ' ')
-[ "$total_checked" -gt 0 ] || { echo "$SELF: ERROR — nothing was checked (0 directories enumerated)" >&2; exit 2; }
-
-# Fail-closed baseline validation: every line must be
-#   path<TAB><integer>            or   path<TAB>EXEMPT<TAB><non-empty reason>
-# A malformed line would otherwise read as "no baseline entry" or as an
-# unusable count and silently change the verdict.
-awk -F'\t' '
-    NF >= 2 && $2 == "EXEMPT" { if (NF < 3 || $3 == "") { print NR": "$0; bad=1 } ; next }
-    NF == 2 && $2 ~ /^[0-9]+$/ { next }
-    { print NR": "$0; bad=1 }
-    END { exit 0 }
-' "$BASELINE" > "$work/badlines.txt"
-if [ -s "$work/badlines.txt" ]; then
-    echo "$SELF: ERROR — malformed baseline line(s) in $BASELINE:" >&2
-    sed 's/^/  ? /' "$work/badlines.txt" >&2
-    echo "ERROR — nothing was checked (malformed baseline)"
+if [ "$FANOUT_STATUS" -eq 2 ] || [ "$DEPTH_STATUS" -eq 2 ]; then
+    echo "ERROR — nothing was checked"
     exit 2
 fi
 
-: > "$work/new_over.txt"
-: > "$work/grown_over.txt"
+total_checked=$((FANOUT_CHECKED + DEPTH_CHECKED))
+total_over=$((FANOUT_OVER + DEPTH_OVER))
+names=$(printf '%s,%s' "$FANOUT_NAMES" "$DEPTH_NAMES" | sed 's/^,//;s/,$//;s/,,/,/')
 
-while IFS='	' read -r dir cnt; do
-    [ "$cnt" -gt "$LIMIT" ] || continue
-    baseline_cnt=$(awk -F'\t' -v d="$dir" '$1==d{print $2; found=1} END{if(!found) print ""}' "$BASELINE")
-    if [ "$baseline_cnt" = "EXEMPT" ]; then
-        continue
-    elif [ -z "$baseline_cnt" ]; then
-        printf '%s\t%s\n' "$dir" "$cnt" >> "$work/new_over.txt"
-    elif [ "$cnt" -gt "$baseline_cnt" ]; then
-        printf '%s\t%s (baseline %s)\n' "$dir" "$cnt" "$baseline_cnt" >> "$work/grown_over.txt"
-    fi
-done < "$work/current.txt"
-
-n_new=$(wc -l < "$work/new_over.txt" | tr -d ' ')
-n_grown=$(wc -l < "$work/grown_over.txt" | tr -d ' ')
-n_over_limit=$((n_new + n_grown))
-
-status=0
-if [ "$n_new" -gt 0 ]; then
-    echo "$SELF: NEW director(ies) exceeding $LIMIT files, not in $BASELINE:" >&2
-    sed 's/^/  + /' "$work/new_over.txt" >&2
-    status=1
-fi
-if [ "$n_grown" -gt 0 ]; then
-    echo "$SELF: baselined director(ies) that GREW past their recorded baseline count:" >&2
-    sed 's/^/  ! /' "$work/grown_over.txt" >&2
-    status=1
-fi
-
-if [ "$status" -ne 0 ]; then
-    names=$(cut -f1 "$work/new_over.txt" "$work/grown_over.txt" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-    echo "FAIL — $n_over_limit over limit: $names"
+if [ "$FANOUT_STATUS" -ne 0 ] || [ "$DEPTH_STATUS" -ne 0 ]; then
+    echo "FAIL — $total_over over limit (fanout=$FANOUT_OVER, depth=$DEPTH_OVER): $names"
     exit 1
 fi
 
-echo "PASS — $total_checked director(ies) checked, 0 over limit"
+echo "PASS — $total_checked director(ies) checked (fanout=$FANOUT_CHECKED, depth=$DEPTH_CHECKED), 0 over limit"
 exit 0

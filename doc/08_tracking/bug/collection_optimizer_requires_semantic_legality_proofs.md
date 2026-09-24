@@ -1,4 +1,8 @@
 # Collection optimizer requires semantic-legality proofs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -34,3 +38,4 @@ Rehabilitate each rewrite independently with resolved operation identity,
 ownership/COW/lifetime/trapping/destruction proof, positive and negative
 witnesses, adversarial semantic differentials, and profitability evidence.
 Do not re-enable the aggregate pass merely because one pattern is repaired.
+

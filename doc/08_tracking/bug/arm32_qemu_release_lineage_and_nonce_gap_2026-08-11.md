@@ -1,4 +1,8 @@
 # ARM32 QEMU Release Lineage and Nonce Gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** OPEN  
@@ -42,3 +46,4 @@ bundle.
 
 - Owner: ARM32 SimpleOS execution lane
 - Final reviewer: independent normal/highest-capability reviewer
+

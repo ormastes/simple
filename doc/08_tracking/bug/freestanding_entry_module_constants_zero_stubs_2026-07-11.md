@@ -1,4 +1,8 @@
 # Freestanding Entry Constants Become Zero Stubs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Stage3 Cranelift freestanding builds emit module-level scalar `val`s declared
 in the entry file as weak functions returning zero instead of initialized data.
@@ -18,3 +22,4 @@ The native-project data-export/mangling pass must classify entry-module
 per-module compilation. Until fixed, early freestanding entry hardware values
 are local immediates at their owning operations. They must not be replaced by
 fake device readback or fixed evidence metadata.
+

@@ -1,4 +1,8 @@
 # Bug: `}}` in a double-quoted string literal collapses to `}` (silent payload corruption)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Found:** 2026-08-28, MCP parity lane, while debugging why `jq` returned
   nothing for spec-built hook payloads.
@@ -25,3 +29,4 @@
 - **Repro spec candidate:** assert
   `"{\"a\":{\"b\":1}}".len() == 13` — currently fails with 12
   (verified 2026-08-28 on the deployed seed: prints `len=12`).
+

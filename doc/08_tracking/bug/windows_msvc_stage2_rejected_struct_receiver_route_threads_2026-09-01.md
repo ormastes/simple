@@ -1,4 +1,8 @@
 # Windows MSVC Stage 2 builds and links, then is REJECTED by the struct-receiver probe
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Status:** Open — Stage 2 candidate rejected; admission not achieved
@@ -443,3 +447,4 @@ a concurrent session editing
 `src/compiler_rust/compiler/src/linker/object_parser.rs` at 20:31:55, inside the
 build window. Anyone running a full bootstrap in this shared checkout must
 expect this and re-run.
+

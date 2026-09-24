@@ -84,35 +84,28 @@ fn ordinary_registry_trust_source(fixture) -> text:
 
 describe "dynSMF startup autoload policy":
     # @manual scenario evidence
-    # NOTE (2026-09-05): RED before modernization and kept RED — the queued
-    # evidence count/reasons drifted from the pinned admission contract
-    # (evidence rows for file_io/gui_renderer no longer match the expected
-    # compile_background/queued/failed sequence). Product defect; assertions
-    # kept at full strength.
-    it "queues background compile evidence before checked autoload for missing artifacts":
+    it "fails closed without reading or compiling missing startup artifacts":
         # @req REQ-SSPEC-INTEGRATION
         # @req REQ-010
-        # @capture(statistics): background-compile evidence rows queued per missing startup artifact
-        step("queues background compile evidence before checked autoload for missing artifacts")
+        # @capture(statistics): one trusted-admission failure per startup artifact
+        step("fail closed without reading or compiling missing startup artifacts")
         val manifest = [
             DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/startup_missing_file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"]),
             DynSmfManifestEntry(id: "gui_renderer", path: "build/dynsmf/startup_missing_gui_renderer.smf", source_module: "app.ui.web.backend", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_gui"])
         ]
         val session = dynsmf_startup_session_for_manifest_from_values([], "", "", "integration-background", manifest)
         expect(session.loaded.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
-        expect(session.evidence.len()).to_equal(4)  # oracle: pinned constant asserted by this scenario
+        expect(session.evidence.len()).to_equal(2)
         expect(session.evidence[0].library_id).to_equal("file_io")
-        expect(session.evidence[0].action).to_equal("compile_background")
-        expect(session.evidence[0].status).to_equal("queued")
-        expect(session.evidence[0].reason).to_contain("bin/simple compile src/lib/nogc_sync_mut/io/file.spl")
+        expect(session.evidence[0].action).to_equal("load_admitted")
+        expect(session.evidence[0].status).to_equal("failed")
+        expect(session.evidence[0].reason).to_equal("trusted_admission_missing")
         expect(session.evidence[1].library_id).to_equal("gui_renderer")
-        expect(session.evidence[1].action).to_equal("compile_background")
-        expect(session.evidence[1].status).to_equal("queued")
-        expect(session.evidence[1].reason).to_contain("src/app/ui.web/backend.spl")
+        expect(session.evidence[1].action).to_equal("load_admitted")
+        expect(session.evidence[1].status).to_equal("failed")
+        expect(session.evidence[1].reason).to_equal("trusted_admission_missing")
         expect(session.evidence[1].status == "dispatched").to_equal(false)
         expect(session.evidence[1].reason.contains("spawned_pid:")).to_equal(false)
-        expect(session.evidence[2].status).to_equal("failed")
-        expect(session.evidence[2].reason).to_equal("trusted_admission_missing")
 
     it "demand-load policy: default startup loads nothing and queues nothing":
         # @req REQ-005
@@ -206,7 +199,7 @@ describe "dynSMF startup autoload policy":
         val (_, _, cleanup_code) = rt_process_run("rm", ["-rf", work_dir])
         expect(mkdir_code).to_equal(0)  # oracle: the PID-scoped fixture directory must be creatable
         expect(cleanup_code).to_equal(0)  # oracle: the PID-scoped fixture must be removable
-        expect(code).to_equal(0)  # oracle: the status command exits successfully even with a config present
+        expect(code).to_equal(1)  # oracle: a configured dynamic load without trusted admission fails closed
         expect(out).to_contain("file_io:load")
         expect(out).to_contain("trusted_admission_missing")
         expect(out.contains("spawned_pid:")).to_equal(false)
@@ -280,9 +273,9 @@ describe "dynSMF startup autoload policy":
         val trust_start = component.index_of("fn _component_dynsmf_startup_from_trust_values(")
         val trust_end = component.index_of("pub fn component_dynsmf_startup_from_config_path(")
         val trust_path = component.substring(trust_start, trust_end)
-        expect(trust_path).to_contain("request_candidates = [registry_artifact!.request]")
+        expect(trust_path).to_contain("trusted_candidate = Some(registry_artifact!.request)")
         expect(trust_path).to_contain("retained_registry_bytes = registry_artifact!.artifact_bytes")
-        expect(trust_path).to_contain("else:\n                request_candidates = trusted_requests")
+        expect(trust_path).to_contain("elif trusted_request_indices.has(item.component_id):")
         expect(trust_path.index_of("retained_registry_bytes = registry_artifact!.artifact_bytes")).to_be_less_than(trust_path.index_of("if registry == nil:"))
         expect(trust_path.index_of("if registry == nil:")).to_be_less_than(trust_path.index_of("file_exists(admitted.artifact_path)"))
 
@@ -302,20 +295,26 @@ describe "dynSMF startup autoload policy":
     # pinned admission tokens below are absent from the shipped
     # dynsmf_autoload.spl (source-contract drift). Assertions kept at full
     # strength.
-    it "uses one retained digest-verified byte image for admitted autoload":
+    it "uses only the registry-retained byte image for admitted autoload":
         # @req REQ-SSPEC-INTEGRATION
         # @capture(bit_table): retained-byte-image admission pins from the startup source
-        step("use one retained digest-verified byte image for admitted autoload")
+        step("use only the registry-retained byte image for admitted autoload")
         val source = file_read_text("src/app/startup/dynsmf_autoload.spl")
-        expect(source).to_contain("val exact_bytes = file_read_bytes(request.artifact.path)")
-        expect(source).to_contain("sha256_u8_hex(exact_bytes) != request.artifact.content_hash")
-        expect(source).to_contain("trusted_entry.artifact_kind == artifact_kind")
-        expect(source).to_contain("dynsmf_session_load_admitted(session, id, request, exact_bytes)")
-        expect(source).to_contain("dynsmf_session_load_admitted(session, id, admitted!.request, admitted!.artifact_bytes)")
+        expect(source).to_contain("val admitted = dynsmf_admitted_registry_find(registry, step.id)")
+        expect(source).to_contain("dynsmf_session_load_admitted(out, step.id, admitted!.request, admitted!.artifact_bytes)")
         expect(source).to_contain("_dynsmf_startup_queue_missing_without_artifact_read")
+        expect(source.contains("file_read_bytes(")).to_equal(false)
         val queue_missing_background_compiles_retired = source.contains("dynsmf_session_queue_missing_background_compiles(")
         val load_checked_retired = source.contains("dynsmf_session_load_checked(")
         val autoload_checked_retired = source.contains("dynsmf_session_autoload_checked(")
         expect(queue_missing_background_compiles_retired).to_equal(false)  # oracle: background-compile queueing moved behind the no-artifact-read helper
         expect(load_checked_retired).to_equal(false)  # oracle: checked autoload loading is retired from the startup path
         expect(autoload_checked_retired).to_equal(false)  # oracle: autoload-checked loading is retired from the startup path
+
+    it "dispatches only the fixed preexisting background-evidence snapshot":
+        val source = file_read_text("src/app/startup/dynsmf_autoload.spl")
+        expect(source).to_contain("val queued_evidence_count = out.evidence.len()")
+        expect(source).to_contain("while idx < queued_evidence_count:")
+        expect(source).to_contain("if not has_queued_compile:\n        return out")
+        expect(source.index_of("if not has_queued_compile:")).to_be_less_than(source.index_of("var manifest_indices: Dict<text, i64> = {}"))
+        expect(source.contains("while idx < out.evidence.len():")).to_equal(false)

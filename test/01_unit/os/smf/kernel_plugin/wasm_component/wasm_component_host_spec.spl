@@ -1,0 +1,80 @@
+# Purpose: generated-WIT KPF component placement admission and lifecycle.
+# @req REQ-KPF-WASM-COMPONENT
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.wasm_component.*
+
+fn identifier(seed: u64) -> KpfId128: KpfId128(hi: seed, lo: seed + 1)
+fn digest(seed: u64) -> KpfDigest256:
+    KpfDigest256(w0: seed, w1: seed + 1, w2: seed + 2, w3: seed + 3)
+
+fn manifest() -> KpfWasmComponentManifestV1:
+    KpfWasmComponentManifestV1(component_id: identifier(1), component_digest: digest(10),
+        interface_id: identifier(2), schema_digest: digest(20),
+        required_capability_bits: 1, imported_capability_bits: 4,
+        requests_ambient_filesystem: false, requests_ambient_network: false,
+        requests_ambient_process: false)
+
+fn admit(value: KpfWasmComponentManifestV1, capabilities: u64) -> KpfWasmComponentOutcome:
+    kpf_wasm_component_admit_v1(value, identifier(1), digest(10), identifier(2),
+        digest(20), capabilities).outcome
+
+fn request(slot: i64, epoch: i64) -> KpfRequestHandleV1:
+    KpfRequestHandleV1(generation: 7, session_slot: 3,
+        request_slot: slot, request_epoch: epoch)
+
+describe "KPF Wasm component host placement":
+    it "admits exact generated-WIT identities and declared capability imports":
+        step("validate component interface and schema digests before activation")
+        assert_equal(admit(manifest(), 5), KpfWasmComponentOutcome.Accepted)
+
+    it "fails closed on identity schema capability and ambient authority changes":
+        step("reject every unsealed component authority surface")
+        var changed = manifest()
+        changed.component_digest = digest(11)
+        assert_equal(admit(changed, 5), KpfWasmComponentOutcome.ComponentDigestMismatch)
+        changed = manifest()
+        changed.interface_id = identifier(3)
+        assert_equal(admit(changed, 5), KpfWasmComponentOutcome.InterfaceMismatch)
+        changed = manifest()
+        changed.schema_digest = digest(21)
+        assert_equal(admit(changed, 5), KpfWasmComponentOutcome.SchemaMismatch)
+        assert_equal(admit(manifest(), 1), KpfWasmComponentOutcome.CapabilityDenied)
+        changed = manifest()
+        changed.requests_ambient_filesystem = true
+        assert_equal(admit(changed, 5), KpfWasmComponentOutcome.AmbientAuthorityDenied)
+
+    it "performs bounded asynchronous submit poll and cancel":
+        step("keep request identity and cancellation explicit")
+        val host = KpfDeterministicWasmHostV1.create(7, 2)
+        val transport = KpfWasmComponentTransportV1.create(host, 7, 3, 5, 8)
+        assert_equal(transport.submit(request(0, 9), 1, [3u8]), KpfWasmComponentOutcome.Accepted)
+        assert_equal(transport.submit(request(0, 10), 1, []), KpfWasmComponentOutcome.WouldBlock)
+        assert_equal(transport.cancel(request(0, 9)), KpfWasmComponentOutcome.Accepted)
+        val cancelled = transport.poll()
+        assert_equal(cancelled.outcome, KpfWasmComponentOutcome.Cancelled)
+        assert_equal(cancelled.request_epoch, 9)
+
+    it "requires every resource handle release before close":
+        step("pin component generation until the exact resource is released")
+        val host = KpfDeterministicWasmHostV1.create(7, 2)
+        val transport = KpfWasmComponentTransportV1.create(host, 7, 3, 5, 8)
+        val resource = host.acquire_resource(0)
+        assert_equal(transport.quiesce(), KpfWasmComponentOutcome.Accepted)
+        assert_equal(transport.close(), KpfWasmComponentOutcome.Quiescing)
+        assert_equal(host.release_resource(resource), KpfWasmComponentOutcome.Accepted)
+        assert_equal(host.release_resource(resource), KpfWasmComponentOutcome.StaleHandle)
+        assert_equal(transport.close(), KpfWasmComponentOutcome.Accepted)
+
+    it "rejects stale handles oversized payloads and missing operation authority":
+        step("reject malformed calls without consuming bounded capacity")
+        val host = KpfDeterministicWasmHostV1.create(7, 1)
+        val transport = KpfWasmComponentTransportV1.create(host, 7, 3, 1, 1)
+        assert_equal(transport.submit(request(0, 1), 4, []), KpfWasmComponentOutcome.CapabilityDenied)
+        assert_equal(transport.submit(request(0, 1), 1, [1u8, 2u8]), KpfWasmComponentOutcome.WouldBlock)
+        val stale = KpfRequestHandleV1(generation: 8, session_slot: 3,
+            request_slot: 0, request_epoch: 1)
+        assert_equal(transport.submit(stale, 1, []), KpfWasmComponentOutcome.StaleHandle)

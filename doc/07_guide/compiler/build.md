@@ -68,6 +68,14 @@ bin/simple build --clean
 bin/simple build --verbose
 ```
 
+Native builds delete private crash/failure staging files by default while
+preserving reusable incremental cache objects. Old staging siblings for the
+same output are reclaimed at the next build after 24 hours. Use
+`--keep-intermediates` (or `SIMPLE_KEEP_BUILD_INTERMEDIATES=1`) to retain
+diagnostic scratch. Use `--print-intermediates` (or
+`SIMPLE_PRINT_BUILD_INTERMEDIATES=1`) to retain and print each exact path.
+The legacy `SIMPLE_KEEP_LLVM_IR=1` remains supported for LLVM IR only.
+
 ### Quality Commands
 
 ```bash
@@ -133,7 +141,29 @@ The compiler supports multiple code generation backends:
 
 - **Linux:** LLVM most commonly available. Install `libllvm-18-dev` for `llvm-lib` backend. Preferred linker: `mold`.
 - **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
-- **Windows:** LLVM rarely available; typically falls back to Cranelift. Supports both MSVC and MinGW toolchains.
+- **Windows MSVC C builds:** configure a validated LLVM 23.1.x driver from `C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc`; use `clang-cl.exe` for MSVC C (or the validated `clang.exe` C driver where required), and leave `CXX` unset. `cl.exe`, GCC, G++, MinGW, and `clang++` are not admitted C compiler selections. Cargo may use `link.exe` only as its MSVC Rust linker. Static lint rule `W-WIN-CC-001` checks Windows-specific compiler selection files.
+
+For a pinned macOS bootstrap, Stage 2 forwards `CC`, `CXX`, `AR`, `LD`,
+`LLVM_CONFIG`, and `SIMPLE_LLVM_REQUIRED_VERSION` through its scrubbed child
+environment with either the Cranelift or LLVM backend. These exact values are
+also bound into the admission digest and reconstructed from the transcript by
+Stage 3 resume. Validate this boundary without compiling using
+`sh scripts/check/check-stage2-macos-toolchain-env.shs`; it exercises the real
+argument builder and checks execution/admission/replay agreement, including
+tool paths containing spaces and absence of macOS pins on Linux.
+
+The macOS bootstrap authority also freezes `libsimple_runtime.dylib`: Cocoa
+functions belong to this dynamic provider. Canonical generation and legacy
+migration pass the target explicitly, so a macOS tuple missing the dylib is
+refused. Phase 2/3 runtime capsules preserve its bytes, record
+`dynamic_runtime_sha256`, and include that digest in capsule identity. Existing
+capsules without that optional field retain their original identity format;
+they cannot silently carry an unbound dylib. Projection copies use the existing
+bounded streaming path, so provider size does not become a new peak RSS cost.
+Before Stage 2 compilation, macOS audits the frozen dylib/native-all pair with
+the pinned LLVM `nm` and a real offscreen Cocoa probe under a 60-second process
+deadline. See the retained `macos-cocoa-owner.log`; missing or duplicate Cocoa
+providers stop the bootstrap before compilation.
 
 ### SimpleOS Multi-Platform Binaries
 
@@ -194,6 +224,34 @@ wrapper runs the shared bootstrap compiler sanity: exact bootstrap version,
 fail-closed rejection of unsupported `run`, then strict native-build and
 execution of the canonical `p2_add.spl` fixture. A failed sanity removes that
 stage from consideration on Linux, macOS, Windows/POSIX-shell, and FreeBSD.
+
+Windows frontend sanity uses the host-only
+`scripts/bootstrap/run-process-group-bounded-log-windows.py` adapter through
+the shared frontend capture facade. Native Windows Python is required for this
+verification helper; it is not linked into Simple or required by its runtime.
+The adapter assigns a suspended child to a kill-on-close Job Object before
+resuming it, bounds the combined output stream, and publishes logs and receipts
+to real files without replacing existing evidence. Native descendants remain
+contained after their parent exits. Timeout and overflow terminate the job
+immediately; the configured POSIX signal grace period does not delay that
+Windows termination. Each receipt records the helper SHA-256 and the exact
+Windows exit status alongside the portable shell status. The Linux descriptor
+collector remains the Linux path; its `renameat2` syscall is not used on Windows.
+
+Run `python test/01_unit/scripts/process_group_bounded_log_windows_test.py` on
+Windows to verify native descendant cleanup, output bounds, status preservation,
+publication collisions, assignment failure, and helper mutation. Evidence is
+retained under `build/native_probe/stage2-sanity-windows/collector-regression-*`.
+
+Phase 1 Cargo builds use the same native Windows collector through
+`scripts/bootstrap/bootstrap-logged-process.shs`. It launches the absolute Cargo
+binary with the existing `env -i` environment directly, without an MSYS
+`env.exe` intermediary. The build log names a retained `.process.*` directory
+whose receipt contains the native exit code, shell status, and helper/log/environment
+hashes. An ordinary native exit 0 is required even when Cargo prints `Finished`.
+Cargo capture has a two-hour deadline and a 64 MiB combined output limit; build
+artifacts are unaffected by the stream limit. Other hosts retain their existing
+Cargo launch route.
 
 The `Rust Bootstrap Multiplatform` workflow runs this canonical stage path with
 LLVM on Linux x86_64 and macOS AArch64, and with explicit Cranelift on macOS

@@ -1,0 +1,112 @@
+use std.spec
+use std.io_runtime.{file_read, file_write, file_delete, hash_text}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.driver_core_types.{CompileOptions, SourceFile}
+use compiler.driver.driver_types.{CompileContext}
+
+# Site 12 -- the Stage-2 candidate freezes every native capsule's source
+# identity as sha256("") under SIMPLE_STAGE3_STREAMING_SURFACES=1.
+#
+# Streaming surfaces release SourceFile.content in PHASE 3
+# (driver_hir_pipeline_lowering.spl:497-506; that reclaim+evict is
+# UNCONDITIONAL on the streaming path, while the non-streaming equivalent at
+# driver_orchestration.spl:276-278 is gated on --low-memory), and native
+# capsules are frozen in PHASE 5. Measured 2026-09-13 on Stage-2 candidate
+# ba3c25f30d76c9a8... with the redeploy gate's own env:
+#   +2411ms phase3:streaming_source_reclaim:sources:done reclaimed=1
+#   +2413ms phase5:mode_dispatch:start
+#   capsule-identity=e3b0c442...b855  disk-identity=7dfe1e7b...4e19f
+# e3b0c442... is sha256(""), so the freeze digested an already-released text.
+# With the same candidate and =0 (no reclaim line at all) the same fixture
+# links cleanly.
+#
+# These examples run the release/freeze ORDER in-process, so they are lane
+# independent: evict_sources() is exactly what phase 3 does to ctx.sources.
+describe "native capsule source identity after a streaming release":
+    it "keeps the identity of the bytes the capsule compiled after release":
+        val path = "/tmp/simple_capsule_identity_release.spl"
+        val body = "pub fn released_value() -> i64:\n    41\n"
+        expect(file_write(path, body)).to_equal(true)
+        val content = file_read(path)
+        # Vacuity: a 0-byte read would make every assertion below trivial.
+        expect(content.len()).to_be_greater_than(0)
+        val raw_hash = hash_text(content)
+        val captured_hash = if raw_hash == 0: 1 else: raw_hash
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [SourceFile(path: path, content: content,
+            module_name: "released_mod")]
+        ctx.source_paths_owner = [path]
+        ctx.source_module_names_owner = ["released_mod"]
+        ctx.source_content_hashes_owner = [captured_hash]
+
+        val before = ctx.frozen_native_cache_source_identity_v1("released_mod")
+        expect(before.len()).to_equal(64)
+        expect(before).to_not_equal(sha256_text(""))
+
+        ctx.evict_sources()
+        expect(ctx.sources[0].content).to_equal("")
+        val after = ctx.frozen_native_cache_source_identity_v1("released_mod")
+
+        expect(after).to_not_equal(sha256_text(""))
+        expect(after).to_equal(before)
+        file_delete(path)
+
+    it "refuses an identity when the file changed after the release":
+        val path = "/tmp/simple_capsule_identity_mutated.spl"
+        expect(file_write(path, "pub fn first_value() -> i64:\n    1\n")).to_equal(true)
+        val content = file_read(path)
+        expect(content.len()).to_be_greater_than(0)
+        val raw_hash = hash_text(content)
+        val captured_hash = if raw_hash == 0: 1 else: raw_hash
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [SourceFile(path: path, content: content,
+            module_name: "mutated_mod")]
+        ctx.source_paths_owner = [path]
+        ctx.source_module_names_owner = ["mutated_mod"]
+        ctx.source_content_hashes_owner = [captured_hash]
+
+        ctx.evict_sources()
+        # The source is edited between parse and capsule freeze: recovery must
+        # NOT launder the new bytes into the frozen identity, or the
+        # source-mutated detector becomes vacuous.
+        val replacement = "pub fn first_value() -> i64:\n    2\n"
+        expect(file_write(path, replacement)).to_equal(true)
+        val disk_after = file_read(path)
+        expect(disk_after.len()).to_be_greater_than(0)
+
+        val after = ctx.frozen_native_cache_source_identity_v1("mutated_mod")
+        expect(after).to_not_equal(sha256_text(replacement))
+        expect(after).to_equal("")
+        file_delete(path)
+
+    it "refuses an identity when no content hash was captured at load":
+        val path = "/tmp/simple_capsule_identity_uncaptured.spl"
+        expect(file_write(path, "pub fn uncaptured_value() -> i64:\n    3\n")).to_equal(true)
+        val content = file_read(path)
+        expect(content.len()).to_be_greater_than(0)
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [SourceFile(path: path, content: content,
+            module_name: "uncaptured_mod")]
+        ctx.source_content_hashes_owner = []
+        ctx.source_module_names_owner = []
+
+        ctx.evict_sources()
+        expect(ctx.frozen_native_cache_source_identity_v1("uncaptured_mod")).to_equal("")
+        file_delete(path)
+
+    it "refuses an identity when the owner projection is misaligned":
+        val path = "/tmp/simple_capsule_identity_misaligned.spl"
+        expect(file_write(path, "pub fn misaligned_value() -> i64:\n    4\n")).to_equal(true)
+        val content = file_read(path)
+        expect(content.len()).to_be_greater_than(0)
+        val raw_hash = hash_text(content)
+        val captured_hash = if raw_hash == 0: 1 else: raw_hash
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [SourceFile(path: path, content: content,
+            module_name: "misaligned_mod")]
+        ctx.source_module_names_owner = ["some_other_mod"]
+        ctx.source_content_hashes_owner = [captured_hash]
+
+        ctx.evict_sources()
+        expect(ctx.frozen_native_cache_source_identity_v1("misaligned_mod")).to_equal("")
+        file_delete(path)

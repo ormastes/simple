@@ -1,4 +1,8 @@
 # ZSTD sequence-decode: "normal offset" test decodes as a straight back-reference copy instead of expected RLE-style expansion
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** low (single test-vector mismatch, sibling offset-1/rep1 tests
@@ -63,3 +67,4 @@ of the assigned test-cluster scope regardless).
 ## Affected
 
 - `test/unit/lib/common/zstd_sequence_rle_spec.spl` — 1 of 6 examples.
+

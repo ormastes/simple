@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: Prove that the CSS math functions min(), max() and clamp() resolve on a
+`width` against the containing block instead of falling through to the first
+number in the function text (which made `width: min(1100px, 100%)` overflow).
+Audience: browser-engine maintainers.
+
+See doc/08_tracking/bug/web_css_min_max_clamp_unparsed_2026-09-12.md
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-MATH-LENGTH-001 — min()/max()/clamp() resolve against the containing block.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl 3%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    css_math_primary, css_math_implied_max_px, css_math_implied_min_px
+}
+
+val BOX_RED: u32 = 0x00ff0000u32
+
+# Absolute pixel oracle: the box is solid #ff0000 on a white page with zero body
+# margin, so the count of red pixels on row 10 IS its resolved border-box width.
+fn red_run(width_value: text, viewport_w: i32) -> i32:
+    val html = (
+        "<html><body style=\"margin:0;padding:0;background:#ffffff\">" +
+        "<div style=\"margin:0;background:#ff0000;height:40px;width:" + width_value + "\"></div>" +
+        "</body></html>"
+    )
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, viewport_w, 100, "cpu_simd")
+    var n = 0
+    var x = 0
+    while x < viewport_w:
+        if (pixels[10 * viewport_w + x] & 0x00ffffffu32) == BOX_RED:
+            n = n + 1
+        x = x + 1
+    n
+
+describe "CSS math lengths resolve against the containing block":
+    it "AC-1: width:min(1100px,100%) in an 852px viewport resolves to 852":
+        expect(red_run("min(1100px,100%)", 852)).to_equal(852)
+
+    it "AC-1: width:min(1100px,100%) in a 1400px viewport is capped at 1100":
+        expect(red_run("min(1100px,100%)", 1400)).to_equal(1100)
+
+    it "AC-2: width:clamp(100px,50%,300px) in a 400px viewport resolves to 200":
+        expect(red_run("clamp(100px,50%,300px)", 400)).to_equal(200)
+
+    it "AC-2: width:clamp(100px,50%,300px) in a 1000px viewport clamps to 300":
+        expect(red_run("clamp(100px,50%,300px)", 1000)).to_equal(300)
+
+    it "AC-3: width:max(400px,10%) in a 900px viewport takes the 400px floor":
+        expect(red_run("max(400px,10%)", 900)).to_equal(400)
+
+describe "CSS math lengths resolve from a <style> rule too":
+    it "AC-5: the catalog shape — width:min(1100px,100%) in a stylesheet rule":
+        # The shared catalog puts this in a <style> block, not an inline style;
+        # the declaration tokenizer must keep the comma inside the parentheses.
+        val html = (
+            "<html><head><style>body\{margin:0;padding:0;background:#ffffff}" +
+            ".card\{margin:0;background:#ff0000;height:40px;width:min(1100px,100%)}" +
+            "</style></head><body><div class=\"card\"></div></body></html>"
+        )
+        val vw = 852
+        val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, vw, 100, "cpu_simd")
+        var n = 0
+        var x = 0
+        while x < vw:
+            if (pixels[10 * vw + x] & 0x00ffffffu32) == BOX_RED:
+                n = n + 1
+            x = x + 1
+        expect(n).to_equal(852)
+
+describe "CSS math desugaring — value level":
+    it "AC-4: min() with a percent argument yields that percent as the width":
+        expect(css_math_primary("min(1100px, 100%)")).to_equal("100%")
+
+    it "AC-4: min() with an implied upper bound reports it as a max-width":
+        expect(css_math_implied_max_px("min(1100px, 100%)")).to_equal(1100)
+
+    it "AC-4: clamp() takes the middle value and both bounds":
+        expect(css_math_primary("clamp(100px, 50%, 300px)")).to_equal("50%")
+        expect(css_math_implied_min_px("clamp(100px, 50%, 300px)")).to_equal(100)
+        expect(css_math_implied_max_px("clamp(100px, 50%, 300px)")).to_equal(300)
+
+    it "AC-4: an all-px min() folds to the smaller length with no clamp":
+        expect(css_math_primary("min(80px, 120px)")).to_equal("80px")
+        expect(css_math_implied_max_px("min(80px, 120px)")).to_equal(0)
+
+    it "AC-4: a plain length is returned unchanged":
+        expect(css_math_primary("240px")).to_equal("240px")

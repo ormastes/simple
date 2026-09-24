@@ -21,6 +21,7 @@ use common.contracts.execution.simple_ring_async_v1.{
 }
 use common.gpu.engine2d.gpu_epoch.{
     ENGINE2D_GPU_PHASE_COMPLETED,
+    ENGINE2D_GPU_PHASE_GPU_FINISHED,
     ENGINE2D_GPU_PHASE_QUEUED,
     ENGINE2D_GPU_PHASE_RETIRED,
     ENGINE2D_GPU_PHASE_SUBMITTED,
@@ -30,6 +31,15 @@ use common.gpu.engine2d.gpu_epoch.{
     engine2d_gpu_epoch_admit,
     engine2d_gpu_epoch_advance,
     engine2d_gpu_truth_none
+}
+use std.nogc_async_mut.gpu.engine2d.packed_completion_authority_v1.{
+    Engine2dPackedCompletionAuthorityV1,
+    Engine2dPackedCompletionLedgerV1,
+    Engine2dPackedCompletionOutcomeV1,
+    engine2d_packed_authority_refusal,
+    engine2d_packed_authority_spend,
+    engine2d_packed_completion_admitted,
+    engine2d_packed_completion_refused
 }
 use std.nogc_async_mut.gpu.engine2d.backend_lane.{
     ENGINE2D_HOST_GPU_LANE_GPU,
@@ -359,6 +369,44 @@ fn engine2d_draw_ir_runtime_queue_complete_packed(receipt: Engine2dGpuEpochRecei
         return advanced
     engine2d_gpu_epoch_advance(advanced, ENGINE2D_GPU_PHASE_COMPLETED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
 
+fn engine2d_draw_ir_runtime_queue_complete_packed_with_authority(receipt: Engine2dGpuEpochReceipt, queue: Engine2dHostGpuRuntimeQueue, ledger: Engine2dPackedCompletionLedgerV1, authority: Engine2dPackedCompletionAuthorityV1?) -> Engine2dPackedCompletionOutcomeV1:
+    """Complete one queued packed epoch against a backend owner's callback authority.
+
+    This is the authority route; `engine2d_draw_ir_runtime_queue_complete_packed`
+    above stays the compatibility route and stays routing-only. The difference is
+    only where the device facts come from: here they are the authority's own
+    evidence, forwarded verbatim, so `device_execution_proven` flips exactly when
+    the OWNER's evidence qualifies and never because this queue said so. Nothing
+    here constructs evidence, and `engine2d_gpu_device_evidence_none()` is
+    deliberately absent from this path.
+
+    Callers gate on `outcome.admitted`, never on the receipt's phase alone: if
+    the host queue fails to complete the packet the authority named, the refused
+    outcome still carries a receipt already advanced to `gpu_finished` (proven,
+    when the owner's evidence qualifies) because the fence really had signalled.
+    A validated authority is spent even when the host queue then disagrees —
+    one-shot means one presentation, not one success.
+
+    The epoch advances queued -> submitted -> gpu_finished -> completed: the
+    authority exists because the owner's fence signalled, which is what the
+    `gpu_finished` phase means. Truth labels stay `engine2d_gpu_truth_none()` —
+    residency and scheduling assurance belong to the profile owner, and inventing
+    them here would be the same fabrication this seam refuses for evidence.
+    """
+    val refusal = engine2d_packed_authority_refusal(receipt: receipt, queue_handle: queue.queue_handle, backend_handle: queue.backend_handle, ledger: ledger, authority: authority)
+    if refusal != "":
+        return engine2d_packed_completion_refused(ledger, receipt, refusal)
+    val spent = engine2d_packed_authority_spend(ledger, authority)
+    val submitted = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+    if submitted.count <= 0:
+        return engine2d_packed_completion_refused(spent, receipt, "runtime queue holds no pending packet for this authority")
+    val advanced = engine2d_gpu_epoch_advance(receipt, ENGINE2D_GPU_PHASE_SUBMITTED, authority.evidence, engine2d_gpu_truth_none())
+    val finished = engine2d_gpu_epoch_advance(advanced, ENGINE2D_GPU_PHASE_GPU_FINISHED, authority.evidence, engine2d_gpu_truth_none())
+    val completed = engine2d_host_gpu_runtime_complete_pending(queue, 1)
+    if completed.count <= 0:
+        return engine2d_packed_completion_refused(spent, finished, "runtime queue did not complete the packet this authority names")
+    engine2d_packed_completion_admitted(spent, engine2d_gpu_epoch_advance(finished, ENGINE2D_GPU_PHASE_COMPLETED, authority.evidence, engine2d_gpu_truth_none()))
+
 fn engine2d_draw_ir_runtime_queue_retire_packed(receipt: Engine2dGpuEpochReceipt, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dGpuEpochReceipt:
     """Release the packed epoch's queue storage after completion; retirement is terminal.
 
@@ -385,4 +433,5 @@ export engine2d_draw_ir_runtime_queue_submit_deferred
 export engine2d_draw_ir_epoch_request_from_batch
 export engine2d_draw_ir_runtime_queue_submit_packed
 export engine2d_draw_ir_runtime_queue_complete_packed
+export engine2d_draw_ir_runtime_queue_complete_packed_with_authority
 export engine2d_draw_ir_runtime_queue_retire_packed

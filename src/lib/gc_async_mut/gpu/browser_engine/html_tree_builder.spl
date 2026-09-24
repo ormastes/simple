@@ -45,6 +45,33 @@ class _TreeStack:
             i = i - 1
         -1
 
+    fn find_tag_in_list_item_scope(tag: text) -> i32:
+        """`find_tag`, but stopping at the barrier the HTML5 "in body" li/dd/dt
+        start-tag algorithm stops at: walking down from the current node, a
+        SPECIAL element that is not `address`, `div` or `p` ends the search.
+
+        `find_tag` scans the whole stack, which made a NESTED list close its
+        outer list item: the catalog page's `html:li` feature example is
+        `<li>...<div><ul><li>List item</li></ul></div>...</li>`, and the inner
+        `<li>` found the outer one straight through the inner `<ul>`. The
+        subsequent `close_through` then popped the inner `ul`, the `div` AND
+        the outer `li`, so the following `</ul>` closed the OUTER list and
+        every remaining `<li>` on the page became a sibling of it instead of a
+        child. Measured on that page: 177 of 431 element nth-paths disagreed
+        with Chrome's — the `<li>` desync recorded in doc/08_tracking/bug/
+        web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md,
+        which is a TREE-CONSTRUCTION defect and not, as first supposed, a
+        geometry-differ enumeration artifact."""
+        var i = self.length - 1
+        while i >= 0:
+            val t = be_dom_get_tag(self.nodes[i])
+            if t == tag:
+                return i
+            if _li_scope_barrier(t):
+                return -1
+            i = i - 1
+        -1
+
     me push_open(node: BeDomNode):
         if self.length >= self.nodes.len():
             val completed_idx = self.length - 1
@@ -181,6 +208,77 @@ fn _closes_p_elem(tag: text) -> bool:
     if tag == "table": return true
     if tag == "ul": return true
     false
+
+fn _html_special_elem(tag: text) -> bool:
+    """The HTML5 "special" element category, restricted to the tags this
+    tree builder can actually put on the open-element stack."""
+    if tag == "address": return true
+    if tag == "article": return true
+    if tag == "aside": return true
+    if tag == "blockquote": return true
+    if tag == "body": return true
+    if tag == "button": return true
+    if tag == "caption": return true
+    if tag == "center": return true
+    if tag == "col": return true
+    if tag == "colgroup": return true
+    if tag == "dd": return true
+    if tag == "details": return true
+    if tag == "dir": return true
+    if tag == "div": return true
+    if tag == "dl": return true
+    if tag == "dt": return true
+    if tag == "fieldset": return true
+    if tag == "figcaption": return true
+    if tag == "figure": return true
+    if tag == "footer": return true
+    if tag == "form": return true
+    if tag == "h1": return true
+    if tag == "h2": return true
+    if tag == "h3": return true
+    if tag == "h4": return true
+    if tag == "h5": return true
+    if tag == "h6": return true
+    if tag == "head": return true
+    if tag == "header": return true
+    if tag == "hgroup": return true
+    if tag == "hr": return true
+    if tag == "html": return true
+    if tag == "iframe": return true
+    if tag == "li": return true
+    if tag == "main": return true
+    if tag == "menu": return true
+    if tag == "nav": return true
+    if tag == "object": return true
+    if tag == "ol": return true
+    if tag == "p": return true
+    if tag == "pre": return true
+    if tag == "script": return true
+    if tag == "section": return true
+    if tag == "select": return true
+    if tag == "style": return true
+    if tag == "summary": return true
+    if tag == "table": return true
+    if tag == "tbody": return true
+    if tag == "td": return true
+    if tag == "template": return true
+    if tag == "textarea": return true
+    if tag == "tfoot": return true
+    if tag == "th": return true
+    if tag == "thead": return true
+    if tag == "title": return true
+    if tag == "tr": return true
+    if tag == "ul": return true
+    false
+
+fn _li_scope_barrier(tag: text) -> bool:
+    """Ends the li/dd/dt implicit-close search. HTML5 walks the open-element
+    stack downwards and aborts on a special element, EXCEPT `address`, `div`
+    and `p`, which it walks straight through."""
+    if tag == "address": return false
+    if tag == "div": return false
+    if tag == "p": return false
+    _html_special_elem(tag)
 
 fn _apply_attrs(node: BeDomNode, attrs: [HtmlAttr]) -> BeDomNode:
     """Apply attributes to node and return the modified node."""
@@ -428,14 +526,15 @@ pub fn html_tree_builder_build_with_parse_limits(
                 if _closes_p_elem(t) and stack.find_tag("p") >= 0:
                     stack.close_through("p")
 
-                # Implicit close of <li> before new <li>
-                if t == "li" and stack.find_tag("li") >= 0:
+                # Implicit close of <li> before new <li> -- scope-limited, so
+                # a list nested inside a list item does not close its host.
+                if t == "li" and stack.find_tag_in_list_item_scope("li") >= 0:
                     stack.close_through("li")
 
                 # A new definition term or description closes either open kind.
                 if t == "dt" or t == "dd":
-                    val open_dt = stack.find_tag("dt")
-                    val open_dd = stack.find_tag("dd")
+                    val open_dt = stack.find_tag_in_list_item_scope("dt")
+                    val open_dd = stack.find_tag_in_list_item_scope("dd")
                     if open_dt > open_dd:
                         stack.close_through("dt")
                     elif open_dd >= 0:

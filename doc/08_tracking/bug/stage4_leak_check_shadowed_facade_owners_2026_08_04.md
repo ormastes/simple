@@ -1,4 +1,9 @@
 # Stage 4 leak checker resolves shadowed compatibility facades
+## Closed 2026-09-16 — ...elect the wrong terminal identity. ## Fix and regression The leak checker imports the in-p
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -27,3 +32,4 @@ exact `nogc_sync_mut` type owner used by `parse_leak_dump`. The adjacent externa
 runner compile-result and internal runner CLI callable use the same physical
 ownership rule. A focused native contract imports the real leak-check entry so
 the complete module family must lower and link.
+

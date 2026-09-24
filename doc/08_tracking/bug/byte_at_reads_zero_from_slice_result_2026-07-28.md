@@ -1,4 +1,8 @@
 # `byte_at()` reads zeros out of a `slice()` result
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28
 **Status:** Open
@@ -56,3 +60,4 @@ Root-cause the interaction between `slice`'s returned array representation and
 `byte_at`'s element read (suspected same family as the nested-array
 element-read shred), A/B it against the JIT and native engines, then drop the
 copy loop above.
+

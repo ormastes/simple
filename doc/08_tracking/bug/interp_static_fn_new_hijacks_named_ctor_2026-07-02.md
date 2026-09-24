@@ -1,7 +1,40 @@
 # Interpreter: `static fn new` hijacks named-argument class construction
 
+## Closed 2026-09-13 — P1 silent-corruption symptom fixed, re-verified by running
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Both cases from the report were re-run.
+
+1. Field-named form (`Widget` with fields `id, size` plus
+   `static fn new(path, size)`), `Widget(id: 3, size: 4)`:
+   prints `id=3 size=4`, exit 0 — binds against the CLASS FIELDS, correct.
+
+2. The report's worst case, the one the "Correction 2026-08-08" section says
+   still reached `static fn new` — `Font(path: "x", size: 8)` where `path` is a
+   `new` parameter name and not a field:
+
+   ```
+   error: semantic: class `Font` has no field named `path`
+   ```
+
+   It no longer "succeeds" producing `Font(id: nil, size: nil)`. The silent
+   nil-field corruption — the P1 severity driver — is gone; the case is now a
+   loud compile-time error.
+
+Closing on that basis (measured). Residual, recorded rather than lost: the
+named-argument form still does not DISPATCH to `static fn new`, it only
+rejects unknown names. Whether it should dispatch is a language-design
+question, not the silent-corruption defect this entry tracked; house style
+(`.claude/rules/language.md`) prefers named constructors over `.new()` anyway.
+
 Date: 2026-07-02
-Status: OPEN (P1)
+Status: OPEN (P1) — CLOSED 2026-09-13 (see top section)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 2026-08-08 RESOLVED verdict was WRONG on its central claim. Field-named
 construction is fixed, but the report's own *worst* case — an argument name

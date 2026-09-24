@@ -1,8 +1,13 @@
 # Tauri Mobile Artifact Gate Fixture Drift - 2026-06-28
 
+## Closed 2026-09-13 — Status was already "Fixed"; gate is an Android/Linux lane not runnable on this host
+
+- **inferred** The entry's own `## Status` section reads `Fixed.` and records the fixture reconciliation.
+- **inferred** Re-running the cited gate (`bin/simple test test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl`) needs an Android/Linux capture host; this Windows box has no such lane, so no fresh measurement was taken.
+
 ## Status
 
-Fixed.
+Closed (fixed) 2026-09-13.
 
 ## Context
 

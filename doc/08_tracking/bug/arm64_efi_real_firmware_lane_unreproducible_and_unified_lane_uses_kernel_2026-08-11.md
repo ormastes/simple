@@ -1,4 +1,8 @@
 # aarch64 real-firmware EFI lane was unreproducible; unified arm64 lane still uses QEMU `-kernel`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-11
 - Status: OPEN (P2)
@@ -525,3 +529,8 @@ artifact cannot be produced until a pure-Simple bootstrap compiler is
 deployed, so an edited lane could not be verified end-to-end and would risk
 masking the real blocker behind a plumbing failure. Migrate the QEMU argv the
 day `pure-simple-bootstrap-compiler` provenance lands.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: EFI/QEMU real-firmware boot-chain migration, needs a self-hosted bin/simple to build the unified kernel (per .claude/rules/board-runnable.md), which this host does not have. No change made.
+

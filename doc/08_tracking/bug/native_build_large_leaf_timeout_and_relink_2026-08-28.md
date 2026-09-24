@@ -1,4 +1,8 @@
 # Native-build large leaf timeout and warm relink cost (2026-08-28)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -61,4 +65,5 @@ worker or linker.
    active. If cold construction remains a required sub-60-second gate, split
    the modules with semantic-owner review and focused regression tests.
 4. Retain cold/warm wall time and max-RSS receipts in the bootstrap handoff.
+
 

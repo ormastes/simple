@@ -1,4 +1,8 @@
 # Duplicate-check incremental cache is disconnected — 2026-07-23
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED / FRESH STAGE-4 QUALIFICATION PENDING
 
@@ -34,3 +38,4 @@ cosine parity, exit parity, and JSON stdout purity.
 Build one fresh incremental Stage-4 CLI and run the focused phase-2 spec and
 bounded essential-tools smoke once. Until both pass, this is source-fixed rather
 than release-qualified.
+

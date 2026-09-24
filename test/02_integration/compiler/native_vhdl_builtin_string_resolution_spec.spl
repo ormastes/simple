@@ -1,0 +1,39 @@
+# @engine-reach: native-by-compile — compiles and executes the VHDL closure
+# with stub fallback disabled.
+"""
+# Native VHDL builtin-text transport
+
+Proves the VHDL renderer's `len`, `contains`, and `starts_with` calls retain
+builtin identity through HIR, MIR, LLVM, link, and standalone execution.
+"""
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+
+describe "Native VHDL builtin-text transport":
+    it "compiles and executes the exact VHDL entry closure without unresolved methods":
+        val (version_out, version_err, version_status) = rt_process_run(
+            "bin/simple", ["--version"])
+        val version = version_out + version_err
+        expect(version_status).to_equal(0)
+        expect(version.contains("Rust-built")).to_equal(false)
+        expect(version.contains("bootstrap seed only")).to_equal(false)
+
+        val candidate = "build/native_vhdl_builtin_string_resolution_probe"
+        val (build_out, build_err, build_status) = rt_process_run("env", [
+            "SIMPLE_NO_STUB_FALLBACK=1", "bin/simple", "compile",
+            "test/fixtures/native_vhdl_builtin_string_resolution/main.spl",
+            "--native", "-o", candidate,
+        ])
+        val build_log = build_out + build_err
+        expect(build_status).to_equal(0)
+        expect(build_log.contains("cannot resolve method call")).to_equal(false)
+        expect(build_log.contains("unknown_")).to_equal(false)
+        expect(build_log.contains("str_len")).to_equal(false)
+        expect(build_log.contains("str_contains")).to_equal(false)
+        expect(build_log.contains("str_starts_with")).to_equal(false)
+
+        val (run_out, run_err, run_status) = rt_process_run(candidate, [])
+        expect(run_status).to_equal(0)
+        expect(run_err).to_equal("")
+        expect(run_out).to_contain(
+            "PROBE VERDICT: PASS vhdl-builtin-text len=pass contains=pass starts-with=pass")

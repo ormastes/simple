@@ -1,4 +1,8 @@
 # Stage-4 tools-only artifact boundary was documentation-only
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -59,3 +63,4 @@ admitted pure-Simple Stage-3 compiler, successful atomic publication, both
 live tool smokes, and receipt revalidation against the exact manifest/journal.
 
 Provider token usage and comparable completed-bug average: unavailable.
+

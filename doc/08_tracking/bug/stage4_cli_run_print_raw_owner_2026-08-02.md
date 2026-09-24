@@ -1,4 +1,8 @@
 # Stage4 CLI run raw-output owner
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Reproduction
 
@@ -16,3 +20,4 @@ builtin name.
 
 `cli_run_output_owner_spec.spl` locks the stdout route and the adjacent stderr
 adapter ownership.
+

@@ -1,4 +1,8 @@
 # Interpolating a struct in native codegen silently renders `<invalid-heap:0x...>`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-02
 **Status:** FIXED (runtime rendering, 2026-09-02) — see §Resolution. NO REGRESSION GUARD EXISTS for it yet.
@@ -236,3 +240,4 @@ Landing note: `test/unit/runtime/` exists alongside `test/01_unit/runtime/`, so
 whoever lands this hits `check-test-tree-divergence.shs`; use the scoped-delta
 escape (`check-test-tree-divergence-delta.shs BASE NEW`) and record the
 pre-existing offender list per `.claude/rules/vcs.md`.
+

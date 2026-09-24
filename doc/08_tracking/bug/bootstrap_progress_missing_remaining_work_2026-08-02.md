@@ -1,4 +1,9 @@
 # Bootstrap Progress Had No Remaining-Work Counters
+## Closed 2026-09-16 — Status Fixed; event-file counters implemented, watcher test covers, overhead measured
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-02
 **Status:** Fixed
@@ -68,3 +73,4 @@ complete validation.
 The seed/source fingerprint can itself consume roughly 197 seconds before a
 native-build begins. This fix makes that phase visible but intentionally does
 not redesign the fingerprint algorithm; it remains the next measured bottleneck.
+

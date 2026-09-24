@@ -1,4 +1,8 @@
 # Bug: single-line `while COND: STMT` not supported ("expected Newline, found Identifier")
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** parser_web_renderer_expected_newline_found_identifier_2026-07-13
 **Filed:** 2026-07-13
@@ -74,3 +78,4 @@ continues to exercise the unchanged block parser.
 
 The focused Rust parser regression and a standalone seed parse remain to be
 run for this source change. No runtime PASS is claimed by this update.
+

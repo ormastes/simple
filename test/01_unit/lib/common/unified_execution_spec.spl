@@ -10,15 +10,14 @@ fn check(condition: bool):
 
 ## Operator workflow
 
-1. Run `bin/simple test test/01_unit/lib/common/unified_execution_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
+# 1. Run `bin/simple test test/01_unit/lib/common/unified_execution_spec.spl`.
+# 2. Every scenario must pass; a failure is a regression in the
+   # behavior under test.
 
 ## Compatibility and limitations
 
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
-"""
+# Covers the interpreter and native lanes for the constructs
+# asserted here; platform-specific behavior is out of scope.
 
 use std.spec
 
@@ -87,6 +86,20 @@ describe "Additional behavior oracles":
     fn stop():
         self.running = false
 
+class QemuTestSession:
+    gdb_port: i64
+    auto_reset: bool
+    running: bool
+
+    static fn create(gdb_port: i64, auto_reset: bool) -> QemuTestSession:
+        QemuTestSession(gdb_port: gdb_port, auto_reset: auto_reset, running: false)
+
+    me start():
+        self.running = true
+
+    me stop():
+        self.running = false
+
 class QemuMultiTestRunner:
     session: QemuTestSession
     tests: [text]
@@ -99,6 +112,57 @@ class QemuMultiTestRunner:
 
     fn run_count() -> i64:
         self.tests.len()
+
+class AdapterConfig:
+    kind: text
+    target: text
+    port: i64
+    auto_reset: bool
+
+    static fn local() -> AdapterConfig:
+        AdapterConfig(kind: "local", target: "local", port: 0, auto_reset: true)
+
+    static fn qemu_riscv32() -> AdapterConfig:
+        AdapterConfig(kind: "qemu-riscv32", target: "riscv32-qemu", port: 3333, auto_reset: true)
+
+    static fn qemu_x86_64() -> AdapterConfig:
+        AdapterConfig(kind: "qemu-x86_64", target: "x86_64-qemu", port: 4444, auto_reset: true)
+
+    static fn custom(target: text, port: i64) -> AdapterConfig:
+        AdapterConfig(kind: "custom", target: target, port: port, auto_reset: true)
+
+    fn is_remote() -> bool:
+        self.kind != "local"
+
+class AdapterCapabilities:
+    can_stop: bool
+    can_break: bool
+    can_run_single_step: bool
+
+    static fn local() -> AdapterCapabilities:
+        AdapterCapabilities(can_stop: true, can_break: true, can_run_single_step: true)
+
+    static fn remote() -> AdapterCapabilities:
+        AdapterCapabilities(can_stop: true, can_break: true, can_run_single_step: false)
+
+class TestExecutor:
+    mode: text
+    capabilities: AdapterCapabilities
+    remote: bool
+    config: AdapterConfig
+
+    static fn create(config: AdapterConfig) -> TestExecutor:
+        val remote = config.is_remote()
+        val caps = if remote: AdapterCapabilities.remote() else: AdapterCapabilities.local()
+        TestExecutor(
+            mode: if remote: "remote" else: "local",
+            capabilities: caps,
+            remote: remote,
+            config: config
+        )
+
+    fn uses_remote_transport() -> bool:
+        self.remote
 
 fn parse_target(target: text) -> AdapterConfig:
     if target == "local":

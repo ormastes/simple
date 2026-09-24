@@ -1,4 +1,8 @@
 # Cross-module CSSValue/CSSDeclaration enum collision breaks CSS-animation reconcile
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-19
 - Status: WORKED AROUND (rename); compiler defect remains OPEN
@@ -39,3 +43,4 @@ Renamed the render_scene types to `RsCssValue` / `RsCssDeclaration`
 
 Enum/type resolution must be module-scoped (or collisions must be a hard
 compile error), like the existing function-collision warning but fatal.
+

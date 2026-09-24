@@ -1,4 +1,9 @@
 # Codex duplicate resume SQLite/WAL contention
+## Closed 2026-09-16 — Status FIXED; stale duplicate stopped, checkpoints ok, flock guard added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED
 **Severity:** P1 — duplicate writers could contend on one session and retain WAL state
@@ -25,3 +30,4 @@ remain independent.
 
 Direct invocations that bypass `bin/codex` cannot be protected by this repo
 guard; keep repo `bin/` first on `PATH` as required by `AGENTS.md`.
+

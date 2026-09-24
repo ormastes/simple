@@ -1,4 +1,8 @@
 # Flat AST Bridge: type-expr index goes stale across an interleaved `ast_reset()`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIX IMPLEMENTED; STAGE-4 ADMISSION PENDING 2026-07-17 — the original
 type bounds check remains, and native Stage-4 statement/expression stores now
@@ -265,3 +269,4 @@ rather than a hard infinite loop.
   re-run this bug's proof recipe (`SIMPLE_TRACE_AST_RESET=1`, watch for
   `[ast_reset]` / `[flat-bridge]` / `[OOB-PROOF]`-style markers) to determine
   whether the re-entrant-parse arena race is real.
+

@@ -15,6 +15,7 @@ struct ParsedStableDb:
     files: List<FileRecord>
     suites: List<SuiteRecord>
     tests: List<TestRecord>
+    integrity_error: text
 
 struct ParsedVolatileDb:
     counters: List<CounterRecord>
@@ -97,6 +98,7 @@ fn parse_stable_db(content: text) -> ParsedStableDb:
     var files: List<FileRecord> = []
     var suites: List<SuiteRecord> = []
     var tests: List<TestRecord> = []
+    var integrity_error = ""
 
     var current_table = ""
     var string_lines: List<text> = []
@@ -120,11 +122,15 @@ fn parse_stable_db(content: text) -> ParsedStableDb:
             # Parse: id, value
             val fields = parse_fields(trimmed)
             if fields.len() >= 2:
+                if fields[0].to_int() != interner.len() and integrity_error == "":
+                    integrity_error = "strings IDs must be unique and contiguous"
                 interner.intern(fields[1])
 
         elif current_table == "files":
             val fields = parse_fields(trimmed)
             if fields.len() >= 2:
+                if fields[0].to_int() != files.len() and integrity_error == "":
+                    integrity_error = "file IDs must be unique and contiguous"
                 files.push(FileRecord(
                     file_id: fields[0].to_int(),
                     path_str: fields[1].to_int()
@@ -133,6 +139,8 @@ fn parse_stable_db(content: text) -> ParsedStableDb:
         elif current_table == "suites":
             val fields = parse_fields(trimmed)
             if fields.len() >= 3:
+                if fields[0].to_int() != suites.len() and integrity_error == "":
+                    integrity_error = "suite IDs must be unique and contiguous"
                 suites.push(SuiteRecord(
                     suite_id: fields[0].to_int(),
                     file_id: fields[1].to_int(),
@@ -142,6 +150,8 @@ fn parse_stable_db(content: text) -> ParsedStableDb:
         elif current_table == "tests":
             val fields = parse_fields(trimmed)
             if fields.len() >= 11:
+                if fields[0].to_int() != tests.len() and integrity_error == "":
+                    integrity_error = "test IDs must be unique and contiguous"
                 tests.push(TestRecord(
                     suite_id: fields[1].to_int(),
                     name_str: fields[2].to_int(),
@@ -154,12 +164,34 @@ fn parse_stable_db(content: text) -> ParsedStableDb:
                     qualified_at: fields[9],
                     qualified_reason: fields[10]
                 ))
+            elif integrity_error == "":
+                integrity_error = "test row does not match the V3 11-field schema"
+
+    val string_count = interner.len()
+    for f in files:
+        if (f.path_str < 0 or f.path_str >= string_count) and integrity_error == "":
+            integrity_error = "file path_str references a missing string"
+    for s in suites:
+        if (s.file_id < 0 or s.file_id >= files.len()) and integrity_error == "":
+            integrity_error = "suite references a missing file"
+        if (s.name_str < 0 or s.name_str >= string_count) and integrity_error == "":
+            integrity_error = "suite name_str references a missing string"
+    for t in tests:
+        if (t.suite_id < 0 or t.suite_id >= suites.len()) and integrity_error == "":
+            integrity_error = "test references a missing suite"
+        if (t.name_str < 0 or t.name_str >= string_count) and integrity_error == "":
+            integrity_error = "test name_str references a missing string"
+        if (t.category_str < 0 or t.category_str >= string_count) and integrity_error == "":
+            integrity_error = "test category_str references a missing string"
+        if (t.status_str < 0 or t.status_str >= string_count) and integrity_error == "":
+            integrity_error = "test status_str references a missing string"
 
     ParsedStableDb(
         interner: interner,
         files: files,
         suites: suites,
-        tests: tests
+        tests: tests,
+        integrity_error: integrity_error
     )
 
 # =========================================================================
@@ -262,4 +294,3 @@ fn parse_volatile_db(content: text) -> ParsedVolatileDb:
         changes: changes,
         test_runs: test_runs
     )
-

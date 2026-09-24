@@ -47,11 +47,49 @@ original `itf` config format:
 
 ```bash
 devhub auth login --confluence --url https://company.atlassian.net/wiki --user you@co.com --token TOKEN
-devhub auth login --jira                                              # delegates to `acli jira auth login --web`
-devhub auth login --jira --url URL --user EMAIL --token TOKEN         # also wires the REST curl fallback acli lacks
+# Confluence Data Center: Bearer personal access token, no --user needed
+devhub auth login --confluence --url https://wiki.corp:8090/confluence --deployment datacenter --auth bearer --token PAT
+# Jira Data Center: Bearer personal access token, no --user needed
+devhub auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT
+# Jira Cloud: basic auth, email + API token
+devhub auth login --jira --url https://company.atlassian.net --user you@co.com --token API_TOKEN
+devhub auth login --jira                                              # acli --web login; skipped when a jira token is already configured
+devhub auth login --jira --acli                                       # force the acli --web login even when a jira token exists
 devhub auth status
 devhub auth logout --confluence
 ```
+
+**Jira token auth (no acli login).** When `jira.url` and a Jira token are
+configured, every `jira` verb (`view`, `search`, `create`, `update`, `comment`,
+`transition`) and `tasks --backend jira` searches call the Jira REST API
+directly. acli is used only when no token is configured
+(`check_jira_auth` in `auth.spl`). A token resolves from `[token_env]`, then
+`[token_cmd]`, then `auth.sdn`. `jira.email` is required only for basic auth.
+
+```sdn
+# ~/.config/itf/config.sdn — Jira Data Center (REST v2, Bearer PAT)
+jira:
+    url: https://jira.corp:8443/jira      # any base URL; port and context path allowed
+    deployment: datacenter                # datacenter -> /rest/api/2 | cloud (default) -> /rest/api/3
+    auth: bearer                          # bearer (DC PAT) | basic (default)
+token_env:
+    jira: JIRA_TOKEN                      # or put `jira: token: ...` in auth.sdn
+```
+
+```sdn
+# ~/.config/itf/config.sdn — Jira Cloud (REST v3, basic email + API token)
+jira:
+    url: https://company.atlassian.net
+    deployment: cloud
+    auth: basic
+    email: you@company.com
+token_env:
+    jira: JIRA_API_TOKEN
+```
+
+On Data Center, `create`/`update`/`comment` send description and comment
+bodies as plain strings (v2 rejects ADF); Cloud gets ADF. Attachment download
+on Data Center follows the attachment metadata's `content` URL.
 
 Other backends have no `devhub auth` verb — their credentials go straight
 into `auth.sdn`/`email.sdn`, or an external tool's own login:
@@ -104,8 +142,8 @@ devhub tasks create --backend jira --project PROJ --title "New bug"
 devhub tasks close 42 --backend github
 ```
 
-Requires: `gh` CLI (github backend) or `acli`/Jira curl credentials (jira
-backend).
+Requires: `gh` CLI (github backend), or for the jira backend `jira.url` + a
+Jira token (REST, see Setup), with `acli` used only when no token is configured.
 
 ## Facade: `git` — `gh`/`git` (routing) + `github`, `bb`/`b` (explicit)
 
@@ -312,11 +350,41 @@ repository can satisfy its protected policy; enabling it merely queues the
 merge. `--no-verify` skips local Git hooks only; it does not satisfy or bypass
 GitHub checks.
 
-### `bb` (alias `b`) — Bitbucket Cloud
+### `bb` (alias `b`) — Bitbucket Cloud and Server / Data Center
 
-Real REST client (`adapter_bitbucket_curl.spl`), not a passthrough — requires
-`--workspace`/`BB_WORKSPACE`, `--repo`/`BB_REPO`, and a `bitbucket.token` in
-`auth.sdn`.
+Real REST client (`adapter_bitbucket.spl`, sending through `curl`), not a
+passthrough. It requires `--project`/`--workspace` (or `BB_PROJECT`/`BB_WORKSPACE`),
+`--repo`/`BB_REPO`, and a Bitbucket token. The token resolves from
+`[token_env]`, then `[token_cmd]`, then `auth.sdn`.
+
+**Server / Data Center (tested shape: 8.19).** Set `bitbucket.url` to your
+server. Port and context path are kept, and a trailing `/rest/api/1.0` is
+stripped. When `bitbucket.deployment` is unset, any URL that is not
+`bitbucket.org` is treated as Data Center. Requests go to
+`{url}/rest/api/1.0` with `Authorization: Bearer <HTTP access token>`.
+`--project` is the project key.
+
+```sdn
+# ~/.config/itf/config.sdn — Bitbucket Server/DC 8.19, Bearer PAT
+bitbucket:
+    url: https://host:222            # also ok: https://host:222/context
+    deployment: datacenter           # optional for non-bitbucket.org URLs
+    auth: bearer                     # default
+    project: PROJ
+    user: jdoe                       # optional; enables participant approve
+token_env:
+    bitbucket: BB_TOKEN
+```
+
+On Data Center:
+- `pr create` sends `fromRef`/`toRef`, and `--reviewer` takes user names.
+- `comment post` sends `text`, plus an `anchor` for inline comments.
+- `merge` reads the PR `version` and posts `strategyId`: `squash`→`squash`,
+  `fast_forward`→`ff-only`, anything else→`no-ff`.
+- `approve` uses `PUT .../participants/{bitbucket.user}`, falling back to the
+  deprecated `POST /approve` when no user is set.
+- `status` reads `/rest/build-status/1.0/commits/{sha}`.
+- Lists page with `isLastPage`/`nextPageStart`.
 
 | Verb | Flags |
 |---|---|
@@ -355,6 +423,70 @@ in config.sdn > `confluence`), `--space KEY` (Confluence), `--repo`/`-R
 OWNER/NAME` (GitHub — the repo whose `.wiki.git` to use), `--json`/`--jq`,
 `--web`, `--limit N` (default 25, Confluence only), `--push` (GitHub backend
 only — pushes local wiki-git commits back to GitHub; never implied).
+
+**Confluence Cloud and Data Center.** The Confluence backend
+(`adapter_confluence.spl`) calls the v1 content API `{confluence.url}/rest/api/content`
+through `curl` on both deployments. On Cloud, `url` includes `/wiki`; on Data
+Center it is the server base with any port and context path. Spaces are
+addressed by key. A configured token is used directly (`[token_env]` >
+`[token_cmd]` > `auth.sdn`), and no login is started. Auth is Basic
+`confluence.user:token` by default, or `Bearer <PAT>` with `confluence.auth: bearer`.
+
+Named targets use `confluence.<name>:` sections. `--host NAME` and
+`--profile NAME` are aliases; without either flag, `default_target` is used,
+then the first named target in file order. Repeated `header:` entries preserve
+multiple values and are attached automatically by both `wiki` and `api` when
+the selected target routes through its gateway. `gateway_url` is a complete API prefix; routing and headers stay in
+`config.sdn`, while target-scoped secrets stay in `auth.sdn`.
+
+```sdn
+confluence:
+    default_target: internal
+
+confluence.internal:
+    url: https://company.atlassian.net/wiki
+    gateway_url: https://gateway.corp/confluence
+    user: you@company.com
+    header: X-Classification: Internal
+    header: X-Scope: Engineering
+    header: X-Scope: Documentation
+
+confluence.public:
+    url: https://public.example/confluence
+    deployment: datacenter
+    auth: bearer
+```
+
+```sdn
+# ~/.config/itf/auth.sdn
+confluence.internal:
+    token: "..."
+confluence.public:
+    token: "..."
+```
+
+For example, `devhub wiki list --host internal` and
+`devhub api GET /content --profile internal` select the same target. `auth
+status --quiet` (or `--silent`) suppresses only deployment-shape warnings.
+
+```sdn
+# Confluence Data Center (Bearer PAT)
+confluence:
+    url: https://wiki.corp:8090/confluence
+    deployment: datacenter
+    auth: bearer
+token_env:
+    confluence: CONFLUENCE_PAT
+```
+
+```sdn
+# Confluence Cloud (Basic email + API token)
+confluence:
+    url: https://company.atlassian.net/wiki
+    user: you@company.com
+token_env:
+    confluence: CONFLUENCE_API_TOKEN
+```
 
 ```bash
 devhub wiki list --space ENG
@@ -476,7 +608,7 @@ directly (no `--backend` selection — each talks to exactly one system):
 
 | Command | Talks to | Notable verbs |
 |---|---|---|
-| `jira` (alias `j`) | Jira only | `view`, `search` (JQL), `create`, `update`, `comment`, `transition` — `update`/`comment`/`transition` try `acli` first, then fall back to REST v3 curl if `jira.url`+`jira.email`+a token are configured |
+| `jira` (alias `j`) | Jira only | `view`, `search` (JQL), `create`, `update`, `comment`, `transition` — all REST (DC `/rest/api/2`, Cloud `/rest/api/3`) when `jira.url` + a token are configured (plus `jira.email` for basic auth); `acli` only when no token is configured |
 | `minio` (alias `mio`) | MinIO/S3 only | `ls`, `get`, `put`, `stat`, `mb`, `rb`, `rm`, `presign`, `presign-put`, `health` |
 | `outlook` (alias `ol`) | Microsoft Graph only | `folders`, `messages <FID>`, `get <MID>`, `move <MID> --to F`, `mark <MID>` |
 | `api` | Raw REST | `api <GET\|POST\|PUT\|DELETE> <URL/path>` against Confluence (default) or Jira (`--jira`) — like `gh api` |
@@ -502,6 +634,10 @@ Honest, currently-open gaps — do not expect these to work:
 - **`rm --recursive`/`rb --force`/`mirror --remove`** are all capped at 1000
   objects per side (no batch `DeleteObjects` call in the adapter); over the
   cap, they refuse and point you at the real `mc` CLI.
+- **`std.nogc_sync_mut.http_client` `add_header` recurses forever.** Its
+  `request_add_header` alias resolves back onto itself, and the shim has no
+  transport. devhub's Confluence and Bitbucket adapters avoid it by using `curl`.
+  The stdlib bug itself is not fixed.
 - **`bb`**: no free-text search verb; list endpoints cap at 10 pages
   (`_capped:true` in `--json` past the cap).
 - **`gh` facade covers `pr` and `repo` only** on non-GitHub backends. `issue`

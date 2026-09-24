@@ -1,0 +1,247 @@
+#!/bin/sh
+# check-native-build-entry-memory-budget.shs
+#
+# Fails when `native-build --entry <small file>` costs whole-project memory.
+#
+# WHY THIS GUARD EXISTS (measured 2026-09-06, aarch64 host, 121 GB RAM)
+# --------------------------------------------------------------------
+# A live bootstrap Stage 3 was observed at Rss 42,386,084 kB, of which
+# 37,543,764 kB sat in a SINGLE `[heap]` (glibc brk) mapping and 4,810,236 kB
+# in 35 anonymous mmaps -- 99.9% private anonymous, monotonic, fully resident.
+# On the SAME job family (compile the compiler's module closure) the Rust seed
+# peaked at 3,524,932 kB. That ~12x gap is not a working set: the self-hosted
+# binary links the Rust runtime for its allocator (`rt_array_new`,
+# `rt_dict_new`, `rt_string_new` all resolve into the `simple_runtime` address
+# range), whose `HEAP_ALLOCATION_REGISTRY` registers every heap object and
+# releases it only through a hand-written `unregister_heap_ptr*` call that
+# compiled Simple code never emits. Heap objects are immortal by default.
+#
+# The collector is out of scope for this guard. What IS in scope, and what this
+# guard pins, is the MULTIPLIER in front of it. `--entry <file>` without
+# `--source` delegates to the Rust `rt_native_build` FFI, which scans the
+# DEFAULT source roots -- effectively the whole ~16,000-file `src/` tree -- and
+# materialises that entire import graph into the never-reclaimed heap before any
+# codegen, for a two-line fixture. `src/app/cli/bootstrap_main.spl:379-381`
+# prints a note saying exactly this, and `:280-285` records the 2026-08-01
+# measurement: 2.1 s with `--source`, no output at all after 45 s without it.
+#
+# THE NOTE IS NOT THE SIGNAL. Measured 2026-09-06: bootstrap_main prints it
+# whenever `--entry` is given without `--source`, INCLUDING on the bounded
+# `--entry-closure` run that completes in 5 s. Greping for it flags a passing
+# shape. The signals this guard uses instead are outcome and cost.
+#
+# Three assertions, all fail-closed:
+#   1. PRECONDITION: the `--source`-bounded build of the fixture must exit 0.
+#      If it does not, the candidate cannot build a two-line program at all and
+#      there is nothing to compare -- that is ERROR, never a pass.
+#   2. OUTCOME: the unbounded `--entry` build must also exit 0. Materialising
+#      the whole tree makes a two-line fixture fail on files it never imports.
+#      Measured on the deployed stage2 in this repo: rc=1,
+#      "native module name collision after path sanitization:
+#       .../commands/add-dir/add-dir.spl and .../commands/add_dir/add_dir.spl".
+#      A hello world has no business knowing those files exist.
+#   3. BUDGET: unbounded peak RSS within RATIO_MAX of the bounded build, and
+#      under ABS_MAX_KB.
+#
+# HONEST LIMIT: assertion 3 has never fired on a live blow-up, because in
+# origin/main's tree assertion 2 short-circuits the unbounded run in ~0.7 s
+# (the add-dir/add_dir pair exists here; /home/yoon/bootstrap-wt lacks it, which
+# is why that lane's Stage 3 runs on to 42 GB instead of aborting). The budget
+# is a real threshold with real numbers, but it is unexercised. Do not report it
+# as the assertion that caught anything until it does.
+#
+# Verdict is the LAST line of stdout, per repo convention:
+#   PASS  -- <n> probe(s) executed, ...            exit 0
+#   FAIL  -- ...                                   exit 1
+#   ERROR -- nothing was checked (<reason>)        exit 2
+# A run that executed 0 probes is ERROR, never a pass. Absence of a candidate
+# binary is ERROR: absence of evidence is not evidence.
+#
+# usage:
+#   sh scripts/check/check-native-build-entry-memory-budget.shs [--candidate <bin>]
+#   sh scripts/check/check-native-build-entry-memory-budget.shs --selftest
+
+set -u
+
+RATIO_MAX_X100=${RATIO_MAX_X100:-200}      # 2.00x the bounded build
+ABS_MAX_KB=${ABS_MAX_KB:-6000000}          # 6 GB hard ceiling for a 2-line entry
+PROBE_TIMEOUT=${PROBE_TIMEOUT:-300}
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$repo_root" ]; then
+    echo "ERROR — nothing was checked (not inside a git repo)"
+    exit 2
+fi
+
+TIME_BIN=/usr/bin/time
+work=$(mktemp -d)
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT INT TERM
+
+# Peak RSS in kB plus exit status for one candidate invocation.
+# The exit status of the timed command is read DIRECTLY into a variable on the
+# line after the invocation, never through a pipe: a pipeline's $? is the last
+# element's status and has produced false greens in this repo before.
+probe() {
+    pr_cand=$1
+    pr_label=$2
+    shift 2
+    PR_LOG=$work/$pr_label.log
+    pr_time=$work/$pr_label.time
+    # `-o` keeps /usr/bin/time's own report out of the candidate's stderr, so
+    # the log can carry BOTH streams. The build's failure diagnostic goes to
+    # stderr; capturing only stdout made the verdict say "no-diagnostic" for a
+    # failure whose cause was printed in plain sight.
+    "$TIME_BIN" -v -o "$pr_time" timeout -k 5 "$PROBE_TIMEOUT" "$pr_cand" "$@" \
+        >"$PR_LOG" 2>&1
+    PR_RC=$?
+    PR_RSS=$(awk '/Maximum resident set size/{print $NF}' "$pr_time")
+    [ -n "$PR_RSS" ] || PR_RSS=0
+}
+
+selftest() {
+    st_fail=0
+    st_n=0
+
+    # 1. The ratio arithmetic must reject the incident's own shape.
+    st_n=$((st_n + 1))
+    if [ $(( 28620832 * 100 / 198056 )) -le "$RATIO_MAX_X100" ]; then
+        echo "selftest: ratio arithmetic accepted a 144x blow-up"; st_fail=1
+    fi
+
+    # 2. ...and accept a bounded 1.5x build.
+    st_n=$((st_n + 1))
+    if [ $(( 300000 * 100 / 200000 )) -gt "$RATIO_MAX_X100" ]; then
+        echo "selftest: ratio arithmetic rejected a bounded 1.5x build"; st_fail=1
+    fi
+
+    # 3. The absolute ceiling must reject the observed 28.6 GB two-line build.
+    st_n=$((st_n + 1))
+    if [ 28620832 -le "$ABS_MAX_KB" ]; then
+        echo "selftest: absolute ceiling accepted a 28.6 GB two-line build"; st_fail=1
+    fi
+
+    # 4. A non-zero unbounded rc must be classified as an offender.
+    st_n=$((st_n + 1))
+    st_off=""
+    if [ 1 -ne 0 ]; then st_off="outcome"; fi
+    if [ -z "$st_off" ]; then
+        echo "selftest: a non-zero unbounded rc was not treated as an offender"; st_fail=1
+    fi
+
+    # 5. A missing peak-RSS measurement must be vacuous, not a pass.
+    st_n=$((st_n + 1))
+    st_rss=$(awk '/Maximum resident set size/{print $NF}' /dev/null)
+    [ -n "$st_rss" ] || st_rss=0
+    if [ "$st_rss" -ne 0 ]; then
+        echo "selftest: an unmeasured probe did not fall back to 0"; st_fail=1
+    fi
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed, $st_n fixture(s))"
+        exit 2
+    fi
+    echo "selftest: $st_n fixture(s) passed"
+}
+
+candidate=""
+run_selftest_only=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --candidate) candidate=$2; shift 2 ;;
+        --selftest)  run_selftest_only=1; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument '$1')"; exit 2 ;;
+    esac
+done
+
+selftest
+[ "$run_selftest_only" -eq 1 ] && exit 0
+
+if [ ! -x "$TIME_BIN" ]; then
+    echo "ERROR — nothing was checked (no $TIME_BIN; peak RSS cannot be measured)"
+    exit 2
+fi
+
+if [ -z "$candidate" ]; then
+    for c in \
+        "$repo_root/build/bootstrap/stage2/$(uname -m)-unknown-linux-gnu/simple" \
+        "$repo_root/bin/release/$(uname -m)-unknown-linux-gnu/simple"
+    do
+        if [ -x "$c" ]; then candidate=$c; break; fi
+    done
+fi
+if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
+    echo "ERROR — nothing was checked (no runnable candidate binary; pass --candidate)"
+    exit 2
+fi
+
+fixture_dir=$repo_root/scripts/check/cert/redeploy_gate/fixtures
+fixture=$fixture_dir/hello_world.spl
+if [ ! -f "$fixture" ]; then
+    echo "ERROR — nothing was checked (fixture missing: $fixture)"
+    exit 2
+fi
+
+cd "$repo_root" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+probes=0
+
+# Bounded reference: --source pins the roots to the fixture's own directory.
+probe "$candidate" bounded \
+    native-build --backend cranelift --runtime-bundle core-c-bootstrap \
+    --mode one-binary --threads 1 --source "$fixture_dir" \
+    --cache-dir "$work/cache-bounded" --entry "$fixture" \
+    --output "$work/out-bounded.bin"
+bounded_rss=$PR_RSS
+bounded_rc=$PR_RC
+probes=$((probes + 1))
+
+if [ "$bounded_rss" -eq 0 ]; then
+    echo "ERROR — nothing was checked (the bounded probe produced no peak-RSS measurement)"
+    exit 2
+fi
+if [ "$bounded_rc" -ne 0 ]; then
+    echo "ERROR — nothing was checked (candidate cannot build the fixture even with --source: rc=$bounded_rc, see $work; re-run with the dir kept)"
+    exit 2
+fi
+
+# Subject: the same build with the source roots unbounded.
+probe "$candidate" open \
+    native-build --backend cranelift --runtime-bundle core-c-bootstrap \
+    --mode one-binary --threads 1 \
+    --cache-dir "$work/cache-open" --entry "$fixture" \
+    --output "$work/out-open.bin"
+open_rss=$PR_RSS
+open_rc=$PR_RC
+open_log=$PR_LOG
+probes=$((probes + 1))
+
+if [ "$open_rss" -eq 0 ]; then
+    echo "ERROR — nothing was checked (the unbounded probe produced no peak-RSS measurement)"
+    exit 2
+fi
+
+offenders=""
+if [ "$open_rc" -ne 0 ]; then
+    # awk, not grep: `grep` on this host is a wrapped ugrep whose flag handling
+    # differs, and it silently returned nothing for a line that is plainly in
+    # the log. The verdict must name WHY the build failed, so read it directly.
+    open_why=$(awk 'tolower($0) ~ /error|failed|collision/ {print; exit}' "$open_log" | cut -c1-160)
+    offenders="$offenders outcome:rc=$open_rc(${open_why:-no-diagnostic})"
+fi
+
+ratio_x100=$(( open_rss * 100 / bounded_rss ))
+if [ "$ratio_x100" -gt "$RATIO_MAX_X100" ]; then
+    offenders="$offenders ratio:${ratio_x100}x100>${RATIO_MAX_X100}"
+fi
+if [ "$open_rss" -gt "$ABS_MAX_KB" ]; then
+    offenders="$offenders abs:${open_rss}kB>${ABS_MAX_KB}kB"
+fi
+
+detail="candidate=$candidate bounded_rss_kb=$bounded_rss open_rss_kb=$open_rss ratio_x100=$ratio_x100 open_rc=$open_rc"
+if [ -n "$offenders" ]; then
+    echo "FAIL — $probes probe(s) executed, $detail, offender(s):$offenders"
+    exit 1
+fi
+echo "PASS — $probes probe(s) executed, 0 offender(s), $detail"
+exit 0

@@ -1,4 +1,8 @@
 # Self-hosted CLI binary segfaults in spl_array_pop during `lex` (and native-build/compile)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-29
 **Severity:** high — blocks the WM gate, smoke matrix, and guard-channel work; the
@@ -333,3 +337,4 @@ allowlist) but **not PROVED** by an end-to-end before/after `lex` run. This
 fix is landed as a well-evidenced, zero-collateral-risk mitigation consistent
 with the established pattern for this bug class, not as
 a fully closed-loop verified fix.
+

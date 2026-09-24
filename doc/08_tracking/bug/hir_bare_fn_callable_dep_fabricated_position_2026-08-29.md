@@ -1,4 +1,8 @@
 # HIR callable-dep diagnostic fabricates name/position for bare `fn()` types
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-29 (debug_service_v1 Opus verification)
 **Status:** OPEN
@@ -12,3 +16,4 @@ at (file,line,col) triples that do not match file content. Root: the bare
 fix it; needs the HIR callable-dependency diagnostic (and possibly resolution
 of bare `fn` types) fixed in the compiler. Last blocker for a clean native MCP
 build (10 error lines). Evidence: $SCRATCHPAD/VERIFY_debug_service.md §3.
+

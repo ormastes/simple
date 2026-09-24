@@ -109,3 +109,7 @@ interprets the working-copy compiler live, so the most likely origin is that
 drift rather than any landed commit. Whoever owns those changes should re-run
 the gate; `scripts/check/check-aot-smoke.shs` is the durable detector and is
 doing its job.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:real-gpu]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

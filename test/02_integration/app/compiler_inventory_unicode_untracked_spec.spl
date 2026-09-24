@@ -1,0 +1,60 @@
+# Warm Git inventory must admit the same literal UTF-8 paths as cold init.
+# @req REQ-COMPILE-INVENTORY-UTF8-UNTRACKED
+use std.spec.{describe, it, expect, step}
+use std.env.platform.{get_temp_dir}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use app.io.mod.{dir_create_all, dir_remove_all, file_atomic_write, getpid, time_now_unix_micros, process_run_bounded}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+fn inventory_fixture_git(root: text, args: [text]) -> text:
+    val (stdout, _stderr, status) = process_run_bounded(
+        "git", ["-C", root] + args, 10000, 262144)
+    expect(status).to_equal(0)
+    stdout
+
+describe "compiler inventory untracked UTF-8 paths":
+    it "admits newly created Unicode sources and manifests after cold initialization":
+        step("Create a Git fixture with default path quoting enabled")
+        val root = get_temp_dir() + "/simple-inventory-unicode-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        expect(dir_create_all(root + "/src/한글")).to_equal(true)
+        inventory_fixture_git(root, ["init", "--quiet"])
+        inventory_fixture_git(root, ["config", "core.quotePath", "true"])
+        expect(file_atomic_write(root + "/src/base.spl", "fn base(): 0\n")).to_equal(true)
+        inventory_fixture_git(root, ["add", "src/base.spl"])
+        inventory_fixture_git(root, ["-c", "user.name=Inventory Spec",
+            "-c", "user.email=inventory@example.invalid",
+            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + root + "/no-hooks",
+            "commit", "--quiet", "--allow-empty", "-m", "fixture"])
+        val head = inventory_fixture_git(root, ["rev-parse", "HEAD"])
+        val cache = root + "/build/scv"
+        val cold = compiler_inventory_refresh_v1(root, cache, ["src"], true)
+        expect(cold.valid).to_equal(true)
+        val source = "fn value(): 1\n"
+        val manifest = "name: fixture\n"
+        expect(file_atomic_write(root + "/src/한글/소스.spl", source)).to_equal(true)
+        expect(file_atomic_write(root + "/src/한글/simple.sdn", manifest)).to_equal(true)
+        expect(file_atomic_write(root + "/src/한글/readme.md", "notes\n")).to_equal(true)
+
+        step("Confirm default Git output quotes the fixture paths")
+        val quoted = inventory_fixture_git(root,
+            ["ls-files", "--others", "--exclude-standard", "--", "src"])
+        expect(quoted.contains("src/한글/소스.spl")).to_equal(false)
+
+        step("Refresh and read the production inventory containing both new identities")
+        val warm = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(warm.valid).to_equal(true)
+        val current = compile_source_inventory_read_current_v1(cache)
+        expect(current.valid).to_equal(true)
+        expect(current.inventory!.entries.len()).to_equal(3)
+        var identities: [text] = []
+        for entry in current.inventory!.entries:
+            identities = identities.push(entry.source_identity)
+            if entry.source_identity.starts_with("src/한글/"):
+                val content = if entry.source_identity.ends_with(".spl"): source else: manifest
+                expect(entry.content_digest).to_equal(sha256_text(content))
+        expect(identities).to_contain("src/한글/소스.spl")
+        expect(identities).to_contain("src/한글/simple.sdn")
+        expect(inventory_fixture_git(root, ["rev-parse", "HEAD"])).to_equal(head)
+        expect(dir_remove_all(root)).to_equal(0)

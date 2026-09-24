@@ -1,4 +1,8 @@
 # Seed (Rust interpreter): arrays alias on local-bind despite Arc/COW design
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open (root cause NOT pinned down)  **Found:** 2026-07-17 (task #186, lane S42)
 **Path:** `bin/simple run` (Rust seed AST interpreter, `src/compiler_rust/driver` /
@@ -90,3 +94,4 @@ Per repo rule ("Fix .spl not Rust" / pure-Simple-first), and since native
 total=17 pass=17 fail=0 codegen_fallback_hits=0), this seed-side gap is
 lower priority: `bin/simple run`/oracle-mode is a bootstrap/comparison tool,
 not the default tooling path.
+

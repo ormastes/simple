@@ -212,7 +212,48 @@ impl Lowerer {
 
         // Regular function call
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
-        let mut args_hir = self.lower_call_args(args, ctx)?;
+        // Preserve the resolved symbol even before its body has been lowered:
+        // forward and recursive callees can still carry a scalar return type.
+        let ret_ty = match (&func_hir.kind, callee) {
+            (HirExprKind::Global(symbol), Expr::Identifier(_)) => {
+                self.call_return_type(&Expr::Identifier(symbol.clone()), func_hir.ty)
+            }
+            _ => self.call_return_type(callee, func_hir.ty),
+        };
+        // Check the RESOLVED symbol, not the bare callee name: in a flattened
+        // unit with a cross-module same-named collision, `func_hir.kind` may
+        // carry a different (owner-mangled) symbol than `callee`'s bare text,
+        // and `proven_nonescaping_functions`/other per-symbol sets below are
+        // keyed by the symbol `lower_function` actually emitted
+        // (`flatten_emitted_symbol`), not by the ambiguous bare name.
+        let resolved_callee_symbol = match (&func_hir.kind, callee) {
+            (HirExprKind::Global(symbol), Expr::Identifier(_)) => Some(symbol.as_str()),
+            (_, Expr::Identifier(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        let proven_nonescaping = resolved_callee_symbol
+            .is_some_and(|symbol| self.proven_nonescaping_functions.contains(symbol))
+            && !self.is_reference_type(ret_ty);
+        let mut args_hir = if proven_nonescaping {
+            self.lower_nonescaping_call_args(args, ctx)?
+        } else if matches!(callee, Expr::Identifier(name) if name == "array_sort_by")
+            && matches!(args, [_, ast::Argument { value: Expr::Lambda { .. }, .. }])
+        {
+            let first = self.lower_expr(&args[0].value, ctx)?;
+            let callback = if let (
+                Some(HirType::Array { element, .. }),
+                Expr::Lambda { params, body, capture_all, .. },
+            ) = (self.module.types.get(first.ty), &args[1].value)
+            {
+                let element = *element;
+                self.lower_lambda_with_param_types(params, body, *capture_all, ctx, &[element, element])?
+            } else {
+                self.lower_expr(&args[1].value, ctx)?
+            };
+            vec![first, callback]
+        } else {
+            self.lower_call_args(args, ctx)?
+        };
 
         // M12 3b: fill omitted trailing arguments from the callee's parameter
         // defaults. Restricted to a directly-named free function called purely
@@ -220,9 +261,17 @@ impl Lowerer {
         // caller-scope locals or sibling parameters); anything else is left
         // unfilled, preserving prior behavior. Method/Path-callee defaults are a
         // separate follow-up.
-        if let Expr::Identifier(name) = callee {
+        if let (Expr::Identifier(name), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
             if args.iter().all(|a| a.name.is_none()) {
-                let to_fill: Vec<Expr> = match self.fn_param_defaults.get(name) {
+                let params = self.fn_param_defaults.get(symbol).or_else(|| {
+                    if self.own_declared_function_names.contains(name) { return None; }
+                    self.current_file.as_ref().and_then(|path| {
+                        self.imported_fn_param_defaults
+                            .get(&crate::interpreter::normalize_path_key(path))
+                            .and_then(|contracts| contracts.get(name))
+                    })
+                });
+                let to_fill: Vec<Expr> = match params {
                     Some(params) if params.len() > args_hir.len() => {
                         let mut pending = Vec::new();
                         for slot in &params[args_hir.len()..] {
@@ -249,8 +298,6 @@ impl Lowerer {
         // Prefer the declared return type for the named callee when we know it.
         // This keeps local variables initialized from imported/helper calls on a
         // concrete type path instead of degrading to ANY at the next field access.
-        let ret_ty = self.call_return_type(callee, func_hir.ty);
-
         Ok(HirExpr {
             kind: HirExprKind::Call {
                 func: func_hir,
@@ -265,7 +312,7 @@ impl Lowerer {
     /// locals or sibling parameters. Conservative: anything not provably
     /// constant (identifiers, calls, field access, …) returns false and is left
     /// unfilled rather than risk a silent miscompile.
-    fn is_constant_default(expr: &Expr) -> bool {
+    pub(super) fn is_constant_default(expr: &Expr) -> bool {
         match expr {
             Expr::Integer(_)
             | Expr::Float(_)
@@ -274,6 +321,9 @@ impl Lowerer {
             | Expr::Nil
             | Expr::Symbol(_)
             | Expr::Atom(_) => true,
+            // Ordinary quoted strings use FString syntax too. Only literal
+            // parts are safe here; interpolation must not capture caller scope.
+            Expr::FString { parts, .. } => parts.iter().all(|part| matches!(part, ast::FStringPart::Literal(_))),
             Expr::Unary { operand, .. } => Self::is_constant_default(operand),
             Expr::Binary { left, right, .. } => Self::is_constant_default(left) && Self::is_constant_default(right),
             _ => false,

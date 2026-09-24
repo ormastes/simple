@@ -1,7 +1,7 @@
 # arm64 and riscv64 embedded GUI entries import but never call `install_generated_simpleos_wm_theme()`
 
 Date: 2026-09-06
-Status: open
+Status: fixed (source regression verified 2026-09-23; live QEMU verification deferred)
 Severity: P3 (visual regression: generated Aetheric base theme is never installed before the CSS override runs)
 Location:
 - `examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:40` (import), no call site
@@ -65,6 +65,22 @@ before and after this session's spec-modernization pass); most of the
 others are `expect(source).to_contain(...)` string-drift failures against
 unrelated modules, not this specific missing-call defect. See the
 per-scenario `# NOTE:` comments in that spec file for the rest.
+
+## Resolution (2026-09-23)
+
+Both production entries now install the generated Fluid OS snapshot exactly
+once and emit its identity/hash receipt before VFS theme override work and
+Engine2D compositor creation. The focused source regression is
+`test/01_unit/os/simpleos_cross_arch_theme_install_source_spec.spl`.
+
+TODO(deferred-QEMU): boot the ARM64 and RV64 production desktop entries in
+their architecture-specific QEMU admission lanes and capture each
+`[theme-evidence]` receipt. This lightweight repair intentionally did not run a
+heavy native build or QEMU.
+
+TODO(deferred-perf): with the admitted ARM64/RV64 phase environment, retain
+first-frame latency and boot heap deltas before/after this one-time install.
+No additional theme installation or receipt formatting belongs in the frame loop.
 
 ## Recovery note (2026-09-06)
 

@@ -2786,3 +2786,7 @@ files  vac_examples  family (digits collapsed to N)
    25             0  system/sanity/sanityNsystem_spec.spl
    25             0  system/smoke/smokeNsystem_spec.spl
 ```
+
+## Triage 2026-09-13
+
+This is a 5,095-file census with an ongoing multi-session repair backlog (6 repaired so far), not a single actionable bug. No new repair attempted this pass given the remaining shard size. Leaving OPEN as previously tracked.

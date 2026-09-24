@@ -1,4 +1,8 @@
 # TestDaemon cache drops the `output` field across save/load
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Found via: sspec modernization residual wave, batch resid7_part_00
@@ -32,3 +36,4 @@ load. Bump `TEST_RESULT_CACHE_VERSION` so old caches invalidate.
 Neighbor to add when fixing: a spec asserting an output containing `|` and
 newlines survives the round-trip (the delimiter-collision case), per the
 "every fix ships two specs" rule.
+

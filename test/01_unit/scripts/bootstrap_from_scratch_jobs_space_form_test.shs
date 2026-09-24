@@ -1,0 +1,95 @@
+#!/bin/sh
+# Reproducer for the `--jobs full` launch that "looked like --help".
+#
+# Before the fix, bootstrap-from-scratch.sh rejected the space form
+# `--jobs full` as `error: unknown option '--jobs'`, then dumped all 112 lines
+# of usage to stderr and exited 1: the one error line scrolled away and the
+# terminal looked exactly like `--help`, so a mistyped launch read as a
+# finished command that never started a build.
+#
+# Contract pinned here:
+#   1. `--jobs full` parses to exactly the same state as `--jobs=full`
+#      (required-value options accept both spellings, GNU getopt_long style).
+#   2. An unknown argument exits 2 with `error: unknown argument: <arg>` and a
+#      one-line --help hint on stderr, and never dumps the usage text.
+#   3. `--jobs` with no value exits 2 with `error: --jobs requires a value`.
+#
+# No build can start: (1) runs the script's own parser in-process on an
+# extracted copy; (2)/(3) run the real script with a malformed argument, which
+# exits at argument parsing, paired with --stop-after-stage2 so the strategy
+# supervisor (which can lock an output root before the engine parses) is
+# bypassed, and with SIMPLE_BOOTSTRAP_REASON_RECEIPT unset.
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+driver=$root/scripts/bootstrap/bootstrap-from-scratch.sh
+[ -f "$driver" ] || { echo "ERROR — nothing was checked (missing $driver)"; exit 2; }
+work=$(mktemp -d "${TMPDIR:-/tmp}/bfs-jobs-space.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+checked=0
+failures=0
+fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
+
+# The argv normalizer (fenced by markers; absent before the fix) and the option
+# loop (from its variable defaults through the end of the first option loop,
+# anchors present both before and after the fix).
+awk '/^# -- argv-normalize begin/ {c=1} c {print} /^# -- argv-normalize end/ {c=0}' \
+  "$driver" >"$work/normalize.shs"
+awk '/^backend=""$/ {c=1} c {print} c && /^done$/ {exit}' "$driver" >"$work/parse.shs"
+grep -q '^while \[ "\$#" -gt 0 \]; do' "$work/parse.shs" ||
+  { echo "ERROR — nothing was checked (option loop not found in $driver)"; exit 2; }
+
+parse_state() {
+  parse_label=$1
+  shift
+  (
+    usage() { echo usage-called; }
+    SIMPLE_BOOTSTRAP_BUILD_ROOT=$work/build
+    . "$work/normalize.shs"
+    . "$work/parse.shs"
+    printf 'jobs=%s target=%s progress_interval=%s\n' \
+      "$jobs" "$target" "$progress_interval"
+  ) 2>"$work/parse-$parse_label.err"
+}
+
+space=$(parse_state space --full-bootstrap --stop-after-stage2 --jobs full)
+space_rc=$?
+equals=$(parse_state equals --full-bootstrap --stop-after-stage2 --jobs=full)
+equals_rc=$?
+checked=$((checked + 1))
+[ "$space_rc" -eq 0 ] || fail "--jobs full was rejected (rc=$space_rc): $(head -1 "$work/parse-space.err")"
+[ "$equals_rc" -eq 0 ] || fail "--jobs=full was rejected (rc=$equals_rc)"
+case "$equals" in *'jobs=full '*) ;; *) fail "--jobs=full did not select jobs=full: $equals" ;; esac
+[ "$space" = "$equals" ] || fail "--jobs full parsed as [$space], --jobs=full as [$equals]"
+
+run_real() {
+  env -u SIMPLE_BOOTSTRAP_REASON_RECEIPT -u SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED \
+    sh "$driver" --full-bootstrap --stop-after-stage2 "$@" \
+    >"$work/out" 2>"$work/err" </dev/null
+}
+
+expect_error() {
+  label=$1 want=$2
+  shift 2
+  run_real "$@"
+  rc=$?
+  checked=$((checked + 1))
+  [ "$rc" -eq 2 ] || fail "$label: exit $rc, want 2"
+  grep -Fq -- "$want" "$work/err" || fail "$label: stderr lacks '$want': $(head -1 "$work/err")"
+  grep -q -- '--help' "$work/err" || fail "$label: stderr lacks a --help hint"
+  errlines=$(wc -l <"$work/err")
+  [ "$errlines" -le 3 ] || fail "$label: $errlines stderr lines (usage dumped on an error path)"
+  [ ! -s "$work/out" ] || fail "$label: wrote to stdout on an error path"
+}
+
+expect_error 'unknown flag' 'error: unknown argument: --jbos=full' --jbos=full
+expect_error 'stray word' 'error: unknown argument: stray' stray
+expect_error 'bare --jobs' 'error: --jobs requires a value' --jobs
+# The real script consumed `--jobs full` as one option: the parse error that
+# follows names the next token, not `--jobs` or `full`.
+expect_error '--jobs full then unknown' 'error: unknown argument: --jbos=x' --jobs full --jbos=x
+
+if [ "$failures" -ne 0 ]; then
+  echo "FAIL — $failures failure(s) across $checked check(s)"
+  exit 1
+fi
+echo "PASS — $checked check(s) checked: --jobs full == --jobs=full; bad arguments exit 2 without a usage dump"

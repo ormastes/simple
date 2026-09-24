@@ -3,8 +3,9 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use std.io_runtime.{env_set, exit}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
 use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner}
@@ -16,6 +17,9 @@ use std.string_core.{char_code}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity}
+use compiler.driver.cache.phase_compatibility_admission.{
+    driver_import_phase2_frontend_v1
+}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
@@ -26,6 +30,7 @@ use compiler.hir.hir_lowering.module_surface.{
     module_surface_from_owner,
     module_surface_promote,
     module_surfaces_promote,
+    module_surfaces_promote_reason,
     module_surfaces_retained_alignment_error
 }
 use compiler.driver.driver_source_loading.{
@@ -243,7 +248,12 @@ fn _driver_publish_frontend_cache_scope() -> bool:
     if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
         return true
     val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
-    _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope)
+    if not _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope):
+        return false
+    val imported = driver_import_phase2_frontend_v1()
+    if imported.starts_with("manifest-rejected:") or imported == "manifest-unreadable":
+        dtrace("[M3] frontend compatibility {imported}")
+    true
 
 pub fn driver_promote_frontend_registry_owners() -> bool:
     val aspect_ok = aspect_registry_promote_transient_owner()
@@ -351,6 +361,19 @@ pub fn driver_end_transient_parse_scope() -> bool:
     ended
 
 impl CompilerDriver:
+    me parse_full_frontend_selected_v1(source_content: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
+        match parse_full_frontend_with_advisory_policy_v1(source_content,
+                source_path, source_module_name, self.ctx.logger,
+                self.ctx.frontend_advisory_policy,
+                self.ctx.environment_variant_frontend_owner_id,
+                self.ctx.environment_variant_frontend_session_id,
+                self.ctx.environment_variant_frontend_generation,
+                self.ctx.environment_variant_frontend_cache_identity):
+            case Ok(module): Ok(module)
+            case Err(_): Err(
+                "required environment variant frontend provider unavailable for {source_path}")
+
     me add_streaming_module_surface(
         builder: ModuleSurfaceBuilder,
         source_path: text,
@@ -372,8 +395,13 @@ impl CompilerDriver:
             content: source_content,
             module_name: source_module_name)
         log_module_surface_stage(source_path, "parse-start")
-        val module = parse_full_frontend(
-            source_content, source_path, source_module_name, self.ctx.logger)
+        val selected_module = self.parse_full_frontend_selected_v1(
+            source_content, source_path, source_module_name)
+        val module = match selected_module:
+            case Ok(value): value
+            case Err(error):
+                val _ended = driver_end_transient_parse_scope()
+                return Err(error)
         if par_had_error_get():
             if not _sffi_transient_array_scope_pause():
                 val _ended = driver_end_transient_parse_scope()
@@ -554,10 +582,11 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "Module surface retention scope pause failed after phase 2")
             return false
-        if not module_surfaces_promote(retained_surfaces):
+        val promote_reason = module_surfaces_promote_reason(retained_surfaces)
+        if promote_reason != "":
             val _ended = _sffi_transient_array_scope_end()
             self.ctx.add_error(
-                "Module surface registry graph promotion failed after phase 2")
+                "Module surface registry graph promotion failed after phase 2: {promote_reason}")
             return false
         if not _sffi_transient_array_scope_end():
             self.ctx.add_error(
@@ -601,6 +630,7 @@ impl CompilerDriver:
         if offload.is_err():
             self.ctx.add_error(offload.unwrap_err())
             return false
+        compiler_work_parser_schedule_v1(self.ctx.sources.len())
         if driver_streaming_surface_enabled(self.ctx):
             return self.parse_all_streaming_surfaces_in_place_impl()
         val (parsed_ctx, parse_ok) = self.parse_all_impl()
@@ -681,12 +711,21 @@ impl CompilerDriver:
                 if not _driver_parse_shard_owns(source.path):
                     progress_parse_done = progress_parse_done + 1
                     continue
-                val entry_module = parse_full_frontend(
+                val selected_entry_module = self.parse_full_frontend_selected_v1(
                     source.content,
                     source.path,
-                    source.module_name,
-                    self.ctx.logger
+                    source.module_name
                 )
+                if selected_entry_module.is_err():
+                    self.ctx.add_error(selected_entry_module.unwrap_err())
+                    val rejected_ctx: CompileContext = self.ctx
+                    rejected_ctx.mark_module_poisoned(source.module_name)
+                    poisoned_physical_keys = poisoned_physical_keys.push(physical_key)
+                    if rejected_ctx.poison_budget_exhausted():
+                        return (self.ctx, false)
+                    progress_parse_done = progress_parse_done + 1
+                    continue
+                val entry_module = selected_entry_module.unwrap()
                 log_phase("phase2:parse:file:done {source.path}")
                 if par_had_error_get():
                     # Collect-all default (see driver_hir_pipeline_lowering.spl):
@@ -908,13 +947,20 @@ impl CompilerDriver:
                 if driver_source_matches_entry(
                     self.ctx, source.path, source.module_name
                 ):
-                    val entry_module = parse_full_frontend(
+                    val selected_entry_module = self.parse_full_frontend_selected_v1(
                         source.content,
                         source.path,
-                        source.module_name,
-                        self.ctx.logger
+                        source.module_name
                     )
-                    if par_had_error_get():
+                    if selected_entry_module.is_err():
+                        self.ctx.add_error(selected_entry_module.unwrap_err())
+                        val rejected_ctx: CompileContext = self.ctx
+                        rejected_ctx.mark_module_poisoned(source.module_name)
+                        if rejected_ctx.poison_budget_exhausted():
+                            var boot_rejected_ctx: CompileContext = self.ctx
+                            boot_rejected_ctx.modules = bootstrap_modules
+                            return (boot_rejected_ctx, false)
+                    elif par_had_error_get():
                         # SIMPLE_BOOTSTRAP=1 (Stage 2/3) took the same
                         # silent-swallow path as the plain loop: a syntax error
                         # in a bootstrap entry source produced no ctx.errors
@@ -930,7 +976,8 @@ impl CompilerDriver:
                             boot_poisoned_ctx.modules = bootstrap_modules
                             return (boot_poisoned_ctx, false)
                     else:
-                        bootstrap_modules[source.module_name] = entry_module
+                        bootstrap_modules[source.module_name] =
+                            selected_entry_module.unwrap()
                 boot_idx = boot_idx + 1
             boot_idx = 0
             while boot_idx < sources.len():
@@ -1002,12 +1049,22 @@ impl CompilerDriver:
             log_build_progress("parse", "files", src_idx, sources.len(),
                 source.path, 1, 6, 0, 0, "running")
             log_phase("phase2:parse:file:start {source.path}")
-            val module = parse_full_frontend(
+            val selected_module = self.parse_full_frontend_selected_v1(
                 source.content,
                 source.path,
-                source.module_name,
-                self.ctx.logger
+                source.module_name
             )
+            if selected_module.is_err():
+                self.ctx.add_error(selected_module.unwrap_err())
+                val rejected_ctx: CompileContext = self.ctx
+                rejected_ctx.mark_module_poisoned(source.module_name)
+                if rejected_ctx.poison_budget_exhausted():
+                    var provider_rejected_ctx: CompileContext = self.ctx
+                    provider_rejected_ctx.modules = parsed_modules
+                    return (provider_rejected_ctx, false)
+                src_idx = src_idx + 1
+                continue
+            val module = selected_module.unwrap()
             if par_had_error_get():
                 # Same collect-all default as the entry-closure loop above and
                 # as driver_hir_pipeline_lowering.spl. Before this check the
@@ -1073,14 +1130,18 @@ impl CompilerDriver:
         self.ctx.modules = parsed_modules
         (self.ctx, self.ctx.error_count_value == 0)
 
-    fn parse_source(source: SourceFile) -> ParserModule:
+    fn parse_source(source: SourceFile) -> Result<ParserModule, text>:
         print "[parse_source] start {source.path} module {source.module_name} len {source.content.len()}"
-        val module = parse_full_frontend(
+        val selected_module = self.parse_full_frontend_selected_v1(
             source.content,
             source.path,
-            source.module_name,
-            self.ctx.logger
+            source.module_name
         )
+        if selected_module.is_err():
+            self.ctx.add_error(selected_module.unwrap_err())
+            self.ctx.mark_module_poisoned(source.module_name)
+            return Err(selected_module.unwrap_err())
+        val module = selected_module.unwrap()
         print "[parse_source] done {source.path}"
         if par_had_error_get():
             # Single-module helper: record the diagnostic so a caller that only
@@ -1090,5 +1151,5 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "parse error in {source.path} (see [parser_error] output above)")
             self.ctx.mark_module_poisoned(source.module_name)
-        module
+        Ok(module)
 use compiler.common.diagnostics.span.{Span}

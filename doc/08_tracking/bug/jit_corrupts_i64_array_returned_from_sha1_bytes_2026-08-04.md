@@ -1,4 +1,8 @@
 # JIT returns a tag-corrupted `[i64]` from `sha1_bytes` — floats, `nil` and heap tags inside an i64 list
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -231,3 +235,14 @@ sink under the JIT, so `(5,6).get(0)` binds as `40`. That IS "a raw tagged word
 read as if already untagged", it is minimal, and `sha1`'s context type is
 `(list, list, i64, i64)` read via `ctx.get(2)` / `ctx.get(3)`. It is a strong
 candidate contributor here and is filed separately with a 5-line reproducer.
+
+## Triage 2026-09-13
+Reconfirmed: JIT tag-corruption defect on i64 arrays returned from
+sha1_bytes, Rust-seed/Cranelift codegen issue. Out of scope for a
+pure-Simple lane. Left OPEN, no code change attempted.
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Root cause is a Rust JIT codegen defect (`src/compiler_rust/compiler/src/codegen/instr/methods.rs`),
+requiring a seed rebuild to fix and verify — out of scope for a pure-Simple
+shard fix. No change made. Leaving OPEN.
+

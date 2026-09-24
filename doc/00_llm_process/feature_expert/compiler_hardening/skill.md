@@ -93,3 +93,14 @@ owned by this feature expert until such dirs are created.)
 
 Update this file whenever a hardening lane lands, a gate's verdict shape changes, a baseline
 file is regenerated, or a 2026-08-21 bug above is closed.
+
+## Imported trait dispatch handoff (2026-09-08)
+
+Per-file native HIR retains authored trait names on parameters, and the focused
+imported-trait MIR regression passes, but project-native compilation does not
+carry imported trait method signatures/slots into each unit. A generic
+`T: CacheGatewayV1` receiver therefore still becomes a bare static
+`virtual_source_store` call in Stage2. Resume in
+`pipeline/native_project/imports.rs`: transport collision-safe trait definitions
+into HIR/MIR, then rerun the retained macOS Stage2 command once. See
+`native_imported_trait_method_metadata_absent_2026-09-08.md`.

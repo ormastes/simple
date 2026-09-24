@@ -1,4 +1,8 @@
 # Pre-push ratchet guards fail full-scan, blocking lanes that introduce nothing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date**: 2026-08-16
 - **Status**: OPEN (step-over recorded; no fix attempted here)
@@ -93,3 +97,4 @@ escape `check-test-tree-divergence-delta.shs` already implements: compare the
 offender list at BASE and at NEW and fail only on newly introduced entries,
 while still requiring the pre-existing list to be recorded. A full-scan guard
 with no delta mode converts one lane's red into a repository-wide push freeze.
+

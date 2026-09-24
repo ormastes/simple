@@ -1,4 +1,8 @@
 # core-C lane cannot host the browser renderer worker (preinit constructor compiled out)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — fail-closed gap, not a silent one
 **Filed:** 2026-08-22 (seed lane)
@@ -41,3 +45,4 @@ Until then the renderer worker must be built on a lane that keeps `.preinit_arra
    marker. Keeps Stage4's no-constructor invariant.
 2. Allow `.preinit_array` specifically in `forbidden_archive_sections`. Weakens
    the invariant the Stage4 tests exist to prove; not recommended.
+

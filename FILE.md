@@ -29,6 +29,8 @@ FILE.md files) are allowed.
 | `.jscpd.json` | Copy-paste detector config |
 | `.dockerignore` | Docker ignore rules |
 | `bin` | Executables and wrappers |
+| `include` | Public native headers |
+| `sdk` | SDK packaging and integration assets |
 | `src` | Source code |
 | `test` | Test files |
 | `examples` | Example projects |
@@ -43,12 +45,13 @@ FILE.md files) are allowed.
 | `.gemini` | Gemini settings |
 | `.github` | GitHub workflows and config |
 | `.spipe` | SPipe state files |
+| `.scv` | SCV workspace state; mutable quarantine lives under `.scv/quarantine/` (`scv/` packs, `jit/` notes, `root/` legacy root artifacts) |
 | `.simple` | Simple language config |
 | `.vscode` | VS Code settings |
 | `.claude-plugin` | Claude Code plugin manifest |
-| `build` | Build output (mutable, includes target/ and bootstrap/) |
+| `build` | Build output and mutable developer probes (`build/scratchpad/`), including target/ and bootstrap/ |
+| `.build` | Mutable local build cache and dashboard state |
 | `tmp` | Temporary files (mutable) |
-| `docs` | Generated spec samples (INDEX/README/test-spec); distinct from `doc/` |
 | `assets` | Fonts and other binary assets consumed by tests and packaging |
 | `plugins` | First-party plugin packages (llm_caret_messaging, ...) |
 | `spec` | Compiler schema contracts (`spec/compiler_schema/`) |
@@ -56,19 +59,10 @@ FILE.md files) are allowed.
 | `variants` | Platform variant overlays (see `variants/FILE.md`) |
 | `target` | `gc-boundary-check-tests` fixture read by `driver/src/cli/check.rs` |
 | `targets.sdn` | Build target registry read by `src/app/build/targets/targets_cli.spl` |
-| `gh-cli-cache` | Quarantined non-UTF-8 GitHub CLI archive pending independent review and deletion |
 | `release` | Tracked release version/support policy; generated release binaries remain ignored |
-| `scratch_fx` | Quarantined binary scratch fixtures pending independent review and deletion |
-| `sweep` | Quarantined non-UTF-8 sweep fixture pending independent review and deletion |
-| `tmp5` | Quarantined SCV binary packs pending independent review and deletion |
-| `tmp10` | Quarantined SCV binary packs pending independent review and deletion |
-| `tmp50` | Quarantined SCV binary packs pending independent review and deletion |
-| `tmp5b` | Quarantined SCV binary packs pending independent review and deletion |
-| `tmpdrv` | Quarantined compressed fixtures pending independent review and deletion |
 
-**No other files at root.** The quarantine entries above are temporary and
-must be removed through an independently reviewed change because the protected
-self-review policy intentionally rejects non-UTF-8 blob deletion.
+**No other files at root.** SCV quarantine artifacts belong under
+`.scv/quarantine/`, never in root-level `tmp*` directories.
 
 ## Child Manifests
 
@@ -217,5 +211,4 @@ self-review policy intentionally rejects non-UTF-8 blob deletion.
 | `bin/t32_lsp_mcp_server.cmd` | T32 LSP MCP |
 | `bin/t32_mcp_server.cmd` | T32 MCP |
 | `bin/codex_chrome_devtools_mcp.cmd` | Codex Chrome DevTools MCP |
-| `bin/codex_stitch_mcp.cmd` | Codex Stitch MCP |
 | `bin/FILE.md` | Bin manifest |

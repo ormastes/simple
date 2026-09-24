@@ -1,0 +1,217 @@
+#!/bin/sh
+# check-glass-material-spirv-pinned.shs -- the checked-in glass-material SPIR-V words
+# must be exactly what glslangValidator produces from the checked-in GLSL.
+#
+#   sh scripts/check/check-glass-material-spirv-pinned.shs [--selftest]
+#
+# Why this exists: `backend_vulkan_glass_material_spirv.spl` carries ~5.8 KB of
+# hand-unreadable hex. Nothing else in the tree can tell whether those bytes
+# still correspond to `shaders/glass_material.comp` -- a GLSL edit that is not
+# regenerated, or a regeneration that is not committed, both leave a tree that
+# builds, tests green on the host path, and silently runs the WRONG kernel on
+# the device. Every other guard in this repo checks structure or compilability;
+# none of them recompiles a shader.
+#
+# Mechanism: recompile the .comp, transcribe it with the same
+# scripts/tool/spirv-to-spl-words.shs the generator uses, and compare the byte
+# body AND the pinned sha256 line against the committed .spl, byte for byte.
+#
+# Verdict is the LAST line of stdout, same convention as the pre-push guards:
+#   PASS  -- <n> byte(s) compared, ...            exit 0
+#   FAIL  -- ...                                  exit 1
+#   ERROR -- nothing was checked (<reason>)       exit 2
+# Non-vacuity is absolute: a run that compared 0 bytes is ERROR, and a host with
+# no glslangValidator is ERROR, never a pass -- absence of a compiler is absence
+# of evidence.
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+comp="$repo_root/src/lib/gc_async_mut/gpu/engine2d/shaders/glass_material.comp"
+spl="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glass_material_spirv.spl"
+words_tool="$repo_root/scripts/tool/spirv-to-spl-words.shs"
+
+fail() { echo "FAIL — $1"; exit 1; }
+oops() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+
+find_glslang() {
+    if [ -n "${GLSLANG:-}" ]; then echo "$GLSLANG"; return; fi
+    for cand in /opt/homebrew/bin/glslangValidator /usr/local/bin/glslangValidator \
+                /usr/bin/glslangValidator; do
+        if [ -x "$cand" ]; then echo "$cand"; return; fi
+    done
+    command -v glslangValidator 2>/dev/null || true
+}
+
+# Extract the `0xNNu8` bytes of the array body from a generated .spl, in order.
+extract_spl_bytes() {
+    grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]u8' "$1" | sed 's/^0x//; s/u8$//' | tr 'A-F' 'a-f'
+}
+extract_spl_sha() {
+    grep -m1 '^# sha256: ' "$1" | awk '{print $3}'
+}
+
+# ---------------------------------------------------------------------------
+# Core comparison, factored so --selftest can point it at fixtures.
+# Sets CMP_BYTES (bytes compared) and CMP_REASON; returns 0 pass, 1 mismatch,
+# 2 could-not-check.
+# ---------------------------------------------------------------------------
+compare_pair() {
+    _comp="$1"; _spl="$2"; _glslang="$3"
+    CMP_BYTES=0; CMP_REASON=""
+    [ -f "$_comp" ] || { CMP_REASON="missing GLSL: $_comp"; return 2; }
+    [ -f "$_spl" ]  || { CMP_REASON="missing blob module: $_spl"; return 2; }
+
+    _tmp="${TMPDIR:-/tmp}/glass_material_pin.$$.$(date +%s%N 2>/dev/null || date +%s)"
+    mkdir -p "$_tmp"
+
+    if ! "$_glslang" -V --target-env vulkan1.1 -o "$_tmp/a.spv" "$_comp" >"$_tmp/log" 2>&1; then
+        CMP_REASON="glslangValidator failed on $_comp: $(head -3 "$_tmp/log" | tr '\n' ' ')"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    if ! sh "$words_tool" "$_tmp/a.spv" 8 > "$_tmp/words" 2>"$_tmp/werr"; then
+        CMP_REASON="transcription failed: $(head -2 "$_tmp/werr" | tr '\n' ' ')"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    _fresh_sha=$(head -1 "$_tmp/words" | awk '{print $3}')
+    tail -n +2 "$_tmp/words" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]u8' \
+        | sed 's/^0x//; s/u8$//' | tr 'A-F' 'a-f' > "$_tmp/fresh_bytes"
+    extract_spl_bytes "$_spl" > "$_tmp/spl_bytes"
+
+    _nf=$(wc -l < "$_tmp/fresh_bytes" | tr -d ' ')
+    _ns=$(wc -l < "$_tmp/spl_bytes" | tr -d ' ')
+    if [ "$_nf" -eq 0 ]; then
+        CMP_REASON="freshly compiled module transcribed to 0 bytes"
+        rm -rf "$_tmp"; return 2
+    fi
+    if [ "$_ns" -eq 0 ]; then
+        CMP_REASON="no 0xNNu8 bytes found in $_spl"
+        rm -rf "$_tmp"; return 2
+    fi
+    CMP_BYTES="$_nf"
+
+    _pinned_sha=$(extract_spl_sha "$_spl")
+    if [ -z "$_pinned_sha" ]; then
+        CMP_REASON="$_spl carries no '# sha256:' pin line"
+        rm -rf "$_tmp"; return 2
+    fi
+
+    if [ "$_nf" -ne "$_ns" ]; then
+        CMP_REASON="byte count differs: committed $_ns, freshly compiled $_nf"
+        rm -rf "$_tmp"; return 1
+    fi
+    if ! cmp -s "$_tmp/fresh_bytes" "$_tmp/spl_bytes"; then
+        _off=$(cmp "$_tmp/fresh_bytes" "$_tmp/spl_bytes" 2>&1 | head -1)
+        _first=$(diff "$_tmp/spl_bytes" "$_tmp/fresh_bytes" | head -4 | tr '\n' ' ')
+        CMP_REASON="committed words differ from freshly compiled GLSL ($_off; first diff: $_first)"
+        rm -rf "$_tmp"; return 1
+    fi
+    if [ "$_pinned_sha" != "$_fresh_sha" ]; then
+        CMP_REASON="pinned sha256 $_pinned_sha != freshly compiled $_fresh_sha"
+        rm -rf "$_tmp"; return 1
+    fi
+    rm -rf "$_tmp"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest: fatal, runs before every real scan.
+# ---------------------------------------------------------------------------
+selftest() {
+    _g="$1"
+    _t="${TMPDIR:-/tmp}/glass_material_pin_selftest.$$"
+    mkdir -p "$_t"
+
+    # Fixture GLSL is written HERE, not copied from the tree. Coupling the
+    # selftest to the real .comp made it abort ("could not edit the GLSL loop")
+    # the moment someone edited that file -- which is precisely when the guard
+    # must still work. This fixture mirrors the real kernel's shape (one storage
+    # buffer, a push constant, an ascending loop) without depending on its text.
+    cat > "$_t/ok.comp" <<'FIXTURE'
+#version 450
+layout(local_size_x = 16) in;
+layout(set = 0, binding = 0) buffer Out { uint data[]; } o;
+layout(push_constant) uniform PC { int n; } pc;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint acc = 0u;
+    for (int k = 0; k < pc.n; ++k) {
+        acc = acc * 3u + uint(k);
+    }
+    o.data[idx] = acc;
+}
+FIXTURE
+
+    # Fixture 1 -- an honestly regenerated pair must PASS.
+    "$_g" -V --target-env vulkan1.1 -o "$_t/ok.spv" "$_t/ok.comp" >/dev/null 2>&1 \
+        || { echo "selftest: could not compile fixture 1" >&2; rm -rf "$_t"; return 2; }
+    {
+        sh "$words_tool" "$_t/ok.spv" 8 | head -1
+        echo "    ["
+        sh "$words_tool" "$_t/ok.spv" 8 | tail -n +2
+        echo "    ]"
+    } > "$_t/ok.spl"
+    if ! compare_pair "$_t/ok.comp" "$_t/ok.spl" "$_g"; then
+        echo "selftest FIXTURE 1 (clean pair must PASS) failed: $CMP_REASON" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 2 -- ONE tampered word must FAIL.
+    sed 's/0x11u8/0x12u8/' "$_t/ok.spl" > "$_t/tampered.spl"
+    if cmp -s "$_t/ok.spl" "$_t/tampered.spl"; then
+        echo "selftest FIXTURE 2 could not tamper any word" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _rc=0; compare_pair "$_t/ok.comp" "$_t/tampered.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 2 (tampered word must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 3 -- a GLSL edit that changes the kernel must FAIL against the old
+    # words. This is the real regression: the shader moved, the blob did not.
+    sed 's/for (int k = 0; k < pc.n; ++k)/for (int k = pc.n - 1; k >= 0; --k)/' \
+        "$_t/ok.comp" > "$_t/reversed.comp"
+    if cmp -s "$_t/ok.comp" "$_t/reversed.comp"; then
+        echo "selftest FIXTURE 3 could not edit the GLSL loop" >&2
+        rm -rf "$_t"; return 1
+    fi
+    _rc=0; compare_pair "$_t/reversed.comp" "$_t/ok.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 1 ]; then
+        echo "selftest FIXTURE 3 (stale blob vs edited GLSL must FAIL with 1) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    # Fixture 4 -- a .spl with no bytes at all must be ERROR, never a pass.
+    echo "# sha256: deadbeef  (0 bytes)" > "$_t/empty.spl"
+    _rc=0; compare_pair "$_t/ok.comp" "$_t/empty.spl" "$_g" || _rc=$?
+    if [ "$_rc" -ne 2 ]; then
+        echo "selftest FIXTURE 4 (empty blob must ERROR with 2) returned $_rc" >&2
+        rm -rf "$_t"; return 1
+    fi
+
+    rm -rf "$_t"
+    return 0
+}
+
+glslang=$(find_glslang)
+[ -n "$glslang" ] || oops "glslangValidator not found; set GLSLANG=/path/to/glslangValidator"
+
+if ! selftest "$glslang"; then
+    st=$?
+    if [ "$st" -eq 2 ]; then oops "selftest could not run"; fi
+    fail "selftest failed (fatal; the guard cannot be trusted)"
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 4 selftest fixture(s) checked, selftest only (no tree scan requested)"
+    exit 0
+fi
+
+rc=0
+compare_pair "$comp" "$spl" "$glslang" || rc=$?
+if [ "$rc" -eq 2 ]; then oops "$CMP_REASON"; fi
+if [ "$rc" -eq 1 ]; then fail "$CMP_BYTES byte(s) compared: $CMP_REASON"; fi
+[ "$CMP_BYTES" -gt 0 ] || oops "0 bytes compared"
+echo "PASS — $CMP_BYTES byte(s) compared, 4 selftest fixture(s) checked, backend_vulkan_glass_material_spirv.spl matches shaders/glass_material.comp (sha256 $(extract_spl_sha "$spl"))"

@@ -1,5 +1,14 @@
 # RV64 web server gate blocked: arm64 import leak (link) + storage unavailable (runtime)
 
+## Triage 2026-09-13 — STILL OPEN: host-blocked, explicitly NOT stale
+- **measured** — the lane is alive: `scripts/qemu/qemu_rv64_http_test.shs`,
+  `test/03_system/os/simpleos_riscv_network_gate_spec.spl`,
+  `src/os/kernel/boot/tcp_baremetal_min.spl` and `src/os/apps/sshd/ssh_session.spl` all
+  still exist.
+- **inferred** — confirming or refuting this needs a `riscv64-unknown-none` link plus a
+  QEMU boot; neither runs from this Windows triage host, and the entry was filed on a Linux
+  box. Left OPEN, host-blocked.
+
 - **Id:** rv64_web_gate_arm64_import_leak_and_storage_2026-06-15
 - **Status:** Open
 - **Severity:** P1 (blocks the RV64 HTTP + NVFS storage QEMU gate entirely)

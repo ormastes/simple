@@ -1,4 +1,8 @@
 # Cross-Platform Bootstrap and Dynload Status (2026-07-10)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Contract
 
@@ -83,3 +87,4 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
   fixture successfully, then `bin/simple <refreshed-main.smf>` exited 1 with
   `file not found`. No fake or knowingly failing spec was committed; production
   SMF dispatch remains a concrete loader/runtime blocker.
+

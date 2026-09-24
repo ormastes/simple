@@ -1,4 +1,8 @@
 # linker_gen section boundary symbols emit three leading underscores, not two
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-06
 **File:** `src/app/linker_gen/main.spl` (`generate_section`, symbol lines)
@@ -53,3 +57,4 @@ two total. Once fixed, update the four Symbol Generation scenarios in
 `test/03_system/feature/app/linker_gen_spec.spl` back to asserting
 `__text_start`/`__text_end`/`__bss_start`/`__bss_end` and remove the `# NOTE:`
 comments citing this file.
+

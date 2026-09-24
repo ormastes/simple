@@ -5,7 +5,6 @@
 use std.io_runtime.{file_read}
 use .main_lazy_json.{make_json_result, make_error, extract_field, escape_json}
 use .main_lazy_json.{top_level_item_count, shell_cmd, _slice_text}
-use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, mcp_virtual_source_read_registered_v1}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
@@ -87,6 +86,22 @@ fn make_resource_content_response(id: text, uri: text, content: text, mime: text
     val result = jo1(jp("contents", "[" + rc + "]"))
     make_result_response(id, result)
 
+# Keep the compiler cache graph off initialize/tools/list and ordinary resource
+# methods. It is needed only for the exact-snapshot virtual summary resource.
+fn read_registered_summary(id: text, uri: text) -> text:
+    use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, mcp_virtual_source_read_registered_v1}
+    val cached = mcp_virtual_source_read_registered_v1(uri, 0, 65536)
+    if cached.status == VirtualSourceRegistrationStatusV1.Unavailable:
+        return make_error(id, -32004, "Virtual summary cache unavailable")
+    if cached.status == VirtualSourceRegistrationStatusV1.Miss:
+        return make_error(id, -32002, "Virtual summary not found in the exact snapshot")
+    if cached.status != VirtualSourceRegistrationStatusV1.Ready or cached.value == nil:
+        return make_error(id, -32602, "Virtual summary request rejected")
+    val value = cached.value.unwrap()
+    if not value.complete:
+        return make_error(id, -32005, "Virtual summary exceeds resource/read bound; use simple_summary_read or simple_summary_page")
+    make_resource_content_response(id, uri, rt_bytes_to_text(value.bytes), "text/x-simple")
+
 fn handle_resources_read(id: text, uri: text) -> text:
     if uri == "":
         return make_error(id, -32602, "Missing required parameter: uri")
@@ -94,17 +109,7 @@ fn handle_resources_read(id: text, uri: text) -> text:
         val info = "Simple MCP (main_lazy)" + NL + "Working Dir: " + get_cwd()
         return make_resource_content_response(id, uri, info, "text/plain")
     if uri.starts_with("simple-summary://"):
-        val cached = mcp_virtual_source_read_registered_v1(uri, 0, 65536)
-        if cached.status == VirtualSourceRegistrationStatusV1.Unavailable:
-            return make_error(id, -32004, "Virtual summary cache unavailable")
-        if cached.status == VirtualSourceRegistrationStatusV1.Miss:
-            return make_error(id, -32002, "Virtual summary not found in the exact snapshot")
-        if cached.status != VirtualSourceRegistrationStatusV1.Ready or cached.value == nil:
-            return make_error(id, -32602, "Virtual summary request rejected")
-        val value = cached.value.unwrap()
-        if not value.complete:
-            return make_error(id, -32005, "Virtual summary exceeds resource/read bound; use simple_summary_read or simple_summary_page")
-        return make_resource_content_response(id, uri, rt_bytes_to_text(value.bytes), "text/x-simple")
+        return read_registered_summary(id, uri)
     if uri.starts_with("file:///"):
         val path = _slice_text(uri, 7, uri.len())
         val content = file_read(path)

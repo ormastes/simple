@@ -1,4 +1,8 @@
 # Seed parser: backslash-lambda inline body with a trailing-operator continuation fails "found Dedent"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (parser fix landed in this lane's worktree; not yet merged to main)
 **Date:** 2026-08-28
@@ -282,3 +286,4 @@ defect everywhere `is_statement_start()` is consulted, not just in
   parsing, out of scope for this parser fix.
 
 No commit/push/deploy performed as part of this follow-up.
+

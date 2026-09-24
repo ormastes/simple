@@ -1,4 +1,8 @@
 # UI Browser stage-by-stage logging documented but nonexistent
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -22,3 +26,4 @@ During known CSS-quadratic first-frame hang, operator following documented comme
 
 ## Next Step
 Either re-add instrumentation via new std.debug stage tracer (P0 module in progress) and fix comment, or remove lying comment. Known issue: stage-logging was added earlier 2026-07-05 but lost (likely parallel-session working-copy clobber). Separately: add M9 smoke test to verify `_has_buffered_mouse` field read behavior.
+

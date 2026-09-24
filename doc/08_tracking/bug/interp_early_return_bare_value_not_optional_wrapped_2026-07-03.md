@@ -1,4 +1,8 @@
 # Bug: early `return <bare-value>` inside a nested block is not Option-wrapped for `T?`-returning `impl` fns
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** P2 — silent wrong-answer (returns `None` instead of `Some(value)`), previously
@@ -91,3 +95,4 @@ between trailing-expression and early-`return` cases.
 `test/01_unit/lib/engine/atlas_builder_spec.spl`'s positive-match tests
 should track a `found` boolean the same way the negative-match test does,
 so a regression back to this bug fails loudly instead of vacuously passing.
+

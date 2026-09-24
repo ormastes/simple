@@ -821,6 +821,30 @@ simple test --refresh-screenshots  # Force recapture
 simple test --screenshot-output doc/06_spec/image/custom
 ```
 
+### Per-spec timeout budget
+
+Three sources, most-specific-wins, resolved by
+`src/app/test_runner_new/timeout_budget.spl`:
+
+| rung | how | note |
+|---|---|---|
+| explicit flag | `--timeout N` / `--timeout=N` | wins over everything |
+| environment | `SIMPLE_TIMEOUT_SECONDS=N` | used when no usable flag was given |
+| built-in default | — | 900 s (`CLIENT_DEFAULT_TIMEOUT_SECS`) |
+
+`0` at either the flag or the environment rung means **unlimited** (resolved to
+a 365-day finite budget, which is above every downstream cap so the spec runs
+directly with no daemon ceiling). A malformed value (`abc`, `-5`, `800s`) is
+ignored and the next rung is consulted — never turned into a 0-second budget
+that would report every spec as a timeout.
+
+An over-budget spec FAILS **once**, with a `SPEC FILE VERDICT: ... timeout=1`
+line counted as a failure in the `Results:` summary. It is never relaunched:
+the light daemon claims a request (renames `<id>.req` to `<id>.req.inflight`)
+BEFORE executing it, so a run killed at its budget cannot be re-served by the
+next poll or by a successor daemon.
+Bug: `doc/08_tracking/bug/web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13.md`
+
 ### Exit Codes
 
 | Code | Meaning |

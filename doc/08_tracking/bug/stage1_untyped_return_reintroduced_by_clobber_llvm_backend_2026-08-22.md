@@ -1,4 +1,8 @@
 # Stage1 fatal sweep: untyped-return fatal reintroduced by clobber; array_advanced in lowering set
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-22  **Status:** RESOLVED (this change)  **Lane:** pure-Simple bug sweep
 
@@ -29,3 +33,4 @@ All `[hir-fatal]` texts across the six stage1 logs normalize to five classes:
 ## Notes
 - Single-module `native-build` of llvm_backend.spl pulls a 375-module closure and exceeds 10 min at load 22; per-class native reproduce is not viable on this host, so reproduction is at the HIR-lowering unit level.
 - The guard's static BFS closure (529) is smaller than run9's 667 (std/lib alias and symlink name variants); the scans above were run over run9's own module list.
+

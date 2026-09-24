@@ -1,4 +1,8 @@
 # `jit_instantiator_spec.spl`: 7 remaining failures after `default()` fix — distinct interpreter/product defects
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-01
@@ -79,3 +83,4 @@ guidance for pre-existing/unrelated deep failures.
 B=src/compiler_rust/target/release/simple.exe
 SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/compiler/loader/jit_instantiator_spec.spl
 ```
+

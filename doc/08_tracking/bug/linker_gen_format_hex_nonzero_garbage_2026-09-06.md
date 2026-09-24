@@ -1,4 +1,8 @@
 # linker_gen `format_hex` emits blank/control characters for any nonzero input
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-06
 **File:** `src/app/linker_gen/main.spl:127-140` (`format_hex`)
@@ -74,3 +78,4 @@ Fix `format_hex` to build hex digit characters correctly regardless of
 `"0123456789ABCDEF"` string by `digit`), or fix `Char.to_int()` so digit
 characters return their ASCII code point consistently with letters — then
 remove the `# NOTE:` in the "formats 1MB as 0x100000" scenario.
+

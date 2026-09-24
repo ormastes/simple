@@ -1,4 +1,9 @@
 # Defect class: copy-on-write + accidental aliasing = O(n) per write
+## Closed 2026-09-16 — ...path builds again. ## KEYSINLOOP resolved, 2026-08-21 (23 -> 7, zero KEYSINLOOP) ### Is th
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-21
 **Status:** two seed-side fixes landed; static ratchet landed with 79 offenders baselined, remediated to 23, then to 7 (zero KEYSINLOOP) on 2026-08-21
@@ -312,3 +317,4 @@ The counter is `#[cfg(test)]`, so the production dict path pays nothing.
   it, but the census still wants it.
 * The JIT lane's collection representation has not been audited for the same
   class.
+

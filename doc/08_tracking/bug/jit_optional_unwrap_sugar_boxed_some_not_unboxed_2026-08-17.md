@@ -1,4 +1,8 @@
 # JIT: `if val x = opt` sugar and `??` leak the raw boxed-Some representation
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. Found 2026-08-17 by the class-detection half of
 `test/01_unit/compiler/codegen/native_optional_payload_extraction_class_spec.spl`,
@@ -120,3 +124,4 @@ coalesce then-branch unwrap) and `:2242`.
 pure-Simple fix. The filed fix direction (emit the `rt_enum_id(subj) >= 0`
 discrimination branch that `stmt_lowering.rs` already has, at BOTH sites) still
 stands and was not attempted.
+

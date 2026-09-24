@@ -1,4 +1,8 @@
 # HIR generic templates are never consumed: `rewrite_module` is the identity, and `HirFunction` cannot even record template-ness
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-08-21
@@ -342,3 +346,4 @@ what catches it.
 - The four Phase A HIR gates stay closed; nothing here is demonstrated from
   SOURCE.
 - `substitute_expr` still does not recurse into sub-expressions.
+

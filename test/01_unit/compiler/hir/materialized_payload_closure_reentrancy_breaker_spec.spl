@@ -1,0 +1,77 @@
+use std.spec.*
+use std.io_runtime.{read_file_text}
+
+fn source(path: text) -> text:
+    read_file_text(path)
+
+# Pins the re-entrancy breaker on the enum-payload closure cycle.
+#
+# Measured 2026-09-14 on the Stage 3 recompile of `compiler.driver.driver`: the
+# main stack carried 13,415 nested levels of
+#   register_imported_symbol -> register_imported_symbol_inner
+#     -> register_materialized_enum_payload_dependencies
+#       -> register_materialized_payload_named_dependency -> (repeat)
+# (624 bytes/level, uniform, read from `sp` at frames 12/16/20/24) before
+# faulting on the stack guard page. The ceiling, if the Dict memo
+# `materialized_payload_origins` were breaking that cycle, is 2,546 -- every
+# enum (2,280) and type alias (266) DECLARED in the tree, since
+# `hir_payload_terminal_identity` is a pure function of
+# (module_name, item_name, item_kind) and the memo marks on ENTRY. 13,415 is
+# 5.3x that, so keys that were set are reading back absent.
+#
+# Hence a plain `[text]` stack rather than a Dict, exactly like the sibling
+# breaker `imported_type_methods_in_progress` and for the same recorded reason.
+# doc/08_tracking/bug/stage3_hir_enum_payload_closure_stack_overflow_driver_2026-09-14.md
+describe "materialized payload closure re-entrancy breaker":
+    it "guards the cycle edge with a check-push-call-pop bracket":
+        val materialization = source("src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl")
+        expect(materialization).to_contain("val reentry_key = imported_mod_name + \"::\" + dependency")
+        expect(materialization).to_contain("if self.materialized_payload_in_progress_has(reentry_key):")
+        expect(materialization).to_contain("self.materialized_payload_in_progress_push(reentry_key)")
+        expect(materialization).to_contain("self.register_materialized_payload_named_dependency_inner(")
+        expect(materialization).to_contain("self.materialized_payload_in_progress_pop(reentry_key)")
+
+    it "keys the breaker on the input tuple, not on the payload identity":
+        # `hir_payload_terminal_identity` is what the FAILING Dict memo keys on.
+        # The breaker must not key on it too, or it inherits the same blind
+        # spot; `(imported_mod_name, dependency)` is this method's own input and
+        # `origin` is a pure function of it.
+        val materialization = source("src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl")
+        expect(materialization).to_not_contain("val reentry_key = hir_payload_terminal_identity(")
+
+    it "stores the breaker as a scalar-safe list, not a Dict":
+        val types = source("src/compiler/20.hir/hir_lowering/types.spl")
+        expect(types).to_contain("materialized_payload_in_progress: [text]")
+        expect(types).to_not_contain("materialized_payload_in_progress: {text: bool}")
+
+    it "reaches the field only through the extension accessors":
+        # A bare `self.<field>` read from an `_Items/` file aborts native-build's
+        # semantic pass with "class `HirLowering` has no field named ...".
+        val lifecycle = source("src/compiler/20.hir/hir_lowering/context_helpers.spl")
+        expect(lifecycle).to_contain("me materialized_payload_in_progress_has(key: text) -> bool:")
+        expect(lifecycle).to_contain("me materialized_payload_in_progress_push(key: text):")
+        expect(lifecycle).to_contain("me materialized_payload_in_progress_pop(key: text):")
+        val materialization = source("src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl")
+        expect(materialization).to_not_contain("self.materialized_payload_in_progress.push(")
+
+    it "clears the breaker at the module boundary":
+        # A key leaked across a module boundary would silently SKIP a needed
+        # payload registration rather than recurse -- the quieter and more
+        # dangerous failure.
+        val lifecycle = source("src/compiler/20.hir/hir_lowering/context_helpers.spl")
+        expect(lifecycle).to_contain("self.materialized_payload_in_progress = []")
+
+    it "keeps both halves of the load-bearing call order it must not 'fix' instead":
+        # `register_imported_symbol` is called BEFORE `if expanded: return` on
+        # purpose -- aliases in a cycle still need their local symbol even when
+        # the physical origin was seen. Reordering that is the tempting wrong
+        # fix, so pin both statements here alongside the breaker.
+        #
+        # Asserted as two single-line `to_contain` rows rather than one row
+        # carrying an embedded newline: an escape-dependent literal is an
+        # assertion whose truth depends on the matcher's string handling as
+        # much as on the source, and this spec should only ever be red for the
+        # second reason.
+        val materialization = source("src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl")
+        expect(materialization).to_contain("self.register_imported_symbol(terminal.physical_index, origin.module_key, origin.item_name, payload_local_name, import_span, true)")
+        expect(materialization).to_contain("if expanded: return")

@@ -70,6 +70,9 @@
 #       is not the commit being pushed. Selftest fixture 7 pins that the two
 #       paths disagree, on both rot axes. See
 #       doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md
+#   sh scripts/check/check-interpreter-extern-registry-gap.shs --rev TIP --baseline-rev BASE
+#       Push-only branch-delta ratchet. BASE's actual gap set replaces the
+#       frozen baseline: newly introduced gaps fail and removed gaps pass.
 #   sh scripts/check/check-interpreter-extern-registry-gap.shs --generate-baseline
 #   sh scripts/check/check-interpreter-extern-registry-gap.shs --selftest
 #
@@ -275,6 +278,30 @@ selftest() {
         _report working-tree-scan-must-differ OK ;;
       *) _report working-tree-scan-must-differ "FAIL($_got)"; _fail=1 ;;
     esac
+
+    # 8-9. Push-delta mode uses BASE's actual gap set. Unchanged debt passes
+    # even with a deliberately stale frozen file; one newly added gap fails.
+    mk_fixture "$_w/f8" "rt_a rt_b" "rt_a"
+    mkdir -p "$_w/f8/scripts/check"
+    printf 'rt_unrelated_stale\n' > "$_w/f8/scripts/check/interpreter_extern_gap_baseline.txt"
+    ( cd "$_w/f8" \
+      && git init -q . \
+      && git config user.email selftest@example.com \
+      && git config user.name selftest \
+      && git add -A && git commit -q -m base \
+      && printf 'harmless\n' > note.txt \
+      && git add note.txt && git commit -q -m unchanged ) >/dev/null 2>&1
+    if sh "$0" --scan-only --root "$_w/f8" --rev HEAD --baseline-rev HEAD~1 >/dev/null 2>&1; then
+      _report base-relative-unchanged-must-pass OK
+    else _report base-relative-unchanged-must-pass FAIL; _fail=1; fi
+    printf 'extern fn rt_new_gap() -> bool\n' >> "$_w/f8/src/compiler/a.spl"
+    ( cd "$_w/f8" && git add src/compiler/a.spl && git commit -q -m regression ) >/dev/null 2>&1
+    if sh "$0" --scan-only --root "$_w/f8" --rev HEAD --baseline-rev HEAD~1 >/dev/null 2>&1; then
+      _report base-relative-new-gap-must-fail FAIL; _fail=1
+    else
+      _rc=$?
+      if [ "$_rc" = 1 ]; then _report base-relative-new-gap-must-fail OK; else _report base-relative-new-gap-must-fail "FAIL(rc=$_rc)"; _fail=1; fi
+    fi
   fi
 
   rm -rf "$_w"
@@ -285,6 +312,7 @@ selftest() {
 ROOT="$repo_root"
 BASELINE=""
 REV=""
+BASELINE_REV=""
 MODE=scan
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -295,11 +323,18 @@ while [ $# -gt 0 ]; do
     --baseline) BASELINE=$2; shift ;;
     --rev) [ $# -ge 2 ] || { echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (--rev needs a value)"; exit 2; }
            REV=$2; shift ;;
+    --baseline-rev) [ $# -ge 2 ] || { echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (--baseline-rev needs a value)"; exit 2; }
+           BASELINE_REV=$2; shift ;;
     -h|--help) sed -n '1,70p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+if [ -n "$BASELINE_REV" ] && { [ -z "$REV" ] || [ -n "$BASELINE" ] || [ "$MODE" = generate ]; }; then
+  echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (--baseline-rev requires --rev and is incompatible with --baseline/--generate-baseline)"
+  exit 2
+fi
 
 if [ "$MODE" != scan-only ]; then
   echo "check-interpreter-extern-registry-gap: selftest"
@@ -310,11 +345,12 @@ if [ "$MODE" != scan-only ]; then
 fi
 
 if [ "$MODE" = selftest ]; then
-  echo "check-interpreter-extern-registry-gap: PASS — 7 fixture(s) checked, selftest only"
+  echo "check-interpreter-extern-registry-gap: PASS — 9 fixture(s) checked, selftest only"
   exit 0
 fi
 
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
+ORIGINAL_ROOT="$ROOT"
 
 # --rev: read COMMITTED content, never the shared working copy. As a `tree`-mode
 # push row this gate scanned whatever happened to be checked out, which under
@@ -350,6 +386,34 @@ if [ -n "$REV" ]; then
   ROOT="$W/rev"
 fi
 
+# In push-delta mode, derive the comparison set from BASE's committed sources
+# and registry. This deliberately does not read BASE's frozen baseline: the
+# question is whether TIP added a gap, not whether main currently matches an
+# older repository-wide snapshot.
+if [ -n "$BASELINE_REV" ]; then
+  if ! ( cd "$ORIGINAL_ROOT" && git rev-parse --verify --quiet "$BASELINE_REV^{commit}" ) >/dev/null 2>&1; then
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (not a baseline commit in $ORIGINAL_ROOT: $BASELINE_REV)"
+    exit 2
+  fi
+  mkdir -p "$W/base-rev"
+  ( cd "$ORIGINAL_ROOT" && git archive "$BASELINE_REV" -- \
+      ':(glob)src/compiler/**/*.spl' \
+      src/compiler_rust/compiler/src/interpreter_extern/mod.rs ) 2>/dev/null \
+    | tar -x -C "$W/base-rev" 2>/dev/null
+  if [ ! -d "$W/base-rev/src/compiler" ]; then
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (could not materialise baseline $BASELINE_REV)"
+    exit 2
+  fi
+  extract_declared "$W/base-rev" "$W/base-declared"
+  extract_registered "$W/base-rev" "$W/base-registered"
+  if [ ! -s "$W/base-declared" ] || [ ! -s "$W/base-registered" ]; then
+    echo "check-interpreter-extern-registry-gap: ERROR — nothing was checked (baseline revision has no declarations or registry rows)"
+    exit 2
+  fi
+  comm -23 "$W/base-declared" "$W/base-registered" > "$W/base-gap"
+  BASELINE="$W/base-gap"
+fi
+
 # Resolved AFTER --rev so the baseline follows the scanned tree. With neither
 # flag this resolves to exactly the path it always did.
 [ -n "$BASELINE" ] || BASELINE="$ROOT/$BASELINE_REL"
@@ -381,9 +445,19 @@ NEW=$(printf '%s' "$OUT" | cut -f3)
 STALE=$(printf '%s' "$OUT" | cut -f4)
 NAMES=$(printf '%s' "$OUT" | cut -f5)
 
+# Removed base gaps are an improvement in push-delta mode, not a stale frozen
+# baseline error. A simultaneous newly introduced gap remains blocking.
+if [ -n "$BASELINE_REV" ] && [ "$KIND" = FAIL ] && [ "$NEW" -eq 0 ]; then
+  KIND=PASS
+fi
+
 case "$KIND" in
   PASS)
-    echo "check-interpreter-extern-registry-gap: PASS — $CHECKED symbol(s) checked, 0 new, 0 stale"
+    if [ -n "$BASELINE_REV" ]; then
+      echo "check-interpreter-extern-registry-gap: PASS — $CHECKED symbol(s) checked, 0 new gaps versus base $BASELINE_REV"
+    else
+      echo "check-interpreter-extern-registry-gap: PASS — $CHECKED symbol(s) checked, 0 new, 0 stale"
+    fi
     exit 0 ;;
   FAIL)
     echo "check-interpreter-extern-registry-gap: FAIL — $CHECKED symbol(s) checked, $NEW new, $STALE stale — $NAMES"

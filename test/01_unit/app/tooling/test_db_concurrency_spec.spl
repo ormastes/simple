@@ -13,30 +13,123 @@
 # - Lock timeouts work correctly
 # - Stale locks are detected and cleaned up
 # - Backup integrity is maintained under failure
+#
+# Every scenario runs against an isolated database path under build/tmp/, never
+# the repository's doc/08_tracking/test/test_db.sdn. Parallel writers are real
+# operating-system processes spawned with process_spawn_async; each worker is a
+# generated .spl program with its path and tag baked in as constants, so no
+# argv plumbing is involved. A worker run costs ~0.4s, which is what makes 10
+# concurrent writers practical here.
+#
+# Fail-closed discipline: a scenario that observes zero lines, zero readers or
+# zero spawned workers FAILS. None of them may pass by not measuring anything.
 
-use std.spec.step
-
-use app.io.mod (getpid, file_exists, file_read, file_delete, file_write)
-
+use std.spec.*
+use std.io.{file_exists, file_read, file_write, file_delete, dir_create}
+use std.io_runtime.{getpid, process_spawn_async, process_is_running, time_now_monotonic_ms}
+use std.test_runner.test_db_io.{LOCK_TIMEOUT, read_db_file, write_db_file_locked, update_db_file}
+use std.test_runner.test_db_lock.{TestDbFileLock}
 
 
 # =========================================================================
-# Helper: Create temporary database path for isolated testing
+# Helper: isolated database paths and worker programs
 # =========================================================================
+
+fn scratch_dir() -> text:
+    val dir = "build/tmp/test_db_concurrency/{getpid()}"
+    dir_create(dir, recursive: true)
+    dir
 
 fn temp_db_path(test_name: text) -> text:
-    "/tmp/test_db_concurrency_{test_name}_{getpid()}.sdn"
+    "{scratch_dir()}/{test_name}.sdn"
 
 fn cleanup_temp_db(test_name: text):
     val db_path = temp_db_path(test_name)
-    val lock_path = "{db_path}.lock"
 
     if file_exists(db_path):
         file_delete(db_path)
-    if file_exists(lock_path):
-        file_delete(lock_path)
+    # The lock sidecar must go too: an aborted writer leaves it behind and the
+    # next write then reports Ok while producing no file -- see
+    # doc/08_tracking/bug/test_db_stale_lock_silent_no_write_2026-09-12.md.
+    if file_exists("{db_path}.lock"):
+        file_delete("{db_path}.lock")
     if file_exists("{db_path}.bak"):
         file_delete("{db_path}.bak")
+
+fn simple_binary() -> text:
+    """Path to a runnable Simple binary for spawning worker processes.
+
+    Fails closed: if neither candidate is present the caller must fail the
+    scenario rather than skip it, because "no binary" is absence of evidence."""
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    if file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    ""
+
+fn write_appender_worker(db_path: text, tag: text, iterations: i64) -> text:
+    """Generate a worker program that appends `iterations` unique lines to
+    `db_path` through the locked read-modify-write helper."""
+    # The generated source carries no `{`/`}`: braces here would be consumed by
+    # this file's own text interpolation, and the parenthesised import form is
+    # the brace-free equivalent of `use mod.{name}`.
+    val worker_path = "{scratch_dir()}/worker_{tag}.spl"
+    val source = "use std.test_runner.test_db_io (update_db_file)\n\nfn main():\n    var i = 0\n    while i < {iterations}:\n        match update_db_file(\"{db_path}\", fn(c: text) -> text: c + \"{tag}-\" + i.to_text() + \"\\n\"):\n            case Ok(_): pass\n            case Err(e): eprint(\"worker {tag} err \" + e)\n        i = i + 1\n"
+    file_write(worker_path, source)
+    worker_path
+
+fn write_reader_worker(db_path: text, tag: text) -> text:
+    """Generate a worker program that reads `db_path` and records exactly what
+    it observed into a per-reader result file."""
+    val worker_path = "{scratch_dir()}/reader_{tag}.spl"
+    val result_path = "{scratch_dir()}/reader_{tag}.out"
+    val source = "use std.test_runner.test_db_io (read_db_file)\nuse std.io (file_write)\n\nfn main():\n    match read_db_file(\"{db_path}\"):\n        case Ok(c): file_write(\"{result_path}\", c)\n        case Err(e): file_write(\"{result_path}\", \"ERR:\" + e)\n"
+    file_write(worker_path, source)
+    worker_path
+
+fn write_locked_write_worker(db_path: text, tag: text, payload: text) -> text:
+    """Generate a worker that attempts one locked write and records whether it
+    got Ok or Err, so lock contention across processes is observable."""
+    val worker_path = "{scratch_dir()}/locker_{tag}.spl"
+    val result_path = "{scratch_dir()}/locker_{tag}.out"
+    val source = "use std.test_runner.test_db_io (write_db_file_locked)\nuse std.io (file_write)\n\nfn main():\n    match write_db_file_locked(\"{db_path}\", \"{payload}\"):\n        case Ok(_): file_write(\"{result_path}\", \"OK\")\n        case Err(e): file_write(\"{result_path}\", \"ERR:\" + e)\n"
+    file_write(worker_path, source)
+    worker_path
+
+fn spawn_worker(worker_path: text) -> i64:
+    process_spawn_async(simple_binary(), ["run", worker_path])
+
+fn await_pids(pids: [i64], budget_ms: i64) -> bool:
+    """Poll until every spawned worker has exited or the budget expires.
+    Returns false on timeout so the caller can fail rather than proceed."""
+    val deadline = time_now_monotonic_ms() + budget_ms
+    var alive = true
+    while alive:
+        alive = false
+        for pid in pids:
+            if process_is_running(pid):
+                alive = true
+        if not alive:
+            return true
+        if time_now_monotonic_ms() > deadline:
+            return false
+    true
+
+fn nonempty_lines(content: text) -> [text]:
+    var out: [text] = []
+    for line in content.split("\n"):
+        if line != "":
+            out.push(line)
+    out
+
+fn all_unique(lines: [text]) -> bool:
+    var seen: Dict<text, bool> = {}
+    for line in lines:
+        if seen.contains(line):
+            return false
+        seen[line] = true
+    true
+
 
 # =========================================================================
 # Tests
@@ -50,48 +143,192 @@ describe "Test Database Concurrency":
         it "handles 5 parallel writers without corruption":
             # @req REQ-SSPEC-UNIT
             step("handles 5 parallel writers without corruption")
-            # Requires process spawning FFI not yet implemented
-            # TODO: Implement after process spawning FFI is verified
-            print "Concurrent writes test (5 workers) - implementation pending"
+            val test_name = "parallel_writers"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+
+            step("a runnable Simple binary is available to spawn workers")
+            assert_true(simple_binary() != "")
+
+            step("spawn 5 real processes, each appending 4 unique lines")
+            var pids: [i64] = []
+            for tag in ["w1", "w2", "w3", "w4", "w5"]:
+                pids.push(spawn_worker(write_appender_worker(db_path, tag, 4)))
+            # Zero spawned workers must never read as success.
+            assert_eq(pids.len(), 5)
+
+            step("every worker exits within the budget")
+            assert_true(await_pids(pids, 120000))
+
+            step("all 20 appends survived: none lost, none duplicated, none torn")
+            val lines = nonempty_lines(file_read(db_path))
+            assert_eq(lines.len(), 20)
+            assert_true(all_unique(lines))
+
+            cleanup_temp_db(test_name)
 
         it "serializes writes correctly with file locking":
             # @req REQ-SSPEC-UNIT
             step("serializes writes correctly with file locking")
-            # Requires isolated database path; db.save() uses global DB_PATH
-            # TODO: Implement after isolated DB path support
-            print "Serialized writes test - implementation pending"
+            val test_name = "serialized_writes"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+            match write_db_file_locked(db_path, "seed\n"):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("seed write failed: {reason}")
+
+            step("while this process holds the lock, a second acquire is refused")
+            val held = TestDbFileLock.acquire(db_path, 10)
+            assert_true(held != nil)
+            var holder: TestDbFileLock = held
+            val blocked = TestDbFileLock.acquire(db_path, 1)
+            assert_true(blocked == nil)
+
+            step("after release the same path locks again, so writes queue rather than interleave")
+            assert_true(holder.release())
+            val regained = TestDbFileLock.acquire(db_path, 1)
+            assert_true(regained != nil)
+            var regained_lock: TestDbFileLock = regained
+            assert_true(regained_lock.release())
+
+            step("the seeded content is intact")
+            assert_eq(file_read(db_path), "seed\n")
+
+            cleanup_temp_db(test_name)
 
     describe "Concurrent Reads":
 
         it "allows multiple simultaneous readers":
             # @req REQ-SSPEC-UNIT
             step("allows multiple simultaneous readers")
-            # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
-            # TODO: Implement after isolated DB path support
-            print "Concurrent reads test - implementation pending"
+            val test_name = "concurrent_reads"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+            val payload = "shared-state-line\n"
+            match write_db_file_locked(db_path, payload):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("seed write failed: {reason}")
+
+            step("spawn 3 reader processes at once")
+            val tags = ["r1", "r2", "r3"]
+            var pids: [i64] = []
+            for tag in tags:
+                pids.push(spawn_worker(write_reader_worker(db_path, tag)))
+            assert_eq(pids.len(), 3)
+            assert_true(await_pids(pids, 120000))
+
+            step("every reader observed the full payload -- no reader was blocked out")
+            var observed = 0
+            for tag in tags:
+                val out_path = "{scratch_dir()}/reader_{tag}.out"
+                assert_true(file_exists(out_path))
+                assert_eq(file_read(out_path), payload)
+                observed = observed + 1
+            # A run that checked zero readers is a failure, not a pass.
+            assert_eq(observed, 3)
+
+            cleanup_temp_db(test_name)
 
         it "readers see consistent state during concurrent writes":
             # @req REQ-SSPEC-UNIT
             step("readers see consistent state during concurrent writes")
-            # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
-            # TODO: Implement after isolated DB path support
-            print "Read-write consistency test - implementation pending"
+            val test_name = "read_write_consistency"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+            match write_db_file_locked(db_path, "base\n"):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("seed write failed: {reason}")
+
+            step("spawn a writer and read repeatedly while it runs")
+            val pid = spawn_worker(write_appender_worker(db_path, "cw", 6))
+            var samples = 0
+            var torn = 0
+            var i = 0
+            while i < 40:
+                match read_db_file(db_path):
+                    case Ok(content):
+                        if content != "":
+                            samples = samples + 1
+                            # Every observable state is a whole number of whole
+                            # lines: a reader must never catch a half-written
+                            # record.
+                            if not content.ends_with("\n"):
+                                torn = torn + 1
+                            for line in nonempty_lines(content):
+                                if line != "base" and not line.starts_with("cw-"):
+                                    torn = torn + 1
+                    case Err(reason): fail("read_db_file returned Err: {reason}")
+                i = i + 1
+            assert_true(await_pids([pid], 120000))
+
+            step("no torn read was observed, and reads actually happened")
+            assert_true(samples > 0)
+            assert_eq(torn, 0)
+
+            step("the writer's 6 appends all landed on top of the base line")
+            assert_eq(nonempty_lines(file_read(db_path)).len(), 7)
+
+            cleanup_temp_db(test_name)
 
     describe "Lock Timeout Handling":
 
         it "respects lock timeout of 10 seconds":
             # @req REQ-SSPEC-UNIT
             step("respects lock timeout of 10 seconds")
-            # Requires FileLock contention behavior verification
-            # TODO: Implement after FileLock API is verified
-            print "Lock timeout test - implementation pending"
+            val test_name = "lock_timeout"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+            file_write(db_path, "x\n")
+
+            step("the database writers are configured with a 10 second lock timeout")
+            assert_eq(LOCK_TIMEOUT, 10)
+
+            step("a contended acquire waits for its configured timeout, then gives up")
+            # Probed at 1s rather than 10s: what is under test is that the
+            # timeout is honoured and bounded, and a 10s probe would add ten
+            # seconds of wall clock to every suite run for no extra evidence.
+            val held = TestDbFileLock.acquire(db_path, 10)
+            assert_true(held != nil)
+            var holder: TestDbFileLock = held
+            val started = time_now_monotonic_ms()
+            val blocked = TestDbFileLock.acquire(db_path, 1)
+            val elapsed = time_now_monotonic_ms() - started
+            assert_true(blocked == nil)
+            assert_true(elapsed >= 900)
+            assert_true(elapsed < 10000)
+            assert_true(holder.release())
+
+            cleanup_temp_db(test_name)
 
         it "second process fails gracefully on lock timeout":
             # @req REQ-SSPEC-UNIT
             step("second process fails gracefully on lock timeout")
-            # Requires FileLock contention behavior verification
-            # TODO: Implement after FileLock API is verified
-            print "Lock contention test - implementation pending"
+            val test_name = "lock_contention"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+            match write_db_file_locked(db_path, "original\n"):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("seed write failed: {reason}")
+
+            step("hold the lock, then let a separate process try to write")
+            val held = TestDbFileLock.acquire(db_path, 10)
+            assert_true(held != nil)
+            var holder: TestDbFileLock = held
+            val pid = spawn_worker(write_locked_write_worker(db_path, "c1", "clobber"))
+            assert_true(await_pids([pid], 120000))
+
+            step("the second process reported a lock failure instead of crashing or clobbering")
+            val out_path = "{scratch_dir()}/locker_c1.out"
+            assert_true(file_exists(out_path))
+            val outcome = file_read(out_path)
+            assert_true(outcome.len() > 0)
+            assert_true(outcome.starts_with("ERR:"))
+
+            step("the held database is untouched")
+            assert_eq(file_read(db_path), "original\n")
+            assert_true(holder.release())
+
+            cleanup_temp_db(test_name)
 
     describe "Stale Lock Detection":
 
@@ -117,40 +354,149 @@ describe "Test Database Concurrency":
         it "prevents duplicate test records from simultaneous creation":
             # @req REQ-SSPEC-UNIT
             step("prevents duplicate test records from simultaneous creation")
-            # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
-            # TODO: Implement after isolated DB path support
-            print "Race condition prevention test - implementation pending"
+            val test_name = "race_prevention"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+
+            step("four processes each create one record, concurrently, on a fresh database")
+            val tags = ["p1", "p2", "p3", "p4"]
+            var pids: [i64] = []
+            for tag in tags:
+                pids.push(spawn_worker(write_appender_worker(db_path, tag, 1)))
+            assert_eq(pids.len(), 4)
+            assert_true(await_pids(pids, 120000))
+
+            step("exactly four distinct records exist -- no creation was lost or doubled")
+            val lines = nonempty_lines(file_read(db_path))
+            assert_eq(lines.len(), 4)
+            assert_true(all_unique(lines))
+
+            cleanup_temp_db(test_name)
 
     describe "Backup Integrity":
 
         it "creates backup before overwriting database":
             # @req REQ-SSPEC-UNIT
             step("creates backup before overwriting database")
-            # Requires isolated database path; db.save() uses global DB_PATH
-            # TODO: Implement after isolated DB path support
-            print "Backup creation test - implementation pending"
+            val test_name = "backup_creation"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+
+            step("the first write creates no backup, because there is nothing to preserve")
+            match write_db_file_locked(db_path, "revision-one\n"):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("first write failed: {reason}")
+            assert_false(file_exists("{db_path}.bak"))
+
+            step("the overwrite preserves the previous revision beside it")
+            match write_db_file_locked(db_path, "revision-two\n"):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("second write failed: {reason}")
+            assert_true(file_exists("{db_path}.bak"))
+            assert_eq(file_read("{db_path}.bak"), "revision-one\n")
+            assert_eq(file_read(db_path), "revision-two\n")
+
+            cleanup_temp_db(test_name)
 
         it "preserves backup on write failure":
             # @req REQ-SSPEC-UNIT
             step("preserves backup on write failure")
-            # Requires simulated write failure (disk full) not yet available
-            # TODO: Simulate write failure
-            print "Backup preservation test - implementation pending"
+            val test_name = "backup_preservation"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+
+            step("build up a database and its backup")
+            match write_db_file_locked(db_path, "keep-one\n"):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("first write failed: {reason}")
+            match write_db_file_locked(db_path, "keep-two\n"):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("second write failed: {reason}")
+            assert_eq(file_read("{db_path}.bak"), "keep-one\n")
+
+            step("a refused write leaves both the database and its backup intact")
+            # The empty-overwrite refusal is the one write-failure vector the
+            # library actually implements, so it is the one that can be
+            # exercised without faking a full disk.
+            var refused = false
+            match write_db_file_locked(db_path, ""):
+                case Ok(_): refused = false
+                case Err(_): refused = true
+            assert_true(refused)
+            assert_eq(file_read(db_path), "keep-two\n")
+            assert_eq(file_read("{db_path}.bak"), "keep-one\n")
+
+            cleanup_temp_db(test_name)
 
     describe "Atomic Write Guarantees":
 
         it "ensures all-or-nothing writes":
             # @req REQ-SSPEC-UNIT
             step("ensures all-or-nothing writes")
-            # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
-            # TODO: Implement after isolated DB path support
-            print "Atomic write test - implementation pending"
+            val test_name = "atomic_writes"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+
+            step("seed a large payload so a partial write would be visible")
+            var old_payload = ""
+            var n = 0
+            while n < 200:
+                old_payload = old_payload + "old-record-{n}\n"
+                n = n + 1
+            match write_db_file_locked(db_path, old_payload):
+                case Ok(_): assert_true(true)
+                case Err(reason): fail("seed write failed: {reason}")
+
+            step("replace it wholesale while sampling the file")
+            var new_payload = ""
+            var m = 0
+            while m < 200:
+                new_payload = new_payload + "new-record-{m}\n"
+                m = m + 1
+            val pid = spawn_worker(write_locked_write_worker(db_path, "atomic", "replaced"))
+            var samples = 0
+            var partial = 0
+            var i = 0
+            while i < 40:
+                val seen = file_read(db_path)
+                if seen != "":
+                    samples = samples + 1
+                    # Only whole states are legal: the seeded payload, or the
+                    # replacement. Anything else is a torn write.
+                    if seen != old_payload and seen != "replaced":
+                        partial = partial + 1
+                i = i + 1
+            assert_true(await_pids([pid], 120000))
+
+            step("no intermediate state was ever observable, and sampling really happened")
+            assert_true(samples > 0)
+            assert_eq(partial, 0)
+            assert_eq(file_read(db_path), "replaced")
+
+            cleanup_temp_db(test_name)
 
     describe "High Contention Stress Test":
 
         it "survives 10 parallel writers with high frequency":
             # @req REQ-SSPEC-UNIT
             step("survives 10 parallel writers with high frequency")
-            # Requires process spawning FFI not yet implemented
-            # TODO: Implement after process spawning is verified
-            print "High contention stress test - implementation pending"
+            val test_name = "high_contention"
+            cleanup_temp_db(test_name)
+            val db_path = temp_db_path(test_name)
+
+            step("spawn 10 processes, each appending 5 lines as fast as it can")
+            val tags = ["h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10"]
+            var pids: [i64] = []
+            for tag in tags:
+                pids.push(spawn_worker(write_appender_worker(db_path, tag, 5)))
+            assert_eq(pids.len(), 10)
+
+            step("every writer finishes within the budget")
+            assert_true(await_pids(pids, 180000))
+
+            step("all 50 appends are present exactly once")
+            val lines = nonempty_lines(file_read(db_path))
+            assert_eq(lines.len(), 50)
+            assert_true(all_unique(lines))
+
+            cleanup_temp_db(test_name)

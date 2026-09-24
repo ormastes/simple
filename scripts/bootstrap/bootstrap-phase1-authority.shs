@@ -1,0 +1,86 @@
+#!/bin/sh
+# Phase 1 invocations stay bound to the current committed seed generation.
+# Full generation admission occurs once; each launch rechecks its commit record,
+# stamp and exact executable bytes, including phase-produced server artifacts.
+bootstrap_phase1_authority_init() {
+    [ "$#" -eq 5 ] || return 1
+    p1a_tool_root=$1 p1a_source_root=$2 p1a_origin=$3 p1a_expected=$4 p1a_work=$5
+    case "$p1a_origin" in /*) ;; *) echo 'phase1-authority-error: compiler must be an explicit absolute path' >&2; return 1 ;; esac
+    BOOTSTRAP_STAGE3_FACADE_PATH=$p1a_tool_root/scripts/check/lib/bootstrap-stage3-provenance.shs
+    BOOTSTRAP_STAGE3_VERSION_ROOT=$p1a_source_root
+    export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH" || return 1
+    p1a_marker=$p1a_source_root/src/compiler_rust/target/bootstrap.current.env
+    p1a_generations=$p1a_source_root/src/compiler_rust/target/bootstrap.generations
+    bootstrap_stage3_resolve_committed_seed "$p1a_generations" "$p1a_marker" || {
+        echo 'phase1-authority-error: no valid current committed seed generation' >&2
+        return 1
+    }
+    p1a_generation=$(bootstrap_stage3_manifest_value generation "$p1a_marker") || return 1
+    p1a_marker_sha=$(bootstrap_stage3_hash_file "$p1a_marker") || return 1
+    set -- "$BOOTSTRAP_STAGE3_COMMITTED_AUTHORITY"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    p1a_stamp=$1
+    p1a_seed=${p1a_stamp%.inputs.sha256}
+    p1a_stamp_sha=$(bootstrap_stage3_hash_file "$p1a_stamp") || return 1
+    [ "$(bootstrap_stage3_manifest_value schema "$p1a_stamp")" = simple-bootstrap-seed-artifact-stamp-v2 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value seed_sha256 "$p1a_stamp")" = "$p1a_expected" ] &&
+        [ "$(bootstrap_stage3_hash_file "$p1a_seed")" = "$p1a_expected" ] &&
+        [ "$(bootstrap_stage3_hash_file "$p1a_origin")" = "$p1a_expected" ] || {
+        echo 'phase1-authority-error: stale compiler differs from current admitted seed' >&2
+        return 1
+    }
+    p1a_tools=$p1a_work/phase1-produced-tools.sha256
+    : >"$p1a_tools" || return 1
+}
+
+bootstrap_phase1_register_tool() {
+    [ "$#" -eq 2 ] || return 1
+    [ -f "$1" ] && [ ! -L "$1" ] && [ -x "$1" ] &&
+        [ "$(bootstrap_stage3_hash_file "$1")" = "$2" ] || return 1
+    case "$1" in "$p1a_work"/*) ;; *) return 1 ;; esac
+    p1a_register_parent=$(CDPATH= cd -- "${1%/*}" && pwd -P) || return 1
+    # Reject traversal and symlinked directory aliases before binding the path.
+    [ "$p1a_register_parent/${1##*/}" = "$1" ] || return 1
+    printf '%s  %s\n' "$2" "$1" >>"$p1a_tools"
+}
+
+bootstrap_phase1_validate_invocation() (
+    [ "$#" -eq 3 ] || return 1
+    p1a_executable=$1 p1a_task=$2 p1a_receipt=$3
+    case "$p1a_executable" in /*) ;; *) echo 'phase1-authority-error: PATH-resolved tool refused' >&2; return 1 ;; esac
+    [ ! -e "$p1a_marker.transaction" ] && [ ! -L "$p1a_marker" ] &&
+        [ "$(bootstrap_stage3_hash_file "$p1a_marker")" = "$p1a_marker_sha" ] &&
+        [ "$(bootstrap_stage3_hash_file "$p1a_stamp")" = "$p1a_stamp_sha" ] &&
+        [ "$(bootstrap_stage3_hash_file "$p1a_seed")" = "$p1a_expected" ] &&
+        [ "$(bootstrap_stage3_hash_file "$p1a_origin")" = "$p1a_expected" ] || {
+        echo 'phase1-authority-error: current generation, admission, or producer changed' >&2
+        return 1
+    }
+    [ -f "$p1a_executable" ] && [ ! -L "$p1a_executable" ] && [ -x "$p1a_executable" ] || return 1
+    p1a_actual=$(bootstrap_stage3_hash_file "$p1a_executable") || return 1
+    p1a_registered=$(awk -v requested="$p1a_executable" 'substr($0, 67) == requested { print substr($0, 1, 64); count++ } END { if (count != 1) exit 1 }' "$p1a_tools") || {
+        echo 'phase1-authority-error: executable was not produced by this admitted phase' >&2
+        return 1
+    }
+    [ "$p1a_actual" = "$p1a_registered" ] || {
+        echo 'phase1-authority-error: tool bytes changed after production' >&2
+        return 1
+    }
+    {
+        echo schema=simple-bootstrap-phase1-invocation-v1
+        echo status=current
+        echo task="$p1a_task"
+        echo executable_path="$p1a_executable"
+        echo executable_sha256="$p1a_actual"
+        echo compiler_path="$p1a_origin"
+        echo compiler_sha256="$p1a_expected"
+        echo admitted_compiler_path="$p1a_seed"
+        echo generation="$p1a_generation"
+        echo admission_path="$p1a_marker"
+        echo admission_sha256="$p1a_marker_sha"
+        echo stamp_path="$p1a_stamp"
+        echo stamp_sha256="$p1a_stamp_sha"
+    } >"$p1a_receipt.tmp.$$" || return 1
+    mv "$p1a_receipt.tmp.$$" "$p1a_receipt"
+)

@@ -1,5 +1,10 @@
 # Encoding Source Restoration 2026-06-26
 
+## Closed 2026-09-13 — restoration landed; all named sources present on disk
+- **measured**: all 23 restored source files listed here exist under `src/lib/common/encoding/` (29 files present, a superset).
+- **measured** (`bin/simple run`, Windows Rust seed): `use std.common.encoding.utf8.*` and `std.common.encoding.base58.*` resolve and run.
+- **inferred**: this entry is a restoration record rather than a live defect; its work product is verifiably in the tree.
+
 ## Summary
 Restored 23 deleted source files and 27 deleted spec files from git history. All files were deleted in commit `a8569120c13ce0a3ca86cb913d6ee61e6a012c6f` and parent commits; they were recovered from the parent commit using `git show <parent>:<path>`.
 

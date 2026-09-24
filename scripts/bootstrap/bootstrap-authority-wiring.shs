@@ -2,6 +2,205 @@
 # Production bootstrap authority wiring shared by bootstrap-from-scratch and
 # focused behavioral tests. All mutation entrypoints require an owned lock.
 
+# Fold every input that changes WHICH build artifacts a Cargo invocation can
+# produce -- never source content -- into a short, stable key used to select
+# an isolated, shared CARGO_TARGET_DIR. This is deliberately NOT the seed
+# content fingerprint: sharing a target dir across different source content
+# (a test-only edit, a comment) is exactly the point (see
+# bootstrap_authority_rust_cargo_target below), but sharing it across
+# different BUILD CONFIGURATIONS is unsafe, because Cargo places some final
+# outputs at a fixed, non-hash-suffixed path (e.g. a profile-root binary or
+# staticlib/.lib such as libsimple_native_all.a, unlike a hash-suffixed
+# deps/*.rlib that carries its own content hash in its filename and can never
+# collide). If two different configurations share a target dir, a fixed-name
+# artifact is only ever overwritten when CARGO decides that exact unit needs
+# rebuilding for the CURRENT invocation -- and if a later, unrelated build
+# under a DIFFERENT configuration wrote to that same slot more recently, a
+# revisited config whose own crates are still Cargo-fresh will silently
+# freeze the OTHER configuration's stale leftover (confirmed concretely:
+# llvm-backend build -> cranelift-backend build overwrites the fixed-name
+# runtime archive -> llvm-backend build again with only a source-only change
+# elsewhere sees its own runtime crates as fresh and freezes the cranelift
+# archive alongside the llvm seed). Recomputing the seed binary's own hash at
+# publish time (bootstrap_stage3_hash_file / bootstrap_stage3_verify_seed_stamp)
+# does not catch this, because the wrong files are the OTHER frozen tuple
+# members, not the seed binary itself.
+#
+# Every input recorded here is one that changes the FEATURE SET, TOOLCHAIN, OR
+# TARGET Cargo builds under -- i.e. can change which code path a fixed-name
+# artifact actually contains, as opposed to only changing source bytes cargo
+# already fingerprints for itself. This function takes 6 explicit positional
+# inputs plus one opaque, caller-assembled "toolchain_extra" string ($7):
+#   - $1 rustc identity: MUST be `rustc --version --verbose` (not bare
+#     --version) -- verbose adds the commit hash, host tuple and rustc's
+#     embedded LLVM version, any of which can change emitted code for the
+#     same source/features/target.
+#   - $2 cargo identity (`cargo --version`) -- resolver/fingerprint/build-plan
+#     behavior can change between cargo versions.
+#   - $3 target platform (`--target <triple>`) -- selects an entirely
+#     different Cargo <target-triple>/<profile>/ subtree; included for
+#     defense in depth even though different triples already segregate
+#     naturally under one CARGO_TARGET_DIR.
+#   - $4 backend selector, $5 the exact `--features ...` string it produces
+#     (the concrete incident this exists for: this is what changes which
+#     crates/feature-gated code paths get compiled into deps/native-all/the
+#     seed binary).
+#   - $6 LLVM identity (major.minor.patch from llvm-config, when the llvm
+#     feature is enabled) -- swapping the LLVM install changes what
+#     LLVM-dependent crates link against and can change emitted code.
+#   - $7 toolchain_extra: an OPAQUE string the caller assembles from every
+#     OTHER input that can change a Cargo build's output bytes. This
+#     function does not interpret it, so the call site is the single source
+#     of truth for its exact contents -- see the `rust_authority_toolchain_extra=`
+#     assembly immediately above the call in bootstrap-from-scratch.sh, which
+#     is kept next to this list specifically so the two cannot drift. As of
+#     this writing that assembly folds in: CFLAGS (SIMPLE_ABI_VERSION
+#     defines), the Windows-GNU mingw linker/cc/ar/cflags/rustflags
+#     selection, CXX/AR/LD/LLVM_CONFIG (forwarded verbatim into the Cargo
+#     environment when ambiently set), LLVM_SYS_231_PREFIX, the resolved
+#     LLVM link kind (static vs dynamic-c-api), RUSTFLAGS and the macOS
+#     per-target CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS/general
+#     CARGO_ENCODED_RUSTFLAGS passthrough, SDKROOT/INCLUDE/LIB, and a sha256
+#     of `src/compiler_rust/.cargo/config.toml`'s contents (registry
+#     replacement / vendor directory / any [build] settings it carries).
+# Deliberately NOT included: source file content (that is the seed content
+# fingerprint's job, and is what this key must stay independent of so a
+# source-only/test-only edit keeps reusing the warm cache), and environment
+# noise that does not change build inputs (ambient PATH ordering beyond the
+# resolved tool paths above, TEMP/HOME locations, log directories).
+bootstrap_authority_rust_build_config_key() {
+  [ "$#" -eq 7 ] || return 64
+  bootstrap_cargo_cfg_rustc=$1
+  bootstrap_cargo_cfg_cargo=$2
+  bootstrap_cargo_cfg_platform=$3
+  bootstrap_cargo_cfg_backend=$4
+  bootstrap_cargo_cfg_llvm_features=$5
+  bootstrap_cargo_cfg_llvm_version=$6
+  bootstrap_cargo_cfg_toolchain_extra=$7
+  # Same sha256-with-fallback chain as bootstrap_stage3_hash_stdin
+  # (scripts/check/lib/bootstrap-stage3/authority.shs) -- duplicated rather
+  # than sourced because this file is a standalone module with no dependency
+  # on authority.shs (focused tests source it alone).
+  if command -v sha256sum >/dev/null 2>&1; then
+    bootstrap_cargo_cfg_digest=$(
+      printf 'profile=bootstrap\nrustc=%s\ncargo=%s\nplatform=%s\nbackend=%s\nllvm-features=%s\nllvm-version=%s\ntoolchain-extra=%s\n' \
+        "${bootstrap_cargo_cfg_rustc}" "${bootstrap_cargo_cfg_cargo}" \
+        "${bootstrap_cargo_cfg_platform}" "${bootstrap_cargo_cfg_backend}" \
+        "${bootstrap_cargo_cfg_llvm_features}" "${bootstrap_cargo_cfg_llvm_version}" \
+        "${bootstrap_cargo_cfg_toolchain_extra}" | sha256sum | awk '{print $1}'
+    ) || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    bootstrap_cargo_cfg_digest=$(
+      printf 'profile=bootstrap\nrustc=%s\ncargo=%s\nplatform=%s\nbackend=%s\nllvm-features=%s\nllvm-version=%s\ntoolchain-extra=%s\n' \
+        "${bootstrap_cargo_cfg_rustc}" "${bootstrap_cargo_cfg_cargo}" \
+        "${bootstrap_cargo_cfg_platform}" "${bootstrap_cargo_cfg_backend}" \
+        "${bootstrap_cargo_cfg_llvm_features}" "${bootstrap_cargo_cfg_llvm_version}" \
+        "${bootstrap_cargo_cfg_toolchain_extra}" | shasum -a 256 | awk '{print $1}'
+    ) || return 1
+  elif command -v sha256 >/dev/null 2>&1; then
+    bootstrap_cargo_cfg_digest=$(
+      printf 'profile=bootstrap\nrustc=%s\ncargo=%s\nplatform=%s\nbackend=%s\nllvm-features=%s\nllvm-version=%s\ntoolchain-extra=%s\n' \
+        "${bootstrap_cargo_cfg_rustc}" "${bootstrap_cargo_cfg_cargo}" \
+        "${bootstrap_cargo_cfg_platform}" "${bootstrap_cargo_cfg_backend}" \
+        "${bootstrap_cargo_cfg_llvm_features}" "${bootstrap_cargo_cfg_llvm_version}" \
+        "${bootstrap_cargo_cfg_toolchain_extra}" | sha256 -q
+    ) || return 1
+  else
+    return 1
+  fi
+  printf '%s\n' "${bootstrap_cargo_cfg_digest}" |
+    LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 1
+  printf '%s\n' "${bootstrap_cargo_cfg_digest}" | cut -c1-12
+}
+
+# MSVC reports C1083 with an empty generated-file name when cc-rs /Fo paths
+# exceed MAX_PATH. Keep Windows Cargo outputs outside the long receipt/HOME
+# tree, while retaining the complete input fingerprint and the repo-wide Rust
+# authority lock. Retries (including different log roots) reuse this same cache.
+#
+# The CARGO_TARGET_DIR this returns is deliberately SHARED across different
+# seed-input CONTENT fingerprints (keyed by bootstrap_cargo_config_key, a
+# build-configuration-only key -- see bootstrap_authority_rust_build_config_key
+# above -- not by bootstrap_cargo_fingerprint, which also hashes source
+# content) -- only the caller's per-content-fingerprint authority root
+# (home/cargo-home/tmp/receipts) stays fingerprint-keyed. Before this, EVERY
+# changed fingerprint (including a test-only #[test] fn with zero effect on
+# the built binary) got a brand-new, empty target dir, so cargo had to
+# recompile the ENTIRE workspace dependency graph from scratch -- 10+ minutes
+# -- even though only one crate's source actually changed. Keying by build
+# configuration instead of content is pure caching, not a trust weakening:
+# cargo tracks per-crate freshness itself (mtime + content fingerprint under
+# target/<profile>/.fingerprint/), so a shared target dir only lets cargo skip
+# recompiling crates it independently proves are byte-for-byte unchanged --
+# every crate whose source did NOT change (most of the workspace: parser,
+# common, type, runtime, unrelated compiler modules, vendored deps) is reused
+# as-is, while the crate that actually changed and everything that depends on
+# it (its reverse-dependency cone, up through the final relink) still pays its
+# full, non-incremental cost -- the bootstrap profile does not set
+# `incremental = true`, so this is a "rebuild only what changed" win at
+# workspace-crate granularity, not free recompilation of the touched crate.
+# Different build configurations (backend, LLVM version, toolchain, target)
+# NEVER share a directory, which is what makes the fixed-name-artifact hazard
+# described above impossible: nothing but the SAME configuration's own cargo
+# invocations ever writes into a given configuration's target dir.
+# Two authority builds pointed at this SAME shared target dir at once are
+# additionally serialized by this repo's own Rust authority lock
+# (bootstrap_acquire_rust_authority / the output lock on non-Windows) before
+# either invokes cargo -- cargo's own per-target-dir lock file is defense in
+# depth on top of that, not the primary guard. The admitted seed hash is
+# ALWAYS recomputed from the actual produced binary (bootstrap_stage3_hash_file
+# / bootstrap_stage3_verify_seed_stamp), never inferred from cache reuse, so a
+# stale artifact still cannot be admitted from ANY build that used the SAME
+# configuration. Selecting the right artifact back out of a target dir that
+# can now hold more than one crate build's leftovers is not new within a
+# single configuration: bootstrap_stage3_copy_seed_tuple already treats deps/
+# as possibly holding multiple hash-suffixed candidates (e.g. from this
+# bootstrap's own two same-profile, different-LTO cargo invocations) and picks
+# the newest by mtime -- see its comments in authority.shs. This selector
+# never moves/removes data.
+bootstrap_authority_rust_cargo_target() (
+  [ "$#" -eq 5 ] || return 64
+  bootstrap_cargo_repo=$1
+  bootstrap_cargo_host=$2
+  bootstrap_cargo_fingerprint=$3
+  bootstrap_cargo_legacy_root=$4
+  bootstrap_cargo_config_key=$5
+  # bootstrap_cargo_fingerprint is still validated (defense against a caller
+  # bug passing an unsanitized value through, e.g. a path-traversal string)
+  # but is intentionally NOT used to build the target path -- see the
+  # shared-cache rationale above. bootstrap_cargo_config_key IS used to build
+  # the path: it is what keeps different build configurations from ever
+  # sharing a directory.
+  printf '%s\n' "${bootstrap_cargo_fingerprint}" |
+    LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 64
+  printf '%s\n' "${bootstrap_cargo_config_key}" |
+    LC_ALL=C grep -Eq '^[0-9a-f]{12}$' || return 64
+  bootstrap_cargo_target_base=$(dirname -- "${bootstrap_cargo_legacy_root}") ||
+    return 1
+  if [ "${bootstrap_cargo_host}" != windows ]; then
+    printf '%s/rust-cargo-target-%s\n' "${bootstrap_cargo_target_base}" \
+      "${bootstrap_cargo_config_key}"
+    return 0
+  fi
+  bootstrap_cargo_target="${bootstrap_cargo_repo}/build/c/${bootstrap_cargo_config_key}"
+  bootstrap_cargo_native=$(cygpath -am "${bootstrap_cargo_target}") || return 1
+  case "${bootstrap_cargo_native}" in
+    [A-Za-z]:/*) ;;
+    *) echo 'error: Windows Cargo cache requires a local checkout' >&2; return 1 ;;
+  esac
+  # Reserve 120 bytes for target/profile/build/crate/out/object nesting under a
+  # conservative 240-byte path budget. Counting UTF-8 bytes is conservative for
+  # Windows UTF-16 paths, and leaves space below MAX_PATH for tool temporaries.
+  LC_ALL=C
+  export LC_ALL
+  if [ "${#bootstrap_cargo_native}" -gt 120 ]; then
+    printf 'error: Windows Cargo target prefix is %s bytes (limit 120); use a shorter checkout path\n' \
+      "${#bootstrap_cargo_native}" >&2
+    return 1
+  fi
+  printf '%s\n' "${bootstrap_cargo_target}"
+)
+
 # Fingerprint helpers use mktemp internally. Keep that scratch traffic on the
 # bootstrap output filesystem: a full /tmp must not make an otherwise healthy
 # authority build fail, and pre/post/commit observations must share one routing
@@ -21,7 +220,8 @@ bootstrap_authority_seed_inputs_fingerprint() {
   mkdir -p "${bootstrap_fingerprint_tmp}" \
     "$(dirname -- "${bootstrap_fingerprint_manifest}")" || return 1
   bootstrap_fingerprint_error_pending="${bootstrap_fingerprint_error}.raw.$$"
-  if TMPDIR="${bootstrap_fingerprint_tmp}" \
+  if BOOTSTRAP_STAGE3_FINGERPRINT_TRACE=1 \
+    TMPDIR="${bootstrap_fingerprint_tmp}" \
     bootstrap_stage3_seed_inputs_fingerprint "$@" \
       2>"${bootstrap_fingerprint_error_pending}"; then
     rm -f "${bootstrap_fingerprint_manifest}" \
@@ -44,17 +244,21 @@ bootstrap_authority_seed_inputs_fingerprint() {
     printf 'status=%s\n' "${bootstrap_fingerprint_status}"
     printf 'tmpdir=%s\n' "${bootstrap_fingerprint_tmp}"
     printf 'error=%s\n' "${bootstrap_fingerprint_error}"
-    # The fingerprint has several silent `return 1` paths (PATH shape, target
-    # triple, symlinks under the seed trees). Without the forwarded arguments
-    # the caller cannot tell which one fired, and the same call reproduced by
-    # hand often succeeds because the shell's own PATH differs. Record them.
+    # Bind the forwarded invocation without retaining checkout names, PATH
+    # entries, feature text, or other potentially secret/unbounded argv.
+    # The function contract fixes these five positions.
+    printf 'argument_count=5\n'
     bootstrap_fingerprint_argn=0
     for bootstrap_fingerprint_arg in "$@"; do
       bootstrap_fingerprint_argn=$((bootstrap_fingerprint_argn + 1))
-      printf 'arg%s=%s\n' "${bootstrap_fingerprint_argn}" \
-        "${bootstrap_fingerprint_arg}"
+      bootstrap_fingerprint_arg_sha=$(printf '%s' \
+        "${bootstrap_fingerprint_arg}" | sha256sum | awk '{print $1}') ||
+        return 1
+      printf 'arg%s_sha256=%s\n' "${bootstrap_fingerprint_argn}" \
+        "${bootstrap_fingerprint_arg_sha}"
     done
-    unset bootstrap_fingerprint_arg bootstrap_fingerprint_argn
+    unset bootstrap_fingerprint_arg bootstrap_fingerprint_argn \
+      bootstrap_fingerprint_arg_sha
   } >"${bootstrap_fingerprint_manifest}.tmp.$$" &&
     mv -f "${bootstrap_fingerprint_manifest}.tmp.$$" \
       "${bootstrap_fingerprint_manifest}"
@@ -95,7 +299,7 @@ bootstrap_authority_recover_or_refuse() {
 }
 
 bootstrap_authority_migrate_complete_legacy() {
-  [ "$#" -eq 11 ] || return 64
+  { [ "$#" -eq 11 ] || [ "$#" -eq 12 ]; } || return 64
   bootstrap_authority_legacy=$1
   bootstrap_authority_root=$2
   bootstrap_authority_marker=$3
@@ -107,6 +311,7 @@ bootstrap_authority_migrate_complete_legacy() {
   bootstrap_authority_nonce=$9
   bootstrap_authority_handle=${10}
   bootstrap_authority_observed=${11}
+  bootstrap_authority_target=${12:-}
   [ ! -e "${bootstrap_authority_marker}.transaction" ] || return 78
   [ ! -f "${bootstrap_authority_marker}" ] || return 0
   bootstrap_authority_require_owned_lock "${bootstrap_authority_handle}" || return 77
@@ -119,7 +324,8 @@ bootstrap_authority_migrate_complete_legacy() {
   bootstrap_stage3_prepare_seed_generation "${bootstrap_authority_legacy}" \
     "${bootstrap_authority_root}" "${bootstrap_authority_inputs}" \
     "${bootstrap_authority_seed_name}" "${bootstrap_authority_native_name}" \
-    "${bootstrap_authority_backfill_name}" "${bootstrap_authority_nonce}" || return 1
+    "${bootstrap_authority_backfill_name}" "${bootstrap_authority_nonce}" \
+    "${bootstrap_authority_target}" || return 1
   bootstrap_stage3_publish_seed_generation \
     "${BOOTSTRAP_STAGE3_PREPARED_STAGING}" \
     "${BOOTSTRAP_STAGE3_PREPARED_GENERATION}" "${bootstrap_authority_marker}" \

@@ -1,4 +1,8 @@
 # Hosted-WM entry closure was unparseable: two grammar gaps + three landed syntax errors
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source repaired (the original change); **Gap A and Gap C are now
 CLOSED in the grammar** — see "Update 2026-08-01" at the end. Gap B
@@ -171,3 +175,4 @@ Non-vacuity, same command on the same file, two binaries:
 The 13 assertions check evaluated *results*, not merely that the file
 loads, so a silent mis-association of a continued condition or RHS fails
 the spec rather than passing it.
+

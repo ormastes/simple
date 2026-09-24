@@ -1,4 +1,8 @@
 # String interpolation has no `{v:x}` hex format-spec
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** confirmed-as-designed (no format-spec grammar) — BUT the recommended
 workaround was itself broken for addresses, and that half is now FIXED
@@ -107,3 +111,4 @@ The 228 `"0x{v}"` call sites are **not** mechanically rewritten to
 that rewrite is finally *safe*, but it is a 228-site bulk edit across unrelated
 subsystems and belongs in its own reviewed lane rather than riding along with
 the library fix.
+

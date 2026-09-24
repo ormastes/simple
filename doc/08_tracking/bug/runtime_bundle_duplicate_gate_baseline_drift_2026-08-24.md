@@ -1,4 +1,8 @@
 # Runtime bundle duplicate-symbol gate has unrelated baseline drift
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open  
 **Severity:** P1 release-verification blocker
@@ -16,3 +20,4 @@ pair. The focused SFFI gate independently extracts and byte-compares those two
 bodies and passes. Do not refresh the broad baseline mechanically: each of the
 12 unrelated pairs needs an owner/link-profile review, and the stale
 `rt_thread_sleep` row needs removal only after confirming its producer moved.
+

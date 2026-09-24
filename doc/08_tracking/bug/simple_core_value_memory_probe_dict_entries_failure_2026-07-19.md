@@ -1,4 +1,8 @@
 # Pure-Simple value/memory probe dict-entries failure — 2026-07-19
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED / RUNTIME QUALIFICATION PENDING
 
@@ -31,3 +35,4 @@ On 2026-07-23 the exact probe was rerun, but stopped earlier while compiling
 defined `rt_native_neq`. That separate source fix is tracked in
 [`simple_core_archive_runtime_symbol_resolution_2026-07-23.md`](simple_core_archive_runtime_symbol_resolution_2026-07-23.md);
 the tuple-row assertion remains unqualified until the probe reaches it again.
+

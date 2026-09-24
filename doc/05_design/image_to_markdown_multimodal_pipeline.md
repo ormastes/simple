@@ -107,6 +107,9 @@ Caret config owns named `[image_read_profiles]`. Each `ModelProfileV1` resolves:
 - declared vision capability and supported MIME/detail modes;
 - detail, maximum tokens, request/response/image bytes and pixels;
 - timeout (default 30 s, ceiling 120 s), concurrency and queue depth;
+- `max_working_set_bytes` (default 384 MiB, ceiling 2 GiB), enforced before
+  pixel decode and Base64/provider-payload construction using a conservative
+  `source_bytes * 8 + pixels * 4` estimate;
 - full-image/crop/retry limits; and `fallback: none`.
 
 The default image profile is local. `image-to-markdown --profile <id>` and the

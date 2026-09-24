@@ -1,3 +1,33 @@
+## Triaged 2026-09-13 — LEFT OPEN, not measurable on this host
+
+Reviewed in the 2026-05-and-earlier tracking sweep. Kept open: this is a real
+perf gap against a live harness, not a stale report.
+
+Checked 2026-09-13:
+
+- the harness still exists and is unchanged in shape —
+  `test/05_perf/collections/run_collection_benchmarks.shs` (and its duplicate
+  tree copy under `test/perf/collections/`, which is the `BENCH_DIR` the script
+  actually resolves), alongside `collection_ref.c`, `collection_ref.rs`,
+  `collection_simple.spl`
+- the ratio floors it enforces are still `SIMPLE_COLLECTION_BENCH_MIN_C_RATIO`
+  and `..._MIN_RUST_RATIO`, both defaulting to `0.50` — the same 0.50x bar the
+  recorded 0.41x / 0.38x / 0.25x / 0.20x results fail
+
+Why no new measurement: the run needs a native C reference build and a Rust
+reference build on the same host as the Simple binary. This host is Windows
+x86_64, the recorded numbers came from a Linux lane using
+`src/compiler_rust/target/debug/simple`, and a bootstrap was running
+concurrently — kicking off native/cargo reference builds would have been both
+unsound (different platform, so the ratios are not comparable to the recorded
+ones) and disruptive. Absence of a measurement is not evidence of a fix, so the
+entry stays open with the 2026-05-14 numbers standing as the last real data.
+
+Next step for whoever picks this up: re-run the harness on the Linux perf lane
+and record fresh ratios before deciding whether the gap has moved.
+
+---
+
 # Pure Simple collection benchmark parity gap
 
 Date: 2026-05-14

@@ -36,10 +36,11 @@ test("manifest blob reads do not parse malformed historical submodule configurat
     const head = run(directory, "git", ["rev-parse", "HEAD"]);
     const mergeBase = run(directory, "git", ["merge-base", base, head]);
     const rawDiff = spawnSync("git", [
-      "diff", "--raw", "-z", "--find-renames", "--find-copies", mergeBase, head, "--",
+      "diff", "--no-ext-diff", "--no-renames", "--no-abbrev", "--raw", "-z", mergeBase, head, "--",
     ], { cwd: directory });
     assert.equal(rawDiff.status, 0, rawDiff.stderr.toString());
     const diffSha256 = createHash("sha256").update(rawDiff.stdout).digest("hex");
+    run(directory, "git", ["config", "core.abbrev", "4"]);
     const output = join(directory, "manifest.sdn");
     const result = spawnSync(producer, [
       "github", "1", "R_test", "owner/repo", "1", "1", "R_test",
@@ -57,9 +58,23 @@ test("manifest blob reads do not parse malformed historical submodule configurat
     assert.match(manifest, new RegExp(`^[ ]{2}merge_base_sha: ${mergeBase}$`, "m"));
     assert.match(manifest, new RegExp(`^[ ]{2}diff_sha256: ${diffSha256}$`, "m"));
 
+    const insertedObject = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: directory, input: "unrelated object inserted after initial manifest\n", encoding: "utf8",
+    });
+    assert.equal(insertedObject.status, 0, insertedObject.stderr);
+    run(directory, "git", ["config", "core.abbrev", "40"]);
+    const secondOutput = join(directory, "manifest-second.sdn");
+    const secondResult = spawnSync(producer, [
+      "github", "1", "R_test", "owner/repo", "1", "1", "R_test",
+      "owner/repo", "refs/heads/main", base, head, mergeBase, secondOutput,
+    ], { cwd: directory, encoding: "utf8" });
+    assert.equal(secondResult.status, 0, secondResult.stderr);
+    assert.deepEqual(readFileSync(secondOutput), readFileSync(output));
+
     const source = readFileSync(producer, "utf8");
     assert.match(source, /git cat-file blob "\$revision:\$path"/);
     assert.doesNotMatch(source, /git show[ ]+"\$revision:\$path"/);
+    assert.match(source, /git diff --no-ext-diff --no-renames --no-abbrev --raw -z/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

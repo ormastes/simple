@@ -94,3 +94,24 @@ bin/release/x86_64-unknown-linux-gnu/simple run <direct-call comparison above>
 ```
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed.
+
+## Addendum 2026-09-19 — still live on the current shared seed (Windows suite-fix lane)
+
+Re-verified against the current shared seed (`/c/Users/ormas/dev/simple/bin/simple.exe`,
+interpreter test mode, repo `mainlane` branch `suite-2026-09-18`):
+
+- `with`-internal `__exit__` field mutation still lost under `test`;
+  the identical direct call `ctx.__exit__(nil)` under `test` mutates correctly,
+  and `bin/simple run` prints `cleaned=true` for the same `with` program.
+- Split-probe results (class defined inside the `it` block): `__enter__`
+  mutation visible inside the block PASSES; post-`with` observation of the
+  `__exit__`-mutated field FAILS (`expected false to equal true`); direct
+  `__exit__` call PASSES. Mechanism remains isolated to the `with` statement's
+  internal exit invocation.
+- Same pins now carried by twin spec `test/system/features/with_statement_basic_spec.spl`
+  (wave-6 twin of the context-manager specs; its original `enter()`/`cleanup()`
+  method names were a stale pin — the desugared protocol is `__enter__`/`__exit__(exc)`
+  per `src/compiler_rust/.../hir/lower/stmt_lowering.rs`, `src/app/interpreter/control/control/context.spl`,
+  and `src/compiler_rust/lib/std/src/core/context.spl`). After aligning names,
+  its "as-clause binding" example passes and the three post-exit field-visibility
+  examples fail exactly as this ledger documents.

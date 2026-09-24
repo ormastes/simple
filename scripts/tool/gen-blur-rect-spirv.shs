@@ -1,0 +1,89 @@
+#!/bin/sh
+# gen-glass-material-spirv.shs -- regenerate backend_vulkan_blur_rect_spirv.spl.
+#
+#   sh scripts/tool/gen-rect-batch-spirv.shs
+#
+# Compiles shaders/blur_rect.comp with glslangValidator and rewrites the
+# generated Simple module in place. The .spv is a build intermediate and is NOT
+# checked in; the word array plus its pinned sha256 are the artifact.
+# `scripts/check/check-rect-batch-spirv-pinned.shs` verifies the two agree.
+set -eu
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+comp="$repo_root/src/lib/gc_async_mut/gpu/engine2d/shaders/blur_rect.comp"
+out="$repo_root/src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_blur_rect_spirv.spl"
+tmp="${TMPDIR:-/tmp}/blur_rect_gen.$$"
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT
+
+glslang="${GLSLANG:-}"
+if [ -z "$glslang" ]; then
+    for cand in /opt/homebrew/bin/glslangValidator /usr/local/bin/glslangValidator \
+                /usr/bin/glslangValidator; do
+        [ -x "$cand" ] && glslang="$cand" && break
+    done
+fi
+if [ -z "$glslang" ]; then
+    glslang=$(command -v glslangValidator 2>/dev/null || true)
+fi
+if [ -z "$glslang" ]; then
+    echo "ERROR: glslangValidator not found (set GLSLANG=/path/to/glslangValidator)" >&2
+    exit 2
+fi
+
+"$glslang" -V --target-env vulkan1.1 -o "$tmp/blur_rect.spv" "$comp" >"$tmp/log" 2>&1 || {
+    echo "ERROR: glslangValidator failed:" >&2
+    cat "$tmp/log" >&2
+    exit 2
+}
+
+sh "$repo_root/scripts/tool/spirv-to-spl-words.shs" "$tmp/blur_rect.spv" 8 > "$tmp/words"
+sha_line=$(head -1 "$tmp/words")
+
+{
+cat <<'HDR'
+# 2D Engine — Vulkan box-blur SPIR-V blob
+#
+# GENERATED — do not hand-edit. Regenerate with:
+#   sh scripts/tool/gen-rect-batch-spirv.shs
+# which runs
+#   glslangValidator -V --target-env vulkan1.1 \
+#       -o blur_rect.spv src/lib/gc_async_mut/gpu/engine2d/shaders/blur_rect.comp
+#   sh scripts/tool/spirv-to-spl-words.shs blur_rect.spv 8
+#
+# The .spv is a build intermediate and is NOT checked in; the words below plus
+# the pinned sha256 ARE the artifact.
+# `sh scripts/check/check-blur-rect-spirv-pinned.shs` recompiles the .comp and
+# fails closed if these bytes no longer match it, so a shader edit that is not
+# regenerated here cannot pass unnoticed.
+#
+# Source of truth for the layout:
+#   src/lib/gc_async_mut/gpu/engine2d/shaders/blur_rect.comp
+# Frozen contract, restated so a reader of this file need not open the GLSL:
+#   binding 0 = framebuffer uint[], index = y * fb_w + x (read only)
+#   binding 1 = output uint[], rw * rh words, index = py * rw + px
+#   push constants (28 bytes): rx, ry, rw, rh, fb_w, fb_h, radius
+#   dispatch: 2D, ceil(rw/16) x ceil(rh/16) workgroups of 16x16
+#   parity: the exact integer twin of emu_draw_blur_rect() in
+#           backend_emu_adv.spl -- one 2D window, raw sums, a SINGLE
+#           truncating division per channel, and 0 where the window holds no
+#           in-bounds sample.
+HDR
+echo "$sha_line"
+cat <<'FN'
+
+fn spirv_blur_rect() -> [u8]:
+    """Validated SPIR-V bytecode for the box-blur kernel.
+
+    One dispatch writes the whole blurred/saturated/tinted glass rect into the
+    binding-1 output buffer. See the module header for the frozen buffer and
+    push-constant layout.
+    """
+    [
+FN
+tail -n +2 "$tmp/words"
+echo "    ]"
+} > "$out"
+
+echo "wrote $out"
+echo "$sha_line"

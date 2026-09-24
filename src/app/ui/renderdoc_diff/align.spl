@@ -1,0 +1,243 @@
+"""Event alignment and divergence classification (MDSOC+ business layer).
+
+ALIGNMENT RULE (three passes, per event-type bucket, A-order, never across types):
+
+  pass 1  exact signature — type|pipeline|targetWxH|targetFormat|draw-params|name
+          (`rdoc_event_signature`). First unmatched B with an equal signature wins.
+  pass 2  relaxed — render-target dimensions + format only (`rdoc_event_target_key`).
+          Catches a draw whose parameters changed but which still paints the same
+          attachment.
+  pass 3  ordinal pairing, allowed ONLY when the remaining unmatched counts are EQUAL
+          on both sides. Unequal remainders are NOT paired: the leftover A events are
+          `missing-draw` and the leftover B events are `extra-draw`. Without the
+          equal-count guard, one dropped draw shifts every later pairing and the gate
+          names the wrong event id.
+
+CLASSIFICATION of a matched pair, first match wins:
+  ordinal differs        -> order
+  target dims differ     -> size-mismatch
+  target format differs  -> format-mismatch
+  output sha256 differs  -> output-mismatch
+Equal on all four is not a divergence. `first divergent` is the lowest event id over
+all divergences (side A's id, or side B's for an extra-draw), so it is stable under
+list order.
+"""
+
+use app.ui.renderdoc_diff.events.{RdocEvent, RdocEventSet, rdoc_event_signature,
+    rdoc_event_target_key}
+use app.ui.renderdoc_diff.thumb.{rdoc_thumb_mismatch_pct}
+
+val RDOC_CLASS_MISSING: text = "missing-draw"
+val RDOC_CLASS_EXTRA: text = "extra-draw"
+val RDOC_CLASS_ORDER: text = "order"
+val RDOC_CLASS_OUTPUT: text = "output-mismatch"
+val RDOC_CLASS_SIZE: text = "size-mismatch"
+val RDOC_CLASS_FORMAT: text = "format-mismatch"
+
+class RdocDivergence:
+    event_id: i64
+    peer_event_id: i64
+    event_type: text
+    name: text
+    divergence_class: text
+    detail: text
+    thumb_mismatch_pct: i64
+
+class RdocTypeCount:
+    event_type: text
+    count_a: i64
+    count_b: i64
+
+class RdocDiff:
+    aligned: i64
+    divergent: i64
+    first_divergent: i64
+    first_divergent_class: text
+    divergences: [RdocDivergence]
+    type_counts: [RdocTypeCount]
+    thumbs_present: bool
+    error: text
+
+fn _types_of(a: RdocEventSet, b: RdocEventSet) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < a.events.len():
+        if not _has_text(out, a.events[i].event_type):
+            out.push(a.events[i].event_type)
+        i = i + 1
+    i = 0
+    while i < b.events.len():
+        if not _has_text(out, b.events[i].event_type):
+            out.push(b.events[i].event_type)
+        i = i + 1
+    out
+
+fn _has_text(xs: [text], v: text) -> bool:
+    var i = 0
+    while i < xs.len():
+        if xs[i] == v:
+            return true
+        i = i + 1
+    false
+
+fn _indices_of_type(set: RdocEventSet, etype: text) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < set.events.len():
+        if set.events[i].event_type == etype:
+            out.push(i)
+        i = i + 1
+    out
+
+fn _classify(x: RdocEvent, y: RdocEvent) -> (text, text):
+    if x.ordinal != y.ordinal:
+        return (RDOC_CLASS_ORDER, "ordinal " + x.ordinal.to_text() + " vs " + y.ordinal.to_text())
+    if x.target_width != y.target_width or x.target_height != y.target_height:
+        return (RDOC_CLASS_SIZE, x.target_width.to_text() + "x" + x.target_height.to_text()
+            + " vs " + y.target_width.to_text() + "x" + y.target_height.to_text())
+    if x.target_format != y.target_format:
+        return (RDOC_CLASS_FORMAT, x.target_format + " vs " + y.target_format)
+    if x.output_sha256 != y.output_sha256:
+        return (RDOC_CLASS_OUTPUT, x.output_sha256 + " vs " + y.output_sha256)
+    ("", "")
+
+fn rdoc_diff(a: RdocEventSet, b: RdocEventSet) -> RdocDiff:
+    """Align two event sets and classify every divergence."""
+    var no_div: [RdocDivergence] = []
+    var no_counts: [RdocTypeCount] = []
+    if a.error != "":
+        return RdocDiff(aligned: 0, divergent: 0, first_divergent: -1, first_divergent_class: "",
+            divergences: no_div, type_counts: no_counts, thumbs_present: false, error: "side a: " + a.error)
+    if b.error != "":
+        return RdocDiff(aligned: 0, divergent: 0, first_divergent: -1, first_divergent_class: "",
+            divergences: no_div, type_counts: no_counts, thumbs_present: false, error: "side b: " + b.error)
+    if a.events.len() == 0 or b.events.len() == 0:
+        return RdocDiff(aligned: 0, divergent: 0, first_divergent: -1, first_divergent_class: "",
+            divergences: no_div, type_counts: no_counts, thumbs_present: false,
+            error: "one or both sides carry 0 events")
+
+    var divergences: [RdocDivergence] = []
+    var type_counts: [RdocTypeCount] = []
+    var aligned = 0
+    var thumbs = false
+    val types = _types_of(a, b)
+    var t = 0
+    while t < types.len():
+        val etype = types[t]
+        val ia = _indices_of_type(a, etype)
+        val ib = _indices_of_type(b, etype)
+        type_counts.push(RdocTypeCount(event_type: etype, count_a: ia.len(), count_b: ib.len()))
+        var taken: [bool] = []
+        var k = 0
+        while k < ib.len():
+            taken.push(false)
+            k = k + 1
+        var partner: [i64] = []
+        k = 0
+        while k < ia.len():
+            partner.push(-1)
+            k = k + 1
+
+        # pass 1 — exact signature
+        var p = 0
+        while p < ia.len():
+            val x = a.events[ia[p]]
+            var q = 0
+            while q < ib.len():
+                if not taken[q] and rdoc_event_signature(b.events[ib[q]]) == rdoc_event_signature(x):
+                    partner[p] = q
+                    taken[q] = true
+                    q = ib.len()
+                else:
+                    q = q + 1
+            p = p + 1
+
+        # pass 2 — render-target dimensions and format only
+        p = 0
+        while p < ia.len():
+            if partner[p] < 0:
+                val x = a.events[ia[p]]
+                var q = 0
+                while q < ib.len():
+                    if not taken[q] and rdoc_event_target_key(b.events[ib[q]]) == rdoc_event_target_key(x):
+                        partner[p] = q
+                        taken[q] = true
+                        q = ib.len()
+                    else:
+                        q = q + 1
+            p = p + 1
+
+        # pass 3 — ordinal pairing, only when the remainders are equal in size
+        var rest_a: [i64] = []
+        p = 0
+        while p < ia.len():
+            if partner[p] < 0:
+                rest_a.push(p)
+            p = p + 1
+        var rest_b: [i64] = []
+        k = 0
+        while k < ib.len():
+            if not taken[k]:
+                rest_b.push(k)
+            k = k + 1
+        if rest_a.len() == rest_b.len():
+            k = 0
+            while k < rest_a.len():
+                partner[rest_a[k]] = rest_b[k]
+                taken[rest_b[k]] = true
+                k = k + 1
+        else:
+            k = 0
+            while k < rest_a.len():
+                val x = a.events[ia[rest_a[k]]]
+                divergences.push(RdocDivergence(event_id: x.event_id, peer_event_id: -1,
+                    event_type: etype, name: x.name, divergence_class: RDOC_CLASS_MISSING,
+                    detail: "no counterpart on side b", thumb_mismatch_pct: -1))
+                k = k + 1
+            k = 0
+            while k < rest_b.len():
+                val y = b.events[ib[rest_b[k]]]
+                divergences.push(RdocDivergence(event_id: y.event_id, peer_event_id: -1,
+                    event_type: etype, name: y.name, divergence_class: RDOC_CLASS_EXTRA,
+                    detail: "no counterpart on side a", thumb_mismatch_pct: -1))
+                k = k + 1
+
+        # classify the matched pairs
+        p = 0
+        while p < ia.len():
+            if partner[p] >= 0:
+                val x = a.events[ia[p]]
+                val y = b.events[ib[partner[p]]]
+                aligned = aligned + 1
+                if x.thumb_base64 != "" or y.thumb_base64 != "":
+                    thumbs = true
+                val verdict = _classify(x, y)
+                if verdict.0 != "":
+                    divergences.push(RdocDivergence(event_id: x.event_id, peer_event_id: y.event_id,
+                        event_type: etype, name: x.name, divergence_class: verdict.0,
+                        detail: verdict.1,
+                        thumb_mismatch_pct: rdoc_thumb_mismatch_pct(x.thumb_base64, y.thumb_base64)))
+            p = p + 1
+        t = t + 1
+
+    var first_id = -1
+    var first_class = ""
+    var d = 0
+    while d < divergences.len():
+        if first_id < 0 or divergences[d].event_id < first_id:
+            first_id = divergences[d].event_id
+            first_class = divergences[d].divergence_class
+        d = d + 1
+    RdocDiff(aligned: aligned, divergent: divergences.len(), first_divergent: first_id,
+        first_divergent_class: first_class, divergences: divergences, type_counts: type_counts,
+        thumbs_present: thumbs, error: "")
+
+fn rdoc_diff_verdict(diff: RdocDiff) -> text:
+    """The last line of the report and of the gate: PASS / FAIL / ERROR."""
+    if diff.error != "":
+        return "RENDERDOC DIFF: ERROR — nothing was checked (" + diff.error + ")"
+    if diff.divergent == 0:
+        return "RENDERDOC DIFF: PASS — " + diff.aligned.to_text() + " event(s) aligned, 0 divergent"
+    "RENDERDOC DIFF: FAIL — " + diff.aligned.to_text() + " event(s) aligned, "
+        + diff.divergent.to_text() + " divergent, first divergent event "
+        + diff.first_divergent.to_text() + " (" + diff.first_divergent_class + ")"

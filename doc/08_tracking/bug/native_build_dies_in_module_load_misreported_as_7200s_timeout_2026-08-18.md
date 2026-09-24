@@ -1,4 +1,8 @@
 # native-build dies during module load and misreports it as a 7200s timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-18
 **Severity:** HIGH — two defects stacked: the native lane of the
@@ -182,3 +186,4 @@ No-regression check: the two-lane gate (`DIFF_LANES=interpret,jit`) returns the
 same verdict before and after the patch —
 `FAIL — 1 unbaselined divergence(s) among 11 fixture(s) compared`, with
 `agreements: 9 / divergences: 2 (1 NEW) / lane errors: 0`.
+

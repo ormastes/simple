@@ -1,0 +1,296 @@
+#!/bin/sh
+# check-transient-scope-reclaims.shs
+#
+# Budget gate on the ONE reclamation mechanism compiled Simple code has.
+#
+# Why this guard exists
+# ---------------------
+# Compiled Simple code allocates through `rt_array_new` / `rt_string_new` /
+# `rt_dict_new`, and every such allocation is entered into
+# `HEAP_ALLOCATION_REGISTRY` (src/compiler_rust/runtime/src/value/heap.rs).
+# Nothing removes it again unless an explicit reclamation site runs. The only
+# reclamation site compiled code can reach is the transient heap scope
+# (`rt_transient_array_scope_begin` / `_pause` / `rt_transient_heap_promote` /
+# `_end`, implemented in runtime/src/value/collections.rs and mirrored in
+# src/runtime/runtime_memory.c). If that mechanism stops reclaiming, the
+# compiler goes back to being an immortal heap: a Stage-3 worker was measured
+# at 42 GB RSS with 110,758,831 registry objects and zero frees.
+#
+# Nothing else in the tree fails when reclamation silently dies. The existing
+# guards check tree structure, symbol sets, and whether source compiles --
+# reclamation is a RUNTIME property, invisible to all of them. A build in which
+# `track_transient_heap` is never called, or in which `free_transient_heap`
+# stops handling a heap type, still compiles, still links, still passes every
+# push-tier gate, and still produces correct output. It just never frees.
+#
+# What it measures
+# ----------------
+# Two natively-built fixtures do byte-for-byte identical work and MUST produce
+# the same exit status. One wraps its allocation loop in a transient scope; the
+# other does not. Peak RSS is read from /usr/bin/time -v.
+#
+#   unscoped  == the PRE-FIX SHAPE. Measured 374,232 kB for 3e6 arrays (aarch64).
+#   scoped    == the post-fix shape. Measured   1,056 kB for the same work.
+#
+# The gate is a RATIO plus an absolute cap, not a bare number: absolute RSS
+# moves with host, allocator and arch (the 37 GB `[heap]` brk figure in the
+# 2026-08-17 bug record is x86_64-specific -- this aarch64 host allocates via
+# mmap and its brk mapping stays at 132 kB). The ratio between two fixtures
+# measured in the same run on the same host is stable.
+#
+# Verdict convention (repo standard, last line of stdout is the verdict):
+#   PASS  -- <n> fixture(s) measured, ...      exit 0
+#   FAIL  -- ...                               exit 1
+#   ERROR -- nothing was checked (<reason>)    exit 2
+# A run that measured 0 fixtures is ERROR, never a pass. No compiler, no seed,
+# or a failed build is ERROR -- absence of evidence is not evidence.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+if [ -z "${REPO_ROOT:-}" ] || [ ! -d "$REPO_ROOT/src/compiler" ]; then
+    echo "ERROR -- nothing was checked (not inside a Simple repo checkout)"
+    exit 2
+fi
+
+# Tunables. Defaults are set from the aarch64 measurement above with wide
+# margin so an ordinary host cannot false-FAIL, while the pre-fix shape
+# (354x here) cannot pass.
+SCOPED_CAP_KB=${SCOPED_CAP_KB:-65536}      # scoped fixture must stay under this
+MIN_RATIO=${MIN_RATIO:-8}                  # unscoped/scoped must be at least this
+ITERS=${ITERS:-3000000}
+CHUNK=${CHUNK:-1000}
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/transient-scope-check.XXXXXX" 2>/dev/null) || {
+    echo "ERROR -- nothing was checked (cannot create work dir)"
+    exit 2
+}
+cleanup() {
+    # Reap anything still running from this check, then remove the work dir.
+    if [ -n "${CHILD_PIDS:-}" ]; then
+        for p in $CHILD_PIDS; do kill -9 "$p" 2>/dev/null; done
+    fi
+    [ -n "${KEEP_WORK:-}" ] || rm -rf "$WORK"
+}
+trap cleanup EXIT INT TERM
+CHILD_PIDS=""
+
+# ---------------------------------------------------------------------------
+# Seed discovery. native-build is routed through the in-process Rust driver
+# (SIMPLE_NATIVE_BUILD_RUST=1); the spawned interpreted worker is the very
+# thing the 2026-08-17 bug record says OOMs, so this guard must not use it.
+# ---------------------------------------------------------------------------
+find_seed() {
+    if [ -n "${SIMPLE_SEED:-}" ]; then
+        [ -x "$SIMPLE_SEED" ] && { echo "$SIMPLE_SEED"; return 0; }
+        return 1
+    fi
+    for c in \
+        "$REPO_ROOT/bin/simple" \
+        "$REPO_ROOT/src/compiler_rust/target/release/simple"
+    do
+        [ -x "$c" ] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+write_fixture() {
+    # $1 = path, $2 = "scoped" | "unscoped"
+    if [ "$2" = "scoped" ]; then
+        cat > "$1" <<EOF
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn main() -> i64:
+    var sink: i64 = 0
+    var outer: i64 = 0
+    while outer < $((ITERS / CHUNK)):
+        val began = rt_transient_array_scope_begin()
+        var i: i64 = 0
+        while i < $CHUNK:
+            val idx: i64 = outer * $CHUNK + i
+            val a: [i64] = [idx, idx + 1, idx + 2]
+            sink = sink + a[0]
+            i = i + 1
+        if began:
+            val _e = rt_transient_array_scope_end()
+        outer = outer + 1
+    sink % 251
+EOF
+    else
+        cat > "$1" <<EOF
+fn main() -> i64:
+    var sink: i64 = 0
+    var outer: i64 = 0
+    while outer < $((ITERS / CHUNK)):
+        var i: i64 = 0
+        while i < $CHUNK:
+            val idx: i64 = outer * $CHUNK + i
+            val a: [i64] = [idx, idx + 1, idx + 2]
+            sink = sink + a[0]
+            i = i + 1
+        outer = outer + 1
+    sink % 251
+EOF
+    fi
+}
+
+# Build one fixture. Echoes the binary path on success; returns non-zero on
+# failure. The build's exit status is read DIRECTLY into a variable on the line
+# after the invocation -- never through a pipe, whose $? is the last stage's.
+build_fixture() {
+    _src=$1
+    _out=$2
+    SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_QUIET_EXTERN_WARN=1 \
+        timeout 900 "$SEED" native-build "$_src" -o "$_out" > "$_out.build.log" 2>&1
+    _rc=$?
+    [ "$_rc" -eq 0 ] && [ -x "$_out" ]
+}
+
+# Run one fixture under /usr/bin/time -v. Sets RUN_RSS and RUN_EXIT.
+run_fixture() {
+    _bin=$1
+    /usr/bin/time -v "$_bin" > "$_bin.out" 2> "$_bin.time"
+    RUN_RSS=$(awk '/Maximum resident set size/{print $NF}' "$_bin.time" 2>/dev/null)
+    RUN_EXIT=$(awk '/Exit status/{print $NF}' "$_bin.time" 2>/dev/null)
+    [ -n "$RUN_RSS" ] && [ -n "$RUN_EXIT" ]
+}
+
+# ---------------------------------------------------------------------------
+# Selftest. Runs before every scan and is fatal. It proves the guard's own
+# discrimination on THIS host rather than asserting it: the unscoped fixture
+# must be measured well above the scoped one. A guard that cannot tell the two
+# apart here would pass a tree in which reclamation is dead.
+# ---------------------------------------------------------------------------
+selftest() {
+    # This guard's real negative control is not a separate fixture set: it is
+    # the unscoped fixture, measured in every run and asserted below to exceed
+    # the budget (see "negative control" in the scan). That makes the pre-fix
+    # shape a live control on every invocation rather than a one-off
+    # experiment, so the checks here are limited to the tunables, which are the
+    # only way this guard can be silently defanged.
+    if [ "$MIN_RATIO" -lt 2 ]; then
+        echo "selftest: MIN_RATIO must be >= 2 to discriminate (got $MIN_RATIO)"
+        return 1
+    fi
+    if [ "$SCOPED_CAP_KB" -lt 1024 ]; then
+        echo "selftest: SCOPED_CAP_KB below 1 MiB would false-FAIL any process"
+        return 1
+    fi
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR -- nothing was checked (selftest failed)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    # A bare --selftest still has to do the real work, because the only
+    # meaningful selftest of this guard IS the paired measurement.
+    :
+fi
+
+SEED=$(find_seed)
+if [ -z "${SEED:-}" ]; then
+    echo "ERROR -- nothing was checked (no runnable seed; set SIMPLE_SEED)"
+    exit 2
+fi
+if [ ! -x /usr/bin/time ]; then
+    echo "ERROR -- nothing was checked (/usr/bin/time absent; cannot read peak RSS)"
+    exit 2
+fi
+
+echo "seed: $SEED"
+echo "budget: scoped <= ${SCOPED_CAP_KB} kB, unscoped/scoped >= ${MIN_RATIO}x"
+
+EV_MEASURED=0
+FAILURES=""
+
+write_fixture "$WORK/scoped.spl" scoped
+write_fixture "$WORK/unscoped.spl" unscoped
+
+if ! build_fixture "$WORK/scoped.spl" "$WORK/scoped.bin"; then
+    echo "ERROR -- nothing was checked (scoped fixture failed to build; see $WORK/scoped.bin.build.log)"
+    KEEP_WORK=1
+    exit 2
+fi
+if ! build_fixture "$WORK/unscoped.spl" "$WORK/unscoped.bin"; then
+    echo "ERROR -- nothing was checked (unscoped fixture failed to build; see $WORK/unscoped.bin.build.log)"
+    KEEP_WORK=1
+    exit 2
+fi
+
+if ! run_fixture "$WORK/scoped.bin"; then
+    echo "ERROR -- nothing was checked (could not measure scoped fixture)"
+    exit 2
+fi
+SCOPED_RSS=$RUN_RSS
+SCOPED_EXIT=$RUN_EXIT
+EV_MEASURED=$((EV_MEASURED + 1))
+echo "scoped:   peak_rss_kB=$SCOPED_RSS exit=$SCOPED_EXIT"
+
+if ! run_fixture "$WORK/unscoped.bin"; then
+    echo "ERROR -- nothing was checked (could not measure unscoped fixture)"
+    exit 2
+fi
+UNSCOPED_RSS=$RUN_RSS
+UNSCOPED_EXIT=$RUN_EXIT
+EV_MEASURED=$((EV_MEASURED + 1))
+echo "unscoped: peak_rss_kB=$UNSCOPED_RSS exit=$UNSCOPED_EXIT"
+
+if [ "$EV_MEASURED" -eq 0 ]; then
+    echo "ERROR -- nothing was checked (0 fixtures measured)"
+    exit 2
+fi
+
+# Correctness gate first: identical work must give an identical answer, and it
+# must be the RIGHT answer. Both fixtures sum 0..ITERS-1 and return it mod 251,
+# so the expected status is computable here. Checking against a computed value
+# (rather than only against each other) is what stops two equally-wrong runs --
+# notably two `timeout` kills, which would otherwise agree at 124 -- from
+# reading as a correctness pass. A scoped build that freed something still live
+# would corrupt or crash and miss this value.
+EXPECTED_EXIT=$(( (ITERS * (ITERS - 1) / 2) % 251 ))
+echo "expected exit status: $EXPECTED_EXIT"
+if [ "$SCOPED_EXIT" != "$UNSCOPED_EXIT" ]; then
+    FAILURES="$FAILURES exit-status-mismatch(scoped=$SCOPED_EXIT,unscoped=$UNSCOPED_EXIT)"
+fi
+if [ "$SCOPED_EXIT" != "$EXPECTED_EXIT" ]; then
+    FAILURES="$FAILURES scoped-wrong-answer(got=$SCOPED_EXIT,want=$EXPECTED_EXIT)"
+fi
+if [ "$UNSCOPED_EXIT" != "$EXPECTED_EXIT" ]; then
+    FAILURES="$FAILURES unscoped-wrong-answer(got=$UNSCOPED_EXIT,want=$EXPECTED_EXIT)"
+fi
+
+# Negative control, evaluated every run: if the unscoped fixture -- the pre-fix
+# shape -- fits under the cap, then the cap cannot discriminate on this host and
+# a PASS would be vacuous. That is ERROR (nothing meaningful was checked), not a
+# pass, and not a FAIL either: the tree may be fine, the budget is not.
+if [ "$UNSCOPED_RSS" -le "$SCOPED_CAP_KB" ]; then
+    echo "ERROR -- nothing was checked (cap ${SCOPED_CAP_KB} kB does not discriminate: unscoped pre-fix shape measured ${UNSCOPED_RSS} kB, at or under the cap)"
+    exit 2
+fi
+
+if [ "$SCOPED_RSS" -gt "$SCOPED_CAP_KB" ]; then
+    FAILURES="$FAILURES scoped-over-budget(${SCOPED_RSS}kB>${SCOPED_CAP_KB}kB)"
+fi
+
+# Integer ratio; guard against a zero denominator.
+if [ "$SCOPED_RSS" -le 0 ]; then
+    echo "ERROR -- nothing was checked (scoped peak RSS reported as $SCOPED_RSS)"
+    exit 2
+fi
+RATIO=$((UNSCOPED_RSS / SCOPED_RSS))
+echo "ratio: ${RATIO}x"
+if [ "$RATIO" -lt "$MIN_RATIO" ]; then
+    FAILURES="$FAILURES reclamation-ineffective(ratio=${RATIO}x<${MIN_RATIO}x)"
+fi
+
+if [ -n "$FAILURES" ]; then
+    echo "FAIL -- $EV_MEASURED fixture(s) measured, transient scope reclamation regressed:$FAILURES"
+    exit 1
+fi
+
+echo "PASS -- $EV_MEASURED fixture(s) measured, scoped ${SCOPED_RSS} kB vs unscoped ${UNSCOPED_RSS} kB (${RATIO}x), identical exit status $SCOPED_EXIT"
+exit 0

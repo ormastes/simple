@@ -1,4 +1,8 @@
 # wine_seh_frame_spec.spl: `common.wine_seh_frame` module does not exist anywhere in src
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Category:** GENUINE-BUG (missing implementation, not a stale rename)
@@ -82,3 +86,4 @@ project rules — do not delete without explicit sign-off).
 ## Affected specs
 
 - `test/01_unit/lib/common/wine_seh_frame_spec.spl` (sole affected spec in this shard)
+

@@ -1,4 +1,8 @@
 # check-push-must-pass requires a bootstrap fingerprint no tree can produce (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (blocks every push through the tracked pre-push dispatcher)
 **Introduced by:** 09e879ff838 `fix(check): harden must-check ledger ownership`
@@ -48,3 +52,4 @@ the same promotion discipline used for `check-stage-binaries-runnable.shs`
 and `check-no-unresolved-runtime-symbols.shs` (landed advisory while honestly
 RED, promoted once green). Keep the structural guards mandatory; they must
 not be skipped as collateral of an unobtainable gate.
+

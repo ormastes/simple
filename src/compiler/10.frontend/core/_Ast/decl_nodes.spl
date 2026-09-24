@@ -324,6 +324,13 @@ var decl_is_hardware: [i64] = []     # 1 if @hardware decorated, 0 otherwise
 var decl_clocked_args: [[text]] = [] # @clocked(clk, reset_n) signal names
 var decl_vhdl_generic_args: [[i64]] = [] # @generic(...) expression ids
 var decl_flatten_struct_output: [i64] = [] # 1 if @flatten_struct_output decorated
+# W3.2 kernel decorators (@unroll(n) / @pipeline(ii=n) / @memory(banks=n)).
+# Arena-backed like decl_flatten_struct_output above: the old env-mirror slots
+# only existed under SIMPLE_BOOTSTRAP=1, so the setters never stored anything
+# on the normal parse path and every getter read back 0.
+var decl_unroll_factor: [i64] = []   # @unroll(n) structural unroll factor; 0 = absent
+var decl_pipeline_ii: [i64] = []     # @pipeline(ii=n) initiation interval; 0 = absent
+var decl_memory_banks: [i64] = []    # @memory(banks=n) bank count; 0 = absent
 var decl_is_value_type: [i64] = []   # 1 = struct (value semantics, copy on bind), 0 = class/actor (reference semantics)
 # Per-parameter `mut` marker (native_freefn_mut_param_no_mutate fix), comma-joined
 # i64 list parallel to PARAM_NAMES/PARAM_TYPES (1 = declared `mut name: T`).
@@ -394,6 +401,9 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_clocked_args.push(decl_empty_text)
     decl_vhdl_generic_args.push(decl_empty_i64)
     decl_flatten_struct_output.push(0)
+    decl_unroll_factor.push(0)
+    decl_pipeline_ii.push(0)
+    decl_memory_banks.push(0)
     decl_is_value_type.push(1)
     decl_param_mut_text.push("")
     decl_param_default_text.push("")
@@ -443,6 +453,9 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_clocked_args[idx] = decl_empty_text
     decl_vhdl_generic_args[idx] = decl_empty_i64
     decl_flatten_struct_output[idx] = 0
+    decl_unroll_factor[idx] = 0
+    decl_pipeline_ii[idx] = 0
+    decl_memory_banks[idx] = 0
     decl_is_value_type[idx] = 1
     decl_param_mut_text[idx] = ""
     decl_param_default_text[idx] = ""
@@ -1258,24 +1271,36 @@ fn decl_get_gpu_backends_text(idx: i64) -> text:
     ast_decl_text_get(idx, "GPU_BACKENDS")
 
 fn decl_set_unroll_factor(idx: i64, n: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "UNROLL_FACTOR", n)
+    """@unroll(n) structural unroll factor for a kernel fn decl."""
+    if idx >= 0 and idx < decl_unroll_factor.len():
+        decl_unroll_factor[idx] = n
+    ast_decl_i64_set(idx, "UNROLL_FACTOR", n)
 
 fn decl_get_unroll_factor(idx: i64) -> i64:
+    if idx >= 0 and idx < decl_unroll_factor.len():
+        return decl_unroll_factor[idx]
     ast_decl_i64_get(idx, "UNROLL_FACTOR")
 
 fn decl_set_pipeline_ii(idx: i64, n: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "PIPELINE_II", n)
+    """@pipeline(ii=n) initiation interval for a kernel fn decl."""
+    if idx >= 0 and idx < decl_pipeline_ii.len():
+        decl_pipeline_ii[idx] = n
+    ast_decl_i64_set(idx, "PIPELINE_II", n)
 
 fn decl_get_pipeline_ii(idx: i64) -> i64:
+    if idx >= 0 and idx < decl_pipeline_ii.len():
+        return decl_pipeline_ii[idx]
     ast_decl_i64_get(idx, "PIPELINE_II")
 
 fn decl_set_memory_banks(idx: i64, n: i64):
-    if not ast_decl_prefer_arena():
-        ast_decl_i64_set(idx, "MEMORY_BANKS", n)
+    """@memory(banks=n) bank count for a kernel fn decl."""
+    if idx >= 0 and idx < decl_memory_banks.len():
+        decl_memory_banks[idx] = n
+    ast_decl_i64_set(idx, "MEMORY_BANKS", n)
 
 fn decl_get_memory_banks(idx: i64) -> i64:
+    if idx >= 0 and idx < decl_memory_banks.len():
+        return decl_memory_banks[idx]
     ast_decl_i64_get(idx, "MEMORY_BANKS")
 
 fn decl_get_derives(idx: i64) -> [text]:
@@ -1563,18 +1588,21 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(decl_is_simd))
     parts = parts.push(flat_pool_enc_i64(decl_is_trait))
     parts = parts.push(flat_pool_enc_i64(decl_is_value_type))
+    parts = parts.push(flat_pool_enc_i64(decl_memory_banks))
     parts = parts.push(flat_pool_enc_text(decl_name))
     parts = parts.push(flat_pool_enc_text(decl_param_default_text))
     parts = parts.push(flat_pool_enc_text(decl_param_mut_text))
     parts = parts.push(flat_pool_enc_text_list(decl_param_names))
     parts = parts.push(flat_pool_enc_i64_list(decl_param_types))
     parts = parts.push(flat_pool_enc_i64_list(decl_params))
+    parts = parts.push(flat_pool_enc_i64(decl_pipeline_ii))
     parts = parts.push(flat_pool_enc_i64(decl_ret_type))
     parts = parts.push(flat_pool_enc_i64(decl_span))
     parts = parts.push(flat_pool_enc_i64(decl_tag))
     parts = parts.push(flat_pool_enc_text_list(decl_type_param_constraint_mode))
     parts = parts.push(flat_pool_enc_text_list_list(decl_type_param_constraints))
     parts = parts.push(flat_pool_enc_text_list(decl_type_params))
+    parts = parts.push(flat_pool_enc_i64(decl_unroll_factor))
     parts = parts.push(flat_pool_enc_i64_list(decl_vhdl_generic_args))
     parts = parts.push(flat_pool_enc_text(decl_visibility))
     parts = parts.push(flat_pool_enc_i64_list(elif_body))
@@ -1624,18 +1652,21 @@ pub fn flat_decl_pools_restore(r: FlatPoolReader) -> bool:
     decl_is_simd = flat_pool_dec_i64(r)
     decl_is_trait = flat_pool_dec_i64(r)
     decl_is_value_type = flat_pool_dec_i64(r)
+    decl_memory_banks = flat_pool_dec_i64(r)
     decl_name = flat_pool_dec_text(r)
     decl_param_default_text = flat_pool_dec_text(r)
     decl_param_mut_text = flat_pool_dec_text(r)
     decl_param_names = flat_pool_dec_text_list(r)
     decl_param_types = flat_pool_dec_i64_list(r)
     decl_params = flat_pool_dec_i64_list(r)
+    decl_pipeline_ii = flat_pool_dec_i64(r)
     decl_ret_type = flat_pool_dec_i64(r)
     decl_span = flat_pool_dec_i64(r)
     decl_tag = flat_pool_dec_i64(r)
     decl_type_param_constraint_mode = flat_pool_dec_text_list(r)
     decl_type_param_constraints = flat_pool_dec_text_list_list(r)
     decl_type_params = flat_pool_dec_text_list(r)
+    decl_unroll_factor = flat_pool_dec_i64(r)
     decl_vhdl_generic_args = flat_pool_dec_i64_list(r)
     decl_visibility = flat_pool_dec_text(r)
     elif_body = flat_pool_dec_i64_list(r)

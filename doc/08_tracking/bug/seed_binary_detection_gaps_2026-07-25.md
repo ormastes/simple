@@ -1,4 +1,8 @@
 # Bug: seed-binary detection is path-based and defeated by cosmetic misdetection
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-25  
 **Status:** DETECTION UNRELIABLE - Identification gap in evidence gates
@@ -18,3 +22,4 @@ Aggravating: the deployed stage4 self-hosted binary itself prints the seed WARNI
 
 ## Fix Direction
 Implement a definitive self-ID channel (e.g., `--version` reporting: `build_lane=seed|stage4-selfhosted` + `source_sha=<hash>`). Consume this across all evidence-gate scripts. Fix the cosmetic warning misdetection at its root in the deployed binary.
+

@@ -1,4 +1,8 @@
 # `origin/main` seed is unbuildable — duplicate `rt_heap_*_bytes` symbols; `check-seed-builds-push.shs` cannot catch it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-16, at `f6cadcc36aff61d16d988651ea36a040d2af6aad` (== `origin/main`),
@@ -107,3 +111,4 @@ editing it from this session risks clobbering in-flight work.
    `check-runtime-api-regression-push.shs` — which already extracts exactly these two
    symbol sets and deliberately keeps them separate rather than unioned, so the data is
    already there.
+

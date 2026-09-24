@@ -1,0 +1,125 @@
+use std.common.crypto.sha256.sha256_text
+use common.kernel_plugin.ids.{KpfDigest256, kpf_digest256_equal, kpf_digest256_zero}
+use app.lint.provider.cpp.compile_database.resolve_compile_command_v1
+use app.lint.provider.cpp.model.*
+use app.lint.provider.cpp.worker.{CppLintWorkerLimitsV1, CppLintWorkerReceiptV1, CppLintWorkerRunV1, run_cpp_lint_worker_v1}
+use os.tooling.clang_worker.clangd_session.{ClangdLifecycleReceiptV1, ClangdLifecycleStateV1, ClangdProcessSessionV1}
+
+pub enum CppSessionStatusV1:
+    Ready
+    Incomplete
+    Cancelled
+    Stale
+    Failed
+    Closed
+
+pub struct CppAnalysisTicketV1:
+    epoch: u64
+    revision: u64
+    content_digest: KpfDigest256
+
+pub struct CppSessionReceiptV1:
+    status: CppSessionStatusV1
+    authoritative: bool
+    revision: u64
+    compile_configuration_fingerprint: text
+    clangd_toolchain_fingerprint: text
+    clang_tidy_toolchain_fingerprint: text
+    reason: text
+
+pub struct CppPublicationResultV1:
+    status: CppSessionStatusV1
+    accepted_diagnostics: u32
+    receipt: CppSessionReceiptV1
+
+fn _toolchain_payload_v1(toolchain: CppToolchainFingerprintV1) -> text:
+    toolchain.tool + "\n" + toolchain.version + "\n" + toolchain.target + "\n" + toolchain.resource_directory + "\n" + "{toolchain.build_digest.w0}:{toolchain.build_digest.w1}:{toolchain.build_digest.w2}:{toolchain.build_digest.w3}"
+
+fn _empty_ticket_v1() -> CppAnalysisTicketV1:
+    CppAnalysisTicketV1(0, 0, kpf_digest256_zero())
+
+pub class AuthoritativeCppToolingSessionV1:
+    clangd: ClangdProcessSessionV1
+    compile_database_content: text
+    compile_database_path: text
+    translation_unit: text
+    configuration_hint: text
+    clang_tidy_wrapper: text
+    clang_tidy_toolchain: CppToolchainFingerprintV1
+    limits: CppLintWorkerLimitsV1
+    current_revision: u64
+    current_digest: KpfDigest256
+    next_epoch: u64
+    active_ticket: CppAnalysisTicketV1
+    active: bool
+    cancelled: bool
+    closed: bool
+
+impl AuthoritativeCppToolingSessionV1:
+    pub static fn create(workspace: text, compile_database_content: text, compile_database_path: text, translation_unit: text, configuration_hint: text, clangd_command: text, clangd_arguments: [text], clangd_toolchain: CppToolchainFingerprintV1, clang_tidy_wrapper: text, clang_tidy_toolchain: CppToolchainFingerprintV1, limits: CppLintWorkerLimitsV1) -> AuthoritativeCppToolingSessionV1:
+        val selection = resolve_compile_command_v1(compile_database_content, translation_unit, configuration_hint, compile_database_path)
+        val receipt = if val selected = selection.receipt: selected else: cpp_empty_config_receipt_v1()
+        val metadata = clangd_session_metadata_v1(workspace, receipt, clangd_toolchain, 0)
+        AuthoritativeCppToolingSessionV1(
+            ClangdProcessSessionV1.create(clangd_command, clangd_arguments, metadata),
+            compile_database_content, compile_database_path, translation_unit, configuration_hint,
+            clang_tidy_wrapper, clang_tidy_toolchain, limits, 0, kpf_digest256_zero(),
+            0, _empty_ticket_v1(), false, false, false,
+        )
+
+    me start() -> ClangdLifecycleReceiptV1:
+        self.clangd.start()
+
+    me begin_revision(revision: u64, content_digest: KpfDigest256) -> CppAnalysisTicketV1:
+        if self.active:
+            self.cancelled = true
+            self.active = false
+        self.current_revision = revision
+        self.current_digest = content_digest
+        self.next_epoch = self.next_epoch + 1
+        self.active_ticket = CppAnalysisTicketV1(self.next_epoch, revision, content_digest)
+        self.active = true
+        self.cancelled = false
+        self.active_ticket
+
+    me cancel(ticket: CppAnalysisTicketV1) -> CppSessionStatusV1:
+        if not self.active or ticket.epoch != self.active_ticket.epoch:
+            return CppSessionStatusV1.Cancelled
+        self.cancelled = true
+        self.active = false
+        CppSessionStatusV1.Cancelled
+
+    fn run_lint(ticket: CppAnalysisTicketV1) -> CppLintWorkerRunV1:
+        if self.closed or self.clangd.state != ClangdLifecycleStateV1.Active or not self.clangd.alive():
+            val result = CppToolResultV1(CppAnalysisState.Failed, CppToolFailure.Crashed, [], -1, "clangd session is not active", cpp_empty_config_receipt_v1(), self.clang_tidy_toolchain)
+            return CppLintWorkerRunV1(result, CppLintWorkerReceiptV1(false, self.translation_unit, self.compile_database_path, "", "", ""))
+        if not self.active or self.cancelled or ticket.epoch != self.active_ticket.epoch:
+            val result = CppToolResultV1(CppAnalysisState.NotAnalyzed, CppToolFailure.None, [], 0, "analysis request was cancelled or superseded", cpp_empty_config_receipt_v1(), self.clang_tidy_toolchain)
+            return CppLintWorkerRunV1(result, CppLintWorkerReceiptV1(false, self.translation_unit, self.compile_database_path, "", "", ""))
+        run_cpp_lint_worker_v1(self.compile_database_content, self.compile_database_path, self.translation_unit, self.configuration_hint, self.clang_tidy_wrapper, ticket.revision, self.clang_tidy_toolchain, self.limits)
+
+    me publish(ticket: CppAnalysisTicketV1, run: CppLintWorkerRunV1) -> CppPublicationResultV1:
+        val configuration_fingerprint = run.worker_receipt.configuration_fingerprint
+        val clangd_fingerprint = sha256_text(_toolchain_payload_v1(self.clangd.metadata.toolchain))
+        val tidy_fingerprint = run.worker_receipt.toolchain_fingerprint
+        if self.closed:
+            return CppPublicationResultV1(CppSessionStatusV1.Closed, 0, CppSessionReceiptV1(CppSessionStatusV1.Closed, false, ticket.revision, configuration_fingerprint, clangd_fingerprint, tidy_fingerprint, "session is closed"))
+        if self.cancelled or not self.active or ticket.epoch != self.active_ticket.epoch:
+            return CppPublicationResultV1(CppSessionStatusV1.Cancelled, 0, CppSessionReceiptV1(CppSessionStatusV1.Cancelled, false, ticket.revision, configuration_fingerprint, clangd_fingerprint, tidy_fingerprint, "analysis request was cancelled or superseded"))
+        if ticket.revision != self.current_revision or not kpf_digest256_equal(ticket.content_digest, self.current_digest):
+            return CppPublicationResultV1(CppSessionStatusV1.Stale, 0, CppSessionReceiptV1(CppSessionStatusV1.Stale, false, ticket.revision, configuration_fingerprint, clangd_fingerprint, tidy_fingerprint, "analysis result does not match the current document snapshot"))
+        self.active = false
+        if run.result.state == CppAnalysisState.Incomplete or run.result.state == CppAnalysisState.NotAnalyzed or not run.worker_receipt.authoritative:
+            return CppPublicationResultV1(CppSessionStatusV1.Incomplete, 0, CppSessionReceiptV1(CppSessionStatusV1.Incomplete, false, ticket.revision, configuration_fingerprint, clangd_fingerprint, tidy_fingerprint, run.result.reason))
+        if run.result.state != CppAnalysisState.Complete:
+            return CppPublicationResultV1(CppSessionStatusV1.Failed, 0, CppSessionReceiptV1(CppSessionStatusV1.Failed, false, ticket.revision, configuration_fingerprint, clangd_fingerprint, tidy_fingerprint, run.result.reason))
+        val authoritative = self.clangd.metadata.authoritative and cpp_toolchain_fingerprint_complete_v1(self.clangd.metadata.toolchain) and cpp_toolchain_fingerprint_complete_v1(self.clang_tidy_toolchain) and run.worker_receipt.authoritative
+        val status = if authoritative: CppSessionStatusV1.Ready else: CppSessionStatusV1.Incomplete
+        val accepted = if authoritative: run.result.diagnostics.len() as u32 else: 0
+        CppPublicationResultV1(status, accepted, CppSessionReceiptV1(status, authoritative, ticket.revision, configuration_fingerprint, clangd_fingerprint, tidy_fingerprint, if authoritative: "" else: "toolchain or compile configuration authority is incomplete"))
+
+    me close() -> ClangdLifecycleReceiptV1:
+        self.active = false
+        self.cancelled = true
+        self.closed = true
+        self.clangd.close()

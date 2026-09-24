@@ -10,11 +10,10 @@
 #     `BlockValue` (whose payloads are `Any`). An unsupported value clears
 #     `w.ok`, so the caller stores nothing for that module and the real build
 #     lowers it in process -- never a lossy entry.
-#   - hc_bad_tag: a decoder that meets an enum tag no arm names raises, since a
-#     versioned, atomically-written entry with a wrong tag is a codec bug, not
-#     a cache miss.
+#   - hc_decode_reject: decoder failures poison the caller-owned reader without
+#     terminating the process. Public decode then treats the entry as a miss.
 
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape, flat_pool_parse_i64}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape}
 use compiler.frontend.parser_types_expr.{Expr}
 use compiler.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -22,6 +21,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # also declared in io/signal_handlers, so the direct module path is required.
 use std.nogc_sync_mut.io_runtime.{exit}
 use std.common.binary_io.{f64_to_bits, f64_from_bits}
+use std.common.encoding.utf8.{text_byte_len}
 
 # CHUNKED: `parts` is the CURRENT chunk and is bounded by HIR_CODEC_CHUNK_LINES;
 # every full chunk is joined once and moved to `chunks`. This is not a style
@@ -34,15 +34,320 @@ use std.common.binary_io.{f64_to_bits, f64_from_bits}
 # CHUNK^2. `finish()` output is byte-identical to the unchunked writer.
 # Record: doc/08_tracking/bug/hir_codec_writer_quadratic_cow_clone_2026-08-22.md
 val HIR_CODEC_CHUNK_LINES: i64 = 512
+val HIR_CODEC_CANONICAL_MAX_OUTPUT_BYTES: i64 = 8 * 1024 * 1024
+val HIR_CODEC_CANONICAL_MAX_ALLOCATION_BYTES: i64 = 128 * 1024 * 1024
+val HIR_CODEC_CANONICAL_MAX_WORK_UNITS: i64 = 1000000
+
+# Explicit caller-selected limits for FlatPoolReader.new_bounded. Keeping the
+# policy DTO in HIR avoids teaching the common flat-pool layer about HIR.
+pub class HirDecodeLimits:
+    max_input_bytes: i64
+    max_allocation_bytes: i64
+    max_nodes: i64
+    max_depth: i64
+    max_work_units: i64
+
+    pub static fn standard() -> HirDecodeLimits:
+        HirDecodeLimits(max_input_bytes: 8 * 1024 * 1024,
+            max_allocation_bytes: 128 * 1024 * 1024,
+            max_nodes: 65536, max_depth: 128, max_work_units: 1000000)
+
+pub struct HirDecodeAuditUsage:
+    peak_live_reserved_bytes: i64
+    entered_nodes: i64
+    maximum_depth: i64
+    charged_work_units: i64
+    overflowed: bool
+
+pub class HirDecodeAuditObserver:
+    event_capacity: i64
+    peak_live_reserved_bytes: i64
+    entered_nodes: i64
+    maximum_depth: i64
+    charged_work_units: i64
+    overflowed: bool
+    var reader_captured: bool
+    var reencode_captured: bool
+    var reader_reserved_bytes: i64
+    var reader_work_units: i64
+    var reader_events: i64
+    var reencode_reserved_bytes: i64
+    var reencode_work_units: i64
+    var reencode_events: i64
+    var allocation_limit: i64
+    var work_limit: i64
+
+    pub static fn create(event_capacity: i64) -> HirDecodeAuditObserver:
+        HirDecodeAuditObserver(event_capacity: event_capacity,
+            peak_live_reserved_bytes: 0, entered_nodes: 0, maximum_depth: 0,
+            charged_work_units: 0, overflowed: event_capacity < 1,
+            reader_captured: false, reencode_captured: false,
+            reader_reserved_bytes: 0, reader_work_units: 0, reader_events: 0,
+            reencode_reserved_bytes: 0, reencode_work_units: 0,
+            reencode_events: 0, allocation_limit: 0, work_limit: 0)
+
+    me _refresh_combined_usage():
+        if not self.reader_captured:
+            return
+        if (self.reader_reserved_bytes < 0 or self.reencode_reserved_bytes < 0 or
+                self.reader_reserved_bytes >
+                    self.allocation_limit - self.reencode_reserved_bytes):
+            self.overflowed = true
+            return
+        if (self.reader_work_units < 0 or self.reencode_work_units < 0 or
+                self.reader_work_units > self.work_limit - self.reencode_work_units):
+            self.overflowed = true
+            return
+        self.peak_live_reserved_bytes = self.reader_reserved_bytes +
+            self.reencode_reserved_bytes
+        self.charged_work_units = self.reader_work_units + self.reencode_work_units
+        if (self.reader_events < 0 or self.reencode_events < 0 or
+                self.event_capacity < 0 or
+                self.reencode_events > self.event_capacity or
+                self.reader_events > self.event_capacity - self.reencode_events):
+            self.overflowed = true
+
+    # FlatPoolReader owns the actual bounded path. Copy its final counters so
+    # this observer stays an audit result DTO rather than pretending to see
+    # allocator events that the runtime does not expose.
+    pub me capture(reader: FlatPoolReader):
+        if self.reader_captured:
+            self.overflowed = true
+            return
+        self.reader_captured = true
+        self.reader_reserved_bytes = reader.live_reserved_bytes
+        self.reader_work_units = reader.charged_work_units
+        self.reader_events = reader.audit_events
+        self.allocation_limit = reader.max_allocation_bytes
+        self.work_limit = reader.max_work_units
+        self.entered_nodes = reader.entered_nodes
+        self.maximum_depth = reader.maximum_depth
+        self._refresh_combined_usage()
+
+    # Record the real attempted canonical writer. This is logical bounded-work
+    # evidence only; it neither observes allocator events nor grants authority.
+    pub me capture_reencode(writer: HirCodecWriter):
+        if self.reencode_captured:
+            self.overflowed = true
+            return
+        self.reencode_captured = true
+        self.reencode_reserved_bytes = writer.charged_allocation_bytes
+        self.reencode_work_units = writer.charged_work_units
+        self.reencode_events = writer.audit_events
+        self._refresh_combined_usage()
+
+    pub fn snapshot() -> HirDecodeAuditUsage:
+        HirDecodeAuditUsage(
+            peak_live_reserved_bytes: self.peak_live_reserved_bytes,
+            entered_nodes: self.entered_nodes,
+            maximum_depth: self.maximum_depth,
+            charged_work_units: self.charged_work_units,
+            overflowed: self.overflowed)
 
 class HirCodecWriter:
     parts: [text]
     chunks: [text]
     ok: bool
     unsupported: text
+    canonical: bool
+    bounded: bool
+    failure_kind: text
+    max_output_bytes: i64
+    max_allocation_bytes: i64
+    max_work_units: i64
+    output_bytes: i64
+    current_part_bytes: i64
+    charged_allocation_bytes: i64
+    charged_work_units: i64
+    audit_events: i64
 
     static fn create() -> HirCodecWriter:
-        HirCodecWriter(parts: [], chunks: [], ok: true, unsupported: "")
+        HirCodecWriter(parts: [], chunks: [], ok: true, unsupported: "",
+            canonical: false, bounded: false, failure_kind: "",
+            max_output_bytes: 0, max_allocation_bytes: 0, max_work_units: 0,
+            output_bytes: 0, current_part_bytes: 0,
+            charged_allocation_bytes: 0, charged_work_units: 0,
+            audit_events: 0)
+
+    static fn create_canonical() -> HirCodecWriter:
+        HirCodecWriter.create_canonical_bounded(
+            HIR_CODEC_CANONICAL_MAX_OUTPUT_BYTES,
+            HIR_CODEC_CANONICAL_MAX_ALLOCATION_BYTES,
+            HIR_CODEC_CANONICAL_MAX_WORK_UNITS)
+
+    static fn create_canonical_bounded(max_output_bytes: i64,
+                                       max_allocation_bytes: i64,
+                                       max_work_units: i64) -> HirCodecWriter:
+        var writer = HirCodecWriter(parts: [], chunks: [], ok: true,
+            unsupported: "", canonical: true, bounded: true,
+            failure_kind: "", max_output_bytes: max_output_bytes,
+            max_allocation_bytes: max_allocation_bytes,
+            max_work_units: max_work_units, output_bytes: 0,
+            current_part_bytes: 0, charged_allocation_bytes: 0,
+            charged_work_units: 0, audit_events: 0)
+        if (max_output_bytes < 0 or max_allocation_bytes < 0 or
+                max_work_units < 0):
+            writer.reject_bounds("invalid_writer_limits")
+        writer
+
+    me reject_bounds(what: text):
+        if self.ok:
+            self.unsupported = what
+            self.failure_kind = "bounds"
+        self.ok = false
+
+    me charge_work(amount: i64) -> bool:
+        if not self.ok:
+            return false
+        if not self.bounded:
+            return true
+        self.audit_events = self.audit_events + 1
+        if amount < 0 or self.charged_work_units > self.max_work_units - amount:
+            self.reject_bounds("writer_work_units")
+            return false
+        self.charged_work_units = self.charged_work_units + amount
+        true
+
+    me reserve(amount: i64) -> bool:
+        if not self.ok:
+            return false
+        if not self.bounded:
+            return true
+        self.audit_events = self.audit_events + 1
+        if (amount < 0 or self.charged_allocation_bytes >
+                self.max_allocation_bytes - amount):
+            self.reject_bounds("writer_allocation_bytes")
+            return false
+        self.charged_allocation_bytes = self.charged_allocation_bytes + amount
+        true
+
+    me _can_append(max_line_bytes: i64, allocation_bytes: i64,
+                   work_units: i64) -> bool:
+        if not self.ok:
+            return false
+        if not self.bounded:
+            return true
+        if (max_line_bytes < 0 or self.output_bytes >
+                self.max_output_bytes - max_line_bytes):
+            self.reject_bounds("writer_output_bytes")
+            return false
+        self.reserve(allocation_bytes) and self.charge_work(work_units)
+
+    me _seal_full_chunk():
+        if not self.ok or self.parts.len() < HIR_CODEC_CHUNK_LINES:
+            return
+        if (self.bounded and
+                self.current_part_bytes > self.max_allocation_bytes - 32):
+            self.reject_bounds("writer_chunk_allocation")
+            return
+        if (not self.reserve(self.current_part_bytes + 32) or
+                not self.charge_work(self.current_part_bytes)):
+            return
+        self.chunks.push(self.parts.join(""))
+        self.parts = []
+        self.current_part_bytes = 0
+
+    me _append_line(line: text):
+        if not self.ok:
+            return
+        val bytes = text_byte_len(line)
+        self.parts.push(line)
+        self.output_bytes = self.output_bytes + bytes
+        self.current_part_bytes = self.current_part_bytes + bytes
+        self._seal_full_chunk()
+
+    me _sort_levels(count: i64) -> i64:
+        var levels: i64 = 0
+        var width: i64 = 1
+        while width < count:
+            levels = levels + 1
+            if width > count / 2: width = count
+            else: width = width * 2
+        levels
+
+    # Dict.keys() materializes its snapshot before typed ordering can inspect
+    # values. Charge that enumeration and retained array first.
+    me account_key_snapshot(count: i64) -> bool:
+        if not self.bounded:
+            return self.ok
+        if count < 0:
+            self.reject_bounds("writer_key_count")
+            return false
+        if count > (self.max_allocation_bytes - 32) / 32:
+            self.reject_bounds("writer_key_snapshot_allocation")
+            return false
+        self.reserve(count * 32 + 32) and self.charge_work(count)
+
+    me account_scalar_key_order(count: i64) -> bool:
+        if not self.bounded:
+            return self.ok
+        if count < 0:
+            self.reject_bounds("writer_key_count")
+            return false
+        val levels = self._sort_levels(count)
+        val work_per_key = levels * 3 + 2
+        val remaining_work = self.max_work_units - self.charged_work_units
+        if work_per_key > 0 and count > remaining_work / work_per_key:
+            self.reject_bounds("writer_key_order_work")
+            return false
+        val sort_work = count * work_per_key
+        if count > (self.max_allocation_bytes - 96) / 24:
+            self.reject_bounds("writer_key_order_allocation")
+            return false
+        self.reserve(count * 24 + 96) and
+            self.charge_work(sort_work)
+
+    me account_text_key_order(values: [text]) -> bool:
+        if not self.bounded:
+            return self.ok
+        val count = values.len()
+        if not self.charge_work(count):
+            return false
+        var total_bytes: i64 = 0
+        var max_key_bytes: i64 = 0
+        for value in values:
+            val bytes = if value == nil: 0 else: text_byte_len(value)
+            if bytes > max_key_bytes:
+                max_key_bytes = bytes
+            if bytes > self.max_allocation_bytes - total_bytes:
+                self.reject_bounds("writer_text_key_bytes")
+                return false
+            total_bytes = total_bytes + bytes
+        val levels = self._sort_levels(count)
+        val remaining_arena_work = self.max_work_units -
+            self.charged_work_units
+        if (count > remaining_arena_work or total_bytes >
+                remaining_arena_work - count):
+            self.reject_bounds("writer_key_order_work")
+            return false
+        if not self.charge_work(total_bytes + count):
+            return false
+        if levels > 0:
+            val remaining_merge_work = self.max_work_units - self.charged_work_units
+            val merge_units_per_key = levels * 3
+            if (merge_units_per_key > 0 and count >
+                    remaining_merge_work / merge_units_per_key):
+                self.reject_bounds("writer_key_order_work")
+                return false
+            if not self.charge_work(count * merge_units_per_key):
+                return false
+            if max_key_bytes > 0:
+                val remaining_compare_work = self.max_work_units -
+                    self.charged_work_units
+                if (count > remaining_compare_work / levels or
+                        count * levels > remaining_compare_work / max_key_bytes):
+                    self.reject_bounds("writer_key_order_work")
+                    return false
+                if not self.charge_work(count * levels * max_key_bytes):
+                    return false
+        if count > (self.max_allocation_bytes - 96) / 88:
+            self.reject_bounds("writer_key_order_allocation")
+            return false
+        val index_bytes = count * 88 + 96
+        if total_bytes > self.max_allocation_bytes - index_bytes:
+            self.reject_bounds("writer_key_order_allocation")
+            return false
+        self.reserve(index_bytes + total_bytes)
 
     # Every put computes its line(s) first, then does exactly ONE push followed
     # by the bounded-chunk seal. Written this way so no early `return` can skip
@@ -51,57 +356,128 @@ class HirCodecWriter:
     # Scalars too can be nil in a lowered module (see put_text). `N` is not a
     # digit, so it cannot collide with any encoded number or bool.
     me put_i64(v: i64):
+        if not self._can_append(22, 64, 22):
+            return
         val line = if v == nil: "N\n" else: "{v}\n"
-        self.parts.push(line)
-        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
-            self.chunks.push(self.parts.join(""))
-            self.parts = []
+        self._append_line(line)
 
     me put_bool(v: bool):
+        if not self._can_append(2, 32, 2):
+            return
         val line = if v == nil: "N\n" else: (if v: "1\n" else: "0\n")
-        self.parts.push(line)
-        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
-            self.chunks.push(self.parts.join(""))
-            self.parts = []
+        self._append_line(line)
 
     # A declared `text` field can hold nil in a real lowered module (doc
     # comments, gpu targets). The escaper only ever emits `\\` or `\n`
     # after a backslash, so the line `\N` cannot collide with any real value
     # and marks nil exactly, keeping nil and "" distinct across the boundary.
     me put_text(v: text):
-        val line = if v == nil: "\\N\n" else: flat_pool_escape(v) + "\n"
-        self.parts.push(line)
-        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
-            self.chunks.push(self.parts.join(""))
-            self.parts = []
+        if v == nil:
+            if self._can_append(3, 32, 1):
+                self._append_line("\\N\n")
+            return
+        if not self.bounded:
+            self._append_line(flat_pool_escape(v) + "\n")
+            return
+        val bytes = text_byte_len(v)
+        if (bytes > (self.max_allocation_bytes - 64) / 4 or
+                bytes > (self.max_work_units - self.charged_work_units) / 7):
+            self.reject_bounds("writer_text_bytes")
+            return
+        # Compute exact output length without materializing escaped text. This
+        # first scan is charged before it begins; _can_append charges the
+        # escaper/materialization pass.
+        if not self.charge_work(bytes):
+            return
+        var encoded_bytes: i64 = 1
+        for character in v:
+            if character == "\\" or character == "\n":
+                encoded_bytes = encoded_bytes + 2
+            else:
+                encoded_bytes = encoded_bytes + text_byte_len(character)
+        # flat_pool_escape materializes both replace results, the newline
+        # append, and the retained part. Reserve a conservative envelope.
+        if bytes > (self.max_allocation_bytes - 96) / 12:
+            self.reject_bounds("writer_text_allocation")
+            return
+        if not self._can_append(encoded_bytes, bytes * 12 + 96,
+                bytes * 6 + 1):
+            return
+        self._append_line(flat_pool_escape(v) + "\n")
 
     # Bit-exact: two i64 halves of the IEEE-754 image, never the printed form
     # (a C-runtime %g print is lossy; the seed's shortest-round-trip print is
     # not the contract either).
     me put_f64(v: f64):
+        if not self._can_append(44, 96, 44):
+            return
         val bits = f64_to_bits(v)
         val hi = (bits >> 32) as i64
         val lo = (bits & 0xFFFFFFFFu64) as i64
-        self.parts.push("{hi}\n{lo}\n")
-        if self.parts.len() >= HIR_CODEC_CHUNK_LINES:
-            self.chunks.push(self.parts.join(""))
-            self.parts = []
+        self._append_line("{hi}\n{lo}\n")
 
     me reject(what: text):
         if self.ok:
             self.unsupported = what
+            self.failure_kind = "unsupported"
         self.ok = false
 
     me finish() -> text:
+        if not self.ok:
+            return ""
         if self.parts.len() > 0:
+            if (self.bounded and
+                    self.current_part_bytes > self.max_allocation_bytes - 32):
+                self.reject_bounds("writer_finish_allocation")
+                return ""
+            if (not self.reserve(self.current_part_bytes + 32) or
+                    not self.charge_work(self.current_part_bytes)):
+                return ""
             self.chunks.push(self.parts.join(""))
             self.parts = []
+            self.current_part_bytes = 0
+        if (self.bounded and
+                self.output_bytes > self.max_allocation_bytes - 32):
+            self.reject_bounds("writer_finish_allocation")
+            return ""
+        if (not self.reserve(self.output_bytes + 32) or
+                not self.charge_work(self.output_bytes)):
+            return ""
         self.chunks.join("")
+
+    me finish_with_header(header: text) -> text:
+        if not self.ok:
+            return ""
+        val header_bytes = text_byte_len(header) + 1
+        if (self.bounded and
+                header_bytes > self.max_output_bytes - self.output_bytes):
+            self.reject_bounds("writer_output_bytes")
+            return ""
+        val body = self.finish()
+        if not self.ok:
+            return ""
+        val final_bytes = header_bytes + text_byte_len(body)
+        if (self.bounded and
+                final_bytes > self.max_allocation_bytes - 32):
+            self.reject_bounds("writer_header_allocation")
+            return ""
+        if (not self.reserve(final_bytes + 32) or
+                not self.charge_work(final_bytes)):
+            return ""
+        self.output_bytes = self.output_bytes + header_bytes
+        header + "\n" + body
 
 fn hc_read_f64(r: FlatPoolReader) -> f64:
     val hi = r.next_i64()
+    if not r.ok:
+        return nil
     val lo = r.next_i64()
+    if not r.ok:
+        return nil
     f64_from_bits(((hi as u64) << 32) | (lo as u64))
+
+fn hc_decode_reject(r: FlatPoolReader):
+    r.reject_malformed("unknown_tag_or_discriminant")
 
 fn hc_bad_tag(type_name: text, tag: i64):
     eprint("error: hir codec: no `{type_name}` arm for tag {tag}; regenerate src/compiler/20.hir/generated/hir_codec.spl\n")
@@ -113,8 +489,11 @@ fn hc_enc_opaque_expr(w: HirCodecWriter, value: Expr):
     w.reject("parser Expr inside a HIR type")
 
 fn hc_dec_opaque_expr(r: FlatPoolReader) -> Expr:
-    hc_bad_tag("Expr", -1)
-    hc_dec_opaque_expr(r)
+    if not r.enter_node():
+        return nil
+    defer r.leave_node()
+    hc_decode_reject(r)
+    nil
 
 # --- opaque: BlockValue (HirExprKind.CustomBlock) ---------------------------
 #
@@ -134,14 +513,32 @@ fn hc_enc_opaque_block_value(w: HirCodecWriter, value: BlockValue):
             w.reject("BlockValue with a non-text payload")
 
 fn hc_dec_opaque_block_value(r: FlatPoolReader) -> BlockValue:
+    if not r.enter_node():
+        return nil
+    defer r.leave_node()
     val tag = r.next_i64()
+    if not r.ok:
+        return nil
     if tag == 0:
-        return BlockValue.Raw(flat_pool_unescape(r.next()))
+        val raw = r.next()
+        if not r.ok:
+            return nil
+        val decoded = r.decode_text(raw)
+        if not r.ok:
+            return nil
+        return BlockValue.Raw(decoded)
     if tag == 1:
-        return BlockValue.Error(flat_pool_unescape(r.next()))
-    hc_bad_tag("BlockValue", tag)
-    BlockValue.Error("unreachable")
+        val message = r.next()
+        if not r.ok:
+            return nil
+        val decoded = r.decode_text(message)
+        if not r.ok:
+            return nil
+        return BlockValue.Error(decoded)
+    hc_decode_reject(r)
+    nil
 
-export HirCodecWriter, hc_bad_tag, hc_read_f64
+export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver
+export HirCodecWriter, hc_bad_tag, hc_decode_reject, hc_read_f64
 export hc_enc_opaque_expr, hc_dec_opaque_expr
 export hc_enc_opaque_block_value, hc_dec_opaque_block_value

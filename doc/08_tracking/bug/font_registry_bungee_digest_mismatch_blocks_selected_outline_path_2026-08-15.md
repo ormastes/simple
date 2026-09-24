@@ -1,4 +1,8 @@
 # Font registry Bungee digest mismatch blocks the registry-validated outline path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
 **Status:** OPEN
@@ -45,3 +49,4 @@ is not.
 Either re-pin the registry digests to the committed TTF bytes, or document/
 provision the expected `SIMPLE_ASSET_ROOT` selected asset so
 `load_selected_font_file` validates on a fresh checkout.
+

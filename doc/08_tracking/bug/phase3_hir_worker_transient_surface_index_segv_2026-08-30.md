@@ -1,4 +1,9 @@
 # Phase 3 HIR worker reads released surface-index dictionary
+## Closed 2026-09-16 — Status fixed in source; receipt shows 821 compiler modules pass HIR+codegen
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Filed: 2026-08-30
 - Severity: high
@@ -39,3 +44,4 @@ all 821 compiler modules through HIR and code generation. Candidate publication
 is independently blocked at link because the selected `core-c-bootstrap` lane
 does not link providers already present in the frozen capsule, including
 `rt_native_build`, `rt_range`, and `rt_cranelift_*`.
+

@@ -1,4 +1,8 @@
 # Seed parser fails on access_cli_grammar.spl ("expected expression, found Dedent")
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-11
 - **Severity:** high (blocks every access-grammar CLI surface under the seed)
@@ -38,3 +42,4 @@ bin/simple run src/app/process/main.spl -- list          # new command, same err
 `access_cli_grammar.spl` last changed in b060ff7c996 (parallel-session WC
 snapshot). Self-hosted binary status untested here (current deployed
 `bin/simple` self-identifies as Rust bootstrap seed).
+

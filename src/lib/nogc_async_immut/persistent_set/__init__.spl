@@ -69,13 +69,21 @@ class PersistentSet:
 
     # Intersection: only elements in both sets.
     fn intersection(other: PersistentSet) -> PersistentSet:
-        val my_items = self._inner.keys()
+        # Intersection is commutative, so iterate whichever side is SMALLER
+        # and probe the larger one. The result cannot be bigger than the
+        # smaller side, yet snapshotting self unconditionally paid an O(|self|)
+        # keys() walk plus |self| probes even when other held a handful of
+        # elements. len() is O(1) on the backing PersistentMap, so picking the
+        # cheaper side costs nothing and the work becomes O(min(|self|,|other|)).
+        val iterate_self = self.len() <= other.len()
+        val items = if iterate_self: self._inner.keys() else: other._inner.keys()
+        val probe = if iterate_self: other else: self
         var result = PersistentMap.empty()
         var i = 0
-        val n = len(my_items)
+        val n = len(items)
         while i < n:
-            val item = my_items[i]
-            if other.contains(item):
+            val item = items[i]
+            if probe.contains(item):
                 result = result.set(item, true)
             i = i + 1
         PersistentSet(_inner: result)
@@ -105,6 +113,12 @@ class PersistentSet:
 
     # Return true if every element of self is also in other.
     fn is_subset(other: PersistentSet) -> bool:
+        # Cardinality guard: self cannot be a subset of a smaller set, and
+        # checking len() is O(1) on the backing PersistentMap while the loop
+        # below pays an O(len) keys() snapshot up front. Short-circuit before
+        # paying that snapshot for a self that is already too big to fit.
+        if self.len() > other.len():
+            return false
         val my_items = self._inner.keys()
         var i = 0
         val n = len(my_items)

@@ -1,4 +1,8 @@
 # Lint exact-span and shared source-view migration is incomplete
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -25,3 +29,4 @@ latency and allocation measurements show no regression.
 
 Missing spans remain explicit fallbacks. They must never become proof of typed semantics,
 purity, alias safety, or transformation legality.
+

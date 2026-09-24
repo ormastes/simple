@@ -1,4 +1,8 @@
 # target_instruction_optimization_32bit_spec pre-existing RED — std.spec does not export 'SPipe'
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Spec: `test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl`
@@ -24,3 +28,4 @@ Spec left RED per testing rules.
 ## Unblock condition
 Either restore the `SPipe` export in `std.spec` or migrate the spec's import to
 the current spipe entrypoint, then re-run.
+

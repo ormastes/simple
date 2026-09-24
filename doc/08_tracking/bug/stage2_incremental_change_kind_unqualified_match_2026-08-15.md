@@ -1,4 +1,9 @@
 # Stage 2 rejects unqualified incremental ChangeKind variants
+## Closed 2026-09-16 — ...d.Added` and `ChangeKind.Modified`. ## Fix Qualify both alternatives: ```simple case Chang
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed and cleared by the next canonical Stage-2 transaction.
 **Observed:** 2026-08-15.
@@ -76,3 +81,4 @@ matcher weakening is part of this fix.
 
 Provider token usage: unavailable. Comparable completed-bug average:
 unavailable.
+

@@ -1,4 +1,9 @@
 # Release workflows reference missing checker scripts
+## Closed 2026-09-16 — ...pts - Date: 2026-07-17 - Status: resolved - Severity: P1 release pipeline failure ## Sympt
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-07-17
 - Status: resolved
@@ -42,3 +47,4 @@ Focused evidence:
 `sh test/01_unit/scripts/release_checker_contract_test.shs` passes with tiny
 local payload/release fixtures and a fake SimpleOS CLI. This does not replace
 live QEMU or GitHub release evidence in their workflows.
+

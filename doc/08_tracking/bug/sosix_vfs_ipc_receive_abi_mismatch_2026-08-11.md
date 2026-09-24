@@ -1,4 +1,8 @@
 # SOSIX VFS IPC Receive ABI Mismatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open blocker for true asynchronous VFS completion  
 **Date:** 2026-08-11
@@ -57,3 +61,4 @@ change. A dedicated nonblocking completion pump owns each reply endpoint.
 4. VFS replies identify the exact `SosixOperationId`.
 5. `sosix_async_read/write` submit without receiving; a completion worker
    performs receive and terminal transition.
+

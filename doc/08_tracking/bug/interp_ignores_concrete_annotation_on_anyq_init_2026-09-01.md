@@ -1,4 +1,8 @@
 # Interpreter ignores concrete annotation on an `any?` initializer (divergence)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01. **Status:** OPEN. **Found while fixing:** MIR-side
 `any?` receiver-type erasure (fixed in `src/compiler/50.mir/mir_lowering_stmts.spl`,
@@ -30,3 +34,4 @@ interpreter side needs the matching unwrap-on-concrete-annotation, or the
 frontend should reject the bare form so both modes agree loudly.
 
 Workaround accepted by both modes today: `... = get_obj(...) ?? {}`.
+

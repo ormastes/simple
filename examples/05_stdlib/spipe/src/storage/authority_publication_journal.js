@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { canonicalJson, contentHash, freezeDeep, sha256Hex } from "./canonical.js";
 import { canonicalRoot, safeNamespace } from "../workspace/paths.js";
+import { fsyncDirectory } from "./directory_fsync.js";
 
 const JOURNAL_BRAND = new WeakSet();
 const JOURNAL_STATE = new WeakMap();
@@ -17,7 +18,6 @@ function digest(value, name) {
   if (!/^sha256:[0-9a-f]{64}$/.test(text)) throw new TypeError(`${name} must be sha256-prefixed`);
   return text;
 }
-function syncDirectory(path) { let fd; try { fd = openSync(path, "r"); fsyncSync(fd); } finally { if (fd !== undefined) closeSync(fd); } }
 function writeDurable(path, bytes, checkpoint = () => {}) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
@@ -25,7 +25,7 @@ function writeDurable(path, bytes, checkpoint = () => {}) {
   let fd;
   try { fd = openSync(temporary, "wx"); checkpoint("write"); writeFileSync(fd, bytes); fsyncSync(fd); checkpoint("file-fsync"); }
   finally { if (fd !== undefined) closeSync(fd); }
-  checkpoint("rename"); renameSync(temporary, path); checkpoint("parent-fsync"); syncDirectory(dirname(path));
+  checkpoint("rename"); renameSync(temporary, path); checkpoint("parent-fsync"); fsyncDirectory(dirname(path));
 }
 function canonicalRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("AuthorityPublicationRecordV1 must be an object");
@@ -55,7 +55,7 @@ export class AuthorityPublicationJournalV1 {
     this.fault_injector = faultInjector;
     this.root = join(this.cache_root, "worktrees", this.worktree_uid, "authority-publications");
     this.records_root = join(this.root, "records"); this.objects_root = join(this.root, "objects"); this.current_path = join(this.root, "current.sdn"); this.lock_path = join(this.root, "writer.lock");
-    mkdirSync(this.records_root, { recursive: true }); mkdirSync(this.objects_root, { recursive: true }); syncDirectory(this.records_root); syncDirectory(this.objects_root);
+    mkdirSync(this.records_root, { recursive: true }); mkdirSync(this.objects_root, { recursive: true }); fsyncDirectory(this.records_root); fsyncDirectory(this.objects_root);
     JOURNAL_BRAND.add(this); JOURNAL_STATE.set(this, { id: randomBytes(16).toString("hex") });
   }
   current() {
@@ -114,7 +114,7 @@ export class AuthorityPublicationJournalV1 {
       writeDurable(this.current_path, bytes, (boundary) => this.#checkpoint(`current-pointer-${boundary}`));
       this.#checkpoint("ack");
       return freezeDeep({ status: "published", previous_publication_uid: current?.publication_uid ?? null, record });
-    } finally { closeSync(lock); unlinkSync(this.lock_path); syncDirectory(dirname(this.lock_path)); }
+    } finally { closeSync(lock); unlinkSync(this.lock_path); fsyncDirectory(dirname(this.lock_path)); }
   }
   recoverAuthorityPublicationV1() { return freezeDeep({ status: "recovered", record: this.current() }); }
   #lock() {

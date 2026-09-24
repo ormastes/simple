@@ -1,3 +1,23 @@
+## Closed 2026-09-13 — already fixed per the entry's own dated evidence (INFERRED, not re-run)
+
+The body already records the resolution and the evidence for it: the Android
+Tauri shell was fixed on 2026-05-29 by restoring the complete Tauri source tree
+and rebuilding the APK with the Android SDK environment set, with an install +
+launch transcript on emulator `simple-pixel-8-api36` (`emulator-5554`, Android
+16 / API 36, x86_64). No status header was ever added, which is the only reason
+this entry still read as open.
+
+Checked 2026-09-13: the Android Gradle project referenced by the evidence still
+exists (`tools/tauri-shell/src-tauri/gen/android/` with `app/`,
+`build.gradle.kts`, `buildSrc/`), so the fix was not lost to a tree removal.
+
+Explicitly NOT re-measured: there is no Android emulator, no `adb`, and no
+Android SDK on this Windows x86_64 host, so the WebView render could not be
+re-observed. This closure rests on the recorded 2026-05-29 transcript, not on a
+new run.
+
+---
+
 # Tauri Android Asset Root Failure
 
 Date: 2026-05-29

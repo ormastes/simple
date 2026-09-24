@@ -1,4 +1,8 @@
 # Stage 3 backend segfault after HIR in GPU dynload bootstrap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -32,3 +36,4 @@ Symbolize offset `0x6fe568` against the admitted Stage 2 binary, reproduce with
 backend crash diagnostics enabled, and repair the pure-Simple compiler before
 retrying bootstrap. Do not substitute the Rust seed or admit the Stage 2 binary
 as a full CLI compiler.
+

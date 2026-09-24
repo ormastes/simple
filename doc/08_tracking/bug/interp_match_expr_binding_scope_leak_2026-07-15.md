@@ -1,4 +1,9 @@
 # Interpreter match-expression bindings leak into caller scope
+## Closed 2026-09-16 — RESOLVED 2026-09-06 with executable proof: spec 6/6 green, defect re-injection discriminates
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - status: **RESOLVED 2026-09-06 — executable proof landed.** (Was: "source fixed
   2026-07-15; executable interpreter proof pending a runnable pure-Simple
@@ -57,3 +62,4 @@ being satisfied by the binding simply never happening.
 
 **Runner trap:** `bin/simple test` caches per spec file by mtime and not by the
 source under test — `touch` the spec before every A/B measurement.
+

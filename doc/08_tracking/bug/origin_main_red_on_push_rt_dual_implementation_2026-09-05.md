@@ -1,4 +1,8 @@
 # `push-rt-dual-implementation` is red on `origin/main` itself (2026-09-05)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -79,3 +83,4 @@ branch was built from and this branch introduces none of the 4 offending
 symbols. All other push-tier gates, and the three range guards
 (`check-no-conflict-tree-push.shs`, `check-no-conflict-markers-push.shs`,
 `check-tree-size-push.shs`), pass clean on this branch.
+

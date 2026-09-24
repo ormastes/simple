@@ -1,4 +1,9 @@
 # Whole test runner skipped comment-only mode
+## Closed 2026-09-16 — ...un as having no enabled test lane. ## Fix and prevention The app entrypoint now imports th
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -15,3 +20,4 @@ and both doctest dispatches.
 
 Static source checks pass. Runtime and whole-suite proof remain pending under
 this session's execution restriction.
+

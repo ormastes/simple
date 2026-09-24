@@ -1,4 +1,8 @@
 # Audit: pure-Simple codegen's own `text`-extern-argument ABI (vs. the `(ptr, len)` convention)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Scope:** the SELF-HOSTED, pure-Simple compiler's own codegen
 (`src/compiler/70.backend/**`, all `.spl`) — NOT `src/compiler_rust` (out of
@@ -274,3 +278,4 @@ No other files were modified. `src/compiler_rust/**`,
 `src/compiler/70.backend/backend/interpreter_calls.spl`, `src/app/mem/**`,
 `src/compiler/10.frontend/**`, and `test/01_unit/runtime/**` were read
 (where read at all) but not edited, per lane ownership boundaries.
+

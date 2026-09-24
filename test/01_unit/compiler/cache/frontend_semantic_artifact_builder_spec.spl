@@ -79,6 +79,36 @@ describe "frontend semantic cache artifact builders":
         expect(a.nodes[0].child_count).to_equal(2)
         expect(a.root_node).to_equal(0)
 
+    it "indexes a mostly-unique payload table without changing canonical node references":
+        var nodes: [FrozenFrontendNodeV1] = []
+        var strings: [text] = []
+        val count: i64 = 256
+        for index in 0..count:
+            val payload = "payload-{count - index}"
+            val children: [i64] = if index + 1 < count: [index + 1] else: []
+            nodes.push(FrozenFrontendNodeV1(
+                kind: index,
+                flags: 0,
+                source_start: index,
+                source_end: index + 1,
+                payload: payload,
+                children: children,
+            ))
+            strings.push(payload)
+            strings.push(payload)
+        val artifact = build_file_ast_v1(
+            digest("large-source"), digest("grammar"), digest("compiler"), count,
+            strings, nodes, 0, digest("summary"), digest("reads"),
+        ).unwrap()
+        expect(artifact.nodes.len()).to_equal(count)
+        expect(artifact.payload_tables.len()).to_equal(count)
+        expect(artifact.string_table).to_equal(artifact.payload_tables)
+        for index in 0..count:
+            val payload_index = artifact.nodes[index].payload_index
+            expect(payload_index >= 0).to_equal(true)
+            expect(payload_index < count).to_equal(true)
+            expect(artifact.payload_tables[payload_index]).to_equal(nodes[index].payload)
+
     it "rejects cycles, multiple parents, bad ranges and unreachable nodes":
         val multiple_parent = [
             FrozenFrontendNodeV1(kind: 1, flags: 0, source_start: 0, source_end: 3,
@@ -184,7 +214,7 @@ describe "frontend semantic cache artifact builders":
 
     it "shares graph identity with the codec across declaration kinds":
         val function_sig = "pub extern fn make_widget() -> Widget"
-        val class_sig = "pub extern class Widget:\n    fn label() -> text"
+        val class_sig = "pub class Widget:\n    pass"
         val summary = project_public_summary_v1(summary_input([
             fact(FrontendPublicFactKindV1.ForwardDeclaration, "sym:widget", class_sig),
             fact(FrontendPublicFactKindV1.Declaration, "sym:widget", class_sig),

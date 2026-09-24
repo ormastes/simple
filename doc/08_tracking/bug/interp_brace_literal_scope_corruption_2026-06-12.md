@@ -1,7 +1,17 @@
 # Brace-containing string literal corrupts lowering scope across functions
 
+## Closed 2026-09-13 — exact regression now executes correctly (the pending execution proof)
+
+- **measured** The entry minimal repro, run verbatim on `bin/simple run` (Rust seed
+  v1.0.0-rc.1, Windows), prints `RULE: [.a { color: red } ]` and exits 0.
+- **measured** No `HIR lowering error: Unknown variable: rule while lowering open_brace`
+  and no `error[E1002]: function main not found` — both filed symptoms are absent.
+- **inferred** The entry status was already "source fixed; exact regression execution
+  pending"; this run supplies the missing execution evidence.
+
+
 Date: 2026-06-12
-Status: source fixed; exact regression execution pending
+Status: closed 2026-09-13 (was: Status: source fixed; exact regression execution pending)
 Severity: P2
 Related: `short_grammar_placeholder_interpolation_2026-05-27.md`,
 memory note "Brace Interpolation in Literals"

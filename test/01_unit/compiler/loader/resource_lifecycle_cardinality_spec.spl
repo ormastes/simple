@@ -1,0 +1,32 @@
+"""Production resource-lifecycle registry cardinality invariant."""
+
+use std.spec.step
+use compiler.loader.loader.smf_cache_manager.{smfcachemanager_with_new_cache}
+use compiler.loader.loader.resource_lifecycle.{
+    lifecycleconfig_default, lifecycle_with_defaults, lifecycle_on_module_load,
+    lifecycle_on_jit_triggered, lifecycle_tracked_module_count,
+    lifecycle_tracked_jit_count, lifecycle_get_jit_origin, lifecycle_stats
+}
+
+describe "resource lifecycle cardinality":
+    it "counts unique module owners without materializing registry keys":
+        # @req NFR-LIFECYCLE-COUNT-001
+        step("register two owners and refresh one owner record")
+        val lifecycle = lifecycle_with_defaults(smfcachemanager_with_new_cache())
+        lifecycle_on_module_load(lifecycle, "a.smf", 1, 10)
+        lifecycle_on_module_load(lifecycle, "b.smf", 2, 20)
+        lifecycle_on_module_load(lifecycle, "a.smf", 3, 30)
+        expect(lifecycle_tracked_module_count(lifecycle)).to_equal(2)
+        expect(lifecycle_stats(lifecycle).tracked_modules).to_equal(2)
+
+    it "counts unique JIT symbols and permits origin refresh":
+        # @req NFR-LIFECYCLE-COUNT-002
+        step("register and retarget an existing JIT symbol")
+        val lifecycle = lifecycle_with_defaults(smfcachemanager_with_new_cache())
+        lifecycle_on_module_load(lifecycle, "owner-a", 1, 10)
+        lifecycle_on_module_load(lifecycle, "owner-b", 2, 20)
+        lifecycle_on_jit_triggered(lifecycle, "owner-a", "jit_fn")
+        lifecycle_on_jit_triggered(lifecycle, "owner-b", "jit_fn")
+        lifecycle_on_jit_triggered(lifecycle, "owner-b", "jit_fn")
+        expect(lifecycle_tracked_jit_count(lifecycle)).to_equal(1)
+        expect(lifecycle_get_jit_origin(lifecycle, "jit_fn") ?? "").to_equal("owner-b")

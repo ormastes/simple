@@ -1,0 +1,67 @@
+use app.io.context_ops.{context_sql_get_pack, context_sql_put_pack}
+use app.io.context_pure_database_importer.{context_sql_import_facade_to_pure_v2}
+use std.database.pure_sql.{PureDatabase}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn import_fixture_content() -> text:
+    "left|right\tline1\r\nline2%tail"
+
+fn prepare(source_path: text, snapshot_path: text):
+    val first = context_sql_put_pack(
+        "src/a.spl", "alpha", import_fixture_content(), source_path, "text")
+    val second = context_sql_put_pack(
+        "src/b.spl", "beta", "second", source_path, "text")
+    if not first.contains("status: ready") or not second.contains("status: ready"):
+        panic("context source preparation failed")
+    if not file_atomic_write(snapshot_path, file_read(source_path)):
+        panic("context source snapshot failed")
+    print "CONTEXT_IMPORT_SOURCE_READY"
+
+fn import_store(source_path: text, stage_path: text, destination_path: text):
+    val receipt = context_sql_import_facade_to_pure_v2(
+        source_path, stage_path, destination_path)
+    if receipt.status != "ready":
+        panic("context import failed: {receipt.reason}")
+    if receipt.row_count != 2:
+        panic("context import row count changed")
+    if (receipt.source_rows_digest != receipt.stage_rows_digest or
+       receipt.source_rows_digest != receipt.destination_rows_digest):
+        panic("context import ordered row digests differ")
+    if receipt.stage_bytes_digest != receipt.destination_bytes_digest:
+        panic("context import stage and destination digests differ")
+    print "CONTEXT_IMPORT_PUBLISHED rows={receipt.row_count} bytes={receipt.stage_bytes}"
+
+fn verify(source_path: text, snapshot_path: text, stage_path: text,
+          destination_path: text):
+    if file_read(source_path) != file_read(snapshot_path):
+        panic("context importer changed its source")
+    if file_exists(stage_path):
+        panic("context importer retained publish stage")
+    val reopened = PureDatabase.open_deferred(destination_path).unwrap()
+    val rows = reopened.query(
+        "SELECT id, source, target, status, lines, token_estimate, content FROM context_packs ORDER BY id", []).unwrap()
+    if rows.len() != 2:
+        panic("context destination row count changed after independent reopen")
+    if rows[0].values[6].to_text() != import_fixture_content():
+        panic("context destination delimiter text changed")
+    val default_read = context_sql_get_pack("src/a.spl", source_path, "text")
+    if (not default_read.contains("backend: sqlite") or
+       not default_read.contains(import_fixture_content())):
+        panic("context default backend changed after import")
+    print "CONTEXT_IMPORT_REOPEN_VERIFIED rows={rows.len()}"
+
+fn main():
+    val args = rt_cli_get_args() ?? []
+    if args.len() < 2:
+        panic("missing context import runner mode")
+    if args[1] == "prepare" and args.len() == 4:
+        prepare(args[2], args[3])
+    elif args[1] == "import" and args.len() == 5:
+        import_store(args[2], args[3], args[4])
+    elif args[1] == "verify" and args.len() == 6:
+        verify(args[2], args[3], args[4], args[5])
+    else:
+        panic("invalid context import runner arguments")

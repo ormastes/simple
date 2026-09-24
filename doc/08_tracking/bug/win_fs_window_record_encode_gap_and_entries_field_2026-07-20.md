@@ -1,4 +1,8 @@
 # `lib.common.win_fs.window_record`: missing `window_record_encode` + internal `WindowRecord.entries` field mismatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/lib/common/win_fs/window_record.spl`,
@@ -71,3 +75,4 @@ Both spec files left unmodified — the imports and field accesses reflect
 what the contract is supposed to be; fixing this means implementing/wiring
 `window_record_encode` and correcting the `winfs_shim_host.spl` publish
 path, not editing the tests.
+

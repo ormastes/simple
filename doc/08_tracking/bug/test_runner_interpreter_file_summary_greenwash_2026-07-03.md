@@ -1,4 +1,8 @@
 # Test runner (interpreter mode): file summary reports Failed: 0 despite failing examples
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-03
 - **Severity:** P1 (trust — CI/agents reading the summary see green on red)
@@ -24,3 +28,4 @@ report failures; only the aggregation drops them.
 Automated verification that greps `^PASS` or trusts the exit code reports
 green on genuinely red specs. Workaround until fixed: also grep the per-block
 output for `✗` / `[1-9][0-9]* failures?`.
+

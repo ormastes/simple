@@ -1,4 +1,8 @@
 # Bare field reference inside methods is illegal in every lane, yet ~740 product-code sites use it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-10
 - Status: OPEN (P2)
@@ -568,3 +572,16 @@ full-mode check floor 5 → 6 so neither gate got looser as scope grew.
 sites are real dead methods and still need fixing. The analyzer no longer has a
 known false-positive family, so a further scope widening is a scanning decision,
 not a precision one.
+
+## Triage 2026-09-13
+
+570-line record covering ~740 product-code sites across src/os,
+src/compiler, src/lib that use an illegal bare-field-reference form
+(no lane accepts it -- confirmed illegal, not a compiler gap). Fixing
+this means editing all ~740 call sites system-wide, a mass mechanical
+change well beyond this lane's per-item budget and risky to attempt
+without a scoped plan (some modules already fixed per the header note,
+"the wider 62-file family is filed here as systemic follow-up").
+Leaving OPEN, no attempt.
+
+

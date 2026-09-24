@@ -99,6 +99,15 @@ impl NativeLinker {
             return Self::from_name(&linker);
         }
 
+        // Mach-O must use the Apple linker frontend.  `ld.lld` is the ELF
+        // frontend even on macOS, so selecting it for an Apple target rejects
+        // Mach-O objects as "unknown file type" and cannot resolve -lSystem.
+        // Do not silently fall through to an incompatible linker when Apple ld
+        // is unavailable; an explicit SIMPLE_LINKER override remains possible.
+        if target.os == TargetOS::MacOS {
+            return Self::is_available(Self::Ld).then_some(Self::Ld);
+        }
+
         match target.linker_flavor() {
             LinkerFlavor::Msvc => {
                 // Prefer lld-link over link.exe
@@ -557,6 +566,11 @@ impl NativeLinker {
                     }
                     if options.shared {
                         cmd.arg("-dylib"); // Apple ld uses -dylib, not -shared
+                        // Simple SFFI plugins are loaded into a host that owns
+                        // the runtime ABI.  Match ELF shared-object semantics:
+                        // leave those host-provided symbols for dyld to bind at
+                        // load time instead of requiring a second runtime copy.
+                        cmd.arg("-undefined").arg("dynamic_lookup");
                     }
                     // -dead_strip is Apple ld's equivalent of --gc-sections
                     cmd.arg("-dead_strip");
@@ -904,7 +918,25 @@ mod tests {
         let _linker = NativeLinker::detect_for_target(&windows);
 
         let macos = Target::new(TargetArch::Aarch64, TargetOS::MacOS);
-        let _linker = NativeLinker::detect_for_target(&macos);
+        let linker = NativeLinker::detect_for_target(&macos);
+        if NativeLinker::is_available(NativeLinker::Ld) {
+            assert_eq!(linker, Some(NativeLinker::Ld));
+        } else {
+            assert_eq!(linker, None);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_shared_plugins_bind_runtime_symbols_from_host() {
+        let mut command = Command::new("ld");
+        NativeLinker::Ld.add_common_flags(&mut command, &LinkOptions::new().as_shared());
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|pair| pair == ["-undefined", "dynamic_lookup"]));
     }
 
     #[test]

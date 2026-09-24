@@ -1,0 +1,140 @@
+use common.kernel_plugin.ids.{KpfDigest256, kpf_digest256_zero}
+
+pub enum CppAnalysisState:
+    Complete
+    Partial
+    Incomplete
+    NotAnalyzed
+    Failed
+
+pub enum CompileCommandStatus:
+    Selected
+    Missing
+    Ambiguous
+    Malformed
+
+pub enum CppToolFailure:
+    None
+    TimedOut
+    Crashed
+    MalformedOutput
+
+pub struct CompileCommandV1:
+    directory: text
+    file: text
+    arguments: [text]
+    command: text
+    configuration_id: text
+
+pub struct TranslationUnitConfigReceiptV1:
+    translation_unit: text
+    directory: text
+    arguments: [text]
+    command: text
+    configuration_id: text
+    compile_database_path: text
+    exact: bool
+
+pub struct CompileCommandSelectionV1:
+    status: CompileCommandStatus
+    state: CppAnalysisState
+    receipt: TranslationUnitConfigReceiptV1?
+    candidate_count: u32
+    reason: text
+
+pub struct CppToolchainFingerprintV1:
+    tool: text
+    version: text
+    target: text
+    resource_directory: text
+    build_digest: KpfDigest256
+
+pub struct ClangdSessionMetadataV1:
+    workspace: text
+    compile_database_path: text
+    toolchain: CppToolchainFingerprintV1
+    configuration_id: text
+    document_revision: u64
+    authoritative: bool
+
+pub struct CppTextEditV1:
+    path: text
+    revision: u64
+    start_byte: u64
+    end_byte: u64
+    replacement: text
+    machine_applicable: bool
+
+pub struct CppDiagnosticV1:
+    rule: text
+    severity: text
+    path: text
+    revision: u64
+    start_byte: u64
+    end_byte: u64
+    message: text
+    fixes: [CppTextEditV1]
+
+pub struct CppToolResultV1:
+    state: CppAnalysisState
+    failure: CppToolFailure
+    diagnostics: [CppDiagnosticV1]
+    exit_code: i64
+    reason: text
+    receipt: TranslationUnitConfigReceiptV1?
+    toolchain: CppToolchainFingerprintV1
+
+pub fn cpp_empty_config_receipt_v1() -> TranslationUnitConfigReceiptV1:
+    TranslationUnitConfigReceiptV1("", "", [], "", "", "", false)
+
+pub fn cpp_unknown_toolchain_v1(tool: text) -> CppToolchainFingerprintV1:
+    CppToolchainFingerprintV1(tool, "unknown", "unknown", "unknown", kpf_digest256_zero())
+
+pub fn cpp_toolchain_fingerprint_complete_v1(fingerprint: CppToolchainFingerprintV1) -> bool:
+    fingerprint.tool != "" and fingerprint.version != "" and fingerprint.version != "unknown" and fingerprint.target != "" and fingerprint.target != "unknown" and fingerprint.resource_directory != "" and fingerprint.resource_directory != "unknown"
+
+pub fn select_compile_command_v1(commands: [CompileCommandV1], translation_unit: text, configuration_hint: text, compile_database_path: text) -> CompileCommandSelectionV1:
+    var matches: [CompileCommandV1] = []
+    for candidate in commands:
+        if candidate.file == translation_unit:
+            if configuration_hint == "" or candidate.configuration_id == configuration_hint:
+                matches.push(candidate)
+
+    if matches.len() == 0:
+        return CompileCommandSelectionV1(
+            CompileCommandStatus.Missing,
+            CppAnalysisState.NotAnalyzed,
+            nil,
+            0,
+            "no exact compile command for translation unit",
+        )
+    if matches.len() > 1:
+        return CompileCommandSelectionV1(
+            CompileCommandStatus.Ambiguous,
+            CppAnalysisState.Partial,
+            nil,
+            matches.len(),
+            "multiple compile commands match translation unit and configuration",
+        )
+
+    val selected = matches[0]
+    val receipt = TranslationUnitConfigReceiptV1(
+        translation_unit: selected.file,
+        directory: selected.directory,
+        arguments: selected.arguments,
+        command: selected.command,
+        configuration_id: selected.configuration_id,
+        compile_database_path: compile_database_path,
+        exact: true,
+    )
+    CompileCommandSelectionV1(CompileCommandStatus.Selected, CppAnalysisState.Complete, receipt, 1, "")
+
+pub fn clangd_session_metadata_v1(workspace: text, receipt: TranslationUnitConfigReceiptV1, toolchain: CppToolchainFingerprintV1, document_revision: u64) -> ClangdSessionMetadataV1:
+    ClangdSessionMetadataV1(
+        workspace: workspace,
+        compile_database_path: receipt.compile_database_path,
+        toolchain: toolchain,
+        configuration_id: receipt.configuration_id,
+        document_revision: document_revision,
+        authoritative: receipt.exact and receipt.compile_database_path != "",
+    )

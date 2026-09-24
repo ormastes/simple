@@ -976,27 +976,51 @@ pub fn load_and_merge_module(
     let _mem_scope = crate::mem_trace::ModuleScope::enter(&module_path);
     let mem_before_parse = crate::mem_trace::live();
 
-    // Read and parse the module
-    let mut source = match crate::read_trace::rts(file!(), line!(), &module_path) {
-        Ok(s) => {
-            // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
-            if s.contains('\r') {
-                s.replace('\r', "")
-            } else {
-                s
-            }
-        }
-        Err(e) => {
+    // Read and parse the module.
+    //
+    // Source and AST both come from the cross-lane cache
+    // (`module_cache::PARSED_SOURCE_CACHE`), which the HIR lowerer fills for
+    // every file it reaches first. Measured on `src/app/mcp/main.spl --help`:
+    // 117 of the 128 files this loader reads were already read and parsed by
+    // that lane -- 1,265,979 bytes re-read and re-parsed here for nothing.
+    let shared = crate::interpreter::shared_source(&module_path);
+    let raw = match &shared {
+        crate::interpreter::SharedSource::Parsed { source, .. } => Arc::clone(source),
+        crate::interpreter::SharedSource::ReadError(e) => {
             unmark_module_loading(&module_path);
             decrement_load_depth();
             return Err(CompileError::Io(format!("Cannot read module {:?}: {}", module_path, e)));
         }
     };
-    source =
-        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, simple_common::target::TargetArch::host());
-
-    let mut parser = simple_parser::Parser::new(&source);
-    let module = match parser.parse() {
+    // Interpreted code runs on the HOST, so wrong-arch `@cfg` globals are
+    // blanked before parsing. The cached AST is the parse of the UNSTRIPPED
+    // bytes, so it is only reusable when stripping is a no-op for this file;
+    // otherwise this lane parses its own source, exactly as it always did.
+    let source =
+        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&raw, simple_common::target::TargetArch::host());
+    let reusable = if source == *raw {
+        match &shared {
+            crate::interpreter::SharedSource::Parsed { ast, .. } => Some(ast.clone()),
+            crate::interpreter::SharedSource::ReadError(_) => None,
+        }
+    } else {
+        None
+    };
+    let parsed = match reusable {
+        Some(Ok(ast)) => {
+            crate::perf_counters::bump(&crate::perf_counters::INTERP_MODULE_AST_REUSE, 1);
+            // `Node` owns its definitions by value, so this is a deep copy: the
+            // interpreter gets a tree it alone owns, identical to the one the
+            // fresh parse produced, without lexing the file a second time.
+            Ok((*ast).clone())
+        }
+        Some(Err(message)) => Err(message.to_string()),
+        None => {
+            crate::perf_counters::bump(&crate::perf_counters::INTERP_MODULE_PARSES, 1);
+            simple_parser::Parser::new(&source).parse().map_err(|e| e.to_string())
+        }
+    };
+    let module = match parsed {
         Ok(m) => m,
         Err(e) => {
             unmark_module_loading(&module_path);
@@ -1553,7 +1577,7 @@ mod tests {
         assert_eq!(resolved, file_path);
     }
 
-    fn use_stmt_with_path(path: &[&str], target: ImportTarget) -> UseStmt {
+    pub(super) fn use_stmt_with_path(path: &[&str], target: ImportTarget) -> UseStmt {
         UseStmt {
             span: Span::new(0, 0, 0, 0),
             path: ModulePath {
@@ -2011,5 +2035,174 @@ export register_wiki_tool
         });
         let requested = vec!["compile_file".to_string()];
         assert!(should_keep_selective_export(&node, &requested));
+    }
+}
+
+/// Cross-lane source+AST cache: the HIR lowerer and this loader must read and
+/// parse a physical file ONCE between them, not once each.
+///
+/// Measured on `src/app/mcp/main.spl --help` before the shared cache
+/// (`SIMPLE_READ_TRACE=1`, realpaths): the lowerer read 117 physical files and
+/// this loader read 128, intersection 117 -- 1,265,979 bytes read and fully
+/// re-parsed for nothing, in two caches that could not see each other.
+///
+/// Pinned by COUNT of cache entries, which is thread-local and therefore exact
+/// under cargo's parallel test threads; the process-global perf counters are
+/// not safe to assert on here.
+#[cfg(test)]
+mod cross_lane_parsed_source_tests {
+    use super::load_and_merge_module;
+    use super::tests::use_stmt_with_path;
+    use crate::interpreter::{clear_parsed_source_cache, parsed_source_cache_len, shared_source, SharedSource};
+    use simple_parser::ast::ImportTarget;
+    use std::collections::HashMap;
+    use std::fs;
+
+    fn glob_use(name: &str) -> simple_parser::ast::UseStmt {
+        use_stmt_with_path(&[name], ImportTarget::Glob)
+    }
+
+    #[test]
+    fn three_module_fixture_is_parsed_once_across_both_lanes() {
+        crate::interpreter::clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        fs::write(&entry, "").unwrap();
+        let names = ["alpha", "beta", "gamma"];
+        for name in names {
+            fs::write(
+                temp.path().join(format!("{name}.spl")),
+                format!("fn {name}_value(): 1\nexport {name}_value\n"),
+            )
+            .unwrap();
+        }
+
+        // Lane 1 -- the HIR lowerer, reaching each file by its plain spelling.
+        let lowered: Vec<_> = names
+            .iter()
+            .map(|name| {
+                crate::hir::lower::import_loader::parsed_imported_module(&temp.path().join(format!("{name}.spl")))
+                    .expect("fixture module parses")
+            })
+            .collect();
+        assert_eq!(parsed_source_cache_len(), 3, "one entry per physical file");
+
+        // Lane 2 -- this loader, reaching the same three files. Before the
+        // shared cache it read and re-parsed all three.
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        for name in names {
+            load_and_merge_module(
+                &glob_use(name),
+                Some(&entry),
+                &mut functions,
+                &mut classes,
+                &mut enums,
+            )
+            .expect("module loads");
+            assert!(
+                functions.contains_key(&format!("{name}_value")),
+                "the borrowed parse must still produce the module's exports"
+            );
+        }
+
+        assert_eq!(
+            parsed_source_cache_len(),
+            3,
+            "the second lane must borrow the first lane's entries, not add its own"
+        );
+        for (name, lowered_ast) in names.iter().zip(lowered) {
+            let SharedSource::Parsed { ast: Ok(cached), .. } = shared_source(&temp.path().join(format!("{name}.spl")))
+            else {
+                panic!("{name} must still be a parsed entry");
+            };
+            assert!(
+                std::sync::Arc::ptr_eq(&lowered_ast, &cached),
+                "{name}: the interpreter lane must not replace the shared parse"
+            );
+        }
+    }
+
+    #[test]
+    fn alias_spellings_of_one_file_share_one_entry() {
+        clear_parsed_source_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("pkg");
+        fs::create_dir_all(&real).unwrap();
+        let module = real.join("types.spl");
+        fs::write(&module, "pub struct Widget:\n    id: i64\n").unwrap();
+
+        let dotted = real.join(".").join("types.spl");
+        let parent_relative = real.join("..").join("pkg").join("types.spl");
+        for spelling in [&module, &dotted, &parent_relative] {
+            assert!(matches!(
+                shared_source(spelling),
+                SharedSource::Parsed { ast: Ok(_), .. }
+            ));
+        }
+        assert_eq!(parsed_source_cache_len(), 1, "alias spellings are one unit");
+    }
+
+    #[test]
+    fn failure_text_survives_being_cached() {
+        clear_parsed_source_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("gone.spl");
+        let broken = temp.path().join("broken.spl");
+        fs::write(&broken, "fn broken(\n").unwrap();
+
+        // The io error's own text, kept so each lane rebuilds its own message.
+        let SharedSource::ReadError(io_text) = shared_source(&missing) else {
+            panic!("an unreadable file must cache a read error");
+        };
+        assert_eq!(
+            io_text.as_ref(),
+            fs::read_to_string(&missing).unwrap_err().to_string(),
+            "cached io text must match what the lane would have seen"
+        );
+
+        let SharedSource::Parsed { ast: Err(parse_text), .. } = shared_source(&broken) else {
+            panic!("an unparseable file must cache its parse error");
+        };
+        assert_eq!(
+            parse_text.as_ref(),
+            simple_parser::Parser::new("fn broken(\n").parse().unwrap_err().to_string(),
+            "cached parse text must match what the lane would have seen"
+        );
+
+        // Both negatives are memoized, as they were in each lane's own cache.
+        assert_eq!(parsed_source_cache_len(), 2);
+        let _ = shared_source(&missing);
+        let _ = shared_source(&broken);
+        assert_eq!(parsed_source_cache_len(), 2);
+    }
+
+    #[test]
+    fn host_cfg_stripping_still_parses_its_own_source() {
+        clear_parsed_source_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let module = temp.path().join("arch.spl");
+        // A global gated to an arch that is never the host: the interpreter
+        // blanks it before parsing, so the shared (unstripped) parse is NOT
+        // reusable for that lane and it must fall back to its own parse.
+        let other_arch = if simple_common::target::TargetArch::host() == simple_common::target::TargetArch::X86_64 {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        fs::write(&module, format!("@cfg({other_arch})\nconst ONLY_THERE = 1\nfn v(): 2\nexport v\n")).unwrap();
+
+        let SharedSource::Parsed { source, ast: Ok(raw_ast) } = shared_source(&module) else {
+            panic!("fixture parses");
+        };
+        let stripped =
+            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, simple_common::target::TargetArch::host());
+        assert_ne!(stripped, *source, "the fixture must actually diverge under stripping");
+        let stripped_ast = simple_parser::Parser::new(&stripped).parse().expect("stripped source parses");
+        assert!(
+            stripped_ast.items.len() < raw_ast.items.len(),
+            "the stripped parse must drop the wrong-arch global, which is why it cannot borrow"
+        );
     }
 }

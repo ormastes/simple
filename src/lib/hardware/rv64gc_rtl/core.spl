@@ -17,6 +17,7 @@
 # ============================================================================
 
 use std.hardware.rv64gc_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv64gc_rtl.pkg.{SocBus64}
 use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM, OP_MISC_MEM}
 use std.hardware.rv64gc_rtl.pkg.{OP_IMMED, OP_REG, OP_OP_IMM_32, OP_OP_32, OP_AMO}
 use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
@@ -331,7 +332,9 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
     val eff_insn = exp.insn
     # Illegal-instruction tval: the 16-bit parcel for a compressed insn, else
     # the full 32-bit word (RISC-V mtval carries the faulting instruction).
-    val ill_tval: i64 = if exp.compressed: (imem_data as i64) & 0xFFFF else: eff_insn as i64
+    var ill_tval: i64 = eff_insn as i64
+    if exp.compressed:
+        ill_tval = (imem_data as i64) & 0xFFFF
 
     var new_pc = state.pc
     var new_halt = state.halt
@@ -671,7 +674,7 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
     val mmu = mmu64_create()
     val pmp = pmp64_entries_reset()
     val fpu_cfg = fpu_config_enabled()
-    var csr_m = csr64_set_fs(csr64_create(0), FS_INITIAL)
+    var csr_m = csr64_create(0)
     csr_m.misa = core64_misa_for_fpu(csr_m.misa & -2, fpu_cfg)
     val csr_s = core64_sync_sstatus_fp(csr_s64_create(), csr_m)
     CoreState64(
@@ -721,7 +724,7 @@ fn core64_init(reset_vec: i64) -> CoreState64:
     val mmu = mmu64_create()
     val pmp = pmp64_entries_reset()
     val fpu_cfg = fpu_config_enabled()
-    var csr_m = csr64_set_fs(csr64_create(0), FS_INITIAL)
+    var csr_m = csr64_create(0)
     csr_m.misa = core64_misa_for_fpu(csr_m.misa & -2, fpu_cfg)
     val csr_s = core64_sync_sstatus_fp(csr_s64_create(), csr_m)
     CoreState64(
@@ -760,3 +763,44 @@ fn core64_init(reset_vec: i64) -> CoreState64:
         rvfi_insn: 0,
         rvfi_pc_wdata: reset_vec
     )
+
+# ============================================================================
+# Direct architectural step
+# ============================================================================
+
+struct Core64StepResult:
+    """Result of one direct core64_step: the stepped core and the bus word
+    it consumed."""
+    state: CoreState64
+    bus: SocBus64
+
+fn core64_step(state: CoreState64, bus: SocBus64) -> Core64StepResult:
+    """Advance the legacy datapath one instruction using the word on the bus.
+
+    core64_step is the direct-step sibling of the protected clocked pipeline:
+    it expands and executes the word supplied on the bus against the
+    combinational datapath and commits PC and register writeback.  It takes
+    no architectural traps — trap policy belongs to the protected clocked
+    entry points — so an illegal or reserved parcel simply advances PC past
+    the parcel.
+    """
+    val imem_data: u32 = bus.data as u32
+    val exp = rvc_expand(imem_data)
+    val instruction = exp.insn
+    var instruction_bytes: u32 = 4
+    if exp.compressed:
+        instruction_bytes = 2
+    var out = state
+    out.instruction = instruction
+    out.instruction_bytes = instruction_bytes
+    val comb = core64_combinational_length(out, instruction, 0, out.rf,
+        instruction_bytes)
+    out.pc = comb.pc_next
+    out.rvfi_valid = true
+    out.rvfi_trap = false
+    out.rvfi_insn = instruction
+    out.rvfi_pc_wdata = comb.pc_next
+    out.rvfi_order = state.rvfi_order + 1
+    if comb.rd_write:
+        out.rf = regfile64_write(out.rf, comb.dec.rd, comb.rd_data, true)
+    Core64StepResult(state: out, bus: bus)

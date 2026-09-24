@@ -1,4 +1,8 @@
 # Stage2 HIR field-type inference regression
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -43,3 +47,4 @@ spelling. The completed repair must retain `TypeId -> canonical owner` metadata
 at class/struct registration (including imported materialization) and use it
 for field layout lookup. A regression must prove that two same-named imported
 types resolve different field index/types from their own receiver TypeIds.
+

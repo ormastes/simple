@@ -984,7 +984,7 @@ admission as invalid and perform a new exact-state review before redispatch.
 `--no-verify` skips local Git hooks only and never bypasses repository
 protection or required checks. See `doc/07_guide/app/devhub.md`,
 `doc/07_guide/infra/self_review_policy_db.md`, and
-`tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
+`tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
 
 For broad SPipe planning lanes, split independent research or implementation
 checks across lower-model parallel agents when available (for example Codex

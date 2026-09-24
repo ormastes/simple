@@ -1,0 +1,123 @@
+"""
+# expect() with an inline comparison argument Specification
+
+**Feature IDs:** N/A
+**Category:** Test harness
+**Difficulty:** 2/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/interp_expect_inline_equality_arg_misevaluates_2026-07-07.md
+
+## Overview
+
+`interp_expect_inline_equality_arg_misevaluates_2026-07-07` reported that
+
+```simple
+val a: u32 = 4294901760
+val b: u32 = 4278190335
+expect(a == b).to_equal(false)
+```
+
+failed with `expected 4294901760 to equal 4278190335` — the matcher received
+the **raw operands** instead of the boolean result, because the inline `a == b`
+collapsed into the surrounding chain instead of being reduced first. The
+recorded testing rule was to treat `expect(<a> <op> <b>)` as a landmine and
+always bind the comparison to a `val`.
+
+Re-checked 2026-09-12: the inline form evaluates to a bool before the matcher
+sees it, on both lanes. This spec pins the inline form specifically — the
+`val`-bound workaround form was never broken, so a guard written the workaround
+way would be vacuous for this defect. Both forms are present so the two can be
+compared.
+
+## Syntax
+
+```simple
+expect(a == b).to_equal(false)     # inline — the defect shape
+val eq = a == b
+expect(eq).to_equal(false)         # workaround shape — the control
+```
+
+"""
+
+use std.spec
+
+
+# ============================================================================
+# Test Group 1: the record's own u32 operands, inline
+# ============================================================================
+
+describe "inline comparison of the record's u32 operands":
+    """
+    ## `0xFFFF0000` vs `0xFF0000FF`
+
+    The exact values from the report. The defect surfaced the operands in the
+    failure message rather than the comparison result.
+    """
+
+    it "evaluates an inline == of two distinct u32 to false":
+        val a: u32 = 4294901760
+        val b: u32 = 4278190335
+        expect(a == b).to_equal(false)
+
+    it "evaluates an inline != of two distinct u32 to true":
+        val a: u32 = 4294901760
+        val b: u32 = 4278190335
+        expect(a != b).to_equal(true)
+
+    it "evaluates an inline == of two equal u32 to true":
+        val a: u32 = 4294901760
+        val b: u32 = 4294901760
+        expect(a == b).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: the val-bound control
+# ============================================================================
+
+describe "val-bound comparison (the recorded workaround)":
+    """
+    ## Control
+
+    This form was never broken. It is kept so a future failure can be
+    attributed to the inline shape rather than to comparison itself.
+    """
+
+    it "matches the inline result when bound to a val first":
+        val a: u32 = 4294901760
+        val b: u32 = 4278190335
+        val eq = a == b
+        expect(eq).to_equal(false)
+
+
+# ============================================================================
+# Test Group 3: other inline operators and payload types
+# ============================================================================
+
+describe "inline comparison, wider operand coverage":
+    """
+    ## Not just u32 equality
+
+    Ordering operators and non-integer payloads go through the same chained
+    argument path.
+    """
+
+    it "evaluates an inline < to a bool":
+        val a: i64 = 3
+        val b: i64 = 9
+        expect(a < b).to_equal(true)
+
+    it "evaluates an inline >= to a bool":
+        val a: i64 = 3
+        val b: i64 = 9
+        expect(a >= b).to_equal(false)
+
+    it "evaluates an inline text comparison to a bool":
+        val a: text = "alpha"
+        val b: text = "beta"
+        expect(a == b).to_equal(false)
+
+    it "evaluates an inline comparison over call results":
+        expect("abc".len() == "xy".len()).to_equal(false)

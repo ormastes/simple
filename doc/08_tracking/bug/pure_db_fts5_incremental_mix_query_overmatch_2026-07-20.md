@@ -1,4 +1,9 @@
 # PureDatabase.fts5_search over-matches after mixed DELETE+INSERT (incremental FTS index)
+## Closed 2026-09-16 — Status FIXED 2026-08-09; tokenizer fix verified 5/5 and 28/28 specs
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-20
 **Status:** FIXED (2026-08-09)
@@ -140,3 +145,4 @@ rebuild) rather than a per-document tokenization bug.
 Per triage scope, no fix was made to `pure_database.spl` — this doc only
 records the defect. The two simpler "insert-only" and "delete-only" incremental
 tests in the same spec file continue to pass and were left untouched.
+

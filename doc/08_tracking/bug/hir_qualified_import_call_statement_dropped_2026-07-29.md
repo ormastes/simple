@@ -1,4 +1,9 @@
 # Qualified-import call statement (`module.func()`) lowers to an empty function body
+## Closed 2026-09-16 — fixed bbe045e92ce; re-verified HEAD 2026-08-01, guard non-vacuous
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed — `bbe045e92ce` (2026-07-29), re-verified at HEAD 2026-08-01
 
@@ -139,3 +144,4 @@ harness plumbing (module_surfaces wiring) is otherwise correct — see
 - `doc/08_tracking/bug/jit_struct_field_compound_assign_loads_zero_2026-07-27.md`
   — different bug, same flavor (silent zero/empty result on the default
   execution path with no diagnostic raised)
+

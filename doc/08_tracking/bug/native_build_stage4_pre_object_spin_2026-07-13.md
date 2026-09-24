@@ -1,4 +1,8 @@
 # Native-build Stage 4 dispatch and strict-link blockers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -816,3 +820,4 @@ runaway guard terminated it. This was the third bounded Stage 4 cycle, so no
 retry was made. The next fix must make the canonical Stage 4 wrapper use the
 same bounded pure-Simple closure path before strict provider/backfill linking;
 it must not re-enter the pre-object whole-tree bootstrap path.
+

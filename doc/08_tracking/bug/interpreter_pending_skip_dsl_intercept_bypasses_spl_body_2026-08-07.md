@@ -1,4 +1,8 @@
 # Rust seed interpreter intercepts `pending`/`skip_it`/`skip` calls before `.spl` body runs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -114,3 +118,4 @@ is a maintainability defect, not a correctness one.
 Rust arm once the self-hosted binary is the default tool (the intercept exists
 only because the seed cannot rely on the stdlib spec DSL loading), not to patch
 it now.
+

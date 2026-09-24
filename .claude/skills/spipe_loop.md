@@ -42,7 +42,8 @@ description: SPipe Loop — periodic check-and-implement plus daily-debug ingest
 
 ## Driver
 
-The pipeline is implemented in `src/app/itf/cmd_daily_debug.spl::run_daily_debug`.
+The pipeline is implemented in `src/app/devhub/cmd_daily_debug.spl::run_daily_debug` (`bin/itf` runs
+`src/app/devhub/main.spl`; `src/app/itf/` is an older copy nothing runs).
 The skill just routes:
 
 ```

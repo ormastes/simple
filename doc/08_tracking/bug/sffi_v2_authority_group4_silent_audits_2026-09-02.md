@@ -1,4 +1,8 @@
 # SFFI v2 authority group 4: silent audit failures + merge-clobbered hardening
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-02
 Gate: `push-sffi-v2-authority` / `scripts/check/check-sffi-v2-authority.shs`
@@ -91,3 +95,4 @@ fixing the remaining rows concurrently.
 - `scripts/audit/sffi-contract-inventory.shs` ratchet `source_variants=416/399`
   blocks `sffi-unsafe-backlog.shs`. Needs a separate owner: either the 17 new
   source-signature variants get tagged/migrated, or the ratchet is reviewed.
+

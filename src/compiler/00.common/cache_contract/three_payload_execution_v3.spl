@@ -1,0 +1,274 @@
+#![allow(primitive_api)]
+
+# Runtime-neutral contract for the trusted three-payload execution prerequisite.
+# These records are copied projections only.  They carry no filesystem handle,
+# live owner reference, grant, parser state, or result-publication authority.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1
+}
+
+pub const THREE_PAYLOAD_PARSE_EXECUTOR_PROFILE_V3: text =
+    "simple.compiler.three-payload.parse-preflight.v3"
+
+pub enum ThreePayloadExecutionStateV3:
+    Unreserved
+    Running
+    ParseComplete
+    CompileComplete
+    Failed
+    Cancelled
+
+pub struct ThreePayloadExecutionLimitsV3:
+    max_read_bytes: i64
+    max_decode_bytes: i64
+    max_decoded_sections: i64
+
+pub struct ThreePayloadExecutionBindingV3:
+    owner_instance_identity: u64
+    session_serial: u64
+    grant_serial: u64
+    run_serial: u64
+    owner_close_epoch: u64
+    scope_generation: i64
+    cancellation_epoch: i64
+    reader_admission_epoch: i64
+    owner_grant_digest: text
+    attempt_seal_digest: text
+    semantic_completeness_seal_digest: text
+    closure_seal_digest: text
+    parser_profile_digest: text
+    execution_limits_digest: text
+    dependency_enumeration_digest: text
+    issuer_set_digest: text
+    body_set_digest: text
+    executor_digest: text
+
+pub struct ThreePayloadPhysicalReadReceiptV3:
+    ordinary_input_count: i64
+    distinct_source: i64
+    distinct_prior: i64
+    distinct_init: i64
+    successful_bounded_facade_read_operations: i64
+    successful_file_read_bytes: i64
+    decoded_sections: i64
+    largest_declared_decode_bytes: i64
+    measured_peak_decode_bytes: i64
+    rr_file_reads: i64
+    external_file_reads: i64
+    denied_input_attempts: i64
+    macro_body_refs: i64
+    generic_body_refs: i64
+    trait_default_body_refs: i64
+    trait_callable_refs: i64
+    aspect_callable_refs: i64
+    semantic_object_file_reads: i64
+
+pub struct ThreePayloadParsePreflightProjectionV3:
+    execution_binding_digest: text
+    source_digest: text
+    prior_tld_digest: text?
+    init_tld_digest: text
+    physical_receipt: ThreePayloadPhysicalReadReceiptV3
+    source_syntax_accepted: bool
+    receipt_digest: text
+
+# This is an owner-returned read projection for the future compiled route.  No
+# current producer constructs one, and no caller can submit one for admission.
+pub struct ThreePayloadCompiledResultProjectionV3:
+    execution_binding_digest: text
+    result_manifest_digest: text
+    summary_object_digest: text
+    diagnostic_object_digest: text
+    portable_object_set_digest: text
+    receipt_digest: text
+
+pub struct ThreePayloadExecutionContractV3:
+    schema: i64
+    parse_preflight_available: bool
+    compiled_result_available: bool
+    owner_only_execution: bool
+    private_reserve_begin_complete: bool
+    caller_result_dto_accepted: bool
+    physical_snapshot_required: bool
+    fourth_input_allowed: bool
+    owned_parser_state_required_for_compile: bool
+    semantic_pipeline_required_for_compile: bool
+
+fn _binding_text_v3(label: text, value: text) -> text:
+    label + ":" + value.len().to_string() + ":" + value + "\n"
+
+fn _binding_number_v3(label: text, value: text) -> text:
+    label + ":" + value + "\n"
+
+pub fn three_payload_execution_limits_valid_v3(
+    limits: ThreePayloadExecutionLimitsV3,
+) -> bool:
+    limits.max_read_bytes > 0 and limits.max_decode_bytes > 0 and
+        limits.max_decoded_sections > 0
+
+pub fn three_payload_execution_binding_valid_v3(
+    binding: ThreePayloadExecutionBindingV3,
+) -> bool:
+    if (binding.owner_instance_identity == 0u64 or
+            binding.owner_instance_identity == 0xffffffffffffffffu64 or
+            binding.session_serial == 0u64 or binding.grant_serial == 0u64 or
+            binding.run_serial == 0u64 or binding.owner_close_epoch ==
+                0xffffffffffffffffu64 or binding.scope_generation < 0 or
+            binding.cancellation_epoch < 0 or
+            binding.reader_admission_epoch < 0 or
+            binding.reader_admission_epoch % 2 != 0):
+        return false
+    for digest in [binding.owner_grant_digest, binding.attempt_seal_digest,
+            binding.semantic_completeness_seal_digest,
+            binding.closure_seal_digest, binding.parser_profile_digest,
+            binding.execution_limits_digest,
+            binding.dependency_enumeration_digest, binding.issuer_set_digest,
+            binding.body_set_digest, binding.executor_digest]:
+        if not three_payload_contract_digest_valid_v1(digest): return false
+    true
+
+pub fn three_payload_execution_binding_digest_v3(
+    binding: ThreePayloadExecutionBindingV3,
+) -> text:
+    if not three_payload_execution_binding_valid_v3(binding): return ""
+    var canonical = "simple.compiler.three-payload.execution-binding.v3\n"
+    canonical = canonical + _binding_number_v3("owner",
+        binding.owner_instance_identity.to_string())
+    canonical = canonical + _binding_number_v3("session",
+        binding.session_serial.to_string())
+    canonical = canonical + _binding_number_v3("grant",
+        binding.grant_serial.to_string())
+    canonical = canonical + _binding_number_v3("run",
+        binding.run_serial.to_string())
+    canonical = canonical + _binding_number_v3("close-epoch",
+        binding.owner_close_epoch.to_string())
+    canonical = canonical + _binding_number_v3("scope-generation",
+        binding.scope_generation.to_string())
+    canonical = canonical + _binding_number_v3("cancellation-epoch",
+        binding.cancellation_epoch.to_string())
+    canonical = canonical + _binding_number_v3("reader-admission-epoch",
+        binding.reader_admission_epoch.to_string())
+    canonical = canonical + _binding_text_v3("owner-grant",
+        binding.owner_grant_digest)
+    canonical = canonical + _binding_text_v3("attempt-seal",
+        binding.attempt_seal_digest)
+    canonical = canonical + _binding_text_v3("completeness-seal",
+        binding.semantic_completeness_seal_digest)
+    canonical = canonical + _binding_text_v3("closure-seal",
+        binding.closure_seal_digest)
+    canonical = canonical + _binding_text_v3("parser-profile",
+        binding.parser_profile_digest)
+    canonical = canonical + _binding_text_v3("execution-limits",
+        binding.execution_limits_digest)
+    canonical = canonical + _binding_text_v3("dependencies",
+        binding.dependency_enumeration_digest)
+    canonical = canonical + _binding_text_v3("issuers",
+        binding.issuer_set_digest)
+    canonical = canonical + _binding_text_v3("bodies",
+        binding.body_set_digest)
+    canonical = canonical + _binding_text_v3("executor",
+        binding.executor_digest)
+    sha256_text(canonical)
+
+pub fn three_payload_execution_binding_equal_v3(
+    left: ThreePayloadExecutionBindingV3,
+    right: ThreePayloadExecutionBindingV3,
+) -> bool:
+    left.owner_instance_identity == right.owner_instance_identity and
+        left.session_serial == right.session_serial and
+        left.grant_serial == right.grant_serial and
+        left.run_serial == right.run_serial and
+        left.owner_close_epoch == right.owner_close_epoch and
+        left.scope_generation == right.scope_generation and
+        left.cancellation_epoch == right.cancellation_epoch and
+        left.reader_admission_epoch == right.reader_admission_epoch and
+        left.owner_grant_digest == right.owner_grant_digest and
+        left.attempt_seal_digest == right.attempt_seal_digest and
+        left.semantic_completeness_seal_digest ==
+            right.semantic_completeness_seal_digest and
+        left.closure_seal_digest == right.closure_seal_digest and
+        left.parser_profile_digest == right.parser_profile_digest and
+        left.execution_limits_digest == right.execution_limits_digest and
+        left.dependency_enumeration_digest ==
+            right.dependency_enumeration_digest and
+        left.issuer_set_digest == right.issuer_set_digest and
+        left.body_set_digest == right.body_set_digest and
+        left.executor_digest == right.executor_digest
+
+pub fn three_payload_physical_read_receipt_valid_v3(
+    receipt: ThreePayloadPhysicalReadReceiptV3,
+) -> bool:
+    if receipt.distinct_prior != 0 and receipt.distinct_prior != 1:
+        return false
+    val expected_inputs = 2 + receipt.distinct_prior
+    (receipt.distinct_source == 1 and
+     receipt.distinct_init == 1 and
+     receipt.ordinary_input_count == expected_inputs and
+     receipt.successful_bounded_facade_read_operations == expected_inputs and
+     receipt.successful_file_read_bytes > 0 and receipt.decoded_sections >= 0 and
+     receipt.largest_declared_decode_bytes >= 0 and
+     receipt.measured_peak_decode_bytes == -1 and
+     receipt.rr_file_reads == 0 and receipt.external_file_reads == 0 and
+     receipt.denied_input_attempts == 0 and receipt.macro_body_refs >= 0 and
+     receipt.generic_body_refs >= 0 and receipt.trait_default_body_refs >= 0 and
+     receipt.trait_callable_refs >= 0 and receipt.aspect_callable_refs >= 0 and
+     receipt.semantic_object_file_reads == 0)
+
+pub fn three_payload_parse_preflight_projection_valid_v3(
+    projection: ThreePayloadParsePreflightProjectionV3,
+) -> bool:
+    if (not three_payload_contract_digest_valid_v1(
+                projection.execution_binding_digest) or
+            not three_payload_contract_digest_valid_v1(projection.source_digest) or
+            not three_payload_contract_digest_valid_v1(projection.init_tld_digest) or
+            not three_payload_contract_digest_valid_v1(projection.receipt_digest) or
+            not projection.source_syntax_accepted or
+            not three_payload_physical_read_receipt_valid_v3(
+                projection.physical_receipt)):
+        return false
+    match projection.prior_tld_digest:
+        case Some(digest):
+            three_payload_contract_digest_valid_v1(digest) and
+                projection.physical_receipt.distinct_prior == 1
+        case nil: projection.physical_receipt.distinct_prior == 0
+
+pub fn three_payload_compiled_result_projection_valid_v3(
+    projection: ThreePayloadCompiledResultProjectionV3,
+) -> bool:
+    for digest in [projection.execution_binding_digest,
+            projection.result_manifest_digest, projection.summary_object_digest,
+            projection.diagnostic_object_digest,
+            projection.portable_object_set_digest, projection.receipt_digest]:
+        if not three_payload_contract_digest_valid_v1(digest): return false
+    true
+
+pub fn three_payload_execution_contract_v3() -> ThreePayloadExecutionContractV3:
+    ThreePayloadExecutionContractV3(schema: 3,
+        parse_preflight_available: true,
+        compiled_result_available: false,
+        owner_only_execution: true,
+        private_reserve_begin_complete: true,
+        caller_result_dto_accepted: false,
+        physical_snapshot_required: true,
+        fourth_input_allowed: false,
+        owned_parser_state_required_for_compile: true,
+        semantic_pipeline_required_for_compile: true)
+
+pub fn three_payload_execution_contract_valid_v3(
+    contract: ThreePayloadExecutionContractV3,
+) -> bool:
+    contract.schema == 3 and contract.parse_preflight_available and
+        not contract.compiled_result_available and contract.owner_only_execution and
+        contract.private_reserve_begin_complete and
+        not contract.caller_result_dto_accepted and
+        contract.physical_snapshot_required and not contract.fourth_input_allowed and
+        contract.owned_parser_state_required_for_compile and
+        contract.semantic_pipeline_required_for_compile
+
+pub fn three_payload_compiled_execution_available_v3() -> bool:
+    false
+
+pub fn three_payload_compiled_execution_blocker_v3() -> text:
+    "owned_parser_state_profile_and_semantic_pipeline_unavailable"

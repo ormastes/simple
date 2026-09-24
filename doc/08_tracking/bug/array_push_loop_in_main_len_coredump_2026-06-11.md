@@ -1,6 +1,14 @@
 # BUG: array push loop inside fn main + len() dumps core (native AND interpreter)
 
-Status: FIXED (verified 2026-06-11)
+## Closed 2026-09-13 — Does not reproduce: the exact repro prints 100 and exits 0
+
+- **measured** Ran the entry's exact program (`var arr: [i64] = []`, `for i in 0..100: arr = arr.push(i)`, `print(arr.len())`) inside `fn main` on the Rust seed `v1.0.0-rc.1`: output `100`, `rc=0`. No SIGSEGV, no core dump.
+- **measured** The regression spec named in the entry still exists: `test/01_unit/compiler/interpreter/array_push_loop_local_len_spec.spl`.
+- **measured** The native half (`exit 139`) could not be re-checked here — `bin/simple compile --native` fails with `ld: cannot find -lsimple_runtime` / `ld: cannot find -lc` on this Windows host.
+- **inferred** Interpreter reproduction is gone and the pinning spec survives, matching the entry's own FIXED status.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 **Date:** 2026-06-11
 **Status:** FIXED — no longer reproduces in interpreter (`bin/simple run` → 100)

@@ -1,4 +1,9 @@
 # SimpleOS HTTP/1.1 missing Host accepted
+## Closed 2026-09-16 — ...request-target consistency. ## Resolution state Implemented, unverified. `Http1RequestFram
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Finding
 
@@ -23,3 +28,4 @@ The focused source scenarios live in
 missing, empty, mixed-case, HTTP/1.0, and duplicate cases. No tests, builds, or
 runtime verification were run in this phase; keep this record open until that
 focused spec passes with an admitted Pure-Simple runtime.
+

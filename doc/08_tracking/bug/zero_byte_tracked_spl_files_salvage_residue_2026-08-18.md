@@ -1,4 +1,9 @@
 # Zero-byte tracked `.spl` files under `src/` — salvage/wipe residue audit
+## Closed 2026-09-16 — ...pl:13-14` — all relative-`.` imports resolved inside `loader/`): loader/resource_lifecycle
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-18
 **Status:** TRIAGED — one real truncation found, five benign; no data lost
@@ -94,3 +99,4 @@ paths' status in its declaration list and passes against the current tree.
 No content was lost. The 0-byte census is 1 mis-salvaged duplicate (recoverable
 from `ae55a746719`, but should be deleted rather than restored) and 6 files that
 never had content.
+

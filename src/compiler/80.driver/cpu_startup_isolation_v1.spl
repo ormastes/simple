@@ -1,0 +1,96 @@
+# codex-impl
+# Evidence-only startup isolation receipt for REQ-013 / NFR-009.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+pub const CPU_STARTUP_COMMAND_HELP_V1: u16 = 1u16
+pub const CPU_STARTUP_COMMAND_VERSION_V1: u16 = 2u16
+pub const CPU_STARTUP_COMMAND_REFERENCE_COMPILE_V1: u16 = 3u16
+
+pub enum CpuStartupIsolationErrorV1:
+    UnknownCommand
+    InvalidObservationIdentity
+    UnexpectedProviderLoad
+    GpuRegistryInitialized
+    GpuDeviceInitialized
+    HiddenCompilationAttempted
+    MissingCpuProvider
+    NonCpuProviderSelected
+
+pub struct CpuStartupIsolationEvidenceV1:
+    command_kind: u16
+    invocation_identity: EnvironmentDigest256V1
+    catalog_observed: bool
+    catalog_identity: EnvironmentDigest256V1
+    mapped_provider_count: u32
+    gpu_registry_initialized: bool
+    gpu_device_initialization_count: u32
+    application_compilation_count: u32
+    provider_compilation_attempt_count: u32
+    missing_provider_compilation_attempted: bool
+    selected_cpu_provider: bool
+    selected_provider_identity: EnvironmentDigest256V1
+    selected_provider_generation: u64
+
+pub struct CpuStartupIsolationReceiptV1:
+    command_kind: u16
+    invocation_identity: EnvironmentDigest256V1
+    catalog_observed: bool
+    mapped_provider_count: u32
+    gpu_registry_initialized: bool
+    gpu_device_initialization_count: u32
+    application_compilation_count: u32
+    provider_compilation_attempt_count: u32
+    selected_cpu_provider: bool
+    selected_provider_identity: EnvironmentDigest256V1
+    selected_provider_generation: u64
+    isolated: bool
+
+fn _declared(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+
+pub fn cpu_startup_isolation_qualify_v1(
+    evidence: CpuStartupIsolationEvidenceV1
+) -> Result<CpuStartupIsolationReceiptV1, CpuStartupIsolationErrorV1>:
+    if evidence.command_kind != CPU_STARTUP_COMMAND_HELP_V1 and
+       evidence.command_kind != CPU_STARTUP_COMMAND_VERSION_V1 and
+       evidence.command_kind != CPU_STARTUP_COMMAND_REFERENCE_COMPILE_V1:
+        return Err(CpuStartupIsolationErrorV1.UnknownCommand)
+    if not _declared(evidence.invocation_identity) or
+       (evidence.catalog_observed and not _declared(evidence.catalog_identity)):
+        return Err(CpuStartupIsolationErrorV1.InvalidObservationIdentity)
+    if evidence.gpu_registry_initialized:
+        return Err(CpuStartupIsolationErrorV1.GpuRegistryInitialized)
+    if evidence.gpu_device_initialization_count != 0u32:
+        return Err(CpuStartupIsolationErrorV1.GpuDeviceInitialized)
+    if evidence.provider_compilation_attempt_count != 0u32 or evidence.missing_provider_compilation_attempted:
+        return Err(CpuStartupIsolationErrorV1.HiddenCompilationAttempted)
+    if evidence.command_kind == CPU_STARTUP_COMMAND_HELP_V1 or
+       evidence.command_kind == CPU_STARTUP_COMMAND_VERSION_V1:
+        if evidence.mapped_provider_count != 0u32:
+            return Err(CpuStartupIsolationErrorV1.UnexpectedProviderLoad)
+        if evidence.application_compilation_count != 0u32:
+            return Err(CpuStartupIsolationErrorV1.HiddenCompilationAttempted)
+        if evidence.selected_cpu_provider or _declared(evidence.selected_provider_identity) or
+           evidence.selected_provider_generation != 0u64:
+            return Err(CpuStartupIsolationErrorV1.UnexpectedProviderLoad)
+    else:
+        if evidence.application_compilation_count != 1u32:
+            return Err(CpuStartupIsolationErrorV1.HiddenCompilationAttempted)
+        if not evidence.selected_cpu_provider:
+            return Err(CpuStartupIsolationErrorV1.NonCpuProviderSelected)
+        if not _declared(evidence.selected_provider_identity) or evidence.selected_provider_generation == 0u64:
+            return Err(CpuStartupIsolationErrorV1.MissingCpuProvider)
+        if evidence.mapped_provider_count != 1u32:
+            return Err(CpuStartupIsolationErrorV1.UnexpectedProviderLoad)
+    Ok(CpuStartupIsolationReceiptV1(command_kind: evidence.command_kind,
+        invocation_identity: evidence.invocation_identity,
+        catalog_observed: evidence.catalog_observed,
+        mapped_provider_count: evidence.mapped_provider_count,
+        gpu_registry_initialized: false, gpu_device_initialization_count: 0u32,
+        application_compilation_count: evidence.application_compilation_count,
+        provider_compilation_attempt_count: 0u32,
+        selected_cpu_provider: evidence.selected_cpu_provider,
+        selected_provider_identity: evidence.selected_provider_identity,
+        selected_provider_generation: evidence.selected_provider_generation,
+        isolated: true))

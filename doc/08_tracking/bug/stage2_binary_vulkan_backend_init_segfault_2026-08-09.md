@@ -1,5 +1,12 @@
 # Stage2 self-hosted binary segfaults in VulkanBackend.init; seed interprets it correctly
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: needs a working self-hosted stage2 binary
+(build/bootstrap/stage3/.../stage2-runtime-authority/simple) plus a Vulkan
+GUI backend to reproduce -- this worktree has no self-hosted stage2 artifact.
+Left OPEN.
+
+
 - **ID:** stage2_binary_vulkan_backend_init_segfault_2026-08-09
 - **Status:** OPEN
 - **Found by:** gui/web/2D vulkan showcase sweep, 2026-08-09

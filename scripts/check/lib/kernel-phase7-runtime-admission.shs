@@ -1,0 +1,68 @@
+#!/bin/sh
+
+kernel_phase7_hash_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else return 1
+  fi
+}
+
+kernel_phase7_manifest_value() {
+  awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; found=1 } END { if (!found) exit 1 }' "$2"
+}
+
+kernel_phase7_canonical_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  directory=$(CDPATH= cd -P -- "$(dirname -- "$1")" 2>/dev/null && pwd -P) || return 1
+  resolved=$directory/$(basename -- "$1")
+  [ -f "$resolved" ] && [ ! -L "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
+}
+
+kernel_phase7_verify_llvm_toolchain_receipt() (
+  receipt=$(kernel_phase7_canonical_file "$1") || exit 1
+  [ "$(kernel_phase7_manifest_value schema "$receipt")" = simple-kernel-phase7-llvm-toolchain-v1 ] || exit 1
+  [ "$(kernel_phase7_manifest_value status "$receipt")" = pass ] || exit 1
+  [ "$(kernel_phase7_manifest_value llvm_major "$receipt")" = 18 ] || exit 1
+  config=$(kernel_phase7_canonical_file "$(kernel_phase7_manifest_value llvm_config_path "$receipt")") || exit 1
+  [ "$(kernel_phase7_manifest_value llvm_config_sha256 "$receipt")" = "$(kernel_phase7_hash_file "$config")" ] || exit 1
+  case "$("$config" --version 2>/dev/null)" in 18.*) ;; *) exit 1 ;; esac
+  library=$(kernel_phase7_canonical_file "$(kernel_phase7_manifest_value llvm_library_path "$receipt")") || exit 1
+  [ "$(kernel_phase7_manifest_value llvm_library_sha256 "$receipt")" = "$(kernel_phase7_hash_file "$library")" ] || exit 1
+)
+
+kernel_phase7_admit_runtime() (
+  [ "$#" -eq 5 ] || return 1
+  runtime=$1 provenance=$2 cache_receipt=$3 root=$4 runtime_receipt=$5
+  [ -x "$runtime" ] && [ -f "$provenance" ] && [ -f "$cache_receipt" ] && [ -f "$runtime_receipt" ] || return 1
+  for tool in ${KERNEL_PHASE7_REQUIRED_TOOLS:-cc ar nm}; do
+    command -v "$tool" >/dev/null 2>&1 || return 1
+  done
+  verifier=stage4_verify_candidate_provenance
+  if [ -n "${KERNEL_PHASE7_PROVENANCE_VERIFY_FN:-}" ]; then
+    [ "${KERNEL_PHASE7_TEST_MODE:-0}" = 1 ] || return 1
+    verifier=$KERNEL_PHASE7_PROVENANCE_VERIFY_FN
+  fi
+  "$verifier" "$provenance" "$runtime" "$root" phase7-llvm || return 1
+  version=$($runtime --version 2>&1) || return 1
+  case "$version" in *'bootstrap seed only'*|*'Rust-built'*) return 1 ;; esac
+  [ "$(kernel_phase7_manifest_value artifact_kind "$provenance")" = pure-simple-full-cli ] || return 1
+  [ "$(kernel_phase7_manifest_value schema "$cache_receipt")" = simple-kernel-phase7-runtime-cache-v1 ] || return 1
+  [ "$(kernel_phase7_manifest_value status "$cache_receipt")" = pass ] || return 1
+  [ "$(kernel_phase7_manifest_value ttl_days "$cache_receipt")" = 1 ] || return 1
+  [ "$(kernel_phase7_manifest_value runtime_sha256 "$cache_receipt")" = "$(kernel_phase7_hash_file "$runtime")" ] || return 1
+  [ "$(kernel_phase7_manifest_value provenance_sha256 "$cache_receipt")" = "$(kernel_phase7_hash_file "$provenance")" ] || return 1
+  [ "$(kernel_phase7_manifest_value source_revision "$cache_receipt")" = "$(kernel_phase7_manifest_value source_revision "$provenance")" ] || return 1
+  [ "$(kernel_phase7_manifest_value schema "$runtime_receipt")" = simple-kernel-phase7-runtime-prerequisite-v1 ] || return 1
+  [ "$(kernel_phase7_manifest_value status "$runtime_receipt")" = pass ] || return 1
+  [ "$(kernel_phase7_manifest_value artifact_kind "$runtime_receipt")" = pure-simple-full-cli ] || return 1
+  [ "$(kernel_phase7_canonical_file "$(kernel_phase7_manifest_value runtime_path "$runtime_receipt")")" = "$(kernel_phase7_canonical_file "$runtime")" ] || return 1
+  [ "$(kernel_phase7_manifest_value runtime_sha256 "$runtime_receipt")" = "$(kernel_phase7_hash_file "$runtime")" ] || return 1
+  [ "$(kernel_phase7_canonical_file "$(kernel_phase7_manifest_value provenance_path "$runtime_receipt")")" = "$(kernel_phase7_canonical_file "$provenance")" ] || return 1
+  [ "$(kernel_phase7_manifest_value provenance_sha256 "$runtime_receipt")" = "$(kernel_phase7_hash_file "$provenance")" ] || return 1
+  [ "$(kernel_phase7_canonical_file "$(kernel_phase7_manifest_value cache_receipt_path "$runtime_receipt")")" = "$(kernel_phase7_canonical_file "$cache_receipt")" ] || return 1
+  [ "$(kernel_phase7_manifest_value cache_receipt_sha256 "$runtime_receipt")" = "$(kernel_phase7_hash_file "$cache_receipt")" ] || return 1
+  llvm_receipt=$(kernel_phase7_canonical_file "$(kernel_phase7_manifest_value llvm_toolchain_receipt_path "$runtime_receipt")") || return 1
+  [ "$(kernel_phase7_manifest_value llvm_toolchain_receipt_sha256 "$runtime_receipt")" = "$(kernel_phase7_hash_file "$llvm_receipt")" ] || return 1
+  kernel_phase7_verify_llvm_toolchain_receipt "$llvm_receipt" || return 1
+)

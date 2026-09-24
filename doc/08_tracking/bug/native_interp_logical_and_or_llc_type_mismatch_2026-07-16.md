@@ -1,4 +1,8 @@
 # Native: `"{a() and b()}"` interpolation fails llc (ptr vs i64 type mismatch)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Source fixed; execution pending  **Found:** 2026-07-16 (p_shortcircuit lane)  **Path:** native-build --entry (strict-llvm)
 ```simple
@@ -38,3 +42,4 @@ lane was limited to static/source verification.
 ## Repro
 
 `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --entry <case>.spl -o <bin> --clean`
+

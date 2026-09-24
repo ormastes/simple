@@ -1,4 +1,9 @@
 # Headless render history retained every HTML snapshot
+## Closed 2026-09-16 — Fixed 2026-08-21; circular buffer regression verifies count 80/retained 64
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -23,3 +28,4 @@ evicted, matching its existing unavailable-index behavior.
 The focused regression renders 80 times and verifies a cumulative count of 80,
 a retained count of 64, eviction of render 15, and availability of renders 16
 and 79.
+

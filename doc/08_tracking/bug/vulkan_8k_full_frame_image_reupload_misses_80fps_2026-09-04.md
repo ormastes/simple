@@ -1,4 +1,8 @@
 # Vulkan 8K full-frame image re-upload misses 80 fps
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -30,3 +34,4 @@ device identity and checksum, zero timed upload/readback, known completion, no
 fallback, p95 at or below 12.5 ms, and Simple p95 at most twice C p95. Merely
 moving upload outside the timer without exposing retained-resource semantics is
 not acceptable evidence.
+

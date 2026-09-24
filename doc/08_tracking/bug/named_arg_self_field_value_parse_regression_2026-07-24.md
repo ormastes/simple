@@ -1,4 +1,8 @@
 # RETRACTED — see jit_option_i64_value3_reads_as_none_2026-07-24.md
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-24
 
@@ -16,3 +20,4 @@ FAIL for any spec with **10–99 examples**.
 
 Full analysis, minimal repro, JIT-vs-interpreter proof, and fix direction:
 **`jit_option_i64_value3_reads_as_none_2026-07-24.md`**.
+

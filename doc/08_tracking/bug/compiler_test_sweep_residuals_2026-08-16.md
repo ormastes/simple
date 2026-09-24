@@ -400,3 +400,20 @@ Status: OPEN (unchanged).
 
 Identical to the recorded baseline (21/24). Row stays OPEN. Only the
 parser_spec row was re-run in this pass.
+
+## Re-check 2026-09-13 (BUGFIX-6 lane)
+
+```
+bin/simple test test/01_unit/compiler_core/parser_spec.spl --no-session-daemon --sequential
+Results: 24 total, 20 passed, 4 failed
+```
+
+Base `a6450c9d6f5`, seed sha256 prefix `3d120a6f9ab5704b`. Still reproduces
+(residual count drifted 21/24 -> 20/24 since the 2026-08-17 baseline — one
+additional example now fails, or a different one flipped; not re-diagnosed
+per-example here). This record spans many independent interpreter/parser/
+backend defects, several already root-caused and requiring seed rebuilds this
+lane cannot perform (blocked bootstrap), and the remainder (interpreter items
+1-8) each need dedicated `src/compiler/10.frontend/core/interpreter/` work
+well beyond a single triage pass. Leaving OPEN, no fix attempted here — too
+large for this lane's per-item budget as a single row.

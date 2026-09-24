@@ -1,4 +1,8 @@
 # Core interpreter: hard iteration caps on `while` (1,000,000, errors) and range `for` (1,000,001, SILENT stop)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-28  **Status:** OPEN  **Area:** `src/compiler/10.frontend/core/interpreter/eval.spl`
 **Found by:** perf_interp profiling lane (release/2026-08-27 tip `bb87306b64c`)
@@ -32,3 +36,4 @@ fn main() -> i64:
 Make the cap opt-in (an execution-limit knob such as the existing `--execution-limit` CLI option
 in `src/app/run/main.spl:124`), and make the range-`for` path report an error like `while` does
 instead of truncating silently. Not changed in the perf lane (feature-affecting).
+

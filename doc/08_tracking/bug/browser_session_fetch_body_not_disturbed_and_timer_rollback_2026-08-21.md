@@ -1,4 +1,8 @@
 # Browser session: fetch body is never "disturbed", and a timer-rollback publication check fails
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
 - Status: OPEN (genuine product defects; the specs are correct as written)
@@ -69,3 +73,4 @@ source-text pin: #1 asserts the WHATWG Fetch body-disturbed rule and #2 asserts
 transactional rollback the session claims to provide.
 
 ## No seed (Rust) change is required.
+

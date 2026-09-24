@@ -1,4 +1,8 @@
 # SimpleOS target codegen lacks `rt_struct_receiver_valid`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open — target-runtime defect; PID1 no longer depends on it
 
@@ -21,3 +25,4 @@ freestanding native smoke that performs a struct receiver field read. PID1 now
 uses parallel primitive arrays and was linked successfully after the user
 syscall trampoline was merged into its runtime archive; do not enable
 `SIMPLE_ALLOW_STUB_FALLBACK` for this image.
+

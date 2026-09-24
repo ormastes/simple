@@ -1,0 +1,91 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Ambient bootstrap MIR semantics only apply when the bootstrap CLI was asked for
+
+`lower_to_mir_with_target_context` builds its `direct_lowering` with the
+ambient bootstrap semantic policy left ON whenever `allow_bootstrap_shortcuts`
+is true. `MirLowering.ambient_bootstrap_enabled()` is then
+`allow_ambient_bootstrap_policy and SIMPLE_BOOTSTRAP == "1"`, and `lower_module`
+routes every module through the bootstrap-FLAT function loop instead of the
+ordinary one.
+
+`SIMPLE_BOOTSTRAP=1` does not mean "this compile IS the bootstrap CLI". The
+Stage-2 candidate-frontend admission re-runs its whole probe set in bootstrap
+mode, and one probe builds `hello_world.spl` positionally — which routes
+through `lower_to_mir()` (`allow_bootstrap_shortcuts = true`).
+
+Measured 2026-09-13 against the Stage-2 binary carrying the two sibling fixes
+(`scratchpad/boot5/pin/simple.stage2.rejected`, sha256 `79139f420ee07450...`),
+`SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_INTERP_TRACE=1`, identical scrubbed
+environment, one variable changed:
+
+    SIMPLE_BOOTSTRAP=0  ->  raw_status=0
+      [mir-lower] lower_function:start main          <- `main` IS lowered
+      ... lower_function:body-done main
+    SIMPLE_BOOTSTRAP=1  ->  raw_status=1
+      [mir-lower] lower_module:start module=...hello_world.spl functions=1
+      [mir-lower] fn-list:start                      <- bootstrap-FLAT loop
+      [mir-lower] functions:count 1
+      [mir-lower] function-index 0
+      [mir-lower] function-symbol
+      [mir-lower] function-loaded                    <- then NO `function:start`
+      [mir-lower] lower_module:done
+      AOT compile error in ...hello_world: MIR module has no functions
+
+The `lower_module:start` / `fn-list:start` / `functions:count` lines print only
+under `bootstrap_trace = bootstrap_mode and trace`, so their presence IS the
+measurement that ambient bootstrap MIR semantics were active for a module that
+is not the bootstrap CLI; `lower_function:*` prints under plain `trace`, which
+is why the passing run shows those and the failing run shows none of them.
+`hir_module_function` missed and returned the `is_extern: true` placeholder, so
+the loop skipped `main` and added nothing.
+
+Two leads are refuted by this same trace, not by argument. HIR was fine in the
+failing run (`phase3:hir:file:done ... funcs=1`), so "HIR is already empty" is
+wrong. And `aot:lower_to_mir:module:done ... functions=-1` appears in BOTH runs
+-- it is the known native `Dict.len()` artifact, not the defect.
+
+The policy must additionally require that `app.cli.bootstrap_main` is among
+`ctx.sources`, the same predicate and the same `ctx.sources` identity the MIR
+fixed-entry gate and the AOT dispatch already apply. `driver_types.spl` (where
+`CompileContext` lives) is fenced, so the predicate stays duplicated inline;
+all three sites must move together.
+"""
+
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Ambient bootstrap MIR semantic policy gate":
+    it "keeps ambient bootstrap MIR semantics only when that module is in ctx.sources":
+        # @req REQ-SSPEC-COMPILER
+        step("the direct-lowering policy selection also tests membership in ctx.sources")
+        val source = rt_file_read_text(
+            "src/compiler/80.driver/driver_pipeline_lowering.spl") ?? ""
+        # Fail closed on a vacuous read: an empty or truncated file must FAIL.
+        expect(source.len() > 20000).to_equal(true)
+        expect(source).to_contain("var direct_lowering = MirLowering.new_for_target")
+        expect(source).to_contain(
+            "if not (allow_bootstrap_shortcuts and bootstrap_entry_requested):")
+        expect(source).to_contain("direct_lowering.use_explicit_semantic_policy()")
+        # The membership scan the gate reads must still be the ctx.sources one.
+        expect(source).to_contain("var bootstrap_entry_requested = false")
+        expect(source).to_contain(
+            "self.ctx.sources[bootstrap_entry_idx].module_name == \"app.cli.bootstrap_main\"")
+
+    it "still lets an explicit-target lowering force the explicit policy":
+        # @req REQ-SSPEC-COMPILER
+        step("an --entry build never gets ambient bootstrap semantics")
+        # `lower_to_mir_for_explicit_target` passes allow_bootstrap_shortcuts =
+        # false, so the new conjunction must still be false for it and the
+        # explicit policy must still be installed. Pin both call shapes so the
+        # gate cannot be "fixed" by deleting the explicit-target routing.
+        val source = rt_file_read_text(
+            "src/compiler/80.driver/driver_pipeline_lowering.spl") ?? ""
+        expect(source.len() > 20000).to_equal(true)
+        expect(source).to_contain(
+            "self.lower_to_mir_with_target_context(target_context, true, false)")
+        expect(source).to_contain(
+            "driver_mir_target_context(self.ctx.options), false, true)")

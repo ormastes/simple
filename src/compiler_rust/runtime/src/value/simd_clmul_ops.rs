@@ -256,7 +256,6 @@ unsafe fn xor_u64x2_neon(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
 // layer lands these signatures can be tightened.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
 pub extern "C" fn rt_simd_clmul_lo_u64(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64, out_lo: *mut u64, out_hi: *mut u64) {
     let r = clmul_lo_u64([a_lo, a_hi], [b_lo, b_hi]);
     unsafe {
@@ -265,7 +264,6 @@ pub extern "C" fn rt_simd_clmul_lo_u64(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u6
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_clmul_hi_u64(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64, out_lo: *mut u64, out_hi: *mut u64) {
     let r = clmul_hi_u64([a_lo, a_hi], [b_lo, b_hi]);
     unsafe {
@@ -274,7 +272,6 @@ pub extern "C" fn rt_simd_clmul_hi_u64(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u6
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_xor_u64x2(a_lo: u64, a_hi: u64, b_lo: u64, b_hi: u64, out_lo: *mut u64, out_hi: *mut u64) {
     let r = xor_u64x2([a_lo, a_hi], [b_lo, b_hi]);
     unsafe {

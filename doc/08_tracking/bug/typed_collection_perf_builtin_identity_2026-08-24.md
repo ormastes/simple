@@ -1,4 +1,8 @@
 # Typed collection diagnostics lack a built-in method identity
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -61,3 +65,4 @@ would make diagnostic severity forgeable and revision-unsafe.
   name inference; Allow/Warn/Deny policy is applied once by its policy owner.
 - Unsupported equality kinds fail with a precise compiler diagnostic rather
   than linking an absent runtime symbol or silently using text semantics.
+

@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-gpu-abi-v1.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+cc=${CC:-cc}
+
+"$cc" -std=c11 -fPIC -shared -DSIMPLE_GPU_ABI_PROVIDER \
+    -I"$repo/src/runtime" \
+    "$repo/test/02_integration/runtime/gpu_provider_abi_lifetime_v1.c" \
+    -o "$build_dir/provider.so"
+digest=$(sha256sum "$build_dir/provider.so" | awk '{print $1}')
+"$cc" -std=c11 -ffunction-sections -fdata-sections \
+    -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 -I"$repo/src/runtime" \
+    -I"$repo/src/runtime/platform" -c "$repo/src/runtime/runtime_native.c" \
+    -o "$build_dir/runtime_native.o"
+"$cc" -std=c11 -ffunction-sections -fdata-sections -I"$repo/src/runtime" \
+    -I"$repo/src/runtime/platform" -c "$repo/src/runtime/runtime_dynload.c" \
+    -o "$build_dir/runtime_dynload.o"
+"$cc" -std=c11 -pthread -Wl,--gc-sections -I"$repo/src/runtime" \
+    "$repo/test/02_integration/runtime/gpu_provider_abi_lifetime_v1.c" \
+    "$build_dir/runtime_dynload.o" "$build_dir/runtime_native.o" \
+    -ldl -lm -o "$build_dir/check"
+"$build_dir/check" "$build_dir/provider.so" "$digest"

@@ -1,4 +1,8 @@
 # Duplicate test-tree divergence — triage pass (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Guard: `scripts/check/check-test-tree-divergence.shs --ref <sha>` (committed content only;
 the shared working copy carries other sessions' in-flight test edits and disagrees).
@@ -125,3 +129,4 @@ Proposed consolidation (reviewable, NOT done here):
 3. Once the baseline is empty, delete `test/unit/` and `test/integration/` in one reviewed
    commit and add an exclusion in the test runner so they cannot be re-created silently.
 Deleting a whole test tree is explicitly out of scope for an automated pass.
+

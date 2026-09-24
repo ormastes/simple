@@ -54,15 +54,21 @@ impl MockFat32BlockDevice:
         MockFat32BlockDevice(sector: bytes)
 
 impl BlockDevice for MockFat32BlockDevice:
-    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
-        var i = 0
-        while i < self.sector.len() and i < buffer.len():
-            if lba == 0:
-                buffer[i] = self.sector[i]
-            else:
-                buffer[i] = 0
-            i = i + 1
-        Result.Ok(true)
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        # Matches the BlockDevice trait's declared 1-arg, return-the-bytes
+        # convention (src/lib/nogc_sync_mut/fs_driver/block_device.spl:12) --
+        # not the earlier 2-arg buffer-mutation shape, which the trait never
+        # declared and which no real caller ever invoked with two arguments
+        # (bug: trait_conformance_check_ignores_arity_2026-08-04).
+        if lba == 0:
+            Result.Ok(self.sector)
+        else:
+            var zeros: [u8] = []
+            var i = 0
+            while i < self.sector.len():
+                zeros.push(0)
+                i = i + 1
+            Result.Ok(zeros)
 
     fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         Result.Ok(true)
@@ -92,7 +98,12 @@ describe "FAT32 hosted seam — mount table registration":
         step("stays on the shared FsFat32Driver surface")
         val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
         val legacy_type = "Fat32" + "Driver"
-        assert_equal(source.contains("use os.services.fat32.fat32"), false)
+        # Built by concatenation, not one literal: this file scans its OWN source,
+        # so a single unsplit string naming the forbidden import would always be
+        # found (inside this very check), making the assertion unsatisfiable by
+        # construction. See .claude/rules/testing.md, section F3.
+        val legacy_module_import = "use os.services" + ".fat32" + ".fat32"
+        assert_equal(source.contains(legacy_module_import), false)
         assert_equal(source.contains(" " + legacy_type + ".new("), false)
         assert_equal(source.contains("=" + legacy_type + ".new("), false)
         assert_equal(source.contains("(" + legacy_type + ".new("), false)

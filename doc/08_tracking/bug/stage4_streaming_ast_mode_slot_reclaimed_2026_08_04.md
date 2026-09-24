@@ -1,4 +1,8 @@
 # Stage 4 streaming AST mode slot reclaimed between files
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -38,3 +42,4 @@ runtime alias, or revive the rejected lexer-lifetime experiment.
   cases for the rebuilt self-hosted test runner.
 - One bounded incremental Stage 2/3 refresh and Phase 4 retry crosses release
   sequence 1 before any broader completion claim.
+

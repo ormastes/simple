@@ -1,4 +1,8 @@
 # stage4 unstub path: multi-function run files silently no-op (deploy rolled back)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03 · **Status:** OPEN — blocks re-deploy of the unstubbed stage4
 
@@ -50,3 +54,4 @@ functions-dict iteration / synthetic-main selection in
 lower_parser_module_unstub dropping non-main functions. Then extend the smoke
 matrix (multi-fn, @cfg, struct/class, imports) BEFORE any re-deploy, and flip
 the default again only after the matrix passes.
+

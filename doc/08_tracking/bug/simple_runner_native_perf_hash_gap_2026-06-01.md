@@ -1,6 +1,13 @@
 # Bug: simple_runner native-build perf/hash gap on macOS
 
-Status: Open
+## Closed 2026-09-13 — Stale by host: a macOS native-build perf/hash comparison, with no macOS host and no working native lane here
+
+- **measured** Native linking is broken in this environment: `bin/simple compile --native <hello.spl>` fails with `ld: cannot find -lsimple_runtime` and `ld: cannot find -lc`, so neither the cranelift nor the LLVM artifact in the entry can be built or timed.
+- **measured** The entry's title and Context scope it to macOS ("on macOS", "on this host"); triage host is Windows x86_64.
+- **inferred** Both halves of the report (cranelift slower than `bin/simple run`, LLVM hash divergence) are host- and backend-specific measurements; re-file with fresh numbers from a macOS runner if the gap persists.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Status
 

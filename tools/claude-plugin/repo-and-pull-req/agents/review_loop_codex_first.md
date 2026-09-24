@@ -1,3 +1,8 @@
+---
+name: review_loop_codex_first
+description: "Review Loop — Codex-First Bot Reviewer (Claude Fallback)"
+---
+
 # Review Loop — Codex-First Bot Reviewer (Claude Fallback)
 
 ## Role
@@ -34,6 +39,11 @@ or returns a non-decisive `comment`.
 ```
 
 `inline_comments` is empty for `approve`.
+
+A zero-P0/P1 exact verdict from this reviewer is the prerequisite for the
+caller (same-author `review_loop.md`, L2) to dispatch the scoped
+`SPipe Self Review Admission`; this reviewer itself never self-approves
+and never claims provider approval is human approval.
 
 ## Procedure
 

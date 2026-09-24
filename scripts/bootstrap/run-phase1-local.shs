@@ -1,0 +1,40 @@
+#!/bin/sh
+# run-phase1-local.shs — phase 1 (Rust seed) bootstrap runner.
+#
+# Phase 1 is the Rust seed build, nothing more (see
+# doc/07_guide/tooling/local_temp_phase1_mcp_deploy.md, "What phase 1 is (and
+# is not)"). This script does ONLY PATH setup: it sources
+# scripts/setup/host-env.shs to pick up this host's PATH prepend from
+# config/host/<hostname>.sdn (a no-op when no such file exists -- the shell
+# keeps its own generic PATH), applies it, then execs the sanctioned
+# bootstrap command below. All actual bootstrap logic lives in
+# bootstrap-windows.sh / bootstrap-from-scratch.sh, not here.
+#
+# Usage:
+#   sh scripts/bootstrap/run-phase1-local.shs [extra args forwarded]
+
+set -u
+
+# Self-locate without external `dirname`: on a fresh Git Bash shell this
+# script's own inherited PATH is the raw, unparseable Windows ';'-separated
+# one (see doc/07_guide/tooling/local_temp_phase1_mcp_deploy.md "0. Fix the
+# shell PATH first") -- `dirname` itself is not yet resolvable at this point,
+# so calling it here (as this script used to) fails with
+# "dirname: command not found" before host-env.shs ever gets a chance to fix
+# PATH. `cd`/`pwd` are shell builtins and need no PATH lookup, so parameter
+# expansion + cd/pwd is enough to find repo_root with zero external commands.
+case "$0" in
+    */*) _script_dir=${0%/*} ;;
+    *)   _script_dir=. ;;
+esac
+repo_root=$(CDPATH= cd -- "${_script_dir}/../.." && pwd)
+
+# shellcheck disable=SC1091
+if ! . "${repo_root}/scripts/setup/host-env.shs"; then
+    printf 'run-phase1-local: host-env.shs refused its config; continuing with the generic PATH\n' >&2
+fi
+host_env_apply_path
+
+cd "${repo_root}" || exit 1
+exec sh scripts/bootstrap/bootstrap-windows.sh \
+    --full-bootstrap --stop-after-stage2 --backend=cranelift --no-mcp --verbose "$@"

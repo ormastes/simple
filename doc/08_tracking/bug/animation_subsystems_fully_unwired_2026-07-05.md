@@ -1,4 +1,8 @@
 # Animation subsystems fully built and tested but unreachable in any live GUI lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -27,3 +31,4 @@ No page with CSS transitions or JS-driven timing (splash screens, fade-in/out, s
 
 ## Next Step
 Immediate: update documentation to not claim animation support until wiring is complete. Medium-term: wire WM animator into open/close/focus paths; drive `ScriptHost.tick()` from the web-render frame loop (after first-frame CSS perf fix lands). Related: see `browser_script_timer_deadline_absolute_relative_confusion_2026-07-05.md` for a latent bug in the timer/rAF deadline logic that would surface when wiring completes.
+

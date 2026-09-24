@@ -1,4 +1,9 @@
 # Chained method call writes its result back into the receiver variable (interpreter)
+## Closed 2026-09-16 — Status FIXED 2026-08-31; regression spec 5/5 post-fix, table_spec 25/25
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-31
 **Status:** FIXED 2026-08-31 (PR fix/chained-call-receiver-mutation)
@@ -117,3 +122,4 @@ still write back (verified).
 the interpreter lane is exercised under the default engine).
 `test/feature/usage/table_spec.spl` now 25/25 including "supports multiple
 aggregations".
+

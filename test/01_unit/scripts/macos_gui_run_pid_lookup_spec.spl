@@ -1,0 +1,84 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/macos_gui_run_sigpipe_141_and_stale_winit_marker_gate_2026-09-06.md
+# plan: doc/03_plan/infra/macos_open_bugs_fix_lanes_2026-09-12.md (Lane 4)
+
+"""# The GUI launcher reports the run it actually performed
+
+A macOS engineer launches the widget showcase through
+`scripts/gui/macos-gui-run.shs`. The window appears. The script must then say
+the run succeeded — and it must be willing to launch the binary this repo
+actually ships.
+
+Two defects broke exactly that, and both are pinned here.
+
+- The launcher's pid lookup was `ps -axo ... | awk '... exit'` under
+  `set -o pipefail`. awk's early `exit` closes the pipe while `ps` is still
+  writing, `ps` dies with SIGPIPE, the pipeline status is **141**, and `set -e`
+  ends the script — *after* `open -n` already put a real window on screen. Every
+  caller read a failure for a successful launch.
+- `has_winit_marker` grepped the candidate binary for `rt_winit_event_loop_new`.
+  The GUI route loads `libspl_winit.<ext>` through `GuiRenderer` at runtime, so a
+  current binary carries no such symbol and was refused even though it works.
+
+The oracle is the committed `.shs` itself: every function under test is
+extracted verbatim from the tracked launcher by
+`test/01_unit/scripts/macos_gui_run_pid_lookup_contract_test.shs` and executed
+under the same `set -euo pipefail`. The harness also runs the exact pre-fix
+shape as a sabotage control, so a passing run proves the harness discriminates
+rather than merely being quiet.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val HARNESS: text = "test/01_unit/scripts/macos_gui_run_pid_lookup_contract_test.shs"
+
+fn harness_output() -> text:
+    val out = process_run("sh", ["-c",
+        "o=$(sh " + HARNESS + " 2>&1); rc=$?; printf '%s\\nHARNESS_RC=%s\\n' \"$o\" \"$rc\""])
+    out.0
+
+describe "macos-gui-run.shs pid lookup":
+    # @manual scenario evidence
+
+    it "returns the launched pid with status 0 instead of dying 141 on SIGPIPE":
+        # @req REQ-SSPEC-UNIT
+        step("returns the launched pid with status 0 instead of dying 141 on SIGPIPE")
+        step("Extract find_exact_app_pid verbatim from the tracked launcher")
+        val s = harness_output()
+        step("The harness itself ran to completion")
+        expect(s).to_contain("HARNESS_RC=0")
+        step("The real function body was extracted — a vacuous extraction fails the harness")
+        expect(s).to_contain("EXTRACT_PID_OK=YES")
+        step("A fake ps writes 20001 lines with the match first; the lookup still succeeds")
+        expect(s).to_contain("PID_RC=0 PID=4242")
+
+    it "still reproduces exit 141 for the pre-fix ps-pipe-awk-exit shape":
+        # @req REQ-SSPEC-UNIT
+        step("still reproduces exit 141 for the pre-fix ps-pipe-awk-exit shape")
+        step("Run the sabotage control through the identical harness")
+        val s = harness_output()
+        expect(s).to_contain("HARNESS_RC=0")
+        step("141 is SIGPIPE — the exact recorded defect, proving the harness discriminates")
+        expect(s).to_contain("SABOTAGE_RC=141")
+
+describe "macos-gui-run.shs winit capability gate":
+    # @manual scenario evidence
+
+    it "admits the dlopen route when libspl_winit is resolvable and refuses it otherwise":
+        # @req REQ-SSPEC-UNIT
+        step("admits the dlopen route when libspl_winit is resolvable and refuses it otherwise")
+        step("Probe a candidate file that carries no baked rt_winit_* symbol at all")
+        val s = harness_output()
+        expect(s).to_contain("HARNESS_RC=0")
+        step("The real probe bodies were extracted")
+        expect(s).to_contain("EXTRACT_WINIT_OK=YES")
+        step("With no libspl_winit anywhere on the search path the candidate is refused")
+        expect(s).to_contain("WITHOUT_DYLIB=NO")
+        step("Once build/sffi/libspl_winit.dylib exists the same candidate is admitted")
+        expect(s).to_contain("WITH_DYLIB=YES")
+        step("The strict-evidence probe stays baked-symbol-only and still refuses it")
+        expect(s).to_contain("BAKED=NO")

@@ -1,0 +1,89 @@
+# Native regression for explicit child roots of a pre-existing MIR-like owner.
+# This exercises the runtime boundary; the source gate separately binds the
+# production inventory to every MirLowering and nested-carrier field.
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_array_free(array: [Any])
+
+struct InventoryBuffer:
+    items: [text]
+
+struct InventoryOwner:
+    buffer: InventoryBuffer
+    names: [text]
+    current_module: text
+    optional_name: text?
+    count: i64
+
+impl InventoryOwner:
+    me populate(module_index: i64):
+        self.current_module = "module-{module_index}|current"
+        self.names = self.names.push("module-{module_index}|name")
+        self.buffer.items = self.buffer.items.push("module-{module_index}|nested")
+        self.count = module_index + 1
+
+    me promote_reference() -> bool:
+        rt_transient_heap_promote(self)
+
+    me promote_inventory() -> bool:
+        var roots: [Any] = []
+        roots.push(self.buffer)
+        roots.push(self.names)
+        roots.push(self.current_module)
+        roots.push(self.optional_name)
+        roots.push(self.count)
+        roots.push(self.buffer.items)
+        val promoted = rt_transient_heap_promote(roots)
+        rt_array_free(roots)
+        promoted
+
+fn check_inventory_scopes() -> i64:
+    var owner = InventoryOwner(
+        buffer: InventoryBuffer(items: []), names: [],
+        current_module: "initial", optional_name: nil, count: 0)
+    var module_index = 0
+    while module_index < 2:
+        if not rt_transient_array_scope_begin():
+            return 10
+        owner.populate(module_index)
+        val lowered = ["module-{module_index}|lowered"]
+        if not rt_transient_array_scope_pause():
+            val _ended_pause = rt_transient_array_scope_end()
+            return 11
+        if not rt_transient_heap_promote(lowered):
+            val _ended_module = rt_transient_array_scope_end()
+            return 12
+        # Reproduce the exact old failure without reading freed memory.
+        if owner.promote_reference():
+            val _ended_reference = rt_transient_array_scope_end()
+            return 13
+        if not owner.promote_inventory():
+            val _ended_inventory = rt_transient_array_scope_end()
+            return 14
+        if not rt_transient_array_scope_end():
+            return 15
+        if owner.current_module != "module-{module_index}|current":
+            return 16
+        if owner.names.len() != module_index + 1 or owner.count != module_index + 1:
+            return 17
+        if owner.names[module_index] != "module-{module_index}|name":
+            return 18
+        if owner.buffer.items[module_index] != "module-{module_index}|nested":
+            return 19
+        if lowered[0] != "module-{module_index}|lowered":
+            return 20
+        module_index = module_index + 1
+    if owner.names[0] != "module-0|name" or owner.buffer.items[0] != "module-0|nested":
+        return 21
+    0
+
+fn main() -> i64:
+    val result = check_inventory_scopes()
+    if result != 0:
+        print "FAIL: MIR retained-root inventory checkpoint={result}"
+        return result
+    print "PASS: old-owner rejection and explicit nested/text/nil/scalar inventory survive two scopes"
+    0

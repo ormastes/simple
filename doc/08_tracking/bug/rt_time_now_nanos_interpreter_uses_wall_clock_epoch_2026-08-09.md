@@ -1,4 +1,9 @@
 # `rt_time_now_nanos` returns a BOOT-relative epoch natively and a WALL-CLOCK epoch in the interpreter
+## Closed 2026-09-16 — Status FIXED 2026-08-17; interpreter now Instant-backed per source; repro not re-run
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED — status line corrected 2026-08-17 (it read "OPEN — filed,
 deliberately not fixed in-stream", which is stale). The interpreter's
@@ -107,3 +112,4 @@ filed, not fixed" section: the correct fix is a semantic name-split
 implementation sites including forbidden `src/compiler_rust/**`, not a
 same-epoch patch to one side, and is owned by the lane-divergence baseline's
 maintainer. No code changed in this pass.
+

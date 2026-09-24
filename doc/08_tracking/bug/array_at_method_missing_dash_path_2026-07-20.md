@@ -1,4 +1,8 @@
 # `array.at(i)` method does not exist — breaks production `dash_path` code, not just its spec
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** high (production source code, not a test-only issue)
@@ -68,3 +72,4 @@ creep beyond this campaign's mandate.
   under `bin/simple run` on a 3-line standalone repro
   (`val bytes: [i64] = [99, 111, 108]; bytes.at(1)`), confirming this is a
   missing builtin, not a test-vs-run evaluator divergence.
+

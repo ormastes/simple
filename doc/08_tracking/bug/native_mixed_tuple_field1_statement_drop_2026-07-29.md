@@ -1,4 +1,8 @@
 # Native lane: reading field 1 of a mixed (text, i64) tuple silently drops statements
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ROOT-CAUSED and FIXED in the seed's lowering (pending seed
 redeploy). TWO stacked causes, both index-blind element typing:
@@ -92,3 +96,4 @@ statements in the enclosing block rather than an error.
 - Do not conflate with the optional-extraction bug (fixed) or the
   kafka <<3 tag-box family; this one is specific to heterogeneous tuple
   field access.
+

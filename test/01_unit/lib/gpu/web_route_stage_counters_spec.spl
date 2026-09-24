@@ -1,0 +1,56 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+Traceability: REQ-SSPEC-LIB
+"""
+# research: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ; plan: doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ; architecture: doc/04_architecture/compiler/mdsoc_architecture_tobe.md ; design: doc/05_design/chromium_web_renderer_primitive_differential.md
+
+# Presenter route-stage counters: the CPU<->GPU boundary terms no Vulkan
+# counter can carry.
+#
+# Host-painted pixels handed to a device write no GPU op, so the backend census
+# and every vk-timing bucket read 0 for them however much CPU they burned. These
+# counters are what let the boundary audit gate tell "the GPU painted this page"
+# apart from "the host painted it and the GPU handed it back" — see
+# doc/08_tracking/bug/web_presenter_double_readback_and_host_paint_passthrough_2026-09-12.md.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    web_route_stage_drain,
+    web_route_stage_host_paint_pixels,
+    web_route_stage_note_host_paint,
+    web_route_stage_readbacks
+}
+use std.spec.{describe, it, expect}
+
+describe("web route-stage counters", \:
+    it("starts at zero after a drain", \:
+        web_route_stage_drain()
+        expect(web_route_stage_host_paint_pixels()).to_equal(0)
+        expect(web_route_stage_readbacks()).to_equal(0)
+    )
+
+    it("accumulates host-painted pixels handed to the device", \:
+        web_route_stage_drain()
+        web_route_stage_note_host_paint(684000)
+        web_route_stage_note_host_paint(1000)
+        expect(web_route_stage_host_paint_pixels()).to_equal(685000)
+    )
+
+    it("never counts a non-positive host paint", \:
+        web_route_stage_drain()
+        web_route_stage_note_host_paint(0)
+        web_route_stage_note_host_paint(-5)
+        expect(web_route_stage_host_paint_pixels()).to_equal(0)
+    )
+
+    it("drains to a per-frame line and resets", \:
+        web_route_stage_drain()
+        web_route_stage_note_host_paint(100)
+        val line = web_route_stage_drain()
+        expect(line.contains("host_paint_pixels=100")).to_equal(true)
+        expect(line.contains("readbacks_gpu_paint=0")).to_equal(true)
+        expect(line.contains("readbacks_upload=0")).to_equal(true)
+        # The drain is what makes the numbers per-frame rather than cumulative.
+        expect(web_route_stage_host_paint_pixels()).to_equal(0)
+        expect(web_route_stage_drain().contains("host_paint_pixels=0")).to_equal(true)
+    )
+)

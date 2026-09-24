@@ -1,0 +1,86 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Purpose: Prove CoreLexer skips a long run of comment-only / whitespace-only
+lines WITHOUT one interpreter frame per line.
+Audience: compiler and tooling engineers who maintain the pure-Simple lexer.
+"""
+# @req: REQ-COMPILER-FRONTEND-002 — stable requirement identity for this spec.
+
+# CoreLexer.handle_indentation() finished both of its skip branches with
+# `self.scan_token(); return`, and scan_token() re-enters handle_indentation()
+# for the next line. A run of N consecutive comment-only (or whitespace-only)
+# lines therefore cost N nested interpreter frames. The seed interpreter's
+# recursion guard rejects call 1000, so a ~450-line comment banner aborted the
+# whole PROCESS with
+#
+#   error: stack overflow: recursion depth 1000 exceeded limit 1000 in function 'peek'
+#
+# `peek` only because it is the innermost call the guard happened to reject —
+# peek() itself is not recursive, which is why the message misdirected the
+# first three investigations.
+#
+# This is not a niche lexer curiosity: the TEST RUNNER lexes every spec's
+# SOURCE in its own process (preprocess_spipe_file -> simple_code_lines, and
+# the runner sets SIMPLE_EXECUTION_MODE=interpret on itself first), so one
+# banner-heavy spec took `bin/simple test <dir>` down mid-sweep and every
+# later spec in that directory was never run and never counted.
+#
+# The probe runs in a CHILD with SIMPLE_EXECUTION_MODE=interpret because the
+# JIT path does not go through the interpreter's recursion guard at all, so an
+# in-process assertion here would pass vacuously.
+#
+# See doc/08_tracking/bug/lexer_comment_run_recursion_overflow_2026-09-13.md
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.io_runtime.{getpid}
+
+fn probe_source(comment_lines: i64) -> text:
+    var body = "use compiler.frontend.core.source_facts.\{simple_code_lines\}\n"
+    body = body + "\nfn build(n: i64) -> text:\n"
+    body = body + "    var s = \"\"\n"
+    body = body + "    var i = 0\n"
+    body = body + "    while i < n:\n"
+    body = body + "        s = s + \"# banner line\\n\"\n"
+    body = body + "        i = i + 1\n"
+    body = body + "    s + \"fn main():\\n    print(1)\\n\"\n"
+    body = body + "\nfn main():\n"
+    body = body + "    val src = build({comment_lines})\n"
+    body = body + "    val lines = simple_code_lines(src)\n"
+    body = body + "    print \"lex_ok lines=\{lines.len()\}\"\n"
+    body
+
+fn run_probe(comment_lines: i64) -> text:
+    # pid-qualified: two lanes running this spec at once must not share the file.
+    val path = "/tmp/simple_lexrec_probe_{getpid()}_{comment_lines}.spl"
+    if file_exists(path):
+        file_delete(path)
+    file_write(path, probe_source(comment_lines))
+    # The guard only exists on the interpreter path; without this the child
+    # JITs the probe and the assertion below cannot fail.
+    env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    val (out, err, _code) = process_run_timeout("bin/simple", ["run", path], 300000)
+    if file_exists(path):
+        file_delete(path)
+    out + "\n" + err
+
+describe "CoreLexer skips long comment runs iteratively":
+    it "lexes 600 consecutive comment lines without exhausting the recursion guard":
+        # @req REQ-SSPEC-COMPILER
+        val captured = run_probe(600)
+        # Fail-closed on vacuity: the assertion that carries the evidence is
+        # the positive one below — a shell-out that captured nothing, or that
+        # captured only the seed's banner, cannot satisfy it.
+        expect(captured).to_contain("lex_ok lines=603")
+        expect(captured.contains("stack overflow")).to_be(false)
+
+    it "still lexes a short comment run correctly (non-vacuity control)":
+        # @req REQ-SSPEC-COMPILER
+        val captured = run_probe(40)
+        expect(captured).to_contain("lex_ok lines=43")
+        expect(captured.contains("stack overflow")).to_be(false)

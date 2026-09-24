@@ -1,0 +1,118 @@
+# SMF manifest current-version identity admission.
+# @req KPM-REQ-004 KPM-REQ-006 KPM-REQ-009 KPM-NFR-005
+
+use std.spec.*
+use compiler.driver.watcher.smf_manifest.{
+    SmfManifest,
+    SmfManifestGateVerdict,
+    SMF_MANIFEST_VERSION_CURRENT,
+    SMF_MANIFEST_VERSION_LEGACY_IDENTITY,
+    smf_manifest_new,
+    smf_manifest_entry_new,
+    smf_manifest_entry_new_with_identity,
+    smf_manifest_update,
+    smf_manifest_to_sdn,
+    smf_manifest_from_sdn,
+    smf_manifest_from_sdn_checked,
+    smf_manifest_find,
+    smf_manifest_entry_gate,
+    smf_manifest_gate_code,
+    smf_manifest_host_abi_digest
+}
+
+fn admitted_fixture() -> text:
+    var manifest = smf_manifest_new()
+    val entry = smf_manifest_entry_new("src/main.spl", "build/main.smf", 7, "cranelift", 0, false, true, false, "dev", [])
+    manifest = smf_manifest_update(manifest, entry)
+    smf_manifest_to_sdn(manifest)
+
+fn parsed_fixture(content: text) -> SmfManifest:
+    smf_manifest_from_sdn(content)
+
+describe("SMF manifest current-version gate", fn():
+    it("admits the production writer serialize parse path", fn():
+        val serialized = admitted_fixture()
+        expect(serialized).to_contain("version: {SMF_MANIFEST_VERSION_CURRENT}")
+        val manifest = parsed_fixture(serialized)
+        val entry = smf_manifest_find(manifest, "src/main.spl").unwrap()
+        assert_equal(manifest.version, SMF_MANIFEST_VERSION_CURRENT)
+        assert_equal(smf_manifest_entry_gate(manifest, entry, smf_manifest_host_abi_digest()), SmfManifestGateVerdict.Admitted)
+    )
+
+    it("rejects legacy version 34 with a named version code", fn():
+        val current = "version: {SMF_MANIFEST_VERSION_CURRENT}"
+        val legacy = "version: {SMF_MANIFEST_VERSION_LEGACY_IDENTITY}"
+        val parsed = smf_manifest_from_sdn_checked(
+            admitted_fixture().replace(current, legacy))
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err.unwrap()).to_contain("SMF-E-VERSION")
+    )
+
+    it("rejects an unknown version rather than defaulting it", fn():
+        val current = "version: {SMF_MANIFEST_VERSION_CURRENT}"
+        val parsed = smf_manifest_from_sdn_checked(
+            admitted_fixture().replace(current, "version: future"))
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.err.unwrap()).to_contain("SMF-E-VERSION")
+    )
+
+    it("rejects an ABI mismatch with a named code", fn():
+        val manifest = parsed_fixture(admitted_fixture())
+        val entry = smf_manifest_find(manifest, "src/main.spl").unwrap()
+        val verdict = smf_manifest_entry_gate(manifest, entry, "wrong-digest")
+        print("KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=BEGIN expected=AbiDigestMismatch")
+        if verdict != SmfManifestGateVerdict.AbiDigestMismatch:
+            print("KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=FAIL expected=AbiDigestMismatch actual={verdict}")
+        assert_equal(verdict, SmfManifestGateVerdict.AbiDigestMismatch)
+        assert_equal(smf_manifest_gate_code(verdict), "SMF-E-ABI-MISMATCH")
+        print("KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=PASS expected=AbiDigestMismatch code=SMF-E-ABI-MISMATCH")
+    )
+
+    it("admits a matching current-version ABI digest", fn():
+        val manifest = parsed_fixture(admitted_fixture())
+        val entry = smf_manifest_find(manifest, "src/main.spl").unwrap()
+        assert_equal(smf_manifest_entry_gate(manifest, entry, smf_manifest_host_abi_digest()), SmfManifestGateVerdict.Admitted)
+    )
+
+    it("round-trips identity columns", fn():
+        var manifest = smf_manifest_new()
+        val entry = smf_manifest_entry_new_with_identity(
+            "src/plugin.spl", "build/plugin.smf", 9, "cranelift", 0,
+            false, true, false, "dev", [], "iface-v1",
+            smf_manifest_host_abi_digest(), ["simple.plugin.Host@1"],
+            ["simple.kernel.Api@1"])
+        manifest = smf_manifest_update(manifest, entry)
+        val content = smf_manifest_to_sdn(manifest)
+        expect(content).to_contain("abi_digest")
+        expect(content).to_contain("simple.plugin.Host@1")
+        expect(content).to_contain("simple.kernel.Api@1")
+        val parsed = smf_manifest_from_sdn(content)
+        val parsed_entry = smf_manifest_find(parsed, "src/plugin.spl").unwrap()
+        assert_equal(parsed_entry.provided_ifaces, ["simple.plugin.Host@1"])
+        assert_equal(parsed_entry.required_ifaces, ["simple.kernel.Api@1"])
+    )
+
+    it("serializes entries and interface sets canonically", fn():
+        var manifest = smf_manifest_new()
+        manifest = smf_manifest_update(manifest, smf_manifest_entry_new_with_identity(
+            "src/z.spl", "build/z.smf", 9, "cranelift", 0,
+            false, true, false, "dev", ["z", "a"], "iface-z",
+            smf_manifest_host_abi_digest(), ["z@1", "a@1"], ["k@1"]))
+        manifest = smf_manifest_update(manifest, smf_manifest_entry_new_with_identity(
+            "src/a.spl", "build/a.smf", 10, "cranelift", 0,
+            false, true, false, "dev", [], "iface-a",
+            smf_manifest_host_abi_digest(), [], []))
+        val first = smf_manifest_to_sdn(manifest)
+        val second = smf_manifest_to_sdn(manifest)
+        expect(first).to_equal(second)
+        expect(first.index_of("src/a.spl")).to_be_less_than(first.index_of("src/z.spl"))
+        expect(first.index_of("a@1")).to_be_less_than(first.index_of("z@1"))
+    )
+
+    it("rejects malformed and duplicate rows instead of dropping them", fn():
+        val header = "entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest, abi_digest, provides, requires|\n"
+        val row = "    \"src/a.spl\", \"build/a.smf\", 1, 2, \"llvm\", 0, false, true, false, \"dev\", [], \"iface\", \"abi\", [], []\n"
+        expect(smf_manifest_from_sdn_checked("smf_manifest:\n  version: 35\n  updated_at: 1\n\n" + header + row + row).is_err()).to_equal(true)
+        expect(smf_manifest_from_sdn_checked("smf_manifest:\n  version: 35\n  updated_at: 1\n\n" + header + "    \"src/a.spl\", 1\n").is_err()).to_equal(true)
+    )
+)

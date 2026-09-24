@@ -4,6 +4,10 @@ Date: 2026-08-01
 Status: family enumerated and closed; one structural hardening landed
 Related: `064d40e5896` (the two originally proved instances)
 
+## Closed 2026-09-13 — Already Fixed
+
+Investigation complete and hardening landed in commit `064d40e5896` (fix: native-build llvm dropped every explicit return value). Family sweep completed with all fixes verified.
+
 ## The defect shape
 
 A dispatcher runs a discriminant check to shortcut a `match`, handles the
@@ -154,3 +158,19 @@ Both existing level-gated probes were used rather than adding new ones:
 `SIMPLE_MIR_RET_TRACE=1`, `SIMPLE_LLVM_RET_TRACE=1`. All temporary
 instrumentation was removed; the scratch tree was verified byte-identical to
 pristine origin afterwards.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: linux-lane** — [env-blocked:linux]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked (deployed-binary/hardware)** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked (deployed-binary/hardware)** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

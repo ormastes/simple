@@ -1,4 +1,9 @@
 # Fix: Calc TUI raw-mode keys — real root cause was the interpreter-fallback extern dispatch table, not module imports
+## Closed 2026-09-16 — .../`rt_terminal_disable_raw_mode` resolved fine from an identically-shaped standalone module
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **ID:** raw_mode_extern_registry_2026-07-03
 **Date:** 2026-07-03
@@ -192,3 +197,4 @@ externs `terminal.spl` actually declares (`() -> bool`, `() -> (i64, i64)`).
    key. If that surprises users, restore `ISIG` after `cfmakeraw()` and before
    `tcsetattr`. (The interpreter-path `native_enable_raw_mode`, gap 2, already
    made this same ISIG-disabling choice explicitly.)
+

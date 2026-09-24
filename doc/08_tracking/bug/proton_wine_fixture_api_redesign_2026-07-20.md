@@ -1,4 +1,8 @@
 # Proton/Wine fixture specs assert an API shape that no longer exists — needs product decision, not a mechanical fix
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** low (test-only; both are `lib/common` fixture/evidence
@@ -101,3 +105,4 @@ spec should be rewritten to the boolean-flag model is a design decision.
   `"rejects incomplete session requests before runtime evidence"`, only
   exercises `proton_session_request_new`/`proton_session_request_gate`,
   which DO match current source, and passes).
+

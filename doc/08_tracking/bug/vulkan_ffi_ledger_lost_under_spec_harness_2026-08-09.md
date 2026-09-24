@@ -1,4 +1,16 @@
 # `VulkanFfi` rejection ledger never accumulates under the spec harness (works under `bin/simple run`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13
+OPEN, out of scope for this pass: the doc's own investigation already
+eliminated the two most obvious hypotheses (plain class mutator, trait-impl
+mutator shape) and states root cause NOT isolated -- this needs a bisection
+between the spec harness's module-loading path and bin/simple run's, which is
+a multi-hour investigation per the doc's own trail, not a contained fix. Left
+OPEN as characterized.
 
 **Filed:** 2026-08-09 (stream F4)
 **Subject:** `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl`
@@ -109,3 +121,4 @@ failed assertion, not the first. The run above reported only
 `expected  to equal shutdown` although the two preceding count assertions
 had failed too. Reading a single failure message as "only one assertion
 failed" is a mistake.
+

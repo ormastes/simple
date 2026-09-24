@@ -3,7 +3,8 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage4-tooling-matrix-test.XXXXXX")
-trap 'rm -rf "$fixture"' EXIT INT TERM HUP
+trap '[ "${STAGE4_TEST_KEEP_FIXTURE:-0}" = 1 ] || rm -rf "$fixture"' EXIT INT TERM HUP
+printf 'FIXTURE=%s\n' "$fixture"
 fake_root="$fixture/repo"
 mkdir -p "$fake_root/scripts/bootstrap" "$fake_root/scripts/check/cert/redeploy_gate" \
   "$fake_root/scripts/smoke" "$fake_root/test/01_unit/lib/tooling" \
@@ -18,13 +19,50 @@ mkdir -p "$fake_root/scripts/bootstrap" "$fake_root/scripts/check/cert/redeploy_
   "$fake_root/build/authority" "$fake_root/build/journals" "$fake_root/build/objects"
 
 cp "$repo_root/scripts/bootstrap/stage4-tools-only.sh" "$fake_root/scripts/bootstrap/"
-cp "$repo_root/scripts/bootstrap/stage4-tooling-matrix.shs" "$fake_root/scripts/bootstrap/"
+cp "${STAGE4_TEST_MATRIX_SOURCE:-$repo_root/scripts/bootstrap/stage4-tooling-matrix.shs}" "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+cp "$repo_root/scripts/bootstrap/run-process-group-timeout.shs" "$fake_root/scripts/bootstrap/"
 chmod +x "$fake_root/scripts/bootstrap/stage4-tools-only.sh" \
-  "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+  "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs" \
+  "$fake_root/scripts/bootstrap/run-process-group-timeout.shs"
 
 fail() {
   echo "bootstrap_stage4_tooling_matrix_test: $*" >&2
   exit 1
+}
+
+process_is_live() {
+  observed_pid=$1
+  kill -0 "$observed_pid" 2>/dev/null || return 1
+  observed_state=$(ps -o stat= -p "$observed_pid" 2>/dev/null | tr -d ' ' || :)
+  [ -n "$observed_state" ] || return 1
+  case "$observed_state" in Z*) return 1 ;; esac
+  return 0
+}
+
+cleanup_owned_fake_concurrency_dirs() {
+  cleanup_root=$1
+  cleanup_inventory=$2
+  [ -d "$cleanup_root" ] && [ ! -L "$cleanup_root" ] || return 1
+  cleanup_root_canonical=$(CDPATH= cd -- "$cleanup_root" && pwd -P) || return 1
+  [ "$cleanup_root_canonical" = "$cleanup_root" ] || return 1
+  [ -f "$cleanup_inventory" ] && [ ! -L "$cleanup_inventory" ] || return 1
+  while IFS= read -r cleanup_candidate; do
+    [ -n "$cleanup_candidate" ] || continue
+    cleanup_parent=$(dirname -- "$cleanup_candidate")
+    cleanup_name=$(basename -- "$cleanup_candidate")
+    [ "$cleanup_parent" = "$cleanup_root_canonical" ] || continue
+    case "$cleanup_name" in
+      signal-cleanup.link_cli.*|signal-cleanup.link_mcp.*|signal-cleanup.link_lsp.*) ;;
+      *) continue ;;
+    esac
+    cleanup_pid=${cleanup_name##*.}
+    case "$cleanup_pid" in ''|*[!0-9]*|0|1) continue ;; esac
+    [ -d "$cleanup_candidate" ] && [ ! -L "$cleanup_candidate" ] || continue
+    process_is_live "$cleanup_pid" && continue
+    # Fixture ownership and a dead creator are necessary but not sufficient:
+    # rmdir keeps nonempty or concurrently reused directories intact.
+    rmdir "$cleanup_candidate" 2>/dev/null || :
+  done <"$cleanup_inventory"
 }
 
 hash_file() {
@@ -44,8 +82,9 @@ FAKE_NATIVE_ARGS="$fixture/native-args"
 FAKE_TASK_AUDIT="$fixture/task-audit.tsv"
 FAKE_CONCURRENCY_AUDIT="$fixture/concurrency-audit.tsv"
 FAKE_CONCURRENCY_ACTIVE="$fixture/concurrency-active"
+FAKE_CONCURRENCY_OWNERS="$fixture/concurrency-owners.txt"
 export FAKE_LINK_COUNT FAKE_GATE_COUNT FAKE_TOOL_TEMPLATE FAKE_TEST_ARGS FAKE_ESSENTIAL_COUNT FAKE_NATIVE_ARGS
-export FAKE_TASK_AUDIT FAKE_CONCURRENCY_AUDIT FAKE_CONCURRENCY_ACTIVE
+export FAKE_TASK_AUDIT FAKE_CONCURRENCY_AUDIT FAKE_CONCURRENCY_ACTIVE FAKE_CONCURRENCY_OWNERS
 : >"$FAKE_LINK_COUNT"
 : >"$FAKE_GATE_COUNT"
 : >"$FAKE_TEST_ARGS"
@@ -53,6 +92,7 @@ export FAKE_TASK_AUDIT FAKE_CONCURRENCY_AUDIT FAKE_CONCURRENCY_ACTIVE
 : >"$FAKE_NATIVE_ARGS"
 : >"$FAKE_TASK_AUDIT"
 : >"$FAKE_CONCURRENCY_AUDIT"
+: >"$FAKE_CONCURRENCY_OWNERS"
 mkdir -p "$FAKE_CONCURRENCY_ACTIVE"
 
 printf '%s\n' \
@@ -62,6 +102,7 @@ printf '%s\n' \
   'fake_active=' \
   'if [ "${FAKE_GATE_DELAY:-0}" != 0 ]; then' \
   '  fake_active="$FAKE_CONCURRENCY_ACTIVE/${STAGE4_MATRIX_ID:-missing}.${STAGE4_MATRIX_TASK_ID:-missing}.$$"; mkdir "$fake_active"' \
+  '  printf "%s\n" "$fake_active" >>"$FAKE_CONCURRENCY_OWNERS"' \
   '  fake_active_count=$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d " ")' \
   '  printf "%s\t%s\t%s\n" "${STAGE4_MATRIX_ID:-missing}" "${STAGE4_MATRIX_TASK_ID:-missing}" "$fake_active_count" >>"$FAKE_CONCURRENCY_AUDIT"' \
   '  trap '\''rmdir "$fake_active" 2>/dev/null || :'\'' EXIT INT TERM HUP' \
@@ -115,10 +156,19 @@ printf '%s\n' \
   'fake_active=' \
   'if [ "${FAKE_GATE_DELAY:-0}" != 0 ]; then' \
   '  fake_active="$FAKE_CONCURRENCY_ACTIVE/${STAGE4_MATRIX_ID:-missing}.${STAGE4_MATRIX_TASK_ID:-missing}.$$"; mkdir "$fake_active"' \
+  '  printf "%s\n" "$fake_active" >>"$FAKE_CONCURRENCY_OWNERS"' \
   '  fake_active_count=$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d " ")' \
   '  printf "%s\t%s\t%s\n" "${STAGE4_MATRIX_ID:-missing}" "${STAGE4_MATRIX_TASK_ID:-missing}" "$fake_active_count" >>"$FAKE_CONCURRENCY_AUDIT"' \
   '  trap '\''rmdir "$fake_active" 2>/dev/null || :'\'' EXIT INT TERM HUP' \
-  '  sleep "$FAKE_GATE_DELAY"' \
+  '  if [ -n "${FAKE_DESCENDANT_DIR:-}" ]; then' \
+  '    sleep "$FAKE_GATE_DELAY" &' \
+  '    fake_descendant=$!' \
+  '    fake_descendant_pgid=$(ps -o pgid= -p "$fake_descendant" | tr -d " ")' \
+  '    printf "pid=%s\npgid=%s\n" "$fake_descendant" "$fake_descendant_pgid" >"$FAKE_DESCENDANT_DIR/${STAGE4_MATRIX_TASK_ID:-missing}.env"' \
+  '    wait "$fake_descendant"' \
+  '  else' \
+  '    sleep "$FAKE_GATE_DELAY"' \
+  '  fi' \
   'fi' \
   'if [ "${FAKE_SLEEP_TASK:-}" = "${STAGE4_MATRIX_TASK_ID:-}" ]; then sleep "${FAKE_SLEEP_SECONDS:-30}"; fi' \
   'out=' \
@@ -315,9 +365,199 @@ printf 'fake spec\n' >"$fake_root/test/02_integration/app/cli/stage4_tools_only_
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/mcp_stdio_integration_spec.spl"
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_stdio_spec.spl"
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_log_modes_spec.spl"
+mkdir -p "$fake_root/test/01_unit/app/spipe" "$fake_root/test/01_unit/app/devhub" \
+  "$fake_root/test/01_unit/app/llm_caret"
+printf 'fake spipe suite spec\n' >"$fake_root/test/01_unit/app/spipe/fake_spec.spl"
+printf 'fake devhub suite spec\n' >"$fake_root/test/01_unit/app/devhub/fake_spec.spl"
+printf 'fake caret suite spec\n' >"$fake_root/test/01_unit/app/llm_caret/fake_spec.spl"
 
 runner="$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
 common_args="--source-root=$fake_root --compiler-manifest=$manifest --cli-journal=$fake_root/build/journals/cli.env --mcp-journal=$fake_root/build/journals/mcp.env --lsp-journal=$fake_root/build/journals/lsp.env --linker=$fake_linker --timeout-seconds=30 --build-jobs=16"
+
+run_signal_cleanup_contract() {
+# TERM owns the exact active worker groups, waits for them, writes a partial
+# parent aggregate, and removes only that invocation's scheduler run directory.
+signal_matrix_status=0
+export FAKE_GATE_DELAY=30
+FAKE_DESCENDANT_DIR="$fixture/signal-descendants"
+export FAKE_DESCENDANT_DIR
+mkdir -p "$FAKE_DESCENDANT_DIR"
+# shellcheck disable=SC2086
+"$runner" --matrix-id=signal-cleanup --scope=link-only $common_args --build-jobs=3 &
+signal_matrix_pid=$!
+signal_scheduler_root="$fake_root/build/mini_builds/stage4_tooling_signal-cleanup/scheduler"
+signal_active_dir=
+signal_wait_count=0
+while [ "$signal_wait_count" -lt 100 ]; do
+  signal_active_dir=$(find "$signal_scheduler_root" -type d -path '*/active' -print -quit 2>/dev/null || :)
+  if [ -n "$signal_active_dir" ] &&
+     [ "$(find "$signal_active_dir" -maxdepth 1 -type f -name '*.env' -print | wc -l | tr -d ' ')" -eq 3 ]; then
+    break
+  fi
+  sleep 0.05
+  signal_wait_count=$((signal_wait_count + 1))
+done
+[ -n "$signal_active_dir" ] || fail "signal cleanup matrix never exposed owned workers"
+signal_run_dir=$(dirname "$signal_active_dir")
+signal_descendant_wait=0
+while [ "$signal_descendant_wait" -lt 100 ] &&
+      [ "$(find "$FAKE_DESCENDANT_DIR" -type f -name '*.env' -print | wc -l | tr -d ' ')" -lt 3 ]; do
+  sleep 0.05
+  signal_descendant_wait=$((signal_descendant_wait + 1))
+done
+[ "$(find "$FAKE_DESCENDANT_DIR" -type f -name '*.env' -print | wc -l | tr -d ' ')" -eq 3 ] ||
+  fail "signal cleanup descendants did not acknowledge start"
+signal_cleanup_violation="$fixture/signal-cleanup-order-violation"
+(
+  signal_cleanup_observations=0
+  while [ -d "$signal_run_dir" ] && [ "$signal_cleanup_observations" -lt 500 ]; do
+    sleep 0.01
+    signal_cleanup_observations=$((signal_cleanup_observations + 1))
+  done
+  if [ -d "$signal_run_dir" ]; then
+    echo "scheduler state remained after cancellation deadline" >"$signal_cleanup_violation"
+    exit 1
+  fi
+  for signal_descendant_file in "$FAKE_DESCENDANT_DIR"/*.env; do
+    signal_descendant_pid=$(sed -n 's/^pid=//p' "$signal_descendant_file")
+    if process_is_live "$signal_descendant_pid"; then
+      echo "state removed while descendant $signal_descendant_pid was live" >"$signal_cleanup_violation"
+      exit 1
+    fi
+  done
+) &
+signal_cleanup_monitor=$!
+: >"$fixture/signal-workers.tsv"
+for signal_active_file in "$signal_active_dir"/*.env; do
+  signal_task=$(sed -n 's/^task=//p' "$signal_active_file")
+  signal_worker_pid=$(sed -n 's/^pid=//p' "$signal_active_file")
+  signal_worker_meta="$signal_run_dir/worker-meta/$signal_task.env"
+  signal_worker_pgid=
+  signal_meta_wait=0
+  while [ "$signal_meta_wait" -lt 20 ] && [ ! -f "$signal_worker_meta" ]; do
+    sleep 0.05
+    signal_meta_wait=$((signal_meta_wait + 1))
+  done
+  [ -f "$signal_worker_meta" ] || fail "worker process-group metadata missing before TERM"
+  signal_worker_pgid=$(sed -n 's/^pgid=//p' "$signal_worker_meta")
+  printf '%s\t%s\t%s\n' "$signal_task" "$signal_worker_pid" "$signal_worker_pgid" >>"$fixture/signal-workers.tsv"
+done
+kill -TERM "$signal_matrix_pid"
+wait "$signal_matrix_pid" || signal_matrix_status=$?
+wait "$signal_cleanup_monitor" || :
+unset FAKE_GATE_DELAY FAKE_DESCENDANT_DIR
+[ "$signal_matrix_status" -eq 143 ] || fail "signal cleanup returned $signal_matrix_status"
+[ ! -f "$signal_cleanup_violation" ] || fail "$(cat "$signal_cleanup_violation")"
+for signal_descendant_file in "$fixture/signal-descendants"/*.env; do
+  signal_descendant_pid=$(sed -n 's/^pid=//p' "$signal_descendant_file")
+  ! process_is_live "$signal_descendant_pid" || fail "acknowledged descendant survived scheduler cleanup"
+done
+while IFS="$(printf '\t')" read -r signal_task signal_worker_pid signal_worker_pgid; do
+  ! kill -0 "$signal_worker_pid" 2>/dev/null || fail "$signal_task worker PID survived cleanup"
+  ! kill -0 -- "-$signal_worker_pgid" 2>/dev/null || fail "$signal_task process group survived cleanup"
+done <"$fixture/signal-workers.tsv"
+[ -z "$(find "$signal_scheduler_root" -maxdepth 1 -type d -name 'run.*' -print -quit 2>/dev/null)" ] ||
+  fail "signal cleanup retained scheduler run state"
+signal_live_guard="$FAKE_CONCURRENCY_ACTIVE/signal-cleanup.link_cli.$$"
+signal_unrelated_guard="$FAKE_CONCURRENCY_ACTIVE/unrelated-owner"
+true &
+signal_dead_guard_pid=$!
+wait "$signal_dead_guard_pid"
+signal_nonempty_guard="$FAKE_CONCURRENCY_ACTIVE/signal-cleanup.link_mcp.$signal_dead_guard_pid"
+mkdir "$signal_live_guard" "$signal_unrelated_guard" "$signal_nonempty_guard"
+: >"$signal_unrelated_guard/data"
+: >"$signal_nonempty_guard/data"
+printf '%s\n%s\n%s\n' "$signal_live_guard" "$signal_unrelated_guard" "$signal_nonempty_guard" >>"$FAKE_CONCURRENCY_OWNERS"
+cleanup_owned_fake_concurrency_dirs "$FAKE_CONCURRENCY_ACTIVE" "$FAKE_CONCURRENCY_OWNERS" ||
+  fail "fixture owner cleanup rejected its canonical root"
+[ -d "$signal_live_guard" ] || fail "fixture cleanup removed a live matching owner"
+[ -f "$signal_unrelated_guard/data" ] || fail "fixture cleanup removed unrelated data"
+[ -f "$signal_nonempty_guard/data" ] || fail "fixture cleanup removed a nonempty dead owner"
+[ -z "$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d \
+  ! -path "$signal_live_guard" ! -path "$signal_unrelated_guard" ! -path "$signal_nonempty_guard" -print -quit)" ] ||
+  fail "signal cleanup retained a fake case owner after deadline"
+[ -f "$fake_root/build/mini_builds/stage4_tooling_signal-cleanup/summary.env" ] ||
+  fail "signal cleanup omitted the parent aggregate"
+
+}
+
+# Exercise the actual supervisor/worker boundary before the 49-row contract.
+# A successful child is only a draft until its supervisor has been reaped.
+mv "$fake_root/scripts/bootstrap/run-process-group-timeout.shs" \
+  "$fake_root/scripts/bootstrap/fixture-process-group-timeout.shs"
+cat >"$fake_root/scripts/bootstrap/run-process-group-timeout.shs" <<'SUPERVISOR'
+#!/bin/sh
+set -eu
+probe_task= probe_root= probe_matrix=
+for probe_arg in "$@"; do
+  case "$probe_arg" in
+    --worker-task=*) probe_task=${probe_arg#*=} ;;
+    --source-root=*) probe_root=${probe_arg#*=} ;;
+    --matrix-id=*) probe_matrix=${probe_arg#*=} ;;
+  esac
+done
+probe_work="$probe_root/build/mini_builds/stage4_tooling_$probe_matrix"
+if [ "$probe_task:${FAKE_SUPERVISOR_FAULT:-}" = link_cli:source-drift ]; then
+  echo changed >"$probe_root/src/compiler/worker-drift.spl"
+fi
+probe_status=0
+sh "$(dirname "$0")/fixture-process-group-timeout.shs" "$@" || probe_status=$?
+if [ "$probe_task" = link_cli ]; then
+  [ ! -f "$probe_work/state/link_cli.env" ] ||
+    echo visible >"$probe_work/canonical-before-reap"
+  probe_draft="${STAGE4_WORKER_DRAFT_DIR:-$probe_work/state}/link_cli.env"
+  case "${FAKE_SUPERVISOR_FAULT:-}" in
+    post-status) exit 124 ;;
+    duplicate-schema) echo schema=Stage4MatrixTaskReceiptV1 >>"$probe_draft" ;;
+    wrong-source) sed 's/^compiler_tree_hash=.*/compiler_tree_hash=WRONG/' "$probe_draft" >"$probe_draft.changed"; mv "$probe_draft.changed" "$probe_draft" ;;
+    source-drift) rm -f "$probe_root/src/compiler/worker-drift.spl" ;;
+  esac
+fi
+exit "$probe_status"
+SUPERVISOR
+chmod +x "$fake_root/scripts/bootstrap/run-process-group-timeout.shs"
+
+for boundary_fault in post-status duplicate-schema wrong-source source-drift; do
+  boundary_status=0
+  # shellcheck disable=SC2086
+  FAKE_SLEEP_TASK=none FAKE_SUPERVISOR_FAULT="$boundary_fault" "$runner" \
+    "--matrix-id=boundary-$boundary_fault" --scope=link-only $common_args \
+    --build-jobs=1 || boundary_status=$?
+  [ "$boundary_status" -eq 1 ] || fail "$boundary_fault supervisor boundary admitted success ($boundary_status)"
+  boundary_root="$fake_root/build/mini_builds/stage4_tooling_boundary-$boundary_fault"
+  [ ! -f "$boundary_root/canonical-before-reap" ] || fail "$boundary_fault worker published before parent reap"
+  ! grep -Fxq result=PASS "$boundary_root/state/link_cli.env" || fail "$boundary_fault retained a canonical PASS"
+  grep -Fxq terminal_count=3 "$boundary_root/summary.env" || fail "$boundary_fault stopped independent rows"
+  [ -f "$boundary_root/scheduler/schedule.tsv" ] || fail "$boundary_fault canonical schedule missing"
+done
+# The remaining contract exercises the unwrapped production supervisor,
+# including its exact TERM forwarding and process-group cleanup semantics.
+mv "$fake_root/scripts/bootstrap/fixture-process-group-timeout.shs" \
+  "$fake_root/scripts/bootstrap/run-process-group-timeout.shs"
+# The four boundary probes above deliberately invoke real link workers before
+# rejecting their draft receipts. Keep their receipts and logs, but isolate the
+# full-matrix link-count oracle from those earlier fixture invocations.
+: >"$FAKE_LINK_COUNT"
+# An existing receipt alone must not release a dependency in the current run.
+sed -n '/^scheduler_task_dependencies_terminal() {$/,/^}$/p' "$runner" >"$fixture/dependency-owner.sh"
+(
+  . "$fixture/dependency-owner.sh"
+  state="$fixture/dependency-state"
+  scheduler_run_dir="$fixture/dependency-run"
+  matrix="$fixture/dependency-matrix.tsv"
+  mkdir -p "$state" "$scheduler_run_dir/committed"
+  printf 'upstream\trequired\t-\ndownstream\trequired\tupstream\n' >"$matrix"
+  printf 'result=PASS\n' >"$state/upstream.env"
+  ! scheduler_task_dependencies_terminal downstream || fail 'uncommitted receipt released a dependency'
+  : >"$scheduler_run_dir/committed/upstream"
+  scheduler_task_dependencies_terminal downstream || fail 'parent-committed dependency remained blocked'
+)
+if [ "${1:-}" = --scheduler-signal ]; then
+  run_signal_cleanup_contract
+  echo "PASS Stage4 scheduler signal descendant ownership"
+  exit 0
+fi
+[ "${1:-}" != --scheduler-boundaries ] || { echo 'PASS Stage4 supervisor/draft/identity boundaries'; exit 0; }
 
 # shellcheck disable=SC2086
 expected_full_status=1
@@ -329,13 +569,13 @@ unset FAKE_GATE_DELAY
 summary="$fake_root/build/mini_builds/stage4_tooling_full/summary.env"
 grep -Fxq 'overall=BLOCKED' "$summary" || fail "unfinished required rows did not remain fail-closed"
 grep -Fxq 'admission_eligible=false' "$summary" || fail "blocked matrix claimed admission eligibility"
-grep -Fxq 'terminal_count=49' "$summary" || fail "full matrix did not terminalize"
-grep -Fxq 'passed=44' "$summary" || fail "full matrix PASS distribution changed"
+grep -Fxq 'terminal_count=53' "$summary" || fail "full matrix did not terminalize"
+grep -Fxq 'passed=47' "$summary" || fail "full matrix PASS distribution changed"
 grep -Fxq 'failed=0' "$summary" || fail "full matrix masked a failed row"
-grep -Fxq 'blocked=2' "$summary" || fail "full matrix blocked-row distribution changed"
+grep -Fxq 'blocked=3' "$summary" || fail "full matrix blocked-row distribution changed"
 grep -Fxq 'remaining=0' "$summary" || fail "full matrix retained pending rows"
 grep -Fxq 'unsupported=3' "$summary" || fail "optional unsupported rows missing"
-grep -Fxq 'required_not_pass=2' "$summary" || fail "required blocked count changed"
+grep -Fxq 'required_not_pass=3' "$summary" || fail "required blocked count changed"
 grep -Fxq 'optional_failed=0' "$summary" || fail "optional failure aggregate wrong"
 grep -Fxq 'stage4_compiler_files=unknown' "$summary" || fail "blocked matrix claimed zero compiler files"
 full_parallel_max=$(awk -F '\t' '$1 == "full" && $3 > max { max=$3 } END { print max + 0 }' "$FAKE_CONCURRENCY_AUDIT")
@@ -343,10 +583,73 @@ full_parallel_max=$(awk -F '\t' '$1 == "full" && $3 > max { max=$3 } END { print
 [ "$full_parallel_max" -le 16 ] || fail "scheduler exceeded the effective jobs bound"
 schedule="$fake_root/build/mini_builds/stage4_tooling_full/scheduler/schedule.tsv"
 schedule_rows=$(wc -l <"$schedule" | tr -d ' ')
-[ "$((schedule_rows - 1))" -eq 49 ] || fail "scheduler manifest row count changed"
+[ "$((schedule_rows - 1))" -eq 53 ] || fail "scheduler manifest row count changed"
 tail -n +2 "$schedule" | cut -f1 >"$fixture/schedule-order"
 cut -f1 "$fake_root/build/mini_builds/stage4_tooling_full/matrix.tsv" >"$fixture/matrix-order"
 cmp -s "$fixture/schedule-order" "$fixture/matrix-order" || fail "parent aggregation lost manifest order"
+cat >"$fixture/expected-matrix-identities" <<'EXPECTED_MATRIX_IDENTITIES'
+link_cli
+link_mcp
+link_lsp
+cli_help
+cli_version
+mcp_help
+mcp_version
+lsp_help
+lsp_version
+core_runtime_smoke
+redeploy_sanity
+compiler_check
+library_check
+mcp_check
+lsp_check
+essential_tools
+lint_help
+lint_focused
+duplicate_help
+duplicate_focused
+format_fixed_focused_regression
+compiler_bootstrap_tests
+compiler_core_tests
+compiler_full_tests
+tooling_contract_tests
+mcp_unit_tests
+lsp_unit_tests
+lsp_log_modes_tests
+mcp_protocol
+mcp_focused
+lsp_protocol
+mcp_stdio_integration
+lsp_stdio_integration
+test_daemon
+examples_check
+fmt
+fix
+verify
+spipe_docgen
+spipe_suite
+devhub_suite
+caret_suite
+phase_live_services
+native_build
+security
+build
+run
+doc_coverage
+vscode_dispatch
+electron_dispatch
+vscode_external
+electron_external
+simple_core_smoke
+EXPECTED_MATRIX_IDENTITIES
+[ "$(wc -l <"$fixture/expected-matrix-identities" | tr -d ' ')" -eq 53 ] ||
+  fail "fixture matrix identity inventory changed"
+[ "$(sort "$fixture/expected-matrix-identities" | uniq | wc -l | tr -d ' ')" -eq 53 ] ||
+  fail "fixture matrix identity inventory contains duplicates"
+sort "$fixture/expected-matrix-identities" >"$fixture/expected-matrix-identities.sorted"
+sort "$fixture/matrix-order" >"$fixture/matrix-order.sorted"
+cmp -s "$fixture/expected-matrix-identities.sorted" "$fixture/matrix-order.sorted" ||
+  fail "source and fixture matrix identity sets differ"
 awk -F '\t' '
   NR == 1 { next }
   $4 == "executed" {
@@ -384,6 +687,18 @@ while IFS="$(printf '\t')" read -r matrix_task matrix_required matrix_deps; do
         grep -Fxq 'pass_marker=-' "$matrix_receipt" || fail "$matrix_task claimed a PASS marker"
         grep -Fxq 'command_path=-' "$matrix_receipt" || fail "$matrix_task retained a command transcript"
         ;;
+      phase_live_services)
+        grep -Fxq 'result=BLOCKED_UPSTREAM' "$matrix_receipt" || fail "$matrix_task was not blocked"
+        grep -Fxq 'status=phase-live-prerequisite-missing' "$matrix_receipt" || fail "$matrix_task blocker status changed"
+        grep -Fxq 'command_executed=false' "$matrix_receipt" || fail "$matrix_task claimed command execution"
+        grep -Fxq 'test_executed=false' "$matrix_receipt" || fail "$matrix_task claimed test execution"
+        grep -Fxq 'executed_test_count=0' "$matrix_receipt" || fail "$matrix_task claimed examples"
+        grep -Fxq 'pass_marker=-' "$matrix_receipt" || fail "$matrix_task claimed a PASS marker"
+        grep -Fxq 'command_path=-' "$matrix_receipt" || fail "$matrix_task retained a command transcript"
+        grep -Fq 'BLOCKED: phase live manifest and host Python verifier required' \
+          "$fake_root/build/mini_builds/stage4_tooling_full/logs/$matrix_task.log" ||
+          fail "$matrix_task blocker evidence changed"
+        ;;
       *) grep -Fxq 'result=PASS' "$matrix_receipt" || fail "$matrix_task required row did not PASS" ;;
     esac
   else
@@ -420,6 +735,15 @@ for test_task in format_fixed_focused_regression compiler_bootstrap_tests compil
   esac
   grep -Fxq "executed_test_count=$expected_count" "$test_receipt" || fail "$test_task count missing"
 done
+for suite_task in spipe_suite devhub_suite caret_suite; do
+  suite_receipt="$fake_root/build/mini_builds/stage4_tooling_full/state/$suite_task.env"
+  grep -Fxq 'result=PASS' "$suite_receipt" || fail "$suite_task did not PASS"
+  grep -Fxq 'test_executed=true' "$suite_receipt" || fail "$suite_task did not prove execution"
+  grep -Fxq 'executed_test_count=1' "$suite_receipt" || fail "$suite_task exact inventory count missing"
+  grep -Fxq 'support_status=supported' "$suite_receipt" || fail "$suite_task was not supported"
+  grep -Fq "matrix_hash=" "$suite_receipt" || fail "$suite_task matrix binding missing"
+  grep -Fq "compiler_manifest_hash=" "$suite_receipt" || fail "$suite_task candidate binding missing"
+done
 for blocked_stdio in mcp_stdio_integration lsp_stdio_integration; do
   grep -Fxq 'result=BLOCKED_UPSTREAM' \
     "$fake_root/build/mini_builds/stage4_tooling_full/state/$blocked_stdio.env" || \
@@ -429,7 +753,9 @@ done
 [ "$(grep -Fxc "$fake_root/test/01_unit/compiler/bootstrap/fake_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "bootstrap shard was not disjoint"
 [ "$(grep -Fxc "$fake_root/test/01_unit/compiler/fake_full_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "full compiler shard was not disjoint"
 [ "$(grep -Fxc "$fake_root/test/01_unit/compiler_core/fake_core_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "compiler-core shard was not distinct"
-[ "$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')" -eq 3 ] || fail "approved tool set was not linked exactly once"
+full_link_count=$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')
+[ "$full_link_count" -eq 3 ] ||
+  fail "approved tool set was not linked exactly once (observed $full_link_count links)"
 
 for negative_mode in zero missing fail omit focused-wrong; do
   negative_status=0
@@ -509,9 +835,14 @@ run_blocked_resume 'receipt tamper'
 # frozen identity before any stale PASS can be reused.
 printf 'fn journal_helper() -> i64: 2\n' >"$fake_root/src/app/journal_support/nonentry.spl"
 source_drift_status=0
+source_drift_output="$fixture/expected-resume-config-mismatch.log"
 # shellcheck disable=SC2086
-"$runner" --matrix-id=full --resume $common_args || source_drift_status=$?
+"$runner" --matrix-id=full --resume $common_args >"$source_drift_output" 2>&1 || source_drift_status=$?
 [ "$source_drift_status" -eq 2 ] || fail "non-entry source drift returned $source_drift_status"
+grep -Fxq 'stage4-tooling-matrix: resume config identity mismatch' "$source_drift_output" ||
+  fail "non-entry source drift omitted the expected resume mismatch diagnostic"
+printf 'EXPECTED_RESUME_MISMATCH_RESULT status=%s output=%s\n' \
+  "$source_drift_status" "$source_drift_output"
 grep -Fxq 'overall=FAIL' "$summary" || fail "source drift retained a stale aggregate"
 grep -Fxq 'admission_eligible=false' "$summary" || fail "source drift exposed admission"
 grep -Fxq 'stage4_compiler_files=unknown' "$summary" || fail "source drift exposed compiler-file zero"
@@ -588,67 +919,38 @@ cmp -s "$fixture/jobs1-order" "$fixture/jobs1-matrix-order" || fail "jobs=1 pare
 # from reaching terminal receipts.
 timeout_matrix_status=0
 export FAKE_SLEEP_TASK=link_cli FAKE_SLEEP_SECONDS=30
+timeout_probe_output="$fixture/case-timeout.log"
 # shellcheck disable=SC2086
 "$runner" --matrix-id=case-timeout --scope=link-only $common_args \
-  --timeout-seconds=1 --build-jobs=3 || timeout_matrix_status=$?
+  --timeout-seconds=10 --build-jobs=3 >"$timeout_probe_output" 2>&1 || timeout_matrix_status=$?
 unset FAKE_SLEEP_TASK FAKE_SLEEP_SECONDS
 [ "$timeout_matrix_status" -eq 1 ] || fail "per-case timeout matrix returned $timeout_matrix_status"
 timeout_state="$fake_root/build/mini_builds/stage4_tooling_case-timeout/state"
-grep -Fxq 'result=TIMEOUT' "$timeout_state/link_cli.env" || fail "timed-out case was not classified"
-grep -Fxq 'result=PASS' "$timeout_state/link_mcp.env" || fail "timeout stopped independent MCP case"
-grep -Fxq 'result=PASS' "$timeout_state/link_lsp.env" || fail "timeout stopped independent LSP case"
-grep -Fxq 'terminal_count=3' "$fake_root/build/mini_builds/stage4_tooling_case-timeout/summary.env" ||
-  fail "timeout matrix did not continue to the end"
+printf 'CASE_TIMEOUT_OUTPUT_BEGIN file=%s\n' "$timeout_probe_output"
+cat "$timeout_probe_output"
+printf 'CASE_TIMEOUT_OUTPUT_END\n'
+for timeout_task in link_cli link_mcp link_lsp; do
+  timeout_receipt="$timeout_state/$timeout_task.env"
+  [ -f "$timeout_receipt" ] || fail "case-timeout omitted $timeout_task receipt"
+done
+timeout_cli_result=$(sed -n 's/^result=//p' "$timeout_state/link_cli.env")
+timeout_cli_status=$(sed -n 's/^status=//p' "$timeout_state/link_cli.env")
+timeout_mcp_result=$(sed -n 's/^result=//p' "$timeout_state/link_mcp.env")
+timeout_mcp_status=$(sed -n 's/^status=//p' "$timeout_state/link_mcp.env")
+timeout_lsp_result=$(sed -n 's/^result=//p' "$timeout_state/link_lsp.env")
+timeout_lsp_status=$(sed -n 's/^status=//p' "$timeout_state/link_lsp.env")
+printf 'CASE_TIMEOUT_RESULT task=link_cli result=%s status=%s\n' "$timeout_cli_result" "$timeout_cli_status"
+printf 'CASE_TIMEOUT_RESULT task=link_mcp result=%s status=%s\n' "$timeout_mcp_result" "$timeout_mcp_status"
+printf 'CASE_TIMEOUT_RESULT task=link_lsp result=%s status=%s\n' "$timeout_lsp_result" "$timeout_lsp_status"
+timeout_sibling_states="cli=$timeout_cli_result/$timeout_cli_status mcp=$timeout_mcp_result/$timeout_mcp_status lsp=$timeout_lsp_result/$timeout_lsp_status"
+[ "$timeout_cli_result:$timeout_cli_status:$timeout_mcp_result:$timeout_mcp_status:$timeout_lsp_result:$timeout_lsp_status" = \
+  'TIMEOUT:124:PASS:0:PASS:0' ] || fail "case-timeout unexpected sibling states: $timeout_sibling_states"
+timeout_summary="$fake_root/build/mini_builds/stage4_tooling_case-timeout/summary.env"
+timeout_terminal_count=$(sed -n 's/^terminal_count=//p' "$timeout_summary")
+[ "$timeout_terminal_count" -eq 3 ] ||
+  fail "timeout matrix terminal_count=$timeout_terminal_count (expected 3); $timeout_sibling_states"
+printf 'CASE_TIMEOUT_SUMMARY terminal_count=%s\n' "$timeout_terminal_count"
 
-# TERM owns the exact active worker groups, waits for them, writes a partial
-# parent aggregate, and removes only that invocation's scheduler run directory.
-signal_matrix_status=0
-export FAKE_GATE_DELAY=30
-# shellcheck disable=SC2086
-"$runner" --matrix-id=signal-cleanup --scope=link-only $common_args --build-jobs=3 &
-signal_matrix_pid=$!
-signal_scheduler_root="$fake_root/build/mini_builds/stage4_tooling_signal-cleanup/scheduler"
-signal_active_dir=
-signal_wait_count=0
-while [ "$signal_wait_count" -lt 100 ]; do
-  signal_active_dir=$(find "$signal_scheduler_root" -type d -path '*/active' -print -quit 2>/dev/null || :)
-  if [ -n "$signal_active_dir" ] &&
-     [ "$(find "$signal_active_dir" -maxdepth 1 -type f -name '*.env' -print | wc -l | tr -d ' ')" -eq 3 ]; then
-    break
-  fi
-  sleep 0.05
-  signal_wait_count=$((signal_wait_count + 1))
-done
-[ -n "$signal_active_dir" ] || fail "signal cleanup matrix never exposed owned workers"
-signal_run_dir=$(dirname "$signal_active_dir")
-: >"$fixture/signal-workers.tsv"
-for signal_active_file in "$signal_active_dir"/*.env; do
-  signal_task=$(sed -n 's/^task=//p' "$signal_active_file")
-  signal_worker_pid=$(sed -n 's/^pid=//p' "$signal_active_file")
-  signal_worker_meta="$signal_run_dir/worker-meta/$signal_task.env"
-  signal_worker_pgid=
-  signal_meta_wait=0
-  while [ "$signal_meta_wait" -lt 20 ] && [ ! -f "$signal_worker_meta" ]; do
-    sleep 0.05
-    signal_meta_wait=$((signal_meta_wait + 1))
-  done
-  [ -f "$signal_worker_meta" ] || fail "worker process-group metadata missing before TERM"
-  signal_worker_pgid=$(sed -n 's/^pgid=//p' "$signal_worker_meta")
-  printf '%s\t%s\t%s\n' "$signal_task" "$signal_worker_pid" "$signal_worker_pgid" >>"$fixture/signal-workers.tsv"
-done
-kill -TERM "$signal_matrix_pid"
-wait "$signal_matrix_pid" || signal_matrix_status=$?
-unset FAKE_GATE_DELAY
-[ "$signal_matrix_status" -eq 143 ] || fail "signal cleanup returned $signal_matrix_status"
-while IFS="$(printf '\t')" read -r signal_task signal_worker_pid signal_worker_pgid; do
-  ! kill -0 "$signal_worker_pid" 2>/dev/null || fail "$signal_task worker PID survived cleanup"
-  ! kill -0 -- "-$signal_worker_pgid" 2>/dev/null || fail "$signal_task process group survived cleanup"
-done <"$fixture/signal-workers.tsv"
-[ -z "$(find "$signal_scheduler_root" -maxdepth 1 -type d -name 'run.*' -print -quit 2>/dev/null)" ] ||
-  fail "signal cleanup retained scheduler run state"
-[ -z "$(find "$FAKE_CONCURRENCY_ACTIVE" -mindepth 1 -maxdepth 1 -type d -print -quit)" ] ||
-  fail "signal cleanup retained a fake case owner"
-[ -f "$fake_root/build/mini_builds/stage4_tooling_signal-cleanup/summary.env" ] ||
-  fail "signal cleanup omitted the parent aggregate"
+run_signal_cleanup_contract
 
 echo "PASS bootstrap Stage4 tooling matrix bounded scheduler, receipts, cleanup, and resume contract"

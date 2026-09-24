@@ -1,0 +1,83 @@
+"""Damage checkpoints preserve event work across delayed presentation.
+
+These are host-owner lifecycle tests, not GPU completion evidence.
+"""
+# @tag: unit, compositor, event-ack, async
+# @cover src/os/compositor/dirty_rect.spl
+
+use std.spec.*
+use os.compositor.dirty_rect.{DirtyRegion, DirtyRegionCheckpoint}
+
+describe "presented damage prefix retirement":
+    it "retires captured damage and retains later overlapping damage":
+        var region = DirtyRegion.new()
+        region.add_rect(4, 5, 20, 30)
+        val checkpoint = region.checkpoint()
+        region.add_rect(4, 5, 20, 30)
+        region.add_rect(80, 90, 3, 4)
+        expect(region.can_retire_prefix(checkpoint)).to_be(true)
+        expect(region.retire_prefix(checkpoint)).to_be(true)
+        expect(region.count()).to_equal(2)
+        expect(region.rects[0].x).to_equal(4)
+        expect(region.rects[0].w).to_equal(20)
+        expect(region.rects[1].x).to_equal(80)
+        expect(region.is_dirty()).to_be(true)
+
+    it "rejects a clear-and-readd even with identical rectangle values":
+        var region = DirtyRegion.new()
+        region.add_rect(4, 5, 20, 30)
+        val checkpoint = region.checkpoint()
+        region.clear()
+        region.add_rect(4, 5, 20, 30)
+        expect(region.retire_prefix(checkpoint)).to_be(false)
+        expect(region.count()).to_equal(1)
+        expect(region.is_dirty()).to_be(true)
+
+    it "rejects duplicate retirement after new damage reuses the same count":
+        var region = DirtyRegion.new()
+        region.add_full_screen(100, 80)
+        val checkpoint = region.checkpoint()
+        expect(region.retire_prefix(checkpoint)).to_be(true)
+        expect(region.is_empty()).to_be(true)
+        region.add_rect(30, 40, 2, 3)
+        expect(region.retire_prefix(checkpoint)).to_be(false)
+        expect(region.rects[0].x).to_equal(30)
+
+    it "rejects malformed checkpoints without changing pending damage":
+        var region = DirtyRegion.new()
+        region.add_full_screen(100, 80)
+        val checkpoint = region.checkpoint()
+        expect(region.retire_prefix(DirtyRegionCheckpoint(
+            epoch: 0, count: 1))).to_be(false)
+        expect(region.retire_prefix(DirtyRegionCheckpoint(
+            epoch: checkpoint.epoch + 1, count: 1))).to_be(false)
+        expect(region.retire_prefix(DirtyRegionCheckpoint(
+            epoch: checkpoint.epoch, count: -1))).to_be(false)
+        expect(region.retire_prefix(DirtyRegionCheckpoint(
+            epoch: checkpoint.epoch, count: 0))).to_be(false)
+        expect(region.retire_prefix(DirtyRegionCheckpoint(
+            epoch: checkpoint.epoch, count: 2))).to_be(false)
+        expect(region.count()).to_equal(1)
+        val unchanged = region.checkpoint()
+        expect(unchanged.epoch).to_equal(checkpoint.epoch)
+
+    it "an empty captured prefix cannot consume a later first event":
+        var region = DirtyRegion.new()
+        val checkpoint = region.checkpoint()
+        region.add_rect(7, 8, 9, 10)
+        expect(region.retire_prefix(checkpoint)).to_be(true)
+        expect(region.count()).to_equal(1)
+        expect(region.rects[0].y).to_equal(8)
+
+    it "does not wrap an exhausted checkpoint identity":
+        var region = DirtyRegion.new()
+        region.prefix_epoch = 9223372036854775806
+        region.add_full_screen(100, 80)
+        val checkpoint = region.checkpoint()
+        expect(region.retire_prefix(checkpoint)).to_be(true)
+        region.add_rect(1, 2, 3, 4)
+        val exhausted = region.checkpoint()
+        expect(exhausted.epoch).to_equal(0)
+        expect(region.retire_prefix(checkpoint)).to_be(false)
+        region.clear()
+        expect(region.prefix_epoch).to_equal(9223372036854775807)

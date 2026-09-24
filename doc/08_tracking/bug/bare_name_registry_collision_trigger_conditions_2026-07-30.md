@@ -1,4 +1,8 @@
 # Bare-name registry collision: trigger conditions NOT established (lane PROBE1)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** the defect is real *in situ*; the **mechanism** the campaign has been
 renaming against is **unproven**, and the primary evidence for it has an internal
@@ -104,3 +108,4 @@ Instrument inside the real `HirLowering`/`SymbolTable` call graph using **real
 `match`/`case` dispatch as the signal** — never `rt_enum_discriminant` from user
 code — and bisect what actually makes `fn_matched` false. Until that lands, treat
 the mechanism as open.
+

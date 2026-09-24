@@ -1,4 +1,8 @@
 # Trait-group `with` sugar — measured status (stream F5, 2026-08-09)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Supersedes the "parser rejects `trait X with A, B:`" claim in
 `src/lib/common/debug/debug_profiler.spl` (lines 15-20) and in
@@ -98,3 +102,4 @@ between the deployed binary and `5b31f9e687c`; not determined.
 A deploy of a P0-carrying binary is **warranted but NOT performed** here
 (per the hard constraint). Recommend it be done through the normal
 bootstrap lane, not by copying this cargo artifact.
+

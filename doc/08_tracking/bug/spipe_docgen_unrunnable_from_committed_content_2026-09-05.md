@@ -1,4 +1,8 @@
 # `spipe-docgen` does not run from committed content, on any spec
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -104,3 +108,4 @@ for `refs/heads/main` explicitly.
 - `doc/08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md`
   (snapshot-build contention; this is a committed-content counterexample to the
   "committed content is buildable" premise a snapshot wrapper rests on)
+

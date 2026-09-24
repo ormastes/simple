@@ -1,4 +1,9 @@
 # Seed `elif`/`while` Condition Continuation vs. Block-Indent Ambiguity
+## Closed 2026-09-16 — CLOSED 2026-08-01; parse_condition_block fix; 27-cell sweep re-measured PARSE_OK
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -83,3 +88,4 @@ level — e.g. tracking pseudo-indent levels on an explicit stack rather than a
 flat `deferred_dedent_count`, or having the lexer suppress INDENT/DEDENT
 emission entirely while a binary expression continuation is open. Either is a
 statement/expression boundary change and should be scoped as its own task.
+

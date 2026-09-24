@@ -1,0 +1,154 @@
+# @req REQ-SIMD-001 REQ-SIMD-004
+# @cover src/compiler/95.interp/mir_interpreter.spl 15%
+# @cover src/compiler/95.interp/mir_simd_interpreter.spl 80%
+
+use std.spec.{describe, it, expect, assert_equal, assert_true}
+use std.spec.step
+use std.common.binary_io.{f32_from_bits, f32_to_bits}
+use std.common.simd_fallback.{simd_i32x16_binop_pure, simd_f32x16_binop_pure}
+use compiler.mir.mir_data.*
+use compiler.interp.mir_interpreter.{MirInterpreter}
+use compiler.backend.native.isel_x86_64.{isel_module_with_x86_simd_capability}
+use compiler.backend.native.native_avx2_capability.{native_avx2_denied_v1}
+use compiler.backend.native.native_avx512_capability.{native_avx512_capability_v1}
+use compiler.backend.native.mach_inst.{X86_OP_VPXORD_ZMM}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn vec16i() -> MirType: MirType(kind: MirTypeKind.Vec16i)
+fn vec16f() -> MirType: MirType(kind: MirTypeKind.Vec16f)
+
+fn encoded_f32(values: [f32]) -> [i64]:
+    var out: [i64] = []
+    for value in values: out.push(f32_to_bits(value) as i64)
+    out
+
+fn decoded_f32(words: [i64]) -> [f32]:
+    var out: [f32] = []
+    for word in words: out.push(f32_from_bits((word & 0xFFFFFFFF) as u32))
+    out
+
+fn compiler_interpreter_parity_module() -> MirModule:
+    val elem = MirType(kind: MirTypeKind.I32)
+    val ptr = MirType(kind: MirTypeKind.Ptr(pointee: elem, mutable: true))
+    val vector = vec16i()
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("left"), type_: ptr, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("right"), type_: ptr, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("out"), type_: ptr, kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("left_v"), type_: vector, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("right_v"), type_: vector, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 5), name: Some("xor_v"), type_: vector, kind: LocalKind.Temp)
+    ]
+    val instructions = [
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), true, vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), true, vector), span: nil),
+        MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 5), MirOperand.copy(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4)), "Xor"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 5)), MirOperand.copy(LocalId(id: 2)), true), span: nil)
+    ]
+    val block = MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: instructions, terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "compiler_interpreter_xor", signature: MirSignature(params: [ptr, ptr, ptr], return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [block], entry_block: BlockId.new(0), span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "compiler_interpreter_parity", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "MIR SIMD interpreter parity":
+    it "matches the portable i32x16 fallback through add compare mask and select":
+        step("matches the portable i32x16 fallback through add compare mask and select")
+        val left = [2147483647, -2147483648, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        val right = [1, -1, 3, 2, 1, 0, -1, -2, -3, 40, 50, 60, 70, 80, 90, 100]
+        var interp = MirInterpreter.create()
+        expect(interp.set_simd_vector(LocalId(id: 1), vec16i(), left)).to_be_nil()
+        expect(interp.set_simd_vector(LocalId(id: 2), vec16i(), right)).to_be_nil()
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 3), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2)), "Add"), span: nil))).to_be_nil()
+        assert_equal(interp.get_simd_vector(LocalId(id: 3)).unwrap(), simd_i32x16_binop_pure(left, right, "Add"))
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdCmp(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2)), "Gt"), span: nil))).to_be_nil()
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdMaskOp(LocalId(id: 5), MirOperand.copy(LocalId(id: 4)), MirOperand.copy(LocalId(id: 4)), "Not"), span: nil))).to_be_nil()
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdSelect(LocalId(id: 6), MirOperand.copy(LocalId(id: 4)), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2))), span: nil))).to_be_nil()
+        val selected = interp.get_simd_vector(LocalId(id: 6)).unwrap()
+        assert_equal(selected[0], left[0])
+        assert_equal(selected[1], right[1])
+        assert_equal(selected[15], right[15])
+
+    it "matches f32x16 scalar arithmetic at both vector boundaries":
+        step("matches f32x16 scalar arithmetic at both vector boundaries")
+        val left: [f32] = [1.0, -2.0, 3.5, 0.0, -0.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        val right: [f32] = [2.0, 2.0, -0.5, 0.0, 0.0, -6.0, -7.0, -8.0, -9.0, -10.0, -11.0, -12.0, -13.0, -14.0, -15.0, 1.0]
+        var interp = MirInterpreter.create()
+        expect(interp.set_simd_vector(LocalId(id: 1), vec16f(), encoded_f32(left))).to_be_nil()
+        expect(interp.set_simd_vector(LocalId(id: 2), vec16f(), encoded_f32(right))).to_be_nil()
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 3), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2)), "Add"), span: nil))).to_be_nil()
+        val actual = decoded_f32(interp.get_simd_vector(LocalId(id: 3)).unwrap())
+        val expected = simd_f32x16_binop_pure(left, right, "Add")
+        assert_equal(actual, expected)
+        assert_equal(actual[0], 3.0)
+        assert_equal(actual[15], 17.0)
+
+    it "loads and stores an overlapping vector from a stable lane snapshot":
+        step("loads and stores an overlapping vector from a stable lane snapshot")
+        var interp = MirInterpreter.create()
+        val base = 5000
+        interp.set_local(LocalId(id: 0), base)
+        for i in 0..16: interp.set_local(LocalId(id: base + i * 8), i)
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 1), MirOperand.copy(LocalId(id: 0)), false, vec16i()), span: nil))).to_be_nil()
+        # Store one logical slot later. A streaming implementation would smear
+        # values; the interpreter must snapshot all source lanes first.
+        interp.set_local(LocalId(id: 2), base + 8)
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2)), false), span: nil))).to_be_nil()
+        assert_equal(interp.get_local(LocalId(id: base + 8)), 0)
+        assert_equal(interp.get_local(LocalId(id: base + 16)), 1)
+        assert_equal(interp.get_local(LocalId(id: base + 16 * 8)), 15)
+
+    it "uses the scalable architectural minimum and a short final active set":
+        step("uses the scalable architectural minimum and a short final active set")
+        var interp = MirInterpreter.create()
+        val elem = MirType(kind: MirTypeKind.I32)
+        val scalable = MirType(kind: MirTypeKind.ScalableVec(element: elem, min_lanes: 4))
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdScalableVsetvl(LocalId(id: 0), MirOperand.const_int(99), elem), span: nil))).to_be_nil()
+        assert_equal(interp.get_local(LocalId(id: 0)), 4)
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 1), MirOperand.const_int(7), scalable), span: nil))).to_be_nil()
+        assert_equal(interp.get_simd_vector(LocalId(id: 1)).unwrap(), [7, 7, 7, 7])
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdScalableVsetvl(LocalId(id: 2), MirOperand.const_int(2), elem), span: nil))).to_be_nil()
+        assert_equal(interp.get_local(LocalId(id: 2)), 2)
+        expect(interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdSplat(LocalId(id: 3), MirOperand.const_int(9), scalable), span: nil))).to_be_nil()
+        assert_equal(interp.get_simd_vector(LocalId(id: 3)).unwrap(), [9, 9])
+
+    it "fails closed for invalid operation and vector shapes":
+        step("fails closed for invalid operation and vector shapes")
+        var interp = MirInterpreter.create()
+        assert_true(interp.set_simd_vector(LocalId(id: 1), vec16i(), [1]).?)
+        val left = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        expect(interp.set_simd_vector(LocalId(id: 2), vec16i(), left)).to_be_nil()
+        expect(interp.set_simd_vector(LocalId(id: 3), vec16i(), left)).to_be_nil()
+        val error = interp.execute_instruction(MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 4), MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 3)), "Div"), span: nil))
+        assert_true(error.?)
+
+    it "uses one MIR program for AVX-512 selection and interpreter scalar execution":
+        step("uses one MIR program for AVX-512 selection and interpreter scalar execution")
+        val module = compiler_interpreter_parity_module()
+        val capability = native_avx512_capability_v1("x86_64-avx512-test", "parity-injected", "parity-v1", true, false, true)
+        val selected = isel_module_with_x86_simd_capability(module, native_avx2_denied_v1(), capability)
+        var native_xors = 0
+        for inst in selected.functions[0].blocks[1].insts:
+            if inst.opcode == X86_OP_VPXORD_ZMM: native_xors = native_xors + 1
+        assert_equal(native_xors, 1)
+
+        val left = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 2147483647]
+        val right = [-1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, -2147483648]
+        val left_base = 7000
+        val right_base = 8000
+        val out_base = 9000
+        var interp = MirInterpreter.create()
+        interp.set_local(LocalId(id: 0), left_base)
+        interp.set_local(LocalId(id: 1), right_base)
+        interp.set_local(LocalId(id: 2), out_base)
+        for i in 0..16:
+            interp.set_local(LocalId(id: left_base + i * 8), left[i])
+            interp.set_local(LocalId(id: right_base + i * 8), right[i])
+        for instruction in module.functions[SymbolId.new(0)].blocks[0].instructions:
+            expect(interp.execute_instruction(instruction)).to_be_nil()
+        val expected = simd_i32x16_binop_pure(left, right, "Xor")
+        for i in 0..16: assert_equal(interp.get_local(LocalId(id: out_base + i * 8)), expected[i])

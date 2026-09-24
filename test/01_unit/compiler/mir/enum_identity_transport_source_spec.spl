@@ -1,0 +1,25 @@
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec
+
+describe "compiler enum identity transport":
+    it "keeps legacy discriminant ABI and adds identity-aware runtime checks":
+        val native_runtime = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
+        val rust_runtime = rt_file_read_text("src/compiler_rust/runtime/src/value/objects.rs") ?? ""
+        val core_runtime = rt_file_read_text("src/runtime/simple_core/core_values.spl") ?? ""
+        expect(native_runtime).to_contain("int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant)")
+        expect(native_runtime).to_contain("expected_enum_id == 0 || e->enum_id == 0")
+        expect(rust_runtime).to_contain("pub extern \"C\" fn rt_enum_check_variant")
+        expect(core_runtime).to_contain("pub fn rt_enum_check_variant(value: i64, expected_enum_id: i64, expected_discriminant: i64)")
+
+    it "routes top-level and nested pure-Simple enum matches through identity":
+        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+        expect(lowering).to_contain("MirConstValue.Str(\"rt_enum_check_variant\")")
+        expect(lowering).to_contain("val nested_enum_id = self.enum_runtime_id(nested_ename)")
+        expect(lowering).to_contain("val expected_enum_id = self.enum_runtime_id(enum_runtime_key)")
+        expect(lowering).to_contain("params: [MirType.i64(), MirType.i64(), MirType.i64()]")
+
+    it "uses stable nonzero IDs for compiler-internal enum declarations":
+        val registration = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        expect(registration).to_contain("val runtime_id = (hm_hash_text(runtime_name) % 2147483646) + 2")
+        expect(registration).to_contain("enum runtime ID collision")

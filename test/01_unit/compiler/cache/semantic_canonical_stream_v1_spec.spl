@@ -1,0 +1,484 @@
+# codex-system-test
+# @req REQ-CSM-003 REQ-CSM-006
+
+use std.spec.*
+use compiler.common.cache_contract.semantic_canonical_stream_v1.{
+    SemanticCanonicalLimitsV1, SemanticCanonicalDigestV1,
+    SemanticCanonicalStreamV1, SemanticRevisionErrorV1,
+    semantic_canonical_limits_v1_default, semantic_canonical_begin_v1,
+    semantic_revision_error_code_v1, semantic_canonical_finish_v1,
+    semantic_canonical_stream_v1_encoded_bytes,
+    semantic_canonical_stream_v1_charged_work,
+    semantic_canonical_begin_record_v1, semantic_canonical_end_record_v1,
+    semantic_canonical_begin_field_v1, semantic_canonical_end_field_v1,
+    semantic_canonical_begin_variant_v1, semantic_canonical_end_variant_v1,
+    semantic_canonical_begin_sequence_v1, semantic_canonical_end_sequence_v1,
+    semantic_canonical_begin_map_v1, semantic_canonical_end_map_v1,
+    semantic_canonical_begin_set_v1, semantic_canonical_end_set_v1,
+    semantic_canonical_begin_option_v1, semantic_canonical_end_option_v1,
+    semantic_canonical_write_bool_v1, semantic_canonical_write_i8_v1,
+    semantic_canonical_write_i16_v1, semantic_canonical_write_i32_v1,
+    semantic_canonical_write_i64_v1, semantic_canonical_write_u8_v1,
+    semantic_canonical_write_u16_v1, semantic_canonical_write_u32_v1,
+    semantic_canonical_write_u64_v1, semantic_canonical_write_f32_bits_v1,
+    semantic_canonical_write_f64_bits_v1, semantic_canonical_write_text_v1,
+    semantic_canonical_write_bytes_v1,
+    semantic_canonical_write_owner_revision_set_v1}
+use compiler.common.cache_contract.semantic_owner_revision_v1.{
+    SemanticOwnerRevisionOwnerV1, SemanticOwnerRevisionV1,
+    SemanticOwnerRevisionSetV1}
+
+fn limits(max_bytes: i64, max_items: i64, max_depth: i64,
+        max_work: i64) -> SemanticCanonicalLimitsV1:
+    SemanticCanonicalLimitsV1(max_bytes: max_bytes, max_items: max_items,
+        max_depth: max_depth, max_work: max_work)
+
+fn stream() -> SemanticCanonicalStreamV1:
+    semantic_canonical_begin_v1("d", "a".repeat(64),
+        semantic_canonical_limits_v1_default()).unwrap()
+
+fn stream_with(value: SemanticCanonicalLimitsV1) -> SemanticCanonicalStreamV1:
+    semantic_canonical_begin_v1("d", "a".repeat(64), value).unwrap()
+
+fn finish_digest(value: SemanticCanonicalStreamV1) -> SemanticCanonicalDigestV1:
+    semantic_canonical_finish_v1(value).unwrap()
+
+fn finish_error(value: SemanticCanonicalStreamV1) -> text:
+    match semantic_canonical_finish_v1(value):
+        case Ok(_): "unexpected_ok"
+        case Err(error): semantic_revision_error_code_v1(error)
+
+fn begin_error(domain: text, schema: text,
+        value: SemanticCanonicalLimitsV1) -> text:
+    match semantic_canonical_begin_v1(domain, schema, value):
+        case Ok(_): "unexpected_ok"
+        case Err(error): semantic_revision_error_code_v1(error)
+
+fn scalar_i64_digest(value: i64) -> text:
+    val writer = stream()
+    semantic_canonical_write_i64_v1(writer, value)
+    finish_digest(writer).digest
+
+fn identity_digest(domain: text, schema: text) -> text:
+    val writer = semantic_canonical_begin_v1(domain, schema,
+        semantic_canonical_limits_v1_default()).unwrap()
+    semantic_canonical_write_bool_v1(writer, true)
+    finish_digest(writer).digest
+
+fn map_digest(reverse: bool) -> text:
+    val writer = stream()
+    semantic_canonical_begin_map_v1(writer, "text", "i64", 2)
+    if reverse:
+        semantic_canonical_write_text_v1(writer, "b")
+        semantic_canonical_write_i64_v1(writer, 2)
+        semantic_canonical_write_text_v1(writer, "a")
+        semantic_canonical_write_i64_v1(writer, 1)
+    else:
+        semantic_canonical_write_text_v1(writer, "a")
+        semantic_canonical_write_i64_v1(writer, 1)
+        semantic_canonical_write_text_v1(writer, "b")
+        semantic_canonical_write_i64_v1(writer, 2)
+    semantic_canonical_end_map_v1(writer)
+    finish_digest(writer).digest
+
+fn set_digest(reverse: bool) -> text:
+    val writer = stream()
+    semantic_canonical_begin_set_v1(writer, "text", 2)
+    if reverse:
+        semantic_canonical_write_text_v1(writer, "b")
+        semantic_canonical_write_text_v1(writer, "a")
+    else:
+        semantic_canonical_write_text_v1(writer, "a")
+        semantic_canonical_write_text_v1(writer, "b")
+    semantic_canonical_end_set_v1(writer)
+    finish_digest(writer).digest
+
+fn record_digest(reverse: bool) -> text:
+    val writer = stream()
+    semantic_canonical_begin_record_v1(writer, "Pair", 2)
+    if reverse:
+        semantic_canonical_begin_field_v1(writer, "right")
+        semantic_canonical_write_i64_v1(writer, 2)
+        semantic_canonical_end_field_v1(writer)
+        semantic_canonical_begin_field_v1(writer, "left")
+        semantic_canonical_write_i64_v1(writer, 1)
+        semantic_canonical_end_field_v1(writer)
+    else:
+        semantic_canonical_begin_field_v1(writer, "left")
+        semantic_canonical_write_i64_v1(writer, 1)
+        semantic_canonical_end_field_v1(writer)
+        semantic_canonical_begin_field_v1(writer, "right")
+        semantic_canonical_write_i64_v1(writer, 2)
+        semantic_canonical_end_field_v1(writer)
+    semantic_canonical_end_record_v1(writer)
+    finish_digest(writer).digest
+
+fn revision(owner: SemanticOwnerRevisionOwnerV1,
+        index: i64) -> SemanticOwnerRevisionV1:
+    SemanticOwnerRevisionV1(owner: owner, owner_instance_digest: "a".repeat(64),
+        owner_generation: index, revision_digest: "b".repeat(64),
+        authority_serial: index + 1)
+
+fn valid_revisions() -> SemanticOwnerRevisionSetV1:
+    SemanticOwnerRevisionSetV1(schema: 1, revisions: [
+        revision(SemanticOwnerRevisionOwnerV1.DeclarationsReexports, 0),
+        revision(SemanticOwnerRevisionOwnerV1.TraitCandidatesCoherence, 1),
+        revision(SemanticOwnerRevisionOwnerV1.AspectCandidatesOrdering, 2),
+        revision(SemanticOwnerRevisionOwnerV1.MacroCtfeLookup, 3),
+        revision(SemanticOwnerRevisionOwnerV1.BodyDependencyClosure, 4)])
+
+describe "semantic canonical stream V1 frozen wire":
+    it "matches the Begin01 and signed-I64 little-endian golden digest":
+        step("Hash the exact frozen wire for domain d, schema a*64, and i64 -2")
+        expect(scalar_i64_digest(-2)).to_equal(
+            "ae531cbc56bef3a2f48a0d25dd67d269c96bf6445aceaab84551a20e28514f29")
+
+    it "keeps every fixed scalar width and signedness distinct":
+        step("Encode the same numeric value through all integer opcodes")
+        var digests: [text] = []
+        var writer = stream()
+        semantic_canonical_write_i8_v1(writer, 7)
+        digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_i16_v1(writer, 7)
+        digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_i32_v1(writer, 7)
+        digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_i64_v1(writer, 7)
+        digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_u8_v1(writer, 7)
+        digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_u16_v1(writer, 7)
+        digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_u32_v1(writer, 7)
+        digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_u64_v1(writer, 7u64)
+        digests.push(finish_digest(writer).digest)
+        expect(digests.unique().len()).to_equal(8)
+
+    it "keeps same-type scalar values distinct":
+        step("Bind the scalar payload bytes, not only its opcode")
+        expect(scalar_i64_digest(1) == scalar_i64_digest(2)).to_equal(false)
+
+    it "binds domain and schema identities independently":
+        step("Distinguish domain changes from schema digest changes")
+        val baseline = identity_digest("one", "a".repeat(64))
+        expect(baseline == identity_digest("two", "a".repeat(64))).to_equal(false)
+        expect(baseline == identity_digest("one", "b".repeat(64))).to_equal(false)
+
+    it "encodes signed minima and full unsigned high-bit values":
+        step("Cover two's-complement minima and the entire u64 wire range")
+        var signed_digests: [text] = []
+        var writer = stream()
+        semantic_canonical_write_i8_v1(writer, -128)
+        signed_digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_i16_v1(writer, -32768)
+        signed_digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_i32_v1(writer, -2147483648)
+        signed_digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_i64_v1(writer, -9223372036854775808)
+        signed_digests.push(finish_digest(writer).digest)
+        writer = stream()
+        semantic_canonical_write_u64_v1(writer, 0x8000000000000000u64)
+        val high_bit = finish_digest(writer).digest
+        writer = stream()
+        semantic_canonical_write_u64_v1(writer, 0xffffffffffffffffu64)
+        val maximum = finish_digest(writer).digest
+        expect(signed_digests.unique().len()).to_equal(4)
+        expect(signed_digests[3] == high_bit).to_equal(false)
+        expect(high_bit == maximum).to_equal(false)
+
+    it "preserves floating bit patterns and distinguishes text from bytes":
+        step("Use frozen float-bit and length-framed scalar opcodes")
+        var writer = stream()
+        semantic_canonical_write_f32_bits_v1(writer, 0x7fc00001u32)
+        val f32_digest = finish_digest(writer).digest
+        writer = stream()
+        semantic_canonical_write_f64_bits_v1(writer, 0x7ff8000000000001u64)
+        val f64_digest = finish_digest(writer).digest
+        writer = stream()
+        semantic_canonical_write_text_v1(writer, "abc")
+        val text_digest = finish_digest(writer).digest
+        writer = stream()
+        semantic_canonical_write_bytes_v1(writer, [97u8, 98u8, 99u8])
+        val bytes_digest = finish_digest(writer).digest
+        expect(f32_digest == f64_digest).to_equal(false)
+        expect(text_digest == bytes_digest).to_equal(false)
+
+    it "length-frames UTF-8 values against concatenation collisions":
+        step("Distinguish [a, bc] from [ab, c]")
+        var left = stream()
+        semantic_canonical_begin_sequence_v1(left, "text", 2)
+        semantic_canonical_write_text_v1(left, "a")
+        semantic_canonical_write_text_v1(left, "bc")
+        semantic_canonical_end_sequence_v1(left)
+        val left_digest = finish_digest(left).digest
+        var right = stream()
+        semantic_canonical_begin_sequence_v1(right, "text", 2)
+        semantic_canonical_write_text_v1(right, "ab")
+        semantic_canonical_write_text_v1(right, "c")
+        semantic_canonical_end_sequence_v1(right)
+        expect(left_digest == finish_digest(right).digest).to_equal(false)
+
+    it "sorts maps by complete encoded keys":
+        step("Canonicalize reverse insertion order without raw-child injection")
+        expect(map_digest(false)).to_equal(map_digest(true))
+
+    it "sorts sets by complete encoded elements":
+        step("Canonicalize reverse set insertion order")
+        expect(set_digest(false)).to_equal(set_digest(true))
+
+    it "preserves declared record field order":
+        step("Keep record layout distinct from map ordering")
+        expect(record_digest(false) == record_digest(true)).to_equal(false)
+
+    it "frames variants and options with exact arity":
+        step("Encode a variant payload containing Some(bool)")
+        val writer = stream()
+        semantic_canonical_begin_variant_v1(writer, "Answer", "Ready", 1)
+        semantic_canonical_begin_option_v1(writer, true)
+        semantic_canonical_write_bool_v1(writer, true)
+        semantic_canonical_end_option_v1(writer)
+        semantic_canonical_end_variant_v1(writer)
+        expect(finish_digest(writer).digest.len()).to_equal(64)
+
+describe "semantic canonical stream V1 fail-closed limits":
+    it "exposes a stable SHA update provider failure code":
+        step("Keep the uninjectable provider boundary error distinguishable")
+        expect(semantic_revision_error_code_v1(
+            SemanticRevisionErrorV1.Sha256UpdateFailed)).to_equal(
+                "sha256_update_failed")
+
+    it "exposes a stable SHA finish provider failure code":
+        step("Keep finalization failure distinct from update failure")
+        expect(semantic_revision_error_code_v1(
+            SemanticRevisionErrorV1.Sha256FinishFailed)).to_equal(
+                "sha256_finish_failed")
+
+    it "rejects negative limits before constructing a stream":
+        step("Refuse an invalid admission envelope")
+        expect(begin_error("d", "a".repeat(64), limits(-1, 1, 1, 1))).to_equal(
+            "invalid_limits")
+
+    it "rejects empty and overlong domains":
+        step("Require a nonempty domain of at most 128 UTF-8 bytes")
+        expect(begin_error("", "a".repeat(64), limits(4096, 32, 8, 4096))).to_equal(
+            "invalid_domain")
+        expect(begin_error("x".repeat(129), "a".repeat(64),
+            limits(4096, 32, 8, 4096))).to_equal("invalid_domain")
+
+    it "rejects non-lowercase or wrong-length schema digests":
+        step("Require exactly 64 lowercase hexadecimal bytes")
+        expect(begin_error("d", "A".repeat(64),
+            limits(4096, 32, 8, 4096))).to_equal("invalid_schema_digest")
+        expect(begin_error("d", "a".repeat(63),
+            limits(4096, 32, 8, 4096))).to_equal("invalid_schema_digest")
+
+    it "precharges the Begin frame against byte limits":
+        step("Reject before allocating or hashing an over-budget Begin frame")
+        expect(begin_error("d", "a".repeat(64), limits(81, 32, 8, 4096))).to_equal(
+            "byte_limit_exceeded")
+
+    it "precharges the Begin frame against work limits":
+        step("Reject before converting or hashing an over-budget Begin frame")
+        expect(begin_error("d", "a".repeat(64), limits(4096, 32, 8, 449))).to_equal(
+            "work_limit_exceeded")
+
+    it "precharges scalar bytes before changing counters or SHA state":
+        step("Reserve the complete scalar before encoding it")
+        val writer = stream_with(limits(82, 32, 8, 4096))
+        semantic_canonical_write_bool_v1(writer, true)
+        expect(finish_error(writer)).to_equal("byte_limit_exceeded")
+        expect(semantic_canonical_stream_v1_encoded_bytes(writer)).to_equal(82)
+
+    it "precharges item slots before encoding a scalar":
+        step("Refuse a root value when the item envelope is empty")
+        val writer = stream_with(limits(4096, 0, 8, 4096))
+        semantic_canonical_write_bool_v1(writer, true)
+        expect(finish_error(writer)).to_equal("item_limit_exceeded")
+
+    it "precharges conversion and attachment work":
+        step("Refuse text conversion before allocating payload bytes")
+        val writer = stream_with(limits(4096, 32, 8, 450))
+        semantic_canonical_write_text_v1(writer, "x")
+        expect(finish_error(writer)).to_equal("work_limit_exceeded")
+
+    it "precharges ordered-close allocation, sorting, and shared-prefix compares":
+        step("Refuse the complete worst-case close budget before sorting")
+        val writer = stream_with(limits(4096, 32, 8, 887))
+        semantic_canonical_begin_map_v1(writer, "text", "i64", 2)
+        semantic_canonical_write_text_v1(writer, "aaaaaaab")
+        semantic_canonical_write_i64_v1(writer, 1)
+        semantic_canonical_write_text_v1(writer, "aaaaaaaa")
+        semantic_canonical_write_i64_v1(writer, 2)
+        val before_close = semantic_canonical_stream_v1_charged_work(writer)
+        semantic_canonical_end_map_v1(writer)
+        expect(finish_error(writer)).to_equal("work_limit_exceeded")
+        expect(semantic_canonical_stream_v1_charged_work(writer)).to_equal(before_close)
+
+    it "precharges SHA finalization allocation before finishing":
+        step("Reserve digest text slots and join work before SHA finalization")
+        val writer = stream_with(limits(4096, 32, 8, 967))
+        semantic_canonical_write_bool_v1(writer, true)
+        val before_finish = semantic_canonical_stream_v1_charged_work(writer)
+        expect(finish_error(writer)).to_equal("work_limit_exceeded")
+        expect(semantic_canonical_stream_v1_charged_work(writer)).to_equal(before_finish)
+
+    it "precharges container depth before allocating a frame":
+        step("Refuse the first container when max depth is zero")
+        val writer = stream_with(limits(4096, 32, 0, 4096))
+        semantic_canonical_begin_sequence_v1(writer, "item", 0)
+        expect(finish_error(writer)).to_equal("depth_limit_exceeded")
+
+    it "rejects negative counts before header allocation":
+        step("Keep signed caller counts off the unsigned wire")
+        val writer = stream()
+        semantic_canonical_begin_sequence_v1(writer, "item", -1)
+        expect(finish_error(writer)).to_equal("negative_count")
+
+    it "rejects map count multiplication overflow":
+        step("Bound the key-value child slot count")
+        val writer = stream()
+        semantic_canonical_begin_map_v1(writer, "key", "value", 9223372036854775807)
+        expect(finish_error(writer)).to_equal("count_overflow")
+
+describe "semantic canonical stream V1 stack and collision refusal":
+    it "requires exactly one root value":
+        step("Refuse an empty content stream")
+        expect(finish_error(stream())).to_equal("root_arity_mismatch")
+
+    it "refuses a second root value":
+        step("Prevent root concatenation ambiguity")
+        val writer = stream()
+        semantic_canonical_write_bool_v1(writer, true)
+        semantic_canonical_write_bool_v1(writer, false)
+        expect(finish_error(writer)).to_equal("root_arity_exceeded")
+
+    it "requires typed fields directly inside records":
+        step("Prevent scalar children from bypassing Field11")
+        val writer = stream()
+        semantic_canonical_begin_record_v1(writer, "R", 1)
+        semantic_canonical_write_bool_v1(writer, true)
+        expect(finish_error(writer)).to_equal("record_field_required")
+
+    it "allows fields only directly inside records":
+        step("Prevent Field11 from appearing as a root value")
+        val writer = stream()
+        semantic_canonical_begin_field_v1(writer, "x")
+        expect(finish_error(writer)).to_equal("field_parent_required")
+
+    it "refuses children beyond declared arity":
+        step("Stop before encoding an extra sequence child")
+        val writer = stream()
+        semantic_canonical_begin_sequence_v1(writer, "item", 0)
+        semantic_canonical_write_bool_v1(writer, true)
+        expect(finish_error(writer)).to_equal("container_arity_exceeded")
+
+    it "refuses closing a container below declared arity":
+        step("Require every declared sequence child")
+        val writer = stream()
+        semantic_canonical_begin_sequence_v1(writer, "item", 1)
+        semantic_canonical_end_sequence_v1(writer)
+        expect(finish_error(writer)).to_equal("container_arity_mismatch")
+
+    it "refuses a mismatched typed close":
+        step("Keep container-kind state explicit")
+        val writer = stream()
+        semantic_canonical_begin_sequence_v1(writer, "item", 0)
+        semantic_canonical_end_record_v1(writer)
+        expect(finish_error(writer)).to_equal("container_kind_mismatch")
+
+    it "refuses finish while a complete container remains open":
+        step("Require the typed end transition before hashing the root")
+        val writer = stream()
+        semantic_canonical_begin_sequence_v1(writer, "item", 0)
+        expect(finish_error(writer)).to_equal("unclosed_container")
+
+    it "refuses duplicate map keys after canonical byte sorting":
+        step("Compare complete encoded keys, not host text ordering")
+        val writer = stream()
+        semantic_canonical_begin_map_v1(writer, "text", "i64", 2)
+        semantic_canonical_write_text_v1(writer, "same")
+        semantic_canonical_write_i64_v1(writer, 1)
+        semantic_canonical_write_text_v1(writer, "same")
+        semantic_canonical_write_i64_v1(writer, 2)
+        semantic_canonical_end_map_v1(writer)
+        expect(finish_error(writer)).to_equal("duplicate_map_key")
+
+    it "refuses duplicate set elements after canonical byte sorting":
+        step("Compare complete encoded elements")
+        val writer = stream()
+        semantic_canonical_begin_set_v1(writer, "text", 2)
+        semantic_canonical_write_text_v1(writer, "same")
+        semantic_canonical_write_text_v1(writer, "same")
+        semantic_canonical_end_set_v1(writer)
+        expect(finish_error(writer)).to_equal("duplicate_set_element")
+
+    it "refuses scalar values outside their declared wire width":
+        step("Keep an out-of-range integer off the canonical stream")
+        val writer = stream()
+        semantic_canonical_write_u8_v1(writer, 256)
+        expect(finish_error(writer)).to_equal("scalar_out_of_range")
+
+    it "refuses signed values below their declared wire width":
+        step("Reject the negative side of a fixed-width boundary")
+        val writer = stream()
+        semantic_canonical_write_i8_v1(writer, -129)
+        expect(finish_error(writer)).to_equal("scalar_out_of_range")
+
+    it "refuses mutation or repeated finish after finalization":
+        step("Make finish a one-way collision-safe transition")
+        val writer = stream()
+        semantic_canonical_write_bool_v1(writer, true)
+        expect(semantic_canonical_finish_v1(writer).is_ok()).to_equal(true)
+        expect(finish_error(writer)).to_equal("already_finished")
+
+    it "refuses a writer transition after finalization":
+        step("Check finished state before root or container arity")
+        val writer = stream()
+        semantic_canonical_write_bool_v1(writer, true)
+        expect(semantic_canonical_finish_v1(writer).is_ok()).to_equal(true)
+        semantic_canonical_write_bool_v1(writer, false)
+        expect(finish_error(writer)).to_equal("already_finished")
+
+describe "semantic canonical stream V1 revision projection":
+    it "copies the validated semantic-owner revision fields":
+        step("Encode the five ordered owner revisions through typed records")
+        val writer = semantic_canonical_begin_v1("simple.semantic.owner",
+            "a".repeat(64), semantic_canonical_limits_v1_default()).unwrap()
+        semantic_canonical_write_owner_revision_set_v1(writer, valid_revisions())
+        expect(finish_digest(writer).digest.len()).to_equal(64)
+
+    it "binds the copied authority serial into content identity":
+        step("Change one valid authority serial and require a new digest")
+        var baseline_revisions = valid_revisions()
+        val baseline_writer = stream()
+        semantic_canonical_write_owner_revision_set_v1(
+            baseline_writer, baseline_revisions)
+        val baseline = finish_digest(baseline_writer).digest
+        var changed = baseline_revisions.revisions[0]
+        changed.authority_serial = changed.authority_serial + 9
+        baseline_revisions.revisions[0] = changed
+        val changed_writer = stream()
+        semantic_canonical_write_owner_revision_set_v1(
+            changed_writer, baseline_revisions)
+        expect(baseline == finish_digest(changed_writer).digest).to_equal(false)
+
+    it "does not accept a revision digest as owner authority":
+        step("Reject an invalid authority serial before projection")
+        var revisions = valid_revisions()
+        var first = revisions.revisions[0]
+        first.authority_serial = 0
+        revisions.revisions[0] = first
+        val writer = stream()
+        semantic_canonical_write_owner_revision_set_v1(writer, revisions)
+        expect(finish_error(writer)).to_equal("invalid_semantic_owner_revision_set")

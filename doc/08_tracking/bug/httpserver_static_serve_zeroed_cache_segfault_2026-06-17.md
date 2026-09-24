@@ -1,9 +1,17 @@
 # Bug: pure-Simple async HTTP server crashes on the first event-loop poll
 
+## Closed 2026-09-13 — confirmed resolved by the entry's own verified fix
+- **inferred** — the entry's Status already reads "INTERPRETER crash FIXED + verified.
+  NATIVE crash FIXED + verified 2026-06-17 (runtime root-cause fix, option A)", with the
+  change described in-document; both halves were verified when filed.
+- **inferred** — the live evidence was a Linux kernel-log segfault trail (`journalctl -k`,
+  Jun 16→17) on the filing host, which is unreachable from this Windows triage host, so the
+  original oracle cannot be re-run. Nothing in the tree contradicts the recorded fix.
+
 - **ID:** httpserver_static_serve_zeroed_cache_segfault_2026-06-17
 - **Severity:** P1 (the `nogc_async_mut` HTTP server could not serve a single request)
 - **Area:** compiler interpreter extern (`rt_event_loop_*`) + lib/nogc_async_mut io/driver
-- **Status:** INTERPRETER crash **FIXED + verified**. NATIVE crash **FIXED +
+- **Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
   verified 2026-06-17** (runtime root-cause fix, option A — see "Real fix landed"
   below).
 

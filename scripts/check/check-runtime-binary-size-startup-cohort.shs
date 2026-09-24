@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+LC_ALL=C; export LC_ALL
+
+fail() { echo "STATUS: FAIL runtime-binary-size-startup-cohort — $*" >&2; exit 1; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+field() { [ "$(grep -c "^$2=" "$1" 2>/dev/null || true)" -eq 1 ] || return 1; sed -n "s/^$2=//p" "$1"; }
+eq_field() { value=$(field "$1" "$2") || fail "missing-$2"; [ "$value" = "$3" ] || fail "invalid-$2"; }
+uint() { value=$(field "$1" "$2") || fail "missing-$2"; case "$value" in ''|*[!0-9]*) fail "invalid-$2";; esac; printf '%s' "$value"; }
+
+RECEIPT= SAMPLES= SIMPLE= C_BINARY= STAGE4= NOGC= PROVIDERS=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --receipt) RECEIPT=$2; shift 2;; --samples) SAMPLES=$2; shift 2;;
+        --simple-binary) SIMPLE=$2; shift 2;; --c-binary) C_BINARY=$2; shift 2;;
+        --stage4-receipt) STAGE4=$2; shift 2;; --nogc-inventory) NOGC=$2; shift 2;;
+        --provider-trace) PROVIDERS=$2; shift 2;; *) fail "unknown-argument-$1";;
+    esac
+done
+for file in "$RECEIPT" "$SAMPLES" "$SIMPLE" "$C_BINARY" "$STAGE4" "$NOGC" "$PROVIDERS"; do
+    [ -f "$file" ] && [ ! -L "$file" ] || fail missing-or-symlinked-input
+done
+
+eq_field "$RECEIPT" schema simple.runtime-binary-size-startup-cohort/v1
+mode=$(field "$RECEIPT" cohort_mode) || fail missing-cohort-mode
+case "$mode" in development) minimum=30;; release) minimum=100;; *) fail invalid-cohort-mode;; esac
+eq_field "$RECEIPT" qualification ADMITTED_STAGE4
+eq_field "$STAGE4" stage 4
+case "$(field "$STAGE4" compiler_kind || true)" in *seed*|*rust*) fail stage4-is-seed;; esac
+eq_field "$RECEIPT" stage4_receipt_sha256 "$(hash_file "$STAGE4")"
+eq_field "$RECEIPT" simple_binary_sha256 "$(hash_file "$SIMPLE")"
+eq_field "$RECEIPT" c_binary_sha256 "$(hash_file "$C_BINARY")"
+eq_field "$RECEIPT" samples_sha256 "$(hash_file "$SAMPLES")"
+eq_field "$RECEIPT" nogc_inventory_sha256 "$(hash_file "$NOGC")"
+eq_field "$RECEIPT" provider_trace_sha256 "$(hash_file "$PROVIDERS")"
+
+simple_bytes=$(wc -c <"$SIMPLE" | tr -d ' '); c_bytes=$(wc -c <"$C_BINARY" | tr -d ' ')
+eq_field "$RECEIPT" simple_binary_bytes "$simple_bytes"
+eq_field "$RECEIPT" c_binary_bytes "$c_bytes"
+[ "$simple_bytes" -lt 2097152 ] || fail nogc-binary-not-below-2mib
+os=$(field "$RECEIPT" host_os) || fail missing-host-os
+allowance=$(uint "$RECEIPT" format_allowance_bytes)
+if [ "$os" = Linux ]; then
+    [ "$allowance" -eq 0 ] || fail linux-format-allowance
+    [ "$simple_bytes" -le 15360 ] || fail linux-release-small-over-15kib
+    [ $((simple_bytes * 100)) -le $((c_bytes * 105)) ] || fail linux-c-ratio-over-105-percent
+else
+    [ "$simple_bytes" -le $((c_bytes + allowance)) ] || fail nonelf-c-plus-allowance
+fi
+
+[ ! -s "$NOGC" ] || fail collector-or-runtime-feature-retained
+[ ! -s "$PROVIDERS" ] || fail optional-provider-loaded-or-initialized
+
+sample_count=$(uint "$RECEIPT" sample_count)
+[ "$sample_count" -ge "$minimum" ] || fail insufficient-samples
+work=$(mktemp -d "${TMPDIR:-/tmp}/bs7-check.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+awk -F'|' -v n="$sample_count" '
+BEGIN { lane[1]="simple"; lane[2]="python" }
+NF != 7 || $1 != "sample" { exit 10 }
+{
+  found=0; for (i=1;i<=2;i++) if ($2==lane[i]) found=i
+  if (!found || $3 !~ /^[0-9]+$/ || $3 != ++count[$2] || $3 > n) exit 11
+  if ($4 !~ /^[1-9][0-9]*$/ || $5 !~ /^[1-9][0-9]*$/ || $6 != 0 || $7 !~ /^[0-9a-f]{64}$/) exit 12
+  print $4 > (out "." $2 ".time"); print $5 > (out "." $2 ".rss")
+}
+END { if (NR != 2*n || count["simple"] != n || count["python"] != n) exit 13 }
+' out="$work/sample" "$SAMPLES" || fail invalid-sample-rows
+
+percentile() { LC_ALL=C sort -n "$1" | sed -n "$2"p; }
+p50=$(( (sample_count + 1) / 2 )); p95=$(( (sample_count * 95 + 99) / 100 ))
+for metric in time rss; do
+    simple_p50=$(percentile "$work/sample.simple.$metric" "$p50")
+    simple_p95=$(percentile "$work/sample.simple.$metric" "$p95")
+    python_p50=$(percentile "$work/sample.python.$metric" "$p50")
+    python_p95=$(percentile "$work/sample.python.$metric" "$p95")
+    eq_field "$RECEIPT" "simple_${metric}_p50" "$simple_p50"
+    eq_field "$RECEIPT" "simple_${metric}_p95" "$simple_p95"
+    eq_field "$RECEIPT" "python_${metric}_p50" "$python_p50"
+    eq_field "$RECEIPT" "python_${metric}_p95" "$python_p95"
+    [ $((simple_p50 * 100)) -le $((python_p50 * 110)) ] || fail "${metric}-p50-over-python-110-percent"
+    [ $((simple_p95 * 100)) -le $((python_p95 * 110)) ] || fail "${metric}-p95-over-python-110-percent"
+done
+eq_field "$RECEIPT" final_verdict PASS
+echo "STATUS: PASS runtime-binary-size-startup-cohort — mode=$mode samples=$sample_count"

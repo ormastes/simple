@@ -1,0 +1,172 @@
+use compiler.frontend.lexer.lexical_scan_runtime.{lexical_scan_runtime_counters_v1}
+
+struct DemandCompilePhaseCounterV1:
+    phase: text
+    elapsed_ns: i64
+
+struct DemandCompileCountersV1:
+    phases: [DemandCompilePhaseCounterV1]
+    source_open_count: i64
+    section_read_count: i64
+    action_scheduled_count: i64
+    action_completed_count: i64
+    cache_hit_count: i64
+    cache_miss_count: i64
+    lexical_scalar_scan_count: i64
+    lexical_simd_scan_count: i64
+    lexical_divergence_fallback_count: i64
+    lexical_gpu_notification_count: i64
+    lexical_scanned_byte_count: i64
+
+struct DemandCompileCounterTransferV1:
+    counters: DemandCompileCountersV1
+    accepted: bool
+
+@unsafe(reason: "monotonic performance evidence clock", capabilities: [ffi])
+extern fn rt_time_monotonic_ns() -> i64
+
+fn demand_compile_counter_now_ns_v1() -> i64:
+    val now = unsafe(capabilities: [ffi]): rt_time_monotonic_ns()
+    if now < 0: 0 else: now
+
+fn demand_compile_phase_names_v1() -> [text]:
+    [
+        "snapshot-admission",
+        "package-resolution",
+        "action-graph",
+        "smf-metadata",
+        "hir-demand",
+        "mir-admission",
+        "baseline-backend",
+        "llvm-promotion",
+        "link",
+        "total"
+    ]
+
+fn demand_compile_counters_empty_v1() -> DemandCompileCountersV1:
+    var phases: [DemandCompilePhaseCounterV1] = []
+    for phase in demand_compile_phase_names_v1():
+        phases.push(DemandCompilePhaseCounterV1(phase: phase, elapsed_ns: 0))
+    DemandCompileCountersV1(
+        phases: phases,
+        source_open_count: 0,
+        section_read_count: 0,
+        action_scheduled_count: 0,
+        action_completed_count: 0,
+        cache_hit_count: 0,
+        cache_miss_count: 0,
+        lexical_scalar_scan_count: 0,
+        lexical_simd_scan_count: 0,
+        lexical_divergence_fallback_count: 0,
+        lexical_gpu_notification_count: 0,
+        lexical_scanned_byte_count: 0)
+
+fn demand_compile_counters_capture_lexical_v1(counters: DemandCompileCountersV1) -> DemandCompileCountersV1:
+    val lexical = lexical_scan_runtime_counters_v1()
+    DemandCompileCountersV1(
+        phases: counters.phases,
+        source_open_count: counters.source_open_count,
+        section_read_count: counters.section_read_count,
+        action_scheduled_count: counters.action_scheduled_count,
+        action_completed_count: counters.action_completed_count,
+        cache_hit_count: counters.cache_hit_count,
+        cache_miss_count: counters.cache_miss_count,
+        lexical_scalar_scan_count: lexical.scalar_scan_count,
+        lexical_simd_scan_count: lexical.simd_scan_count,
+        lexical_divergence_fallback_count: lexical.divergence_fallback_count,
+        lexical_gpu_notification_count: lexical.gpu_notification_count,
+        lexical_scanned_byte_count: lexical.scanned_byte_count)
+
+fn demand_compile_counter_add_phase_v1(
+    counters: &mut DemandCompileCountersV1, phase: text, started_ns: i64
+) -> bool:
+    val finished_ns = demand_compile_counter_now_ns_v1()
+    if started_ns <= 0 or finished_ns < started_ns:
+        return false
+    var index = 0
+    while index < counters.phases.len():
+        if counters.phases[index].phase == phase:
+            counters.phases[index] = DemandCompilePhaseCounterV1(
+                phase, counters.phases[index].elapsed_ns + finished_ns - started_ns)
+            return true
+        index = index + 1
+    false
+
+fn demand_compile_counter_add_phase_owned_v1(
+    counters: DemandCompileCountersV1, phase: text, started_ns: i64
+) -> DemandCompileCounterTransferV1:
+    var owned = counters
+    val accepted = demand_compile_counter_add_phase_v1(
+        &mut owned, phase, started_ns)
+    DemandCompileCounterTransferV1(owned, accepted)
+
+fn demand_compile_counter_source_open_v1(counters: &mut DemandCompileCountersV1):
+    counters.source_open_count = counters.source_open_count + 1
+
+fn demand_compile_counter_section_read_v1(counters: &mut DemandCompileCountersV1):
+    counters.section_read_count = counters.section_read_count + 1
+
+fn demand_compile_counter_action_scheduled_v1(counters: &mut DemandCompileCountersV1):
+    counters.action_scheduled_count = counters.action_scheduled_count + 1
+
+fn demand_compile_counter_action_completed_v1(counters: &mut DemandCompileCountersV1):
+    counters.action_completed_count = counters.action_completed_count + 1
+
+fn demand_compile_counter_cache_hit_v1(counters: &mut DemandCompileCountersV1):
+    counters.cache_hit_count = counters.cache_hit_count + 1
+
+fn demand_compile_counter_cache_miss_v1(counters: &mut DemandCompileCountersV1):
+    counters.cache_miss_count = counters.cache_miss_count + 1
+
+fn demand_compile_counters_validate_v1(counters: DemandCompileCountersV1) -> text:
+    val expected = demand_compile_phase_names_v1()
+    if counters.phases.len() != expected.len():
+        return "demand-counter-phase-set-invalid"
+    var index = 0
+    while index < expected.len():
+        val phase = counters.phases[index]
+        if phase.phase != expected[index]:
+            return "demand-counter-phase-order-invalid"
+        if phase.elapsed_ns < 0:
+            return "demand-counter-phase-duration-invalid"
+        index = index + 1
+    if counters.source_open_count < 0 or counters.section_read_count < 0 or
+        counters.action_scheduled_count < 0 or counters.action_completed_count < 0 or
+        counters.cache_hit_count < 0 or counters.cache_miss_count < 0 or
+        counters.lexical_scalar_scan_count < 0 or counters.lexical_simd_scan_count < 0 or
+        counters.lexical_divergence_fallback_count < 0 or counters.lexical_gpu_notification_count < 0 or
+        counters.lexical_scanned_byte_count < 0:
+        return "demand-counter-value-invalid"
+    if counters.action_completed_count > counters.action_scheduled_count:
+        return "demand-counter-action-balance-invalid"
+    "ok"
+
+fn demand_compile_counters_canonical_v1(counters: DemandCompileCountersV1) -> text:
+    if demand_compile_counters_validate_v1(counters) != "ok":
+        return ""
+    var encoded = "simple-demand-compile-counters-v1\n"
+    for phase in counters.phases:
+        encoded = encoded + "phase={phase.phase}:{phase.elapsed_ns}\n"
+    encoded = encoded + "source-open={counters.source_open_count}\n"
+    encoded = encoded + "section-read={counters.section_read_count}\n"
+    encoded = encoded + "action-scheduled={counters.action_scheduled_count}\n"
+    encoded = encoded + "action-completed={counters.action_completed_count}\n"
+    encoded = encoded + "cache-hit={counters.cache_hit_count}\n"
+    encoded = encoded + "cache-miss={counters.cache_miss_count}\n"
+    encoded = encoded + "lexical-scalar-scan={counters.lexical_scalar_scan_count}\n"
+    encoded = encoded + "lexical-simd-scan={counters.lexical_simd_scan_count}\n"
+    encoded = encoded + "lexical-divergence-fallback={counters.lexical_divergence_fallback_count}\n"
+    encoded = encoded + "lexical-gpu-notification={counters.lexical_gpu_notification_count}\n"
+    encoded = encoded + "lexical-scanned-byte={counters.lexical_scanned_byte_count}\n"
+    encoded
+
+export DemandCompilePhaseCounterV1, DemandCompileCountersV1
+export DemandCompileCounterTransferV1
+export demand_compile_phase_names_v1, demand_compile_counters_empty_v1
+export demand_compile_counters_capture_lexical_v1
+export demand_compile_counters_validate_v1, demand_compile_counters_canonical_v1
+export demand_compile_counter_now_ns_v1, demand_compile_counter_add_phase_v1
+export demand_compile_counter_add_phase_owned_v1
+export demand_compile_counter_source_open_v1, demand_compile_counter_section_read_v1
+export demand_compile_counter_action_scheduled_v1, demand_compile_counter_action_completed_v1
+export demand_compile_counter_cache_hit_v1, demand_compile_counter_cache_miss_v1

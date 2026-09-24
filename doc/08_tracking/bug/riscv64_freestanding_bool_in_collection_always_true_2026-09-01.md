@@ -1,4 +1,8 @@
 # riscv64 freestanding: a `bool` read out of a tuple or array is ALWAYS `true`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: **OPEN** — root cause of goal item 1 row 2 (SimpleOS riscv64 in-guest
   build-and-run sanity). Not fixed.
@@ -489,3 +493,4 @@ Probe, in-guest, the actual function count of the built HIR module immediately
 before `interpret_hir_module`, and print the raw value rather than a comparison
 result. Do not assume the module is empty: `phase=mir-ok functions lowered`
 printed, which is weak evidence that lowering saw something.
+

@@ -1,0 +1,288 @@
+# Pure lifecycle planner for the prospective persistent LSP query session.
+#
+# This module owns no process, transport, semantic result, or availability
+# decision.  It makes lazy-start/reuse and reap-before-fallback transitions
+# explicit so the later V4 transport integration cannot silently start one
+# compiler per query or overlap a failed worker with its one-shot fallback.
+
+const LSP_QUERY_SESSION_MAX_ID_BYTES_V1: i64 = 16384
+const LSP_QUERY_SESSION_MAX_GENERATION_BYTES_V1: i64 = 16384
+const LSP_QUERY_SESSION_MAX_ROOT_BYTES_V1: i64 = 16384
+
+enum LspQuerySessionPhaseV1:
+    Dormant
+    Ready
+    InFlight
+    AwaitingReap
+    ReapedFailure
+    FallbackConsumed
+
+struct LspQuerySessionV1:
+    workspace_root: text
+    phase: LspQuerySessionPhaseV1
+    worker_start_count: i64
+    accepted_request_count: i64
+    last_request_id: text
+    last_execution_generation: text
+    failed_request_id: text
+    failed_execution_generation: text
+    request_deadline_ms: i64
+    answer_cache_enabled: bool
+
+struct LspQuerySessionRequestPlanV1:
+    session: LspQuerySessionV1
+    accepted: bool
+    start_worker: bool
+    reuse_worker: bool
+    request_id: text
+    execution_generation: text
+    absolute_deadline_ms: i64
+    observed_now_ms: i64
+    remaining_deadline_ms: i64
+    reason: text
+
+struct LspQuerySessionTransitionV1:
+    session: LspQuerySessionV1
+    accepted: bool
+    reason: text
+
+struct LspQuerySessionFallbackPlanV1:
+    session: LspQuerySessionV1
+    allowed: bool
+    request_id: text
+    execution_generation: text
+    remaining_deadline_ms: i64
+    reason: text
+
+fn lsp_query_session_initial_v1(workspace_root: text) -> LspQuerySessionV1:
+    LspQuerySessionV1(
+        workspace_root: workspace_root,
+        phase: LspQuerySessionPhaseV1.Dormant,
+        worker_start_count: 0,
+        accepted_request_count: 0,
+        last_request_id: "",
+        last_execution_generation: "",
+        failed_request_id: "",
+        failed_execution_generation: "",
+        request_deadline_ms: 0,
+        answer_cache_enabled: false,
+    )
+
+fn _request_refusal_v1(
+    session: LspQuerySessionV1,
+    request_id: text,
+    execution_generation: text,
+    absolute_deadline_ms: i64,
+    observed_now_ms: i64,
+    reason: text,
+) -> LspQuerySessionRequestPlanV1:
+    val remaining = if absolute_deadline_ms > observed_now_ms:
+        absolute_deadline_ms - observed_now_ms
+    else:
+        0
+    LspQuerySessionRequestPlanV1(
+        session: session,
+        accepted: false,
+        start_worker: false,
+        reuse_worker: false,
+        request_id: request_id,
+        execution_generation: execution_generation,
+        absolute_deadline_ms: absolute_deadline_ms,
+        observed_now_ms: observed_now_ms,
+        remaining_deadline_ms: remaining,
+        reason: reason,
+    )
+
+fn lsp_query_session_plan_request_v1(
+    session: LspQuerySessionV1,
+    request_id: text,
+    workspace_root: text,
+    execution_generation: text,
+    absolute_deadline_ms: i64,
+    observed_now_ms: i64,
+) -> LspQuerySessionRequestPlanV1:
+    if session.answer_cache_enabled:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "answer_cache_must_remain_disabled")
+    if session.workspace_root == "":
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "workspace_root_mismatch")
+    if session.workspace_root.len() > LSP_QUERY_SESSION_MAX_ROOT_BYTES_V1:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "configured_workspace_root_too_large")
+    if workspace_root == "" or workspace_root.len() > LSP_QUERY_SESSION_MAX_ROOT_BYTES_V1:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "presented_workspace_root_too_large")
+    if workspace_root != session.workspace_root:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "workspace_root_mismatch")
+    if request_id == "" or request_id.len() > LSP_QUERY_SESSION_MAX_ID_BYTES_V1:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "invalid_request_id")
+    if execution_generation == "" or
+        execution_generation.len() > LSP_QUERY_SESSION_MAX_GENERATION_BYTES_V1:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "invalid_execution_generation")
+    if observed_now_ms < 0:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "invalid_monotonic_time")
+    if absolute_deadline_ms <= observed_now_ms:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "request_deadline_exhausted")
+    if session.phase != LspQuerySessionPhaseV1.Dormant and
+        session.phase != LspQuerySessionPhaseV1.Ready:
+        return _request_refusal_v1(session, request_id, execution_generation,
+            absolute_deadline_ms, observed_now_ms, "worker_not_ready")
+
+    val starts = if session.phase == LspQuerySessionPhaseV1.Dormant:
+        session.worker_start_count + 1
+    else:
+        session.worker_start_count
+    val next = LspQuerySessionV1(
+        workspace_root: session.workspace_root,
+        phase: LspQuerySessionPhaseV1.InFlight,
+        worker_start_count: starts,
+        accepted_request_count: session.accepted_request_count + 1,
+        last_request_id: request_id,
+        last_execution_generation: execution_generation,
+        failed_request_id: "",
+        failed_execution_generation: "",
+        request_deadline_ms: absolute_deadline_ms,
+        answer_cache_enabled: false,
+    )
+    LspQuerySessionRequestPlanV1(
+        session: next,
+        accepted: true,
+        start_worker: session.phase == LspQuerySessionPhaseV1.Dormant,
+        reuse_worker: session.phase == LspQuerySessionPhaseV1.Ready,
+        request_id: request_id,
+        execution_generation: execution_generation,
+        absolute_deadline_ms: absolute_deadline_ms,
+        observed_now_ms: observed_now_ms,
+        remaining_deadline_ms: absolute_deadline_ms - observed_now_ms,
+        reason: "",
+    )
+
+fn lsp_query_session_note_request_success_v1(
+    session: LspQuerySessionV1,
+    request_id: text,
+    execution_generation: text,
+) -> LspQuerySessionTransitionV1:
+    if session.phase != LspQuerySessionPhaseV1.InFlight or
+        request_id != session.last_request_id or
+        execution_generation != session.last_execution_generation:
+        return LspQuerySessionTransitionV1(
+            session: session, accepted: false, reason: "completion_identity_mismatch")
+    val next = LspQuerySessionV1(
+        workspace_root: session.workspace_root,
+        phase: LspQuerySessionPhaseV1.Ready,
+        worker_start_count: session.worker_start_count,
+        accepted_request_count: session.accepted_request_count,
+        last_request_id: session.last_request_id,
+        last_execution_generation: session.last_execution_generation,
+        failed_request_id: "",
+        failed_execution_generation: "",
+        request_deadline_ms: 0,
+        answer_cache_enabled: false,
+    )
+    LspQuerySessionTransitionV1(session: next, accepted: true, reason: "")
+
+fn lsp_query_session_note_worker_failure_v1(
+    session: LspQuerySessionV1,
+    request_id: text,
+    execution_generation: text,
+) -> LspQuerySessionTransitionV1:
+    if session.phase != LspQuerySessionPhaseV1.InFlight or
+        request_id != session.last_request_id or
+        execution_generation != session.last_execution_generation:
+        return LspQuerySessionTransitionV1(
+            session: session, accepted: false, reason: "failure_identity_mismatch")
+    val next = LspQuerySessionV1(
+        workspace_root: session.workspace_root,
+        phase: LspQuerySessionPhaseV1.AwaitingReap,
+        worker_start_count: session.worker_start_count,
+        accepted_request_count: session.accepted_request_count,
+        last_request_id: session.last_request_id,
+        last_execution_generation: session.last_execution_generation,
+        failed_request_id: request_id,
+        failed_execution_generation: execution_generation,
+        request_deadline_ms: session.request_deadline_ms,
+        answer_cache_enabled: false,
+    )
+    LspQuerySessionTransitionV1(session: next, accepted: true, reason: "")
+
+fn lsp_query_session_note_worker_reaped_v1(
+    session: LspQuerySessionV1,
+    request_id: text,
+    execution_generation: text,
+) -> LspQuerySessionTransitionV1:
+    if session.phase != LspQuerySessionPhaseV1.AwaitingReap or
+        request_id != session.failed_request_id or
+        execution_generation != session.failed_execution_generation:
+        return LspQuerySessionTransitionV1(
+            session: session, accepted: false, reason: "reap_identity_mismatch")
+    val next = LspQuerySessionV1(
+        workspace_root: session.workspace_root,
+        phase: LspQuerySessionPhaseV1.ReapedFailure,
+        worker_start_count: session.worker_start_count,
+        accepted_request_count: session.accepted_request_count,
+        last_request_id: session.last_request_id,
+        last_execution_generation: session.last_execution_generation,
+        failed_request_id: session.failed_request_id,
+        failed_execution_generation: session.failed_execution_generation,
+        request_deadline_ms: session.request_deadline_ms,
+        answer_cache_enabled: false,
+    )
+    LspQuerySessionTransitionV1(session: next, accepted: true, reason: "")
+
+fn lsp_query_session_plan_fallback_v1(
+    session: LspQuerySessionV1,
+    request_id: text,
+    execution_generation: text,
+    presented_absolute_deadline_ms: i64,
+    observed_now_ms: i64,
+) -> LspQuerySessionFallbackPlanV1:
+    var reason = "worker_not_reaped"
+    if session.phase == LspQuerySessionPhaseV1.FallbackConsumed:
+        reason = "fallback_already_consumed"
+    elif request_id != session.failed_request_id or
+        execution_generation != session.failed_execution_generation:
+        reason = "fallback_identity_mismatch"
+    elif presented_absolute_deadline_ms != session.request_deadline_ms:
+        reason = "fallback_deadline_authority_mismatch"
+    elif observed_now_ms < 0:
+        reason = "invalid_monotonic_time"
+    elif observed_now_ms >= session.request_deadline_ms:
+        reason = "request_deadline_exhausted"
+    elif session.phase == LspQuerySessionPhaseV1.ReapedFailure:
+        val next = LspQuerySessionV1(
+            workspace_root: session.workspace_root,
+            phase: LspQuerySessionPhaseV1.FallbackConsumed,
+            worker_start_count: session.worker_start_count,
+            accepted_request_count: session.accepted_request_count,
+            last_request_id: session.last_request_id,
+            last_execution_generation: session.last_execution_generation,
+            failed_request_id: session.failed_request_id,
+            failed_execution_generation: session.failed_execution_generation,
+            request_deadline_ms: session.request_deadline_ms,
+            answer_cache_enabled: false,
+        )
+        return LspQuerySessionFallbackPlanV1(
+            session: next, allowed: true, request_id: request_id,
+            execution_generation: execution_generation,
+            remaining_deadline_ms: session.request_deadline_ms - observed_now_ms,
+            reason: "")
+    LspQuerySessionFallbackPlanV1(
+        session: session, allowed: false, request_id: request_id,
+        execution_generation: execution_generation,
+        remaining_deadline_ms: 0, reason: reason)
+
+export LSP_QUERY_SESSION_MAX_ID_BYTES_V1, LSP_QUERY_SESSION_MAX_GENERATION_BYTES_V1
+export LSP_QUERY_SESSION_MAX_ROOT_BYTES_V1
+export LspQuerySessionPhaseV1, LspQuerySessionV1
+export LspQuerySessionRequestPlanV1, LspQuerySessionTransitionV1
+export LspQuerySessionFallbackPlanV1
+export lsp_query_session_initial_v1, lsp_query_session_plan_request_v1
+export lsp_query_session_note_request_success_v1
+export lsp_query_session_note_worker_failure_v1, lsp_query_session_note_worker_reaped_v1
+export lsp_query_session_plan_fallback_v1

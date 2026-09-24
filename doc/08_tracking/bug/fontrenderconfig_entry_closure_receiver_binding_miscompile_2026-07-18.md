@@ -1,4 +1,8 @@
 # FontRenderConfig `identity()` / `valid()` methods miscompile under entry-closure receiver-binding
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-18
 **Status:** Worked around (methods converted to typed free functions); the
@@ -60,3 +64,4 @@ fields read correctly.
   receiver binding.
 - `baremetal_option_field_unwrap_faults_class_2026-07-18.md` — sibling
   freestanding codegen class (Option unwrap / `if val`).
+

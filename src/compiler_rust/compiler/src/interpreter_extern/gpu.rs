@@ -3809,7 +3809,7 @@ static VULKAN_DEPENDENCY_QUARANTINE_GATE: parking_lot::RawMutex = parking_lot::R
 
 pub fn rt_vulkan_dependency_quarantine_lock_fn(_args: &[Value]) -> Result<Value, CompileError> {
     VULKAN_DEPENDENCY_QUARANTINE_GATE.lock();
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 pub fn rt_vulkan_dependency_quarantine_unlock_fn(_args: &[Value]) -> Result<Value, CompileError> {
@@ -3817,7 +3817,7 @@ pub fn rt_vulkan_dependency_quarantine_unlock_fn(_args: &[Value]) -> Result<Valu
     unsafe {
         VULKAN_DEPENDENCY_QUARANTINE_GATE.unlock();
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 fn check_vulkan_available() -> bool {
@@ -3830,7 +3830,16 @@ fn get_shaderc() -> Option<&'static vulkan_dlopen::ShadercFns> {
 
 /// `rt_vulkan_is_available() -> bool`
 pub fn rt_vulkan_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(if check_vulkan_available() { 1 } else { 0 }))
+    // Bool, not Int. Every Simple declaration of this extern says `-> bool`
+    // (sffi_vulkan.spl:46, io/vulkan_sffi.spl:56) and its siblings here
+    // (rt_vulkan_init_fn, rt_vulkan_select_device_fn, rt_vulkan_shutdown_fn)
+    // already return Value::Bool. Returning Int made `not rt_vulkan_is_available()`
+    // — the form used by the Vulkan backend probe at ffi_vulkan.spl:125,307 and
+    // vulkan_backend3d.spl:263, and by test/05_perf/graphics_2d/bench_2d_vulkan.spl
+    // — stop the caller dead instead of branching, which is why that benchmark
+    // printed its banner and then exited 0 with no frame timings on a host where
+    // Vulkan is in fact available.
+    Ok(Value::Bool(check_vulkan_available()))
 }
 
 const VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x0000_0001;
@@ -4152,10 +4161,10 @@ pub fn rt_vulkan_select_device_fn(args: &[Value]) -> Result<Value, CompileError>
         if idx < s.physical_devices.len() {
             s.selected_device_index = idx;
             s.physical_device = s.physical_devices[idx];
-            return Ok(Value::Int(1));
+            return Ok(Value::Bool(true));
         }
     }
-    Ok(Value::Int(0))
+    Ok(Value::Bool(false))
 }
 
 /// `rt_vulkan_get_device() -> i64` — returns the native Vulkan logical device handle
@@ -4458,6 +4467,86 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(false))
 }
 
+/// `rt_vulkan_copy_to_buffer_u32(handle: i64, words: [u32], offset: i64) -> bool`
+///
+/// Typed sibling of `rt_vulkan_copy_to_buffer`: the payload is a WORD array and
+/// each element becomes four little-endian bytes. The byte entry point marshals
+/// through `strict_owned_bytes`/`arg_bytes_ptr`, which truncate every element to
+/// one byte, so a caller with `u32` data has to explode each word into four
+/// host array stores before it can upload -- 20 interpreter stores per rect for
+/// the Engine2D rect batch, which is the single largest O(N) interpreter term
+/// left in that lane. With this entry point the same batch is 5 stores per rect
+/// and the widening happens here, in Rust, over the whole array at once.
+///
+/// Element range is `-2^31 ..= u32::MAX`: a signed value is taken as its
+/// two's-complement `u32`, so a packed rect can carry a negative x/y without
+/// the caller casting. Anything outside that range is an error rather than a
+/// silent truncation -- silent truncation is exactly the defect this replaces.
+pub fn rt_vulkan_copy_to_buffer_u32_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_copy_to_buffer_u32", 3)? as usize;
+    let words = strict_i64_values(args, 1, "rt_vulkan_copy_to_buffer_u32", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_copy_to_buffer_u32", 3)?;
+    if handle == 0 || offset < 0 {
+        return Ok(Value::Bool(false));
+    }
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for word in &words {
+        let widened = if *word < 0 {
+            if *word < i64::from(i32::MIN) {
+                return Err(CompileError::semantic(format!(
+                    "rt_vulkan_copy_to_buffer_u32 word {word} is out of bounds"
+                )));
+            }
+            (*word as i32) as u32
+        } else {
+            u32::try_from(*word).map_err(|_| {
+                CompileError::semantic(format!("rt_vulkan_copy_to_buffer_u32 word {word} is out of bounds"))
+            })?
+        };
+        bytes.extend_from_slice(&widened.to_le_bytes());
+    }
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Bool(false)),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Bool(false));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Bool(false)),
+    };
+    let offset_u = offset as u64;
+    let count_u = bytes.len() as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Bool(false));
+    }
+    if bytes.is_empty() {
+        return Ok(Value::Bool(true));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::Bool(false));
+        }
+        let dst = std::slice::from_raw_parts_mut((buffer.mapped as *mut u8).add(offset_u as usize), bytes.len());
+        dst.copy_from_slice(&bytes);
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.flush_mapped_memory_ranges)(s.device, 1, &range);
+    }
+    Ok(Value::Bool(true))
+}
+
 /// `rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool`
 pub fn rt_vulkan_copy_to_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;
@@ -4668,6 +4757,131 @@ pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileEr
         let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
         let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
         Ok(Value::byte_array(bytes.to_vec()))
+    }
+}
+
+/// `rt_vulkan_readback_u32_array(handle: i64, pixel_count: i64, offset: i64) -> [u32]`
+///
+/// Interpreter-legal bulk pixel readback. The natively-linked lane uses
+/// `rt_vulkan_readback_u32_checksum(dest, ...)`, which PASSES a runtime array
+/// and is therefore refused by `interpreter_extern/vulkan.rs`'s dispatch, so
+/// the interpreter arm of `vulkan_sffi_readback_u32_into` fell back to an
+/// interpreted byte->u32 unpack loop: 3.6 us/pixel, i.e. 99.6% of a 900x760
+/// web frame (doc/10_metrics/ui/web_render_frame_profile_macos_2026-09-12.md).
+///
+/// Shape is deliberately `rt_vulkan_read_buffer_bytes`'s: scalars in, array
+/// out -- the only shape this lane marshals. Returns an EMPTY array on any
+/// validation failure so the caller can fall back rather than consume partial
+/// pixels.
+pub fn rt_vulkan_readback_u32_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_readback_u32_array", 3)? as usize;
+    let pixel_count = arg_i64(args, 1, "rt_vulkan_readback_u32_array", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_readback_u32_array", 3)?;
+    if handle == 0 || pixel_count <= 0 || offset < 0 {
+        return Ok(Value::array(vec![]));
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return Ok(Value::array(vec![]));
+    };
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::array(vec![])),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::array(vec![]));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::array(vec![])),
+    };
+    let offset_u = offset as u64;
+    let count_u = byte_count as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::array(vec![]));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::array(vec![]));
+        }
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
+        let words: Vec<Value> = bytes
+            .chunks_exact(4)
+            .map(|c| Value::Int(i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))))
+            .collect();
+        Ok(Value::array(words))
+    }
+}
+
+/// `rt_vulkan_readback_u32_array_checksum(handle, pixel_count, offset) -> i64`
+///
+/// The identity checksum that the natively-linked `rt_vulkan_readback_u32_checksum`
+/// returns, over the same bytes, without materialising an array. Kept as a
+/// separate scalar call so the formula stays byte-identical across lanes
+/// instead of being recomputed by an interpreted per-pixel fold. Returns -1 on
+/// any validation failure (a valid checksum is >= 0).
+pub fn rt_vulkan_readback_u32_array_checksum_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_readback_u32_array_checksum", 3)? as usize;
+    let pixel_count = arg_i64(args, 1, "rt_vulkan_readback_u32_array_checksum", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_readback_u32_array_checksum", 3)?;
+    if handle == 0 || pixel_count <= 0 || offset < 0 {
+        return Ok(Value::Int(-1));
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return Ok(Value::Int(-1));
+    };
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Int(-1)),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Int(-1));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Int(-1)),
+    };
+    let offset_u = offset as u64;
+    let count_u = byte_count as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Int(-1));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::Int(-1));
+        }
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
+        let mut checksum: i64 = 0;
+        for c in bytes.chunks_exact(4) {
+            let px = i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            checksum = (checksum + px) % 2_147_483_647;
+        }
+        Ok(Value::Int(checksum))
     }
 }
 
@@ -4906,18 +5120,18 @@ pub fn rt_vulkan_bind_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if dsh == 0 || dsh > s.descriptor_sets.len() || bh == 0 || bh > s.buffers.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let set = match s.descriptor_sets[dsh - 1].as_ref() {
         Some(e) => e.set,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     let (buf, buf_size) = match s.buffers[bh - 1].as_ref() {
         Some(b) => (b.buffer, b.size),
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     unsafe {
         let buf_info = VkDescriptorBufferInfo {
@@ -4939,7 +5153,7 @@ pub fn rt_vulkan_bind_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
         };
         (s.fns.update_descriptor_sets)(s.device, 1, &write, 0, ptr::null());
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_destroy_descriptor_set(handle: i64)`
@@ -4954,11 +5168,11 @@ pub fn rt_vulkan_destroy_descriptor_set_fn(args: &[Value]) -> Result<Value, Comp
                 unsafe {
                     (s.fns.destroy_descriptor_pool)(s.device, e.pool, ptr::null());
                 }
-                return Ok(Value::Int(1));
+                return Ok(Value::Bool(true));
             }
         }
     }
-    Ok(Value::Int(0))
+    Ok(Value::Bool(false))
 }
 
 /// `rt_vulkan_begin_compute() -> i64` — allocates and begins a command buffer; returns handle
@@ -5008,19 +5222,19 @@ pub fn rt_vulkan_bind_pipeline_fn(args: &[Value]) -> Result<Value, CompileError>
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if ch == 0 || ch > s.command_buffers.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let pipeline = {
         let ph_idx = ph as usize;
         if ph_idx == 0 || ph_idx > s.pipelines.len() {
-            return Ok(Value::Int(0));
+            return Ok(Value::Bool(false));
         }
         match s.pipelines[ph_idx - 1].as_ref() {
             Some(p) => p.pipeline,
-            None => return Ok(Value::Int(0)),
+            None => return Ok(Value::Bool(false)),
         }
     };
     let cmd = match s.command_buffers[ch - 1].as_mut() {
@@ -5028,12 +5242,12 @@ pub fn rt_vulkan_bind_pipeline_fn(args: &[Value]) -> Result<Value, CompileError>
             e.pipeline_handle = ph;
             e.cmd
         }
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     unsafe {
         (s.fns.cmd_bind_pipeline)(cmd, 1, pipeline); // PIPELINE_BIND_POINT_COMPUTE = 1
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool`
@@ -5045,31 +5259,31 @@ pub fn rt_vulkan_bind_descriptors_fn(args: &[Value]) -> Result<Value, CompileErr
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if ch == 0 || ch > s.command_buffers.len() || dsh == 0 || dsh > s.descriptor_sets.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let (cmd, ph) = match s.command_buffers[ch - 1].as_ref() {
         Some(e) => (e.cmd, e.pipeline_handle as usize),
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     let layout = if ph > 0 && ph <= s.pipelines.len() {
         match s.pipelines[ph - 1].as_ref() {
             Some(p) => p.layout,
-            None => return Ok(Value::Int(0)),
+            None => return Ok(Value::Bool(false)),
         }
     } else {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     };
     let set = match s.descriptor_sets[dsh - 1].as_ref() {
         Some(e) => e.set,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     unsafe {
         (s.fns.cmd_bind_descriptor_sets)(cmd, 1, layout, 0, 1, &set, 0, ptr::null());
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool`
@@ -5122,14 +5336,14 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if ch == 0 || ch > s.command_buffers.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let cmd = match s.command_buffers[ch - 1].as_ref() {
         Some(e) => e.cmd,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     unsafe {
         (s.fns.cmd_dispatch)(cmd, x, y, z);
@@ -5152,7 +5366,7 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
             ptr::null(),
         );
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_end_compute(cmd: i64) -> bool`
@@ -5162,17 +5376,17 @@ pub fn rt_vulkan_end_compute_fn(args: &[Value]) -> Result<Value, CompileError> {
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if ch == 0 || ch > s.command_buffers.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let cmd = match s.command_buffers[ch - 1].as_ref() {
         Some(e) => e.cmd,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     let ok = unsafe { (s.fns.end_command_buffer)(cmd) };
-    Ok(Value::Int(if ok == vulkan_dlopen::VK_SUCCESS { 1 } else { 0 }))
+    Ok(Value::Bool(ok == vulkan_dlopen::VK_SUCCESS))
 }
 
 /// `rt_vulkan_submit_and_wait(cmd: i64) -> bool`
@@ -5183,14 +5397,14 @@ pub fn rt_vulkan_submit_and_wait_fn(args: &[Value]) -> Result<Value, CompileErro
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if ch == 0 || ch > s.command_buffers.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let cmd = match s.command_buffers[ch - 1].as_ref() {
         Some(e) => e.cmd,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     let submit_info = VkSubmitInfo {
         s_type: 4,
@@ -5216,7 +5430,7 @@ pub fn rt_vulkan_submit_and_wait_fn(args: &[Value]) -> Result<Value, CompileErro
             (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd);
         }
     }
-    Ok(Value::Int(if ok == VK_SUCCESS { 1 } else { 0 }))
+    Ok(Value::Bool(ok == VK_SUCCESS))
 }
 
 pub fn rt_vulkan_fence_submission_supported_fn(_args: &[Value]) -> Result<Value, CompileError> {
@@ -5361,14 +5575,14 @@ pub fn rt_vulkan_wait_fence_fn(args: &[Value]) -> Result<Value, CompileError> {
     let guard = VK_STATE.lock().unwrap();
     let s = match guard.as_ref() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if !s.live_fences.contains(&fence) {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let timeout = if timeout < 0 { u64::MAX } else { timeout as u64 };
     let ok = unsafe { (s.fns.wait_for_fences)(s.device, 1, &fence, 1, timeout) };
-    Ok(Value::Int(if ok == VK_SUCCESS { 1 } else { 0 }))
+    Ok(Value::Bool(ok == VK_SUCCESS))
 }
 
 pub fn rt_vulkan_destroy_fence_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -5378,7 +5592,7 @@ pub fn rt_vulkan_destroy_fence_fn(args: &[Value]) -> Result<Value, CompileError>
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     let Some(index) = s.live_fences.iter().position(|&candidate| candidate == fence) else {
         // Already destroyed by the device-idle quarantine reap: the handle IS
@@ -5386,9 +5600,9 @@ pub fn rt_vulkan_destroy_fence_fn(args: &[Value]) -> Result<Value, CompileError>
         // permanent "release pending" state.
         if let Some(i) = s.retired_fences.iter().position(|&f| f == fence) {
             s.retired_fences.swap_remove(i);
-            return Ok(Value::Int(1));
+            return Ok(Value::Bool(true));
         }
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     };
     s.live_fences.swap_remove(index);
     // A fence belonging to a quarantined (non-blocking) submission is owned by
@@ -5396,10 +5610,10 @@ pub fn rt_vulkan_destroy_fence_fn(args: &[Value]) -> Result<Value, CompileError>
     // idle. Destroying it here would both double-destroy it and free a fence
     // the GPU may still be signalling, so only the caller's handle is revoked.
     if s.quarantined_commands.iter().any(|&(f, _)| f == fence) {
-        return Ok(Value::Int(1));
+        return Ok(Value::Bool(true));
     }
     unsafe { (s.fns.destroy_fence)(s.device, fence, ptr::null()) };
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_wait_idle() -> bool`
@@ -5424,9 +5638,9 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
                 }
             }
         }
-        return Ok(Value::Int(if ok == vulkan_dlopen::VK_SUCCESS { 1 } else { 0 }));
+        return Ok(Value::Bool(ok == vulkan_dlopen::VK_SUCCESS));
     }
-    Ok(Value::Int(0))
+    Ok(Value::Bool(false))
 }
 
 /// `rt_vulkan_get_last_error() -> text`

@@ -4,6 +4,7 @@
 # every child is reachable, and a missing or renamed child fails closed.
 #
 # Flags: --rev <REV>       run the 46 guards against the COMMITTED tree at REV
+#        --baseline-rev <R> push ratchet: reject failures absent at committed R
 #        --root <DIR>      treat DIR as the repository root
 #        --selftest        fixtures only, no real scan
 #        --guard-list <F>  selftest only: drive the loop from a file of
@@ -42,14 +43,20 @@ set -u
 SELF=$0
 ROOT=""
 REV=""
+BASELINE_REV=""
 MODE=scan
 GUARD_LIST_FILE=""
+FAILURE_LIST=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) MODE=selftest; shift ;;
         --rev) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--rev needs a value)"; exit 2; }
                REV="$2"; shift 2 ;;
+        --baseline-rev) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--baseline-rev needs a value)"; exit 2; }
+               BASELINE_REV="$2"; shift 2 ;;
+        --failure-list) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--failure-list needs a value)"; exit 2; }
+               FAILURE_LIST="$2"; shift 2 ;;
         --root) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--root needs a value)"; exit 2; }
                ROOT="$2"; shift 2 ;;
         --guard-list) [ $# -ge 2 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (--guard-list needs a value)"; exit 2; }
@@ -57,6 +64,11 @@ while [ $# -gt 0 ]; do
         *) echo "sffi-v2-authority: ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
     esac
 done
+
+if [ -n "$BASELINE_REV" ] && [ -z "$REV" ]; then
+    echo "sffi-v2-authority: ERROR — nothing was checked (--baseline-rev requires --rev)"
+    exit 2
+fi
 
 if [ -z "$ROOT" ]; then
     ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/../.." 2>/dev/null && pwd -P) || {
@@ -76,6 +88,7 @@ cleanup() {
     rm -rf "$run_tmp"
 }
 trap cleanup EXIT HUP INT TERM
+[ -n "$FAILURE_LIST" ] && : > "$FAILURE_LIST"
 
 run_guard() {
     guard_rel=$1
@@ -83,6 +96,7 @@ run_guard() {
     if [ ! -f "$ROOT/$guard_rel" ]; then
         echo "sffi-v2-authority: MISSING $guard_rel"
         guard_failures=$((guard_failures + 1))
+        [ -n "$FAILURE_LIST" ] && printf '%s\n' "$guard_rel" >> "$FAILURE_LIST"
         return
     fi
     echo "sffi-v2-authority: RUN $guard_rel"
@@ -93,6 +107,7 @@ run_guard() {
         cat "$guard_output"
         echo "sffi-v2-authority: FAIL $guard_rel"
         guard_failures=$((guard_failures + 1))
+        [ -n "$FAILURE_LIST" ] && printf '%s\n' "$guard_rel" >> "$FAILURE_LIST"
     fi
 }
 
@@ -157,9 +172,27 @@ selftest() {
       *) echo "sffi-v2-authority: selftest absent guard was not reported missing, got [$_got]"; _rc=1 ;;
     esac
 
+    # Base-relative push mode admits an unchanged failing guard but rejects a
+    # guard that newly fails in the tip.
+    ( cd "$_st/f" \
+      && printf '#!/bin/sh\necho "FAIL — committed debt"\nexit 1\n' > scripts/audit/fake_two.shs \
+      && git add scripts/audit/fake_two.shs && git commit -q -m base-red \
+      && printf 'harmless\n' > note.txt && git add note.txt && git commit -q -m unchanged ) >/dev/null 2>&1
+    if SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$_st/f" --rev HEAD --baseline-rev HEAD~1 --guard-list "$_st/list.txt" >/dev/null 2>&1; then :; else
+      echo "sffi-v2-authority: selftest unchanged base failure did not pass"; _rc=1
+    fi
+    ( cd "$_st/f" \
+      && printf '#!/bin/sh\necho "FAIL — new debt"\nexit 1\n' > scripts/audit/fake_one.shs \
+      && git add scripts/audit/fake_one.shs && git commit -q -m new-red ) >/dev/null 2>&1
+    if SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$_st/f" --rev HEAD --baseline-rev HEAD~1 --guard-list "$_st/list.txt" >/dev/null 2>&1; then
+      echo "sffi-v2-authority: selftest newly failing guard passed"; _rc=1
+    else
+      _delta_rc=$?; [ "$_delta_rc" = 1 ] || { echo "sffi-v2-authority: selftest new failure returned $_delta_rc"; _rc=1; }
+    fi
+
     rm -rf "$_st"
     [ "$_rc" -eq 0 ] || return 1
-    echo "sffi-v2-authority: selftest 3 fixtures, ok"
+    echo "sffi-v2-authority: selftest 5 fixtures, ok"
     return 0
 }
 
@@ -170,8 +203,28 @@ if [ "${SFFI_V2_SELFTEST_CHILD:-0}" != 1 ]; then
     selftest || { echo "sffi-v2-authority: ERROR — nothing was checked (selftest failed)"; exit 2; }
 fi
 if [ "$MODE" = selftest ]; then
-    echo "sffi-v2-authority: PASS — 3 selftest fixture(s) checked, selftest only"
+    echo "sffi-v2-authority: PASS — 5 selftest fixture(s) checked, selftest only"
     exit 0
+fi
+
+if [ -n "$BASELINE_REV" ]; then
+    base_failures="$run_tmp/base.failures"
+    if [ -n "$GUARD_LIST_FILE" ]; then
+        SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$ROOT" --rev "$BASELINE_REV" --guard-list "$GUARD_LIST_FILE" --failure-list "$base_failures" >/dev/null 2>&1
+        base_rc=$?
+    else
+        SFFI_V2_SELFTEST_CHILD=1 sh "$SELF" --root "$ROOT" --rev "$BASELINE_REV" --failure-list "$base_failures" >/dev/null 2>&1
+        base_rc=$?
+    fi
+    if [ "$base_rc" -eq 0 ]; then
+        :
+    else
+        [ "$base_rc" -eq 1 ] || { echo "sffi-v2-authority: ERROR — nothing was checked (could not measure baseline revision $BASELINE_REV)"; exit 2; }
+    fi
+    [ -f "$base_failures" ] || { echo "sffi-v2-authority: ERROR — nothing was checked (baseline failure set absent)"; exit 2; }
+    tip_failures="$run_tmp/tip.failures"
+    FAILURE_LIST="$tip_failures"
+    : > "$FAILURE_LIST"
 fi
 
 # --rev: run the guards against the COMMITTED tree. See the header for why an
@@ -263,6 +316,19 @@ fi
 if [ "$guard_count" -ne "$expected_guards" ]; then
     echo "sffi-v2-authority: ERROR — expected $expected_guards guards, ran $guard_count"
     exit 2
+fi
+if [ -n "$BASELINE_REV" ]; then
+    sort -u "$base_failures" -o "$base_failures"
+    sort -u "$tip_failures" -o "$tip_failures"
+    comm -23 "$tip_failures" "$base_failures" > "$run_tmp/new.failures"
+    new_failures=$(wc -l < "$run_tmp/new.failures" | tr -d ' ')
+    if [ "$new_failures" -ne 0 ]; then
+        echo "sffi-v2-authority: FAIL — $new_failures newly failing guard(s) versus base $BASELINE_REV: $(tr '\n' ' ' < "$run_tmp/new.failures")"
+        exit 1
+    fi
+    echo "sffi_v2_authority_ok=true"
+    echo "sffi-v2-authority: PASS — 0 newly failing guard(s) versus base $BASELINE_REV ($guard_failures existing failure(s))"
+    exit 0
 fi
 if [ "$guard_failures" -ne 0 ]; then
     echo "sffi_v2_authority_ok=false"

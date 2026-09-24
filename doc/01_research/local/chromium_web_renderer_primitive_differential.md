@@ -42,3 +42,66 @@ linear path only when both adapters declare it supported. CSS filters, shadows,
 transforms, iframes, arbitrary SVG/path, video, WebGL/WebGPU API conformance,
 audio, and arbitrary JavaScript are out of scope and must return
 `unsupported-primitive`, not a partial comparison.
+
+## Implementation evidence (2026-09-08)
+
+The canonical Simple-side ABI records and fail-closed admission seam now live in
+`src/lib/nogc_sync_mut/gpu/chromium_reference_oracle_sffi.spl`. They enforce the
+exact five-symbol ABI, absolute test-only library path, bounded request/response,
+manifest identity, bridge identity/revision, and strict device-readback receipt.
+The focused SFFI contract spec passed 4/4; the converter spec also exited zero.
+The former requested compiled mode degraded to interpreter because its harness
+contains interpreter-only constructs, so neither result substitutes for a real
+native integration test.
+
+The runtime load/call/release functions are now implemented behind the same
+SFFI owner. They hash before and after load, resolve the frozen symbol set once,
+reject a missing symbol before any call, use bounded caller-owned buffers, map
+native statuses, and destroy/close exactly once. Native execution still awaits
+the owned bridge dylib. Three macOS shared-library builds failed at
+`_worker_loop_entry`; the concrete compiler/linker blocker is tracked in
+`doc/08_tracking/bug/pure_simple_macos_shared_library_linker_worker_loop_2026-09-08.md`.
+Electron/Chrome semantic evidence remains useful but is inadmissible for GPU
+comparison because it reports no device-origin readback receipt.
+
+The native C ABI fixture itself passes. The hosted Simple caller now reaches
+load and session creation, but its final integration run fails with
+`unsupported-primitive` even though the request contains every required key.
+This isolates a managed-byte/raw-pointer projection defect in the bootstrap
+interpreter's integer-only dynamic-call path. It is tracked in
+`doc/08_tracking/bug/chromium_oracle_simple_caller_byte_pointer_projection_2026-09-08.md`;
+the integration attempt reached its three-cycle cap and was not retried.
+
+The corrective implementation replaces that raw request projection with the
+runtime's one-call pinned byte-span transport and allocates response plus length
+slot as packed byte arrays. This removes boxed-array pointer reinterpretation
+from the oracle caller. Focused source checks pass; the fixture gate remains
+pending rather than presumed green because the session retry cap still applies.
+
+The real prepared-host broker now verifies exact Electron `42.5.0`, Chrome
+`148.0.7778.271`, its own SHA-256, and the exact npm lockfile SHA-256 before
+rendering. `package.json` no longer uses a semver range. A live pinned run passed
+DOM/style/layout/paint plus trusted pointer, Ctrl+Alt, scroll, and resize input;
+its response remains correctly `device_origin_readback=false` with GPU
+unavailable. Browser/manifest scalar values now percent-escape separators and a
+second live run passed the canonical-scalar check.
+
+### macOS dylib diagnostic (2026-09-08)
+
+A rebuilt bootstrap compiler isolated the shared-library failure to two linker
+contracts. Target-aware detection selected the ELF `ld.lld` frontend for a
+Mach-O target; it now selects Apple `ld` or fails closed. Darwin SFFI plugins
+also need `-undefined dynamic_lookup`, because the loading Simple process owns
+the runtime ABI and the plugin must not embed a second runtime instance. Both
+focused Rust linker tests pass.
+
+With those corrections, the bootstrap diagnostic build produces a 37,872-byte
+arm64 Mach-O dylib. Because that compiler path currently ignores the custom
+name in `@export("C", name: ...)`, the bridge's five Simple function identifiers
+now equal the frozen ABI names as well. `nm` confirms all five exports. The
+artifact is retained only as
+`libsimple_chromium_primitive_oracle.bootstrap-diagnostic.dylib`; it is not an
+admitted Chrome oracle until a source-matched pure-Simple compiler builds it and
+the native load/run/release gate passes. Its diagnostic SHA-256 is
+`c7ae2e9e6960bafe9c9fb318cb2553de6a217ee4b13a21d40ffffcda3e967bcf`;
+`nm` reports exactly five global `simple_chromium_oracle_*` text symbols.

@@ -1,4 +1,8 @@
 # Interpreter: array parameters break indexing — [[text]] params misparse, [f64] param variable-index reads 0
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** downgraded to low — see Re-triage 2026-08-01
@@ -413,3 +417,4 @@ survives an annotated copy.
 **Settling it requires the build ablation** (fix reverted -> reproducer FAILS;
 fix applied -> reproducer PASSES) against a privately-built seed. Until that is
 run, treat the exact line above as the leading candidate and not as proven.
+

@@ -1,0 +1,257 @@
+#!/bin/sh
+# Stage-2 Phase2->Phase3 compatibility-manifest gate, scoped by a POSITIVE
+# producer fact.
+#
+# Why this exists
+# ---------------
+# `bootstrap-from-scratch.sh` used to gate Stage 2 on the bare existence of
+# `phase2-compatibility.manifest`:
+#
+#     [ -f "${stage2_compatibility_manifest_absolute}" ] || {
+#       echo "error: Stage 2 did not publish its compatibility manifest" >&2
+#       exit 1; }
+#
+# That gate is UNSATISFIABLE whenever the Stage-2 producer is the Rust seed,
+# and the seed is the default producer on every OS (`can_full_bootstrap=0`,
+# "Force manual bootstrap", so Stage 2 is always built by
+# `${stage2_runtime_authority}/simple` unless `--stage2-parent`/pure-simple
+# supplies an admitted pure-Simple parent). Measured, with line numbers:
+#
+#   * The only writer is `driver_emit_phase2_compatibility_manifest_v1`
+#     (src/compiler/80.driver/driver_aot_native_output.spl:398), reached from
+#     :2051-2063 inside the pure-Simple native build.
+#   * At :415-418 it returns `m2-receipt-<reason>` unless
+#     `reverse_reference_read_current_admitted_v1`
+#     (src/compiler/80.driver/cache/reverse_reference_receipt.spl:243) finds a
+#     generation pointer plus `<digest>.receipt` under the Phase-2 cache root.
+#   * Those M2 reverse-reference receipts are written ONLY by that pure-Simple
+#     module. `grep -rl 'reverse_reference|current-admitted' src/compiler_rust/`
+#     is EMPTY, as is `grep -rn PHASE2_COMPATIBILITY_MANIFEST src/compiler_rust/`.
+#
+# So a seed-written Phase-2 cache carries no M2 authority at all. Running the
+# pure-Simple writer inside the Stage-2 candidate against that cache (option A)
+# fails at :417 before it inspects a single item -- it is unsatisfiable in
+# exactly the same way as the gate it would replace. Mirroring the writer in
+# the seed (option B) is not "minimal emission": it means porting the whole M2
+# reuse-admission authority (receipt publication, generation pointers, key
+# encoding, exact projection) into Rust as a second authoritative
+# implementation of a trust mechanism.
+#
+# The manifest is therefore, by design, an artifact only a self-hosted
+# pure-Simple producer can publish. The gate is kept and made producer-scoped.
+#
+# The scoping is a POSITIVE fact about the producer, never "the file is
+# missing, so skip" -- that would invert a fail-closed gate into a fail-open
+# one (the failure mode .claude/rules/vcs.md records for the seed-build guard).
+# The producer kind is derived from the ONE variable the script already computes
+# BEFORE Stage 2 runs -- `bootstrap_stage2_parent_override`, set only after
+# `admit-stage2-parent.shs` has verified an admitted pure-Simple release -- and
+# a skip always leaves evidence on disk. `--pure-simple` is deliberately NOT an
+# input; see the note on the derivation function below for why.
+#
+# Fail-closed consequences of a skip are unchanged: Stage 3 still receives
+# `SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ` (the env vector is bound into
+# `bootstrap_stage3_args_sha256` and the canonical env-name lists, so it must
+# not change), `driver_admit_phase2_compatibility_manifest_v1` refuses the
+# absent path, `driver_load_phase2_compatibility_manifest_v1` prints
+# `[M3] reject manifest` and returns nil, and Phase 3 does a clean build with
+# ZERO Phase-2 reuse. No reuse is ever admitted without a manifest.
+#
+# doc/08_tracking/bug/stage2_compatibility_manifest_unwritable_by_rust_seed_2026-09-13.md
+
+# Header line emitted by phase_compatibility_manifest_encode_v1
+# (src/compiler/00.common/cache/phase_compatibility_manifest.spl:166).
+BOOTSTRAP_PHASE2_COMPAT_SCHEMA_HEADER='simple-phase2-phase3-compatibility-v1'
+
+# bootstrap_phase2_compat_producer_kind <parent_override>
+#
+# Prints `pure-simple` or `rust-seed` on stdout; exit 2 if the argument is
+# missing (an absent argument is never silently read as "rust-seed").
+#
+# `bootstrap_stage2_parent_override` is the ONLY thing that changes which
+# binary compiles Stage 2 (bootstrap-from-scratch.sh:2772-2776): non-empty, it
+# is an admitted pure-Simple release that `admit-stage2-parent.shs` verified
+# against the immutable runtime provenance record; empty, Stage 2's parent is
+# by construction the admitted RUST authority at
+# `${stage2_runtime_authority}/simple`, because `can_full_bootstrap=0` pins the
+# manual seed lane on every platform.
+#
+# `--pure-simple` is deliberately NOT consulted: it only forbids REBUILDING the
+# Rust seed (and conflicts with `--full-bootstrap` at :707); it leaves
+# `stage2_seed_absolute` pointing at that same Rust authority. Treating it as a
+# pure-Simple producer would demand a manifest no producer on that lane can
+# publish.
+bootstrap_phase2_compat_producer_kind() {
+  if [ "$#" -lt 1 ]; then
+    echo "error: bootstrap_phase2_compat_producer_kind requires the Stage 2 parent override (possibly empty) as \$1" >&2
+    return 2
+  fi
+  if [ -n "$1" ]; then
+    echo pure-simple
+  else
+    echo rust-seed
+  fi
+  return 0
+}
+
+# bootstrap_phase2_compat_manifest_gate <producer_kind> <manifest_path>
+#                                       <evidence_path> <producer_path>
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS — ...    exit 0
+#   FAIL — ...    exit 1
+#   ERROR — nothing was checked (<reason>)   exit 2
+#
+# pure-simple: the manifest must exist AND carry the frozen schema header.
+# rust-seed:   the manifest is not required, but if one IS present it is still
+#              schema-checked (strictly stronger than skipping), and the skip is
+#              recorded in <evidence_path> naming the producer.
+bootstrap_phase2_compat_manifest_gate() {
+  bpcmg_kind=$1
+  bpcmg_manifest=$2
+  bpcmg_evidence=$3
+  bpcmg_producer=$4
+
+  if [ -z "${bpcmg_manifest}" ]; then
+    echo "ERROR — nothing was checked (no manifest path given)"
+    return 2
+  fi
+  case "${bpcmg_kind}" in
+    pure-simple|rust-seed) ;;
+    *) echo "ERROR — nothing was checked (unknown producer kind '${bpcmg_kind}')"
+       return 2 ;;
+  esac
+
+  if [ -f "${bpcmg_manifest}" ]; then
+    bpcmg_header=$(head -n 1 "${bpcmg_manifest}" 2>/dev/null || true)
+    if [ "${bpcmg_header}" != "${BOOTSTRAP_PHASE2_COMPAT_SCHEMA_HEADER}" ]; then
+      echo "FAIL — Stage 2 compatibility manifest has the wrong schema header:" \
+           "expected '${BOOTSTRAP_PHASE2_COMPAT_SCHEMA_HEADER}', got '${bpcmg_header}'" \
+           "(${bpcmg_manifest})"
+      return 1
+    fi
+    echo "PASS — 2 invariant(s) checked (present, schema header)," \
+         "producer=${bpcmg_kind} manifest=${bpcmg_manifest}"
+    return 0
+  fi
+
+  if [ "${bpcmg_kind}" = "pure-simple" ]; then
+    echo "FAIL — Stage 2 did not publish its compatibility manifest" \
+         "(producer=pure-simple, expected ${bpcmg_manifest})"
+    return 1
+  fi
+
+  # rust-seed, absent: skip WITH evidence. The evidence is MANDATORY -- a skip
+  # that leaves no record on disk is indistinguishable from the gate not having
+  # run at all, which is the failure mode this whole file exists to avoid.
+  if [ -z "${bpcmg_evidence}" ]; then
+    echo "ERROR — nothing was checked (a rust-seed skip requires an evidence path)"
+    return 2
+  fi
+  bpcmg_dir=$(dirname -- "${bpcmg_evidence}")
+  [ -d "${bpcmg_dir}" ] || {
+    echo "ERROR — nothing was checked (evidence directory ${bpcmg_dir} is absent)"
+    return 2
+  }
+  {
+      echo "schema: simple-stage2-compat-manifest-skip-v1"
+      echo "producer_kind: rust-seed"
+      echo "producer_path: ${bpcmg_producer}"
+      echo "manifest_path: ${bpcmg_manifest}"
+      echo "reason: the Phase2->Phase3 compatibility manifest and its M2"
+      echo "reason: reverse-reference authority exist only in the pure-Simple"
+      echo "reason: driver; a seed-built Phase 2 cache carries no M2 receipt,"
+      echo "reason: so the manifest cannot be published by this producer."
+    echo "consequence: Stage 3 admits ZERO Phase-2 reuse (fail-closed)."
+  } > "${bpcmg_evidence}" || {
+    echo "ERROR — nothing was checked (could not write ${bpcmg_evidence})"
+    return 2
+  }
+  echo "PASS — 2 invariant(s) checked (producer identified, skip recorded)," \
+       "producer=rust-seed cannot publish the manifest; Stage 3 reuse disabled;" \
+       "evidence=${bpcmg_evidence}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest. Fatal, and run before every real use by the wrapper check script.
+# ---------------------------------------------------------------------------
+bootstrap_phase2_compat_selftest() {
+  bpcs_tmp=${TMPDIR:-/tmp}/phase2-compat-selftest.$$
+  rm -rf "${bpcs_tmp}"
+  mkdir -p "${bpcs_tmp}" || return 2
+  bpcs_fail=0
+
+  bpcs_case() { # name expected_exit -- verdict prefix
+    bpcs_name=$1; bpcs_want=$2; bpcs_wantpfx=$3; shift 3
+    bpcs_out=$("$@" 2>&1); bpcs_got=$?
+    bpcs_last=$(printf '%s\n' "${bpcs_out}" | tail -n 1)
+    if [ "${bpcs_got}" -ne "${bpcs_want}" ]; then
+      echo "selftest FAIL ${bpcs_name}: exit ${bpcs_got}, want ${bpcs_want}" >&2
+      echo "  verdict: ${bpcs_last}" >&2
+      bpcs_fail=1
+      return
+    fi
+    case "${bpcs_last}" in
+      "${bpcs_wantpfx}"*) ;;
+      *) echo "selftest FAIL ${bpcs_name}: verdict '${bpcs_last}' not '${bpcs_wantpfx}*'" >&2
+         bpcs_fail=1 ;;
+    esac
+  }
+
+  printf '%s\n' "${BOOTSTRAP_PHASE2_COMPAT_SCHEMA_HEADER}" > "${bpcs_tmp}/good.manifest"
+  printf 'simple-phase2-phase3-compatibility-v0\n' > "${bpcs_tmp}/bad.manifest"
+
+  # 1. pure-simple + present + good schema -> PASS
+  bpcs_case pure-present 0 'PASS' \
+    bootstrap_phase2_compat_manifest_gate pure-simple \
+    "${bpcs_tmp}/good.manifest" "${bpcs_tmp}/ev1" /fake/producer
+  # 2. pure-simple + absent -> FAIL (the gate must NOT be droppable)
+  bpcs_case pure-absent 1 'FAIL' \
+    bootstrap_phase2_compat_manifest_gate pure-simple \
+    "${bpcs_tmp}/missing.manifest" "${bpcs_tmp}/ev2" /fake/producer
+  # 3. pure-simple + schema mismatch -> FAIL
+  bpcs_case pure-schema 1 'FAIL' \
+    bootstrap_phase2_compat_manifest_gate pure-simple \
+    "${bpcs_tmp}/bad.manifest" "${bpcs_tmp}/ev3" /fake/producer
+  # 4. rust-seed + absent -> PASS with skip evidence
+  bpcs_case seed-absent 0 'PASS' \
+    bootstrap_phase2_compat_manifest_gate rust-seed \
+    "${bpcs_tmp}/missing.manifest" "${bpcs_tmp}/ev4" /fake/seed
+  if ! grep -q 'producer_kind: rust-seed' "${bpcs_tmp}/ev4" 2>/dev/null; then
+    echo "selftest FAIL seed-absent: no skip evidence written" >&2
+    bpcs_fail=1
+  fi
+  # 5. rust-seed + present but wrong schema -> FAIL (skip is not a blanket pass)
+  bpcs_case seed-schema 1 'FAIL' \
+    bootstrap_phase2_compat_manifest_gate rust-seed \
+    "${bpcs_tmp}/bad.manifest" "${bpcs_tmp}/ev5" /fake/seed
+  # 6. unknown producer kind -> ERROR
+  bpcs_case unknown-kind 2 'ERROR' \
+    bootstrap_phase2_compat_manifest_gate mystery \
+    "${bpcs_tmp}/good.manifest" "${bpcs_tmp}/ev6" /fake/x
+  # 7. no manifest path -> ERROR
+  bpcs_case no-path 2 'ERROR' \
+    bootstrap_phase2_compat_manifest_gate rust-seed "" "${bpcs_tmp}/ev7" /fake/x
+  # 8. evidence directory absent -> ERROR (never a silent pass)
+  bpcs_case bad-evidence-dir 2 'ERROR' \
+    bootstrap_phase2_compat_manifest_gate rust-seed \
+    "${bpcs_tmp}/missing.manifest" "${bpcs_tmp}/nope/ev8" /fake/x
+  # 9. rust-seed skip with NO evidence path -> ERROR: an unrecorded skip is
+  #    indistinguishable from the gate never running.
+  bpcs_case skip-without-evidence 2 'ERROR' \
+    bootstrap_phase2_compat_manifest_gate rust-seed \
+    "${bpcs_tmp}/missing.manifest" "" /fake/x
+
+  # 10-11. producer-kind derivation: the override is the only producer input.
+  bpcs_k=$(bootstrap_phase2_compat_producer_kind "") || bpcs_fail=1
+  [ "${bpcs_k}" = rust-seed ] || { echo "selftest FAIL kind-seed: ${bpcs_k}" >&2; bpcs_fail=1; }
+  bpcs_k=$(bootstrap_phase2_compat_producer_kind /some/admitted/simple) || bpcs_fail=1
+  [ "${bpcs_k}" = pure-simple ] || { echo "selftest FAIL kind-override: ${bpcs_k}" >&2; bpcs_fail=1; }
+  # 12. missing argument -> exit 2, never a silent "rust-seed".
+  bootstrap_phase2_compat_producer_kind >/dev/null 2>&1
+  [ $? -eq 2 ] || { echo "selftest FAIL kind-missing-arg: expected exit 2" >&2; bpcs_fail=1; }
+
+  rm -rf "${bpcs_tmp}"
+  return "${bpcs_fail}"
+}

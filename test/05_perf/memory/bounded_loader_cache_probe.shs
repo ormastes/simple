@@ -1,0 +1,128 @@
+#!/bin/sh
+# Retention bound on the seed interpreter's loader caches, measured on a real run.
+#
+# Runs one entry twice under the SAME binary -- once at the default retention
+# limits, once with `SIMPLE_PARSED_SOURCE_CACHE_MAX` forced tiny -- and checks
+# four things:
+#
+#   1. the eviction counters EXIST (a binary without the bound reports no such
+#      counter, which is the RED this probe is built to catch);
+#   2. at the default limit nothing is evicted, i.e. the bound is a ceiling for
+#      a large import graph and not a change to the normal path;
+#   3. at a tiny limit entries ARE evicted and the count is reported;
+#   4. the program's stdout is byte-identical across the two, i.e. eviction +
+#      reload changes no result.
+#
+# Fail-closed everywhere: a missing binary, an empty counter dump, an absent
+# counter name, or an empty stdout capture is FAIL, never a pass. Verdict is
+# the last line of stdout.
+#
+#   sh test/05_perf/memory/bounded_loader_cache_probe.shs [--selftest]
+#
+# Env: SIMPLE_BIN (default src/compiler_rust/target/release/simple)
+#      SIMPLE_PROBE_ENTRY (default src/app/mcp/main.spl)
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../../.." && pwd)
+cd "$repo_root" || { echo "FAIL — cannot enter repo root"; exit 1; }
+
+BIN=${SIMPLE_BIN:-src/compiler_rust/target/release/simple}
+ENTRY=${SIMPLE_PROBE_ENTRY:-src/app/mcp/main.spl}
+TINY=8
+
+work=$(mktemp -d) || { echo "FAIL — cannot create work dir"; exit 1; }
+trap 'rm -rf "$work"' EXIT
+
+# Read one counter's value out of a `SIMPLE_PERF_COUNTERS` dump.
+# Prints nothing when the counter is ABSENT -- distinct from a counter that is
+# present and zero, which is the distinction the whole probe rests on.
+counter_of() {
+    _file=$1
+    _name=$2
+    awk -v n="$_name" '$1 == n { print $2; found=1 } END { exit found ? 0 : 1 }' "$_file" 2>/dev/null
+}
+
+# Run the entry once; $1 = tag, $2 = extra env assignment ("" for none).
+# Writes $work/<tag>.out (stdout), $work/<tag>.counters, $work/<tag>.rc
+run_entry() {
+    _tag=$1
+    _extra=$2
+    # shellcheck disable=SC2086
+    env SIMPLE_PERF_COUNTERS=1 SIMPLE_PERF_COUNTERS_OUT="$work/$_tag.counters" $_extra \
+        "$BIN" run "$ENTRY" --help > "$work/$_tag.out" 2> "$work/$_tag.err"
+    echo $? > "$work/$_tag.rc"
+}
+
+selftest() {
+    fails=0
+    # A dump that lacks the counter must be reported as ABSENT, not as 0.
+    printf 'interp-perf-counters:\n  SOMETHING_ELSE   3\n' > "$work/st1"
+    if counter_of "$work/st1" PARSED_SOURCE_EVICTIONS > /dev/null 2>&1; then
+        echo "selftest: absent counter was not reported absent"
+        fails=$((fails + 1))
+    fi
+    # A present-but-zero counter must read back as 0, not as absent.
+    printf 'interp-perf-counters:\n  PARSED_SOURCE_EVICTIONS   0\n' > "$work/st2"
+    v=$(counter_of "$work/st2" PARSED_SOURCE_EVICTIONS) || v=ABSENT
+    [ "$v" = "0" ] || { echo "selftest: present-zero counter read as '$v'"; fails=$((fails + 1)); }
+    # A non-zero counter reads its value.
+    printf 'interp-perf-counters:\n  PARSED_SOURCE_EVICTIONS   42\n' > "$work/st3"
+    v=$(counter_of "$work/st3" PARSED_SOURCE_EVICTIONS) || v=ABSENT
+    [ "$v" = "42" ] || { echo "selftest: value counter read as '$v'"; fails=$((fails + 1)); }
+    # An empty dump must be absent, not 0.
+    : > "$work/st4"
+    if counter_of "$work/st4" PARSED_SOURCE_EVICTIONS > /dev/null 2>&1; then
+        echo "selftest: empty dump was not reported absent"
+        fails=$((fails + 1))
+    fi
+    if [ "$fails" -eq 0 ]; then
+        echo "PASS — 4 selftest fixture(s) checked, 0 failures"
+        exit 0
+    fi
+    echo "FAIL — 4 selftest fixture(s) checked, $fails failure(s)"
+    exit 1
+}
+
+[ "${1:-}" = "--selftest" ] && selftest
+
+[ -x "$BIN" ] || { echo "FAIL — no executable seed binary at $BIN (build it with cargo build --release --bin simple)"; exit 1; }
+[ -f "$ENTRY" ] || { echo "FAIL — entry $ENTRY does not exist"; exit 1; }
+
+run_entry default ""
+run_entry bounded "SIMPLE_PARSED_SOURCE_CACHE_MAX=$TINY"
+
+for tag in default bounded; do
+    rc=$(cat "$work/$tag.rc")
+    [ "$rc" = "0" ] || { echo "FAIL — $tag run exited $rc: $(head -3 "$work/$tag.err" | tr '\n' ' ')"; exit 1; }
+    [ -s "$work/$tag.out" ] || { echo "FAIL — $tag run captured 0 bytes of stdout (vacuous)"; exit 1; }
+    [ -s "$work/$tag.counters" ] || { echo "FAIL — $tag run produced no counter dump at $work/$tag.counters (vacuous)"; exit 1; }
+done
+
+for name in PARSED_SOURCE_EVICTIONS PARSED_SOURCE_PINNED_SKIPS PARSED_SOURCE_RETAINED_MAX \
+            PROBE_SOURCE_EVICTIONS PROBE_SOURCE_RETAINED_MAX \
+            PATH_KEY_EVICTIONS PATH_KEY_RETAINED_MAX; do
+    counter_of "$work/default.counters" "$name" > /dev/null 2>&1 || {
+        echo "FAIL — counter $name is absent from the report: this binary has no retention bound"
+        exit 1
+    }
+done
+
+d_ev=$(counter_of "$work/default.counters" PARSED_SOURCE_EVICTIONS)
+d_sk=$(counter_of "$work/default.counters" PARSED_SOURCE_PINNED_SKIPS)
+d_max=$(counter_of "$work/default.counters" PARSED_SOURCE_RETAINED_MAX)
+b_ev=$(counter_of "$work/bounded.counters" PARSED_SOURCE_EVICTIONS)
+b_sk=$(counter_of "$work/bounded.counters" PARSED_SOURCE_PINNED_SKIPS)
+b_max=$(counter_of "$work/bounded.counters" PARSED_SOURCE_RETAINED_MAX)
+
+[ "$d_max" -gt 0 ] 2>/dev/null || { echo "FAIL — default run retained 0 parsed sources; the entry never loaded a module (vacuous)"; exit 1; }
+[ "$d_ev" = "0" ] || { echo "FAIL — default limits evicted $d_ev entr(ies); the default must be a ceiling, not a behaviour change"; exit 1; }
+[ "$b_ev" -gt 0 ] 2>/dev/null || { echo "FAIL — limit=$TINY evicted nothing (evictions=$b_ev); the bound is not enforced"; exit 1; }
+
+sha_d=$(sha256sum < "$work/default.out" | cut -d' ' -f1)
+sha_b=$(sha256sum < "$work/bounded.out" | cut -d' ' -f1)
+[ "$sha_d" = "$sha_b" ] || { echo "FAIL — stdout differs after eviction+reload (default $sha_d vs bounded $sha_b)"; exit 1; }
+
+bytes=$(wc -c < "$work/default.out")
+echo "PASS — 2 run(s) executed, default: evictions=$d_ev pinned_skips=$d_sk retained_max=$d_max; limit=$TINY: evictions=$b_ev pinned_skips=$b_sk retained_max=$b_max; stdout byte-identical ($bytes bytes, sha ${sha_d%"${sha_d#????????}"})"
+exit 0

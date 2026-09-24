@@ -1,0 +1,45 @@
+use std.spec.{describe, it, assert_equal, assert_true}
+use compiler.driver.driver_aot_native_output.{
+    driver_native_attempted_unit_failure_detail_v1
+}
+
+# Regression for
+# doc/08_tracking/bug/stage2_receiver_probe_module_path_naming_not_run_2026-09-14.md
+#
+# The Stage-2 receiver probe schedules TWO native module units. Both were
+# compiled (`llc` resolved once per module, `0 failed`), yet the ledger read
+# `1 ok, 1 not run` with the reason "never started (build ended first)" --
+# false attribution for a unit that demonstrably started, and the one string
+# that could have explained it (the capsule reason) was discarded.
+#
+# NOT_RUN stays exactly as fail-closed as it was: it is still recorded, and it
+# still fails the build, for a unit the compile phase never reached.
+describe "native build unit outcome attribution":
+    it "reports an attempted unit's real capsule reason, not NOT_RUN":
+        # 2 units scheduled, 2 attempted -- the second one's capsule re-check
+        # failed. This is the probe's exact shape.
+        val detail = driver_native_attempted_unit_failure_detail_v1(
+            2, 2, true, "receipt-missing:/obj/module_path_naming.o.capsule-receipt")
+        assert_true(detail != "")
+        assert_true(detail.contains("receipt-missing"))
+        assert_true(detail.contains("compiled unit has no usable capsule result"))
+
+    it "names an unavailable capsule rather than swallowing it":
+        val detail = driver_native_attempted_unit_failure_detail_v1(
+            2, 2, false, "duplicate-capsule")
+        assert_true(detail.contains("capsule-unavailable"))
+        assert_true(detail.contains("duplicate-capsule"))
+
+    it "keeps NOT_RUN for a unit the compile phase never reached":
+        # 2 scheduled, only 1 attempted: "" means the caller records NOT_RUN.
+        assert_equal(driver_native_attempted_unit_failure_detail_v1(
+            1, 2, true, "object-missing:/obj/second.o"), "")
+        assert_equal(driver_native_attempted_unit_failure_detail_v1(
+            0, 2, false, "capsule-not-found"), "")
+
+    it "never returns an empty detail for an attempted unit":
+        # An attempted unit must carry a diagnostic even when the reason text
+        # arrives empty -- a silent outcome is the defect this replaces.
+        val detail = driver_native_attempted_unit_failure_detail_v1(
+            1, 1, true, "")
+        assert_true(detail != "")

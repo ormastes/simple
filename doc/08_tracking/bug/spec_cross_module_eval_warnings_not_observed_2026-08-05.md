@@ -84,3 +84,11 @@ observation and the workaround taken in the one spec it affected.
 - `doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md`
 - `doc/08_tracking/bug/deployed_bin_simple_still_seed_2026-08-05.md`
 - Memory class: "shim vacuity — specs test a local copy" (same family of hazard)
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: this is an interpreter module-instantiation semantic gap
+(mutable package-level globals not shared across separately-imported pieces
+in a third-party compilation unit) -- a workaround is already applied in the
+affected spec, and a real fix needs interpreter-level module/global
+resolution changes, not a bounded local patch. No change made.

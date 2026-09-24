@@ -16,7 +16,7 @@
 //! These tests exercise the parser crate directly and therefore give a verdict
 //! now, on current source.
 
-use simple_parser::Parser;
+use simple_parser::{lexer::Lexer, token::TokenKind, Parser};
 
 fn parse_ok(src: &str) {
     let mut parser = Parser::new(src);
@@ -92,6 +92,47 @@ fn the_statement_forms_of_those_soft_keywords_still_parse() {
     parse_ok("fn f():\n    skip");
     parse_ok("var w = 1\nlet s = spawn w");
     parse_ok("let c = spawn \\x: x + 1");
+}
+
+/// REPRODUCING TEST for bare_trailing_identifier_named_context_fails_to_parse_2026-08-09.
+///
+/// The lexer intentionally reserves `context` so `context value:` remains a
+/// statement. A bare `context` at a block boundary is instead an identifier
+/// expression. Before the fix, `parse_statement` treated Newline/Dedent as
+/// proof of the statement form and `parse_context` rejected the missing colon.
+#[test]
+fn context_is_an_identifier_when_it_ends_a_block() {
+    parse_ok("fn identity(context: i64) -> i64:\n    context\n");
+    // A dedent after the nested block must keep the same trailing-expression
+    // interpretation rather than re-entering the context-statement parser.
+    parse_ok("fn identity(context: i64) -> i64:\n    if true:\n        context\n");
+}
+
+/// COUNTERPART: accepting the identifier use must retain the context statement
+/// grammar, including its required colon and indented body.
+#[test]
+fn context_statement_still_parses_as_a_statement() {
+    parse_ok("context active:\n    pass\n");
+}
+
+/// The Phase-1 tool matrix exposed an authority leak by reporting this exact
+/// current source as invalid through an older deployed `bin/simple`.  Pin both
+/// halves of the diagnosis: the lexer deliberately emits the hard `Auto`
+/// token, while the current parser accepts that token contextually as a named
+/// argument label and as its value expression.
+#[test]
+fn auto_token_parses_contextually_in_the_exact_frontend_offload_source() {
+    let mut lexer = Lexer::new("P(auto: auto)");
+    assert!(matches!(lexer.next_token().kind, TokenKind::Identifier { .. }));
+    assert_eq!(lexer.next_token().kind, TokenKind::LParen);
+    assert_eq!(lexer.next_token().kind, TokenKind::Auto);
+    assert_eq!(lexer.next_token().kind, TokenKind::Colon);
+    assert_eq!(lexer.next_token().kind, TokenKind::Auto);
+    assert_eq!(lexer.next_token().kind, TokenKind::RParen);
+
+    parse_ok(include_str!(
+        "../../../compiler/00.common/structural_contracts/frontend_offload_switch.spl"
+    ));
 }
 
 /// SIMILAR-PROBLEM DETECTION TEST for the defect CLASS: a soft keyword that is

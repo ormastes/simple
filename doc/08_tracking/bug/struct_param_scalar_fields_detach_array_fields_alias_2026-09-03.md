@@ -1,4 +1,8 @@
 # A struct passed to a function is half-copied: scalar fields detach, array fields alias
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-03. Status: OPEN. Severity: HIGH — silent wrong answers, no diagnostic.
 
@@ -98,3 +102,4 @@ without a semantic change.
 
 That either half is wrong in isolation. The defect is that they disagree, and
 that the disagreement is invisible at the call site.
+

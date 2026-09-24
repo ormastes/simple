@@ -1,0 +1,153 @@
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_receipt_valid_v1
+}
+
+val PACKAGE_IMAGE_SCHEMA_V1: i64 = 1
+
+enum PackageSectionKindV1:
+    exports
+    imports
+    types
+    generics
+    hir_summaries
+    mir
+    objects
+    initialization
+    debug
+    receipts
+
+struct PackageSectionDescriptorV1:
+    kind: PackageSectionKindV1
+    member_name: text
+    offset: u64
+    extent: u64
+    checksum: text
+
+struct PackageImageV1:
+    schema_version: i64
+    package_identity: text
+    action_digest: text
+    archive_digest: text
+    receipt_digest: text
+    producer_identity: text
+    producer_digest: text
+    variant_digest: text
+    dependency_interface_digests: [text]
+    sections: [PackageSectionDescriptorV1]
+
+enum PackageImageErrorV1:
+    incompatible_version
+    receipt_invalid
+    invalid_identity
+    invalid_checksum
+    missing_section
+    duplicate_section
+    unknown_member
+    geometry_mismatch
+
+fn package_image_checksum_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn package_image_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn package_section_kind_name_v1(kind: PackageSectionKindV1) -> text:
+    match kind:
+        PackageSectionKindV1.exports: "exports"
+        PackageSectionKindV1.imports: "imports"
+        PackageSectionKindV1.types: "types"
+        PackageSectionKindV1.generics: "generics"
+        PackageSectionKindV1.hir_summaries: "hir-summaries"
+        PackageSectionKindV1.mir: "mir"
+        PackageSectionKindV1.objects: "objects"
+        PackageSectionKindV1.initialization: "initialization"
+        PackageSectionKindV1.debug: "debug"
+        PackageSectionKindV1.receipts: "receipts"
+
+fn package_image_required_section_kinds_v1() -> [PackageSectionKindV1]:
+    [
+        PackageSectionKindV1.exports,
+        PackageSectionKindV1.imports,
+        PackageSectionKindV1.types,
+        PackageSectionKindV1.generics,
+        PackageSectionKindV1.hir_summaries,
+        PackageSectionKindV1.mir,
+        PackageSectionKindV1.objects,
+        PackageSectionKindV1.initialization,
+        PackageSectionKindV1.debug,
+        PackageSectionKindV1.receipts,
+    ]
+
+fn package_image_section_v1(
+    image: PackageImageV1, kind: PackageSectionKindV1
+) -> PackageSectionDescriptorV1?:
+    for section in image.sections:
+        if section.kind == kind:
+            return Some(section)
+    nil
+
+fn package_image_validate_v1(
+    image: PackageImageV1, receipt: PackageArchiveReceiptV1
+) -> Result[(), PackageImageErrorV1]:
+    if image.schema_version != PACKAGE_IMAGE_SCHEMA_V1:
+        return Err(PackageImageErrorV1.incompatible_version)
+    if not pinned_archive_receipt_valid_v1(receipt):
+        return Err(PackageImageErrorV1.receipt_invalid)
+    if (not package_image_text_valid_v1(image.package_identity) or
+            not package_image_text_valid_v1(image.producer_identity)):
+        return Err(PackageImageErrorV1.invalid_identity)
+    for digest in [
+            image.action_digest, image.archive_digest, image.receipt_digest,
+            image.producer_digest, image.variant_digest]:
+        if not package_image_checksum_valid_v1(digest):
+            return Err(PackageImageErrorV1.invalid_checksum)
+    if (image.package_identity != receipt.package_key or
+            image.action_digest != receipt.action_key or
+            image.archive_digest != receipt.archive_digest or
+            image.receipt_digest != receipt.receipt_digest or
+            image.producer_identity != receipt.producer_identity or
+            image.producer_digest != receipt.producer_digest or
+            image.variant_digest != receipt.variant_digest or
+            image.dependency_interface_digests != receipt.dependency_interface_digests):
+        return Err(PackageImageErrorV1.invalid_identity)
+    if image.sections.len() != package_image_required_section_kinds_v1().len():
+        return Err(PackageImageErrorV1.missing_section)
+    for required in package_image_required_section_kinds_v1():
+        var matches = 0
+        for section in image.sections:
+            if section.kind == required:
+                matches = matches + 1
+        if matches == 0:
+            return Err(PackageImageErrorV1.missing_section)
+        if matches != 1:
+            return Err(PackageImageErrorV1.duplicate_section)
+    var previous_name = ""
+    for section in image.sections:
+        if (not package_image_text_valid_v1(section.member_name) or
+                not package_image_checksum_valid_v1(section.checksum)):
+            return Err(PackageImageErrorV1.invalid_checksum)
+        if previous_name != "" and section.member_name <= previous_name:
+            return Err(PackageImageErrorV1.duplicate_section)
+        previous_name = section.member_name
+        var matched = false
+        for member in receipt.members:
+            if member.name == section.member_name:
+                matched = true
+                if (member.offset != section.offset or member.extent != section.extent or
+                        member.payload_digest != section.checksum):
+                    return Err(PackageImageErrorV1.geometry_mismatch)
+        if not matched:
+            return Err(PackageImageErrorV1.unknown_member)
+    Ok(())
+
+export PACKAGE_IMAGE_SCHEMA_V1
+export PackageSectionKindV1, PackageSectionDescriptorV1, PackageImageV1
+export PackageImageErrorV1
+export package_section_kind_name_v1, package_image_required_section_kinds_v1
+export package_image_section_v1, package_image_validate_v1

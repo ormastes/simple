@@ -1,0 +1,363 @@
+# codex-impl
+"""Frozen test-only Chromium primitive-oracle ABI records and admission seam."""
+
+use std.sffi.dynamic.{DynLib, spl_dlclose, spl_wffi_call_i64,
+    spl_wffi_call_i64_with_bytes}
+use std.io_runtime.{file_hash_sha256}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use common.text.{escape_json}
+
+@unsafe(reason: "projects caller-owned byte storage for the frozen Chromium C ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_array_data_ptr_text(collection: [u8]) -> i64
+extern fn rt_bytes_to_text(data: [u8]) -> text
+@unsafe(reason: "allocates packed mutable byte storage for a bounded native response", capabilities: [ffi, raw_ptr])
+extern fn rt_byte_array_new_len(length: i64) -> [u8]
+@unsafe(reason: "reads the provider-written bounded response length slot", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_read_i64(address: i64, offset: i64) -> i64
+
+struct ChromiumOracleAbi:
+    version: i64
+    bridge_id: text
+    chromium_revision: text
+
+struct ChromiumOracleLoadRequest:
+    library_path: text
+    manifest_sha256: text
+    expected_abi_version: i64
+    required_symbols: [text]
+    max_request_bytes: i64
+    max_response_bytes: i64
+    test_only: bool
+
+struct ChromiumOracleResolvedSymbols:
+    abi_version: i64
+    create: i64
+    run_json_into: i64
+    last_error_into: i64
+    destroy: i64
+
+struct ChromiumOracleLibraryProbe:
+    library_handle: i64
+    manifest_sha256: text
+    abi: ChromiumOracleAbi
+    symbols: ChromiumOracleResolvedSymbols
+
+struct ChromiumOracleHandle:
+    library_handle: i64
+    session_handle: i64
+    library_path: text
+    abi_version: i64
+    symbols: ChromiumOracleResolvedSymbols
+    released: bool
+
+struct ChromiumOracleLoadResult:
+    ok: bool
+    status: text
+    library_path: text
+    abi: ChromiumOracleAbi
+    handle: ChromiumOracleHandle?
+    error: text
+
+struct ChromiumOracleCallResult:
+    ok: bool
+    status: text
+    response_json: text
+    response_bytes: i64
+    error: text
+
+struct ChromiumOracleReleaseResult:
+    ok: bool
+    status: text
+    handle: ChromiumOracleHandle
+    error: text
+
+struct ChromiumOracleGpuReceipt:
+    requested_api: text
+    executed_api: text
+    device_identity: text
+    fence_signaled: bool
+    readback_source: text
+    readback_digest: text
+    fallback_used: bool
+
+struct ChromiumOraclePrimitiveFixture:
+    fixture_id: text
+    electron_version: text
+    chrome_version: text
+    broker_sha256: text
+    electron_lock_sha256: text
+    viewport_width: i64
+    viewport_height: i64
+    device_scale_milli: i64
+    font_identity: text
+    font_digest: text
+    image_digest: text
+    image_width: i64
+    image_height: i64
+    html_css: text
+    event_script: text
+    requested_primitives: [text]
+    requires_gpu_receipt: bool
+
+fn _chromium_oracle_symbols_exact(symbols: [text]) -> bool:
+    if symbols.len() != 5:
+        return false
+    symbols[0] == "simple_chromium_oracle_abi_version" and
+        symbols[1] == "simple_chromium_oracle_create" and
+        symbols[2] == "simple_chromium_oracle_run_json_into" and
+        symbols[3] == "simple_chromium_oracle_last_error_into" and
+        symbols[4] == "simple_chromium_oracle_destroy"
+
+fn _chromium_oracle_empty_abi() -> ChromiumOracleAbi:
+    ChromiumOracleAbi(version: 0, bridge_id: "", chromium_revision: "")
+
+fn _chromium_oracle_load_result(request: ChromiumOracleLoadRequest, ok: bool,
+                                status: text, abi: ChromiumOracleAbi,
+                                error: text) -> ChromiumOracleLoadResult:
+    ChromiumOracleLoadResult(ok: ok, status: status,
+        library_path: request.library_path, abi: abi, handle: nil, error: error)
+
+fn chromium_oracle_validate_library_probe(
+    request: ChromiumOracleLoadRequest,
+    probe: ChromiumOracleLibraryProbe) -> ChromiumOracleLoadResult:
+    if not request.test_only or not request.library_path.starts_with("/") or
+       request.manifest_sha256 == "" or request.expected_abi_version != 1 or
+       request.max_request_bytes <= 0 or request.max_request_bytes > 1048576 or
+       request.max_response_bytes <= 0 or request.max_response_bytes > 4194304 or
+       not _chromium_oracle_symbols_exact(request.required_symbols) or
+       probe.library_handle <= 0 or
+       probe.manifest_sha256 != request.manifest_sha256:
+        return _chromium_oracle_load_result(request, false, "invalid-request",
+            _chromium_oracle_empty_abi(), "request-or-manifest-rejected")
+    if probe.abi.version != request.expected_abi_version or
+       probe.abi.bridge_id != "libsimple_chromium_primitive_oracle" or
+       probe.abi.chromium_revision == "":
+        return _chromium_oracle_load_result(request, false, "abi-mismatch",
+            probe.abi, "frozen-abi-identity-mismatch")
+    if probe.symbols.abi_version <= 0 or probe.symbols.create <= 0 or
+       probe.symbols.run_json_into <= 0 or probe.symbols.last_error_into <= 0 or
+       probe.symbols.destroy <= 0:
+        return _chromium_oracle_load_result(request, false, "symbol-missing",
+            probe.abi, "required-abi-v1-symbol-missing")
+    _chromium_oracle_load_result(request, true, "ok", probe.abi, "")
+
+fn chromium_oracle_gpu_receipt_valid(receipt: ChromiumOracleGpuReceipt) -> bool:
+    receipt.requested_api != "" and
+        receipt.executed_api == receipt.requested_api and
+        receipt.device_identity != "" and receipt.fence_signaled and
+        receipt.readback_source == "device_readback" and
+        receipt.readback_digest != "" and not receipt.fallback_used
+
+fn chromium_oracle_fixture_identity_valid(fixture: ChromiumOraclePrimitiveFixture) -> bool:
+    fixture.fixture_id != "" and fixture.electron_version == "42.5.0" and
+        fixture.chrome_version == "148.0.7778.271" and
+        hash256_hex_valid(fixture.broker_sha256) and
+        fixture.broker_sha256 != "0000000000000000000000000000000000000000000000000000000000000000" and
+        hash256_hex_valid(fixture.electron_lock_sha256) and
+        fixture.electron_lock_sha256 != "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn _chromium_oracle_has_primitive(fixture: ChromiumOraclePrimitiveFixture,
+                                  required: text) -> bool:
+    for primitive in fixture.requested_primitives:
+        if primitive == required:
+            return true
+    false
+
+fn _chromium_oracle_json_text(value: text) -> text:
+    "\"" + escape_json(value) + "\""
+
+fn _chromium_oracle_json_texts(values: [text]) -> text:
+    var encoded = "["
+    var index: i64 = 0
+    while index < values.len():
+        if index > 0:
+            encoded = encoded + ","
+        encoded = encoded + _chromium_oracle_json_text(values[index])
+        index = index + 1
+    encoded + "]"
+
+fn chromium_oracle_fixture_json(fixture: ChromiumOraclePrimitiveFixture,
+                                run_id: text, environment_profile_id: text,
+                                ui_environment_profile_id: text) -> text?:
+    if not chromium_oracle_fixture_identity_valid(fixture) or run_id == "" or
+       environment_profile_id == "" or ui_environment_profile_id == "" or
+       fixture.viewport_width <= 0 or fixture.viewport_width > 4096 or
+       fixture.viewport_height <= 0 or fixture.viewport_height > 4096 or
+       fixture.device_scale_milli <= 0 or fixture.html_css == "" or
+       fixture.event_script == "" or fixture.font_identity == "" or
+       not _chromium_oracle_has_primitive(fixture, "rect") or
+       not _chromium_oracle_has_primitive(fixture, "text") or
+       not _chromium_oracle_has_primitive(fixture, "image") or
+       not _chromium_oracle_has_primitive(fixture, "pointer") or
+       not _chromium_oracle_has_primitive(fixture, "keyboard") or
+       not _chromium_oracle_has_primitive(fixture, "scroll") or
+       not _chromium_oracle_has_primitive(fixture, "resize"):
+        return nil
+    Some("{\"schema_version\":1,\"run_id\":" + _chromium_oracle_json_text(run_id) +
+        ",\"environment_profile_id\":" + _chromium_oracle_json_text(environment_profile_id) +
+        ",\"ui_environment_profile_id\":" + _chromium_oracle_json_text(ui_environment_profile_id) +
+        ",\"fixture_id\":" + _chromium_oracle_json_text(fixture.fixture_id) +
+        ",\"viewport_width\":" + fixture.viewport_width.to_text() +
+        ",\"viewport_height\":" + fixture.viewport_height.to_text() +
+        ",\"device_scale_milli\":" + fixture.device_scale_milli.to_text() +
+        ",\"electron_version\":" + _chromium_oracle_json_text(fixture.electron_version) +
+        ",\"chrome_version\":" + _chromium_oracle_json_text(fixture.chrome_version) +
+        ",\"broker_sha256\":" + _chromium_oracle_json_text(fixture.broker_sha256) +
+        ",\"electron_lock_sha256\":" + _chromium_oracle_json_text(fixture.electron_lock_sha256) +
+        ",\"font_identity\":" + _chromium_oracle_json_text(fixture.font_identity) +
+        ",\"font_digest\":" + _chromium_oracle_json_text(fixture.font_digest) +
+        ",\"image_digest\":" + _chromium_oracle_json_text(fixture.image_digest) +
+        ",\"image_width\":" + fixture.image_width.to_text() +
+        ",\"image_height\":" + fixture.image_height.to_text() +
+        ",\"html_css\":" + _chromium_oracle_json_text(fixture.html_css) +
+        ",\"event_script\":" + _chromium_oracle_json_text(fixture.event_script) +
+        ",\"primitives\":" + _chromium_oracle_json_texts(fixture.requested_primitives) + "}")
+
+fn _chromium_oracle_status(code: i64) -> text:
+    if code == 0: return "ok"
+    if code == 1: return "invalid-request"
+    if code == 2: return "unsupported-primitive"
+    if code == 3: return "buffer-too-small"
+    if code == 4: return "adapter-failure"
+    if code == 5: return "released-handle"
+    "unknown-status"
+
+fn _chromium_oracle_prefix_text(bytes: [u8], length: i64) -> text:
+    if length < 0 or length > bytes.len():
+        return ""
+    var exact: [u8] = []
+    var index: i64 = 0
+    while index < length:
+        exact.push(bytes[index])
+        index = index + 1
+    rt_bytes_to_text(exact)
+
+@unsafe(reason: "loads and admits the explicit test-only Chromium oracle provider", capabilities: [ffi, raw_ptr])
+fn chromium_oracle_load(request: ChromiumOracleLoadRequest) -> ChromiumOracleLoadResult:
+    if not request.test_only or not request.library_path.starts_with("/") or
+       request.manifest_sha256 == "" or request.expected_abi_version != 1 or
+       request.max_request_bytes <= 0 or request.max_request_bytes > 1048576 or
+       request.max_response_bytes <= 0 or request.max_response_bytes > 4194304 or
+       not _chromium_oracle_symbols_exact(request.required_symbols):
+        return _chromium_oracle_load_result(request, false, "invalid-request",
+            _chromium_oracle_empty_abi(), "request-rejected-before-load")
+    val digest = file_hash_sha256(request.library_path)
+    if digest != request.manifest_sha256:
+        return _chromium_oracle_load_result(request, false, "manifest-mismatch",
+            _chromium_oracle_empty_abi(), "provider-artifact-digest-mismatch")
+    val loaded = DynLib.load(request.library_path)
+    if loaded == nil:
+        return _chromium_oracle_load_result(request, false, "library-not-found",
+            _chromium_oracle_empty_abi(), "provider-load-failed")
+    var lib = loaded.?
+    val symbols = ChromiumOracleResolvedSymbols(
+        abi_version: lib.sym(request.required_symbols[0]),
+        create: lib.sym(request.required_symbols[1]),
+        run_json_into: lib.sym(request.required_symbols[2]),
+        last_error_into: lib.sym(request.required_symbols[3]),
+        destroy: lib.sym(request.required_symbols[4]))
+    if symbols.abi_version <= 0 or symbols.create <= 0 or
+       symbols.run_json_into <= 0 or symbols.last_error_into <= 0 or
+       symbols.destroy <= 0:
+        spl_dlclose(lib.handle)
+        return _chromium_oracle_load_result(request, false, "symbol-missing",
+            _chromium_oracle_empty_abi(), "required-abi-v1-symbol-missing")
+    val digest_after_load = file_hash_sha256(request.library_path)
+    if digest_after_load != digest:
+        spl_dlclose(lib.handle)
+        return _chromium_oracle_load_result(request, false, "manifest-mismatch",
+            _chromium_oracle_empty_abi(), "provider-artifact-changed-during-load")
+    val abi_version = spl_wffi_call_i64(symbols.abi_version, [], 0)
+    val abi = ChromiumOracleAbi(version: abi_version,
+        bridge_id: "libsimple_chromium_primitive_oracle", chromium_revision: "manifest-pinned")
+    val probe = ChromiumOracleLibraryProbe(library_handle: lib.handle,
+        manifest_sha256: digest, abi: abi, symbols: symbols)
+    val admitted = chromium_oracle_validate_library_probe(request, probe)
+    if not admitted.ok:
+        spl_dlclose(lib.handle)
+        return admitted
+    val session = spl_wffi_call_i64(symbols.create, [0, 0], 2)
+    if session <= 0:
+        spl_dlclose(lib.handle)
+        return _chromium_oracle_load_result(request, false, "create-failed", abi,
+            "provider-session-create-failed")
+    ChromiumOracleLoadResult(ok: true, status: "ok", library_path: request.library_path,
+        abi: abi, handle: Some(ChromiumOracleHandle(library_handle: lib.handle,
+            session_handle: session, library_path: request.library_path,
+            abi_version: abi_version, symbols: symbols, released: false)), error: "")
+
+@unsafe(reason: "invokes the admitted bounded Chromium oracle request ABI", capabilities: [ffi, raw_ptr])
+fn chromium_oracle_run(handle: ChromiumOracleHandle, request_json: text,
+                       max_response_bytes: i64) -> ChromiumOracleCallResult:
+    if handle.released or handle.library_handle <= 0 or handle.session_handle <= 0:
+        return ChromiumOracleCallResult(ok: false, status: "released-handle",
+            response_json: "", response_bytes: 0, error: "released-handle")
+    if request_json == "" or request_json.len() > 1048576 or
+       max_response_bytes <= 0 or max_response_bytes > 4194304:
+        return ChromiumOracleCallResult(ok: false, status: "invalid-request",
+            response_json: "", response_bytes: 0, error: "request-or-capacity-rejected")
+    val run_ptr = handle.symbols.run_json_into
+    if run_ptr <= 0:
+        return ChromiumOracleCallResult(ok: false, status: "symbol-missing",
+            response_json: "", response_bytes: 0, error: "run-symbol-missing")
+    val request_bytes = request_json.bytes()
+    val response = rt_byte_array_new_len(max_response_bytes)
+    val response_len_slot = rt_byte_array_new_len(8)
+    val response_ptr = rt_array_data_ptr_text(response)
+    val response_len_ptr = rt_array_data_ptr_text(response_len_slot)
+    if response_ptr <= 0 or response_len_ptr <= 0:
+        return ChromiumOracleCallResult(ok: false, status: "buffer-unavailable",
+            response_json: "", response_bytes: 0, error: "packed-response-allocation-failed")
+    val code = spl_wffi_call_i64_with_bytes(run_ptr, [handle.session_handle],
+        request_bytes, 0, request_bytes.len(),
+        [response_ptr, response.len(), response_len_ptr])
+    val response_len = rt_ptr_read_i64(response_len_ptr, 0)
+    val status = _chromium_oracle_status(code)
+    if code != 0:
+        return ChromiumOracleCallResult(ok: false, status: status,
+            response_json: "", response_bytes: response_len, error: status)
+    val output = _chromium_oracle_prefix_text(response, response_len)
+    if output == "":
+        return ChromiumOracleCallResult(ok: false, status: "invalid-response",
+            response_json: "", response_bytes: response_len, error: "empty-or-invalid-length")
+    ChromiumOracleCallResult(ok: true, status: "ok", response_json: output,
+        response_bytes: response_len, error: "")
+
+@unsafe(reason: "serializes and invokes one fully pinned Chromium primitive fixture", capabilities: [ffi, raw_ptr])
+fn chromium_oracle_run_fixture(handle: ChromiumOracleHandle,
+                               fixture: ChromiumOraclePrimitiveFixture,
+                               run_id: text, environment_profile_id: text,
+                               ui_environment_profile_id: text,
+                               max_response_bytes: i64) -> ChromiumOracleCallResult:
+    val request = chromium_oracle_fixture_json(fixture, run_id,
+        environment_profile_id, ui_environment_profile_id)
+    if request == nil:
+        return ChromiumOracleCallResult(ok: false, status: "invalid-fixture",
+            response_json: "", response_bytes: 0, error: "fixture-identity-or-shape-rejected")
+    chromium_oracle_run(handle, request.?, max_response_bytes)
+
+@unsafe(reason: "destroys the native oracle session and closes its provider exactly once", capabilities: [ffi, raw_ptr])
+fn chromium_oracle_release(handle: ChromiumOracleHandle) -> ChromiumOracleReleaseResult:
+    if handle.released or handle.library_handle <= 0 or handle.session_handle <= 0:
+        return ChromiumOracleReleaseResult(ok: false, status: "released-handle",
+            handle: handle, error: "released-handle")
+    val destroy_ptr = handle.symbols.destroy
+    val code = if destroy_ptr <= 0: 1 else:
+        spl_wffi_call_i64(destroy_ptr, [handle.session_handle], 1)
+    spl_dlclose(handle.library_handle)
+    val released = ChromiumOracleHandle(library_handle: 0, session_handle: 0,
+        library_path: handle.library_path, abi_version: handle.abi_version,
+        symbols: handle.symbols, released: true)
+    val status = _chromium_oracle_status(code)
+    ChromiumOracleReleaseResult(ok: code == 0, status: status, handle: released,
+        error: if code == 0: "" else: status)
+
+export ChromiumOracleAbi, ChromiumOracleLoadRequest,
+    ChromiumOracleResolvedSymbols, ChromiumOracleLibraryProbe,
+    ChromiumOracleHandle, ChromiumOracleLoadResult, ChromiumOracleCallResult,
+    ChromiumOracleReleaseResult,
+    ChromiumOracleGpuReceipt, ChromiumOraclePrimitiveFixture,
+    chromium_oracle_validate_library_probe, chromium_oracle_gpu_receipt_valid,
+    chromium_oracle_fixture_identity_valid,
+    chromium_oracle_fixture_json, chromium_oracle_load, chromium_oracle_run,
+    chromium_oracle_run_fixture, chromium_oracle_release

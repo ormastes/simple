@@ -1,4 +1,9 @@
 # `dap_breakpoint_system_spec` never terminates — CAUSE ESTABLISHED
+## Closed 2026-09-16 — FIXED 2026-08-09; specs capped to MAX_CHECK_FILES; post-fix wall times measured
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-09 (stream G3) — cause established by direct measurement
 **Found:** 2026-08-09 by stream P3 (host `DebugTarget` adapter)
@@ -97,3 +102,4 @@ spec files, of which four are the affected family plus `dap_spec.spl`.
 - Environment trap confirmed again: a stale `.build/test_daemon_light/daemon.lock`
   makes EVERY spec exit 1 with `ERROR: test daemon timed out` and no verdict
   line. Fix: `rm -rf .build/test_daemon_light`.
+

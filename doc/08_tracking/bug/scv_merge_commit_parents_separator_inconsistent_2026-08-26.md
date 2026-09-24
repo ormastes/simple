@@ -1,4 +1,8 @@
 # SCV: merge-commit `parents:` separator inconsistent across readers (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (partial). `merge.spl` now writes `parents: <left> <right>` (space-joined).
 
@@ -13,3 +17,4 @@ to a commit object and **every `merge-commits` call failed with `ERROR invalid o
 These readers still split `parents` on `","` and will misparse a space-joined merge commit as one
 parent token: `integrity_view.spl:132`, `recover.spl:76`, `maintenance.spl:283`, `integrity.spl:418`.
 They need to split on `" "` (and tolerate `","` for any legacy objects). No spec pins them yet.
+

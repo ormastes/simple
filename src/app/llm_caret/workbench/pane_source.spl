@@ -1,0 +1,57 @@
+# Caret workbench — smux pane -> active-session output (lane A8, seam 2).
+#
+# The smux terminal service (`os.apps.smux.api`) drives a REAL child process
+# over pipes. This file drains one pane and hands its lines to the workbench's
+# live registry, so the big active-session region shows what a child actually
+# produced instead of placeholder text.
+#
+# Kept separate from `session_source.spl` on purpose: this module is the only
+# thing that imports smux, so smux's `Result<...>` instantiations never reach
+# `gui.spl` -> `main.spl`, where they would co-compile with the
+# `app.llm_caret.provider` backend graph (see session_source.spl's header for
+# the filed generic-resolution defect this avoids).
+#
+# ponytail: the pane's child is NOT one of the manager's agents -- the manager
+# spawns with `process_spawn_async` (no piped stdout) while a pane needs
+# `smux_pane_spawn`. Both surfaces therefore label the region with the PANE id
+# rather than implying pane == selected agent. upgrade: launch managed agents
+# through `smux_pane_spawn` so the two identities coincide.
+
+use os.apps.smux.api.{smux_capture}
+use app.llm_caret.workbench.session_source.{publish_pane_output}
+
+# `{found/ok, value}` result struct rather than Option<T> -- see
+# session_source.spl's header.
+struct PaneOutput:
+    ok: bool
+    error: text
+    pane_id: text
+    lines: [text]
+
+# Drains the pane's child once and returns its scrollback as lines. An unknown
+# or cross-session pane stays a typed error here; it is never turned into an
+# empty-but-successful capture.
+pub fn capture_pane_output(session_id: text, window_id: text, pane_id: text,
+        history_lines: int) -> PaneOutput:
+    val cap = smux_capture(session_id, window_id, pane_id, history_lines)
+    if cap.is_err():
+        var none: [text] = []
+        return PaneOutput(ok: false, error: cap.unwrap_err(),
+            pane_id: pane_id, lines: none)
+    val content = cap.unwrap().content
+    var lines: [text] = []
+    if content != "":
+        for line in content.split("\n"):
+            if line != "":
+                lines.push(line)
+    PaneOutput(ok: true, error: "", pane_id: pane_id, lines: lines)
+
+# Captures and publishes in one step -- the call an event loop makes per frame.
+pub fn refresh_active_pane(session_id: text, window_id: text, pane_id: text,
+        history_lines: int) -> PaneOutput:
+    val out = capture_pane_output(session_id, window_id, pane_id, history_lines)
+    if out.ok:
+        publish_pane_output(out.pane_id, out.lines)
+    out
+
+export PaneOutput, capture_pane_output, refresh_active_pane

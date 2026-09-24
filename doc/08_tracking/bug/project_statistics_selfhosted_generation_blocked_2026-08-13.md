@@ -1,4 +1,9 @@
 # Project statistics self-hosted generation blocked
+## Closed 2026-09-16 — Status Resolved; PPTX generated and validated, specs pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -32,3 +37,4 @@ Markdown, TLDR, SimpleOS-native slide source, and a nine-slide PPTX are generate
 The broader full-CLI bootstrap remains independently useful, but is no longer
 required to consume this report package. Keep the focused parser and protocol
 regressions green when the shared CLI is next rebuilt.
+

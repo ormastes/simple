@@ -1,4 +1,9 @@
 # sha256_bytes / base58check engine divergence — root cause (2026-07-29)
+## Closed 2026-09-16 — both defects fixed and verified vs python oracle; closes sha256_bytes/base58check divergence item
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Assignment (Fix-Security-Inline, top priority): root-cause the pass-7
 finding that `sha256_bytes` / `_b58_double_sha256_first4` produced
@@ -187,3 +192,4 @@ tag-box bug (pass 3), which stays with the engine investigation lanes —
 now with three named triggers for the same `<<3` family on record
 (empty-list-rebind, loop-carried push-realloc spill, `list`-typed
 parameter) for whoever picks up the compiler-side (cranelift) fix.
+

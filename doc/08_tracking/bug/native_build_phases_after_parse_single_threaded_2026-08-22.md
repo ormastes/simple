@@ -1,4 +1,8 @@
 # native-build: every phase after parse is single-threaded (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Lane: perf. Sibling of
 `native_build_frontend_not_incremental_2026-08-21.md` (which made PARSE
@@ -277,3 +281,4 @@ HIR in under an hour on this host (see "What remains").
   this lane was not run: neither closure completes HIR in under an hour on
   this host, so a 2 × multi-hour probe under load 28 with a bootstrap lane in
   flight was out of budget. The fixture numbers above are the evidence.
+

@@ -8,6 +8,10 @@
   compiler interpreted by the Rust seed). The seed's own interpreter (`simple run`)
   is NOT affected — it never goes through this HIR/MIR/LLVM path.
 
+## Closed 2026-09-13 — Already Fixed
+
+Root cause 1 fixed: statements.spl line 450 now uses `if val rt_val_e = rt_val:` instead of `case Some(...)` for nullable binding. Root cause 2 fixed: core_codegen.spl fast paths now call `mark_instruction_dest_defined` before returning. Verified in source and documented with SIMPLE_MIR_RET_TRACE probe.
+
 ## Summary
 
 Any user-defined function whose value left the body through an explicit `return`
@@ -303,3 +307,7 @@ the index-read half (`d[k]`) is what this change fixes.
   struct name) and `[field-idx-fallback0]` in `function_lowering.spl` (every time
   `resolve_field_index` silently defaults a field to index 0 — the exact silent
   failure mode of this bug).
+
+## Host-environment classification (2026-09-18)
+
+Audited by the fix-pipeline classification review: **environment-blocked: deployed-binary** — [env-blocked:deployed-binary]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.

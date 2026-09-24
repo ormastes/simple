@@ -1,3 +1,30 @@
+## Triaged 2026-09-13 — LEFT OPEN, not measurable on this host
+
+Reviewed in the 2026-05-and-earlier tracking sweep. Kept open deliberately: the
+body's own 2026-05-30 update already narrows this to backend work — static-data
+/ global-array correctness plus loop and branch codegen quality — and records
+that a static-data LUT probe compiled but produced **wrong native checksums**.
+A wrong-result probe is a correctness signal, not just a perf one, and nothing
+in this sweep contradicts it.
+
+Checked 2026-09-13: the Cranelift codegen surface named in the entry is still
+present (`src/compiler_rust/compiler/src/codegen/instr/calls.rs` carries the
+ctype-specific handling), so the mitigation described has not been reverted.
+
+Why no new measurement: the recorded table is native AOT throughput
+(ops/ms over 128M calls) against `C -O2` on the same machine. Reproducing it
+needs a native build lane plus a C reference compile; this host is Windows
+x86_64 with a bootstrap running concurrently, and the recorded numbers are from
+a different platform, so any figure taken here would not be comparable to the
+0.07x-0.46x baseline it would have to be judged against. Declaring it
+unmeasurable is the honest outcome rather than inferring a ratio.
+
+Not closed as stale: the component (Cranelift AOT codegen quality for pure
+Simple stdlib) is current, not removed, and the pattern generalises beyond
+`ctype` — which is the entry's stated reason for tracking it.
+
+---
+
 # Perf Bug: Pure Simple ctype 0.07x–0.46x C (Cranelift, no inlining)
 
 Status: Open / pure-Simple path exhausted — partially mitigated 2026-05-29;

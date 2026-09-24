@@ -1,4 +1,8 @@
 # Fresh bootstrap seed `test` command: NOT a fail-open — real signal buried under a duplicated whole-tree parse
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** high — genuine hang confirmed on directory/section targets (see "UPDATE" below); single-file path is fail-closed and not a fail-open
@@ -184,3 +188,4 @@ no code changes were made.
   in `execution.rs`, not `targeted_discovery_is_empty` in `runner.rs`).
 - [[seed_compile_smf_stub_fail_open_2026-07-17]] — unrelated fail-open family
   (SMF stub emission), same campaign day.
+

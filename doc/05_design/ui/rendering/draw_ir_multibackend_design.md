@@ -158,7 +158,17 @@ straight src-over on ARGB u32). The contract, restated as an acceptance invarian
 
 > For any scene S and any backend B, `B.read_pixels(S)` **==** `SharedRaster.read_pixels(S)`
 > pixel-for-pixel, where equality is exact u32 ARGB match. Example anchor (src-over,
-> 0xAARRGGBB): `blend_over(src=0x01020304, dst=0x10203040) == 0x101F2F3F`.
+> 0xAARRGGBB): `blend_over(src=0x01020304, dst=0x10203040) == 0x101E2D3C`.
+
+**Anchor corrected 2026-09-12.** Every `0x101E2D3C` in this file read `0x101F2F3F` until then.
+`0x101F2F3F` is the *pre-unpremultiply* result `(s*sa + d*(255-sa))/255`; the frozen CPU oracle
+`blend()` (`src/lib/**/engine2d/color.spl`) composites premultiplied and divides by the resulting
+`out_a`, giving `0x101E2D3C` — dst alpha here is `0x10`, not opaque, which is exactly when the two
+formulas diverge. Metal and the Vulkan `spirv_blit()` kernel both produce `0x101E2D3C` on device;
+the stale anchor, had a parity gate been written against it, would have failed every correct
+backend. Byte-level companion guard: `sh scripts/check/check-blit-spirv-pinned.shs`. Device
+evidence: `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_blend_cpu_parity_spec.spl`.
+Record: `doc/08_tracking/bug/vulkan_glsl_blend_formula_stale_vs_cpu_2026-09-12.md`.
 
 This makes the shared reference the **single oracle**: parity gates compare every backend against
 `SharedRaster`, not against each other, so there is exactly one truth. Any op a backend does not
@@ -166,7 +176,7 @@ accelerate trivially passes (it *is* the oracle). Accelerated GPU ops must be va
 
 **Duplicate blend implementation to unify:** `color.spl`'s `blend()` and `backend_emu_math`'s
 `_emu_blend_over` are **byte-identical duplicate src-over copies**, independently confirmed against
-the same anchor (`0x01020304` over `0x10203040` == `0x101F2F3F`). Promoting `_emu_blend_over` to
+the same anchor (`0x01020304` over `0x10203040` == `0x101E2D3C`). Promoting `_emu_blend_over` to
 canonical means deleting `color.spl`'s copy and routing both consumers through the one reference —
 do not leave two source-identical implementations that can drift apart on a future edit to only one
 of them.
@@ -215,7 +225,7 @@ implementation roadmap for the next increment (op-by-op consolidation onto `Shar
 | `draw_rect_filled` | 0 | BIT-EXACT | n/a — single-source already | core primitive |
 | `draw_image` | 0 | BIT-EXACT | n/a — single-source already | core primitive |
 | `draw_gradient_rect_h` | 0 | BIT-EXACT | n/a — delegating stub | already routes through the shared fill |
-| `draw_rect_blend` | 0 | BIT-EXACT | n/a — delegating stub | src-over anchor `0x01020304` over `0x10203040` == `0x101F2F3F` (§3b anchor) |
+| `draw_rect_blend` | 0 | BIT-EXACT | n/a — delegating stub | src-over anchor `0x01020304` over `0x10203040` == `0x101E2D3C` (§3b anchor) |
 | `draw_image_blend` | 0 | BIT-EXACT | n/a — delegating stub | same src-over anchor as `draw_rect_blend` |
 | `draw_rect` (OPAQUE outline repr.) | 0 | BIT-EXACT *for this representative only* | — | alpha=255 only; alpha<255 diverges, see below |
 | `draw_gradient_rect` (OPAQUE repr.) | 0 | BIT-EXACT *for this representative only* | — | integer lerp; only exact at the opaque representative |

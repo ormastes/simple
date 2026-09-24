@@ -1,5 +1,44 @@
 # `std.common.math.field.fe_p256` does not exist; 2 specs and 43 examples cannot run
 
+## Closed 2026-09-13 — the module exists and both specs now execute
+
+**Status: CLOSED (fixed).** The reported defect was that
+`src/lib/common/math/field/fe_p256.spl` "was never written", so both specs
+failed to load and **43 examples had never executed once**.
+
+`src/lib/common/math/field/fe_p256.spl` exists today. Both specs run, on the
+Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`) via
+`SIMPLE_BINARY=<abs> simple test`:
+
+| spec | before (reported) | measured 2026-09-13 |
+|---|---|---|
+| `fe_p256_skeleton_spec.spl` | `1 total, 0 passed, 1 failed` — `Cannot resolve module: std.common.math.field.fe_p256` | **6 total, 6 passed, 0 failed** |
+| `fe_p256_full_spec.spl` | same load failure | **55 total, 48 passed, 7 failed** |
+
+61 examples now execute where 0 did. The `Cannot resolve module` error is gone.
+That is the whole of what this entry reported, so it closes.
+
+### The 7 residual failures are a DIFFERENT defect — do not reopen this entry for them
+
+They split into two unrelated causes, neither of which is "the module is
+missing":
+
+- **2 canonical-zero bugs** in code that *does* exist —
+  `fe_to_bytes(p) reduces to 32 zeros (non-canonical zero)` (`expected 255 to
+  equal 0`) and `fe_is_zero(p) == true (canonical zero detection)`
+  (`expected false to equal true`). Real arithmetic defects: the field element
+  equal to the prime `p` is not being reduced to canonical zero.
+- **5 missing functions** — `fe_cond_swap` (2 examples) and `fe_pow`
+  (3 examples), both `semantic: function ... not found`. The module was written
+  without them.
+
+Neither was investigated here. If they are worth tracking they should be filed
+as their own entry against `fe_p256.spl`'s contents, since this entry's premise
+— that the file does not exist — is no longer true and would mislead anyone
+reading it.
+
+MEASURED. The fixing commit was not bisected.
+
 **Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** medium — P-256 field arithmetic is the base layer under

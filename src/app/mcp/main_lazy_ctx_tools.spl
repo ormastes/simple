@@ -55,7 +55,8 @@ use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plu
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
 use std.database.core.{parse_sdn_table}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
-use std.nogc_sync_mut.io.http_sffi.{http_get}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
+use std.nogc_sync_mut.io.http_get_core.{http_get_raw}
 use std.nogc_sync_mut.security.sanitize.{strip_html_tags}
 use std.common.math.special.{ln_f64}
 use std.common.perf.execution_metrics.{TerminationCause}
@@ -407,10 +408,23 @@ struct CtxHit:
     matched: i64
     mode: text      # "bm25" | "substring"
 
-# Query-side stopwords (parity with context-mode's stopword strip: common
-# English + dev-noise words). Applied to query terms only, so document
-# lengths and the store are untouched.
-const _CTX_STOPWORDS: [text] = ["the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "for", "on", "with", "as", "at", "by", "be", "this", "that", "from", "are", "was", "not", "but", "if", "then", "so", "we", "you", "do", "does", "did", "has", "have", "had", "will", "can", "use", "using", "how", "what", "which", "where", "when", "all", "any", "each", "into", "than", "also", "just", "more", "some", "such", "only", "same", "other", "out", "up", "no", "yes", "its", "these", "those", "there", "here", "update", "fix", "test", "deps"]
+# Query-side stopwords: common English function words only. Applied to query
+# terms only, so document lengths and the store are untouched.
+#
+# 2026-09-24: dropped the dev-noise additions ("update", "fix", "test",
+# "deps") that context-mode's original list carried alongside the English
+# stopwords. In a dev-search index those are exactly the high-signal content
+# words a query names — "fix", above all — and stripping them silently
+# shrank the query to its remaining terms with no indication to the caller.
+# Measured regression: `simple_ctx_search(queries: ["LLVM-C link fix"])`
+# against the live 865-chunk store reduced the query to `llvm|link` (both
+# "c" and "fix" gone — "c" is a legitimate single-char drop, "fix" was the
+# stopword), so an unrelated `llvm-official-llvm-config` doc-page chunk
+# (repeats "llvm" many times, never says "fix") outscored the actual
+# "...LLVM-C link fix..." chunk (score 11.928 vs 10.663) purely because the
+# one term that would have discriminated between them was discarded before
+# scoring. See ctx_search_ranking_stopword_drops_fix_2026-09-24 regression.
+const _CTX_STOPWORDS: [text] = ["the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "for", "on", "with", "as", "at", "by", "be", "this", "that", "from", "are", "was", "not", "but", "if", "then", "so", "we", "you", "do", "does", "did", "has", "have", "had", "will", "can", "use", "using", "how", "what", "which", "where", "when", "all", "any", "each", "into", "than", "also", "just", "more", "some", "such", "only", "same", "other", "out", "up", "no", "yes", "its", "these", "those", "there", "here"]
 
 fn _ctx_is_stopword(t: text) -> bool:
     for s in _CTX_STOPWORDS:
@@ -747,10 +761,25 @@ fn ctx_execute_code(language: text, code: text, file_path: text, timeout_ms: i64
     val lang = language.lower().trim()
     val cap = ctx_capture_max_bytes()
     if lang == "shell" or lang == "sh" or lang == "bash" or lang == "":
-        var argv: [text] = ["-c", "FILE=\"$1\"; export FILE; " + code, "sh"]
+        # `/bin/sh` does not exist as a literal path on Windows (this repo's
+        # native Windows binary is not MSYS-path-translated), which made
+        # every simple_ctx_execute(shell) spawn fail: process_run_observed_bounded
+        # returns exit -1 / stderr "(empty)" when the executable itself is
+        # missing. Resolve the shell the same way std.io.process_ops.shell()
+        # does — SIMPLE_POSIX_SHELL override, then a PATH/install-location
+        # scan for a real POSIX sh.exe (Git for Windows/MSYS/Cygwin) — and
+        # only fail closed when none is found, rather than silently handing
+        # POSIX-syntax code to cmd.exe.
+        val cmd_text = "FILE=\"$1\"; export FILE; " + code
+        val (sh_path, sh_prefix) = resolve_shell_argv(cmd_text)
+        if not is_posix_shell_argv(sh_path):
+            return (nil, "no POSIX sh found for simple_ctx_execute(language: shell) on this host; " +
+                "install Git for Windows (provides usr/bin/sh.exe) or set SIMPLE_POSIX_SHELL to a POSIX sh.exe path")
+        var argv: [text] = sh_prefix
+        argv.push("sh")
         if file_path != "":
             argv.push(file_path)
-        return (Some(ctx_run_bounded("/bin/sh", argv, timeout_ms, cap)), "")
+        return (Some(ctx_run_bounded(sh_path, argv, timeout_ms, cap)), "")
     if lang == "javascript" or lang == "js" or lang == "node":
         if val missing = require_external_tool("simple_ctx_execute", "node", "Node.js"):
             return (nil, missing)
@@ -920,7 +949,13 @@ fn handle_simple_ctx_batch_execute(id: text, body: text) -> text:
     var idx = 0
     var total_bytes: i64 = 0
     for cmd in commands:
-        val r = ctx_run_bounded("/bin/sh", ["-c", cmd], timeout_ms, capture_max)
+        val (sh_path, sh_args) = resolve_shell_argv(cmd)
+        if not is_posix_shell_argv(sh_path):
+            lines.push("[" + str(idx) + "] ERROR: no POSIX sh found for simple_ctx_batch_execute on this host; " +
+                "install Git for Windows or set SIMPLE_POSIX_SHELL")
+            idx = idx + 1
+            continue
+        val r = ctx_run_bounded(sh_path, sh_args, timeout_ms, capture_max)
         val label = source + "#" + str(idx)
         val text_out = "$ " + cmd + "\n" + r.stdout + "\n" + r.stderr_summary
         val n = ctx_index_text(text_out, label)
@@ -982,22 +1017,22 @@ fn handle_simple_ctx_fetch_and_index(id: text, body: text) -> text:
     if source == "":
         source = "web:" + url
     val max_bytes = _ctx_int_param(body, "max_bytes", _CTX_FETCH_DEFAULT_MAX_BYTES, _CTX_FETCH_HARD_MAX_BYTES)
-    val resp = http_get(url)
-    if resp.status_code < 0 or resp.error != "":
-        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: transport error: " + resp.error)
-    if not resp.is_ok:
-        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: HTTP " + str(resp.status_code))
-    val (raw, capped) = ctx_cap_bytes(resp.body, max_bytes)
+    val (status_code, response_body, transport_error) = http_get_raw(url)
+    if status_code < 0 or transport_error != "":
+        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: transport error: " + transport_error)
+    if status_code < 200 or status_code >= 300:
+        return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: HTTP " + str(status_code))
+    val (raw, capped) = ctx_cap_bytes(response_body, max_bytes)
     val plain = ctx_html_to_text(raw)
     val n = ctx_index_text(plain, source)
     if n < 0:
         return make_tool_error(id, -32603, "simple_ctx_fetch_and_index: cannot write " + _ctx_chunks_path())
-    var msg = "Fetched " + url + ": " + str(resp.body.len()) + " byte(s)"
+    var msg = "Fetched " + url + ": " + str(response_body.len()) + " byte(s)"
     if capped:
         msg = msg + " (capped to " + str(max_bytes) + ")"
     msg = msg + ", " + str(plain.len()) + " byte(s) of text, " + str(n) + " chunk(s) under source '" + source + "'"
     _ctx_stats_bump("fetch_calls", 1)
-    tok_record(TOK_FEATURE_CTX, "simple_ctx_fetch_and_index", resp.body.len(), msg.len(), false)
+    tok_record(TOK_FEATURE_CTX, "simple_ctx_fetch_and_index", response_body.len(), msg.len(), false)
     make_tool_result(id, msg)
 
 # ---------------------------------------------------------------------------

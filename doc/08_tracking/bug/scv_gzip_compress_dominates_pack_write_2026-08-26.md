@@ -1,4 +1,9 @@
 # `gzip_compress` dominates every SCV pack write (110s for a 16 KB payload)
+## Closed 2026-09-16 — root cause found and fixed; regression specs green; 50-cycle soak completed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Found: 2026-08-26, during SCV-IMPL-B-06 (pack v2 hardening).
 - Status: OPEN. Worked around **only** on the new `pack-write-v2r` path; the
@@ -295,3 +300,4 @@ faster — that has not been measured and is not claimed here.
 - **`_gzip_append_bytes` in `src/lib/common/compress/gzip.spl`** carries the
   `var out = target; out.push(...)` alias shape that the repo's COW rule warns
   about. Not measured, not touched.
+

@@ -1,4 +1,8 @@
 # Core-C bootstrap bundle misses `rt_is_interpreter_runtime`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -52,3 +56,4 @@ The prepared fix exports a native-false implementation from the existing
 2. `nm -u` shows no unresolved `rt_is_interpreter_runtime`.
 3. The native probe starts and reaches its staged-quads assertions.
 4. The trusted macOS Vulkan 2D harness builds with the same runtime lane.
+

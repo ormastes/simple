@@ -1,4 +1,8 @@
 # `std.io_runtime.file_write` resolves to a retryless twin — silent write failure into a missing directory
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-06 (lane C, found by the dual_fs effect-comparison harness)
 **Severity:** high — a write returns `false` and creates nothing, in a code
@@ -128,3 +132,4 @@ parent-directory retry in pure Simple and is measured performing it
 (`native returned=false exists=false` / `pure returned=true exists=true` on an
 absent parent), which is why the pure provider is currently the *more* correct
 of the two twins.
+

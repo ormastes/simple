@@ -199,7 +199,7 @@ async function main() {
   const win = new BrowserWindow({
     width: 800,
     show: false,
-    webPreferences: { offscreen: true, sandbox: true },
+    webPreferences: { offscreen: true, sandbox: true, contextIsolation: true, nodeIntegration: false },
     backgroundColor: '#ffffff',
   });
   await win.loadFile(htmlPath);

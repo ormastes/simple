@@ -3,7 +3,45 @@
 
 **Date:** 2026-08-30
 
-**Status:** Proposed; implementation claims below are audit results, not completion claims
+**Status:** Active implementation; **NOT COMPLETE**. Structural and portable
+checks are recorded separately from SPipe, native, cross-host, and release
+qualification. No unavailable row is treated as `PASS`.
+
+**Independent M0–M5 re-audit (2026-09-03):**
+`doc/09_report/compiler/macos_bootstrap_reverse_reference_m0_m5_independent_audit_2026-09-03.md`
+records the current requirement-by-requirement result, centralized-storage
+repairs, exact unavailable authority, and next-command prerequisites.
+
+**Documentation reconciliation (2026-09-02):** Final requirements are recorded in
+`doc/02_requirements/feature/macos_bootstrap_reverse_reference_harmonization.md`
+and `doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md`.
+SPipe planning is in
+`doc/03_plan/sys_test/macos_bootstrap_reverse_reference_harmonization.md`.
+`ReverseReferenceKeyV1`, the ten-family receipt path, and exact M2-to-M3
+admission are now structurally implemented and independently audited. The
+current admitted self-hosted binary still lacks the required `test`/`check`
+surface, the latest isolated Stage3 build terminated with worker exit code 1
+without a candidate or provenance receipt, and no native Intel evidence exists.
+Therefore structural results do not establish runtime or native completion.
+The Stage3 recovery authority guard now passes parent-sanity key normalization
+but fails closed at `stage2-transcript-environment-set-mismatch`; no retry is
+authorized until that binding is corrected and one complete 15-field authority
+receipt passes.
+
+**Cross-plan selected authority:** 1A LLVM+Cranelift K1, 2B ABI v1 now, 3A
+`simple.sdn`, 4A atomic APK-only coverage, and baseline-relative 10% RSS
+limits. For each architecture, maximum steady RSS is `<=110%` of its admitted
+baseline and maximum growth across 20 requests is `<=10%` of baseline RSS.
+Missing or architecture-mismatched baseline evidence fails closed.
+The baseline authority validator is `WARN`: schema and workflow ordering are
+implemented, but its one mutation run exposed a case-sensitive document check.
+That check is corrected but not rerun, and real arm64/x86_64 baseline/sample
+receipts remain absent.
+
+**2026-09-03 independent HEAD audit:** the portable
+`MacosBootstrapReceiptV1` schema and mutation-sensitive admission tests now
+exist. Collector integration and native M0/M4/M5 evidence remain incomplete;
+see `doc/09_report/compiler/macos_bootstrap_plan_independent_head_audit_2026-09-03.md`.
 
 **Source plan:** `simple_compiler_performance_kernel_plugin_merged_plan_2026-08-30.md`
 exists on unintegrated commit `7d4aac717e5`; this plan audits that immutable
@@ -18,20 +56,27 @@ must reuse every artifact whose producer-neutral semantic and target-specific
 codegen identities match. A universal binary is an optional packaging product
 assembled only from two separately admitted architecture slices.
 
-This plan does not claim that cross-phase CAS promotion, complete semantic
-reverse registries, kernel/plugin extraction, or universal bootstrap already
-exists.
+This plan does not claim native cross-phase qualification, a shared writable
+CAS, a signed/notarized universal release, or completion of either target plan.
 
 ## 2. Audited implementation status
 
-| Merged phase | Current authoritative substrate | Status and gap |
+Status vocabulary:
+
+- **STRUCTURAL PASS**: production source, wiring, and mutation/portable checks
+  satisfy the inspected contract; this is not a runtime claim.
+- **RUNTIME BLOCKED**: the required admitted self-hosted `simple` command could
+  not execute the SPipe/product path.
+- **NATIVE BLOCKED**: one or both required native macOS rows are absent.
+
+| Milestone | Current determination | Authoritative source/test/report evidence |
 |---|---|---|
-| P0 evidence | Native build reports compiled/cached/failed counts; bootstrap records command, source, provider, phase-profile, memory, and admission evidence. | **Partial.** Stable receipts exist, but cache-explain and macOS cold/warm/edit attribution are not one canonical report. |
-| P1 indexed discovery | `aop_index/reverse_index.spl` stores selector/field/target/advice tables; linker `SymbolGraph.reverse_refs` and module-local `BlockDepGraph` exist. | **Partial, narrow.** These are not one persisted root/layer/feature registry. AOP read sets use conservative predicate-text inspection. Trait, generic, export, runtime-provider, initializer, and unresolved-call registries are incomplete. |
-| P2 semantic queries | Frontend parse and HIR caches persist; dependency interface folds and source fingerprints fail closed. | **Partial.** No complete persistent query database, generation root, used-entry receipts, or red/green propagation across all semantic families. |
-| P3 module artifacts | Native object roots are stable; full source fingerprints gate the changed module; interface surfaces and native module capsule witnesses can preserve sibling objects. | **Partial.** Signature/use/layout edits remain closure-coarse and final-link input receipts are incomplete. Compiler executable/source identity intentionally invalidates objects after compiler changes. |
-| P4 shared bootstrap cache | Stage 2 and Stage 3 retain separate persistent native caches with lane ownership and TTL pruning. | **Not implemented as shared CAS.** There is no atomic cross-process result publication, conflict detection, pinned generation, crash recovery, lease-aware GC, or automatic Phase2→3 promotion. |
-| P5 kernel/plugin split | Provider receipt identity is represented in native cache scope; runtime/provider admission scripts exist. | **Planned.** Bootstrap still compiles the compiler closure and optional product boundaries are not a unified versioned plugin registry. |
+| **M0 — baselines and receipts** | **PORTABLE/STATIC PASS; RUNTIME/NATIVE BLOCKED.** Receipt framing and live-byte admission are repaired. No current native arm64+Intel cold Phase2/3 baseline pair exists; the latest Stage3 attempt produced no candidate. | `scripts/check/check-macos-bootstrap-receipt.shs`; `test/01_unit/app/build/macos_bootstrap_receipt_spec.spl`; `doc/06_spec/03_system/app/compiler/feature/macos_bootstrap_receipt_m0_m1_evidence.md`; `build/review/m0_m1_receipt_adversarial_audit.md`; `build/review/self_hosted_runtime_recovery.md` |
+| **M1 — target/linker correctness** | **PORTABLE/STATIC PASS; NATIVE BLOCKED.** Target, SDK, deployment, linker policy, provider bytes, archive members, and tool identity are bound and revalidated. No retained native arm64+x86_64 proof exists. | `src/app/build/targets/action_identity.spl`; `src/compiler/00.common/cache/darwin_runtime_provider_manifest.spl`; `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl`; `test/02_integration/app/macos_native_action_identity_production_spec.spl`; `build/review/m0_m1_receipt_adversarial_audit.md` |
+| **M2 — projection receipts** | **STRUCTURAL PASS; SPipe/NATIVE BLOCKED.** Ten typed registry families, private-body interface cutoff, ordinary-import/SCC separation, exact exported-interface consumers, lifecycle isolation, transitive/SCC closure, fail-closed fallback, and immutable receipts are present. The combined mutation matrix rejects 16/16 weakenings; no native incremental run is claimed. | `src/compiler/00.common/cache/reverse_reference_facts.spl`; `src/compiler/80.driver/cache/reverse_reference_receipt.spl`; `src/compiler/80.driver/driver_build/incremental.spl`; `test/02_integration/compiler/cache/reverse_reference_projection_receipt_spec.spl`; `scripts/check/check-m3-phase2-phase3-mutations.shs`; `doc/09_report/compiler/macos_m2_m3_incremental_reuse_2026-09-03.md` |
+| **M3 — Phase2→3 compatible reuse** | **STRUCTURAL PASS; SPipe/NATIVE BLOCKED.** Exact immutable M2 receipt digest, owner/root generations, key frame, consumer, canonical no-follow reads, exclusive publication, attributed per-item decisions, and hit/rejection ledger summaries are enforced. No admitted native Phase2→3 reuse receipt or clean/reused output comparison exists. | `src/compiler/00.common/cache/phase_compatibility_manifest.spl`; `src/compiler/80.driver/cache/phase_compatibility_admission.spl`; `src/compiler/80.driver/driver_aot_native_output.spl`; `test/02_integration/compiler/cache/phase2_phase3_compatibility_manifest_spec.spl`; `doc/06_spec/03_system/compiler/macos_phase2_phase3_compatibility_spec.md`; `doc/09_report/compiler/macos_m2_m3_incremental_reuse_2026-09-03.md` |
+| **M4 — native per-architecture qualification** | **PORTABLE CONTRACT PASS; NATIVE BLOCKED.** The exact eight fixtures, real work traces, live provider/archive mutation, producer-built tools, strict `Results:` parsing, and evidence manifests are structurally enforced. Neither architecture has a retained native PASS receipt. | `scripts/check/check-macos-reverse-reference-m4.shs`; `test/01_unit/scripts/macos_reverse_reference_m4_contract_test.shs`; `test/03_system/app/compiler/feature/macos_reverse_reference_m4_native_qualification_spec.spl`; `doc/06_spec/03_system/app/compiler/feature/macos_reverse_reference_m4_native_qualification_spec.md`; `build/review/independent_m4_reverse_reference_audit.md` |
+| **M5 — universal packaging and promotion** | **PORTABLE STRUCTURAL PASS; NATIVE/RELEASE BLOCKED.** The immutable-snapshot wrapper rejected 5/5 mutations, excluded undeclared files, and then completed one drift-free portable qualification from an exact three-file inventory. Independent review confirmed normalized snapshot-root execution, digest-bound evidence, and read-only sealing. No admitted native slice pair or real Apple signing/notary evidence exists. | `scripts/check/check-macos-universal-m5-hermetic.shs`; `test/01_unit/scripts/macos_m5_hermetic_snapshot_wrapper_test.shs`; `scripts/release/macos-universal-m5.shs`; `test/03_system/app/compiler/feature/macos_m5_hermetic_portable_qualification_spec.spl`; `build/review/m5-portable-hermetic-20260902T082331Z-54605/status.env`; `build/review/independent_m5_hermetic_portable_qualification_audit_2026-09-02.md` |
 
 Reverse-reference structures must remain distinct until their identities are
 harmonized:
@@ -178,6 +223,9 @@ satisfy a warm incremental performance gate.
 
 ### M5 — Universal packaging and promotion
 
+- Run focused portable qualification only through
+  `scripts/check/check-macos-universal-m5-hermetic.shs`; bind the exact source
+  inventory and reject source or snapshot drift before accepting its evidence.
 - Compose only admitted thin Phase3 candidates.
 - Validate both slices and run the universal candidate natively on both runners.
 - Sign/notarize only after verification; promotion changes an immutable pointer
@@ -185,20 +233,20 @@ satisfy a warm incremental performance gate.
 
 ## 7. Acceptance gates
 
-| Gate | Required result |
-|---|---|
-| Source/provenance | Clean immutable source revision; exact compiler, provider, SDK, target, and command hashes. |
-| Phase2 | Native executable starts, reports expected version, compiles a focused file, and passes bootstrap receiver/provider contracts. |
-| Phase3 | Produced by admitted Phase2, starts natively, has stable source/provider lineage, and passes the same focused contracts. |
-| Incremental no-op | Zero parsed/lowered/emitted modules where producer-neutral caches apply; zero link when ordered link inputs are unchanged. Until implemented, mark RED rather than relaxing it. |
-| Private-body edit | Rebuild edited module and proven MIR/codegen consumers only; clean/incremental artifacts and diagnostics normalize equal. |
-| Interface edit | Invalidate exact reverse dependents; unknown registry state triggers attributed conservative rebuild. |
-| Cross-phase reuse | Every hit has an exact compatibility receipt; wrong producer/provider/target/schema is rejected. |
-| Concurrency | No shared writable cache until atomic P4 publication exists; later tests cover identical/conflicting writers, pinned readers, crash recovery, and GC. |
-| Memory/performance | Record wall, CPU, peak RSS, retained RSS, cache counts, and critical path; no monotonic retained growth across 20 warm requests. |
-| Mach-O | Correct thin architecture and load commands; no ELF/PE object or linker flag; universal contains exactly the two admitted slices. |
-| Tools | Phase2 and Phase3 full CLI/test runner build in producer-bound caches; MCP/LSP startup and one request pass. |
-| Release | No stubs/fallback, no Rust-seed artifact substitution, native per-arch tests green, universal promoted without rebuild. |
+| Gate | Required result | Current audited status |
+|---|---|---|
+| Source/provenance | Clean immutable source revision; exact compiler, provider, SDK, target, and command hashes. | **BLOCKED:** shared worktree is dirty and no final immutable native receipt pair exists. |
+| Phase2 | Native executable starts, reports expected version, compiles a focused file, and passes bootstrap receiver/provider contracts. | **NATIVE BLOCKED:** no current arm64+x86_64 admitted pair. |
+| Phase3 | Produced by admitted Phase2, starts natively, has stable source/provider lineage, and passes the same focused contracts. | **RUNTIME/NATIVE BLOCKED:** latest Stage3 worker exited 1 without candidate/provenance. |
+| Incremental no-op | Zero parsed/lowered/emitted modules where producer-neutral caches apply; zero link when ordered link inputs are unchanged. Until implemented, mark RED rather than relaxing it. | **RED / NOT PROVEN:** no retained native production receipt. |
+| Private-body edit | Rebuild edited module and proven MIR/codegen consumers only; clean/incremental artifacts and diagnostics normalize equal. | **STRUCTURAL; NATIVE BLOCKED.** |
+| Interface edit | Invalidate exact reverse dependents; unknown registry state triggers attributed conservative rebuild. | **STRUCTURAL PASS; NATIVE BLOCKED.** |
+| Cross-phase reuse | Every hit has an exact compatibility receipt; wrong producer/provider/target/schema is rejected. | **STRUCTURAL PASS; RUNTIME/NATIVE BLOCKED.** |
+| Concurrency | No shared writable cache until atomic P4 publication exists; later tests cover identical/conflicting writers, pinned readers, crash recovery, and GC. | **SOURCE COMPLETE / NATIVE PROCESS MATRIX PENDING:** P4 uses exclusive no-follow immutable generation files, fsync-before-rename pointer publication, generation leases, dead-owner recovery, and bounded deterministic GC. Identical retries are idempotent; conflicting parents fail closed. Interpreter acceptance is 9/9 with 5 mutation classes; existing native thread/process fixtures cover conflicting writers, pinned readers, GC, and dead-process lease recovery. A new all-process identical/conflicting writer fixture remains pending because the admitted compiler rejected its source during discovery. |
+| Memory/performance | Record wall, CPU, peak RSS, retained RSS, cache counts, critical path, and request latency. Require an admitted architecture-matched baseline; maximum steady RSS must be `<=110%` of baseline and maximum growth across 20 requests must be `<=10%` of baseline RSS. | **BLOCKED:** no qualifying admitted native baseline/measurement pair exists. Missing baseline fails closed; no numeric value selection remains pending. |
+| Mach-O | Correct thin architecture and load commands; no ELF/PE object or linker flag; universal contains exactly the two admitted slices. | **STRUCTURAL; NATIVE BLOCKED.** |
+| Tools | Phase2 and Phase3 full CLI/test runner build in producer-bound caches; MCP/LSP startup and one request pass. | **NATIVE BLOCKED:** M4 has no native PASS row. |
+| Release | No stubs/fallback, no Rust-seed artifact substitution, native per-arch tests green, universal promoted without rebuild. | **BLOCKED / NOT READY.** |
 
 ## 8. Sidecar and merge ownership
 
@@ -224,6 +272,7 @@ done marks based only on source assertions or Rust seed artifacts.
 
 ## 9. Documentation links
 
+- `doc/03_plan/compiler/perf/persistent_package_module_index_compile_optimization_plan_2026-09-02.md`
 - `doc/03_plan/compiler/bootstrap/stage3_native_cache_incrementality_2026-08-07.md`
 - `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`
 - `doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md`

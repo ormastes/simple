@@ -1,0 +1,145 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo_root/scripts/bootstrap/bootstrap-deploy-transaction.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-deploy-transaction.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+fail() { echo "bootstrap deploy transaction test: FAIL — $1" >&2; exit 1; }
+expect_reject() { if "$@" >/dev/null 2>&1; then fail "mutation accepted: $*"; fi; }
+payload() { printf '%s\n' "$2" >"$1"; chmod "${3:-755}" "$1"; }
+
+release_parent_real="$scratch/private-var"; release_parent_alias="$scratch/var"; release="$release_parent_alias/release"; platform=test-platform; deploy="$release/$platform"; candidates="$scratch/candidates"
+mkdir -p "$release_parent_real/release" "$candidates"
+ln -s "$release_parent_real" "$release_parent_alias"
+bootstrap_deploy_tx_release_root=$(bootstrap_deploy_tx_canonical_dir "$release")
+bootstrap_deploy_tx_platform=$platform
+[ "$(bootstrap_deploy_tx_canonical_destination "$deploy/simple")" = "$bootstrap_deploy_tx_release_root/$platform/simple" ] || fail nonexistent_generation_parent
+mkdir "$release_parent_real/release/$platform"
+payload "$deploy/simple" old-simple
+for pair in 'simple:new-simple' 'simple_mcp_server:new-mcp' 'simple_lsp_mcp_server:new-lsp'; do
+  payload "$candidates/${pair%%:*}" "${pair#*:}"
+done
+for authority in stage4-provenance kernel-policy phase7 phase7-candidates performance-baseline performance-measurement; do
+  payload "$candidates/$authority" "$authority-authority" 644
+done
+
+write_metadata() {
+  stage4=$1; stage4_sha=$(bootstrap_deploy_tx_hash_file "$stage4")
+  entries="$bootstrap_deploy_tx_dir/receipt-entries.env"; bootstrap_deploy_tx_write_receipt_entries "$entries"
+  entries_sha=$(bootstrap_deploy_tx_hash_file "$entries")
+  final="$bootstrap_deploy_tx_final_dir"
+  cat >"$bootstrap_deploy_tx_dir/bootstrap-generation.env" <<EOF
+schema=bootstrap-deploy-generation-v1
+generation_id=$bootstrap_deploy_tx_id
+generation_kind=provenance-qualified
+transaction_entries_path=$final/receipt-entries.env
+transaction_entries_sha256=$entries_sha
+EOF
+  generation_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_dir/bootstrap-generation.env")
+  cat >"$bootstrap_deploy_tx_dir/bootstrap-deploy-receipt.env" <<EOF
+schema=bootstrap-deploy-receipt-v3
+platform=$platform
+deploy_platform=$platform
+generation_id=$bootstrap_deploy_tx_id
+generation_path=$final
+generation_manifest_path=$final/bootstrap-generation.env
+generation_manifest_sha256=$generation_sha
+current_pointer_target=$bootstrap_deploy_tx_pointer_target
+deployment_status=pass
+stage4_candidate_path=$final/simple
+stage4_candidate_sha256=$stage4_sha
+stage4_provenance_path=$final/authority.stage4-provenance.env
+stage4_provenance_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/stage4-provenance")
+stage3_current_acceptance_status=verified
+stage3_current_acceptance_receipt=$final/authority.stage3-acceptance.env
+stage3_current_acceptance_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/stage3-acceptance")
+policy_authority_path=$final/authority.kernel-policy.sdn
+policy_authority_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/kernel-policy")
+phase7_receipt_path=$final/authority.phase7.env
+phase7_receipt_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/phase7")
+phase7_candidate_manifest_path=$final/authority.phase7-candidates.env
+phase7_candidate_manifest_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/phase7-candidates")
+performance_baseline_receipt_path=$final/authority.performance-baseline.env
+performance_baseline_receipt_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/performance-baseline")
+performance_measurement_receipt_path=$final/authority.performance-measurement.env
+performance_measurement_receipt_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/performance-measurement")
+kernel_k1_policy=llvm-cranelift
+simple_abi_policy=v1
+plugin_manifest_policy=simple-sdn
+coverage_cutover_policy=atomic-apk-only
+coverage_implementation=apk-only
+performance_threshold_mode=baseline-relative-10-percent
+performance_baseline_scope=admitted-per-architecture-receipt
+performance_steady_rss_percent=110
+performance_growth_percent=10
+performance_warm_request_count=20
+previous_pointer_target=$bootstrap_deploy_tx_previous_target
+previous_generation_id=$bootstrap_deploy_tx_previous_generation
+previous_generation_path=$bootstrap_deploy_tx_previous_path
+previous_generation_manifest_path=$bootstrap_deploy_tx_previous_manifest
+previous_generation_manifest_sha256=$bootstrap_deploy_tx_previous_manifest_sha256
+EOF
+}
+
+begin_generation() {
+  bootstrap_deploy_tx_begin "$release" "$platform" "$1"
+  stage4_sha=$(bootstrap_deploy_tx_hash_file "$candidates/simple")
+  printf 'schema=simple-bootstrap-stage3-current-acceptance-v1\nstatus=verified\nstage4_candidate_sha256=%s\n' \
+    "$stage4_sha" >"$candidates/stage3-acceptance"
+  printf 'schema=simple-kernel-phase7-qualification-v2\nstatus=PASS\n' >"$candidates/phase7"
+  expect_reject bootstrap_deploy_tx_add simple "$candidates/simple" "$deploy/not-simple" 755 "$stage4_sha"
+  for name in simple simple_mcp_server simple_lsp_mcp_server; do
+    bootstrap_deploy_tx_add "$name" "$candidates/$name" "$deploy/$name" 755 "$(bootstrap_deploy_tx_hash_file "$candidates/$name")"
+  done
+  for spec in \
+    'authority.stage4-provenance.env:stage4-provenance' \
+    'authority.stage3-acceptance.env:stage3-acceptance' \
+    'authority.kernel-policy.sdn:kernel-policy' \
+    'authority.phase7.env:phase7' \
+    'authority.phase7-candidates.env:phase7-candidates' \
+    'authority.performance-baseline.env:performance-baseline' \
+    'authority.performance-measurement.env:performance-measurement'; do
+    name=${spec%%:*}; source=${spec#*:}
+    bootstrap_deploy_tx_add "$name" "$candidates/$source" "$deploy/$name" 644 \
+      "$(bootstrap_deploy_tx_hash_file "$candidates/$source")"
+  done
+  write_metadata "$candidates/simple"
+}
+
+begin_generation first; bootstrap_deploy_tx_seal; bootstrap_deploy_tx_apply; bootstrap_deploy_tx_commit
+[ "$(cat "$deploy/simple")" = new-simple ] || fail atomic_pointer_publication
+
+payload "$candidates/simple" newer-simple
+begin_generation extra-member; payload "$bootstrap_deploy_tx_dir/unlisted" drift
+expect_reject bootstrap_deploy_tx_seal; rm "$bootstrap_deploy_tx_dir/unlisted"; bootstrap_deploy_tx_abort
+
+begin_generation authority-drift
+printf 'stage4_candidate_sha256=deadbeef\n' >>"$bootstrap_deploy_tx_dir/bootstrap-deploy-receipt.env"
+expect_reject bootstrap_deploy_tx_seal; bootstrap_deploy_tx_abort
+
+begin_generation second; bootstrap_deploy_tx_seal; bootstrap_deploy_tx_apply; bootstrap_deploy_tx_commit
+
+payload "$candidates/simple" interrupted-simple
+begin_generation interrupted; bootstrap_deploy_tx_seal
+bootstrap_deploy_tx_active=0
+bootstrap_deploy_tx_recover "$release" "$platform"
+[ "${bootstrap_deploy_tx_recovery_current}" = ".bootstrap-deploy-generations/$platform/second" ] || fail sealed_crash_changed_pointer
+
+payload "$candidates/simple" recovered-simple
+begin_generation recovered; bootstrap_deploy_tx_seal; bootstrap_deploy_tx_apply
+bootstrap_deploy_tx_active=0
+bootstrap_deploy_tx_recover "$release" "$platform"
+[ "$(cat "$deploy/simple")" = recovered-simple ] || fail published_crash_not_recovered
+recovered_rollback="$release/.bootstrap-deploy-control/rollback-recovered.env"
+bootstrap_deploy_tx_rollback_generation "$release" "$platform" recovered "$recovered_rollback"
+[ "$(cat "$deploy/simple")" = newer-simple ] || fail recovered_rollback_pointer
+
+rollback_receipt="$release/.bootstrap-deploy-control/rollback-second.env"
+bootstrap_deploy_tx_rollback_generation "$release" "$platform" second "$rollback_receipt"
+[ "$(cat "$deploy/simple")" = new-simple ] || fail rollback_pointer
+[ "$(bootstrap_deploy_tx_value "$rollback_receipt" rollback_status)" = pass ] || fail rollback_receipt
+expect_reject bootstrap_deploy_tx_rollback_generation "$release" "$platform" second "$release/stale.env"
+rg -q 'os\.fsync|sync -f' "$repo_root/scripts/bootstrap/bootstrap-deploy-transaction.shs" || fail path_durability
+! rg -q '^[[:space:]]*sync[[:space:]]*$' "$repo_root/scripts/bootstrap/bootstrap-deploy-transaction.shs" || fail global_sync
+echo 'bootstrap deploy transaction test: PASS — generation atomicity, crash recovery, rollback, and mutation gates'

@@ -1,4 +1,8 @@
 # bootstrap_main selected the core-C runtime for compiler-provider imports
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. scripts/check/check-bootstrap-main-provider-symbols.shs INVE
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Evidence
 
@@ -25,3 +29,4 @@ Production Stage 4 remains tools-only
 and compiles zero compiler sources; this Rust provider selection is diagnostic
 bootstrap evidence, not an admitted pure-Simple Stage-3 receipt or production
 PASS.
+

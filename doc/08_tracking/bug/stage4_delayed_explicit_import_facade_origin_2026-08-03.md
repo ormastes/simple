@@ -1,4 +1,8 @@
 # Stage 4 delayed explicit-import facade origin loses precedence
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status and claim
 
@@ -61,3 +65,4 @@ payload as false. An attempted Option-presence assertion did not change the
 Rust-seed interpreter verdict and was reverted so this fix does not absorb an
 unresolved adjacent test-oracle issue. The three-cycle cap is exhausted; no
 broader suite PASS or Stage 4 build is claimed by this isolated lane.
+

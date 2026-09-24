@@ -11,6 +11,22 @@ use crate::hir::lower::error::LowerResult;
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
+fn hir_expr_definitely_returns(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Return(_)) => true,
+            Some(HirStmt::Expr(inner)) => hir_expr_definitely_returns(inner),
+            _ => false,
+        },
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => hir_expr_definitely_returns(then_branch) && hir_expr_definitely_returns(else_branch),
+        _ => false,
+    }
+}
+
 impl Lowerer {
     pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
@@ -39,7 +55,8 @@ impl Lowerer {
 
     /// Lower an if expression to HIR
     ///
-    /// Result type is taken from the then branch.
+    /// Result type follows the then branch, except an empty array literal
+    /// acquires its element type from the sibling array branch.
     /// Else branch is optional.
     pub(super) fn lower_if(
         &mut self,
@@ -67,14 +84,36 @@ impl Lowerer {
             return self.lower_if_let_expr(pattern, condition, then_branch, else_branch, ctx);
         }
         let cond_hir = Box::new(self.lower_condition(condition, ctx)?);
-        let then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
-        let else_hir = if let Some(eb) = else_branch {
+        let mut then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
+        let mut else_hir = if let Some(eb) = else_branch {
             Some(Box::new(self.lower_expr(eb, ctx)?))
         } else {
             None
         };
 
-        let ty = then_hir.ty;
+        let mut ty = then_hir.ty;
+        if let Some(other) = else_hir.as_mut() {
+            // An empty literal's configured default (normally i32) is not
+            // evidence about the sibling's elements. Keeping it here narrows
+            // struct keys to i32 when a conditional array is later iterated.
+            // Restrict contextualization to actual empty literals: a populated
+            // or explicitly typed array must never be silently reinterpreted.
+            let then_empty = matches!(then_branch, Expr::Array(items) if items.is_empty());
+            let else_empty = matches!(else_branch, Some(Expr::Array(items)) if items.is_empty());
+            if then_empty != else_empty {
+                let sibling_ty = if then_empty { other.ty } else { then_hir.ty };
+                if let Some(HirType::Array { element, .. }) = self.module.types.get(sibling_ty) {
+                    let element = *element;
+                    let empty_ty = self.module.types.register(HirType::Array { element, size: Some(0) });
+                    if then_empty {
+                        then_hir.ty = empty_ty;
+                    } else {
+                        other.ty = empty_ty;
+                    }
+                    ty = self.module.types.register(HirType::Array { element, size: None });
+                }
+            }
+        }
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -190,6 +229,19 @@ impl Lowerer {
         capture_all: bool,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.lower_lambda_with_param_types(params, body, capture_all, ctx, &[])
+    }
+
+    /// Unannotated callback parameters receive the collection element types.
+    /// Explicit annotations take precedence over the contextual types.
+    pub(super) fn lower_lambda_with_param_types(
+        &mut self,
+        params: &[ast::LambdaParam],
+        body: &Expr,
+        capture_all: bool,
+        ctx: &mut FunctionContext,
+        inferred_param_types: &[TypeId],
+    ) -> LowerResult<HirExpr> {
         // Track captured variables from outer scope
         let captures: Vec<usize> = if capture_all {
             // Capture all immutable variables from outer scope
@@ -208,11 +260,12 @@ impl Lowerer {
         // Collect parameter names and types
         let param_info: Vec<(String, TypeId)> = params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(index, p)| {
                 let ty = if let Some(ref t) = p.ty {
                     self.resolve_type(t).unwrap_or(TypeId::I64)
                 } else {
-                    TypeId::I64 // Default to I64 for untyped params
+                    inferred_param_types.get(index).copied().unwrap_or(TypeId::I64)
                 };
                 (p.name.clone(), ty)
             })
@@ -444,6 +497,12 @@ impl Lowerer {
 
         // Recursively build the else branch from remaining arms
         let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
+        // A return-only arm does not contribute a value to the match join.
+        // Using its return expression type as the whole match type degraded
+        // `Err(_): return Err(...); Ok(value): value` to ANY.  Arithmetic then
+        // re-boxed the otherwise raw i64 before a direct i64 call (6 -> 48).
+        let then_diverges = hir_expr_definitely_returns(&then_branch);
+        let result_ty = if then_diverges { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -451,7 +510,7 @@ impl Lowerer {
                 then_branch: Box::new(then_branch),
                 else_branch: Some(Box::new(else_branch)),
             },
-            ty: then_ty,
+            ty: result_ty,
         })
     }
 
@@ -674,8 +733,7 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
-                // All enums use hashed variant name discriminants consistently
+                // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -691,8 +749,15 @@ impl Lowerer {
 
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref.clone(), expected_val],
+                        name: "rt_enum_check_variant".to_string(),
+                        args: vec![
+                            subject_ref.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                ty: TypeId::I64,
+                            },
+                            expected_val,
+                        ],
                     },
                     ty: TypeId::BOOL,
                 };
@@ -1007,7 +1072,9 @@ impl Lowerer {
                 }
                 acc
             }
-            Pattern::Enum { variant, payload, .. } => {
+            Pattern::Enum {
+                name, variant, payload, ..
+            } => {
                 // A struct/class spelling (`Point(x, y)`) also arrives as
                 // Pattern::Enum. Emitting a discriminant check for it would
                 // read an object pointer's enum header and never match — see
@@ -1029,9 +1096,13 @@ impl Lowerer {
                 };
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
+                        name: "rt_enum_check_variant".to_string(),
                         args: vec![
                             slot.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_pattern(name, variant)),
+                                ty: TypeId::I64,
+                            },
                             HirExpr {
                                 kind: HirExprKind::Integer(expected_disc),
                                 ty: TypeId::I64,
@@ -1499,6 +1570,36 @@ impl Lowerer {
                     .iter()
                     .any(|(variant, payload)| variant == name && payload.is_none())
             })
+    }
+
+    /// Stable runtime identity for a statically known enum. Zero keeps the
+    /// legacy discriminant-only lane for erased or unresolved user values.
+    pub(crate) fn enum_runtime_id_for_type(&self, subject_ty: TypeId) -> i64 {
+        match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { name, .. }) => i64::from(crate::codegen::shared::enum_runtime_type_id(name)),
+            _ => 0,
+        }
+    }
+
+    fn enum_runtime_id_for_pattern(&self, enum_name: &str, variant_name: &str) -> i64 {
+        if !enum_name.is_empty() && enum_name != "_" {
+            return i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name));
+        }
+
+        let mut owner: Option<&str> = None;
+        for (_, ty) in self.module.types.iter() {
+            let HirType::Enum { name, variants, .. } = ty else {
+                continue;
+            };
+            if !variants.iter().any(|(variant, _)| variant == variant_name) {
+                continue;
+            }
+            if owner.is_some_and(|prior| prior != name) {
+                return 0;
+            }
+            owner = Some(name);
+        }
+        owner.map_or(0, |name| i64::from(crate::codegen::shared::enum_runtime_type_id(name)))
     }
 
     /// Is a bare `case <name>:` arm provably NOT an intended binding?
@@ -2059,7 +2160,13 @@ impl Lowerer {
             let inner_hir = self.lower_expr(inner, ctx)?;
             return Ok(HirExpr {
                 kind: HirExprKind::BuiltinCall {
-                    name: "rt_is_some".to_string(),
+                    // `rt_is_present`, NOT `rt_is_some`: `.?` is absent for an
+                    // empty array/dict/string too, exactly as the interpreter's
+                    // `Expr::ExistsCheck` arm decides it. `rt_is_some` made
+                    // `while arr.?:` loop forever on a drained array under
+                    // native codegen —
+                    // doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+                    name: "rt_is_present".to_string(),
                     args: vec![inner_hir],
                 },
                 ty: TypeId::BOOL,
@@ -2109,7 +2216,9 @@ impl Lowerer {
         // CANONICAL SEMANTICS (decided, not silently picked): `if x:` on an
         // optional/reference-typed `x` means PRESENCE — "x is not nil" — the
         // same meaning `x.?` already carries in condition position two dozen
-        // lines above, and the same predicate (`rt_is_some`) implements both.
+        // lines above. NOTE: they are no longer the SAME predicate -- a bare `.?`
+        // uses `rt_is_present` (nil/None or an empty array/dict/string is absent)
+        // while this tagged-slot wrap keeps `rt_is_some` (not the nil sentinel).
         // This deliberately does NOT adopt `RuntimeValue::truthy`'s
         // emptiness-aware rule; see the residual note below.
         //
@@ -2159,8 +2268,8 @@ impl Lowerer {
     /// whole browser-engine module to the interpreter.
     ///
     /// Recognizes exactly the shape `lower_exists_check` emits —
-    /// `LetIn { value, body: If { condition: rt_is_some(Local(idx)), .. } }` —
-    /// and replaces it with `rt_is_some(value)`, dropping the now-unused
+    /// `LetIn { value, body: If { condition: rt_is_present(Local(idx)), .. } }` —
+    /// and replaces it with `rt_is_present(value)`, dropping the now-unused
     /// binding. Recurses through `and`/`or`/`not` so
     /// `fn f() -> bool: a.? and b.?` is covered too.
     pub(crate) fn coerce_exists_value_to_bool_in_place(expr: &mut HirExpr) {
@@ -2196,7 +2305,7 @@ impl Lowerer {
                     HirExprKind::If { condition, .. } => matches!(
                         &condition.kind,
                         HirExprKind::BuiltinCall { name, args }
-                            if name == "rt_is_some"
+                            if name == "rt_is_present"
                                 && matches!(
                                     args.first().map(|a| &a.kind),
                                     Some(HirExprKind::Local(idx)) if idx == local_idx
@@ -2213,7 +2322,8 @@ impl Lowerer {
                         },
                     );
                     expr.kind = HirExprKind::BuiltinCall {
-                        name: "rt_is_some".to_string(),
+                        // Same presence rule as `lower_condition` — see there.
+                        name: "rt_is_present".to_string(),
                         args: vec![subject],
                     };
                     expr.ty = TypeId::BOOL;
@@ -2283,7 +2393,7 @@ impl Lowerer {
     /// Non-bool return types are unaffected and lower normally, so
     /// `fn f() -> T?: x.?` still yields `T?` per spec.
     pub(crate) fn lower_bool_return_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
-        if ctx.return_type == TypeId::BOOL {
+        if ctx.return_type == TypeId::BOOL && matches!(expr, Expr::ExistsCheck(_)) {
             return self.lower_condition(expr, ctx);
         }
         self.lower_expr(expr, ctx)
@@ -2340,7 +2450,10 @@ impl Lowerer {
 
         let condition = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_is_some".to_string(),
+                // Presence, not mere non-nil: an empty array/dict/string makes
+                // `.?` yield nil in value position too, matching the
+                // interpreter. See `lower_condition`.
+                name: "rt_is_present".to_string(),
                 args: vec![HirExpr {
                     kind: HirExprKind::Local(subject_idx),
                     ty: subject_ty,
@@ -2492,9 +2605,13 @@ impl Lowerer {
                 (hasher.finish() & 0xFFFF_FFFF) as i64
             };
             builtin_check(
-                "rt_enum_check_discriminant",
+                "rt_enum_check_variant",
                 vec![
                     subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(RESULT_ENUM_ID),
+                        ty: TypeId::I64,
+                    },
                     HirExpr {
                         kind: HirExprKind::Integer(err_disc),
                         ty: TypeId::I64,
@@ -2609,19 +2726,19 @@ impl Lowerer {
     /// above (and as `create_enum_value` at construction) — the proven-correct
     /// path, since a hand-written `case Err(e)` always matched.
     ///
-    /// SCOPE: `Result` ONLY. The `"Err"` discriminant above is computed from a
-    /// string literal UNCONDITIONALLY, with no branch on the subject's type, so
-    /// for an `Option` the test is false for BOTH `Some` and `None`: `None?`
-    /// neither early-returns nor yields a value that matches either variant. The
-    /// "mirrors the pure-Simple `lower_try_expr`" claim above therefore holds for
-    /// `Result` only — that lowering has a dedicated `case HirTypeKind.Optional`
-    /// arm (presence via `rt_enum_discriminant`/`rt_is_some`, both the flat-
-    /// nullable and boxed physical reps, `None`-handle promotion before the early
-    /// return) which this function has no equivalent of. Tracked in
-    /// `doc/08_tracking/bug/try_operator_on_option_no_early_return_2026-08-08.md`.
+    /// `Option`/`T?` takes a separate type-directed path: `rt_is_none` recognizes
+    /// both the flat nil sentinel and the canonical boxed `None`, the absent arm
+    /// returns that value immediately, and `rt_unwrap_or_self` yields either a
+    /// boxed `Some` payload or the already-flat present value. Force unwrap uses
+    /// the same payload normalization but deliberately does not propagate.
     /// Guard for the Result half (the spec DSL cannot reach this lowering):
     /// `scripts/check/check-try-operator-error-propagation.shs`.
-    pub(super) fn lower_try(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    pub(super) fn lower_try(
+        &mut self,
+        inner: &Expr,
+        ctx: &mut FunctionContext,
+        propagate_absence: bool,
+    ) -> LowerResult<HirExpr> {
         // Lower the inner expression once and bind it to a temp.
         let inner_hir = self.lower_expr(inner, ctx)?;
         let subject_ty = inner_hir.ty;
@@ -2660,10 +2777,38 @@ impl Lowerer {
                     // would make the next consumer read `42 << 3` as a raw int.
                     // `ANY` is what every other tagged-value producer reports.
                     let _ = pointee;
-                    return Ok(HirExpr {
-                        kind: inner_hir.kind,
-                        ty: TypeId::ANY,
-                    });
+                    // Identity on the VALUE is not the same as returning the
+                    // word unchanged. A `T?` STATIC type does not guarantee a
+                    // bare runtime word: `Some(x)` lowers to `BuiltinCall
+                    // "Some"` (calls.rs:638) and boxes a real Option enum, so
+                    // `val b: text? = Some("world"); b!` handed the Option
+                    // WRAPPER to the next consumer — `b!.len()` answered -1 and
+                    // `"[" + b! + "]"` answered "". That is a silent wrong
+                    // answer, and it is what made every MCP CLI tool report
+                    // "centralized child storage environment is unavailable":
+                    // `_optional_environment` (storage_roots/environment_owner.spl:13)
+                    // returns `Some(value)` into `text?`, and the resolver's
+                    // `environment.local_app_data! == ""` then compared the
+                    // wrapper, not the path.
+                    // `rt_unwrap_or_self` is precisely the normalizer for this:
+                    // it is the identity on a bare/flat word and on every
+                    // non-Option enum, and yields the payload only for the
+                    // reserved OPTION_ENUM_ID (runtime/src/value/objects.rs:326).
+                    // So a genuinely-flat nullable keeps its previous behaviour
+                    // bit for bit, and a boxed `Some(x)` is flattened to `x`.
+                    let payload_ty = TypeId::ANY;
+                    let present = HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![inner_hir.clone()],
+                        },
+                        ty: payload_ty,
+                    };
+                    return if propagate_absence {
+                        Ok(self.lower_option_try_branch(inner_hir, subject_ty, payload_ty, ctx))
+                    } else {
+                        Ok(present)
+                    };
                 }
 
                 // Same defect class, class/struct pointee (case B of the
@@ -2697,10 +2842,27 @@ impl Lowerer {
                     self.module.types.get(pointee),
                     Some(HirType::Struct { .. }) | Some(HirType::Enum { .. })
                 ) {
-                    return Ok(HirExpr {
-                        kind: inner_hir.kind,
+                    // Same `Some(x)`-into-`T?` boxing hazard as the scalar case
+                    // above, and it is on the same incident path one line down:
+                    // `tooling_paths.spl` caches `_tooling_roots = Some(roots)`
+                    // (a `StorageRoots?`) and then returns `Ok(_tooling_roots!)`,
+                    // so the second call in a request handed the Option wrapper
+                    // out typed as `StorageRoots`. `rt_unwrap_or_self` leaves a
+                    // real object reference — and every non-Option user enum —
+                    // untouched, so the class/enum identity this branch exists
+                    // to preserve is preserved.
+                    let present = HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![inner_hir.clone()],
+                        },
                         ty: pointee,
-                    });
+                    };
+                    return if propagate_absence {
+                        Ok(self.lower_option_try_branch(inner_hir, subject_ty, pointee, ctx))
+                    } else {
+                        Ok(present)
+                    };
                 }
             }
         }
@@ -2725,9 +2887,13 @@ impl Lowerer {
 
         let is_err = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_enum_check_discriminant".to_string(),
+                name: "rt_enum_check_variant".to_string(),
                 args: vec![
                     subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                        ty: TypeId::I64,
+                    },
                     HirExpr {
                         kind: HirExprKind::Integer(err_disc),
                         ty: TypeId::I64,
@@ -2770,6 +2936,57 @@ impl Lowerer {
             },
             ty: payload_ty,
         })
+    }
+
+    fn lower_option_try_branch(
+        &mut self,
+        value: HirExpr,
+        subject_ty: TypeId,
+        payload_ty: TypeId,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$try_option_subject".to_string(), subject_ty, Mutability::Immutable);
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+        let is_none = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_none".to_string(),
+                args: vec![subject_ref.clone()],
+            },
+            ty: TypeId::BOOL,
+        };
+        let early_return = HirExpr {
+            kind: HirExprKind::Block(vec![HirStmt::Return(Some(subject_ref))]),
+            ty: payload_ty,
+        };
+        let present = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_unwrap_or_self".to_string(),
+                args: vec![HirExpr {
+                    kind: HirExprKind::Local(subject_idx),
+                    ty: subject_ty,
+                }],
+            },
+            ty: payload_ty,
+        };
+        HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(value),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(is_none),
+                        then_branch: Box::new(early_return),
+                        else_branch: Some(Box::new(present)),
+                    },
+                    ty: payload_ty,
+                }),
+            },
+            ty: payload_ty,
+        }
     }
 
     /// Lower a range expression (start..end or start..=end) to HIR

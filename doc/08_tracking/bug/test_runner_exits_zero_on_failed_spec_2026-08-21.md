@@ -1,4 +1,8 @@
 # `bin/simple test` exits 0 while its own verdict reports failed=1
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (observation only — not root-caused here)
 **Found:** 2026-08-21
@@ -87,3 +91,4 @@ Reproduce spec: `test/01_unit/app/test_daemon/spec_verdict_invariant_spec.spl`
 
 Same fail-open family as `SdnTable::update_row`'s discarded bool — see
 `doc/08_tracking/bug/test_db_update_row_keys_nonexistent_id_column_2026-08-21.md`.
+

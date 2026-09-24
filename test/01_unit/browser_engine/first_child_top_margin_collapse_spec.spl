@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+Purpose: Pin the LEADING half of CSS 2.2 8.3.1 in the pure-Simple web layout
+renderer -- a block's top margin collapses with its FIRST in-flow child's top
+margin when no top border and no top padding separate them, so the margin
+leaves the block instead of being counted inside its height. The trailing half
+is pinned by `li_last_child_margin_collapse_spec.spl`; this file is its mirror.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (headless --headless=new, 900x20000, `body{margin:0;font:16px/1.5
+sans-serif}`, `*{box-sizing:border-box}`), heights in px, transcribed from
+doc/08_tracking/bug/web_first_child_top_margin_never_collapses_through_2026-09-13.md:
+
+| fixture                                                  | Chrome | Simple before |
+|----------------------------------------------------------|--------|---------------|
+| `<div style="padding-bottom:10px"><p>t</p></div>`          | 50     | 66            |
+| `<div style="border-bottom:2px solid #000"><p>t</p></div>` | 42     | 58            |
+| `<div><p>t</p></div>`                                      | 24     | 40            |
+| `<div style="height:70px"><p>t</p></div>`                  | 70     | 70 (ok)       |
+| `<div style="overflow:hidden"><p>t</p></div>`              | 56     | 56 (ok, BFC)  |
+
+Deliberately NOT asserted (still open, recorded as such):
+  - a top margin escaping a FIXED-HEIGHT block. CSS lets it; the
+    implementation's exclusion set is deliberately the same conservative one
+    the trailing half uses, so a height still closes the top edge here.
+  - `<strong>` WIDTH: bold-face advances are never selected.
+    doc/08_tracking/bug/web_inline_bold_face_advances_never_selected_2026-09-12.md
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-MARGIN-COLLAPSE-003 — a block with no top padding, border, or height collapses its first in-flow child's top margin through itself.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+describe "first-child top margin collapses through its block":
+    it "AC-1: a plain wrapper is Chrome's 24 px, not the 40 px it measured before":
+        step("a div whose only child is a <p> with the UA 16 px top margin")
+        expect(probe(
+                "<div id=\"x\"><p id=\"q\">t</p></div>", "x", "h")
+            ).to_equal("24")
+
+    it "AC-2: bottom padding does not hold the LEADING margin in":
+        step("Chrome measures 50: 24 content + 10 padding + the retained 16 bottom")
+        expect(probe(
+                "<div id=\"x\" style=\"padding-bottom:10px\"><p id=\"q\">t</p></div>",
+                "x", "h")).to_equal("50")
+
+    it "AC-3: a bottom border does not hold the LEADING margin in either":
+        step("Chrome measures 42: 24 content + 2 border + the retained 16 bottom")
+        expect(probe(
+                "<div id=\"x\" style=\"border-bottom:2px solid #000\"><p id=\"q\">t</p></div>",
+                "x", "h")).to_equal("42")
+
+    it "AC-4: top padding establishes a top edge and keeps the margin inside":
+        step("10 px of top padding blocks the collapse: 10 + 16 + 24 = 50")
+        expect(probe(
+                "<div id=\"x\" style=\"padding-top:10px\"><p id=\"q\">t</p></div>",
+                "x", "h")).to_equal("50")
+
+    it "AC-5: overflow:hidden establishes a BFC and keeps both margins inside":
+        step("Chrome measures 56 = 16 + 24 + 16")
+        expect(probe(
+                "<div id=\"x\" style=\"overflow:hidden\"><p id=\"q\">t</p></div>",
+                "x", "h")).to_equal("56")
+
+    it "AC-6: an explicit height still declares its own box":
+        step("Chrome measures 70")
+        expect(probe(
+                "<div id=\"x\" style=\"height:70px\"><p id=\"q\">t</p></div>",
+                "x", "h")).to_equal("70")
+
+    it "AC-7: the escaped margin still separates the block from what precedes it":
+        step("the <p> keeps Chrome's y=16: the margin left the box, not the page")
+        expect(probe(
+                "<div id=\"x\"><p id=\"q\">t</p></div>", "q", "y")).to_equal("16")
+
+    it "AC-8: the margin collapses through TWO nested wrappers, not once per level":
+        step("nesting adds no height: the single 16 px margin escapes both")
+        expect(probe(
+                "<div id=\"x\"><div id=\"w\"><p id=\"q\">t</p></div></div>",
+                "x", "h")).to_equal("24")
+
+    it "AC-9: a list item collapses too — its ::marker box must not count as the first child":
+        step("the renderer synthesises ::marker as every <li>'s FIRST node; if the block loop counted it, the real first child could never be the one whose margin escapes. Chrome measures this <li> at 24 px")
+        expect(probe(
+            "<ul style=\"margin:0;padding:0\"><li id=\"x\"><p id=\"q\">t</p></li></ul>",
+            "x", "h")).to_equal("24")
+
+    it "AC-10: an out-of-flow first child does not donate its margin to the block":
+        step("an absolutely positioned child is not in flow, so the <p> after it is the first in-flow child and the box is still Chrome's 24 px")
+        expect(probe(
+            "<div id=\"x\"><span id=\"z\" style=\"position:absolute;margin-top:80px\">a</span>" +
+            "<p id=\"q\">t</p></div>", "x", "h")).to_equal("24")

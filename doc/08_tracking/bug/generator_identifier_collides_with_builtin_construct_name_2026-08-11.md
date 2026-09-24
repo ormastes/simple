@@ -1,4 +1,9 @@
 # `generator` identifier collides with a builtin/reserved construct name
+## Closed 2026-09-16 — Status FIXED 2026-08-17 in builtins.rs with regression coverage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-17 (fix in source; needs a rebuilt seed to observe).
 
@@ -58,3 +63,4 @@ either.
   `use std.generator.{...}` binding over the reserved construct.
 - Fix at the resolution/parser layer — do not work around it by renaming the
   stdlib module, since that would just hide a real name-resolution defect.
+

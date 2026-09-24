@@ -1,0 +1,59 @@
+use std.spec.*
+use compiler.loader.parser_structural_package_owner_v1.*
+
+describe "sealed parser structural Package 5 owner V1":
+    it "owns scalar source session batch commit and rejects replay":
+        val owner = ParserStructuralPackageOwnerV1.create()
+        val source = parser_structural_package_source_create_v1(owner, 1u64,
+            [10u8, 1u8, 34u8, 255u8]).unwrap()
+        val session = parser_structural_package_scalar_session_v1(owner, source, 10u8, 34u8).unwrap()
+        val batch = parser_structural_package_scalar_batch_v1(owner, session, 0u64, 4u64).unwrap()
+        val result = parser_structural_package_commit_v1(owner, batch).unwrap()
+        expect(result.positions).to_equal([0u64, 2u64])
+        expect(result.executed_provider).to_equal(false)
+        expect(parser_structural_package_commit_v1(owner, batch)).to_equal(
+            Err(ParserStructuralPackageErrorV1.UnknownOrStale))
+
+    it "cancels pending stages and shuts down in dependency order":
+        val owner = ParserStructuralPackageOwnerV1.create()
+        val source = parser_structural_package_source_create_v1(owner, 2u64, [10u8]).unwrap()
+        val session = parser_structural_package_scalar_session_v1(owner, source, 10u8, 34u8).unwrap()
+        val batch = parser_structural_package_scalar_batch_v1(owner, session, 0u64, 1u64).unwrap()
+        expect(parser_structural_package_begin_shutdown_v1(owner)).to_equal(Ok(()))
+        expect(parser_structural_package_commit_v1(owner, batch)).to_equal(
+            Err(ParserStructuralPackageErrorV1.UnknownOrStale))
+        expect(parser_structural_package_source_create_v1(owner, 3u64, [])).to_equal(
+            Err(ParserStructuralPackageErrorV1.AdmissionStopped))
+        expect(parser_structural_package_finalize_shutdown_v1(owner)).to_equal(Ok(()))
+        expect(parser_structural_package_finalize_shutdown_v1(owner)).to_equal(
+            Err(ParserStructuralPackageErrorV1.AlreadyShutdown))
+
+    it "rejects handles from another aggregate owner":
+        val first = ParserStructuralPackageOwnerV1.create()
+        val second = ParserStructuralPackageOwnerV1.create()
+        val source = parser_structural_package_source_create_v1(first, 4u64, [1u8]).unwrap()
+        expect(parser_structural_package_scalar_session_v1(second, source, 10u8, 34u8)).to_equal(
+            Err(ParserStructuralPackageErrorV1.UnknownOrStale))
+        expect(parser_structural_package_v2_source_session_v1(second,
+            ParserStructuralPackageActivationV1(handle: 1u64, owner_identity: first.owner_identity),
+            5u64, [0u8 for _ in 0..32], 10u8, 34u8)).to_equal(
+            Err(ParserStructuralPackageErrorV1.UnknownOrStale))
+
+    it "reclaims terminal scalar batch rows across more than the concurrent cap":
+        val owner = ParserStructuralPackageOwnerV1.create()
+        val source = parser_structural_package_source_create_v1(owner, 6u64,
+            [10u8, 1u8, 34u8, 255u8]).unwrap()
+        val session = parser_structural_package_scalar_session_v1(owner, source, 10u8, 34u8).unwrap()
+        val first = parser_structural_package_scalar_batch_v1(owner, session, 0u64, 4u64).unwrap()
+        expect(parser_structural_package_commit_v1(owner, first).unwrap().positions).to_equal([0u64, 2u64])
+        var completed = 1
+        while completed < 300:
+            val batch = parser_structural_package_scalar_batch_v1(owner, session, 0u64, 4u64).unwrap()
+            val result = parser_structural_package_commit_v1(owner, batch).unwrap()
+            expect(result.positions).to_equal([0u64, 2u64])
+            completed = completed + 1
+        expect(completed).to_equal(300)
+        expect(parser_structural_package_commit_v1(owner, first)).to_equal(
+            Err(ParserStructuralPackageErrorV1.UnknownOrStale))
+        expect(parser_structural_package_begin_shutdown_v1(owner)).to_equal(Ok(()))
+        expect(parser_structural_package_finalize_shutdown_v1(owner)).to_equal(Ok(()))

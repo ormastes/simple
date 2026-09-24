@@ -2149,13 +2149,14 @@ fn test_rt_len_string() {
 
 #[test]
 fn test_rt_hash_text_uses_stable_byte_hash() {
+    // FNV-1a 64-bit (canonical algorithm, matches the C runtime oracle).
     let empty = rt_string_new("".as_ptr(), 0);
     let abc = rt_string_new("abc".as_ptr(), 3);
     let key = rt_string_new("key_7".as_ptr(), 5);
 
-    assert_eq!(rt_hash_text(empty), 5381);
-    assert_eq!(rt_hash_text(abc), 193485963);
-    assert_eq!(rt_hash_text(key), 210718207876);
+    assert_eq!(rt_hash_text(empty), -3750763034362895579);
+    assert_eq!(rt_hash_text(abc), -1792535898324117685);
+    assert_eq!(rt_hash_text(key), 8134605878600553210u64 as i64);
     assert_eq!(rt_str_hash(key), rt_hash_text(key));
 }
 

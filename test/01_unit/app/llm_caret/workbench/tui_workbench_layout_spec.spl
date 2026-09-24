@@ -1,0 +1,175 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# research: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ; plan: .spipe/caret_workbench/state.md
+
+"""
+Caret TUI workbench layout/render specification (lane A6, AC-4).
+
+Renders the requested composition (left: roster + selected-agent details +
+composer; right: one large selected session + a strip of read-only inactive
+previews; one status row) at 80x24, 120x40, and 160x50, and writes a real
+captured terminal grid for each width under build/test-artifacts/ so the
+composition can be reviewed as a grid, not a source grep.
+
+**TUI Captures:** build/test-artifacts/caret_workbench/tui_80x24.txt,
+build/test-artifacts/caret_workbench/tui_120x40.txt,
+build/test-artifacts/caret_workbench/tui_160x50.txt
+"""
+# @evidence-display: embed_tui
+
+use std.spec.*
+use std.sffi.io.{file_write_text, file_read_text}
+
+use app.llm_caret.workbench.session_contract.{
+    SessionId, SessionView, ProcessLifecycle, AgentTurn, Transport,
+    CapabilityEvidence, ComposerDraft, InputMode, new_session_id,
+    new_session_view, new_draft, draft_targets, same_session}
+use app.llm_caret.workbench.tui_layout.{compute_layout, CompactView, WorkbenchLayout, FULL_MIN_WIDTH, FULL_MIN_HEIGHT}
+use app.llm_caret.workbench.tui_view.{new_render_input, render_workbench, turn_text}
+
+fn _view_with_state(id: SessionId, label: text, provider: text, turn: AgentTurn, transport: Transport, needs_attention: bool) -> SessionView:
+    val base = new_session_view(id, label, provider)
+    SessionView(id: base.id, label: base.label, provider: base.provider,
+        lifecycle: ProcessLifecycle.Running, turn: turn, transport: transport,
+        evidence: CapabilityEvidence.Verified, needs_attention: needs_attention)
+
+fn _fixture_sessions() -> [SessionView]:
+    val a2 = _view_with_state(new_session_id("a2"), "A2 Claude", "Claude CLI", AgentTurn.WaitingApproval, Transport.Ready, true)
+    val a1 = _view_with_state(new_session_id("a1"), "A1 Codex", "Codex CLI", AgentTurn.Working, Transport.Ready, false)
+    val a3 = _view_with_state(new_session_id("a3"), "A3 Slang", "Slang local", AgentTurn.Unknown, Transport.Stale, false)
+    val a4 = _view_with_state(new_session_id("a4"), "A4 Codex", "Codex CLI", AgentTurn.Completed, Transport.Closed, false)
+    [a2, a1, a3, a4]
+
+fn _grid_lines(width: i64, height: i64) -> [text]:
+    val sessions = _fixture_sessions()
+    val selected = sessions[0].id
+    val draft = new_draft(selected, InputMode.Message)
+    val input = new_render_input(sessions, selected, draft, "Composer")
+    val layout = compute_layout(width, height, CompactView.Agents, 3)
+    render_workbench(layout, input)
+
+fn _lines_to_text(lines: [text]) -> text:
+    lines.join("\n") + "\n"
+
+fn _capture_path(case_name: text) -> text:
+    "build/test-artifacts/caret_workbench/tui_" + case_name + ".txt"
+
+fn _write_capture(case_name: text, content: text) -> bool:
+    file_write_text(_capture_path(case_name), content)
+
+fn _read_capture(case_name: text) -> text:
+    file_read_text(_capture_path(case_name))
+
+# Every row must be exactly `width` visible characters and there must be
+# exactly `height` rows -- a shorter/longer row is a silent overlap or a
+# silent gap, both of which this check refuses to let through.
+fn _all_rows_exact_width(lines: [text], width: i64) -> bool:
+    var i = 0
+    while i < lines.len():
+        if lines[i].len() != width:
+            return false
+        i = i + 1
+    true
+
+describe "Caret TUI workbench layout and render (AC-4)":
+    """
+    Verifies the requested left column (roster/details/composer) + right
+    area (one large session + inactive preview strip) + status row
+    composition at three widths, backed by a real captured grid.
+    """
+
+    it "renders the full three-panel composition at 120x40 with no overlap and writes a matching capture":
+        # @req: REQ-CARET-WORKBENCH-TUI-001
+        step("renders the full three-panel composition at 120x40 with no overlap and writes a matching capture")
+        step("Compute layout at 120x40")
+        val layout = compute_layout(120, 40, CompactView.Agents, 3)
+        expect(layout.is_full).to_equal(true)
+
+        step("Render the grid and check its shape")
+        val lines = _grid_lines(120, 40)
+        expect(lines.len()).to_equal(40)
+        expect(_all_rows_exact_width(lines, 120)).to_equal(true)
+
+        step("Confirm every required surface is present: roster, details, composer, active session, previews, status")
+        val content = _lines_to_text(lines)
+        expect(content).to_contain("Agents")
+        expect(content).to_contain("A2 Claude")
+        expect(content).to_contain("Needs approval")
+        expect(content).to_contain("ACTIVE SESSION")
+        expect(content).to_contain("[read-only]")
+        expect(content).to_contain("To A2 Claude")
+        expect(content).to_contain("Focus: Composer")
+
+        step("Confirm an Unknown turn state renders as Unknown, never as a guessed Idle")
+        expect(turn_text(AgentTurn.Unknown)).to_equal("Unknown")
+        expect(content).to_contain("A3 Slang Slang local Unknown")
+
+        step("Write and verify the 120x40 capture artifact")
+        expect(_write_capture("120x40", content)).to_equal(true)
+        expect(_read_capture("120x40")).to_equal(content)
+
+    it "renders the compact single-view fallback at 80x24 (below the full-layout minimums)":
+        # @req: REQ-CARET-WORKBENCH-TUI-002
+        step("renders the compact single-view fallback at 80x24")
+        step("Confirm 80x24 is below the full-layout minimums")
+        expect(80 < FULL_MIN_WIDTH or 24 < FULL_MIN_HEIGHT).to_equal(true)
+
+        step("Compute the compact layout and render it")
+        val layout = compute_layout(80, 24, CompactView.Agents, 3)
+        expect(layout.is_full).to_equal(false)
+        val lines = _grid_lines(80, 24)
+        expect(lines.len()).to_equal(24)
+        expect(_all_rows_exact_width(lines, 80)).to_equal(true)
+
+        step("Confirm the single-view content is readable, not sliced into microscopic panels")
+        val content = _lines_to_text(lines)
+        expect(content).to_contain("Agents")
+        expect(content).to_contain("A2 Claude Claude CLI Needs approval")
+        expect(content).to_contain("Focus: Composer")
+
+        step("Write and verify the 80x24 capture artifact")
+        expect(_write_capture("80x24", content)).to_equal(true)
+        expect(_read_capture("80x24")).to_equal(content)
+
+    it "renders the full composition at 160x50 with a wider preview strip":
+        # @req: REQ-CARET-WORKBENCH-TUI-003
+        step("renders the full composition at 160x50 with a wider preview strip")
+        val layout = compute_layout(160, 50, CompactView.Session, 3)
+        expect(layout.is_full).to_equal(true)
+        expect(layout.previews.len()).to_equal(3)
+
+        val lines = _grid_lines(160, 50)
+        expect(lines.len()).to_equal(50)
+        expect(_all_rows_exact_width(lines, 160)).to_equal(true)
+
+        step("Confirm all three inactive previews are readable (>= 20 columns each)")
+        var i = 0
+        while i < layout.previews.len():
+            expect(layout.previews[i].w >= 20).to_equal(true)
+            i = i + 1
+
+        val content = _lines_to_text(lines)
+        expect(content).to_contain("A1 Codex / Running")
+        expect(content).to_contain("A3 Slang / Unknown")
+        expect(content).to_contain("A4 Codex / Completed")
+
+        step("Write and verify the 160x50 capture artifact")
+        expect(_write_capture("160x50", content)).to_equal(true)
+        expect(_read_capture("160x50")).to_equal(content)
+
+    it "keeps the composer's To indicator bound to the draft's captured target, not the newly selected row":
+        # @req: REQ-CARET-WORKBENCH-TUI-004
+        step("keeps the composer's To indicator bound to the draft's captured target")
+        step("Capture a draft targeting A2, then select A1 instead")
+        val sessions = _fixture_sessions()
+        val a2_id = sessions[0].id
+        val a1_id = sessions[1].id
+        val draft = new_draft(a2_id, InputMode.Message)
+        val input = new_render_input(sessions, a1_id, draft, "Composer")
+
+        step("Render at 120x40 and confirm the composer still shows 'To A2 Claude'")
+        val layout = compute_layout(120, 40, CompactView.Agents, 3)
+        val lines = render_workbench(layout, input)
+        val content = _lines_to_text(lines)
+        expect(content).to_contain("To A2 Claude")
+        expect(draft_targets(draft, a2_id)).to_equal(true)
+        expect(draft_targets(draft, a1_id)).to_equal(false)

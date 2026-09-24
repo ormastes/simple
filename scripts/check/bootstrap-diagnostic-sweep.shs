@@ -7,7 +7,10 @@ usage() {
 }
 
 compiler=""
-child_compiler="bin/simple"
+# An explicit child path is relative to the caller.  The default is resolved
+# after the runner itself so a cwd-local bin/simple cannot impersonate the
+# diagnostic runner's admitted child.
+child_compiler=""
 roots=""
 cache_root="build/bootstrap/diagnostic-cache"
 evidence_dir=""
@@ -42,12 +45,6 @@ case "$timeout_grace_seconds" in ''|*[!0-9]*|0) echo "error: --timeout-grace mus
 command -v perl >/dev/null 2>&1 || { echo "error: perl is required for isolated diagnostic process groups" >&2; exit 2; }
 [ -n "$roots" ] || roots="src/compiler"
 
-[ -x "$child_compiler" ] || {
-  echo "error: diagnostic child compiler is not executable: $child_compiler" >&2
-  echo "Provide an admitted pure-Simple bin/simple before diagnostic sweep." >&2
-  exit 2
-}
-
 absolute_executable() {
   executable_input=$1
   executable_dir=$(CDPATH= cd -- "$(dirname -- "$executable_input")" && pwd -P) || return 1
@@ -55,8 +52,17 @@ absolute_executable() {
 }
 
 compiler=$(absolute_executable "$compiler") || exit 2
-child_compiler=$(absolute_executable "$child_compiler") || exit 2
 runner_path=$(absolute_executable "$0") || exit 2
+if [ -z "$child_compiler" ]; then
+  runner_repo=$(CDPATH= cd -- "$(dirname -- "$runner_path")/../.." && pwd -P) || exit 2
+  child_compiler="$runner_repo/bin/simple"
+fi
+[ -x "$child_compiler" ] || {
+  echo "error: diagnostic child compiler is not executable: $child_compiler" >&2
+  echo "Provide an admitted pure-Simple child with --child-compiler=<path>." >&2
+  exit 2
+}
+child_compiler=$(absolute_executable "$child_compiler") || exit 2
 runner_hash=$(sha256sum "$runner_path" | awk '{print $1}') || exit 2
 mkdir -p "$cache_root" || exit 2
 cache_root=$(CDPATH= cd -- "$cache_root" && pwd -P) || exit 2

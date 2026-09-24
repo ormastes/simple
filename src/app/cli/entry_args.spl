@@ -1,0 +1,84 @@
+# Argument extraction for the lightweight `simple check` entry.
+#
+# Same algorithm as std.cli.cli_util.get_cli_args, over the raw argv ABI instead
+# of the CLI hub. cli_util's own first import is `std.io (cwd, file_exists,
+# file_read)`, which loads src/lib/nogc_sync_mut/io/__init__.spl and with it the
+# whole SFFI surface (vulkan, metal, sdl3, sqlite, rapier2d, audio, ...):
+# 96 physical files / 1,011,061 source bytes, for one function that reads argv.
+# Dropping it takes `simple check --help` from 132 physical files / 1,302,861
+# source bytes to 27 / 219,758.
+#
+# sys_get_args() is the same ABI cli_util reaches through
+# std.sffi.cli.cli_get_args, so the argv vector is unchanged by construction --
+# verified byte-identical against both cli_get_args() and
+# std.io_runtime.get_args() under `simple check ...`, `simple run <entry> ...`
+# and a bare `simple run <script> <args>`. Declaring the extern here rather than
+# importing a wrapper module keeps the added closure at zero: std.sffi.cli adds
+# 2 files, and std.io_runtime adds none but measured materially slower on the
+# lint path in a 3-run A/B (numbers in the lane receipt, not here -- the host was
+# loaded). Same extern-in-the-consumer idiom as app.check.targets
+# (rt_dir_exists) and app.io.source_discovery (rt_dir_walk, rt_path_absolute).
+#
+# src/app/cli/lint_entry.spl is the intended second consumer and is NOT switched
+# yet: with the hub gone, `lint`/`fmt`/`fix` stop JIT-compiling at all --
+# `SIMPLE_JIT_STRICT=1 simple lint --help` fails with rc 1 and no output,
+# "unresolved external symbol 'io_runtime_cwd'", because
+# src/lib/nogc_sync_mut/sffi/system.spl:8 reaches `cwd` through
+# `use std.io_runtime.{cwd as io_runtime_cwd}` and only the hub was co-compiling
+# that symbol into the same JIT module. Importing the alias by either name from
+# the entry does not resolve it. When that defect is fixed, lint_entry is the
+# same one-line swap as check_entry.
+#
+# Kept as its own leaf rather than inlined into the entry so the second consumer
+# can be added without duplicating argv handling. Same reasoning as
+# app.cli.check_options, which exists so the direct and public check
+# entrypoints fail closed together.
+
+@unsafe(reason: "raw process argument-array ownership ABI", capabilities: [ffi])
+extern fn sys_get_args() -> [text]
+
+fn is_simple_launcher(program: text) -> bool:
+    program == "simple" or
+        program == "simple_runtime" or
+        program.ends_with("/simple") or
+        program.ends_with("/simple_runtime") or
+        program.ends_with("\\simple.exe") or
+        program.ends_with("\\simple_runtime.exe")
+
+fn get_cli_args() -> [text]:
+    """
+    Extract command-line arguments, skipping program name and script path.
+
+    - Gets raw args from runtime
+    - Skips program name (args[0])
+    - Skips script path if present (args[1] ending in .spl)
+    - Returns clean argument list for command processing
+
+    Example:
+        Raw args: ["simple_runtime", "src/app/add/main.spl", "--help", "package"]
+        Returns:  ["--help", "package"]
+    """
+    val raw_args = unsafe(capabilities: [ffi]):
+        sys_get_args()
+    var all_args: [text] = []
+    if raw_args != nil:
+        all_args = raw_args
+
+    # Skip program name and script path
+    var args: [text] = []
+    var start_idx = 1
+
+    # If invoked as `simple run script.spl`, skip both the subcommand and script.
+    if all_args.len() > 2 and all_args[1] == "run" and all_args[2].ends_with(".spl"):
+        start_idx = 3
+    # If second arg is the script path, skip it too.
+    elif all_args.len() > 1 and all_args[1].ends_with(".spl") and is_simple_launcher(all_args[0]):
+        start_idx = 2
+
+    # Collect remaining arguments
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+
+    args

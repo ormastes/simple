@@ -1,4 +1,8 @@
 # vhdl_backend_spec: multiple genuine API mismatches after import/rename fixes (22 failures remain)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Context
 
@@ -80,3 +84,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 - `test/01_unit/compiler/backend/.spipe_matchers_vhdl_backend_spec.spl` (import
   path and `Ret` rename fixed in-place; 22/58 examples still fail on genuine
   VHDL-backend/HIR-lowering API mismatches enumerated above)
+

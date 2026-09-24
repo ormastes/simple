@@ -1,0 +1,405 @@
+# Phase 2 -> Phase 3 read-only compatibility manifest.
+# Writable cache ownership stays outside this value: the manifest only names
+# immutable candidates and Phase 3 must materialize an admitted value into its
+# own writable cache.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_key.{
+    ReverseReferenceKeyV1, reverse_reference_key_decode_v1,
+    reverse_reference_key_encode_v1
+}
+
+val PHASE_COMPATIBILITY_SCHEMA_V1: i64 = 1
+val PHASE_COMPATIBILITY_FRONTEND_V1: text = "frontend"
+val PHASE_COMPATIBILITY_NATIVE_V1: text = "native-object"
+val PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1: text = "producer-neutral"
+
+struct PhaseCompatibilityItemV1:
+    kind: text
+    key_frame: text
+    artifact_path: text
+    artifact_digest: text
+    producer_identity: text
+    provider_identity: text
+    target_identity: text
+    m2_consumer_identity: text
+    schema_version: i64
+
+struct PhaseCompatibilityManifestV1:
+    schema_version: i64
+    phase2_cache_root: text
+    phase3_cache_root: text
+    m2_cache_path: text
+    m2_receipt_digest: text
+    m2_owner_generation: text
+    m2_root_generation: text
+    items: [PhaseCompatibilityItemV1]
+
+struct PhaseCompatibilityExpectationV1:
+    kind: text
+    key_digest: text
+    m2_receipt_digest: text
+    m2_owner_generation: text
+    m2_root_generation: text
+    producer_identity: text
+    provider_identity: text
+    target_identity: text
+    schema_version: i64
+
+struct PhaseCompatibilityDecisionV1:
+    reused: bool
+    reason: text
+    artifact_path: text
+    artifact_digest: text
+
+struct PhaseCompatibilityOutputComparisonV1:
+    equal: bool
+    reason: text
+    clean_digest: text
+    reused_digest: text
+
+struct PhaseCompatibilityManifestDecodeV1:
+    valid: bool
+    reason: text
+    manifest: PhaseCompatibilityManifestV1?
+
+struct PhaseCompatibilityTokenV1:
+    valid: bool
+    reason: text
+    value: text
+    next: i64
+
+fn phase_compatibility_hash_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    true
+
+fn phase_compatibility_kind_valid_v1(kind: text) -> bool:
+    kind == PHASE_COMPATIBILITY_FRONTEND_V1 or
+        kind == PHASE_COMPATIBILITY_NATIVE_V1
+
+fn phase_compatibility_path_within_v1(root: text, path: text) -> bool:
+    root != "" and path.starts_with(root + "/") and
+        not root.contains("/../") and not root.ends_with("/..") and
+        not path.contains("/../") and not path.ends_with("/..")
+
+fn phase_compatibility_reject_v1(reason: text) -> PhaseCompatibilityDecisionV1:
+    PhaseCompatibilityDecisionV1(false, reason, "", "")
+
+fn phase_compatibility_item_validate_v1(item: PhaseCompatibilityItemV1) -> text:
+    if item.schema_version != PHASE_COMPATIBILITY_SCHEMA_V1:
+        return "wrong-schema"
+    if not phase_compatibility_kind_valid_v1(item.kind):
+        return "unknown-kind"
+    val decoded = reverse_reference_key_decode_v1(item.key_frame)
+    if not decoded.valid:
+        return "corrupt-key:" + decoded.reason
+    if item.artifact_path == "":
+        return "missing-artifact-path"
+    if not phase_compatibility_hash_valid_v1(item.artifact_digest):
+        return "corrupt-artifact-digest"
+    if item.provider_identity == "":
+        return "missing-provider"
+    if item.target_identity == "":
+        return "missing-target"
+    if item.kind == PHASE_COMPATIBILITY_FRONTEND_V1:
+        if item.producer_identity != PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1:
+            return "frontend-not-producer-neutral"
+    elif item.producer_identity == "" or item.producer_identity == PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1:
+        return "native-missing-exact-producer"
+    "ok"
+
+fn phase_compatibility_manifest_validate_v1(manifest: PhaseCompatibilityManifestV1) -> text:
+    if manifest.schema_version != PHASE_COMPATIBILITY_SCHEMA_V1:
+        return "wrong-manifest-schema"
+    if manifest.phase2_cache_root == "" or manifest.phase3_cache_root == "":
+        return "missing-cache-root"
+    if manifest.phase2_cache_root == manifest.phase3_cache_root:
+        return "shared-writable-cache"
+    if manifest.m2_cache_path == "":
+        return "missing-m2-cache-path"
+    if not phase_compatibility_hash_valid_v1(manifest.m2_receipt_digest):
+        return "invalid-m2-receipt-digest"
+    if manifest.m2_owner_generation == "" or manifest.m2_root_generation == "":
+        return "missing-m2-generation"
+    var seen: {text: bool} = {}
+    for item in manifest.items:
+        val reason = phase_compatibility_item_validate_v1(item)
+        if reason != "ok":
+            return reason
+        if item.m2_consumer_identity == "":
+            return "missing-m2-consumer-identity"
+        if not phase_compatibility_path_within_v1(
+                manifest.phase2_cache_root, item.artifact_path):
+            return "artifact-outside-phase2-root"
+        val decoded = reverse_reference_key_decode_v1(item.key_frame)
+        val identity = item.kind + ":" + decoded.digest
+        if seen.contains_key(identity):
+            return "duplicate-item"
+        seen[identity] = true
+    "ok"
+
+fn phase_compatibility_manifest_read_only_v1(
+    manifest: PhaseCompatibilityManifestV1,
+    phase3_cache_root: text
+) -> text:
+    val valid = phase_compatibility_manifest_validate_v1(manifest)
+    if valid != "ok":
+        return valid
+    if phase3_cache_root != manifest.phase3_cache_root:
+        return "wrong-phase3-cache-root"
+    if phase3_cache_root == manifest.phase2_cache_root:
+        return "phase2-cache-not-read-only"
+    "ok"
+
+fn phase_compatibility_frame_v1(value: text) -> text:
+    "{value.len()}:" + value
+
+fn phase_compatibility_manifest_encode_v1(manifest: PhaseCompatibilityManifestV1) -> text:
+    val valid = phase_compatibility_manifest_validate_v1(manifest)
+    if valid != "ok":
+        return ""
+    var rows: [text] = [
+        "simple-phase2-phase3-compatibility-v1\n",
+        phase_compatibility_frame_v1("{manifest.schema_version}"),
+        phase_compatibility_frame_v1(manifest.phase2_cache_root),
+        phase_compatibility_frame_v1(manifest.phase3_cache_root),
+        phase_compatibility_frame_v1(manifest.m2_cache_path),
+        phase_compatibility_frame_v1(manifest.m2_receipt_digest),
+        phase_compatibility_frame_v1(manifest.m2_owner_generation),
+        phase_compatibility_frame_v1(manifest.m2_root_generation),
+        phase_compatibility_frame_v1("{manifest.items.len()}")
+    ]
+    for item in manifest.items:
+        rows = rows.push(phase_compatibility_frame_v1(item.kind))
+        rows = rows.push(phase_compatibility_frame_v1(item.key_frame))
+        rows = rows.push(phase_compatibility_frame_v1(item.artifact_path))
+        rows = rows.push(phase_compatibility_frame_v1(item.artifact_digest))
+        rows = rows.push(phase_compatibility_frame_v1(item.producer_identity))
+        rows = rows.push(phase_compatibility_frame_v1(item.provider_identity))
+        rows = rows.push(phase_compatibility_frame_v1(item.target_identity))
+        rows = rows.push(phase_compatibility_frame_v1(item.m2_consumer_identity))
+        rows = rows.push(phase_compatibility_frame_v1("{item.schema_version}"))
+    rows.join("")
+
+fn phase_compatibility_token_v1(frame: text, start: i64) -> PhaseCompatibilityTokenV1:
+    if start < 0 or start >= frame.len():
+        return PhaseCompatibilityTokenV1(false, "truncated-token", "", start)
+    val colon = frame.index_of(":", start)
+    if colon <= start:
+        return PhaseCompatibilityTokenV1(false, "invalid-token-length", "", start)
+    val length_text = frame.substring(start, colon)
+    for ch in length_text:
+        if ch < '0' or ch > '9':
+            return PhaseCompatibilityTokenV1(false, "invalid-token-length", "", start)
+    val length = length_text.to_i64() ?? -1
+    if length < 0 or "{length}" != length_text:
+        return PhaseCompatibilityTokenV1(false, "invalid-token-length", "", start)
+    val value_start = colon + 1
+    val value_end = value_start + length
+    if value_end > frame.len():
+        return PhaseCompatibilityTokenV1(false, "truncated-token", "", start)
+    PhaseCompatibilityTokenV1(true, "ok", frame.substring(value_start, value_end), value_end)
+
+fn phase_compatibility_manifest_decode_v1(frame: text) -> PhaseCompatibilityManifestDecodeV1:
+    val header = "simple-phase2-phase3-compatibility-v1\n"
+    if not frame.starts_with(header):
+        return PhaseCompatibilityManifestDecodeV1(false, "wrong-domain", nil)
+    var cursor = header.len()
+    val schema_token = phase_compatibility_token_v1(frame, cursor)
+    if not schema_token.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, schema_token.reason, nil)
+    val manifest_schema = schema_token.value.to_i64() ?? -1
+    if manifest_schema != PHASE_COMPATIBILITY_SCHEMA_V1:
+        return PhaseCompatibilityManifestDecodeV1(false, "wrong-manifest-schema", nil)
+    cursor = schema_token.next
+    val phase2 = phase_compatibility_token_v1(frame, cursor)
+    if not phase2.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, phase2.reason, nil)
+    cursor = phase2.next
+    val phase3 = phase_compatibility_token_v1(frame, cursor)
+    if not phase3.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, phase3.reason, nil)
+    cursor = phase3.next
+    val m2_cache = phase_compatibility_token_v1(frame, cursor)
+    if not m2_cache.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, m2_cache.reason, nil)
+    cursor = m2_cache.next
+    val m2_digest = phase_compatibility_token_v1(frame, cursor)
+    if not m2_digest.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, m2_digest.reason, nil)
+    cursor = m2_digest.next
+    val m2_owner = phase_compatibility_token_v1(frame, cursor)
+    if not m2_owner.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, m2_owner.reason, nil)
+    cursor = m2_owner.next
+    val m2_root = phase_compatibility_token_v1(frame, cursor)
+    if not m2_root.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, m2_root.reason, nil)
+    cursor = m2_root.next
+    val count_token = phase_compatibility_token_v1(frame, cursor)
+    if not count_token.valid:
+        return PhaseCompatibilityManifestDecodeV1(false, count_token.reason, nil)
+    val count = count_token.value.to_i64() ?? -1
+    if count < 0 or count > 1000000 or "{count}" != count_token.value:
+        return PhaseCompatibilityManifestDecodeV1(false, "invalid-item-count", nil)
+    cursor = count_token.next
+    var items: [PhaseCompatibilityItemV1] = []
+    var index: i64 = 0
+    while index < count:
+        var values: [text] = []
+        var field: i64 = 0
+        while field < 9:
+            val token = phase_compatibility_token_v1(frame, cursor)
+            if not token.valid:
+                return PhaseCompatibilityManifestDecodeV1(false,
+                    "item-{index}-field-{field}:" + token.reason, nil)
+            values = values.push(token.value)
+            cursor = token.next
+            field = field + 1
+        val schema = values[8].to_i64() ?? -1
+        if schema < 0 or "{schema}" != values[8]:
+            return PhaseCompatibilityManifestDecodeV1(false,
+                "item-{index}:invalid-schema-token", nil)
+        items = items.push(PhaseCompatibilityItemV1(
+            values[0], values[1], values[2], values[3], values[4],
+            values[5], values[6], values[7], schema))
+        index = index + 1
+    if cursor != frame.len():
+        return PhaseCompatibilityManifestDecodeV1(false, "trailing-data", nil)
+    val manifest = PhaseCompatibilityManifestV1(
+        manifest_schema, phase2.value, phase3.value,
+        m2_cache.value, m2_digest.value, m2_owner.value, m2_root.value, items)
+    val valid = phase_compatibility_manifest_validate_v1(manifest)
+    if valid != "ok":
+        return PhaseCompatibilityManifestDecodeV1(false, valid, nil)
+    PhaseCompatibilityManifestDecodeV1(true, "ok", Some(manifest))
+
+fn phase_compatibility_admit_v1(
+    manifest: PhaseCompatibilityManifestV1,
+    expected: PhaseCompatibilityExpectationV1,
+    observed_artifact_digest: text
+) -> PhaseCompatibilityDecisionV1:
+    val valid = phase_compatibility_manifest_validate_v1(manifest)
+    if valid != "ok":
+        return phase_compatibility_reject_v1("manifest:" + valid)
+    if expected.schema_version != PHASE_COMPATIBILITY_SCHEMA_V1:
+        return phase_compatibility_reject_v1("wrong-schema")
+    if not phase_compatibility_kind_valid_v1(expected.kind):
+        return phase_compatibility_reject_v1("unknown-kind")
+    if not phase_compatibility_hash_valid_v1(expected.key_digest):
+        return phase_compatibility_reject_v1("corrupt-expected-key")
+    if not phase_compatibility_hash_valid_v1(expected.m2_receipt_digest):
+        return phase_compatibility_reject_v1("corrupt-expected-m2-receipt")
+    if expected.m2_owner_generation == "" or expected.m2_root_generation == "":
+        return phase_compatibility_reject_v1("missing-expected-m2-generation")
+    if manifest.m2_receipt_digest != expected.m2_receipt_digest:
+        return phase_compatibility_reject_v1("m2-receipt-digest-mismatch")
+    if manifest.m2_owner_generation != expected.m2_owner_generation or
+            manifest.m2_root_generation != expected.m2_root_generation:
+        return phase_compatibility_reject_v1("m2-generation-mismatch")
+    if not phase_compatibility_hash_valid_v1(observed_artifact_digest):
+        return phase_compatibility_reject_v1("corrupt-observed-artifact")
+
+    for item in manifest.items:
+        val decoded = reverse_reference_key_decode_v1(item.key_frame)
+        if item.kind == expected.kind and decoded.digest == expected.key_digest:
+            if decoded.key == nil or
+                    decoded.key!.owner_generation != expected.m2_owner_generation or
+                    decoded.key!.root_generation != expected.m2_root_generation:
+                return phase_compatibility_reject_v1("m2-key-generation-mismatch")
+            if item.schema_version != expected.schema_version:
+                return phase_compatibility_reject_v1("wrong-schema")
+            if item.provider_identity != expected.provider_identity:
+                return phase_compatibility_reject_v1("wrong-provider")
+            if item.target_identity != expected.target_identity:
+                return phase_compatibility_reject_v1("wrong-target")
+            if item.kind == PHASE_COMPATIBILITY_NATIVE_V1 and
+                    item.producer_identity != expected.producer_identity:
+                return phase_compatibility_reject_v1("wrong-producer")
+            if item.kind == PHASE_COMPATIBILITY_FRONTEND_V1 and
+                    item.producer_identity != PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1:
+                return phase_compatibility_reject_v1("frontend-not-producer-neutral")
+            if item.artifact_digest != observed_artifact_digest:
+                return phase_compatibility_reject_v1("artifact-corrupt")
+            val reuse_kind = if item.kind == PHASE_COMPATIBILITY_FRONTEND_V1:
+                "reused-producer-neutral-frontend"
+            else:
+                "reused-exact-native-object"
+            return PhaseCompatibilityDecisionV1(
+                true, reuse_kind, item.artifact_path, item.artifact_digest)
+    phase_compatibility_reject_v1("key-not-found")
+
+fn phase_compatibility_normalize_output_v1(output: text) -> text:
+    var normalized: [text] = []
+    val unix = output.replace("\r\n", "\n")
+    for line in unix.split("\n"):
+        if line.starts_with("build_elapsed_us=") or line.starts_with("peak_rss_bytes="):
+            continue
+        normalized = normalized.push(line)
+    normalized.join("\n")
+
+fn phase_compatibility_compare_outputs_v1(
+    clean_output: text,
+    reused_output: text
+) -> PhaseCompatibilityOutputComparisonV1:
+    val clean = phase_compatibility_normalize_output_v1(clean_output)
+    val reused = phase_compatibility_normalize_output_v1(reused_output)
+    val clean_digest = sha256_text(clean)
+    val reused_digest = sha256_text(reused)
+    PhaseCompatibilityOutputComparisonV1(
+        clean == reused,
+        if clean == reused: "normalized-byte-identical" else: "normalized-output-mismatch",
+        clean_digest,
+        reused_digest)
+
+fn phase_compatibility_item_v1(
+    kind: text,
+    key: ReverseReferenceKeyV1,
+    artifact_path: text,
+    artifact_digest: text,
+    producer_identity: text,
+    provider_identity: text,
+    target_identity: text,
+    m2_consumer_identity: text
+) -> PhaseCompatibilityItemV1:
+    PhaseCompatibilityItemV1(
+        kind, reverse_reference_key_encode_v1(key), artifact_path,
+        artifact_digest, producer_identity, provider_identity,
+        target_identity, m2_consumer_identity, PHASE_COMPATIBILITY_SCHEMA_V1)
+
+fn phase_compatibility_item_frame_v1(
+    kind: text,
+    key_frame: text,
+    artifact_path: text,
+    artifact_digest: text,
+    producer_identity: text,
+    provider_identity: text,
+    target_identity: text,
+    m2_consumer_identity: text
+) -> PhaseCompatibilityItemV1:
+    PhaseCompatibilityItemV1(
+        kind, key_frame, artifact_path, artifact_digest,
+        producer_identity, provider_identity, target_identity,
+        m2_consumer_identity, PHASE_COMPATIBILITY_SCHEMA_V1)
+
+export PHASE_COMPATIBILITY_SCHEMA_V1, PHASE_COMPATIBILITY_FRONTEND_V1
+export PHASE_COMPATIBILITY_NATIVE_V1, PHASE_COMPATIBILITY_PRODUCER_NEUTRAL_V1
+export PhaseCompatibilityItemV1, PhaseCompatibilityManifestV1
+export PhaseCompatibilityExpectationV1, PhaseCompatibilityDecisionV1
+export PhaseCompatibilityOutputComparisonV1
+export PhaseCompatibilityManifestDecodeV1
+export phase_compatibility_item_validate_v1
+export phase_compatibility_manifest_validate_v1
+export phase_compatibility_manifest_read_only_v1
+export phase_compatibility_manifest_encode_v1
+export phase_compatibility_manifest_decode_v1
+export phase_compatibility_admit_v1
+export phase_compatibility_normalize_output_v1
+export phase_compatibility_compare_outputs_v1
+export phase_compatibility_item_v1
+export phase_compatibility_item_frame_v1
+export phase_compatibility_path_within_v1

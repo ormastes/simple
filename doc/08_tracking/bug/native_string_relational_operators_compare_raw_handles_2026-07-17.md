@@ -1,4 +1,8 @@
 # Native path: string `<`/`>`/`<=`/`>=` compare raw tagged-string handles, not lexicographic content
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler/50.mir/_MirLoweringExpr/*.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-17
 **Severity:** High (silent wrong output, no diagnostic)
@@ -88,3 +92,4 @@ LLVM/Cranelift case covers raw/raw, tagged/raw, raw/tagged, tagged/tagged, and
 equal-content strict and inclusive boundaries. Linux runs it in the full board; macOS arm64/x64,
 Windows x64, and FreeBSD select it explicitly. First staged execution remains
 pending under the current no-runtime-command restriction.
+

@@ -1,0 +1,44 @@
+"""Centralized package/download storage selection."""
+
+use std.common.storage_roots.*
+use std.nogc_sync_mut.env.platform.{detect_os}
+use std.nogc_sync_mut.storage_roots.{
+    StoragePlatform, StorageRootOverrides, inspect_ambient_storage_roots,
+    derive_user_storage_path,
+}
+
+pub struct PackageStorageSelection:
+    path: CanonicalPath
+    receipts: [StorageReceipt]
+
+fn _platform() -> StoragePlatform:
+    match detect_os():
+        case "macos": StoragePlatform.MacOS
+        case "windows": StoragePlatform.Windows
+        case "simpleos": StoragePlatform.SimpleOS
+        case _: StoragePlatform.Linux
+
+pub fn package_storage_path_for_roots(roots: StorageRoots, cache_key: text) -> Result<CanonicalPath, StoragePathError>:
+    derive_user_storage_path(roots, UserPathRequest(
+        storage_class: StorageClass.Package,
+        producer: "simple-pkg",
+        schema: "git-v1",
+        key: cache_key,
+    ))
+
+pub fn package_storage_root_for_roots(roots: StorageRoots) -> Result<CanonicalPath, StoragePathError>:
+    val sentinel = package_storage_path_for_roots(roots, "entries")?
+    Ok(CanonicalPath(value: sentinel.value.substring(0, sentinel.value.len() - "/entries".len())))
+
+pub fn resolve_package_storage(cache_key: text) -> Result<PackageStorageSelection, text>:
+    val resolution = inspect_ambient_storage_roots(
+        _platform(),
+        StorageRootOverrides(user_root: nil, worktree_root: nil),
+        "simple-pkg-storage-v1",
+    ).map_err(\error: "package storage root resolution failed: {error}")?
+    val path = package_storage_path_for_roots(resolution.roots, cache_key)
+        .map_err(\error: "package storage path rejected: {error}")?
+    Ok(PackageStorageSelection(path: path, receipts: resolution.receipts))
+
+pub fn resolve_package_storage_root() -> Result<PackageStorageSelection, text>:
+    resolve_package_storage("entries")

@@ -1,4 +1,8 @@
 # Flat entry-closure method aggregate return layout collision
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -114,3 +118,4 @@ path. A fresh audit therefore targeted the required Stage4 full CLI.
 The Vulkan QEMU gate still requires a Stage4 full CLI that passes candidate
 admission and prints `84` for the regression. Provider-delegated bootstrap
 outputs are not substitutes for that evidence.
+

@@ -1,0 +1,66 @@
+# KPF compatibility projection for the frozen simple_backend_plugin_v1 ABI.
+
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use common.kernel_plugin.schema_header.{
+    KPF_ABI_VERSION_V1, KPF_SCHEMA_HEADER_V1_SIZE,
+    KpfSchemaHeaderV1, KpfSchemaRequirementV1,
+    kpf_validate_schema_header_v1
+}
+use common.kernel_plugin.status.{KpfStatus}
+use compiler.common.backend_plugin.model.{BackendPluginRequestV1, BackendPluginDescriptorV1}
+use compiler.common.backend_plugin.receipt.{
+    BackendPluginError, BackendProviderReceipt, admit_backend_plugin_descriptor
+}
+
+val BACKEND_KPF_INTERFACE_ID_V1 = KpfId128(
+    hi: 0x73696d706c652e62, lo: 0x61636b656e642e31)
+val BACKEND_KPF_SCHEMA_DIGEST_V1 = KpfDigest256(
+    w0: 0x4b50462d42455631, w1: 0x73696d706c652d62,
+    w2: 0x61636b656e642d76, w3: 0x312d6162692d7631)
+
+struct BackendKpfAdmissionV1:
+    status: KpfStatus
+    schema_header: KpfSchemaHeaderV1
+    receipt: BackendProviderReceipt
+
+fn backend_kpf_schema_header_v1() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_id: BACKEND_KPF_INTERFACE_ID_V1,
+        schema_major: 1, schema_minor: 0,
+        schema_digest: BACKEND_KPF_SCHEMA_DIGEST_V1, reserved0: 0)
+
+fn backend_kpf_schema_requirement_v1() -> KpfSchemaRequirementV1:
+    KpfSchemaRequirementV1(
+        schema_id: BACKEND_KPF_INTERFACE_ID_V1,
+        schema_major: 1, minimum_minor: 0,
+        minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_digest: BACKEND_KPF_SCHEMA_DIGEST_V1)
+
+fn backend_plugin_error_kpf_status_v1(error: BackendPluginError) -> KpfStatus:
+    match error:
+        case BackendPluginError.AbiMismatch(_): KpfStatus.AbiVersionUnsupported
+        case BackendPluginError.DescriptorTooSmall(_): KpfStatus.DescriptorTooShort
+        case BackendPluginError.MirDigestMismatch(_): KpfStatus.SchemaDigestMismatch
+        case _: KpfStatus.ContractInvalid
+
+fn admit_backend_plugin_kpf_v1(
+    request: BackendPluginRequestV1,
+    descriptor: BackendPluginDescriptorV1
+) -> Result<BackendKpfAdmissionV1, BackendPluginError>:
+    val header = backend_kpf_schema_header_v1()
+    val status = kpf_validate_schema_header_v1(
+        header, backend_kpf_schema_requirement_v1())
+    if not status.accepted():
+        return Err(BackendPluginError.ProviderRejected(
+            "backend KPF schema projection rejected with status "
+                + status.code().to_string()))
+    match admit_backend_plugin_descriptor(request, descriptor):
+        case Ok(receipt): Ok(BackendKpfAdmissionV1(status, header, receipt))
+        case Err(error): Err(error)
+
+export BACKEND_KPF_INTERFACE_ID_V1, BACKEND_KPF_SCHEMA_DIGEST_V1
+export BackendKpfAdmissionV1, backend_kpf_schema_header_v1
+export backend_kpf_schema_requirement_v1, backend_plugin_error_kpf_status_v1
+export admit_backend_plugin_kpf_v1

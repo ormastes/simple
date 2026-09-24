@@ -1,4 +1,8 @@
 # ARM64 QEMU ivshmem BAR2 mapping blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 A manually replayed link using the compiler-produced objects plus the existing
 ARM CRT/runtime creates a valid static AArch64 ELF at `0x40000000`, with zero
@@ -21,3 +25,4 @@ low/high values through the existing serial evidence path, and fix the PCI
 config write/probe owner. The intended BAR window `0x3e000000..0x3e7fffff` is
 inside low PCI MMIO and does not overlap ECAM or the ELF. Do not bypass BAR
 discovery or add a guest success marker.
+

@@ -1,0 +1,82 @@
+# Purpose: the web renderer's constant-colour opacity fill now runs as a row
+# kernel instead of a per-pixel loop. The kernel carries PERCENT semantics
+# (/100, +50), NOT the straight-alpha src-over (/255, +128) of
+# rt_engine2d_simd_blend_const_span_u32 — substituting that one would shift
+# every rendered pixel. These examples pin the kernel to its scalar twin.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    fb_blend_const_row_opacity, _scalar_blend_const_row_opacity
+}
+
+fn ramp(n: i64) -> [u32]:
+    var b: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        b.push((0xFF000000u32 | ((i * 5 + 3) as u32)) )
+        i = i + 1
+    b
+
+fn rows_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i.to_i32()] != b[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+fn pair_matches(n: i64, offset: i32, count: i32, color: u32, pct: i32) -> bool:
+    val kernel = fb_blend_const_row_opacity(ramp(n), offset, count, color, pct)
+    val scalar = _scalar_blend_const_row_opacity(ramp(n), offset, count, color, pct)
+    rows_equal(kernel, scalar)
+
+describe "web renderer opacity row kernel matches its scalar twin":
+    it "matches across the full opacity range, including both saturating ends":
+        step("0 and 100 take the early-return paths; 1..99 take the blend math")
+        var bad = 0
+        var pct = 0
+        while pct <= 100:
+            if not pair_matches(64, 0, 64, 0xFF3366CCu32, pct):
+                bad = bad + 1
+            pct = pct + 1
+        assert_equal(bad, 0)
+
+    it "matches for spans that are not the whole row":
+        step("a stride or offset bug cannot hide behind offset 0 / full width")
+        assert_equal(pair_matches(128, 7, 33, 0xFF10A0F0u32, 37), true)
+        assert_equal(pair_matches(128, 64, 64, 0xFF10A0F0u32, 62), true)
+        assert_equal(pair_matches(128, 1, 1, 0xFF10A0F0u32, 50), true)
+
+    it "matches for widths that straddle SIMD lane boundaries":
+        step("16 lanes is the AVX-512 u32 width; check either side of it")
+        var bad = 0
+        var w = 1
+        while w <= 40:
+            if not pair_matches(64, 3, w, 0xFF884422u32, 45):
+                bad = bad + 1
+            w = w + 1
+        assert_equal(bad, 0)
+
+    it "leaves the row untouched for a non-positive count":
+        step("degenerate spans must be a no-op on both paths")
+        assert_equal(pair_matches(32, 4, 0, 0xFF000000u32, 50), true)
+        assert_equal(pair_matches(32, 4, -5, 0xFF000000u32, 50), true)
+
+    it "does not write past the end of the row":
+        step("a count larger than the remaining row must clamp, not overflow")
+        assert_equal(pair_matches(32, 28, 99, 0xFFAABBCCu32, 50), true)
+
+    it "preserves opaque alpha in every blended pixel":
+        step("argb() always sets 0xFF alpha; the kernel must too")
+        val out = fb_blend_const_row_opacity(ramp(32), 0, 32, 0xFF204060u32, 40)
+        var non_opaque = 0
+        var i: i64 = 0
+        while i < 32:
+            if (out[i.to_i32()] >> 24) != 255u32:
+                non_opaque = non_opaque + 1
+            i = i + 1
+        assert_equal(non_opaque, 0)

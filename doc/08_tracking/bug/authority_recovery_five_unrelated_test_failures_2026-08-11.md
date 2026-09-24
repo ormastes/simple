@@ -1,4 +1,8 @@
 # Authority recovery: five unrelated compiler test failures
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -50,3 +54,4 @@ themselves block the narrowly scoped authority tuple or exact Stage-2
 admission. The JIT failure has the same disposition only if native symbol-table
 and executable probes explicitly confirm `rt_struct_alloc`; without that
 evidence, authority admission must fail closed.
+

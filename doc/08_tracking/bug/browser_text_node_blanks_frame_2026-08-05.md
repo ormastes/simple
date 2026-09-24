@@ -163,3 +163,23 @@ symbol as any text node did.
   (diffed byte-identical against the pre-sabotage copy afterward). No separate
   sabotage was needed for Defect 2 since it shares the identical guarded code
   path.
+
+## Triage 2026-09-13
+Reconfirmed via source inspection: `browser_renderer.spl` still has 0
+references to `text_painter.spl` (`grep -c text_painter
+browser_renderer.spl` -> 0, unchanged). Defect 1 (text blanks the whole
+frame) and Defect 2 (class selectors) both still apply per this record.
+Wiring the painter into the render path correctly, without breaking the
+already-pixel-exact box painting, needs careful render-pipeline work
+beyond a single-bug budget. Left OPEN (P1), no code change attempted.
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+Confirmed by content: `_web_budget_expired_at` (line 501) and
+`simple_web_layout_last_render_degrade_reason` (line 406) are both still
+present in `simple_web_html_layout_renderer_foundation.spl` at `f26970e9d93`
+— the fix for both Defect 1 and Defect 2 (same root cause) is intact. The
+header status line ("OPEN (P1)") was stale relative to the doc's own
+2026-08-06 "Resolution" section.
+
+Status: CLOSED (2026-09-13) — both defects fixed and verified 2026-08-06;
+fix confirmed still present by content inspection.

@@ -1,4 +1,8 @@
 # async_spec: destructured Future from anon-tuple Promise.new() gives inconsistent poll() results
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -114,3 +118,4 @@ applied locally for clarity; that fix is not present in the committed file.
   not applied to the file — see top note), and (2) this doc's genuine
   `Future.poll()` inconsistency, which still blocks full green even after
   fix (1) is applied.
+

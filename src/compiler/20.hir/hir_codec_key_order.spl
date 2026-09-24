@@ -1,0 +1,215 @@
+# Canonical HIR dictionary key ordering.
+#
+# This module is deliberately typed instead of exposing a generic comparator.
+# The schema generator dispatches every dictionary key type to exactly one of
+# these helpers and refuses unknown key types.  Each helper sorts scalar source
+# indices with a stable bottom-up merge, then projects the original keys once.
+# Source dictionaries and their key snapshots are never mutated.
+
+use compiler.hir.hir_types.{SymbolId}
+
+fn _hc_i64_index_before_v1(values: [i64], left_index: i64,
+                            right_index: i64) -> bool:
+    val left = values[left_index]
+    val right = values[right_index]
+    if left == nil:
+        return right != nil
+    if right == nil:
+        return false
+    left < right
+
+fn _hc_symbol_id_index_before_v1(values: [SymbolId], left_index: i64,
+                                  right_index: i64) -> bool:
+    val left = values[left_index]
+    val right = values[right_index]
+    if left == nil:
+        return right != nil
+    if right == nil:
+        return false
+    left.id < right.id
+
+fn _hc_utf8_bytes_before_v1(bytes: [[u8]], present: [bool],
+                             left_index: i64, right_index: i64) -> bool:
+    if not present[left_index]:
+        return present[right_index]
+    if not present[right_index]:
+        return false
+    val left = bytes[left_index]
+    val right = bytes[right_index]
+    var offset: i64 = 0
+    while offset < left.len() and offset < right.len():
+        if left[offset] != right[offset]:
+            # u8 comparison is the frozen unsigned UTF-8 byte order.
+            return left[offset] < right[offset]
+        offset = offset + 1
+    left.len() < right.len()
+
+pub fn hc_i64_key_before_v1(left: i64, right: i64) -> bool:
+    if left == nil:
+        return right != nil
+    if right == nil:
+        return false
+    left < right
+
+pub fn hc_symbol_id_key_before_v1(left: SymbolId, right: SymbolId) -> bool:
+    if left == nil:
+        return right != nil
+    if right == nil:
+        return false
+    left.id < right.id
+
+pub fn hc_text_key_before_v1(left: text, right: text) -> bool:
+    if left == nil:
+        return right != nil
+    if right == nil:
+        return false
+    var bytes: [[u8]] = []
+    bytes.push(left.bytes())
+    bytes.push(right.bytes())
+    _hc_utf8_bytes_before_v1(bytes, [true, true], 0, 1)
+
+fn _hc_initial_indices_v1(count: i64) -> [i64]:
+    var indices: [i64] = []
+    var index: i64 = 0
+    while index < count:
+        indices.push(index)
+        index = index + 1
+    indices
+
+fn _hc_order_i64_indices_v1(values: [i64]) -> [i64]:
+    var current = _hc_initial_indices_v1(values.len())
+    if current.len() <= 1:
+        return current
+    var scratch = current
+    var width: i64 = 1
+    while width < current.len():
+        var run_start: i64 = 0
+        while run_start < current.len():
+            var middle = run_start + width
+            if middle > current.len(): middle = current.len()
+            var run_end = middle + width
+            if run_end > current.len(): run_end = current.len()
+            var left = run_start
+            var right = middle
+            var output = run_start
+            while output < run_end:
+                if (right < run_end and (left >= middle or
+                        _hc_i64_index_before_v1(values, current[right], current[left]))):
+                    scratch[output] = current[right]
+                    right = right + 1
+                else:
+                    # Left wins exact ties, preserving source order.
+                    scratch[output] = current[left]
+                    left = left + 1
+                output = output + 1
+            run_start = run_end
+        var copy_index: i64 = 0
+        while copy_index < current.len():
+            current[copy_index] = scratch[copy_index]
+            copy_index = copy_index + 1
+        if width > current.len() / 2: width = current.len()
+        else: width = width * 2
+    current
+
+fn _hc_order_symbol_id_indices_v1(values: [SymbolId]) -> [i64]:
+    var current = _hc_initial_indices_v1(values.len())
+    if current.len() <= 1:
+        return current
+    var scratch = current
+    var width: i64 = 1
+    while width < current.len():
+        var run_start: i64 = 0
+        while run_start < current.len():
+            var middle = run_start + width
+            if middle > current.len(): middle = current.len()
+            var run_end = middle + width
+            if run_end > current.len(): run_end = current.len()
+            var left = run_start
+            var right = middle
+            var output = run_start
+            while output < run_end:
+                if (right < run_end and (left >= middle or
+                        _hc_symbol_id_index_before_v1(values, current[right], current[left]))):
+                    scratch[output] = current[right]
+                    right = right + 1
+                else:
+                    scratch[output] = current[left]
+                    left = left + 1
+                output = output + 1
+            run_start = run_end
+        var copy_index: i64 = 0
+        while copy_index < current.len():
+            current[copy_index] = scratch[copy_index]
+            copy_index = copy_index + 1
+        if width > current.len() / 2: width = current.len()
+        else: width = width * 2
+    current
+
+fn _hc_order_text_indices_v1(values: [text]) -> [i64]:
+    # Materialize each UTF-8 image exactly once. Comparisons address this arena
+    # by scalar index, so merge passes never re-encode or copy text keys.
+    var bytes: [[u8]] = []
+    var present: [bool] = []
+    for value in values:
+        if value == nil:
+            bytes.push([])
+            present.push(false)
+        else:
+            bytes.push(value.bytes())
+            present.push(true)
+    var current = _hc_initial_indices_v1(values.len())
+    if current.len() <= 1:
+        return current
+    var scratch = current
+    var width: i64 = 1
+    while width < current.len():
+        var run_start: i64 = 0
+        while run_start < current.len():
+            var middle = run_start + width
+            if middle > current.len(): middle = current.len()
+            var run_end = middle + width
+            if run_end > current.len(): run_end = current.len()
+            var left = run_start
+            var right = middle
+            var output = run_start
+            while output < run_end:
+                if (right < run_end and (left >= middle or
+                        _hc_utf8_bytes_before_v1(bytes, present,
+                            current[right], current[left]))):
+                    scratch[output] = current[right]
+                    right = right + 1
+                else:
+                    scratch[output] = current[left]
+                    left = left + 1
+                output = output + 1
+            run_start = run_end
+        var copy_index: i64 = 0
+        while copy_index < current.len():
+            current[copy_index] = scratch[copy_index]
+            copy_index = copy_index + 1
+        if width > current.len() / 2: width = current.len()
+        else: width = width * 2
+    current
+
+pub fn hc_order_i64_keys_v1(values: [i64]) -> [i64]:
+    var ordered: [i64] = []
+    for index in _hc_order_i64_indices_v1(values):
+        ordered.push(values[index])
+    ordered
+
+pub fn hc_order_text_keys_v1(values: [text]) -> [text]:
+    var ordered: [text] = []
+    for index in _hc_order_text_indices_v1(values):
+        ordered.push(values[index])
+    ordered
+
+pub fn hc_order_symbol_id_keys_v1(values: [SymbolId]) -> [SymbolId]:
+    var ordered: [SymbolId] = []
+    for index in _hc_order_symbol_id_indices_v1(values):
+        ordered.push(values[index])
+    ordered
+
+export hc_order_i64_keys_v1, hc_order_text_keys_v1
+export hc_order_symbol_id_keys_v1
+export hc_i64_key_before_v1, hc_text_key_before_v1
+export hc_symbol_id_key_before_v1

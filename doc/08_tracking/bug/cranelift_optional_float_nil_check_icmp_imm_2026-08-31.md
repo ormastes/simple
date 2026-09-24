@@ -1,4 +1,8 @@
 # Optional-FLOAT nil-check emits `icmp_imm.f32`, cranelift verifier rejects it, function is silently stubbed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Backend: cranelift (native-build)
@@ -137,3 +141,4 @@ fixtures ALSO differed in control flow. It cost a full ~1 hour rebuild to
 discover. When two fixtures differ in more than one dimension, the bisection is
 not finished. The pair that actually isolates a variable here is (e)/(f), which
 hold the operator and the site count fixed and vary only the early return.
+

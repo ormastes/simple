@@ -1,0 +1,164 @@
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{exit}
+use app.io.mod.{file_write, file_hash_sha256, dir_create_all, getpid}
+use app.build.targets.action_identity.{
+    NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
+    darwin_target_identity_digest_v1, publish_current_native_action_input_v1,
+    load_current_native_action_input_v1, canonical_darwin_cpu_features_v1,
+    darwin_sdk_identity_v1
+}
+use app.build.targets.artifact_receipt.{
+    ImportedClosureInputV1, publish_dependency_manifest_layer_v1,
+    publish_imported_closure_layer_v1, target_cache_namespace_v1,
+    target_action_key_v1
+}
+use compiler.backend.linker.linker_wrapper.{
+    native_direct_platform_flags, native_cc_platform_flags
+}
+use compiler.common.cache.darwin_runtime_provider_manifest.{
+    darwin_runtime_provider_manifest_v1,
+    darwin_runtime_provider_manifest_content_identity_v1
+}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn thin_aarch64_macho() -> [u8]:
+    [
+        0xcfu8, 0xfau8, 0xedu8, 0xfeu8, 0x0cu8, 0x00u8, 0x00u8, 0x01u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+    ]
+
+fn fail(reason: text):
+    print "FAIL: " + reason
+    exit(1)
+
+fn main():
+    val root = "/tmp/simple-macos-receipt-check-{getpid()}"
+    val cache = root + "/build/target_cache/app"
+    dir_create_all(root + "/src")
+    dir_create_all(root + "/build/tools")
+    dir_create_all(root + "/sdk")
+    file_write(root + "/src/main.spl", "fn main(): 0\n")
+    file_write(root + "/build/tools/simple", "admitted-simple-tool\n")
+    file_write(root + "/sdk/SDKSettings.json", "{\"Version\":\"15.0\"}\n")
+    val tool_artifact = file_hash_sha256(root + "/build/tools/simple")
+    val tool_behavior = sha256_text("compiler-behavior-v1")
+    val dependencies = publish_dependency_manifest_layer_v1(root, cache, "//app:main", [])
+    val closure = publish_imported_closure_layer_v1(
+        root, cache, "//app:main", "src/main.spl", tool_behavior, dependencies,
+        [ImportedClosureInputV1("src/main.spl", file_hash_sha256(root + "/src/main.spl"))]
+    )
+    val producer_abi = sha256_text("producer-abi-v1")
+    val sdk = darwin_sdk_identity_v1(root + "/sdk")
+    val provider = sha256_text("runtime-provider")
+    val runtime_path = root + "/runtime.o"
+    rt_file_write_bytes(runtime_path, thin_aarch64_macho())
+    val runtime_body = darwin_runtime_provider_manifest_v1(
+        [runtime_path], "aarch64"
+    ).unwrap()
+    file_write(cache + "/native_runtime_provider_manifest.receipt", runtime_body)
+    val runtime_manifest = darwin_runtime_provider_manifest_content_identity_v1(
+        cache + "/native_runtime_provider_manifest.receipt", "aarch64"
+    )
+    val linker_behavior = sha256_text(
+        "simple-darwin-link-tool-behavior-v1|artifact=64:" + tool_artifact +
+        "|policy=darwin-dead-strip-v1"
+    )
+    val linker_identity = sha256_text(
+        "simple-darwin-link-tool-identity-v1|artifact=64:" + tool_artifact +
+        "|behavior=64:" + linker_behavior
+    )
+    file_write(
+        cache + "/native_link_tool_identity.receipt",
+        "simple-darwin-link-tool-identity-v1\npath=" + root +
+        "/build/tools/simple\nartifact=" + tool_artifact +
+        "\nbehavior=" + linker_behavior + "\nidentity=" + linker_identity +
+        "\npolicy=darwin-dead-strip-v1\n"
+    )
+    val cpu_features = canonical_darwin_cpu_features_v1("")
+    val target_identity = darwin_target_identity_digest_v1(
+        "aarch64-apple-darwin", "aarch64", cpu_features, "13.0.0", sdk, "llvm",
+        "release-o2", "mach-o", "darwin-dead-strip-v1", linker_identity, provider,
+        runtime_manifest
+    )
+    val cache_namespace = target_cache_namespace_v1(producer_abi, target_identity, "release", "binary")
+    val key = target_action_key_v1(
+        "//app:main", "native-build", "P1", "B3", cache_namespace,
+        dependencies, closure, tool_behavior, "binary"
+    )
+    val identity = NativeActionInputIdentityV1(
+        producer: NATIVE_ACTION_INPUT_PRODUCER_V1, target: "//app:main",
+        action: "native-build", entry: "src/main.spl",
+        tool_path: "build/tools/simple", tool_artifact_digest: tool_artifact,
+        tool_behavior_digest: tool_behavior, producer_abi_digest: producer_abi,
+        target_identity_digest: target_identity, profile: "release",
+        dependency_manifest_digest: dependencies, imported_closure_digest: closure,
+        target_triple: "aarch64-apple-darwin", architecture: "aarch64",
+        cpu_features: cpu_features, deployment_target: "13.0.0",
+        sdk_identity: sdk, backend: "llvm",
+        optimization: "release-o2", object_format: "mach-o",
+        linker_policy: "darwin-dead-strip-v1", linker_tool_identity: linker_identity,
+        runtime_provider_receipt: provider,
+        runtime_artifact_digest: runtime_manifest, action_key: key, errors: []
+    )
+    val publish_error = publish_current_native_action_input_v1(cache, identity)
+    if publish_error != "": fail(publish_error)
+    val admitted = load_current_native_action_input_v1(
+        root, cache, "//app:main", "P1", "B3", "src/main.spl", "binary",
+        tool_artifact, identity.target_triple, identity.architecture,
+        identity.deployment_target, sdk, provider, runtime_manifest,
+        root + "/sdk", ""
+    )
+    if admitted.errors.len() != 0: fail(admitted.errors[0])
+    val wrong_arch = load_current_native_action_input_v1(
+        root, cache, "//app:main", "P1", "B3", "src/main.spl", "binary",
+        tool_artifact, identity.target_triple, "x86_64",
+        identity.deployment_target, sdk, provider, runtime_manifest,
+        root + "/sdk", ""
+    )
+    if wrong_arch.errors.len() == 0 or wrong_arch.errors[0] != "target-identity-error: architecture-mismatch":
+        fail("architecture-red-missing")
+    val wrong_sdk = load_current_native_action_input_v1(
+        root, cache, "//app:main", "P1", "B3", "src/main.spl", "binary",
+        tool_artifact, identity.target_triple, identity.architecture,
+        identity.deployment_target, sha256_text("different-sdk"), provider,
+        runtime_manifest, root + "/sdk", ""
+    )
+    if wrong_sdk.errors.len() == 0 or wrong_sdk.errors[0] != "target-identity-error: sdk-identity-mismatch":
+        fail("sdk-red-missing")
+    val wrong_provider = load_current_native_action_input_v1(
+        root, cache, "//app:main", "P1", "B3", "src/main.spl", "binary",
+        tool_artifact, identity.target_triple, identity.architecture,
+        identity.deployment_target, sdk, sha256_text("different-provider"),
+        runtime_manifest, root + "/sdk", ""
+    )
+    if wrong_provider.errors.len() == 0 or wrong_provider.errors[0] != "target-identity-error: runtime-provider-receipt-mismatch":
+        fail("provider-red-missing")
+    val wrong_deployment = load_current_native_action_input_v1(
+        root, cache, "//app:main", "P1", "B3", "src/main.spl", "binary",
+        tool_artifact, identity.target_triple, identity.architecture,
+        "14.0", sdk, provider, runtime_manifest, root + "/sdk", ""
+    )
+    if wrong_deployment.errors.len() == 0 or wrong_deployment.errors[0] != "target-identity-error: deployment-target-mismatch":
+        fail("deployment-red-missing")
+    val wrong_runtime = load_current_native_action_input_v1(
+        root, cache, "//app:main", "P1", "B3", "src/main.spl", "binary",
+        tool_artifact, identity.target_triple, identity.architecture,
+        identity.deployment_target, sdk, provider, sha256_text("different-runtime"),
+        root + "/sdk", ""
+    )
+    if wrong_runtime.errors.len() == 0 or wrong_runtime.errors[0] != "target-identity-error: runtime-artifact-digest-mismatch":
+        fail("runtime-artifact-red-missing")
+    if native_direct_platform_flags("darwin", "lld") != ["-dead_strip"]:
+        fail("darwin-direct-flags")
+    if native_cc_platform_flags("Darwin") != ["-Wl,-dead_strip"]:
+        fail("darwin-cc-flags")
+    for os in ["Linux", "FreeBSD"]:
+        val flags = native_cc_platform_flags(os)
+        if flags.contains("-Wl,-dead_strip") or not flags.contains("-Wl,--gc-sections"):
+            fail("elf-cc-flags:" + os)
+    print "PORTABLE-LOGIC: native action admission and Darwin linker policy"
+
+main()

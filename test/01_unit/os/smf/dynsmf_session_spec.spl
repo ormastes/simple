@@ -255,6 +255,60 @@ describe "dynSMF manifest":
 
         # @req REQ-007
 describe "dynSMF policy":
+    it "indexes a wide disabled-id policy once":
+        var disabled_csv = ""
+        var index = 0
+        while index < 128:
+            if disabled_csv != "":
+                disabled_csv = disabled_csv + ","
+            disabled_csv = disabled_csv + "library_" + index.to_text()
+            index = index + 1
+        val policy = dynsmf_policy_from_args_env([], "", disabled_csv)
+        expect(policy.disabled_ids.len()).to_equal(128)
+        expect(dynsmf_id_disabled(policy, "library_0")).to_equal(true)
+        expect(dynsmf_id_disabled(policy, "library_127")).to_equal(true)
+        expect(dynsmf_id_disabled(policy, "library_128")).to_equal(false)
+
+        val owner = rt_file_read_text("src/os/smf/dynsmf_session.spl")
+        expect(owner.contains("_disabled_id_index: Dict<text, bool>")).to_equal(true)
+        expect(owner.contains("policy._disabled_id_index.has(id)")).to_equal(true)
+        expect(owner.contains("while idx < policy.disabled_ids.len()" )).to_equal(false)
+
+    it "indexes first manifest identities once for autoload":
+        val owner = rt_file_read_text("src/os/smf/dynsmf_session.spl")
+        expect(owner.contains("var first_indices: Dict<text, i64> = {}" )).to_equal(true)
+        expect(owner.contains("out = _dynsmf_session_load_entry_impl(out, entry, id, require_artifact)")).to_equal(true)
+        expect(owner.contains("out = dynsmf_session_load(out, manifest, manifest[idx].id)")).to_equal(false)
+        expect(owner.contains("out = dynsmf_session_load_checked(out, manifest, manifest[idx].id)")).to_equal(false)
+
+    it "owns exact active and historical load indexes":
+        val owner = rt_file_read_text("src/os/smf/dynsmf_session.spl")
+        expect(owner.contains("_loaded_indices: Dict<text, i64>")).to_equal(true)
+        expect(owner.contains("_known_library_slots: Dict<text, i64>")).to_equal(true)
+        expect(owner.contains("if out._loaded_indices.has(id):")).to_equal(true)
+        expect(owner.contains("out._loaded_indices = out._loaded_indices.remove(id)")).to_equal(true)
+        expect(owner.contains("while loaded_idx < out.loaded.len()" )).to_equal(false)
+        expect(owner.contains("while idx < session.loaded.len()" )).to_equal(false)
+        expect(owner.contains("var loaded: [DynSmfLoadedLibrary] = []" )).to_equal(false)
+        expect(owner.contains("out.loaded[slot] = published" )).to_equal(true)
+        expect(owner.contains("out.loaded.len() == session.loaded.len()" )).to_equal(false)
+
+    it "indexes exact trusted facet bindings for publication and lookup":
+        val owner = rt_file_read_text("src/os/smf/dynsmf_session.spl")
+        expect(owner.contains("_trusted_facet_bindings: Dict<text, DynSmfTrustedFacetBinding>")).to_equal(true)
+        expect(owner.contains("_trusted_facet_keys_by_library: Dict<text, [text]>")).to_equal(true)
+        expect(owner.contains("fn _dynsmf_facet_binding_key")).to_equal(true)
+        expect(owner.contains("if not out._trusted_facet_bindings.has(key):")).to_equal(true)
+        expect(owner.contains("if not session._trusted_facet_bindings.has(trusted_key):")).to_equal(true)
+        expect(owner.contains("for binding in session._trusted_facet_bindings:" )).to_equal(false)
+
+    it "filters startup background work without copying the manifest":
+        val owner = rt_file_read_text("src/os/smf/dynsmf_session.spl")
+        expect(owner.contains("autoload_only: bool" )).to_equal(true)
+        expect(owner.contains("if not autoload_only or entry.default_autoload:" )).to_equal(true)
+        expect(owner.contains("var autoload_only: [DynSmfManifestEntry] = []" )).to_equal(false)
+        expect(owner.contains("autoload_only.push(manifest[idx])" )).to_equal(false)
+
     it "supports skip all from args":
         # @req REQ-SSPEC-OS
         step("supports skip all from args")

@@ -1,4 +1,8 @@
 # native-build loses a static method's owner name -> "undefined variable Widget"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-17
 - **Status: OPEN — fix present in the tree, still UNVERIFIED (2026-08-17 re-run).**
@@ -190,3 +194,4 @@ Each of the first two has its own row; they are summarised here only for context
   -- similar-problem detection for the CLASS: owner/static resolution diverging
   between the native and interpreter lowering lanes, measured differentially
   against the interpreter as oracle rather than against hardcoded strings.
+

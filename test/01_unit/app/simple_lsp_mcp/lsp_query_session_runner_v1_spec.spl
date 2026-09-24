@@ -1,0 +1,167 @@
+# Session-level owned-process reuse for the persistent LSP query path (L9 G4).
+#
+# The G2 state machine drives the G3 launcher here.  Every example uses the
+# fake observation port; no example starts a real process.
+# @req LSP-PERSIST-V4-SESSION-RUNNER
+
+use std.spec.*
+use app.simple_lsp_mcp.lsp_query_session_runner_v1.*
+use app.simple_lsp_mcp.lsp_query_owned_process_v1.{LspQueryOwnedLaunchV1,
+    LspQueryOwnedObservationV1, LspQueryOwnedOutcomeV1, LspQueryOwnedProviderV1,
+    lsp_query_owned_provider_probe_v1}
+use app.simple_lsp_mcp.lsp_query_session_v1.{LspQuerySessionPhaseV1}
+
+fn _launch() -> LspQueryOwnedLaunchV1:
+    LspQueryOwnedLaunchV1(
+        executable: "/workspace/bin/simple",
+        args: ["--version"],
+        workspace_root: "/workspace",
+        timeout_ms: 5000,
+        term_grace_ms: 500,
+        max_output_bytes: 65536,
+        poll_wait_ms: 100,
+    )
+
+fn _live() -> LspQueryOwnedObservationV1:
+    LspQueryOwnedObservationV1(
+        version: 1, live: true, terminal: false, timed_out: false, reaped: false,
+        cancel_requested: false, exit_code: -1, stdout_bytes: 0, stderr_bytes: 0,
+        runtime_error: 0)
+
+fn _ok() -> LspQueryOwnedObservationV1:
+    LspQueryOwnedObservationV1(
+        version: 1, live: false, terminal: true, timed_out: false, reaped: true,
+        cancel_requested: false, exit_code: 0, stdout_bytes: 24, stderr_bytes: 0,
+        runtime_error: 0)
+
+fn _timed_out() -> LspQueryOwnedObservationV1:
+    LspQueryOwnedObservationV1(
+        version: 1, live: true, terminal: false, timed_out: true, reaped: false,
+        cancel_requested: false, exit_code: -1, stdout_bytes: 0, stderr_bytes: 0,
+        runtime_error: 0)
+
+fn _available_runner() -> LspQuerySessionRunnerV1:
+    lsp_query_session_runner_new_v1(
+        "/workspace", lsp_query_owned_provider_probe_v1("native", true), _launch())
+
+describe "LspQuerySessionRunnerV1 unavailable provider":
+    it "answers every request with a typed Unavailable and keeps the session dormant":
+        step("Serve three sequential requests against the seed interpreter provider")
+        var runner = lsp_query_session_runner_new_v1(
+            "/workspace", lsp_query_owned_provider_probe_v1("interpreter", true), _launch())
+        var i: i64 = 0
+        while i < 3:
+            val served = lsp_query_session_runner_serve_v1(
+                runner, "request-" + i.to_text(), "/workspace", "generation-a",
+                10000 + i, i, [_ok()])
+            expect(served.accepted).to_be(false)
+            expect(served.reason).to_equal("owned_process_provider_unavailable")
+            expect(served.run.outcome == LspQueryOwnedOutcomeV1.Unavailable).to_be(true)
+            expect(served.run.started).to_be(false)
+            runner = served.runner
+            i = i + 1
+        step("Observe a dormant session that never started or reaped a worker")
+        expect(runner.unavailable_count).to_equal(3)
+        expect(runner.child_start_count).to_equal(0)
+        expect(runner.pin_open_count).to_equal(0)
+        expect(runner.session.worker_start_count).to_equal(0)
+        expect(runner.session.phase == LspQuerySessionPhaseV1.Dormant).to_be(true)
+
+describe "LspQuerySessionRunnerV1 worker reuse":
+    it "opens the reusable worker once across two hundred sequential requests":
+        step("Serve two hundred successful requests through one runner")
+        var runner = _available_runner()
+        var i: i64 = 0
+        while i < 200:
+            val served = lsp_query_session_runner_serve_v1(
+                runner, "request-" + i.to_text(), "/workspace",
+                "generation-" + i.to_text(), 10000 + i, i, [_live(), _ok()])
+            expect(served.accepted).to_be(true)
+            expect(served.run.outcome == LspQueryOwnedOutcomeV1.Completed).to_be(true)
+            expect(served.run.release_count).to_equal(1)
+            runner = served.runner
+            i = i + 1
+        step("Observe one pin open, one session worker start, two hundred accepted requests")
+        expect(runner.pin_open_count).to_equal(1)
+        expect(runner.session.worker_start_count).to_equal(1)
+        expect(runner.session.accepted_request_count).to_equal(200)
+        expect(runner.completed_count).to_equal(200)
+        expect(runner.child_start_count).to_equal(200)
+        expect(runner.session.phase == LspQuerySessionPhaseV1.Ready).to_be(true)
+        expect(runner.session.answer_cache_enabled).to_be(false)
+
+    it "marks the first request as a start and the second as a reuse":
+        step("Serve two requests and read the per-request worker decision")
+        val runner = _available_runner()
+        val first = lsp_query_session_runner_serve_v1(
+            runner, "first", "/workspace", "generation-a", 10000, 0, [_ok()])
+        val second = lsp_query_session_runner_serve_v1(
+            first.runner, "second", "/workspace", "generation-b", 10000, 1000, [_ok()])
+        expect(first.start_worker).to_be(true)
+        expect(first.reuse_worker).to_be(false)
+        expect(second.start_worker).to_be(false)
+        expect(second.reuse_worker).to_be(true)
+        expect(second.runner.pin_open_count).to_equal(1)
+
+    it "clamps the child timeout to the request's remaining deadline":
+        step("Serve a request whose remaining deadline is shorter than the launch timeout")
+        val runner = _available_runner()
+        val served = lsp_query_session_runner_serve_v1(
+            runner, "first", "/workspace", "generation-a", 700, 0, [_ok()])
+        expect(served.accepted).to_be(true)
+        expect(served.effective_timeout_ms).to_equal(700)
+        step("Serve a request whose remaining deadline exceeds the launch timeout")
+        val wide = lsp_query_session_runner_serve_v1(
+            served.runner, "second", "/workspace", "generation-b", 100000, 0, [_ok()])
+        expect(wide.effective_timeout_ms).to_equal(5000)
+
+describe "LspQuerySessionRunnerV1 refusals":
+    it "refuses a request naming a different workspace root and starts no child":
+        step("Serve a request for another workspace root")
+        val served = lsp_query_session_runner_serve_v1(
+            _available_runner(), "first", "/other", "generation-a", 10000, 0, [_ok()])
+        expect(served.accepted).to_be(false)
+        expect(served.reason).to_equal("workspace_root_mismatch")
+        expect(served.runner.child_start_count).to_equal(0)
+        expect(served.run.started).to_be(false)
+
+    it "refuses a request with an exhausted deadline and starts no child":
+        step("Serve a request whose deadline has already passed")
+        val served = lsp_query_session_runner_serve_v1(
+            _available_runner(), "first", "/workspace", "generation-a", 100, 100, [_ok()])
+        expect(served.accepted).to_be(false)
+        expect(served.reason).to_equal("request_deadline_exhausted")
+        expect(served.runner.child_start_count).to_equal(0)
+
+describe "LspQuerySessionRunnerV1 failure and fallback":
+    it "reaps a timed-out worker and allows exactly one one-shot fallback":
+        step("Serve a request whose child times out")
+        val served = lsp_query_session_runner_serve_v1(
+            _available_runner(), "first", "/workspace", "generation-a", 10000, 0,
+            [_live(), _timed_out()])
+        expect(served.accepted).to_be(true)
+        expect(served.run.outcome == LspQueryOwnedOutcomeV1.TimedOut).to_be(true)
+        expect(served.run.release_count).to_equal(1)
+        expect(served.runner.failed_count).to_equal(1)
+        step("Observe the session reaped and the fallback allowed exactly once")
+        expect(served.runner.session.phase == LspQuerySessionPhaseV1.ReapedFailure).to_be(true)
+        val fallback = lsp_query_session_runner_fallback_v1(
+            served.runner, "first", "generation-a", 1000)
+        expect(fallback.allowed).to_be(true)
+        val second_fallback = lsp_query_session_runner_fallback_v1(
+            fallback.runner, "first", "generation-a", 1100)
+        expect(second_fallback.allowed).to_be(false)
+        expect(second_fallback.reason).to_equal("fallback_already_consumed")
+
+    it "refuses a later request once the fallback has been consumed":
+        step("Consume the fallback, then serve another request")
+        val served = lsp_query_session_runner_serve_v1(
+            _available_runner(), "first", "/workspace", "generation-a", 10000, 0,
+            [_timed_out()])
+        val fallback = lsp_query_session_runner_fallback_v1(
+            served.runner, "first", "generation-a", 1000)
+        val later = lsp_query_session_runner_serve_v1(
+            fallback.runner, "second", "/workspace", "generation-b", 10000, 2000, [_ok()])
+        expect(later.accepted).to_be(false)
+        expect(later.reason).to_equal("worker_not_ready")
+        expect(later.runner.child_start_count).to_equal(1)

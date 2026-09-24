@@ -175,3 +175,12 @@ same change as "make it behave like SMF".
 Do **not** silence the warning. Blocking work before the flip: the
 `app.build.quality` namespace (§4) must be resolved first, or turning the
 warning into an error breaks the stage-3 build outright.
+
+## Triage 2026-09-13
+
+Doc already documents this as a deliberate policy decision, blocked on
+resolving the `app.build.quality` namespace first (flipping the warning
+to an error before that lands "breaks the stage-3 build outright" per the
+doc's own words). Not a code bug to TDD-fix in isolation; the blocking
+prerequisite work is out of this pass's scope. Leaving OPEN, no code
+change made.

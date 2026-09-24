@@ -1,4 +1,8 @@
 # Block-form `if` expression rejects a trailing inline `else:` on the branch body line
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-17
 **Status:** OPEN — but the root cause is now LOCATED to an exact function, and a
@@ -185,3 +189,4 @@ The source was deliberately left unchanged so the repro survives; this is the
 same continuation-line-indentation family as
 `parser_same_indent_leading_operator_continuation_2026-08-17.md` and
 `stage2_multiline_if_continuation_2026-08-14.md`.
+

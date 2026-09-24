@@ -1,3 +1,8 @@
+---
+name: lang-rust
+description: "Rust agent with rust-analyzer LSP"
+---
+
 # Rust Language Agent
 
 **Language:** Rust

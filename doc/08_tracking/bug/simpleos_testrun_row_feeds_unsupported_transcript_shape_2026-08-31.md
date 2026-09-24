@@ -1,4 +1,8 @@
 # SimpleOS in-guest `testrun` row is red on every arch because the FIXTURE feeds a shape `parse_test_output` does not support
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Rows: `testrun` on both
@@ -197,3 +201,4 @@ into `digits_to_i64` turns exactly those three examples red —
 `15 examples, 3 failures` — and reverting restores `15 examples, 0 failures`.
 The first fix's five cargo examples ARE genuinely red-before on the pre-fix
 parser (`12 examples, 3 failures`).
+

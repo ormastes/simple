@@ -1,0 +1,105 @@
+use app.io.process_ops.{process_run_bounded, process_bounded_timed_out}
+use os.tooling.rust_analyzer_worker.json_ingest.{ingest_rust_json_lines}
+use os.tooling.rust_analyzer_worker.model.{RustAnalysisState, RustToolchainIdentityV1, RustAnalysisResultV1}
+use std.json.{json_parse, json_get_type, json_object_get, json_to_number, json_to_string}
+
+pub enum RustLintToolV1:
+    CargoCheck
+    Clippy
+
+pub struct RustLintWorkerConfigV1:
+    workspace_root: text
+    cargo_path: text
+    rustc_path: text
+    clippy_path: text
+    target: text
+    features: text
+    timeout_ms: i64
+    maximum_output_bytes: i64
+    maximum_diagnostics: u32
+    tool: RustLintToolV1
+
+pub struct RustLintWorkerReceiptV1:
+    result: RustAnalysisResultV1
+    metadata_format_version: u32
+    metadata_valid: bool
+    cargo_exit_code: i64
+    tool_exit_code: i64
+    non_json_or_malformed_records: u32
+    command_fingerprint: text
+
+fn stable_fingerprint(parts: [text]) -> text:
+    var hash: u64 = 1469598103934665603
+    for part in parts:
+        var index = 0
+        while index < part.len():
+            hash = (hash ^ part.char_code_at(index).to_u64()) * 1099511628211
+            index = index + 1
+        hash = (hash ^ 255) * 1099511628211
+    hash.to_text()
+
+fn bounded_version(path: text, timeout_ms: i64, maximum_output_bytes: i64) -> (text, i64, bool):
+    val (stdout, stderr, exit_code) = process_run_bounded(path, ["--version"], timeout_ms, maximum_output_bytes)
+    (stdout.trim(), exit_code, process_bounded_timed_out(exit_code, stderr))
+
+fn metadata_is_v1(output: text) -> bool:
+    val root = json_parse(output)
+    if root == nil or json_get_type(root) != "object": return false
+    val version = json_object_get(root, "version")
+    val workspace_root = json_object_get(root, "workspace_root")
+    val packages = json_object_get(root, "packages")
+    if version == nil or json_get_type(version) != "number": return false
+    if workspace_root == nil or json_get_type(workspace_root) != "string": return false
+    if packages == nil or json_get_type(packages) != "array": return false
+    (json_to_number(version) as i64) == 1 and json_to_string(workspace_root) != ""
+
+fn manifest_path(config: RustLintWorkerConfigV1) -> text:
+    if config.workspace_root.ends_with("/"):
+        return config.workspace_root + "Cargo.toml"
+    config.workspace_root + "/Cargo.toml"
+
+fn analysis_args(config: RustLintWorkerConfigV1) -> [text]:
+    var args: [text] = []
+    match config.tool:
+        RustLintToolV1.CargoCheck: args.push("check")
+        RustLintToolV1.Clippy: args.push("clippy")
+    args = args + ["--manifest-path", manifest_path(config), "--message-format=json"]
+    if config.target != "": args = args + ["--target", config.target]
+    if config.features != "": args = args + ["--features", config.features]
+    args
+
+fn failed_receipt(config: RustLintWorkerConfigV1, state: RustAnalysisState, stderr: text, cargo_exit: i64, tool_exit: i64, metadata_valid: bool, fingerprint: text) -> RustLintWorkerReceiptV1:
+    val identity = RustToolchainIdentityV1(cargo_version: "", rustc_version: "", clippy_version: "", rust_analyzer_version: "", workspace_fingerprint: stable_fingerprint([config.workspace_root]), configuration_fingerprint: fingerprint)
+    RustLintWorkerReceiptV1(result: RustAnalysisResultV1(state: state, identity: identity, diagnostics: [], malformed_record_count: 0, truncated: false, stderr_text: stderr), metadata_format_version: 1, metadata_valid: metadata_valid, cargo_exit_code: cargo_exit, tool_exit_code: tool_exit, non_json_or_malformed_records: 0, command_fingerprint: fingerprint)
+
+pub fn run_rust_lint_worker(config: RustLintWorkerConfigV1, cancelled: bool) -> RustLintWorkerReceiptV1:
+    val base_fingerprint = stable_fingerprint([config.workspace_root, config.target, config.features, manifest_path(config)])
+    if cancelled:
+        return failed_receipt(config, RustAnalysisState.Cancelled, "", 0, 0, false, base_fingerprint)
+
+    val metadata_args = ["metadata", "--format-version", "1", "--no-deps", "--manifest-path", manifest_path(config)]
+    val (metadata_out, metadata_err, metadata_exit) = process_run_bounded(config.cargo_path, metadata_args, config.timeout_ms, config.maximum_output_bytes)
+    if process_bounded_timed_out(metadata_exit, metadata_err):
+        return failed_receipt(config, RustAnalysisState.TimedOut, metadata_err, metadata_exit, 0, false, base_fingerprint)
+    val metadata_valid = metadata_exit == 0 and metadata_is_v1(metadata_out)
+    if not metadata_valid:
+        return failed_receipt(config, RustAnalysisState.Failed, metadata_err + "\ninvalid cargo metadata v1", metadata_exit, 0, false, base_fingerprint)
+
+    val (cargo_version, cargo_version_exit, cargo_timed_out) = bounded_version(config.cargo_path, config.timeout_ms, config.maximum_output_bytes)
+    val (rustc_version, rustc_version_exit, rustc_timed_out) = bounded_version(config.rustc_path, config.timeout_ms, config.maximum_output_bytes)
+    val (clippy_version, clippy_version_exit, clippy_timed_out) = bounded_version(config.clippy_path, config.timeout_ms, config.maximum_output_bytes)
+    if cargo_timed_out or rustc_timed_out or clippy_timed_out:
+        return failed_receipt(config, RustAnalysisState.TimedOut, "toolchain version probe timed out", metadata_exit, 0, true, base_fingerprint)
+    if cargo_version_exit != 0 or rustc_version_exit != 0 or clippy_version_exit != 0:
+        return failed_receipt(config, RustAnalysisState.Failed, "toolchain version probe failed", metadata_exit, 0, true, base_fingerprint)
+
+    val args = analysis_args(config)
+    val fingerprint = stable_fingerprint([metadata_out, cargo_version, rustc_version, clippy_version, config.target, config.features, args.join("\u001f")])
+    val identity = RustToolchainIdentityV1(cargo_version: cargo_version, rustc_version: rustc_version, clippy_version: clippy_version, rust_analyzer_version: "", workspace_fingerprint: stable_fingerprint([metadata_out]), configuration_fingerprint: fingerprint)
+    val (stdout, stderr, tool_exit) = process_run_bounded(config.cargo_path, args, config.timeout_ms, config.maximum_output_bytes)
+    val page = ingest_rust_json_lines(stdout, config.maximum_output_bytes.to_u64(), config.maximum_diagnostics)
+    var state = page.state
+    if process_bounded_timed_out(tool_exit, stderr): state = RustAnalysisState.TimedOut
+    elif tool_exit != 0 and page.diagnostics.len() == 0: state = RustAnalysisState.Failed
+    elif tool_exit != 0 and state == RustAnalysisState.Complete: state = RustAnalysisState.Partial
+    RustLintWorkerReceiptV1(result: RustAnalysisResultV1(state: state, identity: identity, diagnostics: page.diagnostics, malformed_record_count: page.malformed_record_count, truncated: page.truncated, stderr_text: stderr), metadata_format_version: 1, metadata_valid: true, cargo_exit_code: metadata_exit, tool_exit_code: tool_exit, non_json_or_malformed_records: page.malformed_record_count, command_fingerprint: fingerprint)

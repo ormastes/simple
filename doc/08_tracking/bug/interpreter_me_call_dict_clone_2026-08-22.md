@@ -1,4 +1,9 @@
 # Seed interpreter: every `me` call deep-copies each Dict field the method writes
+## Closed 2026-09-16 — Status FIXED (MECALL-OWNED): before/after measurements, pinned by regression spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-22
 **Area:** Rust seed interpreter — `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs`,
@@ -111,3 +116,4 @@ The real-closure `[hir-prof]` numbers (136 ms/enum, 402 s imports) are owed a
 re-measure once this seed is deployed; the mechanism (one deep copy per
 `me`-call per dict written) applies to every HIR `me` method, so the import
 registration sub-phases should move too.
+

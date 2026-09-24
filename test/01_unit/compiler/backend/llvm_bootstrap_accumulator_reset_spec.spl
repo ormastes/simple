@@ -28,9 +28,17 @@ use std.spec.step
 
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_add, llvm_bootstrap_string_globals_text}
+use compiler.driver.driver_bootstrap.{bootstrap_real_llvm_translator}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_lowering.{MirLowering}
 
 
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 val DECL_MARKER: text = "= private unnamed_addr constant"
 
@@ -45,26 +53,59 @@ fn count_occurrences(hay: text, needle: text) -> i64:
         rest = rest.substring(i + needle.len(), rest.len())
     n
 
+fn lower_bootstrap_source(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "bootstrap_globals.spl", "bootstrap_globals.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("bootstrap_globals.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
 describe "LLVM bootstrap module-level accumulators reset per compilation unit":
     # @manual scenario evidence
+    it "routes direct-emit translator strings to the trailer and checks both callers":
+        # @req REQ-SSPEC-COMPILER
+        step("routes direct-emit translator strings to the trailer and checks both callers")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+
+        llvm_bootstrap_string_globals_add("STALE_UNIT")
+        var translator = bootstrap_real_llvm_translator()
+        val name = translator.add_string_global("DIRECT_EMIT_UNIT")
+        val globals = llvm_bootstrap_string_globals_text()
+        expect(translator.bootstrap_string_globals_active).to_equal(true)
+        expect(name).to_equal("@.str.0")
+        expect(count_occurrences(globals, DECL_MARKER)).to_equal(1)
+        expect(globals).to_contain("@.str.0 = private unnamed_addr constant")
+        expect(globals).to_contain("DIRECT_EMIT_UNIT")
+        expect(globals).to_not_contain("STALE_UNIT")
+        expect(translator.string_globals.len()).to_equal(0)
+
+        # The helper is exercised above; these source slices guard both
+        # production callers without claiming an object-compile result.
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+        val object_start = driver.index_of("pub fn bootstrap_emit_real_llvm_object(")
+        val module_start = driver.index_of("pub fn bootstrap_emit_real_llvm_module_object(")
+        val next_start = driver.index_of("pub fn bootstrap_emit_driver_stub_llvm_object(")
+        expect(object_start).to_be_greater_than(-1)
+        expect(module_start).to_be_greater_than(object_start)
+        expect(next_start).to_be_greater_than(module_start)
+        expect(driver.substring(object_start, module_start)).to_contain("bootstrap_real_llvm_translator()")
+        expect(driver.substring(module_start, next_start)).to_contain("bootstrap_real_llvm_translator()")
+
     it "does not carry unit one's string constants into unit two":
         # @req REQ-SSPEC-COMPILER
         step("does not carry unit one's string constants into unit two")
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
 
-        var a = MirToLlvm.create("mod_a", CodegenTarget.X86_64, nil)
-        val a_name = a.add_string_global("AAA_UNIT_ONE")
-        val after_a = a.string_globals.join("\n")
-
-        var b = MirToLlvm.create("mod_b", CodegenTarget.X86_64, nil)
-        val b_name = b.add_string_global("BBB_UNIT_TWO")
-        val after_b = b.string_globals.join("\n")
+        llvm_bootstrap_string_globals_reset()
+        llvm_bootstrap_string_globals_add("@.str.0 = private unnamed_addr constant [13 x i8] c\"AAA_UNIT_ONE\\00\"")
+        val after_a = llvm_bootstrap_string_globals_text()
+        llvm_bootstrap_string_globals_reset()
+        llvm_bootstrap_string_globals_add("@.str.0 = private unnamed_addr constant [13 x i8] c\"BBB_UNIT_TWO\\00\"")
+        val after_b = llvm_bootstrap_string_globals_text()
 
         # string_counter is per-instance, so BOTH units name their first
         # constant @.str.0. If unit two inherits unit one's decl the emitted
         # module defines @.str.0 twice and llc rejects it as a redefinition.
-        expect(a_name).to_equal("@.str.0")
-        expect(b_name).to_equal("@.str.0")
 
         # Positive artifacts: unit one emitted exactly its own one decl, and
         # unit two emitted exactly its own one decl naming its own constant.
@@ -77,7 +118,7 @@ describe "LLVM bootstrap module-level accumulators reset per compilation unit":
     it "keeps the per-instance string_global_text mirror unit-local":
         # @req REQ-SSPEC-COMPILER
         step("keeps the per-instance string_global_text mirror unit-local")
-        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
 
         var a = MirToLlvm.create("mod_a2", CodegenTarget.X86_64, nil)
         a.add_string_global("AAA_UNIT_ONE")
@@ -91,7 +132,7 @@ describe "LLVM bootstrap module-level accumulators reset per compilation unit":
         expect(b.string_globals.join("\n")).to_not_contain("AAA_UNIT_ONE")
 
     it "keeps interleaved translator writes owner-local":
-        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
 
         var a = MirToLlvm.create("mod_interleave_a", CodegenTarget.X86_64, nil)
         var b = MirToLlvm.create("mod_interleave_b", CodegenTarget.X86_64, nil)
@@ -126,3 +167,15 @@ describe "LLVM bootstrap module-level accumulators reset per compilation unit":
         expect(count_occurrences(ir_b, "target triple")).to_equal(1)
         expect(ir_b).to_contain("mod_b3")
         expect(ir_b).to_not_contain("mod_a3")
+
+    it "emits string globals on both shortcut and explicit translation routes":
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val source = "fn entry() -> text:\n    \"BOOTSTRAP_EMITTED_IR\"\n"
+        val shortcut_ir = MirToLlvm.create("bootstrap_shortcut", CodegenTarget.X86_64, nil)
+            .translate_module(lower_bootstrap_source(source))
+        val explicit_ir = MirToLlvm.create("bootstrap_explicit", CodegenTarget.X86_64, nil)
+            .translate_module_with_entry(lower_bootstrap_source(source), true)
+        expect(shortcut_ir).to_contain("BOOTSTRAP_EMITTED_IR")
+        expect(shortcut_ir).to_contain("; String constants")
+        expect(explicit_ir).to_contain("BOOTSTRAP_EMITTED_IR")
+        expect(explicit_ir).to_contain("; String constants")

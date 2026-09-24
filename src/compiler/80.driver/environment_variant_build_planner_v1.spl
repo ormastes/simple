@@ -1,0 +1,198 @@
+# codex-impl
+# Compiler-owned build planning for one baseline core plus parser providers.
+# Target profiles are explicit inputs: no host snapshot participates in planning.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1, EnvironmentArenaRangeV1,
+    ENV_ARCH_X86_64_V1, ENV_ARCH_AARCH64_V1,
+    ENV_PLACEMENT_NATIVE_DYNLIB_V1, ENV_PLACEMENT_SMF_V1, ENV_PLACEMENT_JIT_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.{
+    TargetCodegenProfileV1, target_codegen_profile_validate_v1,
+    target_codegen_features_subset_v1
+}
+
+pub const ENV_VARIANT_BUILD_PLAN_SCHEMA_V1: u16 = 1u16
+pub const ENV_VARIANT_SCOPE_PARSER_V1: u16 = 1u16
+
+pub enum EnvironmentVariantBuildPlanErrorV1:
+    InvalidIdentity
+    InvalidTargetProfile
+    WholeExecutableIsaMatrixForbidden
+    UnsupportedVariantScope
+    UnsupportedPlacement
+    UnsupportedBackendFeatures
+    DuplicateVariant
+    EmptyVariantSet
+    CapacityExceeded
+    NonCanonicalRequestOrder
+
+pub struct EnvironmentVariantBuildRequestV1:
+    variant_identity: EnvironmentDigest256V1
+    scope: u16
+    placement: u16
+    target_profile: TargetCodegenProfileV1
+    source_or_ir_digest: EnvironmentDigest256V1
+    compiler_digest: EnvironmentDigest256V1
+    dependency_lock_digest: EnvironmentDigest256V1
+    optimization_policy_digest: EnvironmentDigest256V1
+    artifact_format_digest: EnvironmentDigest256V1
+
+pub struct EnvironmentVariantArtifactPlanV1:
+    variant_identity: EnvironmentDigest256V1
+    scope: u16
+    placement: u16
+    target_profile: TargetCodegenProfileV1
+    artifact_identity: EnvironmentDigest256V1
+    cache_key: EnvironmentDigest256V1
+
+pub struct EnvironmentVariantBuildPlanV1:
+    schema_version: u16
+    baseline_core_identity: EnvironmentDigest256V1
+    baseline_core_profile: TargetCodegenProfileV1
+    artifacts: [EnvironmentVariantArtifactPlanV1]
+    plan_identity: EnvironmentDigest256V1
+
+fn _declared(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _same(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+fn _digest_order(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> i64:
+    if left.w0 != right.w0: return if left.w0 < right.w0: -1 else: 1
+    if left.w1 != right.w1: return if left.w1 < right.w1: -1 else: 1
+    if left.w2 != right.w2: return if left.w2 < right.w2: -1 else: 1
+    if left.w3 != right.w3: return if left.w3 < right.w3: -1 else: 1
+    0
+
+fn _push_u64(out: [i64], value: u64):
+    for shift in 0..8:
+        out.append(((value >> ((shift as u64) * 8u64)) & 255u64) as i64)
+
+fn _push_digest(out: [i64], value: EnvironmentDigest256V1):
+    _push_u64(out, value.w0); _push_u64(out, value.w1)
+    _push_u64(out, value.w2); _push_u64(out, value.w3)
+
+fn _read_u64(bytes: [i64], offset: i64) -> u64:
+    var value = 0u64
+    for i in 0..8:
+        value = value | ((bytes[offset + i] as u64) << ((i as u64) * 8u64))
+    value
+
+fn _hash(material: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(w0: _read_u64(raw, 0), w1: _read_u64(raw, 8),
+        w2: _read_u64(raw, 16), w3: _read_u64(raw, 24))
+
+fn _baseline_feature_mask(architecture: u16) -> u64:
+    if architecture == ENV_ARCH_X86_64_V1 or architecture == ENV_ARCH_AARCH64_V1:
+        return 1u64
+    0u64
+
+fn _profile_material(out: [i64], profile: TargetCodegenProfileV1, words: [u64]):
+    _push_digest(out, profile.profile_identity); _push_digest(out, profile.target_identity)
+    _push_u64(out, profile.target_architecture as u64); _push_u64(out, profile.target_abi_id as u64)
+    _push_u64(out, profile.target_object_format_id as u64)
+    _push_u64(out, profile.target_endian_id as u64); _push_u64(out, profile.target_pointer_width_bits as u64)
+    _push_u64(out, profile.strict_requested_features as u64)
+    _push_digest(out, profile.backend_identity); _push_digest(out, profile.semantic_identity)
+    _push_u64(out, profile.numerical_contract_id as u64)
+    _push_u64(out, profile.requested_features.words.count as u64)
+    var i = 0u32
+    while i < profile.requested_features.words.count:
+        _push_u64(out, words[(profile.requested_features.words.offset + i) as i64])
+        i = i + 1u32
+
+pub fn environment_variant_build_plan_v1(
+    baseline_core_identity: EnvironmentDigest256V1,
+    baseline_core_profile: TargetCodegenProfileV1,
+    baseline_feature_words: [u64], requests: [EnvironmentVariantBuildRequestV1],
+    request_feature_words: [[u64]], backend_supported_features: [EnvironmentFeatureSetV1],
+    backend_feature_words: [[u64]]
+) -> Result<EnvironmentVariantBuildPlanV1, EnvironmentVariantBuildPlanErrorV1>:
+    # Bounded/canonical preflight precedes validation, traversal, and hashing.
+    # Digest ordering matches catalog_identity_v1: w0, then w1, w2, w3.
+    if requests.len() > 256 or baseline_feature_words.len() > 64:
+        return Err(EnvironmentVariantBuildPlanErrorV1.CapacityExceeded)
+    if requests.len() != request_feature_words.len() or requests.len() != backend_supported_features.len() or requests.len() != backend_feature_words.len():
+        return Err(EnvironmentVariantBuildPlanErrorV1.InvalidTargetProfile)
+    var preflight = 0
+    while preflight < requests.len():
+        if request_feature_words[preflight].len() > 64 or backend_feature_words[preflight].len() > 64:
+            return Err(EnvironmentVariantBuildPlanErrorV1.CapacityExceeded)
+        val backend_range = backend_supported_features[preflight].words
+        if backend_range.offset > backend_feature_words[preflight].len() as u32 or
+           backend_range.count > backend_feature_words[preflight].len() as u32 - backend_range.offset:
+            return Err(EnvironmentVariantBuildPlanErrorV1.InvalidTargetProfile)
+        if preflight > 0:
+            val order = _digest_order(requests[preflight - 1].variant_identity,
+                requests[preflight].variant_identity)
+            if order == 0: return Err(EnvironmentVariantBuildPlanErrorV1.DuplicateVariant)
+            if order > 0: return Err(EnvironmentVariantBuildPlanErrorV1.NonCanonicalRequestOrder)
+        preflight = preflight + 1
+    if not _declared(baseline_core_identity): return Err(EnvironmentVariantBuildPlanErrorV1.InvalidIdentity)
+    if target_codegen_profile_validate_v1(baseline_core_profile, baseline_feature_words) != Ok(()):
+        return Err(EnvironmentVariantBuildPlanErrorV1.InvalidTargetProfile)
+    # Baseline includes architecture-mandated features (x86-64 SSE2 and
+    # AArch64 NEON).  Only bits beyond that ABI baseline are forbidden here.
+    val baseline_mask = _baseline_feature_mask(baseline_core_profile.target_architecture)
+    var i = 0u32
+    while i < baseline_core_profile.requested_features.words.count:
+        val allowed = if i == 0u32: baseline_mask else: 0u64
+        if baseline_feature_words[(baseline_core_profile.requested_features.words.offset + i) as i64] & allowed !=
+           baseline_feature_words[(baseline_core_profile.requested_features.words.offset + i) as i64]:
+            return Err(EnvironmentVariantBuildPlanErrorV1.WholeExecutableIsaMatrixForbidden)
+        i = i + 1u32
+    if requests.len() == 0: return Err(EnvironmentVariantBuildPlanErrorV1.EmptyVariantSet)
+    var artifacts: [EnvironmentVariantArtifactPlanV1] = []
+    var plan_material: [i64] = []
+    _push_digest(plan_material, baseline_core_identity)
+    _profile_material(plan_material, baseline_core_profile, baseline_feature_words)
+    for index in 0..requests.len():
+        val request = requests[index]
+        val words = request_feature_words[index]
+        if request.scope != ENV_VARIANT_SCOPE_PARSER_V1:
+            return Err(EnvironmentVariantBuildPlanErrorV1.UnsupportedVariantScope)
+        if request.placement != ENV_PLACEMENT_NATIVE_DYNLIB_V1 and request.placement != ENV_PLACEMENT_SMF_V1 and request.placement != ENV_PLACEMENT_JIT_V1:
+            return Err(EnvironmentVariantBuildPlanErrorV1.UnsupportedPlacement)
+        if target_codegen_profile_validate_v1(request.target_profile, words) != Ok(()):
+            return Err(EnvironmentVariantBuildPlanErrorV1.InvalidTargetProfile)
+        # The shared predicate addresses one arena, so normalize the two caller
+        # arenas into a temporary request-then-backend arena before comparison.
+        var comparison_words = words
+        for word in backend_feature_words[index]: comparison_words.append(word)
+        val backend_features = EnvironmentFeatureSetV1(
+            architecture: backend_supported_features[index].architecture,
+            words: EnvironmentArenaRangeV1(
+                offset: words.len() as u32 + backend_supported_features[index].words.offset,
+                count: backend_supported_features[index].words.count))
+        if not target_codegen_features_subset_v1(request.target_profile.requested_features,
+            backend_features, comparison_words):
+            return Err(EnvironmentVariantBuildPlanErrorV1.UnsupportedBackendFeatures)
+        if not _declared(request.variant_identity) or not _declared(request.source_or_ir_digest) or
+           not _declared(request.compiler_digest) or not _declared(request.dependency_lock_digest) or
+           not _declared(request.optimization_policy_digest) or not _declared(request.artifact_format_digest):
+            return Err(EnvironmentVariantBuildPlanErrorV1.InvalidIdentity)
+        for prior in artifacts:
+            if _same(prior.variant_identity, request.variant_identity):
+                return Err(EnvironmentVariantBuildPlanErrorV1.DuplicateVariant)
+        var material: [i64] = []
+        _push_u64(material, ENV_VARIANT_BUILD_PLAN_SCHEMA_V1 as u64)
+        _push_digest(material, request.variant_identity); _push_u64(material, request.scope as u64)
+        _push_u64(material, request.placement as u64); _profile_material(material, request.target_profile, words)
+        _push_digest(material, request.source_or_ir_digest); _push_digest(material, request.compiler_digest)
+        _push_digest(material, request.dependency_lock_digest); _push_digest(material, request.optimization_policy_digest)
+        _push_digest(material, request.artifact_format_digest)
+        val cache_key = _hash(material)
+        var identity_material = material
+        _push_digest(identity_material, cache_key)
+        val artifact_identity = _hash(identity_material)
+        artifacts.append(EnvironmentVariantArtifactPlanV1(
+            variant_identity: request.variant_identity, scope: request.scope,
+            placement: request.placement, target_profile: request.target_profile,
+            artifact_identity: artifact_identity, cache_key: cache_key))
+        _push_digest(plan_material, artifact_identity); _push_digest(plan_material, cache_key)
+    Ok(EnvironmentVariantBuildPlanV1(schema_version: ENV_VARIANT_BUILD_PLAN_SCHEMA_V1,
+        baseline_core_identity: baseline_core_identity, baseline_core_profile: baseline_core_profile,
+        artifacts: artifacts, plan_identity: _hash(plan_material)))

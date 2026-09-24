@@ -1,4 +1,8 @@
 # "oldguard" pre-push probe recursion — located search, guard added (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Severity: critical (host-hang precedent — thousands of `timeout`/`sh`
   processes spawned, box became unresponsive, user had to kill the process
@@ -114,3 +118,4 @@ the dispatcher-level guard only bounds chains that pass back through
 `scripts/hooks/pre-push`; a probe that recurses through some other,
 unrelated entry point (never routing back through this dispatcher) would
 need its own local check of the same env var.
+

@@ -1,4 +1,8 @@
 # yaml parse: single-quoted scalars and nested block mappings
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED — found 2026-08-01 while fixing
 `common_encoding_yaml_broken_cross_submodule_import_2026-07-20`, fixed
@@ -71,3 +75,4 @@ Unaffected neighbours checked by inspection: `yaml_flow_guard_spec.spl` (flow
 paths only), and the `yaml_parse` block assertions in `yaml_coverage_spec.spl` /
 `parsers_misc_coverage_spec.spl` (flat two-key mapping and flat sequence, both
 covered by the oracle).
+

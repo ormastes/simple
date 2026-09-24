@@ -1,4 +1,8 @@
 # Rust-seed native codegen: bool-arg function call returns wrong value after inlining
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Found, NOT fixed (out of scope for the lane that found it) **Found:** 2026-07-17,
 while verifying the C3 (`and`/`or` short-circuit) fix in
@@ -83,3 +87,4 @@ instrumentation (temporary — none currently lands with this doc) around
 `compiler/src/codegen/instr/body.rs`'s per-function compile loop, focused on
 how a `false`-literal/computed argument's `Value` gets propagated across the
 inlined call boundary vs. a `true`-valued one (which works).
+

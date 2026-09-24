@@ -1,4 +1,8 @@
 # `simple lint` runs the entire pure-Simple linter in the tree-walking interpreter (two stacked de-JIT causes)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-18
 - Status: **OPEN — root cause located and reproduced; fix not landed**
@@ -255,3 +259,4 @@ arm because the feed only populates the duplicate-struct map.
 Module-qualified struct resolution across all three engines. Until then the
 sanctioned remedy for a specific collision remains renaming one struct
 (fix option 1), which buys the measured **1.23x** on lint and nothing more.
+

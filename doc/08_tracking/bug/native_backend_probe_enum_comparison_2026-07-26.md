@@ -1,4 +1,9 @@
 # Native Backend Probe Enum Comparison
+## Closed 2026-09-16 — ...Probe Enum Comparison ## Status Resolved by routing comparisons through `backend_probe_ini
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -21,3 +26,4 @@ Strict Vulkan creation now passes and selects `backend_name=vulkan`.
 
 The next blocker is the separate aggregate-return defect recorded in
 `native_engine2d_readback_aggregate_abi_2026-07-26.md`.
+

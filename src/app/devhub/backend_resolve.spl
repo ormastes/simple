@@ -48,10 +48,11 @@ class RepoDevhubConfig:
     tasks_backend: text  # jira | github
     bb_workspace: text
     bb_repo: text
+    bb_project: text     # Bitbucket Server / Data Center PROJECT_KEY (the DC counterpart of bb_workspace)
     token_envs: [(text, text)]  # (provider, ENV VAR NAME) — never a secret
 
     static fn empty() -> RepoDevhubConfig:
-        RepoDevhubConfig(git_backend: "", wiki_backend: "", tasks_backend: "", bb_workspace: "", bb_repo: "", token_envs: [])
+        RepoDevhubConfig(git_backend: "", wiki_backend: "", tasks_backend: "", bb_workspace: "", bb_repo: "", bb_project: "", token_envs: [])
 
 
 # ============================================================================
@@ -188,6 +189,7 @@ fn parse_repo_devhub_config(content: text) -> RepoDevhubConfig:
     var tasks_backend = ""
     var bb_workspace = ""
     var bb_repo = ""
+    var bb_project = ""
     var token_envs: [(text, text)] = []
     for entry in parse_sdn_sections(content):
         if entry.0 == "devhub":
@@ -203,9 +205,11 @@ fn parse_repo_devhub_config(content: text) -> RepoDevhubConfig:
                 bb_workspace = value
             else if key == "bb_repo":
                 bb_repo = value
+            else if key == "bb_project":
+                bb_project = value
             else if key.ends_with("_token_env"):
                 token_envs = token_envs + [(key[0:key.len() - 10], value)]
-    RepoDevhubConfig(git_backend: git_backend, wiki_backend: wiki_backend, tasks_backend: tasks_backend, bb_workspace: bb_workspace, bb_repo: bb_repo, token_envs: token_envs)
+    RepoDevhubConfig(git_backend: git_backend, wiki_backend: wiki_backend, tasks_backend: tasks_backend, bb_workspace: bb_workspace, bb_repo: bb_repo, bb_project: bb_project, token_envs: token_envs)
 
 
 # ============================================================================
@@ -272,15 +276,32 @@ fn resolve_bb_coordinates(args: [text]) -> (text, text):
     only ADDS the two config rungs the design doc recorded as missing
     ("cmd_bb.spl still resolves those from --workspace/--repo flags or
     BB_WORKSPACE/BB_REPO env vars only, not from config.sdn").
+
+    Bitbucket Server / Data Center has no workspace; its URL shape is
+    /projects/{PROJECT_KEY}/repos/{slug}, so the first slot carries the
+    project key there. Within each tier (flag, env, repo config, user config)
+    the project key is consulted before the workspace, but a tier never
+    outranks a higher one: an explicit `--workspace` still beats a
+    repo-tracked `bb_project`. Keys: `--project`, BB_PROJECT,
+    `.spipe/config.sdn [devhub] bb_project`, `~/.config/itf` [bitbucket]
+    project.
     """
     val repo_cfg = load_repo_devhub_config()
     val user_cfg = load_config()
 
-    var ws = _extract_flag(args, "--workspace", "")
+    var ws = _extract_flag(args, "--project", "")
+    if ws == "":
+        ws = _extract_flag(args, "--workspace", "")
+    if ws == "":
+        ws = env_get("BB_PROJECT")
     if ws == "":
         ws = env_get("BB_WORKSPACE")
     if ws == "":
+        ws = repo_cfg.bb_project
+    if ws == "":
         ws = repo_cfg.bb_workspace
+    if ws == "":
+        ws = user_cfg.bb_project
     if ws == "":
         ws = user_cfg.bb_workspace
 

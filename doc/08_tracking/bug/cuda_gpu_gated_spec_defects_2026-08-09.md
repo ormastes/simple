@@ -1,5 +1,15 @@
 # CUDA/GPU defects uncovered by opening the P15 env gates (2026-08-09)
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: needs SIMPLE_CUDA_TEST=1 plus real CUDA
+hardware to re-run the three gated specs this doc characterizes. The
+embedded "HARNESS TRAP" finding (only the last failure in an it block is
+reported) is a distinct, generic test-runner defect worth flagging to
+whoever tracks test_runner_reports_only_last_failure_per_example_2026-08-04
+(same shape), but reproducing the CUDA-specific findings needs a GPU host.
+Left OPEN.
+
+
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 

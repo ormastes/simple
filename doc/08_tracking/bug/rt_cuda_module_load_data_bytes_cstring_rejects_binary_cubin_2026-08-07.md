@@ -1,4 +1,8 @@
 # `rt_cuda_module_load_data_bytes` rejects real cubin/fatbin binaries containing embedded NUL bytes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ARCHITECTURAL-OPEN — fix location is entirely inside
 `src/compiler_rust/**` (both `runtime/src/cuda_runtime.rs:2402` and
@@ -75,3 +79,8 @@ SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_RUST_SEED_WARNING=0 bin/simple test \
   test/02_integration/os/crypto/x25519mlkem768_cuda_binary_execution_spec.spl \
   --no-cache --no-cover-check
 ```
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Record already states the fix location is entirely inside src/compiler_rust and needs real CUDA hardware to verify -- explicitly architectural-open and out of pure-Simple scope. No change made.
+

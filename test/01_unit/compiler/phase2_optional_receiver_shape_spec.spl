@@ -1,0 +1,37 @@
+# Purpose and audience: behavioral/import regression evidence for Phase 2 typed lowering.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.{describe, it, expect, step}
+use app.devhub.version_manifest.{_version_value}
+use compiler.loader.loader.object_mapper.{SharedExecMapper, SharedExecMapperConfig, SharedExecRecord}
+use compiler.loader.segment_mapper.{segment_mapper_owns_receipt_v1}
+use std.common.structural.parallel_commit.executable_mapping_receipt.{
+    ExecutableMappingProducerKindV1, executable_mapping_receipt_v1
+}
+
+describe "Phase 2 typed receiver behavior":
+    it "unwraps optional text positions before arithmetic":
+        step("Extract a manifest value and preserve the missing-delimiter fallback")
+        expect(_version_value("schema: simple-release-version/1")).to_equal("simple-release-version/1")
+        expect(_version_value("schema-without-value")).to_equal("")
+
+    it "returns the exact JIT mapping owner and nil for a miss":
+        step("Exercise owner lookup through the typed SharedExecRecord map")
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig.default())
+        mapper.records["compiled_symbol"] = SharedExecRecord(
+            owner_id: "jit-owner", symbol: "compiled_symbol", address: 4096,
+            size: 8, generation: 1, got_base: 0, got_size: 0)
+        expect(mapper.owner_for_symbol("compiled_symbol").unwrap()).to_equal("jit-owner")
+        expect(mapper.owner_for_symbol("missing_symbol").is_none()).to_be(true)
+
+    it "accepts only the matching segment receipt producer and instance":
+        step("Exercise the typed enum and mapper-instance ownership predicate")
+        val segment_receipt = executable_mapping_receipt_v1(
+            ExecutableMappingProducerKindV1.SegmentMapper, "mapper-1", "owner",
+            "owner#0", 1, 8, 1)
+        val shared_receipt = executable_mapping_receipt_v1(
+            ExecutableMappingProducerKindV1.SharedExecMapper, "mapper-1", "owner",
+            "owner#0", 1, 8, 1)
+        expect(segment_mapper_owns_receipt_v1(segment_receipt, "mapper-1")).to_be(true)
+        expect(segment_mapper_owns_receipt_v1(segment_receipt, "mapper-2")).to_be(false)
+        expect(segment_mapper_owns_receipt_v1(shared_receipt, "mapper-1")).to_be(false)

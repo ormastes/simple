@@ -1,0 +1,339 @@
+# Event-maintained canonical source inventory for compile-owned SCV snapshots.
+#
+# This module never discovers files. Git/filesystem adapters submit explicit
+# events, and compilation freezes one admitted immutable generation. All writes
+# are confined to the caller-provided SCV cache root.
+
+use std.common.crypto.sha256.{sha256_text}
+@allow(star_import) # reason: public compatibility facade over the pure inventory core
+export use std.scv.compile_source_inventory_core.*
+use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+use std.io_runtime.{process_is_running}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+
+extern fn rt_getpid() -> i64
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_rename(from_path: text, to_path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+
+fn compile_source_inventory_apply_and_publish_v1(
+    cache_root: text, events: [CompileSourceEventV1]
+) -> CompileSourceInventoryReadV1:
+    val current = compile_source_inventory_read_current_v1(cache_root)
+    var inventory = if current.valid:
+        current.inventory!
+    else:
+        CompileSourceInventoryV1(COMPILE_SOURCE_INVENTORY_SCHEMA_V1, 0, [])
+    val initial = if inventory.generation == 0 and inventory.entries.len() == 0:
+        compile_source_inventory_initial_events_v1(events)
+    else:
+        nil
+    if initial != nil:
+        inventory = initial!
+    else:
+        for event in events:
+            val changed = compile_source_inventory_apply_event_v1(inventory, event)
+            if not changed.valid:
+                return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
+            inventory = changed.inventory!
+    val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
+        cache_root, inventory)
+    if digest == "":
+        return CompileSourceInventoryReadV1(
+            false, "inventory-publication-failed:" + publish_reason, "", nil)
+    compile_source_inventory_read_current_v1(cache_root)
+
+fn compile_source_inventory_apply_git_changes_v1(
+    cache_root: text, changes: [CompileSourceGitChangeV1]
+) -> CompileSourceInventoryReadV1:
+    var events: [CompileSourceEventV1] = []
+    for change in changes:
+        events = events.push(compile_source_inventory_git_event_v1(
+            change.operation, change.source_identity, change.content))
+    compile_source_inventory_apply_and_publish_v1(cache_root, events)
+
+# Same publish path as compile_source_inventory_apply_git_changes_v1 above,
+# for a caller (the git inventory bridge) that already reduced each file to
+# an event — digests only, no retained file content — instead of collecting
+# a `[CompileSourceGitChangeV1]` that holds every file's full text at once.
+# On a ~1.6 GB, ~60k-file cold-init walk that array was the dominant retained
+# allocation; producing events per-file as they are listed, rather than
+# batching raw content first, keeps only ~5 fixed-size digests per file live.
+fn compile_source_inventory_apply_git_events_v1(
+    cache_root: text, events: [CompileSourceEventV1]
+) -> CompileSourceInventoryReadV1:
+    compile_source_inventory_apply_and_publish_v1(cache_root, events)
+
+fn compile_source_inventory_apply_filesystem_events_v1(
+    root: text, cache_root: text, events: [FsWatchEvent]
+) -> CompileSourceInventoryReadV1:
+    var translated: [CompileSourceEventV1] = []
+    for event in events:
+        if event.kind == "overflow":
+            return CompileSourceInventoryReadV1(
+                false, "inventory-event-overflow", "", nil)
+        val identity = compile_source_inventory_event_path_v1(root, event.path)
+        # Watch journals cover the whole tree; only compilable source paths
+        # (.spl, simple.sdn) are inventory-tracked, matching the git-event
+        # producer filter. Skipping here keeps one editor saving e.g. a
+        # README from failing the whole batch with event-invalid.
+        if not compile_source_inventory_path_valid_v1(identity):
+            continue
+        if event.kind == "deleted" or event.kind == "rename_from":
+            translated = translated.push(
+                compile_source_inventory_filesystem_event_v1(
+                    "delete", identity, ""))
+            continue
+        if event.kind == "renamed" and event.related != "":
+            val related = compile_source_inventory_event_path_v1(root, event.related)
+            translated = translated.push(
+                compile_source_inventory_filesystem_event_v1(
+                    "delete", related, ""))
+        val content = compile_source_inventory_read_text_v1(event.path)
+        if content == nil:
+            return CompileSourceInventoryReadV1(
+                false, "inventory-event-read-failed:{identity}", "", nil)
+        val operation = if event.kind == "created" or event.kind == "rename_to":
+            "create"
+        else:
+            "modify"
+        translated = translated.push(
+            compile_source_inventory_filesystem_event_v1(
+                operation, identity, content!))
+    compile_source_inventory_apply_and_publish_v1(cache_root, translated)
+
+# Cold replay retains one slot per distinct identity rather than constructing
+# successively larger inventories for every event. Reuse the one-event authority
+# on at most ONE row so validation, no-ops, facets and generation stay identical.
+# Deleted slots are reused on recreation; churn cannot retain one row per event.
+fn compile_source_inventory_apply_cold_events_v1(
+    initial_generation: i64, events: [CompileSourceEventV1]
+) -> CompileSourceInventoryChangeV1:
+    if initial_generation < 0:
+        return CompileSourceInventoryChangeV1(false, "event-invalid", nil, false, false)
+    var positions: Dict<text, i64> = {}
+    var retained: [CompileSourceInventoryEntryV1] = []
+    var active: [bool] = []
+    var generation = initial_generation
+    var content_changed = false
+    var semantics_changed = false
+    for event in events:
+        var position = -1
+        var single: [CompileSourceInventoryEntryV1] = []
+        if positions.has(event.source_identity):
+            position = positions[event.source_identity]
+            if active[position]:
+                single = single.push(retained[position])
+        val changed = compile_source_inventory_apply_event_v1(
+            CompileSourceInventoryV1(1, generation, single), event)
+        if not changed.valid:
+            return changed
+        val next = changed.inventory!
+        generation = next.generation
+        content_changed = content_changed or changed.content_changed
+        semantics_changed = semantics_changed or changed.semantics_changed
+        if next.entries.len() == 0:
+            if position >= 0:
+                active[position] = false
+        else:
+            if position >= 0:
+                retained[position] = next.entries[0]
+                active[position] = true
+            else:
+                positions[event.source_identity] = retained.len()
+                retained = retained.push(next.entries[0])
+                active = active.push(true)
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var index = 0
+    while index < retained.len():
+        if active[index]:
+            entries = entries.push(retained[index])
+        index = index + 1
+    val inventory = CompileSourceInventoryV1(1, generation, compile_source_inventory_sort_v1(entries))
+    val reason = if generation == initial_generation: "ok-no-change" else: "ok"
+    CompileSourceInventoryChangeV1(true, reason, Some(inventory), content_changed, semantics_changed)
+
+fn compile_source_inventory_storage_v1(cache_root: text) -> text:
+    "{cache_root}/source-inventory"
+
+fn compile_source_inventory_read_text_v1(path: text) -> text?:
+    if not rt_file_is_regular_no_follow(path):
+        return nil
+    val size = rt_file_size(path)
+    if size <= 0 or size > COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1:
+        return nil
+    rt_file_read_regular_no_follow_bounded(path, size)
+
+fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryReadV1:
+    val lines = content.split("\n")
+    if lines.len() < 3 or lines[0] != "simple-compile-source-inventory-v1" or
+            not lines[1].starts_with("generation=") or
+            not lines[2].starts_with("count="):
+        return CompileSourceInventoryReadV1(false, "inventory-header-invalid", "", nil)
+    val generation = lines[1].substring(11).to_i64() ?? -1
+    val count = lines[2].substring(6).to_i64() ?? -1
+    if generation < 0 or count < 0 or lines.len() != count + 3:
+        return CompileSourceInventoryReadV1(false, "inventory-count-invalid", "", nil)
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var index = 3
+    while index < lines.len():
+        val fields = lines[index].split("|")
+        if fields.len() != 7:
+            return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
+        entries = entries.push(CompileSourceInventoryEntryV1(
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5],
+            fields[6].to_i64() ?? -1))
+        index = index + 1
+    val inventory = CompileSourceInventoryV1(1, generation, entries)
+    if compile_source_inventory_encode_v1(inventory) != content:
+        return CompileSourceInventoryReadV1(false, "inventory-noncanonical", "", nil)
+    CompileSourceInventoryReadV1(true, "ok", sha256_text(content), Some(inventory))
+
+fn compile_source_inventory_publish_v1(
+    cache_root: text, inventory: CompileSourceInventoryV1
+) -> text:
+    """Publish and answer the digest, or "" on any failure.
+
+    Kept for the exported contract. Everything in-tree should call
+    `compile_source_inventory_publish_reasoned_v1` instead and surface the
+    reason: this function has EIGHT distinct failure paths and collapsing them
+    into one empty string is what made a permanently wedged cache read exactly
+    like a full disk. See
+    doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
+    """
+    val (digest, _reason) = compile_source_inventory_publish_reasoned_v1(cache_root, inventory)
+    digest
+
+fn compile_source_inventory_publish_reasoned_v1(
+    cache_root: text, inventory: CompileSourceInventoryV1
+) -> (text, text):
+    """Publish an inventory, answering `(digest, reason)`.
+
+    `reason` is "ok" on success and otherwise names WHICH of the eight failure
+    paths fired, so a caller can tell a retryable race
+    (`publish-superseded-by-newer-generation`) from a permanent wedge
+    (`publish-generation-digest-divergence`, which no retry can clear) from an
+    environment failure (`publish-lock-unavailable`, `publish-storage-*`).
+    """
+    if not compile_source_inventory_cache_root_valid_v1(cache_root):
+        return ("", "publish-cache-root-invalid")
+    val content = compile_source_inventory_encode_v1(inventory)
+    if content == "":
+        return ("", "publish-encode-empty")
+    val digest = sha256_text(content)
+    val root = compile_source_inventory_storage_v1(cache_root)
+    if not rt_dir_create_all("{root}/generations"):
+        return ("", "publish-storage-mkdir-failed")
+    val publication_lock = file_lock("{root}/publication.lock", 5)
+    if publication_lock < 0:
+        return ("", "publish-lock-unavailable")
+    val current = compile_source_inventory_read_current_v1(cache_root)
+    if current.valid and current.inventory!.generation > inventory.generation:
+        val _unlocked = file_unlock(publication_lock)
+        return ("", "publish-superseded-by-newer-generation")
+    if current.valid and current.inventory!.generation == inventory.generation:
+        val existing_digest = current.digest
+        val _unlocked = file_unlock(publication_lock)
+        if existing_digest == digest:
+            return (digest, "ok")
+        # Same generation, different content: no retry can ever clear this, and
+        # it is exactly the state an empty generation-0 inventory leaves behind.
+        # Say so, and name the remedy, instead of answering "" like a transient.
+        return ("", "publish-generation-digest-divergence (cached inventory at this generation has different content; clear {cache_root} to rebuild)")
+    val generation_path = "{root}/generations/{digest}.inventory"
+    if not rt_file_exists(generation_path):
+        val generation_staged = "{generation_path}.tmp.{rt_getpid()}"
+        rt_file_delete(generation_staged)
+        if (not file_create_excl(generation_staged, content) or
+                not rt_file_rename(generation_staged, generation_path)):
+            rt_file_delete(generation_staged)
+            val raced = compile_source_inventory_read_text_v1(generation_path)
+            if raced == nil or raced! != content:
+                val _unlocked = file_unlock(publication_lock)
+                return ("", "publish-generation-write-failed")
+    val staged = "{root}/CURRENT.tmp.{rt_getpid()}"
+    rt_file_delete(staged)
+    if not file_create_excl(staged, digest) or
+            not rt_file_rename(staged, "{root}/CURRENT"):
+        rt_file_delete(staged)
+        val _unlocked = file_unlock(publication_lock)
+        return ("", "publish-current-write-failed")
+    val _unlocked = file_unlock(publication_lock)
+    (digest, "ok")
+
+fn compile_source_inventory_read_current_v1(
+    cache_root: text
+) -> CompileSourceInventoryReadV1:
+    if not compile_source_inventory_cache_root_valid_v1(cache_root):
+        return CompileSourceInventoryReadV1(false, "inventory-cache-root-invalid", "", nil)
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val pointer = compile_source_inventory_read_text_v1("{root}/CURRENT")
+    if pointer == nil or not compile_source_inventory_digest_valid_v1(pointer!):
+        return CompileSourceInventoryReadV1(false, "inventory-pointer-invalid", "", nil)
+    val content = compile_source_inventory_read_text_v1(
+        "{root}/generations/{pointer!}.inventory")
+    if content == nil or sha256_text(content!) != pointer!:
+        return CompileSourceInventoryReadV1(false, "inventory-generation-invalid", "", nil)
+    compile_source_inventory_decode_v1(content!)
+
+fn compile_source_inventory_recover_v1(cache_root: text) -> i64:
+    if not compile_source_inventory_cache_root_valid_v1(cache_root):
+        return 0
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val recovery_lock = file_lock("{root}/publication.lock", 1)
+    if recovery_lock < 0:
+        return 0
+    var removed = 0
+    for name in dir_list(root):
+        if name.starts_with("CURRENT.tmp."):
+            val owner = name.substring(12).to_i64() ?? -1
+            if owner > 0 and not process_is_running(owner) and
+                    rt_file_delete("{root}/{name}"):
+                removed = removed + 1
+    for name in dir_list("{root}/generations"):
+        if name.contains(".inventory.tmp."):
+            val parts = name.split(".tmp.")
+            val owner = if parts.len() == 2: parts[1].to_i64() ?? -1 else: -1
+            if owner > 0 and not process_is_running(owner) and
+                    rt_file_delete("{root}/generations/{name}"):
+                removed = removed + 1
+    val _unlocked = file_unlock(recovery_lock)
+    removed
+
+fn compile_source_inventory_snapshot_rows_v1(
+    inventory: CompileSourceInventoryV1
+) -> text:
+    val entries = compile_source_inventory_sort_v1(inventory.entries)
+    var rows: [text] = []
+    for entry in entries:
+        if not compile_source_inventory_entry_valid_v1(entry):
+            return ""
+        rows = rows.push("{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
+    rows.join("\n")
+
+export COMPILE_SOURCE_INVENTORY_SCHEMA_V1
+export CompileSourceInventoryEntryV1, CompileSourceEventV1
+export CompileSourceGitChangeV1
+export CompileSourceInventoryV1, CompileSourceInventoryReadV1
+export CompileSourceInventoryChangeV1
+export compile_source_inventory_apply_event_v1
+export compile_source_inventory_initial_events_v1
+export compile_source_inventory_path_valid_v1
+export compile_source_inventory_git_event_v1
+export compile_source_inventory_filesystem_event_v1
+export compile_source_inventory_apply_git_changes_v1
+export compile_source_inventory_apply_git_events_v1
+export compile_source_inventory_apply_filesystem_events_v1
+export compile_source_inventory_encode_v1, compile_source_inventory_decode_v1
+export compile_source_inventory_digest_v1
+export compile_source_inventory_publish_v1, compile_source_inventory_publish_reasoned_v1, compile_source_inventory_read_current_v1
+export compile_source_inventory_recover_v1
+export compile_source_inventory_snapshot_rows_v1

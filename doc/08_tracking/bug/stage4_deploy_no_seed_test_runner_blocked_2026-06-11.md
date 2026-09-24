@@ -1,7 +1,16 @@
 # stage4 deploy left no seed driver — `bin/simple test` blocked host-wide
 
+## Closed 2026-09-13 — resolved 2026-06-12 (seed rebuilt, deploy gate implemented)
+
+- **inferred** Entry status: resolved (2026-06-12 — seed rebuilt; deploy-gate implemented
+  in bootstrap-from-scratch.sh).
+- **measured** A seed test runner is present and functional on this host: `bin/simple test
+  <spec>` executes, reports `WARNING: test daemon unavailable; running directly`, and emits
+  a structured `SPEC FILE VERDICT: ...` line — the capability whose absence blocked this entry.
+
+
 Date: 2026-06-11
-Status: resolved (2026-06-12 — seed rebuilt; deploy-gate implemented in bootstrap-from-scratch.sh)
+Status: closed 2026-09-13 (was: Status: resolved (2026-06-12 — seed rebuilt; deploy-gate implemented in bootstrap-from-scratch.sh))
 Owner: stage4 deploy lane
 
 ## Resolution (2026-06-12)

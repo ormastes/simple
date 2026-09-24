@@ -105,6 +105,7 @@ class SettlementContainer:
     3. Link modules (resolve cross-module symbols)
     """
     modules: Dict<text, ModuleEntry>
+    registered_module_count: i64
     load_order: [text]       # Modules in topological order
     linker: SettlementLinker
     is_linked: bool
@@ -113,6 +114,7 @@ impl SettlementContainer:
     static fn create() -> SettlementContainer:
         SettlementContainer(
             modules: {},
+            registered_module_count: 0,
             load_order: [],
             linker: SettlementLinker.create(),
             is_linked: false
@@ -131,6 +133,7 @@ impl SettlementContainer:
             return Err(ContainerError.ModuleAlreadyLoaded(id))
         val entry = ModuleEntry.create(id, path)
         self.modules[id] = entry
+        self.registered_module_count = self.registered_module_count + 1
         self.linker.add_module(id)
         self._invalidate_load_order()
         self.is_linked = false
@@ -188,16 +191,19 @@ impl SettlementContainer:
         for name in self.linker.fallback_exports.keys():
             if not staged.exports.contains(name):
                 staged.exports[name] = self.linker.fallback_exports[name]
+                staged.export_count = staged.export_count + 1
         # Preserve other directly registered non-module exports as well.
         for name in self.linker.exports.keys():
             val existing = self.linker.exports[name]
             if not replayed.contains(existing.module_id) and not staged.exports.contains(name):
                 staged.exports[name] = existing
+                staged.export_count = staged.export_count + 1
 
         var entry = self.modules[module_id]
         entry.exports = exports
         self.modules[module_id] = entry
         self.linker.exports = staged.exports
+        self.linker.export_count = staged.export_count
         self.linker.resolved_count = 0
         self.linker.unresolved_count = 0
 
@@ -210,6 +216,7 @@ impl SettlementContainer:
             return Err(ContainerError.ModuleNotFound(module_id))
 
         var staged_imports: Dict<text, [ImportRef]> = {}
+        var staged_import_count = 0i64
         for name in self.linker.imports.keys():
             for ref in self.linker.imports[name]:
                 if ref.from_module == module_id:
@@ -217,12 +224,16 @@ impl SettlementContainer:
                 var bucket: [ImportRef] = []
                 if staged_imports.contains(name):
                     bucket = staged_imports[name]
+                else:
+                    staged_import_count = staged_import_count + 1
                 bucket.push(ref)
                 staged_imports[name] = bucket
         for ref in imports:
             var bucket: [ImportRef] = []
             if staged_imports.contains(ref.symbol_name):
                 bucket = staged_imports[ref.symbol_name]
+            else:
+                staged_import_count = staged_import_count + 1
             bucket.push(ref)
             staged_imports[ref.symbol_name] = bucket
 
@@ -230,6 +241,7 @@ impl SettlementContainer:
         entry.imports = imports
         self.modules[module_id] = entry
         self.linker.imports = staged_imports
+        self.linker.import_count = staged_import_count
         self.linker.resolved_count = 0
         self.linker.unresolved_count = 0
 
@@ -284,6 +296,7 @@ impl SettlementContainer:
                 self.modules[dependent_id] = dependent
 
         self.modules = self.modules.remove(module_id)
+        self.registered_module_count = self.registered_module_count - 1
         self.linker.modules = self.linker.modules.filter(\id: id != module_id)
         self.load_order = []
         for remaining_id in self.modules.keys():
@@ -306,11 +319,14 @@ impl SettlementContainer:
         """
         # Count each module's unresolved dependencies. A dependency-free module
         # is ready first; completing it releases its dependents.
+        # Snapshot IDs once: Dict.keys() materializes an array, and this graph is
+        # immutable for the duration of sorting.
+        val module_ids = self.modules.keys()
         var in_degree: Dict<text, i64> = {}
-        for id in self.modules.keys():
+        for id in module_ids:
             in_degree[id] = 0
 
-        for id in self.modules.keys():
+        for id in module_ids:
             val entry = self.modules[id]
             for dep_id in entry.dependencies:
                 if in_degree.contains(dep_id):
@@ -374,10 +390,10 @@ impl SettlementContainer:
                             ready[ready_index] = temporary
                             ready_index = parent
 
-        if sorted.len() != self.modules.keys().len():
+        if sorted.len() != self.registered_module_count:
             # Circular dependency — find the cycle
             var cycle: [text] = []
-            for id in self.modules.keys():
+            for id in module_ids:
                 # Kahn processing reduces every emitted node to zero. Any
                 # positive residual belongs to the same unprocessed set that
                 # used to be found by scanning `sorted` once per module.
@@ -429,7 +445,7 @@ impl SettlementContainer:
 
     fn module_count() -> i64:
         """Get the number of modules."""
-        self.modules.keys().len()
+        self.registered_module_count
 
     fn get_load_order() -> [text]:
         """Get modules in topological load order."""
@@ -449,7 +465,7 @@ impl SettlementContainer:
                 case _: pass
 
         ContainerStats(
-            total_modules: self.modules.keys().len(),
+            total_modules: self.registered_module_count,
             loaded: loaded,
             linked: linked,
             failed: failed,

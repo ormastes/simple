@@ -590,6 +590,34 @@ fn eval_method_call(eid: i64) -> i64:
     val arg_eids = e_node.args
     val arg_names = expr_get_arg_names(eid)
 
+    # Static class-method call: Type.method(args). The parser builds a
+    # METHOD_CALL for this shape (parse_postfix_on), so the receiver is the
+    # bare class NAME, not a value — evaluating it as an expression dies with
+    # "undefined variable: Type" because class names live in the struct table,
+    # not the value env (this is what made a module-level
+    # `val _global_mock_policy = MockPolicy.new()` — and with it the whole
+    # std.spec import closure — unloadable under core_interpret; see
+    # doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md
+    # and its "flat registry lets one module's symbol hijack another" family).
+    # Mirror the EXPR_CALL field-access path in eval_call below: enum variants
+    # first, then Type__method in the function table.
+    if expr_get(receiver_eid).tag == EXPR_IDENT:
+        val type_name = expr_get(receiver_eid).s_val
+        val enum_variants = enum_table_lookup(type_name)
+        if enum_variants != "":
+            val variant_list = enum_variants.split(",")
+            var is_variant = false
+            for vn in variant_list:
+                if vn == method_name:
+                    is_variant = true
+                    break
+            if is_variant:
+                return eval_enum_variant_call(type_name, method_name, arg_eids)
+        if struct_table_lookup(type_name) >= 0:
+            val static_decl = func_table_lookup(type_name + "__" + method_name)
+            if static_decl >= 0:
+                return eval_function_call(static_decl, arg_eids, arg_names)
+
     val receiver = eval_expr(receiver_eid)
     if eval_had_error: return -1
 

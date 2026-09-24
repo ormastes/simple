@@ -1,4 +1,9 @@
 # iso ownership-transfer sites still missing MIR `Move` (WP-M audit)
+## Closed 2026-09-16 — Status CLOSED; items 1-3 closed via commits 6a53442fbd1/63dc29b11a2 with sabotage-verified specs
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** CLOSED — all of items #1, #2, #3 (plus the array/dict/`.push()`
 collection-store follow-up) now emit real Move facts. Item #4 remains
@@ -304,3 +309,4 @@ site this lane already fixed.
   let-binding proof + the terminator/return blind-spot comment cited above.
 - `src/compiler/50.mir/mir_data.spl:353-369` -- `emit_move`'s own docstring,
   the original "no caller yet" audit this lane's audit continues.
+

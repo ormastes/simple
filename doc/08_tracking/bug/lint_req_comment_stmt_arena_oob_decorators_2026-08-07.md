@@ -1,4 +1,9 @@
 # `bin/simple lint` crashes with stmt-arena OOB on `decorators.spl` (pre-existing)
+## Closed 2026-09-16 — Status CLOSED ALREADY-FIXED; repro re-run clean 2026-08-17 with cause identified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: CLOSED — ALREADY-FIXED, reproduced clean 2026-08-17 (see the
   verification section at the end of this file). The earlier "OPEN (P2) /
@@ -140,3 +145,4 @@ concurrent lane. It needs its own row against that tree.
 Not proven by this lane: that the five accessors above are reachable with a
 stale index today — only that the guard which makes `stmt_get_tag` safe has no
 counterpart in them.
+

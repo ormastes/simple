@@ -1,0 +1,254 @@
+# Purpose: executable transition-model evidence for RR Atomic Generation V2.
+# This does not grant production publication or old-history issuer authority.
+# @req REQ-RRAG2-001 REQ-RRAG2-002 REQ-RRAG2-003 REQ-RRAG2-004
+# @req REQ-RRAG2-005 REQ-RRAG2-006 REQ-RRAG2-007
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1,
+}
+use compiler.driver.cache.reference.reverse_reference_atomic_generation_v2.{
+    RrOldOutgoingAuthorityV2, RrAtomicGenerationInputV2,
+    RrAtomicGenerationV2, RrAtomicGenerationStageV2, RrAtomicCrashPointV2,
+    prepare_rr_atomic_generation_v2,
+    prepare_rr_atomic_generation_transition_model_v2,
+    rr_old_outgoing_authority_receipt_v2,
+    rr_old_outgoing_authority_available_v2,
+    rr_atomic_generation_publisher_authority_available_v2,
+    rr_atomic_generation_transition_model_v2,
+    recover_rr_atomic_generation_v2,
+}
+
+fn digest(label: text) -> text: sha256_text("rrag2-" + label)
+
+fn query(label: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "resolve", stable_entity_id: label,
+        semantic_profile_digest: digest("profile"), parameter_digest: digest(label))
+
+fn read(producer: SemanticQueryKeyV1, consumer: SemanticQueryKeyV1,
+        fingerprint: text, ordinal: i64) -> SemanticQueryReadV1:
+    SemanticQueryReadV1(producer: producer, consumer: consumer,
+        facet: "membership", ordinal: ordinal,
+        consumed_fingerprint: digest(fingerprint),
+        witness_digest: digest("witness-" + fingerprint),
+        partition_id: "partition-a", completeness: SemanticCoverageV1.Complete)
+
+fn manifest(consumer: SemanticQueryKeyV1,
+        reads: [SemanticQueryReadV1]) -> SemanticQueryReadManifestV1:
+    SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+        ordered_reads: reads)
+
+fn base_input(generation: i64) -> RrAtomicGenerationInputV2:
+    val producer_digest = digest("producer-summary")
+    RrAtomicGenerationInputV2(generation: generation,
+        snapshot_digest: digest("snapshot"), catalog_digest: digest("catalog"),
+        summary_refs: [producer_digest], scope_refs: [digest("scope")],
+        portable_refs: [], target_refs: [digest("target")],
+        diagnostic_refs: [digest("diagnostic")],
+        producer_semantic_digest: producer_digest, reevaluation_succeeded: true)
+
+fn next_input(prior: RrAtomicGenerationV2) -> RrAtomicGenerationInputV2:
+    RrAtomicGenerationInputV2(generation: prior.generation + 1,
+        snapshot_digest: prior.manifest.snapshot_digest,
+        catalog_digest: prior.manifest.catalog_digest,
+        summary_refs: prior.manifest.summary_refs,
+        scope_refs: prior.manifest.scope_refs,
+        portable_refs: prior.manifest.portable_refs,
+        target_refs: prior.manifest.target_refs,
+        diagnostic_refs: prior.manifest.diagnostic_refs,
+        producer_semantic_digest: prior.producer_semantic_digest,
+        reevaluation_succeeded: true)
+
+fn candidate(stage: RrAtomicGenerationStageV2) -> RrAtomicGenerationV2:
+    match stage.candidate:
+        case Some(value): value
+        case nil: fail("accepted transition omitted its candidate generation")
+
+fn authority(prior: RrAtomicGenerationV2,
+        old_reads: SemanticQueryReadManifestV1) -> RrOldOutgoingAuthorityV2:
+    val manifest_digest = sha256_u8_hex(
+        semantic_query_read_manifest_encode_v1(old_reads))
+    RrOldOutgoingAuthorityV2(schema: 2, owner_id: "fixture-owner",
+        generation_digest: prior.manifest_digest,
+        outgoing_manifest_digest: manifest_digest,
+        read_count: old_reads.ordered_reads.len(),
+        coverage: SemanticCoverageV1.Complete,
+        owner_receipt_digest: rr_old_outgoing_authority_receipt_v2(
+            "fixture-owner", prior.manifest_digest, old_reads))
+
+fn genesis(consumer: SemanticQueryKeyV1,
+        reads: [SemanticQueryReadV1]) -> RrAtomicGenerationV2:
+    val staged = prepare_rr_atomic_generation_transition_model_v2(nil, nil, nil,
+        manifest(consumer, reads), base_input(0))
+    expect(staged.accepted).to_be(true)
+    candidate(staged)
+
+fn add_consumer(prior: RrAtomicGenerationV2, consumer: SemanticQueryKeyV1,
+        reads: [SemanticQueryReadV1]) -> RrAtomicGenerationV2:
+    val old_reads = manifest(consumer, [])
+    val staged = prepare_rr_atomic_generation_transition_model_v2(Some(prior),
+        Some(authority(prior, old_reads)), Some(old_reads),
+        manifest(consumer, reads), next_input(prior))
+    expect(staged.accepted).to_be(true)
+    candidate(staged)
+
+fn edge_count_for_consumer(generation: RrAtomicGenerationV2,
+        consumer_id: text) -> i64:
+    var count: i64 = 0
+    for shard in generation.shards:
+        for edge in shard.sorted_edges:
+            if edge.consumer.stable_entity_id == consumer_id: count = count + 1
+    count
+
+describe "RR atomic generation V2 transition model [importance=critical; importance_weight=3]":
+    it "should bind complete old reads and stage insertions plus removals together [importance=critical; importance_weight=3]":
+        step("Build two consumers, update one, and retain the unrelated consumer edge")
+        val producer_a = query("producer-a")
+        val producer_b = query("producer-b")
+        val consumer_a = query("consumer-a")
+        val consumer_b = query("consumer-b")
+        val old_a = manifest(consumer_a,
+            [read(producer_a, consumer_a, "old-a", 0)])
+        val first = genesis(consumer_a, old_a.ordered_reads)
+        val prior = add_consumer(first, consumer_b,
+            [read(producer_b, consumer_b, "old-b", 0)])
+        val new_a = manifest(consumer_a,
+            [read(producer_a, consumer_a, "new-a", 0)])
+        val staged = prepare_rr_atomic_generation_transition_model_v2(Some(prior),
+            Some(authority(prior, old_a)), Some(old_a), new_a, next_input(prior))
+        expect(staged.accepted).to_be(true)
+        match staged.delta:
+            case Some(delta):
+                expect(delta.inserted.len()).to_equal(1)
+                expect(delta.removed.len()).to_equal(1)
+            case nil: fail("accepted update omitted its atomic RR delta")
+        val updated = candidate(staged)
+        expect(edge_count_for_consumer(updated, "consumer-a")).to_equal(1)
+        expect(edge_count_for_consumer(updated, "consumer-b")).to_equal(1)
+
+    it "should refuse nil partial stale and edge-incomplete old history [importance=critical; importance_weight=3]":
+        step("Exercise every fail-closed old-history boundary before candidate exposure")
+        val producer_a = query("producer-a")
+        val producer_b = query("producer-b")
+        val consumer = query("consumer")
+        val old_reads = manifest(consumer, [
+            read(producer_a, consumer, "old-a", 0),
+            read(producer_b, consumer, "old-b", 1),
+        ])
+        val prior = genesis(consumer, old_reads.ordered_reads)
+        val new_reads = manifest(consumer, [])
+        val missing = prepare_rr_atomic_generation_transition_model_v2(Some(prior),
+            nil, nil, new_reads, next_input(prior))
+        expect(missing.rejection_reason).to_equal("old_history_missing")
+        expect(missing.candidate).to_be_nil()
+
+        var partial = authority(prior, old_reads)
+        partial.coverage = SemanticCoverageV1.Unknown
+        val partial_stage = prepare_rr_atomic_generation_transition_model_v2(
+            Some(prior), Some(partial), Some(old_reads), new_reads, next_input(prior))
+        expect(partial_stage.rejection_reason).to_equal("old_history_partial")
+
+        var stale = authority(prior, old_reads)
+        stale.generation_digest = digest("stale-generation")
+        val stale_stage = prepare_rr_atomic_generation_transition_model_v2(
+            Some(prior), Some(stale), Some(old_reads), new_reads, next_input(prior))
+        expect(stale_stage.rejection_reason).to_equal("old_history_manifest_mismatch")
+
+        val incomplete = manifest(consumer,
+            [read(producer_a, consumer, "old-a", 0)])
+        val incomplete_stage = prepare_rr_atomic_generation_transition_model_v2(
+            Some(prior), Some(authority(prior, incomplete)), Some(incomplete),
+            new_reads, next_input(prior))
+        expect(incomplete_stage.rejection_reason).to_equal("old_history_manifest_mismatch")
+
+    it "should preserve producer identity and reject non-RR payload mutation [importance=critical; importance_weight=3]":
+        step("Keep producer summary identity stable across a consumer-only generation")
+        val producer = query("producer")
+        val consumer = query("consumer")
+        val old_reads = manifest(consumer, [read(producer, consumer, "old", 0)])
+        val prior = genesis(consumer, old_reads.ordered_reads)
+        val new_reads = manifest(consumer, [read(producer, consumer, "new", 0)])
+        val staged = prepare_rr_atomic_generation_transition_model_v2(Some(prior),
+            Some(authority(prior, old_reads)), Some(old_reads), new_reads,
+            next_input(prior))
+        expect(staged.accepted).to_be(true)
+        expect(candidate(staged).producer_semantic_digest).to_equal(
+            prior.producer_semantic_digest)
+
+        var changed = next_input(prior)
+        changed.scope_refs = [digest("changed-scope")]
+        val rejected = prepare_rr_atomic_generation_transition_model_v2(Some(prior),
+            Some(authority(prior, old_reads)), Some(old_reads), new_reads, changed)
+        expect(rejected.rejection_reason).to_equal(
+            "non_rr_payload_changed_by_consumer_update")
+
+    it "should bind one acyclic manifest and refuse a stage replayed on another prior [importance=critical; importance_weight=3]":
+        step("Inspect manifest reference families and the expected-prior binding")
+        val producer = query("producer")
+        val consumer = query("consumer")
+        val old_reads = manifest(consumer, [read(producer, consumer, "old", 0)])
+        val prior = genesis(consumer, old_reads.ordered_reads)
+        val staged = prepare_rr_atomic_generation_transition_model_v2(Some(prior),
+            Some(authority(prior, old_reads)), Some(old_reads), manifest(consumer, []),
+            next_input(prior))
+        val next = candidate(staged)
+        expect(next.manifest.summary_refs.contains(next.manifest_digest)).to_be(false)
+        expect(next.manifest.scope_refs.contains(next.manifest_digest)).to_be(false)
+        expect(next.manifest.rr_shard_refs.contains(next.manifest_digest)).to_be(false)
+        expect(next.manifest.forward_manifest_refs.contains(next.manifest_digest)).to_be(false)
+
+        val other_consumer = query("other-consumer")
+        val other = genesis(other_consumer,
+            [read(producer, other_consumer, "other", 0)])
+        val replay = rr_atomic_generation_transition_model_v2(Some(other), staged,
+            RrAtomicCrashPointV2.NoCrash)
+        expect(replay.recovery_reason).to_equal("stale_prior_generation")
+        match recover_rr_atomic_generation_v2(replay):
+            case Some(active): expect(active.manifest_digest).to_equal(other.manifest_digest)
+            case nil: fail("stale-stage refusal lost the coherent prior generation")
+
+    it "should recover exactly one coherent generation at every crash point [importance=critical; importance_weight=3]":
+        step("Check old-before-swap and new-after-swap recovery identities")
+        val producer = query("producer")
+        val consumer = query("consumer")
+        val old_reads = manifest(consumer, [read(producer, consumer, "old", 0)])
+        val prior = genesis(consumer, old_reads.ordered_reads)
+        val staged = prepare_rr_atomic_generation_transition_model_v2(Some(prior),
+            Some(authority(prior, old_reads)), Some(old_reads), manifest(consumer, []),
+            next_input(prior))
+        val next = candidate(staged)
+        for point in [RrAtomicCrashPointV2.BeforePrepare,
+                RrAtomicCrashPointV2.AfterPrepare,
+                RrAtomicCrashPointV2.BeforeActiveRootSwap]:
+            val recovered = recover_rr_atomic_generation_v2(
+                rr_atomic_generation_transition_model_v2(Some(prior), staged, point))
+            match recovered:
+                case Some(active):
+                    expect(active.manifest_digest).to_equal(prior.manifest_digest)
+                case nil: fail("pre-swap recovery lost the prior generation")
+        for point in [RrAtomicCrashPointV2.AfterActiveRootSwap,
+                RrAtomicCrashPointV2.NoCrash]:
+            val recovered = recover_rr_atomic_generation_v2(
+                rr_atomic_generation_transition_model_v2(Some(prior), staged, point))
+            match recovered:
+                case Some(active):
+                    expect(active.manifest_digest).to_equal(next.manifest_digest)
+                case nil: fail("post-swap recovery lost the candidate generation")
+
+    it "should keep production old-history and publisher authority closed [importance=critical; importance_weight=3]":
+        step("Prove model evidence cannot open the production commit path")
+        expect(rr_old_outgoing_authority_available_v2()).to_be(false)
+        expect(rr_atomic_generation_publisher_authority_available_v2()).to_be(false)
+        val producer = query("producer")
+        val consumer = query("consumer")
+        val old_reads = manifest(consumer, [read(producer, consumer, "old", 0)])
+        val prior = genesis(consumer, old_reads.ordered_reads)
+        val production = prepare_rr_atomic_generation_v2(Some(prior),
+            Some(authority(prior, old_reads)), Some(old_reads), manifest(consumer, []),
+            next_input(prior))
+        expect(production.accepted).to_be(false)
+        expect(production.rejection_reason).to_equal(
+            "old_history_authority_unavailable")

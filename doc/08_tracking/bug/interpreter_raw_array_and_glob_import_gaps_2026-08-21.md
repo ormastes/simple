@@ -1,4 +1,8 @@
 # Interpreter gaps behind the lib/native failing-spec cluster (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (Rust seed changes required; seed rebuild is blocked — a sweep
 is running against the deployed `bin/simple`, so no diff was applied.)
@@ -106,3 +110,4 @@ Rust seed. Item 4 (`dict` has no `for_each`) was independently re-confirmed:
 surface to add it to (details in
 `map_for_each_missing_on_dict_2026-08-21.md`). Still OPEN, still blocked on a
 seed rebuild + deploy.
+

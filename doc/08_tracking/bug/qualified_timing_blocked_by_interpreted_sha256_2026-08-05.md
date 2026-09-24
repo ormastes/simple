@@ -1,4 +1,9 @@
 # The paired-timing spec is blocked by interpreted SHA-256, not by its accumulator
+## Closed 2026-09-16 — ...computing SHA-256 at all.** ## Resolution (2026-08-05) ``` Results: 9 total, 9 passed, 0 f
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** CLOSED 2026-08-05 — the spec produces a real 9-example verdict at
 the DEFAULT timeout. See "Resolution" at the end. Both the original diagnosis
@@ -282,3 +287,4 @@ record, the 120 s child default is the one this spec was failing: without
 `--timeout`, the pre-fix 137 s run produced **`ERROR: test daemon timed out`
 and no `Results:` line at all** — not even the `1 total` wrapper. The post-fix
 run needs no flags.
+

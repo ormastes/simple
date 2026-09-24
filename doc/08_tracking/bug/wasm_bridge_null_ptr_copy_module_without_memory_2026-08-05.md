@@ -1,4 +1,9 @@
 # wasm bridge: null-pointer `ptr::copy` when running a module that exports no memory
+## Closed 2026-09-16 — fixed 2026-08-05; null_memory_repro + 11 tests pass; sabotage-verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed 2026-08-05
 **Severity:** undefined behaviour (aborts the process)
@@ -174,3 +179,4 @@ packaging, not done in this change to keep the diff minimal and reviewable).
   reproduced verbatim (`unsafe precondition(s) violated: ptr::copy requires
   that both pointer arguments are aligned and non-null`, SIGABRT). Restored
   the fix and reran -- passes again.
+

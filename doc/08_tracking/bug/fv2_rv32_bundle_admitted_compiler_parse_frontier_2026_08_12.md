@@ -1,4 +1,8 @@
 # FV2 RV32 bundle admitted-compiler parse frontier
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -32,3 +36,4 @@ temporary executable only after rejecting stale-runtime and stub markers.
 2. Build the generator once with that compiler and require a clean transcript.
 3. Execute proof, reachability cover, subtraction mutation, RTL/netlist
    equivalence, and pinned Sail differential jobs over one exact bundle.
+

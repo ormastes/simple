@@ -1,4 +1,8 @@
 # Hosted volatile-u16 migration Stage 4 evidence blocked — 2026-08-20
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -41,3 +45,4 @@ Using an admitted current-source pure-Simple Stage 4 runtime, run each once:
 100% decision/branch coverage, focused mutation kills, compiled C/Simple parity,
 and warm native performance medians. Until those rows pass, component verdict
 remains HOLD and the broader envelope must not claim GO.
+

@@ -18,6 +18,11 @@ use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
 use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+# Guard import for
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md:
+# executing lint-main's module graph (module-level Dict state init) must not
+# poison a later frontend run in the same interpreter session.
+use compiler.tools.lint._LintMain.config_and_model.parse_lint_profile
 
 fn check_source(src: text, module_name: text) -> [SafetyError]:
     val parsed = parse_full_frontend(src, "testdata/{module_name}.spl", module_name, Logger(level: 0))
@@ -251,3 +256,25 @@ describe "safety checker unsafe boundary":
         expect(inventory.raw_call_sites).to_equal(0)
         expect(inventory.resolved_extern_symbols).to_equal(0)
         expect(inventory.hir_complete).to_equal(true)
+
+describe "safety checker unsafe boundary after lint-main module init":
+    # Permanent regression guard for
+    # doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+    # The filed repro: in ONE interpreter session, executing lint-main's
+    # module graph (one bare parse_lint_profile call is sufficient — it runs
+    # config_and_model's module init, including its module-level Dict state)
+    # and THEN driving parse_full_frontend used to fail the frontend half with
+    # "semantic: type mismatch: cannot convert dict to int". The record's
+    # requested permanent spec is exactly these two `it` blocks, BOTH green.
+    it "executes lint-main's profile parser first (runs its module init)":
+        step("Verify: parse_lint_profile executes lint-main's module-level state init")
+        expect(parse_lint_profile("critical").is_some()).to_equal(true)
+
+    it "then still lowers and checks a module through the real frontend":
+        step("Verify: frontend graph survives lint-main module init in one session")
+        val src = "fn after_lint_init() -> i64:\n" +
+            "    1\n"
+        val errors = check_source(src, "safety_after_lint_init")
+        expect(errors.len()).to_equal(0)
+        expect(count_kind(errors, "raw_ptr")).to_equal(0)
+        expect(count_kind(errors, "ffi")).to_equal(0)

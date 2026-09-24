@@ -1,0 +1,114 @@
+use std.spec.*
+use std.nogc_async_mut.gpu.environment_variant_adapter_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
+
+fn d(v: u64) -> EnvironmentDigest256V1: EnvironmentDigest256V1(w0: v, w1: 0u64, w2: 0u64, w3: 0u64)
+fn provider() -> GpuHostControlProviderV1:
+    GpuHostControlProviderV1(provider_identity: d(1u64), variant_identity: d(2u64), provider_generation: 3u64,
+        registry_backend_id: 1u32, device_program_identity: d(4u64), resource_layout_digest: d(5u64),
+        artifact_digest: d(60u64),
+        abi_identity: d(13u64), api_contract_identity: d(14u64),
+        allowed_effect_bits: 7u64, numerical_contract_id: 2u32)
+fn image() -> GpuDeviceProgramImageV1:
+    GpuDeviceProgramImageV1(program_identity: d(4u64), image_digest: d(6u64), device_api_id: 1u32,
+        minimum_api_version: 12u32, required_feature_bits: 3u64, minimum_buffer_bytes: 1024u64,
+        minimum_workgroup_invocations: 64u32, minimum_queue_family_count: 1u32, resource_layout_digest: d(5u64),
+        abi_identity: d(13u64), api_contract_identity: d(14u64),
+        required_effect_bits: 1u64, numerical_contract_id: 2u32)
+fn device() -> GpuEnabledDeviceAuthorityV1:
+    GpuEnabledDeviceAuthorityV1(device_identity: d(7u64), registry_generation: 2u64, device_api_id: 1u32,
+        enabled_api_version: 13u32, enabled_feature_bits: 7u64, maximum_buffer_bytes: 4096u64,
+        maximum_workgroup_invocations: 256u32, queue_family_count: 2u32)
+fn lease() -> GpuResourceLeaseV1:
+    GpuResourceLeaseV1(lease_identity: d(8u64), device_identity: d(7u64), provider_generation: 3u64,
+        resource_layout_digest: d(5u64), leased_bytes: 2048u64, lease_generation: 1u64)
+fn evidence(state: u16) -> GpuSubmissionEvidenceV1:
+    GpuSubmissionEvidenceV1(evidence_state: state, submission_identity: d(9u64), provider_identity: d(1u64),
+        provider_generation: 3u64, program_identity: d(4u64), image_digest: d(6u64), device_identity: d(7u64),
+        lease_identity: d(8u64), fence_identity: d(10u64), completion_identity: d(11u64), retirement_identity: d(12u64))
+fn image_authority() -> GpuDeviceProgramImageAuthorityV1:
+    GpuDeviceProgramImageAuthorityV1(
+        observed_image_digest: d(6u64), required_trust_policy_digest: d(20u64),
+        required_verifier_identity: d(21u64), minimum_verifier_generation: 22u64,
+        trust_receipt: ArtifactTrustVerificationReceiptV1(
+            descriptor_size: ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1,
+            schema_version: 1u16, authentication_status: ENV_ARTIFACT_TRUST_AUTHENTICATED_V1,
+            receipt_identity: d(23u64), artifact_digest: d(6u64),
+            trust_policy_digest: d(20u64), verifier_identity: d(21u64),
+            verifier_generation: 22u64, verification_evidence_digest: d(24u64)))
+
+describe "GPU environment variant adapter V1":
+    it "validates compatibility but keeps device-image trust admission unavailable":
+        expect(gpu_environment_variant_admit_v1(provider(), image(), device())).to_equal(Ok(()))
+        expect(gpu_device_program_image_authority_validate_v1(
+            image(), image_authority())).to_equal(
+                Err(GpuEnvironmentVariantErrorV1.DeviceImageNotAuthenticated))
+    it "rejects caller-shaped image digests without authenticated trust evidence":
+        var forged = image_authority()
+        forged.trust_receipt.authentication_status = ENV_ARTIFACT_TRUST_UNKNOWN_V1
+        expect(gpu_device_program_image_authority_validate_v1(image(), forged)).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.DeviceImageNotAuthenticated))
+    it "rejects provider program and device identity mismatches":
+        var mismatched_provider = provider(); mismatched_provider.device_program_identity = d(99u64)
+        expect(gpu_environment_variant_admit_v1(mismatched_provider, image(), device())).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.ProviderImageMismatch))
+        var mismatched_image = image(); mismatched_image.resource_layout_digest = d(99u64)
+        expect(gpu_environment_variant_admit_v1(provider(), mismatched_image, device())).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.ResourceLayoutMismatch))
+        var mismatched_device = device(); mismatched_device.device_api_id = 2u32
+        expect(gpu_environment_variant_admit_v1(provider(), image(), mismatched_device)).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.DeviceApiMismatch))
+    it "rejects unavailable features versions and limits":
+        var weak = device(); weak.enabled_feature_bits = 1u64
+        expect(gpu_environment_variant_admit_v1(provider(), image(), weak)).to_equal(Err(GpuEnvironmentVariantErrorV1.RequiredFeaturesNotEnabled))
+        weak = device(); weak.enabled_api_version = 11u32
+        expect(gpu_environment_variant_admit_v1(provider(), image(), weak)).to_equal(Err(GpuEnvironmentVariantErrorV1.DeviceApiMismatch))
+        weak = device(); weak.maximum_buffer_bytes = 512u64
+        expect(gpu_environment_variant_admit_v1(provider(), image(), weak)).to_equal(Err(GpuEnvironmentVariantErrorV1.DeviceLimitsInsufficient))
+        weak = device(); weak.maximum_workgroup_invocations = 32u32
+        expect(gpu_environment_variant_admit_v1(provider(), image(), weak)).to_equal(Err(GpuEnvironmentVariantErrorV1.DeviceLimitsInsufficient))
+        weak = device(); weak.queue_family_count = 0u32
+        expect(gpu_environment_variant_admit_v1(provider(), image(), weak)).to_equal(Err(GpuEnvironmentVariantErrorV1.DeviceLimitsInsufficient))
+    it "rejects ABI API effect and numerical contract substitutions":
+        var wrong_image = image(); wrong_image.abi_identity = d(99u64)
+        expect(gpu_environment_variant_admit_v1(provider(), wrong_image, device())).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.ProviderAbiMismatch))
+        wrong_image = image(); wrong_image.api_contract_identity = d(99u64)
+        expect(gpu_environment_variant_admit_v1(provider(), wrong_image, device())).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.ProviderApiContractMismatch))
+        wrong_image = image(); wrong_image.required_effect_bits = 8u64
+        expect(gpu_environment_variant_admit_v1(provider(), wrong_image, device())).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.EffectContractMismatch))
+        wrong_image = image(); wrong_image.numerical_contract_id = 3u32
+        expect(gpu_environment_variant_admit_v1(provider(), wrong_image, device())).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.NumericalContractMismatch))
+    it "rejects stale lease generations and resource layouts":
+        var stale_generation = lease(); stale_generation.provider_generation = 4u64
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), stale_generation, evidence(GPU_ENV_EVIDENCE_RETIRED_V1))).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.InvalidLease))
+        var invalid_generation = lease(); invalid_generation.lease_generation = 0u64
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), invalid_generation, evidence(GPU_ENV_EVIDENCE_RETIRED_V1))).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.InvalidLease))
+        var stale_layout = lease(); stale_layout.resource_layout_digest = d(99u64)
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), stale_layout, evidence(GPU_ENV_EVIDENCE_RETIRED_V1))).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.InvalidLease))
+    it "rejects routing-only evidence as device execution":
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), evidence(GPU_ENV_EVIDENCE_ROUTED_V1))).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.RoutingOnlyNotExecution))
+    it "requires submitted evidence to carry a fence before execution":
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), evidence(GPU_ENV_EVIDENCE_SUBMITTED_V1))).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.MissingFenceEvidence))
+    it "rejects forged execution identities after retirement":
+        var forged_provider = evidence(GPU_ENV_EVIDENCE_RETIRED_V1); forged_provider.provider_generation = 99u64
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), forged_provider)).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.SubmissionMismatch))
+        var forged_image = evidence(GPU_ENV_EVIDENCE_RETIRED_V1); forged_image.image_digest = d(99u64)
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), forged_image)).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.SubmissionMismatch))
+    it "requires completion and retirement after a valid lease and fence":
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), evidence(GPU_ENV_EVIDENCE_FENCE_SIGNALED_V1))).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.MissingCompletionEvidence))
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), evidence(GPU_ENV_EVIDENCE_COMPLETED_V1))).to_equal(
+            Err(GpuEnvironmentVariantErrorV1.MissingRetirementEvidence))
+        expect(gpu_environment_variant_execution_validate_v1(provider(), image(), device(), lease(), evidence(GPU_ENV_EVIDENCE_RETIRED_V1))).to_equal(Ok(()))

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { projectSimpleToolEnvironment, resolveVsCodeStorageRoots } from './storageRoots';
 
 export type SimpleLspMode = 'auto' | 'native' | 'wasm';
 
@@ -143,9 +144,13 @@ export function resolveSimpleLspServerCommand(
 
     const isWrapper = isSimpleLspWrapper(command);
     const args = isWrapper ? [] : ['lsp'];
-    const environment: NodeJS.ProcessEnv = {
-        ...process.env,
-    };
+    const roots = resolveVsCodeStorageRoots(options.context, workspaceRoot);
+    const environment: NodeJS.ProcessEnv = roots
+        ? projectSimpleToolEnvironment(roots)
+        : { ...process.env };
+    if (!roots) {
+        notes.push('Centralized storage roots unavailable; native launch remains degraded.');
+    }
 
     const repoRoot = resolvedRoot ?? (path.isAbsolute(command) ? findRepositoryRoot(command) : undefined);
     if (repoRoot) {

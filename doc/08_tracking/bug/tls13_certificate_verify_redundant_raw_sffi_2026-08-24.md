@@ -1,4 +1,8 @@
 # TLS CertificateVerify repeated raw foreign verification
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed in the current SFFI hardening worktree
 
@@ -44,3 +48,4 @@ to one.
   the new single-verifier assertions did not fail.
 
 Production provider signing/admission remains separate and incomplete.
+

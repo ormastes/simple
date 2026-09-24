@@ -1,8 +1,9 @@
 # Part of src/compiler/50.mir/mir_lowering.spl: bootstrap HIR-globals-to-MIR-module lowering helpers
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.asm_and_targets.*
-use compiler.mir._MirLowering.bootstrap_type_registration.{bootstrap_type_registry_reset, bootstrap_register_flat_type_defs, bootstrap_register_flat_class_defs, bootstrap_register_hir_type_defs}
+use compiler.mir._MirLowering.bootstrap_type_registration.{bootstrap_type_registry_reset, bootstrap_register_flat_type_defs, bootstrap_register_flat_class_defs, bootstrap_register_flat_class_providers, bootstrap_register_hir_type_defs}
 # MIR Lowering - HIR to MIR Transformation
 #
 # This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
@@ -81,16 +82,11 @@ fn bootstrap_mir_logical_module_name(path: text) -> text:
     # whole native-smoke-matrix 0/19).
     module_logical_name_from_path(path)
 
-fn bootstrap_hir_function_symbol_name(module: HirModule, func: HirFunction) -> text:
-    if func.is_method:
-        return module.symbols.symbol_display_name(func.symbol, func.name).replace("::", ".")
-    func.name
+fn bootstrap_hir_function_symbol_name(module: HirModule, func: HirFunction, is_entry_module: bool = false) -> text:
+    mir_provider_function_name(module.name, module.symbols, func, is_entry_module)
 
 fn bootstrap_hir_accumulator_name(module: HirModule, func: HirFunction) -> text:
-    val name = bootstrap_hir_function_symbol_name(module, func)
-    if func.is_method:
-        return name
-    "{bootstrap_mir_logical_module_name(module.name)}.{name}"
+    bootstrap_hir_function_symbol_name(module, func)
 
 var _bootstrap_mir_functions: [MirFunction] = []
 var _bootstrap_mir_function_names: [text] = []
@@ -110,17 +106,65 @@ var _bootstrap_mir_static_init_payloads: [text] = []
 var _bootstrap_mir_static_alignments: [i64] = []
 var _bootstrap_mir_static_visibilities: [i64] = []
 var _bootstrap_function_value_names: [text] = []
+var _bootstrap_callable_link_names: Dict<text, text> = {}
+
+fn bootstrap_mir_registries_promote() -> bool:
+    """Promote every flat `_bootstrap_mir_*` accumulator (plus the sibling
+    `_bootstrap_function_value_names`) out of the active per-module transient
+    scope, mirroring 20.hir's `bootstrap_hir_modules_promote_last`
+    (hir_lowering/_Items/lowering_helpers.spl). These registries are read
+    ACROSS modules (cross-module return-type/prescan lookups via
+    `mir_data.spl`'s `_bootstrap_fn_*` — see `bootstrap_fn_registries_promote`)
+    and again after the whole entry-closure lowering loop ends
+    (70.backend/_MirToLlvm/core_codegen.spl:2818/2827 calls
+    `bootstrap_llvm_exact_function_index` / `bootstrap_llvm_module_local_function_index`,
+    which read `_bootstrap_mir_function_names` lazily via
+    `bootstrap_llvm_name_index_ensure`), so they must outlive the module whose
+    scope wrote into them. Promoting each OUTER array (not just the pushed
+    element) is required, not optional: `.push()` reassigns the backing
+    array (see the `bs_modules = _bootstrap_mir_static_modules` /
+    `_bootstrap_mir_static_modules = bs_modules` copy-modify-reassign pattern
+    above), so any backing-store reallocation that happened while a scope was
+    active must be adopted before that scope ends -- exactly the contract
+    `lower_module_transient_scoped`'s docstring requires and the reason this
+    escape set used to be excluded rather than assumed safe."""
+    val fns_ok = rt_transient_heap_promote(_bootstrap_mir_functions)
+    val names_ok = rt_transient_heap_promote(_bootstrap_mir_function_names)
+    val modules_ok = rt_transient_heap_promote(_bootstrap_mir_function_modules)
+    val ret_tags_ok = rt_transient_heap_promote(_bootstrap_mir_function_return_type_tags)
+    val ret_unsigned_ok = rt_transient_heap_promote(_bootstrap_mir_function_return_unsigned)
+    val p_starts_ok = rt_transient_heap_promote(_bootstrap_mir_function_param_starts)
+    val p_counts_ok = rt_transient_heap_promote(_bootstrap_mir_function_param_counts)
+    val p_tags_ok = rt_transient_heap_promote(_bootstrap_mir_function_param_type_tags)
+    val static_modules_ok = rt_transient_heap_promote(_bootstrap_mir_static_modules)
+    val static_symbol_ids_ok = rt_transient_heap_promote(_bootstrap_mir_static_symbol_ids)
+    val static_names_ok = rt_transient_heap_promote(_bootstrap_mir_static_names)
+    val static_type_tags_ok = rt_transient_heap_promote(_bootstrap_mir_static_type_tags)
+    val static_init_kinds_ok = rt_transient_heap_promote(_bootstrap_mir_static_init_kinds)
+    val static_init_payloads_ok = rt_transient_heap_promote(_bootstrap_mir_static_init_payloads)
+    val static_alignments_ok = rt_transient_heap_promote(_bootstrap_mir_static_alignments)
+    val static_visibilities_ok = rt_transient_heap_promote(_bootstrap_mir_static_visibilities)
+    val value_names_ok = rt_transient_heap_promote(_bootstrap_function_value_names)
+    val callable_links_ok = rt_transient_heap_promote(_bootstrap_callable_link_names)
+    fns_ok and names_ok and modules_ok and ret_tags_ok and ret_unsigned_ok and
+        p_starts_ok and p_counts_ok and p_tags_ok and static_modules_ok and
+        static_symbol_ids_ok and static_names_ok and static_type_tags_ok and
+        static_init_kinds_ok and static_init_payloads_ok and
+        static_alignments_ok and static_visibilities_ok and value_names_ok and callable_links_ok
 
 fn bootstrap_function_value_names_reset():
     _bootstrap_function_value_names = []
+    _bootstrap_callable_link_names = {}
 
 fn bootstrap_register_function_value_module(module: HirModule):
     val module_name = bootstrap_mir_logical_module_name(module.name)
     for func in module.functions.values():
         val function_name = bootstrap_hir_function_symbol_name(module, func)
+        val source_name = module.symbols.symbol_display_name(func.symbol, func.name)
+        _bootstrap_callable_link_names[mir_provider_callable_key(module_name, source_name)] = function_name
+        if not func.is_method and not func.is_static:
+            _bootstrap_callable_link_names[mir_provider_callable_key(module_name, func.name)] = function_name
         _bootstrap_function_value_names.push(function_name)
-        if not func.is_method:
-            _bootstrap_function_value_names.push("{module_name}.{function_name}")
 
 fn bootstrap_register_fn_ret_types_module(module: HirModule):
     """Pre-register Str-returning functions' return types under every call-site
@@ -353,19 +397,13 @@ fn bootstrap_flat_symbol_table(module_index: i64) -> SymbolTable:
     var symbol_index = 0
     while symbol_index < bootstrap_hir_module_symbol_count(module_index):
         val symbol = bootstrap_hir_module_symbol_at(module_index, symbol_index)
-        table.symbols[symbol.id.id] = symbol
+        table.register_preserved_symbol(symbol)
+        match symbol.kind:
+            case Class | Struct | Enum | Trait:
+                table.bind_qualified_type(symbol.defining_module ?? "", symbol.name, symbol.id)
+            case _: ()
         symbol_index = symbol_index + 1
     table
-
-fn bootstrap_flat_function_symbol_name(symbols: SymbolTable, func: HirFunction) -> text:
-    # Static methods (is_static, is_method may be false) must emit under their
-    # qualified `Type.method` symbol name too — same as instance methods — so the
-    # body matches symbol_to_operand at the call site (which reads the symbol's
-    # renamed .name). Without this a static method emits as a bare, collision-prone
-    # `method` and mismatches the call.
-    if func.is_method or func.is_static:
-        return symbols.symbol_display_name(func.symbol, func.name).replace("::", ".")
-    func.name
 
 fn bootstrap_register_flat_function_values():
     var module_index = 0
@@ -375,13 +413,18 @@ fn bootstrap_register_flat_function_values():
         var function_index = 0
         while function_index < bootstrap_hir_module_function_count(module_index):
             val func = bootstrap_hir_module_function_at(module_index, function_index)
-            val function_name = bootstrap_flat_function_symbol_name(symbols, func)
+            val function_name = mir_provider_function_name(module_name, symbols, func, module_index == bootstrap_hir_entry_index())
+            val source_name = symbols.symbol_display_name(func.symbol, func.name)
+            _bootstrap_callable_link_names[mir_provider_callable_key(module_name, source_name)] = function_name
+            if not func.is_method and not func.is_static:
+                _bootstrap_callable_link_names[mir_provider_callable_key(module_name, func.name)] = function_name
             _bootstrap_function_value_names.push(function_name)
-            if not func.is_method:
-                _bootstrap_function_value_names.push("{module_name}.{function_name}")
+            if not func.is_method and not func.is_static:
                 # Cross-module declared HIR return types (name-keyed; see
                 # bootstrap_fn_ret_hir_type_register in mir_data.spl).
                 bootstrap_fn_ret_hir_type_register(func.name, func.return_type)
+                if function_name != func.name:
+                    bootstrap_fn_ret_hir_type_register(function_name, func.return_type)
             function_index = function_index + 1
         module_index = module_index + 1
 
@@ -411,11 +454,13 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     # attributed to the wrong owner.
     lowering.current_module_id = mir_layout_canonical_module_name(module_name)
     lowering.current_function_names = _bootstrap_function_value_names
+    lowering.callable_link_names = _bootstrap_callable_link_names
     # Register this module's own enum/struct type defs so `E.V` reclassifies to
     # an enum-variant const (not a field-load on an undefined base) and `S(..)`
     # reclassifies to an inline aggregate construct (not a call to an undefined
     # `@S` ctor). The reduced flat store now carries these; the globals/extra
     # lowering paths use bootstrap_register_hir_type_defs for the same purpose.
+    lowering = bootstrap_register_flat_class_providers(lowering, module_index)
     lowering = bootstrap_register_flat_type_defs(lowering, module_index)
     # Register class field layout so class construction lowers inline instead of
     # calling an undefined `@C` ctor. (Class method resolution is a follow-up that
@@ -474,15 +519,9 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         if hir_fn.is_extern:
             function_index = function_index + 1
             continue
-        val function_name = bootstrap_flat_function_symbol_name(symbols, hir_fn)
-        # is_static methods already carry a qualified `Type.method` function_name
-        # (see bootstrap_flat_function_symbol_name) — don't module-prefix them.
-        val emitted_name = if is_entry or hir_fn.is_method or hir_fn.is_static:
-            function_name
-        else:
-            "{logical_module_name}.{function_name}"
-        lowering.symbols = symbols
-        val mir_fn = lowering.lower_function(hir_fn)
+        val emitted_name = mir_provider_function_name(logical_module_name, symbols, hir_fn, is_entry)
+        var mir_fn = lowering.lower_function(hir_fn)
+        mir_fn.name = emitted_name
         # Function-body errors are recorded after the pre-loop constants check.
         # Reject them before partial MIR reaches the shared flat accumulator.
         if bootstrap_reject_fatal_mir_errors(lowering):
@@ -841,13 +880,15 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             print "error[E-MIR-BOOTSTRAP-ENTRY-NIL]: the bootstrap entry HIR module is nil at MIR lowering -- the HIR phase produced no entry module (upstream: the phase-2 module set was lost before phase 3). Refusing to lower an empty program."
             exit(1)
         var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
+        lowering.callable_link_names = _bootstrap_callable_link_names
         lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
         val entry_functions = hir_module.functions
         val fn_keys = entry_functions.keys()
         var function_names: [text] = []
         for func in entry_functions.values():
-            function_names.push(bootstrap_hir_function_symbol_name(hir_module, func))
+            lowering.register_provider_callable_link(hir_module.name, hir_module.symbols, func, true)
+            function_names.push(bootstrap_hir_function_symbol_name(hir_module, func, true))
             # Declared-return-type registry (native_call_return_type_loss
             # 2026-07-23): bare + qualified spellings, cross-module global.
             # Register ONLY Str returns — for other kinds the HIR-side
@@ -878,7 +919,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         var fki = 0
         while fki < fn_keys.len():
             val hir_fn: HirFunction = entry_functions[fn_keys[fki]]
-            val bootstrap_name = bootstrap_hir_function_symbol_name(hir_module, hir_fn)
+            val bootstrap_name = bootstrap_hir_function_symbol_name(hir_module, hir_fn, true)
             if hir_fn.is_extern:
                 # Extern functions (e.g. rt_cli_get_args) have no body. Lowering
                 # them to MIR emits a STRONG `define <ret> @name(){ ret 0 }` stub
@@ -890,7 +931,6 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             if bootstrap_name != "":
                 if trace_enabled:
                     print "[mir-lower-free] function:start {bootstrap_name}"
-                lowering.symbols = hir_module.symbols
                 val mir_fn = lowering.lower_function(hir_fn)
                 # The constants-only rejection above cannot see body errors.
                 # Fail before this function reaches either MIR accumulator.
@@ -956,6 +996,7 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     val trace_enabled = mir_lower_trace_enabled()
     var added_instr_total = 0
     var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
+    lowering.callable_link_names = _bootstrap_callable_link_names
     lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
     lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
     # Same module-constant registration as the entry path above: non-entry
@@ -971,6 +1012,7 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     val fn_keys = entry_functions.keys()
     var function_names: [text] = []
     for func in entry_functions.values():
+        lowering.register_provider_callable_link(hir_module.name, hir_module.symbols, func)
         function_names.push(bootstrap_hir_function_symbol_name(hir_module, func))
         if not func.is_method:
             function_names.push(bootstrap_hir_accumulator_name(hir_module, func))
@@ -1024,7 +1066,6 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
                 already_added = true
             dup_i = dup_i + 1
         if fn_name != "" and not already_added:
-            lowering.symbols = hir_module.symbols
             val mir_fn = lowering.lower_function(hir_fn)
             if bootstrap_reject_fatal_mir_errors(lowering):
                 return -1

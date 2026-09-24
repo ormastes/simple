@@ -1,4 +1,9 @@
 # self-hosted parser: `var name: Type` without initializer rejected
+## Closed 2026-09-16 — resolved 2026-07-17; parser synthesizes default init; all named files parse; smoke matrix 15/15
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Severity:** high (blocks whole entry closures from parsing)
 **Found:** 2026-07-17 during stage3 entry-closure hang diagnosis
@@ -129,3 +134,4 @@ added lines, 0 removed).
   xfail=0 xpass=0 codegen_fallback_hits=0`.
 - Big-file parse sanity (`src/compiler/20.hir/hir_lowering/expressions.spl`
   via the check app): byte-identical output before and after the fix.
+

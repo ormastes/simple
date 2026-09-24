@@ -208,3 +208,36 @@ describe "smf_reloc_compute_wire":
     it "rejects negative wire code -1":
         val r = smf_reloc_compute_wire(-1, 4096, 8, 0)
         expect(r.ok).to_be(false)
+
+# ----------------------------------------------------------------------------
+# 7. Wire-4 (GotRel32) semantics golden — S MUST be the GOT-entry address
+#
+# Pins the design §4 / doc/08_tracking/bug/
+# smf_gotrel32_applied_as_symbol_value_2026-09-18.md rule: wire 4 is
+# G + A - P with s == the GOT slot's own address (G), never the symbol's
+# address. Both live loaders currently pass the symbol's address instead
+# (module_loader_compat.spl:1363-1365, smf_dynlib.spl:759) — that defect is
+# pinned separately by the in-development
+# T/compiler/loader/loader_reloc_wire4_spec.spl (lane A4a/A4b). This golden
+# shows the two choices of `s` are not interchangeable: a symbol at one
+# address and a GOT slot holding a pointer to it at a different address
+# produce different wire-4 results for the identical addend and place.
+# ----------------------------------------------------------------------------
+
+describe "smf_reloc_compute GotRel32 wire-4 rule — s must be the GOT-entry address, not the symbol address":
+    it "symbol address and GOT-entry address give different results (hand-derived, 0x420004 vs 0x500004)":
+        # place P = 0x400010; addend A = 4.
+        # Correct: s = GOT-entry address G = 0x500000 -> 0x500000 + 4 - 0x400010 = 0xFFFF4 = 1048564
+        val correct = smf_reloc_compute(RelocationType.GotRel32, 0x500000, 4, 0x400010)
+        expect(correct.ok).to_be(true)
+        expect(correct.value).to_equal(1048564)
+
+        # Wrong (the live-loader defect): s = the symbol's own address = 0x420000
+        # -> 0x420000 + 4 - 0x400010 = 0x1FFF4 = 131060
+        val wrong = smf_reloc_compute(RelocationType.GotRel32, 0x420000, 4, 0x400010)
+        expect(wrong.ok).to_be(true)
+        expect(wrong.value).to_equal(131060)
+
+        # The oracle computes exactly what it is given — the two differ because
+        # G != the symbol's address, which is the whole point of the wire-4 rule.
+        expect(correct.value == wrong.value).to_be(false)

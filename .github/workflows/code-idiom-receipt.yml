@@ -1,0 +1,572 @@
+name: Code Idiom Receipt Decision
+
+# BASE-ONLY half of the local-CI receipt lane (design §9.1; ADDENDUM_2026-09-06
+# §A). It decides which `ci` rows of the extended gate job
+# (.github/workflows/code-idiom-gates.yml, a `pull_request` workflow) may be
+# skipped, and publishes that decision as an artifact. The gates themselves run
+# over there, on `pull_request`, where head code only reaches the PR's own
+# Actions cache scope.
+#
+# WHY TWO WORKFLOWS. Under `pull_request` GitHub executes the PR HEAD's YAML, so
+# a decision made there is the PR deciding its own skips. Under
+# `pull_request_target` GitHub executes this file as it exists on the BASE
+# branch — but a pull_request_target job also runs in the base branch's
+# context, including main's Actions cache scope, and head code running there
+# could poison caches that release.yml / cache-main-writer.yml restore
+# (the "Cacheract" technique: sudo on a hosted runner reaches
+# ACTIONS_RUNTIME_TOKEN regardless of `permissions:`). So this job runs NO head
+# code at all:
+#   * no `actions/checkout`; nothing of the head is ever written as files;
+#   * the head is fetched only as git OBJECTS, blobless, into a private
+#     repository under RUNNER_TEMP, and read as data by base code;
+#   * the verifier, allowed-signers file and gate manifest are materialized
+#     with `git show <BASE_SHA>:<path>`.
+#
+# THE DECISION CHANNEL. The decision is uploaded as artifact
+# `receipt-decision-<head sha>` of THIS run. code-idiom-gates.yml accepts it only
+# from a run whose `event` is `pull_request_target` and whose `path` is exactly
+# `.github/workflows/code-idiom-receipt.yml`, with conclusion `success`, and
+# only if the file's pr / head_sha / base_ref match its own event payload. A PR
+# cannot make GitHub run a head copy of this file under pull_request_target
+# (that event always uses the base branch's copy), and an artifact can only be
+# uploaded by the run that owns it, so the only code able to write an
+# acceptable artifact is this file, from main, which never executes head
+# content. Anything missing, late, malformed or mismatched is `full`.
+#
+# Only PRs into `main` are decided: main is ruleset-protected, so the copy of
+# this file that runs is reviewed code. Every other base gets no decision and
+# therefore runs every gate.
+#
+# Forks need no exclusion here (nothing of theirs executes); `opened` is listed
+# so a new PR is decided on its first push (review-admission.yml's wart).
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  receipt-decision:
+    name: Local CI Receipt Decision (base)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # contents: read  — anonymous-equivalent fetch of public objects;
+    # pull-requests: read — the PR files API in `classify`. No write scope, no
+    # id-token, no secrets context. upload-artifact uses the runner's own
+    # runtime token for THIS run, not GITHUB_TOKEN.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # ---------------------------------------------------------------------
+      # DOCS-ONLY CHANGE CLASSIFICATION (independent of the receipt system
+      # below — no signed local-CI receipt is required or consulted here).
+      #
+      # The CI queue on this repo is saturated and docs-only PRs (doc/**, root
+      # *.md, root README/LICENSE) are a meaningful share of it, yet every gate
+      # below runs regardless, including several that scan Rust/Simple/C
+      # source, runtime ABI shape, and native build artifacts that a
+      # documentation-only change cannot possibly touch. This step reads the
+      # PR's OWN changed-file list from the GitHub API
+      # (`GET /repos/.../pulls/{n}/files`, which GitHub computes against the
+      # merge-base, exactly the semantics of `origin/<base>...HEAD` three-dot
+      # diff) and sets `docs_only=true` only when EVERY one of those paths is
+      # documentation and NONE is under `.github/**` (a workflow-adjacent
+      # change must never self-exempt).
+      #
+      # Deliberately NOT `git diff <base_sha> <head_sha>` (two-dot,
+      # tree-to-tree): on a repo where main advances every few minutes, that
+      # would include every change main gained since the branch point, as
+      # reversals, so it would almost never read docs-only except right after
+      # a branch update — the exact trap the receipt-admission step below
+      # avoids only because IT legitimately cannot attest merged-in code and
+      # is not the shape this classification needs. The GitHub files API
+      # sidesteps depth/fetch entirely and needs no full-history fetch (this
+      # workflow has no checkout at all; history would add clone cost
+      # to every PR just to make a subset of PRs faster).
+      #
+      # No merge-delta re-check is needed either, unlike the receipt step:
+      # gates run against the tree base_tip (main's current commit) merged
+      # with the PR's OWN docs-only changes. A code-scoped gate's verdict on
+      # that merged tree is identical to its verdict on base_tip alone, since
+      # none of the gates this lets `docs_only` skip scan doc/** or *.md (see
+      # the exclusion list below). base_tip is main, and main only advances
+      # through PRs that themselves passed this same required check under the
+      # branch ruleset — by induction its gates are already known-good there,
+      # so a docs-only PR skipping them changes nothing about main's state.
+      # That induction is why this is scoped to `base.ref == main` below:
+      # develop/release branches are not gated the same way and get no skip.
+      #
+      # Fail-safe in every direction: any API failure, a returned count that
+      # disagrees with the PR's own declared `changed_files`, any event that
+      # is not `pull_request_target` against `main`, or an EMPTY changed-file list
+      # all leave `docs_only` at its default `false` — an empty diff is NEVER
+      # read as docs-only. `set +e` up front is deliberate: this is `shell:
+      # sh`, which GitHub runs as `sh -e {0}`, and an unguarded failing
+      # substitution or an `$?` read after a piped/redirected command would
+      # otherwise abort this step before `GITHUB_OUTPUT` is ever written —
+      # exactly the trap the receipt-admission step below documents at length
+      # for the same reason (see its own `decide() || true` and 2026-09-07
+      # incident note). A step that dies here still leaves gates running
+      # (empty output never equals `'true'`), but a dead step is a RED
+      # required job, which is strictly worse than doing nothing.
+      #
+      # This does not widen what a signed receipt can already skip (see MODE
+      # PRECEDENCE below); it lets the SAME class of skip apply on an
+      # ordinary PR that carries no receipt at all, which is the overwhelming
+      # majority of docs-only PRs today.
+      #
+      # What stays gated OUT of docs_only's reach, deliberately, because each
+      # one CAN fire on a documentation-only change (verified by reading each
+      # guard's actual scan roots, not by its name):
+      #   * Workspace root write guard       — root-placement policy; a stray
+      #     doc file in the wrong place is exactly what it exists to catch.
+      #   * Guard-wiring ratchet gate        — greps the WHOLE tree, docs
+      #     included (`rg -F ... --no-ignore --hidden`, no path restriction),
+      #     for guard-script filename mentions; a doc merely naming a script
+      #     changes its wired/unwired verdict.
+      #   * spipe submodule gitlink shape    — tree/index structural
+      #     integrity; kept unconditional out of caution.
+      #   * Plan-acceptance coverage ratchet — reads doc/03_plan/**.md content
+      #     directly and cross-checks it against acceptance specs; a plan
+      #     checkbox edited with no spec update is precisely what it flags.
+      # Every gate this DOES let docs_only skip was individually confirmed
+      # scoped to src/, test/, scripts/ or a specific generated report path —
+      # never doc/ and never an unrestricted repo-wide text scan.
+      # ---------------------------------------------------------------------
+      - name: Change classification (docs-only detection)
+        id: classify
+        if: ${{ !cancelled() }}
+        shell: sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DECLARED_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          # D8 kill switch (see the receipt step): also turns this lane off.
+          SKIP_KILL_SWITCH: ${{ vars.SIMPLE_CI_RECEIPT_DISABLED }}
+        run: |
+          set +e
+          docs_only=false
+          reason="default: not confirmed docs-only"
+          tmp=${RUNNER_TEMP:-/tmp}
+
+          # Kill switch: anything but unset/empty or the exact word `false`
+          # disables skipping (a typo errs toward running every gate).
+          case "$SKIP_KILL_SWITCH" in
+              ''|false) kill_switch=off ;;
+              *) kill_switch=on ;;
+          esac
+
+          if [ "$kill_switch" = on ]; then
+              reason="kill switch vars.SIMPLE_CI_RECEIPT_DISABLED=\"$SKIP_KILL_SWITCH\" is set: no gate may be skipped"
+          elif [ "$EVENT_NAME" = pull_request_target ] && [ -n "$PR_NUMBER" ]; then
+              if [ "$BASE_REF" = main ]; then
+                  # Emit BOTH the new name and (for a rename/rename+edit) the
+                  # OLD name. The API reports a rename as one row with
+                  # filename=<new> and previous_filename=<old>; reading only
+                  # filename would see "doc/x.md" and never notice that
+                  # "src/x.spl" was deleted out from under several gates that
+                  # ratchet on baselines naming specific files (orphaned
+                  # docstrings, keyword-identifier bindings, pid-keyed build
+                  # artifacts). One row per changed file keeps $n an exact,
+                  # meaningful count against `declared` below.
+                  gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
+                      --jq '.[] | [.filename, (.previous_filename // "")] | @tsv' \
+                      > "$tmp/classify-rows" 2>"$tmp/classify-gh.err"
+                  gh_rc=$?
+                  if [ "$gh_rc" -eq 0 ]; then
+                      n=$(awk 'END {print NR}' "$tmp/classify-rows")
+                      awk -F'\t' '{ print $1; if ($2 != "") print $2 }' "$tmp/classify-rows" \
+                          > "$tmp/classify-changed"
+                      declared=${DECLARED_CHANGED_FILES:-0}
+                      if [ "$n" -gt 0 ] && [ "$n" = "$declared" ]; then
+                          nondoc=$(awk '
+                              /^\.github\// { print; exit }
+                              /^doc\// { next }
+                              /^[^\/]+\.md$/ { next }
+                              /^(README|LICENSE)(\.md|\.txt)?$/ { next }
+                              { print; exit }' "$tmp/classify-changed")
+                          if [ -z "$nondoc" ]; then
+                              docs_only=true
+                              reason="$n file(s) changed per GitHub PR files API, all documentation"
+                          else
+                              reason="non-doc path present: $nondoc"
+                          fi
+                      else
+                          reason="file count $n disagrees with declared changed_files $declared (or is zero); fail-safe to non-docs"
+                      fi
+                  else
+                      reason="gh api pulls/$PR_NUMBER/files failed (exit $gh_rc): $(tail -n1 "$tmp/classify-gh.err" 2>/dev/null)"
+                  fi
+              else
+                  reason="base ref \"$BASE_REF\" is not main; the skip-safety induction only holds for main's ruleset"
+              fi
+          else
+              reason="event \"$EVENT_NAME\" is not a pull_request_target, or the PR number is missing"
+          fi
+
+          printf 'docs_only=%s\n' "$docs_only" >> "$GITHUB_OUTPUT"
+          printf 'CHANGE-CLASSIFICATION: docs_only=%s (%s)\n' "$docs_only" "$reason"
+
+      # ---------------------------------------------------------------------
+      # LOCAL CI RECEIPT ADMISSION
+      #
+      # A developer can sign a receipt (schema simple.local-ci-receipt/v1)
+      # stating that they ran the `ci`-tier rows of
+      # config/check/must_check_gates.sdn over one exact tree, produced by one
+      # exact jj change-id set. When that receipt VERIFIES against this job's
+      # rows, the gates below are skipped and this job reports success without
+      # re-running them. (Since 2026-09-23 the required context is the
+      # fast-gates job in repo-hygiene.yml, which this receipt never skips.)
+      #
+      # THREE MODES, and only three:
+      #   full      run every gate, exactly as before. EVERY undecidable,
+      #             missing, malformed, unsigned, mismatched or unreadable
+      #             input lands here. This is the fail-closed zone.
+      #   docs      the receipt verifies and every changed path is
+      #             documentation.
+      #   sanity    the receipt verifies AND binds the PR head tree. The gate
+      #             job checks out exactly head.sha and re-checks that its
+      #             HEAD^{tree} equals the `tree` in this decision before it
+      #             honours anything but `full`. Only the conflict-class
+      #             guards run there.
+      # (The former `escalate` mode compared the attested head with the MERGE
+      # tree the gate job tested. The gate job now tests head.sha itself, and
+      # the strict up-to-date ruleset makes head == merge at land time, so
+      # that branch could never fire and was removed rather than left dead.)
+      #
+      # THE ONE LINE THAT ENFORCES FAIL-CLOSED is `mode=full` at the top of
+      # `Local CI receipt admission`, paired with the fact that `decide()`
+      # only ever WIDENS trust and every failure path `return`s with mode
+      # still full — and, in code-idiom-gates.yml, with the INVERTED `if:` on
+      # each gate step (`!contains(steps.receipt.outputs.skip_ids,
+      # '|<row id>|')`) plus an importer that re-validates this decision and
+      # emits `full` for anything it cannot accept.
+      #
+      # Every input the decision consumes, and where it comes from:
+      #   EVENT_NAME, BASE_SHA, HEAD_SHA, PR_COMMITS  event payload (GitHub)
+      #   DOCS_ONLY                steps.classify, BASE code over the PR files API
+      #   SKIP_KILL_SWITCH         repo variable (D8)
+      #   verifier, allowed signers, gate manifest (row list)
+      #                            `git show <BASE_SHA>:<path>` into RUNNER_TEMP
+      #   commits, trees, change-id / patch-id identities, changed paths
+      #                            git OBJECTS of the head in a private repo
+      #                            under RUNNER_TEMP — read as data, never
+      #                            checked out, never executed
+      #   the receipt + signature  refs/notes/ci-receipts: author-writable
+      #                            data, admitted only by the sshsig check
+      #                            against the BASE allowed-signers file
+      # This workflow has no checkout step, so no head byte is ever a file in
+      # $GITHUB_WORKSPACE and no head script can run in main's context.
+      #
+      # The verifier reads the manifest from the HEAD tree (to bind the
+      # receipt's manifest_sha) — as git data. That is safe only because a PR
+      # that touches .github/workflows/, config/check/, or any of
+      # scripts/{check,hooks,lib,setup}/ (the last two are sourced by 68
+      # scripts/check/*.shs gates) is refused admission outright below. The
+      # changed-path list is computed with --no-renames, so a MOVE out of a
+      # refused directory still lists the refused source path.
+      #
+      # D8 KILL SWITCH: set repo variable SIMPLE_CI_RECEIPT_DISABLED to any
+      # value other than `false` (Settings -> Secrets and variables -> Actions
+      # -> Variables) and the next decision skips nothing — receipt AND
+      # docs-only lanes. No commit, no merge queue. The gate workflow's
+      # importer honours the same variable.
+      # ---------------------------------------------------------------------
+      - name: Local CI receipt admission
+        id: receipt
+        if: ${{ !cancelled() }}
+        shell: sh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+          REPO: ${{ github.repository }}
+          CI_JOB: code-idiom-gates
+          DOCS_ONLY: ${{ steps.classify.outputs.docs_only }}
+          SKIP_KILL_SWITCH: ${{ vars.SIMPLE_CI_RECEIPT_DISABLED }}
+        run: |
+          mode=full
+          skip_ids=""
+          tree=""
+          reason="default: nothing has proved a receipt for this head"
+          tmp=${RUNNER_TEMP:-/tmp}
+
+          # decide() only ever widens trust. Every failure path returns with
+          # mode still `full`; there is no path that sets a narrower mode
+          # without having proved the condition immediately above it.
+          decide() {
+              [ "$EVENT_NAME" = pull_request_target ] || { reason="event \"$EVENT_NAME\" is not a pull_request_target"; return 0; }
+
+              # D8 kill switch, before anything that can narrow. Unset/empty or
+              # exactly `false` = off; anything else (a typo too) = on.
+              case "$SKIP_KILL_SWITCH" in
+                  ''|false) : ;;
+                  *) reason="kill switch vars.SIMPLE_CI_RECEIPT_DISABLED=\"$SKIP_KILL_SWITCH\" is set: no gate may be skipped"; return 0 ;;
+              esac
+
+              # The independent PR-files classifier already proved every
+              # changed path is documentation against protected main. Do not
+              # fetch notes or walk every commit just to discover that no local
+              # receipt was supplied. Leave mode=full and skip_ids empty: only
+              # the separately audited docs-only step conditions may skip gates.
+              if [ "$DOCS_ONLY" = true ]; then
+                  reason="docs-only PR: receipt lookup unnecessary; conflict-class guards still run"
+                  return 0
+              fi
+
+              command -v ssh-keygen >/dev/null 2>&1 || { reason="ssh-keygen is absent on this runner"; return 0; }
+
+              # A private, EMPTY-worktree repository under RUNNER_TEMP: head
+              # content arrives only as git objects (blobless; the few blobs
+              # the verifier and patch-id need are fetched lazily), is never
+              # checked out, and nothing in it is executed. Anonymous fetch —
+              # the repo is public and no credential is written anywhere.
+              repo=$tmp/ci-decide
+              git init -q "$repo"
+              init_rc=$?
+              [ "$init_rc" -eq 0 ] || { reason="could not create the decision repository"; return 0; }
+              cd "$repo" || { reason="could not enter the decision repository"; return 0; }
+              git remote add origin "https://github.com/$REPO"
+              remote_rc=$?
+              [ "$remote_rc" -eq 0 ] || { reason="could not configure the decision remote"; return 0; }
+              git fetch --no-tags --quiet --filter=blob:none --depth="$(( PR_COMMITS + 1 ))" origin "$BASE_SHA" "$HEAD_SHA"
+              fetch_rc=$?
+              [ "$fetch_rc" -eq 0 ] || { reason="could not fetch the PR endpoints (git exit $fetch_rc)"; return 0; }
+
+              # Base-only policy, materialized from BASE_SHA's objects.
+              base=$tmp/ci-base
+              mkdir -p "$base/scripts/check" "$base/config/check"
+              mkdir_rc=$?
+              [ "$mkdir_rc" -eq 0 ] || { reason="could not create the base policy directory"; return 0; }
+              verifier=$base/scripts/check/verify-local-ci-receipt.shs
+              signers=$base/config/check/ci_receipt_allowed_signers
+              manifest=$base/config/check/must_check_gates.sdn
+              git show "$BASE_SHA:scripts/check/verify-local-ci-receipt.shs" > "$verifier"
+              show_verifier_rc=$?
+              [ "$show_verifier_rc" -eq 0 ] || { reason="the BASE ref carries no verify-local-ci-receipt.shs"; return 0; }
+              git show "$BASE_SHA:config/check/ci_receipt_allowed_signers" > "$signers"
+              show_signers_rc=$?
+              [ "$show_signers_rc" -eq 0 ] || { reason="the BASE ref carries no ci_receipt_allowed_signers"; return 0; }
+              git show "$BASE_SHA:config/check/must_check_gates.sdn" > "$manifest"
+              show_manifest_rc=$?
+              [ "$show_manifest_rc" -eq 0 ] || { reason="the BASE ref carries no gate manifest"; return 0; }
+
+              n=$(git rev-list --count "$BASE_SHA..$HEAD_SHA" 2>/dev/null)
+              count_rc=$?
+              [ "$count_rc" -eq 0 ] || { reason="could not enumerate $BASE_SHA..$HEAD_SHA"; return 0; }
+              [ "$n" = "$PR_COMMITS" ] || { reason="range holds $n commit(s) but the PR payload declares $PR_COMMITS (shallow or rewritten history)"; return 0; }
+              [ "$n" -gt 0 ] || { reason="the PR range is empty; there is nothing to attest"; return 0; }
+
+              # A PR may never edit the rules that admit it. --no-renames: with
+              # rename detection a move scripts/check/g.shs -> scripts/lib/g.shs
+              # lists only the destination, hiding the refused source path.
+              git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA" > "$tmp/ci-changed"
+              diff_rc=$?
+              [ "$diff_rc" -eq 0 ] || { reason="could not diff BASE against HEAD"; return 0; }
+              policy=$(awk '/^\.github\/workflows\/|^scripts\/(check|hooks|lib|setup)\/|^config\/check\// {print; exit}' "$tmp/ci-changed")
+              [ -z "$policy" ] || { reason="the PR edits check policy ($policy); a receipt may never admit its own rules"; return 0; }
+
+              # Rebase-stable commit identity, resolved per commit, fail-closed
+              # at every step:
+              #   1. jj writes change-id INTO the git commit object header, so
+              #      plain git reads it and no jj binary is needed.
+              #   2. Commits landed by plain git (this repo's documented
+              #      `git worktree add --detach` + `gh pr create` route) have no
+              #      such header. Measured 2026-09-06: 0 of the last 40
+              #      origin/main commits and 0 of PR #380's head commits carry
+              #      it, so today's real PRs take this branch. `git patch-id
+              #      --stable` hashes the DIFF, so like a change-id it survives
+              #      rebase and cherry-pick — and unlike one it is UNDEFINED for
+              #      a merge commit, which is therefore unbindable.
+              #   3. Neither available => unbindable => full.
+              # The two kinds are never mixed in one set: a receipt signed over
+              # patch-ids must not be accepted against change-ids.
+              git rev-list "$BASE_SHA..$HEAD_SHA" > "$tmp/ci-commits"
+              list_rc=$?
+              [ "$list_rc" -eq 0 ] || { reason="could not list the PR commits"; return 0; }
+              id_kind=""
+              while read -r commit; do
+                  git cat-file commit "$commit" > "$tmp/ci-commit-object"
+                  cat_rc=$?
+                  [ "$cat_rc" -eq 0 ] || { reason="commit $commit is unreadable"; return 0; }
+                  cid=$(awk '$1 == "change-id" { print $2; exit } /^$/ { exit }' "$tmp/ci-commit-object")
+                  if [ -n "$cid" ]; then
+                      kind=change-id
+                  else
+                      parents=$(awk '$1 == "parent" { n++ } /^$/ { exit } END { print n + 0 }' "$tmp/ci-commit-object")
+                      [ "$parents" -le 1 ] || { reason="commit $commit is a merge commit with no change-id header: patch-id is undefined for merges, so it is unbindable"; return 0; }
+                      git show "$commit" > "$tmp/ci-commit-diff"
+                      show_rc=$?
+                      [ "$show_rc" -eq 0 ] || { reason="commit $commit diff is unreadable"; return 0; }
+                      git patch-id --stable < "$tmp/ci-commit-diff" > "$tmp/ci-patch-id"
+                      patch_rc=$?
+                      cid=$(awk '{ print $1; exit }' "$tmp/ci-patch-id")
+                      [ "$patch_rc" -eq 0 ] && [ -n "$cid" ] || { reason="commit $commit has neither a jj change-id header nor a stable patch-id: unbindable"; return 0; }
+                      kind=patch-id
+                  fi
+                  [ -z "$id_kind" ] || [ "$id_kind" = "$kind" ] || { reason="the PR mixes $id_kind and $kind commit identities; comparing unlike identities is a forgery surface"; return 0; }
+                  id_kind=$kind
+              done < "$tmp/ci-commits"
+
+              head_tree=$(git rev-parse "$HEAD_SHA^{tree}" 2>/dev/null)
+              head_tree_rc=$?
+              [ "$head_tree_rc" -eq 0 ] && [ -n "$head_tree" ] || { reason="could not resolve the head tree"; return 0; }
+
+              # RECEIPT DELIVERY: a git note on refs/notes/ci-receipts,
+              # keyed by the PR head sha. It CANNOT be a tracked file: the
+              # receipt binds `tree`, so committing it into that tree changes
+              # the tree and the bound tree could never equal the tested one.
+              # A note lives outside the commit tree, so attaching one perturbs
+              # nothing. The note is author-writable and that is fine — the
+              # sshsig signature inside it, checked against the BASE
+              # allowed-signers file, is what protects the contents.
+              #
+              # Producer side (developer, after signing locally):
+              #   cat <receipt> <receipt>.sig > /tmp/note
+              #   git notes --ref=ci-receipts add -f -F /tmp/note <head-sha>
+              #   git push origin refs/notes/ci-receipts
+              #
+              # A missing note is the ORDINARY case, not an error: it means
+              # this PR carries no receipt, which means `full`.
+              git fetch --no-tags --quiet origin 'refs/notes/ci-receipts:refs/notes/ci-receipts'
+              notes_fetch_rc=$?
+              [ "$notes_fetch_rc" -eq 0 ] || { reason="no refs/notes/ci-receipts on origin: this PR carries no receipt"; return 0; }
+              git notes --ref=ci-receipts show "$HEAD_SHA" > "$tmp/ci-note" 2>/dev/null
+              note_rc=$?
+              [ "$note_rc" -eq 0 ] || { reason="no ci-receipt note on head $HEAD_SHA"; return 0; }
+              awk '/^-----BEGIN SSH SIGNATURE-----/ { exit } { print }' "$tmp/ci-note" > "$tmp/ci-receipt"
+              sed -n '/^-----BEGIN SSH SIGNATURE-----/,$p' "$tmp/ci-note" > "$tmp/ci-receipt.sig"
+              [ -s "$tmp/ci-receipt" ] || { reason="the ci-receipt note on $HEAD_SHA carries no payload"; return 0; }
+              [ -s "$tmp/ci-receipt.sig" ] || { reason="the ci-receipt note on $HEAD_SHA carries no sshsig block"; return 0; }
+
+              # The identity SET and the tree are both bound here: --changes
+              # gives the verifier the exact commit set to resolve identities
+              # from (change-id header, else stable patch-id — the verifier
+              # supports both kinds and refuses a kind mismatch), and --rev
+              # pins the content. IT IS THE PR HEAD, NEVER A MERGE TIP: patch-id
+              # is undefined for a merge. A force-push preserves identities but
+              # not the tree, which is why both are required. The verifier is
+              # BASE's copy, run from RUNNER_TEMP against the decision repo.
+              sh "$verifier" --root "$repo" --rev "$HEAD_SHA" \
+                  --changes "$BASE_SHA..$HEAD_SHA" --tier ci \
+                  --receipt "$tmp/ci-receipt" --signature "$tmp/ci-receipt.sig" \
+                  --allowed-signers "$signers" > "$tmp/ci-verify.out" 2>&1
+              verify_rc=$?
+              sed -n '1,40p' "$tmp/ci-verify.out"
+              verdict=$(tail -n 1 "$tmp/ci-verify.out")
+              [ "$verify_rc" -eq 0 ] || { reason="receipt not admitted (verifier exit $verify_rc): $verdict"; return 0; }
+
+              # Rows the gate job owns, read from the BASE manifest.
+              awk -F, -v job="$CI_JOB" '
+                  /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*ci,/ {
+                      id=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+                      j=$6; gsub(/^[[:space:]]+|[[:space:]]+$/, "", j)
+                      inp=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", inp)
+                      if (j == job && id != "" && inp != "") print id "\t" inp
+                  }' "$manifest" > "$tmp/ci-rows"
+              [ -s "$tmp/ci-rows" ] || { reason="the BASE manifest declares no ci row for job $CI_JOB"; return 0; }
+              all_ids=$(awk -F'\t' '{printf "|%s", $1} END {printf "|"}' "$tmp/ci-rows")
+              covered=$(awk 'END {print NR}' "$tmp/ci-rows")
+
+              # ---- MODE PRECEDENCE: full -> docs -> sanity ------------------
+              # `full` is everything above that returned early. Then:
+              #   docs      every changed path is pure documentation.
+              #   sanity    otherwise; the attested tree is the head tree, and
+              #             the gate job re-checks that it is testing exactly it.
+              all_paths=$(awk 'END {print NR}' "$tmp/ci-changed")
+              # DOC-ONLY PREDICATE, defined once, here (same as classify).
+              #   allowed: doc/**, *.md at the repository root, README/LICENSE
+              #   (bare, .md or .txt) at the root
+              #   NEVER allowed: .github/** — even a comment there can change
+              #   the gate that is deciding to skip, so it is excluded before
+              #   any allow rule is consulted.
+              # The final `{ print; exit }` is the fail-closed line: ANY path
+              # that matched no allow rule — a .spl, .shs, .c, .rs, .yml, .sdn,
+              # a nested .md, an extensionless file, anything unclassifiable —
+              # disqualifies the whole PR from docs mode.
+              nondoc=$(awk '
+                  /^\.github\// { print; exit }
+                  /^doc\// { next }
+                  /^[^\/]+\.md$/ { next }
+                  /^(README|LICENSE)(\.md|\.txt)?$/ { next }
+                  { print; exit }' "$tmp/ci-changed")
+              tree=$head_tree
+              if [ -z "$nondoc" ] && [ "$all_paths" -gt 0 ]; then
+                  skip_ids=$all_ids
+                  mode=docs
+                  reason="identity bound as $id_kind, $all_paths path(s) changed and every one is documentation; the conflict-class floor still runs, and the manifest declares no doc-specific ci row for $CI_JOB"
+                  return 0
+              fi
+
+              skip_ids=$all_ids
+              mode=sanity
+              reason="identity bound as $id_kind, tree $head_tree attested, $covered row(s) attested: $verdict"
+          }
+
+          # `shell: sh` is `sh -e`, and decide() reads `$?` after commands it
+          # expects to be able to fail (`git fetch` ... `fetch_rc=$?`). Under
+          # errexit that read is never reached and the step would die before
+          # writing any output (measured 2026-09-07 on PR #457). Invoking
+          # through `||` suspends errexit for the call; every failure path
+          # inside it already returns with `mode` still `full`.
+          decide || true
+          [ "$mode" = full ] && { skip_ids=""; tree=""; }
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+          printf 'skip_ids=%s\n' "$skip_ids" >> "$GITHUB_OUTPUT"
+          printf 'tree=%s\n' "$tree" >> "$GITHUB_OUTPUT"
+          printf 'LOCAL-CI-RECEIPT MODE: %s (%s)\n' "$mode" "$reason"
+
+      # The decision file is written by BASE code from BASE step outputs and the
+      # event payload only. Always published (even `full`), so the gate job can
+      # tell "decided full" from "not decided yet".
+      - name: Publish receipt decision
+        if: ${{ !cancelled() }}
+        shell: sh
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MODE: ${{ steps.receipt.outputs.mode }}
+          SKIP_IDS: ${{ steps.receipt.outputs.skip_ids }}
+          TREE: ${{ steps.receipt.outputs.tree }}
+          DOCS_ONLY: ${{ steps.classify.outputs.docs_only }}
+        run: |
+          dir=${RUNNER_TEMP:-/tmp}/receipt-decision
+          mkdir -p "$dir"
+          case "$MODE" in sanity|docs) : ;; *) MODE=full; SKIP_IDS=""; TREE="" ;; esac
+          [ "$DOCS_ONLY" = true ] || DOCS_ONLY=false
+          {
+              printf 'schema=simple.ci-receipt-decision/v1\n'
+              printf 'pr=%s\n' "$PR_NUMBER"
+              printf 'head_sha=%s\n' "$HEAD_SHA"
+              printf 'base_sha=%s\n' "$BASE_SHA"
+              printf 'base_ref=%s\n' "$BASE_REF"
+              printf 'mode=%s\n' "$MODE"
+              printf 'skip_ids=%s\n' "$SKIP_IDS"
+              printf 'tree=%s\n' "$TREE"
+              printf 'docs_only=%s\n' "$DOCS_ONLY"
+          } > "$dir/decision.txt"
+          cat "$dir/decision.txt"
+
+      - name: Upload receipt decision
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: receipt-decision-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/receipt-decision/decision.txt
+          retention-days: 3
+          if-no-files-found: error

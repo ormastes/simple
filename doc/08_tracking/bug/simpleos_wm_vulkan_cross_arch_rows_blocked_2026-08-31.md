@@ -1,4 +1,8 @@
 # SimpleOS WM Vulkan smoke rows: blockers per arch (2026-08-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Goal item: "SimpleOS window manager with Vulkan-backed smoke tests on x86_64,
 aarch64 and riscv64" — three rows. This record states, per arch, exactly what
@@ -425,3 +429,4 @@ attribution complained about above already exists.
 Both defects are in the pure-Simple compiler, not the Rust seed, and neither
 is engine2d-specific — they blocked essentially every non-trivial
 `native-build` on this lane.
+

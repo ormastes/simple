@@ -1,0 +1,114 @@
+"""
+Two line-breaking rules the engine did not have: `white-space: pre` preserves
+newlines as forced breaks, and `overflow-wrap: normal` forbids breaking INSIDE
+a word.
+
+**Item 1 — `white-space: pre`.** `white_space_nowrap` carried both `nowrap` and
+`pre`, and the `#text` branch gave that one flag a single wrap range spanning
+the whole run. That is right for `nowrap` (which COLLAPSES newlines) and wrong
+for `pre` (which PRESERVES them), so a `<pre>` block was one line however many
+rows it held. `pre` now has its own `Style.white_space_pre`, set by the UA rule
+for `<pre>` and by `white-space: pre`, and the layout splits at every U+000A.
+On the catalog's `<pre>` sample this was Chrome 128 against Simple 104, and
+because the row sits two thirds of the way down `html.html` its 24 px shortfall
+dragged 44 later root rows up behind it — Sigma 1080 attributed, the single
+largest item in the 8-page catalog.
+
+**Item 2 — `overflow-wrap: normal`.** The wrap loop cut the line at whatever
+byte stopped fitting. CSS Text 3 reserves that for `overflow-wrap: break-word`
+/ `anywhere` and `word-break: break-all`; under the initial value a word wider
+than the line OVERFLOWS it. The damage was worst when the run STARTED mid-line,
+because then `max_width` is a pen remainder of a few pixels and the
+`endv == start` arm emitted one CODEPOINT per line: the catalog's
+`<p style="width:80px">LongWord<wbr>BreakHere</p>` came out NINE lines tall
+against Chrome's two (dh 168, the largest single delta in the catalog).
+
+Every number below is HARVESTED from Chrome 152 `--headless=new
+--window-size=900,20000` over exactly the markup this spec feeds the engine
+(`HEAD` reproduces the fixture's `<head>` byte for byte), not predicted:
+
+| case                                             | Chrome h |
+|--------------------------------------------------|----------|
+| `<pre>A\nB</pre>`                                | 48       |
+| `<pre>\nA\nB</pre>` (leading newline dropped)     | 48       |
+| `<pre>A\nB\n</pre>` (no trailing empty line)      | 48       |
+| `<pre>One line</pre>`                            | 24       |
+| `white-space:nowrap` over the same two rows       | 24       |
+| `width:80px`, one unbreakable word                | 24       |
+| ... plus `overflow-wrap:break-word`               | 48       |
+| `width:80px`, four short words                    | 72       |
+| a plain-text div in the same block                | 24       |
+
+The last four rows are CONTROLS, and they are why the two rules can be stated
+separately: the `nowrap` row fails the moment `white_space_pre` is folded back
+into `white_space_nowrap`, and the `break-word` row fails the moment the
+`may_break_in_word` condition is deleted rather than inverted.
+
+TWO RESIDUES, stated rather than absorbed:
+
+1. `<wbr>` is still not a soft-break OPPORTUNITY. With the fix
+   `LongWord<wbr>BreakHere` is one overflowing line where Chrome makes two, so
+   the catalog row moves from +168 to -24 rather than to 0. That is a
+   different layer (the inline pen, not the per-run wrapper) and is filed as
+   `doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`. The
+   discriminator is already measured: `LongWord<i></i>BreakHere` with no `wbr`
+   is ONE line in both engines, so the run boundary alone is correctly not a
+   break opportunity — only `<wbr>` is missing.
+2. `compute_style_wrap_ranges_float_band` keeps the old intra-word chop. It is
+   a separate copy of the loop with its own two-width contract, no catalog page
+   exercises it, and changing it unmeasured would be a guess.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LAYOUT-015 — a `white-space: pre` run breaks at every preserved newline, and a run under `overflow-wrap: normal` never breaks inside a word.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+fn probe(inner: text, id: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + "</body></html>", VW, VH, id, prop)
+
+describe "white-space:pre preserves newlines and overflow-wrap:normal never splits a word":
+    it "AC-1: a two-row <pre> is two lines tall":
+        step("Chrome 48; the pre-fix engine returned 24, one line for both rows")
+        expect(probe("<div><pre id=\"p\">Column A\nColumn B</pre></div>", "p", "h")).to_equal("48")
+
+    it "AC-2: a newline immediately after the <pre> start tag is dropped":
+        step("Chrome 48, not 72 — the HTML parsing rule, harvested not recalled")
+        expect(probe("<div><pre id=\"p\">\nColumn A\nColumn B</pre></div>", "p", "h")).to_equal("48")
+
+    it "AC-3: a run ending in a newline does not open a trailing empty line":
+        step("Chrome 48, not 72")
+        expect(probe("<div><pre id=\"p\">Column A\nColumn B\n</pre></div>", "p", "h")).to_equal("48")
+
+    it "AC-4 (control): a one-row <pre> is still one line":
+        step("Chrome 24; the newline split must not invent a line where there is no newline")
+        expect(probe("<div><pre id=\"p\">One line</pre></div>", "p", "h")).to_equal("24")
+
+    it "AC-5 (control): white-space:nowrap over the same two rows stays ONE line":
+        step("Chrome 24 — nowrap COLLAPSES newlines, which is why pre needed its own flag")
+        step("this is the row that fails if white_space_pre is folded back into white_space_nowrap")
+        expect(probe("<div><div id=\"p\" style=\"white-space:nowrap\">Column A\nColumn B</div></div>", "p", "h")).to_equal("24")
+
+    it "AC-6: an unbreakable word wider than its box overflows on ONE line":
+        step("Chrome 24; the pre-fix engine chopped it into 2 lines")
+        expect(probe("<div><p id=\"p\" style=\"width:80px\">LongWordBreakHere</p></div>", "p", "h")).to_equal("24")
+
+    it "AC-7 (control): overflow-wrap:break-word still breaks inside the word":
+        step("Chrome 48 — intra-word breaking is narrowed to where CSS asks for it, not removed")
+        expect(probe("<div><p id=\"p\" style=\"width:80px;overflow-wrap:break-word\">LongWordBreakHere</p></div>", "p", "h")).to_equal("48")
+
+    it "AC-8 (control): ordinary multi-word wrapping is untouched":
+        step("Chrome 72 — four short words in an 80 px box still break at the spaces")
+        expect(probe("<div><p id=\"p\" style=\"width:80px\">alpha beta gamma delta</p></div>", "p", "h")).to_equal("72")
+
+    it "AC-9 (control): a plain-text div in the same block keeps its single line":
+        step("Chrome 24 — neither rule may reach a run that has no newline and no long word")
+        expect(probe("<div id=\"p\">plain text</div>", "p", "h")).to_equal("24")

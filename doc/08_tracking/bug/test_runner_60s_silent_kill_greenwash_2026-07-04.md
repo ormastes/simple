@@ -1,4 +1,9 @@
 # Test runner: spec file killed at ~60s budget still prints PASS
+## Closed 2026-09-16 — ...ts successor after the tree swap). ## Fix (2026-07-17) Verified fixed on the single-file p
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-04
 **Severity:** high (greenwashing — killed tests read as passing)
@@ -67,3 +72,4 @@ path (`test_runner_execute.spl`) and `make_result_from_output`'s existing
 correct by inspection and were the subject of the same-day bounded-polling
 fix; flag for a follow-up if a killed run is ever observed to still read
 green through that path specifically.
+

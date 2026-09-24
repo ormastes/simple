@@ -1,0 +1,341 @@
+use compiler.driver.action_graph.build_action_v1.{
+    BuildActionPoolV1, BuildActionResultV1, BuildActionV1,
+    build_action_digest_v1, build_action_result_validate_v1
+}
+use compiler.driver.cache.cas_batch_transaction.{
+    CasBatchTransactionV1,
+    cas_batch_abort_v1, cas_batch_begin_v1, cas_batch_current_v1,
+    cas_batch_lookup_receipt_digest_v1, cas_batch_publish_v1,
+    cas_batch_stage_object_v1
+}
+use compiler.driver.cache.package_archive_cache.{
+    package_archive_receipt_decode_v1
+}
+use compiler.driver.cache.cas_store.{cas_blob_path, cas_get, cas_put}
+use compiler.driver.cache.package_archive_types.{
+    PackageActionKeyV1, PackageArchiveMemberReceiptV1,
+    PackageArchiveReceiptV1, package_archive_receipt_canonical_fields_v1,
+    package_archive_receipt_digest_v1
+}
+use compiler.driver.smf.package_image_v1.{
+    PACKAGE_IMAGE_SCHEMA_V1, PackageImageV1, PackageSectionDescriptorV1,
+    PackageSectionKindV1, package_image_validate_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+val RUNTIME_PACKAGE_IDENTITY_V1: text = "simple.runtime"
+val STD_PACKAGE_IDENTITY_V1: text = "simple.std"
+
+struct RuntimeStdPackageAuthorityV1:
+    compiler_digest: text
+    action_abi_digest: text
+    runtime_abi_digest: text
+    std_abi_digest: text
+    config_digest: text
+    target_triple: text
+    snapshot_revision: text
+
+struct RuntimeStdSectionContentV1:
+    kind: PackageSectionKindV1
+    member_name: text
+    content: text
+
+struct RuntimeStdPackageInputV1:
+    package_identity: text
+    package_abi_digest: text
+    dependency_interface_digests: [text]
+    sections: [RuntimeStdSectionContentV1]
+
+struct RuntimeStdPackageAdmissionV1:
+    valid: bool
+    reason: text
+    package_identity: text
+    action_digest: text
+    archive_path: text
+    image: PackageImageV1?
+    receipt: PackageArchiveReceiptV1?
+
+struct RuntimeStdPackageSetV1:
+    valid: bool
+    reason: text
+    runtime: RuntimeStdPackageAdmissionV1
+    std: RuntimeStdPackageAdmissionV1
+
+struct RuntimeStdStageResultV1:
+    admission: RuntimeStdPackageAdmissionV1
+    transaction: CasBatchTransactionV1
+
+fn runtime_std_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn runtime_std_authority_valid_v1(authority: RuntimeStdPackageAuthorityV1) -> bool:
+    runtime_std_digest_valid_v1(authority.compiler_digest) and
+        runtime_std_digest_valid_v1(authority.action_abi_digest) and
+        runtime_std_digest_valid_v1(authority.runtime_abi_digest) and
+        runtime_std_digest_valid_v1(authority.std_abi_digest) and
+        runtime_std_digest_valid_v1(authority.config_digest) and
+        authority.target_triple != "" and authority.snapshot_revision != ""
+
+fn runtime_std_package_abi_v1(
+    authority: RuntimeStdPackageAuthorityV1, package_identity: text
+) -> text:
+    if package_identity == RUNTIME_PACKAGE_IDENTITY_V1:
+        return authority.runtime_abi_digest
+    if package_identity == STD_PACKAGE_IDENTITY_V1:
+        return authority.std_abi_digest
+    ""
+
+fn runtime_std_action_digest_v1(
+    authority: RuntimeStdPackageAuthorityV1, package_identity: text
+) -> text:
+    val package_abi = runtime_std_package_abi_v1(authority, package_identity)
+    if not runtime_std_authority_valid_v1(authority) or package_abi == "":
+        return ""
+    sha256_text(
+        "simple/runtime-std-package-action/v1" +
+        "|package={package_identity}" +
+        "|compiler={authority.compiler_digest}" +
+        "|action-abi={authority.action_abi_digest}" +
+        "|package-abi={package_abi}" +
+        "|config={authority.config_digest}" +
+        "|target={authority.target_triple}")
+
+fn runtime_std_build_action_v1(
+    authority: RuntimeStdPackageAuthorityV1, package_identity: text
+) -> BuildActionV1?:
+    val action_digest = runtime_std_action_digest_v1(authority, package_identity)
+    if action_digest == "":
+        return nil
+    val action = BuildActionV1(
+        "runtime-std:{package_identity}", action_digest,
+        [authority.compiler_digest, authority.action_abi_digest,
+            runtime_std_package_abi_v1(authority, package_identity),
+            authority.config_digest], [], [package_identity],
+        BuildActionPoolV1.semantic, 0, authority.snapshot_revision,
+        512 * 1024 * 1024, action_digest)
+    if build_action_digest_v1(action) == "":
+        return nil
+    Some(action)
+
+fn runtime_std_sections_valid_v1(sections: [RuntimeStdSectionContentV1]) -> bool:
+    if sections.len() != 10:
+        return false
+    var seen: [text] = []
+    var previous_name = ""
+    for section in sections:
+        val key = match section.kind:
+            PackageSectionKindV1.exports: "exports"
+            PackageSectionKindV1.imports: "imports"
+            PackageSectionKindV1.types: "types"
+            PackageSectionKindV1.generics: "generics"
+            PackageSectionKindV1.hir_summaries: "hir-summaries"
+            PackageSectionKindV1.mir: "mir"
+            PackageSectionKindV1.objects: "objects"
+            PackageSectionKindV1.initialization: "initialization"
+            PackageSectionKindV1.debug: "debug"
+            PackageSectionKindV1.receipts: "receipts"
+        if (seen.contains(key) or section.member_name == "" or
+                section.member_name.contains("\n") or section.content == ""):
+            return false
+        if previous_name != "" and section.member_name <= previous_name:
+            return false
+        seen.push(key)
+        previous_name = section.member_name
+    seen.len() == 10
+
+fn runtime_std_empty_admission_v1(reason: text) -> RuntimeStdPackageAdmissionV1:
+    RuntimeStdPackageAdmissionV1(false, reason, "", "", "", nil, nil)
+
+fn runtime_std_stage_package_v1(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    input: RuntimeStdPackageInputV1, transaction_input: CasBatchTransactionV1
+) -> RuntimeStdStageResultV1:
+    var transaction = transaction_input
+    val action_digest = runtime_std_action_digest_v1(
+        authority, input.package_identity)
+    if (action_digest == "" or input.package_abi_digest !=
+            runtime_std_package_abi_v1(authority, input.package_identity) or
+            not runtime_std_sections_valid_v1(input.sections)):
+        return RuntimeStdStageResultV1(
+            runtime_std_empty_admission_v1("runtime-std-input-invalid"), transaction)
+    var content = ""
+    var members: [PackageArchiveMemberReceiptV1] = []
+    var descriptors: [PackageSectionDescriptorV1] = []
+    var offset: u64 = 0
+    for section in input.sections:
+        val extent = section.content.bytes().len().to_u64()
+        val digest = sha256_text(section.content)
+        members.push(PackageArchiveMemberReceiptV1(
+            section.member_name, offset, extent, digest))
+        descriptors.push(PackageSectionDescriptorV1(
+            section.kind, section.member_name, offset, extent, digest))
+        content = content + section.content
+        offset = offset + extent
+    val archive_digest = cas_put(root, content)
+    val producer_identity = sha256_text(
+        "{authority.compiler_digest}|{authority.action_abi_digest}")
+    val provisional = PackageArchiveReceiptV1(
+        input.package_identity, action_digest, archive_digest,
+        input.package_abi_digest, producer_identity,
+        authority.compiler_digest, authority.config_digest,
+        input.dependency_interface_digests.sorted(), members, "")
+    val receipt = PackageArchiveReceiptV1(
+        provisional.package_key, provisional.action_key,
+        provisional.archive_digest, provisional.normalized_metadata_digest,
+        provisional.producer_identity, provisional.producer_digest,
+        provisional.variant_digest, provisional.dependency_interface_digests,
+        provisional.members, package_archive_receipt_digest_v1(provisional))
+    val image = PackageImageV1(
+        PACKAGE_IMAGE_SCHEMA_V1, input.package_identity, action_digest,
+        archive_digest, receipt.receipt_digest, producer_identity,
+        authority.compiler_digest, authority.config_digest,
+        receipt.dependency_interface_digests, descriptors)
+    if (archive_digest == "" or package_image_validate_v1(image, receipt).is_err() or
+            cas_put(root, package_archive_receipt_canonical_fields_v1(receipt)) !=
+                receipt.receipt_digest or
+            cas_batch_stage_object_v1(
+                transaction, input.package_identity,
+                PackageActionKeyV1(action_digest), receipt).is_err()):
+        return RuntimeStdStageResultV1(
+            runtime_std_empty_admission_v1("runtime-std-publication-invalid"),
+            transaction)
+    RuntimeStdStageResultV1(
+        RuntimeStdPackageAdmissionV1(
+            true, "staged", input.package_identity, action_digest,
+            cas_blob_path(root, archive_digest), Some(image), Some(receipt)),
+        transaction)
+
+fn runtime_std_publish_set_v1(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    runtime_input: RuntimeStdPackageInputV1,
+    std_input: RuntimeStdPackageInputV1,
+    runtime_result: BuildActionResultV1,
+    std_result: BuildActionResultV1
+) -> RuntimeStdPackageSetV1:
+    if (runtime_input.package_identity != RUNTIME_PACKAGE_IDENTITY_V1 or
+            std_input.package_identity != STD_PACKAGE_IDENTITY_V1):
+        val invalid = runtime_std_empty_admission_v1("runtime-std-set-invalid")
+        return RuntimeStdPackageSetV1(false, invalid.reason, invalid, invalid)
+    val runtime_action = runtime_std_build_action_v1(
+        authority, RUNTIME_PACKAGE_IDENTITY_V1)
+    val std_action = runtime_std_build_action_v1(
+        authority, STD_PACKAGE_IDENTITY_V1)
+    if (runtime_action == nil or std_action == nil or
+            build_action_result_validate_v1(
+                runtime_action!, runtime_result) != "ok" or
+            build_action_result_validate_v1(std_action!, std_result) != "ok" or
+            not runtime_result.success or not std_result.success or
+            runtime_result.output_identity != runtime_action!.restat_identity or
+            std_result.output_identity != std_action!.restat_identity):
+        val invalid = runtime_std_empty_admission_v1(
+            "runtime-std-action-result-invalid")
+        return RuntimeStdPackageSetV1(false, invalid.reason, invalid, invalid)
+    val begun = cas_batch_begin_v1(
+        root, cas_batch_current_v1(root), "runtime-std-baseline",
+        [RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1])
+    if begun.is_err():
+        val invalid = runtime_std_empty_admission_v1(
+            "runtime-std-transaction-refused")
+        return RuntimeStdPackageSetV1(false, invalid.reason, invalid, invalid)
+    val runtime_stage = runtime_std_stage_package_v1(
+        root, authority, runtime_input, begun.unwrap())
+    val runtime = runtime_stage.admission
+    if not runtime.valid:
+        _ = cas_batch_abort_v1(runtime_stage.transaction)
+        return RuntimeStdPackageSetV1(
+            false, runtime.reason, runtime,
+            runtime_std_empty_admission_v1("not-staged"))
+    val standard_stage = runtime_std_stage_package_v1(
+        root, authority, std_input, runtime_stage.transaction)
+    val standard = standard_stage.admission
+    if not standard.valid:
+        _ = cas_batch_abort_v1(standard_stage.transaction)
+        return RuntimeStdPackageSetV1(false, standard.reason, runtime, standard)
+    if cas_batch_publish_v1(standard_stage.transaction).is_err():
+        return RuntimeStdPackageSetV1(
+            false, "runtime-std-publication-failed", runtime, standard)
+    RuntimeStdPackageSetV1(true, "rebuilt", runtime, standard)
+
+fn runtime_std_load_package_v1(
+    root: text, authority: RuntimeStdPackageAuthorityV1,
+    package_identity: text
+) -> RuntimeStdPackageAdmissionV1:
+    val action_digest = runtime_std_action_digest_v1(authority, package_identity)
+    if action_digest == "":
+        return runtime_std_empty_admission_v1("runtime-std-authority-invalid")
+    val receipt_digest = cas_batch_lookup_receipt_digest_v1(
+        root, package_identity, action_digest)
+    if receipt_digest == nil:
+        return runtime_std_empty_admission_v1("runtime-std-rebuild-required")
+    val receipt_text = cas_get(root, receipt_digest!)
+    if receipt_text == nil:
+        return runtime_std_empty_admission_v1("runtime-std-receipt-missing")
+    val receipt = package_archive_receipt_decode_v1(receipt_text!)
+    val expected_abi = runtime_std_package_abi_v1(authority, package_identity)
+    val expected_producer = sha256_text(
+        "{authority.compiler_digest}|{authority.action_abi_digest}")
+    if (receipt == nil or receipt!.receipt_digest != receipt_digest! or
+            receipt!.package_key != package_identity or
+            receipt!.action_key != action_digest or
+            receipt!.normalized_metadata_digest != expected_abi or
+            receipt!.producer_identity != expected_producer or
+            receipt!.producer_digest != authority.compiler_digest or
+            receipt!.variant_digest != authority.config_digest or
+            receipt!.members.len() != 10):
+        return runtime_std_empty_admission_v1("runtime-std-authority-mismatch")
+    var sections: [PackageSectionDescriptorV1] = []
+    for member in receipt!.members:
+        val kind = match member.name:
+            "debug.smf": Some(PackageSectionKindV1.debug)
+            "exports.smf": Some(PackageSectionKindV1.exports)
+            "generics.smf": Some(PackageSectionKindV1.generics)
+            "hir-summaries.smf": Some(PackageSectionKindV1.hir_summaries)
+            "imports.smf": Some(PackageSectionKindV1.imports)
+            "initialization.smf": Some(PackageSectionKindV1.initialization)
+            "mir.smf": Some(PackageSectionKindV1.mir)
+            "objects.smf": Some(PackageSectionKindV1.objects)
+            "receipts.smf": Some(PackageSectionKindV1.receipts)
+            "types.smf": Some(PackageSectionKindV1.types)
+            _: nil
+        if kind == nil:
+            return runtime_std_empty_admission_v1("runtime-std-member-invalid")
+        sections.push(PackageSectionDescriptorV1(
+            kind!, member.name, member.offset, member.extent,
+            member.payload_digest))
+    val image = PackageImageV1(
+        PACKAGE_IMAGE_SCHEMA_V1, package_identity, action_digest,
+        receipt!.archive_digest, receipt!.receipt_digest, expected_producer,
+        authority.compiler_digest, authority.config_digest,
+        receipt!.dependency_interface_digests, sections)
+    if package_image_validate_v1(image, receipt!).is_err():
+        return runtime_std_empty_admission_v1("runtime-std-image-invalid")
+    RuntimeStdPackageAdmissionV1(
+        true, "cached", package_identity, action_digest,
+        cas_blob_path(root, receipt!.archive_digest), Some(image), Some(receipt!))
+
+fn runtime_std_load_baseline_v1(
+    root: text, authority: RuntimeStdPackageAuthorityV1
+) -> RuntimeStdPackageSetV1:
+    val runtime = runtime_std_load_package_v1(
+        root, authority, RUNTIME_PACKAGE_IDENTITY_V1)
+    if not runtime.valid:
+        return RuntimeStdPackageSetV1(false, runtime.reason, runtime,
+            runtime_std_empty_admission_v1("not-loaded"))
+    val standard = runtime_std_load_package_v1(
+        root, authority, STD_PACKAGE_IDENTITY_V1)
+    if not standard.valid:
+        return RuntimeStdPackageSetV1(false, standard.reason, runtime, standard)
+    RuntimeStdPackageSetV1(true, "cached", runtime, standard)
+
+export RUNTIME_PACKAGE_IDENTITY_V1, STD_PACKAGE_IDENTITY_V1
+export RuntimeStdPackageAuthorityV1, RuntimeStdSectionContentV1
+export RuntimeStdPackageInputV1, RuntimeStdPackageAdmissionV1
+export RuntimeStdPackageSetV1
+export runtime_std_action_digest_v1, runtime_std_build_action_v1
+export runtime_std_publish_set_v1, runtime_std_load_package_v1
+export runtime_std_load_baseline_v1

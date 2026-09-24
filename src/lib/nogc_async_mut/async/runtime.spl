@@ -84,12 +84,17 @@ impl Runtime:
     fn spawn<T>(future: Future<T>) -> i64:
         """Spawn a new async task.
 
-        Returns a task ID that can be used to check completion.
+        Returns a task ID that can be used to check completion. There is no
+        standalone await-by-id API: to collect a spawned task's result,
+        register it in `awaited` and drive it via `run_once`/`run` (the
+        protocol `block_on` follows), or call `block_on` directly on the
+        future instead of pre-spawning it.
 
         Example:
             val task_id = runtime.spawn(fetch_data())
-            # ... do other work ...
-            val result = runtime.await_task(task_id)
+            runtime.awaited.insert(task_id, true)
+            runtime.run()
+            val result = runtime.completed[task_id]
         """
         val task_id = generate_task_id()
 
@@ -182,6 +187,11 @@ impl Runtime:
         ready task. When nothing is runnable but timers are registered, parks
         until the nearest deadline instead of busy-spinning.
         Returns true if there are still tasks to process.
+
+        A completed task's result is retained in `completed` only when the
+        task id was registered in `awaited` before this call (the protocol
+        `block_on` follows). An un-awaited task's result is discarded rather
+        than leaked for the runtime's lifetime.
         """
         self._drain_wakers()
         self._fire_due_timers()

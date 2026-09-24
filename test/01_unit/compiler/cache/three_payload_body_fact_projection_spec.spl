@@ -1,0 +1,256 @@
+# Frontend body extraction is physical evidence only.  P1 facts are copied
+# projections; only the driver may compose them with live semantic authority.
+# @req REQ-CSM-003 REQ-CSM-006 REQ-CSM-017 REQ-CSM-024 NFR-CSM-010
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.physical_tld_v1.{
+    PhysicalTldHeaderV1, PhysicalTldObjectV1, TldPayloadRoleV1, TldSectionRefV1,
+    physical_tld_section_table_digest_v1, physical_tld_object_encode_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticQueryKeyV1}
+use compiler.common.cache_contract.snapshot_contract_v1.{CacheObjectRefV1}
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadClosureSealV2, ThreePayloadFallbackV1,
+    ThreePayloadSemanticBinding, ThreePayloadSemanticRefV2,
+    closure_coverage_dimension_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.frontend.cache_artifact.three_payload_semantic_closure.{
+    ThreePayloadSemanticBindBounds, ThreePayloadSemanticAuthorityState,
+    ThreePayloadBodySectionCandidate, ThreePayloadBodyFactProjection,
+    bind_three_payload_semantic_inputs,
+    extract_three_payload_body_section_candidate,
+    match_three_payload_body_fact_projection,
+    resolve_three_payload_semantic_input}
+
+fn d(label: text) -> text: sha256_text(label)
+fn body() -> [u8]: "canonical-p1-hir-body".bytes()
+
+fn section(bytes: [u8]) -> TldSectionRefV1:
+    TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld, section_index: 0,
+        kind: "semantic-body", semantic_object_digest: sha256_u8_hex(bytes),
+        offset: 0, stored_bytes: bytes.len(), decoded_bytes: bytes.len(),
+        encoding_profile: "raw-v1")
+
+fn init_object(bytes: [u8]) -> PhysicalTldObjectV1:
+    val item = section(bytes)
+    PhysicalTldObjectV1(header: PhysicalTldHeaderV1(schema: 1,
+        role: TldPayloadRoleV1.PackageInitTld,
+        semantic_record_digest: d("record"),
+        section_table_digest: physical_tld_section_table_digest_v1([item]),
+        payload_bytes: bytes.len(), sections: [item]), canonical_sections: [bytes])
+
+fn roots() -> [ClosureCoverageRootV1]:
+    var result: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        result.push(ClosureCoverageRootV1(
+            dimension: closure_coverage_dimension_v1(index),
+            root_digest: d("root:{index}"), coverage: SemanticCoverageV1.Complete))
+        index = index + 1
+    result
+
+fn binding(bytes: [u8], kind: ThreePayloadSemanticRefKindV1
+) -> ThreePayloadSemanticBinding:
+    ThreePayloadSemanticBinding(stable_entity_id: "fixture.entry",
+        semantic_use_kind: kind,
+        object_ref: CacheObjectRefV1(kind: "portable_hir_object", schema: 2,
+            object_digest: d("typed-object")),
+        embedded_role: Some(TldPayloadRoleV1.PackageInitTld),
+        embedded_section_index: Some(0),
+        raw_section_digest: Some(sha256_u8_hex(bytes)),
+        access_policy_digest: d("access"), semantic_profile_digest: d("profile"),
+        callable_signature_digest: d("signature"), effect_digest: d("effect"),
+        selection_contract_digest: d("selection"))
+
+fn seal(bytes: [u8], kind: ThreePayloadSemanticRefKindV1
+) -> ThreePayloadClosureSealV2:
+    val object_bytes = physical_tld_object_encode_v1(init_object(bytes))
+    val reference = ThreePayloadSemanticRefV2(kind: kind,
+        stable_entity_id: "fixture.entry", callable_signature_digest: d("signature"),
+        effect_digest: d("effect"), body_or_object_digest: sha256_u8_hex(bytes),
+        embedded: Some(section(bytes)), selection_contract_digest: d("selection"))
+    ThreePayloadClosureSealV2(schema: 2, input_generation_digest: d("generation"),
+        snapshot_digest: d("snapshot"), source_digest: d("source"),
+        prior_tld_digest: nil, init_tld_digest: sha256_u8_hex(object_bytes),
+        compiler_semantics_digest: d("profile"), consumed_inputs_digest: d("inputs"),
+        semantic_refs: [reference], coverage_roots: roots(), section_count: 1,
+        payload_bytes: object_bytes.len(), max_decode_bytes: object_bytes.len())
+
+fn bounds() -> ThreePayloadSemanticBindBounds:
+    ThreePayloadSemanticBindBounds(max_bindings: 8, max_sections: 8,
+        max_retained_bytes: 65536, max_decoded_bytes: 65536,
+        expected_input_generation_digest: d("generation"),
+        expected_access_policy_digest: d("access"),
+        expected_owner_receipt_digest: d("owner"),
+        presented_owner_receipt_digest: d("owner"),
+        expected_module_id: "fixture", presented_module_id: "fixture")
+
+fn view(kind: ThreePayloadSemanticRefKindV1):
+    val bytes = body()
+    bind_three_payload_semantic_inputs(seal(bytes, kind), nil, init_object(bytes),
+        [binding(bytes, kind)], bounds()).unwrap()
+
+fn projection(kind: ThreePayloadSemanticRefKindV1) -> ThreePayloadBodyFactProjection:
+    ThreePayloadBodyFactProjection(semantic_use_kind: kind,
+        verified_object_kind: "portable_hir_object", codec_identity: "spl-hircodec-v2",
+        verifier_identity: d("p1-verifier"),
+        rules_identity: "embedded-pure-closed-functions",
+        semantic_profile_digest: d("profile"), raw_content_digest: sha256_u8_hex(body()),
+        module_name: "fixture", selected_entry_name: "entry", exported_entry_count: 1,
+        callable_signature_digest: d("signature"), normalized_effect_digest: d("effect"),
+        transitive_effect_digest: d("transitive-effect"),
+        dependency_digest: d("dependencies"))
+
+fn query() -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "compile", stable_entity_id: "consumer",
+        semantic_profile_digest: d("profile"), parameter_digest: d("selection"))
+
+fn legacy_body_fingerprint(candidate: ThreePayloadBodySectionCandidate,
+                           fact: ThreePayloadBodyFactProjection) -> text:
+    val value = candidate.binding
+    sha256_u8_hex(("three_payload_body_fact_v1\u0000" + fact.verified_object_kind +
+        "\u0000" + fact.codec_identity + "\u0000" + fact.verifier_identity +
+        fact.rules_identity + fact.semantic_profile_digest + fact.raw_content_digest +
+        value.stable_entity_id + value.callable_signature_digest + value.effect_digest +
+        fact.transitive_effect_digest + fact.dependency_digest +
+        value.selection_contract_digest).bytes())
+
+describe "Three-payload non-authoritative body facts":
+    it "extracts exact embedded bytes for every physical body family":
+        val kinds = [ThreePayloadSemanticRefKindV1.MacroExpansion,
+            ThreePayloadSemanticRefKindV1.GenericBody,
+            ThreePayloadSemanticRefKindV1.TraitDefaultBody,
+            ThreePayloadSemanticRefKindV1.ConcreteFunction]
+        for kind in kinds:
+            val candidate = extract_three_payload_body_section_candidate(
+                view(kind), kind, "fixture.entry").unwrap()
+            expect(candidate.section_bytes).to_equal(body())
+            expect(candidate.binding.semantic_use_kind).to_equal(kind)
+
+    it "matches every exact concrete P1 fact without minting authority":
+        val candidate = extract_three_payload_body_section_candidate(
+            view(ThreePayloadSemanticRefKindV1.ConcreteFunction),
+            ThreePayloadSemanticRefKindV1.ConcreteFunction, "fixture.entry").unwrap()
+        val matched = match_three_payload_body_fact_projection(candidate,
+            projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)).unwrap()
+        expect(matched.body_fingerprint.len()).to_equal(64)
+        expect(matched.authority_state).to_equal(
+            ThreePayloadSemanticAuthorityState.TypedObjectAuthorityUnavailable)
+        match resolve_three_payload_semantic_input(
+                view(ThreePayloadSemanticRefKindV1.ConcreteFunction), query(),
+                ThreePayloadSemanticRefKindV1.ConcreteFunction, "fixture.entry"):
+            case Err(ThreePayloadFallbackV1.UnsupportedSemantics): pass
+            case _: fail("copied P1 facts authorized a complete body read")
+
+    it "rejects kind labels for macro generic and trait-default semantic authority":
+        val kinds = [ThreePayloadSemanticRefKindV1.MacroExpansion,
+            ThreePayloadSemanticRefKindV1.GenericBody,
+            ThreePayloadSemanticRefKindV1.TraitDefaultBody]
+        for kind in kinds:
+            val candidate = extract_three_payload_body_section_candidate(
+                view(kind), kind, "fixture.entry").unwrap()
+            match match_three_payload_body_fact_projection(candidate, projection(kind)):
+                case Err(ThreePayloadFallbackV1.UnsupportedSemantics): pass
+                case _: fail("an unsupported body-family label became semantic proof")
+
+    it "rejects exact-field substitution in copied concrete facts":
+        val candidate = extract_three_payload_body_section_candidate(
+            view(ThreePayloadSemanticRefKindV1.ConcreteFunction),
+            ThreePayloadSemanticRefKindV1.ConcreteFunction, "fixture.entry").unwrap()
+        var fact = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact.verified_object_kind = "foreign_object"
+        expect(match_three_payload_body_fact_projection(candidate, fact).is_err()).to_equal(true)
+        fact = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact.raw_content_digest = d("other-body")
+        expect(match_three_payload_body_fact_projection(candidate, fact).is_err()).to_equal(true)
+        fact = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact.module_name = "other"
+        expect(match_three_payload_body_fact_projection(candidate, fact).is_err()).to_equal(true)
+        fact = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact.callable_signature_digest = d("other-signature")
+        expect(match_three_payload_body_fact_projection(candidate, fact).is_err()).to_equal(true)
+        fact = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact.normalized_effect_digest = d("other-effect")
+        expect(match_three_payload_body_fact_projection(candidate, fact).is_err()).to_equal(true)
+        fact = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact.exported_entry_count = 2
+        expect(match_three_payload_body_fact_projection(candidate, fact).is_err()).to_equal(true)
+        fact = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact.dependency_digest = ""
+        expect(match_three_payload_body_fact_projection(candidate, fact).is_err()).to_equal(true)
+
+    it "length-prefixes body fingerprint fields that collided by concatenation":
+        val raw = sha256_u8_hex(body())
+        val profile_a = d("profile-a")
+        var binding_a = binding(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        binding_a.semantic_profile_digest = profile_a
+        binding_a.stable_entity_id = raw + "m.e"
+        var fact_a = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact_a.rules_identity = "r"
+        fact_a.semantic_profile_digest = profile_a
+        fact_a.module_name = raw + "m"
+        fact_a.selected_entry_name = "e"
+        val candidate_a = ThreePayloadBodySectionCandidate(
+            binding: binding_a, section_bytes: body())
+
+        var binding_b = binding(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        binding_b.semantic_profile_digest = raw
+        binding_b.stable_entity_id = "m.e"
+        var fact_b = projection(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        fact_b.rules_identity = "r" + profile_a
+        fact_b.semantic_profile_digest = raw
+        fact_b.module_name = "m"
+        fact_b.selected_entry_name = "e"
+        val candidate_b = ThreePayloadBodySectionCandidate(
+            binding: binding_b, section_bytes: body())
+
+        expect(legacy_body_fingerprint(candidate_a, fact_a)).to_equal(
+            legacy_body_fingerprint(candidate_b, fact_b))
+        val matched_a = match_three_payload_body_fact_projection(candidate_a, fact_a).unwrap()
+        val matched_b = match_three_payload_body_fact_projection(candidate_b, fact_b).unwrap()
+        expect(matched_a.body_fingerprint == matched_b.body_fingerprint).to_equal(false)
+
+    it "refuses missing budget-exhausted corrupt and smuggled bodies":
+        val concrete = view(ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        match extract_three_payload_body_section_candidate(concrete,
+                ThreePayloadSemanticRefKindV1.ConcreteFunction, "missing.entry"):
+            case Err(ThreePayloadFallbackV1.ExternalBodyRequired): pass
+            case _: fail("missing body did not require an external body")
+        var tiny = bounds()
+        tiny.max_decoded_bytes = body().len() - 1
+        match bind_three_payload_semantic_inputs(
+                seal(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction), nil,
+                init_object(body()),
+                [binding(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction)], tiny):
+            case Err(ThreePayloadFallbackV1.BoundsExceeded): pass
+            case _: fail("body decode budget was not enforced")
+        var zero_claim = seal(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        zero_claim.payload_bytes = 0
+        match bind_three_payload_semantic_inputs(zero_claim, nil, init_object(body()),
+                [binding(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction)], bounds()):
+            case Err(ThreePayloadFallbackV1.CorruptPayload): pass
+            case _: fail("a nonempty encoded header accepted a zero wire-byte claim")
+        var checked_add_limit = bounds()
+        val wire_bytes = physical_tld_object_encode_v1(init_object(body())).len()
+        checked_add_limit.max_retained_bytes = wire_bytes * 2 - 1
+        match bind_three_payload_semantic_inputs(
+                seal(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction), nil,
+                init_object(body()),
+                [binding(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction)],
+                checked_add_limit):
+            case Err(ThreePayloadFallbackV1.BoundsExceeded): pass
+            case _: fail("retained wire-byte checked addition crossed its bound")
+        var corrupt = init_object(body())
+        corrupt.canonical_sections[0] = "substituted".bytes()
+        expect(bind_three_payload_semantic_inputs(
+            seal(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction), nil, corrupt,
+            [binding(body(), ThreePayloadSemanticRefKindV1.ConcreteFunction)], bounds()
+        ).is_err()).to_equal(true)
+        match extract_three_payload_body_section_candidate(
+                view(ThreePayloadSemanticRefKindV1.GenericBody),
+                ThreePayloadSemanticRefKindV1.TraitCallable, "fixture.entry"):
+            case Err(ThreePayloadFallbackV1.UnsupportedSemantics): pass
+            case _: fail("symbolic callable smuggled an embedded body")

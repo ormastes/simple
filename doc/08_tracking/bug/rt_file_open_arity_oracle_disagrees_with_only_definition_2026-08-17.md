@@ -1,4 +1,9 @@
 # `rt_file_open` — extern-ABI oracle declares 4 args; the only definition takes 3
+## Closed 2026-09-16 — Status FIXED 2026-08-17; runtime_sffi.rs corrected to 3 args, row gone from gate
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-17
 **Status:** FIXED 2026-08-17 (this row) — `runtime_sffi.rs:1888` corrected to 3
@@ -126,3 +131,4 @@ are NOT fixed here.
   divergence is proven statically; the runtime consequence is inferred.
 - The `470 symbols checked` C-header half of the gate has not been observed
   passing or failing at HEAD, because the gate exits before reaching it.
+

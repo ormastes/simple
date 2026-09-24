@@ -1,0 +1,408 @@
+# Immutable reverse-reference generation receipts for incremental compilation.
+
+use compiler.common.cache.reverse_reference_key.{
+    ReverseReferenceKeyV1, reverse_reference_key_decode_v1,
+    reverse_reference_key_digest_v1, reverse_reference_key_encode_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use compiler.common.cache.phase_compatibility_manifest.{phase_compatibility_path_within_v1}
+use compiler.common.cache.phase_compatibility_path_io.{
+    phase_compatibility_canonical_directory_io_v1,
+    phase_compatibility_existing_artifact_io_v1,
+    phase_compatibility_read_manifest_io_v1
+}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_rename(from_path: text, to_path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+val REVERSE_REFERENCE_RECEIPT_SCHEMA_V1: i64 = 1
+val REVERSE_REFERENCE_FAMILIES_V1: [text] = [
+    "direct-import-export",
+    "trait-type-implementation",
+    "unresolved-method-candidate",
+    "annotation-consumer",
+    "generic-specialization",
+    "aop-consumer",
+    "runtime-provider",
+    "initializer-dependent",
+    "module-scc-artifact",
+    "emitted-symbol-relocation"
+]
+
+struct ReverseReferenceProjectionV1:
+    key: ReverseReferenceKeyV1
+    consumer_identity: text
+
+struct ReverseReferenceGenerationReceiptV1:
+    schema_version: i64
+    owner_generation: text
+    root_generation: text
+    projections: [ReverseReferenceProjectionV1]
+
+struct ReverseReferenceReceiptReadV1:
+    valid: bool
+    reason: text
+    receipt: ReverseReferenceGenerationReceiptV1?
+
+struct ReverseReferenceConsumersV1:
+    exact: bool
+    fallback_reason: text
+    consumers: [text]
+
+struct ReverseReferenceProjectionBindingV1:
+    key: ReverseReferenceKeyV1
+    key_frame: text
+    consumer_identity: text
+
+fn reverse_reference_receipt_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn reverse_reference_sorted_v1(values: [text]) -> [text]:
+    var result = values
+    var index = 1
+    while index < result.len():
+        val value = result[index]
+        var insertion = index
+        while insertion > 0 and value < result[insertion - 1]:
+            result[insertion] = result[insertion - 1]
+            insertion = insertion - 1
+        result[insertion] = value
+        index = index + 1
+    result
+
+fn reverse_reference_projection_lines_v1(receipt: ReverseReferenceGenerationReceiptV1) -> [text]:
+    var lines: [text] = []
+    for projection in receipt.projections:
+        val frame = reverse_reference_key_encode_v1(projection.key)
+        if frame == "" or not reverse_reference_receipt_text_valid_v1(projection.consumer_identity):
+            return []
+        lines = lines.push("{frame.len()}:{frame}{projection.consumer_identity.len()}:{projection.consumer_identity}")
+    reverse_reference_sorted_v1(lines)
+
+fn reverse_reference_receipt_encode_v1(receipt: ReverseReferenceGenerationReceiptV1) -> text:
+    if receipt.schema_version != REVERSE_REFERENCE_RECEIPT_SCHEMA_V1:
+        return ""
+    if not reverse_reference_receipt_text_valid_v1(receipt.owner_generation):
+        return ""
+    if not reverse_reference_receipt_text_valid_v1(receipt.root_generation):
+        return ""
+    val lines = reverse_reference_projection_lines_v1(receipt)
+    if receipt.projections.len() > 0 and lines.len() == 0:
+        return ""
+    [
+        "simple-reverse-reference-generation-receipt-v1",
+        "schema=1",
+        "owner={receipt.owner_generation}",
+        "root={receipt.root_generation}",
+        "count={lines.len()}"
+    ].concat(lines).join("\n")
+
+fn reverse_reference_receipt_digest_v1(receipt: ReverseReferenceGenerationReceiptV1) -> text:
+    val encoded = reverse_reference_receipt_encode_v1(receipt)
+    if encoded == "": "" else: sha256_text(encoded)
+
+fn reverse_reference_decimal_prefix_v1(value: text) -> (i64, i64)?:
+    val colon = value.index_of(":")
+    if colon <= 0:
+        return nil
+    val digits = value.substring(0, colon)
+    val parsed = digits.to_i64()
+    if parsed == nil or parsed! < 0 or "{parsed!}" != digits:
+        return nil
+    Some((parsed!, colon + 1))
+
+fn reverse_reference_projection_decode_v1(line: text) -> ReverseReferenceProjectionV1?:
+    val frame_prefix = reverse_reference_decimal_prefix_v1(line)
+    if frame_prefix == nil:
+        return nil
+    val frame_len = frame_prefix!.0
+    val frame_start = frame_prefix!.1
+    val frame_end = frame_start + frame_len
+    if frame_end > line.len():
+        return nil
+    val frame = line.substring(frame_start, frame_end)
+    val decoded = reverse_reference_key_decode_v1(frame)
+    if not decoded.valid or decoded.key == nil:
+        return nil
+    val consumer_encoded = line.substring(frame_end, line.len())
+    val consumer_prefix = reverse_reference_decimal_prefix_v1(consumer_encoded)
+    if consumer_prefix == nil:
+        return nil
+    val consumer_len = consumer_prefix!.0
+    val consumer_start = consumer_prefix!.1
+    val consumer_end = consumer_start + consumer_len
+    if consumer_end != consumer_encoded.len():
+        return nil
+    val consumer = consumer_encoded.substring(consumer_start, consumer_end)
+    if not reverse_reference_receipt_text_valid_v1(consumer):
+        return nil
+    Some(ReverseReferenceProjectionV1(key: decoded.key!, consumer_identity: consumer))
+
+fn reverse_reference_receipt_decode_v1(content: text) -> ReverseReferenceReceiptReadV1:
+    val lines = content.split("\n")
+    if lines.len() < 5 or lines[0] != "simple-reverse-reference-generation-receipt-v1":
+        return ReverseReferenceReceiptReadV1(false, "corrupt-header", nil)
+    if lines[1] != "schema=1":
+        return ReverseReferenceReceiptReadV1(false, "unsupported-schema", nil)
+    if not lines[2].starts_with("owner=") or not lines[3].starts_with("root="):
+        return ReverseReferenceReceiptReadV1(false, "corrupt-generation", nil)
+    val owner = lines[2].substring(6, lines[2].len())
+    val root = lines[3].substring(5, lines[3].len())
+    if not reverse_reference_receipt_text_valid_v1(owner) or not reverse_reference_receipt_text_valid_v1(root):
+        return ReverseReferenceReceiptReadV1(false, "corrupt-generation", nil)
+    if not lines[4].starts_with("count="):
+        return ReverseReferenceReceiptReadV1(false, "corrupt-count", nil)
+    val count = lines[4].substring(6, lines[4].len()).to_i64()
+    if count == nil or count! < 0 or lines.len() != count! + 5:
+        return ReverseReferenceReceiptReadV1(false, "corrupt-count", nil)
+    var projections: [ReverseReferenceProjectionV1] = []
+    var previous = ""
+    var index = 5
+    while index < lines.len():
+        if previous != "" and lines[index] <= previous:
+            return ReverseReferenceReceiptReadV1(false, "noncanonical-order-or-duplicate", nil)
+        val projection = reverse_reference_projection_decode_v1(lines[index])
+        if projection == nil:
+            return ReverseReferenceReceiptReadV1(false, "corrupt-projection", nil)
+        if projection!.key.owner_generation != owner or projection!.key.root_generation != root:
+            return ReverseReferenceReceiptReadV1(false, "mixed-generation", nil)
+        projections = projections.push(projection!)
+        previous = lines[index]
+        index = index + 1
+    val receipt = ReverseReferenceGenerationReceiptV1(1, owner, root, projections)
+    for family in REVERSE_REFERENCE_FAMILIES_V1:
+        var covered = false
+        for projection in projections:
+            if projection.key.projection_kind == family:
+                covered = true
+        if not covered:
+            return ReverseReferenceReceiptReadV1(
+                false, "missing-family:{family}", nil)
+    if reverse_reference_receipt_encode_v1(receipt) != content:
+        return ReverseReferenceReceiptReadV1(false, "noncanonical-receipt", nil)
+    ReverseReferenceReceiptReadV1(true, "ok", Some(receipt))
+
+fn reverse_reference_receipt_dir_v1(cache_path: text) -> text:
+    cache_path + ".reverse-references"
+
+fn reverse_reference_receipt_pointer_v1(cache_path: text) -> text:
+    reverse_reference_receipt_dir_v1(cache_path) + "/CURRENT"
+
+fn reverse_reference_publish_generation_v1(cache_path: text,
+        receipt: ReverseReferenceGenerationReceiptV1) -> bool:
+    val content = reverse_reference_receipt_encode_v1(receipt)
+    val digest = reverse_reference_receipt_digest_v1(receipt)
+    if content == "" or digest == "":
+        return false
+    val dir = reverse_reference_receipt_dir_v1(cache_path)
+    if not rt_dir_create_all(dir):
+        return false
+    val immutable_path = "{dir}/{digest}.receipt"
+    if rt_file_exists(immutable_path):
+        val existing = rt_file_read_text(immutable_path)
+        if existing == nil or existing! != content:
+            return false
+    else:
+        if not file_create_excl(immutable_path, content):
+            val raced = rt_file_read_text(immutable_path)
+            if raced == nil or raced! != content:
+                return false
+    val pointer = reverse_reference_receipt_pointer_v1(cache_path)
+    val pointer_tmp = "{pointer}.tmp.{rt_getpid()}"
+    if not rt_file_write_text(pointer_tmp, digest):
+        return false
+    if not rt_file_rename(pointer_tmp, pointer):
+        rt_file_delete(pointer_tmp)
+        return false
+    true
+
+fn reverse_reference_read_current_v1(cache_path: text) -> ReverseReferenceReceiptReadV1:
+    val pointer = rt_file_read_text(reverse_reference_receipt_pointer_v1(cache_path))
+    if pointer == nil or pointer! == "":
+        return ReverseReferenceReceiptReadV1(false, "missing-generation", nil)
+    if pointer!.len() != 64:
+        return ReverseReferenceReceiptReadV1(false, "corrupt-generation-pointer", nil)
+    val path = "{reverse_reference_receipt_dir_v1(cache_path)}/{pointer!}.receipt"
+    val content = rt_file_read_text(path)
+    if content == nil:
+        return ReverseReferenceReceiptReadV1(false, "missing-generation-receipt", nil)
+    if sha256_text(content!) != pointer!:
+        return ReverseReferenceReceiptReadV1(false, "generation-digest-mismatch", nil)
+    val decoded = reverse_reference_receipt_decode_v1(content!)
+    if not decoded.valid and (decoded.reason == "corrupt-header" or
+            decoded.reason == "unsupported-schema"):
+        return ReverseReferenceReceiptReadV1(false, "unknown-generation", nil)
+    decoded
+
+fn reverse_reference_read_current_admitted_v1(
+        phase2_root: text, cache_path: text) -> ReverseReferenceReceiptReadV1:
+    val cache_admission = phase_compatibility_existing_artifact_io_v1(
+        phase2_root, cache_path)
+    if not cache_admission.valid:
+        return ReverseReferenceReceiptReadV1(
+            false, "cache-path:" + cache_admission.reason, nil)
+    val receipt_dir = reverse_reference_receipt_dir_v1(
+        cache_admission.canonical_path)
+    val receipt_dir_admission = phase_compatibility_canonical_directory_io_v1(
+        receipt_dir)
+    if not receipt_dir_admission.valid or not phase_compatibility_path_within_v1(
+            phase2_root, receipt_dir_admission.canonical_root):
+        return ReverseReferenceReceiptReadV1(
+            false, "receipt-dir-not-admitted", nil)
+    val pointer_path = reverse_reference_receipt_pointer_v1(
+        cache_admission.canonical_path)
+    val pointer = phase_compatibility_read_manifest_io_v1(pointer_path)
+    if not pointer.valid:
+        return ReverseReferenceReceiptReadV1(
+            false, "generation-pointer:" + pointer.reason, nil)
+    if pointer.content.len() != 64:
+        return ReverseReferenceReceiptReadV1(
+            false, "corrupt-generation-pointer", nil)
+    val receipt_path = "{receipt_dir_admission.canonical_root}/{pointer.content}.receipt"
+    val receipt = phase_compatibility_read_manifest_io_v1(receipt_path)
+    if not receipt.valid:
+        return ReverseReferenceReceiptReadV1(
+            false, "generation-receipt:" + receipt.reason, nil)
+    if sha256_text(receipt.content) != pointer.content:
+        return ReverseReferenceReceiptReadV1(
+            false, "generation-digest-mismatch", nil)
+    val decoded = reverse_reference_receipt_decode_v1(receipt.content)
+    if not decoded.valid and (decoded.reason == "corrupt-header" or
+            decoded.reason == "unsupported-schema"):
+        return ReverseReferenceReceiptReadV1(false, "unknown-generation", nil)
+    decoded
+
+fn reverse_reference_consumers_v1(read: ReverseReferenceReceiptReadV1,
+        subject_identity: text, projection_kind: text) -> ReverseReferenceConsumersV1:
+    if not read.valid or read.receipt == nil:
+        return ReverseReferenceConsumersV1(false, read.reason, [])
+    if not REVERSE_REFERENCE_FAMILIES_V1.contains(projection_kind):
+        return ReverseReferenceConsumersV1(
+            false, "unknown-projection-family:{projection_kind}", [])
+    var consumers: [text] = []
+    for projection in read.receipt!.projections:
+        if projection.key.projection_kind == projection_kind and
+                projection.key.subject_identity == "@unknown-family":
+            return ReverseReferenceConsumersV1(
+                false, "unknown-family:{projection_kind}", [])
+        if projection.key.subject_identity == subject_identity and
+                projection.key.projection_kind == projection_kind:
+            if not consumers.contains(projection.consumer_identity):
+                consumers = consumers.push(projection.consumer_identity)
+    ReverseReferenceConsumersV1(true, "", reverse_reference_sorted_v1(consumers))
+
+fn reverse_reference_exact_key_v1(read: ReverseReferenceReceiptReadV1,
+        subject_identity: text, consumer_identity: text,
+        projection_kind: text) -> ReverseReferenceKeyV1?:
+    if not read.valid or read.receipt == nil:
+        return nil
+    var match_key: ReverseReferenceKeyV1? = nil
+    for projection in read.receipt!.projections:
+        if projection.key.subject_identity == subject_identity and
+                projection.consumer_identity == consumer_identity and
+                projection.key.projection_kind == projection_kind:
+            if match_key != nil:
+                return nil
+            match_key = Some(projection.key)
+    match_key
+
+fn reverse_reference_exact_projection_v1(read: ReverseReferenceReceiptReadV1,
+        subject_identity: text, consumer_identity: text,
+        projection_kind: text) -> ReverseReferenceProjectionBindingV1?:
+    if not read.valid or read.receipt == nil:
+        return nil
+    var matched: ReverseReferenceProjectionBindingV1? = nil
+    for projection in read.receipt!.projections:
+        if projection.key.subject_identity == subject_identity and
+                projection.consumer_identity == consumer_identity and
+                projection.key.projection_kind == projection_kind:
+            if matched != nil:
+                return nil
+            matched = Some(ReverseReferenceProjectionBindingV1(
+                projection.key,
+                reverse_reference_key_encode_v1(projection.key),
+                projection.consumer_identity))
+    matched
+
+fn reverse_reference_receipt_contains_key_v1(
+        read: ReverseReferenceReceiptReadV1, key_frame: text) -> bool:
+    if not read.valid or read.receipt == nil:
+        return false
+    for projection in read.receipt!.projections:
+        if reverse_reference_key_encode_v1(projection.key) == key_frame:
+            return true
+    false
+
+fn reverse_reference_receipt_contains_projection_v1(
+        read: ReverseReferenceReceiptReadV1, key_frame: text,
+        consumer_identity: text) -> bool:
+    if not read.valid or read.receipt == nil:
+        return false
+    for projection in read.receipt!.projections:
+        if projection.consumer_identity == consumer_identity and
+                reverse_reference_key_encode_v1(projection.key) == key_frame:
+            return true
+    false
+
+fn reverse_reference_bind_read_published_keys_v1(
+        read: ReverseReferenceReceiptReadV1,
+        expected_receipt_digest: text, expected_owner_generation: text,
+        expected_root_generation: text, key_frames: [text],
+        consumer_identities: [text]) -> text:
+    if not read.valid or read.receipt == nil:
+        return "m2-receipt:" + read.reason
+    if reverse_reference_receipt_digest_v1(read.receipt!) !=
+            expected_receipt_digest:
+        return "m2-receipt-digest-mismatch"
+    if read.receipt!.owner_generation != expected_owner_generation or
+            read.receipt!.root_generation != expected_root_generation:
+        return "m2-generation-mismatch"
+    if key_frames.len() != consumer_identities.len():
+        return "m2-projection-count-mismatch"
+    var index: i64 = 0
+    while index < key_frames.len():
+        if not reverse_reference_receipt_contains_projection_v1(
+                read, key_frames[index], consumer_identities[index]):
+            return "m2-synthesized-key-substitution"
+        index = index + 1
+    "ok"
+
+fn reverse_reference_bind_published_keys_v1(cache_path: text,
+        expected_receipt_digest: text, expected_owner_generation: text,
+        expected_root_generation: text, key_frames: [text],
+        consumer_identities: [text]) -> text:
+    reverse_reference_bind_read_published_keys_v1(
+        reverse_reference_read_current_v1(cache_path),
+        expected_receipt_digest, expected_owner_generation,
+        expected_root_generation, key_frames, consumer_identities)
+
+fn reverse_reference_bind_admitted_published_keys_v1(
+        phase2_root: text, cache_path: text,
+        expected_receipt_digest: text, expected_owner_generation: text,
+        expected_root_generation: text, key_frames: [text],
+        consumer_identities: [text]) -> text:
+    reverse_reference_bind_read_published_keys_v1(
+        reverse_reference_read_current_admitted_v1(phase2_root, cache_path),
+        expected_receipt_digest, expected_owner_generation,
+        expected_root_generation, key_frames, consumer_identities)
+
+export REVERSE_REFERENCE_FAMILIES_V1
+export ReverseReferenceProjectionV1, ReverseReferenceGenerationReceiptV1
+export ReverseReferenceReceiptReadV1, ReverseReferenceConsumersV1
+export reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1
+export reverse_reference_receipt_digest_v1, reverse_reference_publish_generation_v1
+export reverse_reference_read_current_v1, reverse_reference_consumers_v1
+export reverse_reference_read_current_admitted_v1
+export reverse_reference_exact_key_v1
+export ReverseReferenceProjectionBindingV1
+export reverse_reference_exact_projection_v1
+export reverse_reference_receipt_contains_key_v1
+export reverse_reference_receipt_contains_projection_v1
+export reverse_reference_bind_published_keys_v1
+export reverse_reference_bind_admitted_published_keys_v1

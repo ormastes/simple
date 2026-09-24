@@ -1,0 +1,285 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase1-authority.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+cleanup_tmp=$tmp
+trap 'chmod -R u+w "$cleanup_tmp" 2>/dev/null || :; rm -rf "$cleanup_tmp"' EXIT HUP INT TERM
+fail() { echo "bootstrap_phase_stage1_native_build_authority_test: $*" >&2; exit 1; }
+
+# An inherited export attribute can hide assignment-before-function differences
+# between host shells. Require the verifier to export its task environment and
+# to scrub bootstrap-only dispatch controls from non-producer tasks.
+unset TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NATIVE_BUILD_CACHE_DIR
+SIMPLE_BOOTSTRAP=ambient SIMPLE_NATIVE_BUILD_RUST=ambient SIMPLE_BINARY=ambient
+export SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+
+mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/good" "$tmp/silent/outputs"
+# This fixture checks dispatch isolation, so supply deterministic toolchain
+# probes instead of depending on the host's installed LLVM version.
+mkdir -p "$tmp/phase-drivers" "$tmp/toolchain/bin"
+for driver in clang clang++; do
+  printf '#!/bin/sh\nexit 0\n' >"$tmp/phase-drivers/$driver"
+  chmod +x "$tmp/phase-drivers/$driver"
+done
+printf '#!/bin/sh\nprintf "clang version 23.1.1\\n"\n' >"$tmp/toolchain/bin/clang-cl.exe"
+chmod +x "$tmp/toolchain/bin/clang-cl.exe"
+LLVM_SYS_231_PREFIX="$tmp/toolchain"
+PATH="$tmp/phase-drivers:$PATH"
+export LLVM_SYS_231_PREFIX PATH
+unset CC CXX SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CL
+
+mkdir -p "$tmp/source/scripts/resource"
+cp "$root/scripts/resource/process-tree-rss-watchdog.pl" "$tmp/source/scripts/resource/"
+cp "$root/scripts/resource/macos-process-observer.c" "$tmp/source/scripts/resource/"
+cp "$root/scripts/bootstrap/bootstrap-session-exec.c" "$tmp/source/scripts/bootstrap/"
+cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
+  "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
+cp "$root/scripts/bootstrap/windows-process-group-rss.awk" \
+  "$tmp/source/scripts/bootstrap/windows-process-group-rss.awk"
+
+cat >"$tmp/fake-seed" <<'EOF'
+#!/bin/sh
+work=$(dirname "$0")
+[ "${HOME:-}" = "$work/home" ] || exit 71
+[ "${TMPDIR:-}" = "$work/tmp" ] || exit 72
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || exit 73
+case "${SIMPLE_NATIVE_BUILD_CACHE_DIR:-}" in
+  "$work/cache/"?*) ;;
+  *) exit 74 ;;
+esac
+if [ "${1:-}" = --version ]; then
+  [ "$SIMPLE_NATIVE_BUILD_CACHE_DIR" = "$work/cache/compiler_version" ] || exit 75
+  [ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}${SIMPLE_BINARY:-}" ] || exit 76
+  echo fake-phase1-seed
+  exit 0
+fi
+if [ "${1:-}" = native-build ]; then
+  verification_root=${SIMPLE_NATIVE_BUILD_CACHE_DIR%/cache/*}
+  [ "${SIMPLE_BOOTSTRAP:-}" = 1 ] || exit 77
+  [ "${SIMPLE_NATIVE_BUILD_RUST:-}" = 1 ] || exit 78
+  [ "${SIMPLE_BINARY:-}" = "$verification_root/compiler.snapshot" ] || exit 79
+  printf 'rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
+    "${SIMPLE_NATIVE_BUILD_RUST:-}" "${SIMPLE_BINARY:-}" \
+    "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_INVOCATIONS"
+  output=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then shift; output=$1; fi
+    shift
+  done
+  [ -n "$output" ] || exit 2
+  [ "${PHASE1_SILENT_SUCCESS:-0}" != 1 ] || exit 0
+  mkdir -p "$(dirname "$output")"
+  cat >"$output" <<'TOOL'
+#!/bin/sh
+[ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}${SIMPLE_BINARY:-}" ] || exit 77
+printf 'generic=%s|rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
+  "$(basename "$0")" "${SIMPLE_NATIVE_BUILD_RUST:-}" \
+  "${SIMPLE_BINARY:-}" "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_EXECUTIONS"
+case "${PHASE1_SUMMARY_FAULT:-}" in
+  mask|mask-readonly)
+    sed '/|result=UNSUPPORTED|/d' "$PHASE1_SUMMARY" >"$PHASE1_SUMMARY.mask"
+    mv "$PHASE1_SUMMARY.mask" "$PHASE1_SUMMARY"
+    [ "$PHASE1_SUMMARY_FAULT" != mask-readonly ] || chmod a-w "$PHASE1_SUMMARY"
+    ;;
+esac
+exit 0
+TOOL
+  chmod +x "$output"
+fi
+exit 0
+EOF
+chmod +x "$tmp/fake-seed"
+seed_sha=$(sha256sum "$tmp/fake-seed" | awk '{print $1}')
+. "$root/test/01_unit/scripts/fixtures/phase1_authority_fixture.shs"
+phase1_authority_fixture "$root" "$tmp/source" "$tmp/fake-seed"
+
+if [ "${1:-}" != --summary-only ]; then
+: >"$tmp/good.invocations"
+: >"$tmp/good.executions"
+status=0
+PHASE1_INVOCATIONS="$tmp/good.invocations" \
+PHASE1_EXECUTIONS="$tmp/good.executions" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage1 --compiler="$tmp/fake-seed" \
+    --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+    --source-root="$tmp/source" --work-root="$tmp/good" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "Stage 1 unsupported rows unexpectedly admitted the whole matrix"
+grep -Fq 'task=compiler_version|result=PASS|status=0' "$tmp/good/summary.env" ||
+  fail "compiler version child did not receive isolated task environment"
+[ "$(wc -l <"$tmp/good.invocations" | tr -d ' ')" = 2 ] ||
+  fail "expected both Stage 1 server builds"
+snapshot="$tmp/good/compiler.snapshot"
+if grep -Fv "rust=1|binary=$snapshot|bootstrap=1|" "$tmp/good.invocations" >/dev/null; then
+  fail "Stage 1 native-build escaped the admitted snapshot/Rust bootstrap authority"
+fi
+grep -Fq -- '--entry src/app/mcp/main.spl' "$tmp/good.invocations" ||
+  fail "MCP entry was not built"
+grep -Fq -- '--entry src/app/simple_lsp_mcp/main.spl' "$tmp/good.invocations" ||
+  fail "LSP MCP entry was not built"
+grep -Eq 'task=mcp_build\|result=PASS\|status=0.*artifact_status=present' \
+  "$tmp/good/summary.env" || fail "materialized MCP build was not recorded"
+grep -Eq 'task=lsp_build\|result=PASS\|status=0.*artifact_status=present' \
+  "$tmp/good/summary.env" || fail "materialized LSP build was not recorded"
+grep -Fq 'generic=simple_mcp_server|rust=|binary=|bootstrap=|argv=--help' \
+  "$tmp/good.executions" || fail "MCP generic child inherited bootstrap dispatch controls"
+grep -Fq 'generic=simple_lsp_mcp_server|rust=|binary=|bootstrap=|argv=--help' \
+  "$tmp/good.executions" || fail "LSP generic child inherited bootstrap dispatch controls"
+
+# A stale executable plus an exit-zero producer used to become a false PASS.
+# The recorder must delete the residue, require a fresh exact artifact, and
+# preserve both full-matrix rows as explicit failures.
+printf '#!/bin/sh\nexit 0\n' >"$tmp/silent/outputs/simple_mcp_server"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/silent/outputs/simple_lsp_mcp_server"
+chmod +x "$tmp/silent/outputs/simple_mcp_server" "$tmp/silent/outputs/simple_lsp_mcp_server"
+: >"$tmp/silent.invocations"
+: >"$tmp/silent.executions"
+status=0
+PHASE1_SILENT_SUCCESS=1 PHASE1_INVOCATIONS="$tmp/silent.invocations" \
+PHASE1_EXECUTIONS="$tmp/silent.executions" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage1 --compiler="$tmp/fake-seed" \
+    --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+    --source-root="$tmp/source" --work-root="$tmp/silent" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "exit-zero missing artifacts passed"
+grep -Eq 'task=mcp_build\|result=FAIL\|status=87.*artifact_status=missing' \
+  "$tmp/silent/summary.env" || fail "missing MCP executable was not failed closed"
+grep -Eq 'task=lsp_build\|result=FAIL\|status=87.*artifact_status=missing' \
+  "$tmp/silent/summary.env" || fail "missing LSP executable was not failed closed"
+grep -Fq 'task=simple_mcp_server_help|result=BLOCKED|status=not-built' \
+  "$tmp/silent/summary.env" || fail "missing MCP executable reached launch"
+grep -Fq 'task=simple_lsp_mcp_server_help|result=BLOCKED|status=not-built' \
+  "$tmp/silent/summary.env" || fail "missing LSP executable reached launch"
+[ ! -s "$tmp/silent.executions" ] || fail "stale server residue executed"
+[ ! -e "$tmp/silent/outputs/simple_mcp_server" ] || fail "stale MCP artifact survived"
+[ ! -e "$tmp/silent/outputs/simple_lsp_mcp_server" ] || fail "stale LSP artifact survived"
+fi
+
+# The verifier must retain UNSUPPORTED in memory even if a child overwrites
+# the summary while producing/help-checking otherwise valid phase artifacts.
+for fault in mask mask-readonly; do
+  mkdir "$tmp/$fault"
+  : >"$tmp/$fault.invocations"
+  : >"$tmp/$fault.executions"
+  status=0
+  PHASE1_SUMMARY_FAULT="$fault" PHASE1_SUMMARY="$tmp/$fault/summary.env" \
+  PHASE1_INVOCATIONS="$tmp/$fault.invocations" \
+  PHASE1_EXECUTIONS="$tmp/$fault.executions" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage1 --compiler="$tmp/fake-seed" \
+      --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+      --source-root="$tmp/source" --work-root="$tmp/$fault" \
+      --timeout-seconds=30 >"$tmp/$fault.log" 2>&1 || status=$?
+  chmod u+w "$tmp/$fault/summary.env"
+  [ "$status" -ne 0 ] || fail "$fault summary admitted unsupported Phase1"
+  if [ "$fault" = mask ]; then
+    grep -Fqx 'overall=FAIL' "$tmp/$fault/summary.env" || fail 'masked summary lost in-memory failure'
+    grep -Eq '^unsupported_tasks=[1-9][0-9]*$' "$tmp/$fault/summary.env" || fail 'unsupported latch missing'
+  fi
+done
+
+# A previous PASS must not survive a failed attempt to initialize the summary.
+# Canonical sh already refuses the failed special-builtin redirection; preserve
+# that refusal and ensure it happens before any producer work is launched.
+mkdir "$tmp/readonly"
+printf 'overall=PASS\n' >"$tmp/readonly/summary.env"
+chmod a-w "$tmp/readonly/summary.env"
+if ( : >>"$tmp/readonly/summary.env" ) 2>/dev/null; then
+  echo 'SKIP: filesystem/privilege does not enforce read-only summary writes'
+else
+  : >"$tmp/readonly.invocations"
+  : >"$tmp/readonly.executions"
+  status=0
+  PHASE1_INVOCATIONS="$tmp/readonly.invocations" \
+  PHASE1_EXECUTIONS="$tmp/readonly.executions" \
+    sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+      --phase=stage1 --compiler="$tmp/fake-seed" \
+      --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+      --source-root="$tmp/source" --work-root="$tmp/readonly" \
+      --timeout-seconds=30 >"$tmp/readonly.log" 2>&1 || status=$?
+  chmod u+w "$tmp/readonly/summary.env"
+  [ "$status" -ne 0 ] || fail "read-only stale PASS summary admitted Phase1"
+  [ ! -s "$tmp/readonly.invocations" ] || fail "read-only summary still launched producer work"
+fi
+chmod u+w "$tmp/readonly/summary.env"
+
+# The compiler-unit and repository-full runners deliberately bypass run_task.
+# Execute those function bodies with hostile exported dispatch controls and a
+# fake runner that rejects leakage while requiring the exact receipt-bound CLI.
+direct="$tmp/direct"
+mkdir -p "$direct/source/test/01_unit/compiler" "$direct/source/scripts/bootstrap" \
+  "$direct/logs" "$direct/tmp" "$direct/cache"
+: >"$direct/source/test/01_unit/compiler/env_isolation_spec.spl"
+cp "$root/scripts/bootstrap/validate-test-runner-json.pl" \
+  "$direct/source/scripts/bootstrap/validate-test-runner-json.pl"
+cat >"$direct/source/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+exec "$@"
+EOF
+chmod +x "$direct/source/scripts/bootstrap/run-process-group-timeout.shs"
+cp "$root/scripts/bootstrap/validate-test-runner-json.pl" \
+  "$direct/source/scripts/bootstrap/validate-test-runner-json.pl"
+cat >"$direct/runner" <<'EOF'
+#!/bin/sh
+[ -z "${SIMPLE_BOOTSTRAP:-}${SIMPLE_NATIVE_BUILD_RUST:-}" ] || exit 80
+[ "${SIMPLE_BINARY:-}" = "$EXPECTED_SIMPLE_BINARY" ] || exit 81
+case " $* " in
+  *' --json '*)
+    echo '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+    ;;
+esac
+EOF
+chmod +x "$direct/runner"
+{
+  sed -n '/^proc_tree_rss_kib()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^validate_test_runner_json_log()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^run_measured_timeout()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^read_max_rss_kib()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^run_inventory_row()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^run_inventory_rows()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^run_compiler_unit_tests()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+  sed -n '/^run_repository_full_tests()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+} >"$direct/functions.sh"
+# shellcheck disable=SC1090 -- generated from the verifier under test.
+. "$direct/functions.sh"
+validate_command_owner_receipt() { return 0; }
+rss_time_style=none
+test_workers=1
+test_mode_flag=--sequential
+test_worker_flag=
+source_root="$direct/source"
+logs="$direct/logs"
+tmp="$direct/tmp"
+cache="$direct/cache"
+home="$direct/home"
+mkdir -p "$home"
+spec_timeout_seconds=30
+rss_time=""
+rss_measurement=unavailable
+compiler_cli="$direct/receipt-bound-simple"
+summary="$direct/summary.env"
+: >"$summary"
+EXPECTED_SIMPLE_BINARY="$compiler_cli"
+export EXPECTED_SIMPLE_BINARY
+run_compiler_unit_tests "$direct/runner" "$direct/owner.env" ||
+  fail "compiler-unit child inherited hostile bootstrap dispatch controls"
+run_repository_full_tests "$direct/runner" "$direct/owner.env" "$direct/mcp" ||
+  fail "repository-full child inherited hostile bootstrap dispatch controls"
+grep -Fq 'task=compiler_unit_tests|result=PASS' "$summary" ||
+  fail "compiler-unit isolation receipt missing"
+grep -Fq 'task=repository_full_tests|result=PASS' "$summary" ||
+  fail "repository-full isolation receipt missing"
+
+echo 'bootstrap_phase_stage1_native_build_authority_test: PASS'

@@ -97,3 +97,34 @@ Of the 227 failures, **57 across 6 files** are in the legacy mirror trees
 runs **47 total, 7 passed, 40 failed** — an older API surface, not a defect.
 `scripts/check/test_tree_divergence_baseline.txt` already carries 9 `llm_caret`
 entries. The live trees account for the other **170 failures across 36 files**.
+
+## 2026-09-12: reproduced, partially mitigated in pure Simple
+
+Re-measured on the current tree with the deployed Rust seed `bin/simple.exe`;
+exit status read directly into a variable, never through a pipe:
+
+| invocation | code |
+|---|---|
+| `rt_process_run("test/fixtures/llm_caret/mock_claude_cli.shs", ["--version"])` | **-1** |
+| `rt_process_run("sh", ["test/fixtures/llm_caret/mock_claude_cli.shs", "--version"])` | **65** |
+
+Identical to the 2026-09-02 measurement, so the defect is still live.
+
+The runtime-level fix stays deferred under this record's own overlap warning
+(another session owns `src/runtime` spawn) and because the host cannot build or
+verify a runtime change right now. Instead a **pure-Simple, Windows-only**
+shim was added at the stdlib layer, where no build is required:
+
+- `src/lib/nogc_async_mut/env/shebang.spl` — `shebang_interpreter_argv` (pure
+  `#!`-line parser, reduces `/bin/sh` to `sh` and collapses `/usr/bin/env NAME`
+  to `NAME`), `shebang_argv_for_file`, and `process_run_script`, which is a
+  straight passthrough to `rt_process_run` on POSIX and only re-routes on
+  Windows when the target actually carries a shebang.
+- `src/app/llm_caret/claude_cli.spl:359,383` now call `process_run_script`.
+
+Measured after the change: `process_run_script` on the same fixture returns
+**65**, matching the through-`sh` row above instead of `-1`.
+
+This does not close the record. `rt_process_run` itself is still unable to exec
+a shebang script, so every other caller on Windows remains affected; this is a
+call-site mitigation for the dominant caret-suite bucket, not the root fix.

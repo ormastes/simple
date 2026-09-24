@@ -1,4 +1,8 @@
 # Stage-2 tool codegen drops the `rt_panic` runtime root
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Fix diagnostic-confirmed; pure-Simple admission remains blocked.
 
@@ -42,3 +46,4 @@ Retained logs:
 - `build/native_probe/stage2-tools/simple-lsp-mcp/log/native-build.log`
 - `build/native_probe/current-rust-seed/log/common-backend-rt-panic-root-test.log`
 - `build/native_probe/current-rust-seed/mcp-cycle2/log/native-build.log`
+

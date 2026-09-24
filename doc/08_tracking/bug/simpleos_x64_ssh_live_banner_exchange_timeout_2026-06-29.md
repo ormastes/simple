@@ -1,4 +1,8 @@
 # SimpleOS x64 SSH Live Banner Exchange Timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - status: open
 - date: 2026-06-29
@@ -41,3 +45,4 @@ The host probe now asks for durable session transcripts:
 The SSH exec bridge has a focused Simple launch proof path for
 `simple.smf --version` and `simple --check`, but live OpenSSH does not reach it
 while banner exchange fails.
+

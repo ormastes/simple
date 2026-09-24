@@ -1,4 +1,25 @@
 # Bootstrap Stage 4 AST/HIR overlap exhausts the no-GC heap registry
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## 2026-09-22 current-source ownership audit
+
+Still open. Baseline `e0dd873da1b` already contains the streaming AST/HIR
+architecture. Existing [PR #1282](https://github.com/ormastes/simple/pull/1282)
+owns the missing phase-memo promotion on both streaming and retained-parser
+HIR paths; [PR #1203](https://github.com/ormastes/simple/pull/1203) owns a
+separate allocation-registry churn repair. Neither is full Stage 4 admission.
+
+The baseline Linux x86_64 GCC core-C capsule passed 65 checks, including
+transient ownership and thread-affinity controls. Capsule build/check wall
+time was 87.56 seconds and GNU time maximum RSS was 144,624 KiB; these are
+runtime-capsule measurements, not compiler or aggregate process-tree RSS.
+The bounded compiler gate rejected the installed Windows seed's missing
+candidate provenance before compilation. No compiler before/after memory
+comparison, native cross-host parity, or bug closure is claimed.
+See the [audit and retained receipts](../../09_report/stage4_ast_hir_memory_audit_2026-09-22.md).
 
 ## Status
 
@@ -366,3 +387,4 @@ suite pass. Entry publication, imported-alias refresh, and block/function
 shadow relay regressions bring the serialized suite to 25/25. This is focused
 evidence only; method/lambda lifecycle review and a
 new bounded Retry 12 remain required for Stage 4 admission.
+

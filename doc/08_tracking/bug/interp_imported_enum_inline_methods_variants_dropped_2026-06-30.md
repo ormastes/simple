@@ -1,5 +1,11 @@
 # Bug: `std.sdn.*` resolves to a STALE bundled stdlib copy (divergent SdnValue API)
 
+## Closed 2026-09-13 — `std.sdn.*` now resolves to the canonical Int-API SdnValue
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's fence is now inverted: `use std.sdn.value.{SdnValue}` + `print(SdnValue.Int(5))` succeeds, while `SdnValue.i32(5)` fails with `unknown variant or method 'i32' on enum SdnValue (declared variants: Null ...)`. The reported defect (canonical `Int` unreachable) no longer reproduces.
+- **inferred** The stale bundled copy `src/compiler_rust/lib/std/src/sdn/value.spl` still exists on disk, but resolver precedence no longer prefers it, so the user-visible divergence is closed; deleting the bundled copy remains a separate bootstrap-owner decision.
+
 **Date:** 2026-06-30
 **Severity:** Medium — latent. Any code importing `std.sdn.value` / `std.sdn.parser`
 silently gets the seed-bundled SDN module, whose `SdnValue` has a DIFFERENT,

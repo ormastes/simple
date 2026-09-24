@@ -1,3 +1,28 @@
+## Closed 2026-09-13 — already fixed, verified by running (MEASURED)
+
+Does not reproduce. Ran a minimal receiver-enumeration repro against
+`src/lib/nogc_async_mut/src/set.spl` on Windows x86_64 with the Rust seed
+`bin/simple.exe` (`Simple Language v1.0.0-rc.1`, self-identified bootstrap seed):
+
+```
+union contains 1: true
+union contains 4: true
+inter contains 2: true
+inter contains 1: false
+```
+
+Both `union` and `intersection` see a populated receiver and produce correct
+results, which is exactly the behaviour the entry says was broken. The in-body
+`Status: resolved` (top-level `items: [T]` index used for Set-to-Set operations
+instead of traversing nested `Map` bucket arrays) is confirmed live. Closing.
+
+Not covered by this run: the full `set_api_parity_spec.spl` suite did not
+complete on this host — the test runner aborted at its own bound rather than
+executing the spec, an unrelated runner-boundary issue on Windows. The direct
+`bin/simple.exe run` repro above is the evidence.
+
+---
+
 # Generic Set binary operations see empty receiver
 
 Date: 2026-05-14

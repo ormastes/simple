@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# bug: doc/08_tracking/bug/web_renderer_duplicate_public_entry_binding_2026-08-04.md
+#
+# `simple_web_renderer.spl` and `simple_web_engine2d_renderer.spl` each used to
+# declare a `pub fn simple_web_render_html_to_pixels_with_engine2d_backend`
+# with the SAME name and SAME signature but DIFFERENT bodies. Every `use
+# ...simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}`
+# import silently bound to whichever declaration won the compiler's global
+# (not per-module) name resolution, regardless of which module was actually
+# named in the `use` clause — a fail-open trap for sabotage verification,
+# since perturbing the *named* module's body had zero effect on any caller.
+#
+# This spec fails closed on vacuity: both source files must read non-empty,
+# and the substring search must find at least the one surviving declaration —
+# an empty read or a zero count in the "still declared once" checks would
+# otherwise look identical to a passing assertion.
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn occurrences(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+const RENDERER_PATH: text = "src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl"
+const ENGINE2D_PATH: text = "src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl"
+const DUP_NAME: text = "simple_web_render_html_to_pixels_with_engine2d_backend"
+
+describe "web renderer duplicate public entry binding":
+    it "declares simple_web_render_html_to_pixels_with_engine2d_backend exactly once across the two renderer modules":
+        val renderer_src = rt_file_read_text(RENDERER_PATH)
+        val engine2d_src = rt_file_read_text(ENGINE2D_PATH)
+        # vacuity guard: a failed read must not be mistaken for "0 declarations"
+        expect(renderer_src.len() > 0).to_equal(true)
+        expect(engine2d_src.len() > 0).to_equal(true)
+
+        val renderer_decls = occurrences(renderer_src, "pub fn " + DUP_NAME + "(")
+        val engine2d_decls = occurrences(engine2d_src, "pub fn " + DUP_NAME + "(")
+
+        # exactly one of the two modules may still declare this name; the
+        # other must have been renamed away so global resolution is
+        # unambiguous again.
+        expect(renderer_decls + engine2d_decls).to_equal(1)
+
+    it "the surviving declaration is the engine2d one every real caller already relies on":
+        val engine2d_src = rt_file_read_text(ENGINE2D_PATH)
+        expect(engine2d_src.len() > 0).to_equal(true)
+        expect(occurrences(engine2d_src, "pub fn " + DUP_NAME + "(")).to_equal(1)

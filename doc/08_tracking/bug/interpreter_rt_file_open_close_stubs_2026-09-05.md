@@ -1,4 +1,8 @@
 # Interpreter `rt_file_open` / `rt_file_close` were stubs returning -1 / false
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05 · **Status:** FIXED in source (uncommitted), deployed seed still affected · **Lane:** `.spipe/sosix_runtime_unification/state.md`
 
@@ -28,3 +32,4 @@ mirroring the runtime's mode table (0 read, 1 read-write, 2 write). Landed with
 - Generalization: same spec, "writes bytes at an offset…" (read-write mode) and
   "reports failures as -errno…" (a closed descriptor yields -EBADF, proving the
   close really closed).
+

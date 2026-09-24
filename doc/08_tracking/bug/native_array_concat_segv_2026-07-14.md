@@ -1,4 +1,9 @@
 # Native: array + concat (a + [x]) SIGSEGVs
+## Closed 2026-09-16 — ...t (a + [x]) SIGSEGVs **Status:** Resolved 2026-07-15 **Found:** 2026-07-14 (iterators lane
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved 2026-07-15  **Found:** 2026-07-14 (iterators lane)  **Path:** native-build --entry
 ```simple
@@ -29,3 +34,4 @@ through the generic `emit_call`.
 Verified native == oracle for `[] + [2,4]` (2), chained `a + [3,4] + [5]` (5),
 and element access. Parity harness case `array_concat` is green in the
 `check-native-seed-parity.shs` gate.
+

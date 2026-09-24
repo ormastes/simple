@@ -1,4 +1,8 @@
 # Result unwrap loses receiver type during native method resolution
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -52,3 +56,4 @@ Tracked by TODO 558.
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148: `probe03_result_unwrap_erasure_a.spl` (two structs `A`/`B` each defining `emit_object`, `make() -> Result<A, text>` returns `Ok(A(x:1))`, unannotated `val module = compiled.unwrap(); module.emit_object()`). Oracle: `bin/simple run` → `111`. Native: `native-build --entry --clean` exit 0, binary built, run → `111`. No ambiguous-method-call error; MIR retains declared return type through unannotated bindings and correctly disambiguates.
+

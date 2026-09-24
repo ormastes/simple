@@ -1,0 +1,123 @@
+# Compiler-owned immutable authority over canonical composite publication.
+use compiler.driver.environment_variant_composite_publication_v1.*
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.EnvironmentVariantCatalogPolicyProjectionV1
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.EnvironmentDependencyResolutionV1
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.PublicationArtifactEvidenceV1
+
+pub enum EnvironmentCompositePublicationOwnerErrorV1:
+    InvalidOwner
+    CapacityExceeded
+    CounterOverflow
+    AdmissionRejected
+    UnknownOrSubstituted
+    AlreadyReleased
+
+pub struct EnvironmentCompositePublicationOwnerTokenV1:
+    token_id: u64
+    owner_identity: u64
+
+struct _EnvironmentCompositePublicationOwnerRecordV1:
+    token: EnvironmentCompositePublicationOwnerTokenV1
+    publication: EnvironmentCompositePublicationV1
+
+var _next_composite_publication_owner_identity_v1: u64 = 1u64
+pub class EnvironmentCompositePublicationOwnerV1:
+    var owner_identity: u64
+    var next_token_id: u64
+    var records: [_EnvironmentCompositePublicationOwnerRecordV1]
+    pub static fn create() -> EnvironmentCompositePublicationOwnerV1:
+        val candidate = _next_composite_publication_owner_identity_v1
+        val identity = if candidate == 0u64 or candidate == 0xffffffffffffffffu64: 0u64 else: candidate
+        if identity != 0u64:
+            _next_composite_publication_owner_identity_v1 = identity + 1u64
+        EnvironmentCompositePublicationOwnerV1(owner_identity: identity,
+            next_token_id: 1u64, records: [])
+
+fn _copy_publication_ecpo(value: EnvironmentCompositePublicationV1) -> EnvironmentCompositePublicationV1:
+    var artifacts: [PublicationArtifactEvidenceV1] = []
+    for row in value.admission.admitted_artifacts: artifacts.push(row)
+    val admission = EnvironmentPublicationAdmissionV1(
+        schema_version: value.admission.schema_version, plan: value.admission.plan,
+        root_provider_identity: value.admission.root_provider_identity,
+        root_variant_identity: value.admission.root_variant_identity,
+        dependency_closure_digest: value.admission.dependency_closure_digest,
+        admitted_artifacts: artifacts)
+    var bindings: [VariantFacetBindingV1] = []; for row in value.facet_bindings: bindings.push(row)
+    var selected: [EnvironmentDigest256V1] = []; for row in value.selected_variant_identities: selected.push(row)
+    var rejections: [VariantRejectionV1] = []; for row in value.rejections: rejections.push(row)
+    var location: [u8] = []; for row in value.root_artifact_location_bytes: location.push(row)
+    var features: [u64] = []; for row in value.root_referenced_feature_words: features.push(row)
+    var dependencies: [VariantDependencyV1] = []; for row in value.root_referenced_dependencies: dependencies.push(row)
+    EnvironmentCompositePublicationV1(admission: admission,
+        canonical_base_plan_digest: value.canonical_base_plan_digest,
+        preferred_fallback: value.preferred_fallback,
+        policy_explanation_digest: value.policy_explanation_digest,
+        facet_bindings: bindings, selected_variant_identities: selected,
+        rejections: rejections, root_descriptor: value.root_descriptor,
+        root_descriptor_digest: value.root_descriptor_digest,
+        root_artifact_location_bytes: location,
+        root_referenced_feature_words: features,
+        root_referenced_dependencies: dependencies)
+
+pub fn environment_composite_publication_owner_admit_v1(
+    owner: EnvironmentCompositePublicationOwnerV1,
+    snapshot: EnvironmentSnapshotV1, arena_bytes: [u8], feature_words: [u64],
+    gpu_devices: [EnvironmentGpuDeviceV1], root: VariantDescriptorV1,
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1],
+    resolution: EnvironmentDependencyResolutionV1,
+    evidence: [PublicationArtifactEvidenceV1], catalog_generation: u64,
+    publication_generation: u64, bindings: [VariantFacetBindingV1],
+    projection: EnvironmentVariantCatalogPolicyProjectionV1
+) -> Result<EnvironmentCompositePublicationOwnerTokenV1, EnvironmentCompositePublicationOwnerErrorV1>:
+    if owner.owner_identity == 0u64: return Err(EnvironmentCompositePublicationOwnerErrorV1.InvalidOwner)
+    if owner.records.len() >= 256: return Err(EnvironmentCompositePublicationOwnerErrorV1.CapacityExceeded)
+    if owner.next_token_id == 0u64 or owner.next_token_id == 0xffffffffffffffffu64:
+        return Err(EnvironmentCompositePublicationOwnerErrorV1.CounterOverflow)
+    val publication = match environment_composite_publication_admit_v1(snapshot,
+        arena_bytes, feature_words, gpu_devices, root, descriptors, dependencies,
+        resolution, evidence, catalog_generation, publication_generation,
+        bindings, projection):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentCompositePublicationOwnerErrorV1.AdmissionRejected)
+    val token = EnvironmentCompositePublicationOwnerTokenV1(token_id: owner.next_token_id,
+        owner_identity: owner.owner_identity)
+    owner.records.push(_EnvironmentCompositePublicationOwnerRecordV1(token: token,
+        publication: _copy_publication_ecpo(publication)))
+    owner.next_token_id = owner.next_token_id + 1u64
+    Ok(token)
+
+pub fn environment_composite_publication_owner_project_v1(
+    owner: EnvironmentCompositePublicationOwnerV1,
+    token: EnvironmentCompositePublicationOwnerTokenV1
+) -> Result<EnvironmentCompositePublicationV1, EnvironmentCompositePublicationOwnerErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentCompositePublicationOwnerErrorV1.UnknownOrSubstituted)
+    for record in owner.records:
+        if record.token == token:
+            return Ok(_copy_publication_ecpo(record.publication))
+    Err(EnvironmentCompositePublicationOwnerErrorV1.UnknownOrSubstituted)
+
+pub fn environment_composite_publication_owner_projection_live_v1(
+    owner: EnvironmentCompositePublicationOwnerV1,
+    token: EnvironmentCompositePublicationOwnerTokenV1,
+    projection: EnvironmentCompositePublicationV1) -> bool:
+    match environment_composite_publication_owner_project_v1(owner, token):
+        case Ok(expected): expected == projection and
+            environment_composite_publication_sidecars_valid_v1(expected)
+        case Err(_): false
+
+pub fn environment_composite_publication_owner_release_v1(
+    owner: EnvironmentCompositePublicationOwnerV1,
+    token: EnvironmentCompositePublicationOwnerTokenV1
+) -> Result<(), EnvironmentCompositePublicationOwnerErrorV1>:
+    if token.owner_identity != owner.owner_identity:
+        return Err(EnvironmentCompositePublicationOwnerErrorV1.UnknownOrSubstituted)
+    var found = false
+    var kept: [_EnvironmentCompositePublicationOwnerRecordV1] = []
+    for record in owner.records:
+        if record.token == token: found = true
+        else: kept.push(record)
+    if not found: return Err(EnvironmentCompositePublicationOwnerErrorV1.AlreadyReleased)
+    owner.records = kept
+    Ok(())

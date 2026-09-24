@@ -1,4 +1,5 @@
 use std.common.crypto.sha256 (sha256_text)
+use std.io_runtime.{time_now_monotonic_ms}
 use compiler.common.cache_contract.cache_gateway_v1.*
 use compiler.common.cache_contract.direct_read_pin_v1 (DirectReadPinV1)
 use compiler.common.cache_contract.errors_v1.*
@@ -7,6 +8,24 @@ use compiler.driver.cache.catalog.cache_catalog_projection (CacheCatalogProjecti
 use compiler.driver.cache.summary.summary_store_v1 (VirtualSourceStoreAdapterV1)
 use compiler.driver.cache.cas.verified_cas_store.{verified_cas_get_pinned_v1, VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1}
 use common.cache_host_authority_v1.*
+use common.cache_daemon_host_authority_v1.{CacheNamespaceModeV3, CacheNamespaceExpectedHeadV3}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use compiler.common.cache_contract.physical_tld_v1.{
+    ThreePayloadContractBudgetV1, three_payload_contract_digest_valid_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticQueryKeyV1}
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{L78ScopePortV4}
+use compiler.driver.cache.gateway.cooperative_namespace_gc_begin_authority_v1.{L78NamespacePortV4}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    L78AffectedDomainPortV4, L78RrPlanV4, ChangedSemanticFacetV1,
+    OldNewMembershipV1, VerifiedSccGroupV1
+}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{ThreePayloadDurablePublicationPacketV1}
+use compiler.driver.cache.publication.three_payload_selected_head_publisher.{
+    L78PublicationPortV4, L78PublicationPhaseV4, L78PublishReceiptV4
+}
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
 
 fn _gateway_error_v1(code: CacheErrorCodeV1) -> CacheErrorV1:
     CacheErrorV1(code: code, retry: RetryClassV1.Never, severity: ErrorSeverityV1.Error,
@@ -26,6 +45,13 @@ pub class CacheGatewayAdapterV1:
     monotonic_now: i64
     next_pin: i64
 
+    me _refresh_trusted_monotonic() -> bool:
+        val now = time_now_monotonic_ms()
+        if now < 0 or now < self.monotonic_now:
+            return false
+        self.monotonic_now = now
+        true
+
     me _pin_valid(pin: DirectReadPinV1) -> bool:
         if (pin.process_instance_nonce != self.process_instance_nonce or
                 pin.boot_identity_digest != self.boot_identity_digest or
@@ -35,17 +61,13 @@ pub class CacheGatewayAdapterV1:
             return false
         val handle = pin.pin_id.to_i64() ?? -1
         if handle <= 0: return false
+        if not self._refresh_trusted_monotonic(): return false
         cache_host_validate_reader_pin_v1(
             CacheReaderPinAuthorityV1(opaque_handle: handle),
             pin.reader_admission_epoch, pin.journal_superblock_generation,
             pin.pinned_manifest_digest, pin.process_instance_nonce,
             pin.boot_identity_digest, pin.namespace_entry_digest,
             self.monotonic_now)
-
-    me advance_monotonic(now: i64) -> bool:
-        if now < self.monotonic_now: return false
-        self.monotonic_now = now
-        true
 
 impl CacheGatewayV1 for CacheGatewayAdapterV1:
     fn begin_direct_read(ttl: i64) -> Result<DirectReadPinV1, CacheErrorV1>:
@@ -54,12 +76,15 @@ impl CacheGatewayV1 for CacheGatewayAdapterV1:
         val root = cache_host_open_root_v1(self.cache_root)
         if not cache_host_root_valid_v1(root):
             return Err(_gateway_error_v1(CacheErrorCodeV1.CacheUnavailable))
-        val namespace = sha256_text("simple.cache.reader.namespace.v1\u0000" +
+        val namespace_entry_digest = sha256_text("simple.cache.reader.namespace.v1\u0000" +
             self.cache_root + "\u0000" + self.pinned_manifest_digest)
+        if not self._refresh_trusted_monotonic():
+            _ = cache_host_close_root_v1(root)
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CacheUnavailable))
         val authority = cache_host_begin_reader_pin_v1(root,
             self.reader_admission_epoch, self.journal_generation,
             self.pinned_manifest_digest, self.process_instance_nonce,
-            self.boot_identity_digest, namespace, self.monotonic_now, ttl)
+            self.boot_identity_digest, namespace_entry_digest, self.monotonic_now, ttl)
         _ = cache_host_close_root_v1(root)
         if authority.opaque_handle <= 0:
             return Err(_gateway_error_v1(CacheErrorCodeV1.CacheUnavailable))
@@ -72,7 +97,7 @@ impl CacheGatewayV1 for CacheGatewayAdapterV1:
             pinned_manifest_digest: self.pinned_manifest_digest,
             created_monotonic: self.monotonic_now,
             expires_monotonic: self.monotonic_now + ttl,
-            namespace_entry_digest: namespace))
+            namespace_entry_digest: namespace_entry_digest))
 
     fn lookup_verified_action(action_digest: text, pin: DirectReadPinV1) -> Result<CacheLookupV1, CacheErrorV1>:
         if not self._pin_valid(pin): return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
@@ -94,6 +119,8 @@ impl CacheGatewayV1 for CacheGatewayAdapterV1:
         if not self._pin_valid(pin): return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
         val authority = CacheReaderPinAuthorityV1(
             opaque_handle: pin.pin_id.to_i64() ?? -1)
+        if not self._refresh_trusted_monotonic():
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinExpired))
         val result = verified_cas_get_pinned_v1(authority, kind, digest,
             limits.max_bytes, self.monotonic_now)?
         Ok(CacheLookupV1(present: result.present, object_kind: result.kind,
@@ -105,6 +132,8 @@ impl CacheGatewayV1 for CacheGatewayAdapterV1:
         val ttl = pin.expires_monotonic - pin.created_monotonic
         val authority = CacheReaderPinAuthorityV1(
             opaque_handle: pin.pin_id.to_i64() ?? -1)
+        if not self._refresh_trusted_monotonic():
+            return Err(_gateway_error_v1(CacheErrorCodeV1.CachePinRenewalFailed))
         val expires = cache_host_renew_reader_pin_v1(authority,
             self.monotonic_now, ttl)
         if expires <= self.monotonic_now:
@@ -135,3 +164,343 @@ impl CacheGatewayV1 for CacheGatewayAdapterV1:
     fn status() -> Result<GatewayStatusV1, CacheErrorV1>:
         Ok(GatewayStatusV1(mode: "verified_descriptor_pinned_reads", writer_epoch_digest: "",
             journal_generation: self.journal_generation))
+
+# V4 is an owner-returning model seam, not a production capability factory.
+# Ports stay in their concrete fields: extracting a value-type port and calling
+# a mutating method on its copy would lose its registry/retention changes.
+pub struct L78PipelinePortsV4<S, R, N, W>:
+    scope: S
+    affected: R
+    namespace_port: N
+    publication: W
+
+pub struct L78PipelineRequestV4:
+    scope_request: SemanticScopeAttemptLiveRequestV1
+    attempt: L78AttemptKeyV4
+    changes: [ChangedSemanticFacetV1]
+    membership: [OldNewMembershipV1]
+    groups: [VerifiedSccGroupV1]
+    expected: CacheNamespaceExpectedHeadV3
+    packet: ThreePayloadDurablePublicationPacketV1
+    limits: L78LimitsV4
+
+pub struct L78PipelineObservationV4:
+    last_completed_stage: i64
+    attempt: L78AttemptKeyV4
+    publication: L78PublishReceiptV4?
+    retained_tokens: [L78OwnerTokenV4]
+    simulated: bool
+
+# Return the budget owner explicitly across helper calls. The common budget
+# is value-semantic; passing it to a void helper would discard its changes.
+fn _l78_pipeline_query_budget_v4(budget: ThreePayloadContractBudgetV1,
+    query: SemanticQueryKeyV1) -> ThreePayloadContractBudgetV1:
+    var current = budget
+    current.add_text(query.kind, false)
+    current.add_text(query.stable_entity_id, false)
+    current.add_text(query.semantic_profile_digest, false)
+    current.add_text(query.parameter_digest, false)
+    current
+
+fn _l78_pipeline_request_digest_v4(request: L78PipelineRequestV4) -> Result<text, L78BoundaryErrorV4>:
+    val bounds = request.limits
+    # The longest path is twelve calls, including one resolution and three
+    # releases. Reserve it before acquisition; do not exhaust a budget while
+    # still holding a namespace whose safe release needs another call.
+    if (bounds.max_items <= 0 or bounds.max_items > 65536 or
+            bounds.max_bytes <= 0 or bounds.max_bytes > 16777216 or
+            bounds.max_steps < 12 or bounds.max_steps > 65536):
+        return Err(L78BoundaryErrorV4.Bounds)
+    val attempt_digest = l78_attempt_key_digest_v4(request.attempt)?
+    val identity = request.scope_request.identity
+    if (identity.generation < 0 or identity.cancellation_epoch < 0 or
+            not three_payload_contract_digest_valid_v1(identity.writer_instance_digest) or
+            not three_payload_contract_digest_valid_v1(identity.manifest_digest) or
+            not three_payload_contract_digest_valid_v1(identity.pin_snapshot_digest) or
+            not three_payload_contract_digest_valid_v1(identity.generation_closure_digest) or
+            not three_payload_contract_digest_valid_v1(identity.binding_digest) or
+            not three_payload_contract_digest_valid_v1(identity.query_domain_digest) or
+            not three_payload_contract_digest_valid_v1(identity.semantic_rules_digest) or
+            not three_payload_contract_digest_valid_v1(request.scope_request.attempt_seal_digest) or
+            not three_payload_contract_digest_valid_v1(request.scope_request.source_content_digest) or
+            not three_payload_contract_digest_valid_v1(request.scope_request.snapshot_semantic_digest)):
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    # Scope describes the pinned input generation; attempt describes the target.
+    # Neither the old manifest nor writer instance is the target/root identity.
+    if (request.attempt.profile_digest != identity.semantic_rules_digest or
+            request.attempt.generation != request.packet.root.generation or
+            request.attempt.manifest_digest != request.packet.root.manifest_digest or
+            request.attempt.manifest_digest != request.packet.prepared.manifest_digest or
+            request.attempt.generation != request.packet.journal.generation or
+            request.attempt.generation != request.packet.durable.generation or
+            request.attempt.operation_digest != request.packet.durable.operation_digest):
+        return Err(L78BoundaryErrorV4.InvalidRequest)
+    var budget = ThreePayloadContractBudgetV1(remaining_bytes: bounds.max_bytes,
+        remaining_items: bounds.max_items, used_bytes: 0, ok: true)
+    # One shared budget, not a fresh allowance for each input collection.
+    budget.add_items(request.changes.len())
+    budget.add_items(request.membership.len())
+    budget.add_items(request.groups.len())
+    budget.add_items(request.packet.objects.len())
+    budget.add_items(request.packet.prepared.immutable_objects.len())
+    if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    for change in request.changes:
+        budget = _l78_pipeline_query_budget_v4(budget, change.producer)
+        budget.add_text(change.facet, false)
+        budget.add_text(change.dimension, false)
+        budget.add_bytes(2)
+        if val digest = change.old_fingerprint: budget.add_text(digest, false)
+        if val digest = change.new_fingerprint: budget.add_text(digest, false)
+        if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    for membership in request.membership:
+        budget = _l78_pipeline_query_budget_v4(budget, membership.owner)
+        budget.add_text(membership.dimension, false)
+        budget.add_text(membership.absence_witness_digest, false)
+        budget.add_bytes(9)
+        budget.add_items(membership.old_candidates.len())
+        budget.add_items(membership.new_candidates.len())
+        if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+        for candidate in membership.old_candidates:
+            budget = _l78_pipeline_query_budget_v4(budget, candidate)
+            if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+        for candidate in membership.new_candidates:
+            budget = _l78_pipeline_query_budget_v4(budget, candidate)
+            if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    for group in request.groups:
+        budget.add_text(group.partition_id, false)
+        budget.add_text(group.group_identity, false)
+        budget.add_text(group.receipt_digest, false)
+        budget.add_bytes(4)
+        budget.add_items(group.member_queries.len())
+        if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+        for member in group.member_queries:
+            budget = _l78_pipeline_query_budget_v4(budget, member)
+            if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    budget.add_bytes(request.packet.journal.bytes.len())
+    if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    for item in request.packet.objects:
+        budget.add_text(item.identity.kind, false)
+        budget.add_text(item.identity.digest, false)
+        budget.add_blob(item.canonical_bytes)
+        if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    for item in request.packet.prepared.immutable_objects:
+        budget.add_text(item.kind, false)
+        budget.add_text(item.digest, false)
+        budget.add_blob(item.bytes)
+        if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    match request.expected:
+        case CacheNamespaceExpectedHeadV3.Genesis: budget.add_bytes(1)
+        case CacheNamespaceExpectedHeadV3.Selected(encoded):
+            if encoded.len() <= 0: return Err(L78BoundaryErrorV4.InvalidRequest)
+            budget.add_blob(encoded)
+    if not budget.ok: return Err(L78BoundaryErrorV4.Bounds)
+    Ok(attempt_digest)
+
+fn _l78_pipeline_token_v4(token: L78OwnerTokenV4, kind: L78TokenKindV4, attempt_digest: text) -> bool:
+    token.domain == L78AuthorityDomainV4.TestDouble and token.kind == kind and
+        token.owner_instance > 0 and token.slot > 0 and token.epoch > 0 and
+        token.attempt_digest == attempt_digest
+
+fn _l78_pipeline_retained_v4(scope: L78OwnerTokenV4?, affected: L78OwnerTokenV4?,
+    namespace_token: L78OwnerTokenV4?, closure: L78OwnerTokenV4?) -> [L78OwnerTokenV4]:
+    var retained: [L78OwnerTokenV4] = []
+    if val token = scope: retained.push(token)
+    if val token = affected: retained.push(token)
+    if val token = namespace_token: retained.push(token)
+    if val token = closure: retained.push(token)
+    retained
+
+fn _l78_pipeline_observation_v4(stage: i64, attempt: L78AttemptKeyV4,
+    publication: L78PublishReceiptV4?, scope: L78OwnerTokenV4?,
+    affected: L78OwnerTokenV4?, namespace_token: L78OwnerTokenV4?,
+    closure: L78OwnerTokenV4?) -> L78PipelineObservationV4:
+    L78PipelineObservationV4(last_completed_stage: stage, attempt: attempt,
+        publication: publication,
+        retained_tokens: _l78_pipeline_retained_v4(scope, affected, namespace_token, closure),
+        simulated: true)
+
+fn _l78_pipeline_release_v4<S: L78ScopePortV4, R: L78AffectedDomainPortV4, N: L78NamespacePortV4, W: L78PublicationPortV4>(
+    ports: L78PipelinePortsV4<S, R, N, W>, attempt: L78AttemptKeyV4,
+    publication: L78PublishReceiptV4?, scope: L78OwnerTokenV4?,
+    affected: L78OwnerTokenV4?, namespace_token: L78OwnerTokenV4?,
+    closure: L78OwnerTokenV4?, abort_scope: bool,
+) -> L78OwnedResultV4<L78PipelinePortsV4<S, R, N, W>, L78PipelineObservationV4>:
+    var current = ports
+    # Release child protection only after its owner acknowledges. Any failure
+    # stops cleanup. In particular Unknown never revokes a protecting parent.
+    if val token = namespace_token:
+        val released = if abort_scope: current.namespace_port.abort(token) else: current.namespace_port.finish(token)
+        match released:
+            case Err(_):
+                return L78OwnedResultV4(owner: current, outcome: Ok(
+                    _l78_pipeline_observation_v4(4, attempt, publication,
+                        scope, affected, namespace_token, closure)))
+            case Ok(_): ()
+    if val token = affected:
+        match current.affected.close(token):
+            case Err(_):
+                return L78OwnedResultV4(owner: current, outcome: Ok(
+                    _l78_pipeline_observation_v4(4, attempt, publication,
+                        scope, affected, nil, nil)))
+            case Ok(_): ()
+    if val token = scope:
+        match current.scope.close(token):
+            case Err(_):
+                return L78OwnedResultV4(owner: current, outcome: Ok(
+                    _l78_pipeline_observation_v4(4, attempt, publication,
+                        scope, nil, nil, nil)))
+            case Ok(_): ()
+    L78OwnedResultV4(owner: current, outcome: Ok(
+        _l78_pipeline_observation_v4(5, attempt, publication, nil, nil, nil, nil)))
+
+fn _l78_pipeline_refuse_v4<S: L78ScopePortV4, R: L78AffectedDomainPortV4, N: L78NamespacePortV4, W: L78PublicationPortV4>(
+    ports: L78PipelinePortsV4<S, R, N, W>, attempt: L78AttemptKeyV4,
+    failure: L78BoundaryErrorV4, scope: L78OwnerTokenV4?,
+    affected: L78OwnerTokenV4?, namespace_token: L78OwnerTokenV4?,
+    closure: L78OwnerTokenV4?,
+) -> L78OwnedResultV4<L78PipelinePortsV4<S, R, N, W>, L78PipelineObservationV4>:
+    if failure == L78BoundaryErrorV4.Unknown:
+        return L78OwnedResultV4(owner: ports, outcome: Err(failure))
+    val released = _l78_pipeline_release_v4(ports, attempt, nil,
+        scope, affected, namespace_token, closure, true)
+    val observation = match released.outcome:
+        case Ok(value): value
+        case Err(_): return L78OwnedResultV4(owner: released.owner, outcome: Err(L78BoundaryErrorV4.Unknown))
+    if observation.retained_tokens.len() != 0:
+        return L78OwnedResultV4(owner: released.owner, outcome: Err(L78BoundaryErrorV4.Unknown))
+    L78OwnedResultV4(owner: released.owner, outcome: Err(failure))
+
+fn _l78_pipeline_receipt_v4(receipt: L78PublishReceiptV4, attempt_digest: text) -> bool:
+    val actual = match l78_attempt_key_digest_v4(receipt.operation):
+        case Ok(value): value
+        case Err(_): return false
+    if actual != attempt_digest: return false
+    match receipt.phase:
+        case L78PublicationPhaseV4.Committed:
+            match receipt.authority:
+                case Some(token): _l78_pipeline_token_v4(token, L78TokenKindV4.Publication, attempt_digest)
+                case _: false
+        case L78PublicationPhaseV4.Replayed:
+            match receipt.authority:
+                case Some(token): _l78_pipeline_token_v4(token, L78TokenKindV4.Publication, attempt_digest)
+                case _: false
+        case L78PublicationPhaseV4.NotStarted:
+            match receipt.authority:
+                case Some(_): false
+                case _: true
+        case L78PublicationPhaseV4.Unknown: true
+
+pub fn l78_plan_publish_with_ports_v4<S: L78ScopePortV4, R: L78AffectedDomainPortV4, N: L78NamespacePortV4, W: L78PublicationPortV4>(
+    ports: L78PipelinePortsV4<S, R, N, W>, request: L78PipelineRequestV4,
+) -> L78OwnedResultV4<L78PipelinePortsV4<S, R, N, W>, L78PipelineObservationV4>:
+    var current = ports
+    val attempt_digest = match _l78_pipeline_request_digest_v4(request):
+        case Ok(value): value
+        case Err(failure): return L78OwnedResultV4(owner: current, outcome: Err(failure))
+    val scope = match current.scope.acquire(request.scope_request):
+        case Ok(value): value
+        case Err(failure): return L78OwnedResultV4(owner: current, outcome: Err(failure))
+    if not _l78_pipeline_token_v4(scope, L78_KIND_SCOPE_V4, attempt_digest):
+        # Acquisition may have retained a resource despite its malformed
+        # locator. Return it for issuer-side recovery, never as authority.
+        # No completed publication or fabricated active head is reported.
+        return L78OwnedResultV4(owner: current, outcome: Ok(
+            _l78_pipeline_observation_v4(0, request.attempt, nil, Some(scope), nil, nil, nil)))
+    match current.scope.validate(scope, request.scope_request):
+        case Err(failure): return _l78_pipeline_refuse_v4(current, request.attempt, failure, Some(scope), nil, nil, nil)
+        case Ok(_): ()
+    val affected = match current.affected.plan(scope, request.changes,
+            request.membership, request.groups, request.limits):
+        case Ok(value): value
+        case Err(failure): return _l78_pipeline_refuse_v4(current, request.attempt, failure, Some(scope), nil, nil, nil)
+    if not _l78_pipeline_token_v4(affected.token, L78TokenKindV4.AffectedDomain, attempt_digest):
+        return L78OwnedResultV4(owner: current, outcome: Ok(
+            _l78_pipeline_observation_v4(1, request.attempt, nil, Some(scope), Some(affected.token), nil, nil)))
+    match current.affected.validate(affected, scope):
+        case Err(failure): return _l78_pipeline_refuse_v4(current, request.attempt, failure, Some(scope), Some(affected.token), nil, nil)
+        case Ok(_): ()
+    val namespace_token = match current.namespace_port.begin(CacheNamespaceModeV3.Publish,
+            request.expected, request.attempt, request.limits):
+        case Ok(value): value
+        case Err(failure): return _l78_pipeline_refuse_v4(current, request.attempt, failure, Some(scope), Some(affected.token), nil, nil)
+    if not _l78_pipeline_token_v4(namespace_token, L78TokenKindV4.Namespace, attempt_digest):
+        return L78OwnedResultV4(owner: current, outcome: Ok(
+            _l78_pipeline_observation_v4(2, request.attempt, nil, Some(scope), Some(affected.token), Some(namespace_token), nil)))
+    val roots = match current.namespace_port.roots(namespace_token):
+        case Ok(value): value
+        case Err(failure): return _l78_pipeline_refuse_v4(current, request.attempt, failure, Some(scope), Some(affected.token), Some(namespace_token), nil)
+    if (roots.members.len() > request.limits.max_items or
+            roots.generation_roots.len() > request.limits.max_items or
+            roots.protected_objects.len() > request.limits.max_items or
+            roots.canonical_bytes.len() > request.limits.max_bytes):
+        return _l78_pipeline_refuse_v4(current, request.attempt, L78BoundaryErrorV4.Bounds,
+            Some(scope), Some(affected.token), Some(namespace_token), nil)
+    val closure = match current.namespace_port.closure(namespace_token):
+        case Ok(value): value
+        case Err(failure): return _l78_pipeline_refuse_v4(current, request.attempt, failure, Some(scope), Some(affected.token), Some(namespace_token), nil)
+    if (not _l78_pipeline_token_v4(closure, L78TokenKindV4.Closure, attempt_digest) or
+            closure.owner_instance != namespace_token.owner_instance or
+            closure.epoch != namespace_token.epoch or closure.slot == namespace_token.slot):
+        # An unresolved child may protect state owned by all preceding
+        # handles. Retain parents; do not abort using an untrusted locator.
+        return L78OwnedResultV4(owner: current, outcome: Ok(
+            _l78_pipeline_observation_v4(2, request.attempt, nil, Some(scope), Some(affected.token), Some(namespace_token), Some(closure))))
+    var publication: L78PublishReceiptV4? = nil
+    var resolve_needed = false
+    match current.publication.commit(namespace_token, scope, affected.token,
+            closure, request.expected, request.packet):
+        case Ok(receipt):
+            if not _l78_pipeline_receipt_v4(receipt, attempt_digest):
+                # An invalid acknowledgement after mutation cannot authorize
+                # abort. Resolve the exact operation once while retaining all.
+                resolve_needed = true
+            elif receipt.phase == L78PublicationPhaseV4.Unknown:
+                resolve_needed = true
+            else:
+                publication = Some(receipt)
+        case Err(failure):
+            if failure == L78BoundaryErrorV4.Unknown:
+                resolve_needed = true
+            else:
+                return _l78_pipeline_refuse_v4(current, request.attempt, failure,
+                    Some(scope), Some(affected.token), Some(namespace_token), Some(closure))
+    if resolve_needed:
+        match current.publication.resolve(namespace_token, request.attempt):
+            case Err(_):
+                # ANY resolve failure after mutation leaves the operation
+                # undecided: no trustworthy receipt exists for an operation that already
+                # mutated.  Report the stage reached with NO publication rather
+                # than inventing a receipt or asserting the expected old head,
+                # and retain all four tokens for issuer-side recovery.
+                return L78OwnedResultV4(owner: current, outcome: Ok(
+                    _l78_pipeline_observation_v4(4, request.attempt, nil,
+                        Some(scope), Some(affected.token), Some(namespace_token),
+                        Some(closure))))
+            case Ok(receipt):
+                if not _l78_pipeline_receipt_v4(receipt, attempt_digest):
+                    return L78OwnedResultV4(owner: current, outcome: Err(L78BoundaryErrorV4.Unknown))
+                if receipt.phase == L78PublicationPhaseV4.Unknown:
+                    # An exact resolve that is itself Unknown is a trustworthy
+                    # receipt for an UNDECIDED operation.  Stop at stage 4 and
+                    # report it: releasing or aborting here could discard state
+                    # a later committed resolution still owns.  Every token
+                    # stays outstanding; no finish, abort or close is issued.
+                    return L78OwnedResultV4(owner: current, outcome: Ok(
+                        _l78_pipeline_observation_v4(4, request.attempt, Some(receipt),
+                            Some(scope), Some(affected.token), Some(namespace_token),
+                            Some(closure))))
+                publication = Some(receipt)
+    val receipt = match publication:
+        case Some(value): value
+        case _: return L78OwnedResultV4(owner: current, outcome: Err(L78BoundaryErrorV4.Unknown))
+    # The acknowledged active head may belong to a later competing commit.
+    # Never replace it with the expected old head or roll back this operation.
+    # Cleanup errors keep a known committed/replayed receipt and stage 4.
+    _l78_pipeline_release_v4(current, request.attempt, Some(receipt),
+        Some(scope), Some(affected.token), Some(namespace_token), Some(closure),
+        receipt.phase == L78PublicationPhaseV4.NotStarted)
+
+pub fn l78_compile_publish_v4(request: L78PipelineRequestV4) -> Result<L78PipelineObservationV4, L78BoundaryErrorV4>:
+    # No injected ports, caller token, mode flag or environment path reaches
+    # live publication before authentic semantic and namespace dependencies.
+    Err(L78BoundaryErrorV4.Unavailable)

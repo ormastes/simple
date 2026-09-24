@@ -1,4 +1,8 @@
 # Follow-up: seed cranelift InterpCall boxed-result gap for generic/composite return types
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-18
 **Lane:** S68
@@ -109,3 +113,4 @@ options A/B applied at the right layer:
 - Fix landed alongside this doc: `compiler/src/compilability.rs` (`Expr::Dict`
   no longer adds `FallbackReason::CollectionLiteral`), plus regression tests in
   `compiler/src/compilability.rs` and `compiler/src/mir/hybrid.rs`.
+

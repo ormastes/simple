@@ -1,0 +1,233 @@
+"""`lint|fmt|fix|test --help` must be routed to a closure-free help entry.
+
+A tool command's real entry resolves its whole implementation closure before
+`main()` can reach its help branch, so on the deployed seed
+(sha256 3d120a6f9ab5704b..., aarch64) `simple lint --help` cost 533 `.spl` opens
+and `simple test --help` cost 10,151 opens / 74 s and then printed
+`Error: unknown option: --help` instead of any help at all.
+See doc/08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md
+
+`use lazy` cannot fix it (the seed loads it eagerly --
+use_lazy_is_a_no_op_in_the_rust_seed_2026-09-12.md) and a function-local `use`
+drops the importing module out of the JIT, so the fix routes a help request to a
+DIFFERENT entry, `src/app/cli/tool_help_entry.spl`, whose whole closure is two
+leaf modules. Both dispatchers must route identically: the Rust seed driver
+(`src/compiler_rust/driver/src/main.rs`) and the pure-Simple
+`src/app/cli/dispatch.spl`. This spec pins the shared predicate, the fact that
+both dispatchers use it, and that the help TEXT has exactly one owner.
+
+Every example fails closed on vacuity: a source read that returned nothing, or
+a flag extraction that found zero flags, is a FAIL and not a pass.
+"""
+
+use std.spec.*
+use std.fs.{read_file}
+use app.cli.tool_help.{
+    lint_family_help_requested,
+    test_help_requested,
+    tool_help_entry_for,
+    tool_help_entry_path,
+    tool_help_lines
+}
+
+val DRIVER_MAIN: text = "src/compiler_rust/driver/src/main.rs"
+val SIMPLE_DISPATCH: text = "src/app/cli/dispatch.spl"
+val LINT_ENTRY: text = "src/app/cli/lint_entry.spl"
+val HELP_ENTRY: text = "src/app/cli/tool_help_entry.spl"
+val RUST_HELP: text = "src/compiler_rust/driver/src/cli/help.rs"
+val TOOL_HELP: text = "src/app/cli/tool_help.spl"
+
+fn list_has(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+fn strip_flag(token: text) -> text:
+    """Drop the Rust string-literal escapes and trailing punctuation a token
+    picks up when the help text is read out of source rather than printed."""
+    var out = token.replace("\\n", "")
+    while out.len() > 0:
+        val tail = out.substring(out.len() - 1, out.len())
+        if tail == "," or tail == "\"" or tail == "\\":
+            out = out.substring(0, out.len() - 1)
+        else:
+            break
+    out
+
+fn flags_in(region: text) -> [text]:
+    """Every `--flag` token named in a block of help text, de-duplicated."""
+    var found: [text] = []
+    for raw_line in region.split("\n"):
+        for token in raw_line.replace("\t", " ").split(" "):
+            if token.starts_with("--") and token.len() > 2:
+                val flag = strip_flag(token)
+                if flag.len() > 2 and not list_has(found, flag):
+                    found.push(flag)
+    found
+
+fn line_names(line: text, marker: text) -> bool:
+    """Substring test built from split(), which every text carries."""
+    line.split(marker).len() > 1
+
+fn region_between(source: text, start_marker: text, end_marker: text) -> text:
+    """The lines from the one naming start_marker up to (not including) the one
+    naming end_marker. Returns "" when the start marker is absent, so a caller
+    that asserts on a non-empty region fails closed on a renamed function."""
+    var out = ""
+    var inside = false
+    for line in source.split("\n"):
+        if not inside:
+            if line_names(line, start_marker):
+                inside = true
+            else:
+                continue
+        elif line_names(line, end_marker):
+            return out
+        out = out + line + "\n"
+    out
+
+fn joined(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+describe "tool help routing":
+    it "routes a bare or --help lint/fmt/fix invocation to the thin help entry":
+        step("the entry path has one owner")
+        val entry = tool_help_entry_path()
+        expect(entry).to_equal(HELP_ENTRY)
+        step("bare command, --help and -h are all help requests")
+        expect(tool_help_entry_for("lint", [])).to_equal(entry)
+        expect(tool_help_entry_for("fmt", ["--help"])).to_equal(entry)
+        expect(tool_help_entry_for("fix", ["-h"])).to_equal(entry)
+        expect(lint_family_help_requested([])).to_be_true()
+        expect(lint_family_help_requested(["-h"])).to_be_true()
+
+    it "leaves a real lint invocation on the implementation entry":
+        step("a target, with or without a trailing --help, is NOT a help request")
+        # `simple lint foo.spl --help` lints today (it exits 2 after reporting
+        # findings); the routing predicate must not turn that into help.
+        expect(tool_help_entry_for("lint", ["foo.spl"])).to_equal("")
+        expect(tool_help_entry_for("lint", ["foo.spl", "--help"])).to_equal("")
+        expect(tool_help_entry_for("fmt", ["--check", "foo.spl"])).to_equal("")
+        expect(lint_family_help_requested(["foo.spl", "--help"])).to_be_false()
+
+    it "routes `test --help` in any position but never a bare `simple test`":
+        val entry = tool_help_entry_path()
+        step("a bare `simple test` runs the suite")
+        expect(tool_help_entry_for("test", [])).to_equal("")
+        expect(test_help_requested([])).to_be_false()
+        step("--help anywhere in the test arguments is a help request")
+        expect(tool_help_entry_for("test", ["--help"])).to_equal(entry)
+        expect(tool_help_entry_for("test", ["test/x_spec.spl", "--help"])).to_equal(entry)
+        expect(tool_help_entry_for("test", ["-h", "--unit"])).to_equal(entry)
+
+    it "routes no other command":
+        expect(tool_help_entry_for("run", ["--help"])).to_equal("")
+        expect(tool_help_entry_for("build", [])).to_equal("")
+        expect(tool_help_entry_for("check", ["--help"])).to_equal("")
+        expect(tool_help_entry_for("", [])).to_equal("")
+
+    it "keeps both dispatchers on the same entry and the same predicate":
+        step("the Rust seed driver routes through tool_help_entry_for")
+        val driver = read_file(DRIVER_MAIN)
+        expect(driver.len()).to_be_greater_than(0)
+        expect(driver).to_contain(HELP_ENTRY)
+        expect(driver).to_contain("tool_help_entry_for(entry.name")
+        step("and the thin entry is on its dispatch allowlist, or dispatch returns None")
+        expect(driver).to_contain("app_relative_path != TOOL_HELP_ENTRY")
+        step("the pure-Simple dispatcher routes through the same owner")
+        val dispatch = read_file(SIMPLE_DISPATCH)
+        expect(dispatch.len()).to_be_greater_than(0)
+        # NOTE: no `{...}` in these literals -- braces are string interpolation
+        # in Simple, so spelling the import group here would evaluate the name
+        # instead of matching it.
+        expect(dispatch).to_contain("use app.cli.tool_help.")
+        expect(dispatch).to_contain("tool_help_entry_for(entry.name")
+
+    it "holds lint_entry's own help text equal to the shared owner's, line for line":
+        # lint_entry deliberately does NOT import app.cli.tool_help: its source
+        # closure is pinned to the file by another lane's exact ceilings in
+        # test/05_perf/startup/check_lint_entry_closure_spec.spl (309 physical
+        # files / 3,767,766 bytes, default lane), and one more leaf would push it
+        # over. It is also native-built as `simple_lint`. So the two copies are
+        # held equal HERE instead: every line the shared owner would print for
+        # lint/fmt/fix must appear as a literal `print` in the entry.
+        val lint_entry = read_file(LINT_ENTRY)
+        expect(lint_entry.len()).to_be_greater_than(0)
+        var checked = 0
+        var missing = 0
+        for command in ["lint", "fmt", "fix"]:
+            for help_line in tool_help_lines(command):
+                if help_line.len() == 0:
+                    continue
+                checked = checked + 1
+                val spelled = "print \"" + help_line + "\""
+                if not line_names(lint_entry, spelled):
+                    print "lint_entry does not print: {help_line}"
+                    missing = missing + 1
+        step("fail closed: a zero-line comparison is not a pass")
+        expect(checked).to_be_greater_than(10)
+        expect(missing).to_equal(0)
+
+    it "keeps two leaf imports and no implementation in the help entry":
+        step("the thin entry imports exactly two leaves and no implementation")
+        val help_entry = read_file(HELP_ENTRY)
+        expect(help_entry.len()).to_be_greater_than(0)
+        var use_lines: [text] = []
+        for line in help_entry.split("\n"):
+            if line.starts_with("use "):
+                use_lines.push(line)
+        expect(use_lines.len()).to_equal(2)
+        var names_argv_leaf = 0
+        var names_help_owner = 0
+        for line in use_lines:
+            if line_names(line, "app.cli.entry_args.") and line_names(line, "get_cli_args"):
+                names_argv_leaf = names_argv_leaf + 1
+            if line_names(line, "app.cli.tool_help.") and line_names(line, "print_tool_help"):
+                names_help_owner = names_help_owner + 1
+        expect(names_argv_leaf).to_equal(1)
+        expect(names_help_owner).to_equal(1)
+
+    it "names the same test option flags as the seed driver's own help text":
+        step("extract the flags from the Rust copy")
+        val rust = read_file(RUST_HELP)
+        expect(rust.len()).to_be_greater_than(0)
+        val rust_region = region_between(rust, "pub fn test_help_text", "pub fn print_test_help")
+        expect(rust_region.len()).to_be_greater_than(0)
+        val rust_flags = flags_in(rust_region)
+        expect(rust_flags.len()).to_be_greater_than(20)
+        step("extract the flags from the pure-Simple copy")
+        val simple_flags = flags_in(joined(tool_help_lines("test")))
+        expect(simple_flags.len()).to_equal(rust_flags.len())
+        step("every flag in one copy is in the other")
+        var missing_in_simple = 0
+        for flag in rust_flags:
+            if not list_has(simple_flags, flag):
+                print "missing in pure-Simple test help: {flag}"
+                missing_in_simple = missing_in_simple + 1
+        expect(missing_in_simple).to_equal(0)
+        var missing_in_rust = 0
+        for flag in simple_flags:
+            if not list_has(rust_flags, flag):
+                print "missing in Rust test help: {flag}"
+                missing_in_rust = missing_in_rust + 1
+        expect(missing_in_rust).to_equal(0)
+
+    it "keeps the help text module free of imports":
+        val owner = read_file(TOOL_HELP)
+        expect(owner.len()).to_be_greater_than(0)
+        var use_lines = 0
+        for line in owner.split("\n"):
+            if line.starts_with("use ") or line.starts_with("export use "):
+                use_lines = use_lines + 1
+        expect(use_lines).to_equal(0)
+        step("and it still prints real help for every routed command")
+        expect(tool_help_lines("lint").len()).to_be_greater_than(0)
+        expect(joined(tool_help_lines("lint"))).to_contain("Usage: simple lint")
+        expect(joined(tool_help_lines("fmt"))).to_contain("Usage: simple fmt")
+        expect(joined(tool_help_lines("fix"))).to_contain("Usage: simple fix")
+        expect(joined(tool_help_lines("test"))).to_contain("simple test [path] [options]")
+        expect(joined(tool_help_lines(""))).to_contain("Usage: simple lint|fmt|fix")

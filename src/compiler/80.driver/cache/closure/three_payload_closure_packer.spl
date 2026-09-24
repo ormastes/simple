@@ -1,0 +1,233 @@
+# Three-payload closure packer and publication boundary.
+#
+# The coordinator owns closure discovery and reverse-reference reads.  This
+# module only packs verified source/.tld payloads and asks the existing worker
+# admission contract to validate the exact read cardinality.  No .rr bytes are
+# accepted here; reverse references remain coordinator-only control-plane data.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefV1, ThreePayloadClosureSealV1,
+    ThreePayloadWorkerReadCountersV1, ThreePayloadAdmissionErrorV1,
+    three_payload_worker_admit_v1
+}
+use compiler.driver.cache.action_key.{canon_field, canon_seq, canon_str, action_key_sort_texts}
+use compiler.driver.cache.cas_store.{
+    ResultManifest, cas_put, result_manifest_encode, result_manifest_put
+}
+use compiler.driver.cache.gateway.cache_writer_v1.{
+    cache_writer_append_host_admitted_v1, cache_writer_mutation_scope_available_v1
+}
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1, ActionRootRecordV1}
+use compiler.driver.cache.catalog.cache_catalog_projection.{CacheCatalogProjectionV1}
+use common.cache_daemon_host_authority_v1.{
+    AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1, DurableWriterEpochV1
+}
+
+val THREE_PAYLOAD_MAX_SECTIONS_V1: i64 = 256
+val THREE_PAYLOAD_MAX_PACKED_BYTES_V1: i64 = 33554432
+
+pub struct ThreePayloadTldSectionV1:
+    name: text
+    bytes: text
+    digest: text
+
+pub struct ThreePayloadPackInputV1:
+    generation_digest: text
+    source_payload: text
+    prior_tld_payload: text?
+    package_init_tld_payload: text
+    membership_root_digest: text
+    absence_witness_root_digest: text
+    tld_sections: [ThreePayloadTldSectionV1]
+    semantic_refs: [ThreePayloadSemanticRefV1]
+    max_decode_bytes: i64
+
+pub struct ThreePayloadPackedV1:
+    seal: ThreePayloadClosureSealV1
+    payload_digest: text
+    canonical_payload: text
+
+pub struct ThreePayloadPublicationV1:
+    action_digest: text
+    payload_digest: text
+    manifest_digest: text
+    journal_record: ActionRootRecordV1
+
+fn _section_key_v1(section: ThreePayloadTldSectionV1) -> text:
+    canon_seq([
+        canon_field("name", canon_str(section.name)),
+        canon_field("digest", canon_str(section.digest)),
+        canon_field("bytes", canon_str(section.bytes))
+    ])
+
+fn _section_position_v1(sections: [ThreePayloadTldSectionV1], name: text) -> i64:
+    var index = 0
+    for section in sections:
+        if section.name == name:
+            return index
+        index = index + 1
+    -1
+
+fn _section_valid_v1(section: ThreePayloadTldSectionV1) -> bool:
+    section.name != "" and section.bytes != "" and section.digest == sha256_text(section.bytes)
+
+fn _section_names_unique_v1(sections: [ThreePayloadTldSectionV1]) -> bool:
+    var left = 0
+    while left < sections.len():
+        var right = left + 1
+        while right < sections.len():
+            if sections[left].name == sections[right].name:
+                return false
+            right = right + 1
+        left = left + 1
+    true
+
+fn _canonical_tld_payload_v1(sections: [ThreePayloadTldSectionV1]) -> text:
+    var encoded: [text] = []
+    for section in sections:
+        encoded.push(_section_key_v1(section))
+    canon_field("simple.three-payload.tld.v1", canon_seq(action_key_sort_texts(encoded)))
+
+fn _sorted_section_keys_v1(sections: [ThreePayloadTldSectionV1]) -> [text]:
+    var encoded: [text] = []
+    for section in sections:
+        encoded.push(_section_key_v1(section))
+    action_key_sort_texts(encoded)
+
+fn _remap_semantic_refs_v1(
+    refs: [ThreePayloadSemanticRefV1], sections: [ThreePayloadTldSectionV1]
+) -> Result<[ThreePayloadSemanticRefV1], ThreePayloadAdmissionErrorV1>:
+    val sorted_keys = _sorted_section_keys_v1(sections)
+    var remapped: [ThreePayloadSemanticRefV1] = []
+    for reference in refs:
+        match reference.embedded_section_index:
+            case Some(index):
+                if index < 0 or index >= sections.len():
+                    return Err(ThreePayloadAdmissionErrorV1.InvalidSemanticReference(
+                        reference.stable_entity_id))
+                val sorted_index = sorted_keys.index_of(_section_key_v1(sections[index]))
+                if sorted_index < 0:
+                    return Err(ThreePayloadAdmissionErrorV1.InvalidSemanticReference(
+                        reference.stable_entity_id))
+                remapped.push(ThreePayloadSemanticRefV1(
+                    kind: reference.kind, stable_entity_id: reference.stable_entity_id,
+                    callable_signature_digest: reference.callable_signature_digest,
+                    effect_digest: reference.effect_digest,
+                    body_or_object_digest: reference.body_or_object_digest,
+                    location: reference.location,
+                    embedded_section_index: Some(sorted_index)))
+            case nil:
+                remapped.push(reference)
+    Ok(remapped)
+
+fn _invalid(reason: text) -> Result<ThreePayloadPackedV1, ThreePayloadAdmissionErrorV1>:
+    Err(ThreePayloadAdmissionErrorV1.InvalidSeal(reason))
+
+pub fn three_payload_pack_and_admit_v1(
+    input: ThreePayloadPackInputV1,
+    reads: ThreePayloadWorkerReadCountersV1
+) -> Result<ThreePayloadPackedV1, ThreePayloadAdmissionErrorV1>:
+    if input.tld_sections.len() <= 0 or input.tld_sections.len() > THREE_PAYLOAD_MAX_SECTIONS_V1:
+        return _invalid("section_count_bound")
+    if input.max_decode_bytes <= 0 or input.max_decode_bytes > THREE_PAYLOAD_MAX_PACKED_BYTES_V1:
+        return _invalid("decode_bound")
+    if input.package_init_tld_payload == "" or
+            _section_names_unique_v1(input.tld_sections) == false:
+        return _invalid("package_init_or_section_identity")
+    for section in input.tld_sections:
+        if not _section_valid_v1(section):
+            return _invalid("section_digest_mismatch")
+
+    val init_digest = sha256_text(input.package_init_tld_payload)
+    val init_index = _section_position_v1(input.tld_sections, "__init__.tld")
+    if init_index < 0 or input.tld_sections[init_index].digest != init_digest or
+            input.tld_sections[init_index].bytes != input.package_init_tld_payload:
+        return _invalid("package_init_section_missing")
+
+    match input.prior_tld_payload:
+        case Some(prior):
+            val prior_index = _section_position_v1(input.tld_sections, "prior.tld")
+            if prior == "" or prior_index < 0 or
+                    input.tld_sections[prior_index].digest != sha256_text(prior) or
+                    input.tld_sections[prior_index].bytes != prior:
+                return _invalid("prior_tld_section_missing")
+        case nil:
+            if _section_position_v1(input.tld_sections, "prior.tld") >= 0:
+                return _invalid("unexpected_prior_tld_section")
+
+    val remapped_refs = match _remap_semantic_refs_v1(input.semantic_refs, input.tld_sections):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    val canonical = _canonical_tld_payload_v1(input.tld_sections)
+    if canonical.len() > input.max_decode_bytes or
+            canonical.len() > THREE_PAYLOAD_MAX_PACKED_BYTES_V1:
+        return _invalid("packed_bytes_bound")
+
+    val seal = ThreePayloadClosureSealV1(
+        generation_digest: input.generation_digest,
+        source_payload_digest: sha256_text(input.source_payload),
+        prior_tld_payload_digest: match input.prior_tld_payload:
+            case Some(prior): Some(sha256_text(prior))
+            case nil: nil,
+        package_init_tld_payload_digest: init_digest,
+        membership_root_digest: input.membership_root_digest,
+        absence_witness_root_digest: input.absence_witness_root_digest,
+        semantic_refs: remapped_refs,
+        section_count: input.tld_sections.len(),
+        packed_bytes: canonical.len(),
+        max_decode_bytes: input.max_decode_bytes
+    )
+    match three_payload_worker_admit_v1(seal, reads):
+        case Err(error): Err(error)
+        case Ok(_):
+            Ok(ThreePayloadPackedV1(seal: seal,
+                payload_digest: sha256_text(canonical), canonical_payload: canonical))
+
+# Blobs and the result manifest are staged first.  Only the existing journal
+# writer admits the action mapping, so a failed/stale writer leaves an
+# unreferenced blob rather than publishing an unsafe cache hit.
+pub fn three_payload_publish_host_admitted_v1(
+    root: text,
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    journal: ActionRootJournalV1,
+    catalog: CacheCatalogProjectionV1,
+    action_digest: text,
+    dependency_manifest: text,
+    prepared: ThreePayloadPackedV1
+) -> Result<ThreePayloadPublicationV1, text>:
+    if root == "" or action_digest == "" or dependency_manifest == "":
+        return Err("publication_identity_missing")
+    if sha256_text(prepared.canonical_payload) != prepared.payload_digest:
+        return Err("prepared_payload_digest_mismatch")
+    # Readiness is not enough for a publication mutation: the current host
+    # ABI can revoke the epoch between validation and journal append.  Fail
+    # closed before staging CAS bytes until the existing writer boundary
+    # exposes a mutation-scoped validate-and-commit capability.
+    if not cache_writer_mutation_scope_available_v1():
+        return Err("mutation_scoped_authority_unavailable")
+
+    val stored_digest = cas_put(root, prepared.canonical_payload)
+    if stored_digest == "" or stored_digest != prepared.payload_digest:
+        return Err("payload_cas_put_failed")
+    val manifest = ResultManifest(
+        action_digest: action_digest,
+        result_kind: "three_payload_tld",
+        artifact_digests: [prepared.payload_digest],
+        output_fingerprint: prepared.seal.generation_digest,
+        dependency_manifest: dependency_manifest,
+        producer_schema: 1
+    )
+    val manifest_digest = sha256_text(result_manifest_encode(manifest))
+    if not result_manifest_put(root, action_digest, manifest):
+        return Err("result_manifest_publish_failed")
+    match cache_writer_append_host_admitted_v1(peer, readiness, readiness_nonce, epoch,
+            journal, catalog, action_digest, "public_summary", prepared.payload_digest,
+            manifest_digest):
+        case Err(_): Err("action_root_admission_failed")
+        case Ok(record): Ok(ThreePayloadPublicationV1(action_digest: action_digest,
+            payload_digest: prepared.payload_digest, manifest_digest: manifest_digest,
+            journal_record: record))

@@ -1,0 +1,67 @@
+# P0 regression: `x = x + y` where `x` and `y` are plain scalars (i64/f64/...)
+# must lower to a real arithmetic add, never to the array-merge builtin.
+#
+# `src/compiler/10.frontend/desugar/collection_desugar.spl` rewrites the
+# statement form `x = x + y` (and `x += y`) into a bare `x.merge(y)` call as
+# an optimization for ARRAY concatenation (`arr = arr + other_arr` -> an
+# in-place extend, avoiding a fresh allocation). Its `is_definite_scalar_addend`
+# gate only recognises LITERAL addends (`p = p + "X"`), not an identifier or
+# method-call addend (`s = s + i`, `t = t + s.char_at(i)`) -- so those get
+# rewritten to `.merge()` even when neither operand is an array. MIR is the
+# first layer that knows the receiver's real type
+# (`lower_unresolved_array_merge`, method_calls_literals.spl); it already
+# special-cases a TEXT receiver (routes to `rt_strcat_tagged` + copy-back,
+# fixing `doc/08_tracking/bug/mir_unresolved_method_call_merge_2026-08-22.md`)
+# but falls through to `rt_array_extend_i64` for every OTHER type, including
+# plain i64/f64 scalars -- passing their raw bit patterns as if they were
+# array handles.
+#
+# Root-caused via the seed's own in-process HIR->MIR->LLVM pipeline (no
+# native-build subprocess needed -- same technique as
+# llvm_emitter_ssa_violation_guard_spec.spl): `var s = 0; var i = 1; s = s + i`
+# emits, in the current (broken) tree:
+#   %l7 = add i64 -1, 0
+#   %t0 = inttoptr i64 <s> to ptr
+#   %t1 = inttoptr i64 <i> to ptr
+#   %l8 = call i8 @rt_array_extend_i64(ptr %t0, ptr %t1, i64 %l7)
+# with the call's result NEVER stored back into `s` -- so `s` never updates,
+# reproducing `phase2_drops_loop_carried_accumulator_2026-09-13.md` (P0):
+# phase 1 prints `sum=55`, phase 2 prints `sum=0`. Confirmed NOT
+# loop-specific: a single non-looping `s = s + i` statement reproduces it.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn lower_source(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "scalar_merge.spl", "scalar_merge.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("scalar_merge.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn emit(label: text, src: text) -> text:
+    MirToLlvm.create("test.scalar_merge.{label}", CodegenTarget.X86_64, nil).translate_module(lower_source(src))
+
+describe "scalar `x = x + y` compound reassignment (both operands plain scalars)":
+    it "does not route an i64 compound reassignment through the array-merge builtin":
+        val ir = emit("i64_reassign", "fn total() -> i64:\n    var a = 1\n    var b = 2\n    a = a + b\n    a\n")
+        # `rt_array_extend_i64` is always FORWARD-DECLARED in the module's
+        # boilerplate extern list regardless of whether anything calls it
+        # (`declare i8 @rt_array_extend_i64(ptr, ptr, i64)`), so check for an
+        # actual CALL, not the bare symbol name.
+        expect(ir.contains("call i8 @rt_array_extend_i64")).to_equal(false)
+        expect(ir.contains("inttoptr")).to_equal(false)
+
+    it "still computes the correct value for a real arithmetic add":
+        val ir = emit("i64_reassign_value", "fn total() -> i64:\n    var a = 1\n    var b = 2\n    a = a + b\n    a\n")
+        expect(ir).to_contain("add nsw i64")
+
+    it "still routes a genuine array `arr = arr + other` through the array-merge builtin":
+        val ir = emit("array_merge", "fn total() -> i64:\n    var arr = [1, 2]\n    var other = [3]\n    arr = arr + other\n    arr.len()\n")
+        expect(ir.contains("call i8 @rt_array_extend_i64")).to_equal(true)

@@ -1,0 +1,230 @@
+# @cover src/lib/common/process/observation_v4.spl 80%
+# @cover src/lib/common/process/deadline_v4.spl 100%
+"""Pure V4 schema and deadline contracts; no host process provider is used."""
+
+use std.spec.*
+use std.common.process.deadline_v4.{
+    ProcessObservationPhaseV4, ProcessObservationDeadlineActionV4,
+    ProcessObservationDeadlineStateV4, process_observation_deadlines_v4,
+    process_observation_reduce_deadline_v4
+}
+use std.common.process.observation_v4.{
+    ProcessObservationWireV4, ProcessObservationPacketKindV4,
+    ProcessObservationStatusV4, ProcessObservationStreamStateV4,
+    ProcessObservationEnvironmentV4, ProcessObservationRequestV4,
+    ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4,
+    POV4_VALID_DIRECT_RSS, POV4_STDOUT_STATE, POV4_STDOUT_ERRNO,
+    POV4_CHILD_DIRECT_RSS_BYTES, decode_process_observation_v4,
+    freeze_process_observation_receipt_v4, process_observation_request_valid_v4,
+    canonical_encode_process_observation_request_v4,
+    canonical_decode_process_observation_request_v4
+}
+
+fn _binding() -> [u8]:
+    var result: [u8] = []
+    var index = 0
+    while index < 32:
+        result.push(index as u8)
+        index = index + 1
+    result
+
+fn _golden_words() -> [i64]:
+    # Golden 64-word Frozen packet. Its position is part of the public V4 ABI.
+    [4, 2, 64, 2, 1, 2, 3, 4, 7, 255, 0, 0, 0, 3, 0, 42, 0, 0, 0,
+        10, 11, 12, 13, 14, 15, 20, 20, 30, 0, 0, 0, 0, 1, 1, 1, 1,
+        3, 4, 7, 0, 2, 100, 1, 0, 0, 1, 1, 1, 1, 2, 0, 2, 2, 2,
+        2, 0, 1, 1, 1, 1, 2, 1, 32, 0]
+
+fn _golden_wire() -> ProcessObservationWireV4:
+    ProcessObservationWireV4(words: _golden_words(), stdout: [111u8, 107u8],
+        stderr: [33u8], binding: _binding())
+
+fn _request() -> ProcessObservationRequestV4:
+    ProcessObservationRequestV4(argv: ["/bin/echo", "ok"],
+        environment: [ProcessObservationEnvironmentV4(key: "A", value: "1"),
+            ProcessObservationEnvironmentV4(key: "B", value: "2")],
+        canonical_cwd: "/work", canonical_pinned_directory: "/work/bin",
+        executable_pin: 9, executable_digest: _binding(), capability_bits: 1,
+        cwd_pin_claim: 10, cwd_identity_digest: _binding(),
+        wall_budget_ns: 10, term_grace_ns: 0, cleanup_budget_ns: 10,
+        stdout_limit_bytes: 1024, stderr_limit_bytes: 1024, memory_limit_bytes: 0,
+        enforcement_kind: ProcessObservationEnforcementKindV4.None,
+        descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
+        max_clock_resolution_ns: 1)
+
+describe "process observation V4 common schema":
+    it "decodes the fixed 64-word golden vector without host authority":
+        val receipt = decode_process_observation_v4(_golden_wire()).unwrap()
+        expect(receipt.packet.packet_kind).to_equal(ProcessObservationPacketKindV4.Frozen)
+        expect(receipt.packet.status).to_equal(ProcessObservationStatusV4.Terminal)
+        expect(receipt.packet.stdout.state).to_equal(ProcessObservationStreamStateV4.Eof)
+        expect(receipt.packet.child_direct_rss_bytes).to_equal(0)
+        expect(receipt.stdout).to_equal([111u8, 107u8])
+
+    it "rejects nonexact schemas and nonzero reserved words":
+        var short_words = _golden_words()
+        short_words.pop()
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: short_words,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+        var reserved = _golden_words()
+        reserved[63] = 1
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: reserved,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+
+    it "keeps EOF and read error semantically distinct":
+        var read_error = _golden_words()
+        read_error[POV4_STDOUT_STATE] = 3
+        read_error[POV4_STDOUT_ERRNO] = 5
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: read_error,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_ok()).to_equal(true)
+        var bad_eof = _golden_words()
+        bad_eof[POV4_STDOUT_ERRNO] = 5
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: bad_eof,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+
+    it "rejects an RSS value when direct RSS evidence is absent":
+        var no_direct_rss = _golden_words()
+        no_direct_rss[9] = no_direct_rss[9] & ~POV4_VALID_DIRECT_RSS
+        no_direct_rss[POV4_CHILD_DIRECT_RSS_BYTES] = 100
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: no_direct_rss,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+
+    it "freezes then consumes exactly the matching acknowledgement digest":
+        var frozen = freeze_process_observation_receipt_v4(
+            decode_process_observation_v4(_golden_wire()).unwrap()).unwrap()
+        expect(frozen.acknowledge(_binding()).is_ok()).to_equal(true)
+        expect(frozen.acknowledge(_binding()).is_err()).to_equal(true)
+
+    it "requires a frozen receipt to preserve every delivered byte and terminal authority":
+        var truncated_payload = _golden_words()
+        truncated_payload[60] = 0
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: truncated_payload,
+            stdout: [], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+        var running_frozen = _golden_words()
+        running_frozen[3] = 1
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: running_frozen,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+        var unreaped_frozen = _golden_words()
+        unreaped_frozen[47] = 0
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: unreaped_frozen,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+        var unconfirmed_frozen = _golden_words()
+        unconfirmed_frozen[22] = -1
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: unconfirmed_frozen,
+            stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).is_err()).to_equal(true)
+        var bypassed_status = decode_process_observation_v4(_golden_wire()).unwrap()
+        bypassed_status.packet.status = ProcessObservationStatusV4.Running
+        expect(freeze_process_observation_receipt_v4(bypassed_status).is_err()).to_equal(true)
+        var bypassed_payload = decode_process_observation_v4(_golden_wire()).unwrap()
+        bypassed_payload.stdout = []
+        expect(freeze_process_observation_receipt_v4(bypassed_payload).is_err()).to_equal(true)
+        var bypassed_leader_time = decode_process_observation_v4(_golden_wire()).unwrap()
+        bypassed_leader_time.packet.leader_waited_ns = -1
+        expect(freeze_process_observation_receipt_v4(bypassed_leader_time).is_err()).to_equal(true)
+        var bypassed_tree_time = decode_process_observation_v4(_golden_wire()).unwrap()
+        bypassed_tree_time.packet.tree_empty_ns = -1
+        expect(freeze_process_observation_receipt_v4(bypassed_tree_time).is_err()).to_equal(true)
+
+    it "requires canonical sorted request inputs":
+        expect(process_observation_request_valid_v4(_request())).to_equal(true)
+        var unsorted = _request()
+        unsorted.environment = [ProcessObservationEnvironmentV4(key: "B", value: "2"),
+            ProcessObservationEnvironmentV4(key: "A", value: "1")]
+        expect(process_observation_request_valid_v4(unsorted)).to_equal(false)
+        var missing_cwd_identity = _request()
+        missing_cwd_identity.cwd_pin_claim = 0
+        expect(process_observation_request_valid_v4(missing_cwd_identity)).to_equal(false)
+        var cwd_alias = _request()
+        cwd_alias.canonical_cwd = "/work/."
+        expect(process_observation_request_valid_v4(cwd_alias)).to_equal(false)
+
+    it "round trips the canonical little-endian request binding exactly":
+        val first = canonical_encode_process_observation_request_v4(_request()).unwrap()
+        val decoded = canonical_decode_process_observation_request_v4(first).unwrap()
+        val second = canonical_encode_process_observation_request_v4(decoded).unwrap()
+        expect(first[0:8]).to_equal([80u8, 79u8, 86u8, 52u8, 82u8, 69u8, 81u8, 0u8])
+        expect(first[8:16]).to_equal([1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
+        expect(first).to_equal(second)
+
+    it "rejects invalid UTF-8 rather than trusting byte-to-text conversion":
+        var invalid_utf8 = canonical_encode_process_observation_request_v4(_request()).unwrap()
+        # 8 magic + 12 request u64 words + 32 digest + 8 cwd length.
+        invalid_utf8[144] = 255u8
+        expect(canonical_decode_process_observation_request_v4(invalid_utf8).is_err()).to_equal(true)
+
+    it "allows a pre-spawn rejection to retain absent process times":
+        var rejected = _golden_words()
+        rejected[1] = 1
+        rejected[3] = 3
+        rejected[8] = 9
+        rejected[9] = 0
+        rejected[10] = 1
+        rejected[11] = 1
+        rejected[13] = 1
+        rejected[15] = 0
+        rejected[21] = -1
+        rejected[22] = -1
+        rejected[23] = -1
+        rejected[24] = -1
+        rejected[25] = -1
+        rejected[26] = -1
+        rejected[27] = -1
+        rejected[49] = 4
+        rejected[54] = 4
+        rejected[32] = 0
+        rejected[33] = 0
+        rejected[34] = 0
+        rejected[35] = 0
+        rejected[40] = 0
+        rejected[41] = 0
+        rejected[45] = 0
+        rejected[46] = 0
+        rejected[47] = 0
+        rejected[48] = 0
+        rejected[51] = 0
+        rejected[52] = 0
+        rejected[53] = 0
+        rejected[56] = 0
+        rejected[57] = 0
+        rejected[58] = 0
+        rejected[60] = 0
+        rejected[61] = 0
+        rejected[62] = 0
+        expect(decode_process_observation_v4(ProcessObservationWireV4(words: rejected,
+            stdout: [], stderr: [], binding: [])).is_ok()).to_equal(true)
+
+describe "process observation V4 absolute deadline reducer":
+    it "sends TERM and KILL on the same tick when grace is zero":
+        val deadlines = process_observation_deadlines_v4(10, 10, 0, 10).unwrap()
+        val decision = process_observation_reduce_deadline_v4(deadlines, 20,
+            ProcessObservationDeadlineStateV4(phase: ProcessObservationPhaseV4.Running,
+                term_attempted: false, kill_attempted: false,
+                leader_reaped: false, tree_empty: false))
+        expect(decision.action).to_equal(ProcessObservationDeadlineActionV4.AttemptTermAndKill)
+
+    it "does not report cleanup before every due signal was attempted":
+        val deadlines = process_observation_deadlines_v4(10, 10, 0, 0).unwrap()
+        val signal_first = process_observation_reduce_deadline_v4(deadlines, 20,
+            ProcessObservationDeadlineStateV4(phase: ProcessObservationPhaseV4.Running,
+                term_attempted: false, kill_attempted: false,
+                leader_reaped: false, tree_empty: false))
+        val cleanup_after_signals = process_observation_reduce_deadline_v4(deadlines, 20,
+            ProcessObservationDeadlineStateV4(phase: ProcessObservationPhaseV4.KillRequested,
+                term_attempted: true, kill_attempted: true,
+                leader_reaped: false, tree_empty: false))
+        expect(signal_first.action).to_equal(ProcessObservationDeadlineActionV4.AttemptTermAndKill)
+        expect(cleanup_after_signals.action).to_equal(ProcessObservationDeadlineActionV4.ReportCleanupPending)
+
+    it "preserves absolute deadlines across EINTR-like repeated reductions":
+        val deadlines = process_observation_deadlines_v4(10, 10, 5, 10).unwrap()
+        val first = process_observation_reduce_deadline_v4(deadlines, 20,
+            ProcessObservationDeadlineStateV4(phase: ProcessObservationPhaseV4.Running,
+                term_attempted: false, kill_attempted: false,
+                leader_reaped: false, tree_empty: false))
+        val retry = process_observation_reduce_deadline_v4(deadlines, 20,
+            ProcessObservationDeadlineStateV4(phase: ProcessObservationPhaseV4.TermRequested,
+                term_attempted: true, kill_attempted: false,
+                leader_reaped: false, tree_empty: false))
+        expect(first.action).to_equal(ProcessObservationDeadlineActionV4.AttemptTerm)
+        expect(retry.action).to_equal(ProcessObservationDeadlineActionV4.None)
+        expect(deadlines.execution_deadline_ns).to_equal(20)

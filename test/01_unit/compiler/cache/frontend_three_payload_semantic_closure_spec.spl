@@ -1,0 +1,87 @@
+# Purpose and audience: executable frontend evidence for Payload B semantic closure.
+# @req REQ-CSM-027
+
+use std.spec.*
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1, ThreePayloadSemanticRefLocationV1,
+}
+use compiler.frontend.cache_artifact.{
+    FrontendThreePayloadSemanticFactV1, build_three_payload_semantic_refs_v1,
+}
+
+fn fact(kind: ThreePayloadSemanticRefKindV1, name: text, section: i64?) -> FrontendThreePayloadSemanticFactV1:
+    FrontendThreePayloadSemanticFactV1(
+        kind: kind, stable_entity_id: name,
+        callable_signature_digest: "signature:{name}",
+        effect_digest: "effects:{name}",
+        body_or_object_digest: "object:{name}",
+        embedded_section_index: section,
+    )
+
+fn fact_with_digests(kind: ThreePayloadSemanticRefKindV1, name: text, section: i64?, signature: text) -> FrontendThreePayloadSemanticFactV1:
+    FrontendThreePayloadSemanticFactV1(
+        kind: kind, stable_entity_id: name,
+        callable_signature_digest: signature,
+        effect_digest: "effects:{name}",
+        body_or_object_digest: "object:{name}",
+        embedded_section_index: section,
+    )
+
+describe "frontend three-payload semantic closure":
+    it "embeds macro/default bodies and keeps trait/aspect calls symbolic":
+        val refs = build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.before", nil),
+            fact(ThreePayloadSemanticRefKindV1.TraitDefaultBody, "Trait.default", Some(3)),
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "Trait.call", nil),
+            fact(ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.expand", Some(2)),
+        ]).unwrap()
+        expect(refs.len()).to_equal(4)
+        expect(refs[0].kind).to_equal(ThreePayloadSemanticRefKindV1.MacroExpansion)
+        expect(refs[0].location).to_equal(ThreePayloadSemanticRefLocationV1.EmbeddedTldSection)
+        expect(refs[1].location).to_equal(ThreePayloadSemanticRefLocationV1.EmbeddedTldSection)
+        expect(refs[2].kind).to_equal(ThreePayloadSemanticRefKindV1.TraitCallable)
+        expect(refs[2].location).to_equal(ThreePayloadSemanticRefLocationV1.SymbolicObject)
+        expect(refs[3].kind).to_equal(ThreePayloadSemanticRefKindV1.AspectCallable)
+        expect(refs[3].location).to_equal(ThreePayloadSemanticRefLocationV1.SymbolicObject)
+        expect(refs[0].embedded_section_index).to_equal(Some(2))
+        expect(refs[2].embedded_section_index).to_equal(nil)
+
+    it "is deterministic and rejects body/call placement violations":
+        val first = build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "Trait.call", nil),
+            fact(ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.expand", Some(2)),
+        ]).unwrap()
+        val second = build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.expand", Some(2)),
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "Trait.call", nil),
+        ]).unwrap()
+        expect(first).to_equal(second)
+        expect(build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.external", nil),
+        ]).is_err()).to_equal(true)
+        expect(build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.body", Some(4)),
+        ]).is_err()).to_equal(true)
+
+    it "covers generic embedding, negative sections, empty identities, and duplicate policy":
+        val generic = build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.GenericBody, "generic.make", Some(7)),
+        ]).unwrap()
+        expect(generic[0].location).to_equal(ThreePayloadSemanticRefLocationV1.EmbeddedTldSection)
+        expect(generic[0].embedded_section_index).to_equal(Some(7))
+        expect(build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.GenericBody, "generic.bad", Some(0 - 1)),
+        ]).is_err()).to_equal(true)
+        expect(build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.MacroExpansion, "", Some(1)),
+        ]).is_err()).to_equal(true)
+        val equal = build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "Trait.same", nil),
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "Trait.same", nil),
+        ]).unwrap()
+        expect(equal.len()).to_equal(1)
+        expect(build_three_payload_semantic_refs_v1([
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "Trait.conflict", nil),
+            fact_with_digests(ThreePayloadSemanticRefKindV1.TraitCallable,
+                "Trait.conflict", nil, "different-signature"),
+        ]).is_err()).to_equal(true)

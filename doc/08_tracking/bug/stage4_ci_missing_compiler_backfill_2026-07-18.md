@@ -1,4 +1,9 @@
 # Stage4 full-CLI CI omitted compiler backfill
+## Closed 2026-09-16 — ...Cargo cache retained stale output. ## Fix and prevention The LLVM seed step now builds `si
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -15,3 +20,4 @@ requires that prerequisite to occur before `mcp_flag=--full-cli`.
 
 This is source/static evidence only; the workflow has not been executed in this
 session.
+

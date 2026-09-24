@@ -170,3 +170,7 @@ set was re-measured, not reduced. Same family as `check_script_wiring_orphans_20
 — these two rows collapse into one backlog item (wire or retire the orphan guards), not two bugs.
 Note: this lane ADDED one new guard, `scripts/check/check-phantom-log-reference.shs`, which is
 currently itself unwired and should be added to a caller when the wiring backlog is worked.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Report-only record by design (no guard wired/deleted/edited per its own header); wiring 48 guards is a large cross-cutting task, not a bounded fix. No change made.

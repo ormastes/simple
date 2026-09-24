@@ -1,4 +1,8 @@
 # Bare local dict-of-list `d[k].push(v)` silently drops the mutation (interpreter)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** OPEN — reproduced incidentally, needs a minimal reduction + spec
@@ -60,3 +64,4 @@ here rather than normalized silently, per CLAUDE.md.
 Reduce to a minimal spec under `test/01_unit/compiler/`, confirm the
 interpreter/native split, then fix. Until then, prefer an owner class over a
 bare local dict-of-list anywhere correctness depends on the push landing.
+

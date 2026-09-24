@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+WRAPPER="$ROOT/scripts/check/check-vulkan-2d-c-compare.shs"
+FIXTURE="$ROOT/test/05_perf/bench/vulkan_2d_c/vk2d_bench.c"
+
+require_text() {
+    needle=$1
+    file=$2
+    grep -F "$needle" "$file" >/dev/null || {
+        echo "missing contract text in $file: $needle" >&2
+        exit 1
+    }
+}
+
+require_text 'VK2D_SCENES="$BENCH_DIR/scenes.txt"' "$WRAPPER"
+require_text 'c.stdout.raw' "$WRAPPER"
+require_text 'c.stderr.raw' "$WRAPPER"
+require_text 'c.runtime.env' "$WRAPPER"
+require_text 'c.toolchain.env' "$WRAPPER"
+require_text 'c_compiler_sha256=' "$WRAPPER"
+require_text 'shader_compiler_sha256=' "$WRAPPER"
+require_text 'cannot bind C compiler identity' "$WRAPPER"
+require_text 'cannot bind shader compiler identity' "$WRAPPER"
+require_text 'maximum resident set size' "$WRAPPER"
+require_text 'c_max_rss_bytes=unavailable' "$WRAPPER"
+require_text 'scene_source)" != table' "$WRAPPER"
+require_text 'c_timing_scope=draw-plus-submit-to-fence-p95' "$WRAPPER"
+require_text 'c_p50_candidate' "$WRAPPER"
+require_text 'c_p50_candidate" -gt "$c_p95_candidate' "$WRAPPER"
+require_text 'c_polls" -lt "$FRAMES' "$WRAPPER"
+require_text 'invalid-post-timing-capture-size' "$WRAPPER"
+require_text 'software-fallback-device' "$WRAPPER"
+require_text 'required table unreadable' "$FIXTURE"
+require_text 'scene_source=%s' "$FIXTURE"
+require_text 'sample_start_ns[slot] = now_ns();' "$FIXTURE"
+
+start_line=$(grep -n 'sample_start_ns\[slot\] = now_ns();' "$FIXTURE" | cut -d: -f1)
+record_line=$(grep -n 'record_frame(cmd_buffers\[slot\]' "$FIXTURE" | cut -d: -f1)
+[ "$start_line" -lt "$record_line" ] || {
+    echo "C timing must start before draw/record work" >&2
+    exit 1
+}
+
+destroy_line=$(grep -n 'vkDestroyBuffer(device, fb_buffer' "$FIXTURE" | cut -d: -f1)
+free_line=$(grep -n 'vkFreeMemory(device, memory' "$FIXTURE" | cut -d: -f1)
+[ "$destroy_line" -lt "$free_line" ] || {
+    echo "bound buffer must be destroyed before its memory is freed" >&2
+    exit 1
+}
+
+echo "vulkan_2d_c_evidence_contract=pass"

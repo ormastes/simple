@@ -1,4 +1,9 @@
 # Interpreter logical operators eagerly evaluate the right operand
+## Closed 2026-09-16 — RESOLVED 2026-09-06 with executable proof: spec 9/9 green, defect re-injection discriminates
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - status: **RESOLVED 2026-09-06 — executable proof landed.** (Was: "source fixed
   2026-07-15; executable interpreter proof pending a runnable pure-Simple
@@ -71,3 +76,4 @@ in this worktree, for every spec tried (`ops_spec.spl`, `todo_builtin_spec.spl`,
 and a three-line hand-written probe). That is a silent vacuous pass on the
 default test command. `SIMPLE_TEST_RUNNER_RUST=1` is the documented escape hatch
 and is what every measurement above used.
+

@@ -1,0 +1,249 @@
+"""Stable parse-result provider seam and normalized scalar dialect parity.
+
+EGL package 4. The seam is the versioned port through which a consumer asks for
+a parse result for (source-bytes identity, dialect) and receives either a
+normalized result or a typed refusal. The scalar provider is the existing
+pure-Simple parser entry `parse_and_build_module_scoped`; the SIMD/variant
+provider slot is declared UNAVAILABLE on this host with an honest receipt.
+
+Parity here is `seam vs direct parser`, not `legacy vs canonical`: the claim
+under test is that routing an admitted request through the provider port does
+not perturb the parse result after normalization. Corpus:
+`test/fixtures/parse_result_provider_seam_v1/*.spl`.
+"""
+
+# @req REQ-009
+
+use std.spec.{describe, it, assert_true, assert_false, expect}
+
+use compiler.driver.parse_result_provider_seam_v1.{
+    PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+    PARSE_DIALECT_SIMPLE_V1,
+    ParseRequestV1,
+    ParseResultRefusalV1,
+    parse_result_provider_scalar_v1,
+    parse_result_provider_simd_v1,
+    parse_result_seam_request_v1,
+    parse_result_normalize_module_v1,
+    parse_result_normalized_output_same_v1,
+    parse_result_parity_evidence_v1
+}
+use compiler.driver.parser_scalar_parity_v1.{
+    ParserScalarNormalizedOutputV1,
+    ParserScalarParityErrorV1,
+    parser_scalar_parity_qualify_v1
+}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val CORPUS: [text] = [
+    "f01_functions.spl",
+    "f02_types.spl",
+    "f03_interpolation.spl",
+    "f04_traits_consts.spl",
+    "f05_diagnostic.spl"
+]
+
+fn corpus_source(name: text) -> text:
+    rt_file_read_text("test/fixtures/parse_result_provider_seam_v1/{name}") ?? ""
+
+fn seam_request(name: text, dialect: u32) -> ParseRequestV1:
+    ParseRequestV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+        source_text: corpus_source(name), source_path: name, dialect_id: dialect)
+
+# The direct leg deliberately does NOT go through the seam: it calls the parser
+# entry, drains the parser's own error channel immediately (the next parse
+# resets it), and applies only the shared normalization definition.
+fn direct_normalized(name: text) -> ParserScalarNormalizedOutputV1:
+    val src = corpus_source(name)
+    val module = parse_and_build_module_scoped(src, name, false)
+    val diagnostics = if parser_has_errors(): parser_get_errors() else: []
+    parse_result_normalize_module_v1(module, src, name, diagnostics)
+
+describe "parse-result provider seam":
+    it "returns a fully declared normalized result for every frozen corpus entry":
+        # @req REQ-009
+        val scalar = parse_result_provider_scalar_v1()
+        assert_true(scalar.available)
+        for name in CORPUS:
+            val outcome = parse_result_seam_request_v1(
+                scalar, seam_request(name, PARSE_DIALECT_SIMPLE_V1))
+            match outcome:
+                case Ok(result):
+                    expect(result.schema_version).to_equal(
+                        PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1)
+                    expect(result.dialect_id).to_equal(PARSE_DIALECT_SIMPLE_V1)
+                    expect(result.provider_id).to_equal(scalar.provider_id)
+                    assert_true(result.source_length > 0u64)
+                    assert_true(result.token_count > 0u64)
+                    assert_true(result.declaration_count > 0u64)
+                    assert_true(result.output.token_digest.w0 != 0u64 or
+                        result.output.token_digest.w1 != 0u64)
+                    assert_true(result.output.span_digest.w0 != 0u64 or
+                        result.output.span_digest.w1 != 0u64)
+                    assert_true(result.output.node_digest.w0 != 0u64 or
+                        result.output.node_digest.w1 != 0u64)
+                    assert_true(result.output.diagnostic_digest.w0 != 0u64 or
+                        result.output.diagnostic_digest.w1 != 0u64)
+                case Err(refusal):
+                    assert_true(false)
+
+    it "is byte-identical for the same source through the seam twice":
+        # @req REQ-009
+        val scalar = parse_result_provider_scalar_v1()
+        for name in CORPUS:
+            val first = parse_result_seam_request_v1(
+                scalar, seam_request(name, PARSE_DIALECT_SIMPLE_V1))
+            val second = parse_result_seam_request_v1(
+                scalar, seam_request(name, PARSE_DIALECT_SIMPLE_V1))
+            match first:
+                case Ok(a):
+                    match second:
+                        case Ok(b):
+                            assert_true(parse_result_normalized_output_same_v1(
+                                a.output, b.output))
+                            expect(b.source_identity.w0).to_equal(a.source_identity.w0)
+                            expect(b.token_count).to_equal(a.token_count)
+                            expect(b.declaration_count).to_equal(a.declaration_count)
+                            expect(b.diagnostic_count).to_equal(a.diagnostic_count)
+                        case Err(e):
+                            assert_true(false)
+                case Err(e):
+                    assert_true(false)
+
+    it "matches the direct parser entry after normalization":
+        # @req REQ-009
+        val scalar = parse_result_provider_scalar_v1()
+        for name in CORPUS:
+            val direct = direct_normalized(name)
+            val outcome = parse_result_seam_request_v1(
+                scalar, seam_request(name, PARSE_DIALECT_SIMPLE_V1))
+            match outcome:
+                case Ok(result):
+                    assert_true(parse_result_normalized_output_same_v1(
+                        result.output, direct))
+                case Err(e):
+                    assert_true(false)
+
+    it "discriminates distinct corpus sources instead of always agreeing":
+        # @req REQ-009
+        val scalar = parse_result_provider_scalar_v1()
+        val a = parse_result_seam_request_v1(
+            scalar, seam_request("f01_functions.spl", PARSE_DIALECT_SIMPLE_V1))
+        val b = parse_result_seam_request_v1(
+            scalar, seam_request("f02_types.spl", PARSE_DIALECT_SIMPLE_V1))
+        match a:
+            case Ok(ra):
+                match b:
+                    case Ok(rb):
+                        assert_false(parse_result_normalized_output_same_v1(
+                            ra.output, rb.output))
+                        assert_false(ra.source_identity.w0 == rb.source_identity.w0)
+                    case Err(e):
+                        assert_true(false)
+            case Err(e):
+                assert_true(false)
+
+    it "carries parser diagnostics into the diagnostic digest":
+        # @req REQ-009
+        val scalar = parse_result_provider_scalar_v1()
+        val clean = parse_result_seam_request_v1(
+            scalar, seam_request("f01_functions.spl", PARSE_DIALECT_SIMPLE_V1))
+        val broken = parse_result_seam_request_v1(
+            scalar, seam_request("f05_diagnostic.spl", PARSE_DIALECT_SIMPLE_V1))
+        match clean:
+            case Ok(rc):
+                expect(rc.diagnostic_count).to_equal(0u64)
+                match broken:
+                    case Ok(rb):
+                        assert_true(rb.diagnostic_count > 0u64)
+                        assert_false(rc.output.diagnostic_digest.w0 ==
+                            rb.output.diagnostic_digest.w0)
+                    case Err(e):
+                        assert_true(false)
+            case Err(e):
+                assert_true(false)
+
+    it "declares the SIMD provider slot unavailable with an honest receipt":
+        # @req REQ-009
+        val simd = parse_result_provider_simd_v1()
+        assert_false(simd.available)
+        expect(simd.unavailable_reason).to_contain("aarch64")
+        expect(simd.unavailable_reason).to_contain("package 5")
+        val outcome = parse_result_seam_request_v1(
+            simd, seam_request("f01_functions.spl", PARSE_DIALECT_SIMPLE_V1))
+        match outcome:
+            case Ok(result):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.ProviderUnavailable)
+
+    it "refuses an unknown dialect and an unidentified source":
+        # @req REQ-009
+        val scalar = parse_result_provider_scalar_v1()
+        val bad_dialect = parse_result_seam_request_v1(
+            scalar, seam_request("f01_functions.spl", 4097u32))
+        match bad_dialect:
+            case Ok(r):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.UnsupportedDialect)
+        val no_path = parse_result_seam_request_v1(scalar,
+            ParseRequestV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+                source_text: "fn a() -> i64:\n    1\n", source_path: "",
+                dialect_id: PARSE_DIALECT_SIMPLE_V1))
+        match no_path:
+            case Ok(r):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.InvalidRequest)
+        val wrong_schema = parse_result_seam_request_v1(scalar,
+            ParseRequestV1(schema_version: 9u16,
+                source_text: "fn a() -> i64:\n    1\n", source_path: "p.spl",
+                dialect_id: PARSE_DIALECT_SIMPLE_V1))
+        match wrong_schema:
+            case Ok(r):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.ProviderSchemaMismatch)
+
+    it "qualifies seam-versus-direct parity through the parity owner":
+        # @req REQ-009
+        val scalar = parse_result_provider_scalar_v1()
+        val name = "f03_interpolation.spl"
+        val direct = direct_normalized(name)
+        val outcome = parse_result_seam_request_v1(
+            scalar, seam_request(name, PARSE_DIALECT_SIMPLE_V1))
+        match outcome:
+            case Ok(result):
+                val evidence = parse_result_parity_evidence_v1(
+                    result, direct, "frontend.flat_ast_bridge.direct.v1", 1u64)
+                match evidence:
+                    case Ok(ev):
+                        match parser_scalar_parity_qualify_v1(ev):
+                            case Ok(receipt):
+                                assert_true(receipt.default_promotion_qualified)
+                                expect(receipt.dialect_id).to_equal(
+                                    PARSE_DIALECT_SIMPLE_V1)
+                            case Err(err):
+                                assert_true(false)
+                        # A perturbed normalized output must be refused, so a
+                        # green qualification is not a vacuous one.
+                        var mutated = ev
+                        mutated.legacy_output = ParserScalarNormalizedOutputV1(
+                            token_digest: ev.legacy_output.span_digest,
+                            span_digest: ev.legacy_output.token_digest,
+                            node_digest: ev.legacy_output.node_digest,
+                            diagnostic_digest: ev.legacy_output.diagnostic_digest)
+                        match parser_scalar_parity_qualify_v1(mutated):
+                            case Ok(receipt):
+                                assert_true(false)
+                            case Err(err):
+                                assert_true(err ==
+                                    ParserScalarParityErrorV1.NormalizedOutputMismatch)
+                    case Err(refusal):
+                        assert_true(false)
+            case Err(e):
+                assert_true(false)

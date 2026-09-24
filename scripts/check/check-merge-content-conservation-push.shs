@@ -205,12 +205,24 @@ substantive() {
 #   closing it needs real scope analysis, not a grep.
 # ---------------------------------------------------------------------------
 definitions() {
+    # `pub` is optional AND may carry a Rust visibility scope -- `pub(crate) fn`,
+    # `pub(super) fn`, `pub(in crate::x) fn`. Measured 2026-09-12: without the
+    # scope, merge 4be361c5f63 reported `shared_text_is_ascii` in
+    # src/compiler_rust/compiler/src/interpreter_method/mod.rs as a LOST
+    # definition with 1 surviving reference, when the definition is present at
+    # line 59 of the merge result and the result's file is byte-identical to
+    # origin/main's. One parent declared it `fn`, the other widened it to
+    # `pub(crate) fn`, and the result kept the widened form -- which this
+    # pattern then failed to see, so the name was in the parent union and not in
+    # the result set. Widening the pattern makes the extractor see MORE
+    # definitions on every side, so it cannot hide a real loss; it only stops
+    # inventing one out of a visibility change.
     awk '
-        /^(pub )?(fn|struct|class|enum|trait|mixin) [A-Za-z_][A-Za-z0-9_]*/ {
+        /^(pub(\([^)]*\))? )?(fn|struct|class|enum|trait|mixin) [A-Za-z_][A-Za-z0-9_]*/ {
           line = $0
-          match(line, /^(pub )?(fn|struct|class|enum|trait|mixin) [A-Za-z_][A-Za-z0-9_]*/)
+          match(line, /^(pub(\([^)]*\))? )?(fn|struct|class|enum|trait|mixin) [A-Za-z_][A-Za-z0-9_]*/)
           s = substr(line, RSTART, RLENGTH)
-          sub(/^(pub )?(fn|struct|class|enum|trait|mixin) /, "", s)
+          sub(/^(pub(\([^)]*\))? )?(fn|struct|class|enum|trait|mixin) /, "", s)
           print s
         }
     ' "$1" | LC_ALL=C sort -u > "$2"

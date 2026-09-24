@@ -1,0 +1,88 @@
+use app.spipe.testing.*
+use compiler.driver.cache.cas_store.{cas_open}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, package_archive_load_v1,
+    package_archive_publish_v1
+}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn archive_entry() -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        "pkg.alpha", "pkg.alpha.main", "snapshot/pkg/alpha/main.spl",
+        sha256_text("source"), sha256_text("interface"),
+        sha256_text("export"), sha256_text("abi"), sha256_text("init"),
+        sha256_text("provider"), sha256_text("action-key"),
+        sha256_text("manifest"), "scc.alpha", [], [])
+
+fn archive_authority(variant: text) -> PackageArchiveAuthorityV1:
+    PackageArchiveAuthorityV1(
+        sha256_text("producer"), "root-generation", variant,
+        "revision", "tree", sha256_text("inventory"))
+
+describe "sealed clean-package archive cache":
+    it "loads a clean package without opening source":
+        val root = "/tmp/simple-package-archive-cache-clean"
+        expect(cas_open(root)).to_equal(true)
+        val entry = archive_entry()
+        val authority = archive_authority(sha256_text("variant"))
+        expect(package_archive_publish_v1(
+            root, entry, authority, [sha256_text("dependency")],
+            "interface", "action-object")).to_equal(true)
+        val loaded = package_archive_load_v1(
+            root, entry, authority, [sha256_text("dependency")])
+        expect(loaded.valid).to_equal(true)
+        expect(loaded.source_required).to_equal(false)
+        expect(loaded.interface_path).to_contain("/cas/sha256/")
+        expect(loaded.action_path).to_contain("/cas/sha256/")
+
+    it "fails closed on provenance or dependency mismatch":
+        val root = "/tmp/simple-package-archive-cache-provenance"
+        expect(cas_open(root)).to_equal(true)
+        val entry = archive_entry()
+        val authority = archive_authority(sha256_text("variant"))
+        expect(package_archive_publish_v1(
+            root, entry, authority, [sha256_text("dependency")],
+            "interface", "action-object")).to_equal(true)
+        val wrong_variant = package_archive_load_v1(
+            root, entry, archive_authority(sha256_text("other")),
+            [sha256_text("dependency")])
+        expect(wrong_variant.valid).to_equal(false)
+        expect(wrong_variant.source_required).to_equal(false)
+        expect(wrong_variant.reason).to_equal("archive-provenance-mismatch")
+        val wrong_dependency = package_archive_load_v1(
+            root, entry, authority, [sha256_text("other-dependency")])
+        expect(wrong_dependency.valid).to_equal(false)
+        expect(wrong_dependency.source_required).to_equal(false)
+
+    it "rejects an unbound authority dimension":
+        val root = "/tmp/simple-package-archive-cache-authority"
+        expect(cas_open(root)).to_equal(true)
+        val entry = archive_entry()
+        val invalid = PackageArchiveAuthorityV1(
+            sha256_text("producer"), "", sha256_text("variant"),
+            "revision", "tree", sha256_text("inventory"))
+        expect(package_archive_publish_v1(
+            root, entry, invalid, [sha256_text("dependency")],
+            "interface", "action-object")).to_equal(false)
+
+    it "routes only a missing archive back to frozen source":
+        val root = "/tmp/simple-package-archive-cache-missing"
+        expect(cas_open(root)).to_equal(true)
+        val loaded = package_archive_load_v1(
+            root, archive_entry(), archive_authority(sha256_text("variant")),
+            [sha256_text("dependency")])
+        expect(loaded.valid).to_equal(false)
+        expect(loaded.reason).to_equal("archive-missing")
+        expect(loaded.source_required).to_equal(true)
+
+    it "admits packages with no dependencies":
+        val root = "/tmp/simple-package-archive-cache-leaf"
+        expect(cas_open(root)).to_equal(true)
+        val entry = archive_entry()
+        val authority = archive_authority(sha256_text("variant"))
+        expect(package_archive_publish_v1(
+            root, entry, authority, [], "interface", "action-object"
+        )).to_equal(true)
+        expect(package_archive_load_v1(
+            root, entry, authority, []).valid).to_equal(true)

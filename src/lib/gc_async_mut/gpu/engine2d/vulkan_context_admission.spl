@@ -1,0 +1,140 @@
+"""Authoritative Pure-Simple Vulkan context admission for Engine2D.
+
+This module is deliberately a gate, not a second Vulkan owner. It accepts only
+a live Engine2D `VulkanBackend` and inspects its retained `VulkanSession`, but
+does not publish raw handles as identities; callers cannot provide a
+device/session number as proof.
+
+The current canonical SFFI has a managed async buffer binder, but no checked
+operation that binds an async session to this exact live session, framebuffer,
+and presentation target.  Therefore this package reports that capability as
+unavailable and leaves the existing synchronous owner in charge.  It must not
+manufacture a positive async receipt from local handles.
+"""
+
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.vulkan_async_submission.{
+    vulkan_async_session_bind_buffer_supported
+}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuDrawIrPayload, simpleos_host_gpu_draw_ir_encode
+}
+use std.common.ui.draw_ir.{DrawIrComposition}
+
+pub val VULKAN_CONTEXT_ADMISSION_ADMITTED: text = "admitted"
+pub val VULKAN_CONTEXT_ADMISSION_UNAVAILABLE: text = "unavailable"
+pub val VULKAN_CONTEXT_ADMISSION_REJECTED: text = "rejected"
+
+pub struct VulkanDrawIrAdmission:
+    status: text
+    reason: text
+    packet: SimpleOsHostGpuDrawIrPayload
+    device_identity: i64
+    session_generation: i64
+    surface_identity: i64
+    capacity: i64
+    buffer_binding_supported: bool
+    context_binding_supported: bool
+    async_claim: bool
+
+fn _unavailable(packet: SimpleOsHostGpuDrawIrPayload, reason: text,
+                capacity: i64) -> VulkanDrawIrAdmission:
+    VulkanDrawIrAdmission(
+        status: VULKAN_CONTEXT_ADMISSION_UNAVAILABLE,
+        reason: reason,
+        packet: packet,
+        # Raw handles observed through a caller-provided backend are not a
+        # provider-issued binding. Never expose them as admitted identities.
+        device_identity: 0,
+        session_generation: 0,
+        surface_identity: 0,
+        capacity: capacity,
+        buffer_binding_supported: vulkan_async_session_bind_buffer_supported(),
+        context_binding_supported: false,
+        async_claim: false)
+
+fn _rejected(packet: SimpleOsHostGpuDrawIrPayload, reason: text,
+             capacity: i64) -> VulkanDrawIrAdmission:
+    VulkanDrawIrAdmission(
+        status: VULKAN_CONTEXT_ADMISSION_REJECTED,
+        reason: reason,
+        packet: packet,
+        device_identity: 0, session_generation: 0, surface_identity: 0,
+        capacity: capacity, buffer_binding_supported: false,
+        context_binding_supported: false, async_claim: false)
+
+fn _packet_for(composition: DrawIrComposition) -> SimpleOsHostGpuDrawIrPayload:
+    # The existing canonical codec carries actual command geometry, text,
+    # styles, and image/resource references.  It is the immutable packet
+    # contract; a checksum alone is never treated as a recording receipt.
+    simpleos_host_gpu_draw_ir_encode(composition, 16777216, 4096)
+
+fn _packet_not_encoded(reason: text) -> SimpleOsHostGpuDrawIrPayload:
+    SimpleOsHostGpuDrawIrPayload(
+        ok: false, reason: reason, bytes: [], checksum: 0, command_count: 0)
+
+pub fn vulkan_context_draw_ir_packet(
+    composition: DrawIrComposition
+) -> SimpleOsHostGpuDrawIrPayload:
+    """Encode the bounded canonical candidate packet without claiming authority."""
+    _packet_for(composition)
+
+pub fn vulkan_context_admit(backend: VulkanBackend,
+                            capacity: i64) -> VulkanDrawIrAdmission:
+    if capacity < 3 or capacity > 16:
+        return _rejected(_packet_not_encoded("not-encoded"),
+            "async-capacity-out-of-range", capacity)
+    val no_packet = _packet_not_encoded("not-encoded-until-provider-admission")
+    if not backend.initialized or not backend.owns_session or
+       not backend.session.is_initialized or backend.session.device <= 0 or
+       backend.d_framebuffer <= 0:
+        return _unavailable(no_packet,
+            "live-engine2d-vulkan-context-unavailable", capacity)
+    if backend.completion_unknown:
+        return _unavailable(no_packet,
+            "vulkan-context-completion-unknown", capacity)
+    if backend.pending_compute_command > 0 or backend.pending_compute_count > 0:
+        return _unavailable(no_packet,
+            "legacy-recording-authority-active", capacity)
+    if not vulkan_async_session_bind_buffer_supported():
+        return _unavailable(no_packet,
+            "managed-buffer-binding-unavailable", capacity)
+    # Buffer binding is necessary but insufficient.  There is no canonical
+    # provider call to atomically bind the async session to this exact session,
+    # framebuffer, and presenter target, so a positive local identity cannot
+    # authorize a submission.  Keep this branch explicit for future SFFI work.
+    _unavailable(no_packet,
+        "provider-context-binding-unavailable", capacity)
+
+pub fn vulkan_context_admission_without_backend(
+    capacity: i64
+) -> VulkanDrawIrAdmission:
+    """Return an unavailable admission without manufacturing a backend owner."""
+    if capacity < 3 or capacity > 16:
+        return _rejected(_packet_not_encoded("not-encoded"),
+            "async-capacity-out-of-range", capacity)
+    val packet = _packet_not_encoded("not-encoded-without-live-context")
+    VulkanDrawIrAdmission(
+        status: VULKAN_CONTEXT_ADMISSION_UNAVAILABLE,
+        reason: "live-engine2d-vulkan-context-unavailable",
+        packet: packet, device_identity: 0, session_generation: 0,
+        surface_identity: 0, capacity: capacity,
+        buffer_binding_supported: false, context_binding_supported: false,
+        async_claim: false)
+
+pub fn vulkan_context_admission_summary(admission: VulkanDrawIrAdmission) -> text:
+    admission.status + ":" + admission.reason +
+        ":packet_ok=" + admission.packet.ok.to_text() +
+        ":commands=" + admission.packet.command_count.to_text() +
+        ":bytes=" + admission.packet.bytes.len().to_i64().to_text() +
+        ":device=" + admission.device_identity.to_text() +
+        ":session_generation=" + admission.session_generation.to_text() +
+        ":surface=" + admission.surface_identity.to_text() +
+        ":capacity=" + admission.capacity.to_text() +
+        ":buffer_binding=" + admission.buffer_binding_supported.to_text() +
+        ":context_binding=" + admission.context_binding_supported.to_text() +
+        ":async_claim=" + admission.async_claim.to_text()
+
+export VulkanDrawIrAdmission
+export vulkan_context_admit, vulkan_context_admission_without_backend
+export vulkan_context_admission_summary, vulkan_context_draw_ir_packet

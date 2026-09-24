@@ -1,4 +1,8 @@
 # `native-build` of an `io_runtime` importer does not terminate in `native_compile`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** RESOLVED 2026-08-24 — FIFTH blocker in the `io_runtime` native-build chain
 **Successor:** blocker #6, `native_compile_explicit_panic_diverging_process_ops_2026-08-24.md`
@@ -285,3 +289,4 @@ selftest: 7 fixture(s) passed
 PASS - 2 check(s) run, `ssa_block_can_reach` is iterative (single shared `seen`, no per-branch copy); native-build terminated with exit 1 within 600s (NOT a hang)
 GATE_RC=0
 ```
+

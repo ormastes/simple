@@ -1,4 +1,8 @@
 # Stage 4 compile-target trace environment facade
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -37,3 +41,4 @@ facade. The adjacent save/restore reads remain facade-owned and no raw
 Focused source contract: 2 examples passed (exact trace pair plus adjacent
 save/restore reads). `direct-env-runtime-guard.shs --working` also reported
 `STATUS: PASS`.
+

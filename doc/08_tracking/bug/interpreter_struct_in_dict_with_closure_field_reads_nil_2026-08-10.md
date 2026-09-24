@@ -88,3 +88,16 @@ slot when that struct has a closure-typed field; out of scope for stdlib lanes.
 Incidental second finding from the same run: `"Actor {actor_id}: not found"`
 interpolated the whole struct (`Actor ActorId(value: 0)`) rather than the id.
 Cosmetic, separate, not filed.
+
+## Triage 2026-09-13
+
+Deep tree-walk interpreter defect (struct read back out of a Dict
+value slot loses data when the struct has a closure-typed field),
+confirmed live on the real spawn_actor public API. The record itself
+explicitly says NOT to patch around it in actor.spl since that masks
+an engine defect affecting other callers with the same shape -- the
+real fix belongs in the interpreter's struct/Dict/closure handling,
+which is core compiler-internals work well beyond this lane's per-item
+budget and risky to attempt without deep interpreter familiarity.
+Leaving OPEN, no attempt (per the record's own explicit guidance).
+

@@ -1,5 +1,12 @@
 # RISC-V64 QEMU Boot Spec Yields Zero Executed Tests
 
+## Closed 2026-09-13 — Resolved 2026-06-06 by removing the misleading zero-test spec
+
+- **inferred** The Status line records the resolution: the misleading spec that declared tests but executed none was removed.
+- **measured** All three paths the entry references still exist (path scan: 3 referenced, 0 missing), i.e. the surviving lane is the intended one.
+- **inferred** QEMU RISC-V boot cannot be exercised from this Windows host; closing on the recorded removal.
+
+
 Date: 2026-06-06
 
 ## Summary
@@ -8,7 +15,7 @@ Date: 2026-06-06
 system-spec path with five `slow_it` scenarios, but the runner reports zero
 listed, passed, or failed tests.
 
-Status: resolved on 2026-06-06 by removing the misleading
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 `@platform: baremetal(riscv64)` filter from the host-run QEMU spec.
 
 ## Evidence

@@ -1,4 +1,8 @@
 # Current-source Stage 3 terminates after unbounded HIR build RSS growth
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN
 - Date: 2026-08-14
@@ -1267,3 +1271,83 @@ phases here.
 
 Neither is this bug's termination reproduced. Reproducing it still needs a
 Stage 2 and a canonical Stage 3, neither of which exists in this worktree.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: verification needs "one future canonical build" (a full Stage 3
+bootstrap run to measure RSS), which this lane does not run (no bootstrap per
+the fan-out brief). No change made.
+
+
+## Triage 2026-09-20 (Windows worktree, diagnosis-only, no reproduction attempted)
+
+Read in full before touching anything, per this record's own repeated warning
+that a kill without a monotonic HIR-phase RSS trace is not a repro. Per the
+task brief for this session, no attempt was made to reproduce the ~24.8 GB
+signal-15 termination directly — that is explicitly out of scope for this
+host/session (do not brute-force a 25 GB run), and matches the "Triage
+2026-09-13 (BUGFIX-7 lane)" entry immediately above this one, which reached
+the same conclusion for the same reason.
+
+No new measurement was taken, so nothing here promotes any of section 7 /
+section 10's candidates. Restating the state as of section 10 for the next session that *can*
+run an instrumented Stage 3, since it is the most actionable pointer in the
+record: the leading candidate is the untyped word-scan in
+`rt_transient_heap_promote` (`src/runtime/runtime_native.c:2131-2162`), which
+clears the owned bit on every node transitively reachable from a promoted HIR
+module (by scanning every 8-byte word of each block, not by following typed
+fields) -- a conservative retention path with no stated bound. Section 10's
+"cheapest next test" is unchanged and still unrun: report, per source,
+(a) blocks/bytes registered while the transient scope is paused, (b)
+blocks/bytes un-owned by promotion, and (c) blocks/bytes actually freed by
+`rt_core_reclaim_transient_raw`, alongside the existing `hir-promotion` /
+`hir-promotion-total` snapshot rows already present in
+`rt_core_transient_raw_register_state`, `rt_transient_heap_promote`, and
+`rt_core_reclaim_transient_raw`. That is a counter-only change (no
+representation or behaviour change) and would settle attribution across all
+four still-open candidates in one transaction. Not implemented in this lane:
+it requires driving a real Stage 2 + canonical Stage 3 to the HIR phase, which
+this record documents (section 11) as taking ~40 min (63-source closure) to ~12 h
+(775-source closure) on comparable hardware, and this session had neither a
+Stage 2 artifact nor the time budget for that.
+
+## 2026-09-21 — allocation registry churn contributor repaired; Stage 3 remains OPEN
+
+The current C owners had a reproducible bookkeeping-retention defect independent
+of the unresolved HIR promotion-closure hypothesis. Both struct-allocation
+registries doubled their backing table at the 70% occupied threshold even when
+retired addresses (tombstones), rather than live objects, caused the pressure.
+Both raw transient-allocation tables used the same unconditional growth policy.
+Transient scope completion does not shrink the retained table capacity.
+
+The repair applies the existing immortal-registry policy to these four tables:
+rehash at the current capacity when tombstones dominate and the next live entry
+still leaves live load below 50%; grow normally when the live set needs room.
+Rehashing copies allocation sizes and ownership flags and drops only tombstones.
+No HIR graph, promotion edge, or allocation reclamation policy changes.
+
+`src/runtime/test/rt_allocation_registry_churn_selfcheck.c` executes the actual
+owner functions, using distinct valid addresses for 512 module-shaped batches
+with 48 temporary entries and one retained cross-module root. It also checks
+retired lookup refusal, retained size/ownership, and a genuine 512-entry growth
+control. The table-byte oracle measures these bookkeeping buffers only.
+
+Linux x86_64, Clang C, WSL Ubuntu 22.04:
+
+| Provider | Before, bytes per table | After, bytes per table | Verdict |
+| --- | ---: | ---: | --- |
+| `runtime_native.c` | 262144 | 4096 | red baseline, repaired PASS |
+| `runtime_memory.c` | 262144 | 4096 | red baseline, repaired PASS |
+
+Run: `sh scripts/check/check-allocation-registry-churn.shs`.
+Logs: `build/native_probe/allocation-registry-churn/`.
+Windows x86_64 MSVC, Clang 18.1.8 `clang-cl /TC`: the memory-provider fixture
+passed with 4096 bytes per table. The native-provider translation compiled, but
+its isolated executable could not link unrelated runtime dependencies, so this
+lane does not claim a Windows native-provider execution PASS.
+
+This is a measured 64-fold reduction of retained registry storage for the
+bounded workload, **not attribution or closure of the historical Stage 3 P0**.
+The 25 GB termination, real full-entry-closure RSS budget, provenance-bound
+candidate, hello, and module-qualified field-layout checks remain unverified.
+No canonical Stage 3 was run, and both authoritative DB rows remain OPEN.

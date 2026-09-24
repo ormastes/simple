@@ -1,4 +1,8 @@
 # Stage-4 ignores `--threads` entirely — two independent layers both discard
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 # it (pure-Simple frontend driver has no fanout concept; AOT codegen's
 # "ParallelBuilder" computes a worker count and then runs sequentially anyway)
 
@@ -334,3 +338,4 @@ patches.
 - `doc/08_tracking/bug/stage4_entry_closure_duplicate_parse_2026-07-17.md`
 - `doc/08_tracking/bug/macos_stage4_full_cli_low_memory_runaway_2026-07-17.md`
 - `doc/08_tracking/bug/native_build_stage4_pre_object_spin_2026-07-13.md`
+

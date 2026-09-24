@@ -1,11 +1,6 @@
 # Linter check_* rule implementations.
 use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use compiler.tools.lint.main.*
-# Direct import from the concrete defining sibling module — the seed mangler
-# bare-externs calls whose import chain crosses the facade wildcard re-export.
-# See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
-use compiler.tools.lint._LintMain.name_lints.{lint_accessor_and_parent_names}
-use compiler.tools.lint._LintMain.nonexistent_type_lints.{lint_nonexistent_types}
 # Simple Language Linter
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
@@ -24,21 +19,12 @@ use compiler.tools.fix.rules.registry.{check_all_rules}
 use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
 use lazy nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
-use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
-use compiler.semantics.lint.param_tag.{check_param_tag}
-use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
 use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access_with_allowlist, raw_rt_lexical_code_lines, raw_rt_wrapper_replacement}
-use compiler.semantics.lint.cow_alias_hotpath.{check_cow_alias_hotpath}
-use compiler.semantics.lint.linear_scan_in_loop.{check_linear_scan_in_loop}
-use compiler.semantics.lint.silent_default.{check_silent_default}
 use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability_acquire}
 use std.critical.capability_manifest.{load_critical_mode_config}
-use compiler.semantics.lint.leading_operator.{check_leading_operator}
-use compiler.semantics.lint.const_ref_default.{check_const_ref_default}
-use compiler.semantics.lint.bare_primitive_internal.{check_bare_primitive_internal}
-use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource}
-use compiler.semantics.lint.raw_sffi_call.{
-    check_raw_sffi_calls, check_raw_sffi_declarations
+use compiler.tools.lint.static_rules.{
+    LintParamsV1, LintUnit, StaticLintCategory, StaticLintLevel,
+    static_lint_rule_table, run_static_lint_rule_table
 }
 
 # File I/O wrapper
@@ -250,7 +236,9 @@ impl Linter:
             critical_dynamic_acquire_loaded: false,
             critical_dynamic_acquire_mode: "allow",
             manifest_dir_cache: {}, manifest_dir_cache_count: 0,
-            prepared_config_path: "")
+            prepared_config_path: "", last_diagnostic_count: 0,
+            last_error_count: 0, last_warning_count: 0,
+            last_not_analyzed: false)
     
     # Lint a source buffer while RETAINING the combined lexical view that
     # `lint_source` otherwise releases on exit. `entry_and_fixes` calls this so
@@ -292,25 +280,11 @@ impl Linter:
         self.check_ui_raw_variant(path, content)
         self.check_ui_raw_theme_name(path, content)
         self.check_theme_package(path)
-        self.check_riscv_rtl_debuggability(path, content)
-        self.check_param_tag_spl(path, content)
         self.check_stale_md_diagrams(path, content)
-        self.check_accessor_and_parent_names(path, content)
         self.check_llvm_backend_type_safety(path, content)
-        self.check_os_freestanding_patterns(path, content)
-        self.check_nonexistent_types(path, content)
-        self.check_module_init_literal_spl(path, content)
-        self.check_cow_alias_hotpath_spl(path, content)
-        self.check_linear_scan_in_loop_spl(path, content)
         self.check_raw_rt_access_spl(path, content)
         self.check_dynamic_capability_acquire_spl(path, content)
-        self.check_silent_default_spl(path, content)
-        self.check_leading_operator_spl(path, content)
-        self.check_const_ref_default_spl(path, content)
-        self.check_bare_primitive_internal_spl(path, content)
-        self.check_unwrapped_foreign_resource_spl(path, content)
-        self.check_raw_sffi_call_spl(path, content)
-        self.check_raw_sffi_declaration_spl(path, content)
+        self.check_static_lint_rules(path, content)
         self.check_wm_lane_boundary(file_config, path, content)
         self.check_gpu_2d_perf(file_config, path, content)
 
@@ -395,58 +369,6 @@ impl Linter:
                 .with_fix("Fix config/themes/theme.sdn or the referenced theme package file")
             self.results.push(LintRunResult.new(path, 1, 0, lint))
 
-    me check_riscv_rtl_debuggability(path: String, content: String):
-        val warnings = lint_riscv_rtl_debuggability(content, path)
-        for warning in warnings:
-            val level = if warning.severity == "ERROR": LintLevel.Deny else: LintLevel.Warn
-            val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, warning.message)
-                .with_fix(warning.hint)
-            self.results.push(LintRunResult.new(path, warning.line_num, 0, lint))
-
-    me check_param_tag_spl(path: String, content: String):
-        # PTAG001/PTAG002 scope: src/lib/ only (AC-5 annotation sweep covered lib; compiler/app not yet annotated)
-        if not path.contains("src/lib/"):
-            return
-        val lines = content.split("\n")
-        val warnings = check_param_tag(lines, path)
-        for warning in warnings:
-            val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Warning, warning.message)
-                .with_fix(warning.hint)
-            self.results.push(LintRunResult.new(path, warning.line_num, 0, lint))
-
-    # TYPE001/TYPE002: casts and globals naming types that do not exist.
-    me check_nonexistent_types(path: String, content: String):
-        val warnings = lint_nonexistent_types(path, content)
-        for warning in warnings:
-            val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
-                .with_fix(warning.hint)
-            self.results.push(LintRunResult.new(path, warning.line, 0, lint))
-
-    # COW-alias hot-path lint — see
-    # doc/08_tracking/bug/value_semantics_cow_alias_perf_class_2026-08-21.md
-    me check_cow_alias_hotpath_spl(path: String, content: String):
-        for finding in check_cow_alias_hotpath(content, path):
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Warning, finding.message)
-                .with_fix(finding.hint)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    # Linear-scan-in-loop hot-path lint (PERF-SCAN-001) — see
-    # doc/08_tracking/bug/stage3_quadratic_transient_heap_promote_2026-09-02.md
-    # A whole-container scan called once per item makes the enclosing work
-    # O(n^2). This class stalled Stage 3 with no error and no diagnostic.
-    me check_linear_scan_in_loop_spl(path: String, content: String):
-        for finding in check_linear_scan_in_loop(content, path):
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Warning, finding.message)
-                .with_fix(finding.hint)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    me check_module_init_literal_spl(path: String, content: String):
-        val warnings = check_module_init_literal(content, path)
-        for warning in warnings:
-            val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
-                .with_fix(warning.hint)
-            self.results.push(LintRunResult.new(path, warning.line_num, 0, lint))
-
     # DCA001: capability-group acquisition outside an `@init_phase` function.
     # Severity comes from `critical.dynamic_acquire` in config/critical_mode.sdn,
     # which ships as `enabled: false` -> mode `allow`, so this contributes zero
@@ -506,123 +428,26 @@ impl Linter:
                         lint = lint.with_easy_fix(fix)
             self.results.push(LintRunResult.new(path, finding.line_num, finding.column, lint))
 
-    # W-MC-DEF-00x (silent_default): fail-open code that substitutes a
-    # plausible-looking constant for a missing answer. LintLevel.Warn — NOT Deny:
-    # existing code must keep compiling today, and the deliberate escalation
-    # point is the single `levels["silent_default"]` line in config_and_model.spl,
-    # not here. See silent_default.spl's header for the full upgrade path.
-    me check_silent_default_spl(path: String, content: String):
-        val findings = check_silent_default(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    # W-MC-DEF-00x (silent_default): fail-open code that substitutes a
-    # plausible-looking constant for a missing answer. LintLevel.Warn — NOT Deny:
-    # existing code must keep compiling today, and the deliberate escalation
-    # point is the single `levels["silent_default"]` line in config_and_model.spl,
-    # not here. See silent_default.spl's header for the full upgrade path.
-    me check_silent_default_spl(path: String, content: String):
-        val findings = check_silent_default(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    # W-MC-DEF-00x (silent_default): fail-open code that substitutes a
-    # plausible-looking constant for a missing answer. LintLevel.Warn — NOT Deny:
-    # existing code must keep compiling today, and the deliberate escalation
-    # point is the single `levels["silent_default"]` line in config_and_model.spl,
-    # not here. See silent_default.spl's header for the full upgrade path.
-    me check_silent_default_spl(path: String, content: String):
-        val findings = check_silent_default(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    # LEADOP001: statement-leading `-`/`+` glued onto the previous statement by
-    # the seed parser (silent wrong arithmetic). Warn-level, not Deny: 156
-    # existing sites would fail the build immediately, and escalating a rule to
-    # Deny before its population is converted is what made lint unusable.
-    me check_leading_operator_spl(path: String, content: String):
-        val findings = check_leading_operator(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    # W-MC-REF-001 (const_ref_default): const-by-default references — warn when
-    # a fn body mutates a parameter not declared `mut`. Warn-level in ALL tiers
-    # including reliable; escalation to deny is a later profile-v2 change
-    # (deliberately not implemented here). Text-level heuristic — see
-    # const_ref_default.spl for the ponytail note and semantic upgrade path.
-    me check_const_ref_default_spl(path: String, content: String):
-        val findings = check_const_ref_default(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    # W-MC-VAL-001 (bare_primitive_internal): REQ-MC-011 — internal `val`/`var`
-    # bindings typed only by a bare primitive. Constructed at Allow level: the
-    # end-of-lint_source config filter suppresses them by default and promotes
-    # to Warn under the mission-critical profile. Text-level heuristic — see
-    # bare_primitive_internal.spl for the ponytail note and typed-HIR upgrade
-    # path.
-    me check_bare_primitive_internal_spl(path: String, content: String):
-        val findings = check_bare_primitive_internal(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Allow, LintCategory.Correctness, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    # W-MC-RES-001 (unwrapped_foreign_resource): REQ-MC-023 — a bare handle
-    # returned by an SFFI acquire-verb extern must not escape its call site
-    # unwrapped. Constructed at Allow level: the end-of-lint_source config
-    # filter suppresses them by default and promotes to Warn under the
-    # critical profile. Text-level, intraprocedural, single-assignment
-    # heuristic — see unwrapped_foreign_resource.spl for the ponytail note
-    # and typed-HIR data-flow upgrade path.
-    me check_unwrapped_foreign_resource_spl(path: String, content: String):
-        val findings = check_unwrapped_foreign_resource(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Allow, LintCategory.Correctness, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    me check_raw_sffi_call_spl(path: String, content: String):
-        val findings = check_raw_sffi_calls(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Allow, LintCategory.Safety, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    me check_raw_sffi_declaration_spl(path: String, content: String):
-        val findings = check_raw_sffi_declarations(content, path)
-        for finding in findings:
-            val lint = LintDiag.new(finding.code, LintLevel.Allow, LintCategory.Safety, finding.message)
-                .with_fix(finding.note)
-            self.results.push(LintRunResult.new(path, finding.line_num, 0, lint))
-
-    me check_accessor_and_parent_names(path: String, content: String):
-        val warnings = lint_accessor_and_parent_names(path, content)
-        for warning in warnings:
-            val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Warning, warning.message)
-                .with_fix(warning.hint)
-            self.results.push(LintRunResult.new(path, warning.line, 0, lint))
-
-    # Freestanding/kernel-risk pattern lints (entry-closure codegen defects
-    # C1/C4/C5/C7) — scoped to src/os/** and examples/09_embedded/** inside
-    # lint_os_freestanding_patterns itself. Always warn-level: heuristic,
-    # non-type-checked patterns must never fail the build.
-    me check_os_freestanding_patterns(path: String, content: String):
-        val warnings = lint_os_freestanding_patterns(path, content)
-        for warning in warnings:
-            val lint = LintDiag.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
-                .with_fix(warning.hint)
-            self.results.push(LintRunResult.new(path, warning.line, 0, lint))
+    me check_static_lint_rules(path: String, content: String):
+        val run = run_static_lint_rule_table(
+            LintParamsV1.defaults(), LintUnit(path, content), static_lint_rule_table())
+        for failure in run.errors:
+            val lint = LintDiag.new(failure, LintLevel.Deny, LintCategory.Correctness,
+                "Static lint-rule registration was rejected")
+            self.results.push(LintRunResult.new(path, 1, 0, lint))
+        for finding in run.findings:
+            val level = match finding.level:
+                case Allow: LintLevel.Allow
+                case Warn: LintLevel.Warn
+                case Deny: LintLevel.Deny
+            val category = match finding.category:
+                case Safety: LintCategory.Safety
+                case Correctness: LintCategory.Correctness
+                case Style: LintCategory.Style
+                case Warning: LintCategory.Warning
+            val lint = LintDiag.new(finding.code, level, category, finding.message)
+                .with_fix(finding.hint)
+            self.results.push(LintRunResult.new(path, finding.line_num, finding.column, lint))
 
     # WM/GUI/web/2D portable-lane dependency boundary (WML001/WML002).
     #

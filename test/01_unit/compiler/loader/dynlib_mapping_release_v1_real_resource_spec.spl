@@ -1,0 +1,58 @@
+# Test-only TDD freeze for the dynSMF mapping receipt/release bridge.
+#
+# The first two scenarios deliberately use the existing native alloc/copy/seal
+# paths.  The remaining assertions describe the frozen receipt endpoint that
+# is not yet present: a copied receipt must release only its exact mapper
+# instance/record/generation, and bulk unmap/clear must not be accepted as a
+# receipt release.  No address, handle, or mapper record is fabricated here.
+
+use std.spec
+use compiler.loader.segment_mapper.{SegmentMapper}
+use compiler.loader.object_mapper.{SharedExecMapper, SharedExecMapperConfig}
+use compiler.loader.loader.object_mapper.{SharedExecMapper as CanonicalSharedExecMapper, SharedExecMapperConfig as CanonicalSharedExecMapperConfig}
+
+fn real_code() -> [u8]:
+    # x86-64 `ret`; this is mapped by the production native owner.
+    [195]
+
+describe "real dynlib mapping receipt release v1 freeze":
+    it "records an exact live SegmentMapper resource before teardown":
+        step("map one real segment and retain its native record facts")
+        var mapper = SegmentMapper.new()
+        val mapped = mapper.map_segment("receipt-segment-owner", 0, real_code(), 1)
+        expect(mapped.is_ok()).to_equal(true)
+        val base = mapped.unwrap()
+        expect(base).to_be_greater_than(0)
+        val stats = mapper.stats()
+        expect(stats.segment_count).to_equal(1)
+        expect(stats.bytes_mapped).to_equal(1)
+        expect(stats.generation).to_equal(1)
+        val receipt = mapper.map_segment_receipt_v1("receipt-segment-owner", 1, real_code(), 1)
+        val released = mapper.release_mapping_v1(receipt)
+        expect(released.outcome).to_equal("Released")
+
+    it "records an exact live compatibility object-mapper resource":
+        step("map one real executable object through the i64 compatibility surface")
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig.default())
+        val mapped = mapper.map_symbol("receipt-object-owner", "receipt_symbol", real_code(), false)
+        expect(mapped.is_ok()).to_equal(true)
+        val address = mapped.unwrap()
+        expect(address).to_be_greater_than(0)
+        val record = mapper.get_record("receipt_symbol")
+        expect(record.is_some()).to_equal(true)
+        if record.is_none():
+            return
+        val live = record.unwrap()
+        expect(live.address).to_equal(address)
+        expect(live.owner_id).to_equal("receipt-object-owner")
+        expect(live.generation).to_equal(1)
+        val receipt = mapper.map_symbol_receipt_v1("receipt-object-owner", "receipt_symbol_2", real_code(), false)
+        val released = mapper.release_mapping_v1(receipt)
+        expect(released.outcome).to_equal("Released")
+
+    it "requires the canonical nested i32 mapper to expose the same receipt API":
+        step("exercise the canonical nested i32 mapper receipt surface")
+        var mapper = CanonicalSharedExecMapper.new(CanonicalSharedExecMapperConfig.default())
+        val receipt = mapper.map_symbol_receipt_v1("receipt-nested-owner", "receipt_nested", real_code(), false)
+        val released = mapper.release_mapping_v1(receipt)
+        expect(released.outcome).to_equal("Released")

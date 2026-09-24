@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+Purpose: Pin the HTML UA-stylesheet rule that zeroes the BLOCK margins of a
+list container (`dir`/`dl`/`menu`/`ol`/`ul`) that has a list-container
+ANCESTOR -- the `ul ul, ul ol, ul dl, ol ul, dl dl, menu ul, ...` descendant
+block in Chrome's `html.css`. Without it every nested list inside an `<li>`
+carries the 16 px UA `margin-block-start`/`-end` that Chrome does not, and the
+whole block flow below it drifts by 16 px per occurrence.
+Audience: browser-engine layout maintainers.
+
+Why it hid: when the nested list is the li's FIRST in-flow child its 16 px top
+margin collapses through the li anyway (pinned by
+`first_child_top_margin_collapse_spec.spl`), so the geometry came out right for
+the wrong reason. The moment an inline run precedes it -- `<li><code>x</code>
+<ul>...</ul></li>`, the shape all over the `html` catalog page -- collapsing is
+no longer available and the missing UA rule becomes a visible 16 px.
+
+Chrome oracle (headless --headless=new, 900x20000,
+`*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}`, so the line
+box is 24 px), harvested through
+`scripts/check/check-chrome-layout-geometry-diff.shs` on
+`test/fixtures/browser/nested_list_margin_oracle.html`:
+
+| fixture (inside the li, after an inline `<code>` run) | Chrome nested y | Chrome li h |
+|---|---|---|
+| `<ul><li><code/><ul>..</ul></li></ul>`                | 24              | 48          |
+| `<ul><li><code/><dl><dt/></dl></li></ul>`             | 24              | 48          |
+| `<ol><li><code/><ul>..</ul></li></ol>`                | 24              | 48          |
+| `<ul><li><code/><ul>..</ul><span/></li></ul>`         | 24              | 72          |
+| `<div><span/><ul>..</ul></div>` (NO list ancestor)    | 40              | 64 (div)    |
+| `<ul><li><code/><p/></li></ul>` (`p` is not a list)   | 40              | 64 (li)     |
+
+The last two are the controls: the rule is scoped to list CONTAINERS with a
+list-container ancestor, so a `<ul>` outside any list, and a `<p>` inside one,
+both keep their UA 16 px.
+
+Deliberately NOT asserted: the `dd` 40 px start margin, and `li` markers --
+neither is touched by this rule.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-UA-NESTED-LIST-MARGIN-001 — a list container nested in a list container has zero UA block margins.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+describe "a nested list container carries no UA block margin":
+    it "AC-1: a <ul> inside an <li>, after an inline run, sits on the line box at y=24":
+        step("Chrome: the anonymous block for the <code> run is one 24 px line box and the nested <ul> starts immediately below it, with no 16 px UA margin")
+        expect(probe(
+            "<ul style=\"margin:0;padding:0\"><li id=\"l\"><code>x</code><ul id=\"n\"><li>n</li></ul></li></ul>",
+            "n", "y")).to_equal("24")
+
+    it "AC-2: its BOTTOM margin is zero too — the li is Chrome's 48 px":
+        step("24 px line box + 24 px nested list, no margin on either side")
+        expect(probe(
+            "<ul style=\"margin:0;padding:0\"><li id=\"l\"><code>x</code><ul id=\"n\"><li>n</li></ul></li></ul>",
+            "l", "h")).to_equal("48")
+
+    it "AC-3: <dl> is a list container for this rule as well":
+        step("Chrome's rule names dir/dl/menu/ol/ul on both sides, so `ul dl` matches")
+        expect(probe(
+            "<ul style=\"margin:0;padding:0\"><li id=\"l\"><code>x</code><dl id=\"n\"><dt>a</dt></dl></li></ul>",
+            "n", "y")).to_equal("24")
+
+    it "AC-4: the ancestor may be an <ol> and the descendant a <ul>":
+        step("the rule is the full cross product, not same-tag nesting")
+        expect(probe(
+            "<ol style=\"margin:0;padding:0\"><li id=\"l\"><code>x</code><ul id=\"n\"><li>n</li></ul></li></ol>",
+            "n", "y")).to_equal("24")
+
+    it "AC-5: the ancestor is not required to be the PARENT":
+        step("`ul ul` is a descendant combinator and the <li> sits between them; the li is Chrome's 72 px with a trailing inline run")
+        expect(probe(
+            "<ul style=\"margin:0;padding:0\"><li id=\"l\"><code>x</code><ul id=\"n\"><li>n</li></ul>" +
+            "<span>tail</span></li></ul>", "l", "h")).to_equal("72")
+
+    it "AC-6: CONTROL — a <ul> with no list ancestor keeps its UA 16 px top margin":
+        step("Chrome puts it at 24 (line box) + 16 (margin) = 40; zeroing unconditionally would break this")
+        expect(probe(
+            "<div id=\"d\"><span>x</span><ul id=\"n\"><li>n</li></ul></div>",
+            "n", "y")).to_equal("40")
+
+    it "AC-7: CONTROL — a <p> inside a list is not a list container and keeps its 16 px":
+        step("the rule names list containers only; Chrome puts the <p> at 40")
+        expect(probe(
+            "<ul style=\"margin:0;padding:0\"><li id=\"l\"><code>x</code><p id=\"n\">a</p></li></ul>",
+            "n", "y")).to_equal("40")
+
+    it "AC-8: CONTROL — the control li is correspondingly 64 px, not 48":
+        step("24 line box + 16 margin + 24 <p>; the bottom margin collapses out of the li")
+        expect(probe(
+            "<ul style=\"margin:0;padding:0\"><li id=\"l\"><code>x</code><p id=\"n\">a</p></li></ul>",
+            "l", "h")).to_equal("64")

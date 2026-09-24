@@ -1,4 +1,8 @@
 # Web DrawIR 8K native optional-GPU extern link failure — 2026-08-12
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -69,3 +73,4 @@ for this narrow ABI repair.
 The current remaining unresolved groups are `gc_env_get`, Intel Engine2D kernel
 argument/upload/download calls, three WebGPU surface calls, and
 `rt_sleep_nanos`.
+

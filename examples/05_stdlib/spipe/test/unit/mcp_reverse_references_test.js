@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { constants, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ const graphRoot = `sha256:${"2".repeat(64)}`;
 const target = `A-${"9".repeat(26)}`;
 const sourceOne = `A-${"1".repeat(26)}`;
 const sourceTwo = `A-${"2".repeat(26)}`;
+const secureNoFollowAvailable = typeof constants.O_NOFOLLOW === "number";
 
 function inventory(edges = [edge(2, sourceTwo), edge(1, sourceOne)]) {
   return {
@@ -44,7 +45,7 @@ test("MCP schema publishes exact bounded reverse-reference inputs", () => {
   assert.equal(tool.inputSchema.properties.max_work_units.maximum, 500000);
 });
 
-test("MCP query paginates deterministically and binds its cursor", () => {
+test("MCP query paginates deterministically and binds its cursor", { skip: !secureNoFollowAvailable }, () => {
   const root = mkdtempSync(join(tmpdir(), "spipe-mcp-reverse-"));
   try {
     const path = join(root, "inventory.json");
@@ -62,7 +63,7 @@ test("MCP query paginates deterministically and binds its cursor", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("MCP query rejects malformed, aliased, and unknown inputs", () => {
+test("MCP query rejects malformed, aliased, and unknown inputs", { skip: !secureNoFollowAvailable }, () => {
   const root = mkdtempSync(join(tmpdir(), "spipe-mcp-reverse-"));
   try {
     const path = join(root, "inventory.json");
@@ -77,7 +78,17 @@ test("MCP query rejects malformed, aliased, and unknown inputs", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("MCP query invalidates a replaced compiled inventory", () => {
+test("MCP query rejects when atomic no-follow is unavailable", { skip: secureNoFollowAvailable }, () => {
+  const root = mkdtempSync(join(tmpdir(), "spipe-mcp-reverse-"));
+  try {
+    const path = join(root, "inventory.json");
+    writeFileSync(path, JSON.stringify(inventory()));
+    const service = new CompiledInventoryReverseReferenceService({ cursor_key: Buffer.alloc(32, 5) });
+    assert.throws(() => service.query({ inventory_path: path, target_uid: target }), /secure no-follow inventory opening unavailable/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("MCP query invalidates a replaced compiled inventory", { skip: !secureNoFollowAvailable }, () => {
   const root = mkdtempSync(join(tmpdir(), "spipe-mcp-reverse-"));
   try {
     const path = join(root, "inventory.json");
@@ -99,7 +110,7 @@ test("MCP query invalidates a replaced compiled inventory", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("MCP inventory read stays on one descriptor across an adversarial pathname swap", () => {
+test("MCP inventory read stays on one descriptor across an adversarial pathname swap", { skip: !secureNoFollowAvailable }, () => {
   const root = mkdtempSync(join(tmpdir(), "spipe-mcp-reverse-"));
   try {
     const path = join(root, "inventory.json");

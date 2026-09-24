@@ -1,0 +1,67 @@
+use std.spec.*
+use common.gpu.environment_variant_task_contract_v1.*
+
+fn identity(value: u64) -> GpuTaskIdentityV1:
+    GpuTaskIdentityV1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn bounded_task() -> GpuBoundedTaskV1:
+    GpuBoundedTaskV1(
+        descriptor_size: GPU_ENVIRONMENT_TASK_DESCRIPTOR_BYTES_V1,
+        schema_version: GPU_ENVIRONMENT_TASK_SCHEMA_V1,
+        operation_kind: GpuTaskOperationKindV1.FrontendParse,
+        fallback_policy: GpuTaskFallbackPolicyV1.AllowCpu,
+        invocation_id: 17u64,
+        provider_generation: 3u64,
+        lease_generation: 5u64,
+        input_arena: GpuTaskArenaRangeV1(offset: 0u64, length: 64u64),
+        output_arena: GpuTaskArenaRangeV1(offset: 64u64, length: 64u64),
+        arena_capacity_bytes: 128u64,
+        resource_layout_identity: identity(7u64),
+        required_effect_bits: 1u64,
+        numerical_contract_id: 2u32,
+        cpu_fallback_semantically_allowed: true)
+
+describe "bounded GPU environment task contract V1":
+    it "accepts disjoint immutable input and reserved output ranges":
+        expect(gpu_bounded_task_validate_v1(bounded_task())).to_equal(Ok(()))
+
+    it "rejects one byte beyond the arena without overflowing arithmetic":
+        var task = bounded_task()
+        task.output_arena = GpuTaskArenaRangeV1(offset: 127u64, length: 2u64)
+        expect(gpu_bounded_task_validate_v1(task)).to_equal(
+            Err(GpuTaskContractErrorV1.ArenaRangeInvalid))
+        task = bounded_task()
+        task.input_arena = GpuTaskArenaRangeV1(offset: 0xffffffffffffffffu64, length: 1u64)
+        expect(gpu_bounded_task_validate_v1(task)).to_equal(
+            Err(GpuTaskContractErrorV1.ArenaRangeInvalid))
+
+    it "rejects overlapping input and output ownership regions":
+        var task = bounded_task()
+        task.output_arena = GpuTaskArenaRangeV1(offset: 63u64, length: 2u64)
+        expect(gpu_bounded_task_validate_v1(task)).to_equal(
+            Err(GpuTaskContractErrorV1.ArenaRangesOverlap))
+
+    it "makes missing-provider fallback explicit and policy strict":
+        expect(gpu_task_missing_provider_decision_v1(
+            GpuTaskFallbackPolicyV1.AllowCpu, true)).to_equal(
+                GpuTaskFallbackDecisionV1.UseCpu)
+        expect(gpu_task_missing_provider_decision_v1(
+            GpuTaskFallbackPolicyV1.AllowCpu, false)).to_equal(
+                GpuTaskFallbackDecisionV1.SemanticsForbidFallback)
+        expect(gpu_task_missing_provider_decision_v1(
+            GpuTaskFallbackPolicyV1.RequireRequested, true)).to_equal(
+                GpuTaskFallbackDecisionV1.RequiredProviderUnavailable)
+
+    it "rejects undeclared layout generation and numerical contracts while permitting pure work":
+        var task = bounded_task()
+        task.resource_layout_identity = identity(0u64)
+        expect(gpu_bounded_task_validate_v1(task)).to_equal(
+            Err(GpuTaskContractErrorV1.InvalidIdentity))
+        task = bounded_task(); task.provider_generation = 0u64
+        expect(gpu_bounded_task_validate_v1(task)).to_equal(
+            Err(GpuTaskContractErrorV1.InvalidGeneration))
+        task = bounded_task(); task.required_effect_bits = 0u64
+        expect(gpu_bounded_task_validate_v1(task)).to_equal(Ok(()))
+        task = bounded_task(); task.numerical_contract_id = 0u32
+        expect(gpu_bounded_task_validate_v1(task)).to_equal(
+            Err(GpuTaskContractErrorV1.InvalidContract))

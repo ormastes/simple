@@ -1,4 +1,9 @@
 # do_version_exchange "chained cast / rt_bytes_slice" note — NOT A BUG (verified)
+## Closed 2026-09-16 — ...leOS freestanding). **Status:** RESOLVED / NOT REPRODUCIBLE. Filed as its own record becau
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Target:** `native-build --backend cranelift --target x86_64-unknown-none`
 (SimpleOS freestanding). **Status:** RESOLVED / NOT REPRODUCIBLE. Filed as its
@@ -43,3 +48,4 @@ of the same arc as the retracted
 `x64_freestanding_chained_len_cast_miscompile.md`; the ONE genuine defect from
 that arc is the `rt_push_byte` reassignment dropping BYTE_PACKED for large `[u8]`
 (`x64_freestanding_push_byte_reassign_byte_packed.md`, fixed with `.push`).
+

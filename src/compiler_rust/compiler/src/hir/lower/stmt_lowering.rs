@@ -145,8 +145,73 @@ impl Lowerer {
             .global_fn_return_types
             .as_ref()?
             .get(&format!("{}.{}", type_name, method))?;
+        Self::declared_type_struct_name(declared).map(|(name, _)| name)
+    }
+
+    /// Like `static_call_return_type_name`, but also reports whether the
+    /// declared return type WRAPPED the struct (`-> T?`, `-> mut T`, `-> *T`).
+    ///
+    /// The distinction is load-bearing and the caller must honour it: for an
+    /// unwrapped `-> T` the binding's TypeId may be upgraded to T outright, but
+    /// for `-> T?` the VALUE is an optional, so typing the local as bare `T`
+    /// makes every field read address the payload's slots through the wrapper
+    /// and return garbage. A wrapped return therefore contributes the NAME only.
+    fn static_call_return_type_name_parts(&self, init: &Expr) -> Option<(String, bool)> {
+        let (type_name, method) = match init {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Path(segments) if segments.len() == 2 => (segments[0].clone(), segments[1].clone()),
+                _ => return None,
+            },
+            Expr::MethodCall { receiver, method, .. } => match receiver.as_ref() {
+                Expr::Identifier(name) => (name.clone(), method.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if !type_name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return None;
+        }
+        let declared = self
+            .global_fn_return_types
+            .as_ref()?
+            .get(&format!("{}.{}", type_name, method))?;
+        Self::declared_type_struct_name(declared)
+    }
+
+    /// The struct NAME a declared return type names, looking through the
+    /// wrappers that carry a payload of that type.
+    ///
+    /// `Type::Optional` had no arm here and fell to `_ => None`, so EVERY
+    /// `static fn ... -> T?` constructor silently lost its name. That is the
+    /// whole `FileFingerprint.from_file(path) -> FileFingerprint?` family: the
+    /// `val object_fp = FileFingerprint.from_file(...)` binding recorded no
+    /// `static_call_type_hints` row, so the later `if val fp = object_fp:`
+    /// binding had no name to inherit either, and `fp.size` reached
+    /// `get_field_info(TypeId::ANY, "size")`. That function's LOCAL-BEST scan
+    /// picks the SMALLEST index among every struct in `module.types` declaring
+    /// the name and returns Ok, so no receiver-aware fallback and no trace ever
+    /// ran. Measured in the 834-unit Stage 2 closure (2026-09-13):
+    /// `[FIELD-TRACE] ANY/size -> LOCAL-BEST idx=0 count=7 in
+    /// driver_aot_native_output.spl` — byte offset 0 instead of 24, returning
+    /// the struct's `path` text POINTER (34363944961 = 0x8_0010_2001) where a
+    /// 632-byte file size belonged. 15 structs in the tree declare `size` as
+    /// their FIRST field, so the decoy only enters `module.types` once the
+    /// closure is big enough — which is exactly why the 3-unit and 58-unit
+    /// reproducers pass and only the full closure fails.
+    /// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+    ///
+    /// Unwrapping is limited to payload-preserving wrappers (`T?`, `mut T`,
+    /// pointers): each names exactly one underlying struct, so the name is the
+    /// receiver's own and never a guess. Tuples, unions, arrays and functions
+    /// stay `None` — they name no single struct.
+    pub(crate) fn declared_type_struct_name(declared: &ast::Type) -> Option<(String, bool)> {
         match declared {
-            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => (!name.is_empty()).then(|| name.clone()),
+            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => {
+                (!name.is_empty()).then(|| (name.clone(), false))
+            }
+            ast::Type::Optional(inner) | ast::Type::Capability { inner, .. } | ast::Type::Pointer { inner, .. } => {
+                Self::declared_type_struct_name(inner).map(|(name, _)| (name, true))
+            }
             _ => None,
         }
     }
@@ -246,6 +311,7 @@ impl Lowerer {
                 for (name, ty) in &bindings {
                     ctx.add_local(name.clone(), *ty, mutability);
                 }
+                self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
                 let mut then_block = self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
                 then_block.extend(self.lower_block(body, ctx)?);
                 for (name, previous) in previous_bindings {
@@ -337,6 +403,27 @@ impl Lowerer {
                         pattern: format!("{:?}", let_stmt.pattern),
                     });
                 }
+
+                // Keep an authored `Result<T, E>` annotation available to
+                // property projection.  On the Windows bootstrap path a
+                // generic local can arrive at expression lowering as i64;
+                // using the annotation here prevents `value.ok` / `value.err`
+                // from being mis-routed through struct-field lowering.
+                let result_projection_type = if let Some(ast::Type::Generic { name: family, args }) =
+                    let_stmt.ty.as_ref().or(pattern_type)
+                {
+                    if family == "Result" && args.len() == 2 {
+                        if let (Ok(ok_ty), Ok(err_ty)) = (self.resolve_type(&args[0]), self.resolve_type(&args[1])) {
+                            Some((ok_ty, err_ty))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
                 let is_untyped_empty_array_binding = !has_explicit_type
                     && value
@@ -435,9 +522,15 @@ impl Lowerer {
                 // doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
                 if ty == TypeId::ANY {
                     if let Some(init) = &let_stmt.value {
-                        if let Some(hint) = self.static_call_return_type_name(init) {
+                        if let Some((hint, wrapped)) = self.static_call_return_type_name_parts(init) {
+                            // A WRAPPED return (`-> T?`) contributes the name
+                            // only: the value is an optional, so upgrading the
+                            // local's TypeId to bare `T` would make every field
+                            // read address the payload's slots through the
+                            // wrapper. Unwrapped `-> T` keeps the existing
+                            // TypeId upgrade.
                             match self.module.types.lookup(&hint) {
-                                Some(resolved) if resolved != TypeId::ANY => ty = resolved,
+                                Some(resolved) if !wrapped && resolved != TypeId::ANY => ty = resolved,
                                 _ => {
                                     ctx.static_call_type_hints.insert(name.clone(), hint);
                                 }
@@ -446,6 +539,9 @@ impl Lowerer {
                     }
                 }
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if let Some(result_payload_types) = result_projection_type {
+                    ctx.result_projection_types.insert(local_index, result_payload_types);
+                }
                 if is_untyped_empty_array_binding {
                     self.untyped_empty_array_locals.insert(local_index);
                 }
@@ -605,6 +701,7 @@ impl Lowerer {
                     // just laundered through a return. 42 owned `-> bool`
                     // functions in this repo return a bare `.?`.
                     let expr = self.lower_bool_return_expr(v, ctx)?;
+                    self.validate_declared_return_type(ctx.return_type, expr.ty)?;
 
                     // Check for returning local reference (E2005)
                     // If the return expression is a variable reference, check its origin
@@ -684,6 +781,7 @@ impl Lowerer {
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
+                    self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
 
                     // 5. Generate payload extraction stmts through the same owner
                     // used by match arms, including multi-field array typing.
@@ -822,6 +920,7 @@ impl Lowerer {
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
+                    self.propagate_pattern_binding_type_name_hint(condition_expr, &bindings, ctx);
 
                     let mut then_block =
                         self.build_if_let_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
@@ -1106,9 +1205,73 @@ impl Lowerer {
                 }
             }
 
-            Node::Function(_f) => {
-                // Nested function definitions are ignored in native lowering for now.
-                Ok(vec![])
+            // A `fn` declared inside another function body is lowered as a local
+            // closure binding -- `val <name> = \<params>: <body>` -- and handed
+            // straight back to the `Node::Let` arm above.
+            //
+            // It used to answer `Ok(vec![])`, dropping the definition entirely.
+            // That is not a silent wrong answer, because the call site then
+            // lowers to an unresolved external symbol and the JIT drops the
+            // WHOLE module to the interpreter -- but it costs ~100-1000x on
+            // every module that contains one, and on the native lane (which has
+            // no interpreter to fall back to) it is a link error.
+            //
+            // Measured on the deployed seed before this change: a non-capturing
+            // nested fn, a capturing one, and a recursive one each answered
+            // `unresolved external symbol '<name>'`; the sibling shapes written
+            // as lambdas (`val f = \n: n + k`) compiled and ran, including
+            // capture of an enclosing local, a direct call, and being passed as
+            // a value. So the closure path already carries everything a nested
+            // fn needs -- it was only ever the AST shape that was unhandled.
+            //
+            // The one exception is SELF-RECURSION, and it is a correctness
+            // guard rather than a missing feature: HIR closures have no letrec,
+            // so inside the converted body the fn's own name is unbound. It
+            // would either fail to resolve or -- worse -- silently resolve to a
+            // module-level function of the same name and compile a call to the
+            // WRONG body. A recursive nested fn therefore keeps the old
+            // behaviour and falls back to the interpreter, which handles it
+            // correctly. That gap is the same one that makes a recursive
+            // *lambda* fail outright on both engines; it is tracked separately.
+            //
+            // Mutual recursion needs no guard: lowering `a`'s body hits `b`,
+            // which is unbound, so the module falls back exactly as it does
+            // today and the interpreter runs the original AST.
+            //
+            // Bug: doc/08_tracking/bug/
+            //      nested_fn_in_spec_block_loses_captured_local_2026-08-04.md
+            Node::Function(f) => {
+                let mut bound: Vec<String> = Vec::new();
+                let mut free_reads = std::collections::HashSet::new();
+                super::expr::control::collect_identifiers_function(f, &mut bound, &mut free_reads);
+                if free_reads.contains(&f.name) {
+                    return Ok(vec![]);
+                }
+
+                let lambda = Expr::Lambda {
+                    params: f
+                        .params
+                        .iter()
+                        .map(|p| ast::LambdaParam {
+                            name: p.name.clone(),
+                            ty: p.ty.clone(),
+                        })
+                        .collect(),
+                    body: Box::new(Expr::DoBlock(f.body.statements.clone())),
+                    move_mode: ast::MoveMode::Copy,
+                    capture_all: false,
+                };
+                let binding = ast::LetStmt {
+                    span: f.span,
+                    pattern: Pattern::Identifier(f.name.clone()),
+                    ty: None,
+                    value: Some(lambda),
+                    mutability: Mutability::Immutable,
+                    storage_class: ast::StorageClass::Auto,
+                    is_ghost: false,
+                    is_suspend: false,
+                };
+                self.lower_node(&Node::Let(binding), ctx)
             }
 
             // Module-level imports are resolved in module_pass.rs. Function-scope
@@ -1326,6 +1489,7 @@ impl Lowerer {
             Node::Extern(e) => {
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.extern_fn_names.insert(e.name.clone());
                 Ok(vec![])
             }
@@ -1430,6 +1594,58 @@ impl Lowerer {
     /// both canonical boxed Option values and the raw migration form.
     /// Match-arm identifiers intentionally continue to bind their full subject
     /// through `build_pattern_binding_stmts` below.
+    /// Carry the SUBJECT's authored struct name onto pattern bindings whose
+    /// TypeId erased to ANY.
+    ///
+    /// `if val fp = object_fp:` registers `fp` with `ctx.add_local(name, ty, ..)`
+    /// — a TypeId and nothing else. When that TypeId is ANY (the payload type was
+    /// lost cross-unit), the binding carries NO name at all: not a
+    /// `type_name_hint` (that is set only for parameters) and no
+    /// `static_call_type_hints` row (that is keyed by the SUBJECT's name,
+    /// `object_fp`, never the binding's). So every later receiver-aware recovery
+    /// — `expr/access.rs`'s ambiguous-field guard and its by-name fallbacks —
+    /// asks `try_resolve_receiver_struct_name_from_expr(fp)`, gets None, and
+    /// declines. `get_field_info(TypeId::ANY, field)` then reaches its LOCAL-BEST
+    /// scan, which picks the SMALLEST index among every struct in `module.types`
+    /// that declares the name, and returns Ok — so no fallback and no trace ever
+    /// runs.
+    ///
+    /// Measured consequence (2026-09-13): in the 834-unit Stage 2 closure,
+    /// `fp.size` on a `FileFingerprint` (`size` at index 3) lowered to
+    /// `[FIELD-TRACE] ANY/size -> LOCAL-BEST idx=0 count=7`, i.e. byte offset 0,
+    /// and returned the struct's `path` text POINTER instead of the file size —
+    /// 34363944961 (0x8_0010_2001) for a 632-byte object. 15 structs in the tree
+    /// declare `size` as their FIRST field (FileStat, GcObjectHeader, TypeLayout,
+    /// BlockHeader, ...), so the decoy only enters `module.types` once the
+    /// closure is large enough — which is exactly why 3-unit and 58-unit
+    /// reproducers pass and only the full closure fails.
+    /// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+    ///
+    /// Recording the name into `static_call_type_hints` reuses the EXISTING
+    /// consumer (`expr/access.rs`'s Identifier arm) rather than adding a second
+    /// mechanism. Purely additive and fail-soft: a hint that names nothing simply
+    /// fails the subsequent lookup and leaves today's behaviour untouched. Only
+    /// bindings already erased to ANY are touched, so an authored type is never
+    /// overridden.
+    fn propagate_pattern_binding_type_name_hint(
+        &mut self,
+        subject_expr: &Expr,
+        bindings: &[(String, TypeId)],
+        ctx: &mut FunctionContext,
+    ) {
+        if !bindings.iter().any(|(_, ty)| *ty == TypeId::ANY) {
+            return;
+        }
+        let Some(struct_name) = self.try_resolve_receiver_struct_name_from_expr(subject_expr, ctx) else {
+            return;
+        };
+        for (name, ty) in bindings {
+            if *ty == TypeId::ANY {
+                ctx.static_call_type_hints.insert(name.clone(), struct_name.clone());
+            }
+        }
+    }
+
     pub(crate) fn build_if_let_binding_stmts(
         &mut self,
         pattern: &Pattern,
@@ -1679,6 +1895,19 @@ impl Lowerer {
                         // Use the binding's resolved type (from enum variant definition)
                         // instead of ANY, so MIR lowering can insert proper unboxing
                         let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
+                        // The local slot is allocated while pattern bindings are
+                        // collected, before generic enum fields have necessarily
+                        // been resolved.  MIR treats the slot's declared type as
+                        // authoritative (not only HirStmt::Let.ty), so leaving it
+                        // as ANY re-boxes an already-unboxed Result<i64> payload:
+                        // `6` is stored as the tagged word `48` and later used as
+                        // an ordinary integer.  Keep the slot and initializer in
+                        // agreement, as the struct/optional binder paths do.
+                        if binding_ty != TypeId::ANY {
+                            if let Some(local) = ctx.locals.get_mut(local_idx) {
+                                local.ty = binding_ty;
+                            }
+                        }
                         if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                             eprintln!(
                                 "[HIR-PAT-BIND] {}({}) subject_ty={:?} ({:?}) binding_ty={:?} ({:?})",
@@ -2478,7 +2707,7 @@ impl Lowerer {
             }
             Pattern::Identifier(name) => {
                 if self.subject_enum_has_variant(subject_ty, name) {
-                    // Treat as enum variant pattern using rt_enum_check_discriminant
+                    // Treat as an identity-aware enum variant pattern.
                     let expected_disc: i64 = {
                         use std::collections::hash_map::DefaultHasher;
                         use std::hash::{Hash, Hasher};
@@ -2494,8 +2723,15 @@ impl Lowerer {
 
                     Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
-                            name: "rt_enum_check_discriminant".to_string(),
-                            args: vec![subject_ref, expected_val],
+                            name: "rt_enum_check_variant".to_string(),
+                            args: vec![
+                                subject_ref,
+                                HirExpr {
+                                    kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                    ty: TypeId::I64,
+                                },
+                                expected_val,
+                            ],
                         },
                         ty: TypeId::BOOL,
                     })
@@ -2798,8 +3034,7 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
-                // All enums use hashed variant name discriminants consistently
+                // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -2815,8 +3050,15 @@ impl Lowerer {
 
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref.clone(), expected_val],
+                        name: "rt_enum_check_variant".to_string(),
+                        args: vec![
+                            subject_ref.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                ty: TypeId::I64,
+                            },
+                            expected_val,
+                        ],
                     },
                     ty: TypeId::BOOL,
                 };

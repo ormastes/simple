@@ -1,4 +1,8 @@
 # Trait-group `with` sugar is unreachable, and the generated `.from()` capability check is AOT-broken
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-09 (stream P0b, while correcting the unsound `.from()` shape)
 **Related:** `capability_group_from_unsound_under_value_semantics_2026-08-09.md`
@@ -107,3 +111,4 @@ cover AOT while the sugar is unreachable (blocker 1).
 Fix order: blocker 2 must be closed (or `.from()` re-expressed with an
 AOT-sound Option test) before the sugar is wired, or wiring it ships a
 fail-open capability check.
+

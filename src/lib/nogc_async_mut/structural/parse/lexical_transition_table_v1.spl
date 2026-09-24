@@ -1,0 +1,202 @@
+# Finite transition-table summary for independently scanned lexical blocks.
+# This is the scalar authority for future parallel/SIMD implementations.
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.common.crypto.sha256.sha256_bytes
+
+pub const LEXICAL_TRANSITION_STATE_COUNT_V1: u64 = 22u64
+pub const LEXICAL_TRANSITION_MAX_BLOCKS_V1: u64 = 256u64
+pub enum LexicalTransitionTableErrorV1:
+    BlockTooWide
+    InvalidTable
+    CapacityExceeded
+    StateNotAdmitted
+pub struct LexicalTransitionRowV1:
+    state_id: u32
+    input_state: LexicalBlockStateV1
+    output_state: LexicalBlockStateV1
+    blocks: [LexicalBlockSummaryV1]
+pub struct LexicalTransitionDigestV1:
+    w0: u64
+    w1: u64
+    w2: u64
+    w3: u64
+pub struct LexicalTransitionTableV1:
+    rows: [LexicalTransitionRowV1]
+    block_count: u32
+    digest: LexicalTransitionDigestV1
+# Non-admissible computation value. It carries no artifact/receipt authority
+# and must be sealed as LexicalTransitionTableV1 before crossing trust layers.
+pub struct LexicalTransitionRowsV1:
+    rows: [LexicalTransitionRowV1]
+    block_count: u32
+
+fn _base_ltt(q: LexicalQuoteKindV1, escape: bool) -> LexicalBlockStateV1:
+    LexicalBlockStateV1(quote_kind: q, escape_parity: escape,
+        in_line_comment: false, in_block_comment: false, pending_quote_byte: 0u8,
+        pending_quote_run: 0u8, pending_raw_prefix: false,
+        pending_identifier: false, pending_slash: false, after_newline: false)
+pub fn lexical_transition_admitted_states_v1() -> [LexicalBlockStateV1]:
+    var out: [LexicalBlockStateV1] = []
+    val code = _base_ltt(LexicalQuoteKindV1.None, false); out.push(code)
+    var s = code; s.pending_identifier = true; out.push(s)
+    s = code; s.pending_identifier = true; s.pending_raw_prefix = true; out.push(s)
+    s = code; s.pending_slash = true; out.push(s)
+    s = code; s.after_newline = true; out.push(s)
+    for qbyte in [34u8, 39u8]:
+        for run in [1u8, 2u8]:
+            s = code; s.pending_quote_byte = qbyte; s.pending_quote_run = run; out.push(s)
+    s = code; s.in_line_comment = true; out.push(s)
+    for quote in [LexicalQuoteKindV1.Single, LexicalQuoteKindV1.Double]:
+        for escaped in [false, true]:
+            val quoted = _base_ltt(quote, escaped); out.push(quoted)
+        val quoted = _base_ltt(quote, false)
+        for qbyte in [34u8, 39u8]:
+            for run in [1u8, 2u8]:
+                s = quoted; s.pending_quote_byte = qbyte; s.pending_quote_run = run; out.push(s)
+    out
+fn _state_id_ltt(state: LexicalBlockStateV1) -> i64:
+    val states = lexical_transition_admitted_states_v1(); var i = 0
+    while i < states.len():
+        if states[i] == state: return i
+        i = i + 1
+    -1
+fn _push64_ltt(out: [i64], v: u64):
+    for i in 0..8: out.push(((v >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _push_state_ltt(out: [i64], s: LexicalBlockStateV1):
+    for v in [s.quote_kind as u64, if s.escape_parity: 1u64 else: 0u64,
+              if s.in_line_comment: 1u64 else: 0u64, if s.in_block_comment: 1u64 else: 0u64,
+              s.pending_quote_byte as u64, s.pending_quote_run as u64,
+              if s.pending_raw_prefix: 1u64 else: 0u64,
+              if s.pending_identifier: 1u64 else: 0u64,
+              if s.pending_slash: 1u64 else: 0u64, if s.after_newline: 1u64 else: 0u64]: _push64_ltt(out, v)
+fn _read64_ltt(raw: [i64], at: i64) -> u64:
+    var v = 0u64
+    for i in 0..8: v = v | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    v
+fn _digest_ltt(rows: [LexicalTransitionRowV1], block_count: u32) -> LexicalTransitionDigestV1:
+    var bytes: [i64] = []; _push64_ltt(bytes, 1u64); _push64_ltt(bytes, block_count as u64)
+    for row in rows:
+        _push64_ltt(bytes, row.state_id as u64); _push_state_ltt(bytes, row.input_state)
+        _push_state_ltt(bytes, row.output_state); _push64_ltt(bytes, row.blocks.len() as u64)
+        for b in row.blocks:
+            _push_state_ltt(bytes, b.input_state); _push_state_ltt(bytes, b.output_state)
+            _push64_ltt(bytes, b.byte_count as u64); _push64_ltt(bytes, b.quote_mask as u64)
+            _push64_ltt(bytes, b.escape_mask as u64); _push64_ltt(bytes, b.line_comment_mask as u64)
+            _push64_ltt(bytes, b.newline_mask as u64); _push64_ltt(bytes, b.delimiter_mask as u64)
+            _push64_ltt(bytes, b.fallback_bits); _push64_ltt(bytes, if b.canonical_usable: 1u64 else: 0u64)
+    val h = sha256_bytes(bytes)
+    LexicalTransitionDigestV1(w0: _read64_ltt(h, 0), w1: _read64_ltt(h, 8),
+        w2: _read64_ltt(h, 16), w3: _read64_ltt(h, 24))
+
+fn _rows_shape_valid_ltt(rows: [LexicalTransitionRowV1], block_count: u32) -> bool:
+    val states = lexical_transition_admitted_states_v1()
+    if states.len() as u64 != LEXICAL_TRANSITION_STATE_COUNT_V1 or rows.len() != states.len() or
+       block_count as u64 > LEXICAL_TRANSITION_MAX_BLOCKS_V1: return false
+    var i = 0
+    while i < rows.len():
+        val r = rows[i]
+        if r.state_id != i as u32 or r.input_state != states[i] or
+           r.blocks.len() != block_count as i64: return false
+        var state = r.input_state
+        for b in r.blocks:
+            if b.input_state != state or b.byte_count > 32u32: return false
+            state = b.output_state
+        if state != r.output_state or _state_id_ltt(r.output_state) < 0: return false
+        i = i + 1
+    true
+fn _table_shape_valid_ltt(table: LexicalTransitionTableV1, verify_digest: bool) -> bool:
+    if not _rows_shape_valid_ltt(table.rows, table.block_count): return false
+    not verify_digest or table.digest == _digest_ltt(table.rows, table.block_count)
+pub fn lexical_transition_table_valid_v1(table: LexicalTransitionTableV1) -> bool:
+    _table_shape_valid_ltt(table, true)
+
+pub fn lexical_transition_table_build_v1(bytes: [u8]) -> Result<LexicalTransitionTableV1, LexicalTransitionTableErrorV1>:
+    val unsealed = lexical_transition_rows_build_unsealed_v1(bytes)?
+    val table = LexicalTransitionTableV1(rows: unsealed.rows, block_count: unsealed.block_count,
+        digest: _digest_ltt(unsealed.rows, unsealed.block_count))
+    if not _table_shape_valid_ltt(table, false): return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    Ok(table)
+
+pub fn lexical_transition_rows_build_unsealed_v1(bytes: [u8]
+) -> Result<LexicalTransitionRowsV1, LexicalTransitionTableErrorV1>:
+    if bytes.len() as u64 > LEXICAL_BLOCK_WIDTH_V1: return Err(LexicalTransitionTableErrorV1.BlockTooWide)
+    var rows: [LexicalTransitionRowV1] = []; val states = lexical_transition_admitted_states_v1()
+    var i = 0
+    while i < states.len():
+        val summary = lexical_block_summary_scalar_v1(bytes, states[i]).unwrap()
+        if _state_id_ltt(summary.output_state) < 0: return Err(LexicalTransitionTableErrorV1.StateNotAdmitted)
+        rows.push(LexicalTransitionRowV1(state_id: i as u32, input_state: states[i],
+            output_state: summary.output_state, blocks: [summary])); i = i + 1
+    val result = LexicalTransitionRowsV1(rows: rows, block_count: 1u32)
+    if not _rows_shape_valid_ltt(result.rows, result.block_count): return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    Ok(result)
+
+pub fn lexical_transition_table_identity_v1() -> LexicalTransitionTableV1:
+    var rows: [LexicalTransitionRowV1] = []; val states = lexical_transition_admitted_states_v1()
+    var i = 0
+    while i < states.len():
+        rows.push(LexicalTransitionRowV1(state_id: i as u32, input_state: states[i],
+            output_state: states[i], blocks: [])); i = i + 1
+    LexicalTransitionTableV1(rows: rows, block_count: 0u32, digest: _digest_ltt(rows, 0u32))
+
+pub fn lexical_transition_table_compose_v1(left: LexicalTransitionTableV1,
+    right: LexicalTransitionTableV1) -> Result<LexicalTransitionTableV1, LexicalTransitionTableErrorV1>:
+    if not lexical_transition_table_valid_v1(left) or not lexical_transition_table_valid_v1(right):
+        return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    if left.block_count as u64 + right.block_count as u64 > LEXICAL_TRANSITION_MAX_BLOCKS_V1:
+        return Err(LexicalTransitionTableErrorV1.CapacityExceeded)
+    val unsealed = lexical_transition_rows_compose_unsealed_v1(
+        LexicalTransitionRowsV1(rows: left.rows, block_count: left.block_count),
+        LexicalTransitionRowsV1(rows: right.rows, block_count: right.block_count))?
+    val table = LexicalTransitionTableV1(rows: unsealed.rows, block_count: unsealed.block_count,
+        digest: _digest_ltt(unsealed.rows, unsealed.block_count))
+    if not _table_shape_valid_ltt(table, false): return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    Ok(table)
+
+pub fn lexical_transition_rows_compose_unsealed_v1(left: LexicalTransitionRowsV1,
+    right: LexicalTransitionRowsV1) -> Result<LexicalTransitionRowsV1, LexicalTransitionTableErrorV1>:
+    if not _rows_shape_valid_ltt(left.rows, left.block_count) or
+       not _rows_shape_valid_ltt(right.rows, right.block_count): return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    if left.block_count as u64 + right.block_count as u64 > LEXICAL_TRANSITION_MAX_BLOCKS_V1:
+        return Err(LexicalTransitionTableErrorV1.CapacityExceeded)
+    var rows: [LexicalTransitionRowV1] = []
+    for l in left.rows:
+        val next = _state_id_ltt(l.output_state)
+        if next < 0: return Err(LexicalTransitionTableErrorV1.StateNotAdmitted)
+        val r = right.rows[next]; var blocks = l.blocks
+        for b in r.blocks: blocks.push(b)
+        rows.push(LexicalTransitionRowV1(state_id: l.state_id, input_state: l.input_state,
+            output_state: r.output_state, blocks: blocks))
+    Ok(LexicalTransitionRowsV1(rows: rows, block_count: left.block_count + right.block_count))
+
+pub fn lexical_transition_rows_select_unsealed_v1(value: LexicalTransitionRowsV1,
+    input: LexicalBlockStateV1) -> Result<LexicalTransitionRowV1, LexicalTransitionTableErrorV1>:
+    if not _rows_shape_valid_ltt(value.rows, value.block_count): return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    val id = _state_id_ltt(input)
+    if id < 0: return Err(LexicalTransitionTableErrorV1.StateNotAdmitted)
+    Ok(value.rows[id])
+
+pub fn lexical_transition_table_select_v1(table: LexicalTransitionTableV1,
+    input: LexicalBlockStateV1) -> Result<LexicalTransitionRowV1, LexicalTransitionTableErrorV1>:
+    if not lexical_transition_table_valid_v1(table): return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    val id = _state_id_ltt(input)
+    if id < 0: return Err(LexicalTransitionTableErrorV1.StateNotAdmitted)
+    Ok(table.rows[id])
+
+# Fused public trust boundary for callers needing one composed row. Each input
+# table is digest-validated once; no expanded composed table is hashed twice.
+pub fn lexical_transition_table_compose_select_v1(left: LexicalTransitionTableV1,
+    right: LexicalTransitionTableV1, input: LexicalBlockStateV1
+) -> Result<LexicalTransitionRowV1, LexicalTransitionTableErrorV1>:
+    if not lexical_transition_table_valid_v1(left) or not lexical_transition_table_valid_v1(right):
+        return Err(LexicalTransitionTableErrorV1.InvalidTable)
+    if left.block_count as u64 + right.block_count as u64 > LEXICAL_TRANSITION_MAX_BLOCKS_V1:
+        return Err(LexicalTransitionTableErrorV1.CapacityExceeded)
+    val input_id = _state_id_ltt(input)
+    if input_id < 0: return Err(LexicalTransitionTableErrorV1.StateNotAdmitted)
+    val l = left.rows[input_id]; val next = _state_id_ltt(l.output_state)
+    if next < 0: return Err(LexicalTransitionTableErrorV1.StateNotAdmitted)
+    val r = right.rows[next]; var blocks = l.blocks
+    for b in r.blocks: blocks.push(b)
+    Ok(LexicalTransitionRowV1(state_id: input_id as u32, input_state: input,
+        output_state: r.output_state, blocks: blocks))

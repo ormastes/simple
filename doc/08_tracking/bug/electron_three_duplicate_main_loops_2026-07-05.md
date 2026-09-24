@@ -1,4 +1,8 @@
 # Three parallel Electron main-loop implementations, two dead
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -19,3 +23,4 @@ Developer finds `--shared-wm` support in `async_app.spl` and assumes it's live; 
 
 ## Next Step
 Merge logic into one module or delete dead implementations per repo rule: no duplicate module splits.
+

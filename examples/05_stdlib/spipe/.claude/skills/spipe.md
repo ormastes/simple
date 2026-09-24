@@ -14,7 +14,7 @@ shared contexts, test types, doc generation, and critical rules.
 
 ## Protected PR self-review handoff
 
-GitHub forbids a PR author `APPROVED` review. `SPipe Self Review Admission` is
+GitHub forbids a PR author from submitting an `APPROVED` review. `SPipe Self Review Admission` is
 a required status check, not provider/independent approval. Ordinary code/text
 is default allow absent external deny/constrain, with `code`, `text`, exact
 `file`, immediate `directory_files`, and recursive `directory_recursive`

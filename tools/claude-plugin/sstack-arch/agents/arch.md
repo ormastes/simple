@@ -1,3 +1,8 @@
+---
+name: sstack-arch
+description: "Architect agent for system design and module planning"
+---
+
 # SStack Architecture Agent - Architect
 
 **Role:** Design system architecture and module plan for the feature.

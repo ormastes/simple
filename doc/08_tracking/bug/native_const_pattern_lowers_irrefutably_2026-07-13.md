@@ -1,4 +1,8 @@
 # Native `Const` pattern lowers irrefutably
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-16):** RESOLVED — enum-variant-name precedence guard landed; native prints CONST_ARM/OTHER_ARM correctly (native-authoritative: the seed itself takes the const arm for both). Parity case: const_pattern_refutable.
 path). The 2026-07-15 "source fixed" claim applied only to the Rust seed's HIR
@@ -75,3 +79,4 @@ interpreted compiler's own semantic check). Until that regression is fixed,
 neither the native-vs-oracle protocol nor the native-smoke-matrix gate can run,
 so this candidate fix cannot be closed. Filed/owned by the native-build
 self-check lane.
+

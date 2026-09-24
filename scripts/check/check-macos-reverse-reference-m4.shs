@@ -1,0 +1,999 @@
+#!/bin/sh
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+cd "$root" || exit 2
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+storage_roots_init || exit 2
+fixtures="$root/test/fixtures/compiler/macos_reverse_reference_m4"
+spec="test/03_system/app/compiler/feature/macos_reverse_reference_m4_native_qualification_spec.spl"
+mode=qualify
+requested_arch=
+compiler=
+evidence_dir="$SIMPLE_WORKTREE_STORAGE_ROOT/evidence/compiler/macos-reverse-reference-m4"
+candidate=
+admission_receipt=
+phase3_authority_receipt=
+residency_baseline_receipt=
+source_run_id=
+source_run_attempt=
+source_repository=
+source_workflow_ref=
+source_workflow_sha=
+source_head_sha=
+source_artifact=
+source_artifact_id=
+source_artifact_digest=
+qualification_run_id=
+qualification_run_attempt=
+qualification_repository=
+qualification_workflow_ref=
+qualification_workflow_sha=
+qualification_head_sha=
+qualification_artifact=
+evidence_artifact=
+residency_authority_run_id=
+residency_authority_artifact=
+performance_checker="$root/scripts/check/lib/macos-bootstrap-performance-evidence.shs"
+kernel_policy_manifest="$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
+
+die() { echo "M4 FAIL: $*" >&2; exit 1; }
+blocked() {
+  mkdir -p "$evidence_dir"
+  printf 'status=BLOCKED\narchitecture=%s\nreason=%s\n' "$requested_arch" "$1" >"$evidence_dir/status.env"
+  echo "M4 BLOCKED [$requested_arch]: $1"
+  exit 3
+}
+normalize_arch() {
+  case "$1" in arm64|aarch64) echo arm64 ;; x86_64|amd64) echo x86_64 ;; *) echo unknown ;; esac
+}
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else printf '%s' "$1" | sha256sum | awk '{print $1}'; fi
+}
+manifest_value() {
+  manifest=$1; key=$2
+  count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$manifest")
+  [ "$count" -eq 1 ] || return 1
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$manifest"
+}
+require_admission_value() {
+  value=$(manifest_value "$admission_receipt" "$1") || die "Phase3 admission receipt has missing or duplicate $1"
+  [ -n "$value" ] || die "Phase3 admission receipt has empty $1"
+  printf '%s\n' "$value"
+}
+require_authority_value() {
+  value=$(manifest_value "$phase3_authority_receipt" "$1") || die "Phase3 producer authority has missing or duplicate $1"
+  [ -n "$value" ] || die "Phase3 producer authority has empty $1"
+  printf '%s\n' "$value"
+}
+require_sha256() { printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$'; }
+require_sha256_digest() { printf '%s\n' "$1" | grep -Eq '^sha256:[0-9a-f]{64}$'; }
+policy_value() {
+  awk -v key="$1" '$1 == key ":" { count++; value=$2 } END { if (count != 1 || value == "") exit 1; print value }' "$kernel_policy_manifest"
+}
+validate_canonical_policy() {
+  [ -f "$kernel_policy_manifest" ] && [ ! -L "$kernel_policy_manifest" ] || die "canonical kernel policy authority is unavailable"
+  policy_manifest_sha=$(sha256_file "$kernel_policy_manifest")
+  [ "$(require_admission_value kernel_policy_manifest_sha256)" = "$policy_manifest_sha" ] || die "Phase3 kernel policy manifest digest mismatch"
+  [ "$(require_admission_value kernel_k1_policy)" = "$(policy_value k1_policy)" ] || die "Phase3 K1 policy drift"
+  [ "$(require_admission_value kernel_plugin_abi)" = 1 ] && [ "$(policy_value simple_abi_policy)" = v1 ] || die "Phase3 kernel ABI is not canonical v1"
+  for binding in plugin_manifest_policy:plugin_manifest_policy coverage_cutover_policy:coverage_cutover_policy coverage_implementation:coverage_implementation performance_threshold_mode:performance_threshold_mode performance_threshold_status:performance_threshold_status performance_baseline_scope:performance_baseline_scope performance_steady_rss_percent:performance_steady_rss_percent performance_growth_percent:performance_growth_percent performance_warm_request_count:performance_warm_request_count; do
+    admission_key=${binding%%:*}; policy_key=${binding#*:}
+    [ "$(require_admission_value "$admission_key")" = "$(policy_value "$policy_key")" ] || die "Phase3 canonical policy drift: $admission_key"
+  done
+  [ "$(policy_value k1_policy)" = llvm-cranelift ] && [ "$(policy_value plugin_manifest_policy)" = simple-sdn ] &&
+    [ "$(policy_value coverage_cutover_policy)" = atomic-apk-only ] && [ "$(policy_value coverage_implementation)" = apk-only ] &&
+    [ "$(policy_value performance_threshold_mode)" = baseline-relative-10-percent ] && [ "$(policy_value performance_threshold_status)" = selected ] &&
+    [ "$(policy_value performance_baseline_scope)" = admitted-per-architecture-receipt ] && [ "$(policy_value performance_steady_rss_percent)" = 110 ] &&
+    [ "$(policy_value performance_growth_percent)" = 10 ] && [ "$(policy_value performance_warm_request_count)" = 20 ] || die "canonical kernel policy authority drifted"
+}
+require_results() {
+  [ "$(grep -Ec '^Results: [0-9]+ total, [0-9]+ passed, [0-9]+ failed$' "$1")" -eq 1 ] || return 1
+  results=$(sed -n 's/^Results: \([0-9][0-9]*\) total, \([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed$/\1 \2 \3/p' "$1")
+  [ "$(printf '%s\n' "$results" | awk '{print NF}')" -eq 3 ] || return 1
+  total=$(printf '%s\n' "$results" | awk '{print $1}')
+  passed=$(printf '%s\n' "$results" | awk '{print $2}')
+  failed=$(printf '%s\n' "$results" | awk '{print $3}')
+  [ "$total" -gt 0 ] && [ "$passed" -eq "$total" ] && [ "$failed" -eq 0 ] && [ $((passed + failed)) -eq "$total" ]
+}
+require_native_macho() {
+  artifact_label=$1; artifact_path=$2
+  [ -x "$artifact_path" ] || die "$artifact_label is not executable"
+  /usr/bin/file "$artifact_path" | grep -q 'Mach-O' || die "$artifact_label is not a Mach-O binary"
+  artifact_arches=$(/usr/bin/lipo -archs "$artifact_path" 2>/dev/null) || die "$artifact_label architecture is unreadable"
+  [ "$artifact_arches" = "$requested_arch" ] || die "$artifact_label must be one thin $requested_arch slice, found $artifact_arches"
+}
+record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$evidence_dir/results.tsv"; }
+run_logged() {
+  name=$1; shift
+  "$@" >"$evidence_dir/$name.log" 2>&1
+}
+cache_counts() {
+  sed -n 's/.*cache: \([0-9][0-9]*\) hits, \([0-9][0-9]*\) misses.*/\1 \2/p; s/.*Cache: \([0-9][0-9]*\) hits, \([0-9][0-9]*\) misses.*/\1 \2/p' "$1" | tail -n 1
+}
+case_field() { awk -F '\t' -v wanted="$1" -v column="$2" '$1 == wanted { print $column; exit }' "$fixtures/cases.tsv"; }
+normalize_diagnostics() {
+  sed -n '/error\|warning\|diagnostic/p' "$1" | sed \
+    -e "s|$work|<SOURCE>|g" \
+    -e "s|${clean_work:-$work}|<SOURCE>|g" \
+    -e "s|$evidence_dir|<EVIDENCE>|g" \
+    -e "s|$root|<ROOT>|g" \
+    -e 's/[0-9][0-9]*ms/<TIME>/g' \
+    -e 's/[0-9a-f][0-9a-f]*\{32,\}/<DIGEST>/g' >"$2"
+}
+require_work_evidence() {
+  receipt_case=$1; receipt_file=$2
+  [ "$(manifest_value "$receipt_file" schema)" = macos-m4-observed-work-v1 ] || die "$receipt_case observed-work schema mismatch"
+  [ "$(manifest_value "$receipt_file" case)" = "$receipt_case" ] || die "$receipt_case observed-work case mismatch"
+  [ "$(manifest_value "$receipt_file" compiler_sha256)" = "$candidate_sha" ] || die "$receipt_case observed-work compiler mismatch"
+  column=3
+  for key in parsed lowered emitted linked parsed_modules lowered_modules emitted_modules; do
+    expected=$(case_field "$receipt_case" "$column")
+    actual=$(manifest_value "$receipt_file" "$key") || die "$receipt_case observed-work missing or duplicate $key"
+    [ "$actual" = "$expected" ] || die "$receipt_case $key=$actual, expected $expected"
+    column=$((column + 1))
+  done
+}
+require_zero_work_evidence() {
+  receipt_case=$1; receipt_file=$2
+  [ "$(manifest_value "$receipt_file" schema)" = macos-m4-observed-work-v1 ] || die "$receipt_case observed-work schema mismatch"
+  [ "$(manifest_value "$receipt_file" case)" = "$receipt_case" ] || die "$receipt_case observed-work case mismatch"
+  [ "$(manifest_value "$receipt_file" compiler_sha256)" = "$candidate_sha" ] || die "$receipt_case observed-work compiler mismatch"
+  for key in parsed lowered emitted linked; do
+    [ "$(manifest_value "$receipt_file" "$key")" = 0 ] || die "$receipt_case unexpectedly performed $key work"
+  done
+  for key in parsed_modules lowered_modules emitted_modules; do
+    [ "$(manifest_value "$receipt_file" "$key")" = - ] || die "$receipt_case unexpectedly recorded $key"
+  done
+}
+provider_oracle_relationship_error() {
+  baseline_oracle=$1; same_byte_oracle=$2; mutated_oracle=$3
+  for oracle in "$baseline_oracle" "$same_byte_oracle" "$mutated_oracle"; do
+    [ "$(manifest_value "$oracle" schema 2>/dev/null || true)" = macos-m4-provider-archive-oracle-v1 ] || {
+      echo provider-oracle-schema-mismatch
+      return
+    }
+  done
+  baseline_archive=$(manifest_value "$baseline_oracle" archive_sha256 2>/dev/null || true)
+  same_byte_archive=$(manifest_value "$same_byte_oracle" archive_sha256 2>/dev/null || true)
+  mutated_archive=$(manifest_value "$mutated_oracle" archive_sha256 2>/dev/null || true)
+  baseline_members=$(manifest_value "$baseline_oracle" members_sha256 2>/dev/null || true)
+  same_byte_members=$(manifest_value "$same_byte_oracle" members_sha256 2>/dev/null || true)
+  mutated_members=$(manifest_value "$mutated_oracle" members_sha256 2>/dev/null || true)
+  baseline_payloads=$(manifest_value "$baseline_oracle" member_payloads_sha256 2>/dev/null || true)
+  same_byte_payloads=$(manifest_value "$same_byte_oracle" member_payloads_sha256 2>/dev/null || true)
+  mutated_payloads=$(manifest_value "$mutated_oracle" member_payloads_sha256 2>/dev/null || true)
+  baseline_manifest=$(manifest_value "$baseline_oracle" manifest_content_identity 2>/dev/null || true)
+  same_byte_manifest=$(manifest_value "$same_byte_oracle" manifest_content_identity 2>/dev/null || true)
+  mutated_manifest=$(manifest_value "$mutated_oracle" manifest_content_identity 2>/dev/null || true)
+  baseline_backend=$(manifest_value "$baseline_oracle" backend_provider_digest 2>/dev/null || true)
+  same_byte_backend=$(manifest_value "$same_byte_oracle" backend_provider_digest 2>/dev/null || true)
+  mutated_backend=$(manifest_value "$mutated_oracle" backend_provider_digest 2>/dev/null || true)
+  for digest in "$baseline_archive" "$same_byte_archive" "$mutated_archive" \
+      "$baseline_members" "$same_byte_members" "$mutated_members" \
+      "$baseline_payloads" "$same_byte_payloads" "$mutated_payloads" \
+      "$baseline_manifest" "$same_byte_manifest" "$mutated_manifest" \
+      "$baseline_backend" "$same_byte_backend" "$mutated_backend"; do
+    printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || {
+      echo provider-oracle-digest-malformed
+      return
+    }
+  done
+  [ "$baseline_archive" = "$same_byte_archive" ] || {
+    echo provider-same-byte-copy-digest-mismatch
+    return
+  }
+  [ "$baseline_members" = "$same_byte_members" ] || {
+    echo provider-same-byte-copy-members-mismatch
+    return
+  }
+  [ "$baseline_payloads" = "$same_byte_payloads" ] || {
+    echo provider-same-byte-copy-payloads-mismatch
+    return
+  }
+  [ "$baseline_manifest" = "$same_byte_manifest" ] || {
+    echo provider-same-byte-copy-changed-identity
+    return
+  }
+  [ "$baseline_archive" != "$mutated_archive" ] || {
+    echo provider-mutation-reused-baseline-archive-bytes
+    return
+  }
+  [ "$baseline_members" != "$mutated_members" ] || {
+    echo provider-mutation-reused-baseline-member-bytes
+    return
+  }
+  [ "$baseline_payloads" != "$mutated_payloads" ] || {
+    echo provider-mutation-preserved-member-payloads
+    return
+  }
+  [ "$baseline_manifest" != "$mutated_manifest" ] || {
+    echo provider-mutation-preserved-runtime-provider-identity
+    return
+  }
+  [ "$baseline_backend" = "$same_byte_backend" ] && [ "$baseline_backend" = "$mutated_backend" ] || {
+    echo provider-mutation-changed-compiler-backend-provider
+    return
+  }
+}
+require_provider_oracle_relationships() {
+  relationship_error=$(provider_oracle_relationship_error "$1" "$2" "$3")
+  [ -z "$relationship_error" ] || die "$relationship_error"
+}
+collect_provider_oracle() {
+  oracle_case=$1; selected_archive=$2
+  runtime_manifest="$cache/native_runtime_provider_manifest.receipt"
+  backend_receipt="$cache/native_provider_identity.receipt"
+  [ -f "$runtime_manifest" ] && [ ! -L "$runtime_manifest" ] || die "$oracle_case production runtime/provider manifest missing or symlinked"
+  [ -f "$backend_receipt" ] && [ ! -L "$backend_receipt" ] || die "$oracle_case production backend-provider receipt missing or symlinked"
+  [ "$(sed -n '1p' "$runtime_manifest")" = simple-darwin-runtime-provider-manifest-v1 ] || die "$oracle_case production runtime/provider manifest schema mismatch"
+  [ "$(manifest_value "$runtime_manifest" architecture)" = "$(require_admission_value target_triple | sed 's/-apple-darwin$//')" ] || die "$oracle_case production runtime/provider manifest architecture mismatch"
+  archive_sha=$(sha256_file "$selected_archive")
+  artifact_record=$(awk -v digest="$archive_sha" '
+    index($0, "artifact=") == 1 && index($0, "|digest=" digest) > 0 {
+      suffix = "|digest=" digest
+      if (substr($0, length($0) - length(suffix) + 1) != suffix) next
+      record = $0
+      sub(/^artifact=/, "", record)
+      artifact_index = record
+      sub(/\|.*/, "", artifact_index)
+      rest = $0
+      sub(/^artifact=[0-9][0-9]*\|path=/, "", rest)
+      declared = rest
+      sub(/:.*/, "", declared)
+      sub(/^[0-9][0-9]*:/, "", rest)
+      path = substr(rest, 1, length(rest) - length(suffix))
+      if (declared !~ /^[0-9]+$/ || length(path) != declared) next
+      count++
+      selected = artifact_index "\t" path
+    }
+    END { if (count == 1) print selected; else exit 1 }
+  ' "$runtime_manifest") || die "$oracle_case selected provider archive is not uniquely present in production manifest"
+  artifact_index=$(printf '%s\n' "$artifact_record" | awk -F '\t' '{print $1}')
+  snapshot_path=$(printf '%s\n' "$artifact_record" | awk -F '\t' '{print $2}')
+  case "$snapshot_path" in "$cache"/darwin_link_inputs/*) ;; *) die "$oracle_case provider snapshot escaped production cache" ;; esac
+  [ -f "$snapshot_path" ] && [ ! -L "$snapshot_path" ] || die "$oracle_case provider snapshot missing or symlinked"
+  [ "$(sha256_file "$snapshot_path")" = "$archive_sha" ] || die "$oracle_case live provider snapshot digest mismatch"
+  retained_manifest="$evidence_dir/$oracle_case.runtime-provider-manifest.receipt"
+  retained_backend="$evidence_dir/$oracle_case.backend-provider.receipt"
+  cp "$runtime_manifest" "$retained_manifest"
+  cp "$backend_receipt" "$retained_backend"
+  [ "$(sha256_file "$retained_manifest")" = "$(sha256_file "$runtime_manifest")" ] || die "$oracle_case retained runtime/provider manifest changed during copy"
+  [ "$(sha256_file "$retained_backend")" = "$(sha256_file "$backend_receipt")" ] || die "$oracle_case retained backend-provider receipt changed during copy"
+  members_file="$evidence_dir/$oracle_case.provider-members.tsv"
+  raw_members="$evidence_dir/$oracle_case.provider-member-payloads.tsv"
+  member_names="$evidence_dir/$oracle_case.provider-member-names"
+  awk -v artifact="$artifact_index" '
+    index($0, "member=" artifact ":") == 1 {
+      record = $0
+      sub(/^member=[0-9][0-9]*:/, "", record)
+      member_index = record
+      sub(/\|.*/, "", member_index)
+      size = record
+      sub(/^[0-9][0-9]*\|size=/, "", size)
+      sub(/\|.*/, "", size)
+      digest = record
+      sub(/^.*\|digest=/, "", digest)
+      if (member_index != count || size !~ /^[0-9]+$/ || size + 0 <= 0 || digest !~ /^[0-9a-f]{64}$/) exit 2
+      print $0
+      count++
+    }
+    END { if (count == 0) exit 3 }
+  ' "$runtime_manifest" >"$raw_members" || die "$oracle_case production archive members are missing, malformed, or unordered"
+  /usr/bin/ar -t "$selected_archive" >"$member_names" || die "$oracle_case archive member names are unreadable"
+  [ "$(wc -l <"$raw_members" | tr -d ' ')" = "$(wc -l <"$member_names" | tr -d ' ')" ] || die "$oracle_case archive member-name count disagrees with production manifest"
+  paste "$raw_members" "$member_names" | awk -F '\t' '
+    {
+      row = $1; name = $2
+      if (name == "" || name ~ /[^A-Za-z0-9_.+\/-]/) exit 1
+      print row "|name=" length(name) ":" name
+    }
+  ' >"$members_file" || die "$oracle_case archive member names are malformed"
+  rm -f "$member_names"
+  member_count=$(wc -l <"$members_file" | tr -d ' ')
+  content_identity=$(manifest_value "$runtime_manifest" content-identity) || die "$oracle_case production runtime/provider content identity missing"
+  printf '%s\n' "$content_identity" | grep -Eq '^[0-9a-f]{64}$' || die "$oracle_case production runtime/provider content identity malformed"
+  [ "$(sed -n '1p' "$backend_receipt")" = simple-native-provider-identity-v1 ] || die "$oracle_case backend provider receipt schema mismatch"
+  backend_provider=$(manifest_value "$backend_receipt" provider) || die "$oracle_case backend provider digest missing"
+  printf '%s\n' "$backend_provider" | grep -Eq '^[0-9a-f]{64}$' || die "$oracle_case backend provider digest malformed"
+  oracle_file="$evidence_dir/$oracle_case.provider-oracle.env"
+  cat >"$oracle_file" <<EOF
+schema=macos-m4-provider-archive-oracle-v1
+case=$oracle_case
+compiler_sha256=$candidate_sha
+backend_provider_digest=$backend_provider
+selected_input_path=$selected_archive
+snapshot_path=$snapshot_path
+archive_sha256=$archive_sha
+manifest_sha256=$(sha256_file "$retained_manifest")
+backend_receipt_sha256=$(sha256_file "$retained_backend")
+manifest_content_identity=$content_identity
+artifact_index=$artifact_index
+member_count=$member_count
+members_sha256=$(sha256_file "$members_file")
+member_payloads_sha256=$(sha256_file "$raw_members")
+EOF
+}
+module_set_from_phase() {
+  phase_name=$1; phase_log=$2
+  phase_modules=$(sed -n "s/^\\[M4 ${phase_name}\\] module=\\([^ ]*\\) work=1.*$/\\1/p" "$phase_log" | \
+    sed 's|.*/||; s|\.spl$||' | sort -u | paste -sd, -)
+  if [ -n "$phase_modules" ]; then printf '%s\n' "$phase_modules"; else echo -; fi
+}
+emitted_module_set() {
+  emit_log=$1
+  emitted_modules_value=$(sed -n 's/^\[M4 emit\] module=\([^ ]*\) work=1.*$/\1/p' "$emit_log" | sort -u | paste -sd, -)
+  if [ -n "$emitted_modules_value" ]; then printf '%s\n' "$emitted_modules_value"; else echo -; fi
+}
+collect_work_evidence() {
+  collect_case=$1; collect_log=$2
+  malformed_trace=$(grep '^\[M4 ' "$collect_log" | grep -Evc '^\[M4 parse\] module=[^ ]+ work=[01] imports=[0-9]+$|^\[M4 lower\] module=[^ ]+ work=[01]$|^\[M4 emit\] module=[^ ]+ work=1$' || true)
+  [ "$malformed_trace" -eq 0 ] || die "$collect_case contains malformed M4 phase evidence"
+  parsed_modules=$(module_set_from_phase parse "$collect_log")
+  lowered_modules=$(module_set_from_phase lower "$collect_log")
+  emitted_modules=$(emitted_module_set "$collect_log")
+  parsed=$(if [ "$parsed_modules" = - ]; then echo 0; else printf '%s\n' "$parsed_modules" | awk -F, '{print NF}'; fi)
+  lowered=$(if [ "$lowered_modules" = - ]; then echo 0; else printf '%s\n' "$lowered_modules" | awk -F, '{print NF}'; fi)
+  emitted=$(if [ "$emitted_modules" = - ]; then echo 0; else printf '%s\n' "$emitted_modules" | awk -F, '{print NF}'; fi)
+  linked=$(wc -l <"$link_count_file" | tr -d ' ')
+  observed_file="$evidence_dir/$collect_case.observed-work.env"
+  cat >"$observed_file" <<EOF
+schema=macos-m4-observed-work-v1
+case=$collect_case
+compiler_sha256=$candidate_sha
+trace_sha256=$(sha256_file "$collect_log")
+link_argv_sha256=$(sha256_file "$link_count_file.args")
+parsed=$parsed
+lowered=$lowered
+emitted=$emitted
+linked=$linked
+parsed_modules=$parsed_modules
+lowered_modules=$lowered_modules
+emitted_modules=$emitted_modules
+EOF
+}
+restore_baseline() {
+  active_provider_archive=$provider_baseline_archive
+  rm -rf "$work" "$cache"
+  cp -R "$baseline_work" "$work"
+  cp -R "$baseline_cache" "$cache"
+  cp "$baseline_output" "$output"
+  : >"$link_count_file"
+  : >"$link_count_file.args"
+  [ "$(tree_digest "$work")" = "$baseline_work_digest" ] || die "baseline source restoration mismatch"
+  [ "$(tree_digest "$cache")" = "$baseline_cache_digest" ] || die "baseline cache restoration mismatch"
+  [ "$(sha256_file "$output")" = "$baseline_output_digest" ] || die "baseline output restoration mismatch"
+}
+tree_digest() {
+  tree_root=$1
+  (cd "$tree_root" && find . -type f -print | LC_ALL=C sort | while IFS= read -r tree_file; do
+    printf '%s\t%s\n' "$tree_file" "$(sha256_file "$tree_file")"
+  done) | if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'; else sha256sum | awk '{print $1}'; fi
+}
+apply_mutation() {
+  case_name=$1
+  case "$case_name" in
+    private_body) cp "$fixtures/private_body/api.spl" "$work/api.spl" ;;
+    interface) cp "$fixtures/interface/api.spl" "$work/api.spl" ;;
+    provider) active_provider_archive=$provider_mutated_archive ;;
+    one_file) cp "$fixtures/one_file/main.spl" "$work/main.spl" ;;
+  esac
+}
+native_build() {
+  log_name=$1
+  linker_policy_flag=
+  [ "$log_name" != linker-policy ] || linker_policy_flag=--strip
+  metric_memory="$evidence_dir/$log_name.memory.env"
+  metric_spans="$evidence_dir/$log_name.execution.sdn"
+  metric_receipt="$evidence_dir/$log_name.performance.env"
+  rm -f "$metric_memory" "$metric_spans" "$metric_receipt"
+  run_logged "$log_name" /usr/bin/time -l -p env SIMPLE_LIB="$root/src" SIMPLE_COMPILER_TRACE=1 SIMPLE_M4_WORK_RECEIPT=1 \
+    SIMPLE_LINK_OBJECTS="$active_provider_archive" \
+    SIMPLE_HIR_PHASE_PROFILE=1 SIMPLE_MEM_SNAPSHOT_FILE="$metric_memory" \
+    SIMPLE_EXECUTION_METRICS_FILE="$metric_spans" SIMPLE_EVIDENCE_RUN_ID="m4-$requested_arch-$log_name" \
+    SIMPLE_FRONTEND_CACHE_SCOPE=m4 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \
+    SIMPLE_HIR_CACHE_DIR="$cache/hir" SIMPLE_NATIVE_INCREMENTAL=1 \
+    SIMPLE_CC="$link_wrapper" M4_REAL_CC="$real_cc" M4_LINK_COUNT_FILE="$link_count_file" \
+    "$compiler" native-build --trace \
+    --source "$work" --entry "$work/main.spl" --cache-dir "$cache" -o "$output" $linker_policy_flag
+  build_status=$?
+  [ "$build_status" -eq 0 ] || return "$build_status"
+  performance_request=$log_name
+  [ "$log_name" != baseline ] || performance_request=m0-baseline
+  sh "$performance_checker" extract "$evidence_dir/$log_name.log" "$metric_memory" "$metric_spans" "$metric_receipt" "$performance_request"
+}
+clean_compare() {
+  compare_case=$1
+  clean_policy_flag=
+  [ "$compare_case" != linker_policy ] || clean_policy_flag=--strip
+  clean_work="$evidence_dir/clean-$compare_case-work"
+  clean_cache="$evidence_dir/clean-$compare_case-cache"
+  clean_output="$evidence_dir/clean-$compare_case-output"
+  rm -rf "$clean_work" "$clean_cache" "$clean_output"
+  cp -R "$work" "$clean_work"
+  mkdir -p "$clean_cache"
+  run_logged "clean-$compare_case" env SIMPLE_LIB="$root/src" SIMPLE_COMPILER_TRACE=1 SIMPLE_M4_WORK_RECEIPT=1 \
+    SIMPLE_LINK_OBJECTS="$active_provider_archive" \
+    SIMPLE_FRONTEND_CACHE_SCOPE="m4-clean-$compare_case" SIMPLE_FRONTEND_CACHE_DIR="$clean_cache/frontend" \
+    SIMPLE_HIR_CACHE_DIR="$clean_cache/hir" SIMPLE_NATIVE_INCREMENTAL=1 \
+    "$compiler" native-build --trace --source "$clean_work" --entry "$clean_work/main.spl" \
+    --cache-dir "$clean_cache" -o "$clean_output" $clean_policy_flag || die "$compare_case clean comparison build failed"
+  run_logged "$compare_case-incremental-run" "$output" || die "$compare_case incremental executable failed"
+  run_logged "$compare_case-clean-run" "$clean_output" || die "$compare_case clean executable failed"
+  cmp -s "$evidence_dir/$compare_case-incremental-run.log" "$evidence_dir/$compare_case-clean-run.log" || die "$compare_case clean/incremental output differs"
+  cmp -s "$output" "$clean_output" || die "$compare_case clean/incremental executable bytes differ"
+  expected_stdout=$(case_field "$compare_case" 11)
+  grep -Fxq "$expected_stdout" "$evidence_dir/$compare_case-incremental-run.log" || die "$compare_case executable output mismatch"
+  normalize_diagnostics "$evidence_dir/$compare_case.log" "$evidence_dir/$compare_case.incremental.diagnostics"
+  normalize_diagnostics "$evidence_dir/clean-$compare_case.log" "$evidence_dir/$compare_case.clean.diagnostics"
+  cmp -s "$evidence_dir/$compare_case.incremental.diagnostics" "$evidence_dir/$compare_case.clean.diagnostics" || die "$compare_case normalized diagnostics differ"
+}
+build_provider_archive() {
+  provider_variant=$1
+  provider_source="$fixtures/provider_archive/$provider_variant.spl"
+  provider_output="$evidence_dir/provider-artifacts/$provider_variant.a"
+  provider_cache="$evidence_dir/tool-cache/provider-$provider_variant-$candidate_sha"
+  rm -rf "$provider_cache" "$provider_output"
+  mkdir -p "$provider_cache" "$(dirname "$provider_output")"
+  run_logged "build-provider-$provider_variant" env SIMPLE_LIB="$root/src" "$compiler" native-build \
+    --source "$fixtures/provider_archive" --entry-closure --entry "$provider_source" \
+    --target "$(require_admission_value target_triple)" --emit-archive --threads 1 \
+    --cache-dir "$provider_cache" --output "$provider_output" || die "$provider_variant provider archive producer-bound build failed"
+  [ -s "$provider_output" ] || die "$provider_variant provider archive was not produced"
+  /usr/bin/file "$provider_output" >"$evidence_dir/provider-$provider_variant.file.log"
+  grep -Eq 'archive|ar archive' "$evidence_dir/provider-$provider_variant.file.log" || die "$provider_variant provider output is not an archive"
+  cat >"$evidence_dir/provider-$provider_variant.tool-build.env" <<EOF
+schema=macos-m4-provider-tool-build-v1
+status=PASS
+variant=$provider_variant
+architecture=$requested_arch
+target_triple=$(require_admission_value target_triple)
+producer_sha256=$candidate_sha
+source_sha256=$(sha256_file "$provider_source")
+archive_sha256=$(sha256_file "$provider_output")
+build_log_sha256=$(sha256_file "$evidence_dir/build-provider-$provider_variant.log")
+EOF
+}
+build_tool() {
+  tool_name=$1; tool_entry=$2; tool_output=$3
+  tool_cache_identity=$(sha256_text "macos-m4-tool-cache-v1|$candidate_sha|$requested_arch|$tool_name")
+  tool_cache="$evidence_dir/tool-cache/$candidate_sha/$tool_name-$tool_cache_identity"
+  rm -rf "$tool_cache" "$tool_output"
+  mkdir -p "$tool_cache" "$(dirname "$tool_output")"
+  run_logged "build-$tool_name" env SIMPLE_LIB="$root/src" "$compiler" native-build \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry "$tool_entry" --threads 1 --cache-dir "$tool_cache" --output "$tool_output" || die "$tool_name producer-bound build failed"
+  require_native_macho "$tool_name" "$tool_output"
+  cat >"$evidence_dir/$tool_name.tool-build.env" <<EOF
+schema=macos-m4-tool-build-v1
+status=PASS
+tool=$tool_name
+architecture=$requested_arch
+target_triple=$(require_admission_value target_triple)
+producer_sha256=$candidate_sha
+artifact_sha256=$(sha256_file "$tool_output")
+cache_identity=$tool_cache_identity
+cache_owner_sha256=$candidate_sha
+cache_mode=exclusive-writer
+build_log_sha256=$(sha256_file "$evidence_dir/build-$tool_name.log")
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --self-test) mode=self-test ;;
+    --arch=*) requested_arch=${arg#*=} ;;
+    --compiler=*) compiler=${arg#*=} ;;
+    --cli=*|--mcp=*|--lsp=*) die "prebuilt tool artifacts are not M4 build evidence" ;;
+    --provider-archive=*|--provider-manifest=*|--provider-receipt=*) die "prebuilt or synthetic provider evidence is not M4 build evidence" ;;
+    --candidate=*) candidate=${arg#*=} ;;
+    --admission-receipt=*) admission_receipt=${arg#*=} ;;
+    --phase3-authority-receipt=*) phase3_authority_receipt=${arg#*=} ;;
+    --residency-baseline-receipt=*) residency_baseline_receipt=${arg#*=} ;;
+    --source-run-id=*) source_run_id=${arg#*=} ;;
+    --source-run-attempt=*) source_run_attempt=${arg#*=} ;;
+    --source-repository=*) source_repository=${arg#*=} ;;
+    --source-workflow-ref=*) source_workflow_ref=${arg#*=} ;;
+    --source-workflow-sha=*) source_workflow_sha=${arg#*=} ;;
+    --source-head-sha=*) source_head_sha=${arg#*=} ;;
+    --source-artifact=*) source_artifact=${arg#*=} ;;
+    --source-artifact-id=*) source_artifact_id=${arg#*=} ;;
+    --source-artifact-digest=*) source_artifact_digest=${arg#*=} ;;
+    --qualification-run-id=*) qualification_run_id=${arg#*=} ;;
+    --qualification-run-attempt=*) qualification_run_attempt=${arg#*=} ;;
+    --qualification-repository=*) qualification_repository=${arg#*=} ;;
+    --qualification-workflow-ref=*) qualification_workflow_ref=${arg#*=} ;;
+    --qualification-workflow-sha=*) qualification_workflow_sha=${arg#*=} ;;
+    --qualification-head-sha=*) qualification_head_sha=${arg#*=} ;;
+    --qualification-artifact=*) qualification_artifact=${arg#*=} ;;
+    --evidence-artifact=*) evidence_artifact=${arg#*=} ;;
+    --residency-authority-run-id=*) residency_authority_run_id=${arg#*=} ;;
+    --residency-authority-artifact=*) residency_authority_artifact=${arg#*=} ;;
+    --evidence-dir=*) evidence_dir=${arg#*=} ;;
+    *) die "unknown option $arg" ;;
+  esac
+done
+
+if [ "$mode" = self-test ]; then
+  [ "$(sha256_file "$fixtures/cases.tsv")" = b0212d07197abf756e441704dce6a0c907e092e7d4523225aee2ee58e2f6e38f ] || die "fixture matrix differs from the exact eight-row M4 contract"
+  [ "$(awk -F '\t' '!/^#/ && NF == 11 { n++ } END { print n + 0 }' "$fixtures/cases.tsv")" -eq 8 ] || die "fixture matrix must contain eight complete cases"
+  expected_cases='corrupt_cache interface interrupted_build linker_policy no_op one_file private_body provider'
+  actual_cases=$(awk -F '\t' '!/^#/ { print $1 }' "$fixtures/cases.tsv" | LC_ALL=C sort | paste -sd' ' -)
+  [ "$actual_cases" = "$expected_cases" ] || die "fixture matrix case set mismatch"
+  awk -F '\t' '!/^#/ {
+    if (seen[$1]++) exit 1
+    for (i = 3; i <= 6; i++) if ($i !~ /^[0-9]+$/) exit 1
+    for (i = 7; i <= 11; i++) if ($i == "") exit 1
+  }' "$fixtures/cases.tsv" || die "fixture matrix contains duplicate or malformed expectations"
+  for path in base/api.spl base/provider.spl base/main.spl private_body/api.spl interface/api.spl provider_archive/baseline.spl provider_archive/mutated.spl one_file/main.spl; do
+    [ -s "$fixtures/$path" ] || die "missing fixture $path"
+  done
+  cmp -s "$fixtures/base/api.spl" "$fixtures/private_body/api.spl" && die "private-body fixture does not mutate source"
+  cmp -s "$fixtures/base/api.spl" "$fixtures/interface/api.spl" && die "interface fixture does not mutate source"
+  cmp -s "$fixtures/provider_archive/baseline.spl" "$fixtures/provider_archive/mutated.spl" && die "provider archive sources do not mutate provider bytes"
+  cmp -s "$fixtures/base/main.spl" "$fixtures/one_file/main.spl" && die "one-file fixture does not mutate source"
+  selftest_root=$(storage_roots_mktemp macos-m4-selftest) || die "centralized self-test scratch unavailable"
+  temp=$selftest_root/results
+  provider_selftest=$selftest_root/provider-oracle
+  trap 'rm -f "$temp" "$temp.bad"; rm -rf "$provider_selftest"' EXIT HUP INT TERM
+  printf 'pretend success\n' >"$temp.bad"
+  if require_results "$temp.bad"; then die "exit-zero/no-results evidence was accepted"; fi
+  printf 'Results: 2 total, 2 passed, 0 failed\n' >"$temp"
+  require_results "$temp" || die "real Results line was rejected"
+  printf 'Results: 2 total, 1 passed, 1 failed\n' >"$temp.bad"
+  if require_results "$temp.bad"; then die "failing Results line was accepted"; fi
+  printf 'noise Results: 2 total, 2 passed, 0 failed suffix\n' >"$temp.bad"
+  if require_results "$temp.bad"; then die "embedded Results line was accepted"; fi
+  printf 'Results: 2 total, 2 passed, 0 failed\nResults: 2 total, 2 passed, 0 failed\n' >"$temp.bad"
+  if require_results "$temp.bad"; then die "duplicate Results lines were accepted"; fi
+  printf ' Results: 2 total, 2 passed, 0 failed\n' >"$temp.bad"
+  if require_results "$temp.bad"; then die "whitespace-prefixed Results line was accepted"; fi
+  mkdir -p "$provider_selftest"
+  baseline_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mutated_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  baseline_members=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  mutated_members=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  baseline_payloads=2222222222222222222222222222222222222222222222222222222222222222
+  mutated_payloads=3333333333333333333333333333333333333333333333333333333333333333
+  baseline_manifest=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  mutated_manifest=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  backend_digest=1111111111111111111111111111111111111111111111111111111111111111
+  for oracle_case in baseline provider-same-byte provider; do
+    archive_digest=$baseline_digest
+    members_digest=$baseline_members
+    manifest_digest=$baseline_manifest
+    if [ "$oracle_case" = provider ]; then
+      archive_digest=$mutated_digest
+      members_digest=$mutated_members
+      manifest_digest=$mutated_manifest
+    fi
+    cat >"$provider_selftest/$oracle_case.env" <<EOF
+schema=macos-m4-provider-archive-oracle-v1
+archive_sha256=$archive_digest
+members_sha256=$members_digest
+member_payloads_sha256=$(if [ "$oracle_case" = provider ]; then echo "$mutated_payloads"; else echo "$baseline_payloads"; fi)
+manifest_content_identity=$manifest_digest
+backend_provider_digest=$backend_digest
+EOF
+  done
+  require_provider_oracle_relationships "$provider_selftest/baseline.env" "$provider_selftest/provider-same-byte.env" "$provider_selftest/provider.env"
+  sed "s/archive_sha256=$mutated_digest/archive_sha256=$baseline_digest/" \
+    "$provider_selftest/provider.env" >"$provider_selftest/provider.same-bytes.env"
+  relationship_error=$(provider_oracle_relationship_error "$provider_selftest/baseline.env" "$provider_selftest/provider-same-byte.env" "$provider_selftest/provider.same-bytes.env")
+  [ "$relationship_error" = provider-mutation-reused-baseline-archive-bytes ] || die "provider same-byte mutation was not rejected"
+  sed "s/member_payloads_sha256=$mutated_payloads/member_payloads_sha256=$baseline_payloads/" \
+    "$provider_selftest/provider.env" >"$provider_selftest/provider.same-payloads.env"
+  relationship_error=$(provider_oracle_relationship_error "$provider_selftest/baseline.env" "$provider_selftest/provider-same-byte.env" "$provider_selftest/provider.same-payloads.env")
+  [ "$relationship_error" = provider-mutation-preserved-member-payloads ] || die "provider member-payload-preserving mutation was not rejected"
+  echo "M4 structural self-test PASS: 8 fixtures; Results parser fail closed; prebuilt tools rejected; provider/archive mutation-red"
+  exit 0
+fi
+
+requested_arch=$(normalize_arch "$requested_arch")
+[ "$requested_arch" != unknown ] || die "--arch must be arm64 or x86_64"
+[ "$(uname -s)" = Darwin ] || blocked "native macOS host unavailable ($(uname -s))"
+host_arch=$(normalize_arch "$(uname -m)")
+[ "$host_arch" = "$requested_arch" ] || blocked "native $requested_arch host unavailable (running $host_arch)"
+[ -n "$compiler" ] && [ -x "$compiler" ] || blocked "compiler artifact unavailable"
+[ -n "$candidate" ] && [ -f "$candidate" ] || blocked "admitted Phase3 candidate unavailable"
+[ -n "$admission_receipt" ] && [ -f "$admission_receipt" ] || blocked "Phase3 admission receipt unavailable"
+[ -n "$phase3_authority_receipt" ] && [ -f "$phase3_authority_receipt" ] && [ ! -L "$phase3_authority_receipt" ] || blocked "authenticated Phase3 producer authority unavailable"
+[ "$(require_admission_value schema)" = macos-phase3-admission-v1 ] || die "unsupported Phase3 admission schema"
+[ "$(require_admission_value status)" = PASS ] || die "Phase3 admission is not PASS"
+[ "$(require_admission_value phase)" = 3 ] || die "candidate is not admitted Phase3"
+candidate_sha=$(require_admission_value candidate_sha256)
+[ "$candidate_sha" = "$(sha256_file "$candidate")" ] || die "Phase3 admission candidate digest mismatch"
+[ "$candidate_sha" = "$(sha256_file "$compiler")" ] || die "M4 compiler is not the admitted Phase3 candidate"
+[ "$(require_admission_value architecture)" = "$requested_arch" ] || die "Phase3 admission architecture mismatch"
+case "$requested_arch:$(require_admission_value target_triple)" in
+  arm64:aarch64-apple-darwin|x86_64:x86_64-apple-darwin) ;;
+  *) die "Phase3 admission target mismatch" ;;
+esac
+for key in source_revision simple_version compiler_schema kernel_plugin_abi runtime_bundle_identity provider_identity deployment_policy target_identity_digest deployment_target sdk_identity kernel_policy_manifest_sha256 kernel_k1_policy plugin_manifest_policy coverage_cutover_policy coverage_implementation performance_threshold_mode performance_threshold_status performance_baseline_scope performance_steady_rss_percent performance_growth_percent performance_warm_request_count; do
+  require_admission_value "$key" >/dev/null
+done
+validate_canonical_policy
+[ "$(require_admission_value deployment_policy)" = macos-13 ] || die "Phase3 deployment policy is not canonical macos-13"
+printf '%s\n' "$(require_admission_value target_identity_digest)" | grep -Eq '^[0-9a-f]{64}$' || die "Phase3 target identity digest is malformed"
+printf '%s\n' "$(require_admission_value sdk_identity)" | grep -Eq '^[0-9a-f]{64}$' || die "Phase3 SDK identity is malformed"
+printf '%s\n' "$(require_admission_value deployment_target)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "Phase3 deployment target is not canonical"
+printf '%s\n' "$(require_admission_value source_revision)" | grep -Eq '^[0-9a-f]{40}$' || die "Phase3 source revision is not an exact commit SHA"
+[ -n "$source_run_id" ] || die "source workflow run id is required"
+[ -n "$source_run_attempt" ] || die "source workflow run attempt is required"
+[ -n "$source_repository" ] || die "source repository is required"
+[ -n "$source_workflow_ref" ] || die "source workflow ref is required"
+[ -n "$source_workflow_sha" ] || die "source workflow SHA is required"
+[ -n "$source_head_sha" ] || die "source head SHA is required"
+[ -n "$source_artifact" ] || die "source artifact identity is required"
+[ -n "$source_artifact_id" ] || die "source artifact ID is required"
+[ -n "$source_artifact_digest" ] || die "source artifact digest is required"
+[ -n "$qualification_run_id" ] || die "qualification workflow run id is required"
+[ -n "$qualification_run_attempt" ] || die "qualification workflow run attempt is required"
+[ -n "$qualification_repository" ] || die "qualification repository is required"
+[ -n "$qualification_workflow_ref" ] || die "qualification workflow ref is required"
+[ -n "$qualification_workflow_sha" ] || die "qualification workflow SHA is required"
+[ -n "$qualification_head_sha" ] || die "qualification head SHA is required"
+[ -n "$qualification_artifact" ] || die "qualification artifact name is required"
+[ -n "$evidence_artifact" ] || die "evidence artifact name is required"
+[ -n "$residency_authority_run_id" ] || die "residency authority workflow run id is required"
+[ -n "$residency_authority_artifact" ] || die "residency authority artifact identity is required"
+[ -f "$residency_baseline_receipt" ] && [ ! -L "$residency_baseline_receipt" ] || die "admitted baseline receipt is required"
+case "$source_run_id:$source_run_attempt:$source_artifact_id" in *[!0-9:]*) die "source run/attempt/artifact ID must be numeric" ;; esac
+case "$qualification_run_id" in *[!0-9]*|'') die "qualification workflow run id must be numeric" ;; esac
+case "$qualification_run_attempt" in *[!0-9]*|'') die "qualification workflow run attempt must be numeric" ;; esac
+case "$qualification_artifact:$evidence_artifact" in *[!A-Za-z0-9._:-]*) die "artifact names contain unsafe characters" ;; esac
+case "$residency_authority_run_id" in *[!0-9]*|'') die "residency authority workflow run id must be numeric" ;; esac
+case "$source_artifact" in *[!A-Za-z0-9._-]*|'') die "source artifact identity is malformed" ;; esac
+case "$residency_authority_artifact" in *[!A-Za-z0-9._-]*|'') die "residency authority artifact identity is malformed" ;; esac
+current_revision=$(git rev-parse HEAD 2>/dev/null) || die "source revision is unavailable"
+[ "$(require_admission_value source_revision)" = "$current_revision" ] || die "Phase3 source revision does not match checked-out source"
+[ "$source_head_sha" = "$current_revision" ] && [ "$qualification_head_sha" = "$current_revision" ] || die "workflow head SHA does not match checked-out source"
+require_sha256 "$source_workflow_sha" || die "source workflow SHA is malformed"
+require_sha256 "$qualification_workflow_sha" || die "qualification workflow SHA is malformed"
+require_sha256_digest "$source_artifact_digest" || die "source artifact digest is malformed"
+[ "$(require_authority_value schema)" = macos-phase3-producer-authority-v1 ] || die "unsupported Phase3 producer authority schema"
+[ "$(require_authority_value status)" = AUTHENTICATED ] || die "Phase3 producer authority is not authenticated"
+for binding in repository:$source_repository workflow_ref:$source_workflow_ref workflow_sha:$source_workflow_sha head_sha:$source_head_sha run_id:$source_run_id run_attempt:$source_run_attempt artifact_name:$source_artifact artifact_id:$source_artifact_id artifact_digest:$source_artifact_digest candidate_sha256:$candidate_sha admission_receipt_sha256:$(sha256_file "$admission_receipt"); do
+  authority_key=${binding%%:*}; authority_expected=${binding#*:}
+  [ "$(require_authority_value "$authority_key")" = "$authority_expected" ] || die "Phase3 producer authority mismatch: $authority_key"
+done
+[ "$(require_authority_value authority_repository)" = "$qualification_repository" ] || die "Phase3 authority repository mismatch"
+[ "$(require_authority_value authority_workflow_ref)" = "$qualification_workflow_ref" ] || die "Phase3 authority workflow ref mismatch"
+[ "$(require_authority_value authority_workflow_sha)" = "$qualification_workflow_sha" ] || die "Phase3 authority workflow SHA mismatch"
+[ "$(require_authority_value authority_head_sha)" = "$qualification_head_sha" ] || die "Phase3 authority head SHA mismatch"
+[ "$(require_authority_value authority_run_id)" = "$qualification_run_id" ] || die "Phase3 authority run ID mismatch"
+[ "$(require_authority_value authority_run_attempt)" = "$qualification_run_attempt" ] || die "Phase3 authority run attempt mismatch"
+[ -z "$(git status --porcelain --untracked-files=all)" ] || die "M4 source worktree must be clean and immutable"
+[ -x /usr/bin/lipo ] || blocked "native lipo unavailable"
+require_native_macho "Phase3 compiler" "$compiler"
+
+rm -rf "$evidence_dir"
+mkdir -p "$evidence_dir" "$evidence_dir/work" "$evidence_dir/cache" "$evidence_dir/authority"
+cp "$admission_receipt" "$evidence_dir/authority/phase3-admission.env"
+cp "$phase3_authority_receipt" "$evidence_dir/authority/phase3-producer-authority.env"
+cp "$residency_baseline_receipt" "$evidence_dir/authority/residency-baseline.env"
+cp "$kernel_policy_manifest" "$evidence_dir/authority/kernel-closure.sdn"
+tool_root="$evidence_dir/tools/$candidate_sha"
+cli="$tool_root/simple_cli"
+test_runner="$tool_root/simple_test_runner"
+mcp="$tool_root/simple_mcp_server"
+lsp="$tool_root/simple_lsp_mcp_server"
+work="$evidence_dir/work"
+cache="$evidence_dir/cache"
+output="$evidence_dir/m4-fixture"
+baseline_work="$evidence_dir/admitted-baseline-work"
+baseline_cache="$evidence_dir/admitted-baseline-cache"
+baseline_output="$evidence_dir/admitted-baseline-output"
+link_wrapper="$root/scripts/check/fixtures/macos-reverse-reference-m4-linker.shs"
+link_count_file="$evidence_dir/link-count"
+real_cc=$(command -v cc) || blocked "native C linker unavailable"
+[ -x /usr/bin/xcodebuild ] || blocked "native Xcode version authority unavailable"
+[ -x "$link_wrapper" ] || die "M4 linker wrapper unavailable"
+[ -x /usr/bin/time ] || blocked "authoritative macOS /usr/bin/time unavailable"
+[ -x "$performance_checker" ] || die "performance evidence checker unavailable"
+: >"$link_count_file"
+: >"$link_count_file.args"
+run_logged xcode-version /usr/bin/xcodebuild -version || die "Xcode version evidence failed"
+grep -Eq '^Xcode [0-9]' "$evidence_dir/xcode-version.log" || die "Xcode version evidence malformed"
+run_logged clang-version "$real_cc" --version || die "clang version evidence failed"
+grep -Eq '(^| )([Aa]pple )?[Cc]lang version [0-9]' "$evidence_dir/clang-version.log" || die "clang version evidence malformed"
+cp "$fixtures/base/"*.spl "$work/"
+printf 'case\tstatus\tevidence\n' >"$evidence_dir/results.tsv"
+
+build_provider_archive baseline
+build_provider_archive mutated
+provider_baseline_archive="$evidence_dir/provider-artifacts/baseline.a"
+provider_mutated_archive="$evidence_dir/provider-artifacts/mutated.a"
+provider_same_byte_archive="$evidence_dir/provider-artifacts/baseline-same-bytes.a"
+cp "$provider_baseline_archive" "$provider_same_byte_archive"
+[ "$(sha256_file "$provider_baseline_archive")" = "$(sha256_file "$provider_same_byte_archive")" ] || die "provider same-byte substitution copy changed bytes"
+[ "$(sha256_file "$provider_baseline_archive")" != "$(sha256_file "$provider_mutated_archive")" ] || die "provider mutation produced the same archive bytes"
+cat >"$evidence_dir/provider-builds.env" <<EOF
+schema=macos-m4-provider-build-set-v1
+producer_sha256=$candidate_sha
+baseline_receipt_sha256=$(sha256_file "$evidence_dir/provider-baseline.tool-build.env")
+mutated_receipt_sha256=$(sha256_file "$evidence_dir/provider-mutated.tool-build.env")
+baseline_archive_sha256=$(sha256_file "$provider_baseline_archive")
+same_byte_archive_sha256=$(sha256_file "$provider_same_byte_archive")
+mutated_archive_sha256=$(sha256_file "$provider_mutated_archive")
+same_byte_source=checker-owned-copy-of-live-baseline
+EOF
+active_provider_archive=$provider_baseline_archive
+
+run_logged compiler-version "$compiler" --version || die "compiler did not start"
+build_tool full_cli src/app/cli/_CliMain/main_and_help.spl "$cli"
+build_tool test_runner src/app/test_runner_new/main.spl "$test_runner"
+build_tool mcp src/app/mcp/main.spl "$mcp"
+build_tool lsp src/app/simple_lsp_mcp/main.spl "$lsp"
+cat >"$evidence_dir/tool-builds.env" <<EOF
+schema=macos-m4-tool-build-set-v1
+producer_sha256=$candidate_sha
+full_cli_receipt_sha256=$(sha256_file "$evidence_dir/full_cli.tool-build.env")
+test_runner_receipt_sha256=$(sha256_file "$evidence_dir/test_runner.tool-build.env")
+mcp_receipt_sha256=$(sha256_file "$evidence_dir/mcp.tool-build.env")
+lsp_receipt_sha256=$(sha256_file "$evidence_dir/lsp.tool-build.env")
+EOF
+run_logged cli-version "$cli" --version || die "full CLI did not start"
+run_logged cli-check env SIMPLE_LIB="$root/src" "$cli" check "$work" || die "full CLI check failed"
+grep -Eq '^Checking .*\.spl|^Checking ' "$evidence_dir/cli-check.log" || die "full CLI check examined no source"
+child_executable=$(CDPATH= cd -- "$(dirname -- "$cli")" && pwd -P)/$(basename -- "$cli")
+child_executable_sha=$(sha256_file "$child_executable")
+run_logged test-runner env SIMPLE_BINARY="$child_executable" SIMPLE_LIB="$root/src" "$test_runner" "$root/$spec" --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran || die "test runner failed"
+require_results "$evidence_dir/test-runner.log" || die "test runner emitted no passing non-zero Results line"
+
+native_build baseline || die "baseline native build failed"
+[ -x "$output" ] || die "baseline produced no executable"
+collect_provider_oracle baseline "$provider_baseline_archive"
+live_backend_provider_identity=$(manifest_value "$evidence_dir/baseline.provider-oracle.env" backend_provider_digest)
+[ "$live_backend_provider_identity" = "$(require_admission_value provider_identity)" ] || die "baseline backend provider digest does not match Phase3 admission"
+baseline_performance="$evidence_dir/baseline.performance.env"
+[ "$(manifest_value "$baseline_performance" schema)" = macos-bootstrap-performance-evidence-v1 ] || die "M0 baseline performance schema mismatch"
+[ "$(manifest_value "$baseline_performance" request)" = m0-baseline ] || die "M0 baseline performance request mismatch"
+for baseline_key in wall_seconds peak_rss_bytes retained_rss_kib retained_hwm_kib source_reads import_count cache_misses critical_path_ms; do
+  baseline_value=$(manifest_value "$baseline_performance" "$baseline_key") || die "M0 baseline missing $baseline_key"
+  awk -v value="$baseline_value" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value > 0) }' || die "M0 baseline $baseline_key must be positive"
+done
+run_logged baseline-run "$output" || die "baseline executable failed"
+grep -Fxq '43' "$evidence_dir/baseline-run.log" || die "baseline output mismatch"
+cp -R "$work" "$baseline_work"
+cp -R "$cache" "$baseline_cache"
+cp "$output" "$baseline_output"
+baseline_work_digest=$(tree_digest "$baseline_work")
+baseline_cache_digest=$(tree_digest "$baseline_cache")
+baseline_output_digest=$(sha256_file "$baseline_output")
+cp "$link_count_file.args" "$evidence_dir/baseline-link.args"
+restore_baseline
+native_build no-op || die "no-op build failed"
+collect_work_evidence no_op "$evidence_dir/no-op.log"
+require_work_evidence no_op "$evidence_dir/no_op.observed-work.env"
+[ ! -s "$link_count_file" ] || die "no-op invoked the linker"
+clean_compare no_op
+record no_op PASS "observed_work_sha256=$(sha256_file "$evidence_dir/no_op.observed-work.env")"
+
+for case_name in private_body interface one_file; do
+  restore_baseline
+  apply_mutation "$case_name"
+  native_build "$case_name" || die "$case_name build failed"
+  collect_work_evidence "$case_name" "$evidence_dir/$case_name.log"
+  require_work_evidence "$case_name" "$evidence_dir/$case_name.observed-work.env"
+  [ "$(wc -l <"$link_count_file" | tr -d ' ')" -eq "$(case_field "$case_name" 6)" ] || die "$case_name actual linker count mismatch"
+  clean_compare "$case_name"
+  record "$case_name" PASS "observed_work_sha256=$(sha256_file "$evidence_dir/$case_name.observed-work.env")"
+done
+
+restore_baseline
+active_provider_archive=$provider_same_byte_archive
+native_build provider-same-byte || die "same-byte provider path substitution build failed"
+collect_work_evidence provider_same_byte "$evidence_dir/provider-same-byte.log"
+require_zero_work_evidence provider_same_byte "$evidence_dir/provider_same_byte.observed-work.env"
+[ ! -s "$link_count_file" ] || die "same-byte provider path substitution invoked the linker"
+collect_provider_oracle provider-same-byte "$provider_same_byte_archive"
+[ "$(sha256_file "$output")" = "$baseline_output_digest" ] || die "same-byte provider path substitution changed output bytes"
+
+restore_baseline
+apply_mutation provider
+native_build provider || die "provider archive mutation build failed"
+collect_work_evidence provider "$evidence_dir/provider.log"
+require_work_evidence provider "$evidence_dir/provider.observed-work.env"
+[ "$(wc -l <"$link_count_file" | tr -d ' ')" -eq "$(case_field provider 6)" ] || die "provider actual linker count mismatch"
+collect_provider_oracle provider "$provider_mutated_archive"
+require_provider_oracle_relationships "$evidence_dir/baseline.provider-oracle.env" \
+  "$evidence_dir/provider-same-byte.provider-oracle.env" "$evidence_dir/provider.provider-oracle.env"
+clean_compare provider
+record provider PASS "live_archive_mutation; same_byte_zero_work_sha256=$(sha256_file "$evidence_dir/provider_same_byte.observed-work.env"); observed_work_sha256=$(sha256_file "$evidence_dir/provider.observed-work.env"); provider_oracle_sha256=$(sha256_file "$evidence_dir/provider.provider-oracle.env")"
+
+if grep -Eq -- '-Wl,(-z|--gc-sections)|-pie|-z[ ,]' "$evidence_dir/baseline-link.args"; then die "ELF linker policy observed on Darwin"; fi
+if ! grep -Eq -- '-dead_strip|dead_strip' "$evidence_dir/baseline-link.args"; then die "Darwin dead_strip was not observed"; fi
+file "$output" >"$evidence_dir/macho.log"
+grep -q 'Mach-O' "$evidence_dir/macho.log" || die "output is not Mach-O"
+grep -q "$requested_arch" "$evidence_dir/macho.log" || die "output has wrong architecture"
+restore_baseline
+native_build linker-policy || die "linker-policy mutation build failed"
+collect_work_evidence linker_policy "$evidence_dir/linker-policy.log"
+require_work_evidence linker_policy "$evidence_dir/linker_policy.observed-work.env"
+[ "$(wc -l <"$link_count_file" | tr -d ' ')" -eq 1 ] || die "linker-policy mutation did not relink exactly once"
+clean_compare linker_policy
+record linker_policy PASS "Mach-O $requested_arch; Darwin-only flags; observed_work_sha256=$(sha256_file "$evidence_dir/linker_policy.observed-work.env")"
+
+restore_baseline
+cache_victim=$(find "$cache" -type f -name '*.o' -print | head -n 1)
+[ -n "$cache_victim" ] || die "cache contains no cached object to corrupt"
+case "$cache_victim" in "$cache"/*) ;; *) die "corruption victim escaped cache root" ;; esac
+printf 'M4-corrupt\n' >"$cache_victim"
+native_build corrupt-cache || die "corrupt cache was not recovered fail closed"
+collect_work_evidence corrupt_cache "$evidence_dir/corrupt-cache.log"
+require_work_evidence corrupt_cache "$evidence_dir/corrupt_cache.observed-work.env"
+run_logged corrupt-run "$output" || die "recovered artifact did not run"
+grep -Fxq "$(case_field corrupt_cache 11)" "$evidence_dir/corrupt-run.log" || die "corrupt-cache recovered output mismatch"
+clean_compare corrupt_cache
+record corrupt_cache PASS "observed_work_sha256=$(sha256_file "$evidence_dir/corrupt_cache.observed-work.env")"
+
+restore_baseline
+apply_mutation one_file
+pre_interrupt_output_sha=$(sha256_file "$output")
+rm -rf "$cache"
+mkdir -p "$cache"
+interrupt_block="$evidence_dir/interrupted-link.block"
+: >"$interrupt_block"
+rm -f "$interrupt_block.ready" "$interrupt_block.pid"
+env SIMPLE_LIB="$root/src" SIMPLE_COMPILER_TRACE=1 SIMPLE_M4_WORK_RECEIPT=1 \
+  SIMPLE_LINK_OBJECTS="$active_provider_archive" \
+  SIMPLE_FRONTEND_CACHE_SCOPE=m4 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \
+  SIMPLE_HIR_CACHE_DIR="$cache/hir" SIMPLE_NATIVE_INCREMENTAL=1 \
+  SIMPLE_CC="$link_wrapper" M4_REAL_CC="$real_cc" M4_LINK_COUNT_FILE="$link_count_file" \
+  M4_LINK_BLOCK_FILE="$interrupt_block" "$compiler" native-build --trace \
+  --source "$work" --entry "$work/main.spl" --cache-dir "$cache" -o "$output" \
+  >"$evidence_dir/interrupted-build.log" 2>&1 &
+interrupted_pid=$!
+wait_count=0
+while [ ! -f "$interrupt_block.ready" ] && [ "$wait_count" -lt 60 ]; do
+  kill -0 "$interrupted_pid" 2>/dev/null || die "interrupted producer exited before publication barrier"
+  sleep 1
+  wait_count=$((wait_count + 1))
+done
+[ -f "$interrupt_block.ready" ] || die "interrupted producer never reached publication barrier"
+interrupt_linker_pid=$(cat "$interrupt_block.pid")
+kill -0 "$interrupted_pid" 2>/dev/null || die "interrupted producer exited before termination"
+kill -0 "$interrupt_linker_pid" 2>/dev/null || die "interrupted linker exited before termination"
+[ "$(sha256_file "$output")" = "$pre_interrupt_output_sha" ] || die "interrupted producer replaced output before publication"
+run_logged interrupted-old-run "$output" || die "published baseline output stopped running during interruption"
+grep -Fxq '43' "$evidence_dir/interrupted-old-run.log" || die "published baseline output changed during interruption"
+kill -TERM "$interrupted_pid" 2>/dev/null || die "failed to terminate interrupted producer"
+kill -TERM "$interrupt_linker_pid" 2>/dev/null || die "failed to terminate interrupted linker"
+if wait "$interrupted_pid" 2>/dev/null; then die "interrupted producer reported success after termination"; fi
+termination_wait=0
+while kill -0 "$interrupt_linker_pid" 2>/dev/null && [ "$termination_wait" -lt 10 ]; do
+  sleep 1
+  termination_wait=$((termination_wait + 1))
+done
+if kill -0 "$interrupt_linker_pid" 2>/dev/null; then die "interrupted linker remained alive after termination"; fi
+[ "$(sha256_file "$output")" = "$pre_interrupt_output_sha" ] || die "interrupted producer changed published output after termination"
+rm -f "$interrupt_block" "$interrupt_block.ready" "$interrupt_block.pid"
+native_build interrupted-recovery || die "interrupted build did not recover"
+collect_work_evidence interrupted_build "$evidence_dir/interrupted-recovery.log"
+require_work_evidence interrupted_build "$evidence_dir/interrupted_build.observed-work.env"
+[ -x "$output" ] || die "interrupted recovery did not publish atomically"
+run_logged interrupted-run "$output" || die "interrupted recovery executable failed"
+grep -Fxq "$(case_field interrupted_build 11)" "$evidence_dir/interrupted-run.log" || die "interrupted recovery output mismatch"
+clean_compare interrupted_build
+record interrupted_build PASS "terminated-before-publication; observed_work_sha256=$(sha256_file "$evidence_dir/interrupted_build.observed-work.env")"
+
+MCP_NATIVE_BOOTSTRAP_FRESH=1 SIMPLE_BINARY="$cli" MCP_SERVER="$mcp" LSP_MCP_SERVER="$lsp" \
+  sh "$root/scripts/check/check-mcp-native-smoke.shs" >"$evidence_dir/mcp-lsp.log" 2>&1 || die "MCP/LSP native smoke failed"
+record compiler_full_cli_test_mcp_lsp PASS "producer_bound_tool_builds_sha256=$(sha256_file "$evidence_dir/tool-builds.env"); native startup, compile, Results, initialize/list/call"
+sh "$root/scripts/check/check-macos-m4-long-lived-residency.shs" \
+  --server="$mcp" --evidence-dir="$evidence_dir/long-lived-residency" \
+  --arch="$requested_arch" --producer-sha256="$candidate_sha" \
+  --baseline-receipt="$residency_baseline_receipt" || die "long-lived MCP residency gate failed"
+record performance_residency PASS "build wall/cpu/peak+terminal-rss/source-reads/imports/cache/critical-path; one MCP PID, 20 correlated RSS/HWM samples"
+
+rows=$(awk -F '\t' 'NR > 1 && $2 == "PASS" { n++ } END { print n + 0 }' "$evidence_dir/results.tsv")
+[ "$rows" -eq 10 ] || die "expected 10 passing evidence rows, found $rows"
+evidence_hash=$(sha256_file "$evidence_dir/results.tsv")
+(cd "$evidence_dir" && find . -type f \
+  ! -name status.env ! -name evidence-files.sha256 \
+  ! -path './cache/*' ! -path './tool-cache/*' ! -path './work/*' \
+  ! -path './admitted-baseline-cache/*' ! -path './admitted-baseline-work/*' \
+  ! -path './clean-*-cache/*' ! -path './clean-*-work/*' \
+  -print | LC_ALL=C sort | while IFS= read -r evidence_file; do
+    printf '%s\t%s\n' "$evidence_file" "$(sha256_file "$evidence_file")"
+  done) >"$evidence_dir/evidence-files.sha256"
+evidence_manifest_sha=$(sha256_file "$evidence_dir/evidence-files.sha256")
+cat >"$evidence_dir/status.env" <<EOF
+schema=macos-m4-qualification-v1
+status=PASS
+architecture=$requested_arch
+host_architecture=$host_arch
+target_triple=$(require_admission_value target_triple)
+target_identity_digest=$(require_admission_value target_identity_digest)
+deployment_target=$(require_admission_value deployment_target)
+sdk_identity=$(require_admission_value sdk_identity)
+candidate_sha256=$candidate_sha
+admission_receipt_sha256=$(sha256_file "$admission_receipt")
+phase3_authority_receipt_sha256=$(sha256_file "$phase3_authority_receipt")
+source_run_id=$source_run_id
+source_run_attempt=$source_run_attempt
+source_repository=$source_repository
+source_workflow_ref=$source_workflow_ref
+source_workflow_sha=$source_workflow_sha
+source_head_sha=$source_head_sha
+source_artifact=$source_artifact
+source_artifact_id=$source_artifact_id
+source_artifact_digest=$source_artifact_digest
+qualification_run_id=$qualification_run_id
+qualification_run_attempt=$qualification_run_attempt
+qualification_repository=$qualification_repository
+qualification_workflow_ref=$qualification_workflow_ref
+qualification_workflow_sha=$qualification_workflow_sha
+qualification_head_sha=$qualification_head_sha
+qualification_artifact=$qualification_artifact
+evidence_artifact=$evidence_artifact
+residency_authority_run_id=$residency_authority_run_id
+residency_authority_artifact=$residency_authority_artifact
+cli_sha256=$(sha256_file "$cli")
+test_runner_sha256=$(sha256_file "$test_runner")
+child_executable_path=$child_executable
+child_executable_sha256=$child_executable_sha
+mcp_sha256=$(sha256_file "$mcp")
+lsp_mcp_sha256=$(sha256_file "$lsp")
+tool_builds_sha256=$(sha256_file "$evidence_dir/tool-builds.env")
+xcode_version_sha256=$(sha256_file "$evidence_dir/xcode-version.log")
+clang_version_sha256=$(sha256_file "$evidence_dir/clang-version.log")
+source_revision=$(require_admission_value source_revision)
+simple_version=$(require_admission_value simple_version)
+compiler_schema=$(require_admission_value compiler_schema)
+kernel_plugin_abi=$(require_admission_value kernel_plugin_abi)
+kernel_policy_manifest_sha256=$policy_manifest_sha
+kernel_k1_policy=$(policy_value k1_policy)
+plugin_manifest_policy=$(policy_value plugin_manifest_policy)
+coverage_cutover_policy=$(policy_value coverage_cutover_policy)
+coverage_implementation=$(policy_value coverage_implementation)
+performance_threshold_mode=$(policy_value performance_threshold_mode)
+performance_threshold_status=$(policy_value performance_threshold_status)
+performance_baseline_scope=$(policy_value performance_baseline_scope)
+performance_steady_rss_percent=$(policy_value performance_steady_rss_percent)
+performance_growth_percent=$(policy_value performance_growth_percent)
+performance_warm_request_count=$(policy_value performance_warm_request_count)
+runtime_bundle_identity=$(require_admission_value runtime_bundle_identity)
+provider_identity=$(require_admission_value provider_identity)
+provider_builds_sha256=$(sha256_file "$evidence_dir/provider-builds.env")
+provider_baseline_oracle_sha256=$(sha256_file "$evidence_dir/baseline.provider-oracle.env")
+provider_same_byte_oracle_sha256=$(sha256_file "$evidence_dir/provider-same-byte.provider-oracle.env")
+provider_mutated_oracle_sha256=$(sha256_file "$evidence_dir/provider.provider-oracle.env")
+provider_baseline_archive_sha256=$(sha256_file "$provider_baseline_archive")
+provider_same_byte_archive_sha256=$(sha256_file "$provider_same_byte_archive")
+provider_mutated_archive_sha256=$(sha256_file "$provider_mutated_archive")
+provider_baseline_members_sha256=$(sha256_file "$evidence_dir/baseline.provider-members.tsv")
+provider_same_byte_members_sha256=$(sha256_file "$evidence_dir/provider-same-byte.provider-members.tsv")
+provider_mutated_members_sha256=$(sha256_file "$evidence_dir/provider.provider-members.tsv")
+provider_baseline_payloads_sha256=$(sha256_file "$evidence_dir/baseline.provider-member-payloads.tsv")
+provider_same_byte_payloads_sha256=$(sha256_file "$evidence_dir/provider-same-byte.provider-member-payloads.tsv")
+provider_mutated_payloads_sha256=$(sha256_file "$evidence_dir/provider.provider-member-payloads.tsv")
+provider_baseline_manifest_identity=$(manifest_value "$evidence_dir/baseline.provider-oracle.env" manifest_content_identity)
+provider_same_byte_manifest_identity=$(manifest_value "$evidence_dir/provider-same-byte.provider-oracle.env" manifest_content_identity)
+provider_mutated_manifest_identity=$(manifest_value "$evidence_dir/provider.provider-oracle.env" manifest_content_identity)
+deployment_policy=$(require_admission_value deployment_policy)
+results_sha256=$evidence_hash
+evidence_manifest_sha256=$evidence_manifest_sha
+baseline_performance_sha256=$(sha256_file "$evidence_dir/baseline.performance.env")
+baseline_wall_seconds=$(manifest_value "$baseline_performance" wall_seconds)
+baseline_user_cpu_seconds=$(manifest_value "$baseline_performance" user_cpu_seconds)
+baseline_system_cpu_seconds=$(manifest_value "$baseline_performance" system_cpu_seconds)
+baseline_peak_rss_bytes=$(manifest_value "$baseline_performance" peak_rss_bytes)
+baseline_retained_rss_kib=$(manifest_value "$baseline_performance" retained_rss_kib)
+baseline_source_reads=$(manifest_value "$baseline_performance" source_reads)
+baseline_import_count=$(manifest_value "$baseline_performance" import_count)
+baseline_cache_hits=$(manifest_value "$baseline_performance" cache_hits)
+baseline_cache_misses=$(manifest_value "$baseline_performance" cache_misses)
+baseline_critical_path_ms=$(manifest_value "$baseline_performance" critical_path_ms)
+long_lived_residency_sha256=$(sha256_file "$evidence_dir/long-lived-residency/receipt.env")
+residency_baseline_receipt_sha256=$(sha256_file "$residency_baseline_receipt")
+EOF
+echo "M4 PASS [$requested_arch]: 10 evidence rows; results_sha256=$evidence_hash"

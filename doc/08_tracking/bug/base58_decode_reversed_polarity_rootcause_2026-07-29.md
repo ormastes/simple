@@ -1,4 +1,9 @@
 # base58_decode reversed-polarity engine bug — root cause (2026-07-29)
+## Closed 2026-09-16 — ...tions, independent of any rebind). ## Fix (base58-side workaround, both engines proven) `s
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Assignment: root-cause the pass-5 finding that `base58_decode`'s
 carry-propagation loop corrupted values under the DEFAULT engine while the
@@ -195,3 +200,4 @@ an open item at the end of the bracket-slice byte/char index campaign
 (pass 3, stays with the engine investigation lanes) and the newly-found
 `sha256_bytes`/base58check-encode engine divergence noted above (new,
 unowned).
+

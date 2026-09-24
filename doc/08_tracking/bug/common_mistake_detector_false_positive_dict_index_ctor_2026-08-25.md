@@ -1,4 +1,9 @@
 # "Common mistake" detector misreads `dict[Ctor(...)] = v` as `List[T]` generics (2026-08-25)
+## Closed 2026-09-16 — Status FIXED 2026-08-25; 284->0 false positives, new gate 4/4
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-25 (see Resolution).
 
@@ -65,3 +70,4 @@ could possibly report the mistake (`ident` `[` `CapitalizedIdent`).
 - New gate `parser/tests/wrong_brackets_index_false_positive.rs` — 4/4, and it pins BOTH
   directions: the three index shapes must stay silent and a genuine `List[T]` must still be
   reported, so the fix cannot be "achieved" by disabling the rule.
+

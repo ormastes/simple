@@ -1,5 +1,10 @@
 # Bug: `return` inside a match/if EXPRESSION is swallowed (becomes the expr value)
 
+## Closed 2026-09-13 — `return` inside a match expression now returns from the function
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's minimal reproducer runs clean: `f(Err("bad"))` yields a Result with `is_ok=false` (no "cannot convert enum to int"), and `f(Ok(41))` yields `ok=true v=42`, proving the non-return arm still works.
+
 **Date:** 2026-06-30
 **Severity:** High — a whole CLASS of `Result`-handling failures. Any
 `val x = match r: case Ok(v): v; case Err(e): return Err(e)` leaves `x` bound to

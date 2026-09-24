@@ -177,7 +177,9 @@ fn is_msvc_archive_tool(tool: &str) -> bool {
     Path::new(tool)
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("lib"))
+        .is_some_and(|stem| {
+            stem.eq_ignore_ascii_case("lib") || stem.eq_ignore_ascii_case("llvm-lib")
+        })
 }
 
 pub(super) fn archive_create_command(
@@ -306,6 +308,9 @@ pub(crate) fn core_c_target_flags(
     riscv_vector: bool,
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
+    if let Some(flag) = windows_gnu_target_flag(target) {
+        flags.push(flag);
+    }
     if target.arch == simple_common::target::TargetArch::Aarch64 {
         flags.push("-mno-outline-atomics");
     }
@@ -314,6 +319,14 @@ pub(crate) fn core_c_target_flags(
         flags.extend(["-march=rv64gcv", "-mabi=lp64d"]);
     }
     flags
+}
+
+pub(crate) fn windows_gnu_target_flag(
+    target: simple_common::target::Target,
+) -> Option<&'static str> {
+    (target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu)
+        .then_some("--target=x86_64-w64-windows-gnu")
 }
 
 /// C11-atomics flags required by the MSVC-style drivers, and by nobody else.
@@ -369,6 +382,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let target = effective_target();
     let mut runtime_inputs = vec![
         "runtime_native.c",
+        "runtime_file_view.c",
         "runtime_cache_host_authority_v1.c",
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
@@ -449,6 +463,9 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
         // Compiles with zero symbol collisions against the existing members.
         "runtime_simd_case.c",
+        // Core-C provider for rt_simd_str_search, used by the full CLI's
+        // string-search closure. It must be an archive member under host-gpu.
+        "runtime_simd_search.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
         "runtime_simd_dispatch.c",
@@ -463,6 +480,15 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // tolerated-undefined-then-SIGSEGV class as rt_unwrap_or_trap
         // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
         "runtime_terminal.c",
+        // Env-gated SIGPROF PC sampler (diagnostic tooling). Compiles to an
+        // empty TU off Linux x86_64/aarch64. When SIMPLE_PROF_SAMPLE_FILE is
+        // set, a constructor(101) installs a SIGPROF handler + 100 Hz
+        // ITIMER_PROF and appends raw 8-byte PCs to the named file. Zero
+        // symbols are referenced by other members, so the archive link would
+        // drop this TU; prof_sample_force_link is forced as a retention
+        // root by runtime_retention_symbols (native_project/linker.rs).
+        // Self-contained: no runtime.h include, zero symbol overlap.
+        "runtime_prof_sample.c",
         // Group E of stage2_windows_unresolved_inventory_2026-08-31: the only
         // definitions of rt_mkdir / rt_random_i64 / rt_readdir{,_count,_entry,
         // _free} / rt_shell_output live in runtime.c, which is NOT in this list
@@ -509,6 +535,18 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     }
     if include_stage4_hosted {
         runtime_inputs.extend(["runtime_font.c", "runtime_sqlite.c"]);
+    } else {
+        // Cranelift JIT bridge NAMED-TRAP stubs (75 symbols) -- see
+        // doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md
+        // "Bucket 2 deferred: cranelift JIT bridge". Only the core-C-bootstrap
+        // lane (this branch, include_stage4_hosted == false) needs these: the
+        // real symbols are defined in Rust
+        // (compiler/src/codegen/cranelift_sffi.rs) and already exported by
+        // libsimple_compiler.so / native_all, which is what
+        // build_stage4_c_runtime_library's lane links. Adding them there too
+        // would be an immediate "symbol is already defined" break -- keep
+        // this in the include_stage4_hosted == false arm only.
+        runtime_inputs.push("runtime_cranelift_bridge_stub.c");
     }
 
     let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
@@ -543,16 +581,38 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     for source in runtime_inputs.iter().copied().filter(|input| input.ends_with(".c")) {
         let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
         let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-        let status = std::process::Command::new(&cc)
-            .arg("-c")
-            .arg("-Os")
-            .arg("-ffunction-sections")
-            .arg("-fdata-sections")
-            .arg("-fno-unwind-tables")
-            .arg("-fno-asynchronous-unwind-tables")
-            .arg("-fno-stack-protector")
-            .arg("-fPIC")
-            .arg("-std=gnu11")
+        // cl.exe understands none of the GNU codegen flags -- it reports each as
+        // `warning D9002: ignoring unknown option` -- and, decisively, reads
+        // `-o` as its long-deprecated `/o` (`warning D9035`) rather than as
+        // "write the object here". Every translation unit then compiles
+        // successfully while no .obj appears at the requested path, and the
+        // failure surfaces much later and far from its cause, at the archive
+        // step: `llvm-ar: runtime_native.obj: no such file or directory`.
+        let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+        let mut command = std::process::Command::new(&cc);
+        if msvc {
+            command
+                .arg("-c")
+                .arg("-O1")   // -Os: optimise for size
+                .arg("-Gy")   // -ffunction-sections
+                .arg("-Gw")   // -fdata-sections
+                .arg("-GS-"); // -fno-stack-protector
+            // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
+            // code is position-independent by construction and SEH unwind data
+            // is not optional there.
+        } else {
+            command
+                .arg("-c")
+                .arg("-Os")
+                .arg("-ffunction-sections")
+                .arg("-fdata-sections")
+                .arg("-fno-unwind-tables")
+                .arg("-fno-asynchronous-unwind-tables")
+                .arg("-fno-stack-protector")
+                .arg("-fPIC")
+                .arg("-std=gnu11");
+        }
+        let status = command
             .args(msvc_c11_atomics_flags(&cc))
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
             // Selects runtime_memory.c as THE memory provider and compiles out
@@ -563,8 +623,11 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
             .arg(runtime_root.join(source))
-            .arg("-o")
-            .arg(&object)
+            .args(if msvc {
+                vec![format!("-Fo{}", object.display())]
+            } else {
+                vec!["-o".to_string(), object.display().to_string()]
+            })
             .status()
             .ok()?;
         if !status.success() {
@@ -671,24 +734,49 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
     std::fs::create_dir_all(build_dir).ok()?;
     let cc = target_c_compiler(target);
     let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-    let status = std::process::Command::new(&cc)
-        .arg("-c")
-        .arg("-Os")
-        .arg("-ffunction-sections")
-        .arg("-fdata-sections")
-        .arg("-fno-unwind-tables")
-        .arg("-fno-asynchronous-unwind-tables")
-        .arg("-fno-stack-protector")
-        .arg("-fPIC")
-        .arg("-std=gnu11")
+    // cl.exe understands none of the GCC codegen flags -- it reports each as
+    // `warning D9002: ignoring unknown option` -- and, worse, reads `-o` as its
+    // long-deprecated `/o` (`warning D9035`) rather than as "write the object
+    // here". The object therefore never appeared at the requested path and the
+    // archive step failed with `llvm-ar: runtime_native.obj: no such file or
+    // directory` AFTER every translation unit had compiled successfully. Give
+    // MSVC its own spelling of the same intent; the GNU branch is unchanged.
+    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let mut command = std::process::Command::new(&cc);
+    if msvc {
+        command
+            .arg("-c")
+            .arg("-O1")   // -Os: optimise for size
+            .arg("-Gy")   // -ffunction-sections
+            .arg("-Gw")   // -fdata-sections
+            .arg("-GS-"); // -fno-stack-protector
+        // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
+        // code is position-independent by construction, and SEH unwind data is
+        // not optional there.
+    } else {
+        command
+            .arg("-c")
+            .arg("-Os")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
+            .arg("-fno-unwind-tables")
+            .arg("-fno-asynchronous-unwind-tables")
+            .arg("-fno-stack-protector")
+            .arg("-fPIC")
+            .arg("-std=gnu11");
+    }
+    let status = command
         .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
         .args(core_c_target_flags(target, source, riscv_vector))
         .arg(format!("-I{}", runtime_root.display()))
         .arg(format!("-I{}", runtime_root.join("platform").display()))
         .arg(&source_path)
-        .arg("-o")
-        .arg(&object)
+        .args(if msvc {
+            vec![format!("-Fo{}", object.display())]
+        } else {
+            vec!["-o".to_string(), object.display().to_string()]
+        })
         .status()
         .ok()?;
     (status.success() && std::fs::metadata(&object).map(|m| m.len() > 0).unwrap_or(false)).then_some(object)
@@ -1439,6 +1527,11 @@ pub(super) fn validate_stage4_cli_c_provider_archive_contract(path: &Path, sourc
 
 fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<String, String>, String> {
     let mut owners = BTreeMap::<String, String>::new();
+    // Core-C fallbacks are weak by design (runtime_native.c SPL_CORE_C_WEAK:
+    // "Full hosted builds provide stronger implementations"), so a strong
+    // provider definition overrides them at link time. Only that pairing is
+    // admitted; any other overlap stays fatal.
+    let mut weak_core = BTreeSet::<String>::new();
     for (label, archive) in archives {
         // Providers must arrive constructor-free (validate_stage4_cli_c_provider_archive
         // enforces the same on each one). The CORE is different: it is the whole C
@@ -1462,15 +1555,23 @@ fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<Stri
         if defined.is_empty() {
             return Err(format!("Stage4 archive {label} defines no global symbols"));
         }
+        let weak = archive_weak_global_symbols(archive)?;
         for (raw_symbol, count) in defined {
             let symbol = canonical_archive_symbol(&raw_symbol).to_string();
             if count != 1 {
                 return Err(format!("Stage4 archive {label} defines `{symbol}` {count} times"));
             }
+            let is_weak = weak.contains(&raw_symbol);
             if let Some(first_owner) = owners.insert(symbol.clone(), (*label).to_string()) {
+                if !is_weak && weak_core.remove(&symbol) {
+                    continue;
+                }
                 return Err(format!(
                     "Stage4 archive overlap: `{symbol}` is defined by both {first_owner} and {label}"
                 ));
+            }
+            if *label == "core" && is_weak {
+                weak_core.insert(symbol);
             }
         }
     }
@@ -1949,6 +2050,10 @@ pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        "rt_file_create_excl",
+        "rt_file_sync",
+        "rt_simple_abi_version",
+        "rt_simple_abi_version_deferred",
     ]
     .into_iter()
     .map(str::to_string)
@@ -1982,6 +2087,7 @@ fn project_stage4_archive_closure(
     let closure_object = temp_dir.join(format!("{stem}_closure.o"));
     let localized_object = temp_dir.join(format!("{stem}_local.o"));
     let localize_path = temp_dir.join(format!("{stem}_localize.syms"));
+    let weaken_path = temp_dir.join(format!("{stem}_weaken.syms"));
     if inputs.is_empty() {
         return Err("Stage4 archive projection requires at least one input".to_string());
     }
@@ -2136,28 +2242,53 @@ fn project_stage4_archive_closure(
             // leaves the final link undefined (observed run 9, 2026-07-24).
             .filter(|raw| canonical_archive_symbol(raw) != "rust_eh_personality")
             // Allowed-external runtime symbols are OWNED by the outer link (the
-            // Rust runtime's rt_heap_* accounting). The core-C archive ships
-            // WEAK fallbacks for them in the same object as rt_mem_snapshot_*,
-            // so the closure carries them; localizing a weak fallback would bind
-            // the capsule to a private copy the strong owner can never override.
-            // Keep them global; `verify` below insists they stay weak.
+            // Rust runtime's rt_heap_* accounting, or -- for the Stage4 Rust
+            // runtime projection -- every rt_/spl_ symbol the core-C providers
+            // also define). The closure carries them because `ld -r` cannot
+            // drop a symbol from an object it otherwise needs (Rust's codegen
+            // units bundle many functions per .o, so pulling in one requested
+            // root can pull its whole CGU's exports along as passengers, e.g.
+            // rt_array_get/rt_string_concat riding in with unrelated roots on
+            // aarch64-apple-darwin, 2026-09-07). Keep them global rather than
+            // localizing a copy the strong owner could never override.
             .filter(|raw| !allowed_external.contains(canonical_archive_symbol(raw)))
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(
-            &localize_path,
-            if localize_text.is_empty() {
-                String::new()
-            } else {
-                localize_text + "\n"
-            },
-        )
-        .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
+        // Always newline-terminated: GNU objcopy 2.42 exits 1 with no message
+        // on a zero-byte --localize-symbols/--weaken-symbols file, while a
+        // lone "\n" is an empty list to both GNU and LLVM objcopy.
+        std::fs::write(&localize_path, localize_text + "\n")
+            .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
+
+        // Allowed-external symbols that are kept global (above) must yield to
+        // the owner at the final link, i.e. be WEAK, not strong. The core-C
+        // archive already ships its allowed-external fallbacks
+        // (rt_heap_live_bytes/rt_heap_peak_bytes) as source-level
+        // `__attribute__((weak))`, so weakening them again here is a no-op.
+        // The Rust runtime crate's rt_/spl_ C-ABI exports (rt_array_get,
+        // rt_string_concat, ...) have no such attribute available on stable
+        // Rust -- `#[no_mangle] pub extern "C" fn` is always STRONG -- so
+        // without this step every one of them that rides along in a closure
+        // (see above) trips "defines owner-provided runtime symbols STRONGLY"
+        // even though nothing about the source is wrong; the property this
+        // projection promises (owner-overridable) was previously only
+        // ASSUMED true of the input archive instead of being enforced by the
+        // tool that makes the promise. `--weaken-symbols` makes it true
+        // unconditionally, and the STRONGLY check below still verifies it.
+        let weaken_text = closure_defined
+            .keys()
+            .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&weaken_path, weaken_text + "\n")
+            .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
 
         let objcopy = find_objcopy_tool().ok_or_else(|| "Stage4 runtime capsule requires objcopy".to_string())?;
         let localized = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
+            .arg(format!("--weaken-symbols={}", weaken_path.display()))
             .arg("--remove-section=.init_array")
             .arg("--remove-section=.init_array.*")
             .arg("--remove-section=.ctors")
@@ -2176,7 +2307,8 @@ fn project_stage4_archive_closure(
             .map_err(|err| format!("failed to execute Stage4 runtime capsule objcopy: {err}"))?;
         if !localized.status.success() {
             return Err(format!(
-                "Stage4 runtime capsule objcopy failed: {}",
+                "Stage4 runtime capsule objcopy failed ({}): {}",
+                localized.status,
                 String::from_utf8_lossy(&localized.stderr).trim()
             ));
         }

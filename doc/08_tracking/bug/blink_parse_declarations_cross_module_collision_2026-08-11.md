@@ -1,5 +1,28 @@
 # Blink inline `style=` cascade path: `parse_declarations` cross-module name collision
 
+## Triage 2026-09-13
+Re-ran test/01_unit/app/browser/browser_render_lane_spec.spl: partial
+progress since filing. "ignores an inline style= attribute..." no longer
+hits the CssDecl.important field error named in this doc -- it now fails on
+a real numeric mismatch ("expected 150 to equal 200"), i.e. the field/collision
+half is fixed and a genuine, narrower rendering gap remains.
+
+Also observed a NEW failure in the same file, "sabotage check: an author `a
+{ color: ... }` rule still overrides the UA default": `semantic: variable
+`color` not found`. Investigated one candidate theory (double-quoted string
+interpolation of the literal `{ color: red; }` argument, the same class of
+bug fixed in stage4_test_runner_main_hir_names_2026-08-02) and **refuted
+it**: an isolated probe (`probe("a { color: red; }")` outside any spec `it`
+block, same literal, same interpreter) printed the string back verbatim with
+no error. So the error is genuinely inside the `_blink(...)` render pipeline
+processing that CSS text (blink cascade/parse_declarations internals,
+plausibly the same family this doc already tracks), not a spec-authoring
+string-literal bug. Did not root-cause further -- filed as observed-only,
+folded into this record rather than a separate speculative doc since it is
+the same test file and plausibly the same collision family. OPEN, out of
+scope for a full close in this pass: remaining gap is blink layout/cascade
+internals (src/lib/blink/style/cascade.spl-class code).
+
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 exit criterion 5 (stylesheet sources), not caused by that work.

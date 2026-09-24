@@ -32,12 +32,14 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef __linux__
 #include <dirent.h>
 #include <ctype.h>
+#include <sys/ptrace.h>
 #include <sys/syscall.h>
 #endif
 
@@ -115,7 +117,9 @@ typedef struct RtOwnedCapturedByte {
 #define RT_OWNED_HOST_FREE free
 #endif
 #ifndef RT_OWNED_TOKEN_FILL
+#if defined(__linux__) && defined(SYS_getrandom)
 #define RT_OWNED_TOKEN_FILL(dst, len) syscall(SYS_getrandom, (dst), (len), 0)
+#endif
 #endif
 #ifndef RT_OWNED_SIGNAL_GROUP
 #define RT_OWNED_SIGNAL_GROUP(pid, pgid, pidfd, sig) owned_signal_group((pid), (pgid), (pidfd), (sig))
@@ -143,18 +147,36 @@ typedef struct RtOwnedSlot {
     uint8_t input_sha256[32];
     int input_contract_v3;
     int64_t started_ms;
+    int64_t finished_ms;
+    int64_t request_started_ns;
+    int64_t prepared_ns;
+    int64_t process_started_ns;
+    int64_t exec_confirmed_ns;
+    int64_t leader_waited_ns;
+    int64_t tree_empty_ns;
+    int64_t execution_deadline_ns;
+    int64_t kill_deadline_ns;
+    int64_t cleanup_deadline_ns;
     int64_t timeout_ms;
     int64_t term_grace_ms;
     int64_t term_at_ms;
     int64_t drain_deadline_ms;
     int status;
+    int output_incomplete;
+    int stdout_read_error;
+    int stderr_read_error;
+    int stdout_deadline_closed;
+    int stderr_deadline_closed;
     uint64_t output_limit;
+    uint64_t stdout_limit;
+    uint64_t stderr_limit;
     uint64_t stdout_seen;
     uint64_t stderr_seen;
     uint64_t stdout_kept;
     uint64_t stderr_kept;
     uint64_t stdout_delivered;
     uint64_t stderr_delivered;
+    uint64_t eintr_retries;
     uint64_t stdout_scan;
     uint64_t stderr_scan;
     uint64_t retained_count;
@@ -164,8 +186,11 @@ typedef struct RtOwnedSlot {
     int timed_out;
     int term_sent;
     int kill_sent;
+    int term_attempted;
+    int kill_attempted;
     int identity_revalidated;
     int reaped;
+    int clock_failed;
     int runtime_error;
     struct rusage child_usage;
     int child_usage_available;
@@ -230,6 +255,22 @@ void rt_process_owned_test_force_collision(RtOwnedProcessTokenV2 token, int coun
 void rt_process_owned_test_force_signal_failure(int count) { rt_owned_test_signal_fail_count = count; }
 void rt_process_owned_test_force_read_failure(int count) { rt_owned_test_read_fail_count = count; }
 #endif
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+static _Thread_local int pov4_test_exec_failure_count;
+static _Thread_local int pov4_test_exec_failure_errno = EIO;
+static _Thread_local int pov4_test_signal_gone_count;
+static _Thread_local int pov4_test_reconcile_eintr_count;
+void rt_process_observation_v4_test_force_exec_failure(int error, int count) {
+    pov4_test_exec_failure_errno = error > 0 ? error : EIO;
+    pov4_test_exec_failure_count = count > 0 ? count : 0;
+}
+void rt_process_observation_v4_test_force_signal_gone(int count) {
+    pov4_test_signal_gone_count = count > 0 ? count : 0;
+}
+void rt_process_observation_v4_test_force_reconcile_eintr(int count) {
+    pov4_test_reconcile_eintr_count = count > 0 ? count : 0;
+}
+#endif
 
 static void owned_state_locks_init(void) {
     for (uint32_t i = 0; i < RT_OWNED_PROCESS_SLOTS; i++)
@@ -241,6 +282,26 @@ static int64_t owned_now_ms(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
     if (ts.tv_sec > INT64_MAX / 1000) return INT64_MAX;
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int64_t owned_now_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
+    if (ts.tv_sec > INT64_MAX / 1000000000LL) return INT64_MAX;
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static int64_t owned_clock_resolution_ns(clockid_t clock_id) {
+    struct timespec ts;
+    if (clock_getres(clock_id, &ts) != 0 || ts.tv_sec < 0 || ts.tv_nsec < 0)
+        return -1;
+    if (ts.tv_sec > INT64_MAX / 1000000000LL) return INT64_MAX;
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static int owned_deadline_reached_ns(int64_t deadline_ns) {
+    int64_t now = owned_now_ns();
+    return now < 0 || now >= deadline_ns;
 }
 
 static uint64_t owned_add_sat(uint64_t a, uint64_t b) {
@@ -326,18 +387,31 @@ static int owned_pipe_cloexec(int fds[2]) {
     return 0;
 }
 
-static int owned_child_close_inherited_except(int keep_fd) {
+static int owned_child_close_inherited_except2(int keep_a, int keep_b) {
 #if defined(__linux__) && defined(SYS_close_range)
-    if (keep_fd > STDERR_FILENO + 1 &&
+    int low = keep_a < keep_b ? keep_a : keep_b;
+    int high = keep_a < keep_b ? keep_b : keep_a;
+    if (low > STDERR_FILENO + 1 &&
         syscall(SYS_close_range, (unsigned int)(STDERR_FILENO + 1),
-                (unsigned int)keep_fd - 1U, 0U) != 0) return 0;
-    if (syscall(SYS_close_range, (unsigned int)keep_fd + 1U, ~0U, 0U) != 0)
+                (unsigned int)low - 1U, 0U) != 0) return 0;
+    if (high > low + 1 &&
+        syscall(SYS_close_range, (unsigned int)low + 1U,
+                (unsigned int)high - 1U, 0U) != 0) return 0;
+    if (syscall(SYS_close_range, (unsigned int)high + 1U, ~0U, 0U) != 0)
         return 0;
     return 1;
 #else
-    (void)keep_fd;
+    (void)keep_a; (void)keep_b;
     return 0;
 #endif
+}
+
+static void owned_child_exec_failed(int error_fd, int error) {
+    ssize_t written;
+    do written = write(error_fd, &error, sizeof(error));
+    while (written < 0 && errno == EINTR);
+    (void)written;
+    _exit(127);
 }
 
 static int owned_pidfd_live(int pidfd) {
@@ -410,6 +484,23 @@ static int owned_signal_group_pinned(pid_t pid, pid_t pgid, int pidfd, int sig) 
         return 0;
     }
     if (kill(-pgid, sig) == 0 || errno == ESRCH) return 1;
+    return 0;
+}
+
+static int owned_signal_leader_pinned(pid_t pid, int pidfd, int sig) {
+#ifdef __linux__
+    if (pid <= 0 || pidfd < 0 || !owned_pidfd_valid(pidfd)) {
+        errno = ESTALE; return 0;
+    }
+#ifdef SYS_pidfd_send_signal
+    if (syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0 || errno == ESRCH)
+        return 1;
+#else
+    (void)sig; errno = ENOTSUP;
+#endif
+#else
+    (void)pid; (void)pidfd; (void)sig; errno = ENOTSUP;
+#endif
     return 0;
 }
 
@@ -646,8 +737,9 @@ static void owned_async_write_input(RtOwnedSlot* slot) {
  * the receipt must say so; a terminal non-truncated receipt always drained
  * both pipes to EOF. */
 static void owned_async_close_pipes_truncated(RtOwnedSlot* slot) {
-    if (slot->out_open) slot->stdout_truncated = 1;
-    if (slot->err_open) slot->stderr_truncated = 1;
+    if (slot->out_open || slot->err_open) slot->output_incomplete = 1;
+    if (slot->out_open) { slot->stdout_truncated = 1; slot->stdout_deadline_closed = 1; }
+    if (slot->err_open) { slot->stderr_truncated = 1; slot->stderr_deadline_closed = 1; }
     owned_async_close_pipes(slot);
 }
 
@@ -673,8 +765,11 @@ static void owned_async_capture_one(RtOwnedSlot* slot, int fd, int stream,
             *seen = owned_add_sat(*seen, count);
             quantum = owned_add_sat(quantum, count);
             *budget -= count;
-            uint64_t room = slot->retained_count < slot->output_limit
+            uint64_t stream_limit = stream ? slot->stderr_limit : slot->stdout_limit;
+            uint64_t stream_room = *kept < stream_limit ? stream_limit - *kept : 0;
+            uint64_t total_room = slot->retained_count < slot->output_limit
                 ? slot->output_limit - slot->retained_count : 0;
+            uint64_t room = stream_room < total_room ? stream_room : total_room;
             uint64_t take = count < room ? count : room;
             for (uint64_t i = 0; i < take; i++) {
                 slot->retained[slot->retained_count + i].byte = (unsigned char)chunk[i];
@@ -689,7 +784,10 @@ static void owned_async_capture_one(RtOwnedSlot* slot, int fd, int stream,
             close(fd); *open_flag = 0;
         } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             *truncated = 1;
-            if (slot->runtime_error == 0) slot->runtime_error = errno ? errno : EIO;
+            int read_error = errno ? errno : EIO;
+            if (stream) slot->stderr_read_error = read_error;
+            else slot->stdout_read_error = read_error;
+            if (slot->runtime_error == 0) slot->runtime_error = read_error;
             close(fd); *open_flag = 0;
         }
         break;
@@ -785,14 +883,22 @@ static enum OwnedSignalOutcome owned_async_signal_or_reap(RtOwnedSlot* slot, int
     int rc; do rc = waitid(P_PID, (id_t)slot->pid, &info, WEXITED|WNOHANG|WNOWAIT);
     while (rc < 0 && errno == EINTR);
     if (rc == 0 && info.si_pid == slot->pid) {
-        (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
+        if (slot->request_started_ns < 0)
+            (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
         memset(&slot->child_usage, 0, sizeof(slot->child_usage));
         pid_t waited; do waited = wait4(slot->pid, &slot->status, 0, &slot->child_usage);
         while (waited < 0 && errno == EINTR);
         if (waited == slot->pid) {
             slot->child_usage_available = 1;
             slot->reaped = 1;
-            slot->drain_deadline_ms = now + RT_OWNED_POST_REAP_DRAIN_MS;
+            slot->finished_ms = now;
+            slot->leader_waited_ns = owned_now_ns();
+            if (slot->leader_waited_ns < 0 && slot->request_started_ns >= 0)
+                slot->clock_failed = 1;
+            slot->tree_empty_ns = slot->leader_waited_ns;
+            slot->drain_deadline_ms = slot->cleanup_deadline_ns >= 0
+                ? (slot->cleanup_deadline_ns + 999999) / 1000000
+                : now + RT_OWNED_POST_REAP_DRAIN_MS;
             return OWNED_SIGNAL_REAPED;
         }
         slot->runtime_error = errno ? errno : ECHILD;
@@ -802,90 +908,421 @@ static enum OwnedSignalOutcome owned_async_signal_or_reap(RtOwnedSlot* slot, int
     return OWNED_SIGNAL_ERROR;
 }
 
+typedef struct RtOwnedProcessStartConfigV4 {
+    char* const* environment;
+    int cwd_fd;
+    int require_ptrace_exec;
+    int64_t execution_deadline_ns;
+    int64_t kill_deadline_ns;
+    int64_t cleanup_deadline_ns;
+    int64_t request_started_ns;
+    int64_t prepared_ns;
+    uint64_t memory_limit_bytes;
+    int64_t* process_started_ns_out;
+    int64_t* exec_confirmed_ns_out;
+    uint64_t* eintr_retries_out;
+} RtOwnedProcessStartConfigV4;
+
+enum RtOwnedExecFailureClassV4 {
+    RT_OWNED_EXEC_FAILURE_PROVIDER_V4 = 1,
+    RT_OWNED_EXEC_FAILURE_DEADLINE_V4 = 2,
+    RT_OWNED_EXEC_FAILURE_CLOCK_V4 = 3,
+    RT_OWNED_EXEC_FAILURE_CHILD_V4 = 4
+};
+
+#ifdef __linux__
+static pid_t owned_waitpid_before_deadline(pid_t pid, int* status, int options,
+                                           int64_t deadline_ns,
+                                           uint64_t* eintr_retries,
+                                           int* failure_class) {
+    for (;;) {
+        pid_t waited = waitpid(pid, status, options | WNOHANG);
+        if (waited == pid) return waited;
+        if (waited < 0 && errno != EINTR) return waited;
+        if (waited < 0 && errno == EINTR && eintr_retries)
+            *eintr_retries = owned_add_sat(*eintr_retries, 1);
+        int64_t now = owned_now_ns();
+        if (now < 0) {
+            if (failure_class) *failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4;
+            errno = EIO;
+            return -1;
+        }
+        if (now >= deadline_ns) { errno = ETIMEDOUT; return 0; }
+        int64_t remaining = deadline_ns - now;
+        struct timespec pause = {0, remaining < 1000000 ? remaining : 1000000};
+        while (nanosleep(&pause, &pause) != 0) {
+            if (errno != EINTR) return -1;
+            if (eintr_retries) *eintr_retries = owned_add_sat(*eintr_retries, 1);
+            now = owned_now_ns();
+            if (now < 0) {
+                if (failure_class) *failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4;
+                errno = EIO;
+                return -1;
+            }
+            if (now >= deadline_ns) { errno = ETIMEDOUT; return 0; }
+        }
+    }
+}
+
+static void owned_read_child_error_v4(
+        int exec_error_fd, int64_t deadline_ns, uint64_t* eintr_retries,
+        int* exec_error, int* failure_class) {
+    int reported = 0;
+    ssize_t count;
+    for (;;) {
+        count = read(exec_error_fd, &reported, sizeof(reported));
+        if (count >= 0) break;
+        int read_error = errno;
+        if (read_error != EINTR && read_error != EAGAIN &&
+                read_error != EWOULDBLOCK) break;
+        if (read_error == EINTR && eintr_retries)
+            *eintr_retries = owned_add_sat(*eintr_retries, 1);
+        int64_t now = owned_now_ns();
+        if (now < 0) {
+            *exec_error = EIO;
+            *failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4;
+            return;
+        }
+        if (now >= deadline_ns) {
+            *exec_error = ETIMEDOUT;
+            *failure_class = RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+            return;
+        }
+        int64_t remaining_ns = deadline_ns - now;
+        int64_t wait_ms = (remaining_ns + 999999) / 1000000;
+        if (wait_ms > INT_MAX) wait_ms = INT_MAX;
+        struct pollfd diagnostic = {exec_error_fd, POLLIN | POLLHUP | POLLERR, 0};
+        int ready = poll(&diagnostic, 1, (int)wait_ms);
+        if (ready > 0) continue;
+        if (ready < 0 && errno == EINTR) {
+            if (eintr_retries)
+                *eintr_retries = owned_add_sat(*eintr_retries, 1);
+            continue;
+        }
+        if (ready == 0) {
+            *exec_error = ETIMEDOUT;
+            *failure_class = RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+        } else {
+            *exec_error = errno ? errno : EIO;
+            *failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+        }
+        return;
+    }
+    if (count == (ssize_t)sizeof(reported) && reported > 0) {
+        *exec_error = reported;
+        *failure_class = RT_OWNED_EXEC_FAILURE_CHILD_V4;
+    } else {
+        *exec_error = count < 0 && errno ? errno : EPROTO;
+        *failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    }
+}
+
+/* PTRACE_EVENT_EXEC is the only success signal.  CLOEXEC-pipe EOF is useful
+ * diagnostics but is not accepted as proof that the requested image ran. */
+static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
+                                 int64_t deadline_ns, int64_t* confirmed_ns,
+                                 uint64_t* eintr_retries, int* child_reaped,
+                                 int* exec_error, int* failure_class,
+                                 int* terminal_status) {
+    int status = 0;
+    *child_reaped = 0;
+    *exec_error = 0;
+    *failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    if (terminal_status) *terminal_status = 0;
+    pid_t waited = owned_waitpid_before_deadline(
+        pid, &status, WUNTRACED, deadline_ns, eintr_retries, failure_class);
+    if (waited != pid || !WIFSTOPPED(status) || WSTOPSIG(status) != SIGSTOP) {
+        if (waited == pid && (WIFEXITED(status) || WIFSIGNALED(status))) {
+            *child_reaped = 1;
+            if (terminal_status) *terminal_status = status;
+            owned_read_child_error_v4(exec_error_fd, deadline_ns,
+                eintr_retries, exec_error, failure_class);
+        }
+        if (waited == 0) {
+            *exec_error = ETIMEDOUT;
+            *failure_class = RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+        }
+        else if (*exec_error == 0) *exec_error = errno ? errno : EPROTO;
+        return 0;
+    }
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (pov4_test_exec_failure_count > 0) {
+        pov4_test_exec_failure_count--;
+        *exec_error = pov4_test_exec_failure_errno;
+        *failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+        return 0;
+    }
+#endif
+    if (ptrace(PTRACE_SETOPTIONS, pid, NULL,
+               (void*)(uintptr_t)(PTRACE_O_TRACEEXEC | PTRACE_O_EXITKILL)) != 0 ||
+        ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
+        *exec_error = errno ? errno : EIO;
+        return 0;
+    }
+    for (;;) {
+        waited = owned_waitpid_before_deadline(
+            pid, &status, WUNTRACED, deadline_ns, eintr_retries, failure_class);
+        if (waited == 0) {
+            *exec_error = ETIMEDOUT;
+            *failure_class = RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+            return 0;
+        }
+        if (waited < 0) { *exec_error = errno ? errno : EIO; return 0; }
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            *child_reaped = 1;
+            if (terminal_status) *terminal_status = status;
+            owned_read_child_error_v4(exec_error_fd, deadline_ns,
+                eintr_retries, exec_error, failure_class);
+            return 0;
+        }
+        unsigned event = (unsigned)status >> 16;
+        if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP &&
+            event == PTRACE_EVENT_EXEC) {
+            int64_t now = owned_now_ns();
+            if (now < 0 || now > deadline_ns) {
+                *exec_error = now < 0 ? EIO : ETIMEDOUT;
+                *failure_class = now < 0
+                    ? RT_OWNED_EXEC_FAILURE_CLOCK_V4
+                    : RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+                return 0;
+            }
+            if (ptrace(PTRACE_DETACH, pid, NULL, NULL) != 0) {
+                *exec_error = errno ? errno : EIO;
+                return 0;
+            }
+            *confirmed_ns = now;
+            return 1;
+        }
+        *exec_error = EPROTO;
+        return 0;
+    }
+}
+#else
+static int owned_confirm_exec_v4(pid_t pid, int exec_error_fd,
+                                 int64_t deadline_ns, int64_t* confirmed_ns,
+                                 uint64_t* eintr_retries, int* child_reaped,
+                                 int* exec_error, int* failure_class,
+                                 int* terminal_status) {
+    (void)pid; (void)exec_error_fd; (void)deadline_ns; (void)confirmed_ns;
+    (void)eintr_retries; (void)terminal_status;
+    *child_reaped = 0; *exec_error = ENOTSUP;
+    *failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    errno = ENOTSUP;
+    return 0;
+}
+#endif
+
 static bool owned_process_start(const char* cmd, const char* const* argv,
                                const uint8_t* input, uint64_t input_len, int pipe_stdin,
                                int pinned_executable_fd,
+                               const RtOwnedProcessStartConfigV4* v4,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes,
                                RtOwnedProcessTokenV2* token,
                                RtOwnedProcessStartReceiptV2* receipt) {
-    if (!token || !receipt) { if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false; }
+    int configured_cwd_fd = v4 ? v4->cwd_fd : -1;
+    if (!token || !receipt) {
+        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
+        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        return false;
+    }
     memset(token, 0, sizeof(*token)); memset(receipt, 0, sizeof(*receipt));
     receipt->version = RT_OWNED_PROCESS_ASYNC_VERSION;
 #ifndef __linux__
     (void)cmd; (void)argv; (void)timeout_ms; (void)term_grace_ms; (void)max_output_bytes;
     if (pinned_executable_fd >= 0) close(pinned_executable_fd);
+    if (configured_cwd_fd >= 0) close(configured_cwd_fd);
     receipt->runtime_error = ENOTSUP; return false;
 #else
+    int64_t started = owned_now_ms();
+    if (started < 0) {
+        receipt->runtime_error = errno ? errno : EIO;
+        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
+        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        return false;
+    }
     if (!cmd || !argv || !argv[0] || timeout_ms <= 0 ||
         timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS || term_grace_ms < 0 ||
         term_grace_ms > 30000 || max_output_bytes > RT_OWNED_ABI_MAX_OUTPUT_BYTES) {
-        receipt->runtime_error = EINVAL; if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
+        receipt->runtime_error = EINVAL;
+        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
+        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        return false;
+    }
+    if (v4 && (!v4->environment || !v4->require_ptrace_exec ||
+        pinned_executable_fd < 3 || configured_cwd_fd < 3 ||
+        v4->execution_deadline_ns <= v4->prepared_ns ||
+        v4->prepared_ns < v4->request_started_ns ||
+        owned_deadline_reached_ns(v4->execution_deadline_ns))) {
+        receipt->runtime_error = EINVAL;
+        if (pinned_executable_fd >= 0) close(pinned_executable_fd);
+        if (configured_cwd_fd >= 0) close(configured_cwd_fd);
+        return false;
     }
     uint8_t* input_copy = NULL; uint8_t input_sha256[32] = {0};
     if (pipe_stdin && input_len) {
-        if (input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES || !input) { receipt->runtime_error = EINVAL; if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false; }
+        if (input_len > RT_OWNED_PROCESS_MAX_INPUT_BYTES || !input) { receipt->runtime_error = EINVAL; if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false; }
         input_copy = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)input_len);
-        if (!input_copy) { receipt->runtime_error = ENOMEM; if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false; }
+        if (!input_copy) { receipt->runtime_error = ENOMEM; if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false; }
         memcpy(input_copy, input, (size_t)input_len);
     }
     if (pipe_stdin) owned_sha256(input_copy, (size_t)input_len, input_sha256);
     uint32_t index = 0; uint64_t generation = 0;
     if (!owned_reserve(&index, &generation)) {
-        receipt->runtime_error = errno == EOVERFLOW ? EOVERFLOW : EAGAIN; RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
+        receipt->runtime_error = errno == EOVERFLOW ? EOVERFLOW : EAGAIN; RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false;
     }
     RtOwnedProcessTokenV2 minted = {0, 0};
     if (!owned_token_mint_install_reserved(index, generation, &minted)) {
-        receipt->runtime_error = errno; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
+        receipt->runtime_error = errno; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false;
     }
-    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1}, in_pipe[2] = {-1, -1};
+    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1};
+    int in_pipe[2] = {-1, -1}, exec_pipe[2] = {-1, -1};
     if (owned_pipe_cloexec(out_pipe) != 0 || owned_pipe_cloexec(err_pipe) != 0 ||
-        (pipe_stdin && owned_pipe_cloexec(in_pipe) != 0)) {
+        (pipe_stdin && owned_pipe_cloexec(in_pipe) != 0) ||
+        owned_pipe_cloexec(exec_pipe) != 0 ||
+        (v4 && !owned_set_nonblocking(exec_pipe[0]))) {
         int saved = errno;
         if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
         if (err_pipe[0] >= 0) { close(err_pipe[0]); close(err_pipe[1]); }
         if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
-        receipt->runtime_error = saved; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); return false;
+        if (exec_pipe[0] >= 0) { close(exec_pipe[0]); close(exec_pipe[1]); }
+        receipt->runtime_error = saved; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); if (pinned_executable_fd >= 0) close(pinned_executable_fd); if (configured_cwd_fd >= 0) close(configured_cwd_fd); return false;
     }
     pid_t pid = fork();
     if (pid == 0) {
-        (void)setpgid(0, 0); close(out_pipe[0]); close(err_pipe[0]);
+        close(exec_pipe[0]);
+        if (setpgid(0, 0) != 0)
+            owned_child_exec_failed(exec_pipe[1], errno);
+        close(out_pipe[0]); close(err_pipe[0]);
         if (pipe_stdin) close(in_pipe[1]);
         if (dup2(out_pipe[1], STDOUT_FILENO) < 0 || dup2(err_pipe[1], STDERR_FILENO) < 0 ||
-            (pipe_stdin && dup2(in_pipe[0], STDIN_FILENO) < 0)) _exit(126);
+            (pipe_stdin && dup2(in_pipe[0], STDIN_FILENO) < 0))
+            owned_child_exec_failed(exec_pipe[1], errno);
         if (pipe_stdin && in_pipe[0] > STDERR_FILENO) close(in_pipe[0]);
         if (out_pipe[1] > STDERR_FILENO) close(out_pipe[1]);
         if (err_pipe[1] > STDERR_FILENO) close(err_pipe[1]);
+        if (v4) {
+            int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0)
+                owned_child_exec_failed(exec_pipe[1], errno ? errno : EIO);
+            if (null_fd > STDERR_FILENO) close(null_fd);
+            if (fchdir(configured_cwd_fd) != 0)
+                owned_child_exec_failed(exec_pipe[1], errno);
+            close(configured_cwd_fd);
+            if (v4->memory_limit_bytes > 0) {
+                struct rlimit limit;
+                limit.rlim_cur = (rlim_t)v4->memory_limit_bytes;
+                limit.rlim_max = (rlim_t)v4->memory_limit_bytes;
+                if ((uint64_t)limit.rlim_cur != v4->memory_limit_bytes ||
+                    setrlimit(RLIMIT_AS, &limit) != 0)
+                    owned_child_exec_failed(exec_pipe[1], errno ? errno : EOVERFLOW);
+            }
+            if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) != 0)
+                owned_child_exec_failed(exec_pipe[1], errno);
+            if (raise(SIGSTOP) != 0)
+                owned_child_exec_failed(exec_pipe[1], errno);
+            if (!owned_child_close_inherited_except2(
+                    pinned_executable_fd, exec_pipe[1]))
+                owned_child_exec_failed(exec_pipe[1], errno ? errno : EIO);
+            fexecve(pinned_executable_fd, (char* const*)argv,
+                    v4->environment);
+            owned_child_exec_failed(exec_pipe[1], errno);
+        }
         if (pinned_executable_fd >= 0) {
             char* pinned_environment[] = {(char*)"LANG=C", (char*)"LC_ALL=C", (char*)"TZ=UTC", (char*)"PATH=/nonexistent", NULL};
-            if (chdir("/") != 0) _exit(127);
-            if (!owned_child_close_inherited_except(pinned_executable_fd)) _exit(127);
+            if (chdir("/") != 0) owned_child_exec_failed(exec_pipe[1], errno);
+            if (!owned_child_close_inherited_except2(
+                    pinned_executable_fd, exec_pipe[1]))
+                owned_child_exec_failed(exec_pipe[1], errno ? errno : EIO);
             fexecve(pinned_executable_fd, (char* const*)argv, pinned_environment);
         } else execvp(cmd, (char* const*)argv);
-        _exit(127);
+        owned_child_exec_failed(exec_pipe[1], errno);
     }
+    close(exec_pipe[1]);
     close(out_pipe[1]); close(err_pipe[1]);
     if (pipe_stdin) close(in_pipe[0]);
     if (pinned_executable_fd >= 0) { close(pinned_executable_fd); pinned_executable_fd = -1; }
+    if (configured_cwd_fd >= 0) { close(configured_cwd_fd); configured_cwd_fd = -1; }
     if (pid < 0) {
-        int saved = errno; close(out_pipe[0]); close(err_pipe[0]); if (pipe_stdin) close(in_pipe[1]);
+        int saved = errno; close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]); if (pipe_stdin) close(in_pipe[1]);
         receipt->runtime_error = saved; owned_release(index, generation); RT_OWNED_HOST_FREE(input_copy); return false;
     }
+    int64_t process_started_ns = owned_now_ns();
+    if (v4 && process_started_ns < 0) {
+        (void)kill(-pid, SIGKILL);
+        int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]);
+        if (pipe_stdin) close(in_pipe[1]);
+        receipt->runtime_error = EIO; owned_release(index, generation);
+        RT_OWNED_HOST_FREE(input_copy); return false;
+    }
+    if (v4 && v4->process_started_ns_out)
+        *v4->process_started_ns_out = process_started_ns;
     int pidfd = -1; uint64_t identity = 0; int error = 0;
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != EEXIST) error = errno;
+    if (!error && getpgid(pid) != pid) error = EPERM;
+    if (!error && (pidfd = owned_pidfd_open(pid)) < 0) error = errno ? errno : ENOTSUP;
+    if (!error && (identity = owned_start_identity(pid)) == 0) error = ESRCH;
+    if (error) {
+        if (pidfd >= 0) (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
+        else (void)kill(-pid, SIGKILL);
+        int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]);
+        if (pipe_stdin) close(in_pipe[1]);
+        if (pidfd >= 0) close(pidfd);
+        RT_OWNED_HOST_FREE(input_copy); receipt->runtime_error = error;
+        owned_release(index, generation); return false;
+    }
+    int exec_error = 0;
+    if (v4) {
+        int child_reaped = 0;
+        int64_t confirmed_ns = -1;
+        uint64_t exec_eintr = 0;
+        int failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+        int confirmed = owned_confirm_exec_v4(
+            pid, exec_pipe[0], v4->execution_deadline_ns, &confirmed_ns,
+            &exec_eintr, &child_reaped, &exec_error, &failure_class, NULL);
+        if (v4->eintr_retries_out)
+            *v4->eintr_retries_out = owned_add_sat(
+                *v4->eintr_retries_out, exec_eintr);
+        close(exec_pipe[0]);
+        if (!confirmed) {
+            if (!child_reaped) {
+                (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
+                int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+            }
+            close(out_pipe[0]); close(err_pipe[0]);
+            if (pipe_stdin) close(in_pipe[1]);
+            close(pidfd); RT_OWNED_HOST_FREE(input_copy);
+            receipt->runtime_error = exec_error ? exec_error : EIO;
+            owned_release(index, generation); return false;
+        }
+        if (v4->exec_confirmed_ns_out)
+            *v4->exec_confirmed_ns_out = confirmed_ns;
+    } else {
+        ssize_t exec_bytes;
+        do exec_bytes = read(exec_pipe[0], &exec_error, sizeof(exec_error));
+        while (exec_bytes < 0 && errno == EINTR);
+        close(exec_pipe[0]);
+        if (exec_bytes != 0) {
+            int saved = exec_bytes == (ssize_t)sizeof(exec_error)
+                ? exec_error : (errno ? errno : EIO);
+            (void)kill(-pid, SIGKILL);
+            int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+            close(out_pipe[0]); close(err_pipe[0]); if (pipe_stdin) close(in_pipe[1]);
+            close(pidfd);
+            RT_OWNED_HOST_FREE(input_copy); receipt->runtime_error = saved;
+            owned_release(index, generation); return false;
+        }
+    }
     RtOwnedCapturedByte* retained = NULL;
     if (max_output_bytes) {
         if (max_output_bytes > SIZE_MAX / sizeof(*retained)) error = EOVERFLOW;
         else if (!(retained = (RtOwnedCapturedByte*)RT_OWNED_HOST_MALLOC(
                          (size_t)max_output_bytes * sizeof(*retained)))) error = ENOMEM;
     }
-    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != EEXIST) error = errno;
-    if (!error && getpgid(pid) != pid) error = EPERM;
-    if (!error && (pidfd = owned_pidfd_open(pid)) < 0) error = errno ? errno : ENOTSUP;
-    if (!error && (identity = owned_start_identity(pid)) == 0) error = ESRCH;
     if (!error && (!owned_set_nonblocking(out_pipe[0]) || !owned_set_nonblocking(err_pipe[0]) ||
                    (pipe_stdin && !owned_set_nonblocking(in_pipe[1])))) error = errno ? errno : EIO;
-    int64_t started = !error ? owned_now_ms() : -1;
-    if (!error && started < 0) error = errno ? errno : EIO;
     if (error) {
         if (pidfd >= 0) (void)owned_signal_group_pinned(pid, pid, pidfd, SIGKILL);
         else (void)kill(-pid, SIGKILL);
@@ -913,8 +1350,26 @@ static bool owned_process_start(const char* cmd, const char* const* argv,
     memcpy(slot->input_sha256, input_sha256, sizeof(slot->input_sha256));
     slot->input_contract_v3 = pipe_stdin;
     if (pipe_stdin && input_len == 0) { close(slot->in_fd); slot->in_fd = -1; slot->in_open = 0; }
-    slot->started_ms = started; slot->timeout_ms = timeout_ms; slot->term_grace_ms = term_grace_ms;
-    slot->term_at_ms = -1; slot->drain_deadline_ms = -1; slot->output_limit = max_output_bytes;
+    slot->started_ms = started; slot->finished_ms = -1;
+    slot->request_started_ns = v4 ? v4->request_started_ns : -1;
+    slot->prepared_ns = v4 ? v4->prepared_ns : -1;
+    slot->process_started_ns = v4 ? process_started_ns : -1;
+    slot->exec_confirmed_ns = v4 && v4->exec_confirmed_ns_out
+        ? *v4->exec_confirmed_ns_out : -1;
+    slot->leader_waited_ns = -1; slot->tree_empty_ns = -1;
+    slot->execution_deadline_ns = v4 ? v4->execution_deadline_ns : -1;
+    slot->kill_deadline_ns = v4 ? v4->kill_deadline_ns : -1;
+    slot->cleanup_deadline_ns = v4 ? v4->cleanup_deadline_ns : -1;
+    if (v4 && v4->eintr_retries_out)
+        slot->eintr_retries = *v4->eintr_retries_out;
+    slot->timeout_ms = timeout_ms; slot->term_grace_ms = term_grace_ms;
+    slot->term_at_ms = -1; slot->drain_deadline_ms = -1;
+    slot->output_limit = max_output_bytes;
+    /* Legacy V2/V3 callers retain the established combined ceiling.  The
+     * observation adapter may narrow these two stream ceilings exactly once
+     * before its first poll without increasing the preallocated total. */
+    slot->stdout_limit = max_output_bytes;
+    slot->stderr_limit = max_output_bytes;
     slot->retained = retained;
     pthread_mutex_unlock(&rt_owned_lock);
     *token = minted; receipt->accepted = 1; return true;
@@ -925,7 +1380,7 @@ bool rt_process_owned_start_v2(const char* cmd, const char* const* argv,
                                int64_t timeout_ms, int64_t term_grace_ms,
                                uint64_t max_output_bytes, RtOwnedProcessTokenV2* token,
                                RtOwnedProcessStartReceiptV2* receipt) {
-    return owned_process_start(cmd, argv, NULL, 0, 0, -1, timeout_ms, term_grace_ms,
+    return owned_process_start(cmd, argv, NULL, 0, 0, -1, NULL, timeout_ms, term_grace_ms,
                                max_output_bytes, token, receipt);
 }
 
@@ -939,7 +1394,7 @@ bool rt_process_owned_start_v3(const char* cmd, const char* const* argv,
         if (receipt) { memset(receipt, 0, sizeof(*receipt)); receipt->version = RT_OWNED_PROCESS_INPUT_VERSION; receipt->runtime_error = EINVAL; }
         return false;
     }
-    bool ok = owned_process_start(cmd, argv, input, input_len, 1, -1, timeout_ms,
+    bool ok = owned_process_start(cmd, argv, input, input_len, 1, -1, NULL, timeout_ms,
                                   term_grace_ms, max_output_bytes, token, receipt);
     if (receipt) receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
     return ok;
@@ -959,7 +1414,7 @@ bool rt_process_owned_start_pinned_v3(int64_t executable_handle,
         return false;
     }
     bool ok = owned_process_start("simple-pinned-executable", argv, input, input_len, 1,
-                                  private_fd, timeout_ms, term_grace_ms, max_output_bytes,
+                                  private_fd, NULL, timeout_ms, term_grace_ms, max_output_bytes,
                                   token, receipt);
     if (receipt) receipt->version = RT_OWNED_PROCESS_INPUT_VERSION;
     return ok;
@@ -987,13 +1442,19 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
         return true;
     }
     int64_t before_poll = owned_now_ms();
+    if (before_poll < 0 && slot->request_started_ns >= 0) {
+        slot->clock_failed = 1;
+        wait_ms = 0;
+        before_poll = 0;
+    }
     int64_t earliest = before_poll + 25;
     int64_t timeout_at = slot->started_ms + slot->timeout_ms;
     if (timeout_at < earliest) earliest = timeout_at;
     /* Once KILL was sent there is no remaining grace deadline.  Retaining the
      * expired TERM deadline would clamp every later caller poll to zero and
      * prevent bounded progress to the reaping observation. */
-    if (slot->term_sent && !slot->kill_sent && slot->term_at_ms + slot->term_grace_ms < earliest)
+    if (slot->request_started_ns < 0 && slot->term_sent && !slot->kill_sent &&
+        slot->term_at_ms + slot->term_grace_ms < earliest)
         earliest = slot->term_at_ms + slot->term_grace_ms;
     if (slot->reaped && slot->drain_deadline_ms >= 0 && slot->drain_deadline_ms < earliest)
         earliest = slot->drain_deadline_ms;
@@ -1003,38 +1464,101 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
     if (slot->out_open) { oi = (int)count; pfds[count++] = (struct pollfd){slot->out_fd, POLLIN|POLLHUP|POLLERR, 0}; }
     if (slot->err_open) { ei = (int)count; pfds[count++] = (struct pollfd){slot->err_fd, POLLIN|POLLHUP|POLLERR, 0}; }
     if (slot->in_open) { ii = (int)count; pfds[count++] = (struct pollfd){slot->in_fd, POLLOUT|POLLHUP|POLLERR, 0}; }
-    int rc; do rc = poll(pfds, count, (int)wait_ms); while (rc < 0 && errno == EINTR);
+    int rc;
+    int64_t poll_deadline = before_poll + wait_ms;
+    int poll_wait = (int)wait_ms;
+    for (;;) {
+        rc = poll(pfds, count, poll_wait);
+        if (rc >= 0 || errno != EINTR) break;
+        slot->eintr_retries = owned_add_sat(slot->eintr_retries, 1);
+        int64_t after_interrupt = owned_now_ms();
+        if (after_interrupt < 0) {
+            if (slot->request_started_ns >= 0) slot->clock_failed = 1;
+            rc = -1;
+            errno = EIO;
+            break;
+        }
+        if (after_interrupt >= poll_deadline) {
+            rc = 0;
+            break;
+        }
+        poll_wait = (int)(poll_deadline - after_interrupt);
+    }
     if (rc < 0) slot->runtime_error = errno;
-    uint64_t drain_budget = RT_OWNED_DRAIN_QUANTUM;
-    if (oi >= 0 && (pfds[oi].revents & (POLLIN|POLLHUP|POLLERR)))
-        owned_async_capture_one(slot, slot->out_fd, 0, &slot->out_open, &drain_budget);
-    if (ei >= 0 && (pfds[ei].revents & (POLLIN|POLLHUP|POLLERR)))
-        owned_async_capture_one(slot, slot->err_fd, 1, &slot->err_open, &drain_budget);
+    /* Reserve half of every turn for each ready stream before redistributing
+     * unused budget. A continuously readable stdout cannot starve stderr. */
+    uint64_t out_budget = RT_OWNED_DRAIN_QUANTUM / 2;
+    uint64_t err_budget = RT_OWNED_DRAIN_QUANTUM - out_budget;
+    int out_ready = oi >= 0 && (pfds[oi].revents & (POLLIN|POLLHUP|POLLERR));
+    int err_ready = ei >= 0 && (pfds[ei].revents & (POLLIN|POLLHUP|POLLERR));
+    if (out_ready)
+        owned_async_capture_one(slot, slot->out_fd, 0, &slot->out_open, &out_budget);
+    if (err_ready)
+        owned_async_capture_one(slot, slot->err_fd, 1, &slot->err_open, &err_budget);
+    uint64_t spare_budget = out_budget + err_budget;
+    if (out_ready && spare_budget)
+        owned_async_capture_one(slot, slot->out_fd, 0, &slot->out_open, &spare_budget);
+    if (err_ready && spare_budget)
+        owned_async_capture_one(slot, slot->err_fd, 1, &slot->err_open, &spare_budget);
     if (ii >= 0 && (pfds[ii].revents & (POLLOUT|POLLHUP|POLLERR))) owned_async_write_input(slot);
     if (!slot->out_open) slot->out_fd = -1;
     if (!slot->err_open) slot->err_fd = -1;
     siginfo_t info; memset(&info, 0, sizeof(info));
     int wr = 0;
     if (!slot->reaped) {
-        do wr = waitid(P_PID, (id_t)slot->pid, &info,
-            WEXITED|WNOHANG|WNOWAIT); while (wr < 0 && errno == EINTR);
+        for (;;) {
+            wr = waitid(P_PID, (id_t)slot->pid, &info, WEXITED|WNOHANG|WNOWAIT);
+            if (wr >= 0 || errno != EINTR) break;
+            slot->eintr_retries = owned_add_sat(slot->eintr_retries, 1);
+            if (slot->request_started_ns >= 0) {
+                int64_t retry_now = owned_now_ms();
+                if (retry_now >= 0 && retry_now < poll_deadline) continue;
+                if (retry_now < 0) slot->clock_failed = 1;
+                errno = retry_now < 0 ? EIO : ETIMEDOUT;
+                break;
+            }
+        }
     }
     int64_t now = owned_now_ms();
+    if (now < 0 && slot->request_started_ns >= 0) {
+        slot->clock_failed = 1;
+        now = before_poll;
+    }
     if (wr == 0 && info.si_pid == slot->pid && !slot->reaped) {
         /* waitid observed the same pidfd-pinned leader before exact reap. */
         slot->identity_revalidated = 1;
-        (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
+        if (slot->request_started_ns < 0)
+            (void)owned_signal_group_pinned(slot->pid, slot->pgid, slot->pidfd, SIGKILL);
         memset(&slot->child_usage, 0, sizeof(slot->child_usage));
-        pid_t waited; do waited = wait4(slot->pid, &slot->status, 0, &slot->child_usage); while (waited < 0 && errno == EINTR);
+        pid_t waited;
+        for (;;) {
+            waited = wait4(slot->pid, &slot->status, 0, &slot->child_usage);
+            if (waited >= 0 || errno != EINTR) break;
+            slot->eintr_retries = owned_add_sat(slot->eintr_retries, 1);
+            if (slot->request_started_ns >= 0) {
+                int64_t retry_now = owned_now_ms();
+                if (retry_now >= 0 && retry_now < poll_deadline) continue;
+                if (retry_now < 0) slot->clock_failed = 1;
+                errno = retry_now < 0 ? EIO : ETIMEDOUT;
+                break;
+            }
+        }
         if (waited == slot->pid) {
             slot->child_usage_available = 1;
             slot->reaped = 1;
-            slot->drain_deadline_ms = now + RT_OWNED_POST_REAP_DRAIN_MS;
+            slot->finished_ms = now;
+            slot->leader_waited_ns = owned_now_ns();
+            slot->tree_empty_ns = slot->leader_waited_ns;
+            slot->drain_deadline_ms = slot->cleanup_deadline_ns >= 0
+                ? (slot->cleanup_deadline_ns + 999999) / 1000000
+                : now + RT_OWNED_POST_REAP_DRAIN_MS;
             if (slot->runtime_error == ESTALE) slot->runtime_error = 0;
         }
         else slot->runtime_error = errno ? errno : ECHILD;
     } else if (!slot->reaped && wr < 0) slot->runtime_error = errno;
-    if (!slot->reaped && (slot->cancel_requested || now - slot->started_ms >= slot->timeout_ms) && !slot->term_sent) {
+    if (!slot->reaped && slot->request_started_ns < 0 &&
+        (slot->cancel_requested || now - slot->started_ms >= slot->timeout_ms) &&
+        !slot->term_sent) {
         slot->timed_out = !slot->cancel_requested;
         enum OwnedSignalOutcome outcome = owned_async_signal_or_reap(slot, SIGTERM, now);
         if (outcome == OWNED_SIGNAL_SENT) {
@@ -1043,7 +1567,8 @@ bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
             slot->identity_revalidated = 1; slot->runtime_error = 0;
         }
     }
-    if (!slot->reaped && slot->term_sent && !slot->kill_sent && now - slot->term_at_ms >= slot->term_grace_ms) {
+    if (!slot->reaped && slot->request_started_ns < 0 && slot->term_sent &&
+        !slot->kill_sent && now - slot->term_at_ms >= slot->term_grace_ms) {
         enum OwnedSignalOutcome outcome = owned_async_signal_or_reap(slot, SIGKILL, now);
         if (outcome == OWNED_SIGNAL_SENT) slot->kill_sent = 1;
         else if (outcome == OWNED_SIGNAL_REAPED) slot->runtime_error = 0;
@@ -1464,6 +1989,111 @@ static SplArray* owned_adapter_result_values(const RtOwnedProcessResultV2* resul
     return owned_adapter_values(values, (int64_t)(sizeof(values) / sizeof(values[0])));
 }
 
+SplArray* rt_process_owned_v3_capabilities_value(void) {
+    int64_t available = 0;
+#ifdef __linux__
+    /* A pidfd for our own live process is a side-effect-free host capability
+     * probe.  A seccomp policy or old kernel which rejects it cannot support
+     * the identity-pinned lifecycle used by every V3 child. */
+    int pidfd = owned_pidfd_open(getpid());
+    if (pidfd >= 0 && owned_start_identity(getpid()) != 0) {
+        close(pidfd);
+        available = 1;
+    } else if (pidfd >= 0) {
+        close(pidfd);
+    }
+#endif
+    const int64_t values[] = {
+        RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION,
+        available,
+        available ? (int64_t)RT_PROCESS_OBSERVATION_CAP_REQUIRED : 0,
+    };
+    return owned_adapter_values(values, 3);
+}
+
+SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
+                                                        int64_t stdout_limit,
+                                                        int64_t stderr_limit) {
+    int64_t values[] = {RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION, 0, EINVAL};
+    RtOwnedProcessTokenV2 token;
+    uint32_t adapter_index;
+    if (stdout_limit < 0 || stderr_limit < 0 ||
+        (uint64_t)stdout_limit > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
+        (uint64_t)stderr_limit > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
+        (uint64_t)stdout_limit > UINT64_MAX - (uint64_t)stderr_limit)
+        return owned_adapter_values(values, 3);
+    if (!owned_adapter_acquire(handle, &token, &adapter_index)) {
+        values[2] = ESTALE;
+        return owned_adapter_values(values, 3);
+    }
+    RtOwnedSlot* slot = owned_token_acquire(token, NULL);
+    if (!slot) {
+        values[2] = ESTALE;
+        owned_adapter_release_ref(adapter_index);
+        return owned_adapter_values(values, 3);
+    }
+    pthread_mutex_lock(slot->state_lock);
+    uint64_t total = (uint64_t)stdout_limit + (uint64_t)stderr_limit;
+    if (slot->state == 1 && slot->stdout_seen == 0 && slot->stderr_seen == 0 &&
+        slot->stdout_delivered == 0 && slot->stderr_delivered == 0 &&
+        total <= slot->output_limit) {
+        slot->stdout_limit = (uint64_t)stdout_limit;
+        slot->stderr_limit = (uint64_t)stderr_limit;
+        values[1] = 1;
+        values[2] = 0;
+    } else if (slot->state != 1) {
+        values[2] = EBUSY;
+    }
+    pthread_mutex_unlock(slot->state_lock);
+    owned_token_release(slot);
+    owned_adapter_release_ref(adapter_index);
+    return owned_adapter_values(values, 3);
+}
+
+SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
+    int64_t values[15] = {
+        RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION,
+        0, -1, RT_OWNED_PROCESS_OBSERVATION_VERSION,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ESTALE,
+    };
+    RtOwnedProcessTokenV2 token;
+    uint32_t adapter_index;
+    if (!owned_adapter_acquire(handle, &token, &adapter_index))
+        return owned_adapter_values(values, 15);
+    RtOwnedSlot* slot = owned_token_acquire(token, NULL);
+    if (!slot) {
+        owned_adapter_release_ref(adapter_index);
+        return owned_adapter_values(values, 15);
+    }
+    pthread_mutex_lock(slot->state_lock);
+    values[1] = slot->pid;
+    int64_t ended = slot->finished_ms;
+    if (ended < 0) ended = owned_now_ms();
+    if (ended >= slot->started_ms && slot->started_ms >= 0)
+        values[2] = ended - slot->started_ms;
+    if (slot->state == 2) {
+        if (!slot->output_incomplete)
+            values[4] |= RT_PROCESS_EVIDENCE_OUTPUT_EOF;
+        if (slot->child_usage_available) {
+            values[4] |= RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE;
+            values[5] = owned_timeval_ms(slot->child_usage.ru_utime);
+            values[6] = owned_timeval_ms(slot->child_usage.ru_stime);
+            values[7] = owned_direct_child_rss_bytes(&slot->child_usage);
+        }
+        if (slot->reaped && WIFSIGNALED(slot->status))
+            values[12] = WTERMSIG(slot->status);
+        values[14] = 0;
+    } else {
+        values[14] = EAGAIN;
+    }
+    values[13] = slot->eintr_retries > INT64_MAX
+        ? INT64_MAX : (int64_t)slot->eintr_retries;
+    pthread_mutex_unlock(slot->state_lock);
+    owned_token_release(slot);
+    owned_adapter_release_ref(adapter_index);
+    return owned_adapter_values(values, 15);
+}
+
 /* Start publishes no authority until the adapter token map is installed.  A
  * mutex-provider failure at that exact point must still consume the private
  * core lease rather than orphaning a child or its captured output. */
@@ -1691,6 +2321,1561 @@ int rt_process_owned_v3_release_value(int64_t handle) {
         consumed = 1;
     owned_adapter_end_consume(index, consumed);
     return consumed;
+}
+
+/* ===== Process observation V4 Linux host =====
+ *
+ * The Simple common module owns the semantic 64-word schema and request
+ * codec.  These constants are the C ABI spelling of that frozen wire.  V4 is
+ * intentionally independent from the V1 adapter: only a sealed executable,
+ * sealed cwd, exact environment, and PTRACE_EVENT_EXEC-confirmed child can
+ * create a ticket. */
+#define POV4_VERSION_VALUE 4
+#define POV4_WORDS 64
+#define POV4_REQUEST_CODEC_VERSION 1
+#define POV4_TICKET_WORDS 5
+#define POV4_DIGEST_BYTES 32
+#define POV4_MAX_REQUEST_BYTES (16U * 1024U * 1024U)
+#define POV4_MAX_TEXT_BYTES (1024U * 1024U)
+#define POV4_MAX_ARGS 4096
+#define POV4_MAX_ENV 4096
+#define POV4_MAX_POLL_BYTES (64U * 1024U)
+#define POV4_MAX_WAIT_NS 250000000LL
+#define POV4_EFFECTIVE_CLOCK_NS 1000000LL
+#define POV4_SLOTS 16
+#define POV4_CWD_PINS 16
+
+enum Pov4Word {
+    POV4_VERSION = 0, POV4_PACKET_KIND = 1, POV4_WORD_COUNT = 2,
+    POV4_STATUS = 3, POV4_REQUEST_ID_HIGH = 4, POV4_REQUEST_ID_LOW = 5,
+    POV4_TICKET_HIGH = 6, POV4_TICKET_LOW = 7, POV4_PHASE = 8,
+    POV4_VALIDITY = 9, POV4_FAILURE_PHASE = 10, POV4_FAILURE_REASON = 11,
+    POV4_ERRNO = 12, POV4_EXEC_STATE = 13, POV4_EXEC_ERRNO = 14,
+    POV4_PID = 15, POV4_RAW_WAIT = 16, POV4_EXIT_CODE = 17,
+    POV4_SIGNAL = 18, POV4_REQUEST_STARTED_NS = 19, POV4_PREPARED_NS = 20,
+    POV4_PROCESS_STARTED_NS = 21, POV4_EXEC_CONFIRMED_NS = 22,
+    POV4_LEADER_WAITED_NS = 23, POV4_TREE_EMPTY_NS = 24,
+    POV4_EXECUTION_DEADLINE_NS = 25, POV4_KILL_DEADLINE_NS = 26,
+    POV4_CLEANUP_DEADLINE_NS = 27, POV4_TERM_ATTEMPTED = 28,
+    POV4_TERM_SENT = 29, POV4_KILL_ATTEMPTED = 30, POV4_KILL_SENT = 31,
+    POV4_CLOCK_ID = 32, POV4_CLOCK_NOMINAL_RES_NS = 33,
+    POV4_CLOCK_EFFECTIVE_RES_NS = 34, POV4_CLOCK_CPU_RES_NS = 35,
+    POV4_USER_CPU_NS = 36, POV4_SYSTEM_CPU_NS = 37, POV4_TOTAL_CPU_NS = 38,
+    POV4_CHILD_DIRECT_RSS_BYTES = 39, POV4_TREE_METRIC_KIND = 40,
+    POV4_TREE_PEAK_BYTES = 41, POV4_ENFORCEMENT_KIND = 42,
+    POV4_MEMORY_LIMIT_BYTES = 43, POV4_LIMIT_EVENT_BITS = 44,
+    POV4_TREE_ACCOUNTING_AVAILABLE = 45, POV4_TREE_CONTROL_AVAILABLE = 46,
+    POV4_LEADER_REAPED = 47, POV4_TREE_EMPTY = 48, POV4_STDOUT_STATE = 49,
+    POV4_STDOUT_ERRNO = 50, POV4_STDOUT_SEEN = 51,
+    POV4_STDOUT_RETAINED = 52, POV4_STDOUT_DELIVERED = 53,
+    POV4_STDERR_STATE = 54, POV4_STDERR_ERRNO = 55, POV4_STDERR_SEEN = 56,
+    POV4_STDERR_RETAINED = 57, POV4_STDERR_DELIVERED = 58,
+    POV4_EINTR_RETRIES = 59, POV4_STDOUT_PAYLOAD_LENGTH = 60,
+    POV4_STDERR_PAYLOAD_LENGTH = 61, POV4_BINDING_LENGTH = 62,
+    POV4_RESERVED = 63
+};
+
+enum {
+    POV4_KIND_POLL = 1, POV4_KIND_FROZEN = 2, POV4_KIND_ACK = 3,
+    POV4_KIND_CLEANUP_FROZEN = 4, POV4_KIND_CLEANUP_ACK = 5,
+    POV4_STATUS_RUNNING = 1, POV4_STATUS_TERMINAL = 2,
+    POV4_STATUS_REJECTED = 3, POV4_STATUS_CLEANUP_PENDING = 4,
+    POV4_STATUS_PROVIDER_FAILED = 5,
+    POV4_PHASE_PREPARED = 1, POV4_PHASE_RUNNING = 2,
+    POV4_PHASE_TERM = 3, POV4_PHASE_KILL = 4,
+    POV4_PHASE_CLEANUP = 5, POV4_PHASE_TERMINAL = 6,
+    POV4_PHASE_FROZEN = 7, POV4_PHASE_ACK = 8, POV4_PHASE_REJECTED = 9,
+    POV4_FAIL_ADMISSION = 1, POV4_FAIL_EXECUTION = 2, POV4_FAIL_WAIT = 3,
+    POV4_FAIL_STREAM = 4, POV4_FAIL_CLEANUP = 5,
+    POV4_FAIL_COLLECTION = 6, POV4_FAIL_ACK = 7,
+    POV4_REASON_INVALID_REQUEST = 1, POV4_REASON_INVALID_SCHEMA = 2,
+    POV4_REASON_CLOCK = 3, POV4_REASON_EXEC = 4, POV4_REASON_WAIT = 5,
+    POV4_REASON_STREAM = 6, POV4_REASON_EXEC_DEADLINE = 7,
+    POV4_REASON_CLEANUP_DEADLINE = 8, POV4_REASON_MEMORY = 9,
+    POV4_REASON_PROVIDER = 10, POV4_REASON_BINDING = 11,
+    POV4_EXEC_PREPARED = 1, POV4_EXEC_PENDING = 2,
+    POV4_EXEC_CONFIRMED = 3, POV4_EXEC_FAILED = 4,
+    POV4_STREAM_OPEN = 1, POV4_STREAM_EOF = 2,
+    POV4_STREAM_ERROR = 3, POV4_STREAM_DEADLINE = 4,
+    POV4_TREE_CHILD_DIRECT = 1, POV4_ENFORCEMENT_NONE = 1,
+    POV4_ENFORCEMENT_CGROUP = 2, POV4_ENFORCEMENT_RLIMIT_AS = 3,
+    POV4_DESCENDANT_LEADER = 1,
+    POV4_CLOCK_MONOTONIC = 1,
+    POV4_VALID_REQUEST = 1, POV4_VALID_EXEC = 2, POV4_VALID_CLOCK = 4,
+    POV4_VALID_DIRECT_RSS = 8, POV4_VALID_FROZEN = 128
+};
+
+enum {
+    POV4_CAP_PINNED_EXEC = 1 << 0, POV4_CAP_PINNED_CWD = 1 << 1,
+    POV4_CAP_PTRACE_EXEC = 1 << 2, POV4_CAP_EXACT_ENV = 1 << 3,
+    POV4_CAP_ABSOLUTE_DEADLINE = 1 << 4, POV4_CAP_WAIT4 = 1 << 5,
+    POV4_CAP_RLIMIT_AS = 1 << 6, POV4_CAP_TWO_PHASE_COLLECT = 1 << 7,
+    POV4_CAP_LEADER_ONLY = 1 << 8
+};
+#define POV4_CAPABILITIES (POV4_CAP_PINNED_EXEC | POV4_CAP_PINNED_CWD | \
+    POV4_CAP_PTRACE_EXEC | POV4_CAP_EXACT_ENV | POV4_CAP_ABSOLUTE_DEADLINE | \
+    POV4_CAP_WAIT4 | POV4_CAP_RLIMIT_AS | POV4_CAP_TWO_PHASE_COLLECT | \
+    POV4_CAP_LEADER_ONLY)
+
+typedef struct Pov4Request {
+    uint64_t capability_bits;
+    int64_t wall_budget_ns, term_grace_ns, cleanup_budget_ns;
+    uint64_t stdout_limit, stderr_limit, memory_limit;
+    int enforcement_kind, descendant_policy;
+    int64_t max_clock_resolution_ns;
+    uint64_t executable_pin_claim, cwd_pin_claim;
+    uint8_t executable_digest[32], cwd_digest[32], request_digest[32];
+    char* canonical_cwd;
+    char* canonical_pinned_directory;
+    char** argv;
+    char** environment;
+    int64_t argc, environment_count;
+} Pov4Request;
+
+typedef struct Pov4Cursor {
+    const uint8_t* bytes;
+    uint64_t length;
+    uint64_t offset;
+} Pov4Cursor;
+
+static int pov4_canonical_directory(const char* value);
+
+typedef struct Pov4CwdPin {
+    uint64_t handle;
+    int fd;
+    char* canonical_path;
+    uint8_t digest[POV4_DIGEST_BYTES];
+} Pov4CwdPin;
+
+static Pov4CwdPin pov4_cwd_pins[POV4_CWD_PINS];
+static pthread_mutex_t pov4_cwd_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void pov4_store_u64_le(uint8_t* out, uint64_t value) {
+    for (unsigned i = 0; i < 8; i++) out[i] = (uint8_t)(value >> (8 * i));
+}
+
+static int pov4_directory_digest(int fd, uint8_t digest[POV4_DIGEST_BYTES]) {
+    struct stat info;
+    if (fstat(fd, &info) != 0 || !S_ISDIR(info.st_mode)) {
+        if (errno == 0) errno = ENOTDIR;
+        return 0;
+    }
+    uint8_t identity[32] = {'P','O','V','4','C','W','D',0};
+    pov4_store_u64_le(identity + 8, (uint64_t)info.st_dev);
+    pov4_store_u64_le(identity + 16, (uint64_t)info.st_ino);
+    pov4_store_u64_le(identity + 24, (uint64_t)info.st_mode);
+    owned_sha256(identity, sizeof(identity), digest);
+    return 1;
+}
+
+static int pov4_mint_positive(uint64_t* value) {
+#if defined(__linux__) && defined(SYS_getrandom)
+    for (int attempt = 0; attempt < 32; attempt++) {
+        uint64_t candidate = 0;
+        ssize_t got = RT_OWNED_TOKEN_FILL(&candidate, sizeof(candidate));
+        candidate &= (uint64_t)INT64_MAX;
+        if (got == (ssize_t)sizeof(candidate) && candidate != 0) {
+            *value = candidate;
+            return 1;
+        }
+    }
+    errno = EAGAIN;
+    return 0;
+#else
+    (void)value;
+    errno = ENOTSUP;
+    return 0;
+#endif
+}
+
+int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data,
+                                                 uint64_t path_len) {
+#ifndef __linux__
+    (void)path_data; (void)path_len; errno = ENOTSUP; return 0;
+#else
+    if (!path_data || path_len == 0 || path_len > POV4_MAX_TEXT_BYTES ||
+        path_len > SIZE_MAX - 1) { errno = EINVAL; return 0; }
+    char* path = (char*)RT_OWNED_HOST_MALLOC((size_t)path_len + 1);
+    if (!path) { errno = ENOMEM; return 0; }
+    memcpy(path, path_data, (size_t)path_len); path[path_len] = '\0';
+    if (memchr(path, '\0', (size_t)path_len) || !pov4_canonical_directory(path)) {
+        RT_OWNED_HOST_FREE(path); errno = EINVAL; return 0;
+    }
+    char resolved[PATH_MAX];
+    if (!realpath(path, resolved) || strcmp(path, resolved) != 0) {
+        int saved = errno ? errno : EINVAL;
+        RT_OWNED_HOST_FREE(path); errno = saved; return 0;
+    }
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    uint8_t digest[POV4_DIGEST_BYTES];
+    if (fd < 0 || !pov4_directory_digest(fd, digest)) {
+        int saved = errno ? errno : EIO;
+        if (fd >= 0) close(fd);
+        RT_OWNED_HOST_FREE(path); errno = saved; return 0;
+    }
+    if (pthread_mutex_lock(&pov4_cwd_lock) != 0) {
+        close(fd); RT_OWNED_HOST_FREE(path); errno = EBUSY; return 0;
+    }
+    int free_index = -1;
+    for (int i = 0; i < POV4_CWD_PINS; i++)
+        if (pov4_cwd_pins[i].handle == 0) { free_index = i; break; }
+    uint64_t handle = 0;
+    if (free_index >= 0) {
+        for (int attempt = 0; attempt < 32 && handle == 0; attempt++) {
+            uint64_t candidate = 0;
+            if (!pov4_mint_positive(&candidate)) break;
+            int duplicate = 0;
+            for (int i = 0; i < POV4_CWD_PINS; i++)
+                if (pov4_cwd_pins[i].handle == candidate) duplicate = 1;
+            if (!duplicate) handle = candidate;
+        }
+    }
+    if (free_index < 0 || handle == 0) {
+        pthread_mutex_unlock(&pov4_cwd_lock);
+        close(fd); RT_OWNED_HOST_FREE(path);
+        errno = free_index < 0 ? EAGAIN : (errno ? errno : EAGAIN); return 0;
+    }
+    Pov4CwdPin* pin = &pov4_cwd_pins[free_index];
+    pin->handle = handle; pin->fd = fd; pin->canonical_path = path;
+    memcpy(pin->digest, digest, sizeof(pin->digest));
+    pthread_mutex_unlock(&pov4_cwd_lock);
+    return (int64_t)handle;
+#endif
+}
+
+static int pov4_acquire_cwd(uint64_t handle, const char* canonical_path,
+                            const uint8_t digest[POV4_DIGEST_BYTES]) {
+    if (handle == 0 || pthread_mutex_lock(&pov4_cwd_lock) != 0) {
+        errno = handle == 0 ? ESTALE : EBUSY; return -1;
+    }
+    int duplicate = -1;
+    for (int i = 0; i < POV4_CWD_PINS; i++) {
+        Pov4CwdPin* pin = &pov4_cwd_pins[i];
+        if (pin->handle == handle && canonical_path &&
+            strcmp(pin->canonical_path, canonical_path) == 0 &&
+            memcmp(pin->digest, digest, POV4_DIGEST_BYTES) == 0) {
+            duplicate = fcntl(pin->fd, F_DUPFD_CLOEXEC, 3);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&pov4_cwd_lock);
+    if (duplicate < 0) { if (errno == 0) errno = ESTALE; return -1; }
+    uint8_t current[POV4_DIGEST_BYTES];
+    if (!pov4_directory_digest(duplicate, current) ||
+        memcmp(current, digest, POV4_DIGEST_BYTES) != 0) {
+        int saved = errno ? errno : ESTALE; close(duplicate); errno = saved; return -1;
+    }
+    return duplicate;
+}
+
+SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
+    uint8_t digest[POV4_DIGEST_BYTES]; int found = 0;
+    if (handle > 0 && pthread_mutex_lock(&pov4_cwd_lock) == 0) {
+        for (int i = 0; i < POV4_CWD_PINS; i++) if (pov4_cwd_pins[i].handle == (uint64_t)handle) {
+            memcpy(digest, pov4_cwd_pins[i].digest, sizeof(digest)); found = 1; break;
+        }
+        pthread_mutex_unlock(&pov4_cwd_lock);
+    }
+    return owned_adapter_bytes((const char*)digest, found ? sizeof(digest) : 0);
+}
+
+int rt_process_observation_v4_close_cwd_value(int64_t handle) {
+    int fd = -1; char* path = NULL;
+    if (handle <= 0 || pthread_mutex_lock(&pov4_cwd_lock) != 0) return 0;
+    for (int i = 0; i < POV4_CWD_PINS; i++) if (pov4_cwd_pins[i].handle == (uint64_t)handle) {
+        fd = pov4_cwd_pins[i].fd; path = pov4_cwd_pins[i].canonical_path;
+        memset(&pov4_cwd_pins[i], 0, sizeof(pov4_cwd_pins[i])); break;
+    }
+    pthread_mutex_unlock(&pov4_cwd_lock);
+    if (fd < 0) return 0;
+    close(fd); RT_OWNED_HOST_FREE(path); return 1;
+}
+
+static int pov4_read_u64(Pov4Cursor* cursor, uint64_t* value) {
+    if (!cursor || !value || cursor->offset > cursor->length ||
+        cursor->length - cursor->offset < 8) return 0;
+    const uint8_t* at = cursor->bytes + cursor->offset;
+    if (at[7] & 0x80) return 0;
+    uint64_t result = 0;
+    for (unsigned i = 0; i < 8; i++) result |= (uint64_t)at[i] << (8 * i);
+    cursor->offset += 8;
+    *value = result;
+    return 1;
+}
+
+static int pov4_utf8_valid(const uint8_t* bytes, uint64_t length) {
+    uint64_t i = 0;
+    while (i < length) {
+        uint8_t a = bytes[i++];
+        if (a == 0) return 0;
+        if (a < 0x80) continue;
+        unsigned more = 0; uint32_t code = 0, minimum = 0;
+        if ((a & 0xe0) == 0xc0) { more = 1; code = a & 0x1f; minimum = 0x80; }
+        else if ((a & 0xf0) == 0xe0) { more = 2; code = a & 0x0f; minimum = 0x800; }
+        else if ((a & 0xf8) == 0xf0) { more = 3; code = a & 0x07; minimum = 0x10000; }
+        else return 0;
+        if (i + more > length) return 0;
+        for (unsigned j = 0; j < more; j++) {
+            uint8_t b = bytes[i++];
+            if ((b & 0xc0) != 0x80) return 0;
+            code = (code << 6) | (b & 0x3f);
+        }
+        if (code < minimum || code > 0x10ffff ||
+            (code >= 0xd800 && code <= 0xdfff)) return 0;
+    }
+    return 1;
+}
+
+static int pov4_read_text(Pov4Cursor* cursor, char** value, uint64_t* length_out) {
+    uint64_t length = 0;
+    if (!pov4_read_u64(cursor, &length) || length > POV4_MAX_TEXT_BYTES ||
+        cursor->offset > cursor->length || length > cursor->length - cursor->offset ||
+        length > SIZE_MAX - 1 || !pov4_utf8_valid(cursor->bytes + cursor->offset, length))
+        return 0;
+    char* copy = (char*)RT_OWNED_HOST_MALLOC((size_t)length + 1);
+    if (!copy) { errno = ENOMEM; return 0; }
+    memcpy(copy, cursor->bytes + cursor->offset, (size_t)length);
+    copy[length] = '\0'; cursor->offset += length;
+    *value = copy;
+    if (length_out) *length_out = length;
+    return 1;
+}
+
+static int pov4_canonical_directory(const char* value) {
+    size_t length;
+    if (!value || value[0] != '/' || (length = strlen(value)) <= 1 ||
+        value[length - 1] == '/') return 0;
+    for (size_t i = 0; i < length; i++) {
+        if (value[i] == '/' && i + 1 < length && value[i + 1] == '/') return 0;
+        if (value[i] == '/' && i + 2 < length && value[i + 1] == '.' &&
+            (value[i + 2] == '/' || (value[i + 2] == '.' &&
+             (i + 3 == length || value[i + 3] == '/')))) return 0;
+    }
+    return 1;
+}
+
+static void pov4_request_free(Pov4Request* request) {
+    if (!request) return;
+    if (request->argv) {
+        for (int64_t i = 0; i < request->argc; i++) RT_OWNED_HOST_FREE(request->argv[i]);
+        RT_OWNED_HOST_FREE(request->argv);
+    }
+    if (request->environment) {
+        for (int64_t i = 0; i < request->environment_count; i++)
+            RT_OWNED_HOST_FREE(request->environment[i]);
+        RT_OWNED_HOST_FREE(request->environment);
+    }
+    RT_OWNED_HOST_FREE(request->canonical_cwd);
+    RT_OWNED_HOST_FREE(request->canonical_pinned_directory);
+    memset(request, 0, sizeof(*request));
+}
+
+static int pov4_parse_request_bytes(const uint8_t* bytes, uint64_t length,
+                                    Pov4Request* request) {
+    static const uint8_t magic[8] = {'P','O','V','4','R','E','Q',0};
+    memset(request, 0, sizeof(*request));
+    if (!bytes || length < sizeof(magic) || length > POV4_MAX_REQUEST_BYTES ||
+        memcmp(bytes, magic, sizeof(magic)) != 0) { errno = EPROTO; return 0; }
+    owned_sha256(bytes, (size_t)length, request->request_digest);
+    Pov4Cursor cursor = {bytes, length, sizeof(magic)};
+    char* prior_key = NULL;
+    uint64_t version = 0, wall = 0, grace = 0, cleanup = 0;
+    uint64_t stdout_limit = 0, stderr_limit = 0, memory_limit = 0;
+    uint64_t enforcement = 0, descendant = 0, resolution = 0;
+    if (!pov4_read_u64(&cursor, &version) || version != POV4_REQUEST_CODEC_VERSION ||
+        !pov4_read_u64(&cursor, &request->capability_bits) ||
+        !pov4_read_u64(&cursor, &wall) || !pov4_read_u64(&cursor, &grace) ||
+        !pov4_read_u64(&cursor, &cleanup) ||
+        !pov4_read_u64(&cursor, &stdout_limit) ||
+        !pov4_read_u64(&cursor, &stderr_limit) ||
+        !pov4_read_u64(&cursor, &memory_limit) ||
+        !pov4_read_u64(&cursor, &enforcement) ||
+        !pov4_read_u64(&cursor, &descendant) ||
+        !pov4_read_u64(&cursor, &resolution) ||
+        !pov4_read_u64(&cursor, &request->executable_pin_claim) ||
+        cursor.offset > cursor.length || cursor.length - cursor.offset < 32) {
+        errno = EPROTO; goto fail;
+    }
+    memcpy(request->executable_digest, cursor.bytes + cursor.offset, 32);
+    cursor.offset += 32;
+    if (!pov4_read_text(&cursor, &request->canonical_cwd, NULL) ||
+        !pov4_read_text(&cursor, &request->canonical_pinned_directory, NULL) ||
+        !pov4_read_u64(&cursor, &request->cwd_pin_claim) ||
+        cursor.offset > cursor.length || cursor.length - cursor.offset < 32) {
+        if (errno != ENOMEM) errno = EPROTO;
+        goto fail;
+    }
+    memcpy(request->cwd_digest, cursor.bytes + cursor.offset, 32);
+    cursor.offset += 32;
+    uint64_t argc = 0;
+    if (!pov4_read_u64(&cursor, &argc) || argc == 0 || argc > POV4_MAX_ARGS ||
+        argc > SIZE_MAX / sizeof(char*) - 1) { errno = EPROTO; goto fail; }
+    request->argv = (char**)RT_OWNED_HOST_CALLOC((size_t)argc + 1, sizeof(char*));
+    if (!request->argv) { errno = ENOMEM; goto fail; }
+    request->argc = (int64_t)argc;
+    for (uint64_t i = 0; i < argc; i++) {
+        if (!pov4_read_text(&cursor, &request->argv[i], NULL)) {
+            if (errno != ENOMEM) errno = EPROTO;
+            goto fail;
+        }
+    }
+    uint64_t environment_count = 0;
+    if (!pov4_read_u64(&cursor, &environment_count) ||
+        environment_count > POV4_MAX_ENV ||
+        environment_count > SIZE_MAX / sizeof(char*) - 1) {
+        errno = EPROTO; goto fail;
+    }
+    request->environment = (char**)RT_OWNED_HOST_CALLOC(
+        (size_t)environment_count + 1, sizeof(char*));
+    if (!request->environment) { errno = ENOMEM; goto fail; }
+    request->environment_count = (int64_t)environment_count;
+    for (uint64_t i = 0; i < environment_count; i++) {
+        char* key = NULL; char* value = NULL;
+        uint64_t key_length = 0, value_length = 0;
+        if (!pov4_read_text(&cursor, &key, &key_length) ||
+            !pov4_read_text(&cursor, &value, &value_length)) {
+            RT_OWNED_HOST_FREE(key); RT_OWNED_HOST_FREE(value);
+            if (errno != ENOMEM) errno = EPROTO;
+            goto fail;
+        }
+        if (key_length == 0 || strchr(key, '=') ||
+            (prior_key && strcmp(prior_key, key) >= 0) ||
+            key_length > SIZE_MAX - value_length - 2) {
+            RT_OWNED_HOST_FREE(key); RT_OWNED_HOST_FREE(value);
+            errno = EPROTO; goto fail;
+        }
+        char* joined = (char*)RT_OWNED_HOST_MALLOC(
+            (size_t)(key_length + value_length + 2));
+        if (!joined) {
+            RT_OWNED_HOST_FREE(key); RT_OWNED_HOST_FREE(value);
+            errno = ENOMEM; goto fail;
+        }
+        memcpy(joined, key, (size_t)key_length); joined[key_length] = '=';
+        memcpy(joined + key_length + 1, value, (size_t)value_length);
+        joined[key_length + value_length + 1] = '\0';
+        request->environment[i] = joined;
+        RT_OWNED_HOST_FREE(prior_key); prior_key = key;
+        RT_OWNED_HOST_FREE(value);
+    }
+    RT_OWNED_HOST_FREE(prior_key); prior_key = NULL;
+    if (cursor.offset != cursor.length) { errno = EPROTO; goto fail; }
+    if (request->capability_bits == 0 ||
+        wall == 0 ||
+        wall > 3600000000000ULL || grace > 30000000000ULL ||
+        cleanup > 30000000000ULL || stdout_limit > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
+        stderr_limit > RT_OWNED_ABI_MAX_OUTPUT_BYTES ||
+        stdout_limit > RT_OWNED_ABI_MAX_OUTPUT_BYTES - stderr_limit ||
+        resolution == 0 || resolution > INT64_MAX ||
+        request->executable_pin_claim == 0 || request->cwd_pin_claim == 0 ||
+        !pov4_canonical_directory(request->canonical_cwd) ||
+        !pov4_canonical_directory(request->canonical_pinned_directory) ||
+        strcmp(request->canonical_cwd, request->canonical_pinned_directory) != 0 ||
+        request->argv[0][0] == '\0' || descendant < 1 || descendant > 3 ||
+        enforcement < POV4_ENFORCEMENT_NONE || enforcement > 5 ||
+        (enforcement == POV4_ENFORCEMENT_NONE && memory_limit != 0) ||
+        (enforcement == POV4_ENFORCEMENT_RLIMIT_AS && memory_limit == 0)) {
+        errno = EINVAL; goto fail;
+    }
+    if (wall > INT64_MAX - grace || wall + grace > INT64_MAX - cleanup) {
+        errno = EOVERFLOW; goto fail;
+    }
+    request->wall_budget_ns = (int64_t)wall;
+    request->term_grace_ns = (int64_t)grace;
+    request->cleanup_budget_ns = (int64_t)cleanup;
+    request->stdout_limit = stdout_limit;
+    request->stderr_limit = stderr_limit;
+    request->memory_limit = memory_limit;
+    request->enforcement_kind = (int)enforcement;
+    request->descendant_policy = (int)descendant;
+    request->max_clock_resolution_ns = (int64_t)resolution;
+    return 1;
+fail:
+    RT_OWNED_HOST_FREE(prior_key);
+    pov4_request_free(request);
+    return 0;
+}
+
+static int pov4_request_from_value(SplArray* binding, Pov4Request* request) {
+    int64_t length = binding ? rt_array_bytes_validate((int64_t)(uintptr_t)binding) : -1;
+    if (length < 0 || (uint64_t)length > POV4_MAX_REQUEST_BYTES) {
+        errno = EPROTO; return 0;
+    }
+    uint8_t* bytes = NULL;
+    if (length > 0) {
+        bytes = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)length);
+        if (!bytes) { errno = ENOMEM; return 0; }
+        if (rt_array_bytes_copy_checked((int64_t)(uintptr_t)binding, bytes, length) != length) {
+            RT_OWNED_HOST_FREE(bytes); errno = EPROTO; return 0;
+        }
+    }
+    int ok = pov4_parse_request_bytes(bytes, (uint64_t)length, request);
+    RT_OWNED_HOST_FREE(bytes);
+    return ok;
+}
+
+enum Pov4StartOutcome {
+    POV4_START_NO_CHILD = 0,
+    POV4_START_CONFIRMED = 1,
+    POV4_START_CLEANUP = 2
+};
+
+enum Pov4SignalOutcome {
+    POV4_SIGNAL_ERROR = -1,
+    POV4_SIGNAL_GONE = 0,
+    POV4_SIGNAL_SENT = 1
+};
+
+static enum Pov4SignalOutcome pov4_signal_owned_child(
+        pid_t pid, int pidfd, int sig) {
+    if (pid <= 0) { errno = ESTALE; return POV4_SIGNAL_ERROR; }
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (pov4_test_signal_gone_count > 0) {
+        pov4_test_signal_gone_count--;
+        errno = ESRCH;
+        return POV4_SIGNAL_GONE;
+    }
+#endif
+#ifdef SYS_pidfd_send_signal
+    if (pidfd >= 0 && owned_pidfd_valid(pidfd)) {
+        if (syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0)
+            return POV4_SIGNAL_SENT;
+        if (errno == ESRCH) return POV4_SIGNAL_GONE;
+        return POV4_SIGNAL_ERROR;
+    }
+#else
+    (void)pidfd;
+#endif
+    /* An unreaped direct child pins its PID. This fallback is used only before
+     * any wait consumes that child, so it cannot target a reused PID. */
+    if (kill(pid, sig) == 0) return POV4_SIGNAL_SENT;
+    if (errno == ESRCH) return POV4_SIGNAL_GONE;
+    return POV4_SIGNAL_ERROR;
+}
+
+/* ESRCH proves only that the signal target is absent.  It is not signal-sent
+ * evidence.  Reconcile the exclusively-owned direct child with a bounded,
+ * nonblocking wait before any later signal decision. */
+static void pov4_reconcile_gone_child_locked(
+        RtOwnedSlot* slot, pid_t pid, int64_t deadline_ns) {
+    for (int turn = 0; turn < 1000; turn++) {
+        int status = 0;
+        pid_t waited;
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+        if (pov4_test_reconcile_eintr_count > 0) {
+            pov4_test_reconcile_eintr_count--;
+            waited = -1;
+            errno = EINTR;
+        } else
+#endif
+            waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            int64_t waited_ns = owned_now_ns();
+            if (waited_ns < 0) slot->clock_failed = 1;
+            slot->reaped = 1;
+            slot->status = status;
+            slot->leader_waited_ns = waited_ns;
+            slot->finished_ms = waited_ns >= 0 ? waited_ns / 1000000 : -1;
+            slot->drain_deadline_ms = deadline_ns >= 0
+                ? (deadline_ns + 999999) / 1000000 : -1;
+            return;
+        }
+        if (waited >= 0 || errno != EINTR) return;
+        slot->eintr_retries = owned_add_sat(slot->eintr_retries, 1);
+        int64_t now = owned_now_ns();
+        if (now < 0 || now >= deadline_ns) return;
+    }
+}
+
+static enum Pov4StartOutcome pov4_start_exact(
+    int executable_fd, int cwd_fd, const Pov4Request* request,
+    int64_t request_started_ns, int64_t prepared_ns,
+    int64_t execution_deadline_ns, int64_t kill_deadline_ns,
+    int64_t cleanup_deadline_ns, RtOwnedProcessTokenV2* token,
+    int* exec_error_out, int* exec_failure_class_out) {
+    *exec_error_out = 0;
+    *exec_failure_class_out = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    memset(token, 0, sizeof(*token));
+#ifndef __linux__
+    (void)request; (void)request_started_ns; (void)prepared_ns;
+    (void)execution_deadline_ns; (void)kill_deadline_ns;
+    (void)cleanup_deadline_ns;
+    close(executable_fd); close(cwd_fd);
+    *exec_error_out = ENOTSUP;
+    errno = ENOTSUP;
+    return POV4_START_NO_CHILD;
+#else
+    uint64_t output_limit = request->stdout_limit + request->stderr_limit;
+    RtOwnedCapturedByte* retained = NULL;
+    if (output_limit) {
+        retained = (RtOwnedCapturedByte*)RT_OWNED_HOST_MALLOC(
+            (size_t)output_limit * sizeof(*retained));
+        if (!retained) { close(executable_fd); close(cwd_fd); errno = ENOMEM; return POV4_START_NO_CHILD; }
+    }
+    uint32_t index = 0; uint64_t generation = 0;
+    if (!owned_reserve(&index, &generation)) {
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        errno = EAGAIN; return POV4_START_NO_CHILD;
+    }
+    RtOwnedProcessTokenV2 minted = {0, 0};
+    if (!owned_token_mint_install_reserved(index, generation, &minted)) {
+        int saved=errno; owned_release(index,generation); close(executable_fd); close(cwd_fd);
+        RT_OWNED_HOST_FREE(retained); errno=saved; return POV4_START_NO_CHILD;
+    }
+    int out_pipe[2]={-1,-1}, err_pipe[2]={-1,-1}, exec_pipe[2]={-1,-1};
+    if (owned_pipe_cloexec(out_pipe)!=0 || owned_pipe_cloexec(err_pipe)!=0 ||
+        owned_pipe_cloexec(exec_pipe)!=0 || !owned_set_nonblocking(exec_pipe[0]) ||
+        !owned_set_nonblocking(out_pipe[0]) ||
+        !owned_set_nonblocking(err_pipe[0])) {
+        int saved=errno;
+        if(out_pipe[0]>=0){close(out_pipe[0]);close(out_pipe[1]);}
+        if(err_pipe[0]>=0){close(err_pipe[0]);close(err_pipe[1]);}
+        if(exec_pipe[0]>=0){close(exec_pipe[0]);close(exec_pipe[1]);}
+        close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
+        owned_release(index,generation); errno=saved; return POV4_START_NO_CHILD;
+    }
+    pid_t pid=fork();
+    if(pid==0){
+        close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]);
+        if(setpgid(0,0)!=0) owned_child_exec_failed(exec_pipe[1],errno);
+        if(dup2(out_pipe[1],STDOUT_FILENO)<0 || dup2(err_pipe[1],STDERR_FILENO)<0)
+            owned_child_exec_failed(exec_pipe[1],errno);
+        if(out_pipe[1]>STDERR_FILENO) close(out_pipe[1]);
+        if(err_pipe[1]>STDERR_FILENO) close(err_pipe[1]);
+        int null_fd=open("/dev/null",O_RDONLY|O_CLOEXEC);
+        if(null_fd<0 || dup2(null_fd,STDIN_FILENO)<0)
+            owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
+        if(null_fd>STDERR_FILENO) close(null_fd);
+        if(fchdir(cwd_fd)!=0) owned_child_exec_failed(exec_pipe[1],errno);
+        close(cwd_fd);
+        if(request->memory_limit>0){
+            struct rlimit limit={(rlim_t)request->memory_limit,(rlim_t)request->memory_limit};
+            if((uint64_t)limit.rlim_cur!=request->memory_limit || setrlimit(RLIMIT_AS,&limit)!=0)
+                owned_child_exec_failed(exec_pipe[1],errno?errno:EOVERFLOW);
+        }
+        if(ptrace(PTRACE_TRACEME,0,NULL,NULL)!=0 || raise(SIGSTOP)!=0)
+            owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
+        if(!owned_child_close_inherited_except2(executable_fd,exec_pipe[1]))
+            owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
+        fexecve(executable_fd,request->argv,request->environment);
+        owned_child_exec_failed(exec_pipe[1],errno);
+    }
+    close(exec_pipe[1]); close(out_pipe[1]); close(err_pipe[1]);
+    close(executable_fd); close(cwd_fd);
+    if(pid<0){
+        int saved=errno; close(exec_pipe[0]);close(out_pipe[0]);close(err_pipe[0]);
+        RT_OWNED_HOST_FREE(retained); owned_release(index,generation); errno=saved;
+        return POV4_START_NO_CHILD;
+    }
+    int64_t process_started_ns=owned_now_ns();
+    pthread_mutex_lock(&rt_owned_lock);
+    RtOwnedSlot* slot=&rt_owned_slots[index];
+    slot->pid=pid; slot->pgid=pid; slot->pidfd=-1; slot->start_identity=0;
+    slot->token_high=minted.high; slot->token_low=minted.low; slot->state=1;
+    slot->out_fd=out_pipe[0]; slot->err_fd=err_pipe[0]; slot->out_open=1; slot->err_open=1;
+    slot->in_fd=-1; slot->in_open=0; slot->started_ms=request_started_ns/1000000;
+    slot->finished_ms=-1; slot->request_started_ns=request_started_ns;
+    slot->prepared_ns=prepared_ns; slot->process_started_ns=process_started_ns;
+    slot->exec_confirmed_ns=-1; slot->leader_waited_ns=-1; slot->tree_empty_ns=-1;
+    slot->execution_deadline_ns=execution_deadline_ns;
+    slot->kill_deadline_ns=kill_deadline_ns; slot->cleanup_deadline_ns=cleanup_deadline_ns;
+    slot->timeout_ms=RT_OWNED_ABI_MAX_TIMEOUT_MS; slot->term_grace_ms=0;
+    slot->term_at_ms=-1; slot->drain_deadline_ms=-1;
+    slot->output_limit=output_limit; slot->stdout_limit=request->stdout_limit;
+    slot->stderr_limit=request->stderr_limit; slot->retained=retained;
+    pthread_mutex_unlock(&rt_owned_lock);
+    *token=minted;
+
+    int failure=0;
+    int failure_class = RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    if(process_started_ns<prepared_ns) {
+        failure=EIO;
+        failure_class=RT_OWNED_EXEC_FAILURE_CLOCK_V4;
+    }
+    if(!failure && setpgid(pid,pid)!=0 && errno!=EACCES && errno!=EEXIST) failure=errno;
+    if(!failure && getpgid(pid)!=pid) failure=EPERM;
+    int pidfd=-1; uint64_t identity=0;
+    if(!failure && (pidfd=owned_pidfd_open(pid))<0) failure=errno?errno:ENOTSUP;
+    if(!failure && (identity=owned_start_identity(pid))==0) failure=errno?errno:ESRCH;
+    pthread_mutex_lock(slot->state_lock);
+    slot->pidfd=pidfd; slot->start_identity=identity;
+    pthread_mutex_unlock(slot->state_lock);
+    int child_reaped=0, terminal_status=0; int64_t confirmed_ns=-1; uint64_t retries=0;
+    if(!failure && !owned_confirm_exec_v4(pid,exec_pipe[0],execution_deadline_ns,
+            &confirmed_ns,&retries,&child_reaped,&failure,&failure_class,
+            &terminal_status)) {
+        if(!failure) failure=EIO;
+    }
+    close(exec_pipe[0]);
+    pthread_mutex_lock(slot->state_lock);
+    slot->eintr_retries=owned_add_sat(slot->eintr_retries,retries);
+    if(child_reaped){
+        slot->reaped=1; slot->status=terminal_status; slot->leader_waited_ns=owned_now_ns();
+        slot->finished_ms=slot->leader_waited_ns/1000000;
+        slot->drain_deadline_ms=(cleanup_deadline_ns+999999)/1000000;
+    }
+    if(!failure){
+        slot->exec_confirmed_ns=confirmed_ns;
+        pthread_mutex_unlock(slot->state_lock);
+        return POV4_START_CONFIRMED;
+    }
+    slot->runtime_error=failure;
+    if(!slot->reaped){
+        slot->term_attempted=1;
+        enum Pov4SignalOutcome term =
+            pov4_signal_owned_child(pid,pidfd,SIGTERM);
+        if(term==POV4_SIGNAL_SENT) slot->term_sent=1;
+        else if(term==POV4_SIGNAL_GONE)
+            pov4_reconcile_gone_child_locked(slot,pid,cleanup_deadline_ns);
+        if(!slot->reaped){
+            slot->kill_attempted=1;
+            enum Pov4SignalOutcome kill =
+                pov4_signal_owned_child(pid,pidfd,SIGKILL);
+            if(kill==POV4_SIGNAL_SENT) slot->kill_sent=1;
+            else if(kill==POV4_SIGNAL_GONE)
+                pov4_reconcile_gone_child_locked(slot,pid,cleanup_deadline_ns);
+        }
+    }
+    pthread_mutex_unlock(slot->state_lock);
+    *exec_error_out=failure;
+    *exec_failure_class_out=failure_class;
+    return POV4_START_CLEANUP;
+#endif
+}
+
+typedef struct Pov4Slot {
+    int active;
+    int busy;
+    int frozen;
+    int cleanup_only;
+    uint64_t request_high, request_low, ticket_high, ticket_low;
+    RtOwnedProcessTokenV2 core;
+    int64_t words[POV4_WORDS];
+    uint8_t request_digest[POV4_DIGEST_BYTES];
+    uint8_t frozen_digest[POV4_DIGEST_BYTES];
+    uint8_t* stdout_bytes;
+    uint8_t* stderr_bytes;
+    uint64_t stdout_count, stderr_count;
+    uint64_t stdout_limit, stderr_limit;
+} Pov4Slot;
+
+static Pov4Slot pov4_slots[POV4_SLOTS];
+static pthread_mutex_t pov4_slots_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void pov4_words_base(int64_t words[POV4_WORDS], int kind, int status,
+                            int64_t request_started_ns, int64_t prepared_ns) {
+    memset(words, 0, sizeof(int64_t) * POV4_WORDS);
+    words[POV4_VERSION] = POV4_VERSION_VALUE;
+    words[POV4_PACKET_KIND] = kind;
+    words[POV4_WORD_COUNT] = POV4_WORDS;
+    words[POV4_STATUS] = status;
+    words[POV4_PHASE] = status == POV4_STATUS_REJECTED
+        ? POV4_PHASE_REJECTED : POV4_PHASE_RUNNING;
+    words[POV4_EXEC_STATE] = status == POV4_STATUS_REJECTED
+        ? POV4_EXEC_FAILED : POV4_EXEC_CONFIRMED;
+    words[POV4_PID] = 0;
+    words[POV4_RAW_WAIT] = -1;
+    words[POV4_EXIT_CODE] = -1;
+    words[POV4_REQUEST_STARTED_NS] = request_started_ns;
+    words[POV4_PREPARED_NS] = prepared_ns;
+    words[POV4_PROCESS_STARTED_NS] = -1;
+    words[POV4_EXEC_CONFIRMED_NS] = -1;
+    words[POV4_LEADER_WAITED_NS] = -1;
+    words[POV4_TREE_EMPTY_NS] = -1;
+    words[POV4_EXECUTION_DEADLINE_NS] = -1;
+    words[POV4_KILL_DEADLINE_NS] = -1;
+    words[POV4_CLEANUP_DEADLINE_NS] = -1;
+    words[POV4_STDOUT_STATE] = POV4_STREAM_EOF;
+    words[POV4_STDERR_STATE] = POV4_STREAM_EOF;
+    words[POV4_ENFORCEMENT_KIND] = POV4_ENFORCEMENT_NONE;
+}
+
+static SplArray* pov4_bytes(const uint8_t* bytes, uint64_t count) {
+    return owned_adapter_bytes((const char*)bytes, count);
+}
+
+static SplArray* pov4_tuple4(const uint8_t* out, uint64_t out_count,
+                             const uint8_t* err, uint64_t err_count,
+                             const uint8_t* binding, uint64_t binding_count,
+                             const int64_t words[POV4_WORDS]) {
+    SplArray* out_value = pov4_bytes(out, out_count);
+    SplArray* err_value = pov4_bytes(err, err_count);
+    SplArray* binding_value = pov4_bytes(binding, binding_count);
+    SplArray* word_value = owned_adapter_values(words, POV4_WORDS);
+    SplArray* tuple = NULL;
+    if (out_value && err_value && binding_value && word_value &&
+        (tuple = rt_array_new(4)) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)out_value) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)err_value) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)binding_value) &&
+        rt_array_push(tuple, (int64_t)(uintptr_t)word_value)) return tuple;
+    if (tuple) rt_array_free(tuple);
+    if (out_value) rt_array_free(out_value);
+    if (err_value) rt_array_free(err_value);
+    if (binding_value) rt_array_free(binding_value);
+    if (word_value) rt_array_free(word_value);
+    return NULL;
+}
+
+static void pov4_tuple4_free(SplArray* tuple) {
+    if (!tuple) return;
+    if (rt_array_len(tuple) == 4) {
+        for (int i = 0; i < 4; i++) {
+            SplArray* item = (SplArray*)(uintptr_t)rt_array_get(tuple, i);
+            if (item) rt_array_free(item);
+        }
+    }
+    rt_array_free(tuple);
+}
+
+static int pov4_tuple4_replace_words(SplArray* tuple,
+                                     const int64_t words[POV4_WORDS]) {
+    if (!tuple || rt_array_len(tuple) != 4) return 0;
+    SplArray* values = (SplArray*)(uintptr_t)rt_array_get(tuple, 3);
+    if (!values || rt_array_len(values) != POV4_WORDS) return 0;
+    for (int i = 0; i < POV4_WORDS; i++)
+        if (!rt_array_set(values, i, rt_value_int(words[i]))) return 0;
+    return 1;
+}
+
+static SplArray* pov4_rejected(int error, int failure_phase, int failure_reason,
+                               int64_t request_started_ns, int request_valid,
+                               const Pov4Request* request) {
+    int clock_basis_available = request_started_ns >= 0;
+    int64_t prepared = owned_now_ns();
+    if (prepared < request_started_ns) prepared = request_started_ns;
+    int64_t words[POV4_WORDS];
+    pov4_words_base(words, POV4_KIND_POLL, POV4_STATUS_REJECTED,
+                    request_started_ns < 0 ? 0 : request_started_ns,
+                    prepared < 0 ? (request_started_ns < 0 ? 0 : request_started_ns) : prepared);
+    words[POV4_VALIDITY] = request_valid ? POV4_VALID_REQUEST : 0;
+    words[POV4_FAILURE_PHASE] = failure_phase;
+    words[POV4_FAILURE_REASON] = failure_reason;
+    words[POV4_ERRNO] = error > 0 ? error : EIO;
+    words[POV4_EXEC_ERRNO] = failure_reason == POV4_REASON_EXEC ? words[POV4_ERRNO] : 0;
+    if (request) {
+        words[POV4_ENFORCEMENT_KIND] = request->enforcement_kind;
+        words[POV4_MEMORY_LIMIT_BYTES] = (int64_t)request->memory_limit;
+    }
+    int64_t nominal = owned_clock_resolution_ns(CLOCK_MONOTONIC);
+    if (clock_basis_available && nominal > 0) {
+        words[POV4_VALIDITY] |= POV4_VALID_CLOCK;
+        words[POV4_CLOCK_ID] = POV4_CLOCK_MONOTONIC;
+        words[POV4_CLOCK_NOMINAL_RES_NS] = nominal;
+        words[POV4_CLOCK_EFFECTIVE_RES_NS] = nominal > POV4_EFFECTIVE_CLOCK_NS
+            ? nominal : POV4_EFFECTIVE_CLOCK_NS;
+        words[POV4_CLOCK_CPU_RES_NS] = 1000;
+    }
+    return pov4_tuple4(NULL, 0, NULL, 0, NULL, 0, words);
+}
+
+static int pov4_reserve(uint32_t* index) {
+    if (pthread_mutex_lock(&pov4_slots_lock) != 0) { errno = EBUSY; return 0; }
+    int found = -1;
+    for (int i = 0; i < POV4_SLOTS; i++) if (!pov4_slots[i].active) { found = i; break; }
+    if (found >= 0) {
+        memset(&pov4_slots[found], 0, sizeof(pov4_slots[found]));
+        pov4_slots[found].active = 1; pov4_slots[found].busy = 1;
+        *index = (uint32_t)found;
+    }
+    pthread_mutex_unlock(&pov4_slots_lock);
+    if (found < 0) { errno = EAGAIN; return 0; }
+    return 1;
+}
+
+static Pov4Slot* pov4_acquire_ticket(SplArray* ticket, uint32_t* index) {
+    if (!ticket || rt_array_len(ticket) != POV4_TICKET_WORDS ||
+        rt_value_as_int(rt_array_get(ticket, 0)) != POV4_VERSION_VALUE) {
+        errno = EPROTO; return NULL;
+    }
+    int64_t rh = rt_value_as_int(rt_array_get(ticket, 1));
+    int64_t rl = rt_value_as_int(rt_array_get(ticket, 2));
+    int64_t th = rt_value_as_int(rt_array_get(ticket, 3));
+    int64_t tl = rt_value_as_int(rt_array_get(ticket, 4));
+    if (rh <= 0 || rl <= 0 || th <= 0 || tl <= 0) { errno = EPROTO; return NULL; }
+    if (pthread_mutex_lock(&pov4_slots_lock) != 0) { errno = EBUSY; return NULL; }
+    Pov4Slot* found = NULL;
+    for (uint32_t i = 0; i < POV4_SLOTS; i++) {
+        Pov4Slot* slot = &pov4_slots[i];
+        if (slot->active && slot->request_high == (uint64_t)rh &&
+            slot->request_low == (uint64_t)rl && slot->ticket_high == (uint64_t)th &&
+            slot->ticket_low == (uint64_t)tl) {
+            if (!slot->busy) { slot->busy = 1; found = slot; *index = i; }
+            else errno = EBUSY;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&pov4_slots_lock);
+    if (!found && errno != EBUSY) errno = ESTALE;
+    return found;
+}
+
+static void pov4_release_busy(uint32_t index) {
+    pthread_mutex_lock(&pov4_slots_lock);
+    if (index < POV4_SLOTS && pov4_slots[index].active) pov4_slots[index].busy = 0;
+    pthread_mutex_unlock(&pov4_slots_lock);
+}
+
+static int pov4_append(uint8_t* destination, uint64_t* count, uint64_t limit,
+                        const uint8_t* bytes, uint64_t length) {
+    if (length > limit - *count) { errno = EOVERFLOW; return 0; }
+    if (length) memcpy(destination + *count, bytes, (size_t)length);
+    *count += length; return 1;
+}
+
+static int64_t pov4_timeval_ns(struct timeval value) {
+    if (value.tv_sec < 0 || value.tv_usec < 0 || value.tv_usec >= 1000000 ||
+        (int64_t)value.tv_sec > (INT64_MAX - value.tv_usec * 1000LL) / 1000000000LL)
+        return 0;
+    return (int64_t)value.tv_sec * 1000000000LL + (int64_t)value.tv_usec * 1000LL;
+}
+
+static void pov4_snapshot(Pov4Slot* owner, const RtOwnedProcessPollReceiptV2* poll) {
+    RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
+    if (!core) {
+        owner->words[POV4_STATUS] = POV4_STATUS_PROVIDER_FAILED;
+        owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_WAIT;
+        owner->words[POV4_FAILURE_REASON] = POV4_REASON_WAIT;
+        owner->words[POV4_ERRNO] = ESTALE;
+        return;
+    }
+    pthread_mutex_lock(core->state_lock);
+    int64_t* w = owner->words;
+    w[POV4_TERM_ATTEMPTED] = core->term_attempted;
+    w[POV4_TERM_SENT] = core->term_sent;
+    w[POV4_KILL_ATTEMPTED] = core->kill_attempted;
+    w[POV4_KILL_SENT] = core->kill_sent;
+    w[POV4_LEADER_REAPED] = core->reaped;
+    w[POV4_TREE_EMPTY] = 0;
+    w[POV4_LEADER_WAITED_NS] = core->leader_waited_ns;
+    w[POV4_TREE_EMPTY_NS] = -1;
+    if (core->clock_failed ||
+            (owner->cleanup_only &&
+             (w[POV4_PROCESS_STARTED_NS] < 0 ||
+              (core->reaped && core->leader_waited_ns < 0)))) {
+        w[POV4_VALIDITY] &= ~POV4_VALID_CLOCK;
+        w[POV4_CLOCK_ID] = 0;
+        w[POV4_CLOCK_NOMINAL_RES_NS] = 0;
+        w[POV4_CLOCK_EFFECTIVE_RES_NS] = 0;
+        w[POV4_CLOCK_CPU_RES_NS] = 0;
+    }
+    w[POV4_STDOUT_SEEN] = (int64_t)core->stdout_seen;
+    w[POV4_STDOUT_RETAINED] = (int64_t)core->stdout_kept;
+    w[POV4_STDOUT_DELIVERED] = (int64_t)core->stdout_delivered;
+    w[POV4_STDERR_SEEN] = (int64_t)core->stderr_seen;
+    w[POV4_STDERR_RETAINED] = (int64_t)core->stderr_kept;
+    w[POV4_STDERR_DELIVERED] = (int64_t)core->stderr_delivered;
+    w[POV4_STDOUT_ERRNO] = core->stdout_read_error;
+    w[POV4_STDERR_ERRNO] = core->stderr_read_error;
+    w[POV4_STDOUT_STATE] = core->stdout_read_error ? POV4_STREAM_ERROR :
+        (core->out_open ? POV4_STREAM_OPEN :
+         (core->stdout_deadline_closed ? POV4_STREAM_DEADLINE : POV4_STREAM_EOF));
+    w[POV4_STDERR_STATE] = core->stderr_read_error ? POV4_STREAM_ERROR :
+        (core->err_open ? POV4_STREAM_OPEN :
+         (core->stderr_deadline_closed ? POV4_STREAM_DEADLINE : POV4_STREAM_EOF));
+    w[POV4_EINTR_RETRIES] = (int64_t)core->eintr_retries;
+    if (core->reaped) {
+        w[POV4_RAW_WAIT] = core->status;
+        w[POV4_EXIT_CODE] = WIFEXITED(core->status) ? WEXITSTATUS(core->status) : -1;
+        w[POV4_SIGNAL] = WIFSIGNALED(core->status) ? WTERMSIG(core->status) : 0;
+    }
+    if (core->child_usage_available) {
+        int64_t user = pov4_timeval_ns(core->child_usage.ru_utime);
+        int64_t system = pov4_timeval_ns(core->child_usage.ru_stime);
+        w[POV4_USER_CPU_NS] = user; w[POV4_SYSTEM_CPU_NS] = system;
+        w[POV4_TOTAL_CPU_NS] = user <= INT64_MAX - system ? user + system : INT64_MAX;
+        w[POV4_CHILD_DIRECT_RSS_BYTES] = owned_direct_child_rss_bytes(&core->child_usage);
+        w[POV4_VALIDITY] |= POV4_VALID_DIRECT_RSS;
+    }
+    if ((core->stdout_read_error || core->stderr_read_error) &&
+            (!owner->cleanup_only || w[POV4_FAILURE_PHASE] == 0)) {
+        w[POV4_FAILURE_PHASE] = POV4_FAIL_STREAM;
+        w[POV4_FAILURE_REASON] = POV4_REASON_STREAM;
+        w[POV4_ERRNO] = core->stdout_read_error ? core->stdout_read_error : core->stderr_read_error;
+    } else if (core->clock_failed &&
+            (!owner->cleanup_only || w[POV4_FAILURE_PHASE] == 0)) {
+        w[POV4_FAILURE_PHASE] = POV4_FAIL_WAIT;
+        w[POV4_FAILURE_REASON] = POV4_REASON_CLOCK;
+        w[POV4_ERRNO] = EIO;
+    } else if (!owner->cleanup_only && core->runtime_error && core->runtime_error != EAGAIN) {
+        w[POV4_FAILURE_PHASE] = POV4_FAIL_WAIT;
+        w[POV4_FAILURE_REASON] = POV4_REASON_WAIT;
+        w[POV4_ERRNO] = core->runtime_error;
+    }
+    if (poll && poll->terminal) {
+        w[POV4_STATUS] = owner->cleanup_only
+            ? POV4_STATUS_PROVIDER_FAILED : POV4_STATUS_TERMINAL;
+        w[POV4_PHASE] = POV4_PHASE_TERMINAL;
+    }
+    pthread_mutex_unlock(core->state_lock);
+    owned_token_release(core);
+}
+
+static int pov4_apply_deadlines(Pov4Slot* owner, int cancel_requested) {
+    RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
+    if (!core) { errno = ESTALE; return 0; }
+    pthread_mutex_lock(core->state_lock);
+    int64_t now_ns = owned_now_ns();
+    int64_t now_ms = now_ns >= 0 ? now_ns / 1000000 : -1;
+    int due_term = cancel_requested || (now_ns >= core->execution_deadline_ns);
+    if (!core->reaped && due_term && !core->term_attempted) {
+        core->term_attempted = 1;
+        enum Pov4SignalOutcome signal_outcome =
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGTERM);
+        if (signal_outcome == POV4_SIGNAL_SENT) {
+            core->identity_revalidated = 1; core->term_sent = 1; core->term_at_ms = now_ms;
+        } else if (signal_outcome == POV4_SIGNAL_GONE) {
+            pov4_reconcile_gone_child_locked(
+                core, core->pid, core->cleanup_deadline_ns);
+        } else core->runtime_error = errno ? errno : EIO;
+        if (!cancel_requested && owner->words[POV4_FAILURE_PHASE] == 0) {
+            owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_EXECUTION;
+            owner->words[POV4_FAILURE_REASON] = POV4_REASON_EXEC_DEADLINE;
+            owner->words[POV4_ERRNO] = ETIMEDOUT;
+        }
+    }
+    if (!core->reaped && now_ns >= core->kill_deadline_ns && !core->kill_attempted) {
+        core->kill_attempted = 1;
+        enum Pov4SignalOutcome signal_outcome =
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
+        if (signal_outcome == POV4_SIGNAL_SENT) {
+            core->identity_revalidated = 1; core->kill_sent = 1;
+        } else if (signal_outcome == POV4_SIGNAL_GONE) {
+            pov4_reconcile_gone_child_locked(
+                core, core->pid, core->cleanup_deadline_ns);
+        } else core->runtime_error = errno ? errno : EIO;
+    }
+    pthread_mutex_unlock(core->state_lock);
+    owned_token_release(core);
+    if (now_ns < 0) {
+        if (!owner->cleanup_only) { errno = EIO; return 0; }
+        owner->words[POV4_VALIDITY] &= ~POV4_VALID_CLOCK;
+        owner->words[POV4_CLOCK_ID] = 0;
+        owner->words[POV4_CLOCK_NOMINAL_RES_NS] = 0;
+        owner->words[POV4_CLOCK_EFFECTIVE_RES_NS] = 0;
+        owner->words[POV4_CLOCK_CPU_RES_NS] = 0;
+    }
+    return 1;
+}
+
+static SplArray* pov4_drive(Pov4Slot* owner, int64_t wait_ns, int cancel_requested,
+                            int freeze, int* terminal_out) {
+    if (wait_ns < 0 || wait_ns > POV4_MAX_WAIT_NS) wait_ns = wait_ns < 0 ? 0 : POV4_MAX_WAIT_NS;
+    if (!pov4_apply_deadlines(owner, cancel_requested)) return NULL;
+    int64_t now = owned_now_ns();
+    if (now < 0 && owner->cleanup_only) wait_ns = 0;
+    int64_t next = owner->words[POV4_EXECUTION_DEADLINE_NS];
+    if (owner->words[POV4_TERM_ATTEMPTED]) next = owner->words[POV4_KILL_DEADLINE_NS];
+    if (owner->words[POV4_KILL_ATTEMPTED]) next = owner->words[POV4_CLEANUP_DEADLINE_NS];
+    if (next >= 0 && now >= 0 && wait_ns > next - now) wait_ns = next > now ? next - now : 0;
+    int64_t wait_ms = (wait_ns + 999999) / 1000000;
+    uint64_t out_room = owner->stdout_limit - owner->stdout_count;
+    uint64_t err_room = owner->stderr_limit - owner->stderr_count;
+    uint64_t out_cap = out_room < POV4_MAX_POLL_BYTES ? out_room : POV4_MAX_POLL_BYTES;
+    uint64_t err_cap = err_room < POV4_MAX_POLL_BYTES ? err_room : POV4_MAX_POLL_BYTES;
+    uint8_t out[POV4_MAX_POLL_BYTES + 1], err[POV4_MAX_POLL_BYTES + 1];
+    RtOwnedProcessPollReceiptV2 poll;
+    (void)rt_process_owned_poll_v2(owner->core, wait_ms,
+        (char*)out, out_cap ? out_cap + 1 : 0,
+        (char*)err, err_cap ? err_cap + 1 : 0, &poll);
+    (void)pov4_apply_deadlines(owner, cancel_requested);
+    if (!pov4_append(owner->stdout_bytes, &owner->stdout_count, owner->stdout_limit,
+                     out, poll.stdout_bytes_delivered) ||
+        !pov4_append(owner->stderr_bytes, &owner->stderr_count, owner->stderr_limit,
+                     err, poll.stderr_bytes_delivered)) return NULL;
+    pov4_snapshot(owner, &poll);
+    now = owned_now_ns();
+    if (!poll.terminal && owner->cleanup_only) {
+        owner->words[POV4_STATUS] = POV4_STATUS_CLEANUP_PENDING;
+        owner->words[POV4_PHASE] = POV4_PHASE_CLEANUP;
+        if (now >= owner->words[POV4_CLEANUP_DEADLINE_NS] &&
+                owner->words[POV4_FAILURE_PHASE] == 0) {
+            owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_CLEANUP;
+            owner->words[POV4_FAILURE_REASON] = POV4_REASON_CLEANUP_DEADLINE;
+            owner->words[POV4_ERRNO] = ETIMEDOUT;
+        }
+    } else if (!poll.terminal &&
+            now >= owner->words[POV4_CLEANUP_DEADLINE_NS]) {
+        owner->words[POV4_STATUS] = POV4_STATUS_CLEANUP_PENDING;
+        owner->words[POV4_PHASE] = POV4_PHASE_CLEANUP;
+        if (owner->words[POV4_FAILURE_PHASE] == 0) {
+            owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_CLEANUP;
+            owner->words[POV4_FAILURE_REASON] = POV4_REASON_CLEANUP_DEADLINE;
+            owner->words[POV4_ERRNO] = ETIMEDOUT;
+        }
+    } else if (!poll.terminal && owner->words[POV4_KILL_ATTEMPTED]) {
+        owner->words[POV4_PHASE] = POV4_PHASE_KILL;
+    } else if (!poll.terminal && owner->words[POV4_TERM_ATTEMPTED]) {
+        owner->words[POV4_PHASE] = POV4_PHASE_TERM;
+    }
+    owner->words[POV4_STDOUT_PAYLOAD_LENGTH] = (int64_t)poll.stdout_bytes_delivered;
+    owner->words[POV4_STDERR_PAYLOAD_LENGTH] = (int64_t)poll.stderr_bytes_delivered;
+    owner->words[POV4_BINDING_LENGTH] = 0;
+    if (terminal_out) *terminal_out = poll.terminal;
+    if (freeze) return NULL;
+    return pov4_tuple4(out, poll.stdout_bytes_delivered,
+        err, poll.stderr_bytes_delivered, NULL, 0, owner->words);
+}
+
+static int pov4_snapshot_digest(Pov4Slot* owner) {
+    static const uint8_t domain[8] = {'P','O','V','4','F','R','Z',0};
+    uint64_t fixed = sizeof(domain) + POV4_DIGEST_BYTES + POV4_WORDS * 8ULL;
+    if (owner->stdout_count > SIZE_MAX - fixed ||
+        owner->stderr_count > SIZE_MAX - fixed - owner->stdout_count) {
+        errno = EOVERFLOW; return 0;
+    }
+    size_t length = (size_t)(fixed + owner->stdout_count + owner->stderr_count);
+    uint8_t* bytes = (uint8_t*)RT_OWNED_HOST_MALLOC(length);
+    if (!bytes) { errno = ENOMEM; return 0; }
+    size_t offset = 0;
+    memcpy(bytes + offset, domain, sizeof(domain)); offset += sizeof(domain);
+    memcpy(bytes + offset, owner->request_digest, POV4_DIGEST_BYTES);
+    offset += POV4_DIGEST_BYTES;
+    for (int i = 0; i < POV4_WORDS; i++) {
+        pov4_store_u64_le(bytes + offset, (uint64_t)owner->words[i]); offset += 8;
+    }
+    if (owner->stdout_count) {
+        memcpy(bytes + offset, owner->stdout_bytes, (size_t)owner->stdout_count);
+        offset += (size_t)owner->stdout_count;
+    }
+    if (owner->stderr_count)
+        memcpy(bytes + offset, owner->stderr_bytes, (size_t)owner->stderr_count);
+    owned_sha256(bytes, length, owner->frozen_digest);
+    RT_OWNED_HOST_FREE(bytes); return 1;
+}
+
+static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
+    for (unsigned turn = 0; turn < 2U * (RT_OWNED_ABI_MAX_OUTPUT_BYTES /
+             POV4_MAX_POLL_BYTES + 2); turn++) {
+        RtOwnedProcessPollReceiptV2 poll;
+        uint64_t out_room = owner->stdout_limit - owner->stdout_count;
+        uint64_t err_room = owner->stderr_limit - owner->stderr_count;
+        uint64_t out_cap = out_room < POV4_MAX_POLL_BYTES ? out_room : POV4_MAX_POLL_BYTES;
+        uint64_t err_cap = err_room < POV4_MAX_POLL_BYTES ? err_room : POV4_MAX_POLL_BYTES;
+        uint8_t out[POV4_MAX_POLL_BYTES + 1], err[POV4_MAX_POLL_BYTES + 1];
+        (void)rt_process_owned_poll_v2(owner->core, 0, (char*)out,
+            out_cap ? out_cap + 1 : 0, (char*)err,
+            err_cap ? err_cap + 1 : 0, &poll);
+        if (!pov4_append(owner->stdout_bytes, &owner->stdout_count, owner->stdout_limit,
+                         out, poll.stdout_bytes_delivered) ||
+            !pov4_append(owner->stderr_bytes, &owner->stderr_count, owner->stderr_limit,
+                         err, poll.stderr_bytes_delivered)) return NULL;
+        pov4_snapshot(owner, &poll);
+        if (poll.terminal &&
+            owner->words[POV4_STDOUT_STATE] != POV4_STREAM_OPEN &&
+            owner->words[POV4_STDERR_STATE] != POV4_STREAM_OPEN &&
+            owner->words[POV4_STDOUT_DELIVERED] == owner->words[POV4_STDOUT_RETAINED] &&
+            owner->words[POV4_STDERR_DELIVERED] == owner->words[POV4_STDERR_RETAINED]) break;
+        if (!poll.terminal) { errno = EAGAIN; return NULL; }
+    }
+    if ((owner->words[POV4_STATUS] != POV4_STATUS_TERMINAL &&
+         owner->words[POV4_STATUS] != POV4_STATUS_PROVIDER_FAILED) ||
+        owner->words[POV4_LEADER_REAPED] != 1 ||
+        (!owner->cleanup_only && owner->words[POV4_EXEC_STATE] != POV4_EXEC_CONFIRMED) ||
+        owner->words[POV4_STDOUT_STATE] == POV4_STREAM_OPEN ||
+        owner->words[POV4_STDERR_STATE] == POV4_STREAM_OPEN ||
+        owner->words[POV4_STDOUT_DELIVERED] != (int64_t)owner->stdout_count ||
+        owner->words[POV4_STDERR_DELIVERED] != (int64_t)owner->stderr_count) {
+        errno = EAGAIN; return NULL;
+    }
+    int64_t prior_words[POV4_WORDS];
+    memcpy(prior_words, owner->words, sizeof(prior_words));
+    owner->words[POV4_PACKET_KIND] = owner->cleanup_only
+        ? POV4_KIND_CLEANUP_FROZEN : POV4_KIND_FROZEN;
+    owner->words[POV4_STATUS] = owner->cleanup_only
+        ? POV4_STATUS_PROVIDER_FAILED : POV4_STATUS_TERMINAL;
+    owner->words[POV4_PHASE] = POV4_PHASE_FROZEN;
+    owner->words[POV4_VALIDITY] |= POV4_VALID_FROZEN;
+    owner->words[POV4_STDOUT_PAYLOAD_LENGTH] = (int64_t)owner->stdout_count;
+    owner->words[POV4_STDERR_PAYLOAD_LENGTH] = (int64_t)owner->stderr_count;
+    owner->words[POV4_BINDING_LENGTH] = POV4_DIGEST_BYTES;
+    if (!pov4_snapshot_digest(owner)) {
+        memcpy(owner->words, prior_words, sizeof(prior_words));
+        return NULL;
+    }
+    SplArray* tuple = pov4_tuple4(owner->stdout_bytes, owner->stdout_count,
+        owner->stderr_bytes, owner->stderr_count, owner->frozen_digest,
+        POV4_DIGEST_BYTES, owner->words);
+    if (!tuple) {
+        memcpy(owner->words, prior_words, sizeof(prior_words));
+        return NULL;
+    }
+    RtOwnedProcessResultV2 result;
+    int collected = rt_process_owned_collect_v2(owner->core, &result);
+    if (!collected && !(result.reaped && result.runtime_error != EAGAIN &&
+                         result.runtime_error != EBUSY)) {
+        pov4_tuple4_free(tuple);
+        owner->words[POV4_PACKET_KIND] = POV4_KIND_POLL;
+        owner->words[POV4_PHASE] = POV4_PHASE_TERMINAL;
+        owner->words[POV4_VALIDITY] &= ~POV4_VALID_FROZEN;
+        owner->words[POV4_STDOUT_PAYLOAD_LENGTH] = 0;
+        owner->words[POV4_STDERR_PAYLOAD_LENGTH] = 0;
+        owner->words[POV4_BINDING_LENGTH] = 0;
+        owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_COLLECTION;
+        owner->words[POV4_FAILURE_REASON] = POV4_REASON_PROVIDER;
+        owner->words[POV4_ERRNO] = result.runtime_error ? result.runtime_error : EIO;
+        return NULL;
+    }
+    owner->frozen = 1;
+    return tuple;
+}
+
+static void pov4_abandon_unpublished(uint32_t index) {
+    if (index >= POV4_SLOTS) return;
+    Pov4Slot* owner = &pov4_slots[index];
+    RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
+    if (core) {
+        pthread_mutex_lock(core->state_lock);
+        core->kill_attempted = 1;
+        enum Pov4SignalOutcome signal_outcome =
+            pov4_signal_owned_child(core->pid, core->pidfd, SIGKILL);
+        if (signal_outcome == POV4_SIGNAL_SENT)
+            core->kill_sent = 1;
+        else if (signal_outcome == POV4_SIGNAL_GONE)
+            pov4_reconcile_gone_child_locked(
+                core, core->pid, core->cleanup_deadline_ns);
+        pthread_mutex_unlock(core->state_lock); owned_token_release(core);
+    }
+    uint8_t out[POV4_MAX_POLL_BYTES + 1], err[POV4_MAX_POLL_BYTES + 1];
+    RtOwnedProcessPollReceiptV2 poll;
+    for (int turn = 0; turn < 1000; turn++) {
+        int64_t now = owned_now_ns();
+        int64_t deadline = owner->words[POV4_CLEANUP_DEADLINE_NS];
+        int64_t wait_ms = now >= 0 && deadline > now ? 1 : 0;
+        (void)rt_process_owned_poll_v2(owner->core, wait_ms, (char*)out, sizeof(out),
+            (char*)err, sizeof(err), &poll);
+        if (poll.terminal && poll.stdout_bytes_delivered == 0 &&
+            poll.stderr_bytes_delivered == 0) break;
+        now = owned_now_ns();
+        if (now < 0 || deadline < 0 || now >= deadline) break;
+    }
+    RtOwnedProcessResultV2 result;
+    int collected = rt_process_owned_collect_v2(owner->core, &result);
+    if (!collected && !(result.reaped && result.runtime_error != EAGAIN &&
+                         result.runtime_error != EBUSY)) {
+        pthread_mutex_lock(&pov4_slots_lock);
+        owner->busy = 0;
+        pthread_mutex_unlock(&pov4_slots_lock);
+        return;
+    }
+    pthread_mutex_lock(&pov4_slots_lock);
+    RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
+    memset(owner, 0, sizeof(*owner));
+    pthread_mutex_unlock(&pov4_slots_lock);
+}
+
+SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
+                                                int64_t caller_wait_ns) {
+    uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
+    if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
+        POV4_REASON_BINDING, 0, 0, NULL);
+    SplArray* result;
+    if (owner->frozen) {
+        owner->words[POV4_STDOUT_PAYLOAD_LENGTH] = (int64_t)owner->stdout_count;
+        owner->words[POV4_STDERR_PAYLOAD_LENGTH] = (int64_t)owner->stderr_count;
+        result = pov4_tuple4(owner->stdout_bytes, owner->stdout_count,
+            owner->stderr_bytes, owner->stderr_count, owner->frozen_digest,
+            POV4_DIGEST_BYTES, owner->words);
+    } else {
+        int terminal = 0;
+        result = pov4_drive(owner, caller_wait_ns, 0, 0, &terminal);
+    }
+    pov4_release_busy(index); return result;
+}
+
+SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
+                                                  int64_t caller_wait_ns) {
+    uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
+    if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
+        POV4_REASON_BINDING, 0, 0, NULL);
+    int terminal = 0;
+    SplArray* result;
+    if (owner->frozen) {
+        owner->words[POV4_STDOUT_PAYLOAD_LENGTH] = (int64_t)owner->stdout_count;
+        owner->words[POV4_STDERR_PAYLOAD_LENGTH] = (int64_t)owner->stderr_count;
+        result = pov4_tuple4(owner->stdout_bytes, owner->stdout_count,
+            owner->stderr_bytes, owner->stderr_count, owner->frozen_digest,
+            POV4_DIGEST_BYTES, owner->words);
+    } else result = pov4_drive(owner, caller_wait_ns, 1, 0, &terminal);
+    pov4_release_busy(index); return result;
+}
+
+SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
+                                                   int64_t caller_wait_ns) {
+    uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
+    if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_COLLECTION,
+        POV4_REASON_BINDING, 0, 0, NULL);
+    SplArray* result = NULL;
+    if (owner->frozen) {
+        owner->words[POV4_STDOUT_PAYLOAD_LENGTH] = (int64_t)owner->stdout_count;
+        owner->words[POV4_STDERR_PAYLOAD_LENGTH] = (int64_t)owner->stderr_count;
+        result = pov4_tuple4(owner->stdout_bytes, owner->stdout_count,
+            owner->stderr_bytes, owner->stderr_count, owner->frozen_digest,
+            POV4_DIGEST_BYTES, owner->words);
+    } else {
+        int terminal = 0;
+        (void)pov4_drive(owner, caller_wait_ns, 0, 1, &terminal);
+        if (!terminal) {
+            owner->words[POV4_STDOUT_PAYLOAD_LENGTH] = 0;
+            owner->words[POV4_STDERR_PAYLOAD_LENGTH] = 0;
+            result = pov4_tuple4(NULL, 0, NULL, 0, NULL, 0, owner->words);
+        }
+        else {
+            result = pov4_freeze_terminal(owner);
+        }
+    }
+    pov4_release_busy(index); return result;
+}
+
+SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
+                                                       SplArray* digest_value) {
+    uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
+    if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_ACK,
+        POV4_REASON_BINDING, 0, 0, NULL);
+    uint8_t digest[POV4_DIGEST_BYTES];
+    int valid = owner->frozen && digest_value &&
+        rt_array_bytes_copy_checked((int64_t)(uintptr_t)digest_value,
+                                    digest, POV4_DIGEST_BYTES) == POV4_DIGEST_BYTES;
+    unsigned different = 0;
+    if (valid) for (int i = 0; i < POV4_DIGEST_BYTES; i++)
+        different |= (unsigned)(digest[i] ^ owner->frozen_digest[i]);
+    if (!valid || different) {
+        pov4_release_busy(index);
+        return pov4_rejected(ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING,
+            0, 0, NULL);
+    }
+    int64_t ack[POV4_WORDS]; memcpy(ack, owner->words, sizeof(ack));
+    ack[POV4_PACKET_KIND] = owner->cleanup_only
+        ? POV4_KIND_CLEANUP_ACK : POV4_KIND_ACK;
+    ack[POV4_PHASE] = POV4_PHASE_ACK;
+    ack[POV4_STDOUT_PAYLOAD_LENGTH] = 0;
+    ack[POV4_STDERR_PAYLOAD_LENGTH] = 0;
+    ack[POV4_BINDING_LENGTH] = POV4_DIGEST_BYTES;
+    SplArray* result = pov4_tuple4(NULL, 0, NULL, 0, owner->frozen_digest,
+        POV4_DIGEST_BYTES, ack);
+    if (!result) { pov4_release_busy(index); return NULL; }
+    pthread_mutex_lock(&pov4_slots_lock);
+    RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
+    memset(owner, 0, sizeof(*owner));
+    pthread_mutex_unlock(&pov4_slots_lock);
+    return result;
+}
+
+SplArray* rt_process_observation_v4_capabilities_value(void) {
+#ifdef __linux__
+    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 1, POV4_CAPABILITIES,
+        POV4_SLOTS, RT_OWNED_ABI_MAX_OUTPUT_BYTES, POV4_MAX_WAIT_NS, 0};
+#else
+    const int64_t values[8] = {POV4_VERSION_VALUE, 8, 0, 0, 0, 0, 0, ENOTSUP};
+#endif
+    return owned_adapter_values(values, 8);
+}
+
+SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
+    int64_t started = owned_now_ns(); Pov4Request request;
+    int valid = pov4_request_from_value(binding, &request);
+    SplArray* result = pov4_rejected(ENOTSUP, POV4_FAIL_ADMISSION,
+        POV4_REASON_PROVIDER, started, valid, valid ? &request : NULL);
+    if (valid) pov4_request_free(&request);
+    return result;
+}
+
+SplArray* rt_process_observation_v4_start_pinned_value(
+    int64_t executable_handle, int64_t cwd_handle, SplArray* binding) {
+    int64_t started = owned_now_ns(); Pov4Request request;
+    if (started < 0)
+        return pov4_rejected(EIO, POV4_FAIL_ADMISSION,
+            POV4_REASON_CLOCK, -1, 0, NULL);
+    if (!pov4_request_from_value(binding, &request))
+        return pov4_rejected(errno ? errno : EPROTO, POV4_FAIL_ADMISSION,
+            POV4_REASON_INVALID_SCHEMA, started, 0, NULL);
+    if (request.descendant_policy != POV4_DESCENDANT_LEADER ||
+        (request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
+         request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS)) {
+        int memory_unavailable = request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
+            request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS;
+        SplArray* rejected = pov4_rejected(ENOTSUP, POV4_FAIL_ADMISSION,
+            memory_unavailable ? POV4_REASON_MEMORY : POV4_REASON_PROVIDER,
+            started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    if (executable_handle <= 0 || cwd_handle <= 0 ||
+        request.executable_pin_claim != (uint64_t)executable_handle ||
+        request.cwd_pin_claim != (uint64_t)cwd_handle) {
+        SplArray* rejected = pov4_rejected(ESTALE, POV4_FAIL_ADMISSION,
+            POV4_REASON_BINDING, started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    SplArray* executable_digest = rt_process_pinned_executable_sha256_value(executable_handle);
+    uint8_t digest[POV4_DIGEST_BYTES];
+    int digest_ok = executable_digest &&
+        rt_array_bytes_copy_checked((int64_t)(uintptr_t)executable_digest,
+                                    digest, POV4_DIGEST_BYTES) == POV4_DIGEST_BYTES;
+    if (executable_digest) rt_array_free(executable_digest);
+    int executable_fd = digest_ok ? (int)rt_process_acquire_pinned_executable(executable_handle) : -1;
+    int cwd_fd = pov4_acquire_cwd((uint64_t)cwd_handle,
+        request.canonical_pinned_directory, request.cwd_digest);
+    if (!digest_ok || memcmp(digest, request.executable_digest, POV4_DIGEST_BYTES) != 0 ||
+        executable_fd < 0 || cwd_fd < 0) {
+        if (executable_fd >= 0) close(executable_fd);
+        if (cwd_fd >= 0) close(cwd_fd);
+        SplArray* rejected = pov4_rejected(ESTALE, POV4_FAIL_ADMISSION,
+            POV4_REASON_BINDING, started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    int64_t nominal = owned_clock_resolution_ns(CLOCK_MONOTONIC);
+    int64_t effective = nominal > POV4_EFFECTIVE_CLOCK_NS ? nominal : POV4_EFFECTIVE_CLOCK_NS;
+    if (nominal <= 0 || effective > request.max_clock_resolution_ns ||
+        started > INT64_MAX - request.wall_budget_ns ||
+        started + request.wall_budget_ns > INT64_MAX - request.term_grace_ns ||
+        started + request.wall_budget_ns + request.term_grace_ns >
+            INT64_MAX - request.cleanup_budget_ns) {
+        int saved = nominal <= 0 ? EIO : (effective > request.max_clock_resolution_ns ? ERANGE : EOVERFLOW);
+        close(executable_fd); close(cwd_fd);
+        SplArray* rejected = pov4_rejected(saved, POV4_FAIL_ADMISSION,
+            nominal <= 0 ? POV4_REASON_CLOCK : POV4_REASON_INVALID_REQUEST,
+            started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    int64_t execution_deadline = started + request.wall_budget_ns;
+    int64_t kill_deadline = execution_deadline + request.term_grace_ns;
+    int64_t cleanup_deadline = kill_deadline + request.cleanup_budget_ns;
+    int64_t prepared = owned_now_ns();
+    if (prepared < started || prepared >= execution_deadline) {
+        close(executable_fd); close(cwd_fd);
+        SplArray* rejected = pov4_rejected(ETIMEDOUT, POV4_FAIL_EXECUTION,
+            POV4_REASON_EXEC_DEADLINE, started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    uint32_t index = 0;
+    if (!pov4_reserve(&index)) {
+        close(executable_fd); close(cwd_fd);
+        SplArray* rejected = pov4_rejected(EAGAIN, POV4_FAIL_ADMISSION,
+            POV4_REASON_PROVIDER, started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    Pov4Slot* owner = &pov4_slots[index];
+    owner->stdout_limit = request.stdout_limit;
+    owner->stderr_limit = request.stderr_limit;
+    owner->stdout_bytes = request.stdout_limit ?
+        (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)request.stdout_limit) : NULL;
+    owner->stderr_bytes = request.stderr_limit ?
+        (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)request.stderr_limit) : NULL;
+    if ((request.stdout_limit && !owner->stdout_bytes) ||
+        (request.stderr_limit && !owner->stderr_bytes)) {
+        close(executable_fd); close(cwd_fd);
+        RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
+        pthread_mutex_lock(&pov4_slots_lock);
+        memset(owner, 0, sizeof(*owner));
+        pthread_mutex_unlock(&pov4_slots_lock);
+        SplArray* rejected = pov4_rejected(ENOMEM, POV4_FAIL_ADMISSION,
+            POV4_REASON_PROVIDER, started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    uint64_t request_high=0, request_low=0, ticket_high=0, ticket_low=0;
+    if (!pov4_mint_positive(&request_high) || !pov4_mint_positive(&request_low) ||
+        !pov4_mint_positive(&ticket_high) || !pov4_mint_positive(&ticket_low)) {
+        close(executable_fd); close(cwd_fd);
+        RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
+        pthread_mutex_lock(&pov4_slots_lock);
+        memset(owner, 0, sizeof(*owner));
+        pthread_mutex_unlock(&pov4_slots_lock);
+        SplArray* rejected = pov4_rejected(EAGAIN, POV4_FAIL_ADMISSION,
+            POV4_REASON_PROVIDER, started, 1, &request);
+        pov4_request_free(&request); return rejected;
+    }
+    int64_t placeholder[POV4_WORDS];
+    pov4_words_base(placeholder, POV4_KIND_POLL, POV4_STATUS_REJECTED, started, prepared);
+    SplArray* start_result=pov4_tuple4(NULL,0,NULL,0,NULL,0,placeholder);
+    if(!start_result){
+        close(executable_fd); close(cwd_fd);
+        RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
+        pthread_mutex_lock(&pov4_slots_lock);
+        memset(owner, 0, sizeof(*owner));
+        pthread_mutex_unlock(&pov4_slots_lock);
+        pov4_request_free(&request); return NULL;
+    }
+    int exec_error=0;
+    int exec_failure_class=RT_OWNED_EXEC_FAILURE_PROVIDER_V4;
+    enum Pov4StartOutcome outcome=pov4_start_exact(executable_fd,cwd_fd,&request,
+        started,prepared,execution_deadline,kill_deadline,cleanup_deadline,
+        &owner->core,&exec_error,&exec_failure_class);
+    if(outcome==POV4_START_NO_CHILD){
+        int saved=errno?errno:EIO; pov4_tuple4_free(start_result);
+        RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
+        pthread_mutex_lock(&pov4_slots_lock); memset(owner,0,sizeof(*owner));
+        pthread_mutex_unlock(&pov4_slots_lock);
+        SplArray* rejected=pov4_rejected(saved,POV4_FAIL_ADMISSION,
+            POV4_REASON_PROVIDER,started,1,&request);
+        pov4_request_free(&request); return rejected;
+    }
+    RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
+    int64_t process_started=core?core->process_started_ns:-1;
+    int64_t exec_confirmed=core?core->exec_confirmed_ns:-1;
+    int64_t child_pid=core?core->pid:0;
+    if(core) owned_token_release(core);
+    memcpy(owner->request_digest, request.request_digest, POV4_DIGEST_BYTES);
+    pov4_words_base(owner->words, POV4_KIND_POLL,
+        outcome==POV4_START_CONFIRMED?POV4_STATUS_RUNNING:POV4_STATUS_CLEANUP_PENDING,
+        started, prepared);
+    owner->words[POV4_REQUEST_ID_HIGH]=(int64_t)request_high;
+    owner->words[POV4_REQUEST_ID_LOW]=(int64_t)request_low;
+    owner->words[POV4_TICKET_HIGH]=(int64_t)ticket_high;
+    owner->words[POV4_TICKET_LOW]=(int64_t)ticket_low;
+    owner->words[POV4_VALIDITY]=POV4_VALID_REQUEST|POV4_VALID_CLOCK;
+    owner->words[POV4_EXEC_STATE]=outcome==POV4_START_CONFIRMED
+        ? POV4_EXEC_CONFIRMED
+        : (exec_failure_class==RT_OWNED_EXEC_FAILURE_CHILD_V4
+            ? POV4_EXEC_FAILED : POV4_EXEC_PENDING);
+    owner->words[POV4_PID] = child_pid;
+    owner->words[POV4_PROCESS_STARTED_NS]=process_started;
+    owner->words[POV4_EXEC_CONFIRMED_NS]=exec_confirmed;
+    owner->words[POV4_EXECUTION_DEADLINE_NS]=execution_deadline;
+    owner->words[POV4_KILL_DEADLINE_NS]=kill_deadline;
+    owner->words[POV4_CLEANUP_DEADLINE_NS]=cleanup_deadline;
+    owner->words[POV4_CLOCK_ID]=POV4_CLOCK_MONOTONIC;
+    owner->words[POV4_CLOCK_NOMINAL_RES_NS]=nominal;
+    owner->words[POV4_CLOCK_EFFECTIVE_RES_NS]=effective;
+    owner->words[POV4_CLOCK_CPU_RES_NS]=1000;
+    owner->words[POV4_ENFORCEMENT_KIND]=request.enforcement_kind;
+    owner->words[POV4_MEMORY_LIMIT_BYTES]=(int64_t)request.memory_limit;
+    owner->words[POV4_STDOUT_STATE]=POV4_STREAM_OPEN;
+    owner->words[POV4_STDERR_STATE]=POV4_STREAM_OPEN;
+    if(outcome==POV4_START_CONFIRMED) owner->words[POV4_VALIDITY]|=POV4_VALID_EXEC;
+    else {
+        owner->cleanup_only=1;
+        owner->words[POV4_PHASE]=POV4_PHASE_CLEANUP;
+        owner->words[POV4_EXEC_ERRNO]=
+            exec_failure_class==RT_OWNED_EXEC_FAILURE_CHILD_V4
+                ? (exec_error?exec_error:EIO) : 0;
+        owner->words[POV4_FAILURE_PHASE]=POV4_FAIL_EXECUTION;
+        owner->words[POV4_FAILURE_REASON]=
+            exec_failure_class==RT_OWNED_EXEC_FAILURE_CHILD_V4
+                ? POV4_REASON_EXEC
+                : (exec_failure_class==RT_OWNED_EXEC_FAILURE_DEADLINE_V4
+                    ? POV4_REASON_EXEC_DEADLINE
+                    : (exec_failure_class==RT_OWNED_EXEC_FAILURE_CLOCK_V4
+                        ? POV4_REASON_CLOCK : POV4_REASON_PROVIDER));
+        owner->words[POV4_ERRNO]=exec_error?exec_error:EIO;
+        if (exec_failure_class == RT_OWNED_EXEC_FAILURE_CLOCK_V4) {
+            owner->words[POV4_VALIDITY] &= ~POV4_VALID_CLOCK;
+            owner->words[POV4_CLOCK_ID] = 0;
+            owner->words[POV4_CLOCK_NOMINAL_RES_NS] = 0;
+            owner->words[POV4_CLOCK_EFFECTIVE_RES_NS] = 0;
+            owner->words[POV4_CLOCK_CPU_RES_NS] = 0;
+        }
+        pov4_snapshot(owner,NULL);
+    }
+    pthread_mutex_lock(&pov4_slots_lock);
+    owner->request_high=request_high; owner->request_low=request_low;
+    owner->ticket_high=ticket_high; owner->ticket_low=ticket_low;
+    owner->busy=0;
+    pthread_mutex_unlock(&pov4_slots_lock);
+    if(!pov4_tuple4_replace_words(start_result,owner->words)) {
+        pov4_tuple4_free(start_result); start_result=NULL;
+    }
+    pov4_request_free(&request);
+    if (!start_result) pov4_abandon_unpublished(index);
+    return start_result;
 }
 
 static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
@@ -2043,6 +4228,664 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 
 #else
 
+/* --- Win32 real implementation of the SYNCHRONOUS bounded family ------
+ * Everything this branch does NOT implement (the async token-lease family,
+ * the v3 opaque-handle surface, the observation-v4 family) is deliberately
+ * left to the shared fallback stubs below, so a future family added there is
+ * automatically covered on Windows too. Only the definitions Win32 really
+ * implements are fenced out of that fallback, via
+ * RT_OWNED_WIN32_SYNC_IMPLEMENTED. */
+#if defined(_WIN32)
+
+/* ---------------------------------------------------------------------------
+ * Win32 bounded child capsule.
+ *
+ * Until 2026-09-13 the guard above was the ONLY non-stub branch, so on Windows
+ * every bounded spawn fell into the ENOTSUP `#else` and returned rc=-1 with
+ * runtime_error=ENOTSUP. That is the root cause of the ctx_tools /
+ * ctx_batch_scale / token_stats spec failures and of check-mcp-native-smoke:
+ * `run_in_execution_resource_scope` (src/lib/nogc_sync_mut/io/resource_scope.spl)
+ * calls rt_process_run_owned_observed_bounded_value, which could never run a
+ * child at all.
+ *
+ * Scope, stated plainly: this branch implements the SYNCHRONOUS bounded family
+ * (`rt_process_run_owned_bounded`, `..._observed_bounded`, and the two
+ * `*_value` ABI wrappers) — the family the failing specs actually reach. The
+ * asynchronous token-lease family (`rt_process_owned_start_v2/v3`, `poll_v2`,
+ * `cancel_v2`, `result_v2`, and the `rt_process_owned_v3_*` opaque-handle
+ * surface) is NOT implemented here and keeps its honest ENOTSUP answer below.
+ *
+ * Bounded semantics are provided by a job object rather than a process group:
+ * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE means the whole child tree dies with the
+ * job, which is Windows' equivalent of the POSIX branch's kill-the-group
+ * behaviour, and TerminateJobObject is the deadline action.
+ * ------------------------------------------------------------------------- */
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+#define RT_OWNED_ABI_MAX_TIMEOUT_MS 3600000
+#define RT_OWNED_ABI_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
+#ifndef RT_OWNED_HOST_MALLOC
+#define RT_OWNED_HOST_MALLOC malloc
+#define RT_OWNED_HOST_CALLOC calloc
+#define RT_OWNED_HOST_FREE free
+#endif
+
+/* One pipe end pair plus the capped capture state for that stream. */
+typedef struct OwnedWinStream {
+    HANDLE read_end;
+    HANDLE write_end;
+    char* buf;
+    uint64_t cap;      /* buffer capacity in bytes, including the NUL slot */
+    uint64_t limit;    /* policy cap, which may be smaller than the buffer */
+    uint64_t seen;     /* total bytes the child produced */
+    uint64_t kept;     /* bytes actually retained in buf */
+    int truncated;
+} OwnedWinStream;
+
+/* CommandLineToArgvW inverse. Returns the byte count written (or that WOULD be
+ * written when dst is NULL). Getting this wrong is the classic Windows spawn
+ * bug: a path containing a space silently splits into two arguments. */
+static size_t owned_win_quote_arg(const char* arg, char* dst) {
+    size_t w = 0;
+    int need_quote = (arg[0] == '\0');
+    const char* scan = arg;
+    while (*scan && !need_quote) {
+        if (*scan == ' ' || *scan == '\t' || *scan == '\n' || *scan == '\v' || *scan == '"') {
+            need_quote = 1;
+        }
+        scan++;
+    }
+    if (!need_quote) {
+        size_t n = strlen(arg);
+        if (dst) memcpy(dst, arg, n);
+        return n;
+    }
+    if (dst) dst[w] = '"';
+    w++;
+    const char* p = arg;
+    for (;;) {
+        size_t bs = 0;
+        while (*p == '\\') { bs++; p++; }
+        if (*p == '\0') {
+            /* Backslashes immediately before the closing quote are doubled. */
+            for (size_t i = 0; i < bs * 2; i++) { if (dst) dst[w] = '\\'; w++; }
+            break;
+        }
+        if (*p == '"') {
+            for (size_t i = 0; i < bs * 2 + 1; i++) { if (dst) dst[w] = '\\'; w++; }
+            if (dst) dst[w] = '"';
+            w++;
+            p++;
+        } else {
+            for (size_t i = 0; i < bs; i++) { if (dst) dst[w] = '\\'; w++; }
+            if (dst) dst[w] = *p;
+            w++;
+            p++;
+        }
+    }
+    if (dst) dst[w] = '"';
+    w++;
+    return w;
+}
+
+/* argv[0] is the program; the caller guarantees a NULL terminator. */
+static char* owned_win_build_cmdline(const char* const* argv) {
+    size_t total = 0;
+    for (size_t i = 0; argv[i]; i++) {
+        if (i) total += 1;
+        total += owned_win_quote_arg(argv[i], NULL);
+    }
+    char* line = (char*)RT_OWNED_HOST_MALLOC(total + 1);
+    if (!line) return NULL;
+    size_t w = 0;
+    for (size_t i = 0; argv[i]; i++) {
+        if (i) line[w++] = ' ';
+        w += owned_win_quote_arg(argv[i], line + w);
+    }
+    line[w] = '\0';
+    return line;
+}
+
+static WCHAR* owned_win_widen(const char* s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    WCHAR* w = (WCHAR*)RT_OWNED_HOST_MALLOC((size_t)n * sizeof(WCHAR));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n) <= 0) {
+        RT_OWNED_HOST_FREE(w);
+        return NULL;
+    }
+    return w;
+}
+
+static int owned_win_is_file(const WCHAR* p) {
+    DWORD a = GetFileAttributesW(p);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Resolve an explicit application path, or NULL to let CreateProcessW do its
+ * own PATH search from the command line (the right answer for a bare `node` or
+ * `cmd`). CreateProcess does NOT append `.exe` to a path that already contains
+ * a separator, so a caller passing `bin/simple` must be probed for
+ * `bin/simple.exe` here — the runtime twin of the wrapper `.exe` gap. */
+static WCHAR* owned_win_resolve_exe(const char* cmd) {
+    int has_sep = (strchr(cmd, '/') != NULL) || (strchr(cmd, '\\') != NULL);
+    WCHAR* w = owned_win_widen(cmd);
+    if (!w) return NULL;
+    for (WCHAR* q = w; *q; q++) {
+        if (*q == L'/') *q = L'\\';
+    }
+    if (owned_win_is_file(w)) return w;
+    size_t n = wcslen(w);
+    WCHAR* w2 = (WCHAR*)RT_OWNED_HOST_MALLOC((n + 5) * sizeof(WCHAR));
+    if (w2) {
+        memcpy(w2, w, n * sizeof(WCHAR));
+        w2[n] = L'.'; w2[n + 1] = L'e'; w2[n + 2] = L'x'; w2[n + 3] = L'e'; w2[n + 4] = L'\0';
+        if (owned_win_is_file(w2)) {
+            RT_OWNED_HOST_FREE(w);
+            return w2;
+        }
+        RT_OWNED_HOST_FREE(w2);
+    }
+    RT_OWNED_HOST_FREE(w);
+    /* No such file: with a separator this will fail in CreateProcessW and be
+     * reported as ENOENT; without one, PATH search is the correct behaviour. */
+    (void)has_sep;
+    return NULL;
+}
+
+static void owned_win_close(HANDLE* h) {
+    if (*h && *h != INVALID_HANDLE_VALUE) {
+        CloseHandle(*h);
+        *h = NULL;
+    }
+}
+
+/* Drain whatever is already buffered in one pipe. Anonymous pipes have no
+ * overlapped mode, so PeekNamedPipe is what keeps this single-threaded loop
+ * from blocking in ReadFile. Returns 0 when the pipe reached EOF. */
+static int owned_win_drain(OwnedWinStream* s) {
+    if (!s->read_end) return 0;
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(s->read_end, NULL, 0, NULL, &avail, NULL)) {
+            owned_win_close(&s->read_end);
+            return 0;
+        }
+        if (avail == 0) return 1;
+        char chunk[4096];
+        DWORD want = avail > (DWORD)sizeof(chunk) ? (DWORD)sizeof(chunk) : avail;
+        DWORD got = 0;
+        if (!ReadFile(s->read_end, chunk, want, &got, NULL) || got == 0) {
+            owned_win_close(&s->read_end);
+            return 0;
+        }
+        s->seen += got;
+        if (s->cap > 0) {
+            uint64_t buffer_room = s->cap - 1 - s->kept;
+            uint64_t policy_room = s->kept < s->limit ? s->limit - s->kept : 0;
+            uint64_t room = buffer_room < policy_room ? buffer_room : policy_room;
+            uint64_t take = got < room ? (uint64_t)got : room;
+            if (take) {
+                memcpy(s->buf + s->kept, chunk, (size_t)take);
+                s->kept += take;
+            }
+            if ((uint64_t)got > take) s->truncated = 1;
+        } else {
+            s->truncated = 1;
+        }
+    }
+}
+
+static int64_t owned_win_filetime_ms(const FILETIME* ft) {
+    ULARGE_INTEGER u;
+    u.LowPart = ft->dwLowDateTime;
+    u.HighPart = ft->dwHighDateTime;
+    return (int64_t)(u.QuadPart / 10000ULL); /* 100ns ticks -> ms */
+}
+
+static bool owned_win_run_bounded_impl(const char* cmd, const char* const* argv,
+                                       int64_t timeout_ms, uint64_t max_output_bytes,
+                                       char* out, uint64_t out_cap,
+                                       char* err, uint64_t err_cap,
+                                       RtOwnedProcessReceipt* receipt,
+                                       RtOwnedProcessObservationV1* observation) {
+    if (!receipt) return false;
+    memset(receipt, 0, sizeof(*receipt));
+    if (observation) {
+        memset(observation, 0, sizeof(*observation));
+        observation->version = RT_OWNED_PROCESS_OBSERVATION_VERSION;
+    }
+    receipt->version = RT_OWNED_PROCESS_RECEIPT_VERSION;
+    receipt->exit_code = -1;
+    /* Validation mirrors the POSIX branch byte for byte, including
+     * `timeout_ms <= 0` being EINVAL rather than "no deadline". */
+    if (!cmd || !argv || !argv[0] || timeout_ms <= 0 ||
+        (out_cap && !out) || (err_cap && !err)) {
+        receipt->runtime_error = EINVAL;
+        if (observation) observation->runtime_error = EINVAL;
+        return false;
+    }
+    if (timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS) timeout_ms = RT_OWNED_ABI_MAX_TIMEOUT_MS;
+    if (out_cap) out[0] = '\0';
+    if (err_cap) err[0] = '\0';
+    /* Apply the policy cap independently from the caller's storage capacity.
+     * This mirrors the POSIX implementation and keeps direct ABI callers from
+     * retaining more output than max_output_bytes declares. */
+    uint64_t out_limit = out_cap > 0 && max_output_bytes > out_cap - 1
+        ? out_cap - 1 : max_output_bytes;
+    uint64_t err_limit = err_cap > 0 && max_output_bytes > err_cap - 1
+        ? err_cap - 1 : max_output_bytes;
+
+    OwnedWinStream so = {NULL, NULL, out, out_cap, out_limit, 0, 0, 0};
+    OwnedWinStream se = {NULL, NULL, err, err_cap, err_limit, 0, 0, 0};
+    HANDLE job = NULL;
+    HANDLE child_stdin = INVALID_HANDLE_VALUE;
+    char* cmdline = NULL;
+    WCHAR* wcmdline = NULL;
+    WCHAR* wapp = NULL;
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof(pi));
+    int rt_err = 0;
+
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+
+    if (!CreatePipe(&so.read_end, &so.write_end, &sa, 0) ||
+        !CreatePipe(&se.read_end, &se.write_end, &sa, 0)) {
+        rt_err = EMFILE;
+        goto done;
+    }
+    /* The parent's read ends must NOT be inheritable, or the child holds a
+     * duplicate of them and the reader never observes EOF. */
+    if (!SetHandleInformation(so.read_end, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(se.read_end, HANDLE_FLAG_INHERIT, 0)) {
+        rt_err = EINVAL;
+        goto done;
+    }
+
+    /* A bounded child gets an empty stdin, never the parent's. */
+    child_stdin = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &sa, OPEN_EXISTING, 0, NULL);
+    if (child_stdin == INVALID_HANDLE_VALUE) {
+        rt_err = ENOENT;
+        goto done;
+    }
+
+    job = CreateJobObjectW(NULL, NULL);
+    if (!job) { rt_err = EAGAIN; goto done; }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+    memset(&jeli, 0, sizeof(jeli));
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+        rt_err = EINVAL;
+        goto done;
+    }
+
+    cmdline = owned_win_build_cmdline(argv);
+    if (!cmdline) { rt_err = ENOMEM; goto done; }
+    wcmdline = owned_win_widen(cmdline);
+    if (!wcmdline) { rt_err = ENOMEM; goto done; }
+    wapp = owned_win_resolve_exe(cmd); /* NULL => PATH search from the cmdline */
+
+    /* Inherit EXACTLY the three std handles. A bare bInheritHandles=TRUE hands
+     * the child every inheritable handle in the process, so two concurrent
+     * bounded spawns leak each other's pipe write ends and neither reader ever
+     * sees EOF — the shape that makes a concurrent scale test hang to timeout. */
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)RT_OWNED_HOST_MALLOC(attr_size);
+    if (!attrs) { rt_err = ENOMEM; goto done; }
+    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size)) {
+        RT_OWNED_HOST_FREE(attrs);
+        attrs = NULL;
+        rt_err = EINVAL;
+        goto done;
+    }
+    HANDLE inherit[3];
+    inherit[0] = child_stdin;
+    inherit[1] = so.write_end;
+    inherit[2] = se.write_end;
+    if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                   inherit, sizeof(inherit), NULL, NULL)) {
+        rt_err = EINVAL;
+        goto done;
+    }
+
+    STARTUPINFOEXW si;
+    memset(&si, 0, sizeof(si));
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = child_stdin;
+    si.StartupInfo.hStdOutput = so.write_end;
+    si.StartupInfo.hStdError = se.write_end;
+    si.lpAttributeList = attrs;
+
+    /* CREATE_SUSPENDED so the child is inside the job before it can fork any
+     * grandchild that would otherwise escape the bound. */
+    if (!CreateProcessW(wapp, wcmdline, NULL, NULL, TRUE,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                        NULL, NULL, &si.StartupInfo, &pi)) {
+        DWORD gle = GetLastError();
+        rt_err = (gle == ERROR_FILE_NOT_FOUND || gle == ERROR_PATH_NOT_FOUND) ? ENOENT
+               : (gle == ERROR_ACCESS_DENIED) ? EACCES
+               : EINVAL;
+        memset(&pi, 0, sizeof(pi));
+        goto done;
+    }
+    receipt->pid = (int64_t)pi.dwProcessId;
+    receipt->process_group_id = (int64_t)pi.dwProcessId;
+    receipt->start_identity = (uint64_t)pi.dwProcessId;
+
+    if (!AssignProcessToJobObject(job, pi.hProcess)) {
+        /* Without the job the bound cannot be honoured; refuse rather than run
+         * an unbounded child. */
+        TerminateProcess(pi.hProcess, 1);
+        rt_err = EPERM;
+        goto done;
+    }
+    ResumeThread(pi.hThread);
+
+    /* The parent must drop its copies of the write ends or the reads below
+     * never reach EOF, because the parent itself keeps the pipe open. */
+    owned_win_close(&so.write_end);
+    owned_win_close(&se.write_end);
+    owned_win_close(&child_stdin);
+
+    ULONGLONG started = GetTickCount64();
+    int child_done = 0;
+    for (;;) {
+        int so_open = owned_win_drain(&so);
+        int se_open = owned_win_drain(&se);
+        if (!child_done && WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
+            child_done = 1;
+        }
+        if (child_done && !so_open && !se_open) break;
+        ULONGLONG elapsed = GetTickCount64() - started;
+        if (!receipt->kill_sent && elapsed >= (ULONGLONG)timeout_ms) {
+            receipt->timed_out = 1;
+            receipt->term_sent = 1;
+            receipt->kill_sent = 1;
+            /* Windows has no graceful group signal; the job terminate IS the
+             * kill, so term_sent and kill_sent are set together rather than
+             * pretending a TERM grace period happened. */
+            TerminateJobObject(job, 1);
+        }
+        if (child_done && receipt->kill_sent) break;
+        Sleep(2);
+    }
+    /* One last drain after the child exited: bytes can still sit in the pipe. */
+    (void)owned_win_drain(&so);
+    (void)owned_win_drain(&se);
+
+    if (WaitForSingleObject(pi.hProcess, receipt->kill_sent ? 2000 : 0) == WAIT_OBJECT_0 || child_done) {
+        DWORD code = 0;
+        if (GetExitCodeProcess(pi.hProcess, &code) && code != STILL_ACTIVE) {
+            receipt->exit_code = (int64_t)(int32_t)code;
+            receipt->reaped = 1;
+        }
+    }
+    if (receipt->timed_out) receipt->exit_code = -1;
+
+    if (observation) {
+        FILETIME ct, xt, kt, ut;
+        if (GetProcessTimes(pi.hProcess, &ct, &xt, &kt, &ut)) {
+            observation->system_cpu_ms = owned_win_filetime_ms(&kt);
+            observation->user_cpu_ms = owned_win_filetime_ms(&ut);
+            observation->evidence_flags |= RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE;
+        }
+        JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION acct;
+        memset(&acct, 0, sizeof(acct));
+        if (QueryInformationJobObject(job, JobObjectBasicAndIoAccountingInformation,
+                                      &acct, sizeof(acct), NULL)) {
+            observation->io_read_bytes = (int64_t)acct.IoInfo.ReadTransferCount;
+            observation->io_write_bytes = (int64_t)acct.IoInfo.WriteTransferCount;
+            observation->pids_peak = (int64_t)acct.BasicInfo.TotalProcesses;
+            observation->evidence_flags |= RT_PROCESS_EVIDENCE_TREE_PIDS;
+        }
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION peak;
+        memset(&peak, 0, sizeof(peak));
+        if (QueryInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                      &peak, sizeof(peak), NULL)) {
+            observation->peak_tree_charge_bytes = (int64_t)peak.PeakJobMemoryUsed;
+            observation->peak_direct_child_rss_bytes = (int64_t)peak.PeakProcessMemoryUsed;
+            observation->evidence_flags |= RT_PROCESS_EVIDENCE_TREE_CHARGE;
+        }
+        /* Windows delivers no POSIX termination signal; leaving this 0 is the
+         * honest answer, not a relabelling of the timeout kill. */
+        observation->termination_signal = 0;
+    }
+
+done:
+    receipt->stdout_bytes_seen = so.seen;
+    receipt->stderr_bytes_seen = se.seen;
+    receipt->stdout_bytes_kept = so.kept;
+    receipt->stderr_bytes_kept = se.kept;
+    receipt->stdout_truncated = so.truncated;
+    receipt->stderr_truncated = se.truncated;
+    if (out_cap) out[so.kept < out_cap ? so.kept : out_cap - 1] = '\0';
+    if (err_cap) err[se.kept < err_cap ? se.kept : err_cap - 1] = '\0';
+    receipt->runtime_error = rt_err;
+
+    if (pi.hThread) CloseHandle(pi.hThread);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (attrs) {
+        DeleteProcThreadAttributeList(attrs);
+        RT_OWNED_HOST_FREE(attrs);
+    }
+    owned_win_close(&so.read_end);
+    owned_win_close(&so.write_end);
+    owned_win_close(&se.read_end);
+    owned_win_close(&se.write_end);
+    /* owned_win_close NULLs as it closes, so this is correct on both the
+     * success path (already closed before the read loop) and every goto. A
+     * bare CloseHandle here would be handed NULL after a successful run. */
+    owned_win_close(&child_stdin);
+    /* Closing the job kills anything still alive in it (KILL_ON_JOB_CLOSE). */
+    if (job) CloseHandle(job);
+    RT_OWNED_HOST_FREE(cmdline);
+    RT_OWNED_HOST_FREE(wcmdline);
+    RT_OWNED_HOST_FREE(wapp);
+    if (observation && !observation->runtime_error) observation->runtime_error = rt_err;
+    return rt_err == 0;
+}
+
+bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
+                                  int64_t timeout_ms, uint64_t max_output_bytes,
+                                  char* out, uint64_t out_cap,
+                                  char* err, uint64_t err_cap,
+                                  RtOwnedProcessReceipt* receipt) {
+    return owned_win_run_bounded_impl(cmd, argv, timeout_ms, max_output_bytes,
+                                      out, out_cap, err, err_cap, receipt, NULL);
+}
+
+bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
+                                           int64_t timeout_ms, uint64_t max_output_bytes,
+                                           char* out, uint64_t out_cap,
+                                           char* err, uint64_t err_cap,
+                                           RtOwnedProcessReceipt* receipt,
+                                           RtOwnedProcessObservationV1* observation) {
+    if (!observation) return false;
+    return owned_win_run_bounded_impl(cmd, argv, timeout_ms, max_output_bytes,
+                                      out, out_cap, err, err_cap, receipt, observation);
+}
+
+bool rt_process_owned_terminate(int64_t pid, uint64_t identity) {
+    if (pid <= 0 || identity == 0 || (uint64_t)pid != identity) return false;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+    if (!h) return false;
+    BOOL ok = TerminateProcess(h, 1);
+    CloseHandle(h);
+    return ok ? true : false;
+}
+bool rt_process_owned_cancel(uint64_t slot, uint64_t generation, int64_t pid,
+                             uint64_t identity, RtOwnedProcessCancelReceipt* receipt) {
+    (void)slot; (void)generation;
+    if (!receipt) return false;
+    memset(receipt, 0, sizeof(*receipt));
+    receipt->version = RT_OWNED_PROCESS_CANCEL_RECEIPT_VERSION;
+    receipt->pid = pid;
+    receipt->start_identity = identity;
+    if (rt_process_owned_terminate(pid, identity)) {
+        receipt->accepted = 1;
+        receipt->term_sent = 1;
+        return true;
+    }
+    receipt->runtime_error = ESRCH;
+    return false;
+}
+
+bool rt_process_owned_cancel_value(uint64_t slot, uint64_t generation,
+                                   int64_t pid, uint64_t identity) {
+    RtOwnedProcessCancelReceipt receipt;
+    return rt_process_owned_cancel(slot, generation, pid, identity, &receipt);
+}
+#ifndef RT_PROCESS_OWNED_CORE_ONLY
+/* Same stable numeric ABI as the POSIX branch: 19 receipt words, then 11
+ * observation words. The order below MUST stay identical to
+ * owned_run_bounded_value_impl above — the Simple facade indexes it. */
+static int64_t* owned_win_run_bounded_value_impl(const char* cmd_data, uint64_t cmd_len,
+                                                 SplArray* args, int64_t timeout_ms,
+                                                 int64_t max_output_bytes,
+                                                 int include_observation) {
+    if (!cmd_data || cmd_len > SIZE_MAX - 1 || timeout_ms < 0 || max_output_bytes < 0) return NULL;
+    if (!args || memchr(cmd_data, '\0', (size_t)cmd_len) != NULL) return NULL;
+    if (timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS) timeout_ms = RT_OWNED_ABI_MAX_TIMEOUT_MS;
+    if (max_output_bytes > (int64_t)RT_OWNED_ABI_MAX_OUTPUT_BYTES) {
+        max_output_bytes = (int64_t)RT_OWNED_ABI_MAX_OUTPUT_BYTES;
+    }
+    char* cmd = (char*)RT_OWNED_HOST_MALLOC((size_t)cmd_len + 1);
+    if (!cmd) return NULL;
+    memcpy(cmd, cmd_data, (size_t)cmd_len);
+    cmd[cmd_len] = '\0';
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) {
+        RT_OWNED_HOST_FREE(cmd);
+        return NULL;
+    }
+    char** argv = (char**)RT_OWNED_HOST_CALLOC((size_t)argc + 2, sizeof(char*));
+    char* out = NULL;
+    char* err = NULL;
+    SplArray* fields = NULL;
+    int64_t* tuple = NULL;
+    int64_t stdout_value = 0;
+    int64_t stderr_value = 0;
+    RtOwnedProcessReceipt receipt;
+    RtOwnedProcessObservationV1 observation;
+    if (!argv) goto fail;
+    argv[0] = cmd;
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t value = rt_array_get(args, i);
+        int64_t arg_len = rt_string_len(value);
+        const uint8_t* arg_data = rt_string_data(value);
+        if (arg_len < 0 || !arg_data || (uint64_t)arg_len > SIZE_MAX - 1 ||
+            memchr(arg_data, '\0', (size_t)arg_len) != NULL) {
+            goto fail;
+        }
+        argv[i + 1] = (char*)RT_OWNED_HOST_MALLOC((size_t)arg_len + 1);
+        if (!argv[i + 1]) goto fail;
+        memcpy(argv[i + 1], arg_data, (size_t)arg_len);
+        argv[i + 1][arg_len] = '\0';
+    }
+
+    uint64_t limit = (uint64_t)max_output_bytes;
+    if (limit > SIZE_MAX - 1) goto fail;
+    size_t capacity = (size_t)limit + 1;
+    out = (char*)RT_OWNED_HOST_MALLOC(capacity);
+    err = (char*)RT_OWNED_HOST_MALLOC(capacity);
+    if (!out || !err) goto fail;
+
+    if (include_observation) {
+        (void)rt_process_run_owned_observed_bounded(cmd, (const char* const*)argv, timeout_ms,
+                                                    limit, out, capacity, err, capacity,
+                                                    &receipt, &observation);
+    } else {
+        memset(&observation, 0, sizeof(observation));
+        (void)rt_process_run_owned_bounded(cmd, (const char* const*)argv, timeout_ms, limit,
+                                           out, capacity, err, capacity, &receipt);
+    }
+    fields = rt_array_new(include_observation ? 30 : 19);
+    if (!fields) goto fail;
+#define OWNED_WIN_PUSH(value) do { if (!rt_array_push(fields, rt_value_int((int64_t)(value)))) goto fail; } while (0)
+    OWNED_WIN_PUSH(receipt.version); OWNED_WIN_PUSH(receipt.slot); OWNED_WIN_PUSH(receipt.generation);
+    OWNED_WIN_PUSH(receipt.pid); OWNED_WIN_PUSH(receipt.process_group_id);
+    OWNED_WIN_PUSH(receipt.start_identity);
+    OWNED_WIN_PUSH(receipt.stdout_bytes_seen); OWNED_WIN_PUSH(receipt.stderr_bytes_seen);
+    OWNED_WIN_PUSH(receipt.stdout_bytes_kept); OWNED_WIN_PUSH(receipt.stderr_bytes_kept);
+    OWNED_WIN_PUSH(receipt.exit_code); OWNED_WIN_PUSH(receipt.timed_out);
+    OWNED_WIN_PUSH(receipt.term_sent); OWNED_WIN_PUSH(receipt.kill_sent);
+    OWNED_WIN_PUSH(receipt.identity_revalidated); OWNED_WIN_PUSH(receipt.reaped);
+    OWNED_WIN_PUSH(receipt.stdout_truncated); OWNED_WIN_PUSH(receipt.stderr_truncated);
+    OWNED_WIN_PUSH(receipt.runtime_error);
+    if (include_observation) {
+        OWNED_WIN_PUSH(observation.version); OWNED_WIN_PUSH(observation.evidence_flags);
+        OWNED_WIN_PUSH(observation.user_cpu_ms); OWNED_WIN_PUSH(observation.system_cpu_ms);
+        OWNED_WIN_PUSH(observation.peak_direct_child_rss_bytes);
+        OWNED_WIN_PUSH(observation.peak_tree_charge_bytes);
+        OWNED_WIN_PUSH(observation.io_read_bytes); OWNED_WIN_PUSH(observation.io_write_bytes);
+        OWNED_WIN_PUSH(observation.pids_peak); OWNED_WIN_PUSH(observation.termination_signal);
+        OWNED_WIN_PUSH(observation.runtime_error);
+    }
+#undef OWNED_WIN_PUSH
+
+    stdout_value = rt_string_new((const uint8_t*)out, receipt.stdout_bytes_kept);
+    stderr_value = rt_string_new((const uint8_t*)err, receipt.stderr_bytes_kept);
+    if (!stdout_value || !stderr_value) goto fail;
+    tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
+    if (!tuple) goto fail;
+    tuple[0] = stdout_value;
+    tuple[1] = stderr_value;
+    tuple[2] = (int64_t)(uintptr_t)fields;
+    for (int64_t i = 1; i <= argc; i++) RT_OWNED_HOST_FREE(argv[i]);
+    RT_OWNED_HOST_FREE(argv); RT_OWNED_HOST_FREE(cmd);
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err);
+    return tuple;
+
+fail:
+    if (argv) {
+        for (int64_t i = 1; i <= argc; i++) RT_OWNED_HOST_FREE(argv[i]);
+    }
+    RT_OWNED_HOST_FREE(argv); RT_OWNED_HOST_FREE(cmd);
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err);
+    if (stdout_value) (void)RT_OWNED_FREE_VALUE(stdout_value);
+    if (stderr_value) (void)RT_OWNED_FREE_VALUE(stderr_value);
+    if (fields) rt_array_free(fields);
+    if (tuple) rt_free(tuple);
+    return NULL;
+}
+
+int64_t* rt_process_run_owned_bounded_value(const char* cmd_data, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return owned_win_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms,
+                                            max_output_bytes, 0);
+}
+
+int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint64_t cmd_len,
+                                                     SplArray* args, int64_t timeout_ms,
+                                                     int64_t max_output_bytes) {
+    return owned_win_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms,
+                                            max_output_bytes, 1);
+}
+#endif /* RT_PROCESS_OWNED_CORE_ONLY */
+
+#define RT_OWNED_WIN32_SYNC_IMPLEMENTED 1
+#endif /* _WIN32 */
+
 #include <errno.h>
 #include <string.h>
 
@@ -2096,6 +4939,9 @@ bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
     return false;
 }
 
+/* Win32 implements this for real above; only the non-unix fallback needs the
+ * ENOTSUP answer. */
+#ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
                                            int64_t timeout_ms, uint64_t max_output_bytes,
                                            char* out, uint64_t out_cap, char* err,
@@ -2108,6 +4954,7 @@ bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* a
     return rt_process_run_owned_bounded(cmd, argv, timeout_ms, max_output_bytes,
                                         out, out_cap, err, err_cap, receipt);
 }
+#endif
 
 bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
                               char* out, uint64_t out_cap, char* err,
@@ -2153,6 +5000,7 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
     return rt_process_owned_result_v2(token, result);
 }
 
+#ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                   int64_t timeout_ms, uint64_t max_output_bytes,
                                   char* out, uint64_t out_cap, char* err,
@@ -2189,9 +5037,11 @@ bool rt_process_owned_cancel_value(uint64_t slot, uint64_t generation,
     (void)slot; (void)generation; (void)pid; (void)identity;
     return false;
 }
+#endif
 
 
 #ifndef RT_PROCESS_OWNED_CORE_ONLY
+#ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 int64_t* rt_process_run_owned_bounded_value(const char* cmd, uint64_t cmd_len, SplArray* args,
                                             int64_t timeout_ms,
                                             int64_t max_output_bytes) {
@@ -2252,6 +5102,7 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd, uint64_t c
     tuple[2] = (int64_t)(uintptr_t)fields;
     return tuple;
 }
+#endif /* RT_OWNED_WIN32_SYNC_IMPLEMENTED */
 
 static SplArray* owned_v3_unsupported_words(int64_t count, int64_t error_index) {
     SplArray* values = rt_array_new(count);
@@ -2263,6 +5114,46 @@ static SplArray* owned_v3_unsupported_words(int64_t count, int64_t error_index) 
             rt_array_free(values); return NULL;
         }
     }
+    return values;
+}
+
+SplArray* rt_process_owned_v3_capabilities_value(void) {
+    const int64_t fields[] = {
+        RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION, 0, 0,
+    };
+    SplArray* values = rt_array_new(3);
+    if (!values) return NULL;
+    for (int i = 0; i < 3; i++)
+        if (!rt_array_push(values, rt_value_int(fields[i]))) {
+            rt_array_free(values); return NULL;
+        }
+    return values;
+}
+
+SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
+                                                        int64_t stdout_limit,
+                                                        int64_t stderr_limit) {
+    (void)handle; (void)stdout_limit; (void)stderr_limit;
+    SplArray* values = owned_v3_unsupported_words(3, 2);
+    if (values)
+        (void)rt_array_set(values, 0,
+            rt_value_int(RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION));
+    return values;
+}
+
+SplArray* rt_process_owned_v3_observation_value(int64_t handle) {
+    (void)handle;
+    const int64_t fields[] = {
+        RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION,
+        0, -1, RT_OWNED_PROCESS_OBSERVATION_VERSION,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ENOTSUP,
+    };
+    SplArray* values = rt_array_new(15);
+    if (!values) return NULL;
+    for (int i = 0; i < 15; i++)
+        if (!rt_array_push(values, rt_value_int(fields[i]))) {
+            rt_array_free(values); return NULL;
+        }
     return values;
 }
 
@@ -2320,6 +5211,72 @@ SplArray* rt_process_owned_v3_collect_value(int64_t handle) {
 }
 int rt_process_owned_v3_release_value(int64_t handle) {
     (void)handle; return 0;
+}
+
+static SplArray* pov4_unavailable_tuple(void) {
+    SplArray* out = rt_array_new(0), *err = rt_array_new(0), *binding = rt_array_new(0);
+    SplArray* words = rt_array_new(64), *tuple = rt_array_new(4);
+    if (!out || !err || !binding || !words || !tuple) goto fail;
+    for (int i = 0; i < 64; i++) {
+        int64_t value = 0;
+        if (i == 0) value = 4;
+        else if (i == 1) value = 1;
+        else if (i == 2) value = 64;
+        else if (i == 3) value = 3;
+        else if (i == 8) value = 9;
+        else if (i == 10) value = 1;
+        else if (i == 11) value = 10;
+        else if (i == 12) value = ENOTSUP;
+        else if (i == 13) value = 4;
+        else if (i == 16 || i == 17 || (i >= 21 && i <= 27)) value = -1;
+        else if (i == 42) value = 1;
+        else if (i == 49 || i == 54) value = 2;
+        if (!rt_array_push(words, rt_value_int(value))) goto fail;
+    }
+    if (!rt_array_push(tuple, (int64_t)(uintptr_t)out) ||
+        !rt_array_push(tuple, (int64_t)(uintptr_t)err) ||
+        !rt_array_push(tuple, (int64_t)(uintptr_t)binding) ||
+        !rt_array_push(tuple, (int64_t)(uintptr_t)words)) goto fail;
+    return tuple;
+fail:
+    if (tuple) rt_array_free(tuple); if (out) rt_array_free(out);
+    if (err) rt_array_free(err); if (binding) rt_array_free(binding);
+    if (words) rt_array_free(words); return NULL;
+}
+
+SplArray* rt_process_observation_v4_capabilities_value(void) {
+    const int64_t fields[8] = {4, 8, 0, 0, 0, 0, 0, ENOTSUP};
+    SplArray* values = rt_array_new(8); if (!values) return NULL;
+    for (int i=0;i<8;i++) if (!rt_array_push(values, rt_value_int(fields[i]))) {
+        rt_array_free(values); return NULL;
+    }
+    return values;
+}
+int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data, uint64_t path_len) {
+    (void)path_data; (void)path_len; return 0;
+}
+SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
+    (void)handle; return rt_array_new(0);
+}
+int rt_process_observation_v4_close_cwd_value(int64_t handle) { (void)handle; return 0; }
+SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
+    (void)binding; return pov4_unavailable_tuple();
+}
+SplArray* rt_process_observation_v4_start_pinned_value(int64_t executable_handle,
+        int64_t cwd_handle, SplArray* binding) {
+    (void)executable_handle; (void)cwd_handle; (void)binding; return pov4_unavailable_tuple();
+}
+SplArray* rt_process_observation_v4_poll_value(SplArray* ticket, int64_t wait_ns) {
+    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+}
+SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket, int64_t wait_ns) {
+    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+}
+SplArray* rt_process_observation_v4_collect_value(SplArray* ticket, int64_t wait_ns) {
+    (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();
+}
+SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray* digest) {
+    (void)ticket; (void)digest; return pov4_unavailable_tuple();
 }
 #endif
 

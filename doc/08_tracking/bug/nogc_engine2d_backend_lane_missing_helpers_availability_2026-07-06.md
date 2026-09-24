@@ -1,4 +1,8 @@
 # nogc Engine2D `backend_lane` lacks shared `helpers_availability` — font-offload backend priority diverges from gc mirror
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -52,3 +56,4 @@ Operation-lane tier routing (`vector_font`/`vector_glyph`/`glyph_raster`/
 this backend-priority coupling was left as an explicit divergence rather than
 half-ported. Marked at the call site in
 `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
+

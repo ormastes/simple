@@ -1,4 +1,8 @@
 # RISC-V 64 QEMU Release Lineage and Nonce Gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** OPEN  
@@ -32,3 +36,4 @@ the canonical system spec is run once through the deployed pure-Simple CLI.
 - Owner: RISC-V64 SimpleOS execution lane
 - Merge owner: SOSIX/QEMU integration lane
 - Final reviewer: independent normal/highest-capability reviewer
+

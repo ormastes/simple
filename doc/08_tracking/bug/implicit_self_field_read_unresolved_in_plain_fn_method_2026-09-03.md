@@ -1,4 +1,8 @@
 # Implicit `self` field READ inside a plain `fn` method is unresolved (JIT + HIR)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
 - Status: OPEN
@@ -67,3 +71,4 @@ every devhub exit path.
 
 Write `self.kind` explicitly. Not applied here: the scope of the defect is
 compiler-side and a mass rewrite would hide it.
+

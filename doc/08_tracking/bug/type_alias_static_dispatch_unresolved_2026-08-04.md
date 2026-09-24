@@ -1,4 +1,8 @@
 # `type X = Y` does not resolve as a static-call receiver — `X.new()` sees nil
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — architectural (needs a Rust-seed interpreter name-resolution
 change, out of scope per repo rules; re-confirmed 2026-08-10)
@@ -120,3 +124,10 @@ pure-Simple side, but the bug and its architectural blocker are unchanged.
   capture this bug sits downstream of.
 - `type_alias_swapped_winner_is_inert_2026-08-01.md`
 - `flat_ast_export_from_and_type_alias_loss_2026-07-27.md`
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Record already states this is architectural, needing a Rust-seed interpreter
+name-resolution change, out of scope per repo rules, re-confirmed 2026-08-10.
+No change made.
+

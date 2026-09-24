@@ -9,10 +9,14 @@ export function createLineHandler(router, write) {
       const response = router(message);
       if (response !== undefined) write(`${stableJson(response)}\n`);
     } catch (error) {
-      // Legacy SPipe reports handler and parse failures with a null id. Keep
-      // that wire behavior through the protocol-neutral Wave 1 extraction;
-      // request-id preservation belongs to the later versioned MCP migration.
-      write(`${stableJson(errorResult(null, error))}\n`);
+      // A JSON.parse failure has no id to recover (message stays undefined) —
+      // that case is still reported with a null id, per JSON-RPC 2.0 §5.
+      // A handler failure (thrown deep in the router, e.g. tools.js's
+      // allowlist check) DOES have a valid parsed message with its own id;
+      // discarding it here broke request/response correlation for every
+      // tool call that throws, which is most of the validated spipe_release_*
+      // tools. Preserve it when available.
+      write(`${stableJson(errorResult(message?.id ?? null, error))}\n`);
     }
   };
 }

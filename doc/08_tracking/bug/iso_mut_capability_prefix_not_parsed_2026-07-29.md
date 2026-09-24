@@ -1,4 +1,9 @@
 # Bug: `iso`/`mut` capability-prefixed types are not parsed by the real frontend (`parse_full_frontend`) at all
+## Closed 2026-09-16 — Status FIXED; iso/mut parser branch verified in source by 2026-08-07 re-check
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-29
 - Status: FIXED
@@ -190,3 +195,4 @@ source parses fine when the *seed's own* engine evaluates the spec file,
 independent of whether the pure-Simple `parse_full_frontend` in
 `src/compiler/10.frontend/**` (the code path this bug is about, and the one
 `CompilerDriver.compile()` uses) supports it.
+

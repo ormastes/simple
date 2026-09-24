@@ -1,4 +1,8 @@
 # native-build rejects an entry file outside the source roots: "missing importing module surface" (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (tree-side regression, not a seed regression). Workaround in
 place for the bootstrap pipeline (hello-world fixtures are written INSIDE the
@@ -50,3 +54,4 @@ seed.
 - Fix: when the entry file is outside every source root, register its surface
   under a synthetic root (its parent directory), as the pre-registry loader
   did, instead of failing the HIR phase.
+

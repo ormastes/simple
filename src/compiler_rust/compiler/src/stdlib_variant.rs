@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::fs_probe::p_is_dir;
 use simple_simd::{active_simd_tier as resolved_active_simd_tier, SimdTier};
 
 pub fn active_simd_tier() -> SimdTier {
@@ -25,6 +26,53 @@ pub fn stdlib_root_candidates(root: &Path) -> Vec<PathBuf> {
 
     candidates.push(root.to_path_buf());
     candidates
+}
+
+/// The one directory every variant candidate for `root` would live under, or
+/// `None` when `root` matches no variant layout at all. Mirrors the suffix
+/// tests in `append_tier_candidates` — keep the two in step.
+fn variant_container_dir(root: &Path) -> Option<PathBuf> {
+    let root_str = root.to_string_lossy().replace('\\', "/");
+
+    if root_str.ends_with("/src/lib/std/src")
+        || root_str.ends_with("/simple/std_lib/src")
+        || root_str.ends_with("/std_lib/src")
+    {
+        return root.parent().map(|parent| parent.join("variants"));
+    }
+
+    if root_str.ends_with("/src/lib") || root_str.ends_with("/src/std") {
+        return Some(root.join("variants"));
+    }
+
+    None
+}
+
+/// `stdlib_root_candidates`, minus the candidates that cannot exist.
+///
+/// Every variant candidate for `root` lives under one `variants/` directory. A
+/// candidate root that is not a directory can never yield an existing file, and
+/// no caller does anything with this list except probe the filesystem with it —
+/// so when that container is absent the only reachable candidate is `root`
+/// itself, and the whole tier fan-out is dead weight.
+///
+/// The saving is not one stat but two families of them. Each doomed candidate
+/// root is the base of a subtree the caller then builds and probes
+/// (`<root>/<module>.spl`, `<root>/<module>/__init__.spl`, one per family
+/// subdir, …), and resolving the tier at all re-stats the host cpu config —
+/// `host_cpu_config` deliberately re-reads it on every call so a mid-process
+/// on-disk edit is seen, which is correct and is exactly why it must not be
+/// reached once per module resolution. `p_is_dir` is memoized per path by
+/// `fs_probe`, so this guard costs one stat for the whole process.
+///
+/// Prefer this over `stdlib_root_candidates` at every resolution call site.
+/// `stdlib_root_candidates` stays as the pure, filesystem-independent shape of
+/// the candidate list.
+pub fn stdlib_root_candidates_present(root: &Path) -> Vec<PathBuf> {
+    match variant_container_dir(root) {
+        Some(container) if p_is_dir(&container) => stdlib_root_candidates(root),
+        _ => vec![root.to_path_buf()],
+    }
 }
 
 fn append_tier_candidates(out: &mut Vec<PathBuf>, root: &Path, tier: SimdTier) {
@@ -319,6 +367,65 @@ mod tests {
                 .collect::<Vec<_>>();
             expected.push(PathBuf::from("/tmp/proj/src/lib/std/src"));
             assert_eq!(roots, expected);
+        });
+    }
+
+    #[test]
+    fn present_candidates_drop_variant_roots_when_the_container_is_absent() {
+        with_simd_tier_env(Some("x86_64_avx512"), || {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("src").join("lib");
+            std::fs::create_dir_all(&root).unwrap();
+            // No `variants/` directory: every tier candidate is unreachable.
+            assert!(stdlib_root_candidates(&root).len() > 1);
+            assert_eq!(stdlib_root_candidates_present(&root), vec![root.clone()]);
+        });
+    }
+
+    #[test]
+    fn present_candidates_keep_the_full_shape_when_the_container_exists() {
+        with_simd_tier_env(Some("x86_64_avx512"), || {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("src").join("lib");
+            std::fs::create_dir_all(root.join("variants")).unwrap();
+            assert_eq!(
+                stdlib_root_candidates_present(&root),
+                stdlib_root_candidates(&root)
+            );
+        });
+    }
+
+    #[test]
+    fn a_root_matching_no_variant_layout_needs_no_filesystem_probe() {
+        with_simd_tier_env(Some("x86_64_avx512"), || {
+            let root = PathBuf::from("/tmp/proj/some/other/place");
+            assert_eq!(variant_container_dir(&root), None);
+            assert_eq!(stdlib_root_candidates_present(&root), vec![root.clone()]);
+        });
+    }
+
+    #[test]
+    fn the_container_matches_the_layout_the_candidates_use() {
+        // Keeps `variant_container_dir` and `append_tier_candidates` in step:
+        // every candidate must live under the container this guard probes.
+        with_simd_tier_env(Some("x86_64_avx512"), || {
+            for root in [
+                PathBuf::from("/tmp/proj/src/lib"),
+                PathBuf::from("/tmp/proj/src/std"),
+                PathBuf::from("/tmp/proj/src/lib/std/src"),
+                PathBuf::from("/tmp/proj/simple/std_lib/src"),
+            ] {
+                let container = variant_container_dir(&root).expect("layout has a container");
+                for candidate in stdlib_root_candidates(&root) {
+                    if candidate == root {
+                        continue;
+                    }
+                    assert!(
+                        candidate.starts_with(&container),
+                        "{candidate:?} is not under {container:?}"
+                    );
+                }
+            }
         });
     }
 }

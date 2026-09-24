@@ -1,0 +1,146 @@
+#!/bin/sh
+
+# Bootstrap-wide CPU selection. Source this file, then call:
+#   bootstrap_select_jobs "${cli_jobs:-}" [config/bootstrap.sdn]
+# It sets host_cpus, jobs, selfhost_jobs, and job_source in the caller.
+
+bootstrap_jobs_positive_integer() {
+  case ${1:-} in
+    ''|*[!0-9]*|0|0*) return 1 ;;
+    *)
+      [ "${#1}" -le 5 ] || return 1
+      [ "$1" -le 65535 ] || return 1
+      return 0
+      ;;
+  esac
+}
+
+bootstrap_detect_host_cpus() {
+  # nproc respects the current process's affinity/cgroup availability. getconf
+  # may report every online host CPU even when fewer are available here.
+  detected=$(nproc 2>/dev/null || :)
+  if ! bootstrap_jobs_positive_integer "$detected"; then
+    detected=$(getconf _NPROCESSORS_ONLN 2>/dev/null || :)
+  fi
+  if ! bootstrap_jobs_positive_integer "$detected"; then
+    detected=$(sysctl -n hw.ncpu 2>/dev/null || :)
+  fi
+  if ! bootstrap_jobs_positive_integer "$detected"; then
+    detected=${NUMBER_OF_PROCESSORS:-}
+  fi
+  printf '%s\n' "$detected"
+}
+
+bootstrap_jobs_config_value() {
+  jobs_config=$1
+  [ -f "$jobs_config" ] || return 0
+  awk '
+    /^[[:space:]]*#/ { next }
+    {
+      line=$0
+      sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ /^[[:space:]]*(jobs|native_build_threads)[[:space:]]*:/) {
+        sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line)
+        sub(/[[:space:]]*$/, "", line)
+        count++
+        value=line
+      }
+    }
+    END {
+      if (count > 1) print "__MULTIPLE__"
+      else if (count == 1) print value
+    }
+  ' "$jobs_config"
+}
+
+bootstrap_select_jobs() {
+  cli_jobs=${1:-}
+  jobs_config=${2:-config/bootstrap.sdn}
+  host_cpus=$(bootstrap_detect_host_cpus)
+  if ! bootstrap_jobs_positive_integer "$host_cpus"; then
+    printf 'bootstrap-jobs: invalid or zero detected CPU count; using 1\n' >&2
+    host_cpus=1
+    host_detection_fallback=1
+  else
+    host_detection_fallback=0
+  fi
+
+  selected=
+  job_source=
+  if [ -n "$cli_jobs" ]; then
+    case "$cli_jobs" in
+      auto|full) selected=$host_cpus ;;
+      half)
+        selected=$((host_cpus / 2))
+        [ "$selected" -ge 1 ] || selected=1
+        ;;
+      min|minimal|minimum) selected=1 ;;
+      *)
+        if ! bootstrap_jobs_positive_integer "$cli_jobs"; then
+          printf 'bootstrap-jobs: --jobs must be a positive integer, auto, full, half, or min\n' >&2
+          return 1
+        fi
+        selected=$cli_jobs
+        ;;
+    esac
+    job_source=cli
+  elif [ -n "${SIMPLE_NATIVE_BUILD_THREADS:-}" ]; then
+    case "$SIMPLE_NATIVE_BUILD_THREADS" in
+      full)
+        selected=$host_cpus
+        job_source=env
+        ;;
+      *)
+        if bootstrap_jobs_positive_integer "$SIMPLE_NATIVE_BUILD_THREADS"; then
+          selected=$SIMPLE_NATIVE_BUILD_THREADS
+          job_source=env
+        else
+          printf 'bootstrap-jobs: invalid SIMPLE_NATIVE_BUILD_THREADS=%s; using all %s detected CPUs\n' \
+            "$SIMPLE_NATIVE_BUILD_THREADS" "$host_cpus" >&2
+          selected=$host_cpus
+          job_source=fallback-env-invalid
+        fi
+        ;;
+    esac
+  else
+    configured=$(bootstrap_jobs_config_value "$jobs_config") || configured=
+    if [ -n "$configured" ]; then
+      case "$configured" in
+        auto|full)
+          selected=$host_cpus
+          job_source=config
+          ;;
+        half)
+          selected=$((host_cpus / 2))
+          [ "$selected" -ge 1 ] || selected=1
+          job_source=config
+          ;;
+        min|minimal|minimum)
+          selected=1
+          job_source=config
+          ;;
+        *)
+          if bootstrap_jobs_positive_integer "$configured"; then
+            selected=$configured
+            job_source=config
+          else
+            printf 'bootstrap-jobs: invalid jobs value in %s; using all %s detected CPUs\n' \
+              "$jobs_config" "$host_cpus" >&2
+            selected=$host_cpus
+            job_source=fallback-config-invalid
+          fi
+          ;;
+      esac
+    else
+      selected=$host_cpus
+      job_source=default
+    fi
+  fi
+
+  jobs=$selected
+  selfhost_jobs=$selected
+  if [ "$host_detection_fallback" -eq 1 ] && [ "$job_source" = default ]; then
+    job_source=fallback-host-detection
+  fi
+  return 0
+}

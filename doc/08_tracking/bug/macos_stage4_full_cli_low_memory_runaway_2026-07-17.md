@@ -1,4 +1,8 @@
 # macOS Stage 4 full-CLI compile exceeds bounded resource envelope
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -78,3 +82,4 @@ within a documented time and peak-RSS budget on a 24 GiB host.
    linker and produces a candidate within the agreed bounded time/RSS target.
 4. The candidate passes `-c`, source-check, redeploy, MCP, and LSP smoke gates.
 5. Preserve strict `SIMPLE_NO_STUB_FALLBACK=1` and exact provider ownership.
+

@@ -270,3 +270,7 @@ filing this (the deployed `bin/simple` is currently the Rust seed and reports
 
 Working notes for this investigation lived in a session-local scratchpad
 (`blocker10_findings.md`) which will not survive; the substance is reproduced above.
+
+## Triage 2026-09-13
+
+Record states the fix was POSTPONED by explicit user decision on 2026-08-05, with the prepared rank-1/rank-2/rank-4 changes deliberately reverted. Respecting that decision -- not resuming it unilaterally in this pass. Leaving OPEN, no code change made.

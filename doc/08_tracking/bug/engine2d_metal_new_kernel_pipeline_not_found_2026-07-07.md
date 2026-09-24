@@ -1,4 +1,9 @@
 # Metal `newFunctionWithName` cannot find a genuinely-new kernel appended to `_engine2d_msl()`
+## Closed 2026-09-16 — ...o `_engine2d_msl()` > **STATUS: RESOLVED — NON-REPRODUCING (transient) — 2026-07-07.** > >
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **STATUS: RESOLVED — NON-REPRODUCING (transient) — 2026-07-07.**
 >
@@ -133,3 +138,4 @@ Minimal Rust-adjacent repro: append literally any new `kernel void
 kernel_xyz(...)` to `_engine2d_msl()`'s embedded MSL string and observe
 `metal_last_error()` after `create_compute_pipeline(device, lib,
 "kernel_xyz")`.
+

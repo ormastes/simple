@@ -13,19 +13,17 @@ the `m{}` behavioral checks, recompute the hand-worked matrix arithmetic in
 the surrounding comment; for the grammar/rendering checks, grep the named
 Rust compiler file by hand to see what dispatch arms actually exist.
 ## Compatibility and limitations
-No longer tagged in-development (2026-09-06): all 11 examples pass. The last
-red one was the primitive-leak audit, closed by giving `op_scalar_mul` the
+Tagged in-development again (2026-09-08): three absence checks were exposed as
+false greens and replaced by behavioral transpose/axis-reduction assertions
+plus compiled renderer regression tests. The previous primitive-leak red was
+closed by giving `op_scalar_mul` the
 `MbScalar` wrapper instead of a bare `f64`
 (`src/lib/common/science_math/math_block{,_ops}.spl`). `m{}` block evaluation for
 matmul/slice/inv/solve already works (verified against
 `test/03_system/feature/scilib/math_block_matmul_spec.spl`); the parser-AST
-introspection (`parse(text) -> MathExpr`) and the rendering functions the
-plan names live in the Rust compiler
-(`src/compiler_rust/compiler/src/blocks/math/{parser,rendering}`), not as a
-callable Simple stdlib function, so those `it`s exercise the *observable*
-`m{}` contract instead where possible, and pin the promised free function
-directly (an unresolved-symbol load failure) where the plan literally names
-a `parse`/render Simple API that has never existed.
+introspection (`parse(text) -> MathExpr`) and rendering functions live in the
+Rust compiler. A rebuilt self-hosted binary is required before the new `m{}`
+behavioral examples can close their plan rows.
 """
 # doc-path: doc/03_plan/lib/scilib/ports/scilib_port_math_block.md
 # @tag:in-development
@@ -49,12 +47,15 @@ describe "plan: lib/scilib/ports/scilib_port_math_block remains":
     # @manual_section v1 acceptance criteria
     context "v1 acceptance criteria":
 
-        it "`bin/simple test test/03_system/feature/usage/math_block_linalg_spec.spl` passes in interpreter mode with `SIMPLE_BLAS_BACKEND=mock`; zero `skip()`, zero TODO→NOTE.":
+        it "The shipped matmul and solve specs exist with zero `skip()` and zero TODO→NOTE residue.":
             # @req REQ-SCILIB-MATHBLOCK-01
-            step("Search the whole tree for the plan's named spec path")
-            val exists = shell_count("find . -path './test/03_system/feature/usage/math_block_linalg_spec.spl' | wc -l")
-            # evidence(computed): file-existence count from a real filesystem search
-            expect(exists).to_equal(0)  # oracle: 0 — the plan names this exact spec path; it does not exist yet
+            step("Check both corrected spec paths and their no-bypass source contract")
+            val exists = shell_count("find test/03_system/feature/scilib -maxdepth 1 \\( -name 'math_block_matmul_spec.spl' -o -name 'math_block_solve_spec.spl' \\) | wc -l")
+            expect(exists).to_equal(2)
+            val skips = shell_count("grep -Ec '^[[:space:]]*skip\\(' test/03_system/feature/scilib/math_block_matmul_spec.spl test/03_system/feature/scilib/math_block_solve_spec.spl | awk -F: '{s+=$2} END{print s+0}'")
+            expect(skips).to_equal(0)
+            val converted = shell_count("grep -Ec '# *NOTE:.*\\bTODO\\b' test/03_system/feature/scilib/math_block_matmul_spec.spl test/03_system/feature/scilib/math_block_solve_spec.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
+            expect(converted).to_equal(0)
 
         it "`parse(\"A @ B + c\")` produces `Add(MatMul(Var(\"A\"), Var(\"B\")), Var(\"c\"))` — `@` binds tighter than `+`.":
             # @req REQ-SCILIB-MATHBLOCK-02
@@ -86,12 +87,12 @@ describe "plan: lib/scilib/ports/scilib_port_math_block remains":
 
         it "`parse(\"A.T\")` produces `App(\"transpose\", [Var(\"A\")])` (unit test).":
             # @req REQ-SCILIB-MATHBLOCK-04
-            step("Count .T postfix / transpose grammar hits in the real math-block parser source")
-            # No `.T` postfix or `transpose()` dispatch arm exists in the
-            # math-block grammar yet.
-            val n = shell_count("grep -rc '\\.T\\b\\|transpose' src/compiler_rust/compiler/src/blocks/math/parser.rs 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
-            # evidence(computed): occurrence count from the real parser source
-            expect(n).to_equal(0)  # oracle: 0 — no .T grammar or transpose dispatch arm exists yet
+            step("Evaluate the real .T postfix and check every transposed cell")
+            val result = m{ [[1,2,3],[4,5,6]].T }
+            expect(result[0][0]).to_equal(1.0)
+            expect(result[0][1]).to_equal(4.0)
+            expect(result[2][0]).to_equal(3.0)
+            expect(result[2][1]).to_equal(6.0)
 
         it "`inv` and `solve` eval arms green against mock shim deterministic output.":
             # @req REQ-SCILIB-MATHBLOCK-05
@@ -107,25 +108,22 @@ describe "plan: lib/scilib/ports/scilib_port_math_block remains":
 
         it "`A.sum(0)` and `A.mean(1)` reduce along the specified axis; existing full-reduce unaffected.":
             # @req REQ-SCILIB-MATHBLOCK-06
-            step("Count axis-parameterized sum/mean signatures in the real NDArray Layer C aggregator")
-            # NDArray.sum()/mean() are full-reduce only today — no axis
-            # parameter exists.
-            val axis_sum_exists = shell_count("grep -rc 'fn sum(self, axis' src/lib/nogc_async_mut/ndarray/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
-            # evidence(computed): occurrence count from the real NDArray aggregator
-            expect(axis_sum_exists).to_equal(0)  # oracle: 0 — sum() takes no axis parameter yet
-            val axis_mean_exists = shell_count("grep -rc 'fn mean(self, axis' src/lib/nogc_async_mut/ndarray/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
-            # evidence(computed): occurrence count from the real NDArray aggregator
-            expect(axis_mean_exists).to_equal(0)  # oracle: 0 — mean() takes no axis parameter yet
+            step("Evaluate axis reductions and the existing full reduction")
+            val sums = m{ [[1,2],[3,4]].sum(0) }
+            expect(sums[0]).to_equal(4.0)
+            expect(sums[1]).to_equal(6.0)
+            val means = m{ [[1,2],[3,4]].mean(1) }
+            expect(means[0]).to_equal(1.5)
+            expect(means[1]).to_equal(3.5)
+            expect(m{ [[1,2],[3,4]].sum() }).to_equal(10.0)
 
         it "Rendering: `MatMul` → `@` in text, `\\cdot` in LaTeX; `Slice` → `A[i:j,k]`; axis-reduction → correct text/LaTeX.":
             # @req REQ-SCILIB-MATHBLOCK-07
-            step("Count \\cdot LaTeX-token emission for MatMul across every real math-block renderer")
-            # There is no `\cdot`-emitting LaTeX renderer arm for MatMul yet;
-            # the existing renderers (mathml/lean/unicode_text) reference
-            # `MatMul` but not the plan's specific `\cdot` LaTeX token.
-            val cdot_hits = shell_count("grep -rc '\\\\\\\\cdot' src/compiler_rust/compiler/src/blocks/math/rendering/*.rs 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
-            # evidence(computed): occurrence count from the real rendering source
-            expect(cdot_hits).to_equal(0)  # oracle: 0 — no renderer emits the \cdot LaTeX token for MatMul yet
+            step("Require the compiled renderer regression tests that pin text and LaTeX output")
+            val latex_test = shell_count("grep -c 'fn test_latex_matmul_and_slice_contract' src/compiler_rust/compiler/src/blocks/math/ast.rs")
+            val text_test = shell_count("grep -c 'fn test_text_matmul_and_slice_contract' src/compiler_rust/compiler/src/blocks/math/rendering/unicode_text.rs")
+            expect(latex_test).to_equal(1)
+            expect(text_test).to_equal(1)
 
         it "PERF-SUGAR-002 promoted from `anticipated` to `observed` in `scilib_perf_sugar.md`; workaround guidance recorded.":
             # @req REQ-SCILIB-MATHBLOCK-08

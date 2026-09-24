@@ -1,4 +1,8 @@
 # ARM64 Freestanding Text Equality Route Miscompile
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-12  
 **Status:** Workaround implemented; compiler root cause open
@@ -111,3 +115,4 @@ would admit forged headers in immutable image data, and would not accept the
 actual value produced at this call site. The remaining route failure is after
 canonical literal construction and requires value/rejection-reason capture at
 the wrapper boundary in a later live diagnostic.
+

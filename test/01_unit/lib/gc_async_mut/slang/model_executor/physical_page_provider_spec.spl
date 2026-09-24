@@ -1,0 +1,76 @@
+"""
+## Purpose and audience
+Proves fail-closed, all-or-nothing negotiation of Slang's optional physical
+paged-KV provider ABI. It does not claim that the stock backend implements it.
+Audience: Slang runtime and backend maintainers.
+"""
+
+# Requirements: doc/02_requirements/feature/slang_paged_kv_backend.md
+# @req: REQ-001
+
+use std.spec.step
+use std.gc_async_mut.slang.model_executor.backend.{
+    PhysicalPageProviderStatus, SLANG_CAP_PHYSICAL_PAGED_KV,
+    SLANG_PHYSICAL_PAGE_ABI_V1, physical_page_version_probe_is_authorized,
+    physical_page_group_status_from_probe}
+
+fn complete_group() -> [i64]:
+    [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113,
+     114, 115, 116, 117]
+
+describe "Slang physical page provider negotiation":
+    it "does not call the version function before dependencies resolve":
+        step("deny the call when S3 or any physical symbol is unavailable")
+        var partial = complete_group()
+        partial[16] = 0
+        expect(physical_page_version_probe_is_authorized(
+            SLANG_CAP_PHYSICAL_PAGED_KV, false, complete_group())).to_equal(false)
+        expect(physical_page_version_probe_is_authorized(
+            SLANG_CAP_PHYSICAL_PAGED_KV, true, partial)).to_equal(false)
+
+    it "permits the version probe only for an advertised complete group":
+        step("authorize one guarded version call after all prerequisites")
+        expect(physical_page_version_probe_is_authorized(
+            SLANG_CAP_PHYSICAL_PAGED_KV, true, complete_group())).to_equal(true)
+
+    it "keeps the S3 path when the physical capability bit is absent":
+        step("treat unadvertised physical paging as unavailable")
+        val status = physical_page_group_status_from_probe(
+            31, true, complete_group(), SLANG_PHYSICAL_PAGE_ABI_V1)
+        expect(status).to_equal(PhysicalPageProviderStatus.Unavailable)
+
+    it "rejects paging when the S3 independent-request group is unavailable":
+        step("require complete request isolation before physical page attachment")
+        val status = physical_page_group_status_from_probe(
+            SLANG_CAP_PHYSICAL_PAGED_KV, false, complete_group(),
+            SLANG_PHYSICAL_PAGE_ABI_V1)
+        expect(status).to_equal(PhysicalPageProviderStatus.RejectedDependency)
+
+    it "rejects an advertised but partial ABI group":
+        step("zero one required operation address")
+        var partial = complete_group()
+        partial[8] = 0
+        val status = physical_page_group_status_from_probe(
+            SLANG_CAP_PHYSICAL_PAGED_KV, true, partial,
+            SLANG_PHYSICAL_PAGE_ABI_V1)
+        expect(status).to_equal(PhysicalPageProviderStatus.RejectedPartial)
+
+    it "rejects an advertised group with the wrong cardinality":
+        step("supply fewer operations than ABI v1 requires")
+        val status = physical_page_group_status_from_probe(
+            SLANG_CAP_PHYSICAL_PAGED_KV, true, [1, 2, 3],
+            SLANG_PHYSICAL_PAGE_ABI_V1)
+        expect(status).to_equal(PhysicalPageProviderStatus.RejectedPartial)
+
+    it "rejects a complete group with a different ABI version":
+        step("preserve execution-layout compatibility at negotiation")
+        val status = physical_page_group_status_from_probe(
+            SLANG_CAP_PHYSICAL_PAGED_KV, true, complete_group(), 2)
+        expect(status).to_equal(PhysicalPageProviderStatus.RejectedVersion)
+
+    it "admits only the complete version-one group":
+        step("accept all required operations and exact ABI version")
+        val status = physical_page_group_status_from_probe(
+            SLANG_CAP_PHYSICAL_PAGED_KV, true, complete_group(),
+            SLANG_PHYSICAL_PAGE_ABI_V1)
+        expect(status).to_equal(PhysicalPageProviderStatus.Ready)

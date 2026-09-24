@@ -1,4 +1,9 @@
 # `PoolLinkedList.push_back`/`push_front` (and everything using `alloc_node`/`free_node`) fails at runtime — interpreter rejects indexed-field assignment
+## Closed 2026-09-16 — library bug fixed+sabotage-verified green; underlying interpreter rejection closed as ALREADY_FIXED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-07
 **Severity:** high — shipped, exported code is non-functional; masked by a
@@ -185,3 +190,4 @@ Results: 2 total, 2 passed, 0 failed          # rc=0
 
 Assignment through a complex indexed-field receiver (`pool[i].next = x`) no
 longer fails. Closing as already fixed; no source change was made by this lane.
+

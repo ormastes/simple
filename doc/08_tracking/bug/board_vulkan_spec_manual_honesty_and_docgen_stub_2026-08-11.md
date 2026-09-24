@@ -1,4 +1,8 @@
 # Board-Vulkan SSpec manuals: docgen stub + non-execution scope note
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11
 **Lane:** S3 (spipe docgen for `test/01_unit/os/vulkan/`)
@@ -131,3 +135,4 @@ owning lane).
   write, `INDEX.md` untouched via `--no-index`)
 - Docgen log: session scratchpad `docgen.log`
 - Scorer log: session scratchpad `sspec_scan.log`
+

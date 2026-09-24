@@ -1,4 +1,8 @@
 # JIT string append is quadratic (100k appends = 259s)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-18  - **Status:** OPEN
 - **Symptom:** the cross-language compute benchmark
@@ -16,3 +20,4 @@
 - **Unblock:** amortized growth in the concat fast path, or make the
   string-builder optimization catch `s = s + x` loops; add a differential
   perf budget once fixed.
+

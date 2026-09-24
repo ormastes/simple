@@ -1,0 +1,89 @@
+"""Tests the remaining policy capability model without claiming device evidence."""
+# @req: REQ-LIB-GPU-SESSION-001
+# @cover src/lib/gc_async_mut/gpu/session/graphics_capabilities.spl 100%
+# @tag: unit, gpu, session, capabilities
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.spec.step
+use std.gpu.session.graphics_capabilities.{GraphicsCapabilities}
+
+describe "GraphicsCapabilities policy decoding":
+
+    it "labels Vulkan policy without calling it a device probe":
+        step("Decode a declared Vulkan policy")
+        val caps = GraphicsCapabilities.from_policy("vulkan", "x86_64", 64)
+        assert_true(caps.supports_vulkan)
+        assert_true(caps.has_compute)
+        assert_true(caps.has_graphics)
+        assert_true(caps.has_present)
+        assert_true(caps.has_readback)
+        assert_false(caps.supports_metal)
+        assert_false(caps.supports_webgpu)
+        assert_false(caps.supports_cuda)
+
+    it "labels Metal policy":
+        step("Decode a declared Metal policy")
+        val caps = GraphicsCapabilities.from_policy("metal", "aarch64", 64)
+        assert_true(caps.supports_metal)
+        assert_true(caps.has_compute)
+        assert_true(caps.has_graphics)
+        assert_false(caps.supports_vulkan)
+
+    it "labels WebGPU policy":
+        step("Decode a declared WebGPU policy")
+        val caps = GraphicsCapabilities.from_policy("webgpu", "wasm32", 32)
+        assert_true(caps.supports_webgpu)
+        assert_true(caps.has_compute)
+        assert_true(caps.has_graphics)
+        expect(caps.bits).to_equal(32)
+
+    it "labels CUDA as compute-only policy":
+        step("Decode a declared CUDA policy")
+        val caps = GraphicsCapabilities.from_policy("cuda", "x86_64", 64)
+        assert_true(caps.supports_cuda)
+        assert_true(caps.has_compute)
+        assert_false(caps.has_graphics)
+        assert_false(caps.has_present)
+
+    it "refuses to grant capabilities to an unknown backend":
+        step("Decode an unsupported backend name")
+        val caps = GraphicsCapabilities.from_policy("nonexistent-gpu", "x86_64", 64)
+        assert_false(caps.supports_vulkan)
+        assert_false(caps.supports_metal)
+        assert_false(caps.supports_webgpu)
+        assert_false(caps.supports_cuda)
+        assert_false(caps.has_compute)
+        assert_false(caps.has_graphics)
+        assert_false(caps.has_present)
+        assert_false(caps.has_readback)
+
+    it "answers support queries from declared flags":
+        step("Query each known and unknown backend")
+        val caps = GraphicsCapabilities.from_policy("vulkan", "x86_64", 64)
+        assert_true(caps.supports_backend("cpu"))
+        assert_true(caps.supports_backend("vulkan"))
+        assert_false(caps.supports_backend("metal"))
+        assert_false(caps.supports_backend("webgpu"))
+        assert_false(caps.supports_backend("cuda"))
+        assert_false(caps.supports_backend("bogus"))
+
+    it "keeps CPU-only limits conservative":
+        step("Construct CPU-only capabilities")
+        val caps = GraphicsCapabilities.cpu_only()
+        expect(caps.backend_kind).to_equal("cpu")
+        expect(caps.simd_kind).to_equal("sse2")
+        expect(caps.vector_bits).to_equal(128)
+        assert_true(caps.has_compute)
+        assert_true(caps.has_readback)
+        assert_false(caps.has_graphics)
+        expect(caps.max_texture_size).to_equal(0)
+
+    it "summarizes declared architecture and features":
+        step("Summarize Vulkan policy capabilities")
+        val summary = GraphicsCapabilities.from_policy("vulkan", "aarch64", 64).summary()
+        assert_true(summary.contains("backend=vulkan"))
+        assert_true(summary.contains("arch=aarch64"))
+        assert_true(summary.contains("bits=64"))
+        assert_true(summary.contains("compute"))
+        assert_true(summary.contains("graphics"))
+        assert_true(summary.contains("present"))

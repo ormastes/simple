@@ -1,0 +1,121 @@
+# Tests for case-insensitive label lookup, path normalization,
+# and cross-file DO resolution.
+
+use cmm_text_helpers.{dir_of, normalize_path_sep, path_equals_ci}
+use cmm_analyzer.{CmmSymbolTable, CmmSymbol, CmmSymbolKind, analyze_program}
+use cmm_parser_runtime.{parse_cmm_source}
+use lsp_goto.{get_definition_at, resolve_file_reference}
+
+use std.spec.{describe, it, expect}
+
+# ---------------------------------------------------------------------------
+# Path utility tests
+# ---------------------------------------------------------------------------
+
+describe "Path utilities":
+    it "dir_of handles forward slashes":
+        expect(dir_of("/home/user/project/main.cmm")).to_equal("/home/user/project")
+
+    it "dir_of handles backslashes":
+        expect(dir_of("C:\\Users\\foo\\bar.cmm")).to_equal("C:\\Users\\foo")
+
+    it "dir_of handles mixed separators":
+        expect(dir_of("C:\\Users/foo\\bar.cmm")).to_equal("C:\\Users/foo")
+
+    it "dir_of returns empty for filename only":
+        expect(dir_of("main.cmm")).to_equal("")
+
+    it "normalize_path_sep converts backslashes":
+        expect(normalize_path_sep("C:\\Users\\foo\\bar.cmm")).to_equal("C:/Users/foo/bar.cmm")
+
+    it "normalize_path_sep preserves forward slashes":
+        expect(normalize_path_sep("/home/user/bar.cmm")).to_equal("/home/user/bar.cmm")
+
+    it "normalize_path_sep handles mixed separators":
+        expect(normalize_path_sep("C:\\Users/foo\\bar.cmm")).to_equal("C:/Users/foo/bar.cmm")
+
+    it "path_equals_ci matches same path":
+        expect(path_equals_ci("/home/user/FOO.cmm", "/home/user/foo.cmm")).to_equal(true)
+
+    it "path_equals_ci matches across separators":
+        expect(path_equals_ci("C:\\Users\\Foo\\bar.cmm", "C:/Users/foo/bar.cmm")).to_equal(true)
+
+    it "path_equals_ci rejects different paths":
+        expect(path_equals_ci("/home/user/foo.cmm", "/home/user/baz.cmm")).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Case-insensitive label lookup tests
+# ---------------------------------------------------------------------------
+
+describe "Case-insensitive label lookup":
+    it "GOSUB with different case produces no error":
+        val source = "MyLabel:\n  PRINT \"hello\"\n  ENDDO\n\nGOSUB mylabel\nENDDO"
+        val program = parse_cmm_source(source, "<test>")
+        val analysis = analyze_program(program)
+        # Should NOT have "Undefined label 'mylabel'" error
+        var has_undefined_label_error = false
+        var i = 0
+        while i < analysis.diagnostics.len():
+            val msg = analysis.diagnostics[i].message
+            if msg.contains("Undefined label") and msg.contains("mylabel"):
+                has_undefined_label_error = true
+            i = i + 1
+        expect(has_undefined_label_error).to_equal(false)
+
+    it "find_by_name_ci finds label with any case":
+        val source = "MyLabel:\n  ENDDO"
+        val program = parse_cmm_source(source, "<test>")
+        val analysis = analyze_program(program)
+        val syms_lower = analysis.symbols.find_by_name_ci("mylabel")
+        val syms_upper = analysis.symbols.find_by_name_ci("MYLABEL")
+        val syms_mixed = analysis.symbols.find_by_name_ci("MyLabel")
+        expect(syms_lower.len() > 0).to_equal(true)
+        expect(syms_upper.len() > 0).to_equal(true)
+        expect(syms_mixed.len() > 0).to_equal(true)
+
+    it "has_label_ci returns true for mismatched case":
+        val source = "setup_hw:\n  ENDDO"
+        val program = parse_cmm_source(source, "<test>")
+        val analysis = analyze_program(program)
+        expect(analysis.symbols.has_label_ci("SETUP_HW")).to_equal(true)
+        expect(analysis.symbols.has_label_ci("Setup_Hw")).to_equal(true)
+        expect(analysis.symbols.has_label_ci("setup_hw")).to_equal(true)
+
+    it "GOTO with uppercase target matches lowercase label":
+        val source = "init:\n  PRINT \"ok\"\n  ENDDO\n\nGOTO INIT\nENDDO"
+        val program = parse_cmm_source(source, "<test>")
+        val analysis = analyze_program(program)
+        var has_undefined = false
+        var i = 0
+        while i < analysis.diagnostics.len():
+            if analysis.diagnostics[i].message.contains("Undefined label"):
+                has_undefined = true
+            i = i + 1
+        expect(has_undefined).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Cross-file DO resolution tests
+# ---------------------------------------------------------------------------
+
+describe "Cross-file DO resolution":
+    it "resolve_file_reference normalizes backslash path":
+        val result = resolve_file_reference("utils\\init.cmm", "file:///C:/project/main.cmm")
+        if result.?:
+            val r = result ?? pass_todo("unreachable")
+            # Should contain forward slashes after normalization
+            expect(r.uri.contains("\\")).to_equal(false)
+            expect(r.uri.contains("utils/init.cmm")).to_equal(true)
+
+    it "resolve_file_reference adds .cmm extension case-insensitively":
+        val result = resolve_file_reference("utils/init.CMM", "file:///project/main.cmm")
+        if result.?:
+            val r = result ?? pass_todo("unreachable")
+            # Should NOT double-add .cmm since .CMM is already present
+            expect(r.uri.ends_with(".CMM")).to_equal(true)
+            expect(r.uri.contains(".CMM.cmm")).to_equal(false)
+
+    it "resolve_file_reference adds .cmm when no extension":
+        val result = resolve_file_reference("utils/init", "file:///project/main.cmm")
+        if result.?:
+            val r = result ?? pass_todo("unreachable")
+            expect(r.uri.ends_with(".cmm")).to_equal(true)

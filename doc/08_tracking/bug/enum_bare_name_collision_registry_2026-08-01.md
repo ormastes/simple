@@ -1,4 +1,8 @@
 # Enum bare-name collisions: enumeration, mechanism correction, and resolution options
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** ENUMERATION LANDED — no fix applied. Needs an owner decision on the
@@ -579,3 +583,4 @@ seed-side, it is not reversible file-by-file, and a partial attempt is a silent
 wrong answer at the ABI boundary. It needs its own sequenced lane with an
 artifact-compatibility plan. The three controls above are the tripwire that
 keeps it honest in the meantime.
+

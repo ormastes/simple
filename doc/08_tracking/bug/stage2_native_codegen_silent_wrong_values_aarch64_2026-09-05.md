@@ -1,4 +1,8 @@
 # Stage-2 native codegen produces silently wrong values on aarch64
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-05
@@ -162,3 +166,4 @@ a dict/map type**. Stage-2 compiles `src/lib` from source with the same
 `--source` roots used for the probe, so it had the same view the seed did and
 still returned a value. The claim stands: this is an unresolved method silently
 producing `3`, not a real method computing the wrong number.
+

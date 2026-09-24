@@ -1,0 +1,77 @@
+use std.spec.*
+use compiler.hir.archive.interface_action_archive.{
+    CompileActionRegistry, InterfaceActionArchiveV1, InterfaceArchiveSymbolV1,
+    CompileArchiveActionV1, SemanticContext, route_archive_install_begin_v1,
+    route_archive_install_stage_owned_v1, route_archive_install_commit_owned_v1,
+    route_archive_install_rollback_owned_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+
+fn test_variant_v1() -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1("test", "test", [], "test", "v1", [], [])
+
+fn test_archive_v1(package_key: text) -> InterfaceActionArchiveV1:
+    InterfaceActionArchiveV1(
+        package_key, test_variant_v1(), "producer", [], "interface", "actions",
+        [InterfaceArchiveSymbolV1("symbol", "fn", "type", "digest")],
+        [CompileArchiveActionV1("action", "compile", "symbol", "digest")])
+
+describe "archive install owner-result lifecycle":
+    it "returns one transaction owner through stage and rollback":
+        val archive = test_archive_v1("pkg")
+        val staged = route_archive_install_stage_owned_v1(
+            route_archive_install_begin_v1(), archive)
+        expect(staged.result.is_ok()).to_be(true)
+        val rolled_back = route_archive_install_rollback_owned_v1(
+            staged.transaction)
+        expect(rolled_back.closed).to_be(true)
+        expect(rolled_back.archives.len()).to_equal(0)
+
+    it "publishes both owners only through commit":
+        val archive = test_archive_v1("pkg")
+        val staged = route_archive_install_stage_owned_v1(
+            route_archive_install_begin_v1(), archive)
+        val committed = route_archive_install_commit_owned_v1(
+            staged.transaction, SemanticContext([], []),
+            CompileActionRegistry([], []))
+        expect(committed.result.is_ok()).to_be(true)
+        expect(committed.transaction.closed).to_be(true)
+        expect(committed.semantic_owner.archive_package_keys).to_contain("pkg")
+        expect(committed.action_owner.archive_package_keys).to_contain("pkg")
+
+    it "returns exactly one owner when duplicate staging fails":
+        val first = route_archive_install_stage_owned_v1(
+            route_archive_install_begin_v1(), test_archive_v1("pkg"))
+        val duplicate = route_archive_install_stage_owned_v1(
+            first.transaction, test_archive_v1("pkg"))
+        expect(duplicate.result.is_err()).to_be(true)
+        expect(duplicate.transaction.archives.len()).to_equal(1)
+        val restored = route_archive_install_rollback_owned_v1(
+            duplicate.transaction)
+        expect(restored.closed).to_be(true)
+
+    it "keeps both owners unchanged when package commit fails":
+        val staged = route_archive_install_stage_owned_v1(
+            route_archive_install_begin_v1(), test_archive_v1("pkg"))
+        val committed = route_archive_install_commit_owned_v1(
+            staged.transaction, SemanticContext(["pkg"], []),
+            CompileActionRegistry([], []))
+        expect(committed.result.is_err()).to_be(true)
+        expect(committed.semantic_owner.archive_package_keys.len()).to_equal(1)
+        expect(committed.semantic_owner.archive_symbols.len()).to_equal(0)
+        expect(committed.action_owner.archive_package_keys.len()).to_equal(0)
+        expect(committed.action_owner.archive_actions.len()).to_equal(0)
+
+    it "rejects duplicate action without partial publication":
+        val staged = route_archive_install_stage_owned_v1(
+            route_archive_install_begin_v1(), test_archive_v1("pkg"))
+        val existing = CompileArchiveActionV1(
+            "action", "compile", "symbol", "existing")
+        val committed = route_archive_install_commit_owned_v1(
+            staged.transaction, SemanticContext([], []),
+            CompileActionRegistry([], [existing]))
+        expect(committed.result.is_err()).to_be(true)
+        expect(committed.semantic_owner.archive_package_keys.len()).to_equal(0)
+        expect(committed.semantic_owner.archive_symbols.len()).to_equal(0)
+        expect(committed.action_owner.archive_package_keys.len()).to_equal(0)
+        expect(committed.action_owner.archive_actions.len()).to_equal(1)

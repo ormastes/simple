@@ -1,0 +1,84 @@
+# Application-facing lifecycle owner for the compiler environment-variant
+# startup port. It receives an already-collected policy request and delegates
+# all authority validation to the loader owner; it performs no policy lookup.
+
+use compiler.common.structural_contracts.environment_variant_startup_port_v1.*
+use compiler.loader.environment_variant_startup_binding_v1.*
+use compiler.driver.driver.{CompilerDriver}
+use compiler.common.structural_contracts.environment_variant_policy_v1.{
+    environment_variant_policy_resolve_v1}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{
+    frontend_advisory_policy_from_environment_decision_v1}
+
+pub class AppEnvironmentVariantStartupOwnerV1:
+    var loader: EnvironmentVariantStartupOwnerV1
+    var active: EnvironmentVariantStartupHandleV1?
+
+    pub static fn create() -> AppEnvironmentVariantStartupOwnerV1:
+        AppEnvironmentVariantStartupOwnerV1(
+            loader: EnvironmentVariantStartupOwnerV1.create(), active: nil)
+
+pub fn app_environment_variant_startup_set_candidate_v1(
+    owner: AppEnvironmentVariantStartupOwnerV1,
+    context: FrontendLexicalAdvisoryBindingContextV1
+) -> Result<(), EnvironmentVariantStartupErrorV1>:
+    environment_variant_startup_set_candidate_v1(owner.loader, context)
+
+pub fn app_environment_variant_startup_open_v1(
+    owner: AppEnvironmentVariantStartupOwnerV1,
+    request: EnvironmentVariantStartupRequestV1
+) -> Result<EnvironmentVariantStartupReceiptV1, EnvironmentVariantStartupErrorV1>:
+    if owner.active.?: return Err(EnvironmentVariantStartupErrorV1.Busy)
+    val opened = environment_variant_startup_open_v1(owner.loader, request)?
+    owner.active = Some(opened.0)
+    Ok(opened.1)
+
+pub fn app_environment_variant_startup_open_driver_v1(
+    owner: AppEnvironmentVariantStartupOwnerV1,
+    request: EnvironmentVariantStartupRequestV1,
+    driver: CompilerDriver
+) -> Result<EnvironmentVariantStartupReceiptV1, EnvironmentVariantStartupErrorV1>:
+    val receipt = app_environment_variant_startup_open_v1(owner, request)?
+    val retained = environment_variant_startup_project_receipt_v1(
+        owner.loader, request, receipt)
+    if retained.is_err():
+        if app_environment_variant_startup_close_v1(owner).is_err():
+            return Err(EnvironmentVariantStartupErrorV1.CleanupFailed)
+        return Err(EnvironmentVariantStartupErrorV1.InvalidRequest)
+    val exact = retained.unwrap()
+    val decision = environment_variant_policy_resolve_v1(request.collection.policy_inputs)
+    if decision.is_err():
+        if app_environment_variant_startup_close_v1(owner).is_err():
+            return Err(EnvironmentVariantStartupErrorV1.CleanupFailed)
+        return Err(EnvironmentVariantStartupErrorV1.InvalidRequest)
+    val policy = decision.unwrap()
+    driver.ctx.frontend_advisory_policy =
+        frontend_advisory_policy_from_environment_decision_v1(policy)
+    driver.ctx.environment_variant_policy_digest = policy.policy_digest
+    driver.ctx.environment_variant_frontend_owner_id = 0u64
+    driver.ctx.environment_variant_frontend_session_id = 0u64
+    driver.ctx.environment_variant_frontend_generation = 0u64
+    if exact.status == EnvironmentVariantStartupStatusV1.Selected:
+        driver.ctx.environment_variant_frontend_owner_id = exact.handle.owner_id
+        driver.ctx.environment_variant_frontend_session_id = exact.handle.session_id
+        driver.ctx.environment_variant_frontend_generation = exact.handle.generation
+    driver.ctx.environment_variant_frontend_cache_identity =
+        environment_variant_startup_cache_identity_v1(exact)
+    Ok(exact)
+
+pub fn app_environment_variant_startup_validate_v1(
+    owner: AppEnvironmentVariantStartupOwnerV1
+) -> bool:
+    match owner.active:
+        Some(handle): environment_variant_startup_validate_v1(owner.loader, handle)
+        nil: false
+
+pub fn app_environment_variant_startup_close_v1(
+    owner: AppEnvironmentVariantStartupOwnerV1
+) -> Result<(), EnvironmentVariantStartupErrorV1>:
+    match owner.active:
+        Some(handle):
+            environment_variant_startup_close_v1(owner.loader, handle)?
+            owner.active = nil
+            Ok(())
+        nil: Err(EnvironmentVariantStartupErrorV1.AlreadyClosed)

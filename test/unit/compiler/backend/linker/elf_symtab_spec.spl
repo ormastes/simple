@@ -1,0 +1,203 @@
+# Internal ELF linker: .symtab / .strtab in linked outputs — lane B2 (A7 hardening)
+#
+# Outputs carry a non-allocated SHT_SYMTAB (+ its SHT_STRTAB) so nm, readelf
+# and debuggers see symbols: locals first (per input file, STT_SECTION
+# dropped, FILE kept as SHN_ABS, hidden globals demoted to LOCAL like ld.lld),
+# then globals in first-reference order, imports as UND; sh_info = index of
+# the first global. Symbol sets are compared with ld.lld's output for the
+# same fixtures (evidence in the lane report); the only local ld.lld keeps
+# that this linker cannot is a mapping symbol inside a non-allocated input
+# section (.comment), which has no output section here.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/synthetic_sections.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_static_link, elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+val FIX: text = "test/fixtures/linker/elf"
+val GLIBC: text = "/usr/lib/aarch64-linux-gnu"
+val SHT_SYMTAB: i64 = 2
+val SHT_STRTAB: i64 = 3
+val PT_LOAD: i64 = 1
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn shdr_index(b: [i64], name: text) -> i64:
+    (shdr_by_name(b, name) - rd64(b, 0x28)) / 64
+
+struct Sym:
+    name: text
+    bind: i64
+    typ: i64
+    other: i64
+    shndx: i64
+    value: i64
+    size: i64
+
+fn symtab(b: [i64]) -> [Sym]:
+    val h = shdr_by_name(b, ".symtab")
+    val so = rd64(b, h + 24)
+    val n = rd64(b, h + 32) / 24
+    val str = rd64(b, shdr_by_name(b, ".strtab") + 24)
+    var out: [Sym] = []
+    var i: i64 = 0
+    while i < n:
+        val e = so + i * 24
+        out = out.push(Sym(name: cstr(b, str + rd32(b, e)), bind: b[e + 4] >> 4, typ: b[e + 4] & 0xf,
+            other: b[e + 5], shndx: rd16(b, e + 6), value: rd64(b, e + 8), size: rd64(b, e + 16)))
+        i = i + 1
+    out
+
+fn find_sym(syms: [Sym], name: text) -> i64:
+    var i: i64 = 0
+    while i < syms.len():
+        if syms[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn static_a64() -> [i64]:
+    val r = elf_static_link([load_path("{FIX}/start_a64.o"), load_path("{FIX}/lib_a64.o")], [], "_start", RelocArch.AArch64)
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+fn dynamic_a64() -> [i64]:
+    val objs = [load_path("{GLIBC}/crt1.o"), load_path("{GLIBC}/crti.o"),
+        load_path("{FIX}/hello_libc_a64.o"), load_path("{GLIBC}/crtn.o")]
+    val r = elf_link(ElfLinkRequest(objects: objs, archives: [], shared: [file_read_bytes("{GLIBC}/libc.so.6")],
+        entry: "_start", target: RelocArch.AArch64, mode: ELF_LINK_DYNAMIC_EXEC, interp: "/lib/ld-linux-aarch64.so.1"))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "elf_link - .symtab section header":
+    it "is a non-allocated SHT_SYMTAB linked to a SHT_STRTAB, entsize 24":
+        val b = static_a64()
+        val h = shdr_by_name(b, ".symtab")
+        expect(h > 0).to_equal(true)
+        expect(rd32(b, h + 4)).to_equal(SHT_SYMTAB)
+        expect(rd64(b, h + 8)).to_equal(0)
+        expect(rd64(b, h + 16)).to_equal(0)
+        expect(rd64(b, h + 56)).to_equal(24)
+        expect(rd32(b, h + 40)).to_equal(shdr_index(b, ".strtab"))
+        expect(rd32(b, shdr_by_name(b, ".strtab") + 4)).to_equal(SHT_STRTAB)
+
+    it "is not covered by any PT_LOAD":
+        val b = static_a64()
+        val so = rd64(b, shdr_by_name(b, ".symtab") + 24)
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val ph = rd64(b, 32) + i * 56
+            if rd32(b, ph) == PT_LOAD:
+                val lo = rd64(b, ph + 8)
+                expect(so >= lo + rd64(b, ph + 32)).to_equal(true)
+            i = i + 1
+
+describe "elf_link - .symtab contents (static aarch64)":
+    it "puts locals before globals and sh_info at the first global":
+        val b = static_a64()
+        val syms = symtab(b)
+        val first = rd32(b, shdr_by_name(b, ".symtab") + 44)
+        expect(first > 1).to_equal(true)
+        expect(first < syms.len()).to_equal(true)
+        var i: i64 = 0
+        while i < syms.len():
+            if i < first:
+                expect(syms[i].bind).to_equal(0)
+            else:
+                expect(syms[i].bind != 0).to_equal(true)
+            i = i + 1
+
+    it "lists ld.lld's globals in ld.lld's order with final addresses":
+        val b = static_a64()
+        val syms = symtab(b)
+        val first = rd32(b, shdr_by_name(b, ".symtab") + 44)
+        var globals: [text] = []
+        var i = first
+        while i < syms.len():
+            globals = globals.push(syms[i].name)
+            i = i + 1
+        expect(globals).to_equal(["_start", "msg", "add_val", "base", "scratch"])
+        val s = syms[find_sym(syms, "_start")]
+        expect(s.value).to_equal(rd64(b, 24))
+        expect(s.typ).to_equal(2)
+        expect(s.size).to_equal(60)
+        expect(s.shndx).to_equal(shdr_index(b, ".text"))
+        expect(syms[find_sym(syms, "base")].typ).to_equal(1)
+
+    it "keeps FILE symbols as SHN_ABS and drops section symbols":
+        val b = static_a64()
+        val syms = symtab(b)
+        val f = find_sym(syms, "start_a64.c")
+        expect(f > 0).to_equal(true)
+        expect(syms[f].typ).to_equal(4)
+        expect(syms[f].shndx).to_equal(0xfff1)
+        expect(find_sym(syms, "lib_a64.c") > f).to_equal(true)
+        for s in syms:
+            expect(s.typ != 3).to_equal(true)
+
+describe "elf_link - .symtab contents (dynamic libc)":
+    it "has imports as UND, demotes hidden crt globals to LOCAL, and names _DYNAMIC":
+        val b = dynamic_a64()
+        val syms = symtab(b)
+        val p = syms[find_sym(syms, "puts")]
+        expect(p.shndx).to_equal(0)
+        expect(p.bind).to_equal(1)
+        expect(p.typ).to_equal(2)
+        val m = syms[find_sym(syms, "main")]
+        expect(m.bind).to_equal(1)
+        expect(m.shndx).to_equal(shdr_index(b, ".text"))
+        val init = syms[find_sym(syms, "_init")]
+        expect(init.bind).to_equal(0)
+        expect(init.other).to_equal(2)
+        val d = syms[find_sym(syms, "_DYNAMIC")]
+        expect(d.bind).to_equal(0)
+        expect(d.shndx).to_equal(shdr_index(b, ".dynamic"))
+        expect(d.value).to_equal(rd64(b, shdr_by_name(b, ".dynamic") + 16))
+        val g = syms[find_sym(syms, "__gmon_start__")]
+        expect(g.bind).to_equal(2)
+        expect(g.shndx).to_equal(0)

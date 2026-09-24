@@ -1,4 +1,9 @@
 # Web layout/paint engine has no device-pixel-ratio / DPI scaling hook
+## Closed 2026-09-16 — ... purposes while (b) multiplying resolved px lengths by the DPR when computing box geometry
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -61,3 +66,4 @@ for media-query/vw purposes while (b) multiplying resolved px lengths by the
 DPR when computing box geometry and glyph metrics for the full-resolution
 raster buffer. This is a genuine (if bounded) engine change and should be
 scoped and reviewed on its own, not bundled into a showcase resolution bump.
+

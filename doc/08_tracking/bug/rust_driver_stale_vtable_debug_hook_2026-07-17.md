@@ -1,4 +1,9 @@
 # Rust Driver Stale Vtable Debug Hook
+## Closed 2026-09-16 — Status: Fixed in source 2026-07-17 by deleting temporary driver hook
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -27,3 +32,4 @@ the same change that removes their implementation.
 Verification was not retried in this session because three bounded driver-test
 attempts had already reached the repository's hard retry cap: one compile
 timeout, one library-target link failure, and this binary-target compile error.
+

@@ -119,7 +119,12 @@ Lane 0 contracts
 - **Work:** transport translation only over injected `VirtualSourceStoreV1`; delete/seal tool-side parsing/generation/index paths without touching dirty files; retain generated/untrusted provenance and bounds.
 - **Dependencies:** Lanes 0, 3 and 4.
 - **Sidecar:** Codex Spark may inventory competing generators read-only.
-- **Acceptance:** MCP and LSP MCP list/stat/read/page bytes/errors/digests match core and each other; no parser/source-reader/subprocess dependency; token/root/session/capability attacks fail.
+- **Acceptance:** MCP and LSP MCP list/stat/read/page bytes/errors/digests match core and each other; no parser/source-reader or per-request subprocess dependency; token/root/session/capability attacks fail. Repeated semantic queries prove one lazy worker startup; edits and newly visible imports change results; hung/flooding workers remain byte/time bounded and are reaped; restart results match the bounded one-shot oracle; idle/cache retirement meets the RSS budget.
+- **Ordered work:** extract non-printing query results; bound/replace nested grep;
+  qualify framed piped-process reads and stderr drainage; add the sequential
+  session worker without answer caching; then add digest-keyed byte-budgeted
+  outline snapshots. Workspace answer caching waits for complete snapshot,
+  membership, absence-witness and editor-overlay invalidation.
 
 ## Lane 5C — SPipe adapter
 
@@ -153,7 +158,7 @@ Lane 0 contracts
 ## Lane 8 — Integration, shadow rollout and bootstrap
 
 - **Worktree:** the primary integrated bootstrap worktree only; no side branch.
-- **Exact ownership:** merge commits, cache activation configuration owned by the new cache modules, minimal invocations in `scripts/bootstrap/bootstrap-phase-verification.shs`, and evidence under `doc/09_report/compiler_semantic_cache_manager/`. The merge owner performs this lane.
+- **Exact ownership:** merge commits, cache activation configuration owned by the new cache modules, minimal invocations in `scripts/bootstrap/bootstrap-phase-verification.shs`, and future evidence under `doc/09_report/compiler_semantic_cache_manager/`. That report path is currently absent, so it is not evidence for this plan. The merge owner performs this lane.
 - **Must not edit:** semantics merely to make tests pass; failures return to owning lane.
 - **Work:** merge in dependency order; observe then shadow AST/summary/object reuse; collect zero-divergence evidence; activate frontend authority, then object authority, then GC; build admitted pure-Simple Phase 2 and incremental Phase 3; run compiler/interpreter/loader, CLI/tools, MCP/LSP and full test/sanity matrices; run performance gate.
 - **Dependencies:** all implementation lanes and independent per-lane review.
@@ -163,7 +168,7 @@ Lane 0 contracts
 ## Lane 9 — Independent final verification
 
 - **Worktree:** fresh read-only verification worktree created from the exact candidate commit.
-- **Exact ownership:** standalone report `doc/09_report/compiler_semantic_cache_manager/final_verification.md` only; fixes are returned to owners and reviewed again.
+- **Exact ownership:** future standalone report `doc/09_report/compiler_semantic_cache_manager/final_verification.md` only; it is currently absent and cannot provide acceptance evidence. Fixes are returned to owners and reviewed again.
 - **Reviewer:** best available normal/highest-capability agent, independent of Lanes 0–8.
 - **Sidecar:** N/A.
 - **Work:** requirement-by-requirement trace; inspect actual code and tests; reproduce one corruption, one mutation race, daemon failure, journal recovery, cross-worktree hit, summary authorization, capsule closure and paired perf verdict; run production readiness/stub and direct-env guards.
@@ -180,3 +185,23 @@ Lane 0 contracts
 7. Lane 9 must issue `STATUS: PASS` before release.
 
 Each acceptance command runs at most once after it is green in a session. Limit each failing lane to three fix/verify cycles, then report the remaining failure rather than looping. Cache-preserving incremental builds are mandatory; a full clean rebuild requires recorded evidence that identity/schema invalidation demands it.
+
+## Metadata-first extension lanes (2026-09-08)
+
+Shared additions are frozen before parallel work: `GenerationManifestV1`, `PackageInitTldV1`, `ThreePayloadSemanticRefV2`, `ThreePayloadClosureSealV2`, `PreparedThreePayloadV2`, `SemanticQueryReadManifestV1`, `ReverseReferenceShardV1`, `PortableBaseSioV1`, `PortableComposedSioV1`, `AdviceCallPlanV1`, and `CacheServiceCore`. The V1 `ThreePayloadCompileV1` compatibility/model surface retains its existing meaning and is not a strict-admission interface. The query manifest is additive and does not reinterpret external-effect `SemanticReadSetV1`. Sidecars may inventory and generate adversarial fixtures only; the merge owner owns schemas and admission semantics, and Astra performs final architecture/evidence review.
+
+| Order | Lane | Owner scope | Exit condition |
+|---:|---|---|---|
+| P0 | Contract delta | Lane 0 common contracts and codecs | Canonical query-read vectors, bounds, and no reinterpretation or duplicate schema |
+| P1 | Summary graph CPU work | Lane 2 projector | Interned IDs + adjacency and linear SCC discovery; canonical bytes unchanged |
+| P2 | Physical metadata | Lanes 2/3 | Golden vectors prove the single self-indexed physical `.tld` representation and its readable virtual TLDR rendering, plus package `__init__.tld`; `.rr` rebuilds from reads; navigation/loader projections stay non-authoritative; no digest cycles |
+| P3 | Query cutoff | Lanes 1/2/3 | Seal closure under byte/section/decode-RSS bounds; restricted frontend worker consumes three payloads warm and two cold (`.spl` + optional prior `.tld` + closure-complete `__init__.tld`); stage-qualified counters prove zero worker `.rr`/hidden reads; macro executable content, aspect callable refs, and trait facets follow typed policies; typed fallback names every external open; coordinator `.rr` restores/deltas complete query reads |
+| P4 | Portable object | Lane 4A, existing HIR/MIR owners | Lossless feature-preservation matrix is complete; base/composed `.sio` keys are distinct; final composition is immutable; verifier rejects target leakage and native execution |
+| P5 | Callable aspects | AOP owner + Lane 4A | Typed before/after calls pass with static catalog/facet/read identity; dynamic registry generations retain guarded loader dispatch; around/structural/incomplete selectors fail closed |
+| P6 | Pure-Simple blob/cache core | DB + cache owners | Private core remains behind `CacheGatewayV1`; bounded streaming leases, crash recovery, DB reconstruction, and direct/IPC parity |
+| P7 | HTTP/cache server | HTTP adapter owner | Auth/quotas/leases/retry; unavailable server preserves output within fallback budget |
+| P8 | Target fan-out/providers | backend/loader owners | Named composed-SIO -> existing build-plan/`BinaryObjectActionV1` projection feeds qualified targets with exact receipt; host ISA cannot leak into output target |
+| P9 | Java/Go parity | Lane 7 evidence owner | Independent matched `.sio`/Java-class and Simple-target-object/Go-package fixtures produce separate NFR-CSM-013 verdict receipts with complete provenance; neither verdict can satisfy the other |
+| P10 | Integration/review | merge owner, then independent Astra | Phase 2/3 parity, requirements trace, `STATUS: PASS` before authority/release |
+
+P1, Pure-Simple blob-storage prototyping, and parity-fixture construction may proceed concurrently after P0. P4 starts after the portability inventory freezes. P5 depends on stable joinpoint and effect contracts. P7 depends on P6 durability semantics, while target fan-out does not depend on remote cache deployment. GPU and optional native providers never block the pure-Simple correctness route.

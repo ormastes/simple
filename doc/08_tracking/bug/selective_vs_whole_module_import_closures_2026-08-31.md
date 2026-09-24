@@ -1,4 +1,8 @@
 # `use M` vs `use M.{x}`: two independent defects, not one (2026-08-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Investigates the convergence of PR #182's `Dict` cluster ("`use M` compiles clean
 but `use M.{x}` fails — they build different closures") and PR #183's R2/R3
@@ -141,3 +145,4 @@ loaders, filed rather than "fixed" without a repro.
 
 ## Not done
 No test, assertion or gate was weakened, skipped or deleted. No Rust changed.
+

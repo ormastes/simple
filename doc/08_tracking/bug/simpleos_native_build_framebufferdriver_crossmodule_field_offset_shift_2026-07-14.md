@@ -1,4 +1,8 @@
 # BUG: freestanding native-build shifts cross-module struct field offsets by one slot for classes with `[u32]` array fields (SimpleOS 4K WM render)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source fix and regressions added; executable native/PPM verification pending
 **Severity:** high (blocks the SimpleOS x86_64 4K WM desktop from rendering a real PPM; cr2=0x0 null-deref cascade)
@@ -443,3 +447,4 @@ Same-day landing of interconnected struct-lowering root causes:
 - `8932fcb3a14`: vtable keyed by struct NAME not per-module TypeId (all 13 RenderBackend vtables now emitted; Symptom B root fix in sibling bug `simpleos_native_build_field_defaults_and_boxed_trait_dispatch_2026-07-16.md`)
 
 **Access.rs field-type pre-scan patch READY but UNCOMMITTED on disk** (at `scratchpad/screendump_handoff/compiler_field_fix.patch`). The patch recovers receiver-struct name from erased ANY to resolve ambiguous field indices correctly; bootstrap-safe (seed rebuild 3m29s, no regression). Awaiting runtime verification of: (1) composition builds fully, (2) Engine2D creation dims read correctly, (3) first-frame-rendered screendump non-black.
+

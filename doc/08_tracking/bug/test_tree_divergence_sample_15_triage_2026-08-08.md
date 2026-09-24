@@ -1,4 +1,8 @@
 # Test-tree divergence: 15-pair sample triage (2026-08-08)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** 2 pairs reconciled (real fixes, verified green/red/green). 1 pair
 flagged as **CONTRADICTORY** (do not touch). 12 pairs classified, not touched.
@@ -291,3 +295,4 @@ design, the next run of `check-test-tree-divergence.shs` will report them as
 human to now shrink the baseline for exactly these 2 lines. That baseline
 edit was intentionally left for a reviewer, not done here, since this task's
 scope was the sample triage plus the fixes, not baseline maintenance.
+

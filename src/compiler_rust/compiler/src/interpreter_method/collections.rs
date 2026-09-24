@@ -1206,6 +1206,60 @@ pub fn handle_frozen_dict_methods(
     handle_dict_methods(map.as_ref(), method, args, env, functions, classes, enums, impl_methods)
 }
 
+/// Apply a dict mutating method to a `&mut HashMap<String, Value>` in place.
+///
+/// This is the single mutation kernel shared by BOTH the ownership-gated in-place
+/// fast path (uniquely-owned dict -- `Arc::make_mut` in
+/// `interpreter_helpers/patterns.rs`) and the clone-then-mutate slow path in
+/// `handle_dict_methods` below, so the two paths are provably byte-for-byte
+/// identical in semantics; only *where* the `HashMap` lives differs. Same
+/// discipline as `apply_array_mutation_in_place` for arrays.
+///
+/// Unlike the array kernel this returns `()`, not `Option<Value>`: every dict
+/// mutator's expression result is the DICT itself. `d.remove(k)` yields the
+/// updated dict, deliberately UNLIKE `array.remove(i)`, which returns the removed
+/// element (2026-07-20 contract fix). Pinned by
+/// `test/05_perf/interp/dict_mutator_scaling_spec.spl`.
+///
+/// Arguments are pre-evaluated by the caller, exactly once: `key` is the raw key
+/// `Value` (not just its string form -- `set`/`insert` needs it for
+/// `wrap_dict_entry`, which preserves a non-text key's original type), and `value`
+/// carries the payload for `set`/`insert` or the other dict for `merge`/`extend`.
+/// A missing `merge`/`extend` argument is the caller's empty-dict default, which
+/// is a no-op; a non-dict argument is the same `TYPE_MISMATCH` the functional arm
+/// has always raised.
+pub(crate) fn apply_dict_mutation_in_place(
+    method: &str,
+    map: &mut HashMap<String, Value>,
+    key: Option<Value>,
+    value: Option<Value>,
+) -> Result<(), CompileError> {
+    match method {
+        "set" | "insert" => {
+            let key_val = key.unwrap_or(Value::Nil);
+            let key_str = key_val.to_key_string();
+            map.insert(key_str, Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil)));
+        }
+        "remove" | "delete" => {
+            map.remove(&key.unwrap_or(Value::Nil).to_key_string());
+        }
+        "merge" | "extend" => match value {
+            Some(Value::Dict(other)) => {
+                map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("merge expects a dict argument");
+                return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
+            }
+        },
+        "clear" => map.clear(),
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Handle Dict methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_dict_methods(
@@ -1253,18 +1307,23 @@ pub fn handle_dict_methods(
                 .collect();
             Value::array(vals)
         }
+        // The three arms below are the CLONE-THEN-MUTATE lane: this entry point only
+        // ever receives a `&HashMap`, so it cannot mutate the caller's Arc and must
+        // copy. When the receiver is a bare identifier the statement path in
+        // `interpreter_helpers/patterns.rs` owns the slot and runs the same kernel
+        // through `Arc::make_mut` instead, which is what makes dict building and
+        // draining O(N) rather than O(N^2).
         "set" | "insert" => {
             let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let key = key_val.to_key_string();
             let value = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_map = map.clone();
-            new_map.insert(key, Value::wrap_dict_entry(&key_val, value));
+            apply_dict_mutation_in_place(method, &mut new_map, Some(key_val), Some(value))?;
             Value::Dict(Arc::new(new_map))
         }
         "remove" | "delete" => {
-            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let key_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_map = map.clone();
-            new_map.remove(&key);
+            apply_dict_mutation_in_place(method, &mut new_map, Some(key_val), None)?;
             Value::Dict(Arc::new(new_map))
         }
         "merge" | "extend" => {
@@ -1278,17 +1337,14 @@ pub fn handle_dict_methods(
                 enums,
                 impl_methods,
             )?;
-            if let Value::Dict(other_map) = other {
-                let mut new_map = map.clone();
-                new_map.extend(other_map.iter().map(|(k, v)| (k.clone(), v.clone())));
-                Value::Dict(Arc::new(new_map))
-            } else {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::TYPE_MISMATCH)
-                    .with_help("merge expects a dict argument");
-                return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
-            }
+            let mut new_map = map.clone();
+            apply_dict_mutation_in_place(method, &mut new_map, None, Some(other))?;
+            Value::Dict(Arc::new(new_map))
         }
+        // Already O(1) -- a fresh empty map costs nothing to build, so this arm
+        // does NOT go through the kernel's clone-then-mutate shape (that would
+        // make `clear` linear). The kernel's own `clear` arm is the in-place
+        // equivalent used by the identifier fast path.
         "clear" => {
             // Return empty dict (functional style - original is not modified)
             Value::Dict(Arc::new(HashMap::new()))
@@ -1578,7 +1634,6 @@ mod keys_materialization_tests {
             },
             simd_requested: false,
             is_suspend: false,
-            auto_enumerate: false,
             invariants: vec![],
             label: None,
         };
@@ -1642,7 +1697,6 @@ mod keys_materialization_tests {
                 },
                 simd_requested: false,
                 is_suspend: false,
-                auto_enumerate: false,
                 invariants: vec![],
                 label: None,
             };

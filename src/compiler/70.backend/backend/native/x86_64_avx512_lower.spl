@@ -1,0 +1,268 @@
+# Fixed SIMD instruction selection. This owner snapshots vector operands in
+# frame storage and uses only volatile ZMM0..3 / k1..3 within one instruction.
+use compiler.mir.mir_data.*
+use compiler.backend.common.isel_context.{ISelContext, isel_frame_offset, isel_alloc_frame_slot}
+use compiler.backend.common.isel_common.{ISelInstResult, isel_fresh_dest, local_vreg_op}
+use compiler.backend.native.mach_inst.*
+use compiler.backend.native.x86_64_avx512.{X86_ZMM0}
+use compiler.backend.native.x86_64_avx512_isel.{x86_avx512_shape, x86_avx512_source_shape, x86_avx512_operand_local}
+use compiler.backend.native.x86_64_avx512_ops.*
+use std.common.binary_io.{f64_to_bits}
+use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits}
+
+val AVX512_SCRATCH_A: i64 = -9001
+val AVX512_SCRATCH_B: i64 = -9002
+val AVX512_SCRATCH_C: i64 = -9003
+
+fn x86_avx512_allocate_scratch_slots(ctx: ISelContext) -> ISelContext:
+    var out = isel_alloc_frame_slot(ctx, AVX512_SCRATCH_A, 64)
+    out = isel_alloc_frame_slot(out, AVX512_SCRATCH_B, 64)
+    isel_alloc_frame_slot(out, AVX512_SCRATCH_C, 64)
+
+fn x86_avx512_handles(inst: MirInst, shapes: Dict<i64, text>) -> bool:
+    # A denied AVX-512 capability produces no planned shapes.  In that state
+    # every SIMD instruction must remain available to the AVX2/SSE/portable
+    # selector instead of reaching an encoder that can emit ZMM instructions.
+    if shapes.len() == 0: return false
+    match inst.kind:
+        # Keep these arms separate. The self-hosted match lowering previously
+        # miscompiled the long comma-alternative arm as a catch-all, routing a
+        # scalar hello-world instruction into the AVX-512 owner.
+        case Copy(dest, _): shapes.contains_key(dest.id)
+        case Move(dest, _): shapes.contains_key(dest.id)
+        case MirSimdLoad(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdStore(value, _, _): x86_avx512_source_shape(shapes, value) != ""
+        case MirSimdSplat(dest, _, _): shapes.contains_key(dest.id)
+        case MirSimdGather(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdScatter(value, _, _): x86_avx512_source_shape(shapes, value) != ""
+        case MirSimdBinop(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdTernop(dest, _, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdUnop(dest, _, _): shapes.contains_key(dest.id)
+        case MirSimdReduce(_, source, _): x86_avx512_source_shape(shapes, source) != ""
+        case MirSimdShuffle(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdPermute(dest, _, _): shapes.contains_key(dest.id)
+        case MirSimdCmp(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdSelect(dest, _, _, _): shapes.contains_key(dest.id)
+        case MirSimdMaskOp(dest, _, _, _): shapes.contains_key(dest.id)
+        case _: false
+
+class Avx512InstructionLowerer:
+    ctx: ISelContext
+    insts: [MachInst]
+    shapes: Dict<i64, text>
+
+    fn slot(local: i64) -> Operand:
+        if not self.ctx.frame_slots.contains_key(local): panic("AVX-512 local has no frame storage")
+        op_mem(physical_reg(X86_RBP), 0 - isel_frame_offset(self.ctx, local))
+
+    fn offset(local: i64) -> i64:
+        0 - isel_frame_offset(self.ctx, local)
+
+    me fresh() -> Operand:
+        val lowered = isel_fresh_dest(self.ctx)
+        self.ctx = lowered.ctx
+        lowered.result
+
+    me emit(opcode: i64, operands: [Operand]):
+        self.insts.push(new_mach_inst(opcode, operands))
+
+    me scalar(value: MirOperand) -> Operand:
+        match value.kind:
+            case Copy(local), Move(local): local_vreg_op(local.id)
+            case Const(constant, type_):
+                var bits = 0
+                match constant:
+                    case Int(value): bits = value
+                    case Bool(value): bits = if value: 1 else: 0
+                    case Float(value):
+                        match type_.kind:
+                            case F32: bits = math_f64_round_to_f32_bits(value)
+                            case F64: bits = f64_to_bits(value)
+                            case _: panic("SIMD floating constant has a non-floating type")
+                    case Zero: bits = 0
+                    case _: panic("SIMD scalar input must be numeric or a pointer local")
+                val dest = self.fresh()
+                self.emit(X86_OP_MOV_REG_IMM, [dest, op_imm(bits)])
+                dest
+
+    me load_local(local: i64, zmm: i64, width: i64):
+        self.emit(X86_OP_AVX512_LOADU, [op_phys(X86_ZMM0 + zmm), self.slot(local), op_imm(width)])
+
+    me load(value: MirOperand, zmm: i64):
+        val local = x86_avx512_operand_local(value)
+        val width = if x86_avx512_shape(self.shapes, local) == "i32x8": 32 else: 64
+        self.load_local(local, zmm, width)
+
+    me store(local: i64, zmm: i64):
+        val width = if x86_avx512_shape(self.shapes, local) == "i32x8": 32 else: 64
+        self.emit(X86_OP_AVX512_STOREU, [self.slot(local), op_phys(X86_ZMM0 + zmm), op_imm(width)])
+
+    me snapshot(value: MirOperand, scratch: i64):
+        self.load(value, 0)
+        # All private scratch slots are 64 bytes, including i32x8 controls.
+        self.emit(X86_OP_AVX512_STOREU, [self.slot(scratch), op_phys(X86_ZMM0), op_imm(64)])
+
+    me kload(value: MirOperand, kreg: i64):
+        self.emit(X86_OP_AVX512_KLOAD, [op_imm(kreg), self.slot(x86_avx512_operand_local(value))])
+
+    me kstore(local: i64, kreg: i64):
+        self.emit(X86_OP_AVX512_KSTORE, [self.slot(local), op_imm(kreg), op_imm(if x86_avx512_shape(self.shapes, local) == "mask8": 8 else: 16)])
+
+    me indexed(value_local: i64, index_local: i64, base: Operand, base_offset: i64, shape: i64, store: bool):
+        val index_reg = self.fresh()
+        val data_reg = self.fresh()
+        self.emit(X86_OP_AVX512_INDEXED, [index_reg, data_reg, base, op_imm(self.offset(value_local)), op_imm(self.offset(index_local)), op_imm(base_offset), op_imm(shape), op_imm(if store: 1 else: 0)])
+
+    me bounds(local: i64, count: i64, limit: i64):
+        val scratch = self.fresh()
+        self.emit(X86_OP_AVX512_BOUNDS, [scratch, self.slot(local), op_imm(count), op_imm(limit)])
+
+    me write_control_lane(local: i64, lane: i64, value: i64):
+        val scratch = self.fresh()
+        self.emit(X86_OP_MOV_REG_IMM, [scratch, op_imm(value)])
+        self.emit(X86_OP_MOV_MEM32_REG, [op_mem(physical_reg(X86_RBP), self.offset(local) + lane * 4), scratch])
+
+    me lower(inst: MirInst):
+        match inst.kind:
+            case MirSimdLoad(dest, ptr, _, _):
+                val pointer = self.scalar(ptr)
+                val width = if x86_avx512_shape(self.shapes, dest.id) == "i32x8": 32 else: 64
+                self.emit(X86_OP_AVX512_LOADU, [op_phys(X86_ZMM0), op_mem(operand_get_reg(pointer), 0), op_imm(width)])
+                self.store(dest.id, 0)
+            case MirSimdStore(value, ptr, _):
+                val pointer = self.scalar(ptr)
+                self.load(value, 0)
+                val width = if x86_avx512_source_shape(self.shapes, value) == "i32x8": 32 else: 64
+                self.emit(X86_OP_AVX512_STOREU, [op_mem(operand_get_reg(pointer), 0), op_phys(X86_ZMM0), op_imm(width)])
+            case MirSimdSplat(dest, value, _):
+                val scalar = self.scalar(value)
+                self.emit(X86_OP_MOV_MEM_REG, [self.slot(AVX512_SCRATCH_A), scalar])
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                self.emit(X86_OP_AVX512_SPLAT, [op_imm(0), self.slot(AVX512_SCRATCH_A), op_imm(shape)])
+                self.store(dest.id, 0)
+            case Copy(dest, source), Move(dest, source):
+                val shape = x86_avx512_shape(self.shapes, dest.id)
+                if shape == "mask8" or shape == "mask16":
+                    self.kload(MirOperand.copy(source), 1)
+                    self.kstore(dest.id, 1)
+                else:
+                    self.load(MirOperand.copy(source), 0)
+                    self.store(dest.id, 0)
+            case MirSimdBinop(dest, lhs, rhs, op):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                val code = avx512_binop_code(op)
+                if code >= 11: self.bounds(x86_avx512_operand_local(rhs), 16, 32)
+                self.load(lhs, 0)
+                self.load(rhs, 1)
+                var opcode = -1
+                if shape == 1 and code >= 1 and code <= 4: opcode = X86_OP_VADDPS_ZMM + code - 1
+                elif shape == 2 and code >= 1 and code <= 4: opcode = X86_OP_VADDPD_ZMM + code - 1
+                elif shape == 3 and code >= 1 and code <= 3: opcode = X86_OP_VPADDD_ZMM + code - 1
+                elif shape == 3 and code >= 7 and code <= 9: opcode = X86_OP_VPANDD_ZMM + code - 7
+                if opcode >= 0:
+                    self.emit(opcode, [op_phys(X86_ZMM0), op_phys(X86_ZMM0), op_phys(X86_ZMM0 + 1)])
+                else:
+                    self.emit(X86_OP_AVX512_BINARY, [op_imm(0), op_imm(0), op_imm(1), op_imm(shape), op_imm(code)])
+                self.store(dest.id, 0)
+            case MirSimdTernop(dest, lhs, rhs, addend, op):
+                self.load(lhs, 0)
+                self.load(rhs, 1)
+                self.load(addend, 2)
+                self.emit(X86_OP_AVX512_TERNARY, [op_imm(0), op_imm(1), op_imm(2), op_imm(avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))), op_imm(if op == "Fnmadd": 1 else: 0)])
+                self.store(dest.id, 0)
+            case MirSimdUnop(dest, source, op):
+                self.load(source, 0)
+                self.emit(X86_OP_AVX512_UNARY, [op_imm(0), op_imm(0), op_imm(avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))), op_imm(avx512_unop_code(op))])
+                self.store(dest.id, 0)
+            case MirSimdCmp(dest, lhs, rhs, op):
+                self.load(lhs, 0)
+                self.load(rhs, 1)
+                self.emit(X86_OP_AVX512_COMPARE, [op_imm(1), op_imm(0), op_imm(1), op_imm(avx512_shape_code(x86_avx512_source_shape(self.shapes, lhs))), op_imm(avx512_cmp_code(op))])
+                self.kstore(dest.id, 1)
+            case MirSimdSelect(dest, mask, yes, no):
+                self.load(no, 0)
+                self.load(yes, 1)
+                self.kload(mask, 1)
+                self.emit(X86_OP_AVX512_SELECT, [op_imm(0), op_imm(1), op_imm(1), op_imm(avx512_shape_code(x86_avx512_shape(self.shapes, dest.id)))])
+                self.store(dest.id, 0)
+            case MirSimdMaskOp(dest, lhs, rhs, op):
+                self.kload(lhs, 1)
+                if op != "Not": self.kload(rhs, 2)
+                self.emit(X86_OP_AVX512_MASK, [op_imm(1), op_imm(1), op_imm(2), op_imm(if op == "Not": 14 else: avx512_binop_code(op))])
+                self.kstore(dest.id, 1)
+            case MirSimdReduce(dest, source, op):
+                val shape = avx512_shape_code(x86_avx512_source_shape(self.shapes, source))
+                val code = avx512_reduce_code(op)
+                if shape == 3:
+                    self.load(source, 0)
+                    for shift in [8, 4, 2, 1]:
+                        for lane in 0..16:
+                            self.write_control_lane(AVX512_SCRATCH_C, lane, (lane + shift) % 16)
+                        self.load_local(AVX512_SCRATCH_C, 1, 64)
+                        self.emit(X86_OP_AVX512_PERMUTE, [op_imm(1), op_imm(1), op_imm(0), op_imm(shape)])
+                        self.emit(X86_OP_AVX512_BINARY, [op_imm(0), op_imm(0), op_imm(1), op_imm(shape), op_imm(code)])
+                    self.emit(X86_OP_AVX512_EXTRACT_I32, [local_vreg_op(dest.id), op_imm(0)])
+                else:
+                    # Floating reductions remain ordered to preserve language
+                    # rounding and NaN behavior exactly.
+                    val scratch = self.fresh()
+                    self.emit(X86_OP_AVX512_REDUCE, [local_vreg_op(dest.id), scratch, self.slot(x86_avx512_operand_local(source)), op_imm(shape), op_imm(code)])
+            case MirSimdGather(dest, base, indices, _):
+                val pointer = self.scalar(base)
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                self.load(indices, 1)
+                if shape == 1 or shape == 2 or shape == 3:
+                    # The all-lanes gather mask is materialized by the encoder.
+                    self.emit(X86_OP_AVX512_GATHER, [op_imm(0), op_imm(1), pointer, op_imm(shape)])
+                else:
+                    self.snapshot(indices, AVX512_SCRATCH_A)
+                    self.indexed(AVX512_SCRATCH_B, AVX512_SCRATCH_A, pointer, 0, shape, false)
+                    self.load_local(AVX512_SCRATCH_B, 0, 64)
+                self.store(dest.id, 0)
+            case MirSimdScatter(value, base, indices):
+                val pointer = self.scalar(base)
+                self.snapshot(indices, AVX512_SCRATCH_A)
+                self.snapshot(value, AVX512_SCRATCH_B)
+                self.indexed(AVX512_SCRATCH_B, AVX512_SCRATCH_A, pointer, 0, avx512_shape_code(x86_avx512_source_shape(self.shapes, value)), true)
+            case MirSimdPermute(dest, source, indices):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                self.bounds(x86_avx512_operand_local(indices), avx512_lanes(shape), avx512_lanes(shape))
+                self.load(source, 0)
+                self.load(indices, 1)
+                self.emit(X86_OP_AVX512_PERMUTE, [op_imm(0), op_imm(1), op_imm(0), op_imm(shape)])
+                self.store(dest.id, 0)
+            case MirSimdShuffle(dest, lhs, rhs, op):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                if op == "BroadcastLane":
+                    self.snapshot(lhs, AVX512_SCRATCH_A)
+                    val index = self.scalar(rhs)
+                    val scratch = self.fresh()
+                    val data = self.fresh()
+                    self.emit(X86_OP_MOV_REG_REG, [scratch, index])
+                    self.emit(X86_OP_AVX512_BROADCAST_LANE, [scratch, data, op_imm(self.offset(AVX512_SCRATCH_C)), op_imm(self.offset(AVX512_SCRATCH_A)), op_imm(shape)])
+                    self.store(dest.id, 0)
+                elif op == "Reverse":
+                    val count = avx512_lanes(shape)
+                    for i in 0..count:
+                        self.write_control_lane(AVX512_SCRATCH_C, i, count - i - 1)
+                    self.load(lhs, 0)
+                    self.load_local(AVX512_SCRATCH_C, 1, if shape == 2: 32 else: 64)
+                    self.emit(X86_OP_AVX512_PERMUTE, [op_imm(1), op_imm(1), op_imm(0), op_imm(shape)])
+                    self.store(dest.id, 1)
+                else:
+                    val count = avx512_lanes(shape)
+                    val start = if op == "InterleaveHi": count / 2 else: 0
+                    for i in 0..count:
+                        val source_lane = start + i / 2
+                        self.write_control_lane(AVX512_SCRATCH_C, i, source_lane + (if i % 2 == 0: 0 else: count))
+                    self.load(lhs, 0)
+                    self.load_local(AVX512_SCRATCH_C, 1, if shape == 2: 32 else: 64)
+                    self.load(rhs, 2)
+                    self.emit(X86_OP_AVX512_SHUFFLE, [op_imm(1), op_imm(0), op_imm(2), op_imm(shape)])
+                    self.store(dest.id, 1)
+            case _: panic("non-SIMD instruction reached AVX-512 instruction owner")
+
+fn isel_avx512_frame_inst(ctx: ISelContext, inst: MirInst, shapes: Dict<i64, text>) -> ISelInstResult:
+    var lowerer = Avx512InstructionLowerer(ctx: ctx, insts: [], shapes: shapes)
+    lowerer.lower(inst)
+    ISelInstResult(insts: lowerer.insts, ctx: lowerer.ctx)

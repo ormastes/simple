@@ -1,0 +1,188 @@
+"""Atomic-owner scheduling and receipt-integrity contract for executable cleanup.
+
+The helpers in this file are intentionally frozen: every scenario injects the
+worker schedule through the public mailbox functions and never calls a native
+release endpoint directly.  This keeps the RED evidence behavioural rather
+than a source-shape check.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.atomic.{MemoryOrdering}
+use compiler.loader.loader.mapping_lifetime_accounting_v1.{
+    MAPPING_LIFETIME_SEQUENCE_MAX_V1}
+use compiler.loader.loader.exec_mapping_cleanup_v1.{
+    ExecCleanupNativeOutcomeKindV1,
+    exec_cleanup_state_v1, exec_cleanup_completion_mailbox_v1,
+    exec_cleanup_reserve_v1, exec_cleanup_begin_construct_v1,
+    exec_cleanup_complete_construct_v1,
+    exec_cleanup_construct_dispatch_v1,
+    exec_cleanup_bind_failure_v1, exec_cleanup_release_dispatch_v1,
+    exec_cleanup_arm_native_dispatch_v1,
+    exec_cleanup_publish_native_outcome_v1,
+    exec_cleanup_drain_native_outcomes_v1,
+    exec_cleanup_retry_at_map_entry_v1}
+
+fn frozen_reservation(mapping_id: text = "map-a", extent: i64 = 4096) -> any:
+    exec_cleanup_reserve_v1(exec_cleanup_state_v1(), mapping_id, extent)
+
+fn frozen_bind_failure(mapping_id: text = "map-a", extent: i64 = 4096,
+                       address: i64 = 16384) -> any:
+    val reserved = frozen_reservation(mapping_id, extent)
+    exec_cleanup_bind_failure_v1(reserved.state, reserved.token, address)
+
+fn frozen_release_dispatch(state: any, token: i64,
+                           address: i64 = 16384) -> any:
+    val bound = exec_cleanup_begin_construct_v1(state, token, address)
+    val pending = exec_cleanup_complete_construct_v1(
+        bound.state, token, false)
+    exec_cleanup_release_dispatch_v1(
+        pending, ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)
+
+fn cell_is_zero(cell: any) -> bool:
+    cell.token.load(MemoryOrdering.Acquire) == 0 and
+        cell.action_generation.load(MemoryOrdering.Acquire) == 0 and
+        cell.address.load(MemoryOrdering.Acquire) == 0 and
+        cell.extent.load(MemoryOrdering.Acquire) == 0 and
+        cell.outcome.load(MemoryOrdering.Acquire) == 0 and
+        cell.ready.load(MemoryOrdering.Acquire) == 0 and
+        cell.mapping_id == ""
+
+describe "exec mapping cleanup atomic owner v1":
+    it "should retain the exact failed bind range and make it retryable":
+        step("Inject a construction failure followed by a native release failure")
+        val first = frozen_bind_failure("retain-me", 8192, 24576)
+        expect(first.transition.ok).to_equal(true)
+        expect(first.transition.release_address).to_equal(24576)
+        expect(first.transition.release_bytes).to_equal(8192)
+        expect(first.ticket.mapping_id).to_equal("retain-me")
+        expect(first.ticket.address).to_equal(24576)
+        expect(first.ticket.extent).to_equal(8192)
+
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, first)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, first.ticket,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)).to_equal(true)
+        val failed = exec_cleanup_drain_native_outcomes_v1(
+            first.transition.state, mailbox)
+        expect(failed.reason).to_equal("NativeReleaseFailed")
+        expect(failed.state.reserved_bytes).to_equal(8192)
+
+        step("Retry the retained receipt and preserve the same physical range")
+        val retry = exec_cleanup_retry_at_map_entry_v1(failed.state, [])
+        expect(retry.reason).to_equal("retry_failed_receipts")
+        expect(retry.release_address).to_equal(24576)
+        expect(retry.release_bytes).to_equal(8192)
+        expect(retry.permit.mapping_id).to_equal("retain-me")
+
+    it "should refuse an unbound dispatch without changing any mailbox cell":
+        step("Inject a bind refusal for an unknown token")
+        val refused = exec_cleanup_bind_failure_v1(
+            exec_cleanup_state_v1(), 999, 16384)
+        expect(refused.ticket_present).to_equal(false)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, refused)).to_equal(false)
+        var all_zero = true
+        for cell in mailbox.cells:
+            if not cell_is_zero(cell):
+                all_zero = false
+        expect(all_zero).to_equal(true)
+
+    it "should reject an ABA preclaim carrying an old action generation":
+        step("Complete one action, reuse its mailbox cell, and inject its stale ticket")
+        val first = frozen_bind_failure("aba", 4096, 32768)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, first)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, first.ticket,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)).to_equal(true)
+        val released = exec_cleanup_drain_native_outcomes_v1(
+            first.transition.state, mailbox)
+        expect(released.reason).to_equal("released")
+
+        val second_reservation = exec_cleanup_reserve_v1(
+            released.state, "aba", 4096)
+        val second = frozen_release_dispatch(
+            second_reservation.state, second_reservation.token, 32768)
+        var stale = second
+        var stale_ticket = stale.ticket
+        stale_ticket.action_generation = first.ticket.action_generation
+        stale.ticket = stale_ticket
+        expect(stale.ticket.action_generation !=
+            second.ticket.action_generation).to_equal(true)
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, stale)).to_equal(false)
+        expect(cell_is_zero(mailbox.cells[0])).to_equal(true)
+
+    it "should keep a claimed cell immutable after a conflicting arm":
+        step("Claim a cell, then inject a ticket with altered coordinates")
+        val dispatch = frozen_bind_failure("immutable", 4096, 40960)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, dispatch)).to_equal(true)
+        val original_token = mailbox.cells[0].token.load(MemoryOrdering.Acquire)
+        val original_address = mailbox.cells[0].address.load(
+            MemoryOrdering.Acquire)
+        var forged = dispatch
+        var forged_ticket = forged.ticket
+        forged_ticket.address = 45056
+        forged_ticket.extent = 8192
+        forged.ticket = forged_ticket
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, forged)).to_equal(false)
+        expect(mailbox.cells[0].token.load(MemoryOrdering.Acquire)).to_equal(
+            original_token)
+        expect(mailbox.cells[0].address.load(MemoryOrdering.Acquire)).to_equal(
+            original_address)
+        expect(mailbox.cells[0].extent.load(MemoryOrdering.Acquire)).to_equal(4096)
+
+    it "should reject an outcome kind incompatible with construction":
+        step("Arm a construction ticket and inject a release outcome")
+        val reserved = frozen_reservation("kind", 4096)
+        val bound = exec_cleanup_begin_construct_v1(
+            reserved.state, reserved.token, 49152)
+        val construct = exec_cleanup_construct_dispatch_v1(bound)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, construct)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, construct.ticket,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)).to_equal(false)
+
+    it "should reject a forged receipt while preserving the authentic claim":
+        step("Forge the address and ticket coordinates after arming")
+        val dispatch = frozen_bind_failure("forged", 4096, 53248)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, dispatch)).to_equal(true)
+        var forged = dispatch.ticket
+        forged.address = 57344
+        forged.extent = 8192
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, forged,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)).to_equal(false)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)).to_equal(true)
+
+    it "should report capacity and generation exhaustion without dispatch":
+        step("Fill the bounded reservation table")
+        var full = exec_cleanup_state_v1()
+        var index: i64 = 0
+        while index < 64:
+            val reserved = exec_cleanup_reserve_v1(
+                full, "full-" + index.to_text(), 1)
+            full = reserved.state
+            index = index + 1
+        val capacity = exec_cleanup_reserve_v1(full, "overflow", 1)
+        expect(capacity.reason).to_equal("capacity-refused")
+        expect(capacity.permit_present).to_equal(false)
+
+        step("Exhaust the monotonic token and outcome-generation domains")
+        var token_exhausted = exec_cleanup_state_v1()
+        token_exhausted.next_token = MAPPING_LIFETIME_SEQUENCE_MAX_V1
+        val no_token = exec_cleanup_reserve_v1(token_exhausted, "no-token", 1)
+        expect(no_token.reason).to_equal("token-exhausted")
+
+        val reserved = frozen_reservation("no-generation", 1)
+        var generation_exhausted = reserved.state
+        generation_exhausted.next_action_generation =
+            MAPPING_LIFETIME_SEQUENCE_MAX_V1
+        val no_generation = exec_cleanup_begin_construct_v1(
+            generation_exhausted, reserved.token, 61440)
+        expect(no_generation.reason).to_equal("outcome-generation-exhausted")

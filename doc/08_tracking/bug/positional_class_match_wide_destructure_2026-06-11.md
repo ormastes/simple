@@ -1,7 +1,16 @@
 # Bug: positional class/struct pattern match silently no-matches (interpreter) and SIGSEGVs (cranelift)
 
+## Closed 2026-09-13 — already FULLY FIXED on both paths (2026-06-12)
+
+- **inferred** Entry status: FULLY FIXED (interpreter 2026-06-12; cranelift/JIT compiled
+  path 2026-06-12), with per-path fix records in-file.
+- **measured** Positional class construction and field access work on the current seed
+  (`Holder(size_index: 7)` then method dispatch prints `10`; `Box(items: [])` accumulates),
+  so no residual of the wide-destructure failure is observable.
+
+
 - **Date:** 2026-06-11
-- **Status:** FULLY FIXED (interpreter 2026-06-12; cranelift/JIT compiled path 2026-06-12)
+Status: closed 2026-09-13 (was: - **Status:** FULLY FIXED (interpreter 2026-06-12; cranelift/JIT compiled path 2026-06-12))
 - **Severity:** high — silent wrong behavior in interpreted mode, crash in compiled mode
 
 ## Symptom

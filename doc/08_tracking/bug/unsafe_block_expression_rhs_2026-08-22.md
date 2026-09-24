@@ -1,4 +1,8 @@
 # Unsafe capability block cannot initialize a value
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open parser/lowering bug, source and execution reproduced
 
@@ -25,3 +29,4 @@ The `rt_time` hardening uses the accepted statement form so safety work can
 continue. Fix the parser and HIR lowering so an unsafe block is a normal block
 expression whose value is its tail expression; retain the same lexical
 capability metadata and erase it only after safety checking.
+

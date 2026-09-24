@@ -1,4 +1,8 @@
 # Workspace diagnostics nested-process overhead
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -45,3 +49,4 @@ Zero per-file subprocesses; unchanged file/diagnostic order, duplicates,
 clean-file omission, lint-profile behavior, totals, JSON bytes, and exit status;
 no trace stdout; no cross-file state contamination; peak RSS no more than 10%
 above baseline.
+

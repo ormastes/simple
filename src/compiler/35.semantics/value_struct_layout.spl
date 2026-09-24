@@ -14,20 +14,6 @@ struct ValueStructLayoutWalk:
     node_key: text
     path: text
 
-fn value_layout_named_symbol(type_: HirType) -> SymbolId?:
-    match type_.kind:
-        case HirTypeKind.Named(symbol, args):
-            if args.len() == 0:
-                return Some(symbol)
-        case _:
-            pass
-    nil
-
-fn value_layout_symbol_is_struct(symbol: HirSymbol) -> bool:
-    match symbol.kind:
-        case SymbolKind.Struct: true
-        case _: false
-
 fn value_layout_node_key(module_name: text, struct_name: text) -> text:
     # Both values are compiler-owned scalar identities. Re-normalizing a key
     # through HIR path logic is unnecessary and crosses a fragile native text
@@ -111,19 +97,41 @@ fn validate_value_struct_layouts(
             val owner_module_key = module_keys[owner_module_index]
             val owner: HirModule = module_values[owner_module_index]
             for field in struct_.fields:
-                val named_symbol = value_layout_named_symbol(field.type_)
-                if not named_symbol.?:
+                # Scalar-only edge resolution. This path used to cross two
+                # Option-of-aggregate boundaries -- a `SymbolId?` helper return
+                # and `Dict<i64, HirSymbol>.get()` -- and the Phase-2 native
+                # ABI decoded both as a nil payload that the next field read
+                # dereferenced: a bare SIGSEGV, no diagnostic, on EVERY module
+                # declaring a struct field whose type is a user-declared name
+                # (struct, class or enum alike). Membership test plus indexed
+                # read is the idiom the struct index above already uses, and
+                # the match is inlined so no HirType aggregate crosses a call
+                # boundary either.
+                var field_symbol_id: i64 = -1
+                match field.type_.kind:
+                    case HirTypeKind.Named(symbol, args):
+                        if args.len() == 0:
+                            field_symbol_id = symbol.id
+                    case _:
+                        pass
+                if field_symbol_id < 0:
                     continue
-                val symbol: HirSymbol? = owner.symbols.symbols.get(named_symbol.unwrap().id)
-                if not symbol.?:
+                if not owner.symbols.symbols.has(field_symbol_id):
                     continue
-                val resolved = symbol.unwrap()
-                if not value_layout_symbol_is_struct(resolved):
+                val resolved: HirSymbol = owner.symbols.symbols[field_symbol_id]
+                val resolved_is_struct: bool = match resolved.kind:
+                    case SymbolKind.Struct: true
+                    case _: false
+                if not resolved_is_struct:
                     continue
 
-                val defining_module = resolved.defining_module ?? owner_module_key
-                val unresolved_key = value_layout_node_key(defining_module, resolved.name)
-                val target = unresolved_key
+                var defining_module: text = owner_module_key
+                match resolved.defining_module:
+                    case Some(symbol_module):
+                        defining_module = symbol_module
+                    case _:
+                        pass
+                val target = value_layout_node_key(defining_module, resolved.name)
                 if not structs.has(target):
                     continue
 

@@ -1,6 +1,31 @@
 # macOS Full-CLI GUI Admission Process Proof
+## Update 2026-09-21 — focused contracts pass on macOS arm64
 
-**Status:** cycle-3 source candidate / builder self-test blocked after fixture chmod repair / Swift link+self-test blocked after `-lbsm` repair / live Endpoint Security evidence unavailable (exit 125)
+Status: OPEN (P3) — live Endpoint Security admission remains unavailable.
+
+At source revision `20245f731dbe12f3eb93943e2dc3c2f4fc22d76c`, all four
+prepared-host focused contracts below returned exit 0 on macOS arm64:
+
+- `macos_gui_execution_history_boundary_contract.shs`
+- `macos_gui_full_cli_provenance_contract.shs`
+- `macos_gpu_trusted_build_admission_contract.shs`
+- `macos_es_history_collector_contract.shs`
+
+The collector contract compiled and linked the real Swift source with
+`-lEndpointSecurity -lbsm -framework Security`, executed its test-only state
+machine, and passed the builder's immutable snapshot and admission-tamper
+self-test. This clears both previously unrerun focused gates described in the
+historical record below. The tracked policy still has unassigned signing
+identity and `status=unavailable`; build-candidate and verify correctly return
+125. Live ES process history, prepared/admitted signing identities, and GUI
+qualification remain open and are not implied by these source-contract passes.
+
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** open — post-spawn rejection cleanup fixed and Astra reviewed; collector source contract PASS; live Endpoint Security admission unavailable (no approved signing identity)
 **Evidence row:** `MAC-WM-GLASS-LOCAL-001`
 
 The cycle-3 source candidate repairs the previously rejected boundary:
@@ -32,7 +57,8 @@ The cycle-3 source candidate repairs the previously rejected boundary:
    `--exec-verified`, which execs the exact immutable admitted collector
    snapshot rather than returning to a mutable collector pathname.
 
-The candidate is not accepted until its focused gates and independent review
+Historical cycle-3 state (superseded for the collector gates by the 2026-09-22
+entry below): The candidate is not accepted until its focused gates and independent review
 pass. The builder `--self-test` reached its immutable-manifest restore fixture,
 but was not rerun after the final mode-0400-to-0600 fixture repair. Swift source
 typechecking reached the link step, but the compile/link self-test cap was
@@ -67,3 +93,20 @@ the provisioned identities and artifact, run:
 sh scripts/check/check-macos-vulkan-gui-widget-live-evidence.shs
 sh scripts/check/check-macos-vulkan-web-live-evidence.shs
 ```
+
+## 2026-09-22 — post-spawn rejection cleanup
+
+Source review found a separate child-lifecycle bug: after successful spawn,
+process-group validation or `bindRoot()` rejection could return without
+terminating and reaping the owned child. The candidate now retains explicit
+ownership until reap, terminates only the unreaped child/its anchored group
+on rejection, and makes cleanup idempotent after normal wait. Real-process
+Swift self-tests cover pre-root failure, actual process-group mismatch,
+sibling survival, reaping, and the successful-wait path. A missing-scope-cleanup
+mutation is rejected by the new test. See
+`doc/09_report/macos_es_negative_admission_2026-09-22.md` for the bounded run
+and resource evidence. Independent Astra review approved corrected source
+`d5922bf44e1`; the canonical collector source contract then passed against
+that clean commit in 23.15 seconds (sampled process-tree peak 208,064 KiB
+under the enforced 5,859,375 KiB cap). This source fix does not supply the
+missing Apple identity/entitlement; the canonical bug remains open.

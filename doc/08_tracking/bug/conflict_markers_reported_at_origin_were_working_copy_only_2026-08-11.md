@@ -1,4 +1,9 @@
 # Conflict markers reported "committed at origin" were WORKING-COPY ONLY (stalled cherry-pick)
+## Closed 2026-09-16 — Status: CLOSED (not reproducible); markers were working-copy only, origin clean
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-11
 - Status: CLOSED (not reproducible)
@@ -113,3 +118,4 @@ Optional hardening, deliberately not implemented here: a cheap pre-build/pre-rep
 tripwire that reports `.git/CHERRY_PICK_HEAD` / `MERGE_HEAD` / `rebase-*` presence and any
 `git ls-files -u` entries, so an in-flight operation is named as the cause instead of
 being misattributed to a published commit. Not a one-liner in guard terms; filed here.
+

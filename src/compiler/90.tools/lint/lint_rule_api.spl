@@ -1,0 +1,103 @@
+use common.plugin.iface_id.{IfaceId, ParamHeader, ParamExt}
+use common.plugin.negotiation.{HostOfferV1, PluginAnswerV1, NegotiateVerdict, negotiate}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.canonical_identity.{canon_str, canon_nat, canon_field, canon_seq}
+
+pub const LINT_RULE_IFACE_NAME = "simple.lint.LintRule"
+pub const LINT_RULE_IFACE_MAJOR = 1
+pub const LINT_RULE_IFACE_MINOR = 0
+pub const LINT_RULE_ERROR_MAJOR = "PLUG-E-MAJOR"
+
+pub struct LintParamsV1:
+    hdr: ParamHeader
+    host_iface: IfaceId
+    ext: [ParamExt]
+
+impl LintParamsV1:
+    static fn defaults() -> LintParamsV1:
+        LintParamsV1(
+            ParamHeader("simple.lint.LintParams", 1, 0, 0),
+            lint_rule_host_iface(), [])
+
+pub struct LintUnit:
+    path: text
+    content: text
+
+pub enum StaticLintLevel:
+    Allow
+    Warn
+    Deny
+
+pub enum StaticLintCategory:
+    Safety
+    Correctness
+    Style
+    Warning
+
+pub struct StaticLintFinding:
+    code: text
+    level: StaticLintLevel
+    category: StaticLintCategory
+    message: text
+    hint: text
+    line_num: i64
+    column: i64
+
+pub trait LintRule:
+    fn iface() -> IfaceId
+    fn id() -> text
+    fn check(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]
+
+pub struct StaticLintRule:
+    rule_iface: IfaceId
+    rule_id: text
+    check_fn: fn(LintParamsV1, LintUnit) -> [StaticLintFinding]
+
+impl LintRule for StaticLintRule:
+    fn iface() -> IfaceId: self.rule_iface
+    fn id() -> text: self.rule_id
+    fn check(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+        self.check_fn(params, unit)
+
+pub fn lint_rule_host_iface() -> IfaceId:
+    IfaceId(LINT_RULE_IFACE_NAME, LINT_RULE_IFACE_MAJOR,
+        LINT_RULE_IFACE_MINOR, lint_rule_contract_digest_v1())
+
+pub fn lint_rule_contract_digest_v1() -> text:
+    val contract = canon_seq([
+        canon_field("iface", canon_str(LINT_RULE_IFACE_NAME)),
+        canon_field("major", canon_nat(LINT_RULE_IFACE_MAJOR)),
+        canon_field("minor", canon_nat(LINT_RULE_IFACE_MINOR)),
+        canon_field("params", canon_str("LintParamsV1{hdr:ParamHeader,host_iface:IfaceId,ext:[ParamExt]}")),
+        canon_field("unit", canon_str("LintUnit{path:text,content:text}")),
+        canon_field("finding", canon_str("StaticLintFinding{code:text,level:StaticLintLevel,category:StaticLintCategory,message:text,hint:text,line_num:i64,column:i64}")),
+        canon_field("call", canon_str("check(LintParamsV1,LintUnit)->[StaticLintFinding]"))
+    ])
+    sha256_text(canon_field("simple/lint-rule-contract/v1", contract))
+
+pub fn lint_rule_provider_digest_v1(rule_id: text) -> text:
+    sha256_text(canon_field("simple/lint-rule-provider/v1", canon_seq([
+        canon_field("contract", canon_str(lint_rule_contract_digest_v1())),
+        canon_field("rule_id", canon_str(rule_id))
+    ])))
+
+pub fn lint_rule_provider_iface(rule_id: text) -> IfaceId:
+    IfaceId(LINT_RULE_IFACE_NAME, LINT_RULE_IFACE_MAJOR,
+        LINT_RULE_IFACE_MINOR, lint_rule_provider_digest_v1(rule_id))
+
+pub fn lint_rule_negotiate_v1(rule: StaticLintRule) -> NegotiateVerdict:
+    val expected_provider_digest = lint_rule_provider_digest_v1(rule.id())
+    negotiate(
+        HostOfferV1(
+            ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0),
+            1, false, "simple-bootstrap-lint-static-v1",
+            [lint_rule_host_iface()], [expected_provider_digest], [], []),
+        PluginAnswerV1(
+            ParamHeader("simple.plugin.PluginAnswerV1", 1, 0, 0),
+            rule.iface(), 1, false, [], expected_provider_digest, []))
+
+pub fn static_lint_rule(
+    rule_id: text, rule_iface: IfaceId,
+    check_fn: fn(LintParamsV1, LintUnit) -> [StaticLintFinding]
+) -> StaticLintRule:
+    StaticLintRule(rule_iface, rule_id, check_fn)

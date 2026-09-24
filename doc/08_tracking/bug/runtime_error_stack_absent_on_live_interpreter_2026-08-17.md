@@ -84,3 +84,17 @@ named reproducer under the current binary.
 changed by this lane. Unblock condition unchanged, plus an explicit first step:
 give `format_error` a caller on the interpreter's error-reporting path, and
 re-verify on a self-hosted binary rather than the seed.
+
+## Triage 2026-09-13
+
+Re-confirmed: `format_error`/`call_stack_trace` in
+`src/compiler/95.interp/mir_interpreter.spl` still have zero call
+sites (grep unchanged from the 2026-08-17 finding). Wiring this in and
+proving it green requires exercising it through a self-hosted
+`bin/simple`, but this worktree has no self-hosted binary — only the
+Rust seed (`3d120a6f9ab5704b`) is deployed, and it is what
+`bin/simple run` actually executes, per this lane's
+setup.shs workaround. A fix here cannot be verified against
+`bin/simple run` on this host. Exceeds this lane's per-item budget once
+a self-hosted build is factored in. Leaving OPEN.
+

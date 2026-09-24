@@ -1,4 +1,9 @@
 # DOM→HTML serializer recursed per depth: a hostile page aborted the renderer (2026-08-04)
+## Closed 2026-09-16 — Status FIXED; iterative serializer landed, hardening spec 13/13 green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED
 **Severity:** High — remotely triggerable denial of service of the browser-engine renderer
@@ -139,3 +144,4 @@ runs execute at all. These gates were therefore verified against that stale
 tree, **not** against the origin tip. The serializer change is a pure `.spl`
 library change that the compiler break does not interact with, but the
 distinction is recorded here rather than glossed.
+

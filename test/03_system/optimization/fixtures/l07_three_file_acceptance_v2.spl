@@ -1,0 +1,266 @@
+# codex-system-test
+# Shared fixtures for the L07 activation acceptance suite.  These fixtures
+# invoke the real packer and physical-file broker; they never manufacture a
+# worker receipt, portable-object verification receipt, or publication receipt.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, TldSectionRefV1, PhysicalTldHeaderV1,
+    physical_tld_section_table_digest_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1
+}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadFallbackV1, ThreePayloadSemanticRefV2,
+    closure_coverage_dimension_v1, three_payload_semantic_ref_valid_v2
+}
+use compiler.common.cache_contract.three_payload_worker_v1.{ThreePayloadWorkerPolicyV1}
+use compiler.frontend.cache_artifact.physical_tld_codec_v1.{encode_physical_tld_v1}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    PreparedThreePayloadV2, ThreePayloadSnapshotV2, ThreePayloadParentGenerationV2,
+    ThreePayloadModuleClosureV2, ThreePayloadVerifiedObjectsV2,
+    ThreePayloadPackBoundsV2, seal_three_payload_closure_v2
+}
+use compiler.driver.cache.worker.three_payload_physical_file_broker_v1.{
+    ThreePayloadPhysicalFileSetV1, three_payload_physical_worker_activation_available_v1
+}
+use compiler.driver.cache.worker.three_payload_worker_io_v1.{
+    three_payload_worker_confinement_available_v1
+}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    three_payload_generation_publication_available_v1,
+    three_payload_generation_publication_blocker_v1,
+    PreparedThreePayloadGenerationV1, publish_three_payload_generation_v1
+}
+use compiler.common.cache_contract.generation_manifest_v1.{GenerationManifestV1}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{stage_reverse_delta_v1}
+use compiler.hir.portable_object_profile_v1.{
+    portable_hir_semantic_verifier_available_v1,
+    portable_hir_semantic_verifier_digest_v1
+}
+
+pub val L07_FIXTURE_ROOT_V2 = "build/test/l07_three_file_acceptance_v2"
+
+pub struct L07ThreeFileFixtureV2:
+    root: text
+    prepared: PreparedThreePayloadV2
+    files: ThreePayloadPhysicalFileSetV1
+    policy: ThreePayloadWorkerPolicyV1
+
+pub fn l07_digest_v2(label: text) -> text:
+    sha256_text("l07-three-file-v2:" + label)
+
+pub fn l07_coverage_roots_v2() -> [ClosureCoverageRootV1]:
+    var roots: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        val dimension = closure_coverage_dimension_v1(index)
+        roots.push(ClosureCoverageRootV1(dimension: dimension,
+            root_digest: l07_digest_v2("coverage:" + dimension),
+            coverage: SemanticCoverageV1.Complete))
+        index = index + 1
+    roots
+
+pub fn l07_section_v2(index: i64, offset: i64, body: [u8]) -> TldSectionRefV1:
+    TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld, section_index: index,
+        kind: "semantic-body", semantic_object_digest: sha256_u8_hex(body),
+        offset: offset, stored_bytes: body.len(), decoded_bytes: body.len(),
+        encoding_profile: "raw-v1")
+
+pub fn l07_embedded_body_reference_v2(kind: ThreePayloadSemanticRefKindV1,
+        stable_entity_id: text, section: TldSectionRefV1) -> ThreePayloadSemanticRefV2:
+    ThreePayloadSemanticRefV2(kind: kind, stable_entity_id: stable_entity_id,
+        callable_signature_digest: l07_digest_v2("signature:" + stable_entity_id),
+        effect_digest: l07_digest_v2("effects:" + stable_entity_id),
+        body_or_object_digest: section.semantic_object_digest, embedded: Some(section),
+        selection_contract_digest: l07_digest_v2("selection:" + stable_entity_id))
+
+pub fn l07_symbolic_call_reference_v2(kind: ThreePayloadSemanticRefKindV1,
+        stable_entity_id: text, contract_label: text) -> ThreePayloadSemanticRefV2:
+    ThreePayloadSemanticRefV2(kind: kind, stable_entity_id: stable_entity_id,
+        callable_signature_digest: l07_digest_v2("signature:" + contract_label),
+        effect_digest: l07_digest_v2("effects:" + contract_label),
+        body_or_object_digest: l07_digest_v2("callable:" + contract_label), embedded: nil,
+        selection_contract_digest: l07_digest_v2("selection:" + contract_label))
+
+pub fn l07_worker_policy_v2() -> ThreePayloadWorkerPolicyV1:
+    ThreePayloadWorkerPolicyV1(executor_digest: l07_digest_v2("worker-policy"),
+        max_read_bytes: 1048576, max_decode_bytes: 1048576,
+        max_decoded_sections: 32, request_external_input: false,
+        request_reverse_reference: false)
+
+pub fn l07_fixture_with_body_marker_v2(case_id: text, warm: bool,
+        body_marker: text) -> Result<L07ThreeFileFixtureV2, text>:
+    # Every scenario gets its own physical namespace. A previous worker attempt
+    # cannot leave a prior `.tld` or RR fixture that changes another case.
+    if case_id.len() == 0 or case_id.contains("/") or case_id.contains("\\"):
+        return Err("invalid_case_id")
+    val fixture_root = L07_FIXTURE_ROOT_V2 + "/" + case_id
+    val source = text_to_bytes("fn three_file_entry() -> i64: 7\n")
+    val macro_body = text_to_bytes("macro expansion body:" + body_marker)
+    val generic_body = text_to_bytes("generic body")
+    val default_body = text_to_bytes("default trait body")
+    val macro_section = l07_section_v2(0, 0, macro_body)
+    val generic_section = l07_section_v2(1, macro_body.len(), generic_body)
+    val default_section = l07_section_v2(2, macro_body.len() + generic_body.len(), default_body)
+    val sections = [macro_section, generic_section, default_section]
+    val init_header = PhysicalTldHeaderV1(schema: 1, role: TldPayloadRoleV1.PackageInitTld,
+        semantic_record_digest: l07_digest_v2("init-record"),
+        section_table_digest: physical_tld_section_table_digest_v1(sections),
+        payload_bytes: macro_body.len() + generic_body.len() + default_body.len(),
+        sections: sections)
+    val init_bytes = match encode_physical_tld_v1(init_header,
+            [macro_body, generic_body, default_body]):
+        case Ok(value): value
+        case Err(_): return Err("init_tld_encode_failed")
+    var prior_digest: text? = nil
+    var prior_bytes: [u8]? = nil
+    var prior_header: PhysicalTldHeaderV1? = nil
+    if warm:
+        val prior_body = text_to_bytes("prior public summary")
+        val prior_section = TldSectionRefV1(role: TldPayloadRoleV1.PriorModuleTld,
+            section_index: 0, kind: "summary", semantic_object_digest: sha256_u8_hex(prior_body),
+            offset: 0, stored_bytes: prior_body.len(), decoded_bytes: prior_body.len(),
+            encoding_profile: "raw-v1")
+        val header = PhysicalTldHeaderV1(schema: 1, role: TldPayloadRoleV1.PriorModuleTld,
+            semantic_record_digest: l07_digest_v2("prior-record"),
+            section_table_digest: physical_tld_section_table_digest_v1([prior_section]),
+            payload_bytes: prior_body.len(), sections: [prior_section])
+        val encoded = match encode_physical_tld_v1(header, [prior_body]):
+            case Ok(value): value
+            case Err(_): return Err("prior_tld_encode_failed")
+        prior_digest = Some(sha256_u8_hex(encoded))
+        prior_bytes = Some(encoded)
+        prior_header = Some(header)
+    # Canonical semantic-reference order is by stable ID.  Macro/generic/default
+    # bodies are embedded; ordinary trait/aspect calls carry only call contracts.
+    val refs = [
+        l07_symbolic_call_reference_v2(ThreePayloadSemanticRefKindV1.AspectCallable,
+            "aspect.call", "aspect-contract"),
+        l07_embedded_body_reference_v2(ThreePayloadSemanticRefKindV1.GenericBody,
+            "generic.body", generic_section),
+        l07_embedded_body_reference_v2(ThreePayloadSemanticRefKindV1.MacroExpansion,
+            "macro.body", macro_section),
+        l07_symbolic_call_reference_v2(ThreePayloadSemanticRefKindV1.TraitCallable,
+            "trait.call", "trait-contract"),
+        l07_embedded_body_reference_v2(ThreePayloadSemanticRefKindV1.TraitDefaultBody,
+            "trait.default", default_section)
+    ]
+    val prepared = match seal_three_payload_closure_v2(
+            ThreePayloadSnapshotV2(snapshot_digest: l07_digest_v2("snapshot"),
+                source_digest: sha256_u8_hex(source), source_bytes: source),
+            ThreePayloadParentGenerationV2(generation_digest: l07_digest_v2("parent"),
+                prior_tld_digest: prior_digest, prior_tld_bytes: prior_bytes,
+                prior_tld_header: prior_header),
+            ThreePayloadModuleClosureV2(module_id: "l07.fixture",
+                init_tld_digest: sha256_u8_hex(init_bytes), init_tld_bytes: init_bytes,
+                init_tld_header: init_header, semantic_refs: refs,
+                coverage_roots: l07_coverage_roots_v2()),
+            ThreePayloadVerifiedObjectsV2(compiler_semantics_digest: l07_digest_v2("semantics"),
+                consumed_inputs_digest: l07_digest_v2("inputs"),
+                verified_semantic_object_digests: [macro_section.semantic_object_digest,
+                    generic_section.semantic_object_digest, default_section.semantic_object_digest,
+                    l07_digest_v2("callable:aspect-contract"),
+                    l07_digest_v2("callable:trait-contract")]),
+            ThreePayloadPackBoundsV2(max_sections: 32, max_payload_bytes: 1048576,
+                max_decode_bytes: 1048576)):
+        case Ok(value): value
+        case Err(_): return Err("three_payload_pack_failed")
+    if not dir_create_all(fixture_root): return Err("fixture_directory_failed")
+    val source_path = fixture_root + "/module.spl"
+    val prior_path = fixture_root + "/module.tld"
+    val init_path = fixture_root + "/__init__.tld"
+    if not file_write_bytes(source_path, prepared.source_bytes) or
+            not file_write_bytes(init_path, prepared.init_tld_bytes):
+        return Err("fixture_write_failed")
+    match prepared.prior_tld_bytes:
+        case Some(bytes):
+            if not file_write_bytes(prior_path, bytes): return Err("prior_fixture_write_failed")
+        case nil: pass
+    Ok(L07ThreeFileFixtureV2(root: fixture_root, prepared: prepared,
+        files: ThreePayloadPhysicalFileSetV1(source_path: source_path,
+            prior_tld_path: if warm: Some(prior_path) else: nil,
+            effective_init_tld_path: init_path), policy: l07_worker_policy_v2()))
+
+pub fn l07_fixture_for_case_v2(case_id: text, warm: bool) -> Result<L07ThreeFileFixtureV2, text>:
+    l07_fixture_with_body_marker_v2(case_id, warm, "stable")
+
+pub fn l07_physical_worker_active_v2() -> bool:
+    three_payload_physical_worker_activation_available_v1() and
+        three_payload_worker_confinement_available_v1()
+
+pub fn l07_portable_hir_active_v2() -> bool:
+    portable_hir_semantic_verifier_available_v1()
+
+pub fn l07_publication_active_v2() -> bool:
+    three_payload_generation_publication_available_v1()
+
+pub fn l07_all_activation_owners_active_v2() -> bool:
+    l07_physical_worker_active_v2() and l07_portable_hir_active_v2() and
+        l07_publication_active_v2()
+
+pub fn l07_missing_evidence_v2(primary_id: text) -> text:
+    "MissingEvidence:" + primary_id +
+        ": admitted physical worker, portable verifier, and atomic publisher are required"
+
+pub fn l07_live_evidence_required_v2(primary_id: text) -> Result<(), text>:
+    # Availability bits are diagnostic only. They cannot turn a test fixture
+    # into an issuer-measured compilation, verifier, or publication receipt.
+    # Replace this deliberate red gate only when each primary invokes and
+    # validates its real admitted endpoint and durable receipt.
+    Err(l07_missing_evidence_v2(primary_id))
+
+pub fn l07_publication_blocker_v2() -> text:
+    three_payload_generation_publication_blocker_v1()
+
+pub fn l07_reference_valid_v2(reference: ThreePayloadSemanticRefV2,
+        section_count: i64, max_decode_bytes: i64) -> bool:
+    three_payload_semantic_ref_valid_v2(reference, section_count, max_decode_bytes)
+
+# This is a supporting coordinator oracle only.  It calls the real reverse
+# delta owner with fixture manifests; a positive result is not worker or
+# publication evidence because its forward reads are not issuer-measured.
+pub fn l07_fixture_rr_delta_changes_v2() -> bool:
+    val producer = SemanticQueryKeyV1(kind: "resolve", stable_entity_id: "l07.producer",
+        semantic_profile_digest: l07_digest_v2("rr-profile"),
+        parameter_digest: l07_digest_v2("rr-parameter"))
+    val consumer = SemanticQueryKeyV1(kind: "compile", stable_entity_id: "l07.consumer",
+        semantic_profile_digest: l07_digest_v2("rr-profile"),
+        parameter_digest: l07_digest_v2("rr-parameter"))
+    val old_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+        facet: "macro_ctfe_inputs", ordinal: 0,
+        consumed_fingerprint: l07_digest_v2("body-before"),
+        witness_digest: l07_digest_v2("witness-before"), partition_id: "l07-fixture",
+        completeness: SemanticCoverageV1.Complete)
+    val new_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+        facet: "macro_ctfe_inputs", ordinal: 0,
+        consumed_fingerprint: l07_digest_v2("body-after"),
+        witness_digest: l07_digest_v2("witness-after"), partition_id: "l07-fixture",
+        completeness: SemanticCoverageV1.Complete)
+    val old_manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+        ordered_reads: [old_read])
+    val new_manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+        ordered_reads: [new_read])
+    val delta = stage_reverse_delta_v1(Some(old_manifest), new_manifest)
+    delta.inserted.len() == 1 and delta.removed.len() == 1 and
+        delta.new_manifest_digest.len() == 64
+
+# Calls the real publication endpoint with an intentionally invalid candidate.
+# This is a supporting rejection oracle, never a constructed publication
+# receipt. The primary cannot call publication until a live worker produces the
+# complete immutable object closure and durable root/pin authority.
+pub fn l07_publisher_rejects_untrusted_candidate_v2() -> bool:
+    val malformed = PreparedThreePayloadGenerationV1(
+        manifest: GenerationManifestV1(schema: 0, snapshot_digest: "", catalog_digest: "",
+            summary_refs: [], scope_refs: [], rr_shard_refs: [], forward_manifest_refs: [],
+            portable_refs: [], target_refs: [], diagnostic_refs: []),
+        manifest_digest: "", immutable_objects: [])
+    match publish_three_payload_generation_v1(malformed, l07_digest_v2("untrusted-action")):
+        case Err(ThreePayloadFallbackV1.CorruptPayload): true
+        case _: false

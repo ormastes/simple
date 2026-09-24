@@ -1,9 +1,15 @@
 # JIT/compiled mode corrupts `[u8]` built via `((hi<<4)|lo).to_u8()` loop
 
+## Closed 2026-09-13 — JIT-compiled hex decode produces correct bytes
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's exact reproducer prints `len=5` and `b0=48 b1=130 b2=1` — the expected bytes; the reported `b0=249 b1=251 b2=250` garbage does not occur.
+- **measured** The run took the JIT path, not the interpreter fallback: `grep -c 'JIT compilation failed'` over the full output returns `0`.
+
 - **Filed:** 2026-06-30
 - **Severity:** High (silently corrupts byte arrays under JIT/native; interpreter is correct)
 - **Area:** compiler — JIT/native codegen for `i64 -> u8` (`to_u8()`) and/or u8 array push in a tight loop
-- **Status:** Open
+- **Status:** Closed (fixed) 2026-09-13
 
 ## Summary
 

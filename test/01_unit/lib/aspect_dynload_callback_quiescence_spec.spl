@@ -1,0 +1,61 @@
+# Focused generation/lease/quiescence contract for aspect dynload execution.
+use std.spec.{describe, it, expect, step}
+use std.common.aspect_dynload_lifecycle_v1
+
+fn lifecycle(device_fences: bool = false) -> AspectDynloadLifecycleHandleV1:
+    aspect_dynload_lifecycle_create_v1("trace/Callback", 7, 8, device_fences).unwrap()
+
+describe "aspect dynload callback quiescence":
+    it "holds quiescing through a nested callback":
+        val owner = lifecycle()
+        val outer = aspect_dynload_callback_begin_v1(owner).unwrap()
+        expect(aspect_dynload_unload_v1(owner).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        val nested = aspect_dynload_nested_callback_begin_v1(owner, outer).unwrap()
+        expect(aspect_dynload_lease_complete_v1(owner, outer).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_lease_complete_v1(owner, nested).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+
+    it "atomically carries an around continuation":
+        val owner = lifecycle()
+        val callback = aspect_dynload_callback_begin_v1(owner).unwrap()
+        val continuation = aspect_dynload_around_suspend_v1(owner, callback).unwrap()
+        expect(aspect_dynload_lease_complete_v1(owner, callback).is_err()).to_equal(true)
+        expect(aspect_dynload_unload_v1(owner).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        val resumed = aspect_dynload_around_resume_v1(owner, continuation).unwrap()
+        expect(aspect_dynload_lease_complete_v1(owner, continuation).is_err()).to_equal(true)
+        expect(aspect_dynload_lease_complete_v1(owner, resumed).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+
+    it "waits for an applicable device fence":
+        val owner = lifecycle(true)
+        val callback = aspect_dynload_callback_begin_v1(owner).unwrap()
+        val fence = aspect_dynload_device_fence_begin_v1(owner, callback).unwrap()
+        expect(aspect_dynload_unload_v1(owner).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_lease_complete_v1(owner, callback).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_lease_complete_v1(owner, fence).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+        val cpu = lifecycle(false)
+        val cpu_callback = aspect_dynload_callback_begin_v1(cpu).unwrap()
+        expect(aspect_dynload_device_fence_begin_v1(cpu, cpu_callback).is_err()).to_equal(true)
+
+    it "binds copied handles to one canonical row":
+        val owner = lifecycle()
+        val copied = owner
+        val callback = aspect_dynload_callback_begin_v1(copied).unwrap()
+        expect(aspect_dynload_lifecycle_snapshot_v1(owner).unwrap().callback_count).to_equal(1)
+        expect(aspect_dynload_unload_v1(owner).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_lease_complete_v1(copied, callback).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+
+    it "rejects duplicate-owner, copied-result, duplicate, and stale coordinates":
+        val first = lifecycle()
+        val second = lifecycle()
+        expect(first.lifecycle_id == second.lifecycle_id).to_equal(false)
+        val first_lease = aspect_dynload_callback_begin_v1(first).unwrap()
+        val second_lease = aspect_dynload_callback_begin_v1(second).unwrap()
+        expect(first_lease.lease_id).to_equal(second_lease.lease_id)
+        expect(aspect_dynload_lease_complete_v1(second, first_lease).is_err()).to_equal(true)
+        val copied_result = first_lease
+        expect(aspect_dynload_unload_v1(first).unwrap().state).to_equal(ASPECT_DYNLOAD_QUIESCING_V1)
+        expect(aspect_dynload_callback_begin_v1(first).is_err()).to_equal(true)
+        expect(aspect_dynload_lease_complete_v1(first, copied_result).unwrap().state).to_equal(ASPECT_DYNLOAD_RETIRED_V1)
+        expect(aspect_dynload_lease_complete_v1(first, first_lease).is_err()).to_equal(true)
+        expect(aspect_dynload_publish_next_generation_v1(first).unwrap()).to_equal(8)
+        expect(aspect_dynload_lease_complete_v1(first, first_lease).is_err()).to_equal(true)
+        expect(aspect_dynload_lease_complete_v1(second, second_lease).is_ok()).to_equal(true)

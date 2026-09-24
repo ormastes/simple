@@ -1,4 +1,8 @@
 # Interp TestDatabase class-name collision kills every aggregate `simple test` run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** P1 (directory runs, sdoctest/md phase, and test_result.md generation all die)
@@ -65,3 +69,4 @@ Fixed by renaming the core-struct cluster to `RunnerTestDbCore`
 `test_db_perf.spl`; compat class and its users unchanged; 0 leftovers,
 green single-file and md-lane probes pass). The underlying interpreter
 defect (global struct registry not module-scoped) remains open seed-side.
+

@@ -1,4 +1,8 @@
 # Seed divergences hit while making the sspec scorer runnable (2026-09-05)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Fresh seed rebuilt from current source (`cargo build --profile bootstrap -p
 simple-driver -p simple-native-all`, 2026-09-05) still diverges from the
@@ -39,3 +43,4 @@ explicit return) should be preferred everywhere both toolchains run a function.
 - Support no-arg `str.split` as whitespace split in the seed runtime.
 - Support implicit trailing-expression returns for unannotated functions, or
   reject them at compile time instead of silently returning nil.
+

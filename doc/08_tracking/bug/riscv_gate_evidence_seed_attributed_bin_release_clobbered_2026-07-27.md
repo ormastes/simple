@@ -1,4 +1,8 @@
 # RISC-V gate evidence is seed-attributed — `bin/release/<triple>/simple` is a Rust seed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open (blocker row, not a defect in the gates themselves)
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H)
@@ -91,3 +95,4 @@ dressed as completion.
   (`build/native_probe/simple`, present here, dated 2026-07-23).
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
 - SPipe state: `.spipe/simple_riscv_hardening/state.md`
+

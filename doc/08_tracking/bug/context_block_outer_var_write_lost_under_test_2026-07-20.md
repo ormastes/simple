@@ -1,4 +1,8 @@
 # `context <obj>:` block body writes to an outer `var` are lost under `test`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `bin/simple test` (SSpec evaluator) scoping for `context
@@ -105,3 +109,4 @@ Verified with:
 → `Passed: 20, Failed: 3`
 `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/structs_spec.spl --no-session-daemon 2>&1 | sed 's/\x1b\[[0-9;]*m//g'`
 → `Passed: 8, Failed: 2`
+

@@ -41,6 +41,7 @@ exports.resolveSimpleLspServerCommand = resolveSimpleLspServerCommand;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
+const storageRoots_1 = require("./storageRoots");
 function readSimpleLspConfiguration() {
     const config = vscode.workspace.getConfiguration('simple');
     const rawMode = config.get('lsp.mode', 'auto');
@@ -120,9 +121,13 @@ function resolveSimpleLspServerCommand(options) {
     }
     const isWrapper = isSimpleLspWrapper(command);
     const args = isWrapper ? [] : ['lsp'];
-    const environment = {
-        ...process.env,
-    };
+    const roots = (0, storageRoots_1.resolveVsCodeStorageRoots)(options.context, workspaceRoot);
+    const environment = roots
+        ? (0, storageRoots_1.projectSimpleToolEnvironment)(roots)
+        : { ...process.env };
+    if (!roots) {
+        notes.push('Centralized storage roots unavailable; native launch remains degraded.');
+    }
     const repoRoot = resolvedRoot ?? (path.isAbsolute(command) ? findRepositoryRoot(command) : undefined);
     if (repoRoot) {
         environment.SIMPLE_LIB = path.join(repoRoot, 'src');

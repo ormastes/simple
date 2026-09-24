@@ -1,4 +1,8 @@
 # SimpleOS SFNT UTF-16 name decoding cannot materialize characters natively
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Fix implemented; fresh pure bootstrap and QEMU evidence pending
 **Date:** 2026-07-17
@@ -60,3 +64,4 @@ this session.
 - Existing malformed-surrogate SFNT tests still reject invalid input.
 - SimpleOS emits no unresolved `i64.chr` warning, registers the pinned font,
   and reaches the taskbar-clock pixel oracle.
+

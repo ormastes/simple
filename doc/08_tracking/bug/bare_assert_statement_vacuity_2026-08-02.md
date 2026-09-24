@@ -1,4 +1,8 @@
 # Bare `assert` vacuity — remaining inert sites after the interpreter fix
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02
 **Status:** interpreter bare-`assert` FIXED (`7d73d4dd3a6e`); OPEN 2 FIXED
@@ -316,3 +320,4 @@ freshly built binary invoked as `simple test` therefore measures the OLD
 debug binary in the shared working copy and shows no change at all — this
 lane hit exactly that and briefly concluded the fix had no effect. Use
 `<your-binary> run <spec>` to measure the binary you actually built.
+

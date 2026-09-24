@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+MINGW*|MSYS*|CYGWIN*) ;;
+*) echo 'bootstrap_windows_compatibility_junction: SKIP (non-Windows)'; exit 0 ;;
+esac
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+tmp=${TMPDIR:-/tmp}/bootstrap-windows-compatibility-junction.$$
+trap 'rm -rf "$tmp"' EXIT INT TERM
+mkdir -p "$tmp/bootstrap.generations/generation-a"
+printf 'immutable generation\n' >"$tmp/bootstrap.generations/generation-a/identity.txt"
+
+temporary="$tmp/.bootstrap-link.$$"
+bootstrap_stage3_create_compatibility_link \
+  'bootstrap.generations/generation-a' "$temporary"
+bootstrap_stage3_compatibility_pointer_valid "$temporary"
+[ "$(cat "$temporary/identity.txt")" = 'immutable generation' ]
+
+perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename: $!\n"' \
+  "$temporary" "$tmp/bootstrap"
+bootstrap_stage3_compatibility_pointer_valid "$tmp/bootstrap"
+[ "$(cat "$tmp/bootstrap/identity.txt")" = 'immutable generation' ]
+
+mkdir "$tmp/ordinary-directory"
+if bootstrap_stage3_compatibility_pointer_valid "$tmp/ordinary-directory"; then
+  echo 'bootstrap_windows_compatibility_junction: ordinary directory admitted' >&2
+  exit 1
+fi
+
+echo 'bootstrap_windows_compatibility_junction: PASS'

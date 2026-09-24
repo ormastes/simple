@@ -1,4 +1,8 @@
 # HDA pure-Simple PCI scan Phase-3 SIGSEGV
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -30,3 +34,4 @@ Fix the Phase-3 native failure before replacing the existing scalar C hardware
 boundary with pure-Simple config-port enumeration. QEMU audio remains a failed
 runtime gate for the separate controller/stream/IRQ wiring and live-evidence
 work, not for missing PCI providers.
+

@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+receipt=${1:-$root/build/check/kernel-phase7/llvm-toolchain.env}
+github_env=${2:-${GITHUB_ENV:-}}
+case "$receipt" in /*) ;; *) receipt=$root/$receipt ;; esac
+
+[ "$(uname -s)" = Darwin ] || {
+  echo 'error: Phase7 pinned LLVM provisioning currently requires macOS' >&2
+  exit 1
+}
+command -v brew >/dev/null 2>&1 || {
+  echo 'error: Homebrew is required to provision pinned LLVM 18' >&2
+  exit 1
+}
+
+prefix=$(brew --prefix llvm@18 2>/dev/null) || {
+  echo 'error: repo-pinned Homebrew llvm@18 is not installed' >&2
+  exit 1
+}
+prefix=$(CDPATH= cd -- "$prefix" && pwd -P)
+config=$prefix/bin/llvm-config
+[ -x "$config" ] || { echo 'error: pinned LLVM 18 lacks llvm-config' >&2; exit 1; }
+version=$($config --version)
+case "$version" in 18.*) ;; *) echo "error: expected LLVM 18, found $version" >&2; exit 1 ;; esac
+
+LLVM_VERSIONS=18 LLVM_SYS_180_PREFIX=$prefix
+export LLVM_VERSIONS LLVM_SYS_180_PREFIX
+. "$root/scripts/setup/platform-detect.shs"
+[ "${LLVM_FOUND:-0}" = 1 ] && [ "$LLVM_VERSION" = 18 ] && [ "$LLVM_PREFIX" = "$prefix" ] || {
+  echo 'error: shared platform detector rejected pinned LLVM 18' >&2
+  exit 1
+}
+
+hash_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'
+  fi
+}
+mkdir -p "$(dirname "$receipt")"
+tmp=$receipt.tmp.$$
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+{
+  echo schema=simple-kernel-phase7-llvm-toolchain-v1
+  echo status=pass
+  echo llvm_major=18
+  echo llvm_version="$version"
+  echo llvm_prefix="$prefix"
+  echo llvm_config_path="$config"
+  echo llvm_config_sha256="$(hash_file "$config")"
+  echo llvm_library_path="$LLVM_LIB"
+  echo llvm_library_sha256="$(hash_file "$LLVM_LIB")"
+} >"$tmp"
+mv "$tmp" "$receipt"
+trap - EXIT HUP INT TERM
+
+if [ -n "$github_env" ]; then
+  {
+    echo LLVM_VERSIONS=18
+    echo LLVM_SYS_180_PREFIX="$prefix"
+    echo SIMPLE_LLVM_PATH="$LLVM_LIB"
+    echo SIMPLE_PHASE7_LLVM_RECEIPT="$receipt"
+    echo PATH="$prefix/bin:$PATH"
+  } >>"$github_env"
+fi
+echo SIMPLE_PHASE7_LLVM_RECEIPT="$receipt"

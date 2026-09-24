@@ -55,11 +55,7 @@ host.
 
 No production default changes until selected requirements exist and the
 canonical parser reaches declared parity. The legacy CPU frontend remains an
-independent correctness path. The first source-landed provider seam routes the
-existing compiler frontend facade through `ParserProviderV1`, with
-`LegacyReference` as its sole executable member. Canonical scalar, SIMD, and
-GPU members are typed candidates that fail closed before parser state is
-mutated; they are not execution claims or promotion evidence.
+independent correctness path.
 
 ## Canonical contracts
 
@@ -192,20 +188,6 @@ sosh retain distinct dialects under one grammar authority. GPU-valid regions
 may advance to flat Parsed HIR/local work; global binding and recovery remain
 explicit CPU stages until independently designed and qualified.
 
-The current core-facade `ParserProviderV1` compiler adapter is intentionally narrower than
-the future independently loaded `FrontendFacetV1`: it selects the existing
-facade implementation and emits an execution receipt without exporting AST/HIR
-layouts. It is the call-path seam used to preserve legacy behavior while later
-facets qualify; it does not introduce a second frontend ABI.
-Native `_FlatAstBridge/module_assembly.spl` now crosses the same
-`ParserProviderV1` admission authority before entering any trace scope or
-mutating lexer, parser, diagnostic, pool, transient-scope, or cache-capture
-state. The enclosing native frontend admits before cache key/load, pool restore,
-hit/miss accounting, or capture arming, so cache hits and misses cannot bypass
-provider authority. Its specialized flat-AST assembly remains a distinct execution adapter,
-not a second provider-selection authority: only `LegacyReference` is admitted,
-and canonical scalar, SIMD, and GPU candidates fail closed without fallback.
-
 ## Generated-code architecture
 
 The baseline facade and initialization closure remain within their declared ISA.
@@ -215,6 +197,16 @@ catalog remains the portable deployment mechanism. JIT units record executor
 features, backend/compiler digest, target ABI, optimization/numerical policy,
 dependencies, and resource generation. Unsupported strict features fail; a
 scalar loop cannot be reported as SIMD execution.
+
+The x86 host path uses the V2 feature word as its sole preset authority. The
+live adapter bounds CPUID leaves, keeps hardware, OS-usable, and policy-ceiling
+words separate, and admits AVX-512 state only when XSAVE and OSXSAVE are
+advertised and XCR0 enables XMM, YMM, opmask, ZMM-high-256, and high-ZMM state.
+Plain x86-64-v4 requires AVX512F/BW/CD/DQ/VL; VBMI and VBMI2 remain separately
+named optional variants. Canonical publication routes x86 snapshots through
+this exact-level gate before mapping or artifact admission, while forwarding
+GPU device facts unchanged to the shared eligibility selector. Generated-code
+target CPU/features never participate in this host-execution decision.
 
 ## GPU architecture
 

@@ -1,4 +1,8 @@
 # Typed facet parser lacks authoritative aspect-version context
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler/99.loader/pack_file_snapshot.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -73,3 +77,4 @@ verified descriptor. Missing, duplicate, or unmatched names fail closed. The
 driver must never take provider IDs, concrete/interface/method IDs, ABI/layout
 hashes, capability, or sidecar facts from source declarations or recompute
 them from HIR as a substitute.
+

@@ -1,0 +1,133 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.*
+
+fn digest(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn feature_set(offset: u32) -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: offset, count: 1u32))
+
+fn empty_features() -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: 1u32, count: 1u32))
+
+fn profile(strict: bool) -> TargetCodegenProfileV1:
+    TargetCodegenProfileV1(
+        descriptor_size: TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1,
+        schema_version: TARGET_CODEGEN_PROFILE_SCHEMA_V1,
+        profile_identity: digest(1u64), target_identity: digest(2u64),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        target_abi_id: 1u32, target_object_format_id: 1u32,
+        target_endian_id: 1u16, target_pointer_width_bits: 64u16,
+        requested_features: feature_set(0u32),
+        strict_requested_features: strict,
+        backend_identity: digest(3u64), semantic_identity: digest(4u64),
+        numerical_contract_id: 1u32)
+
+fn backend() -> TargetCodegenBackendAcceptanceV1:
+    TargetCodegenBackendAcceptanceV1(
+        backend_identity: digest(3u64), accepted: true,
+        accepted_features: feature_set(0u32), acceptance_evidence: digest(10u64))
+
+fn artifact(declared: EnvironmentFeatureSetV1) -> TargetCodegenArtifactDeclarationV1:
+    TargetCodegenArtifactDeclarationV1(
+        artifact_identity: digest(20u64), artifact_digest: digest(21u64),
+        declared_features: declared, declaration_evidence: digest(22u64))
+
+fn emission(emitted: EnvironmentFeatureSetV1) -> TargetCodegenEmissionEvidenceV1:
+    TargetCodegenEmissionEvidenceV1(
+        emitted_features: emitted, emission_evidence: digest(30u64),
+        emitted_instruction_count: 4u64)
+
+fn selection(identity: u64) -> TargetCodegenSelectionEvidenceV1:
+    TargetCodegenSelectionEvidenceV1(
+        selected_implementation_identity: digest(identity),
+        selection_evidence: digest(40u64))
+
+fn execution(identity: u64, executed: EnvironmentFeatureSetV1) -> TargetCodegenExecutionEvidenceV1:
+    TargetCodegenExecutionEvidenceV1(
+        executed_implementation_identity: digest(identity),
+        executed_features: executed, execution_evidence: digest(50u64),
+        invocation_count: 1u64)
+
+fn accepted_receipt(strict: bool) -> TargetCodegenReceiptV1:
+    val p = profile(strict)
+    var receipt = target_codegen_receipt_create_v1(p, [1u64]).unwrap()
+    receipt = target_codegen_receipt_record_backend_v1(
+        p, receipt, backend(), [1u64]).unwrap()
+    receipt = target_codegen_receipt_record_artifact_v1(
+        p, receipt, artifact(feature_set(0u32)), [1u64]).unwrap()
+    receipt = target_codegen_receipt_record_emission_v1(
+        p, receipt, emission(feature_set(0u32)), [1u64]).unwrap()
+    receipt = target_codegen_receipt_record_selection_v1(
+        p, receipt, selection(60u64)).unwrap()
+    receipt
+
+describe "Target codegen profile V1" :
+    it "keeps target identity independent from host feature words":
+        val p = profile(true)
+        expect(target_codegen_profile_validate_v1(p, [1u64])).to_equal(Ok(()))
+        expect(p.target_identity).to_equal(digest(2u64))
+        expect(p.requested_features.architecture).to_equal(ENV_ARCH_X86_64_V1)
+
+    it "requires strict requested features in backend acceptance and artifact declaration":
+        val p = profile(true)
+        var receipt = target_codegen_receipt_create_v1(p, [1u64]).unwrap()
+        val weak_backend = TargetCodegenBackendAcceptanceV1(
+            backend_identity: digest(3u64), accepted: true,
+            accepted_features: feature_set(1u32), acceptance_evidence: digest(10u64))
+        expect(target_codegen_receipt_record_backend_v1(
+            p, receipt, weak_backend, [1u64, 0u64])).to_equal(
+            Err(TargetCodegenProfileErrorV1.StrictFeaturesNotAccepted))
+        receipt = target_codegen_receipt_record_backend_v1(
+            p, receipt, backend(), [1u64]).unwrap()
+        expect(target_codegen_receipt_record_artifact_v1(
+            p, receipt, artifact(empty_features()), [1u64, 0u64])).to_equal(
+            Err(TargetCodegenProfileErrorV1.StrictFeaturesNotDeclared))
+
+    it "does not infer emitted or executed work from target flags":
+        val p = profile(false)
+        var receipt = target_codegen_receipt_create_v1(p, [1u64]).unwrap()
+        receipt = target_codegen_receipt_record_backend_v1(
+            p, receipt, backend(), [1u64]).unwrap()
+        receipt = target_codegen_receipt_record_artifact_v1(
+            p, receipt, artifact(feature_set(0u32)), [1u64]).unwrap()
+        expect(target_codegen_receipt_finalize_v1(p, receipt, [1u64])).to_equal(
+            Err(TargetCodegenProfileErrorV1.MissingSelectionIdentity))
+        receipt = target_codegen_receipt_record_emission_v1(
+            p, receipt, emission(empty_features()), [1u64, 0u64]).unwrap()
+        receipt = target_codegen_receipt_record_selection_v1(
+            p, receipt, selection(60u64)).unwrap()
+        expect(target_codegen_receipt_finalize_v1(p, receipt, [1u64, 0u64])).to_equal(
+            Err(TargetCodegenProfileErrorV1.MissingExecutionIdentity))
+
+    it "requires selected and executed identities to match explicit evidence":
+        val p = profile(true)
+        var receipt = accepted_receipt(true)
+        expect(target_codegen_receipt_record_execution_v1(
+            p, receipt, execution(61u64, feature_set(0u32)), [1u64])).to_equal(
+            Err(TargetCodegenProfileErrorV1.ExecutionIdentityMismatch))
+        receipt = target_codegen_receipt_record_execution_v1(
+            p, receipt, execution(60u64, feature_set(0u32)), [1u64]).unwrap()
+        expect(target_codegen_receipt_finalize_v1(p, receipt, [1u64])).to_equal(Ok(()))
+
+    it "rejects cross-architecture and unbounded feature requests":
+        val bad_arch = TargetCodegenProfileV1(
+            descriptor_size: TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1,
+            schema_version: TARGET_CODEGEN_PROFILE_SCHEMA_V1,
+            profile_identity: digest(1u64), target_identity: digest(2u64),
+            target_architecture: ENV_ARCH_AARCH64_V1,
+            target_abi_id: 1u32, target_object_format_id: 1u32,
+            target_endian_id: 1u16, target_pointer_width_bits: 64u16,
+            requested_features: feature_set(0u32), strict_requested_features: true,
+            backend_identity: digest(3u64), semantic_identity: digest(4u64),
+            numerical_contract_id: 1u32)
+        expect(target_codegen_profile_validate_v1(bad_arch, [1u64])).to_equal(
+            Err(TargetCodegenProfileErrorV1.InvalidFeatureSet))
+        expect(target_codegen_profile_validate_v1(profile(true),
+            [for _ in 0..65: 1u64])).to_equal(
+            Err(TargetCodegenProfileErrorV1.FeatureWordCapacityExceeded))

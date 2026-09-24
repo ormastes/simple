@@ -1,4 +1,8 @@
 # `native-build` invoked directly against the seed hangs under JIT; `SIMPLE_EXECUTION_MODE=interpret` terminates. Mechanism UNKNOWN — an earlier version of this doc asserted a wrong explanation; see the correction below.
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open, mechanism honestly unresolved after eight tested
 explanations. **Confirmed:** default-mode `native-build`, invoked directly
@@ -515,3 +519,4 @@ terminating condition.
 **Real defects this leaves, both worth their own work:**
 - `_native_build_entry_closure` at ~2.2 s/file for a syntactic scan.
 - The `method 'len' not found on type 'str'` semantic error at ~5 modules in.
+

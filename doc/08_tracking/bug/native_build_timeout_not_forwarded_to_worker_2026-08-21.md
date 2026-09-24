@@ -1,4 +1,8 @@
 # native-build: "worker timed out after 569328s" at 2742 s of wall, and the phase-2 worker outlived the driver (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (working tree, stage-1 bootstrap lane). Specs:
 `test/01_unit/app/cli/native_build_timeout_parse_spec.spl` (7 examples, the
@@ -93,3 +97,4 @@ Three separate defects line up to produce that message:
 `rt_process_wait`'s `-1` for signal deaths (`env_process.rs`) is a seed
 change and belongs to the seed lane; the driver now classifies it correctly
 instead of blaming `--timeout`.
+

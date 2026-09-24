@@ -1,0 +1,271 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+
+# Seed interpreter BLOCK-SCOPE SHADOW budget and parity.
+#
+# `exec_block` (src/compiler_rust/compiler/src/interpreter/block_exec.rs) runs
+# `capture_node_scope_shadows` before, and `restore_block_scope_shadows` after,
+# EVERY execution of a block. For a loop body that means once per iteration, and
+# a loop body that declares a `val`/`var` is the single most common shape in
+# `src/lib/common/**` (28,246 in-body declarations measured 2026-09-13, against
+# 5,774 `.push(` and 10,859 `[i]` reads).
+#
+# Measured on this host at n = 2,000,000 on child USER CPU time (wall clock does
+# not survive its own control here -- see the budget scenario): a
+# three-statement body costs ~920 ns/iteration, and adding ONE block-local `val`
+# to it cost a further ~250 ns/iteration, about 20% of the iteration. The
+# bookkeeping was allocating, per declared name per iteration, three owned
+# copies of the same name (a scratch `Vec<String>`, a dedup `HashSet<String>`,
+# and the returned vector), plus an `Arc` clone and a fourth `String` on the
+# restore side's `CURRENT_EXEC_MODULE` fallback. This spec pins BOTH halves of
+# removing them:
+#
+#   budget    - the block-scope path is entered exactly once per declared name
+#               and costs exactly one owner-store probe per captured non-local
+#               name, pinned as COUNTS because wall-clock ratios do not survive
+#               this host (see the scenario for the measurements);
+#   semantics - six scope behaviours that the bookkeeping exists to provide are
+#               byte-identical to the values the pre-change seed produced.
+#
+# The semantics oracles are literal values, recorded from the BASE seed
+# (sha256 22878382bc1b5ccf..., built from origin/main f26970e9d93) before the
+# change. A candidate seed that disagrees with any of them has changed
+# behaviour, which is the thing this spec exists to forbid.
+#
+# Non-vacuity: every child runs under SIMPLE_PERF_COUNTERS=1 with
+# SIMPLE_PERF_COUNTERS_OUT. A run whose counters file has no
+# `interp-perf-counters:` header, whose RESULT line is missing, whose child
+# exited non-zero, or whose `BLOCK_SHADOW_NAMES` row is absent, FAILS - it is
+# never silently treated as a pass.
+
+use std.spec.step
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Iterations per timed round in decl_parity_pair.spl, and the number of rounds
+# it runs of each shape. Both must track that fixture.
+val PAIR_N = 1000000
+val PAIR_ROUNDS = 3
+val FIXTURES = "test/05_perf/interp/fixtures/block_shadow"
+
+# --- process plumbing -------------------------------------------------------
+
+fn sh(script: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", script])
+
+fn path_is_exec(p: text) -> bool:
+    if p.len() == 0:
+        return false
+    val (_o, _e, code) = sh("test -x '" + p + "'")
+    code == 0
+
+# Resolve the interpreter under test. `SIMPLE_PERF_SELF_BIN` wins so a lane can
+# point this spec at the candidate seed it just built; otherwise the usual
+# in-tree locations are probed. Returns "" when nothing is runnable, which the
+# scenarios turn into a FAIL rather than a skip.
+#
+# TRAP, measured 2026-09-13: the test runner DROPS `SIMPLE_PERF_SELF_BIN` in
+# DIRECTORY mode (`simple test <dir>`) while propagating it in single-file mode,
+# so a directory run silently falls through to whatever `bin/simple` points at --
+# which in a fresh worktree is a hand-linked DEPLOYED seed that may predate the
+# very change under test. That is why every scenario prints the resolved binary
+# before asserting: the first `[perf] binary=` line says what was actually
+# measured. `while_loop_shape_parity_spec.spl` should carry the same line.
+#
+# NOTE: `{` and `}` inside a Simple text literal are INTERPOLATION, so no shell
+# snippet in this file may use `${VAR}` / `${VAR:-default}` / `\{n,m\}`. Use
+# `$VAR`, an explicit `[ -n "$x" ] || x=-1` default, and `sed -E`.
+fn simple_binary() -> text:
+    val (env_out, _e, _c) = sh("printf %s \"$SIMPLE_PERF_SELF_BIN\"")
+    val override = env_out.trim()
+    if path_is_exec(override):
+        return override
+    val candidates = [
+        "src/compiler_rust/target/release/simple",
+        "bin/release/x86_64-unknown-linux-gnu/simple",
+        "bin/release/aarch64-unknown-linux-gnu/simple",
+        "bin/release/linux-x86_64/simple",
+        "bin/simple",
+    ]
+    for c in candidates:
+        if path_is_exec(c):
+            return c
+    ""
+
+struct RunOut:
+    ok: i64
+    elapsed_us: i64
+    acc: text
+    iters: i64
+    header: i64
+    names: i64
+    probes: i64
+    rc: i64
+    raw: text
+
+# Run one fixture in a child process with the perf counters armed, and bring
+# back eight machine-readable fields.
+#
+# All extraction happens in the CHILD SHELL, and every numeric field is emitted
+# as a digit string with -1 as the "not found" sentinel, because
+# `text.to_i64()` in this seed NEVER fails: it returns 0 for "" and "abc" and
+# the character code for a one-character string ("X" -> 88), so a `?? default`
+# fallback is dead code and an unparseable field would arrive as a plausible
+# number. See doc/08_tracking/bug/text_to_i64_never_nil_2026-09-12.md.
+# The separate `ok` flag is the only thing this spec trusts to mean "the child
+# actually produced a RESULT line".
+fn run_fixture(binary: text, fixture: text) -> RunOut:
+    val script = "d=$(mktemp -d) || exit 9; "
+        + "SIMPLE_EXECUTION_MODE=interpreter SIMPLE_PERF_COUNTERS=1 "
+        + "SIMPLE_PERF_COUNTERS_OUT=\"$d/c.txt\" "
+        + "timeout 900 '" + binary + "' run '" + fixture + "' > \"$d/o.txt\" 2>\"$d/e.txt\"; rc=$?; "
+        + "line=$(grep -m1 '^RESULT ' \"$d/o.txt\" 2>/dev/null); "
+        + "el=$(printf '%s' \"$line\" | sed -nE 's/.*elapsed_us=(-?[0-9]+).*/\\1/p'); "
+        + "ac=$(printf '%s' \"$line\" | sed -nE 's/.*acc=([-0-9:]+).*/\\1/p'); "
+        + "it=$(printf '%s' \"$line\" | sed -nE 's/.*iters=(-?[0-9]+).*/\\1/p'); "
+        + "hd=$(grep -c 'interp-perf-counters:' \"$d/c.txt\" 2>/dev/null); "
+        + "nm=$(sed -nE 's/^ +BLOCK_SHADOW_NAMES +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "pb=$(sed -nE 's/^ +BLOCK_SHADOW_OWNER_PROBES +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "ok=1; "
+        + "[ -n \"$el\" ] || ok=0; [ -n \"$ac\" ] || ok=0; [ -n \"$it\" ] || ok=0; "
+        + "[ -n \"$el\" ] || el=-1; [ -n \"$ac\" ] || ac=-1; [ -n \"$it\" ] || it=-1; "
+        + "[ -n \"$hd\" ] || hd=-1; [ -n \"$nm\" ] || nm=-1; [ -n \"$pb\" ] || pb=-1; "
+        + "printf '%s|%s|%s|%s|%s|%s|%s|%s' \"$ok\" \"$el\" \"$ac\" \"$it\" \"$hd\" \"$nm\" \"$pb\" \"$rc\"; "
+        + "rm -rf \"$d\""
+    val (out, _err, _code) = sh(script)
+    val parts = out.trim().split("|")
+    if parts.len() != 8:
+        return RunOut(ok: 0, elapsed_us: -1, acc: "", iters: -1, header: -1, names: -1, probes: -1, rc: -1, raw: out)
+    val ok = parts[0].trim().to_i64() ?? -1
+    val el = parts[1].trim().to_i64() ?? -1
+    val it = parts[3].trim().to_i64() ?? -1
+    val hd = parts[4].trim().to_i64() ?? -1
+    val nm = parts[5].trim().to_i64() ?? -1
+    val pb = parts[6].trim().to_i64() ?? -1
+    val rc = parts[7].trim().to_i64() ?? -1
+    RunOut(ok: ok, elapsed_us: el, acc: parts[2].trim(), iters: it, header: hd, names: nm, probes: pb, rc: rc, raw: out)
+
+# Fail-closed gate every scenario runs on its result before asserting anything
+# else: the child must have exited 0, emitted a counters block, reported the
+# iteration count the fixture was written for, and reached the block-scope path
+# at least once. A binary whose counters report has no BLOCK_SHADOW_NAMES row
+# (`names == -1`) fails here rather than passing vacuously, which is what makes
+# this spec RED on a seed that predates the counter.
+fn assert_ran(tag: text, r: RunOut, expect_iters: i64):
+    print "[perf] {tag}: ok={r.ok} rc={r.rc} iters={r.iters} elapsed_us={r.elapsed_us} header={r.header} NAMES={r.names} PROBES={r.probes} acc={r.acc}"
+    expect(r.raw.len() > 0).to_equal(true)
+    expect(r.ok).to_equal(1)
+    expect(r.rc).to_equal(0)
+    expect(r.header).to_equal(1)
+    expect(r.iters).to_equal(expect_iters)
+    expect(r.names > 0).to_equal(true)
+    expect(r.probes >= 0).to_equal(true)
+
+# Run a semantics fixture and assert its acc trace matches the value the BASE
+# seed produced. `expect_iters` is the loop count the fixture declares.
+fn assert_semantics(binary: text, fixture: text, tag: text, expect_iters: i64, oracle: text):
+    val r = run_fixture(binary, FIXTURES + "/" + fixture)
+    assert_ran(tag, r, expect_iters)
+    print "[perf] {tag}: acc={r.acc} oracle={oracle}"
+    expect(r.acc.len() > 0).to_equal(true)
+    expect(r.acc).to_equal(oracle)
+
+describe "seed interpreter: a block-local declaration in a loop body is affordable":
+    # @manual scenario evidence
+    it "the block-scope path is entered exactly once per declared name, and costs a bounded time":
+        step("the block-scope path is entered exactly once per declared name, and costs a bounded time")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        val r = run_fixture(binary, FIXTURES + "/decl_parity_pair.spl")
+        assert_ran("decl_parity_pair", r, PAIR_N * PAIR_ROUNDS)
+        # `acc` carries the hoisted control's best round, `elapsed_us` the
+        # declaring shape's, both measured IN THIS ONE PROCESS.
+        val hoisted = r.acc.to_i64() ?? -1
+        expect(hoisted > 0).to_equal(true)
+        expect(r.elapsed_us > 0).to_equal(true)
+        print "[perf] block-shadow budget: hoisted={hoisted}us declaring={r.elapsed_us}us iters={r.iters} NAMES={r.names} PROBES={r.probes}"
+        # THE REGRESSION LOCK IS A COUNT, NOT A TIME. PERF-6 measured, on this
+        # host at load ~38, a 2.2x spread between two whole-process samples of
+        # the SAME binary and in-process ratios of 0.85 / 0.96 / 1.37 / 1.35 for
+        # one unchanged seed -- ratios below 1.0 are physically impossible for a
+        # strictly-more-work shape, so a wall-clock ratio bound here would pin
+        # noise and flake. What IS deterministic is how many times the
+        # block-scope path runs: the declaring loop declares exactly one name per
+        # iteration, so NAMES must be at least the loop's own iteration count,
+        # and every captured non-local name costs exactly one owner-store probe
+        # on the way out. A change that re-introduces per-iteration bookkeeping
+        # by running the path more often fails here; a change that makes each
+        # visit cheaper (which is what PERF-6 did: five heap allocations per
+        # declared name per iteration removed, measured on child USER CPU time
+        # at 250 -> 152 ns/iteration) leaves these counts untouched by design.
+        expect(r.names >= PAIR_N * PAIR_ROUNDS).to_equal(true)
+        expect(r.probes >= PAIR_N * PAIR_ROUNDS).to_equal(true)
+        # ... and never MORE than one capture and one probe per declared name
+        # plus the module's own handful of top-level and `main`-body names.
+        expect(r.names <= PAIR_N * PAIR_ROUNDS + 1000).to_equal(true)
+        expect(r.probes <= r.names).to_equal(true)
+        # A loose absolute ceiling that catches a catastrophic regression:
+        # 10 us/iteration for the declaring shape, which ran at 1.1-3.3
+        # us/iteration across every sample PERF-6 took on both seeds. The
+        # headroom is deliberately 3x rather than 1.5x: this host showed a 2.2x
+        # spread between two samples of the SAME binary, so a 5 us ceiling would
+        # have had less headroom than the measured noise and would eventually
+        # flake. This is the ONLY wall-clock assertion in the file, and it is a
+        # catastrophe detector, not a budget. The budget is the counts above.
+        expect(r.elapsed_us <= PAIR_N * 10).to_equal(true)
+
+describe "seed interpreter: block-scope shadowing is unchanged by the budget fix":
+    # @manual scenario evidence
+    it "a nested redeclaration does not leak past its block":
+        step("a nested redeclaration does not leak past its block")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_nested_redeclare.spl", "sem_nested_redeclare", 10, "10:1")
+
+    # @manual scenario evidence
+    it "the shadowed pre-block value is re-read on every iteration, never memoised":
+        step("the shadowed pre-block value is re-read on every iteration, never memoised")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_prior_varies.spl", "sem_prior_varies", 10, "55:10")
+
+    # @manual scenario evidence
+    it "a module global mutated by a callee while shadowed restores to the NEW value":
+        step("a module global mutated by a callee while shadowed restores to the NEW value")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        # This is the one behaviour the module-global owner-store probe exists
+        # for: `g` is 5, the block shadows it with 1000 and calls `bump()` from
+        # another frame four times. Each post-block read must see 6, 7, 8, 9 --
+        # the live global -- not the stale pre-block 5 and not the shadow.
+        assert_semantics(binary, "sem_global_shadow.spl", "sem_global_shadow", 4, "30:9")
+
+    # @manual scenario evidence
+    it "a destructuring declaration scopes and restores every bound name":
+        step("a destructuring declaration scopes and restores every bound name")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_destructure.spl", "sem_destructure", 10, "250:7:8")
+
+    # @manual scenario evidence
+    it "only the FIRST declaration of a repeated name in one block is captured":
+        step("only the FIRST declaration of a repeated name in one block is captured")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_dup_decl.spl", "sem_dup_decl", 10, "3230:3")
+
+    # @manual scenario evidence
+    it "a block left early by break still restores its shadow":
+        step("a block left early by break still restores its shadow")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        # If restore were skipped on the break path, the shadowed `e = 42` would
+        # leak out of the block for i = 0, 1, 2 and acc would be 135, not 36.
+        assert_semantics(binary, "sem_error_path.spl", "sem_error_path", 4, "36:0")

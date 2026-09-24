@@ -1,5 +1,11 @@
 # Native Render Log Matrix PIX Fixture Reason Mismatch
 
+## Closed 2026-09-13 — recorded as fixed in-lane; no contradicting evidence in the tree
+- **measured**: `test/03_system/check/native_render_log_platform_matrix_contract_spec.spl` exists, so the fix was not achieved by deleting coverage.
+- **inferred**: the entry's own status already reads "fixed in the same 2026-06-28 lane".
+- **inferred**: the spec could not be re-run — `bin/simple test` is broken on this Windows host (a trivial 1-assertion spec also reports `reason=outer-bound-timeout budget_ms=930000` in under a second).
+- **inferred**: the residual it describes lived in a per-run build artifact (`build/test-native-render-log-.../evidence.env`) that does not exist in this checkout.
+
 Date: 2026-06-28
 
 ## Summary
@@ -8,7 +14,7 @@ Date: 2026-06-28
 now passes with the fixed SSpec runner. The previously remaining failure was in
 `rejects Windows D3D12 rows whose PIX file-byte proof is missing`.
 
-Status: fixed in the same 2026-06-28 lane.
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Observed Evidence
 

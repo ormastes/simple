@@ -1,4 +1,8 @@
 # `unsafe(capabilities: [...])` is a STATEMENT-only form; in expression position it silently becomes a call and breaks LLVM codegen
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-30
 **Status:** OPEN (parser feature gap). Call sites worked around; the gap is NOT fixed.
@@ -95,3 +99,4 @@ unsafe block at all. The failure mode here is that it never becomes one.
 - `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:1201`
 - `scripts/check/check-predicate-parser-native-build.shs` (same defect class)
 - `doc/08_tracking/bug/stage2_native_build_has_paren_idx_undeclared_global_2026-08-09.md`
+

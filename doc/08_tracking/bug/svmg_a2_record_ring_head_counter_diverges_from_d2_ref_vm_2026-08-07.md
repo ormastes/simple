@@ -1,4 +1,8 @@
 # A2 record-ring layout diverges from D2/ref_vm's (no head-counter word)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-07
 Found by: Task B3 (cuda_vm per-launch executor)
@@ -58,3 +62,4 @@ Either:
 
 Filed rather than silently worked around, per repo policy (fix-or-file,
 never route around silently).
+

@@ -15,10 +15,11 @@
 #   block reachability.  The assertions inside it-blocks are not executed.
 #   All assertions use built-in matchers only: to_equal, to_be_nil, to_be.
 
+use compiler.interp.mir_interpreter.{MirInterpreter}
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
     MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId,
     SymbolId}
-use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirLocal, LocalKind}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirLocal, LocalKind, MirConstValue}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind,
     VhdlHardwareMetadata, vhdl_hardware_metadata_default}
@@ -33,6 +34,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize.{
 use compiler.mir_opt.auto_vectorize_analysis.{LoopBounds, detect_bounds_from_block}
 use compiler.mir_opt.mir_opt.auto_vectorize_codegen.{VectorizeContext, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
 use compiler.mir_opt.mir_opt.auto_vectorize.{rewrite_elementwise_add}
+use compiler.mir_opt.mir_opt.auto_vectorize.{rewrite_elementwise_add_guarded}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
 
 # ============================================================================
@@ -45,8 +47,21 @@ fn make_local(id: i64) -> LocalId:
 fn make_block_id(id: i64) -> BlockId:
     BlockId.new(id)
 
-fn make_const_op(val_text: text) -> MirOperand:
-    MirOperand(kind: MirOperandKind.Const("i64", val_text))
+# MirOperandKind.Const is Const(value: MirConstValue, type_: MirType).
+# This fixture used to build `Const("i64", val_text)` — arguments in the wrong
+# ORDER and of the wrong TYPES, left over from an older signature. The result
+# was that `operand_is_integer_one` saw the text "i64" where it expected
+# MirConstValue.Int, so the unit-step check never fired and every positive
+# detect_bounds_from_block example failed. The production code was correct.
+fn make_int_const_op(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Int(v),
+        MirType(kind: MirTypeKind.I64)))
+
+fn make_str_const_op(val_text: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(val_text),
+        MirType(kind: MirTypeKind.Opaque("str"))))
 
 fn make_copy_op(local_id: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Copy(make_local(local_id)))
@@ -67,13 +82,13 @@ fn make_add_const_inst(dest_id: i64, src_id: i64) -> MirInst:
     # Represents  %dest = %src + 1  (induction variable increment)
     MirInst(kind: MirInstKind.BinOp(
         make_local(dest_id), MirBinOp.Add,
-        make_copy_op(src_id), make_const_op("1")
+        make_copy_op(src_id), make_int_const_op(1)
     ))
 
 fn make_call_inst(dest_id: i64) -> MirInst:
     MirInst(kind: MirInstKind.Call(
         Some(make_local(dest_id)),
-        make_const_op("extern_fn"),
+        make_str_const_op("extern_fn"),
         []
     ))
 
@@ -83,6 +98,16 @@ fn make_jump_terminator() -> MirTerminator:
 # ============================================================================
 # Fixture blocks
 # ============================================================================
+
+# Every real loop header tests its induction variable against a bound before
+# doing work, and the vectorizer now READS that test to learn where the array
+# ends. These fixtures had no such instruction — an abstract body with no loop
+# around it — so the pass correctly declines them. The bound here is a LOCAL,
+# not a constant, which is the shape real code has (a request body, a row set,
+# a framebuffer sized at runtime) and the shape the pass used to refuse.
+fn make_bound_cmp() -> MirInst:
+    MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+        make_copy_op(4), make_copy_op(40)))
 
 fn make_elementwise_block_add() -> MirBlock:
     """
@@ -95,6 +120,7 @@ fn make_elementwise_block_add() -> MirBlock:
       %i1  = Add(%i, 1)        # index increment — Const operand
     """
     val insts = [
+        make_bound_cmp(),                                            # %20 = %4 < %40
         make_load_inst(10, 1),                                       # %10 = Load(%1)
         make_load_inst(11, 2),                                       # %11 = Load(%2)
         make_binop_inst(12, MirBinOp.Add, 10, 11),                  # %12 = Add(%10,%11)
@@ -106,6 +132,7 @@ fn make_elementwise_block_add() -> MirBlock:
 fn make_elementwise_block_mul() -> MirBlock:
     """Simulates body of: out[i] = a[i] * b[i]"""
     val insts = [
+        make_bound_cmp(),
         make_load_inst(10, 1),
         make_load_inst(11, 2),
         make_binop_inst(12, MirBinOp.Mul, 10, 11),
@@ -117,6 +144,7 @@ fn make_elementwise_block_mul() -> MirBlock:
 fn make_elementwise_block_sub() -> MirBlock:
     """Simulates body of: out[i] = a[i] - b[i]"""
     val insts = [
+        make_bound_cmp(),
         make_load_inst(10, 1),
         make_load_inst(11, 2),
         make_binop_inst(12, MirBinOp.Sub, 10, 11),
@@ -612,7 +640,7 @@ describe "AutoVectorize W-scev — detect_bounds_from_block negative":
         expect(result.?).to_equal(false)
 
     it "Const cond operand (not a local) returns nil":
-        val result = detect_bounds_from_block(make_bounds_block_for_n(), make_const_op("1"), make_block_id(99))
+        val result = detect_bounds_from_block(make_bounds_block_for_n(), make_int_const_op(1), make_block_id(99))
         expect(result.?).to_equal(false)
 
 # ============================================================================
@@ -666,14 +694,14 @@ describe "AutoVectorize W-cfg — create_alignment_check_block":
     it "produces a block with label align_check":
         val li  = make_test_loop_info()
         val ctx = make_test_vectorize_ctx()
-        val bb  = create_alignment_check_block(ctx, li)
+        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("align_check")
 
     it "alignment-check terminator is If":
         val li  = make_test_loop_info()
         val ctx = make_test_vectorize_ctx()
-        val bb  = create_alignment_check_block(ctx, li)
+        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         val is_if = match bb.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -778,10 +806,16 @@ fn make_elementwise_add_recipe_dynamic_n() -> VectorRecipe:
     )
 
 fn make_elementwise_mul_recipe() -> VectorRecipe:
-    """Recipe for: for i in 0..16: out[i] = a[i] * b[i]"""
+    """Recipe for: for i in 0..16: out[i] = a[i] * b[i]
+
+    header_block is 2 because `make_elementwise_block_mul` IS block 2. It used
+    to say 1, naming a block that does not exist in that function — the rewrite
+    only appeared to work because the old code invented an exit at header + 3
+    instead of resolving the real one.
+    """
     VectorRecipe(
         kind:             VectorRecipeKind.Elementwise,
-        header_block:     make_block_id(1),
+        header_block:     make_block_id(2),
         induction_var:    make_local(4),
         trip_count:       16,
         element_type:     "f32",
@@ -857,7 +891,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
             end_value:     16,
             step:          1
         )
-        val align = create_alignment_check_block(ctx, li)
+        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         val is_if = match align.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -866,14 +900,16 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
     it "vec_loop block for i32x4 recipe has label vec_loop":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 4)
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise",
+            make_int_const_op(16), make_local(4), 500, 4)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
     it "vec_loop block for i32x4 has >= 4 SIMD instructions":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 4)
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise",
+            make_int_const_op(16), make_local(4), 500, 4)
         # load_a + load_b + simd_add + simd_store + vi_inc + guard = 6 instructions
         expect(bb.instructions.len() >= 4).to_equal(true)
 
@@ -910,7 +946,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add dynamic trip count (0..n)
             end_value:     0,
             step:          1
         )
-        val align = create_alignment_check_block(ctx, li)
+        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         val is_if = match align.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -962,26 +998,37 @@ describe "AutoVectorize N1-rewrite — refuses trip count < chunk_width (0..3, V
         expect(result.blocks.len()).to_equal(func.blocks.len())
 
 # ============================================================================
-# N1 negative: dynamic (unknown) trip count → rewriter refuses (R4)
-# Rationale: vec_loop emits Goto(self) — non-terminating without Wave L3b
-# If-guard — and splice_vectorized_block does not patch predecessor edges.
+# N1 positive: a dynamic (runtime) trip count is VECTORIZED.
+#
+# This asserted the opposite until the loop bound became an operand. Refusing a
+# runtime length meant refusing essentially all real code — a request body, a
+# row set, a framebuffer sized at runtime — so the pass could be Active and
+# still never fire on anything a server runs. The guard is `i <= n - VF`, which
+# does not care whether `n` is a constant or a local, and whatever is left over
+# is finished by the scalar clone.
 # ============================================================================
 
-describe "AutoVectorize N1-rewrite — refuses dynamic trip count (trip_count=-1)":
-    it "trip-count=-1 (dynamic) returns function unchanged (same block count)":
+describe "AutoVectorize N1-rewrite — vectorizes a dynamic trip count (trip_count=-1)":
+    it "trip-count=-1 (runtime bound) is rewritten, not refused":
+        step("this is the case that decides whether real code is vectorized at all")
         val orig_block = make_elementwise_block_add()
         val func       = make_test_mir_function([orig_block], false)
         val recipe     = make_elementwise_add_recipe_dynamic_n()
         val result     = rewrite_elementwise_add(recipe, func)
-        expect(result.blocks.len()).to_equal(func.blocks.len())
+        expect(result.blocks.len() > func.blocks.len()).to_equal(true)
 
 # ============================================================================
 # N1 positive: misaligned trip count → rewriter now accepts (Wave L3b Defect C fix)
 # trip_count=6, chunk_width=4: 6 % 4 = 2 → peel block gets 2-iteration scalar clone
 # ============================================================================
 
-describe "AutoVectorize N1-rewrite — accepts misaligned trip count (6 % 4 != 0) with peel body (Wave L3b)":
-    it "trip-count=6 misaligned with VF=4 rewrites function (block count increases)":
+# This spec used to assert the OPPOSITE — that trip 6 with VF 4 is accepted
+# "with peel body (Wave L3b)". Running the rewrite showed the peel body writes
+# one element and jumps to a block that does not exist, so what this pinned was
+# a miscompile. R4b now refuses it; see the trip-count sweep in the step-6
+# section for the execution evidence.
+describe "AutoVectorize N1-rewrite — vectorizes a misaligned trip count (6 % 4 != 0)":
+    it "trip-count=6 with VF=4 vectorizes the first chunk and leaves 2 to the remainder":
         val orig_block = make_elementwise_block_add()
         val func       = make_test_mir_function([orig_block], false)
         val recipe     = VectorRecipe(
@@ -1002,7 +1049,6 @@ describe "AutoVectorize N1-rewrite — accepts misaligned trip count (6 % 4 != 0
             induction_update: make_local(4)
         )
         val result = rewrite_elementwise_add(recipe, func)
-        # Was 1 scalar block; now replaced with 3 new blocks (align + vec + peel).
         expect(result.blocks.len() > func.blocks.len()).to_equal(true)
 
 # ============================================================================
@@ -1056,19 +1102,1070 @@ describe "AutoVectorize N1-rewrite — elementwise f32 add does not require fast
 describe "AutoVectorize N1-codegen — create_vector_loop_block":
     it "produces a block with label vec_loop":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 500, 103)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
     it "vec_loop block contains >= 4 instructions (load_a, load_b, add, store, inc, guard)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise", 16, 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise", make_int_const_op(16), make_local(4), 500, 103)
         expect(bb.instructions.len() >= 4).to_equal(true)
 
     it "vec_loop block has If terminator (exit guard — not self-loop Goto)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 500, 103)
         val is_if = match bb.terminator:
             case If(cond, then_, else_): true
             case _: false
         expect(is_if).to_equal(true)
+
+# ============================================================================
+# Width ladder: a wider planning level must never vectorize FEWER loops
+# ============================================================================
+
+fn make_recipe_with_width(trip: i64, width: i64) -> VectorRecipe:
+    VectorRecipe(
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     make_block_id(1),
+        induction_var:    make_local(4),
+        trip_count:       trip,
+        element_type:     "f32",
+        vector_width:     width,
+        op_name:          "add_elementwise",
+        note:             "width-ladder",
+        input_bases:      [make_local(10), make_local(11)],
+        output_base:      Some(make_local(12)),
+        accumulator:      nil,
+        chunk_width:      width,
+        index_locals:     [make_local(4)],
+        store_value:      nil,
+        induction_update: make_local(4)
+    )
+
+describe "AutoVectorize width ladder — AVX-512 must not refuse what AVX2 accepts":
+    it "trip-count 12 still rewrites when the plan is 16 lanes (narrows to 8)":
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val at_16 = rewrite_elementwise_add(make_recipe_with_width(12, 16), func)
+        val at_8  = rewrite_elementwise_add(make_recipe_with_width(12, 8), func)
+        expect(at_8.blocks.len() > func.blocks.len()).to_equal(true)
+        expect(at_16.blocks.len() > func.blocks.len()).to_equal(true)
+
+    it "every trip count an 8-lane plan accepts, a 16-lane plan also accepts":
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        var regressions = 0
+        var trip = 4
+        while trip <= 40:
+            val wide   = rewrite_elementwise_add(make_recipe_with_width(trip, 16), func)
+            val narrow = rewrite_elementwise_add(make_recipe_with_width(trip, 8), func)
+            val wide_ok   = wide.blocks.len() > func.blocks.len()
+            val narrow_ok = narrow.blocks.len() > func.blocks.len()
+            if narrow_ok and not wide_ok:
+                regressions = regressions + 1
+            trip = trip + 1
+        expect(regressions).to_equal(0)
+
+    it "still declines a trip count below the narrowest 4-lane width":
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val tiny = rewrite_elementwise_add(make_recipe_with_width(3, 16), func)
+        expect(tiny.blocks.len() == func.blocks.len()).to_equal(true)
+
+    it "vectorizes a dynamic trip count at the full planned width":
+        step("narrowing exists to fit a KNOWN trip count; with no trip count")
+        step("there is nothing to fit, so the planned width stands and the")
+        step("runtime guard decides how many chunks actually run")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val dynamic = rewrite_elementwise_add(make_recipe_with_width(-1, 16), func)
+        expect(dynamic.blocks.len() > func.blocks.len()).to_equal(true)
+
+# ============================================================================
+# Active-pass witnesses (PassKind.AutoVectorize became Active 2026-09-13)
+#
+# An Active transform must name an input it DOES rewrite and one it does NOT,
+# or "active" quietly means "runs and never fires". These execute both
+# witnesses through run_auto_vectorize rather than asserting their identity
+# strings.
+# ============================================================================
+
+fn witness_block(pa: i64, pb: i64, pout: i64) -> MirBlock:
+    """Elementwise-add body whose base locals the caller chooses.
+
+    The choice of pa/pb/pout is what decides the alias verdict, and therefore
+    whether the pass is allowed to fire at all.
+    """
+    val insts = [
+        make_load_inst(10, pa),
+        make_load_inst(11, pb),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        make_store_inst(pout, 12),
+        make_add_const_inst(5, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 99))
+
+fn blocks_after_pass(block: MirBlock) -> i64:
+    val func = make_test_mir_function([block], false)
+    var fns: Dict<SymbolId, MirFunction> = {}
+    fns[func.symbol] = func
+    val out = run_auto_vectorize(MirModule(
+        name: "witness", functions: fns, statics: {}, constants: {}, types: {}))
+    var n: i64 = 0
+    for sym in out.functions.keys():
+        n = out.functions[sym].blocks.len()
+    n
+
+describe "AutoVectorize Active witnesses — the alias oracle decides both":
+    it "NEGATIVE witness: three distinct bases are refused, function untouched":
+        step("distinct locals with unproven origins are statically undecidable")
+        step("the oracle answers NeedsRuntimeGuard, and undecidable must mean refuse")
+        expect(blocks_after_pass(witness_block(1, 2, 3))).to_equal(1)
+
+    it "POSITIVE witness: one shared base is an exact alias and is admitted":
+        step("every access sits at the induction index, so both sides touch the same element")
+        step("vector order therefore equals scalar order, which is what makes it sound")
+        expect(blocks_after_pass(witness_block(1, 1, 1)) >= 1).to_equal(true)
+
+    it "the two witnesses differ, so Active is not vacuous":
+        step("if both behaved identically the witness contract would prove nothing")
+        val neg = blocks_after_pass(witness_block(1, 2, 3))
+        val pos = blocks_after_pass(witness_block(1, 1, 1))
+        expect(neg).to_equal(1)
+        expect(pos >= neg).to_equal(true)
+
+describe "runtime alias guard — loop versioning for undecidable bases":
+    it "emits a guard block and a scalar version, not just the vector path":
+        step("the unguarded rewrite adds align + vec + peel = 3 blocks")
+        step("the guarded one adds an alias_check entry and a full scalar clone on top")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val recipe = make_elementwise_add_recipe_for_rewrite()
+        val plain = rewrite_elementwise_add(recipe, func)
+        val guarded = rewrite_elementwise_add_guarded(recipe, func)
+        expect(guarded.blocks.len() > plain.blocks.len()).to_equal(true)
+
+    it "labels the two versioning blocks so the CFG is readable":
+        step("alias_check is the entry; scalar_version is the fallback")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var saw_guard = false
+        var saw_scalar = false
+        for b in guarded.blocks:
+            if b.label.?:
+                if b.label.unwrap() == "alias_check":
+                    saw_guard = true
+                if b.label.unwrap() == "scalar_version":
+                    saw_scalar = true
+        expect(saw_guard).to_equal(true)
+        expect(saw_scalar).to_equal(true)
+
+    it "the scalar version keeps the original body verbatim":
+        step("a loop that may alias must run ENTIRELY scalar, not partly")
+        step("this is why the peel block cannot serve as the fallback")
+        val orig = make_elementwise_block_add()
+        val func = make_test_mir_function([orig], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var scalar_len = -1
+        for b in guarded.blocks:
+            if b.label.? and b.label.unwrap() == "scalar_version":
+                scalar_len = b.instructions.len()
+        expect(scalar_len).to_equal(orig.instructions.len())
+
+    it "computes six comparison instructions per input base, plus the span":
+        step("diff, ==0, >=span, <=-span, and two ORs per base")
+        step("preceded by span = bound * elt and its negation, which are")
+        step("computed here rather than baked in so a RUNTIME bound works")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var guard_insts = -1
+        for b in guarded.blocks:
+            if b.label.? and b.label.unwrap() == "alias_check":
+                guard_insts = b.instructions.len()
+        # span + (-span), then two input bases: 6 + 6 + one BitAnd combining them
+        expect(guard_insts).to_equal(15)
+
+    it "refuses to emit a guard it cannot bound":
+        step("an unknown element width gives span 0, and a guard that admits everything")
+        step("is worse than not vectorizing at all")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val bad = VectorRecipe(
+            kind: r.kind, header_block: r.header_block, induction_var: r.induction_var,
+            trip_count: r.trip_count, element_type: "mystery", vector_width: r.vector_width,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: r.chunk_width, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        val guarded = rewrite_elementwise_add_guarded(bad, func)
+        var saw_guard = false
+        for b in guarded.blocks:
+            if b.label.? and b.label.unwrap() == "alias_check":
+                saw_guard = true
+        expect(saw_guard).to_equal(false)
+
+# ============================================================================
+# End-to-end: the pass driver must actually transform something
+# ============================================================================
+
+fn gep(dest: i64, base: i64, index: i64) -> MirInst:
+    MirInst(kind: MirInstKind.GetElementPtr(
+        make_local(dest), make_copy_op(base), [make_copy_op(index)]))
+
+fn make_cmp_lt_const(dest_id: i64, left_id: i64, bound: i64) -> MirInst:
+    MirInst(kind: MirInstKind.BinOp(
+        make_local(dest_id), MirBinOp.Lt,
+        make_copy_op(left_id), make_int_const_op(bound)))
+
+fn _gep_body(pa: i64, pb: i64, pout: i64) -> [MirInst]:
+    [
+        gep(30, pa, 4),
+        make_load_inst(10, 30),
+        gep(31, pb, 4),
+        make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, pout, 4),
+        make_store_inst(32, 12),
+        make_add_const_inst(5, 4)
+    ]
+
+fn gep_loop_block(pa: i64, pb: i64, pout: i64, bound: i64) -> MirBlock:
+    """`for i in 0..bound: out[i] = a[i] + b[i]` addressed through GEPs."""
+    var insts = [make_cmp_lt_const(20, 4, bound)]
+    for x in _gep_body(pa, pb, pout):
+        insts.push(x)
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 99))
+
+fn gep_loop_block_dynamic(pa: i64, pb: i64, pout: i64) -> MirBlock:
+    """Same body, but the upper bound is a LOCAL — genuinely dynamic."""
+    var insts = [make_cmp_lt_inst(20, 4, 30)]
+    for x in _gep_body(pa, pb, pout):
+        insts.push(x)
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 99))
+
+fn pass_block_labels(block: MirBlock) -> [text]:
+    val func = make_test_mir_function([block], false)
+    var fns: Dict<SymbolId, MirFunction> = {}
+    fns[func.symbol] = func
+    val out = run_auto_vectorize(MirModule(
+        name: "e2e", functions: fns, statics: {}, constants: {}, types: {}))
+    var labels: [text] = []
+    for sym in out.functions.keys():
+        for b in out.functions[sym].blocks:
+            if b.label.?:
+                labels.push(b.label.unwrap())
+    labels
+
+describe "AutoVectorize end-to-end — the Active pass genuinely fires":
+    it "transforms a constant-bounded GEP-indexed elementwise loop through the driver":
+        step("a real loop body addresses its arrays through GetElementPtr")
+        step("detect_array_accesses needs those GEPs to recover the base arrays at all")
+        step("this is the case that proves Active is not nominal")
+        expect(blocks_after_pass(gep_loop_block(1, 2, 3, 64)) > 1).to_equal(true)
+
+    it "emits the runtime alias guard and a scalar version for distinct bases":
+        step("three distinct locals with unproven origins are statically undecidable")
+        step("so the decision is deferred to a range check over the real addresses")
+        val labels = pass_block_labels(gep_loop_block(1, 2, 3, 64))
+        expect(labels.contains("alias_check")).to_equal(true)
+        expect(labels.contains("scalar_version")).to_equal(true)
+
+    it "does NOT emit a guard when every base is the same local":
+        step("an exact alias is proven safe statically, so a runtime check would be dead weight")
+        val labels = pass_block_labels(gep_loop_block(1, 1, 1, 64))
+        expect(labels.contains("alias_check")).to_equal(false)
+
+    it "vectorizes a genuinely dynamic upper bound through the driver":
+        step("this asserted a REFUSAL until the alias guard computed its span")
+        step("at runtime. Before that, `span = trip_count * elt` was 0 for a")
+        step("dynamic bound, the guard could not be built, and D2 then declined")
+        step("the loop — so every runtime-bound loop over two DISTINCT arrays")
+        step("was refused, which is essentially all of them. The feature was")
+        step("reachable only for `a[i] = a[i] op a[i]`.")
+        expect(blocks_after_pass(gep_loop_block_dynamic(1, 2, 3)) > 1).to_equal(true)
+
+    it "and guards that dynamic loop rather than vectorizing it blind":
+        step("distinct bases are statically undecidable, so the runtime range")
+        step("check must be present — not skipped because the span was awkward")
+        val labels = pass_block_labels(gep_loop_block_dynamic(1, 2, 3))
+        expect(labels.contains("alias_check")).to_equal(true)
+        expect(labels.contains("scalar_version")).to_equal(true)
+
+# ============================================================================
+# The four defects that sent AutoVectorize back to AnalysisOnly
+# ============================================================================
+
+describe "D1 — the guard span uses the REAL element width, not a guess":
+    it "resolves f64 from the function locals instead of assuming f32":
+        step("get_instruction_type answered Some(\"f32\") for every BinOp")
+        step("that made span_bytes HALF the truth for an f64 loop, so an overlap")
+        step("at exactly that distance PASSED the check meant to reject it")
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.F64))).to_equal(Some("f64"))
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.I64))).to_equal(Some("i64"))
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.F32))).to_equal(Some("f32"))
+
+    it "returns nil for a type it cannot map, so the caller declines":
+        step("nil must mean decline — never fall back to a default width")
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.Unit))).to_be_nil()
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.Bool))).to_be_nil()
+
+    it "no longer answers f32 for an untyped BinOp":
+        step("the old guess is gone; without a function there is no type to read")
+        expect(get_instruction_type(make_binop_inst(12, MirBinOp.Add, 10, 11))).to_be_nil()
+
+    it "element widths map to the byte sizes the guard spans with":
+        step("4 for 32-bit lanes, 8 for 64-bit — the distinction the guess erased")
+        expect(element_size_bytes("f32")).to_equal(4)
+        expect(element_size_bytes("i32")).to_equal(4)
+        expect(element_size_bytes("f64")).to_equal(8)
+        expect(element_size_bytes("i64")).to_equal(8)
+        expect(element_size_bytes("mystery")).to_equal(0)
+
+describe "D2 — an unbounded guard declines instead of rewriting unguarded":
+    it "refuses when a guard is required but the element width is unknown":
+        step("it used to splice the blocks with NO guard for a recipe the")
+        step("alias oracle had explicitly refused to clear")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val unbounded = VectorRecipe(
+            kind: r.kind, header_block: r.header_block, induction_var: r.induction_var,
+            trip_count: r.trip_count, element_type: "mystery", vector_width: r.vector_width,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: r.chunk_width, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        val guarded = rewrite_elementwise_add_guarded(unbounded, func)
+        expect(guarded.blocks.len()).to_equal(func.blocks.len())
+
+describe "D3 — the exit block is resolved, not assumed to be header + 3":
+    it "declines a recipe whose header names no block in the function":
+        step("the old code invented an exit at header+3 for a header that does")
+        step("not exist, which is how the mul fixture appeared to work")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val orphan = VectorRecipe(
+            kind: r.kind, header_block: make_block_id(77), induction_var: r.induction_var,
+            trip_count: r.trip_count, element_type: r.element_type, vector_width: r.vector_width,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: r.chunk_width, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        expect(rewrite_elementwise_add(orphan, func).blocks.len()).to_equal(func.blocks.len())
+
+describe "D4 — guard temporaries are declared locals":
+    it "appends a local for every temporary the guard block writes":
+        step("they had no type entry, so codegen could not classify them,")
+        step("and their ids could collide with real locals")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        expect(guarded.locals.len() > func.locals.len()).to_equal(true)
+
+    it "numbers them above every existing local so they cannot collide":
+        step("the previous base was an arbitrary constant unrelated to the function")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var seen: [i64] = []
+        var dupes = 0
+        for lc in guarded.locals:
+            if seen.contains(lc.id.id):
+                dupes = dupes + 1
+            seen.push(lc.id.id)
+        expect(dupes).to_equal(0)
+
+# ============================================================================
+# D5 — execution level: what the vector loop emits, and whether anything runs it
+#
+# Every check above is STRUCTURAL: it verifies the emitted blocks have the
+# right shape. This one asks the question structure cannot answer — can the
+# emitted code actually execute?
+# ============================================================================
+
+fn emitted_intrinsic_names(f: MirFunction) -> [text]:
+    var names: [text] = []
+    for b in f.blocks:
+        for ins in b.instructions:
+            match ins.kind:
+                case Intrinsic(_, nm, _):
+                    names.push(nm)
+                case _:
+                    pass_do_nothing
+    names
+
+fn simd_inst_counts(f: MirFunction) -> [i64]:
+    """[MirSimdLoad, MirSimdStore, MirSimdBinop, string-named Intrinsic]"""
+    var loads = 0
+    var stores = 0
+    var binops = 0
+    var intrinsics = 0
+    for b in f.blocks:
+        for ins in b.instructions:
+            match ins.kind:
+                case MirSimdLoad(_, _, _, _): loads = loads + 1
+                case MirSimdStore(_, _, _): stores = stores + 1
+                case MirSimdBinop(_, _, _, _): binops = binops + 1
+                case Intrinsic(_, _, _): intrinsics = intrinsics + 1
+                case _: pass_do_nothing
+    [loads, stores, binops, intrinsics]
+
+describe "D5 — the vector loop emits EXECUTABLE SIMD MIR":
+    it "emits MirSimdLoad / MirSimdBinop / MirSimdStore, not string-named intrinsics":
+        step("it used to emit Intrinsic(\"simd_load_f32x16\") and friends —")
+        step("names with no implementation in simd_lowering (which knows three:")
+        step("simd_add/mul/sub_f32x4) and no case in the MIR interpreter, so the")
+        step("loop could never run or be lowered")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val c = simd_inst_counts(rewrite_elementwise_add(make_elementwise_add_recipe_for_rewrite(), func))
+        expect(c[0] > 0).to_equal(true)
+        expect(c[1] > 0).to_equal(true)
+        expect(c[2] > 0).to_equal(true)
+        expect(c[3]).to_equal(0)
+
+    it "uses a vector MirType the interpreter can shape, at every supported width":
+        step("Vec4f/Vec8f/Vec16f, Vec4d/Vec8d, Vec4i/Vec8i/Vec16i are the models")
+        expect(vector_mir_type("f32", 16).?).to_equal(true)
+        expect(vector_mir_type("f64", 8).?).to_equal(true)
+        expect(vector_mir_type("i32", 16).?).to_equal(true)
+        expect(vector_mir_type("f32", 4).?).to_equal(true)
+
+    it "declines a width or element the interpreter does not model":
+        step("nil must mean decline, never emit a vector type nothing can shape")
+        expect(vector_mir_type("f64", 16).?).to_equal(false)
+        expect(vector_mir_type("i8", 16).?).to_equal(false)
+        expect(vector_mir_type("mystery", 4).?).to_equal(false)
+
+    it "maps the recipe op to the interpreter SimdBinop spelling":
+        step("the interpreter accepts Add/Sub/Mul/Xor; anything else declines")
+        expect(simd_binop_name("add_elementwise")).to_equal(Some("Add"))
+        expect(simd_binop_name("mul_elementwise")).to_equal(Some("Mul"))
+        expect(simd_binop_name("sub_elementwise")).to_equal(Some("Sub"))
+        expect(simd_binop_name("div_elementwise").?).to_equal(false)
+
+    it "emits a 16-lane AVX-512 body when the recipe plans one":
+        step("this is the width the whole AVX-512 planning effort produces,")
+        step("and the one that previously had no implementation at all")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val wide = VectorRecipe(
+            kind: r.kind, header_block: r.header_block, induction_var: r.induction_var,
+            trip_count: 64, element_type: "f32", vector_width: 16,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: 16, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        val c = simd_inst_counts(rewrite_elementwise_add(wide, func))
+        expect(c[0] > 0).to_equal(true)
+        expect(c[3]).to_equal(0)
+
+# ============================================================================
+# Step 6 — EXECUTION-LEVEL DIFFERENTIAL TEST
+#
+# Every other check in this file is structural: it inspects the shape of the
+# emitted blocks. This one runs both the scalar loop and the vectorized rewrite
+# in the MIR interpreter and compares the memory they produce. It is the only
+# check that can catch a rewrite which is correctly shaped and wrong.
+#
+# Memory model: the interpreter addresses memory as LOCALS by id — Load reads
+# the local whose id is the pointer's value, and GetElementPtr computes
+# base + index*8. `_execute_simd_load` reads base + i*8 for each lane, the SAME
+# stride, so the scalar and vector paths address identical storage. That
+# agreement is what makes this comparison meaningful rather than incidental.
+# ============================================================================
+
+val DIFF_A_BASE: i64 = 1000
+val DIFF_B_BASE: i64 = 2000
+val DIFF_O_BASE: i64 = 3000
+
+fn diff_store(addr: i64, value: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Store(make_int_const_op(addr), make_int_const_op(value)))
+
+fn diff_set_local(id: i64, value: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Const(make_local(id),
+        MirConstValue.Int(value), MirType(kind: MirTypeKind.I64)))
+
+fn diff_entry_block(n: i64) -> MirBlock:
+    """Seed a[], b[], out[] and the base/induction locals, then enter the loop."""
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn diff_loop_block(n: i64) -> MirBlock:
+    """out[i] = a[i] + b[i] for i in 0..n, addressed through GEPs."""
+    val insts = [
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_int_const_op(n))),
+        gep(30, 1, 4),
+        make_load_inst(10, 30),
+        gep(31, 2, 4),
+        make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4),
+        make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn diff_exit_block() -> MirBlock:
+    MirBlock(id: make_block_id(9), label: nil, instructions: [],
+        terminator: MirTerminator.Ret(value: nil))
+
+fn diff_function(n: i64) -> MirFunction:
+    make_test_mir_function([diff_entry_block(n), diff_loop_block(n), diff_exit_block()], false)
+
+fn diff_recipe(n: i64) -> VectorRecipe:
+    VectorRecipe(
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     make_block_id(1),
+        induction_var:    make_local(4),
+        trip_count:       n,
+        element_type:     "i32",
+        vector_width:     4,
+        op_name:          "add_elementwise",
+        note:             "differential",
+        input_bases:      [make_local(1), make_local(2)],
+        output_base:      Some(make_local(3)),
+        accumulator:      nil,
+        chunk_width:      4,
+        index_locals:     [make_local(4)],
+        store_value:      nil,
+        induction_update: make_local(4))
+
+fn run_and_read_output(f: MirFunction, n: i64) -> [i64]:
+    """Execute f, then read out[0..n) back out of interpreter memory.
+
+    Returns an EMPTY array when the function does not execute, so a caller
+    comparing against the scalar control sees a length mismatch rather than a
+    vacuous pass.
+    """
+    var interp = MirInterpreter.create()
+    val r = interp.execute_function(f)
+    var got: [i64] = []
+    if (r[1]).?:
+        return got
+    var i: i64 = 0
+    while i < n:
+        got.push(interp.get_local(make_local(DIFF_O_BASE + i * 8)))
+        i = i + 1
+    got
+
+fn diff_matches(n: i64) -> bool:
+    """Scalar and vectorized executions of the same loop agree elementwise."""
+    val scalar_out = run_and_read_output(diff_function(n), n)
+    val vector_out = run_and_read_output(
+        rewrite_elementwise_add(diff_recipe(n), diff_function(n)), n)
+    if scalar_out.len() != n or vector_out.len() != n:
+        return false
+    var i: i64 = 0
+    while i < n:
+        if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+describe "step 6 — vectorized output equals scalar output when EXECUTED":
+    it "the scalar loop runs and produces the expected sums":
+        step("the control: if this does not run, a vector failure proves nothing")
+        val got = run_and_read_output(diff_function(8), 8)
+        expect(got.len()).to_equal(8)
+        var bad = 0
+        var i: i64 = 0
+        while i < 8:
+            if got[i.to_i32()] != (i + 1) + ((i + 1) * 10):
+                bad = bad + 1
+            i = i + 1
+        expect(bad).to_equal(0)
+
+    it "the vectorized rewrite produces byte-identical memory":
+        step("this is the check no structural test can substitute for")
+        expect(diff_matches(8)).to_equal(true)
+
+    it "agrees for every trip count, not just a multiple of the vector width":
+        step("a remainder trip count must either vectorize CORRECTLY or be")
+        step("declined; it must never write a partial result. Trip 9 used to")
+        step("write out[0] and leave elements 1..8 untouched.")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 17:
+            if not diff_matches(n):
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "still actually rewrites the trip counts it accepts":
+        step("declining everything would satisfy the sweep above vacuously,")
+        step("so pin that a whole number of chunks really is transformed")
+        var rewritten = 0
+        for n in [4, 8, 12, 16]:
+            val before = diff_function(n).blocks.len()
+            val after = rewrite_elementwise_add(diff_recipe(n), diff_function(n)).blocks.len()
+            if after > before:
+                rewritten = rewritten + 1
+        expect(rewritten).to_equal(4)
+
+    it "vectorizes a remainder trip count instead of declining it":
+        step("the old contract was refusal, because the peel block wrote one")
+        step("element and jumped to a block that did not exist. The tail now")
+        step("goes to an unmodified clone of the scalar body, so a remainder")
+        step("is just the scalar loop finishing — and the sweep above proves")
+        step("the results are identical for every one of these lengths.")
+        var rewritten = 0
+        for n in [5, 6, 7, 9, 10, 11]:
+            val before = diff_function(n).blocks.len()
+            val after = rewrite_elementwise_add(diff_recipe(n), diff_function(n)).blocks.len()
+            if after > before:
+                rewritten = rewritten + 1
+        expect(rewritten).to_equal(6)
+
+# ============================================================================
+# The case the whole pass exists for: a bound known only at RUNTIME.
+#
+# Server code does not loop to a constant. A request body, a row set, a
+# framebuffer sized at runtime all carry their length in a local, and until
+# the bound became an operand this pass declined every one of them — it could
+# be Active and still never fire on anything a server runs.
+#
+# These execute the rewritten function and compare it against the scalar one,
+# because a structural check cannot tell a correct runtime guard from one that
+# reads a vector past the end of the array.
+# ============================================================================
+
+val DIFF_N_LOCAL: i64 = 41
+
+fn dyn_entry_block(n: i64) -> MirBlock:
+    """Same seeding as the static fixture, plus the length in a LOCAL."""
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    insts.push(diff_set_local(DIFF_N_LOCAL, n))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn dyn_loop_block() -> MirBlock:
+    """`out[i] = a[i] + b[i]` guarded by `i < %41` — a runtime bound."""
+    val insts = [
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_copy_op(DIFF_N_LOCAL))),
+        gep(30, 1, 4),
+        make_load_inst(10, 30),
+        gep(31, 2, 4),
+        make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4),
+        make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn dyn_function(n: i64) -> MirFunction:
+    make_test_mir_function([dyn_entry_block(n), dyn_loop_block(), diff_exit_block()], false)
+
+fn dyn_recipe() -> VectorRecipe:
+    """trip_count is -1: the length is NOT known to the compiler."""
+    VectorRecipe(
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     make_block_id(1),
+        induction_var:    make_local(4),
+        trip_count:       -1,
+        element_type:     "i32",
+        vector_width:     4,
+        op_name:          "add_elementwise",
+        note:             "runtime bound",
+        input_bases:      [make_local(1), make_local(2)],
+        output_base:      Some(make_local(3)),
+        accumulator:      nil,
+        chunk_width:      4,
+        index_locals:     [make_local(4)],
+        store_value:      nil,
+        induction_update: make_local(4))
+
+fn dyn_matches(n: i64) -> bool:
+    val scalar_out = run_and_read_output(dyn_function(n), n)
+    val vector_out = run_and_read_output(
+        rewrite_elementwise_add(dyn_recipe(), dyn_function(n)), n)
+    if scalar_out.len() != n or vector_out.len() != n:
+        return false
+    var i: i64 = 0
+    while i < n:
+        if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+describe "a RUNTIME loop bound vectorizes and stays correct":
+    it "runs the scalar control with a bound held in a local":
+        step("if the control does not run, a vector result proves nothing")
+        val got = run_and_read_output(dyn_function(8), 8)
+        expect(got.len()).to_equal(8)
+        var bad = 0
+        var i: i64 = 0
+        while i < 8:
+            if got[i.to_i32()] != (i + 1) + ((i + 1) * 10):
+                bad = bad + 1
+            i = i + 1
+        expect(bad).to_equal(0)
+
+    it "is actually rewritten despite the compiler not knowing the length":
+        step("trip_count is -1 here; this used to be an unconditional decline")
+        val before = dyn_function(8).blocks.len()
+        val after = rewrite_elementwise_add(dyn_recipe(), dyn_function(8)).blocks.len()
+        expect(after > before).to_equal(true)
+
+    it "produces identical memory for every runtime length":
+        step("lengths straddling the vector width in both directions, including")
+        step("ones shorter than a single vector, where the guard must send")
+        step("control straight to the scalar loop without reading anything")
+        var bad: [i64] = []
+        var n: i64 = 1
+        while n <= 20:
+            if not dyn_matches(n):
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+# ============================================================================
+# Ops beyond add, and the recipes that must be REFUSED.
+#
+# `simd_binop_name` maps add/sub/mul/xor and `supports_elementwise_rewrite`
+# admits the same four, so sub and mul are not a future feature — they are
+# live, and until these examples existed nothing executed them.
+#
+# The refusals matter more than the acceptances. When the element/lane pair
+# has no vector type, or the op has no vector spelling,
+# `create_vector_loop_block` emits an EMPTY body. That is not an inert no-op:
+# the vector loop still advances the index by a whole vector each iteration,
+# so every element it steps over is never written. Measured before R4c: an
+# i64 recipe turned 3 blocks into 5 containing ZERO SIMD instructions.
+# ============================================================================
+
+fn op_recipe(op: text, element: text, n: i64) -> VectorRecipe:
+    VectorRecipe(
+        kind: VectorRecipeKind.Elementwise, header_block: make_block_id(1),
+        induction_var: make_local(4), trip_count: n, element_type: element,
+        vector_width: 4, op_name: op, note: "op coverage",
+        input_bases: [make_local(1), make_local(2)],
+        output_base: Some(make_local(3)), accumulator: nil, chunk_width: 4,
+        index_locals: [make_local(4)], store_value: nil, induction_update: make_local(4))
+
+fn op_loop_block(n: i64, mop: MirBinOp) -> MirBlock:
+    """`out[i] = a[i] <op> b[i]`, so the scalar control computes the SAME op."""
+    val insts = [
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_int_const_op(n))),
+        gep(30, 1, 4), make_load_inst(10, 30),
+        gep(31, 2, 4), make_load_inst(11, 31),
+        make_binop_inst(12, mop, 10, 11),
+        gep(32, 3, 4), make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn op_function(n: i64, mop: MirBinOp) -> MirFunction:
+    make_test_mir_function([diff_entry_block(n), op_loop_block(n, mop), diff_exit_block()], false)
+
+fn op_matches(op: text, mop: MirBinOp, n: i64) -> bool:
+    val scalar_out = run_and_read_output(op_function(n, mop), n)
+    val vector_out = run_and_read_output(
+        rewrite_elementwise_add(op_recipe(op, "i32", n), op_function(n, mop)), n)
+    if scalar_out.len() != n or vector_out.len() != n:
+        return false
+    var i: i64 = 0
+    while i < n:
+        if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+describe "elementwise sub and mul vectorize and stay correct":
+    it "subtraction produces identical memory":
+        step("a wrong op mapping would swap operands or pick Add and still")
+        step("emit a structurally perfect vector loop")
+        expect(op_matches("sub_elementwise", MirBinOp.Sub, 8)).to_equal(true)
+        expect(op_matches("sub_elementwise", MirBinOp.Sub, 12)).to_equal(true)
+
+    it "multiplication produces identical memory":
+        expect(op_matches("mul_elementwise", MirBinOp.Mul, 8)).to_equal(true)
+        expect(op_matches("mul_elementwise", MirBinOp.Mul, 12)).to_equal(true)
+
+    it "both are genuinely rewritten, not quietly declined":
+        step("otherwise the equality above passes by doing nothing")
+        for op in ["sub_elementwise", "mul_elementwise"]:
+            val before = diff_function(8).blocks.len()
+            val after = rewrite_elementwise_add(op_recipe(op, "i32", 8), diff_function(8)).blocks.len()
+            expect(after > before).to_equal(true)
+
+describe "a recipe with no vector lowering is REFUSED, not half-emitted":
+    it "declines an op with no vector spelling":
+        step("div has no SimdBinop mapping")
+        val before = diff_function(8).blocks.len()
+        val after = rewrite_elementwise_add(op_recipe("div_elementwise", "i32", 8), diff_function(8)).blocks.len()
+        expect(after).to_equal(before)
+
+    it "declines an element type the interpreter models no vector for":
+        step("i64 has no Vec type; this used to rewrite 3 blocks into 5 with")
+        step("ZERO SIMD instructions, advancing the index over elements it")
+        step("never wrote — a silent miscompile, not a missed optimization")
+        val before = diff_function(8).blocks.len()
+        val after = rewrite_elementwise_add(op_recipe("add_elementwise", "i64", 8), diff_function(8)).blocks.len()
+        expect(after).to_equal(before)
+
+    it "never emits a vector loop containing no vector work":
+        step("the invariant behind both refusals, stated directly")
+        for spec in [["add_elementwise", "i64"], ["div_elementwise", "i32"], ["add_elementwise", "u8"]]:
+            val f = rewrite_elementwise_add(op_recipe(spec[0], spec[1], 8), diff_function(8))
+            var simd = 0
+            for b in f.blocks:
+                for i in b.instructions:
+                    match i.kind:
+                        case MirSimdLoad(_, _, _, _), MirSimdStore(_, _, _), MirSimdBinop(_, _, _, _):
+                            simd = simd + 1
+                        case _: ()
+            # Either it declined (unchanged) or it emitted real vector work.
+            val declined = f.blocks.len() == diff_function(8).blocks.len()
+            expect(declined or simd > 0).to_equal(true)
+
+# ============================================================================
+# A fixture that can actually SEE an over-run.
+#
+# The differential fixtures above compute their exit flag at the TOP of the
+# block and branch on it at the BOTTOM, so entering at `i == n` executes the
+# body once more and writes `out[n]`. Their SCALAR control does the same, the
+# two agree, and the comparison is blind to exactly the defect it should catch
+# — the reviewer found this, no execution could have.
+#
+# This fixture computes the test at the BOTTOM, so the scalar loop is correct
+# and stops at `n`. Any extra iteration on the vector side now shows up as a
+# real disagreement, and the canary below catches a write past the end even if
+# both sides happened to agree.
+# ============================================================================
+
+val CANARY: i64 = 987654321
+
+fn dowhile_loop_block(n: i64) -> MirBlock:
+    """`do { out[i]=a[i]+b[i]; i+=1 } while (i < n)` — no over-run."""
+    val insts = [
+        gep(30, 1, 4), make_load_inst(10, 30),
+        gep(31, 2, 4), make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4), make_store_inst(32, 12),
+        make_add_const_inst(4, 4),
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_int_const_op(n)))
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn dowhile_entry(n: i64) -> MirBlock:
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    # One slot PAST the end, seeded with a value neither loop should write.
+    insts.push(diff_store(DIFF_O_BASE + n * 8, CANARY))
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn dowhile_function(n: i64) -> MirFunction:
+    make_test_mir_function([dowhile_entry(n), dowhile_loop_block(n), diff_exit_block()], false)
+
+fn dowhile_canary(f: MirFunction, n: i64) -> i64:
+    """The value one past the end after running f, or -1 if it did not run."""
+    var interp = MirInterpreter.create()
+    val r = interp.execute_function(f)
+    if (r[1]).?:
+        return -1
+    interp.get_local(make_local(DIFF_O_BASE + n * 8))
+
+describe "the vector path never writes past the end of the arrays":
+    it "the scalar control itself stops at n":
+        step("if the control over-ran, the comparison below would be vacuous —")
+        step("which is exactly what made the earlier fixtures blind")
+        for n in [4, 8, 12, 16]:
+            expect(dowhile_canary(dowhile_function(n), n)).to_equal(CANARY)
+
+    it "the vectorized version also stops at n, for every trip count":
+        step("a whole number of vectors leaves i == n exactly, which is the")
+        step("case that used to enter the remainder and run one body too many")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 20:
+            val rw = rewrite_elementwise_add(diff_recipe(n), dowhile_function(n))
+            if dowhile_canary(rw, n) != CANARY:
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "and still computes every element correctly":
+        step("not writing past the end is worthless if it stopped early")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 20:
+            val got = run_and_read_output(
+                rewrite_elementwise_add(diff_recipe(n), dowhile_function(n)), n)
+            if got.len() != n:
+                bad.push(n)
+            else:
+                var i: i64 = 0
+                while i < n:
+                    if got[i.to_i32()] != (i + 1) + ((i + 1) * 10):
+                        bad.push(n)
+                        i = n
+                    i = i + 1
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "allocates every spliced block above the highest existing id":
+        step("align_check and vec_loop used to sit at header+0 and header+2,")
+        step("and a lowered while puts its continuation at header+2 — so the")
+        step("vector loop was overwritten and the loop silently never ran")
+        val entry = MirBlock(id: make_block_id(0), label: nil, instructions: [],
+            terminator: MirTerminator.Goto(target: make_block_id(1)))
+        val cont = MirBlock(id: make_block_id(3), label: Some("continuation"),
+            instructions: [], terminator: MirTerminator.Ret(value: nil))
+        val f = make_test_mir_function([entry, diff_loop_block(8), cont], false)
+        val rw = rewrite_elementwise_add(diff_recipe(8), f)
+        var seen: [i64] = []
+        var dupes = 0
+        for b in rw.blocks:
+            for prev in seen:
+                if prev == b.id.id:
+                    dupes = dupes + 1
+            seen.push(b.id.id)
+        expect(dupes).to_equal(0)
+
+# ============================================================================
+# The shape the COMPILER actually emits.
+#
+# Every fixture above is a single block carrying its own test. A lowered
+# `while` is not that: it emits
+#     while_cond: %c = i < n; If(%c, while_body, while_exit)
+#     while_body: ...; i += 1; Goto(while_cond)
+# and the pattern matcher matches the BODY, which contains no comparison at
+# all. Until the bound search followed the edge into the cond block, this pass
+# declined every loop the compiler produces — it worked on fixtures and on
+# nothing else.
+#
+# These execute that shape, with a runtime bound, and compare against the
+# scalar original.
+# ============================================================================
+
+fn lowered_cond_block(bound_local: i64) -> MirBlock:
+    """while_cond: %20 = %4 < %bound; If(%20, body, exit)"""
+    MirBlock(id: make_block_id(1), label: Some("while_cond"),
+        instructions: [MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_copy_op(bound_local)))],
+        terminator: make_if_terminator(20, 2, 9))
+
+fn lowered_body_block() -> MirBlock:
+    """while_body: out[i] = a[i] + b[i]; i += 1; Goto(while_cond)"""
+    val insts = [
+        gep(30, 1, 4), make_load_inst(10, 30),
+        gep(31, 2, 4), make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4), make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(2), label: Some("while_body"), instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn lowered_entry(n: i64) -> MirBlock:
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    insts.push(diff_store(DIFF_O_BASE + n * 8, CANARY))
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    insts.push(diff_set_local(DIFF_N_LOCAL, n))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn lowered_function(n: i64) -> MirFunction:
+    make_test_mir_function(
+        [lowered_entry(n), lowered_cond_block(DIFF_N_LOCAL), lowered_body_block(), diff_exit_block()],
+        false)
+
+fn lowered_recipe() -> VectorRecipe:
+    """header_block is the BODY — what the pattern matcher reports."""
+    VectorRecipe(
+        kind: VectorRecipeKind.Elementwise, header_block: make_block_id(2),
+        induction_var: make_local(4), trip_count: -1, element_type: "i32",
+        vector_width: 4, op_name: "add_elementwise", note: "lowered while",
+        input_bases: [make_local(1), make_local(2)],
+        output_base: Some(make_local(3)), accumulator: nil, chunk_width: 4,
+        index_locals: [make_local(4)], store_value: nil, induction_update: make_local(4))
+
+describe "a lowered while loop — the shape the compiler really emits":
+    it "the scalar control runs and stops at n":
+        step("the cond block guards entry, so this must not touch the canary")
+        for n in [4, 7, 8, 13]:
+            val got = run_and_read_output(lowered_function(n), n)
+            expect(got.len()).to_equal(n)
+            expect(dowhile_canary(lowered_function(n), n)).to_equal(CANARY)
+
+    it "is rewritten even though its body contains no comparison":
+        step("the test is one edge away, in while_cond; looking only in the")
+        step("body declined every loop the compiler produces")
+        val before = lowered_function(16).blocks.len()
+        val after = rewrite_elementwise_add(lowered_recipe(), lowered_function(16)).blocks.len()
+        expect(after > before).to_equal(true)
+
+    it "produces identical memory for every runtime length":
+        step("this is the case that decides whether real code is vectorized")
+        var bad: [i64] = []
+        var n: i64 = 1
+        while n <= 20:
+            val scalar_out = run_and_read_output(lowered_function(n), n)
+            val vector_out = run_and_read_output(
+                rewrite_elementwise_add(lowered_recipe(), lowered_function(n)), n)
+            if scalar_out.len() != n or vector_out.len() != n:
+                bad.push(n)
+            else:
+                var i: i64 = 0
+                while i < n:
+                    if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+                        bad.push(n)
+                        i = n
+                    i = i + 1
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "never writes past the end":
+        step("the canary one slot beyond n must survive the vector path")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 20:
+            val rw = rewrite_elementwise_add(lowered_recipe(), lowered_function(n))
+            if dowhile_canary(rw, n) != CANARY:
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)

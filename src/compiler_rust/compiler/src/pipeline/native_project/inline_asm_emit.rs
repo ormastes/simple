@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::tools::find_c_compiler;
+use super::{effective_target, tools::{find_c_compiler, windows_gnu_target_flag}};
 
 fn escape_c_asm_string(s: &str) -> String {
     let mut out = String::new();
@@ -243,6 +243,9 @@ pub(crate) fn compile_inline_asm_c(
         }
     } else {
         cmd.arg("-ffunction-sections").arg("-fdata-sections");
+        if let Some(flag) = windows_gnu_target_flag(effective_target()) {
+            cmd.arg(flag);
+        }
     }
 
     let output = cmd.output().map_err(|e| format!("compile inline asm C ({cc}): {e}"))?;

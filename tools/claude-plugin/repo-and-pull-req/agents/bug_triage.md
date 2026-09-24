@@ -1,3 +1,8 @@
+---
+name: bug_triage
+description: "Autonomous bug triage agent — periodically classifies bugs by severity and component"
+---
+
 # Bug Triage Agent — Autonomous Bug Classification
 
 ## Role

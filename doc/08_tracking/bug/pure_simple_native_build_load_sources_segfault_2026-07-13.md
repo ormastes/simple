@@ -1,4 +1,8 @@
 # Pure-Simple native-build crashes while loading sources
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -179,3 +183,4 @@ reaches the cached native-build worker path that produced stages 12 and 13.
 Keep `build/bootstrap-simd-stage5/cache`, do not rerun an unchanged entry path,
 and resume the unchanged LLVM SIMD probe only after a new pure-Simple compiler
 artifact is produced.
+

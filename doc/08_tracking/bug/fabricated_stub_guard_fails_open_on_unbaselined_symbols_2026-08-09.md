@@ -1,4 +1,9 @@
 # Fabricated-stub guard failed OPEN on unbaselined symbols
+## Closed 2026-09-16 — Status FIXED; fail-closed gate added with sabotage-proof evidence table
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-09
 **Status:** FIXED (gate added); one real finding left RED on purpose
@@ -152,3 +157,4 @@ Read the verdict line, which is always the last line of stdout.
 - `doc/08_tracking/bug/simpleos_fabricated_rt_guard_weak_real_false_positive_2026-07-28.md`
 - `doc/08_tracking/bug/bytespan_starts_with_dropped_from_kernel_closure_weak_nil_stub_2026-07-28.md`
 - `test/01_unit/os/kernel/boot/baremetal_rt_index_of_not_fabricated_spec.spl`
+

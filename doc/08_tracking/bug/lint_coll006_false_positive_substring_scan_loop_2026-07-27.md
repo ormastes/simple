@@ -1,4 +1,9 @@
 # COLL006 "string concat in loop" fires on loops with no string concatenation
+## Closed 2026-09-16 — Status Fixed 2026-07-28 per .spipe/lint_coll006/state.md; same COLL006 rule fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Fixed 2026-07-28 (working copy) — see .spipe/lint_coll006/state.md
 **Found by:** lane URLPARSE, 2026-07-27
@@ -59,3 +64,4 @@ in place, documented here. The one *genuine* COLL006 in the same file
 Three pre-existing COLL006 hits in the same file (`parse_query_string`,
 `build_query_string`, `remove_query_param`/`add_query_param`) are genuine and
 predate this lane.
+

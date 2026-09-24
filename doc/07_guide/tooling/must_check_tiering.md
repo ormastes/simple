@@ -22,6 +22,18 @@ rows are push-blocking.
 The bounded push tier also materializes the exact pushed ref for the Rust
 interpreter module-owner scan. This prevents an undeclared tracked module from
 wasting a full Rust authority/bootstrap attempt while avoiding a compiler run.
+Debt ratchets whose frozen baseline can lag `main` compare the pushed ref with
+the committed base of its outgoing range. In particular, `push-no-direct-rt`
+uses `--rev <tip> --baseline-rev <base>`: unchanged or reduced direct-runtime
+debt is admitted, while any branch-added site fails. Standalone/bootstrap runs
+still use the tracked baseline, and mission-critical release still uses the
+zero-grace `--critical` scan.
+`push-interpreter-extern-registry-gap` follows the same rule using the base
+commit's actual unregistered-extern set: a topic may reduce that set, but any
+new gap introduced by the topic blocks its push.
+The SFFI v2 aggregate compares failed guard identities across the same two
+committed trees. Existing red mainline guards remain visible but cannot block
+an unrelated topic; any newly failing child guard is blocking.
 
 ## Compiler phase admission
 

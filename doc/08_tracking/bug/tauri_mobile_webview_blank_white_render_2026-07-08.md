@@ -1,4 +1,8 @@
 # BUG: Tauri mobile webview paints blank white on both iOS sim and Android emulator despite `eval OK` / render pipeline "succeeding"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED. Patch applied and committed (see Fix section for sha). Priority: P0 (both
 mobile lanes render nothing visible) — root render-pipeline bug resolved; iOS-simulator
@@ -199,3 +203,4 @@ this task.
   correct — imports the right module)
 - Evidence: `doc/09_report/mobile_blank_render_debug_2026-07-08.md` (uncommitted)
 - Patch: `/private/tmp/claude-501/-Users-ormastes-simple/7597a415-f0b0-4c3f-822d-107292b34bec/scratchpad/mobile_blank_fix.patch`
+

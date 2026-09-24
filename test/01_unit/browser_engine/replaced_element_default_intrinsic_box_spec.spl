@@ -1,0 +1,111 @@
+"""
+A replaced element with no loaded media and no specified size must take the UA
+default box, not the container's width and a line box's height.
+
+CSS 2.1 §10.3.2 and §10.6.2: when a replaced element has neither an intrinsic
+size nor a specified one, the used width is 300px and the used height 150px.
+Chrome's `<audio controls>` is the one measured exception — the control strip
+is a widget with its own default, 300x54 — and `<video>` follows the §10.6.2
+height while still honouring a `width` attribute on the width axis alone (no
+ratio scaling, because there is no intrinsic ratio to scale).
+
+Before this change only `<iframe>` had the default box (a single hardcoded
+branch in `layout_with_style`); `<audio>`, `<video>`, `<canvas>`, `<embed>` and
+`<object>` had no sizing branch at all and took the generic block path. Chrome
+152 on the `animation` catalog page, harvested by
+`scripts/check/check-chrome-layout-geometry-diff.shs`:
+
+    Chrome   path:0/0/4 | audio | 294 | 281 | 300 |  54
+    Chrome   path:0/0/5 | video | 594 | 185 | 120 | 150
+    diff     path:0/0/4 | audio | dx=249 dy=16 dw=510 dh=30
+    diff     path:0/0/5 | video |                dw=0  dh=126
+
+`dw=510` is Simple handing `<audio>` the 810 px container width; `dh=126` is
+`<video>` getting one 24 px line box where 150 belongs.
+
+SABOTAGE (run before landing): make `replaced_default_box_h` return 150 for
+`audio` as well and AC-2 fails at 150 while AC-1 (its width) and every other
+row still pass — so the 54 is a measured widget default, not a constant that
+happened to fit.
+
+STATED RESIDUE, deliberately not fixed here and not asserted: Chrome reports
+all three of these as `display=inline`, so they sit on a shared line box with
+their bottoms on the baseline (`audio` y=281, `video` y=185, `canvas` y=295 all
+bottom out at 335). This renderer still lays them out as block-level, so their
+`dx`/`dy` stay wrong even now that their `dw`/`dh` are right. Making replaced
+elements inline-level touches line-box construction and baseline alignment,
+which this round did not read; it is named rather than guessed at.
+
+Second stated gap: Chrome's UA stylesheet carries `audio:not([controls]) {
+display: none }`, which this renderer does not implement — a bare `<audio>`
+gets the 300x54 box here and no box at all in Chrome. The one `<audio>` in the
+eight-page catalog is `<audio controls>` (verified by grep), so nothing
+measures the difference; it is recorded rather than implemented speculatively.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-REPLACED-002 — a replaced element with no intrinsic media size falls back to the UA default box (300x150; 300x54 for audio), with a width/height attribute overriding only its own axis.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.{
+    replaced_default_box_w, replaced_default_box_h
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}div{width:728px;margin:0;padding:0}</style></head><body><div>"
+
+fn probe(inner: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</div></body></html>", VW, VH, "x", prop)
+
+fn box_of(inner: text) -> text:
+    probe(inner, "w") + "x" + probe(inner, "h")
+
+describe "UA default box for a replaced element with no intrinsic size":
+    it "AC-1: <audio controls> is Chrome's 300x54, not the container width":
+        step("animation page root row: dx=249 dw=510 dh=30 against 810x24")
+        expect(box_of("<audio id=\"x\" controls></audio>")).to_equal("300x54")
+
+    it "AC-2: <video> with no source is the §10.6.2 fallback 300x150":
+        step("dh=126 was one 24 px line box where 150 belongs")
+        expect(box_of("<video id=\"x\"></video>")).to_equal("300x150")
+
+    it "AC-3: a width attribute overrides ONLY the width axis":
+        step("Chrome gives <video width=120> 120x150 — no ratio scaling")
+        expect(box_of("<video id=\"x\" width=\"120\"></video>")).to_equal("120x150")
+
+    it "AC-4: <canvas> honours both attributes, as Chrome does at 120x40":
+        step("the catalog's canvas row, which was already correct on width")
+        expect(box_of("<canvas id=\"x\" width=\"120\" height=\"40\"></canvas>")).to_equal("120x40")
+
+    it "AC-5: <canvas> with no attributes takes the same 300x150 fallback":
+        step("the default applies to the whole family, not just video")
+        expect(box_of("<canvas id=\"x\"></canvas>")).to_equal("300x150")
+
+    it "AC-6 (control): <iframe> had this branch before and must not move":
+        step("the pre-existing behaviour the generalisation was built from")
+        expect(box_of("<iframe id=\"x\"></iframe>")).to_equal("300x150")
+
+    it "AC-7 (control): CSS width wins over the UA default":
+        step("a default that overrode an author's width would be a regression")
+        expect(box_of("<video id=\"x\" style=\"width:200px;height:80px\"></video>")).to_equal("200x80")
+
+    it "AC-8 (control): <img> and <input> are NOT given a 300 px default":
+        step("they size from real UA/intrinsic metrics; 300 would regress them")
+        expect(replaced_default_box_w("img")).to_equal(0)
+        expect(replaced_default_box_w("input")).to_equal(0)
+
+    it "AC-9: the width and height tables agree on which tags they cover":
+        step("a tag with a default width and no default height would size to 0")
+        var mismatch = ""
+        for t in ["iframe", "video", "canvas", "embed", "object", "audio", "img", "input", "p"]:
+            val has_w = replaced_default_box_w(t) > 0
+            val has_h = replaced_default_box_h(t) > 0
+            if has_w != has_h:
+                mismatch = mismatch + t + " "
+        expect(mismatch).to_equal("")

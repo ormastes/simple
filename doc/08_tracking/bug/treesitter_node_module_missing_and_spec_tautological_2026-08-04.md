@@ -1,4 +1,8 @@
 # BUG: `std.parser.treesitter_node` does not exist, and its spec asserts nothing anyway
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (architectural — blocked on owner decision, not a lane-fixable defect)
 **Re-verified:** 2026-08-10 — `find src/lib -iname '*treesitter*'` still returns
@@ -77,3 +81,19 @@ need a decision this lane cannot make alone:
    implementation goes red.
 
 Blocked on (1): the owner of `#PARSER-NODE-API-001` / "Phase 2.3".
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Confirmed unchanged: `find src/lib -iname '*treesitter_node*'` still returns
+nothing; `std.parser.treesitter_node` still does not exist. Explicitly
+blocked on an owner decision (implement the API or delete the spec) that
+this lane cannot make unilaterally, per the record's own "Why not fixed
+now". Left OPEN, unchanged.
+## Triage 2026-09-13
+
+Explicitly recorded as "architectural -- blocked on owner decision,
+not a lane-fixable defect" (implement a real TreeSitter Node FFI
+wrapper, or delete the module/spec -- a product-direction decision
+this lane cannot make unilaterally). Leaving OPEN as recorded.
+
+

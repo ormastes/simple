@@ -1,0 +1,83 @@
+# crosslang_statistics_gate — refuses to emit a cross-language comparison while
+# coverage is incomplete.
+#
+# Gap this fills (L10 recorded rejection cause 4, plan
+# doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+# lines 1038-1057 and 1303-1305): "thirteen checks remain explicitly pending",
+# Go and Bun are absent from this host, and the binding rule is that "pending
+# markers and unavailable peers cannot be converted into substituted results".
+# The same rows fix the retained-sample floor at 15.
+#
+# The gate is all-or-nothing on purpose: a comparison with one peer missing is
+# not a smaller comparison, it is the incomplete-coverage claim the review
+# rejected. So a single pending, unavailable, short or unit-divergent peer
+# refuses the WHOLE report, and every peer's state is carried in `peer_states`
+# whether the report was emitted or not — an unavailable peer stays visible and
+# unavailable rather than disappearing from the matrix.
+#
+# `refusal` is always non-empty when `emitted` is false, so an empty `rows`
+# array can never read as a clean comparison.
+#
+# Percentiles come from perf_stats (nearest rank, real sort + index) — this
+# module does not invent a formula. Pure: no peer is executed (the plan forbids
+# a fourth collector cycle).
+
+use common.perf.perf_stats.{perf_stats_p50, perf_stats_p95}
+
+pub struct PeerSamples:
+    peer_id: text
+    state: text
+    unit: text
+    values: [i64]
+
+pub struct ComparisonRow:
+    peer_id: text
+    unit: text
+    sample_count: i64
+    p50: i64
+    p95: i64
+
+pub struct ComparisonReport:
+    emitted: bool
+    refusal: text
+    rows: [ComparisonRow]
+    peer_states: [text]
+
+pub fn crosslang_min_samples() -> i64:
+    """The retained-sample floor the L10 gates require per peer."""
+    15
+
+fn _states(peers: [PeerSamples]) -> [text]:
+    var out: [text] = []
+    for peer in peers:
+        out.push("{peer.peer_id}={peer.state}")
+    out
+
+fn _refuse(peers: [PeerSamples], reason: text) -> ComparisonReport:
+    ComparisonReport(emitted: false, refusal: reason, rows: [], peer_states: _states(peers))
+
+pub fn crosslang_emit_comparison(peers: [PeerSamples]) -> ComparisonReport:
+    """Emit one row per peer, or refuse the whole comparison naming the first
+    peer that fails the coverage bar."""
+    if peers.len() == 0:
+        return ComparisonReport(emitted: false, refusal: "refused: no_peers", rows: [], peer_states: [])
+    val unit = peers[0].unit
+    val floor = crosslang_min_samples()
+    for peer in peers:
+        if peer.state != "available":
+            return _refuse(peers, "refused: {peer.peer_id} {peer.state}")
+        if peer.unit != unit:
+            return _refuse(peers, "refused: {peer.peer_id} unit_mismatch {peer.unit} vs {unit}")
+        if peer.values.len() < floor:
+            return _refuse(peers,
+                "refused: {peer.peer_id} insufficient_samples n={peer.values.len().to_text()} min={floor.to_text()}")
+    var rows: [ComparisonRow] = []
+    for peer in peers:
+        rows.push(ComparisonRow(
+            peer_id: peer.peer_id,
+            unit: peer.unit,
+            sample_count: peer.values.len(),
+            p50: perf_stats_p50(peer.values),
+            p95: perf_stats_p95(peer.values),
+        ))
+    ComparisonReport(emitted: true, refusal: "", rows: rows, peer_states: _states(peers))

@@ -1,0 +1,114 @@
+#!/bin/sh
+set -eu
+LC_ALL=C
+export LC_ALL
+
+fail() { echo "STATUS: FAIL native-link-attribution-producer — $*" >&2; exit 1; }
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+canonical_file() { (CDPATH= cd -- "$(dirname -- "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$1")"); }
+safe_token() { case "$1" in ''|*[!A-Za-z0-9._:@+/-]*) return 1;; esac; }
+
+OUTPUT_DIR= BINARY= LINK_MAP= REMOVED= SYMBOLS= DSOS= CONSTRUCTORS= EXPORTS= ACTION_RECEIPT= RUNTIME_CLOSURE= REASONS=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output-dir) OUTPUT_DIR=$2; shift 2;;
+        --binary) BINARY=$2; shift 2;;
+        --link-map) LINK_MAP=$2; shift 2;;
+        --removed-sections) REMOVED=$2; shift 2;;
+        --symbols) SYMBOLS=$2; shift 2;;
+        --dsos) DSOS=$2; shift 2;;
+        --constructors) CONSTRUCTORS=$2; shift 2;;
+        --exports) EXPORTS=$2; shift 2;;
+        --action-receipt) ACTION_RECEIPT=$2; shift 2;;
+        --runtime-closure) RUNTIME_CLOSURE=$2; shift 2;;
+        --reason-ledger) REASONS=$2; shift 2;;
+        *) fail "unknown-argument-$1";;
+    esac
+done
+
+[ -n "$OUTPUT_DIR" ] || fail missing-output-dir
+case "$OUTPUT_DIR" in /|/*|..|../*|*/../*|*/..) fail unsafe-output-dir;; esac
+for input in "$BINARY" "$LINK_MAP" "$REMOVED" "$SYMBOLS" "$DSOS" "$CONSTRUCTORS" "$EXPORTS" "$ACTION_RECEIPT" "$RUNTIME_CLOSURE" "$REASONS"; do
+    [ -f "$input" ] && [ ! -L "$input" ] || fail missing-or-symlinked-input
+done
+[ ! -e "$OUTPUT_DIR" ] || fail output-exists
+mkdir -p "$(dirname -- "$OUTPUT_DIR")"
+mkdir "$OUTPUT_DIR"
+trap 'rm -rf "$OUTPUT_DIR"' HUP INT TERM
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-link-attribution.XXXXXX")
+trap 'rm -rf "$work"; rm -rf "$OUTPUT_DIR"' HUP INT TERM
+raw="$work/raw.tsv"
+: >"$raw"
+append_inventory() {
+    expected=$1; path=$2
+    awk -F '\t' -v expected="$expected" '
+        NF != 3 || $1 != expected || $2 !~ /^(0|[1-9][0-9]*)$/ || $3 == "" { exit 2 }
+        $3 ~ /[\t\r\n]/ { exit 2 }
+        { print $1 "\t" $2 "\t" $3 }
+    ' "$path" >>"$raw" || fail "invalid-$expected-inventory"
+}
+append_inventory retained-section "$LINK_MAP"
+append_inventory removed-section "$REMOVED"
+append_inventory symbol "$SYMBOLS"
+append_inventory dso "$DSOS"
+append_inventory constructor "$CONSTRUCTORS"
+append_inventory export "$EXPORTS"
+
+LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k3,3 "$raw" >"$work/sorted.tsv"
+[ "$(wc -l <"$raw" | tr -d ' ')" -eq "$(LC_ALL=C sort -u -t "$(printf '\t')" -k1,1 -k3,3 "$raw" | wc -l | tr -d ' ')" ] || fail duplicate-attribution-identity
+awk -F '\t' '
+    NF != 4 || $1 == "" || $2 == "" || $3 == "" || $4 == "" { exit 2 }
+    $1 ~ /[\t\r\n]/ || $2 ~ /[\t\r\n]/ || $3 ~ /[\t\r\n]/ || $4 ~ /[\t\r\n]/ { exit 2 }
+    { print }
+' "$REASONS" >"$work/reasons.tsv" || fail invalid-reason-ledger
+[ "$(wc -l <"$work/reasons.tsv" | tr -d ' ')" -eq "$(LC_ALL=C sort -u -t "$(printf '\t')" -k1,1 -k2,2 "$work/reasons.tsv" | wc -l | tr -d ' ')" ] || fail duplicate-reason-identity
+
+awk -F '\t' 'NR==FNR { reason[$1 SUBSEP $2]=$3 "\t" $4; next }
+    { key=$1 SUBSEP $3; if (!(key in reason)) exit 3; print $1 "\t" $2 "\t" $3 "\t" reason[key]; used[key]=1 }
+    END { for (key in reason) if (!(key in used)) exit 4 }
+' "$work/reasons.tsv" "$work/sorted.tsv" >"$OUTPUT_DIR/attribution.tsv" || fail incomplete-or-extra-reason-ledger
+
+cp "$LINK_MAP" "$OUTPUT_DIR/link-map.tsv"
+cp "$ACTION_RECEIPT" "$OUTPUT_DIR/action-receipt.env"
+cp "$RUNTIME_CLOSURE" "$OUTPUT_DIR/runtime-closure.env"
+binary_path=$(canonical_file "$BINARY")
+action_digest=$(hash_file "$ACTION_RECEIPT")
+runtime_digest=$(hash_file "$RUNTIME_CLOSURE")
+attribution_digest=$(hash_file "$OUTPUT_DIR/attribution.tsv")
+retained_bytes=$(awk -F '\t' '$1=="retained-section" { total += $2 } END { print total+0 }' "$OUTPUT_DIR/attribution.tsv")
+removed_bytes=$(awk -F '\t' '$1=="removed-section" { total += $2 } END { print total+0 }' "$OUTPUT_DIR/attribution.tsv")
+row_count=$(wc -l <"$OUTPUT_DIR/attribution.tsv" | tr -d ' ')
+
+cat >"$OUTPUT_DIR/receipt.env" <<EOF
+schema=simple.native-link-attribution/v1
+binary_path=$binary_path
+binary_sha256=$(hash_file "$BINARY")
+binary_bytes=$(wc -c <"$BINARY" | tr -d ' ')
+action_receipt_sha256=$action_digest
+runtime_closure_sha256=$runtime_digest
+raw_link_map_sha256=$(hash_file "$LINK_MAP")
+removed_sections_sha256=$(hash_file "$REMOVED")
+symbols_sha256=$(hash_file "$SYMBOLS")
+dsos_sha256=$(hash_file "$DSOS")
+constructors_sha256=$(hash_file "$CONSTRUCTORS")
+exports_sha256=$(hash_file "$EXPORTS")
+reason_ledger_sha256=$(hash_file "$REASONS")
+attribution_sha256=$attribution_digest
+attribution_rows=$row_count
+retained_section_bytes=$retained_bytes
+removed_section_bytes=$removed_bytes
+final_verdict=PASS
+EOF
+
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+"$(dirname -- "$0")/check-native-link-attribution.shs" \
+    --receipt "$OUTPUT_DIR/receipt.env" --attribution "$OUTPUT_DIR/attribution.tsv" \
+    --binary "$BINARY" --link-map "$LINK_MAP" --removed-sections "$REMOVED" \
+    --symbols "$SYMBOLS" --dsos "$DSOS" --constructors "$CONSTRUCTORS" \
+    --exports "$EXPORTS" --action-receipt "$ACTION_RECEIPT" \
+    --runtime-closure "$RUNTIME_CLOSURE" --reason-ledger "$REASONS" >/dev/null
+echo "STATUS: PASS native-link-attribution-producer — $OUTPUT_DIR"

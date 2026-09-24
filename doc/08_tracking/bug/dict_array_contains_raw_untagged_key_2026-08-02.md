@@ -1,5 +1,35 @@
 # `.has()` / `.contains()` / `in` answer membership questions with an untagged key
 
+## 2026-09-13 — lane data point added; entry stays OPEN
+
+The reported defect is on the **self-hosted stage-3 native binary**, and the
+entry already records that no host pipeline could verify a fix. That is still
+true here — no stage-3 binary was built during this pass. What was added is a
+control measurement on the **Rust seed**, which the entry never recorded:
+
+`build/vt4/bootstrap/simple.exe run <probe>`, same probe table, default JIT lane
+and `SIMPLE_EXECUTION_MODE=interpret` — **identical and fully correct on both**:
+
+| probe | expected | seed measured |
+|---|---|---|
+| `b.has(7/9/11/13)` | `true true true true` | `true true true true` ✓ |
+| `b[7/9/11/13]` | `70 90 110 130` | `70 90 110 130` ✓ |
+| `b.has(5) b.has(6)` | `false false` | `false false` ✓ |
+| `[10,9,30].contains(10/9/30/7)` | `true true true false` | `true true true false` ✓ |
+| `9 in b` / `5 in b` | `true false` | `true false` ✓ |
+
+This is useful in two ways. It confirms the defect is **not** in the shared
+dict/array runtime or in the language semantics — the seed exercises the same
+`rt_contains` contract and gets every row right, including both of the reported
+wrong-direction rows (`contains` false-negative, `in` false-positive). And it
+gives the fix a ready differential oracle: the seed's answers are the intended
+column, so a candidate stage-3 fix can be diffed against this table directly
+rather than against hand computation.
+
+The `bare_rt_redirect` emitter analysis below is therefore still the live
+hypothesis, and remains unverified for want of a buildable stage-3 lane.
+
+
 - **Status:** OPEN — root cause PROVED, **emitter LOCATED 2026-08-02** (Rust seed
   LLVM backend `bare_rt_redirect`, see "The emitter, LOCATED"), codegen fix
   specified but NOT landed (no host pipeline can verify it; see "Reproduction

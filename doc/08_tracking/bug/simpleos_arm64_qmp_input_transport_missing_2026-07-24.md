@@ -1,4 +1,8 @@
 # SimpleOS ARM64/RV64 QMP input transport evidence gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** PARTIAL — ARM64/RV64 source implemented; live proof remains open
 **Scope:** `arm64-desktop-engine2d` and `riscv64-display-smoke` on QEMU `virt`
@@ -156,3 +160,4 @@ guest-owned backing bytes directly. The current wrapper instead uses
 7. Capture baseline and post-input buffers with `pmemsave`. Admit PASS only
    after guest IRQ, WM-state, later frame generation, and distinct pixels all
    correlate; serial-only or host-nonce-only evidence remains invalid.
+

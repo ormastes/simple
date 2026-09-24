@@ -24,11 +24,11 @@ set -eu
 #   silent fallback to the seed and no PASS on an untested target.
 #
 # Exit status:
-#   0  self-hosted target verified AND interpret correct AND JIT either correct
-#      (PASS) or the known-open, tracked 0.0 (XFAIL — see bug doc above)
+#   0  self-hosted target verified AND interpret correct AND JIT correct (PASS)
 #   1  a real failure: interpreter wrong, or JIT produced an UNEXPECTED value
 #   2  could NOT test: target missing, unreadable, refuses --version, or is the
 #      Rust bootstrap seed rather than the self-hosted binary
+#   3  measured the tracked known-bad JIT 0.0 (development XFAIL, admission deny)
 #
 # Override the target with SIMPLE_BIN=/path/to/self-hosted/simple.
 
@@ -63,7 +63,8 @@ fi
 SIMPLE_REAL="$(readlink -f -- "$SIMPLE_PATH" 2>/dev/null || printf '%s' "$SIMPLE_PATH")"
 echo "target:    $SIMPLE  ->  $SIMPLE_REAL"
 
-if VERSION_OUT="$("$SIMPLE_PATH" --version 2>&1)"; then
+if VERSION_OUT="$(env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUST_SEED_WARNING \
+        "$SIMPLE_PATH" --version 2>&1)"; then
     :
 else
     untestable "'$SIMPLE_REAL --version' exited non-zero; cannot establish identity"
@@ -111,7 +112,8 @@ norm() { sed 's/\.0*$//; s/0*$//; s/\.$//'; }
 # Stage 1 — interpreter is the always-correct baseline. Hard requirement.
 # stderr is kept: a crashed run must not masquerade as a wrong value.
 # ---------------------------------------------------------------------------
-if INTERP_RAW="$(SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_PATH" run "$PROG" 2>/dev/null)"; then
+if INTERP_RAW="$(env -u SIMPLE_JIT_STRICT SIMPLE_EXECUTION_MODE=interpret \
+        "$SIMPLE_PATH" run "$PROG" 2>/dev/null)"; then
     :
 else
     untestable "interpreter run of the probe program exited non-zero; the target cannot run Simple source"
@@ -130,7 +132,8 @@ echo "interpret: 21.5  OK"
 # ---------------------------------------------------------------------------
 # Stage 2 — JIT (compiled) path, the one the bug lives in.
 # ---------------------------------------------------------------------------
-if JIT_OUT="$("$SIMPLE_PATH" run "$PROG" 2>/dev/null)"; then
+if JIT_OUT="$(env -u SIMPLE_EXECUTION_MODE SIMPLE_JIT_STRICT=1 \
+        "$SIMPLE_PATH" run "$PROG" 2>/dev/null)"; then
     :
 else
     untestable "JIT run of the probe program exited non-zero; the ABI property was not exercised"
@@ -150,7 +153,9 @@ case "$JIT" in
         # non-empty above, so this arm is only reachable for a real 0.0/-0 value.
         echo "jit:       $JIT_RAW  XFAIL — known-open self-hosted codegen bug, not yet ported"
         echo "  tracked: doc/08_tracking/bug/f64_self_hosted_call_result_codegen_2026-06-21.md"
-        exit 0 ;;
+        # Keep the development classification, but never let an admission
+        # caller mistake the known defect for success.
+        exit 3 ;;
     *)
         echo "FAIL: jit produced an UNEXPECTED value '$JIT_RAW' (want 21.5, known-bad 0.0)" >&2
         exit 1 ;;

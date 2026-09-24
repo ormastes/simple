@@ -1,0 +1,70 @@
+"""Closed cooperative namespace contract for cache mutation and host GC.
+
+This is a capability seam, not a second journal/CAS/GC owner.  The current host
+cannot issue a namespace scope that spans immutable-object sync, journal
+admission, selected-head replacement, and reader/lease/pin changes.  Therefore
+all mutation and GC entrypoints remain fail-closed until that issuer exists.
+"""
+
+use compiler.common.cache_contract.errors_v1.{
+    CacheErrorCodeV1, CacheErrorV1, RetryClassV1, ErrorSeverityV1,
+    RejectTelemetryV1, cache_error_telemetry_class_v1,
+    cache_error_safe_context_v1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.gateway.cooperative_namespace_gc_begin_authority_v1.{
+    cache_cooperative_namespace_gc_host_issuance_available_v1}
+
+pub struct CacheCooperativeNamespaceLimitsV1:
+    max_retained_roots: i64
+    max_reader_domains: i64
+    max_lease_records: i64
+
+fn _namespace_error_v1(code: CacheErrorCodeV1, detail: text) -> CacheErrorV1:
+    CacheErrorV1(code: code, retry: RetryClassV1.AfterStateChange,
+        severity: ErrorSeverityV1.Error,
+        reject: RejectTelemetryV1(
+            telemetry_class: cache_error_telemetry_class_v1(code),
+            safe_context: cache_error_safe_context_v1(code),
+            reason_digest: sha256_text("simple.cache.cooperative-namespace.v1\u0000" + detail),
+            bounded_detail: detail))
+
+pub fn cache_cooperative_namespace_limits_valid_v1(
+    limits: CacheCooperativeNamespaceLimitsV1,
+) -> bool:
+    limits.max_retained_roots > 0 and limits.max_retained_roots <= 65536 and
+        limits.max_reader_domains > 0 and limits.max_reader_domains <= 65536 and
+        limits.max_lease_records > 0 and limits.max_lease_records <= 65536
+
+# The host GC V2 owner must remain disabled until one issuer can prove that
+# every reader domain, lease and explicit pin is inside this same namespace.
+pub fn cache_cooperative_namespace_capability_available_v1() -> bool:
+    cache_cooperative_namespace_gc_host_issuance_available_v1()
+
+pub fn cache_cooperative_namespace_gc_begin_available_v1() -> bool:
+    cache_cooperative_namespace_gc_host_issuance_available_v1()
+
+# Pure preflights expose only typed refusal behavior. No namespace or mutation
+# scope type exists in this module, so they are safe to exercise without
+# fabricating host handles.
+pub fn cache_cooperative_namespace_open_preflight_v1(
+    limits: CacheCooperativeNamespaceLimitsV1,
+) -> Result<(), CacheErrorV1>:
+    if not cache_cooperative_namespace_limits_valid_v1(limits):
+        return Err(_namespace_error_v1(CacheErrorCodeV1.CacheBoundsExceeded,
+            "cooperative-namespace-limits-invalid"))
+    Err(_namespace_error_v1(CacheErrorCodeV1.CacheUnavailable,
+        "cooperative-namespace-capability-unavailable"))
+
+pub fn cache_cooperative_namespace_begin_preflight_v1(
+    expected_selected_head_revision: i64,
+    writer_incarnation: i64,
+) -> Result<(), CacheErrorV1>:
+    if expected_selected_head_revision < 0 or writer_incarnation < 0:
+        return Err(_namespace_error_v1(CacheErrorCodeV1.CacheBoundsExceeded,
+            "cooperative-namespace-head-or-writer-invalid"))
+    Err(_namespace_error_v1(CacheErrorCodeV1.CacheUnavailable,
+        "cooperative-namespace-mutation-scope-unavailable"))
+
+# Actual open/begin/finish/abort operations deliberately do not exist in this
+# gateway module. They belong to the existing host owner once it can issue and
+# continuously validate a non-constructible per-root scope.

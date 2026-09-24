@@ -1,4 +1,16 @@
 # CLI Dispatch Perf Spec Still Fails
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: new, different failure mode; not closable
+- **measured** — `bin/simple run test/05_perf/cli_dispatch_perf_spec.spl` (Rust seed
+  v1.0.0-rc.1, Windows) does not reach any benchmark: it fails to parse with
+  `Unexpected token: expected expression, found Indent`. So the "one failing benchmark
+  case" this entry reports can be neither confirmed nor cleared here.
+- **inferred** — the spec is now blocked earlier in the pipeline than the defect it tracks.
+  Left OPEN, with the parse failure recorded as the current state on this host.
 
 Date: 2026-06-21
 
@@ -27,3 +39,4 @@ syntax or fix the benchmark target.
 
 Do not use this spec as release evidence until the failing benchmark case is
 identified and made deterministic.
+

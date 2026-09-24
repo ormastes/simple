@@ -77,6 +77,11 @@ pub extern "C" fn rt_vulkan_destroy_fence(_fence: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_wait_fence(fence: i64, timeout_ns: i64) -> i64 {
     let state = STATE.lock();
+    // Session fences are observed through generation-bound session operations;
+    // the legacy API holds STATE across waits and cannot satisfy that contract.
+    if state.async_compute_session_fences.contains(&fence) {
+        return 0;
+    }
     // Resolves both plain fences and the pending fence of a non-blocking
     // `rt_vulkan_submit_no_wait` submission, whose command buffer is still
     // quarantined. Looking only in `state.fences` made every no-wait handle

@@ -1,4 +1,8 @@
 # native-build: non-parse driver overhead before and inside the per-file loop
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
 - Status: PARTIALLY FIXED (source-closure preamble 4.0x faster; residue tracked below)
@@ -155,3 +159,4 @@ bootstrap redeploy, unlike the two driver fixes which the worker reads as source
   call sites would recover the copy, but those call sites are in
   `driver_source_pipeline_loading.spl` and `src/app/io/_CliCompile/compile_targets.spl`.
 - Per-file `parse` dt remains 4.8-22.2 s and is untouched: that is the parser lane.
+

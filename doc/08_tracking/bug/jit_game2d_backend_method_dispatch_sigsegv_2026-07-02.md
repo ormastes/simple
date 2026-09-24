@@ -1,4 +1,8 @@
 # Bug: JIT SIGSEGV calling GameBackend trait methods via `LoopDriver.step`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-02
 **Component:** Cranelift JIT path (`bin/simple run` / `src/compiler_rust/target/release/simple run`),
@@ -265,3 +269,4 @@ Lane design (recorded, not implemented here):
 Interim mitigation: the 2026-08-02 determinism fix makes the winner stable;
 divergent-layout pairs above rarely co-load (different tiers/domains), and the
 browser_engine resolver spec pins the engine2d family green (6/6).
+

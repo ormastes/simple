@@ -1,0 +1,46 @@
+# PersistentSet.is_subset cardinality-guard perf pin.
+#
+# `is_subset` used to snapshot `self._inner.keys()` (an O(len) HAMT walk)
+# before checking a single element, even when `other` obviously cannot
+# contain everything in a much larger `self` (e.g. `other` is empty).
+# Cardinality is a cheap O(1) check (`len()` on the backing PersistentMap)
+# that can short-circuit the whole snapshot-and-scan.
+#
+# Plan measured 8.96s -> 5.6ms for 256 calls of `big.is_subset(empty)` with a
+# 2048-element `big` set. This spec pins a generous 200ms budget (well above
+# the fixed post-fix cost, well below the pre-fix quadratic-ish cost) so it
+# stays robust to host jitter while still catching a regression back to the
+# unguarded snapshot-first path.
+#
+# See doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+# section "L2 runtime/interpreter PersistentSet subset guard — 2026-09-09".
+
+use std.persistent_set.{PersistentSet}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn build_big() -> PersistentSet:
+    var s = PersistentSet.empty()
+    var i = 0
+    while i < 2048:
+        s = s.add("item_{i}")
+        i = i + 1
+    s
+
+describe "seed interpreter: PersistentSet.is_subset cardinality guard":
+    it "rejects a much-larger self against an empty other in bounded time":
+        val big = build_big()
+        val empty = PersistentSet.empty()
+
+        val t0 = rt_time_now_unix_micros()
+        var i = 0
+        var false_count = 0
+        while i < 256:
+            if not big.is_subset(empty):
+                false_count = false_count + 1
+            i = i + 1
+        val elapsed_ms = (rt_time_now_unix_micros() - t0) / 1000
+
+        expect(false_count).to_equal(256)
+        expect("{elapsed_ms}ms < 200ms: {elapsed_ms < 200}").to_equal(
+            "{elapsed_ms}ms < 200ms: true")

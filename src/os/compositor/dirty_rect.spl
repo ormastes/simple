@@ -62,13 +62,26 @@ fn irect_is_empty(r: IRect) -> bool:
 fn irect_area(r: IRect) -> i32:
     if irect_is_empty(r): 0 else: r.w * r.h
 
+# One owner-issued name for the exact damage prefix offered to a frame.
+# Keeping epoch and count in one value prevents call sites from assembling a
+# checkpoint from observations made at different owner revisions.
+struct DirtyRegionCheckpoint:
+    epoch: i64
+    count: i64
+
 # DirtyRegion — accumulates invalidation rects each frame.
 class DirtyRegion:
     rects: [IRect]
     has_any: bool
+    # Appending damage preserves the existing prefix. Clearing or consuming
+    # it invalidates every older checkpoint, including clear-and-readd ABA.
+    prefix_epoch: i64
+    active_checkpoint_count: i64
 
     static fn new() -> DirtyRegion:
-        DirtyRegion(rects: [], has_any: false)
+        DirtyRegion(
+            rects: [], has_any: false, prefix_epoch: 1,
+            active_checkpoint_count: -1)
 
     # Add a rectangle to the dirty set.
     me add_rect(x: i32, y: i32, w: i32, h: i32):
@@ -105,6 +118,50 @@ class DirtyRegion:
     me clear():
         self.rects = []
         self.has_any = false
+        self._advance_prefix_epoch()
+
+    me _advance_prefix_epoch():
+        self.active_checkpoint_count = -1
+        # Exhaustion disables checkpoints instead of wrapping their identity.
+        if self.prefix_epoch < 9223372036854775807:
+            self.prefix_epoch = self.prefix_epoch + 1
+
+    me checkpoint() -> DirtyRegionCheckpoint:
+        """Name this owner's current prefix; epoch zero means exhausted."""
+        if self.prefix_epoch <= 0 or self.prefix_epoch >= 9223372036854775807:
+            self.active_checkpoint_count = -1
+            return DirtyRegionCheckpoint(epoch: 0, count: 0)
+        self.active_checkpoint_count = self.rects.len().to_i64()
+        DirtyRegionCheckpoint(
+            epoch: self.prefix_epoch,
+            count: self.active_checkpoint_count
+        )
+
+    fn can_retire_prefix(checkpoint: DirtyRegionCheckpoint) -> bool:
+        """Validate an owner-held checkpoint while allowing newer appends."""
+        (checkpoint.epoch > 0 and checkpoint.epoch == self.prefix_epoch and
+            checkpoint.count >= 0 and checkpoint.count ==
+                self.active_checkpoint_count and
+            checkpoint.count <= self.rects.len().to_i64())
+
+    me retire_prefix(checkpoint: DirtyRegionCheckpoint) -> bool:
+        """Consume only damage captured before a matching present attempt.
+
+        Later pointer/resource/timer damage stays pending, even when its
+        rectangle overlaps a presented rectangle. The caller must validate
+        the actual provider receipt; this checkpoint is not device evidence.
+        """
+        if not self.can_retire_prefix(checkpoint):
+            return false
+        var remaining: [IRect] = []
+        var i = checkpoint.count
+        while i < self.rects.len().to_i64():
+            remaining.push(self.rects[i])
+            i = i + 1
+        self.rects = remaining
+        self.has_any = remaining.len() > 0
+        self._advance_prefix_epoch()
+        true
 
     # Number of pending dirty rects.
     me count() -> i32:

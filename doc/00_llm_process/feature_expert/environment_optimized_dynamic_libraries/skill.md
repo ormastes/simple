@@ -47,3 +47,13 @@ execution remain unclaimed until focused evidence passes.
 
 Update this expert map with each pipeline stage, source/spec paths, exact evidence,
 open blockers, and resume commands in the same change.
+
+## 2026-09-22 cross-feature integration
+
+`doc/04_architecture/compiler/dynamic_runtime_kernel_provider_composition_2026-09-22.md`
+and its detail design/test/agent plans reconcile this selected provider design
+with runtime cdylib authority, Cocoa packaging and existing KPF/aspect owners.
+This is documentation evidence only. Existing selected contracts and promotion
+gates remain unchanged; outstanding aspect options remain unselected. The
+retained feature knowledge receipt does not cover OS kernel/driver code, which
+requires a refreshed `mdsoc_only` route before implementation.

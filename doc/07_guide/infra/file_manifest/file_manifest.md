@@ -62,6 +62,14 @@ and contributors discover which entries are external repositories.
    `## dir/` section as well
 4. Run `sh scripts/check-workspace-root-guard.shs audit` to verify
 
+## SCV Temporary State
+
+SCV repository state belongs under the workspace's `.scv/` directory. Local
+unreviewed packs and other recoverable artifacts belong in
+`.scv/quarantine/`; do not create root-level `tmp*` directories for them.
+The root manifest intentionally does not admit `tmp5`, `tmp10`, `tmp50`,
+`tmp5b`, or `tmpdrv`.
+
 ## How to Create a New Child Manifest
 
 1. Create `<dir>/FILE.md` with `## Allowed Entries` listing the directory contents
@@ -96,3 +104,20 @@ sh scripts/check-workspace-root-guard.shs --self-test      # Run smoke tests
 sh scripts/setup/install-workspace-guard-hook.shs --check        # Check hook status
 sh scripts/setup/install-workspace-guard-hook.shs --apply        # Install hook
 ```
+
+## Related: directory fan-out and depth (doc layout)
+
+FILE.md governs *which entries* are allowed in a directory. A sibling guard,
+`scripts/check/check-directory-fanout.shs`, governs a different axis — *how
+many* files a directory holds and *how deep* the doc tree nests — backing
+`.claude/rules/structure.md`'s "≤10 files per directory; max depth 4
+(doc/phase/domain/topic)" rule. It is baseline-relative (new/grown violations
+fail, pre-existing ones are grandfathered), configured by
+`config/check/doc_layout.sdn` (`root`, `file_limit`, `max_depth`,
+`exempt_phase` per DO-NOT-REFACTOR phase), and supports `--config`/`--root`
+overrides, a `--depth`-only or `--fanout`-only mode, a `--plan` mode that
+prints a proposed (never-applied) file-to-subdirectory split for an
+over-limit directory, and a fatal `--selftest`. See the script's own header
+comment for the full contract and the two baseline files
+(`scripts/check/directory_fanout_baseline.txt`,
+`scripts/check/doc_depth_baseline.txt`).

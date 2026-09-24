@@ -1,4 +1,9 @@
 # Flat --entry-closure lane: class-method resolution was NON-DETERMINISTIC (misdiagnosed as a "comment/line-count landmine")
+## Closed 2026-09-16 — ROOT-CAUSED and FIXED; 10/10 green rebuilds after sort fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-24 (root-caused + fixed 2026-07-25)
 **Severity:** High (silent miscompile of the *target* program on ~1/3 of builds)
@@ -80,3 +85,4 @@ classrepro rebuilds (was ~2/3).
   cure.
 - Regression guard: `src/app/classrepro` oracle — but run it **N times**, not
   once (a single green run never proved anything here).
+

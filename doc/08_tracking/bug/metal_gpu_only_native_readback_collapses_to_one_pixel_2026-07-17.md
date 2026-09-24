@@ -1,4 +1,8 @@
 # Metal GPU-only native readback collapses to one pixel
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Scope
 
@@ -89,3 +93,4 @@ cycle proves the 1,024-pixel device result and clip oracle.
    `SIMPLE_NO_STUB_FALLBACK=1`.
 4. The focused 8x8 SPipe readback spec asserts full length and clipped pixels
    from the device source on current native macOS.
+

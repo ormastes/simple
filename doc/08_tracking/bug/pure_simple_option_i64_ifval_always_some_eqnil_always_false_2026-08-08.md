@@ -1,4 +1,8 @@
 # Pure-Simple AOT lane: `i64?` value-3 collision does NOT reproduce, but `if val`/`== nil` are broken worse
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** REOPENED 2026-08-17 -- reproduces under SIMPLE_EXECUTION_MODE=jit (see REOPENED section at end). Previously: LIKELY FIXED, unconfirmed on the AOT lane — 2026-08-10 re-check. A fix
 matching this doc's own "candidate (a)" is already present in
@@ -277,3 +281,4 @@ LEVEL does NOT diverge; a top-level body runs interpreted regardless of the pin.
 Any "re-verified by source inspection" stamp above is void per repo policy.
 Full method, population counts and probe paths:
 `<scratchpad>/rv/UNPINNED_ENGINE_REVERIFICATION_2026-08-17.md`.
+

@@ -1,6 +1,20 @@
 # Seed interpreter: static methods with default params unreachable with fewer args
 
-- **Status:** FIXED IN SEED — pending redeploy (workaround in shell.spl still in place)
+## Closed 2026-09-13 — filed symptom gone (method reachable); a NEW defect found and filed
+
+- **measured** The exact repro no longer errors: `Probe.make(5)` where
+  `static fn make(a: i64, b: i64 = 0)` returns a value instead of
+  `unknown static method make on class Probe`. Rust seed v1.0.0-rc.1, Windows.
+- **measured** BUT the filled default is WRONG. An instrumented probe prints `a=5 b=3` for a
+  declared default of `0`; `b: i64 = 100` also yields `b=3`, and `x: i64 = 42` yields `x=3`.
+  Free functions are correct (`free b=100`). Static-method default fill substitutes the
+  constant `3` regardless of the declared expression.
+- **inferred** That is a distinct defect (reachability vs. value) living in
+  `src/compiler_rust`, off limits during the running bootstrap. Filed separately as
+  `seed_static_method_default_param_value_wrong_2026-09-13.md`.
+
+
+Status: closed 2026-09-13 (was: - **Status:** FIXED IN SEED — pending redeploy (workaround in shell.spl still in place))
 - **Fixed:** 2026-06-12 in `src/compiler_rust/compiler/src/interpreter_method/special/objects.rs`
 - **Found:** 2026-06-11 while fixing
   `std_shell_file_dir_ops_false_2026-06-11.md` (S1)

@@ -1,4 +1,8 @@
 # Bug: rt_process_run_with_limits Arg-Count Mismatch and Missing JIT Expansion
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-31  
 **Status:** Dormant (unreachable)  
@@ -78,3 +82,4 @@ Whoever wires up a call site owns fixing both defects before landing the change.
 ## Cross-Reference
 
 See also: `doc/08_tracking/bug/rt_process_spawn_async_jit_missing_ptr_len_expansion_2026-07-31.md` — the live sibling defect that prompted this audit.
+

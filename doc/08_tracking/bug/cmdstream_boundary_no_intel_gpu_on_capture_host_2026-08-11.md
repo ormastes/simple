@@ -193,3 +193,8 @@ and hardware-verification flags remain false. A real Mesa `anv` batch captured
 from Intel Gen12/Xe hardware and compared against the candidate is still
 required; NVIDIA, a hand-authored stream, or the synthetic schema fixture is
 not acceptable substitute evidence.
+
+## Triage 2026-09-13
+Reconfirmed: source already fixed per this record; live Intel ANV evidence
+is blocked by no Intel GPU on the capture host, a hardware-availability
+gap, not reproducible in this environment. Left OPEN (P3), no code change.

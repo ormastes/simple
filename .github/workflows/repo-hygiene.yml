@@ -12,6 +12,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  chromium-oracle-builder-contract:
+    name: Chromium Oracle Builder Admission Contract
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # Exercise refusal paths with no admitted compiler or output artifact.
+      # The contract's receipt fixtures target the native arm64 macOS host.
+      - name: Check Chromium oracle builder admission and no-clobber contract
+        env:
+          CHROMIUM_ORACLE_BUILDER: scripts/check/build-chromium-primitive-oracle.shs
+        run: sh test/01_unit/scripts/chromium_primitive_oracle_builder_contract_test.shs
+
   # File-type hygiene content gate (forbidden .py/.sh, secrets, naming, staged
   # root-guard). Kept in its own job: it is currently RED on pre-existing debt
   # (tracked .py/.sh files that predate this workflow), so it must not gate the
@@ -28,949 +41,90 @@ jobs:
         run: |
           sh scripts/check/check-repo-hygiene.shs
 
-  # Idiom / structural ratchet gates. Every gate here self-passes green on the
-  # current tree and ratchets: a NEW violation fails its step and this job. This
-  # is the authoritative, non-bypassable enforcement lane — jj bypasses the
-  # pre-commit git hook and build-lint routes the CLI lane to clippy, so CI is
-  # the only place these gates are guaranteed to run.
-  code-idiom-gates:
+  # REQUIRED fast lane (2026-09-23). The ruleset spipe-vcs-v3-main requires the
+  # status context "Code Idiom & Structural Ratchet Gates"; this job carries
+  # that name so a PR can land in about a minute (user order: required checks
+  # < 1 min, pre-push < 20 s). It runs the SAME fast, diff-scoped set the
+  # pre-push hook runs, against the PR's own base..head range, so enforcement
+  # does not depend on local hooks (pushes bypassed the hook that day). The
+  # 47-step ratchet lane below keeps running on every PR and on main as the
+  # NON-required "(extended)" job; heavy proofs (cargo check, C compile, test
+  # sweeps, advisory gates) belong there or post-merge, never here.
+  #
+  # Checkout is sparse (only scripts/check + config/check reach the working
+  # tree; every gate reads committed objects) and depth 1; the PR endpoints
+  # are fetched at PR_COMMITS+1 depth exactly as the extended job does.
+  fast-gates:
     name: Code Idiom & Structural Ratchet Gates
     runs-on: ubuntu-latest
-
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/check
+            config/check
+          sparse-checkout-cone-mode: true
 
-      # ---------------------------------------------------------------------
-      # LOCAL CI RECEIPT ADMISSION
-      #
-      # A developer can sign a receipt (schema simple.local-ci-receipt/v1)
-      # stating that they ran the `ci`-tier rows of
-      # config/check/must_check_gates.sdn over one exact tree, produced by one
-      # exact jj change-id set. When that receipt VERIFIES against this job's
-      # rows, the gates below are skipped and this job — whose name is the
-      # required status context `Code Idiom & Structural Ratchet Gates` —
-      # reports success without re-running them.
-      #
-      # THREE MODES, and only three:
-      #   full      run every gate, exactly as before. EVERY undecidable,
-      #             missing, malformed, unsigned, mismatched or unreadable
-      #             input lands here. This is the fail-closed zone.
-      #   sanity    the receipt verifies AND binds the tree actually under
-      #             test. Only the conflict-class guards below run.
-      #   escalate  the receipt verifies for the PR head, but the merge CI is
-      #             testing has a different tree. The conflict-class guards
-      #             run, plus every gate whose declared `inputs` intersect the
-      #             changed paths. A gate whose inputs are `*` (unbounded)
-      #             ALWAYS runs — unknown escalates to running, never to
-      #             skipping.
-      #
-      # THE ONE LINE THAT ENFORCES FAIL-CLOSED is `mode=full` at the top of
-      # `Local CI receipt admission`, paired with the fact that `decide()`
-      # only ever WIDENS trust and every failure path `return`s with mode
-      # still full — and with the INVERTED `if:` on each gate step below
-      # (`!contains(steps.receipt.outputs.skip_ids, '|<row id>|')`). An empty,
-      # missing or unset `skip_ids` makes `contains` false, so the gate RUNS.
-      # A decision step that dies, is skipped, or emits nothing therefore
-      # runs everything; nothing can be skipped by omission.
-      #
-      # BASE-ONLY READS (F6). The verifier script and the allowed-signers file
-      # are materialized with `git show <BASE_SHA>:<path>` into RUNNER_TEMP —
-      # never read from the PR head, or a PR could add its own key. BASE_SHA
-      # comes from the event payload, which the PR cannot forge.
-      #
-      # They are deliberately NOT a second `actions/checkout` into the
-      # workspace: a `.ci-base/` root entry with a duplicate `scripts/check/`
-      # inside it is exactly what the workspace root guard and every
-      # find/rg-based gate below would then scan, so the admission machinery
-      # would change the verdict of the gates it is admitting. Nothing this
-      # step creates lives inside $GITHUB_WORKSPACE.
-      #
-      # The manifest is read by the verifier from the head tree, which is safe
-      # only because a PR that touches config/check/, scripts/check/,
-      # scripts/hooks/ or .github/workflows/ is refused admission outright
-      # (see decide()).
-      # ---------------------------------------------------------------------
-      - name: Local CI receipt admission
-        id: receipt
+      - name: Fast push-tier gates on the PR range
         shell: sh
         env:
-          EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_COMMITS: ${{ github.event.pull_request.commits }}
-          CI_JOB: code-idiom-gates
         run: |
-          mode=full
-          skip_ids=""
-          range=""
-          reason="default: nothing has proved a receipt for this head"
-          tmp=${RUNNER_TEMP:-/tmp}
-
-          # decide() only ever widens trust. Every failure path returns with
-          # mode still `full`; there is no path that sets a narrower mode
-          # without having proved the condition immediately above it.
-          decide() {
-              [ "$EVENT_NAME" = pull_request ] || { reason="event \"$EVENT_NAME\" is not a pull request"; return 0; }
-              command -v ssh-keygen >/dev/null 2>&1 || { reason="ssh-keygen is absent on this runner"; return 0; }
-
-              # The PR endpoints are not in a depth-1 merge-ref checkout.
-              git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 1 ))" origin "$BASE_SHA" "$HEAD_SHA"
-              fetch_rc=$?
-              [ "$fetch_rc" -eq 0 ] || { reason="could not fetch the PR endpoints (git exit $fetch_rc)"; return 0; }
-
-              # Base-only policy, materialized OUTSIDE the workspace.
-              base=$tmp/ci-base
-              mkdir -p "$base/scripts/check" "$base/config/check"
-              mkdir_rc=$?
-              [ "$mkdir_rc" -eq 0 ] || { reason="could not create the base policy directory"; return 0; }
-              verifier=$base/scripts/check/verify-local-ci-receipt.shs
-              signers=$base/config/check/ci_receipt_allowed_signers
-              manifest=$base/config/check/must_check_gates.sdn
-              git show "$BASE_SHA:scripts/check/verify-local-ci-receipt.shs" > "$verifier"
-              show_verifier_rc=$?
-              [ "$show_verifier_rc" -eq 0 ] || { reason="the BASE ref carries no verify-local-ci-receipt.shs"; return 0; }
-              git show "$BASE_SHA:config/check/ci_receipt_allowed_signers" > "$signers"
-              show_signers_rc=$?
-              [ "$show_signers_rc" -eq 0 ] || { reason="the BASE ref carries no ci_receipt_allowed_signers"; return 0; }
-              git show "$BASE_SHA:config/check/must_check_gates.sdn" > "$manifest"
-              show_manifest_rc=$?
-              [ "$show_manifest_rc" -eq 0 ] || { reason="the BASE ref carries no gate manifest"; return 0; }
-
-              n=$(git rev-list --count "$BASE_SHA..$HEAD_SHA" 2>/dev/null)
-              count_rc=$?
-              [ "$count_rc" -eq 0 ] || { reason="could not enumerate $BASE_SHA..$HEAD_SHA"; return 0; }
-              [ "$n" = "$PR_COMMITS" ] || { reason="range holds $n commit(s) but the PR payload declares $PR_COMMITS (shallow or rewritten history)"; return 0; }
-              [ "$n" -gt 0 ] || { reason="the PR range is empty; there is nothing to attest"; return 0; }
-              range="$BASE_SHA..$HEAD_SHA"
-
-              # A PR may never edit the rules that admit it.
-              git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$tmp/ci-changed"
-              diff_rc=$?
-              [ "$diff_rc" -eq 0 ] || { reason="could not diff BASE against HEAD"; return 0; }
-              policy=$(awk '/^\.github\/workflows\/|^scripts\/(check|hooks)\/|^config\/check\// {print; exit}' "$tmp/ci-changed")
-              [ -z "$policy" ] || { reason="the PR edits check policy ($policy); a receipt may never admit its own rules"; return 0; }
-
-              # Rebase-stable commit identity, resolved per commit, fail-closed
-              # at every step:
-              #   1. jj writes change-id INTO the git commit object header, so
-              #      plain git reads it and no jj binary is needed.
-              #   2. Commits landed by plain git (this repo's documented
-              #      `git worktree add --detach` + `gh pr create` route) have no
-              #      such header. Measured 2026-09-06: 0 of the last 40
-              #      origin/main commits and 0 of PR #380's head commits carry
-              #      it, so today's real PRs take this branch. `git patch-id
-              #      --stable` hashes the DIFF, so like a change-id it survives
-              #      rebase and cherry-pick — and unlike one it is UNDEFINED for
-              #      a merge commit, which is therefore unbindable.
-              #   3. Neither available => unbindable => full.
-              # The two kinds are never mixed in one set: a receipt signed over
-              # patch-ids must not be accepted against change-ids.
-              git rev-list "$BASE_SHA..$HEAD_SHA" > "$tmp/ci-commits"
-              list_rc=$?
-              [ "$list_rc" -eq 0 ] || { reason="could not list the PR commits"; return 0; }
-              id_kind=""
-              while read -r commit; do
-                  git cat-file commit "$commit" > "$tmp/ci-commit-object"
-                  cat_rc=$?
-                  [ "$cat_rc" -eq 0 ] || { reason="commit $commit is unreadable"; return 0; }
-                  cid=$(awk '$1 == "change-id" { print $2; exit } /^$/ { exit }' "$tmp/ci-commit-object")
-                  if [ -n "$cid" ]; then
-                      kind=change-id
-                  else
-                      parents=$(awk '$1 == "parent" { n++ } /^$/ { exit } END { print n + 0 }' "$tmp/ci-commit-object")
-                      [ "$parents" -le 1 ] || { reason="commit $commit is a merge commit with no change-id header: patch-id is undefined for merges, so it is unbindable"; return 0; }
-                      git show "$commit" > "$tmp/ci-commit-diff"
-                      show_rc=$?
-                      [ "$show_rc" -eq 0 ] || { reason="commit $commit diff is unreadable"; return 0; }
-                      git patch-id --stable < "$tmp/ci-commit-diff" > "$tmp/ci-patch-id"
-                      patch_rc=$?
-                      cid=$(awk '{ print $1; exit }' "$tmp/ci-patch-id")
-                      [ "$patch_rc" -eq 0 ] && [ -n "$cid" ] || { reason="commit $commit has neither a jj change-id header nor a stable patch-id: unbindable"; return 0; }
-                      kind=patch-id
-                  fi
-                  [ -z "$id_kind" ] || [ "$id_kind" = "$kind" ] || { reason="the PR mixes $id_kind and $kind commit identities; comparing unlike identities is a forgery surface"; return 0; }
-                  id_kind=$kind
-              done < "$tmp/ci-commits"
-
-              head_tree=$(git rev-parse "$HEAD_SHA^{tree}" 2>/dev/null)
-              head_tree_rc=$?
-              tested_tree=$(git rev-parse "HEAD^{tree}" 2>/dev/null)
-              tested_tree_rc=$?
-              [ "$head_tree_rc" -eq 0 ] && [ "$tested_tree_rc" -eq 0 ] || { reason="could not resolve the head and tested trees"; return 0; }
-
-              # RECEIPT DELIVERY: a git note on refs/notes/ci-receipts,
-              # keyed by the PR head sha. It CANNOT be a tracked file: the
-              # receipt binds `tree`, so committing it into that tree changes
-              # the tree and the bound tree could never equal the tested one.
-              # A note lives outside the commit tree, so attaching one perturbs
-              # nothing. The note is author-writable and that is fine — the
-              # sshsig signature inside it, checked against the BASE
-              # allowed-signers file, is what protects the contents.
-              #
-              # Producer side (developer, after signing locally):
-              #   cat <receipt> <receipt>.sig > /tmp/note
-              #   git notes --ref=ci-receipts add -f -F /tmp/note <head-sha>
-              #   git push origin refs/notes/ci-receipts
-              #
-              # A missing note is the ORDINARY case, not an error: it means
-              # this PR carries no receipt, which means `full`.
-              git fetch --no-tags --quiet origin 'refs/notes/ci-receipts:refs/notes/ci-receipts'
-              notes_fetch_rc=$?
-              [ "$notes_fetch_rc" -eq 0 ] || { reason="no refs/notes/ci-receipts on origin: this PR carries no receipt"; return 0; }
-              git notes --ref=ci-receipts show "$HEAD_SHA" > "$tmp/ci-note" 2>/dev/null
-              note_rc=$?
-              [ "$note_rc" -eq 0 ] || { reason="no ci-receipt note on head $HEAD_SHA"; return 0; }
-              awk '/^-----BEGIN SSH SIGNATURE-----/ { exit } { print }' "$tmp/ci-note" > "$tmp/ci-receipt"
-              sed -n '/^-----BEGIN SSH SIGNATURE-----/,$p' "$tmp/ci-note" > "$tmp/ci-receipt.sig"
-              [ -s "$tmp/ci-receipt" ] || { reason="the ci-receipt note on $HEAD_SHA carries no payload"; return 0; }
-              [ -s "$tmp/ci-receipt.sig" ] || { reason="the ci-receipt note on $HEAD_SHA carries no sshsig block"; return 0; }
-
-              # The identity SET and the tree are both bound here: --changes
-              # gives the verifier the exact commit set to resolve identities
-              # from (change-id header, else stable patch-id — the verifier
-              # supports both kinds and refuses a kind mismatch), and --rev
-              # pins the content. IT IS THE PR HEAD, NEVER THE MERGE TIP: a
-              # GitHub merge commit has two parents, and patch-id is undefined
-              # for a merge, so binding the tested merge would be unbindable by
-              # construction. A force-push preserves identities but not the
-              # tree, which is why both are required.
-              sh "$verifier" --root "$PWD" --rev "$HEAD_SHA" \
-                  --changes "$BASE_SHA..$HEAD_SHA" --tier ci \
-                  --receipt "$tmp/ci-receipt" --signature "$tmp/ci-receipt.sig" \
-                  --allowed-signers "$signers" > "$tmp/ci-verify.out" 2>&1
-              verify_rc=$?
-              sed -n '1,40p' "$tmp/ci-verify.out"
-              verdict=$(tail -n 1 "$tmp/ci-verify.out")
-              [ "$verify_rc" -eq 0 ] || { reason="receipt not admitted (verifier exit $verify_rc): $verdict"; return 0; }
-
-              # Rows this job owns, read from the BASE manifest.
-              awk -F, -v job="$CI_JOB" '
-                  /^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*ci,/ {
-                      id=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
-                      j=$6; gsub(/^[[:space:]]+|[[:space:]]+$/, "", j)
-                      inp=$7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", inp)
-                      if (j == job && id != "" && inp != "") print id "\t" inp
-                  }' "$manifest" > "$tmp/ci-rows"
-              [ -s "$tmp/ci-rows" ] || { reason="the BASE manifest declares no ci row for job $CI_JOB"; return 0; }
-              all_ids=$(awk -F'\t' '{printf "|%s", $1} END {printf "|"}' "$tmp/ci-rows")
-              covered=$(awk 'END {print NR}' "$tmp/ci-rows")
-
-              # The merge delta: empty exactly when the attested head tree IS
-              # the tree under test.
-              if [ "$head_tree" = "$tested_tree" ]; then
-                  : > "$tmp/ci-merge-changed"
-                  merge_rc=$?
-              else
-                  git diff --name-only "$head_tree" "$tested_tree" > "$tmp/ci-merge-changed"
-                  merge_rc=$?
-              fi
-              [ "$merge_rc" -eq 0 ] || { reason="receipt verified but the merge diff could not be computed"; return 0; }
-
-              # ---- MODE PRECEDENCE: full -> docs -> sanity -> escalate ------
-              # `full` is everything above that returned early. Then:
-              #   docs      every changed path — the PR's own AND anything the
-              #             merge brought — is pure documentation.
-              #   sanity    the attested tree IS the tested tree.
-              #   escalate  it is not; re-run the gates the delta can reach.
-              cat "$tmp/ci-changed" "$tmp/ci-merge-changed" > "$tmp/ci-all-changed"
-              cat_rc=$?
-              [ "$cat_rc" -eq 0 ] || { reason="could not assemble the changed-path set"; return 0; }
-              all_paths=$(awk 'END {print NR}' "$tmp/ci-all-changed")
-              # DOC-ONLY PREDICATE, defined once, here.
-              #   allowed: doc/**  and any *.md anywhere
-              #   NEVER allowed: .github/** — even a comment there can change
-              #   the gate that is deciding to skip, so it is excluded before
-              #   the .md rule is ever consulted.
-              # The final `{ print; exit }` is the fail-closed line: ANY path
-              # that matched no allow rule — a .spl, .shs, .c, .rs, .yml, .sdn,
-              # an extensionless file, anything unclassifiable — disqualifies
-              # the whole PR from docs mode.
-              nondoc=$(awk '
-                  /^\.github\// { print; exit }
-                  /^doc\// { next }
-                  /\.md$/ { next }
-                  { print; exit }' "$tmp/ci-all-changed")
-              if [ -z "$nondoc" ] && [ "$all_paths" -gt 0 ]; then
-                  skip_ids=$all_ids
-                  mode=docs
-                  reason="identity bound as $id_kind, $all_paths path(s) changed and every one is documentation; the conflict-class floor still runs, and the manifest declares no doc-specific ci row for $CI_JOB"
-                  return 0
-              fi
-
-              if [ "$head_tree" = "$tested_tree" ]; then
-                  skip_ids=$all_ids
-                  mode=sanity
-                  reason="identity bound as $id_kind, tree $head_tree is the tree under test, $covered row(s) attested: $verdict"
-                  return 0
-              fi
-
-              changed=$(awk 'END {print NR}' "$tmp/ci-merge-changed")
-              skip_ids=$(awk -F'\t' -v changed="$tmp/ci-merge-changed" '
-                  BEGIN { while ((getline p < changed) > 0) paths[++np] = p }
-                  {
-                      if ($2 == "*") next          # unbounded inputs always run
-                      hit = 0
-                      k = split($2, want, " ")
-                      for (i = 1; i <= k; i++)
-                          for (j = 1; j <= np; j++)
-                              if (paths[j] == want[i] || index(paths[j], want[i] "/") == 1) hit = 1
-                      if (!hit) printf "|%s", $1
-                  }
-                  END { if (np >= 0) printf "|" }' "$tmp/ci-rows")
-              mode=escalate
-              reason="identity bound as $id_kind, tree differs: $changed path(s) changed by the merge, gates with intersecting or unbounded inputs re-run (of $covered row(s))"
-          }
-
-          # `shell: sh` is `sh -e`, and decide() reads `$?` after commands it
-          # expects to be able to fail (`git fetch` ... `fetch_rc=$?`). Under
-          # errexit that read is never reached: the fetch aborts the whole step
-          # with exit 1, before any `mode=`/`skip_ids=`/`range=` output is
-          # written. Measured 2026-09-07 on PR #457 and reproduced by re-running
-          # the job: 2.6s, no stdout at all, `##[error]Process completed with
-          # exit code 1`. The damage is not the failed step -- it is that
-          # `Install ripgrep` below carries no `!cancelled()`, so it is skipped
-          # once a prior step fails, while every gate step DOES carry it and
-          # runs anyway. The job then fails as `rg: not found` in three
-          # unrelated gates, which names nothing about the real cause.
-          # Invoking through `||` suspends errexit for the call, which is the
-          # non-errexit semantics decide() was written against. Every failure
-          # path inside it already returns 0 with `mode` still `full`, the
-          # strictest mode, so this can only widen what gets checked.
-          decide || true
-          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
-          printf 'skip_ids=%s\n' "$skip_ids" >> "$GITHUB_OUTPUT"
-          printf 'range=%s\n' "$range" >> "$GITHUB_OUTPUT"
-          printf 'LOCAL-CI-RECEIPT MODE: %s (%s)\n' "$mode" "$reason"
-
-      # Conflict-class guards. BLOCKING IN EVERY MODE, and the reason `sanity`
-      # and `docs` are not empty: a receipt attests the tree the developer ran
-      # gates on, while CI tests the MERGE of that head against a base that
-      # moves every few minutes. Conflict-introduced damage was never seen by
-      # the local run and a valid signature says nothing about it. main was
-      # wiped to four files twice in 24 hours with every other check green.
-      #
-      # Measured 2026-09-06 against a CI-shaped range (4699194f81e~3..
-      # 4699194f81e): conflict-tree PASS 1s, conflict-markers PASS 5s,
-      # tree-size PASS 2s — 8s for the whole floor, so this is affordable in
-      # every mode including the ~60s sanity budget.
-      #
-      # The `range` precondition is mechanical, not an escape: `range` is set
-      # only for pull_request events, and every event that leaves it empty is
-      # `full` by construction, where the gates below are the enforcement.
-      - name: Conflict-class guards (all modes)
-        if: ${{ !cancelled() && steps.receipt.outputs.range != '' }}
-        shell: sh
-        env:
-          RANGE: ${{ steps.receipt.outputs.range }}
-          MODE: ${{ steps.receipt.outputs.mode }}
-        run: |
-          rc_total=0
-          for guard in check-no-conflict-tree-push check-no-conflict-markers-push; do
-              sh "scripts/check/$guard.shs" "$RANGE"
-              rc=$?
-              [ "$rc" -eq 0 ] || { echo "conflict-class guard $guard exit $rc"; rc_total=1; }
-          done
-          sh scripts/check/check-tree-size-push.shs --push-tip "$RANGE"
-          rc=$?
-          [ "$rc" -eq 0 ] || { echo "conflict-class guard check-tree-size-push exit $rc"; rc_total=1; }
-          if [ "$rc_total" -ne 0 ]; then
-              echo "LOCAL-CI-RECEIPT: conflict-class guard failed in mode $MODE"
-              exit 1
+          # `shell: sh` is `sh -e`; without this the first red gate aborts the
+          # step before `rc=$?` and the per-gate report below never prints.
+          set +e
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+              echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
+              exit 0
           fi
+          case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
+          # PR_COMMITS + 1 is enough for every diff-scoped gate, but
+          # check-no-stale-snapshot-rewind consults up to --window (default 40)
+          # first-parent ancestors of each commit's parent as contributors. With
+          # only one ancestor beyond the range it would still exit 0 while
+          # examining a near-empty contributor window — a silent weakening, not a
+          # FAIL, which is exactly the fail-open shape this workflow avoids
+          # elsewhere. 41 extra commits keeps the window real.
+          git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
+              { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
+          RANGE="$BASE_SHA..$HEAD_SHA"
+          rc_total=0
+          run_gate() {
+              _gate=$1
+              _t0=$(date +%s)
+              sh "$@"
+              rc=$?
+              echo "fast-gates: $_gate exit=$rc $(( $(date +%s) - _t0 ))s"
+              [ "$rc" -eq 0 ] || rc_total=1
+          }
+          run_gate scripts/check/check-no-conflict-tree-push.shs "$RANGE"
+          run_gate scripts/check/check-no-conflict-markers-push.shs "$RANGE"
+          run_gate scripts/check/check-tree-size-push.shs --push-tip "$RANGE"
+          run_gate scripts/check/check-sdn-crc32-sealed.shs --rev "$HEAD_SHA"
+          run_gate scripts/check/check-rust-duplicate-reexport.shs --rev "$HEAD_SHA"
+          run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$HEAD_SHA" --baseline-rev "$BASE_SHA"
+          run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
+          run_gate scripts/check/check-range-shs-hygiene-push.shs "$RANGE"
+          # Blocking at push (push-no-stale-snapshot-rewind) and therefore
+          # required here too: the push tier is bypassable and the rewind class
+          # (e274cd33719 and two more, 2026-09-06) is precisely what a stale
+          # whole-tree snapshot pushed over someone else's landed work looks
+          # like. It reads committed objects only, so the sparse checkout above
+          # is sufficient; the depth fetched covers every commit in the range
+          # and its parent, which is what the single-parent walk needs.
+          run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
+          [ "$rc_total" -eq 0 ] || { echo "fast-gates: one or more fast gates failed"; exit 1; }
 
-      # Most gates below hard-depend on ripgrep; install once for the job.
-      # Skipped in `sanity`: apt-get alone costs more than the whole 60s budget.
-      # An empty/missing output is never 'sanity', so this installs by default.
-      - name: Install ripgrep
-        if: ${{ !cancelled() && steps.receipt.outputs.mode != 'sanity' }}
-        run: |
-          command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+  # The extended lane (job `code-idiom-gates`, "Code Idiom & Structural Ratchet
+  # Gates (extended)") moved to .github/workflows/code-idiom-gates.yml on
+  # 2026-09-24 so its receipt skip decision runs from BASE under
+  # pull_request_target. See that file's header.
 
-      # Every gate step below carries `if: ${{ !cancelled() }}`.
-      #
-      # Without it, steps run in sequence and the FIRST red gate aborts the job,
-      # so every later gate reports "skipped" and its signal is invisible. That
-      # is not hypothetical: on 2026-08-01 the CPU hot-loop gate below was red on
-      # every push to main, and as a direct result the UI backend-isolation, TUI
-      # standalone-closure, workspace root-guard, guard-wiring and extern-report
-      # gates had NOT EXECUTED ONCE. The UI gate in particular had been failing
-      # since at least 2026-07-25 (23 unbaselined violations at 37cda4befdc) and
-      # nobody could see it -- CI masked it and jj bypasses the pre-commit hook.
-      #
-      # This is the same masking bug the repo-hygiene job above was split out to
-      # avoid; putting five gates in one sequential job reintroduced it one step
-      # further down. `!cancelled()` makes each gate report its own pass/fail
-      # while the job still fails if ANY gate fails -- enforcement is unchanged,
-      # only visibility improves. Do NOT replace this with continue-on-error,
-      # which would make the gates advisory.
-      #
-      # CPU-lane per-element-loop hot-path gate (design §6.1 / plan W2).
-      # Relocated here from the repo-hygiene job so it actually runs (that job
-      # aborted at its first step, leaving this gate dead). Command unchanged.
-      - name: CPU-lane hot-loop hot-path gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-cpu-hotloop-idiom|')) }}
-        run: |
-          sh scripts/check/check-cpu-hotloop-idiom.shs
-
-      # dual_fs effect-comparison gate: the switchable pure-Simple <-> native
-      # file I/O wrapper (src/lib/nogc_sync_mut/dual_fs/) must keep defaulting
-      # to today's native provider, and its acceptance spec must keep asserting
-      # that an effect comparison catches a write which returns `true` and
-      # writes nothing — the live shape of
-      # src/lib/nogc_sync_mut/file_system/file_ops.spl:60.
-      #
-      # --no-run deliberately: this runner has no deployed bin/simple, so the
-      # spec cannot be executed here and the gate would otherwise ERROR on
-      # every PR. --no-run still runs the 7 selftest fixtures, the
-      # switch-default check and the spec-assertion check, which is what
-      # catches a gutted spec or a drifted default. The full run (which
-      # executes the spec and exercises the real differential comparison) is
-      # the local/push-host invocation, without --no-run.
-      - name: dual_fs effect-comparison gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-dual-fs-effect-compare|')) }}
-        run: |
-          sh scripts/check/check-dual-fs-effect-compare.shs --no-run
-
-      # UI backend-isolation: apps/examples/UI-libs must call rendering facades,
-      # never declare/call rt_* backend externs or construct backend classes.
-      # Baseline-ratcheted (scripts/check/ui_backend_isolation_baseline.txt).
-      - name: UI backend-isolation ratchet gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-ui-backend-isolation|')) }}
-        run: |
-          sh scripts/check/check-ui-backend-isolation.shs
-
-      # Standalone TUI import-closure: the generated TUI lane must route through
-      # the narrow app.ui.tui.screen facade and must not pull web/tauri/electron
-      # or a hosted runtime bundle into the standalone binary.
-      - name: TUI standalone-closure gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-tui-standalone-closure|')) }}
-        run: |
-          sh scripts/check/check-tui-standalone-closure.shs
-
-      # Slim-UI import-closure gate, self-test half (NFR-UI-SLIM-002,
-      # doc/02_requirements/nfr/ui_slim_kernel_plugin.md). The real closure
-      # run needs a built seed for `deps fast`, which this runner does not have,
-      # so it lives in rust-bootstrap-multiplatform.yml after the Build step.
-      # --selftest exercises the scan logic against 5 synthetic deps listings
-      # (clean -> PASS, forbidden hit -> FAIL, empty output -> ERROR, seed
-      # exit 3 -> ERROR, missing seed -> ERROR) with no binary at all, and is
-      # fail-closed: 5/5 or exit 2.
-      - name: Slim-UI closure gate self-test
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-ui-slim-closure.shs --selftest
-
-      # Workspace root write guard: enforces the root-directory placement policy
-      # / FILE.md manifests across the tree (git + POSIX sh only, no rg needed).
-      - name: Workspace root write guard
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-workspace-root-guard|')) }}
-        run: |
-          sh scripts/check-workspace-root-guard.shs
-
-      # Guard-wiring ratchet. A check script that no hook and no CI job runs is
-      # decoration: on 2026-08-01, 366 of 413 tracked shell guards were
-      # reachable from nothing at all. This gate fails when a guard is neither
-      # wired nor listed in scripts/check/guard_wiring_optout.txt with a reason,
-      # so adding a guard wires it automatically and SKIPPING one becomes the
-      # deliberate act that needs justification. It also fails when an installed
-      # .git/hooks entry is a copy rather than a symlink -- a copied hook goes
-      # stale silently, which is how a two-revisions-behind pre-push hook ran
-      # without any of that session's fail-open fixes.
-      # See doc/08_tracking/bug/check_script_wiring_orphans_2026-08-01.md.
-      # Lifecycle-reachability ratchet. Wired here 2026-09-06: the script landed
-      # green but referenced by nothing, which made check-guard-wiring (below)
-      # report it as NEW unwired. That one unwired file failed the guard-wiring
-      # step, which failed this whole required job, which left every open PR
-      # BLOCKED -- 25 of them at once, with the ruleset's
-      # strict_required_status_checks_policy=true re-running the queue on every
-      # merge. The guard itself was never broken: it reports
-      # "PASS -- 135 symbol(s) checked, 0 new, 0 stale". It just needed an
-      # enforcement surface, which is exactly what the guard-wiring ratchet
-      # exists to demand.
-      - name: Lifecycle-reachability ratchet gate
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-lifecycle-reachability.shs
-
-      - name: Guard-wiring ratchet gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-guard-wiring|')) }}
-        run: |
-          sh scripts/check/check-guard-wiring.shs
-
-      # Dangling `*_partN` facade re-export gate.
-      #
-      # Merge e274cd33719 rewrote ~21 facade files to `export use <name>_partN.*`
-      # naming modules that were never created -- the real split files live in
-      # sibling `_ClassName/` folders. A dangling re-export erases the facade's
-      # ENTIRE exported API downstream, surfacing far away as
-      # `hir: cannot infer field type ... struct 'ANY'` and
-      # `codegen: GlobalLoad: unresolved identifier`. It was the single largest
-      # cause of the SimpleOS kernel being unbuildable (B1), and nothing in the
-      # tree detected it: the failures name the victim modules, never the broken
-      # facade.
-      #
-      # Blocking, not advisory: pure text scan, no seed/compiler/hardware, runs
-      # in seconds, and measured GREEN on this tree
-      # (`PASS — 0 _partN re-export(s) across 9018 module(s)`).
-      # See doc/08_tracking/bug/simpleos_b1_merge_clobber_e274cd33719_2026-08-31.md.
-      - name: Dangling _partN re-export gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-no-dangling-reexports|')) }}
-        run: |
-          sh scripts/check/check-no-dangling-reexports.shs
-
-      # JIT runtime-symbol manifest gate.
-      #
-      # The JIT symbol table is generated from a HAND-MAINTAINED list,
-      # RUNTIME_SYMBOL_NAMES in src/compiler_rust/common/src/runtime_symbols.rs.
-      # There is no scanner. A symbol codegen emits but the list omits is never
-      # registered, the JIT import fails to resolve, and the WHOLE module falls
-      # back to the interpreter -- correct, and ~1000x slower (rt_index_of took
-      # compute_styles from 369ms to over ten minutes, fixed in 5c75a1bbce0).
-      # Because de-JITted code stays CORRECT, nothing else catches this.
-      #
-      # Wired 2026-08-01 from guard_wiring_optout.txt. It was red on three
-      # symbols at the time (rt_array_at, rt_at, rt_mem_attr_set_owner); those
-      # were added to the manifest in the same change rather than baselined.
-      - name: JIT runtime-symbol manifest gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-jit-runtime-symbol-manifest|')) }}
-        run: |
-          sh scripts/check/check-jit-runtime-symbol-manifest.shs
-
-      # .spipe/spipe gitlink shape gate.
-      #
-      # Index/tree corruption class. When a submodule gitlink (mode 160000) is
-      # flattened into a tracked file tree, or a tracked tree collapses into a
-      # gitlink, the parent index silently changes shape and a clone gets the
-      # wrong content. main was wiped to near-zero twice in 24h on 2026-08-01
-      # through adjacent index-shape failures, so this class gets a gate.
-      # Runs in ~0s and needs nothing but git.
-      - name: spipe submodule gitlink shape gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-spipe-submodule-gitlinks|')) }}
-        run: |
-          sh scripts/check/check-spipe-submodule-gitlinks.shs
-
-      # Lint-census classifier self-test.
-      #
-      # check-lint-census.shs exists because `simple lint` can DIE mid-file with
-      # no summary line, and a census that scores by summary lines reads that
-      # crash as success -- a lint census was retracted on 2026-08-01 for
-      # exactly that vacuous oracle. The census itself needs a built bin/simple
-      # and explicit targets so it cannot gate here, but its classifier can:
-      # --self-test drives 11 synthetic runs (clean, not-linted, arena-OOB
-      # crash, crash-with-rc-0, timeout, SIGKILL, missing log) through the real
-      # classify_run and asserts each verdict. If the classifier ever regresses
-      # to scoring a crash as LINTED, this step goes red.
-      - name: Lint-census classifier self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-lint-census-selftest|')) }}
-        run: |
-          sh scripts/check/check-lint-census.shs --self-test
-
-      # Runnable-probe gate, scorer self-test.
-      #
-      # A *_spec.spl CANNOT execute under the Cranelift JIT -- describe/it/expect
-      # are Rust interpreter intrinsics and a module with no `fn main` de-JITs
-      # regardless -- so a spec pinning engine-dependent behaviour is green by
-      # construction against a JIT-only defect. The repo's answer is the runnable
-      # PROBE (test/**/*_jit_probe.spl), a self-scoring program run once per
-      # engine. On 2026-08-02 an audit found no hook and no workflow executed any
-      # of them: the only cover for that whole defect class asserted nothing.
-      #
-      # The full gate needs a built Simple binary, so it runs in the Core + MCP
-      # Dev Pipeline where one exists. What gates HERE is its scorer and its
-      # fail-closed paths: --self-test drives 25 synthetic assertions (both
-      # verdict shapes, unscoreable output, timeout/signal kill, exit-code
-      # independence proved in both directions, the two discovery branches, and
-      # the four ERROR exits for zero probes / short list / unknown engine /
-      # missing binary) through the real score_verdict and discover_probes. It
-      # was checked against 14 branch sabotages and goes red on every one. If the
-      # scorer ever regresses to reading a FAIL as a PASS, this step goes red.
-      - name: Runnable-probe scorer self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-runnable-probes-selftest|')) }}
-        run: |
-          sh scripts/check/check-runnable-probes.shs --self-test
-
-      # Engine2D Vulkan/C parity comparator, self-test only.
-      #
-      # The comparator itself needs two rendered outputs to diff
-      # (--compare --simple FILE --c FILE) and a vulkan-feature seed binary to
-      # produce them, neither of which a hosted runner has; run bare it exits 1
-      # with its usage line. What gates HERE is the comparator's own scoring,
-      # driven by --self-test over synthetic fixtures. Measured 2026-09-05 on a
-      # host with no vulkan seed and no SDK: rc=0,
-      # "engine2d_vulkan_c_parity_selftest=pass". If the comparator ever
-      # regresses to reading a mismatch as parity, this step goes red.
-      - name: Engine2D Vulkan/C parity comparator self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-engine2d-vulkan-c-parity-selftest|')) }}
-        run: |
-          sh scripts/check/check-engine2d-vulkan-c-parity.shs --self-test
-
-      # Unregistered-extern gate, REPORT-ONLY for now.
-      #
-      # An @extern symbol with no registration does not fail to link: depending
-      # on lane it returns a silent nil/0 or NULL-jumps. This has shipped real
-      # wrong answers (b9ae3d91c07). The guard was landed and hardened on
-      # 2026-08-01 and was wired into NOTHING -- it is the case that motivated
-      # the wiring ratchet above.
-      #
-      # It runs WITHOUT --strict deliberately. --strict currently exits 1 at
-      # ~2,377 unregistered symbols; that backlog is a program needing an owner,
-      # not something to be silenced. Report-only makes the number visible in
-      # every run so it can be driven down. When it reaches zero, add --strict
-      # here. Do NOT add an allowlist and do NOT weaken the guard's vacuity
-      # bound or self-tests to shrink the number.
-      # NOT a ci-tier manifest row, deliberately: the reason is COST, not
-      # brokenness. An earlier comment here claimed this scan "does not
-      # terminate" and is "broken"; that was WRONG — it came from reading
-      # mid-output prose in a run killed at 110s. Run to completion it exits
-      # rc=0 with extern_registration_ok=true. It is simply by far the slowest
-      # gate in this job (hours locally, versus seconds for every other row),
-      # so requiring a developer to run and sign it would make producing a
-      # receipt more expensive than the CI it replaces.
-      # It therefore runs in `full` and `escalate` and is skipped in `sanity`
-      # and `docs`. Stated plainly so no one reads more into a green than is
-      # there: a `sanity` pass does NOT attest extern registration.
-      - name: Unregistered-extern report (report-only, not yet enforcing)
-        if: ${{ !cancelled() && steps.receipt.outputs.mode != 'sanity' && steps.receipt.outputs.mode != 'docs' }}
-        run: |
-          sh scripts/check/check-extern-registration.shs
-
-      # Crypto verify/sign symbol collisions. The seed interpreter's function
-      # registry is FLAT and GLOBAL, so two modules defining the same verifier
-      # name with the SAME signature collide silently -- one wins by module
-      # load order, with no diagnostic and no symptom saying which. On
-      # 2026-08-02 this was proved to break TLS 1.3 certificate Ed25519
-      # verification: importing ANY symbol from signature_sffi registers all of
-      # that module's functions and replaced the explicitly-imported pure
-      # verifier, so a valid RFC 8032 signature verified as FALSE.
-      #
-      # This one DOES enforce (exit 1). Five known pure-vs-native collisions
-      # are recorded in crypto_verify_symbol_collisions_baseline.txt so the
-      # gate fails on anything NEW without being permanently red on debt it did
-      # not cause. That baseline is a ratchet: it may only ever shrink. Do NOT
-      # add a line to it to make a new collision pass.
-      - name: Crypto verify symbol collision gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-crypto-verify-symbol-collisions|')) }}
-        run: |
-          sh scripts/check/check-crypto-verify-symbol-collisions.shs
-
-      # ---------------------------------------------------------------------
-      # Guard-wiring debt paydown, batch 1 (2026-08-02).
-      #
-      # These four guards were the entire set that check-guard-wiring.shs
-      # reported as unwired AND unexcused at 66974acc (7 reported; the other
-      # three need a built bin/simple or a Stage-4 corpus and cannot run in
-      # this job). They are pure textual/structural checks -- sh, grep, find,
-      # awk, and rg which this job already installs -- so there was never a
-      # capability reason for them to sit outside CI.
-      #
-      # Each was verified non-vacuous by sabotaging the IMPLEMENTATION it
-      # guards and confirming it goes red; see the wiring batch commit body.
-      # ---------------------------------------------------------------------
-
-      # Memory deallocation ownership: every arena tier must reach its owning
-      # free operation and drop its backing reference, and the hosted/native/
-      # SimpleOS free families must keep their shared native owner. A tier that
-      # allocates but never reaches sys_free leaks silently -- nothing else in
-      # the tree tests that the release path is CONNECTED rather than present.
-      - name: Memory deallocation ownership gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-memory-deallocation-ownership|')) }}
-        run: |
-          sh scripts/check/check-memory-deallocation-ownership.shs
-
-      # rt_free ABI: pure-Simple declarations and calls must pass exactly ONE
-      # pointer. rt_free is defined in five places (native runtime, hosted
-      # runtime, SimpleOS libc, the Cranelift RuntimeFuncSpec table, and the
-      # Rust SFFI shim); an arity drift in any one of them is a silent
-      # miscompile, not a link error, because -z muldefs makes duplicate C
-      # symbols first-definition-wins.
-      - name: rt_free ABI consistency gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-rt-free-abi|')) }}
-        run: |
-          sh scripts/check/check-rt-free-abi.shs
-
-      # Stage-4 generated-facade hint-scan fast path: the exact-marker guard
-      # must precede the empty return, which must precede the line split, and
-      # the marker test must keep the generator's COMPLETE prefix
-      # ("# Re-exported from ", trailing space included). Widening it to
-      # "# Re-exported" admits ordinary prose comments into the facade scan.
-      - name: Module-surface hint-scan fast-path gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-module-surface-hint-scan-fast-path|')) }}
-        run: |
-          sh scripts/check/check-module-surface-hint-scan-fast-path.shs
-
-      # Bootstrap progress watcher: live / exited / stale-PID coverage.
-      #
-      # Wiring this one was a truth reveal. It had rotted while orphaned: its
-      # live-sample assertion ended in `main_log_bytes=3$`, anchoring on that
-      # field being LAST on the line, and the watcher has since gained
-      # phase/unit_kind/tasks_* fields. The guard failed against a watcher that
-      # was working correctly. Fixed by matching main_log_bytes as a whole
-      # field instead of by position -- exactness preserved, ordering coupling
-      # removed. This is precisely the decay an unwired guard accumulates.
-      - name: Bootstrap progress-watcher coverage gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-bootstrap-progress-watch|')) }}
-        run: |
-          sh scripts/check/check-bootstrap-progress-watch.shs
-
-      # ---------------------------------------------------------------------
-      # Guard-wiring debt paydown, batch 2 (2026-08-06).
-      #
-      # Found by auditing guard_wiring_optout.txt for FALSE exemptions, after
-      # line 22 (the core-C capsule gate) was proved to claim "needs QEMU, an
-      # FPGA or a physical dev board" while in fact needing only cc/ar/nm --
-      # and to have been RED at origin/main the whole time nothing ran it.
-      # See doc/08_tracking/bug/guard_wiring_optout_false_exemptions_2026-08-06.md.
-      # ---------------------------------------------------------------------
-
-      # Reserved keywords used as binding identifiers. The Rust seed parser
-      # accepts `val match = ...` where the self-hosted parser rejects it, so
-      # such code lands clean and detonates hours later at bootstrap Stage 4
-      # attributed to an innocent file (3 stdlib files did exactly that on
-      # 2026-07-27). Needs only git and grep; runs in ~3s.
-      #
-      # Its opt-out reason was honest -- "prints a bare OK with no count, which
-      # violates the guard contract" -- and named its own precondition. The
-      # count (plus a >=500-file vacuity floor and an ERROR exit) is added in
-      # this same change, so the entry is removed and the gate is wired here.
-      # Verified non-vacuous: with a `val match = 1` .spl staged into a scratch
-      # index it reports "FAIL — 34480 .spl file(s) checked, 1 violation(s)"
-      # and exits 1.
-      - name: Keyword-identifier binding gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-keyword-identifier-bindings|')) }}
-        run: |
-          sh scripts/check/check-keyword-identifier-bindings.shs
-
-      # ---------------------------------------------------------------------
-      # Guard-wiring debt paydown, batch 3 (2026-08-06).
-      #
-      # From triaging the 127 "not yet triaged" guard_wiring_optout entries by
-      # RUNNING all of them. These four LLM-runtime/finetune setup-contract
-      # gates are pure-source: they were re-run from a pristine
-      # `git archive origin/main` tree under `env -i PATH=/usr/bin:/bin
-      # HOME=/nonexistent` and passed there, which is the only evidence that
-      # supports wiring (a stripped env alone still sees working-tree build
-      # artifacts -- see the batch-3 method note in the bug doc).
-      #
-      # Each already reported checked_count=N; this change adds the missing
-      # half of the guard contract -- a `PASS - <n> contract case(s) checked`
-      # verdict plus a vacuity floor that exits 2 with `ERROR - nothing was
-      # checked`. Each floor was PROVED live by neutering the counter in a
-      # throwaway tree: all four then exit 2 with checked_count=0.
-      #   slang 41 case(s) / torch 33 / finetune 34 / prereq-doctor 10
-      # See doc/08_tracking/bug/guard_wiring_optout_false_exemptions_2026-08-06.md.
-      # ---------------------------------------------------------------------
-      - name: LLM runtime and finetune setup-contract gates
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-llm-runtime-slang-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-runtime-torch-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-finetune-setup-contract|') || !contains(steps.receipt.outputs.skip_ids, '|ci-llm-strict-host-prereq-doctor-contract|')) }}
-        run: |
-          sh scripts/check/check-llm-runtime-slang-setup-contract.shs
-          sh scripts/check/check-llm-runtime-torch-setup-contract.shs
-          sh scripts/check/check-llm-finetune-setup-contract.shs
-          sh scripts/check/check-llm-strict-host-prereq-doctor-contract.shs
-
-      # ---------------------------------------------------------------------
-      # Guard-wiring debt paydown, batch 4 (2026-08-23).
-      #
-      # Three guards landed by today's lanes were reachable from nothing, which
-      # made check-guard-wiring.shs itself red and blocked EVERY push -- lanes
-      # were reaching for `--no-verify`, which silently disables all the other
-      # gates too. That is a strictly worse failure than the three guards being
-      # unwired, so they are wired here by their honest state: green gates
-      # block, red gates land advisory and are named as such.
-      # ---------------------------------------------------------------------
-
-      # Engine-receipt guard, SCORER SELF-TEST only -- this half is green and
-      # therefore blocks.
-      #
-      # The full gate needs a built Simple binary and is honestly RED (verified
-      # 2026-08-23 against a real seed: no [engine-receipt] line is emitted for
-      # either fixture, the documented pre-fix state), so it is wired ADVISORY
-      # in the Core + MCP Dev Pipeline where a binary exists. What gates HERE is
-      # the part that needs no binary: --selftest drives 8 assertions through
-      # the real receipt parser and proves it DISCRIMINATES -- a receipt saying
-      # the same thing for both halves of the pair must FAIL. If that parser
-      # ever regresses to accepting a hardcoded "jit", this step goes red.
-      #
-      # Same split as the runnable-probe scorer self-test above, for the same
-      # reason: wire the falsifiable half now rather than wire nothing.
-      - name: Engine-receipt discrimination scorer self-test
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-sspec-lane-shape|')) }}
-        run: |
-          sh scripts/check/check-sspec-lane-shape.shs
-
-      # Plan-acceptance coverage ratchet.
-      #
-      # Every open checkbox in a plan listed by the plan-remains acceptance
-      # lane must have an `it` in that plan's acceptance spec, and every
-      # acceptance spec must carry the in-development tag. Landed 2026-09-05
-      # by a parallel lane and caught by the guard-wiring ratchet as NEW
-      # unwired; verified green on this tree before wiring
-      # ("PASS — 36 plan(s) checked, 0 uncovered"). Pure text scan over
-      # tracked plan/spec content -- no binary, no hardware.
-      - name: Plan-acceptance coverage ratchet gate
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-plan-acceptance-coverage|')) }}
-        run: |
-          sh scripts/check/check-plan-acceptance-coverage.shs
-
-      # PID/clock-keyed build-artifact ratchet.
-      #
-      # Neighbour sweep of the C-runtime recompile (71347b901b6): keying a
-      # DURABLE build artifact by pid, wall-clock, or randomness makes reuse
-      # structurally impossible -- no later run can ever name the path, so no
-      # cache policy can rescue it. That defect cost 102,564 ms of a 108,003 ms
-      # hello-world build and was invisible to every other gate, because a
-      # pid-keyed path is perfectly well-formed source.
-      #
-      # Blocking, not advisory: measured green on this tree
-      # (PASS -- 32 candidate(s) checked, 0 new, 0 stale), needs nothing but
-      # grep/find/comm, and runs in seconds. Fails on a NEW offender and on a
-      # STALE baseline entry, because a baseline that no longer describes the
-      # tree is how a ratchet silently stops ratcheting.
-      - name: PID/clock-keyed build artifact ratchet
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-no-pid-keyed-build-artifacts|')) }}
-        run: |
-          sh scripts/check/check-no-pid-keyed-build-artifacts.shs
-
-      # Baremetal tagged-bool decode parity.
-      #
-      # Pins riscv64_freestanding_bool_in_collection_always_true_2026-09-01:
-      # the riscv64 baremetal `rt_value_unbox_int` omitted the tagged-bool arm
-      # the canonical hosted runtime implements, so every bool read out of a
-      # collection decoded as its raw tag (always truthy). The in-guest parser
-      # then looped, exhausted the bump arena and re-entered spl_start 67 times.
-      # Blocking, not advisory: a pure static scan over the runtime definitions
-      # (no compiler, no QEMU, no firmware), measured green on this tree
-      # (PASS -- 3 definition(s) checked), runs in seconds, and its --selftest
-      # is fatal with a must-FAIL fixture.
-      - name: Baremetal tagged-bool decode parity
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-baremetal-tagged-bool-decode.shs
-
-      # Inline .len() heap-tag coverage.
-      #
-      # Pins the `-1` half of
-      # riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01: Cranelift
-      # inlines `.len()` as a load keyed on the heap type byte and answers a -1
-      # SENTINEL for any tag it does not recognise -- which fails OPEN in both
-      # directions at once (`x.len() == 0` is false AND `i < x.len()` iterates
-      # zero times). Blocking, not advisory: a pure static scan of the codegen
-      # tag table against the baremetal heap tags, ratcheted by
-      # inline_len_uncovered_heap_tag_baseline.txt, green on this tree
-      # (PASS -- 8 tag(s) checked, 4 known-uncovered) and needing only grep.
-      - name: Inline .len() covers baremetal heap tags
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-inline-len-covers-baremetal-heap-tags.shs
-
-      # Bump-allocator exhaustion is reported, never silent.
-      #
-      # The 67 silent guest re-entries above were a full bump arena: rv_alloc()
-      # returned NULL, the caller stored through it, and the fault was
-      # unattributable -- the exhaustion report existed but lived only in
-      # malloc(), not rt_alloc/calloc/realloc. Two sessions read that as a
-      # firmware/reset problem. This guard requires every NULL-returning path to
-      # name itself on the console and every riscv64 boot TU to wire a printing
-      # reporter. Blocking, not advisory: pure static scan, green on this tree
-      # (PASS -- 6 definition(s) checked), no build artifact required.
-      - name: Bump-allocator exhaustion is reported
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-bump-heap-exhaustion-reported.shs
-
-      # Declaration-index lookup must not hinge on an empty-text comparison.
-      #
-      # module_decl_at chose between its env mirror and its slot array with
-      # `if env_value != "":`. On riscv64 freestanding that is TRUE for a
-      # ZERO-LENGTH text (measured in-guest: len()==0 and the != arm taken
-      # anyway), so it returned ast_parse_i64("") == 0 for EVERY index and the
-      # top-level walk converted declaration 0 N times -- `main` silently
-      # ceased to exist, with zero errors from either lowering stage. Four
-      # boots and three prior sessions to find; a one-line edit to reintroduce.
-      # Blocking, not advisory: a static scan of that one decision site (it is
-      # deliberately NOT a tree-wide ban on `!= ""`), green on this tree, and
-      # verified RED against the fix's own parent commit.
-      - name: Declaration-index lookup is not an empty-text compare
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-decl-index-lookup-not-empty-text-compare.shs
-
-      # Pins the fix for the riscv64 in-guest E-MIR-TYPE-ZeroKind abort, whose
-      # measured root cause is the if-val optional-extraction miscompile:
-      # match_result_mir_type bound a zeroed HirType from an ABSENT optional
-      # and dereferenced .kind, aborting the whole in-guest MIR lowering.
-      # Source mode is a ratchet on the one-line regression, not proof the
-      # target is healthy -- the boot in
-      # check-simpleos-riscv64-interpreter-in-guest-opensbi.shs is the
-      # acceptance test. Verified RED against the fix's own parent commit.
-      - name: match_result_mir_type guards its if-val extraction
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-rv64-match-result-type-guarded.shs
-
-      # Pins the riscv64 baremetal rt_contains dict arm. .has/.contains/
-      # .contains_key on a Dict all lower to rt_contains, and that port
-      # answered FALSE for every dict in-guest, which made the interpreter's
-      # function-name index useless and the row report "function 'add' not
-      # found" on an index that provably held it. check-c-runtime-compiles-push
-      # scans src/runtime/ ONLY and cannot see this file -- measured: it
-      # returned rc=0 over this incident's own broken first fix attempt.
-      # Verified RED against that fix's own parent commit.
-      - name: riscv64 rt_contains answers dicts
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-rv64-rt-contains-has-dict-arm.shs
-
-      # Pins the riscv64 baremetal rt_unwrap_or_trap. It checked only
-      # `value == NIL_VALUE` and returned everything else unchanged, so a boxed
-      # Some(x) came back as the WRAPPER and None/Err never trapped. In-guest
-      # that handed call_hir_function a Some-box instead of a HirFunction and
-      # the 248-byte by-value copy faulted off the end of a 32-byte object --
-      # the build-and-run row's blocker. The identical defect was already fixed
-      # on the x86_64 sibling in arch/common/boot/freestanding_value_registry_impl.h;
-      # riscv64's own duplicate shadows it, so a tree-wide grep finds the GOOD
-      # one and looks green. Unlike its neighbour above this guard is not a
-      # source-shape ratchet: it host-compiles the real function body and
-      # asserts a Some-box yields its PAYLOAD. Verified RED against the fix's
-      # own parent commit.
-      - name: riscv64 rt_unwrap_or_trap actually unwraps
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-rv64-unwrap-or-trap-unwraps.shs
-
-  # Advisory gates: honestly RED on the current tree.
-  #
-  # Separate job, exactly like the repo-hygiene job at the top of this file and
-  # for the same reason: a gate that is red on pre-existing debt must not mask
-  # the per-gate signal of the green ratchets in code-idiom-gates. The job is
-  # marked continue-on-error so it reports its own status without blocking the
-  # workflow -- the guards themselves are UNCHANGED and unweakened, and none of
-  # them is opted out. Promote a gate out of this job into code-idiom-gates the
-  # day the underlying defect is fixed and it goes green.
-
-      # Freestanding RuntimeString.len ABI.
-      #
-      # `.len()` never calls rt_len: codegen inlines a LOAD OF i64 AT +8 with
-      # payload at +16. A freestanding runtime declaring `uint32_t len` reads
-      # correct in its own C accessors (so substring/equality/trim/chars all
-      # look fine) while `.len()` alone returns length | first-4-payload-bytes
-      # -- 0x6F72227B_0000000F for a 15-byte string. Unbounded scan loops, no
-      # trap. Fixed 2026-07-12 for x64, silently reverted by tree wipe
-      # 6f86ff32a7d; riscv64/arm64 were never fixed. Host-only, no boot needed.
-      - name: Freestanding string .len() ABI
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-freestanding-string-len-abi|')) }}
-        run: sh scripts/check/check-freestanding-string-len-abi.shs
-
-      # Derived syscall-shim linker aliases.
-      #
-      # Hand-maintained `spl_handle_X = kernel__abi__syscall_shim__spl_handle_X`
-      # tables are correct only for the exact entry and seed they were generated
-      # against (mangling carries an entry-specific prefix), and they broke the
-      # x86_64 link outright once the shims were split into sub-modules. The
-      # static scan is host-only and runs in seconds; it fails if any such table
-      # reappears or if the 128MB load base regresses.
-      - name: SimpleOS x86_64 linker aliases are derived, not hand-maintained
-        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-simpleos-x86-64-linker-alias-derived|')) }}
-        run: sh scripts/check/check-simpleos-x86-64-linker-alias-derived.shs
   advisory-gates:
     name: Advisory Gates (honestly RED, not yet blocking)
     runs-on: ubuntu-latest
@@ -1136,6 +290,7 @@ jobs:
           run_guard check-arm32-real-fsexec-wiring-v16.shs
           run_guard check-arm32-supervisor-resume-v16.shs
           run_guard check-arm64-blocking-user-entry-assembly.shs
+          run_guard check-bootstrap-stage3-receipt-autowire.shs
           run_guard check-arm64-elf-map-owner.shs
           run_guard check-arm64-fault-operands.shs
           run_guard check-arm64-fsexec-probe-abi.shs
@@ -1143,8 +298,10 @@ jobs:
           run_guard check-arm64-image-map-receipt.shs
           run_guard check-arm64-qemu-nonce-slot.shs
           run_guard check-arm64-svc-translation-window.shs
+          run_guard check-smf-compile-degrade.shs
           run_guard check-arm64-user-as-owner.shs
           run_guard check-arm64-user-trampoline-alignment.shs
+          run_guard check-gpu-provider-abi-lifetime-v1.shs
           run_guard check-arm-fs-route-receipt.shs
           run_guard check-bootstrap-link-libraries-capability.shs
           run_guard check-bootstrap-resume-stage3-progress.shs
@@ -1160,6 +317,7 @@ jobs:
           run_guard check-cosmos-ftl-nfc-backend-policy-source-c.shs
           run_guard check-cosmos-ftl-policy-source-c.shs
           run_guard check-cosmos-nfc-ecc-bridge-coverage.shs
+          run_guard egl-host-capability-ledger.shs
           run_guard check-cosmos-nfc-ecc-link-wiring.shs
           run_guard check-critical-alloc-closure-source-contract.shs
           run_guard check-doc06-spec-layout-migration.shs
@@ -1198,6 +356,7 @@ jobs:
           run_guard check-hal-sealed-clock-v2.shs
           run_guard check-hosted-confined-file.shs
           run_guard check-llvm-23-1-provider-builder-contract.shs
+          run_guard check-llvm-cross-preflight-order.shs
           run_guard check-mcdc-aspect-object-converter.shs
           run_guard check-mcdc-native-runtime-perf.shs
           run_guard check-native-build-focused-entry-scope.shs
@@ -1230,6 +389,7 @@ jobs:
           run_guard check-no-stale-snapshot-rewind.shs --selftest
           run_guard check-no-windows-style-paths.shs
           run_guard check-bootstrap-jobs-memory-clamp.shs
+          run_guard check-package-index-cold-init-self-heal.shs
           run_guard check-pg-dispatch-port-prototype.shs
           run_guard check-pg-scalar-adapter-contract.shs
           run_guard check-pg-scalar-port-readiness.shs
@@ -1301,6 +461,178 @@ jobs:
           run_guard check-freestanding-rt-value-int-tags.shs
           run_guard check-prepush-no-recursion.shs
           run_guard check-script-non-vacuity.shs
+          # -------------------------------------------------------------------
+          # Wired 2026-09-12 (guard-wiring ratchet, agent K). 116 guards that
+          # were added to scripts/check|audit since 2026-08-15 and sat in
+          # guard_wiring_unwired_baseline.txt -- listed as known unwired debt
+          # with no reason, i.e. "someone forgot", not "deliberately not a
+          # gate". Triage was MEASURED, not inferred, in a detached worktree at
+          # 28a96c436b9 (aarch64 host):
+          #   1. 560 baselined-and-new basenames enumerated;
+          #   2. 167 dropped as host-bound (their text names bin/simple,
+          #      $SIMPLE_BIN, native-build, bootstrap-stage3-provenance, QEMU,
+          #      chrome/electron/playwright, vulkan/cuda/nvidia, cargo
+          #      build|test|run, ssh, fpga/vivado/openocd, docker or sudo --
+          #      none of which this runner has; the dominant blocker is still
+          #      the absence of an admitted Stage-3/4 pure-Simple compiler);
+          #   3. the remaining 393 were RUN here under `timeout 70`, and only
+          #      the 169 that exited 0 were considered further;
+          #   4. 7 held back for a named host dependency (node, gh, llvm-config,
+          #      python3, cargo) or because the guard MUTATES the tree it
+          #      judges (one writes into .spipe/scv-migration/ as a side
+          #      effect of being run);
+          #   5. 46 more held back as VACUOUS: 44 exit 0 having printed nothing
+          #      at all, one prints "BLOCKED:" and still exits 0, and one
+          #      emits 2.4 MB of raw census. An rc=0 with no
+          #      verdict line is exactly the false assurance this program
+          #      exists to kill -- wiring one would let the ratchet count it as
+          #      enforced while it enforces nothing. They stay baselined.
+          # The 116 below each exited 0 AND printed a real verdict (`PASS -- n
+          # ... checked`, `<name> audit: PASS`, or `<name>_status=pass`). Summed
+          # wall here is ~60 s for all 116, so they are cheap even run serially.
+          # The 220 candidates that are honestly RED (193 rc=1) or vacuous
+          # ERROR (25 rc=2) are NOT wired and NOT opted out: they are not
+          # host-bound, so an opt-out line would be a false statement in a file
+          # whose whole value is that its statements are true. They keep their
+          # baseline rows until each gets an owner.
+          # Like the 2026-09-01 block above, these land in the ADVISORY job:
+          # none has a CI green on record yet. Promote individually into
+          # code-idiom-gates as each is observed green here.
+          # -------------------------------------------------------------------
+          run_guard artifact-manifest-admission-contract.shs
+          run_guard check-vulkan-compute-real.shs
+          run_guard ast-sffi-authority.shs
+          run_guard async-providerless-sffi-authority.shs
+          run_guard audio-manager-sffi-authority.shs
+          run_guard audio-sffi-authority.shs
+          run_guard audio-sffi-contracts.shs
+          run_guard bootstrap-alloc-sffi-contracts.shs
+          run_guard bootstrap-shell-sffi-contracts.shs
+          run_guard bootstrap-synchronization-sffi-contracts.shs
+          run_guard reseal-sdn-crc32.shs
+          run_guard channel-sffi-authority.shs
+          run_guard check-baremetal-mmio-sffi-owner.shs
+          run_guard check-config-parser-float-profile-parity.shs
+          run_guard check-doctest-manifest-staleness.shs
+          run_guard check-fix-not-silently-reverted.shs
+          run_guard check-flat-ast-codec-complete.shs
+          run_guard check-fork-capture-complete.shs
+          run_guard check-heap-ref-wellformed-accepts-class-refs.shs
+          run_guard check-kill-monitor-cpu-sampling.shs
+          run_guard check-md-fence-wellformed.shs
+          run_guard check-metal-provider-dynload-registry.shs
+          run_guard check-no-phantom-field-push.shs
+          run_guard check-sffi-exact-fd-dlopen.shs
+          run_guard check-bootstrap-stage3-package-index-cold-init.shs
+          run_guard check-bootstrap-stage3-scv-cold-init-passthrough.shs
+          run_guard check-stage3-diagnostic-env-passthrough.shs
+          run_guard check-starfive-nvme-storage.shs
+          run_guard check-symbol-define-visibility-arg.shs
+          run_guard check-up-squared-apl-dci.shs
+          run_guard check-volatile-mmio-sffi-authority.shs
+          run_guard check-wffi-checked-admission.shs
+          run_guard check-wffi-i64-checked-c.shs
+          run_guard cli-sffi-owner.shs
+          run_guard compat-loader-raw-ptr-authority.shs
+          run_guard compiler-minimal-sffi-contracts.shs
+          run_guard compression-sffi-contracts.shs
+          run_guard compress-sffi-authority.shs
+          run_guard counterpart-abi-sffi-authority.shs
+          run_guard cranelift-sffi-fail-closed.shs
+          run_guard curve25519-dh-sffi-authority.shs
+          run_guard debug-sffi-authority.shs
+          run_guard debug-sffi-owner.shs
+          run_guard direct-fat32-boot-sffi-authority.shs
+          run_guard dynamic-sffi-typed-admission.shs
+          run_guard editor-sdl-sffi-contract.shs
+          run_guard error-sffi-owner-authority.shs
+          run_guard fast-db-sffi-contracts.shs
+          run_guard ftp-sffi-authority.shs
+          run_guard ftp-sffi-contracts.shs
+          run_guard game2d-winit-contract.shs
+          run_guard glfw-sffi-contract.shs
+          run_guard graphics2d-lyon-sffi-authority.shs
+          run_guard gui-renderer-sffi-authority.shs
+          run_guard hir-lowering-helpers-sffi-authority.shs
+          run_guard hosted-winit-sffi-owner.shs
+          run_guard check-bug-status-consistency.shs
+          run_guard host-gpu-event-queue-sffi-authority.shs
+          run_guard http-sffi-contracts.shs
+          run_guard intel-engine2d-sffi-owner-authority.shs
+          run_guard interpreter-crypto-sffi-fail-closed.shs
+          run_guard interpreter-generic-ffi-dispatch-guard.shs
+          run_guard interpreter-hook-provider-authority.shs
+          run_guard interpreter-memory-attribution-sffi-contract.shs
+          run_guard interpreter-memory-profile-sffi-contract.shs
+          run_guard io-driver-sffi-fail-closed.shs
+          run_guard io-file-sffi-fail-closed.shs
+          run_guard jit-native-sffi-fail-closed.shs
+          run_guard check-stdlib-variant-probe-waste.shs
+          run_guard math-advanced-sffi-authority.shs
+          run_guard metal-lane-session-sffi-authority.shs
+          run_guard metal-session-providerless-guard.shs
+          run_guard mir-actor-runtime-abi.shs
+          run_guard mmap-provider-contracts.shs
+          run_guard check-bootstrap-stage3-receipt-autowire.shs
+          run_guard check-stage2-parent-receipt-candidate-binding.shs
+          run_guard module-loader-resolve-sffi-authority.shs
+          run_guard netstack-ipc-sffi-authority.shs
+          run_guard network-sffi-authority.shs
+          run_guard nogc-sync-cli-sffi-authority.shs
+          run_guard nogc-sync-simd-sffi-authority.shs
+          run_guard oneapi-sffi-contracts.shs
+          run_guard opencl-sffi-owner-authority.shs
+          run_guard opengl-sffi-owner-authority.shs
+          run_guard os-tools-test-sffi-authority.shs
+          run_guard package-sffi-authority.shs
+          run_guard platform-event-sffi-authority.shs
+          run_guard rapier2d-sffi-contract.shs
+          run_guard rocm-engine2d-sffi-owner-authority.shs
+          run_guard rocm-io-sffi-contracts.shs
+          run_guard check-simd-kernels-vectorized.shs
+          run_guard runtime-sffi-owner.shs
+          run_guard runtime-value-sffi-authority.shs
+          run_guard sdl2-clipboard-sffi-contract.shs
+          run_guard sdl2-cursor-contract.shs
+          run_guard sdl2-display-contract.shs
+          run_guard sdl2-display-sffi-contract.shs
+          run_guard sdl2-lifecycle-contract.shs
+          run_guard sdl2-polled-input-contract.shs
+          run_guard sdl2-time-contract.shs
+          run_guard sdl2-window-mutation-contract.shs
+          run_guard sdl2-window-property-mutation-contract.shs
+          run_guard sdl2-window-read-contract.shs
+          run_guard sdl3-io-sffi-contracts.shs
+          run_guard sffi-cpp-boundary-contract.shs
+          run_guard sha1-sffi-contract.shs
+          run_guard simd-sffi-contracts.shs
+          run_guard simplebox-fs-applets-sffi-authority.shs
+          run_guard smf-top-level-sffi-authority.shs
+          run_guard sqlite-legacy-wrappers-sffi-authority.shs
+          run_guard sqlite-sffi-contracts.shs
+          run_guard ssh-autostart-sffi-contract.shs
+          run_guard ssh-sffi-authority.shs
+          run_guard ssh-sffi-contracts.shs
+          run_guard stdlib-file-io-sffi-contract.shs
+          run_guard sync-file-io-sffi-contracts.shs
+          run_guard sync-lock-sffi-authority.shs
+          run_guard udp-sffi-contracts.shs
+          run_guard ui-web-websocket-pure-sha1.shs
+          run_guard vfs-boot-state-sffi-authority.shs
+          run_guard webgpu-sffi-owner-authority.shs
+          run_guard winit-buffer-sffi-cstring.shs
+          run_guard sync-tracking-db-status.shs
+          run_guard winit-event-admission-contract.shs
+          run_guard winit-window-read-contract.shs
+          run_guard x86-fs-exec-ring3-sffi-authority.shs
+          run_guard check-mcp-stdio-roundtrip.shs
+          run_guard check-t32-mcp-server-runnable.shs
+          # Advisory on purpose: it executes the DEPLOYED binary, and CI's
+          # checkout has no deployed binary to execute, so it reports ERROR
+          # there rather than a verdict. Its value is on a developer host and in
+          # any lane that runs before trusting bin/simple. See
+          # doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
+          run_guard check-deployed-binary-optional-unwrap.shs
           echo ""
           echo "newly_wired_guards_run=$ran"
           echo "newly_wired_guards_failed=$failed"
@@ -1493,3 +825,108 @@ jobs:
 
       - name: check-stage2-sanity-artifact-binding.shs
         run: timeout 180 sh scripts/check/check-stage2-sanity-artifact-binding.shs || true
+
+      # Requires an admitted self-hosted Stage-3 binary; this checkout-only
+      # runner records the honest unavailable verdict until that lane provides it.
+      - name: check-stage3-hir-retained-parser-rss.shs
+        run: timeout 180 sh scripts/check/check-stage3-hir-retained-parser-rss.shs || true
+
+
+  # Kernel-plugin migration lane guards. ADVISORY, and honestly so: each one
+  # needs a deployed compiler, a macOS host, or a built kernel-plugin fabric
+  # that this runner does not have, so as blocking gates they would fail every
+  # build for having nothing to say. They are wired here rather than parked in
+  # guard_wiring_optout.txt because they ARE gates -- their verdicts belong in
+  # the log where a reader can see them -- and check-guard-wiring.shs counts a
+  # guard as wired only if something actually runs it.
+  kernel-plugin-migration-gates:
+    name: Kernel-Plugin Migration Gates (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check-centralized-storage-roots.shs
+        run: timeout 120 sh scripts/audit/check-centralized-storage-roots.shs || true
+
+      - name: check-demand-driven-smf-compile-performance.shs
+        run: timeout 120 sh scripts/check/check-demand-driven-smf-compile-performance.shs || true
+
+      - name: check-demand-driven-smf-compile-pipeline.shs
+        run: timeout 120 sh scripts/check/check-demand-driven-smf-compile-pipeline.shs || true
+
+      - name: check-demand-driven-smf-evidence-static.shs
+        run: timeout 120 sh scripts/check/check-demand-driven-smf-evidence-static.shs || true
+
+      - name: check-host-shared-compiler-cache.shs
+        run: timeout 120 sh scripts/check/check-host-shared-compiler-cache.shs || true
+
+      - name: check-k0g-import-closure.shs
+        run: timeout 120 sh scripts/check/kernel-plugin-fabric/check-k0g-import-closure.shs || true
+
+      - name: check-kernel-closure.shs
+        run: timeout 120 sh scripts/check/check-kernel-closure.shs || true
+
+      - name: check-kernel-phase7-deployment-prerequisite.shs
+        run: timeout 120 sh scripts/check/check-kernel-phase7-deployment-prerequisite.shs || true
+
+      - name: check-kernel-plugin-migration-evidence-matrix.shs
+        run: timeout 120 sh scripts/check/check-kernel-plugin-migration-evidence-matrix.shs || true
+
+      - name: check-kpf-extended-enum-sealer.shs
+        run: timeout 120 sh scripts/check/check-kpf-extended-enum-sealer.shs || true
+
+      - name: check-m3-phase2-phase3-mutations.shs
+        run: timeout 120 sh scripts/check/check-m3-phase2-phase3-mutations.shs || true
+
+      - name: check-m3-phase2-phase3-production.shs
+        run: timeout 120 sh scripts/check/check-m3-phase2-phase3-production.shs || true
+
+      - name: check-macos-bootstrap-receipt.shs
+        run: timeout 120 sh scripts/check/check-macos-bootstrap-receipt.shs || true
+
+      - name: check-macos-reverse-reference-owner-publication-mutations.shs
+        run: timeout 120 sh scripts/check/check-macos-reverse-reference-owner-publication-mutations.shs || true
+
+      - name: check-macos-reverse-reference-owner-publication.shs
+        run: timeout 120 sh scripts/check/check-macos-reverse-reference-owner-publication.shs || true
+
+      - name: check-macos-universal-m5-hermetic.shs
+        run: timeout 120 sh scripts/check/check-macos-universal-m5-hermetic.shs || true
+
+      - name: check-macos-universal-m5.shs
+        run: timeout 120 sh scripts/check/check-macos-universal-m5.shs || true
+
+      - name: check-native-link-attribution.shs
+        run: timeout 120 sh scripts/check/check-native-link-attribution.shs || true
+
+      - name: check-param-object-evolution.shs
+        run: timeout 120 sh scripts/check/check-param-object-evolution.shs || true
+
+      - name: check-phase5-backend-dispatch.shs
+        run: timeout 120 sh scripts/check/check-phase5-backend-dispatch.shs || true
+
+      - name: check-release-small-unwind-rtti.shs
+        run: timeout 120 sh scripts/check/check-release-small-unwind-rtti.shs || true
+
+      - name: check-runtime-binary-size-startup-cohort.shs
+        run: timeout 120 sh scripts/check/check-runtime-binary-size-startup-cohort.shs || true
+
+      - name: check-strict-noalloc-instrumentation.shs
+        run: timeout 120 sh scripts/check/kernel-plugin-fabric/check-strict-noalloc-instrumentation.shs || true
+
+      - name: check-strict-noalloc-proof.shs
+        run: timeout 120 sh scripts/check/kernel-plugin-fabric/check-strict-noalloc-proof.shs || true
+
+  macos-stage2-shell-contracts:
+    name: macOS Stage 2 Shell Contracts
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage 2 shell contracts
+        run: |
+          sh scripts/check/check-stage2-admission-helper-contract.shs
+          sh scripts/check/check-stage2-macos-toolchain-env.shs

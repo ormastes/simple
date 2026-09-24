@@ -1,4 +1,8 @@
 # SimpleOS process tool target artifact admission gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — release blocker
 **Owner:** process-tool package, launcher, loader, and target-build owners
@@ -23,3 +27,4 @@ truthfully keeps the process row `Blocked`.
 - Execute help, version, normal listing, filter, malformed-option, and task-list
   failure behavior from FAT32, DBFS, and NVFS.
 - Retain target/runtime receipts and representative latency/RSS evidence.
+

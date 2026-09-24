@@ -51,6 +51,10 @@ pub extern "C" fn rt_vulkan_provider_device_count() -> i64 {
 pub extern "C" fn rt_vulkan_select_device(id: i64) -> i64 {
     use super::vulkan_graphics_runtime_core::SemaphorePool;
     let mut state = STATE.lock();
+    if state.async_compute_session_active {
+        state.set_error("select_device: async compute session is still active".to_string());
+        return 0;
+    }
     let idx = id as usize;
     let dev_count = state.physical_devices.len();
     if idx >= dev_count {

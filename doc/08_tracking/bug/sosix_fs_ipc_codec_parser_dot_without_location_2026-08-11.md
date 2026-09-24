@@ -1,4 +1,8 @@
 # SOSIX FS IPC codec parser dot diagnostic lacks a source location
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Claimed by the SOSIX parallel-QEMU integration lane
 
@@ -59,3 +63,4 @@ results.  The remaining next step is a location-preserving lexer/parser run
 with an admitted pure-Simple compiler (or a seed rebuilt with the current
 parser's span-bearing diagnostic).  Add the adjacent regression only after
 that run identifies the precise source construct.
+

@@ -1,0 +1,83 @@
+# CompileSourceInventory delete semantics.
+# @req REQ-COMPILE-SOURCE-INVENTORY-REMOVE-AT
+
+use std.spec.{describe, expect, it, step}
+use std.scv.compile_source_inventory.{
+    CompileSourceEventV1, CompileSourceInventoryEntryV1,
+    CompileSourceInventoryV1, compile_source_inventory_apply_event_v1
+}
+
+fn digest_a() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn digest_b() -> text:
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn entry(path: text, digest: text) -> CompileSourceInventoryEntryV1:
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest, 10)
+
+fn inventory() -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 7, [
+        entry("a.spl", digest_a()),
+        entry("b.spl", digest_b()),
+        entry("c.spl", digest_a())
+    ])
+
+fn delete_event(path: text) -> CompileSourceEventV1:
+    CompileSourceEventV1("git", "delete", path, "", "", "", "", "", 0)
+
+describe "CompileSourceInventory delete contract":
+    it "removes the first entry and preserves survivor order":
+        step("Delete the first source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("a.spl"))
+        expect(change.valid).to_equal(true)
+        expect(change.inventory!.entries.len()).to_equal(2)
+        expect(change.inventory!.entries[0].source_identity).to_equal("b.spl")
+        expect(change.inventory!.entries[1].source_identity).to_equal("c.spl")
+
+    it "removes a middle entry and preserves survivor fields":
+        step("Delete the middle source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("b.spl"))
+        expect(change.inventory!.entries.len()).to_equal(2)
+        expect(change.inventory!.entries[0].source_identity).to_equal("a.spl")
+        expect(change.inventory!.entries[1].source_identity).to_equal("c.spl")
+        expect(change.inventory!.entries[1].content_digest).to_equal(digest_a())
+
+    it "removes the last entry without changing earlier entries":
+        step("Delete the last source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("c.spl"))
+        expect(change.inventory!.entries.len()).to_equal(2)
+        expect(change.inventory!.entries[0].source_identity).to_equal("a.spl")
+        expect(change.inventory!.entries[1].source_identity).to_equal("b.spl")
+
+    it "leaves an absent delete unchanged":
+        step("Delete an absent source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("z.spl"))
+        expect(change.valid).to_equal(true)
+        expect(change.reason).to_equal("ok-no-change")
+        expect(change.content_changed).to_equal(false)
+        expect(change.semantics_changed).to_equal(false)
+        expect(change.inventory!.generation).to_equal(7)
+
+    it "increments generation and reports semantic change":
+        step("Observe generation and change flags after deletion")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("b.spl"))
+        expect(change.inventory!.generation).to_equal(8)
+        expect(change.content_changed).to_equal(true)
+        expect(change.semantics_changed).to_equal(true)
+
+    it "repeated deletion is idempotent":
+        step("Delete the same source identity twice")
+        val first = compile_source_inventory_apply_event_v1(inventory(), delete_event("b.spl"))
+        val second = compile_source_inventory_apply_event_v1(first.inventory!, delete_event("b.spl"))
+        expect(second.valid).to_equal(true)
+        expect(second.reason).to_equal("ok-no-change")
+        expect(second.inventory!.generation).to_equal(8)
+        expect(second.inventory!.entries.len()).to_equal(2)
+
+    it "rejects an invalid delete identity without mutation":
+        step("Exercise the fail-closed identity boundary")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("../b.spl"))
+        expect(change.valid).to_equal(false)
+        expect(change.reason).to_equal("event-invalid")
+        expect(change.inventory).to_be_nil()

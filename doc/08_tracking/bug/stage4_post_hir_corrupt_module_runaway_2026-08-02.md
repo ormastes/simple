@@ -1,4 +1,8 @@
 # Stage4 post-HIR corrupt module runaway
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Reproduction
 
@@ -19,3 +23,4 @@ diagnostic exit remains before retention, preserving original errors.
 `hir_function_count_spec.spl` covers empty, populated, and replacement cases
 through the native-safe typed-key helper. The driver source orders the fatal
 error exit before shared-trait and phase-module retention.
+

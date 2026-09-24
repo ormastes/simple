@@ -1,13 +1,13 @@
 # SimpleOS rv64 link aliases lost call targets (`unknown_N`) to real functions via `--defsym`
 
-- **Status:** OPEN — currently inert, but armed
+- **Status:** OPEN — fail-closed source fix present; RV64 target admission pending
 - **Severity:** HIGH (latent memory-safety / wrong-signature calls)
-- **Area:** `src/compiler/70.backend/backend/llvm_native_link.spl`, SimpleOS riscv64 link
+- **Area:** `src/compiler/70.backend/backend/simpleos_native_linkers.spl`, SimpleOS riscv64 link
 - **Filed:** 2026-07-28
 
 ## Summary
 
-`link_simpleos_riscv64` unconditionally aliases thirteen `unknown_0..unknown_12`
+`link_simpleos_riscv64` previously aliased thirteen `unknown_0..unknown_12`
 symbols onto five real kernel functions using `ld` `--defsym`, on the real-kernel
 link path. `unknown_N` is not an intentional extern — it is the placeholder the
 MIR lowering emits when a callee symbol resolves to an **empty name**, i.e. a
@@ -80,6 +80,28 @@ The block is present as of commit `37cda4befdc`. Caveat on attribution: that
 commit is `fix(vcs): restore main from pushed jj conflict tree`, a bulk
 restoration after the jj-conflict-tree incident, so it is the commit that put
 this text on `main` but not necessarily where the code was originally authored.
+
+## Verification status (2026-09-23)
+
+Current source contains no `--defsym=unknown_` argument under
+`src/compiler/70.backend`; the RISC-V64 route still reaches
+`link_simpleos_riscv64` through `llvm_native_link_orchestrator`. The focused
+regression now creates real RISC-V64 objects and demonstrates both behaviors:
+the historical `--defsym` silently aliases `unknown_0` onto an unrelated real
+function, while omitting it leaves the undefined symbol visible and makes
+`ld.lld` fail closed. The fixture discovers supported versioned or unversioned
+LLVM tools and accepts explicit `SIMPLE_TEST_CLANG`, `SIMPLE_TEST_LLD`, and
+`SIMPLE_TEST_NM` overrides; missing tools are reported as test failures.
+
+The focused interpreter spec passed 2/2 on 2026-09-23 using the available Rust
+bootstrap seed in 1.86 seconds wall time with 283,608 KiB peak RSS. This is
+host-fixture evidence only; it is not pure-Simple or QEMU admission evidence.
+
+TODO(deferred-rv64-qemu-perf-rss): When an admitted pure-Simple phase compiler
+and RV64 QEMU environment are ready, run this focused spec with that compiler,
+exercise the production `link_simpleos_riscv64` kernel route in QEMU, and record
+wall time plus peak RSS against the prior baseline. Host-fixture evidence alone
+does not close the target verification or performance/memory gate.
 
 ## Suggested fix
 

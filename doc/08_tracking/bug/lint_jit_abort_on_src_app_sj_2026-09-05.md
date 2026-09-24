@@ -1,4 +1,8 @@
 # `bin/simple lint` aborts (SIGABRT) in cranelift `finalize_definitions` on `src/app/sj/*.spl`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-05
 - Status: OPEN
@@ -70,3 +74,4 @@ offending files themselves, not the modules they pull in.
 Crash reports were written to `.simple/logs/crash_2055979.log`,
 `.simple/logs/crash_2056619.log`, `.simple/logs/crash_2056845.log`,
 `.simple/logs/crash_2057276.log`.
+

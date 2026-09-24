@@ -1,4 +1,8 @@
 # Vulkan Engine2D receipt physical-adapter identity gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -100,3 +104,4 @@ The focused structural contract passes 3/3, and an isolated
 winit `EventLoop::run` deprecation warning). Native live validation remains
 blocked until a current self-hosted compiler/runtime authority is admitted and
 published.
+

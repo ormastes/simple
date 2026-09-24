@@ -1,4 +1,8 @@
 # BUG: rt_native_build arg parser silently compiles the wrong entry (defaults to src/app/cli/main.spl)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source fixed 2026-07-15 in the pure-Simple bootstrap wrapper and
 Rust seed parser; executable native-build proof pending
@@ -38,3 +42,4 @@ diagnostic. Directory-only stage builds retain their legacy CLI entry default.
 Focused pure-Simple classification and Rust resolver regressions cover these
 decisions; compile/run marker proof remains pending a runnable bootstrap
 artifact.
+

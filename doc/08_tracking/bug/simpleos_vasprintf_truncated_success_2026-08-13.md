@@ -1,4 +1,8 @@
 # SimpleOS `vasprintf` truncated-success defect
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -16,3 +20,4 @@ truncated string while reporting an exact successful length.
 `length + 1` allocation, renders with a second copied list, and frees/fails
 closed if the second pass disagrees. The focused C harness exercises a 5,014
 byte result and null output-pointer rejection.
+

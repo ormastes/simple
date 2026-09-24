@@ -7,6 +7,7 @@ set -eu
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 . "${repo_root}/scripts/setup/platform-detect.shs"
+. "${repo_root}/scripts/setup/release-platform.shs"
 
 # --- Windows: materialize git symlinks before anything reads the tree --------
 # On Windows without Developer Mode / SeCreateSymbolicLinkPrivilege, git checks
@@ -35,7 +36,7 @@ if [ -f "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" ]; then
   # itself -- never through a pipe, whose $? is the last stage's status and has
   # produced false greens in this repo before.
   materialize_rc=0
-  sh "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" "${repo_root}" || materialize_rc=$?
+  bash "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" "${repo_root}" || materialize_rc=$?
   if [ "${materialize_rc}" -ne 0 ]; then
     echo "setup: FAILED to materialize git symlinks (rc=${materialize_rc}); the checkout will not compile" >&2
     exit "${materialize_rc}"
@@ -43,40 +44,61 @@ if [ -f "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" ]; then
 fi
 # ---------------------------------------------------------------------------
 
-# platform-detect emits the 3-part Rust triple (e.g. aarch64-apple-darwin), but
-# release binaries live under the 4-part Simple-native triple (…-macho on macOS).
-# Resolve PLATFORM_TRIPLE to whichever release dir actually exists.
-if [ ! -x "${repo_root}/bin/release/${PLATFORM_TRIPLE}/simple" ]; then
-  for cand in "${PLATFORM_TRIPLE}-macho" "${PLATFORM_ARCH}-apple-darwin-macho"; do
-    if [ -x "${repo_root}/bin/release/${cand}/simple" ]; then
-      PLATFORM_TRIPLE="${cand}"
-      break
-    fi
-  done
-fi
+
+# macOS has one canonical Simple-native release directory. Never select a
+# legacy three-part directory merely because a stale binary exists there.
+PLATFORM_TRIPLE=$(simple_release_platform_dir "${PLATFORM_TRIPLE}") || {
+  echo "setup: unsupported release platform: ${PLATFORM_TRIPLE}" >&2
+  exit 1
+}
 
 release_dir="${repo_root}/bin/release/${PLATFORM_TRIPLE}"
 
-if [ ! -x "${release_dir}/simple" ]; then
-  echo "setup: ${release_dir}/simple not found — run bootstrap first" >&2
-  exit 0
+# Windows release artifacts are named `<prog>.exe`, so this probe never matched
+# there: setup.shs exited 0 at the "run bootstrap first" line and NEVER reached
+# the MCP wrapper generation below. A fix to a generated wrapper therefore could
+# not be deployed on Windows at all. Accept either spelling.
+# Missing release binary is no longer fatal: the MCP/LSP wrappers generated
+# below carry a source-tree fallback, and the bin/simple symlink block is
+# guarded by its own [ -x ... ] probe. Exiting here meant a fresh Windows
+# checkout never received bin/simple_mcp_server at all, so
+# test/02_integration/app/mcp_stdio_integration_spec.spl failed before any
+# server ran. Warn, then continue to wrapper generation.
+if [ ! -x "${release_dir}/simple" ] && [ ! -x "${release_dir}/simple.exe" ]; then
+  echo "setup: ${release_dir}/simple not found; generating wrappers against the source fallback (run bootstrap for the native path)" >&2
 fi
 
 cd "${repo_root}/bin"
 
-ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
+# Generated launchers remain usable when bin/ is distributed separately from
+# the source tree. Keep one copied resolver beside every generated wrapper.
+cp "${repo_root}/scripts/lib/host-executable.shs" .simple-host-executable.shs
 
-if [ -x "release/${PLATFORM_TRIPLE}/simple_seed" ]; then
-  ln -sf "release/${PLATFORM_TRIPLE}/simple_seed" simple_seed
-else
-  rm -f simple_seed
-fi
+# Deploy the stable bin/ entrypoints only where an UNSUFFIXED native artifact
+# exists — i.e. everywhere except Windows. This is deliberate and narrow:
+# `bin/simple.exe` is a tracked artifact owned by the Windows bootstrap lane,
+# and platform-detect.shs derives the Windows ABI from MSYSTEM, which Git Bash
+# always sets to MINGW64 -> `gnu`, while the tracked artifacts in this repo are
+# `msvc`. Relinking from here therefore replaced the tracked msvc binary with a
+# stale gnu one (measured 2026-09-13: bin/simple.exe 16,347,136 -> 28,291,570
+# bytes). Wrapper generation below is the part Windows actually needs from this
+# script and is unaffected by the skip. The ABI-selection mismatch itself is a
+# separate defect and is NOT fixed here.
+if [ -x "release/${PLATFORM_TRIPLE}/simple" ]; then
+  ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
 
-for b in simple_ui_backend; do
-  if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
-    ln -sf "release/${PLATFORM_TRIPLE}/${b}" "${b}"
+  if [ -x "release/${PLATFORM_TRIPLE}/simple_seed" ]; then
+    ln -sf "release/${PLATFORM_TRIPLE}/simple_seed" simple_seed
+  else
+    rm -f simple_seed
   fi
-done
+
+  for b in simple_ui_backend; do
+    if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
+      ln -sf "release/${PLATFORM_TRIPLE}/${b}" "${b}"
+    fi
+  done
+fi
 
 rm -f simple_mcp_server
 cat > simple_mcp_server <<'EOF'
@@ -104,6 +126,13 @@ if [ "${script_dir}" = "$0" ]; then
 fi
 script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
+. "${script_dir}/.simple-host-executable.shs"
+host_family=$(simple_host_family)
+# Host-resolved release directory + executable suffix. The candidate list below
+# used to be entirely hardcoded, so a host triple absent from that list (any
+# aarch64 Windows box, any freebsd-elf box) had no candidate at all.
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix "${host_family}")"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
 
@@ -243,7 +272,7 @@ mcp_probe_native() {
 cd "${repo_root}"
 native=""
 if [ -n "${SIMPLE_MCP_NATIVE:-}" ]; then
-  if [ -x "${SIMPLE_MCP_NATIVE}" ] && native_hash_is_valid "${SIMPLE_MCP_NATIVE}" && mcp_probe_native "${SIMPLE_MCP_NATIVE}"; then
+  if simple_host_executable_compatible "${SIMPLE_MCP_NATIVE}" "${host_family}" && native_hash_is_valid "${SIMPLE_MCP_NATIVE}" && mcp_probe_native "$(simple_native_exec_path "${SIMPLE_MCP_NATIVE}" "${host_family}")"; then
     native="${SIMPLE_MCP_NATIVE}"
   else
     printf '%s\n' "error: SIMPLE_MCP_NATIVE is missing or failed its MCP probe: ${SIMPLE_MCP_NATIVE}" >&2
@@ -251,6 +280,7 @@ if [ -n "${SIMPLE_MCP_NATIVE:-}" ]; then
   fi
 else
   for candidate in \
+    "${script_dir}/release/${platform_dir}/simple_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-apple-darwin/simple_mcp_server" \
     "${script_dir}/release/aarch64-apple-darwin-macho/simple_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/simple_mcp_server" \
@@ -262,7 +292,7 @@ else
     "${script_dir}/release/x86_64-pc-windows-gnu/simple_mcp_server.exe" \
     "${script_dir}/release/aarch64-pc-windows-msvc/simple_mcp_server.exe"
   do
-    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_native "${candidate}"; then
+    if simple_host_executable_compatible "${candidate}" "${host_family}" && native_hash_is_valid "${candidate}" && mcp_probe_native "$(simple_native_exec_path "${candidate}" "${host_family}")"; then
       native="${candidate}"
       break
     fi
@@ -286,7 +316,43 @@ export SIMPLE_MCP_TOOL_SET="${SIMPLE_MCP_TOOL_SET:-all}"
 export RUST_LOG="${RUST_LOG:-error}"
 
 printf 'startup wrapper=simple_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
-exec "${native}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
+native_exec="$(simple_native_exec_path "${native}" "${host_family}")"
+# MCP clients surface stderr, so it goes to a per-process log by default:
+# ${TMPDIR:-/tmp}/simple/mcp/<wrapper pid>/stderr.log. The directory is created
+# first; if that fails, stderr is inherited rather than failing to start.
+# SIMPLE_MCP_STDERR=inherit opts out.
+if [ "${SIMPLE_MCP_STDERR:-}" = "inherit" ]; then
+  exec "${native_exec}" "$@"
+fi
+mcp_tmp="${TMPDIR:-/tmp}"
+mcp_base="${mcp_tmp%/}/simple/mcp"
+# Prune: keep the 20 newest run dirs. A dir is named by its wrapper pid, and the
+# wrapper stays alive for as long as its server does (see below), so a pid that
+# still answers kill -0 is skipped: a live server's log is never deleted.
+if [ -d "${mcp_base}" ]; then
+  ls -1t "${mcp_base}" 2>/dev/null | tail -n +21 | while IFS= read -r mcp_old; do
+    case "${mcp_old}" in ''|*[!0-9]*) continue ;; esac
+    if kill -0 "${mcp_old}" 2>/dev/null; then
+      continue
+    fi
+    rm -rf "${mcp_base:?}/${mcp_old}"
+  done
+fi
+mcp_run_dir="${mcp_base}/$$"
+if ! mkdir -p "${mcp_run_dir}" 2>/dev/null; then
+  exec "${native_exec}" "$@"
+fi
+mcp_log="${mcp_run_dir}/stderr.log"
+# Foreground child, not exec: the wrapper must outlive the server to report a
+# non-zero exit. The child is not backgrounded, because a non-interactive `&`
+# would replace its stdin (the MCP request stream) with /dev/null. If a client
+# kills the wrapper, the server still sees EOF on stdin and exits.
+mcp_rc=0
+"${native_exec}" "$@" 2>>"${mcp_log}" || mcp_rc=$?
+if [ "${mcp_rc}" -ne 0 ]; then
+  printf 'simple_mcp_server: exited %s; stderr log: %s\n' "${mcp_rc}" "${mcp_log}" >&2
+fi
+exit "${mcp_rc}"
 EOF
 chmod +x simple_mcp_server
 
@@ -315,8 +381,15 @@ if [ "${script_dir}" = "$0" ]; then
   script_dir="."
 fi
 script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
+. "${script_dir}/.simple-host-executable.shs"
+host_family=$(simple_host_family)
+# Resolve the HOST triple. This used to be a hardcoded
+# `x86_64-unknown-linux-gnu` default, so on Windows the `${platform_dir}`
+# candidate below named a directory that does not exist and the diagnostic
+# printed a Linux triple on a Windows box.
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix "${host_family}")"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
 
@@ -428,7 +501,7 @@ mcp_probe_lsp_native() {
 cd "${repo_root}"
 native=""
 if [ -n "${SIMPLE_LSP_MCP_NATIVE:-}" ]; then
-  if [ -x "${SIMPLE_LSP_MCP_NATIVE}" ] && native_hash_is_valid "${SIMPLE_LSP_MCP_NATIVE}" && mcp_probe_lsp_native "${SIMPLE_LSP_MCP_NATIVE}"; then
+  if simple_host_executable_compatible "${SIMPLE_LSP_MCP_NATIVE}" "${host_family}" && native_hash_is_valid "${SIMPLE_LSP_MCP_NATIVE}" && mcp_probe_lsp_native "$(simple_native_exec_path "${SIMPLE_LSP_MCP_NATIVE}" "${host_family}")"; then
     native="${SIMPLE_LSP_MCP_NATIVE}"
   else
     printf '%s\n' "error: SIMPLE_LSP_MCP_NATIVE is missing or failed its LSP MCP probe: ${SIMPLE_LSP_MCP_NATIVE}" >&2
@@ -438,11 +511,14 @@ else
   for candidate in \
     "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server" \
+    "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/simple_lsp_mcp_server" \
-    "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server"
+    "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server" \
+    "${script_dir}/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe" \
+    "${script_dir}/release/x86_64-pc-windows-gnu/simple_lsp_mcp_server.exe" \
+    "${script_dir}/release/aarch64-pc-windows-msvc/simple_lsp_mcp_server.exe"
   do
-    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_lsp_native "${candidate}"; then
+    if simple_host_executable_compatible "${candidate}" "${host_family}" && native_hash_is_valid "${candidate}" && mcp_probe_lsp_native "$(simple_native_exec_path "${candidate}" "${host_family}")"; then
       native="${candidate}"
       break
     fi
@@ -460,7 +536,7 @@ if [ ! -x "${native}" ]; then
 fi
 
 printf 'startup wrapper=simple_lsp_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_lsp_mcp_startup.log"
-exec "${native}" "$@" 2>>"${log_dir}/simple_lsp_mcp_stderr.log"
+exec "$(simple_native_exec_path "${native}" "${host_family}")" "$@" 2>>"${log_dir}/simple_lsp_mcp_stderr.log"
 EOF
 chmod +x simple_lsp_mcp_server
 
@@ -498,7 +574,9 @@ if [ "${script_dir}" = "$0" ]; then
   script_dir="."
 fi
 script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+. "${script_dir}/.simple-host-executable.shs"
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix)"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
@@ -531,7 +609,7 @@ else
   for candidate in \
     "${script_dir}/release/aarch64-apple-darwin/t32_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/t32_mcp_server" \
-    "${script_dir}/release/${platform_dir}/t32_mcp_server" \
+    "${script_dir}/release/${platform_dir}/t32_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/t32_mcp_server" \
     "${script_dir}/release/linux-x86_64/t32_mcp_server"
   do
@@ -547,7 +625,7 @@ if [ -z "${native}" ] || [ ! -x "${native}" ]; then
     printf '%s\n' "error: native t32_mcp_server not found"
     printf '%s\n' "checked release directory: ${script_dir}/release"
     printf '%s\n' "platform: ${platform_dir}"
-    printf '%s\n' "hint: rebuild with native-build for src/app/t32_mcp_server/main.spl"
+    printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_mcp/main.spl"
   } >&2
   exit 127
 fi
@@ -586,7 +664,9 @@ if [ "${script_dir}" = "$0" ]; then
   script_dir="."
 fi
 script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+. "${script_dir}/.simple-host-executable.shs"
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix)"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
@@ -619,7 +699,7 @@ else
   for candidate in \
     "${script_dir}/release/aarch64-apple-darwin/t32_lsp_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/t32_lsp_mcp_server" \
-    "${script_dir}/release/${platform_dir}/t32_lsp_mcp_server" \
+    "${script_dir}/release/${platform_dir}/t32_lsp_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/t32_lsp_mcp_server" \
     "${script_dir}/release/linux-x86_64/t32_lsp_mcp_server"
   do
@@ -635,7 +715,7 @@ if [ -z "${native}" ] || [ ! -x "${native}" ]; then
     printf '%s\n' "error: native t32_lsp_mcp_server not found"
     printf '%s\n' "checked release directory: ${script_dir}/release"
     printf '%s\n' "platform: ${platform_dir}"
-    printf '%s\n' "hint: rebuild with native-build for src/app/t32_lsp_mcp/main.spl"
+    printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
   } >&2
   exit 127
 fi

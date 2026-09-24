@@ -1,4 +1,8 @@
 # layout_core still targets the pre-redesign BeLayoutBox (2026-08-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/layout_core.spl` vs
@@ -48,3 +52,4 @@ Port `layout_core.spl` (10 ctor sites plus all `container.content_*` reads)
 to the committed `BeLayoutBox` shape, implement
 `layout_text_has_break_opportunity` (whitespace break-opportunity scan), and
 update `layout_text_node_spec.spl` to the ported signatures.
+

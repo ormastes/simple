@@ -393,6 +393,31 @@ fn array_join_stays_a_static_string_builtin() {
 }
 
 #[test]
+fn text_receiver_join_is_not_typed_as_unrelated_user_join_method() {
+    // `Thread.join() -> i64?` (std.concurrent.thread) used to win the by-name
+    // `.join` fallback, so `"/" + "/".join(parts)` was rejected as Add on an
+    // unwrapped optional.
+    let module = parse_and_lower(
+        "class Thread:\n    handle: i64\n    fn join() -> i64?:\n        nil\n\nfn joined(parts: [text]) -> text:\n    return \"/\" + \"/\".join(parts)\n",
+    )
+    .expect("text-receiver join must lower");
+    let joined = module
+        .functions
+        .iter()
+        .find(|function| function.name == "joined")
+        .expect("joined");
+    let returned = joined
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .expect("joined return");
+    assert_eq!(returned.ty, TypeId::STRING);
+}
+
+#[test]
 fn text_rfind_uses_string_method_lowering() {
     let module = parse_and_lower(
         r#"struct text:
@@ -1023,7 +1048,7 @@ fn test_trait_typed_method_result_enables_result_builtin() {
         .unwrap();
     let body = format!("{:?}", failed.body);
     assert!(
-        body.contains("rt_enum_check_discriminant") && !body.contains("method: \"is_err\""),
+        body.contains("rt_enum_check_variant") && !body.contains("method: \"is_err\""),
         "trait Result return must lower is_err as a builtin: {body}"
     );
 }
@@ -1387,4 +1412,347 @@ fn test_fn_scope_module_use_does_not_bait_field_guess() {
             );
         }
     }
+}
+
+/// `static fn ... -> T?` must not lose T's name, and an optional-bound field
+/// read must use T's OWN field index.
+///
+/// Regression for the 2026-09-13 Stage 2 miscompile: `FileFingerprint.from_file`
+/// is declared `-> FileFingerprint?`, whose `ast::Type::Optional` had no arm in
+/// `static_call_return_type_name` and fell to `_ => None`. With no name recorded
+/// for `object_fp`, the `if val fp = object_fp:` binding had none to inherit, so
+/// `fp.size` reached `get_field_info(TypeId::ANY, "size")`, whose LOCAL-BEST scan
+/// returns the SMALLEST index among every struct in `module.types` declaring the
+/// name — index 0 here, thanks to the `Decoy` below, which stands in for the 15
+/// real structs (FileStat, GcObjectHeader, TypeLayout, ...) that declare `size`
+/// first. Offset 0 instead of 24 returned the struct's `path` text POINTER
+/// (measured: 34363944961 = 0x8_0010_2001) where a 632-byte file size belonged.
+/// The decoy is what makes this test discriminate: without it LOCAL-BEST finds
+/// only FileFingerprint and yields 3 even when the name is lost, which is exactly
+/// why 3-unit and 58-unit reproducers passed and only the 834-unit closure failed.
+///
+/// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+#[test]
+fn test_optional_static_return_keeps_struct_name_for_bound_field_index() {
+    fn walk(stmts: &[HirStmt], seen: &mut Option<usize>) {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Return(Some(expr)) => {
+                    if let HirExprKind::FieldAccess { field_index, .. } = &expr.kind {
+                        *seen = Some(*field_index);
+                    }
+                }
+                HirStmt::If {
+                    then_block, else_block, ..
+                } => {
+                    walk(then_block, seen);
+                    if let Some(block) = else_block {
+                        walk(block, seen);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let source = concat!(
+        "struct Decoy:\n",
+        "    size: i64\n",
+        "\n",
+        "fn probe(p: text) -> i64:\n",
+        "    val object_fp = FileFingerprint.from_file(p)\n",
+        "    if val fp = object_fp:\n",
+        "        return fp.size\n",
+        "    return 0 - 1\n",
+    );
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    // FileFingerprint is declared in ANOTHER unit: it reaches this module only
+    // through the whole-program tables, never `module.types`.
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "FileFingerprint".to_string(),
+        vec![
+            ("path".to_string(), Type::Simple("text".to_string())),
+            ("content_hash".to_string(), Type::Simple("text".to_string())),
+            ("modified_time".to_string(), Type::Simple("i64".to_string())),
+            ("size".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
+    // `size` sits at index 0 in Decoy and index 3 in FileFingerprint.
+    lowerer.set_ambiguous_field_names(Arc::new(HashSet::from(["size".to_string()])));
+    // The declared return type is OPTIONAL — the exact shape that was dropped.
+    lowerer.set_global_fn_return_types(Arc::new(HashMap::from([(
+        "FileFingerprint.from_file".to_string(),
+        Type::Optional(Box::new(Type::Simple("FileFingerprint".to_string()))),
+    )])));
+
+    let lowered = lowerer.lower_module(&module).unwrap();
+    let func = lowered
+        .functions
+        .iter()
+        .find(|f| f.name.contains("probe"))
+        .expect("probe not lowered");
+
+    let mut seen = None;
+    walk(&func.body, &mut seen);
+
+    assert_eq!(
+        seen,
+        Some(3),
+        "`fp.size` must read FileFingerprint's own index 3 (byte offset 24); \
+         index 0 is the Decoy's `size` — the miscompile that returned the \
+         `path` pointer instead of the file size"
+    );
+}
+
+/// A declared `-> T?` return type names T, and reports that T arrived WRAPPED.
+///
+/// This is the exact resolution step the 2026-09-13 Stage 2 miscompile turned
+/// on. `ast::Type::Optional` had no arm and fell to `_ => None`, so every
+/// `static fn ... -> T?` constructor — `FileFingerprint.from_file` among them —
+/// silently contributed no name, and the field read downstream fell through to
+/// `get_field_info(TypeId::ANY, ..)`'s smallest-index guess (offset 0, the
+/// struct's `path` pointer, instead of offset 24's 632-byte size).
+///
+/// The `wrapped` flag is equally load-bearing in the other direction: the
+/// caller may upgrade a binding's TypeId only for an UNWRAPPED `-> T`. Typing an
+/// optional-valued local as bare `T` addresses the payload's slots through the
+/// wrapper and reads zero — measured as `field=0:runtime=632` on the way to this
+/// fix.
+///
+/// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+#[test]
+fn test_declared_type_struct_name_looks_through_payload_wrappers() {
+    let ff = || Type::Simple("FileFingerprint".to_string());
+
+    // Unwrapped: name, and the caller may upgrade the TypeId.
+    assert_eq!(
+        Lowerer::declared_type_struct_name(&ff()),
+        Some(("FileFingerprint".to_string(), false))
+    );
+
+    // `-> T?` — the shape that was dropped entirely.
+    assert_eq!(
+        Lowerer::declared_type_struct_name(&Type::Optional(Box::new(ff()))),
+        Some(("FileFingerprint".to_string(), true)),
+        "`-> T?` must still name T, and must report it as wrapped"
+    );
+
+    // Nested wrappers resolve to the same single struct.
+    assert_eq!(
+        Lowerer::declared_type_struct_name(&Type::Optional(Box::new(Type::Optional(Box::new(ff()))))),
+        Some(("FileFingerprint".to_string(), true))
+    );
+
+    // Types that name no single struct stay None — never a guess.
+    assert_eq!(Lowerer::declared_type_struct_name(&Type::Tuple(vec![ff(), ff()])), None);
+    assert_eq!(Lowerer::declared_type_struct_name(&Type::Union(vec![ff()])), None);
+}
+
+/// A nominal receiver must never borrow a same-spelled field from an unrelated
+/// struct.  This used to succeed twice: first through `get_field_info`'s local
+/// best-field scan and then through `lower_field_access`'s equivalent fallback.
+#[test]
+fn nominal_receiver_rejects_field_owned_only_by_decoy() {
+    let source = concat!(
+        "struct Point:\n",
+        "    x: i64\n",
+        "\n",
+        "struct Decoy:\n",
+        "    x: i64\n",
+        "    phantom: i64\n",
+        "\n",
+        "fn probe(point: Point) -> i64:\n",
+        "    return point.phantom\n",
+    );
+
+    for lenient in [false, true] {
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse failed");
+        let mut lowerer = Lowerer::new();
+        lowerer.set_lenient_types(lenient);
+        let error = lowerer
+            .lower_module(&module)
+            .expect_err("Point.phantom must be rejected even though Decoy declares phantom");
+        let message = format!("{error:?}");
+        assert!(message.contains("Point"), "diagnostic must name Point: {message}");
+        assert!(message.contains("phantom"), "diagnostic must name phantom: {message}");
+    }
+}
+
+/// Explicitly dynamic receivers retain field lookup semantics.  Tightening
+/// nominal lookup must not turn `Any` into a closed structural type.
+#[test]
+fn any_receiver_retains_dynamic_field_lookup() {
+    let source = concat!(
+        "struct Decoy:\n",
+        "    x: i64\n",
+        "    phantom: i64\n",
+        "\n",
+        "fn probe(value: Any) -> i64:\n",
+        "    return value.phantom\n",
+    );
+
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+    let mut lowerer = Lowerer::new();
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer
+        .lower_module(&module)
+        .expect("Any.phantom remains a valid dynamic field access");
+    let probe = lowered
+        .functions
+        .iter()
+        .find(|function| function.name == "probe")
+        .unwrap();
+    let field_index = probe.body.iter().find_map(|statement| match statement {
+        HirStmt::Return(Some(HirExpr {
+            kind: HirExprKind::FieldAccess { field_index, .. },
+            ..
+        })) => Some(*field_index),
+        _ => None,
+    });
+    assert_eq!(
+        field_index,
+        Some(1),
+        "dynamic lookup must preserve Decoy.phantom's slot"
+    );
+}
+
+/// An erased receiver may use a field slot only when every candidate agrees
+/// on its index and type. A smallest-slot fallback is in bounds but can read a
+/// different field from the actual wide receiver.
+#[test]
+fn erased_receiver_field_fallback_rejects_conflicting_layouts() {
+    fn struct_type(name: &str, fields: &[&str]) -> HirType {
+        HirType::Struct {
+            name: name.to_string(),
+            fields: fields.iter().map(|field| ((*field).to_string(), TypeId::I64)).collect(),
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: HashMap::new(),
+        }
+    }
+
+    let mut local = Lowerer::new();
+    local
+        .module
+        .types
+        .register_named("ZzSmall".to_string(), struct_type("ZzSmall", &["zzq"]));
+    local.module.types.register_named(
+        "ZzBig".to_string(),
+        struct_type("ZzBig", &["p0", "p1", "p2", "p3", "zzq"]),
+    );
+    assert!(
+        local.get_field_info(TypeId::ANY, "zzq").is_err(),
+        "a narrow index-0 candidate and wide index-4 candidate must not select either slot"
+    );
+
+    let mut global = Lowerer::new();
+    global.set_global_struct_defs(Arc::new(HashMap::from([
+        (
+            "ZzSmall".to_string(),
+            vec![("zzq".to_string(), Type::Simple("i64".to_string()))],
+        ),
+        (
+            "ZzBig".to_string(),
+            vec![
+                ("p0".to_string(), Type::Simple("i64".to_string())),
+                ("p1".to_string(), Type::Simple("i64".to_string())),
+                ("p2".to_string(), Type::Simple("i64".to_string())),
+                ("p3".to_string(), Type::Simple("i64".to_string())),
+                ("zzq".to_string(), Type::Simple("i64".to_string())),
+            ],
+        ),
+    ])));
+    assert!(
+        global.resolve_global_field_info("zzq").is_none(),
+        "cross-module candidates with different field slots must fail closed"
+    );
+
+    let mut mixed_slot = Lowerer::new();
+    mixed_slot
+        .module
+        .types
+        .register_named("ZzLocal".to_string(), struct_type("ZzLocal", &["zzq"]));
+    mixed_slot.set_global_struct_defs(Arc::new(HashMap::from([(
+        "ZzImported".to_string(),
+        vec![
+            ("p0".to_string(), Type::Simple("i64".to_string())),
+            ("p1".to_string(), Type::Simple("i64".to_string())),
+            ("zzq".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
+    assert!(
+        mixed_slot.get_field_info(TypeId::ANY, "zzq").is_err(),
+        "a local slot-0 field and imported slot-2 field must not select either slot"
+    );
+
+    let mut mixed_type = Lowerer::new();
+    mixed_type
+        .module
+        .types
+        .register_named("ZzLocal".to_string(), struct_type("ZzLocal", &["zzq"]));
+    mixed_type.set_global_struct_defs(Arc::new(HashMap::from([(
+        "ZzImported".to_string(),
+        vec![("zzq".to_string(), Type::Simple("text".to_string()))],
+    )])));
+    assert!(
+        mixed_type.get_field_info(TypeId::ANY, "zzq").is_err(),
+        "same-slot local and imported fields with different types must fail closed"
+    );
+}
+
+#[test]
+fn erased_receiver_field_fallback_accepts_an_agreeing_layout() {
+    fn struct_type(name: &str) -> HirType {
+        HirType::Struct {
+            name: name.to_string(),
+            fields: vec![("prefix".to_string(), TypeId::I64), ("shared".to_string(), TypeId::I64)],
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: HashMap::new(),
+        }
+    }
+
+    let mut lowerer = Lowerer::new();
+    lowerer
+        .module
+        .types
+        .register_named("First".to_string(), struct_type("First"));
+    lowerer
+        .module
+        .types
+        .register_named("Second".to_string(), struct_type("Second"));
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "Imported".to_string(),
+        vec![
+            ("prefix".to_string(), Type::Simple("i64".to_string())),
+            ("shared".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
+    assert_eq!(
+        lowerer.get_field_info(TypeId::ANY, "shared").unwrap().0,
+        1,
+        "matching local and imported layouts retain the receiver-blind field access"
+    );
+}
+
+#[test]
+fn builtin_receiver_method_fallback_ignores_unrelated_user_class_methods() {
+    // `Widget.frob() -> i64?` must not type `frob` on a text or array receiver.
+    // Before the owner filter, both `+` expressions below were rejected as Add
+    // on an unwrapped optional, dropping the module to the interpreter.
+    let module = parse_and_lower(
+        "class Widget:\n    id: i64\n    fn frob() -> i64?:\n        nil\n\nfn on_text(s: text) -> i64:\n    val n = s.frob() + 1\n    return 0\n\nfn on_array(xs: [text]) -> i64:\n    val n = xs.frob() + 1\n    return 0\n",
+    );
+    assert!(
+        module.is_ok(),
+        "builtin receivers must not borrow Widget.frob's i64? return type: {:?}",
+        module.err()
+    );
 }

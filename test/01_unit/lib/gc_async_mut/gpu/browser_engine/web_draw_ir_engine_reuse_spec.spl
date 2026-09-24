@@ -32,6 +32,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     web_draw_ir_engine_cache_live_count,
     web_draw_ir_engine_cache_reuse_count,
     web_draw_ir_gpu_route_canonical_submission_count,
+    web_draw_ir_gpu_route_cache_generation_match,
+    web_draw_ir_gpu_route_cached_reuse_count,
     web_draw_ir_gpu_route_last_evidence,
     web_draw_ir_fingerprint_pixels_scanned,
     web_draw_ir_gpu_route_policy_reset,
@@ -208,9 +210,9 @@ describe "Web Draw IR Engine2D reuse across route calls":
         expect(web_draw_ir_gpu_route_last_evidence().should_offload).to_equal(false)
         expect(web_draw_ir_fingerprint_pixels_scanned()).to_equal(0)
 
-    it "keeps the offload gate's fingerprint able to fail a genuine mismatch":
+    it "keeps the diagnostic fingerprint able to distinguish a genuine mismatch":
         # @req REQ-SSPEC-LIB
-        step("keeps the offload gate's fingerprint able to fail a genuine mismatch")
+        step("keeps the diagnostic fingerprint able to distinguish a genuine mismatch")
         _reset_all()
         val oracle = _solid_pixels(8 * 4)
         val baseline = web_draw_ir_oracle_fingerprint(oracle)
@@ -235,3 +237,72 @@ describe "Web Draw IR Engine2D reuse across route calls":
                 web_draw_ir_oracle_fingerprint(reordered)).to_equal(false)
         # A truncated surface is a mismatch, not a near miss.
         expect(web_draw_ir_oracle_fingerprint(_solid_pixels(8 * 4 - 1)) == baseline).to_equal(false)
+        # Arrays are values: a caller mutation copy-on-writes and cannot alter
+        # the owner-retained canonical pixels used by the cache.
+        val retained = _solid_pixels(8 * 4)
+        var caller_copy = retained
+        caller_copy[0] = 0xff000000u32
+        expect(retained[0]).to_equal(REUSE_GREEN)
+        expect(caller_copy[0] == retained[0]).to_equal(false)
+
+    it "reuses a validated frame only for the same scene and device generations":
+        # @req REQ-GPUUI-006
+        step("reuses a validated frame only for the same scene and device generations")
+        # The real retained-frame branch is device-gated, so this pure contract
+        # seam exercises the exact authorization tuple on every host.  The
+        # scene generation comes from DrawIrComposition and is distinct for
+        # layout/style/image/resource revisions; the device token binds the
+        # parked framebuffer and device generation.
+        expect(web_draw_ir_gpu_route_cache_generation_match(
+            41, 41,
+            "vulkan;owner=11;surface=7;device=3",
+            "vulkan;owner=11;surface=7;device=3", 32, 32
+        )).to_equal(true)
+        expect(web_draw_ir_gpu_route_cached_reuse_count()).to_equal(0)
+
+    it "invalidates retained frames for every producer or device revision":
+        # @req REQ-GPUUI-006
+        step("invalidates retained frames for every producer or device revision")
+        val cached = 41
+        # A rebuilt composition receives a new exact generation for each
+        # producer-side cause; no pixel hash is used to authorize reuse.
+        val layout_revision = _reuse_composition(8, 4).generation
+        val style_revision = _reuse_composition(8, 4).generation
+        val image_revision = _reuse_composition(8, 4).generation
+        val resource_revision = _reuse_composition(8, 4).generation
+        expect(layout_revision > 0).to_equal(true)
+        expect(style_revision > layout_revision).to_equal(true)
+        expect(image_revision > style_revision).to_equal(true)
+        expect(resource_revision > image_revision).to_equal(true)
+        expect(web_draw_ir_gpu_route_cache_generation_match(
+            cached, layout_revision,
+            "vulkan;owner=11;surface=7;device=3",
+            "vulkan;owner=11;surface=7;device=3", 32, 32
+        )).to_equal(false)
+        # ABA defense: even if a driver recycles both raw handles after
+        # teardown, the cache-owner generation cannot repeat.
+        expect(web_draw_ir_gpu_route_cache_generation_match(
+            cached, cached,
+            "vulkan;owner=11;surface=7;device=3",
+            "vulkan;owner=12;surface=7;device=3", 32, 32
+        )).to_equal(false)
+        expect(web_draw_ir_gpu_route_cache_generation_match(
+            cached, cached,
+            "vulkan;owner=11;surface=7;device=3",
+            "vulkan;owner=11;surface=8;device=3", 32, 32
+        )).to_equal(false)
+        expect(web_draw_ir_gpu_route_cache_generation_match(
+            cached, cached,
+            "vulkan;owner=11;surface=7;device=3",
+            "vulkan;owner=11;surface=7;device=4", 32, 32
+        )).to_equal(false)
+        expect(web_draw_ir_gpu_route_cache_generation_match(
+            cached, cached,
+            "vulkan;owner=11;surface=7;device=3",
+            "vulkan;owner=11;surface=7;device=3", 32, 31
+        )).to_equal(false)
+        expect(web_draw_ir_gpu_route_cache_generation_match(
+            0, 0,
+            "vulkan;owner=11;surface=7;device=3",
+            "vulkan;owner=11;surface=7;device=3", 32, 32
+        )).to_equal(false)

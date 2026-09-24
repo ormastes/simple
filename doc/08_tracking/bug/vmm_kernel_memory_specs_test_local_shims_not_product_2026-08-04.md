@@ -1,4 +1,9 @@
 # BUG: `test/01_unit/os/kernel/memory/` specs test spec-local copies, not `src/os/kernel/memory/` — and both copies share a real value-semantics defect
+## Closed 2026-09-16 — Status FIXED 2026-08-06; specs green + sabotage check; test-tree follow-up completed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED
 **Found:** 2026-08-04
@@ -306,3 +311,4 @@ Completed 2026-08-10 in commit `6788fd65c4c0e5c0189bf497727fb7fce2273ac5`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+

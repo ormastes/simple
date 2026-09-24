@@ -1,4 +1,8 @@
 # Sweep: how many specs pass vacuously because of the JIT enum-associated-fn hijack?
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-28
 - **Kind:** measurement (no specs were rewritten)
@@ -303,3 +307,4 @@ would be work aimed at a defect they do not have.
   the two files that are `M` in the working tree (`src/lib/common/sdn/value.spl`,
   `src/compiler/00.common/config.spl`) were re-inspected afterwards and still
   carry the parallel session's Dict-pitfall fixes, not mutation text.
+

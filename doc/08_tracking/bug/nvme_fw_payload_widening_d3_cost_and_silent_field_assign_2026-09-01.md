@@ -1,4 +1,8 @@
 # NVMe FW payload widening (D1-D3): measured cost regression + a silent-field-assign hazard
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-01 while landing D1-D3 of
 `doc/03_plan/hardware/nvme_command_set_and_payload_completeness_plan.md`
@@ -66,3 +70,4 @@ Not fixed here — the compiler is out of this change's scope
 (`examples/09_embedded/simpleos_nvme_fw/fw/*.spl` only). The specific instance
 was repaired by renaming the reference to `nt.page`, and the assertion it guards
 is unchanged.
+

@@ -1,4 +1,8 @@
 # Vulkan instance init fails under `bin/simple run` but succeeds under `bin/simple test` (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. **Binary:** `bin/simple` = Rust seed (`bin/release/x86_64-unknown-linux-gnu/simple`).
 **Host:** Linux, 2x NVIDIA (RTX A6000, TITAN RTX), `vulkaninfo` reports both at Vulkan 1.4.312.
@@ -35,3 +39,4 @@ SPIR-V bytes are identical on both paths (`len=19068, b0..b3 = 3 2 35 7`), so th
 cd examples/08_gpu/backends/vulkan && ../../../../bin/simple run ../svmg_hello.spl   # instance-init-failed
 bin/simple test examples/08_gpu/backends/backends_spec.spl                            # vulkan case live-passes
 ```
+

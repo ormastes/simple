@@ -1,4 +1,8 @@
 # JIT `Unknown type: DrawIrRenderTarget` — resolved by trait pre-registration
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-30
 **Status:** `DrawIrRenderTarget` RESOLVED (confirmed independently this pass,
@@ -1318,3 +1322,4 @@ available," stated plainly rather than inferring a number.
 
 Blocked on gap 7, same as before — a correct-or-non-degenerate JIT result
 still does not exist for this example.
+

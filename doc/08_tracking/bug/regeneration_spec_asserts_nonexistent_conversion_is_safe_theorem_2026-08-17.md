@@ -201,3 +201,24 @@ The class-detection spec added by the earlier lane stays green, so the
 generalising gate was not weakened to accommodate the fix.
 
 Status: FIXED.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane) — theorem present in tree, spec green, CLOSED
+
+The top-of-file "REOPENED 2026-08-21" claim (`conversion_is_safe` has 0 hits in
+the generator) does not hold at `a6450c9d6f5`:
+
+```
+$ grep -n conversion_is_safe src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl
+106:        "conversion_is_safe",
+
+$ bin/simple test test/00_formal_verification/compiler/regeneration_spec.spl --no-session-daemon --sequential
+4 examples, 0 failures
+Results: 4 total, 4 passed, 0 failed
+```
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha256
+prefix `3d120a6f`). The 2026-08-17 fix is in the tree and the spec passes.
+Whatever caused the 2026-08-21 reopening (a stale checkout at the time, or a
+transient revert since re-applied) is not the current state.
+
+- Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`.

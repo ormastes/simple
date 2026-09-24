@@ -1,4 +1,8 @@
 # `in` returns FALSE for a member that IS present (JIT) — unboxed membership needle
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** FIXED (all three defects below)
@@ -1221,3 +1225,4 @@ out of scope here. Per-symbol verdict, measured on both engines with
 - `simple-runtime --lib` at `1080 passed / 7 failed` before `f835ee71522`,
   `1082 passed / 7 failed` after (that commit added 2 tests); the same 7
   failures by name.
+

@@ -22,7 +22,19 @@ void rt_free(void* ptr) { free(ptr); }
 void rt_array_free(SplArray* array) { free(array->items); free(array); }
 int64_t rt_free_deep(int64_t value) { (void)value; return 1; }
 
-#define _WIN32 1
+/* Select the LAST branch of runtime_process_owned.c — the non-unix, non-Win32
+ * fallback (baremetal / SimpleOS), whose contract is the ENOTSUP surface these
+ * assertions describe.
+ *
+ * This used to be spelled `#define _WIN32 1`, which worked only because Win32
+ * had no implementation of its own and fell into the same `#else`. Since
+ * 2026-09-13 `_WIN32` selects a real CreateProcess+job-object branch, so
+ * defining it here would (a) pull in <windows.h> and fail to compile on Linux,
+ * and (b) test the Windows capsule under a name that claims to test the
+ * fallback. Undefining BOTH guard macros is host-independent and says exactly
+ * which branch is under test. */
+#undef _WIN32
+#undef __unix__
 #include "../runtime_process_owned.c"
 
 int main(void) {

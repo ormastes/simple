@@ -2,7 +2,7 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use super::lowering_di::builtin_type_name;
-use crate::hir::{BinOp, DispatchMode, HirExpr, HirType, TypeId};
+use crate::hir::{BinOp, DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -150,6 +150,87 @@ impl<'a> MirLowerer<'a> {
         simple_runtime::value::hash_variant_discriminant(variant_name) as i64
     }
 
+    /// Erased-at-HIR Result receivers still need the interpreter's Option
+    /// contract. Build the same receiver-once projection used by typed HIR,
+    /// using existing MIR Option constructors instead of a new runtime ABI.
+    fn lower_result_option_projection(&mut self, receiver: &HirExpr, variant: &str) -> MirLowerResult<VReg> {
+        use crate::mir::effects::LocalKind;
+        use crate::mir::function::MirLocal;
+
+        let local_idx = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: "$result_option_subject".to_string(),
+                ty: receiver.ty,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+        let subject = HirExpr {
+            kind: HirExprKind::Local(local_idx),
+            ty: receiver.ty,
+        };
+        let condition = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_check_variant".to_string(),
+                args: vec![
+                    subject.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(2),
+                        ty: TypeId::I64,
+                    },
+                    HirExpr {
+                        kind: HirExprKind::Integer(Self::enum_variant_discriminant(variant)),
+                        ty: TypeId::I64,
+                    },
+                ],
+            },
+            ty: TypeId::BOOL,
+        };
+        let some = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    kind: HirExprKind::Global("Option::Some".to_string()),
+                    ty: TypeId::ANY,
+                }),
+                args: vec![HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_payload".to_string(),
+                        args: vec![subject],
+                    },
+                    ty: TypeId::ANY,
+                }],
+            },
+            ty: TypeId::ANY,
+        };
+        let none = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(HirExpr {
+                    kind: HirExprKind::Global("Option::None".to_string()),
+                    ty: TypeId::ANY,
+                }),
+                args: vec![],
+            },
+            ty: TypeId::ANY,
+        };
+        self.lower_expr(&HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx,
+                value: Box::new(receiver.clone()),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(some),
+                        else_branch: Some(Box::new(none)),
+                    },
+                    ty: TypeId::ANY,
+                }),
+            },
+            ty: TypeId::ANY,
+        })
+    }
+
     pub(super) fn lower_method_call_expr(
         &mut self,
         receiver: &HirExpr,
@@ -190,14 +271,14 @@ impl<'a> MirLowerer<'a> {
                         .or_else(|| self.enum_payload_type_for_method_receiver(effective_ty))
                     {
                         return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
+                            "rt_unwrap_or_trap",
                             std::slice::from_ref(receiver),
                             payload_ty,
                         );
                     }
                     if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
                         return self.lower_builtin_call_expr(
-                            "rt_enum_payload",
+                            "rt_unwrap_or_trap",
                             std::slice::from_ref(receiver),
                             TypeId::ANY,
                         );
@@ -221,6 +302,15 @@ impl<'a> MirLowerer<'a> {
                             TypeId::ANY,
                         );
                     }
+                }
+                "ok" | "err"
+                    if self.type_registry.is_some_and(|registry| {
+                        registry.get_type_name(receiver.ty) == Some("Result")
+                            || registry.get_type_name(effective_ty) == Some("Result")
+                    }) =>
+                {
+                    let variant = if method == "ok" { "Ok" } else { "Err" };
+                    return self.lower_result_option_projection(receiver, variant);
                 }
                 "is_some" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "Some")
@@ -256,8 +346,12 @@ impl<'a> MirLowerer<'a> {
                             kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
                             ty: TypeId::I64,
                         };
-                        let args = [receiver.clone(), expected];
-                        return self.lower_builtin_call_expr("rt_enum_check_discriminant", &args, TypeId::BOOL);
+                        let expected_enum_id = HirExpr {
+                            kind: crate::hir::HirExprKind::Integer(0),
+                            ty: TypeId::I64,
+                        };
+                        let args = [receiver.clone(), expected_enum_id, expected];
+                        return self.lower_builtin_call_expr("rt_enum_check_variant", &args, TypeId::BOOL);
                     }
                 }
                 _ => {}
@@ -435,14 +529,18 @@ impl<'a> MirLowerer<'a> {
 
             let target = crate::mir::effects::CallTarget::from_name("rt_dict_set");
             return self.with_func(|func, current_block| {
-                let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
+                    // rt_dict_set returns an i8 success flag. `.set()` is a
+                    // mutating fluent method, so its expression value is the
+                    // receiver handle, as it is in the interpreter. Returning
+                    // the flag made successful calls look like nil after the
+                    // RuntimeValue conversion in the JIT.
+                    dest: None,
                     target,
                     args: vec![receiver_reg, key_reg, value_reg],
                 });
-                dest
+                receiver_reg
             });
         }
 
@@ -738,11 +836,11 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
-        // `d.entries()` on a Dict<K, V>: mirrors the interpreter's
-        // "entries"|"items" (interpreter_method/collections.rs) — an array
-        // of (key, value) tuples. `rt_dict_entries` (runtime/src/value/
-        // dict.rs) already exists and already had a linker manifest entry
-        // (common/src/runtime_symbols.rs, "for-in iteration over
+        // `d.entries()` / `d.items()` on a Dict<K, V>: mirrors the
+        // interpreter's "entries"|"items" (interpreter_method/collections.rs)
+        // — an array of (key, value) tuples. `rt_dict_entries` (runtime/src/
+        // value/dict.rs) already exists and already had a linker manifest
+        // entry (common/src/runtime_symbols.rs, "for-in iteration over
         // dicts/arrays") but was never declared in the codegen SFFI table
         // (codegen/runtime_sffi.rs) or wired to a dispatch arm, so it fell
         // through to `rt_method_not_found`. Returns a fresh array pointer —
@@ -754,7 +852,17 @@ impl<'a> MirLowerer<'a> {
         // order (the SAME already-known `dict.keys()`/`dict.values()`
         // ordering gap the audit doc calls out separately) — the result SET
         // matches, the SEQUENCE does not.
-        if method == "entries" && args.is_empty() && self.receiver_is_dict(receiver, receiver_local_ty) {
+        // `items` was originally left out of this `if` (only `entries` was
+        // checked) even though the HIR type-inference table above already
+        // treats them as aliases — that gap is
+        // doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md
+        // defect 2: `d.items()` fell through to `rt_method_not_found` under
+        // the default JIT while `d.entries()` (the exact same runtime call)
+        // already worked.
+        if matches!(method, "entries" | "items")
+            && args.is_empty()
+            && self.receiver_is_dict(receiver, receiver_local_ty)
+        {
             let receiver_reg = self.lower_expr(receiver)?;
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -1852,6 +1960,9 @@ impl<'a> MirLowerer<'a> {
         // bridge, mirroring u64. See
         // doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md.
         if method == "to_string" || method == "to_text" || method == "str" {
+            if receiver.ty == TypeId::CHAR {
+                return self.emit_to_string(receiver_reg, TypeId::CHAR);
+            }
             if receiver.ty == TypeId::U64 || receiver.ty == TypeId::I64 {
                 let raw_fn = if receiver.ty == TypeId::U64 {
                     "rt_raw_u64_to_string"
@@ -2011,7 +2122,18 @@ impl<'a> MirLowerer<'a> {
             None
         };
 
-        let func_name = if let Some(class_ty) = erased_class_receiver_ty
+        let declared_trait_owner = match &receiver.kind {
+            crate::hir::HirExprKind::Local(index) => self
+                .local_type_name_hints
+                .get(index)
+                .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
+                .cloned(),
+            _ => None,
+        };
+
+        let func_name = if let Some(trait_name) = declared_trait_owner {
+            format!("{}.{}", trait_name, method)
+        } else if let Some(class_ty) = erased_class_receiver_ty
             .filter(|_| !wrapper_enum_builtin_collision)
             .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)).map(|n| (t, n)))
             .map(|(_, n)| n)
@@ -2083,7 +2205,6 @@ impl<'a> MirLowerer<'a> {
             method.to_string()
         };
 
-        let dispatch_receiver_ty = receiver_local_ty.unwrap_or(receiver.ty);
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch).

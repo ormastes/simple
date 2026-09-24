@@ -1,4 +1,9 @@
 # JIT: `text.substring(n).to_int()` chained returns the raw text pointer, silently
+## Closed 2026-09-16 — fix present in source; 2026-09-06 re-probe not reproducible on either engine
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -193,3 +198,4 @@ likely covers this is already in tree and cited in
 `codegen/instr/closures_structs.rs::builtin_method_result_type`, which records a
 result TYPE for chained builtins so `to_int` no longer defaults its receiver to
 I64.
+

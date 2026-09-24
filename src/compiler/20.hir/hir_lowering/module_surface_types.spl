@@ -295,17 +295,28 @@ pub(package) fn module_surface_export_origin_index_put(
        origin_index.names.len() != origin_index.source_names.len() or
        origin_index.names.len() != origin_index.resolution_kinds.len():
         return Err("module surface export-origin index arrays are misaligned")
+    # BOOT-20 (2026-09-17): the scalar arrays are the authority. The
+    # `{text: i64}` index_by_name is the class-field shape Stage-2 native
+    # codegen silently misreports: a false contains_key negative takes the
+    # "new" branch and pushes a DUPLICATE names entry; a false positive reads
+    # a garbage index and writes the owner arrays out of bounds. Locate the
+    # slot by scanning names and touch the dicts only as best-effort
+    # projections that no reader trusts (position/has read the arrays).
+    var existing: i64 = -1
+    var scan = 0
+    while scan < origin_index.names.len():
+        if origin_index.names[scan] == name:
+            existing = scan
+            break
+        scan = scan + 1
     origin_index.origins[name] = ModuleSurfaceExportOrigin(
         owner_module: owner_module,
         source_name: source_name,
         resolution_kind: resolution_kind)
-    if origin_index.index_by_name.contains_key(name):
-        val index: i64 = origin_index.index_by_name[name]
-        if index < 0 or index >= origin_index.names.len():
-            return Err("module surface export-origin scalar index is invalid")
-        origin_index.owner_modules[index] = owner_module
-        origin_index.source_names[index] = source_name
-        origin_index.resolution_kinds[index] = resolution_kind
+    if existing >= 0:
+        origin_index.owner_modules[existing] = owner_module
+        origin_index.source_names[existing] = source_name
+        origin_index.resolution_kinds[existing] = resolution_kind
         return Ok(())
     val index = origin_index.names.len()
     origin_index.index_by_name[name] = index
@@ -325,19 +336,22 @@ pub(package) fn module_surface_export_origin_index_position(
        entry_count != origin_index.resolution_kinds.len():
         return -1
     var position: i64 = -1
-    # The Dict is a construction-time accelerator. Transient teardown can
-    # invalidate only that carrier while retaining the promoted scalar arrays.
-    if origin_index.index_by_name.len() >= 0:
-        if not origin_index.index_by_name.contains_key(name):
-            return -1
-        position = origin_index.index_by_name[name]
-    else:
-        var scan = 0
-        while scan < entry_count:
-            if origin_index.names[scan] == name:
-                position = scan
-                break
-            scan = scan + 1
+    # BOOT-20 (2026-09-17): the `{text: i64}` `index_by_name` is the defect
+    # class Stage-2 native codegen silently misreports -- contains_key
+    # false-negatives on keys that WERE inserted, and value corruption on a
+    # hit. The old `index_by_name.len() >= 0` gate was constant-true, so the
+    # dict path ran unconditionally and the scalar fallback below was dead
+    # code. The promoted scalar arrays are the retained authority (the Dict
+    # is only a construction-time accelerator that transient teardown can
+    # invalidate); answer from them directly, same stance as
+    # module_surface_registry_index. Correctness over the O(1) cache: a cache
+    # that can silently misreport contains_key cannot be trusted at all.
+    var scan = 0
+    while scan < entry_count:
+        if origin_index.names[scan] == name:
+            position = scan
+            break
+        scan = scan + 1
     if position < 0 or position >= entry_count or
        origin_index.names[position] != name:
         return -1

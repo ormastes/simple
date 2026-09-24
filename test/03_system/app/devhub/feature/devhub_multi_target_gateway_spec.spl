@@ -1,0 +1,180 @@
+# codex-system-test
+# @evidence-display: links
+# REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008
+
+use std.spec.step
+use std.nogc_sync_mut.env.{env_get, env_set, env_has, env_unset}
+use app.io.mod.{file_read, file_write, file_delete, dir_create_all}
+use app.devhub.config.{ItfConfig, confluence_target_from_args, parse_sdn_sections, _apply_config_value, load_config, load_config_for_target, save_config, save_confluence_target, save_auth_token}
+use app.devhub.auth.{jira_api_base, confluence_api_base}
+use app.devhub.adapter_bitbucket.{BbClient, bb_resolve_gateway_url}
+use app.devhub.request_headers.{gateway_request_headers, validate_configured_headers}
+use app.devhub.atlassian_site.{atlassian_deployment_warning}
+use app.devhub.redaction.{redact_devhub_diagnostic}
+
+val CONFIG_FIXTURE_HOME = "build/test-devhub-multi-target-gateway/home"
+
+
+fn _write_config_fixture(config_body: text, auth_body: text) -> bool:
+    val dir = "{CONFIG_FIXTURE_HOME}/.config/itf"
+    if not dir_create_all(dir):
+        return false
+    val _old_config = file_delete("{dir}/config.sdn")
+    val _old_auth = file_delete("{dir}/auth.sdn")
+    if not file_write("{dir}/config.sdn", config_body):
+        return false
+    if auth_body != "":
+        return file_write("{dir}/auth.sdn", auth_body)
+    true
+
+
+fn _restore_home(had_home: bool, original_home: text) -> bool:
+    if had_home:
+        return env_set("HOME", original_home)
+    env_unset("HOME")
+
+describe "DevHub multi-target gateway configuration":
+    describe "REQ-001 and REQ-002: target selection":
+        it "should accept both selector names and fail closed on conflicts":
+            step("Select a named Confluence target")
+            expect(confluence_target_from_args(["--host", "internal"])).to_equal("internal")
+            expect(confluence_target_from_args(["--profile=public"])).to_equal("public")
+            expect(confluence_target_from_args(["--host=a", "--profile=b"])).to_equal("__invalid_confluence_selector__")
+
+        it "should leave default resolution to configured or file-order policy":
+            step("Omit an explicit selector")
+            expect(confluence_target_from_args([])).to_equal("")
+            expect(confluence_target_from_args(["list"])).to_equal("")
+            expect(confluence_target_from_args(["--host"])).to_equal("__invalid_confluence_selector__")
+
+        it "should prefer the configured default target over the first named target":
+            step("Load a real config whose default target is not first in file order")
+            val body = "confluence:\n    default_target: beta\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n\nconfluence.beta:\n    url: https://beta.example/wiki\n"
+            val fixture_written = _write_config_fixture(body, "")
+            val had_home = env_has("HOME")
+            val original_home = env_get("HOME")
+            val home_set = env_set("HOME", CONFIG_FIXTURE_HOME)
+            val selected = load_config_for_target("")
+            val home_restored = _restore_home(had_home, original_home)
+            expect(fixture_written).to_equal(true)
+            expect(home_set).to_equal(true)
+            expect(home_restored).to_equal(true)
+            expect(selected.confluence_target).to_equal("beta")
+            expect(selected.confluence_url).to_equal("https://beta.example/wiki")
+
+        it "should select the first named target when no default is configured":
+            step("Load a real config with named targets in deliberate file order")
+            val body = "confluence.beta:\n    url: https://beta.example/wiki\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n"
+            val fixture_written = _write_config_fixture(body, "")
+            val had_home = env_has("HOME")
+            val original_home = env_get("HOME")
+            val home_set = env_set("HOME", CONFIG_FIXTURE_HOME)
+            val selected = load_config_for_target("")
+            val home_restored = _restore_home(had_home, original_home)
+            expect(fixture_written).to_equal(true)
+            expect(home_set).to_equal(true)
+            expect(home_restored).to_equal(true)
+            expect(selected.confluence_target).to_equal("beta")
+            expect(selected.confluence_url).to_equal("https://beta.example/wiki")
+
+    describe "REQ-003: nested ordered headers":
+        it "should parse nested SDN header maps without collapsing duplicates":
+            step("Read one target's nested headers map")
+            val entries = parse_sdn_sections("confluence.internal:\n    headers:\n        X-Scope: A\n        X-Scope: B\n")
+            expect(entries.len()).to_equal(2)
+            expect(entries[0].1).to_equal("header")
+            expect(entries[1].2).to_equal("X-Scope: B")
+
+        it "should reject header injection before transport":
+            step("Validate configured transport headers")
+            match validate_configured_headers(["X-Good: yes", "X-Bad: one\ntwo"]):
+                Err(message): expect(message).to_contain("CR or LF")
+                Ok(_): expect("accepted unsafe header").to_equal("")
+
+    describe "REQ-004 and REQ-005: provider gateways":
+        it "should resolve Jira, Confluence, and Bitbucket through configured gateway prefixes":
+            step("Apply provider gateway configuration")
+            var config = _apply_config_value(ItfConfig.default(), "jira", "gateway_url", "https://gateway.example/jira")
+            config = _apply_config_value(config, "confluence", "gateway_url", "https://gateway.example/confluence")
+            config = _apply_config_value(config, "bitbucket", "gateway_url", "https://gateway.example/bitbucket")
+            expect(jira_api_base(config)).to_equal("https://gateway.example/jira")
+            expect(confluence_api_base(config)).to_equal("https://gateway.example/confluence")
+            val bitbucket = BbClient(token: "token", base_url: "https://api.bitbucket.org/2.0", deployment: "cloud", auth_scheme: "", user: "", gateway_url: config.bb_gateway_url, headers: config.bb_headers)
+            expect(bb_resolve_gateway_url(bitbucket, "https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests")).to_equal("https://gateway.example/bitbucket/repositories/acme/widgets/pullrequests")
+
+        it "should add classification headers only for the configured gateway":
+            step("Compose gateway headers and explicit overrides")
+            match gateway_request_headers("https://gateway.example/api/pages", "https://gateway.example/api", ["X-Classification: Internal", "X-Scope: A", "X-Scope: B"], ["x-scope: explicit"]):
+                Err(message): expect(message).to_equal("")
+                Ok(headers):
+                    expect(headers.len()).to_equal(2)
+                    expect(headers[0]).to_equal("X-Classification: Internal")
+                    expect(headers[1]).to_equal("x-scope: explicit")
+
+        it "should omit configured classification headers on direct URLs":
+            step("Resolve a request outside the gateway prefix")
+            match gateway_request_headers("https://direct.example/pages", "https://gateway.example/api", ["X-Classification: Internal"], ["X-Explicit: yes"]):
+                Err(message): expect(message).to_equal("")
+                Ok(headers): expect(headers).to_equal(["X-Explicit: yes"])
+
+    describe "REQ-006: deployment diagnostics":
+        it "should warn on mismatches and honor quiet mode":
+            step("Compare deployment with the parsed URL hostname")
+            expect(atlassian_deployment_warning("Confluence", "https://tenant.atlassian.net/wiki", "datacenter", false)).to_contain("Cloud")
+            expect(atlassian_deployment_warning("Confluence", "https://wiki.corp/confluence", "cloud", false)).to_contain("Server/Data Center")
+            expect(atlassian_deployment_warning("Confluence", "https://wiki.corp/confluence", "cloud", true)).to_equal("")
+
+    describe "REQ-007: diagnostic redaction":
+        it "should mask headers, URLs, and both assignment separators":
+            step("Render sensitive diagnostic text")
+            val safe = redact_devhub_diagnostic("Authorization: Bearer abc\ntoken=def\npassword: ghi")
+            expect(safe.contains("abc")).to_equal(false)
+            expect(safe.contains("def")).to_equal(false)
+            expect(safe.contains("ghi")).to_equal(false)
+
+        it "should mask comma-containing secrets completely":
+            step("Render a quoted secret containing punctuation")
+            expect(redact_devhub_diagnostic("token: \"alpha,beta\"")).to_equal("token: ***")
+            expect(redact_devhub_diagnostic("Cookie: a=one, b=two")).to_equal("Cookie: ***")
+
+    describe "REQ-008: preservation contract":
+        it "should retain ordered routing values in the selected config capsule":
+            step("Apply multiple provider routing values without dropping earlier fields")
+            var config = _apply_config_value(ItfConfig.default(), "confluence", "header", "X-A: one")
+            config = _apply_config_value(config, "confluence", "header", "X-A: two")
+            config = _apply_config_value(config, "jira", "gateway_url", "https://gateway.example/jira")
+            expect(config.confluence_headers.len()).to_equal(2)
+            expect(config.confluence_headers[1]).to_equal("X-A: two")
+            expect(config.jira_gateway_url).to_equal("https://gateway.example/jira")
+
+        it "should persist one target and credential without replacing defaults or siblings":
+            step("Save through the real config and credential persistence helpers")
+            val config_body = "confluence:\n    default_target: alpha\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n    headers:\n        X-One: a\n        X-One: b\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    headers:\n        X-Beta: keep\n"
+            val auth_body = "confluence.alpha:\n    token: old-alpha\n\nconfluence.beta:\n    token: keep-beta\n\ncustom:\n    token: keep-custom\n"
+            val fixture_written = _write_config_fixture(config_body, auth_body)
+            val had_home = env_has("HOME")
+            val original_home = env_get("HOME")
+            val home_set = env_set("HOME", CONFIG_FIXTURE_HOME)
+            val legacy_saved = save_config(load_config())
+            val target_saved = save_confluence_target(load_config_for_target("alpha"))
+            val auth_saved = save_auth_token("confluence.alpha", "new-alpha")
+            val saved_config = file_read("{CONFIG_FIXTURE_HOME}/.config/itf/config.sdn")
+            val saved_auth = file_read("{CONFIG_FIXTURE_HOME}/.config/itf/auth.sdn")
+            val reloaded_default = load_config_for_target("")
+            val home_restored = _restore_home(had_home, original_home)
+            expect(fixture_written).to_equal(true)
+            expect(home_set).to_equal(true)
+            expect(home_restored).to_equal(true)
+            expect(legacy_saved).to_equal(true)
+            expect(target_saved).to_equal(true)
+            expect(auth_saved).to_equal(true)
+            expect(saved_config).to_contain("default_target: alpha")
+            expect(saved_config).to_contain("confluence.beta:")
+            expect(saved_config).to_contain("X-Beta: keep")
+            expect(saved_config).to_contain("X-One: a")
+            expect(saved_config).to_contain("X-One: b")
+            expect(saved_auth).to_contain("token: \"new-alpha\"")
+            expect(saved_auth).to_contain("token: keep-beta")
+            expect(saved_auth).to_contain("custom:")
+            expect(reloaded_default.confluence_target).to_equal("alpha")
+            expect(reloaded_default.confluence_headers.len()).to_equal(2)

@@ -32,3 +32,9 @@ closure rather than being evidence of a routing assertion failure.
 - Keep the full composition behavior; do not remove routing to shrink closure.
 - Produce a terminal SSpec summary within the repository's 120-second bound.
 - Record warm compilation and execution timing separately.
+
+## Re-check 2026-09-13
+
+Not reproducible. `bin/simple test test/01_unit/app/llm_caret/messaging/composition_spec.spl --mode=interpreter --no-session-daemon` on the deployed seed completes in 14947ms (well under the 120s watchdog), `5 total, 5 passed, 0 failed`.
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { constants, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -10,8 +10,9 @@ const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const server = join(moduleRoot, "mcp/server.js");
 const target = `A-${"9".repeat(26)}`;
 const source = `A-${"1".repeat(26)}`;
+const secureNoFollowAvailable = typeof constants.O_NOFOLLOW === "number";
 
-test("packaged stdio server exposes and runs folder reverse-reference queries", () => {
+test("packaged stdio server exposes and runs folder reverse-reference queries", { skip: !secureNoFollowAvailable }, () => {
   const root = mkdtempSync(join(tmpdir(), "spipe-mcp-stdio-reverse-"));
   try {
     const inventoryPath = join(root, "inventory.json");

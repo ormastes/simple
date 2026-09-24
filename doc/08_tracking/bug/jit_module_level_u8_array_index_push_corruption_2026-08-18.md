@@ -1,4 +1,8 @@
 # Codegen (JIT) lane: module-level `val [u8]` indexed then `.push()`-ed reads back corrupted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Status:** OPEN — real correctness bug, worked around at the call site (not fixed in the compiler)
@@ -78,3 +82,4 @@ treated as suspect until this is root-caused and fixed in the compiler.
 No compiler source change was made — this was found and worked around while
 doing library-level perf work, not a compiler-focused task. Filing this so
 whoever owns Cranelift JIT array/module-scope codegen can pick it up.
+

@@ -1,4 +1,8 @@
 # Stage-3 self-host imported-type resolution cascade (2026-08-21)
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/std/nogc_sync_mut/io/file_ops.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -39,3 +43,4 @@ ever sees sources with an empty parser cache. A lifecycle regression exercises
 the production dispatcher with the readiness flag deliberately reset. Rerun
 Stage 3 once in a fresh bounded verification session; do not patch 197
 consumers individually or accept a seed fallback.
+

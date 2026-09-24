@@ -1,4 +1,9 @@
 # RISC-V 32 QEMU Guest `ls` and Program Execution Gap
+## Closed 2026-09-16 — ... loaded entry. The listing half was fixed by `rt_riscv32_fat32_list_sys_apps`, which walks
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-11  
 **Status:** IMPLEMENTED DIAGNOSTICALLY — release lineage/correlation open  
@@ -62,3 +67,4 @@ Do not replace these operations with fixed marker strings.
 - Owner: RISC-V 32 SimpleOS execution lane
 - Merge owner: SOSIX/QEMU integration lane
 - Final reviewer: independent normal/highest-capability reviewer
+

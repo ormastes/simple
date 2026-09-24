@@ -29,7 +29,8 @@
 # The honest fix here is the SIGSEGV guard plus a loopback/pty fixture, not a
 # rewritten assertion. Do NOT "fix" these by expecting "ready".
 
-use app.serial_mcp.tools.{detect_tool_name, get_arg, get_arg_int}
+use app.serial_mcp.tools.{get_arg, get_arg_int}
+use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_server_handle, mcp_server_reset}
 use app.serial_mcp.protocol.{make_tool_serial_open, make_tool_ssh_serial_exec}
 use std.common.test_env_gate.{test_env_require, test_env_hardware_available}
 
@@ -62,18 +63,33 @@ describe "SshSerialExecResult":
             expect(test_env_require("SIMPLE_HW_TEST")).to_equal("blocked:SIMPLE_HW_TEST")
 
 describe "MCP Tool Dispatch":
-    describe "detect_tool_name":
-        it "AC-5: extracts tool name from tools/call body":
+    describe "tools/call name routing":
+        # The app-local `detect_tool_name` helper this block used to call was
+        # removed when serial-mcp migrated to the McpServer facade (Wave C3, see
+        # src/app/serial_mcp/main.spl). The facade's mcp_server_handle now does the
+        # params.name lookup, so these examples exercise that real dispatch path
+        # instead of an import that resolves to nothing.
+        it "AC-5: routes a tools/call body to the named tool":
             # @req REQ-SSPEC-UNIT
-            step("AC-5: extracts tool name from tools/call body")
-            val body = "{\"params\":{\"name\":\"ssh_serial_exec\",\"arguments\":{}}}"
-            expect(detect_tool_name(body)).to_equal("ssh_serial_exec")
+            step("AC-5: routes a tools/call body to the named tool")
+            mcp_server_reset()
+            mcp_server_init("serial-mcp-spec", "0.0.0")
+            mcp_server_tool("ssh_serial_exec", "probe", fn() -> text: "{}", fn(a: text) -> text: "picked ssh_serial_exec")
+            mcp_server_tool("serial_open", "probe", fn() -> text: "{}", fn(a: text) -> text: "picked serial_open")
+            val body = "{\"method\":\"tools/call\",\"params\":{\"name\":\"ssh_serial_exec\",\"arguments\":{}}}"
+            expect(mcp_server_handle(body) ?? "").to_contain("picked ssh_serial_exec")
 
-        it "AC-5: extracts serial_open from body":
+        it "AC-5: routes serial_open from body":
             # @req REQ-SSPEC-UNIT
-            step("AC-5: extracts serial_open from body")
-            val body = "{\"params\":{\"name\":\"serial_open\",\"arguments\":{}}}"
-            expect(detect_tool_name(body)).to_equal("serial_open")
+            step("AC-5: routes serial_open from body")
+            mcp_server_reset()
+            mcp_server_init("serial-mcp-spec", "0.0.0")
+            mcp_server_tool("ssh_serial_exec", "probe", fn() -> text: "{}", fn(a: text) -> text: "picked ssh_serial_exec")
+            mcp_server_tool("serial_open", "probe", fn() -> text: "{}", fn(a: text) -> text: "picked serial_open")
+            val body = "{\"method\":\"tools/call\",\"params\":{\"name\":\"serial_open\",\"arguments\":{}}}"
+            val out = mcp_server_handle(body) ?? ""
+            expect(out).to_contain("picked serial_open")
+            expect(out.contains("picked ssh_serial_exec")).to_equal(false)
 
     describe "get_arg":
         it "AC-5: extracts string argument from simple body":

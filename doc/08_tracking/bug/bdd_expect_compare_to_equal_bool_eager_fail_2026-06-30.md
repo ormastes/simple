@@ -1,5 +1,11 @@
 # Bug: `expect(a == b).to_equal(false)` false-fails when a != b
 
+## Closed 2026-09-13 — `expect(a == b).to_equal(false)` passes, with no failure-masking
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Spec with both idioms (`expect("aaa" == "bbb").to_equal(false)` and `expect("aaa" == "aaa").to_equal(true)`) runs green: `2 examples, 0 failures`.
+- **measured** The FALSE-GREEN risk the entry warned about did not materialise: an example containing that idiom followed by a genuinely failing `expect(1).to_equal(2)` still reports `1 example, 1 failure` / `outcome=ERROR`.
+
 **Date:** 2026-06-30
 **Severity:** Medium — false-RED on specs that assert inequality via the
 `expect(<comparison>).to_equal(<bool>)` idiom (library/code is correct).

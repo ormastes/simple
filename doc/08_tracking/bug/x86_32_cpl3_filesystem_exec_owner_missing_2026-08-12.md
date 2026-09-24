@@ -1,4 +1,8 @@
 # x86_32 CPL3 filesystem execution owner is missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The x86_32 initrd lane must not claim arbitrary filesystem-program execution.
 `rt_x86_32_trigger_int80` executes `int $0x80` at the kernel's current
@@ -124,3 +128,4 @@ Compiler SHA-256 is
 This closes the boot/mount/list/nonce/ELF-admission ambiguity but deliberately
 does not close the missing authenticated CPL3 entry/trap/continuation/reap
 owner.
+

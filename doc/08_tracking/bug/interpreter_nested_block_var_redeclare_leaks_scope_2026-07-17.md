@@ -1,7 +1,44 @@
 # Bug: nested-block `var` redeclaration leaks into outer scope (Rust seed interpreter)
 
+## Closed 2026-09-13 — fixed, re-verified by running the entry repro on both lanes
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran the minimal repro verbatim:
+
+```spl
+fn run(args: [text]) -> i32:
+    var kpath = "outer"
+    for arg in args:
+        if arg.starts_with("x"):
+            var kpath = "inner"
+            print "nested={kpath}"
+    print "outer_after={kpath}"
+    0
+
+fn main() -> i32:
+    run(["xyz"])
+```
+
+Both lanes print:
+
+```
+nested=inner
+outer_after=outer
+```
+
+The outer binding is restored on block exit — the inner `var` no longer
+leaks. The `capture_block_scope_shadows` / `restore_block_scope_shadows`
+fix described in the Status line holds in execution, not just in source
+(measured).
+
 - **Date:** 2026-07-17
-- **Status:** fixed — `exec_block`/`exec_block_fn` now capture each block's directly-declared
+- **Status:** fixed — `exec_block`/`exec_block_fn` now capture each block's directly-declared — CLOSED 2026-09-13 (see top section)
   names (`var`/`val`/`const`/`static`) before running its statements and restore
   (or remove) them on every exit path (fallthrough, return, break, continue).
   See `src/compiler_rust/compiler/src/interpreter/block_exec.rs`

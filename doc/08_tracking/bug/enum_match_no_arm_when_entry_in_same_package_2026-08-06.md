@@ -1,4 +1,8 @@
 # `match` on an imported enum silently matches NO arm when the entry point lives in the same package
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-06
 - Status: FIXED
@@ -226,3 +230,4 @@ repro above is quick to reconstruct from this description.
 - Enum registry dual-keyed; discriminant is a cross-crate ABI.
 - Single-field enum variant payload is not a 1-tuple.
 - Enum payload sub-patterns: the axis is nesting.
+

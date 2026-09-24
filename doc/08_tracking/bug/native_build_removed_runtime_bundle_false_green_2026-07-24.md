@@ -1,4 +1,8 @@
 # Native-build removed runtime bundle false-green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -35,3 +39,4 @@ terminated once. No retry was started.
 Fresh deployed Stage-2/Stage-4 qualification remains pending. Before retrying,
 instrument or bound entry-closure discovery so this silent CPU-bound phase
 identifies its current module.
+

@@ -1,0 +1,105 @@
+use common.plugin.iface_id.{IfaceId, ParamHeader, ParamExt}
+
+pub const HOST_OFFER_SCHEMA_V1 = "simple.plugin.HostOfferV1"
+pub const PLUGIN_ANSWER_SCHEMA_V1 = "simple.plugin.PluginAnswerV1"
+
+struct HostOfferV1:
+    hdr: ParamHeader
+    simple_abi_version: i64
+    simple_abi_deferred: bool
+    producer_identity: text
+    ifaces: [IfaceId]
+    accepted_digests: [text]
+    capabilities: [text]
+    ext: [ParamExt]
+
+struct PluginAnswerV1:
+    hdr: ParamHeader
+    implements: IfaceId
+    simple_abi_version: i64
+    simple_abi_deferred: bool
+    requires_caps: [text]
+    plugin_digest: text
+    ext: [ParamExt]
+
+enum NegotiateVerdict:
+    Ok
+    OkAbiDeferred
+    NameMismatch(text)
+    MajorMismatch(i64, i64)
+    MinorTooNew(i64, i64)
+    DigestUnaccepted(text)
+    MissingCapability(text)
+    AbiVersion(i64, i64)
+    AbiDeferralMismatch
+    SchemaMismatch(text)
+
+impl NegotiateVerdict:
+    fn code() -> text:
+        match self:
+            case Ok: "OK"
+            case OkAbiDeferred: "OK-ABI-DEFERRED"
+            case NameMismatch(_): "PLUG-E-NAME"
+            case MajorMismatch(_, _): "PLUG-E-MAJOR"
+            case MinorTooNew(_, _): "PLUG-E-MINOR"
+            case DigestUnaccepted(_): "PLUG-E-DIGEST"
+            case MissingCapability(_): "PLUG-E-CAP"
+            case AbiVersion(_, _): "PLUG-E-ABI"
+            case AbiDeferralMismatch: "PLUG-E-ABI-DEFER"
+            case SchemaMismatch(_): "PLUG-E-SCHEMA"
+
+    fn accepted() -> bool:
+        match self:
+            case Ok: true
+            case OkAbiDeferred: true
+            case _: false
+
+fn _plugin_text_present(values: [text], expected: text) -> bool:
+    for value in values:
+        if value == expected:
+            return true
+    false
+
+fn _plugin_header_v1_valid(header: ParamHeader, expected_name: text) -> bool:
+    header.schema_name == expected_name and header.schema_major == 1 and
+        header.schema_minor == 0 and header.present == 0
+
+pub fn host_offer_v1_schema_valid(host: HostOfferV1) -> bool:
+    _plugin_header_v1_valid(host.hdr, HOST_OFFER_SCHEMA_V1)
+
+fn negotiate(host: HostOfferV1, answer: PluginAnswerV1) -> NegotiateVerdict:
+    if not host_offer_v1_schema_valid(host):
+        return NegotiateVerdict.SchemaMismatch("host-offer")
+    if not _plugin_header_v1_valid(answer.hdr, PLUGIN_ANSWER_SCHEMA_V1):
+        return NegotiateVerdict.SchemaMismatch("plugin-answer")
+    if answer.plugin_digest == "":
+        return NegotiateVerdict.DigestUnaccepted("missing-plugin-digest")
+    var named: IfaceId? = nil
+    for iface in host.ifaces:
+        if iface.name == answer.implements.name:
+            named = Some(iface)
+            break
+    if named == nil:
+        return NegotiateVerdict.NameMismatch(answer.implements.name)
+    val host_iface = named.unwrap()
+    if host_iface.major != answer.implements.major:
+        return NegotiateVerdict.MajorMismatch(host_iface.major, answer.implements.major)
+    if answer.implements.minor > host_iface.minor:
+        return NegotiateVerdict.MinorTooNew(host_iface.minor, answer.implements.minor)
+    if (answer.implements.abi_digest != host_iface.abi_digest and
+            not _plugin_text_present(host.accepted_digests, answer.implements.abi_digest)):
+        return NegotiateVerdict.DigestUnaccepted(answer.implements.abi_digest)
+    for capability in answer.requires_caps:
+        if not _plugin_text_present(host.capabilities, capability):
+            return NegotiateVerdict.MissingCapability(capability)
+    if host.simple_abi_deferred != answer.simple_abi_deferred:
+        return NegotiateVerdict.AbiDeferralMismatch
+    if host.simple_abi_deferred:
+        if host.simple_abi_version != 0 or answer.simple_abi_version != 0:
+            return NegotiateVerdict.AbiDeferralMismatch
+        return NegotiateVerdict.OkAbiDeferred
+    if host.simple_abi_version <= 0 or answer.simple_abi_version <= 0:
+        return NegotiateVerdict.AbiDeferralMismatch
+    if host.simple_abi_version != answer.simple_abi_version:
+        return NegotiateVerdict.AbiVersion(host.simple_abi_version, answer.simple_abi_version)
+    NegotiateVerdict.Ok

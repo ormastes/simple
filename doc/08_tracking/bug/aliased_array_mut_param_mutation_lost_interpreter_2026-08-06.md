@@ -1,4 +1,8 @@
 # Passing one array as both a `mut` and a non-`mut` parameter silently discards the mutation (interpreter)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
@@ -382,3 +386,4 @@ cannot move in either direction without someone being told.
   oracle, the probe, has been executed directly and does work. Do not treat the
   spec as passing until someone has seen a `Results: N total, N passed` line
   from it.
+

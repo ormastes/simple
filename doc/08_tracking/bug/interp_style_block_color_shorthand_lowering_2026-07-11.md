@@ -1,4 +1,8 @@
 # Interpreter HIR-Lowering Flake on `<style>`-Block `background`/`color` During Software Paint
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -69,3 +73,4 @@ path (grep the renderer for the `background`/`color` shorthand expansion reached
 only from the block cascade). Likely the same class as other "variable X not
 found while lowering" lazy-JIT resolution gaps. A compiled (non-interpreter)
 build should be checked to confirm it is interpreter-only.
+

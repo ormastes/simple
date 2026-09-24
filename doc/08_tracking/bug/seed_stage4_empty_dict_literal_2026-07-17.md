@@ -1,4 +1,9 @@
 # Seed Stage4 `{}` empty-dict literal is NOT defective — the `{}` vs `Map.new()` land-war rationale is stale
+## Closed 2026-09-16 — RESOLVED; {} verified clean on all four seed paths, land-war settled
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Lane:** S57
@@ -135,3 +140,4 @@ None needed for `{}`. Action items:
   `test/01_unit/app/cli/bootstrap_main_source_spec.spl`).
 - `6b59a8c4bf7` — prior seed brace-form struct-init nil-fill fix (context: the
   seed has had brace-literal bugs before, but not this one).
+

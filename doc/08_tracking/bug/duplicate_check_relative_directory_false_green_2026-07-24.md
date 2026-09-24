@@ -1,4 +1,8 @@
 # Duplicate-check relative directory false-green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -44,3 +48,4 @@ its direct fixtures/system contract so gate-only changes trigger CI.
 
 Run the exact fresh Stage 4 essential-tools gate once an admitted candidate is
 available; do not accept the temporary bootstrap result as release evidence.
+

@@ -1,4 +1,8 @@
 # SimpleHttpServer dies on the first connection — an isolated-thread arg arrives as the module dict
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-03. Status: OPEN. Severity: HIGH — this breaks **every** in-repo
 `SimpleHttpServer` user, not one lane.
@@ -90,3 +94,4 @@ http_server owner's call; this record does not preempt it.
 - Blocks the live lane of `src/app/slang_server/main.spl`. That server's
   request dispatcher is separately spec-verified (18 examples) — the contract
   is proven, the socket path is not.
+

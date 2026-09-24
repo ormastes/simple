@@ -1,6 +1,6 @@
 # RET lint does not census lambda bodies
 
-- **Status:** OPEN (low priority — measured empty corpus)
+- **Status:** CLOSED (2026-08-17) — WONTFIX, corpus re-measured and still empty; see bottom section. (Header re-synced 2026-09-13 — the body already carried this closure, the header line above did not.)
 - **Component:** `src/compiler/35.semantics/lint/return_type_mismatch.spl`
 - **Filed:** 2026-08-10
 - **Related:** `declared_return_type_not_enforced_2026-08-09.md`,
@@ -95,3 +95,16 @@ The sentence enumerates what the *future type checker* must reconcile and
 explicitly scopes this module to the WARN half. It is the only `lambda`/
 `closure` occurrence in the file. No docstring edit is warranted; do not
 "fix" it on the next pass.
+
+## Re-check 2026-09-13 (BUGFIX-6 lane)
+
+Header/body status mismatch found and corrected (header still said OPEN
+after the WONTFIX closure below it). Re-ran the reopen-condition grep on
+base `a6450c9d6f5`:
+
+```
+/usr/bin/grep -rnE "(fn\s*\(|\|[a-z_, ]*\|)\s*->" --include=*.spl src | wc -l
+0
+```
+
+Still zero. WONTFIX closure stands.

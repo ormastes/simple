@@ -1,4 +1,8 @@
 # 19 spec files define a local `skip_on_interpreter` that DISCARDS its block and reports PASS
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — root-caused and measured, not fixed (fixing it turns the
 affected examples honestly RED; see "Why not fixed here")
@@ -103,3 +107,4 @@ blast radius — HAS been fixed; see
 - All measurements are on the deployed 2026-08-16 **Rust seed**
   (`bin/simple --version` prints its own bootstrap-seed-only warning). Nothing
   here was re-checked against a freshly bootstrapped pure-Simple compiler.
+

@@ -104,3 +104,7 @@ version peeks at `next_lexeme` instead of `prev_kind`.
   `val` bindings / non-bare uses, so none currently trip this in practice —
   the repro above is synthetic but demonstrates the class is real and would
   break the first such usage that's ever written).
+
+## Triage 2026-09-13
+Reconfirmed: Rust seed parser heuristic (error_recovery.rs), out of scope
+for a pure-Simple lane. Left OPEN, no code change attempted.

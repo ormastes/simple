@@ -1,0 +1,189 @@
+"""Closed physical selected-head publication boundary.
+
+The existing three-payload publisher remains the sole semantic owner.  This
+adapter reserves the future physical operation that must hold one
+issuer-validated cooperative namespace scope across blob durability, journal
+admission, selected-head CAS replacement and directory sync.  Until the host
+can issue that scope, this module refuses without staging or mutating anything.
+"""
+
+use compiler.driver.cache.journal.action_root_journal_v1.{
+    action_root_journal_find_operation_v1}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    ThreePayloadDurablePublicationPacketV1,
+    prepared_three_payload_generation_publish_candidate_valid_v2}
+use common.cache_daemon_host_authority_v1.{CacheNamespaceExpectedHeadV3}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    L78BoundaryErrorV4, L78AttemptKeyV4, L78OwnerTokenV4,
+    L78OwnedResultV4}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+# V4 publication is an owner-retaining boundary.  Shared owner/token types
+# come from the common contract; this module adds publication state and a
+# receipt whose host-evidence bit is never set by a model or test adapter.
+pub enum L78PublicationPhaseV4:
+    NotStarted
+    Committed
+    Replayed
+    Unknown
+
+pub struct L78PublishReceiptV4:
+    phase: L78PublicationPhaseV4
+    operation: L78AttemptKeyV4
+    active_head: CacheNamespaceExpectedHeadV3
+    authority: L78OwnerTokenV4?
+
+pub fn l78_publication_phase_transition_v4(
+    current: L78PublicationPhaseV4,
+    next: L78PublicationPhaseV4,
+) -> bool:
+    # In particular, Unknown is never recoverable by resetting the owner to
+    # NotStarted. Exact host recovery must resolve it or retain Unknown.
+    match current:
+        case L78PublicationPhaseV4.NotStarted:
+            next == L78PublicationPhaseV4.Committed or
+                next == L78PublicationPhaseV4.Replayed or
+                next == L78PublicationPhaseV4.Unknown
+        case L78PublicationPhaseV4.Unknown:
+            next == L78PublicationPhaseV4.Committed or
+                next == L78PublicationPhaseV4.Replayed or
+                next == L78PublicationPhaseV4.Unknown
+        case L78PublicationPhaseV4.Committed:
+            next == L78PublicationPhaseV4.Committed
+        case L78PublicationPhaseV4.Replayed:
+            next == L78PublicationPhaseV4.Replayed
+
+pub trait L78PublicationPortV4:
+    me commit(
+        namespace_token: L78OwnerTokenV4,
+        scope: L78OwnerTokenV4,
+        affected: L78OwnerTokenV4,
+        closure: L78OwnerTokenV4,
+        expected: CacheNamespaceExpectedHeadV3,
+        packet: ThreePayloadDurablePublicationPacketV1,
+    ) -> Result<L78PublishReceiptV4, L78BoundaryErrorV4>
+    me resolve(
+        namespace_token: L78OwnerTokenV4,
+        operation: L78AttemptKeyV4,
+    ) -> Result<L78PublishReceiptV4, L78BoundaryErrorV4>
+
+pub struct L78ClosedPublicationPortV4:
+    reason: text
+
+impl L78PublicationPortV4 for L78ClosedPublicationPortV4:
+    me commit(
+        namespace_token: L78OwnerTokenV4,
+        scope: L78OwnerTokenV4,
+        affected: L78OwnerTokenV4,
+        closure: L78OwnerTokenV4,
+        expected: CacheNamespaceExpectedHeadV3,
+        packet: ThreePayloadDurablePublicationPacketV1,
+    ) -> Result<L78PublishReceiptV4, L78BoundaryErrorV4>:
+        # The closed adapter refuses before inspecting caller DTOs.  A future
+        # provider must validate and bind every argument in one owner scope.
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me resolve(
+        namespace_token: L78OwnerTokenV4,
+        operation: L78AttemptKeyV4,
+    ) -> Result<L78PublishReceiptV4, L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+pub fn l78_closed_publication_port_v4(reason: text) -> L78ClosedPublicationPortV4:
+    L78ClosedPublicationPortV4(reason: reason)
+
+# Preserve the concrete owner on both success and refusal.  Callers must not
+# discard a port after an Unknown result, because only that owner can retain
+# and later resolve its attempt-bound receipt.
+pub fn l78_commit_with_port_v4<P: L78PublicationPortV4>(
+    owner: P,
+    namespace_token: L78OwnerTokenV4,
+    scope: L78OwnerTokenV4,
+    affected: L78OwnerTokenV4,
+    closure: L78OwnerTokenV4,
+    expected: CacheNamespaceExpectedHeadV3,
+    packet: ThreePayloadDurablePublicationPacketV1,
+) -> L78OwnedResultV4<P, L78PublishReceiptV4>:
+    val outcome = owner.commit(namespace_token, scope, affected, closure, expected,
+        packet)
+    L78OwnedResultV4<P, L78PublishReceiptV4>(owner: owner, outcome: outcome)
+
+pub fn l78_resolve_with_port_v4<P: L78PublicationPortV4>(
+    owner: P,
+    namespace_token: L78OwnerTokenV4,
+    operation: L78AttemptKeyV4,
+) -> L78OwnedResultV4<P, L78PublishReceiptV4>:
+    val outcome = owner.resolve(namespace_token, operation)
+    L78OwnedResultV4<P, L78PublishReceiptV4>(owner: owner, outcome: outcome)
+
+pub struct ThreePayloadSelectedHeadExpectationV1:
+    prior_revision: i64
+    prior_generation: i64
+    target_generation: i64
+    target_manifest_digest: text
+    accepted_journal_bytes: i64
+    accepted_journal_digest: text
+    operation_digest: text
+
+pub enum ThreePayloadSelectedHeadCommitFailureV1:
+    InvalidRequest
+    NamespaceUnavailable
+    StaleWriter
+    Indeterminate
+
+fn _selected_operation_matches_v1(
+    expected: ThreePayloadSelectedHeadExpectationV1,
+    packet: ThreePayloadDurablePublicationPacketV1,
+) -> bool:
+    if (expected.accepted_journal_bytes < 0 or
+            expected.accepted_journal_bytes > packet.journal.bytes.len()):
+        return false
+    val selected = packet.journal.bytes.slice(0, expected.accepted_journal_bytes)
+    val record = action_root_journal_find_operation_v1(selected,
+        expected.target_generation, expected.operation_digest)
+    record != nil and record?.sequence == packet.durable.sequence and
+        record?.action_digest == packet.action_digest and
+        record?.manifest_digest == expected.target_manifest_digest
+
+pub fn three_payload_selected_head_expectation_valid_v1(
+    expected: ThreePayloadSelectedHeadExpectationV1,
+    packet: ThreePayloadDurablePublicationPacketV1,
+) -> bool:
+    expected.prior_revision >= 0 and expected.prior_generation >= 0 and
+        expected.target_generation >= 0 and
+        expected.target_generation == packet.root.generation and
+        expected.target_generation == packet.journal.generation and
+        expected.target_generation == packet.durable.generation and
+        sha256_lower_hex_valid(expected.target_manifest_digest) and
+        expected.target_manifest_digest == packet.root.manifest_digest and
+        expected.accepted_journal_bytes >= 0 and
+        expected.accepted_journal_bytes <= packet.journal.bytes.len() and
+        expected.accepted_journal_bytes == packet.durable.accepted_journal_bytes and
+        sha256_lower_hex_valid(expected.accepted_journal_digest) and
+        expected.accepted_journal_digest ==
+            packet.durable.accepted_journal_prefix_digest and
+        expected.accepted_journal_digest == sha256_text(packet.journal.bytes.slice(
+            0, expected.accepted_journal_bytes)) and
+        sha256_lower_hex_valid(expected.operation_digest) and
+        expected.operation_digest == packet.durable.operation_digest and
+        packet.durable.journal_digest == sha256_text(packet.journal.bytes) and
+        prepared_three_payload_generation_publish_candidate_valid_v2(
+            packet.prepared, packet.action_digest, packet.root, packet.pins,
+            packet.objects) and
+        _selected_operation_matches_v1(expected, packet)
+
+# Pure preflight only. This function returns no scope or publication receipt.
+# It consumes an already-durable target packet and only validates copied
+# semantics; it neither proves nor performs prior-head compare-and-swap.
+# The future existing-host owner must hold one non-constructible namespace
+# capability while it syncs immutable objects and directories, admits the
+# journal, replaces the selected head, syncs its directory, and finally invokes
+# the existing semantic activation owner.
+pub fn three_payload_selected_head_preflight_v1(
+    expected: ThreePayloadSelectedHeadExpectationV1,
+    packet: ThreePayloadDurablePublicationPacketV1,
+) -> Result<(), ThreePayloadSelectedHeadCommitFailureV1>:
+    if not three_payload_selected_head_expectation_valid_v1(expected, packet):
+        return Err(ThreePayloadSelectedHeadCommitFailureV1.InvalidRequest)
+    Err(ThreePayloadSelectedHeadCommitFailureV1.NamespaceUnavailable)

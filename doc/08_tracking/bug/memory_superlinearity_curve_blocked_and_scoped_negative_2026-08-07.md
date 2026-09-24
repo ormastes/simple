@@ -1,4 +1,9 @@
 # src/app entry-closure memory curve: flat through 550 files, blocked before 722; 70GB figure traced to a different scale entirely
+## Closed 2026-09-16 — explicit Status CLOSED (not reproducible); 70GB traced to different build
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: CLOSED (not reproducible)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -80,3 +85,4 @@ blocker, implicates `src/app`'s closure in the 70GB figure.
    needs direct measurement, it requires sampling the full Stage-3
    self-compile itself, which is out of scope here (explicitly excluded by
    the lane brief: "Do NOT launch a full multi-hour Stage-3 build for this").
+

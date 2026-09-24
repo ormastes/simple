@@ -1,4 +1,9 @@
 # BUG: committed pmm bound kernel_end=0x14000000 overlaps 128MB-base kernel RW — green stream baseline unbuildable from origin
+## Closed 2026-09-16 — ...ildable from origin **Status:** RESOLVED (2026-07-12) **Severity:** medium-high (fresh bui
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-07-12)
 **Severity:** medium-high (fresh builds of the clang streaming path corrupt FAT stream state; masks/compounds the seed regression)
@@ -40,3 +45,4 @@ Verified: 124.6 MB clang_static streams to completion (PASS stream-open,
 no FAT-state corruption; the downstream abort-134 is the separate
 module_vs_entry/source regression); ssh_clang_hello_ring3 FULL green;
 ssh_multi_cmd green; disassembly shows mov $0x18000000 in the built kernel.
+

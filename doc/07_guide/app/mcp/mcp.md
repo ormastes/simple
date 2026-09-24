@@ -1,8 +1,17 @@
 # MCP Server Setup and Usage
 
-The Simple MCP (Model Context Protocol) server currently provides 151 tools, 3
-resources, and 2 prompts for code intelligence, debugging, build, VCS,
+The Simple MCP (Model Context Protocol) server currently provides **192 tools**,
+3 resources, and 2 prompts for code intelligence, debugging, build, VCS,
 analysis, and UI access -- accessible from Claude Code and Claude Desktop.
+
+The number a client actually sees depends on `SIMPLE_MCP_TOOL_SET`, and both
+figures below were measured on 2026-09-13 by counting `tools/list` replies from
+`src/app/mcp/main.spl`, not read off this page:
+
+| `SIMPLE_MCP_TOOL_SET` | tools in `tools/list` | who uses it |
+|---|---|---|
+| unset (auto) / `core` | **19** | the auto-mode core set, upgraded later via `listChanged` |
+| `all` | **192** | what `bin/simple_mcp_server` and `bin\simple_mcp_server.cmd` export, so this is the shipped default |
 
 Writing or migrating a server: use the McpServer facade — see
 `mcp_framework.md` (+tldr) and the ~30-line example in
@@ -240,7 +249,9 @@ bin/simple_mcp_server
 - **Protocol**: JSON-RPC 2.0 over stdio
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
-- **Tool count**: 151 tools in the current source fallback path
+- **Tool count**: 192 tools with `SIMPLE_MCP_TOOL_SET=all` (what the shipped
+  wrappers export), 19 in the auto/`core` set — measured 2026-09-13 from
+  `tools/list` on the source fallback path
 - **Wrapper fallback**: `bin/simple_mcp_server` delegates to the native binary
   first, then falls back to the source MCP entrypoint when native `tools/list`
   is stale or a `play_wm_text_*` request needs the current source handlers.
@@ -415,7 +426,7 @@ For the operator workflow and HTTP route equivalents, see
 | `simple_implementation` | Trait impls | file, line |
 | `simple_folding_range` | Folding ranges | file |
 
-### Context (7 tools)
+### Context (9 tools)
 
 Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 `src/app/mcp/main_lazy_ctx_tools.spl`; specs:
@@ -431,6 +442,8 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 | `simple_ctx_batch_execute` | Run commands, index each output under `source#i`, answer queries in one call | commands |
 | `simple_ctx_fetch_and_index` | GET via the Simple http client (http/https only, no JS), cap bytes, strip tags, index | url |
 | `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
+| `simple_ctx_doctor` | Self-check checklist for the ctx store (schema version, store reachability, hook wiring) | |
+| `simple_ctx_upgrade` | Re-index / compact the chunk store and migrate it to the current schema version | |
 | `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
 | `simple_token_burn` | Code burn: which feature/tool spent the budget, ranked by bytes returned to the model, with tokens saved vs the unoptimized original | |
 | `simple_log_optimize` | Filter a clang/rust/ninja/cmake/simple build log through its plugin descriptor; no `log` argument lists the installed plugins | log |

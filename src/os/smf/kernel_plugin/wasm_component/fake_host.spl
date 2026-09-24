@@ -1,0 +1,98 @@
+use os.smf.kernel_plugin.wasm_component.contract.KpfWasmComponentOutcome
+
+pub struct KpfWasmResourceHandleV1:
+    generation: i64
+    slot: i64
+    epoch: i64
+
+pub struct KpfWasmCompletionV1:
+    outcome: KpfWasmComponentOutcome
+    request_slot: i64
+    request_epoch: i64
+    payload: [u8]
+
+pub class KpfDeterministicWasmHostV1:
+    generation: i64
+    capacity: i64
+    var epochs: [i64]
+    var active: [bool]
+    var cancelled: [bool]
+    var payloads: [[u8]]
+    var resources: [bool]
+    var resource_epochs: [i64]
+    var cursor: i64
+
+impl KpfDeterministicWasmHostV1:
+    pub static fn create(generation: i64, capacity: i64) -> KpfDeterministicWasmHostV1:
+        var epochs: [i64] = []
+        var active: [bool] = []
+        var cancelled: [bool] = []
+        var payloads: [[u8]] = []
+        var resources: [bool] = []
+        var resource_epochs: [i64] = []
+        var index = 0
+        while index < capacity:
+            epochs.push(0)
+            active.push(false)
+            cancelled.push(false)
+            payloads.push([])
+            resources.push(false)
+            resource_epochs.push(0)
+            index = index + 1
+        KpfDeterministicWasmHostV1(generation: generation, capacity: capacity,
+            epochs: epochs, active: active, cancelled: cancelled, payloads: payloads,
+            resources: resources, resource_epochs: resource_epochs, cursor: 0)
+
+    me submit(slot: i64, epoch: i64, payload: [u8]) -> KpfWasmComponentOutcome:
+        if slot < 0 or slot >= self.capacity: return KpfWasmComponentOutcome.StaleHandle
+        if self.active[slot]: return KpfWasmComponentOutcome.WouldBlock
+        self.epochs[slot] = epoch
+        self.active[slot] = true
+        self.cancelled[slot] = false
+        self.payloads[slot] = payload
+        KpfWasmComponentOutcome.Accepted
+
+    me cancel(slot: i64, epoch: i64) -> KpfWasmComponentOutcome:
+        if slot < 0 or slot >= self.capacity or not self.active[slot] or self.epochs[slot] != epoch:
+            return KpfWasmComponentOutcome.StaleHandle
+        self.cancelled[slot] = true
+        KpfWasmComponentOutcome.Accepted
+
+    me poll() -> KpfWasmCompletionV1:
+        var examined = 0
+        while examined < self.capacity:
+            val slot = self.cursor
+            self.cursor = (self.cursor + 1) % self.capacity
+            examined = examined + 1
+            if self.active[slot]:
+                self.active[slot] = false
+                if self.cancelled[slot]:
+                    self.cancelled[slot] = false
+                    return KpfWasmCompletionV1(outcome: KpfWasmComponentOutcome.Cancelled,
+                        request_slot: slot, request_epoch: self.epochs[slot], payload: [])
+                return KpfWasmCompletionV1(outcome: KpfWasmComponentOutcome.Accepted,
+                    request_slot: slot, request_epoch: self.epochs[slot], payload: self.payloads[slot])
+        KpfWasmCompletionV1(outcome: KpfWasmComponentOutcome.Empty,
+            request_slot: -1, request_epoch: 0, payload: [])
+
+    me acquire_resource(slot: i64) -> KpfWasmResourceHandleV1:
+        if slot < 0 or slot >= self.capacity or self.resources[slot]:
+            return KpfWasmResourceHandleV1(generation: 0, slot: -1, epoch: 0)
+        self.resource_epochs[slot] = self.resource_epochs[slot] + 1
+        self.resources[slot] = true
+        KpfWasmResourceHandleV1(generation: self.generation, slot: slot,
+            epoch: self.resource_epochs[slot])
+
+    me release_resource(handle: KpfWasmResourceHandleV1) -> KpfWasmComponentOutcome:
+        if handle.generation != self.generation or handle.slot < 0 or
+                handle.slot >= self.capacity or not self.resources[handle.slot] or
+                self.resource_epochs[handle.slot] != handle.epoch:
+            return KpfWasmComponentOutcome.StaleHandle
+        self.resources[handle.slot] = false
+        KpfWasmComponentOutcome.Accepted
+
+    fn live_resource_count() -> i64:
+        var count = 0
+        for live in self.resources:
+            if live: count = count + 1
+        count

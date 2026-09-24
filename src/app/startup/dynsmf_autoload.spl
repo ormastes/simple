@@ -4,12 +4,11 @@ use os.smf.dynsmf_session.{
     DynSmfManifestEntry,
     dynsmf_default_manifest,
     dynsmf_policy_from_args_env,
-    dynsmf_session_autoload_checked,
     dynsmf_session_new,
-    dynsmf_session_queue_missing_background_compiles,
     DynSmfDynloadSetting,
-    dynsmf_session_load_checked,
+    dynsmf_session_load_admitted,
     dynsmf_session_add_evidence,
+    dynsmf_id_disabled,
     dynsmf_srchash_path,
     dynsmf_source_hash_current,
     dynsmf_manifest_source_path,
@@ -20,6 +19,10 @@ use os.smf.dynsmf_session.{
     dynsmf_artifact_status,
     dynsmf_dynload_setting_parse
 }
+use os.smf.dynsmf_trust_registry.{
+    DynSmfAdmittedRegistry,
+    dynsmf_admitted_registry_find
+}
 use os.smf.dynsmf_lifecycle.{dynsmf_session_close}
 use app.startup.dynsmf_component_bridge.{dynsmf_component_startup_plan}
 use app.io.mod.{env_get, process_spawn_async, file_exists, file_read_text,
@@ -27,20 +30,33 @@ use app.io.mod.{env_get, process_spawn_async, file_exists, file_read_text,
 
 fn dynsmf_dispatch_background_compiles(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
     var out = session
+    val queued_evidence_count = out.evidence.len()
+    var queued_index = 0
+    var has_queued_compile = false
+    while queued_index < queued_evidence_count and not has_queued_compile:
+        val row = out.evidence[queued_index]
+        has_queued_compile = (row.action == dynsmf_background_compile_action() and
+            row.status == "queued")
+        queued_index = queued_index + 1
+    if not has_queued_compile:
+        return out
+    var manifest_indices: Dict<text, i64> = {}
+    var manifest_index = 0
+    while manifest_index < manifest.len():
+        manifest_indices[manifest[manifest_index].id] = manifest_index
+        manifest_index = manifest_index + 1
     var idx = 0
-    while idx < out.evidence.len():
+    while idx < queued_evidence_count:
         val row = out.evidence[idx]
         if (row.action == dynsmf_background_compile_action() and row.status == "queued"):
             var found_source = ""
             var found_path = ""
             var found_abi = ""
-            var mid = 0
-            while mid < manifest.len():
-                if manifest[mid].id == row.library_id:
-                    found_source = dynsmf_manifest_source_path(manifest[mid])
-                    found_path = manifest[mid].path
-                    found_abi = manifest[mid].abi_version
-                mid = mid + 1
+            if manifest_indices.has(row.library_id):
+                val mid = manifest_indices[row.library_id]
+                found_source = dynsmf_manifest_source_path(manifest[mid])
+                found_path = manifest[mid].path
+                found_abi = manifest[mid].abi_version
             if found_source != "" and found_path != "":
                 val current_hash = dynsmf_source_hash_current(found_source)
                 val current_iface_hash = dynsmf_interface_hash_current(found_source)
@@ -63,6 +79,23 @@ fn dynsmf_dispatch_background_compiles(session: DynSmfSession, manifest: [DynSmf
 
 export dynsmf_dispatch_background_compiles
 
+fn _dynsmf_startup_queue_missing_without_artifact_read(session: DynSmfSession,
+        manifest: [DynSmfManifestEntry]) -> DynSmfSession:
+    var out = session
+    for entry in manifest:
+        if entry.default_autoload:
+            if dynsmf_id_disabled(out.policy, entry.id):
+                out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+                    library_id: entry.id, action: "skip", policy_source: out.policy.source,
+                    status: "skipped", handle: 0, generation: out.generation,
+                    reason: "disabled"))
+            else:
+                out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+                    library_id: entry.id, action: "load_admitted",
+                    policy_source: out.policy.source, status: "failed", handle: 0,
+                    generation: out.generation, reason: "trusted_admission_missing"))
+    out
+
 pub fn dynsmf_startup_session_for_manifest_from_values(args: [text], env_dynsmf: text, env_disable: text, session_id: text, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
     # Startup must never spawn a shell/compiler child. Missing autoload
     # artifacts are only QUEUED here (evidence status "queued"); an explicit
@@ -70,8 +103,8 @@ pub fn dynsmf_startup_session_for_manifest_from_values(args: [text], env_dynsmf:
     if (env_get("SIMPLE_DYNSMF_TRACE") ?? "") == "1":
         print "dynsmf-trace: startup_session_init session=" + session_id
     val policy = dynsmf_policy_from_args_env(args, env_dynsmf, env_disable)
-    val queued = dynsmf_session_queue_missing_background_compiles(dynsmf_session_new(session_id, policy), manifest)
-    dynsmf_session_autoload_checked(queued, manifest)
+    _dynsmf_startup_queue_missing_without_artifact_read(
+        dynsmf_session_new(session_id, policy), manifest)
 
 pub fn dynsmf_startup_session_from_values(args: [text], env_dynsmf: text, env_disable: text, session_id: text) -> DynSmfSession:
     dynsmf_startup_session_for_manifest_from_values(args, env_dynsmf, env_disable, session_id, dynsmf_default_manifest())
@@ -111,16 +144,11 @@ pub fn dynsmf_startup_session_with_dynload_settings(args: [text], env_dynsmf: te
     while idx < plan.steps.len():
         val step = plan.steps[idx]
         if step.mode == "dynamic":
-            val evidence_before = out.evidence.len()
-            out = dynsmf_session_load_checked(out, manifest, step.id)
-            if out.evidence.len() > evidence_before:
-                val latest = out.evidence[out.evidence.len() - 1]
-                if latest.status == "failed":
-                    # Transactional startup publication: a later component
-                    # failure immediately closes every earlier checked handle
-                    # in reverse order. The caller never receives a partially
-                    # live component set and need not remember to roll it back.
-                    return dynsmf_session_close(out)
+            out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+                library_id: step.id, action: "load_admitted",
+                policy_source: out.policy.source, status: "failed", handle: 0,
+                generation: out.generation, reason: "trusted_admission_missing"))
+            return dynsmf_session_close(out)
         elif step.mode != "static" and step.mode != "absent":
             out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
                 library_id: step.id, action: "component_resolve",
@@ -128,6 +156,42 @@ pub fn dynsmf_startup_session_with_dynload_settings(args: [text], env_dynsmf: te
                 generation: out.generation, reason: "unknown_mode:" + step.mode))
             return dynsmf_session_close(out)
         idx = idx + 1
+    out
+
+pub fn dynsmf_startup_session_with_registry_dynload_settings(args: [text], env_dynsmf: text,
+        env_disable: text, session_id: text, manifest: [DynSmfManifestEntry],
+        settings: [DynSmfDynloadSetting], registry: DynSmfAdmittedRegistry) -> DynSmfSession:
+    val policy = dynsmf_policy_from_args_env(args, env_dynsmf, env_disable)
+    var out = dynsmf_session_new(session_id, policy)
+    if not registry.ok:
+        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+            library_id: "*", action: "trusted_registry", policy_source: out.policy.source,
+            status: "failed", handle: 0, generation: out.generation, reason: registry.reason))
+    val requested: [text] = []
+    val plan = dynsmf_component_startup_plan(session_id, requested, manifest, settings)
+    if not plan.ok:
+        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+            library_id: "*", action: "component_resolve", policy_source: out.policy.source,
+            status: "failed", handle: 0, generation: out.generation, reason: plan.reason))
+    for step in plan.steps:
+        if step.mode == "dynamic":
+            val admitted = dynsmf_admitted_registry_find(registry, step.id)
+            if admitted == nil:
+                out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+                    library_id: step.id, action: "load_admitted", policy_source: out.policy.source,
+                    status: "failed", handle: 0, generation: out.generation,
+                    reason: "trusted_admission_missing"))
+                return dynsmf_session_close(out)
+            val evidence_before = out.evidence.len()
+            out = dynsmf_session_load_admitted(out, step.id, admitted!.request, admitted!.artifact_bytes)
+            if out.evidence.len() > evidence_before and out.evidence[out.evidence.len() - 1].status == "failed":
+                return dynsmf_session_close(out)
+        elif step.mode != "static" and step.mode != "absent":
+            out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+                library_id: step.id, action: "component_resolve", policy_source: out.policy.source,
+                status: "failed", handle: 0, generation: out.generation,
+                reason: "unknown_mode:" + step.mode))
+            return dynsmf_session_close(out)
     out
 
 pub fn dynsmf_startup_summary(session: DynSmfSession) -> text:
@@ -311,6 +375,32 @@ pub fn dynsmf_startup_session_with_dynload_config_values(args: [text], env_dynsm
         return out
     dynsmf_startup_session_with_dynload_settings(args, env_dynsmf, env_disable, session_id, manifest, config.settings)
 
+pub fn dynsmf_startup_session_with_registry_dynload_config_values(args: [text],
+        env_dynsmf: text, env_disable: text, session_id: text,
+        manifest: [DynSmfManifestEntry], sdn_text: text, env_dynload: text,
+        registry: DynSmfAdmittedRegistry) -> DynSmfSession:
+    val config = dynsmf_dynload_settings_from_values(manifest, sdn_text, env_dynload)
+    if not config.ok:
+        val policy = dynsmf_policy_from_args_env(args, env_dynsmf, env_disable)
+        var out = dynsmf_session_new(session_id, policy)
+        return dynsmf_session_add_evidence(out, DynSmfEvidenceRow(
+            library_id: "*", action: "dynload_config", policy_source: out.policy.source,
+            status: "failed", handle: 0, generation: out.generation, reason: config.reason))
+    dynsmf_startup_session_with_registry_dynload_settings(
+        args, env_dynsmf, env_disable, session_id, manifest, config.settings, registry)
+
+fn _dynsmf_startup_is_root_meta_command(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--":
+            return false
+        if arg == "--help" or arg == "-h" or arg == "--version" or arg == "-v":
+            return true
+    false
+
+fn dynsmf_trace_startup_session(session_id: text):
+    if (env_get("SIMPLE_DYNSMF_TRACE") ?? "") == "1":
+        print "dynsmf-trace: startup_session_init session=" + session_id
+
 pub fn dynsmf_startup_session_with_dynload_config(args: [text], session_id: text, manifest: [DynSmfManifestEntry], config_path: text) -> DynSmfSession:
     var sdn_text = ""
     if config_path != "" and file_exists(config_path):
@@ -324,6 +414,22 @@ pub fn dynsmf_startup_session_with_dynload_config(args: [text], session_id: text
         sdn_text,
         env_get("SIMPLE_DYNLOAD") ?? ""
     )
+
+pub fn dynsmf_startup_session_with_registry_dynload_config(args: [text], session_id: text,
+        manifest: [DynSmfManifestEntry], config_path: text,
+        registry: DynSmfAdmittedRegistry) -> DynSmfSession:
+    if _dynsmf_startup_is_root_meta_command(args):
+        return dynsmf_session_new(session_id, dynsmf_policy_from_args_env(args, "", ""))
+    dynsmf_trace_startup_session(session_id)
+    var sdn_text = ""
+    if config_path != "" and file_exists(config_path):
+        sdn_text = file_read_text(config_path)
+    dynsmf_startup_session_with_registry_dynload_config_values(
+        args,
+        env_get("SIMPLE_DYNSMF") ?? "",
+        env_get("SIMPLE_DYNSMF_DISABLE") ?? "",
+        session_id, manifest, sdn_text,
+        env_get("SIMPLE_DYNLOAD") ?? "", registry)
 
 # Product checked-dynSMF startup owner. SIMPLE_ASPECT_PACKS remains a separate
 # compatibility path owned by app.cli.startup_aspect_packs, keeping its graph
@@ -346,7 +452,11 @@ pub fn dynsmf_startup_options_from_values(args: [text], env_config: text,
         env_settings: text) -> DynSmfStartupOptions:
     var config_path = if env_config != "": env_config else: dynsmf_dynload_config_default_path()
     var explicit_config = env_config != ""
-    var cli_settings: [text] = []
+    # Accumulate pieces and join once so many CLI settings do not repeatedly
+    # copy the complete environment-and-CLI prefix.
+    var settings_parts: [text] = []
+    if env_settings != "":
+        settings_parts.push(env_settings)
     var terminated = false
     var idx = 0
     while idx < args.len():
@@ -371,19 +481,15 @@ pub fn dynsmf_startup_options_from_values(args: [text], env_config: text,
         elif arg == "--dynload":
             if idx + 1 >= args.len() or args[idx + 1] == "":
                 return DynSmfStartupOptions(ok: false, reason: "missing_dynload_setting", config_path: config_path, settings_text: "", explicit_config: explicit_config)
-            cli_settings.push(args[idx + 1])
+            settings_parts.push(args[idx + 1])
             idx = idx + 1
         elif arg.starts_with("--dynload="):
             val value = arg.slice("--dynload=".len(), arg.len())
             if value == "":
                 return DynSmfStartupOptions(ok: false, reason: "missing_dynload_setting", config_path: config_path, settings_text: "", explicit_config: explicit_config)
-            cli_settings.push(value)
+            settings_parts.push(value)
         idx = idx + 1
-    var settings_text = env_settings
-    for setting in cli_settings:
-        if settings_text != "":
-            settings_text = settings_text + ";"
-        settings_text = settings_text + setting
+    val settings_text = settings_parts.join(";")
     DynSmfStartupOptions(ok: true, reason: "loaded", config_path: config_path,
         settings_text: settings_text, explicit_config: explicit_config)
 

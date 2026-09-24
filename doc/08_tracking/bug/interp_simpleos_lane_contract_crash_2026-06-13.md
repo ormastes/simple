@@ -1,11 +1,18 @@
 # Interpreter crash: simpleos_platform_qemu_smoke_lane / lane-contract field access
 
+## Closed 2026-09-13 — Interpreter Option-poison does not reproduce; the QEMU build half is stale-by-host
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the site-2 repro is clean. An imported module returning `[QemuScenario]` supports BOTH access patterns — `get_all_scenarios()[0].name` prints `a` and `for s in get_all_scenarios(): print s.name` prints `a` / `b`. No `'name' on Option`, no crash. The seed's element-type resolution no longer differs by call site.
+- **inferred**: the workaround dispatch this entry describes lives in `src/os/qemu_runner_part3.spl`; that file and its siblings `qemu_runner_part1/4/5.spl` no longer exist — the runner was refactored after this report, so the entry's own fix sites are gone.
+- **inferred**: the "build-feasibility blocker" half is stale-by-host — it measured an LLVM-featureless Linux driver and per-arch `--backend cranelift` ENOENT walls for arm64/arm32/riscv32/x86_64 entry sources. No such lane exists on this Windows host, and `native-build` itself fails here before producing a binary.
+- Verdict: the interpreter root cause this entry left open is not reproducible; anything remaining is SimpleOS build-lane work belonging to that lane's own tracking.
+
 - **ID:** interp_simpleos_lane_contract_crash
 - **Date:** 2026-06-13
 - **Severity:** P1 (blocks interpreter-mode testing of all catalog-lane QEMU scenarios)
-- **Status:** workarounds landed 2026-06-13 (interpreter root cause open)
+- **Status:** fixed 2026-09-22; executable production-path regression added
 
-## Two distinct Option-poison sites (both worked around, root cause shared & open)
+## Original diagnosis: two Option-poison sites
 1. **Platform catalog** (`simpleos_platform_qemu_smoke_lane` etc.) — `Option<SimpleOsPlatformBuildTarget>` unwrap mis-binds. Fixed by index-based accessors (`_simpleos_platform_target_index`, `*_or_smoke`, `*_direct`) so no Option crosses a boundary.
 2. **Scenario catalog** (`get_all_scenarios()[i].name` / `for s in get_all_scenarios(): s.name`) — the seed interpreter wraps **elements of an imported `[QemuScenario]` list as Option**, so BOTH index AND for-iteration field-access fail with `'name' on Option`. Neither access pattern helps; a single constructor call (`scenario_arm64_virtio_fat32_smf().name`) is clean. Worked around with a name→constructor dispatch in `scenario_exists`/`scenario_by_name_direct` (qemu_runner_part3.spl) covering all 27 scenarios — `bin/simple os build/run/test --scenario=X` now runs without the Option crash.
 
@@ -169,4 +176,36 @@ Also fixed `simpleos_platform_arch` in `src/os/qemu_runner_part1.spl` (used same
 
 Regression spec: `test/01_unit/os/port/simpleos_platform_catalog_spec.spl` (10 cases, all green).
 
-The interpreter root cause (Option<large-struct> mis-bind on function return) remains open for a Rust-seed fix.
+At that point the interpreter root cause (Option<large-struct> mis-bind on
+function return) remained open for a Rust interpreter fix.
+
+## Resolution (2026-09-22)
+
+The generic interpreter fix had subsequently landed in
+`src/compiler_rust/compiler/src/interpreter_control.rs` as
+`optional_let_binding`: a bare identifier in `if val name = expression` now
+binds the payload of `Option::Some`, skips `None`/`nil`, and marks the binding
+local before lookup can prefer a module global.  The SimpleOS catalog retained
+its index workaround, so the original production path was never executable
+coverage and this bug remained OPEN.
+
+`simpleos_platform_qemu_smoke_lane` now deliberately consumes
+`simpleos_platform_target_by_name(name) -> SimpleOsPlatformBuildTarget?` with
+`if val` and reads `target.qemu_smoke_lane`.  The focused spec also reads both
+nested lane fields directly from the unwrapped large target.  This is the
+smallest executable reproduction of the former failure while retaining the
+real imported-module and large-aggregate boundary; before
+`optional_let_binding`, the field access observes the `Option` wrapper and
+fails with `unknown property or method ... on Option`.
+
+Focused interpreter evidence on 2026-09-22: 14/14 examples passed, including
+the direct optional target lookup and the production smoke-lane accessor.
+Elapsed time was 1.08 s and maximum RSS was 354,072 KiB.  This is host
+interpreter evidence only; it makes no SimpleOS guest/bootstrap claim.
+
+## Deferred environment verification TODO
+
+- [ ] When the admitted Phase 2 interpreter is available, rerun
+  `test/01_unit/os/port/simpleos_platform_catalog_spec.spl` with that binary
+  and retain the executable digest and result. No QEMU run is claimed or
+  required for this interpreter-contract-only change.

@@ -10,6 +10,7 @@ import { canonicalRoot, safeNamespace } from "../workspace/paths.js";
 import { assertCanonicalUid } from "../model/identity.js";
 import { createSnapshotMetadata } from "./snapshot_store.js";
 import { canonicalGraphBytes, canonicalGraphObject } from "../graph/canonical.js";
+import { fsyncDirectory } from "./directory_fsync.js";
 
 const STAGE_BRAND = new WeakSet();
 const PIN_BRAND = new WeakSet();
@@ -68,13 +69,7 @@ function atomicWrite(path, bytes) {
   const fd = openSync(temporary, "wx");
   try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temporary, path);
-  syncDirectory(dirname(path));
-}
-
-function syncDirectory(path) {
-  let fd;
-  try { fd = openSync(path, "r"); fsyncSync(fd); }
-  finally { if (fd !== undefined) closeSync(fd); }
+  fsyncDirectory(dirname(path));
 }
 
 function canonicalReplay(value, snapshotUid, graphRoot) {
@@ -168,7 +163,7 @@ export class GraphSnapshotStore {
       }
       atomicWrite(join(directory, "manifest.sdn"), `${canonicalJson(canonicalManifest)}\n`);
       if (replayRecord != null) atomicWrite(join(directory, "replay.sdn"), `${canonicalJson(replayRecord)}\n`);
-      syncDirectory(directory);
+      fsyncDirectory(directory);
       const state = {
         store_id: this.#storeId,
         transaction_id: transactionId,
@@ -227,9 +222,9 @@ export class GraphSnapshotStore {
           if (!readFileSync(replayPath).equals(replayBytes)) throw fail("SPK803", `immutable replay collision: ${stage.snapshot_uid}`);
         } else atomicWrite(replayPath, replayBytes);
       }
-      syncDirectory(this.object_root);
-      syncDirectory(this.manifest_root);
-      syncDirectory(this.replay_root);
+      fsyncDirectory(this.object_root);
+      fsyncDirectory(this.manifest_root);
+      fsyncDirectory(this.replay_root);
       atomicWrite(this.current_path, manifestBytes);
       staged.consumed = true;
       rmSync(staged.directory, { recursive: true, force: true });
@@ -238,7 +233,7 @@ export class GraphSnapshotStore {
     } finally {
       closeSync(lock.fd);
       unlinkSync(this.lock_path);
-      syncDirectory(dirname(this.lock_path));
+      fsyncDirectory(dirname(this.lock_path));
     }
   }
 
@@ -345,7 +340,7 @@ export class GraphSnapshotStore {
     }
     writeFileSync(fd, `${canonicalJson({ pid: process.pid, transaction_id: transactionId, nonce: randomBytes(16).toString("hex"), started_at_ms: Date.now() })}\n`);
     fsyncSync(fd);
-    syncDirectory(dirname(this.lock_path));
+    fsyncDirectory(dirname(this.lock_path));
     return { fd };
   }
 }

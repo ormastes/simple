@@ -116,3 +116,11 @@ Both sides of the contract now agree:
 `--emit-evidence` / `--compose-receipt` appear nowhere in the tree. The
 MISMATCH in the title is therefore closed. Still open and not proven here:
 executable acceptance (a Stage-4 CLI run producing a retained receipt).
+
+## Triage 2026-09-13
+
+Reconfirmed: the v1/v2 schema mismatch is already resolved at source level
+per this record's own note; remaining scope is "unverified authority and
+coverage gaps" needing an executable acceptance run against real RISC-V
+Gen2 HWIR evidence, outside this lane's scope. Left as implementation
+handoff / executable acceptance open, no code change attempted.

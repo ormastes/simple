@@ -59,6 +59,11 @@ int64_t rt_thread_id(int64_t handle);
 void    rt_thread_free(int64_t handle);
 void    rt_thread_sleep(int64_t millis);
 void    rt_thread_yield(void);
+/* Raw scalar TLS. Unset/invalid reads return zero; handles are never reused. */
+int64_t rt_thread_local_new(void);
+int64_t rt_thread_local_get_i64(int64_t handle);
+void    rt_thread_local_set_i64(int64_t handle, int64_t value);
+void    rt_thread_local_free(int64_t handle);
 int64_t rt_pool_submit(int64_t fn_ptr, int64_t env_ptr);
 int64_t rt_pool_join(int64_t handle);
 int64_t rt_pool_is_done(int64_t handle);
@@ -249,6 +254,20 @@ void spl_condvar_destroy(spl_condvar_handle handle);
  *   Number of logical CPU cores
  */
 int64_t spl_thread_cpu_count(void);
+
+/* Current-thread AVX2 affinity lease. Linux only; other hosts fail closed. */
+int64_t rt_cpu_affinity_avx2_acquire(void);
+int64_t rt_cpu_affinity_avx2_generation(int64_t handle);
+int64_t rt_cpu_affinity_avx2_thread_id(int64_t handle);
+int64_t rt_cpu_affinity_avx2_cpu(int64_t handle);
+bool rt_cpu_affinity_avx2_validate(int64_t handle, int64_t generation,
+                                   int64_t thread_id, int64_t cpu);
+bool rt_cpu_affinity_avx2_release(int64_t handle, int64_t generation,
+                                  int64_t thread_id);
+bool rt_cpu_affinity_avx2_call_enter(int64_t handle, int64_t generation,
+                                     int64_t thread_id, int64_t cpu);
+bool rt_cpu_affinity_avx2_call_exit(int64_t handle, int64_t generation,
+                                    int64_t thread_id, int64_t cpu);
 
 /* ===== Thread Pool Helper ===== */
 

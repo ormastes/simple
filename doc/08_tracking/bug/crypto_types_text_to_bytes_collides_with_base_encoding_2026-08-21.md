@@ -1,4 +1,8 @@
 # `crypto.types.text_to_bytes` silently loses to `base_encoding.text_to_bytes` — every digest wrong
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
 - Status: **product mitigated** (crypto auth path); **compiler defect OPEN**
@@ -208,3 +212,4 @@ rather than a crash. **Not changed here** — `bin/simple` is the Rust seed and 
 seed build was attempted (see the note above). The deeper fix remains that an
 explicit `use std.crypto.types.{text_to_bytes}` must bind to *that module's*
 definition regardless of collisions.
+

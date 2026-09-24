@@ -1,4 +1,9 @@
 # Generic GPU-lane runner routing is not wired to the real B2/C2 executors
+## Closed 2026-09-16 — Status FIXED 2026-08-08; dispatch wired to real executors, verified live on Vulkan
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-07, during Task E2 (`doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md`)
 **Status:** FIXED 2026-08-08 (see `doc/00_llm_process/feature_expert/gpu_remote_lanes/skill.md`
@@ -103,3 +108,4 @@ B3 status section and `svmg_device_arena_code_coresidency_diverges_from_ref_vm_2
 - `doc/08_tracking/lane_matrix.md`
 - `src/lib/nogc_sync_mut/test_runner/gpu_lane_common.spl`
 - `doc/00_llm_process/feature_expert/gpu_remote_lanes/skill.md`
+

@@ -1,0 +1,98 @@
+"""
+V3 owner-lifecycle acceptance harness for the L07 physical three-file lane.
+
+This suite intentionally separates fail-closed capability observations from
+primary lifecycle acceptance. A passing test process, an availability bit, a
+source scan, or copied binding DTO is not an admitted grant/cancel/revoke
+receipt. The current missing live issuer installation means the primary
+scenarios fail with `MissingEvidence` and earn zero L07 acceptance credit.
+"""
+# codex-system-test
+# @tag: in-development, system, optimization, l07, worker-v3, lifecycle
+# @req REQ-CSM-006 REQ-CSM-024 REQ-CSM-027
+
+use std.spec.{describe, context, it, expect, step}
+use compiler.common.cache_contract.three_payload_execution_v3.{
+    three_payload_execution_contract_v3,
+    three_payload_execution_contract_valid_v3,
+    three_payload_compiled_execution_available_v3,
+    three_payload_compiled_execution_blocker_v3
+}
+use test.system.optimization.fixtures.l07_worker_v3_lifecycle_acceptance_v3.{
+    l07_worker_lifecycle_missing_evidence_v3,
+    l07_require_live_worker_lifecycle_v3
+}
+
+describe "L07 V3 owner lifecycle acceptance [importance=critical; importance_weight=3]":
+
+    context "L07-V3-A01: grant to begin transition [importance=critical; importance_weight=3]":
+        # @scenario: L07-V3-A01 class=blocked status=MissingEvidence owner=compiler.cache.semantic_scope_live_owner_v2 weight=3 resume=install-real-five-issuer-grant-fixture
+        it "should reserve and begin only from one live completeness grant [importance=critical; importance_weight=3]":
+            step("Require a production owner grant instead of a copied binding or test DTO")
+            val evidence = l07_worker_lifecycle_missing_evidence_v3("L07-V3-A01",
+                "semantic_scope_live_owner_v2 + five issuer installation",
+                "install-real-five-issuer-grant-fixture")
+            expect(evidence.status).to_equal("MissingEvidence")
+            expect(evidence.importance_weight).to_equal(3)
+            l07_require_live_worker_lifecycle_v3(evidence)
+
+    context "L07-V3-A02: cancellation at begin [importance=critical; importance_weight=3]":
+        # @scenario: L07-V3-A02 class=blocked status=MissingEvidence owner=compiler.cache.semantic_scope_live_owner_v2 weight=3 resume=install-cancel-after-begin-hook
+        it "should reject parse completion after cancellation at the begin boundary [importance=critical; importance_weight=3]":
+            step("Require a live grant then cancel through the canonical owner after begin")
+            val evidence = l07_worker_lifecycle_missing_evidence_v3("L07-V3-A02",
+                "live grant and cancel-after-begin production hook",
+                "install-cancel-after-begin-hook")
+            expect(evidence.resume).to_equal("install-cancel-after-begin-hook")
+            l07_require_live_worker_lifecycle_v3(evidence)
+
+    context "L07-V3-A03: revocation after parse [importance=critical; importance_weight=3]":
+        # @scenario: L07-V3-A03 class=blocked status=MissingEvidence owner=compiler.cache.semantic_scope_live_owner_v2 weight=3 resume=install-revoke-between-parse-and-projection-hook
+        it "should invalidate a parse projection when the grant is revoked after parsing [importance=critical; importance_weight=3]":
+            step("Require a production revocation between ParseComplete and projection")
+            val evidence = l07_worker_lifecycle_missing_evidence_v3("L07-V3-A03",
+                "live grant and post-parse revocation production hook",
+                "install-revoke-between-parse-and-projection-hook")
+            expect(evidence.missing_owner).to_contain("revocation")
+            l07_require_live_worker_lifecycle_v3(evidence)
+
+    context "L07-V3-A04: cancellation before commit [importance=critical; importance_weight=3]":
+        # @scenario: L07-V3-A04 class=blocked status=MissingEvidence owner=compiler.cache.semantic_scope_live_owner_v2 weight=3 resume=install-revoke-at-precommit-hook
+        it "should fail closed when the live owner revokes authority at the precommit gate [importance=critical; importance_weight=3]":
+            step("Require a production precommit revocation hook rather than a simulated liveness value")
+            val evidence = l07_worker_lifecycle_missing_evidence_v3("L07-V3-A04",
+                "live owner precommit revocation hook",
+                "install-revoke-at-precommit-hook")
+            expect(evidence.acceptance_id).to_equal("L07-V3-A04")
+            l07_require_live_worker_lifecycle_v3(evidence)
+
+    context "L07-V3-A05: terminal parse failure [importance=critical; importance_weight=3]":
+        # @scenario: L07-V3-A05 class=blocked status=MissingEvidence owner=compiler.cache.semantic_scope_live_owner_v2 weight=3 resume=install-malformed-source-live-grant-fixture
+        it "should leave a malformed-source execution terminally failed rather than running [importance=critical; importance_weight=3]":
+            step("Require malformed source through one actual owner reservation and projection refusal")
+            val evidence = l07_worker_lifecycle_missing_evidence_v3("L07-V3-A05",
+                "malformed-source live grant fixture and terminal state projection",
+                "install-malformed-source-live-grant-fixture")
+            expect(evidence.status).to_equal("MissingEvidence")
+            l07_require_live_worker_lifecycle_v3(evidence)
+
+describe "L07 V3 supplemental contract controls [importance=normal; importance_weight=1]":
+
+    context "SUP-L07-V3-001: result injection contract [importance=normal; importance_weight=1]":
+        # @scenario: SUP-L07-V3-001 class=supplemental-contract-control eligibility=none owner=compiler.cache.three_payload_execution_v3 resume=exercise-real-owner-with-forged-result-attempt
+        it "should declare caller-created result DTO admission unavailable without treating policy as a forged-result exercise [importance=normal; importance_weight=1]":
+            step("Read the production V3 contract that forbids caller result admission")
+            val contract = three_payload_execution_contract_v3()
+            expect(three_payload_execution_contract_valid_v3(contract)).to_equal(true)
+            expect(contract.caller_result_dto_accepted).to_equal(false)
+            expect(contract.private_reserve_begin_complete).to_equal(true)
+
+    context "SUP-L07-V3-002: compiled route contract [importance=normal; importance_weight=1]":
+        # @scenario: SUP-L07-V3-002 class=supplemental-contract-control eligibility=none owner=compiler.cache.semantic_scope_live_owner_v2 resume=install-owned-parser-state-and-semantic-pipeline
+        it "should keep compiled execution unavailable until owned parser state and semantic pipeline exist [importance=normal; importance_weight=1]":
+            step("Observe the production compile-route refusal without treating it as compilation success")
+            val contract = three_payload_execution_contract_v3()
+            expect(contract.compiled_result_available).to_equal(false)
+            expect(three_payload_compiled_execution_available_v3()).to_equal(false)
+            expect(three_payload_compiled_execution_blocker_v3()).to_equal(
+                "owned_parser_state_profile_and_semantic_pipeline_unavailable")

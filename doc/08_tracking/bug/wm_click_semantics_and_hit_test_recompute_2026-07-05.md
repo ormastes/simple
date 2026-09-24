@@ -1,4 +1,8 @@
 # WM click semantics fire on down, hit-test recomputed repeatedly without caching
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/os/compositor/host_compositor_entry.spl:566-577
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 Open.
@@ -30,3 +34,4 @@ Users cannot cancel close/drag actions by dragging the pointer away (UX inconsis
 
 ## Next Step
 B1: Fire close/drag actions on release-inside; track pressed-state across down/up; cancel if pointer leaves button. B2: Add `not win.minimized` guard to `wm_lifecycle_pointer_move`. S3: Cache computed layout keyed on widget-tree revision; reuse across `set_pressed`/`dispatch_click` in the same event; skip hover hit-test if tree has not changed since the previous move event.
+

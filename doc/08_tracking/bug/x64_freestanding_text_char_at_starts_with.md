@@ -1,4 +1,9 @@
 # BUG: x86_64 freestanding native-build — text `char_at` / `starts_with` mis-decode
+## Closed 2026-09-16 — ...command.trim().starts_with("/")`. ## Fix Make the x86_64 freestanding native-build codegen
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 **CORRECTED (2026-07-12, evidence-based).** The original title conflates three
@@ -128,3 +133,4 @@ buffer the way `fs_exec_prod_ring3_entry.spl` does before pmm/vmm, or (b) make
 in the merged kernel (NVMe BAR high + FAT stream open). The sshd exec dispatch
 (this session) is already wired and calls `fs_exec_spawn_ring3` correctly; it is
 gated on this reader landing.
+

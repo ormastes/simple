@@ -14,6 +14,14 @@
 
 use compiler.mdsoc.weaving.weaving_rule.{WeavingRule}
 use compiler.mdsoc.aop_cache.aop_group_keys.{aop_selector_digest}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1, reverse_reference_register_aop_v1
+}
+
+pub fn reverse_index_publish_aop_consumer_v1(subject: text, consumer: text,
+        evidence: text):
+    reverse_reference_owner_mark_known_v1("aop-consumer")
+    reverse_reference_register_aop_v1(subject, consumer, evidence)
 
 val AOP_DESCRIPTOR_FIELDS: [text] = ["function_name", "module_path", "signature", "attributes", "effects"]
 
@@ -93,13 +101,20 @@ fn aop_targets_of_advice(index: AopReverseIndex, advice_function: text) -> [text
 # Build all four tables from rules + their partition reads + per-target
 # ordered selections. selections drive both table 3 and (inverted) table 4.
 fn aop_reverse_index_build(rules: [WeavingRule], rule_partitions: [[text]], selections: [AopTargetSelection]) -> AopReverseIndex:
+    reverse_reference_owner_mark_known_v1("aop-consumer")
     var sel_parts: [AopSelectorPartitions] = []
     var read_sets: [AopSelectorReadSet] = []
     var i = 0
     while i < rules.len():
         val sid = aop_selector_digest(rules[i].predicate_text)
         sel_parts.push(AopSelectorPartitions(selector_id: sid, partition_key_digests: rule_partitions[i]))
-        read_sets.push(aop_selector_read_set(rules[i]))
+        val read_set = aop_selector_read_set(rules[i])
+        read_sets.push(read_set)
+        val partition_evidence = rule_partitions[i].join(",")
+        val field_evidence = read_set.fields.join(",")
+        reverse_index_publish_aop_consumer_v1(
+            rules[i].advice_function, rules[i].advice_function,
+            "selector:{sid}:partitions:{partition_evidence}:fields:{field_evidence}:conservative:{read_set.conservative}")
         i = i + 1
     # Invert selections into advice -> targets.
     var advice_names: [text] = []
@@ -122,6 +137,13 @@ fn aop_reverse_index_build(rules: [WeavingRule], rule_partitions: [[text]], sele
             if uses:
                 targets.push(ts.target_entity)
         advice_targets.push(AopAdviceTargets(advice_function: name, target_entities: targets))
+        for target in targets:
+            reverse_index_publish_aop_consumer_v1(
+                name, target, targets.join(","))
+    for selection in selections:
+        for advice in selection.ordered_advice:
+            reverse_index_publish_aop_consumer_v1(
+                selection.target_entity, advice, selection.ordered_advice.join(","))
     AopReverseIndex(
         selector_partitions: sel_parts,
         selector_read_sets: read_sets,

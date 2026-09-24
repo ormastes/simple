@@ -1,4 +1,8 @@
 # `[] of text` is not Simple grammar but fails with "function `of` not found"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-31 · **Status:** OPEN (diagnostic quality)
 **Severity:** low — but the diagnostic is useless and the form looks plausible.
@@ -11,3 +15,4 @@ to a function named `of`, and the user sees
 
 Wanted: either support the form or emit a targeted parse-time diagnostic
 ("`of` is not a type ascription; write `val xs: [text] = []`").
+

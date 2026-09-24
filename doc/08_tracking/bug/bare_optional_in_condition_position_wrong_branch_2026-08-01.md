@@ -1,5 +1,43 @@
 # Bare `T?` in condition position silently takes the WRONG branch
 
+## Closed 2026-09-13 — fix confirmed by RUNNING; the outstanding "needs T3 bootstrap" caveat is discharged
+
+**Status: CLOSED (fixed, behaviourally verified).**
+
+The entry was marked FIXED but explicitly could not be closed, because the
+verification was source inspection only and a T3 full bootstrap was wanted to
+confirm the behaviour. This closes that gap with an execution transcript on the
+Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`), on **both**
+the default JIT lane and `SIMPLE_EXECUTION_MODE=interpret` — identical results:
+
+| case | expression | branch taken | verdict |
+|---|---|---|---|
+| A | `if lookup(false).?:` (absent, explicit `.?`) | ELSE | correct |
+| B | `if lookup(false):` (absent, **bare**) | ELSE | **correct — was THEN** |
+| C | `if lookup(true):` (present, bare) | THEN | correct |
+| D | `if z():` where `z() -> i64?` returns `0` | THEN | correct |
+| E | `if three():` returning `3` | THEN | correct |
+| F | `if n():` returning `nil` | ELSE | correct |
+
+Row B is the reported defect and it is gone. Rows D and E are the two
+adversarial cases and both are right:
+
+- **D** is the truthiness/presence disagreement — a *present* payload of `0`.
+  A naive "test the payload for truthiness" lowering takes ELSE here. It takes
+  THEN, so presence is genuinely being tested, not payload truthiness.
+- **E** is the `RT_NIL == 3` sentinel collision named as the root cause. A
+  *present* payload of exactly `3` would read as absent under the old lowering.
+  It takes THEN. (Same sentinel fix family as
+  `coalesce_raw_i64_sentinel_collision_2026-08-02.md`, closed the same day.)
+
+So the fix is not merely present in source — it discriminates correctly on the
+two inputs that would expose a partial fix.
+
+MEASURED. Not run: a T3 self-hosted bootstrap lane, which still does not exist
+on this host; the seed's two lanes agreeing on all six rows is the evidence
+offered instead.
+
+
 Status: FIXED
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 T3 full bootstrap to confirm. See "Fix landed" below for the precise reason

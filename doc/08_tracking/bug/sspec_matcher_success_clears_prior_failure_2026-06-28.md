@@ -1,6 +1,12 @@
 # SSpec matcher success cleared prior failure
 
-Status: fixed in source, pending deployment to the default `bin/simple`
+## Closed 2026-09-13 — fix is deployed; a passing matcher no longer clears an earlier failure
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Running the entry's own minimized repro (`expect("deliberate").to_equal("failure")` then `expect(1).to_equal(1)`) prints `spec failure: 1 of 1 example(s) failed (exit 1)` and `outcome=ERROR` — the old behaviour was `1 example, 0 failures`.
+- **measured** No false-green in the other direction either: a spec whose only assertions pass reports `0 failures`.
+
+Status: closed (fixed + deployed) 2026-09-13
 
 ## Summary
 

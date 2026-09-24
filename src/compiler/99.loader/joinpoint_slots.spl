@@ -139,6 +139,8 @@ impl JoinpointSlotTable:
     static fn alloc(capacity: i64) -> Result<JoinpointSlotTable, text>:
         if capacity <= 0:
             return Err("Join-point slot table capacity must be positive, got {capacity}")
+        if capacity > 1152921504606846975:
+            return Err("Join-point slot table capacity overflows byte size: {capacity}")
         val size = capacity * SLOT_CELL_SIZE
         val base = native_alloc_rw_memory(size)
         if base == 0:
@@ -160,6 +162,8 @@ impl JoinpointSlotTable:
         ))
 
     me cell_address(slot_id: i64) -> i64:
+        if self.base == 0 or slot_id < 0 or slot_id >= self.used:
+            return 0
         self.base + slot_id * SLOT_CELL_SIZE
 
     """Read a cell straight back out of mapped memory, little-endian.
@@ -168,6 +172,8 @@ impl JoinpointSlotTable:
     specs must be able to prove the pointer actually landed in the mapped
     page, not just in bookkeeping."""
     me read_cell_raw(slot_id: i64) -> Result<i64, text>:
+        if self.base == 0:
+            return Err("Join-point slot table has been freed")
         if slot_id < 0 or slot_id >= self.used:
             return Err("Join-point slot id {slot_id} out of range")
         val addr = self.cell_address(slot_id)
@@ -184,6 +190,8 @@ impl JoinpointSlotTable:
     store with no protection flip. Refuses a duplicate key and refuses to
     overflow the table."""
     me reserve(key: text, unadvised_target: i64) -> Result<i64, text>:
+        if self.base == 0:
+            return Err("Cannot reserve join-point slot: table has been freed")
         if self.sealed:
             return Err("Cannot reserve join-point slot '{key}': table already sealed")
         if key == "":
@@ -212,6 +220,8 @@ impl JoinpointSlotTable:
     """Seal the table: RW -> RX. After this every write goes through
     `patch_cell`."""
     me seal() -> Result<i64, text>:
+        if self.base == 0:
+            return Err("Cannot seal join-point slot table: table has been freed")
         if self.sealed:
             return Err("Join-point slot table already sealed")
         val size = self.capacity * SLOT_CELL_SIZE
@@ -225,6 +235,8 @@ impl JoinpointSlotTable:
     """Look up a slot id by stable key. Unknown key is REFUSED, not
     defaulted."""
     me lookup(key: text) -> Result<i64, text>:
+        if self.base == 0:
+            return Err("Join-point slot table has been freed")
         if not self.by_key.has(key):
             return Err("Unknown join-point slot key: {key}")
         Ok(self.by_key[key])
@@ -232,6 +244,8 @@ impl JoinpointSlotTable:
     """Read the current dispatch target for a slot -- the address an indirect
     call through this cell would land on."""
     me dispatch_target(slot_id: i64) -> Result<i64, text>:
+        if self.base == 0:
+            return Err("Join-point slot table has been freed")
         if slot_id < 0 or slot_id >= self.used:
             return Err("Join-point slot id {slot_id} out of range")
         self.read_cell_raw(slot_id)
@@ -249,6 +263,8 @@ impl JoinpointSlotTable:
     Re-protection is unconditional: no exit path leaves a writable executable
     mapping behind."""
     me patch_cell(slot_id: i64, target: i64) -> Result<i64, text>:
+        if self.base == 0:
+            return Err("Join-point slot table has been freed")
         if slot_id < 0 or slot_id >= self.used:
             return Err("Join-point slot id {slot_id} out of range")
         if target == 0:
@@ -299,5 +315,12 @@ impl JoinpointSlotTable:
         if self.base == 0:
             return false
         val ok = native_free_exec_memory(self.base, self.capacity * SLOT_CELL_SIZE)
+        if not ok:
+            return false
         self.base = 0
-        ok
+        self.capacity = 0
+        self.used = 0
+        self.by_key = {}
+        self.slots = {}
+        self.sealed = false
+        true

@@ -30,67 +30,46 @@
 # guaranteed to agree with byte offsets for non-ASCII, and source files do carry
 # UTF-8 in literals and comments, so an offset-based frame would corrupt them.
 
+use std.common.encoding.utf8.{text_byte_len}
+
 val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v1"
+
+# Generated HIR records currently top out well below this representation
+# reservation. Container entries and text are charged separately by next_len
+# and next, so this is the fixed record/enum shell allowance only.
+val FLAT_POOL_BOUNDED_NODE_BYTES: i64 = 4096
 
 # --- escaping ---------------------------------------------------------------
 
 pub fn flat_pool_escape(value: text) -> text:
     value.replace("\\", "\\\\").replace("\n", "\\n")
 
-# Placeholder that stands in for a decoded literal backslash while the two
-# escape forms are rewritten in bulk. Any value that already contains it takes
-# the character-at-a-time fallback below, so a collision costs speed and never
-# correctness.
-val FLAT_POOL_UNESCAPE_SENTINEL: text = "@@FLATPOOL-ESC@@"
-
-# Decode is on the cache-HIT path and runs once per stored text pool entry, so
-# it is the hottest loop of a hit. Three tiers, all computing the same result
-# the old character-at-a-time loop did:
-#
-#   1. No backslash at all -> the value decodes to itself. Measured 2026-08-21
-#      over the src/app bootstrap closure, the overwhelming majority of pool
-#      entries (identifiers, type names, spans-as-text) are in this class, and
-#      the old code still paid a one-character slice plus a fresh concatenation
-#      for every character of every one of them.
-#   2. Escapes present -> three BULK replaces in the runtime instead of a
-#      per-character interpreted loop. The encoder emits a backslash only as
-#      the lead byte of "\\\\" or "\\n", so unescaping is exactly: hide the
-#      doubled backslashes, turn "\\n" into a newline, restore them. A lone
-#      "\\" the encoder never emits (a trailing one, or "\\q") matches neither
-#      pattern and stays literal -- the same answer the old loop gave.
-#   3. Sentinel collision -> the original loop, verbatim, so the fast path can
-#      never be the reason a value decodes wrongly.
-#
-# Measured over one parse shard of the src/app bootstrap closure (94 real
-# compiler modules, avg blob 63 KB, interpreted worker): a cache hit went from
-# 1812 ms to 1137 ms and the warm parse phase from 170.3 s to 106.9 s. Decode
-# is still 69% of what remains (773 ms of the 1137 ms), because the rest of the
-# codec walks ~20k blob lines with a few interpreted array ops each -- that is
-# the next thing to attack, not something this change claims to have fixed.
-# doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
+# Decode is on the cache-hit path and also accepts untrusted canonical HIR
+# fields. Keep the no-backslash zero-allocation return, then decode in one
+# append-only pass. Unknown and trailing escapes retain the legacy result;
+# canonical readers reject them by re-escaping in decode_text.
 pub fn flat_pool_unescape(value: text) -> text:
     if not value.contains("\\"):
         return value
-    if not value.contains(FLAT_POOL_UNESCAPE_SENTINEL):
-        return value.replace("\\\\", FLAT_POOL_UNESCAPE_SENTINEL).replace(
-            "\\n", "\n").replace(FLAT_POOL_UNESCAPE_SENTINEL, "\\")
-    var out = ""
-    var i: i64 = 0
-    while i < value.len():
-        val ch = value[i:i + 1]
-        if ch == "\\" and i + 1 < value.len():
-            val nxt = value[i + 1:i + 2]
-            if nxt == "n":
-                out = out + "\n"
-                i = i + 2
-                continue
-            if nxt == "\\":
-                out = out + "\\"
-                i = i + 2
-                continue
-        out = out + ch
-        i = i + 1
-    out
+    var parts: [text] = []
+    var escaped = false
+    for character in value:
+        if escaped:
+            if character == "n":
+                parts.push("\n")
+            elif character == "\\":
+                parts.push("\\")
+            else:
+                parts.push("\\")
+                parts.push(character)
+            escaped = false
+        elif character == "\\":
+            escaped = true
+        else:
+            parts.push(character)
+    if escaped:
+        parts.push("\\")
+    parts.join("")
 
 # --- cursor over a line-split blob ------------------------------------------
 #
@@ -102,35 +81,298 @@ pub class FlatPoolReader:
     var lines: [text]
     var pos: i64
     var ok: bool
+    # `new` remains the trusted/legacy cursor. `new_bounded` enables the
+    # additive strict parser and its conservative pre-allocation ledger.
+    var bounded: bool
+    var canonical: bool
+    var failure_kind: text
+    var failure_detail: text
+    var max_allocation_bytes: i64
+    var max_nodes: i64
+    var max_depth: i64
+    var max_work_units: i64
+    var live_reserved_bytes: i64
+    var entered_nodes: i64
+    var current_depth: i64
+    var maximum_depth: i64
+    var charged_work_units: i64
+    var audit_events: i64
 
     fn new(blob: text) -> FlatPoolReader:
-        FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true)
+        FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true,
+            bounded: false, canonical: false, failure_kind: "", failure_detail: "",
+            max_allocation_bytes: 0, max_nodes: 0, max_depth: 0,
+            max_work_units: 0, live_reserved_bytes: 0, entered_nodes: 0,
+            current_depth: 0, maximum_depth: 0, charged_work_units: 0,
+            audit_events: 0)
+
+    # The explicit limits are primitives so this common codec stays below HIR
+    # and can be used by generated decoders without a reverse import.
+    pub static fn new_bounded(blob: text, max_input_bytes: i64,
+                              max_allocation_bytes: i64, max_nodes: i64,
+                              max_depth: i64,
+                              max_work_units: i64) -> FlatPoolReader:
+        var reader = FlatPoolReader(lines: [], pos: 0, ok: true,
+            bounded: true, canonical: true, failure_kind: "", failure_detail: "",
+            max_allocation_bytes: max_allocation_bytes, max_nodes: max_nodes,
+            max_depth: max_depth, max_work_units: max_work_units,
+            live_reserved_bytes: 0, entered_nodes: 0, current_depth: 0,
+            maximum_depth: 0, charged_work_units: 0, audit_events: 0)
+        # Simple requires parentheses around a boolean continued across lines.
+        if (max_input_bytes < 0 or max_allocation_bytes < 0 or max_nodes < 0 or
+                max_depth < 0 or max_work_units < 0):
+            reader.reject_bounds("invalid_limits")
+            return reader
+        val input_bytes = text_byte_len(blob)
+        if input_bytes > max_input_bytes:
+            reader.reject_bounds("input_bytes")
+            return reader
+        if input_bytes > max_allocation_bytes:
+            reader.reject_bounds("allocation_bytes")
+            return reader
+        # Charge the newline scan and the split pass before either begins, then
+        # reserve the retained input plus split-line representation before
+        # `split` can allocate anything.
+        if input_bytes > max_work_units / 2:
+            reader.reject_bounds("work_units")
+            return reader
+        if not reader.charge_work(input_bytes * 2):
+            return reader
+        var line_count: i64 = 1
+        for character in blob:
+            if character == "\n":
+                line_count = line_count + 1
+        if line_count > (max_allocation_bytes - input_bytes) / 64:
+            reader.reject_bounds("line_index_allocation")
+            return reader
+        if not reader.reserve(input_bytes + line_count * 64):
+            return reader
+        reader.lines = blob.split("\n")
+        reader
+
+    pub me reject_malformed(detail: text):
+        if self.ok:
+            self.failure_kind = "malformed"
+            self.failure_detail = detail
+        self.ok = false
+
+    pub me reject_bounds(detail: text):
+        if self.ok:
+            self.failure_kind = "bounds"
+            self.failure_detail = detail
+        self.ok = false
+
+    pub me charge_work(amount: i64) -> bool:
+        if not self.ok:
+            return false
+        if not self.bounded:
+            return true
+        self.audit_events = self.audit_events + 1
+        if amount < 0 or self.charged_work_units > self.max_work_units - amount:
+            self.reject_bounds("work_units")
+            return false
+        self.charged_work_units = self.charged_work_units + amount
+        true
+
+    pub me reserve(amount: i64) -> bool:
+        if not self.ok:
+            return false
+        if not self.bounded:
+            return true
+        self.audit_events = self.audit_events + 1
+        if amount < 0 or self.live_reserved_bytes > self.max_allocation_bytes - amount:
+            self.reject_bounds("allocation_bytes")
+            return false
+        self.live_reserved_bytes = self.live_reserved_bytes + amount
+        true
+
+    pub me enter_node() -> bool:
+        if not self.bounded:
+            return self.ok
+        if not self.charge_work(1):
+            return false
+        self.audit_events = self.audit_events + 1
+        if self.entered_nodes >= self.max_nodes:
+            self.reject_bounds("nodes")
+            return false
+        if self.current_depth >= self.max_depth:
+            self.reject_bounds("depth")
+            return false
+        if not self.reserve(FLAT_POOL_BOUNDED_NODE_BYTES):
+            return false
+        self.entered_nodes = self.entered_nodes + 1
+        self.current_depth = self.current_depth + 1
+        if self.current_depth > self.maximum_depth:
+            self.maximum_depth = self.current_depth
+        true
+
+    pub me leave_node():
+        if self.bounded and self.current_depth > 0:
+            self.current_depth = self.current_depth - 1
 
     me next() -> text:
+        if not self.ok:
+            return ""
+        if self.bounded and not self.charge_work(1):
+            return ""
         if self.pos >= self.lines.len():
-            self.ok = false
+            self.reject_malformed("truncated")
             return ""
         val line = self.lines[self.pos]
         self.pos = self.pos + 1
         line
 
+    me decode_nullable_i64(raw: text) -> i64:
+        if raw == "N":
+            return nil
+        if self.bounded:
+            val byte_count = text_byte_len(raw)
+            if byte_count > 20:
+                self.reject_bounds("integer")
+                return nil
+            if not self.charge_work(byte_count):
+                return nil
+        val value = flat_pool_parse_i64(raw)
+        if not self.bounded or raw == "{value}":
+            return value
+        self.reject_malformed("integer")
+        nil
+
+    me decode_nullable_bool(raw: text) -> bool:
+        if raw == "N":
+            return nil
+        if not self.bounded:
+            return raw == "1"
+        if not self.charge_work(text_byte_len(raw)):
+            return nil
+        if raw == "0":
+            return false
+        if raw == "1":
+            return true
+        self.reject_malformed("boolean")
+        nil
+
+    # Decode one HIR text scalar. Legacy readers retain permissive historical
+    # unescaping. Canonical readers accept only the two producer escape forms,
+    # charge both validation and decode scans, and reserve the append arena plus
+    # joined output before either can be materialized.
+    me decode_text(raw: text) -> text:
+        if raw == "\\N":
+            return nil
+        if not self.bounded:
+            return flat_pool_unescape(raw)
+        val byte_count = text_byte_len(raw)
+        # Validation is one pass. The append-only decoder performs one
+        # no-backslash probe and one decode pass, for three linear scans total.
+        if byte_count > (self.max_work_units - self.charged_work_units) / 3:
+            self.reject_bounds("work_units")
+            return nil
+        if not self.charge_work(byte_count * 3):
+            return nil
+        var escaped = false
+        var has_escape = false
+        for character in raw:
+            if escaped:
+                if character != "n" and character != "\\":
+                    self.reject_malformed("text_escape")
+                    return nil
+                escaped = false
+            elif character == "\\":
+                escaped = true
+                has_escape = true
+        if escaped:
+            self.reject_malformed("text_escape")
+            return nil
+        if not has_escape:
+            return raw
+        # At most one fragment per input byte plus the final decoded bytes.
+        # Check multiplication before reserving the representation envelope.
+        if byte_count > (self.max_allocation_bytes - 64) / 34:
+            self.reject_bounds("text_decode_allocation")
+            return nil
+        if not self.reserve(byte_count * 34 + 64):
+            return nil
+        flat_pool_unescape(raw)
+
+    # Preflight the temporary UTF-8 images used by canonical adjacent text-key
+    # comparison. The ordering helper performs the allocation only after this
+    # conservative ledger charge succeeds.
+    me account_text_key_compare(left: text, right: text) -> bool:
+        if not self.bounded:
+            return self.ok
+        if left == nil or right == nil:
+            return self.charge_work(1)
+        val left_bytes = text_byte_len(left)
+        val right_bytes = text_byte_len(right)
+        if left_bytes > self.max_allocation_bytes - right_bytes:
+            self.reject_bounds("text_key_compare_allocation")
+            return false
+        val total_bytes = left_bytes + right_bytes
+        if total_bytes > (self.max_allocation_bytes - 128) / 4:
+            self.reject_bounds("text_key_compare_allocation")
+            return false
+        if total_bytes > (self.max_work_units - self.charged_work_units - 1) / 3:
+            self.reject_bounds("work_units")
+            return false
+        self.reserve(total_bytes * 4 + 128) and
+            self.charge_work(total_bytes * 3 + 1)
+
     me next_i64() -> i64:
         val raw = self.next()
         if not self.ok:
             return 0
-        flat_pool_parse_i64(raw)
+        if self.bounded:
+            val byte_count = text_byte_len(raw)
+            if byte_count > 20:
+                self.reject_bounds("integer")
+                return 0
+            if not self.charge_work(byte_count):
+                return 0
+        val value = flat_pool_parse_i64(raw)
+        if self.bounded and raw != "{value}":
+            self.reject_malformed("integer")
+            return 0
+        value
 
     # A length header that is negative, or larger than what is left in the
     # blob, means the entry is corrupt. Catching it HERE (rather than looping
     # on it) is what keeps a truncated cache file a miss instead of a hang.
     me next_len() -> i64:
-        val n = self.next_i64()
+        if not self.bounded:
+            val n = self.next_i64()
+            if not self.ok:
+                return 0
+            if (n < 0) or (n > (self.lines.len() - self.pos)):
+                self.ok = false
+                return 0
+            return n
+        val raw = self.next()
         if not self.ok:
             return 0
-        # Parenthesized: the self-hosted parser reads `n < 0 or n > (` as generic args
-        # (doc/08_tracking/bug/parser_lt_gt_or_misparsed_as_generic_args_2026-08-21.md).
-        if (n < 0) or (n > (self.lines.len() - self.pos)):
-            self.ok = false
+        if text_byte_len(raw) > 20:
+            self.reject_bounds("container_count")
+            return 0
+        if not self.charge_work(text_byte_len(raw)):
+            return 0
+        val n = flat_pool_parse_i64(raw)
+        if raw != "{n}":
+            self.reject_malformed("container_count")
+            return 0
+        if n < 0:
+            self.reject_malformed("negative_container_count")
+            return 0
+        if n > self.max_nodes:
+            self.reject_bounds("container_count")
+            return 0
+        if n > self.lines.len() - self.pos:
+            self.reject_malformed("truncated_container")
+            return 0
+        if not self.charge_work(n):
+            return 0
+        if n > (self.max_allocation_bytes - 16) / 32:
+            self.reject_bounds("container_allocation")
+            return 0
+        if not self.reserve(n * 32 + 16):
             return 0
         n
 

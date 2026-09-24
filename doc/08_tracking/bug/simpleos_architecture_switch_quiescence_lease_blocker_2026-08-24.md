@@ -1,4 +1,8 @@
 # SimpleOS architecture switch quiescence lease blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Blocker
 
@@ -58,3 +62,4 @@ lease rather than being inferred by an adapter:
 No unsafe partial owner, runtime boundary, or adapter API is retained. Scheduler
 wiring remains absent. No tests, builds, SPipe, benchmarks, optimizer, bootstrap,
 or other runtime verification were run.
+

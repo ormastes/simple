@@ -1,0 +1,154 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd "$(dirname "$0")/../.." && pwd)
+. "${root}/scripts/lib/host-executable.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/tool-host-resolver.XXXXXX")
+trap 'rm -rf "${tmp}"' EXIT HUP INT TERM
+mkdir -p "${tmp}/path with spaces"
+
+make_magic() {
+  printf "$2" >"$1"
+  chmod +x "$1"
+}
+make_magic "${tmp}/linux-tool" '\177ELFfixture'
+make_magic "${tmp}/windows-tool.exe" 'MZfixture'
+make_magic "${tmp}/mac-tool" '\317\372\355\376fixture'
+export SIMPLE_HOST_RESOLVER_FIXTURE_MODE=1
+
+expect_family() {
+  actual=$(simple_host_family "$1")
+  [ "${actual}" = "$2" ] || { echo "FAIL family $1=$actual expected=$2"; exit 1; }
+}
+expect_family MSYS_NT-10.0 windows
+expect_family MINGW64_NT-10.0 windows
+expect_family CYGWIN_NT-10.0 windows
+expect_family Linux linux
+expect_family Darwin darwin
+expect_family FreeBSD bsd
+expect_family OpenBSD bsd
+expect_family NetBSD bsd
+expect_family DragonFly bsd
+expect_family SimpleOS simpleos
+
+for host in windows; do
+  simple_host_executable_compatible "${tmp}/windows-tool.exe" "$host"
+  ! simple_host_executable_compatible "${tmp}/linux-tool" "$host"
+done
+for host in linux bsd simpleos; do
+  simple_host_executable_compatible "${tmp}/linux-tool" "$host"
+  ! simple_host_executable_compatible "${tmp}/windows-tool.exe" "$host"
+done
+simple_host_executable_compatible "${tmp}/mac-tool" darwin
+! simple_host_executable_compatible "${tmp}/windows-tool.exe" darwin
+
+# WSL1 and WSL2 both report Linux from uname. Their /mnt/c visibility must not
+# make a PE candidate eligible when an ELF candidate is required.
+for wsl_release in '4.4.0-Microsoft' '5.15.153.1-microsoft-standard-WSL2'; do
+  selected=$(simple_resolve_host_executable "$(simple_host_family Linux)" \
+    "${tmp}/windows-tool.exe" "${tmp}/linux-tool")
+  [ "${selected}" = "${tmp}/linux-tool" ] || { echo "FAIL WSL selection: $wsl_release"; exit 1; }
+done
+
+if simple_resolve_host_executable windows "${tmp}/linux-tool" "${tmp}/missing.exe" >/dev/null 2>&1; then
+  echo 'FAIL missing/wrong-format Windows candidates admitted'
+  exit 1
+else
+  [ "$?" -eq 127 ]
+fi
+
+# On an actual MSYS/Git-Bash host, execute a PE from a path containing spaces.
+# The child emits only JSON on stdout and its non-zero status must survive exec.
+case "$(simple_host_family)" in
+  windows)
+    powershell_path=$(command -v powershell.exe || command -v pwsh.exe)
+    cp "${powershell_path}" "${tmp}/path with spaces/mcp fixture.exe"
+    chmod +x "${tmp}/path with spaces/mcp fixture.exe"
+    unset SIMPLE_HOST_RESOLVER_FIXTURE_MODE
+    selected=$(simple_resolve_host_executable windows "${tmp}/path with spaces/mcp fixture.exe")
+    printf '%s\n' "[Console]::Out.WriteLine('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}')" >"${tmp}/path with spaces/json fixture.ps1"
+    printf '%s\n' 'exit 37' >"${tmp}/path with spaces/exit fixture.ps1"
+    json_out=$("${selected}" -NoProfile -ExecutionPolicy Bypass -File "$(simple_native_exec_path "${tmp}/path with spaces/json fixture.ps1" windows)")
+    [ "${json_out}" = '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}' ]
+    set +e
+    "${selected}" -NoProfile -ExecutionPolicy Bypass -File "$(simple_native_exec_path "${tmp}/path with spaces/exit fixture.ps1" windows)" >/dev/null 2>&1
+    status=$?
+    set -e
+    [ "${status}" -eq 37 ]
+    actual_windows_execution=PASS
+
+    if command -v gcc >/dev/null 2>&1; then
+      cat >"${tmp}/path with spaces/tool fixture.c" <<'C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int ends_with(const char *value, const char *suffix) {
+  size_t n = strlen(value), m = strlen(suffix);
+  return n >= m && strcmp(value + n - m, suffix) == 0;
+}
+
+int main(int argc, char **argv) {
+  const char *expected = getenv("FIXTURE_EXPECT");
+  const char *exit_text = getenv("FIXTURE_EXIT");
+  char input[32] = {0};
+  if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+    puts("simple test");
+    return 0;
+  }
+  if (expected && strcmp(expected, "spipe") == 0) {
+    if (argc != 3 || strcmp(argv[1], "alpha beta") || strcmp(argv[2], "quote\"value")) return 41;
+  } else if (expected && strcmp(expected, "devhub") == 0) {
+    if (argc != 5 || strcmp(argv[1], "run") || !ends_with(argv[2], "src/app/devhub/main.spl") ||
+        strcmp(argv[3], "alpha beta") || strcmp(argv[4], "quote\"value")) return 42;
+  }
+  if (fgets(input, sizeof input, stdin) == NULL) input[0] = '\0';
+  fputs("controlled diagnostic\n", stderr);
+  printf("{\"jsonrpc\":\"2.0\",\"args\":\"ok\",\"stdin\":\"%s\"}\n",
+         strcmp(input, "ping\n") == 0 ? "ping" : "empty");
+  return exit_text ? atoi(exit_text) : 0;
+}
+C
+      gcc "${tmp}/path with spaces/tool fixture.c" -o "${tmp}/path with spaces/tool fixture.exe"
+
+      spipe_out=$(printf 'ping\n' | FIXTURE_EXPECT=spipe SIMPLE_SPIPE_MCP_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/spipe_mcp_server" 'alpha beta' 'quote"value' 2>"${tmp}/spipe.err")
+      [ "${spipe_out}" = '{"jsonrpc":"2.0","args":"ok","stdin":"ping"}' ]
+      grep -Fxq 'controlled diagnostic' "${tmp}/spipe.err"
+      set +e
+      FIXTURE_EXPECT=spipe FIXTURE_EXIT=37 SIMPLE_SPIPE_MCP_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/spipe_mcp_server" 'alpha beta' 'quote"value' >/dev/null 2>&1
+      status=$?
+      set -e
+      [ "${status}" -eq 37 ]
+      if SIMPLE_SPIPE_MCP_BINARY="${tmp}/windows-tool.exe" "${root}/bin/spipe_mcp_server" >/dev/null 2>&1; then exit 1; fi
+      if SIMPLE_SPIPE_MCP_BINARY="${tmp}/missing.exe" "${root}/bin/spipe_mcp_server" >/dev/null 2>&1; then exit 1; fi
+
+      devhub_out=$(printf 'ping\n' | FIXTURE_EXPECT=devhub SIMPLE_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/devhub" 'alpha beta' 'quote"value' 2>"${tmp}/devhub.err")
+      [ "${devhub_out}" = '{"jsonrpc":"2.0","args":"ok","stdin":"ping"}' ]
+      [ ! -s "${tmp}/devhub.err" ]
+      set +e
+      FIXTURE_EXPECT=devhub FIXTURE_EXIT=37 SIMPLE_BINARY="${tmp}/path with spaces/tool fixture.exe" \
+        "${root}/bin/devhub" 'alpha beta' 'quote"value' >/dev/null 2>"${tmp}/devhub-fail.err"
+      status=$?
+      set -e
+      [ "${status}" -eq 37 ]
+      grep -Fxq 'controlled diagnostic' "${tmp}/devhub-fail.err"
+      actual_wrapper_execution=PASS
+    else
+      actual_wrapper_execution='BLOCKED(no-windows-c-compiler)'
+    fi
+    ;;
+  *)
+    actual_windows_execution='BLOCKED(host-unavailable)'
+    actual_wrapper_execution='BLOCKED(host-unavailable)'
+    ;;
+esac
+
+echo 'fixture_contract=PASS hosts=MSYS,MINGW,CYGWIN,WSL1,WSL2,Linux,FreeBSD,OpenBSD,NetBSD,DragonFly,Darwin,SimpleOS'
+echo "actual_windows_execution=${actual_windows_execution}"
+echo "actual_wrapper_execution=${actual_wrapper_execution}"
+echo 'cross_host_resume_linux=sh scripts/check/check-tool-host-executable-resolver.shs'
+echo 'cross_host_resume_macos=sh scripts/check/check-tool-host-executable-resolver.shs'
+echo 'cross_host_resume_bsd=sh scripts/check/check-tool-host-executable-resolver.shs'

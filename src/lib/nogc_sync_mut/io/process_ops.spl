@@ -3,6 +3,25 @@
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.common.process.observation_v1.{
+    ProcessObservationProviderV1, ObservedProcessStartStatusV1,
+    ObservedProcessPollStatusV1, ObservedProcessResultStatusV1,
+    ObservedProcessFailureReasonV1,
+    ObservedProcessRequestV1, ObservedProcessPollV1, ObservedProcessResultV1,
+    ObservedProcessStreamV1, ObservedProcessRusageV1, ObservedExecutablePinV1,
+    observed_process_empty_stream_v1, observed_process_empty_rusage_v1,
+    observed_process_empty_pin_v1, observed_process_result_status_v1
+}
+use std.common.process.observation_v4.{
+    PROCESS_OBSERVATION_V4_VERSION, PROCESS_OBSERVATION_V4_WORDS,
+    PROCESS_OBSERVATION_V4_DIGEST_BYTES,
+    ProcessObservationRequestV4, ProcessObservationWireV4,
+    ProcessObservationReceiptV4, ProcessObservationFrozenReceiptV4,
+    ProcessObservationCleanupFrozenReceiptV4, ProcessObservationPacketV4,
+    ProcessObservationPacketKindV4, ProcessObservationStatusV4,
+    canonical_encode_process_observation_request_v4,
+    decode_process_observation_v4
+}
 
 # Extern fn declarations (runtime resolves at file level)
 
@@ -38,6 +57,32 @@ extern fn rt_process_close_pinned_executable_owned_value(handle: i64) -> i32
 extern fn rt_process_pinned_executable_sha256_value(handle: i64) -> [u8]
 @unsafe(reason: "native-owned opaque pinned process start; interpreter rejects this provider", capabilities: [ffi])
 extern fn rt_process_owned_v3_start_pinned_value(handle: i64, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> [i64]
+@unsafe(reason: "native observation capability projection; query has no process side effect", capabilities: [ffi])
+extern fn rt_process_owned_v3_capabilities_value() -> [i64]
+@unsafe(reason: "specialize a fresh native-owned capture arena into independent stream bounds", capabilities: [ffi])
+extern fn rt_process_owned_v3_set_capture_limits_value(handle: i64, stdout_limit: i64, stderr_limit: i64) -> [i64]
+@unsafe(reason: "project same-owner PID, wall clock, exact wait signal, and direct-child wait4 rusage", capabilities: [ffi])
+extern fn rt_process_owned_v3_observation_value(handle: i64) -> [i64]
+@unsafe(reason: "native process observation V4 capability query", capabilities: [ffi])
+extern fn rt_process_observation_v4_capabilities_value() -> [i64]
+@unsafe(reason: "native sealed cwd identity pin", capabilities: [ffi])
+extern fn rt_process_observation_v4_pin_cwd_value(path: text) -> i64
+@unsafe(reason: "native sealed cwd identity digest", capabilities: [ffi])
+extern fn rt_process_observation_v4_cwd_digest_value(handle: i64) -> [u8]
+@unsafe(reason: "native sealed cwd identity close", capabilities: [ffi])
+extern fn rt_process_observation_v4_close_cwd_value(handle: i64) -> i32
+@unsafe(reason: "native V4 unpinned start is an explicit unavailable receipt", capabilities: [ffi])
+extern fn rt_process_observation_v4_start_value(binding: [u8]) -> ([u8], [u8], [u8], [i64])
+@unsafe(reason: "native exact pinned V4 process start", capabilities: [ffi])
+extern fn rt_process_observation_v4_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8]) -> ([u8], [u8], [u8], [i64])
+@unsafe(reason: "native V4 process observation poll", capabilities: [ffi])
+extern fn rt_process_observation_v4_poll_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+@unsafe(reason: "native V4 absolute-deadline cancellation", capabilities: [ffi])
+extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+@unsafe(reason: "native V4 two-phase frozen collection", capabilities: [ffi])
+extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+@unsafe(reason: "native V4 exact frozen digest acknowledgement", capabilities: [ffi])
+extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> ([u8], [u8], [u8], [i64])
 
 pub const OWNED_PROCESS_V3_START_WORDS: i64 = 4
 pub const OWNED_PROCESS_V3_POLL_WORDS: i64 = 17
@@ -45,6 +90,27 @@ pub const OWNED_PROCESS_V3_INPUT_WORDS: i64 = 39
 pub const OWNED_PROCESS_V3_CANCEL_WORDS: i64 = 4
 pub const OWNED_PROCESS_V3_RESULT_WORDS: i64 = 15
 pub const OWNED_EXECUTABLE_SHA256_BYTES: i64 = 32
+
+const PROCESS_OBSERVATION_ADAPTER_VERSION_V1: i64 = 1
+const PROCESS_OBSERVATION_CAPABILITIES_WORDS_V1: i64 = 3
+const PROCESS_OBSERVATION_LIMIT_WORDS_V1: i64 = 3
+const PROCESS_OBSERVATION_METADATA_WORDS_V1: i64 = 15
+const PROCESS_OBSERVATION_REQUIRED_CAPS_V1: i64 = 31
+const PROCESS_OBSERVATION_DIRECT_RUSAGE_V1: i64 = 1
+const PROCESS_OBSERVATION_OUTPUT_EOF_V1: i64 = 16
+const PROCESS_OBSERVATION_MAX_STREAM_BYTES_V1: i64 = 1048576
+const PROCESS_OBSERVATION_MAX_DEADLINE_MS_V1: i64 = 3600000
+const PROCESS_OBSERVATION_MAX_GRACE_MS_V1: i64 = 30000
+const PROCESS_OBSERVATION_MAX_POLL_MS_V1: i64 = 250
+const PROCESS_OBSERVATION_POLL_BYTES_V1: i64 = 65536
+const PROCESS_OBSERVATION_DRAIN_RESERVE_MS_V1: i64 = 1000
+const PROCESS_OBSERVATION_EAGAIN_V1: i64 = 11
+const PROCESS_OBSERVATION_ENOMEM_V1: i64 = 12
+const PROCESS_OBSERVATION_EBUSY_V1: i64 = 16
+const PROCESS_OBSERVATION_EINVAL_V1: i64 = 22
+const PROCESS_OBSERVATION_EMFILE_V1: i64 = 24
+const PROCESS_OBSERVATION_ENOTSUP_V1: i64 = 95
+const PROCESS_OBSERVATION_ESTALE_V1: i64 = 116
 
 pub struct OwnedProcessReceipt:
     lease: OwnedProcessLease
@@ -277,7 +343,451 @@ pub fn process_owned_start_pinned_v3(pin: OwnedExecutablePin, args: [text], inpu
     Ok(OwnedProcessReceipt(
         lease: OwnedProcessLease(handle: words[0], released: false, collected: false),
         version: words[1], accepted: accepted, runtime_error: words[3]))
-use std.io_runtime.{env_get}
+
+# Process-observation V1 authority boundary. This owner deliberately has no
+# public constructor and never exposes the runtime handle.
+pub class ProcessObservationOwnerV1:
+    provider: ProcessObservationProviderV1
+    handle: i64
+    pid: i64
+    deadline_ms: i64
+    term_grace_ms: i64
+    pinned: bool
+    pin_digest: [u8]
+    var stdout_bytes: [u8]
+    var stderr_bytes: [u8]
+    var stdout_seen: i64
+    var stderr_seen: i64
+    var stdout_kept: i64
+    var stderr_kept: i64
+    var stdout_truncated: bool
+    var stderr_truncated: bool
+    var terminal: bool
+    var deadline_exceeded: bool
+    var term_sent: bool
+    var kill_sent: bool
+    var reaped: bool
+    var output_complete: bool
+    var eintr_retries: i64
+    var consumed: bool
+
+type ObservedProcessLeaseV1 = ProcessObservationOwnerV1
+
+pub struct ObservedProcessStartV1:
+    status: ObservedProcessStartStatusV1
+    spawned: bool
+    pid: i64
+    lease: ObservedProcessLeaseV1
+    failure_reason: ObservedProcessFailureReasonV1
+
+fn _process_observation_empty_start_v1(
+    provider: ProcessObservationProviderV1,
+    status: ObservedProcessStartStatusV1,
+    reason: ObservedProcessFailureReasonV1
+) -> ObservedProcessStartV1:
+    ObservedProcessStartV1(
+        status: status,
+        spawned: false, pid: 0,
+        lease: ProcessObservationOwnerV1(
+            provider: provider, handle: 0, pid: 0, deadline_ms: 0,
+            term_grace_ms: 0, pinned: false, pin_digest: [],
+            stdout_bytes: [], stderr_bytes: [], stdout_seen: 0,
+            stderr_seen: 0, stdout_kept: 0, stderr_kept: 0,
+            stdout_truncated: false, stderr_truncated: false,
+            terminal: false, deadline_exceeded: false, term_sent: false,
+            kill_sent: false, reaped: false, output_complete: false,
+            eintr_retries: 0,
+            consumed: false),
+        failure_reason: reason)
+
+fn _process_observation_provider_available_v1() -> bool:
+    val words = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_capabilities_value()
+    words.len() == PROCESS_OBSERVATION_CAPABILITIES_WORDS_V1 and
+        words[0] == PROCESS_OBSERVATION_ADAPTER_VERSION_V1 and
+        words[1] == 1 and
+        (words[2] & PROCESS_OBSERVATION_REQUIRED_CAPS_V1) ==
+            PROCESS_OBSERVATION_REQUIRED_CAPS_V1
+
+fn _process_observation_request_valid_v1(
+    request: ObservedProcessRequestV1
+) -> bool:
+    request.command != "" and request.deadline_ms > 0 and
+        request.deadline_ms <= PROCESS_OBSERVATION_MAX_DEADLINE_MS_V1 and
+        request.term_grace_ms > 0 and
+        request.term_grace_ms <= PROCESS_OBSERVATION_MAX_GRACE_MS_V1 and
+        request.stdout_limit >= 0 and
+        request.stdout_limit <= PROCESS_OBSERVATION_MAX_STREAM_BYTES_V1 and
+        request.stderr_limit >= 0 and
+        request.stderr_limit <= PROCESS_OBSERVATION_MAX_STREAM_BYTES_V1
+
+fn _process_observation_start_failure_v1(
+    provider: ProcessObservationProviderV1,
+    runtime_error: i64
+) -> ObservedProcessStartV1:
+    if runtime_error == PROCESS_OBSERVATION_ENOTSUP_V1:
+        return _process_observation_empty_start_v1(
+            ProcessObservationProviderV1.Unsupported,
+            ObservedProcessStartStatusV1.Unsupported,
+            ObservedProcessFailureReasonV1.None)
+    if runtime_error == PROCESS_OBSERVATION_EINVAL_V1:
+        return _process_observation_empty_start_v1(
+            provider, ObservedProcessStartStatusV1.InvalidRequest,
+            ObservedProcessFailureReasonV1.InvalidRequest)
+    if runtime_error == PROCESS_OBSERVATION_EAGAIN_V1 or
+       runtime_error == PROCESS_OBSERVATION_ENOMEM_V1 or
+       runtime_error == PROCESS_OBSERVATION_EMFILE_V1:
+        return _process_observation_empty_start_v1(
+            provider, ObservedProcessStartStatusV1.ResourceExhausted,
+            ObservedProcessFailureReasonV1.ResourceExhausted)
+    _process_observation_empty_start_v1(
+        provider, ObservedProcessStartStatusV1.ProviderFailed,
+        ObservedProcessFailureReasonV1.ForkFailed)
+
+fn _process_observation_live_owner_v1(
+    provider: ProcessObservationProviderV1,
+    request: ObservedProcessRequestV1,
+    handle: i64,
+    pid: i64,
+    pinned: bool,
+    digest: [u8]
+) -> ProcessObservationOwnerV1:
+    ProcessObservationOwnerV1(
+        provider: provider, handle: handle, pid: pid,
+        deadline_ms: request.deadline_ms, term_grace_ms: request.term_grace_ms,
+        pinned: pinned, pin_digest: digest,
+        stdout_bytes: [], stderr_bytes: [], stdout_seen: 0, stderr_seen: 0,
+        stdout_kept: 0, stderr_kept: 0, stdout_truncated: false,
+        stderr_truncated: false, terminal: false, deadline_exceeded: false,
+        term_sent: false, kill_sent: false, reaped: false,
+        output_complete: false, eintr_retries: 0,
+        consumed: false)
+
+fn _process_observation_cleanup_pending_start_v1(
+    provider: ProcessObservationProviderV1,
+    request: ObservedProcessRequestV1,
+    handle: i64,
+    pid: i64,
+    pinned: bool,
+    digest: [u8]
+) -> ObservedProcessStartV1:
+    ObservedProcessStartV1(
+        status: ObservedProcessStartStatusV1.CleanupPending,
+        spawned: true, pid: pid,
+        lease: _process_observation_live_owner_v1(
+            provider, request, handle, pid, pinned, digest),
+        failure_reason: ObservedProcessFailureReasonV1.CleanupIncomplete)
+
+fn _process_observation_finish_start_v1(
+    provider: ProcessObservationProviderV1,
+    request: ObservedProcessRequestV1,
+    words: [i64],
+    pinned: bool,
+    digest: [u8]
+) -> ObservedProcessStartV1:
+    if words.len() != OWNED_PROCESS_V3_START_WORDS or words[1] != 1:
+        return _process_observation_empty_start_v1(
+            provider, ObservedProcessStartStatusV1.ProviderFailed,
+            ObservedProcessFailureReasonV1.MalformedReceipt)
+    if words[2] != 1 or words[0] <= 0:
+        return _process_observation_start_failure_v1(provider, words[3])
+    val limits = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_set_capture_limits_value(
+            words[0], request.stdout_limit, request.stderr_limit)
+    if limits.len() != PROCESS_OBSERVATION_LIMIT_WORDS_V1 or
+       limits[0] != PROCESS_OBSERVATION_ADAPTER_VERSION_V1 or
+       limits[1] != 1:
+        val _cancel = unsafe(capabilities: [ffi]):
+            rt_process_owned_v3_cancel_value(words[0])
+        return _process_observation_cleanup_pending_start_v1(
+            provider, request, words[0], 0, pinned, digest)
+    val metadata = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_observation_value(words[0])
+    if metadata.len() != PROCESS_OBSERVATION_METADATA_WORDS_V1 or
+       metadata[0] != PROCESS_OBSERVATION_ADAPTER_VERSION_V1 or
+       metadata[1] <= 1 or
+       (metadata[14] != 0 and metadata[14] != PROCESS_OBSERVATION_EAGAIN_V1):
+        val _cancel = unsafe(capabilities: [ffi]):
+            rt_process_owned_v3_cancel_value(words[0])
+        return _process_observation_cleanup_pending_start_v1(
+            provider, request, words[0], 0, pinned, digest)
+    val owner = _process_observation_live_owner_v1(
+        provider, request, words[0], metadata[1], pinned, digest)
+    ObservedProcessStartV1(
+        status: ObservedProcessStartStatusV1.Started, spawned: true,
+        pid: metadata[1], lease: owner,
+        failure_reason: ObservedProcessFailureReasonV1.None)
+
+pub(package) fn process_observation_owner_provider_v1() -> ProcessObservationProviderV1:
+    if _process_observation_provider_available_v1():
+        return ProcessObservationProviderV1.Available
+    ProcessObservationProviderV1.Unsupported
+
+pub(package) fn process_observation_owner_start_v1(
+    provider: ProcessObservationProviderV1,
+    request: ObservedProcessRequestV1
+) -> ObservedProcessStartV1:
+    if provider == ProcessObservationProviderV1.Unsupported or
+       process_observation_owner_provider_v1() == ProcessObservationProviderV1.Unsupported:
+        return _process_observation_empty_start_v1(
+            ProcessObservationProviderV1.Unsupported,
+            ObservedProcessStartStatusV1.Unsupported,
+            ObservedProcessFailureReasonV1.None)
+    if not _process_observation_request_valid_v1(request):
+        return _process_observation_empty_start_v1(
+            provider, ObservedProcessStartStatusV1.InvalidRequest,
+            ObservedProcessFailureReasonV1.InvalidRequest)
+    if request.pin_executable:
+        val pin_result = OwnedExecutablePin.pin(request.command)
+        if pin_result.is_err():
+            return _process_observation_empty_start_v1(
+                provider, ObservedProcessStartStatusV1.ExecFailed,
+                ObservedProcessFailureReasonV1.ExecFailed)
+        val pin = pin_result.unwrap()
+        val digest_result = pin.digest()
+        if digest_result.is_err():
+            val _closed = pin.close()
+            return _process_observation_empty_start_v1(
+                provider, ObservedProcessStartStatusV1.ProviderFailed,
+                ObservedProcessFailureReasonV1.PinFailed)
+        val raw = unsafe(capabilities: [ffi]):
+            rt_process_owned_v3_start_pinned_value(
+                pin.handle, request.args, [], request.deadline_ms,
+                request.term_grace_ms,
+                request.stdout_limit + request.stderr_limit)
+        val _closed = pin.close()
+        return _process_observation_finish_start_v1(
+            provider, request, raw, true, digest_result.unwrap())
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_start_value(
+            request.command, request.args, [], request.deadline_ms,
+            request.term_grace_ms,
+            request.stdout_limit + request.stderr_limit)
+    _process_observation_finish_start_v1(provider, request, raw, false, [])
+
+pub(package) fn process_observation_owner_start_pinned_v1(
+    pin: OwnedExecutablePin,
+    request: ObservedProcessRequestV1
+) -> ObservedProcessStartV1:
+    val provider = process_observation_owner_provider_v1()
+    if provider == ProcessObservationProviderV1.Unsupported:
+        return _process_observation_empty_start_v1(
+            provider, ObservedProcessStartStatusV1.Unsupported,
+            ObservedProcessFailureReasonV1.None)
+    if not _process_observation_request_valid_v1(request) or not request.pin_executable:
+        return _process_observation_empty_start_v1(
+            provider, ObservedProcessStartStatusV1.InvalidRequest,
+            ObservedProcessFailureReasonV1.InvalidRequest)
+    val digest_result = pin.digest()
+    if digest_result.is_err():
+        return _process_observation_empty_start_v1(
+            provider, ObservedProcessStartStatusV1.ExecFailed,
+            ObservedProcessFailureReasonV1.PinFailed)
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_start_pinned_value(
+            pin.handle, request.args, [], request.deadline_ms,
+            request.term_grace_ms,
+            request.stdout_limit + request.stderr_limit)
+    _process_observation_finish_start_v1(
+        provider, request, raw, true, digest_result.unwrap())
+
+fn _process_observation_append_v1(target: [u8], chunk: [u8]):
+    var i = 0
+    while i < chunk.len():
+        target.push(chunk[i])
+        i = i + 1
+
+fn _process_observation_stream_v1(
+    bytes: [u8], seen: i64, kept: i64, truncated: bool
+) -> ObservedProcessStreamV1:
+    ObservedProcessStreamV1(
+        bytes: bytes, seen_bytes: seen, retained_bytes: kept,
+        truncated: truncated)
+
+fn _process_observation_poll_receipt_v1(
+    lease: ObservedProcessLeaseV1,
+    status: ObservedProcessPollStatusV1,
+    reason: ObservedProcessFailureReasonV1,
+    stdout_bytes: [u8],
+    stderr_bytes: [u8]
+) -> ObservedProcessPollV1:
+    ObservedProcessPollV1(
+        status: status, pid: lease.pid, terminal: lease.terminal,
+        deadline_exceeded: lease.deadline_exceeded,
+        term_sent: lease.term_sent, kill_sent: lease.kill_sent,
+        reaped: lease.reaped, output_complete: lease.output_complete,
+        eintr_retries: lease.eintr_retries, failure_reason: reason,
+        stdout: _process_observation_stream_v1(
+            stdout_bytes, lease.stdout_seen, lease.stdout_kept,
+            lease.stdout_truncated),
+        stderr: _process_observation_stream_v1(
+            stderr_bytes, lease.stderr_seen, lease.stderr_kept,
+            lease.stderr_truncated))
+
+pub(package) fn process_observation_owner_poll_v1(
+    lease: ObservedProcessLeaseV1,
+    wait_ms: i64,
+    stdout_capacity: i64,
+    stderr_capacity: i64
+) -> ObservedProcessPollV1:
+    if lease.provider == ProcessObservationProviderV1.Unsupported:
+        return _process_observation_poll_receipt_v1(
+            lease, ObservedProcessPollStatusV1.Unsupported,
+            ObservedProcessFailureReasonV1.None, [], [])
+    if lease.consumed or lease.handle <= 0:
+        return _process_observation_poll_receipt_v1(
+            lease, ObservedProcessPollStatusV1.ReuseRejected,
+            ObservedProcessFailureReasonV1.None, [], [])
+    if wait_ms < 0 or wait_ms > PROCESS_OBSERVATION_MAX_POLL_MS_V1 or
+       stdout_capacity < 0 or stdout_capacity > PROCESS_OBSERVATION_POLL_BYTES_V1 or
+       stderr_capacity < 0 or stderr_capacity > PROCESS_OBSERVATION_POLL_BYTES_V1:
+        return _process_observation_poll_receipt_v1(
+            lease, ObservedProcessPollStatusV1.Malformed,
+            ObservedProcessFailureReasonV1.InvalidRequest, [], [])
+    val (stdout_chunk, stderr_chunk, words) = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_poll_value(
+            lease.handle, wait_ms, stdout_capacity, stderr_capacity)
+    if words.len() != OWNED_PROCESS_V3_POLL_WORDS or words[0] != 1:
+        return _process_observation_poll_receipt_v1(
+            lease, ObservedProcessPollStatusV1.Malformed,
+            ObservedProcessFailureReasonV1.MalformedReceipt, [], [])
+    _process_observation_append_v1(lease.stdout_bytes, stdout_chunk)
+    _process_observation_append_v1(lease.stderr_bytes, stderr_chunk)
+    lease.terminal = words[2] != 0
+    lease.deadline_exceeded = words[4] != 0
+    lease.term_sent = words[5] != 0
+    lease.kill_sent = words[6] != 0
+    lease.reaped = words[7] != 0
+    lease.stdout_truncated = words[8] != 0
+    lease.stderr_truncated = words[9] != 0
+    lease.stdout_seen = words[10]
+    lease.stderr_seen = words[11]
+    lease.stdout_kept = words[12]
+    lease.stderr_kept = words[13]
+    val metadata = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_observation_value(lease.handle)
+    if metadata.len() == PROCESS_OBSERVATION_METADATA_WORDS_V1 and
+       metadata[0] == PROCESS_OBSERVATION_ADAPTER_VERSION_V1:
+        lease.eintr_retries = metadata[13]
+        lease.output_complete =
+            (metadata[4] & PROCESS_OBSERVATION_OUTPUT_EOF_V1) != 0
+    if words[16] == PROCESS_OBSERVATION_ESTALE_V1:
+        return _process_observation_poll_receipt_v1(
+            lease, ObservedProcessPollStatusV1.ReuseRejected,
+            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+    if words[16] == PROCESS_OBSERVATION_ENOTSUP_V1:
+        return _process_observation_poll_receipt_v1(
+            lease, ObservedProcessPollStatusV1.Unsupported,
+            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+    if words[16] != 0:
+        return _process_observation_poll_receipt_v1(
+            lease, ObservedProcessPollStatusV1.ProviderFailed,
+            ObservedProcessFailureReasonV1.WaitFailed, stdout_chunk, stderr_chunk)
+    _process_observation_poll_receipt_v1(
+        lease, ObservedProcessPollStatusV1.Polled,
+        ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+
+pub(package) fn process_observation_owner_collect_v1(
+    lease: ObservedProcessLeaseV1
+) -> ObservedProcessResultV1:
+    if lease.provider == ProcessObservationProviderV1.Unsupported:
+        return _process_observation_result_error_v1(
+            lease, ObservedProcessResultStatusV1.Unsupported,
+            ObservedProcessFailureReasonV1.None)
+    if lease.consumed or lease.handle <= 0:
+        return _process_observation_result_error_v1(
+            lease, ObservedProcessResultStatusV1.ReuseRejected,
+            ObservedProcessFailureReasonV1.None)
+    var turns = (lease.deadline_ms + lease.term_grace_ms +
+        PROCESS_OBSERVATION_DRAIN_RESERVE_MS_V1) / 25 + 4
+    var drained = false
+    while turns > 0 and not drained:
+        val polled = process_observation_owner_poll_v1(
+            lease, 25, PROCESS_OBSERVATION_POLL_BYTES_V1,
+            PROCESS_OBSERVATION_POLL_BYTES_V1)
+        if polled.status != ObservedProcessPollStatusV1.Polled:
+            return _process_observation_result_error_v1(
+                lease, ObservedProcessResultStatusV1.ProviderFailed,
+                polled.failure_reason)
+        drained = polled.terminal and
+            lease.stdout_bytes.len() == lease.stdout_kept and
+            lease.stderr_bytes.len() == lease.stderr_kept
+        turns = turns - 1
+    if not drained:
+        return _process_observation_result_error_v1(
+            lease, ObservedProcessResultStatusV1.CleanupPending,
+            ObservedProcessFailureReasonV1.CleanupIncomplete)
+    val metadata = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_observation_value(lease.handle)
+    if metadata.len() != PROCESS_OBSERVATION_METADATA_WORDS_V1 or
+       metadata[0] != PROCESS_OBSERVATION_ADAPTER_VERSION_V1 or
+       metadata[14] != 0:
+        return _process_observation_result_error_v1(
+            lease, ObservedProcessResultStatusV1.ProviderFailed,
+            ObservedProcessFailureReasonV1.MalformedReceipt)
+    val words = unsafe(capabilities: [ffi]):
+        rt_process_owned_v3_collect_value(lease.handle)
+    if words.len() != OWNED_PROCESS_V3_RESULT_WORDS or words[0] != 1:
+        return _process_observation_result_error_v1(
+            lease, ObservedProcessResultStatusV1.Malformed,
+            ObservedProcessFailureReasonV1.MalformedReceipt)
+    if words[14] == PROCESS_OBSERVATION_EAGAIN_V1 or
+       words[14] == PROCESS_OBSERVATION_EBUSY_V1:
+        return _process_observation_result_error_v1(
+            lease, ObservedProcessResultStatusV1.CleanupPending,
+            ObservedProcessFailureReasonV1.CleanupIncomplete)
+    if words[14] != 0:
+        return _process_observation_result_error_v1(
+            lease, ObservedProcessResultStatusV1.ProviderFailed,
+            ObservedProcessFailureReasonV1.WaitFailed)
+    lease.consumed = true
+    val rusage_available =
+        (metadata[4] & PROCESS_OBSERVATION_DIRECT_RUSAGE_V1) != 0
+    ObservedProcessResultV1(
+        status: ObservedProcessResultStatusV1.Collected,
+        pid: metadata[1],
+        exit_code: if metadata[12] == 0: words[1] else: -1,
+        signal: metadata[12],
+        deadline_exceeded: words[2] != 0, term_sent: words[4] != 0,
+        kill_sent: words[5] != 0, reaped: words[7] != 0,
+        output_complete:
+            (metadata[4] & PROCESS_OBSERVATION_OUTPUT_EOF_V1) != 0,
+        wall_time_ms: metadata[2],
+        stdout: _process_observation_stream_v1(
+            lease.stdout_bytes, words[10], words[12], words[8] != 0),
+        stderr: _process_observation_stream_v1(
+            lease.stderr_bytes, words[11], words[13], words[9] != 0),
+        rusage: ObservedProcessRusageV1(
+            user_cpu_ms: metadata[5], system_cpu_ms: metadata[6],
+            max_rss_kib: metadata[7] / 1024, available: rusage_available),
+        executable_pin: ObservedExecutablePinV1(
+            pinned: lease.pinned, replacement_known: false,
+            replacement_detected: false, digest: lease.pin_digest),
+        failure_reason: ObservedProcessFailureReasonV1.None)
+
+fn _process_observation_result_error_v1(
+    lease: ObservedProcessLeaseV1,
+    status: ObservedProcessResultStatusV1,
+    reason: ObservedProcessFailureReasonV1
+) -> ObservedProcessResultV1:
+    ObservedProcessResultV1(
+        status: status, pid: lease.pid, exit_code: -1, signal: 0,
+        deadline_exceeded: lease.deadline_exceeded,
+        term_sent: lease.term_sent, kill_sent: lease.kill_sent,
+        reaped: lease.reaped, output_complete: lease.output_complete,
+        wall_time_ms: 0,
+        stdout: _process_observation_stream_v1(
+            lease.stdout_bytes, lease.stdout_seen, lease.stdout_kept,
+            lease.stdout_truncated),
+        stderr: _process_observation_stream_v1(
+            lease.stderr_bytes, lease.stderr_seen, lease.stderr_kept,
+            lease.stderr_truncated),
+        rusage: observed_process_empty_rusage_v1(),
+        executable_pin: ObservedExecutablePinV1(
+            pinned: lease.pinned, replacement_known: false,
+            replacement_detected: false, digest: lease.pin_digest),
+        failure_reason: reason)
+use std.io_runtime.{env_get, env_get_nullable, read_file_text_result}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -308,21 +818,61 @@ use std.io_runtime.{getpid}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 extern fn rt_stderr_flush()
 
+pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
+    # Test suites spawn POSIX tools by absolute path ("/bin/sh" 2000+, plus
+    # /bin/echo, /usr/bin/grep, ...). Those paths do not exist on Windows;
+    # route them onto the Git-for-Windows userland: real binaries resolve to
+    # <Git>/usr/bin/<name>.exe when present, shells resolve to the discovered
+    # sh, and the rest run as `sh -c '<name> "$@"'` so builtins (echo/true/
+    # false/test) keep working. Non-POSIX commands and non-Windows hosts pass
+    # through unchanged. (host_path_native is applied by the callers and is
+    # idempotent on the resolved native paths.)
+    if not _is_windows_platform():
+        return (cmd, args)
+    val unix = cmd.replace("\\", "/")
+    if not unix.starts_with("/bin/") and not unix.starts_with("/usr/bin/"):
+        return (cmd, args)
+    val parts = unix.split("/")
+    val name = parts[parts.len() - 1]
+    val sh = _windows_posix_shell_path()
+    if sh == "cmd.exe":
+        return (cmd, args)
+    val sh_norm = sh.replace("\\", "/")
+    var git_root = ""
+    if sh_norm.ends_with("/usr/bin/sh.exe") or sh_norm.ends_with("/usr/bin/bash.exe"):
+        git_root = sh_norm.substring(0, sh_norm.len() - 15)
+    elif sh_norm.ends_with("/bin/sh.exe") or sh_norm.ends_with("/bin/bash.exe"):
+        git_root = sh_norm.substring(0, sh_norm.len() - 10)
+    if git_root != "":
+        val candidate = "{git_root}/usr/bin/{name}.exe"
+        if file_exists(candidate):
+            return (candidate, args)
+        if name == "sh" or name == "bash":
+            return (sh, args)
+    var sh_args: [text] = ["-c", "{name} \"$@\""]
+    sh_args = sh_args.push("_")
+    for a in args:
+        sh_args = sh_args.push(a)
+    (sh, sh_args)
+
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_run(host_path_native(cmd), args)
+        rt_process_run(host_path_native(rcmd), rargs)
 
 fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_run_bounded(host_path_native(cmd), args, timeout_ms, max_output_bytes)
+        rt_process_run_bounded(host_path_native(rcmd), rargs, timeout_ms, max_output_bytes)
 
 fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_running(pid)
 
 fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_async(host_path_native(cmd), args)
+        rt_process_spawn_async(host_path_native(rcmd), rargs)
 
 fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
     unsafe(capabilities: [ffi]):
@@ -333,8 +883,9 @@ fn _process_kill_raw(pid: i64) -> bool:
         rt_process_kill(pid)
 
 fn _process_spawn_piped_raw(cmd: text, args: [text]) -> i64:
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_piped(host_path_native(cmd), args)
+        rt_process_spawn_piped(host_path_native(rcmd), rargs)
 
 fn _process_write_stdin_raw(pid: i64, data: text) -> bool:
     unsafe(capabilities: [ffi]):
@@ -376,16 +927,287 @@ fn _is_windows_platform() -> bool:
 use std.nogc_sync_mut.io_runtime.{ProcessResult}
 
 # ============================================================================
+# Process Observation V4 exact native owner
+# ============================================================================
+
+pub struct ProcessObservationCapabilitiesV4:
+    available: bool
+    capability_bits: i64
+    max_live_tickets: i64
+    max_capture_bytes: i64
+    max_caller_wait_ns: i64
+    runtime_error: i64
+
+pub class OwnedCwdPinV4:
+    handle: i64
+    canonical_path: text
+    identity_digest: [u8]
+    var closed: bool
+
+    pub static fn pin(canonical_path: text) -> Result<OwnedCwdPinV4, text>:
+        val native_path = host_path_native(canonical_path)
+        val handle = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_pin_cwd_value(native_path)
+        if handle <= 0:
+            return Err("process observation V4 cwd pin was rejected")
+        val digest = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_cwd_digest_value(handle)
+        if digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+            val _closed = unsafe(capabilities: [ffi]):
+                rt_process_observation_v4_close_cwd_value(handle)
+            return Err("process observation V4 cwd pin returned an invalid identity digest")
+        Ok(OwnedCwdPinV4(handle: handle, canonical_path: native_path,
+            identity_digest: digest, closed: false))
+
+    pub fn digest(self) -> Result<[u8], text>:
+        if self.closed:
+            return Err("process observation V4 cwd pin is closed")
+        Ok(self.identity_digest)
+
+    me fn close() -> Result<bool, text>:
+        if self.closed:
+            return Ok(true)
+        val closed = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_close_cwd_value(self.handle)
+        if closed != 1:
+            return Err("process observation V4 cwd pin close was rejected")
+        self.closed = true
+        Ok(true)
+
+pub class ProcessObservationLeaseV4:
+    ticket: [i64]
+    var active: bool
+    var frozen_kind: ProcessObservationPacketKindV4
+    var acknowledged: bool
+
+    fn receipt_matches_ticket(self, packet: ProcessObservationPacketV4) -> bool:
+        self.ticket.len() == 5 and
+            self.ticket[0] == PROCESS_OBSERVATION_V4_VERSION and
+            self.ticket[1] == packet.request_id_high and
+            self.ticket[2] == packet.request_id_low and
+            self.ticket[3] == packet.ticket_high and
+            self.ticket[4] == packet.ticket_low
+
+    pub fn poll(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
+        if not self.active or self.acknowledged:
+            return Err("process observation V4 lease is inactive")
+        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_poll_value(self.ticket, caller_wait_ns)
+        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
+            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        if not self.receipt_matches_ticket(receipt.packet):
+            return Err("process observation V4 poll returned different ticket authority")
+        Ok(receipt)
+
+    pub fn cancel(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
+        if not self.active or self.acknowledged:
+            return Err("process observation V4 lease is inactive")
+        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_cancel_value(self.ticket, caller_wait_ns)
+        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
+            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        if not self.receipt_matches_ticket(receipt.packet):
+            return Err("process observation V4 cancel returned different ticket authority")
+        Ok(receipt)
+
+    me fn collect(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
+        if not self.active or self.acknowledged:
+            return Err("process observation V4 lease is inactive")
+        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_collect_value(self.ticket, caller_wait_ns)
+        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
+            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        if not self.receipt_matches_ticket(receipt.packet):
+            return Err("process observation V4 collect returned different ticket authority")
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen or
+                receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+            if receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+                return Err("process observation V4 collect returned an invalid frozen digest")
+            self.frozen_kind = receipt.packet.packet_kind
+        Ok(receipt)
+
+    me fn acknowledge(self, frozen_receipt: ProcessObservationFrozenReceiptV4) -> Result<ProcessObservationReceiptV4, text>:
+        if not self.active or self.acknowledged or
+                self.frozen_kind != ProcessObservationPacketKindV4.Frozen or
+                frozen_receipt.acknowledged or
+                frozen_receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen or
+                not self.receipt_matches_ticket(frozen_receipt.packet):
+            return Err("process observation V4 lease has no unacknowledged frozen snapshot")
+        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_ack_collect_value(
+                self.ticket, frozen_receipt.binding_digest)
+        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
+            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack or
+                not self.receipt_matches_ticket(receipt.packet) or
+                receipt.binding_digest != frozen_receipt.binding_digest:
+            return Err("process observation V4 acknowledgement returned the wrong packet kind")
+        val _packet = frozen_receipt.acknowledge(receipt.binding_digest)?
+        self.acknowledged = true
+        self.active = false
+        Ok(receipt)
+
+    me fn acknowledge_cleanup(
+        self, cleanup_receipt: ProcessObservationCleanupFrozenReceiptV4
+    ) -> Result<ProcessObservationReceiptV4, text>:
+        if not self.active or self.acknowledged or
+                self.frozen_kind != ProcessObservationPacketKindV4.CleanupFrozen or
+                cleanup_receipt.acknowledged or
+                cleanup_receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupFrozen or
+                cleanup_receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
+                not self.receipt_matches_ticket(cleanup_receipt.packet):
+            return Err("process observation V4 lease has no cleanup snapshot to acknowledge")
+        val (stdout, stderr, returned_binding, words) = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_ack_collect_value(
+                self.ticket, cleanup_receipt.binding_digest)
+        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
+            words: words, stdout: stdout, stderr: stderr,
+            binding: returned_binding))?
+        if receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupAck or
+                not self.receipt_matches_ticket(receipt.packet) or
+                receipt.binding_digest != cleanup_receipt.binding_digest:
+            return Err("process observation V4 cleanup acknowledgement does not match its frozen snapshot")
+        val _packet = cleanup_receipt.acknowledge(receipt.binding_digest)?
+        self.acknowledged = true
+        self.active = false
+        Ok(receipt)
+
+pub struct ProcessObservationStartV4:
+    receipt: ProcessObservationReceiptV4
+    lease: ProcessObservationLeaseV4
+
+fn _process_observation_wire_v4(
+    stdout: [u8], stderr: [u8], binding: [u8], words: [i64]
+) -> Result<ProcessObservationReceiptV4, text>:
+    decode_process_observation_v4(ProcessObservationWireV4(
+        words: words, stdout: stdout, stderr: stderr, binding: binding))
+
+pub fn process_observation_owner_capabilities_v4() -> Result<ProcessObservationCapabilitiesV4, text>:
+    val words = unsafe(capabilities: [ffi]):
+        rt_process_observation_v4_capabilities_value()
+    if words.len() != 8 or words[0] != PROCESS_OBSERVATION_V4_VERSION or words[1] != 8:
+        return Err("process observation V4 capability receipt is malformed")
+    Ok(ProcessObservationCapabilitiesV4(
+        available: words[2] == 1, capability_bits: words[3],
+        max_live_tickets: words[4], max_capture_bytes: words[5],
+        max_caller_wait_ns: words[6], runtime_error: words[7]))
+
+fn _process_observation_bound_request_v4(
+    executable: OwnedExecutablePin,
+    cwd: OwnedCwdPinV4,
+    request: ProcessObservationRequestV4
+) -> Result<ProcessObservationRequestV4, text>:
+    if executable.closed or cwd.closed:
+        return Err("process observation V4 requires live executable and cwd pins")
+    val executable_digest = executable.digest()?
+    Ok(ProcessObservationRequestV4(
+        argv: request.argv, environment: request.environment,
+        canonical_cwd: cwd.canonical_path,
+        canonical_pinned_directory: cwd.canonical_path,
+        executable_pin: executable.handle,
+        executable_digest: executable_digest,
+        cwd_pin_claim: cwd.handle,
+        cwd_identity_digest: cwd.identity_digest,
+        capability_bits: request.capability_bits,
+        wall_budget_ns: request.wall_budget_ns,
+        term_grace_ns: request.term_grace_ns,
+        cleanup_budget_ns: request.cleanup_budget_ns,
+        stdout_limit_bytes: request.stdout_limit_bytes,
+        stderr_limit_bytes: request.stderr_limit_bytes,
+        memory_limit_bytes: request.memory_limit_bytes,
+        enforcement_kind: request.enforcement_kind,
+        descendant_policy: request.descendant_policy,
+        max_clock_resolution_ns: request.max_clock_resolution_ns))
+
+pub fn process_observation_owner_start_v4(
+    request: ProcessObservationRequestV4
+) -> Result<ProcessObservationReceiptV4, text>:
+    val encoded = canonical_encode_process_observation_request_v4(request)?
+    val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        rt_process_observation_v4_start_value(encoded)
+    _process_observation_wire_v4(stdout, stderr, binding, words)
+
+pub fn process_observation_owner_start_pinned_v4(
+    executable: OwnedExecutablePin,
+    cwd: OwnedCwdPinV4,
+    request: ProcessObservationRequestV4
+) -> Result<ProcessObservationStartV4, text>:
+    val bound = _process_observation_bound_request_v4(executable, cwd, request)?
+    val encoded = canonical_encode_process_observation_request_v4(bound)?
+    val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        rt_process_observation_v4_start_pinned_value(
+            executable.handle, cwd.handle, encoded)
+    val receipt = _process_observation_wire_v4(stdout, stderr, binding, words)?
+    var ticket: [i64] = []
+    var active = false
+    if receipt.packet.status == ProcessObservationStatusV4.Running or
+            receipt.packet.status == ProcessObservationStatusV4.CleanupPending or
+            receipt.packet.status == ProcessObservationStatusV4.ProviderFailed:
+        if receipt.packet.ticket_high <= 0 or receipt.packet.ticket_low <= 0 or
+                receipt.packet.request_id_high <= 0 or receipt.packet.request_id_low <= 0:
+            return Err("process observation V4 start returned invalid ticket authority")
+        ticket = [PROCESS_OBSERVATION_V4_VERSION,
+            receipt.packet.request_id_high, receipt.packet.request_id_low,
+            receipt.packet.ticket_high, receipt.packet.ticket_low]
+        active = true
+    Ok(ProcessObservationStartV4(receipt: receipt,
+        lease: ProcessObservationLeaseV4(ticket: ticket, active: active,
+            frozen_kind: ProcessObservationPacketKindV4.Unknown,
+            acknowledged: false)))
+
+# ============================================================================
 # Process Execution
 # ============================================================================
+
+fn _windows_path_exts() -> [text]:
+    """%PATHEXT% entries in order, or .COM;.EXE;.BAT;.CMD when unset."""
+    var exts: [text] = []
+    val raw = env_get("PATHEXT")
+    if raw != nil:
+        for e in raw.split(";"):
+            if e.trim() != "":
+                exts.push(e.trim())
+    if exts.len() == 0:
+        exts = [".COM", ".EXE", ".BAT", ".CMD"]
+    exts
+
+
+fn _windows_resolve_cmd(cmd: text) -> text:
+    """Resolve a bare command name the way cmd.exe does: for each PATH
+    directory (cwd first), try each PATHEXT extension. Directory order wins
+    over extension order, so a fixture `curl.cmd` earlier on PATH beats a
+    System32 `curl.exe`. `.cmd`/`.bat` results need no wrapper here: the
+    runtime already launches batch files via `cmd.exe /d /c` with safe
+    argument escaping."""
+    val exts = _windows_path_exts()
+    val lower = cmd.lower()
+    for e in exts:
+        if lower.ends_with(e.lower()):
+            return cmd
+    if cmd.contains("/") or cmd.contains("\\"):
+        for e in exts:
+            if file_exists(cmd + e):
+                return cmd + e
+        return cmd
+    var dirs: [text] = ["."]
+    val path_env = env_get("PATH")
+    if path_env != nil:
+        for d in path_env.split(";"):
+            val dir = d.trim().replace("\"", "")
+            if dir != "":
+                dirs.push(dir)
+    for dir in dirs:
+        for e in exts:
+            val candidate = dir + "\\" + cmd + e
+            if file_exists(candidate):
+                return candidate
+    cmd
+
 
 fn _resolve_process_cmd(cmd: text) -> text:
     var resolved_cmd = cmd
     if _is_windows_platform():
-        if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val check = _process_run_raw("where", [cmd + ".exe"])
-            if check.2 == 0:
-                resolved_cmd = cmd + ".exe"
+        resolved_cmd = _windows_resolve_cmd(cmd)
     else:
         if not cmd.contains("/"):
             val check = _process_run_raw("which", [cmd])
@@ -568,9 +1390,8 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     preserves that exact mechanism and the exact same total budget
     (effective_timeout); it only changes the *granularity* of the wait (many
     small polls instead of one big blocking wait) so output can be relayed
-    incrementally, and defeats the CHILD's own full-buffering (stdout/stderr
-    are not a tty here, they're redirected to a temp file) via `stdbuf -oL
-    -eL`, the same trick used by the app-layer fix.
+    incrementally. Where `stdbuf` is installed, `stdbuf -oL -eL` also disables
+    the child's full buffering. Other hosts retain the child's buffering policy.
     """
     if _is_windows_platform():
         return process_run_timeout_windows(cmd, args, timeout_ms)
@@ -590,33 +1411,34 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     # the real worker orphaned (native-build run6, 2026-08-21).
     val pgid_file = "{temp_dir}/simple_pgid_{pid_str}_{time_str}.txt"
 
-    var command_parts: [text] = ["stdbuf", "-oL", "-eL"]
+    var command_parts: [text] = []
     val cmd_escaped = cmd.replace("'", "'\\''")
     command_parts.push("'{cmd_escaped}'")
     for arg in args:
         val arg_escaped = arg.replace("'", "'\\''")
         command_parts.push("'{arg_escaped}'")
     val command_line = command_parts.join(" ")
-    # command_line is single-quoted per part; inside the double-quoted inner
-    # `sh -c` string the outer shell must not expand anything, so escape \ " $ `.
-    val inner_cmd = command_line.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
-    # `setsid` is util-linux and does NOT exist on macOS, where this line failed
-    # with `/bin/sh: line 0: exec: setsid: not found` and exit 127 -- which
-    # surfaced as an UNDIAGNOSABLE Stage-2 capability failure after a ~25 min
-    # compile, because the probe itself had already reported PASS.
-    # perl ships with macOS and POSIX::setsid() is the same syscall, so the
-    # fallback keeps the session-leader property this code depends on: the inner
-    # `$$` written to pgid_file must be a process-GROUP leader or
-    # _process_kill_group's `kill -- -PGID` cannot reap the tree.
-    # Detected in the shell rather than via std.nogc_sync_mut.platform.is_macos()
-    # on purpose: host_os() shells out to `uname`, and this IS the process
-    # runner, so importing it here would recurse. `command -v setsid` also keeps
-    # Linux byte-identical (it resolves, so the exact previous command runs) and
-    # covers any Unix lacking setsid rather than just Darwin.
-    # Note the perl form needs no `-w`: it execs in-place, so the exit status
-    # propagates through the same process chain instead of via a wait layer.
-    val sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' -- \"$@\"; fi; }; "
-    val redirected_cmd = "{sid_fn}sid sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
+    # stdbuf is a GNU utility and is absent on stock macOS. Test for it in the
+    # child shell, avoiding a recursive process call from this process runner.
+    # Both branches exec so the recorded process-group leader remains valid.
+    val buffered_command = "if command -v stdbuf >/dev/null 2>&1; then exec stdbuf -oL -eL {command_line}; else exec {command_line}; fi"
+    # Quote paths for their own shell, then quote the entire child script for
+    # its parent shell. TMPDIR may contain spaces, apostrophes, or shell syntax;
+    # the child's $$ must expand only after the new process group is created.
+    val pgid_path = pgid_file.replace("'", "'\\''")
+    val child_script = "echo $$ > '{pgid_path}'; {buffered_command}"
+    val inner_cmd = child_script.replace("'", "'\\''")
+    val stdout_path = stdout_file.replace("'", "'\\''")
+    val stderr_path = stderr_file.replace("'", "'\\''")
+    # The sampled bootstrap guard owns the session. Its prebuilt syscall
+    # helper verifies the actual SID, creates only a process group, and execs.
+    # A partial/malformed contract must never fall back to a detached session.
+    val bootstrap_sid = env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_ID")
+    val bootstrap_exec = env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_EXEC")
+    var sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; else exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 125; exec @ARGV or exit 127' -- \"$@\"; fi; }; "
+    if bootstrap_sid != nil or bootstrap_exec != nil:
+        sid_fn = "sid(){ case \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" in /*) ;; *) exit 125 ;; esac; exec \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" -- \"$@\"; }; "
+    val redirected_cmd = "{sid_fn}sid sh -c '{inner_cmd}' > '{stdout_path}' 2> '{stderr_path}'"
 
     proc_slot_acquire()
     val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])
@@ -825,11 +1647,102 @@ pub fn process_output(cmd: text, args: [text]) -> text:
 # Shell Functions
 # ============================================================================
 
+# Memoized result of the Windows POSIX-shell probe below: up to 3
+# `file_exists` per PATH segment plus 6 install-location candidates, on
+# every call, was measurable overhead for callers that resolve the shell
+# once per loop iteration (e.g. simple_ctx_batch_execute over N commands).
+# The resolved shell cannot legitimately change mid-process, so this is
+# safe to compute once and reuse; "" means "not yet resolved" (a resolved
+# path is never empty -- the function always returns at least "cmd.exe").
+var _windows_posix_shell_path_cache: text = ""
+
+fn _windows_posix_shell_path() -> text:
+    if _windows_posix_shell_path_cache != "":
+        return _windows_posix_shell_path_cache
+    val resolved = _windows_posix_shell_path_uncached()
+    _windows_posix_shell_path_cache = resolved
+    resolved
+
+fn _windows_posix_shell_path_uncached() -> text:
+    # Specs and drivers issue POSIX shell commands (test/grep/awk/rm -rf,
+    # VAR=val command prefixes) but Windows routed shell() to cmd.exe, which
+    # cannot run them -- every such spec failed on Windows with empty output
+    # while passing on Linux CI. Prefer a real POSIX sh (Git Bash / MSYS /
+    # Cygwin) when present; fall back to cmd.exe only as a last resort.
+    # Discovery order: explicit override, PATH scan (Git portable installs
+    # like C:\dev\tool\Git land here, and PATH entries may be POSIX-form
+    # "/c/..." when the runner was spawned from Git Bash), then the usual
+    # install locations. BASH when it is already a native path.
+    val override = env_get("SIMPLE_POSIX_SHELL") ?? ""
+    if override != "" and file_exists(override):
+        return override
+    val path_env = env_get("PATH") ?? ""
+    if path_env != "":
+        for raw_seg in path_env.split(";"):
+            val seg = _mingwish_path(raw_seg)
+            if seg == "":
+                continue
+            # The segment may be the install root (Git\cmd), a bin dir
+            # (Git\bin, Git\usr\bin), or anything else -- probe all shapes.
+            if file_exists(seg + "/sh.exe"):
+                return seg + "/sh.exe"
+            if file_exists(seg + "/usr/bin/sh.exe"):
+                return seg + "/usr/bin/sh.exe"
+            if file_exists(seg + "/bin/sh.exe"):
+                return seg + "/bin/sh.exe"
+    val bash_env = env_get("BASH") ?? ""
+    if bash_env.contains(":/") or bash_env.contains(":\\"):
+        if file_exists(bash_env):
+            return bash_env
+    val candidates: [text] = [
+        "C:/Program Files/Git/usr/bin/sh.exe",
+        "C:/Program Files/Git/bin/sh.exe",
+        "C:/Program Files (x86)/Git/usr/bin/sh.exe",
+        "C:/Program Files (x86)/Git/bin/sh.exe",
+        "C:/msys64/usr/bin/sh.exe",
+        "C:/cygwin64/bin/sh.exe"
+    ]
+    for candidate in candidates:
+        if file_exists(candidate):
+            return candidate
+    "cmd.exe"
+
+fn _mingwish_path(path: text) -> text:
+    # Normalize a PATH entry for probing: backslashes to slashes, and a
+    # leading "/x/" MSYS drive spelling to "x:/" (the grammar host_path
+    # documents). Anything else passes through unchanged.
+    val unix = path.replace("\\", "/")
+    if unix.len() >= 3 and unix.starts_with("/") and unix.slice(2, 3) == "/":
+        val drive = unix.slice(1, 2)
+        if drive >= "a" and drive <= "z" or drive >= "A" and drive <= "Z":
+            return drive.lower() + ":/" + unix.slice(3, unix.len())
+    unix
+
 fn _shell_command_args(command: text) -> (text, [text]):
     if _is_windows_platform():
-        ("cmd.exe", ["/c", command])
+        val sh = _windows_posix_shell_path()
+        if sh != "cmd.exe":
+            (sh, ["-c", command])
+        else:
+            ("cmd.exe", ["/c", command])
     else:
         ("/bin/sh", ["-c", command])
+
+# Public entry point for callers that need the resolved shell executable +
+# `-c <command>` argv without running it immediately (e.g. to append extra
+# positional args). Same resolution as `shell()`: SIMPLE_POSIX_SHELL override,
+# then a PATH/install-location scan for a real POSIX `sh.exe` on Windows
+# (Git for Windows / MSYS / Cygwin), falling back to `("cmd.exe", ["/c", ...])`
+# only when no POSIX sh could be found; `/bin/sh` unchanged elsewhere.
+pub fn resolve_shell_argv(command: text) -> (text, [text]):
+    _shell_command_args(command)
+
+# True only when the resolved shell for `resolve_shell_argv` is a real POSIX
+# `sh` (not the `cmd.exe` last-resort fallback) — callers that rely on POSIX
+# positional-parameter semantics (`sh -c script sh $1 …`) should check this
+# before appending extra argv entries, since `cmd.exe /c` cannot honor them.
+pub fn is_posix_shell_argv(shell_path: text) -> bool:
+    not shell_path.lower().ends_with("cmd.exe")
 
 pub fn shell(command: text) -> ProcessResult:
     val (shell_path, shell_args) = _shell_command_args(command)
@@ -881,11 +1794,7 @@ pub fn shell_int(command: text, default: i64) -> i64:
     val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
-        val trimmed = stdout.trim()
-        if trimmed.len() > 0:
-            int(trimmed)
-        else:
-            default
+        _shell_signed_int_or(stdout, default)
     else:
         default
 
@@ -969,5 +1878,114 @@ fn _process_kill_group(pgid_file: text):
     val pgid = file_read_text(pgid_file).trim()
     if pgid == "":
         return
+    if env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_ID") != nil or env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_EXEC") != nil:
+        # This is a nested PGID, never the enclosing guard SID. Whole-session
+        # cleanup belongs to the outer guard when the bootstrap command fails.
+        val cleanup = "case \"$1\" in ''|*[!0-9]*|0|1) exit 125 ;; esac; kill -TERM \"-$1\" 2>/dev/null; sleep 0.5; kill -KILL \"-$1\" 2>/dev/null; true"
+        _process_run_bounded_raw("sh", ["-c", cleanup, "sh", pgid], 5000, 4096)
+        return
     _process_run_bounded_raw("pkill", ["-TERM", "-s", "{pgid}"], 2000, 4096)
     _process_run_bounded_raw("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000, 4096)
+
+# ============================================================================
+# App-twin surface parity (ported from src/app/io/process_ops.spl, 2026-09-19)
+# ----------------------------------------------------------------------------
+# The app/io twin of this module was converted to a pure re-export facade so
+# co-compiled duplicate definitions collapse to one owner per name (Class B
+# silent-win misdispatch; see
+# doc/08_tracking/bug/duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md).
+# These definitions are the app twin's public surface that this module did not
+# yet define; bodies are ported verbatim so app.io.process_ops importers
+# observe identical behaviour through the facade.
+# ============================================================================
+
+@unsafe(reason: "raw inherited-stdio process execution; -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
+@unsafe(reason: "raw inherited-stdio child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_spawn_inherit() -> i64
+@unsafe(reason: "raw arbitrary-PID existence probe; false means absent, invalid, or provider failure", capabilities: [ffi])
+extern fn rt_process_exists(pid: i64) -> bool
+@unsafe(reason: "raw timeout process capture; exit_code -1 is the timeout or execution-failure sentinel", capabilities: [ffi])
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _process_run_inherit_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_run_inherit(host_path_native(cmd), args)
+
+fn _process_spawn_inherit_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_inherit()
+
+fn _process_exists_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_exists(pid)
+
+@always_inline
+fn process_run_direct(cmd: text, args: [text]) -> (text, text, i64):
+    # Exact raw-command facade for callers that already own command lookup.
+    # Unlike process_run, this deliberately performs no PATH preflight and
+    # does not acquire the global process governor slot.
+    _process_run_raw(cmd, args)
+
+fn process_run_inherit(cmd: text, args: [text]) -> i64:
+    # Foreground delegation: preserve the caller's stdin/stdout/stderr.
+    _process_run_inherit_raw(cmd, args)
+
+fn process_spawn_inherit() -> i64:
+    # Spawn the canonical MCP wrapper as a transparent stdio child.
+    _process_spawn_inherit_raw()
+
+fn process_exists(pid: i64) -> bool:
+    # Arbitrary-PID probe. This is intentionally distinct from
+    # process_is_running, whose provider contract is owned-child liveness.
+    if pid <= 0:
+        return false
+    _process_exists_raw(pid)
+
+fn process_pid_exists(pid: i64) -> bool:
+    # Uniquely-named twin of process_exists, same semantics (kill(pid,0))
+    # plus a `ps -p` fallback so hosts without /proc still see arbitrary
+    # pids (piped children process_is_running cannot observe).
+    if pid <= 0:
+        return false
+    if _process_exists_raw(pid):
+        return true
+    val probe = process_run("/bin/ps", ["-p", pid.to_text()])
+    probe.2 == 0
+
+@always_inline
+fn process_kill_unchecked(pid: i64) -> bool:
+    # Exact provider semantics for trusted supervisor PID receipts. Unlike
+    # process_kill, this intentionally permits PID 1; never use arbitrary input.
+    _process_kill_raw(pid)
+
+@always_inline
+fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>:
+    file_read_text_at(path, offset, size)
+
+@always_inline
+fn _read_text_or_empty(path: text) -> text:
+    match read_file_text_result(path):
+        case Ok(content): content
+        case Err(_): ""
+
+fn _process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_timeout(cmd, args, timeout_ms)
+
+fn _shell_signed_int_or(value: text, default: i64) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return default
+    var i = 0
+    for ch in trimmed:
+        if ch >= "0" and ch <= "9":
+            i = i + 1
+            continue
+        if i == 0 and ch == "-":
+            i = i + 1
+            continue
+        return default
+    if trimmed == "-":
+        return default
+    int(trimmed)

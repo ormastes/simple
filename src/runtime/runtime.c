@@ -31,6 +31,14 @@
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
 #include "runtime.h"
+
+int64_t rt_simple_abi_version(void) {
+    return (int64_t)SIMPLE_ABI_VERSION;
+}
+
+int64_t rt_simple_abi_version_deferred(void) {
+    return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
+}
 #include "runtime_startup_args.h"
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
@@ -1610,6 +1618,13 @@ int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     return enum_value && enum_value->discriminant == (int32_t)expected;
 }
 
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    if (!enum_value || enum_value->discriminant != (int32_t)expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
+}
+
 void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
@@ -1701,9 +1716,28 @@ void spl_prefetch_start(const char* path) {
 
 void spl_prefetch_wait(void) {
     if (g_prefetch_pid > 0) {
-        int status;
-        waitpid(g_prefetch_pid, &status, 0);
+        int status = 0;
+        pid_t reaped = waitpid(g_prefetch_pid, &status, 0);
         g_prefetch_pid = 0;
+        /* Phase 3 fork() audit (doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md):
+         * this is the one fork() reaper in this file that used to discard
+         * `status` outright, so a prefetch child killed by SIGSEGV/SIGKILL was
+         * indistinguishable from a clean warm-up. The prefetch is advisory —
+         * a dead child must NOT fail the program — but it must not be silent
+         * either, or an OOM-killed or crashing child looks like success.
+         * Every other fork() site in the runtime (runtime_fork.c,
+         * runtime_process.c, runtime_process_owned.c, runtime_legacy_core.c,
+         * counterpart_worker_runtime.c) already threads WIFSIGNALED through. */
+        if (reaped > 0 && WIFSIGNALED(status)) {
+            char buf[128];
+            int len = snprintf(buf, sizeof(buf),
+                "[simple-runtime] prefetch child killed by signal %d (page warm-up incomplete)\n",
+                WTERMSIG(status));
+            if (len > 0) {
+                ssize_t ignored = write(STDERR_FILENO, buf, (size_t)len);
+                (void)ignored;
+            }
+        }
     }
 }
 
@@ -1809,41 +1843,116 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
 /* Single-handle secret/config admission: no path predicate is separated from
  * the open, classification, size bound, or read. NIL is the fail-closed
  * sentinel; an allocated empty RuntimeValue remains a valid empty file. */
+#if defined(_WIN32)
+/* Widen a UTF-8 path and add the extended-length prefix when it is long enough
+ * to hit the MAX_PATH ceiling. A WIDE call is not exempt on its own:
+ * CreateFileW still caps at MAX_PATH unless the path carries the prefix. Twin
+ * of the helper in runtime_native.c -- this file carries a byte-identical copy
+ * of the reader below, and archive member order decides which one links, so
+ * both must be fixed or the fix is a coin flip. Separator and prefix are built
+ * from the numeric code point (92) to avoid escape sequences. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
+     * resolution for a short drive-absolute path; UNC/extended paths retain
+     * their existing spelling. */
+    if (wide[0] == sep && wide[1] == sep) return wide;
+    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
+        (wide[2] == sep || wide[2] == L'/')) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
+        if (wcslen(full) < 248) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
+/* Why the last bounded no-follow read returned nil.
+ *
+ * The reader has a dozen indistinguishable `rt_nil` exits, and its Simple
+ * caller could only report "returned nil". That is what left the Stage 2
+ * bootstrap failure unexplainable across sessions: the AOT diagnostic was
+ * written successfully and read back as nil with nothing able to name the arm
+ * that refused it. The Rust twin in
+ * runtime/src/value/sffi/file_io/file_ops.rs carries the same code space; this
+ * copy exists because the `core-c-bootstrap` lane resolves the C reader, so a
+ * Rust-only diagnostic would leave that lane with an unresolved external.
+ *
+ * Starts at a sentinel rather than zero so a readout is never ambiguous:
+ * 77 = never called, 100 = succeeded, 1..10 name a rejected arm, and a literal
+ * 0 means this extern is itself unresolved in the lane that read it. */
+/* Thread-local, NOT a global: the bootstrap reads with 24 jobs in flight, so a
+ * concurrent successful read on another thread would overwrite the code before
+ * the failing caller could report it.
+ *
+ * Spelled `_Thread_local` to match this tree's existing TLS (runtime_native.c
+ * and runtime_timestamp.c) rather than a fresh __declspec/__thread macro: one
+ * spelling already proven on every toolchain here beats a second one that has
+ * to be re-argued. */
+static _Thread_local int64_t rt_rnf_last_failure = 77;
+
+int64_t rt_file_read_regular_no_follow_last_failure(void) {
+    return rt_rnf_last_failure;
+}
+
+#define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
+
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
     if (max_bytes < 0 || path_len == 0 ||
         !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
-        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return rt_nil;
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
     size_t capacity = (size_t)max_bytes + 1;
     uint8_t* bytes = (uint8_t*)malloc(capacity);
-    if (!bytes) return rt_nil;
+    if (!bytes) return RT_RNF_FAIL(9);
     size_t total = 0;
 #if defined(_WIN32)
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) { free(bytes); return rt_nil; }
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len)) {
-        free(wide_path); free(bytes); return rt_nil;
-    }
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
     HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
-    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return rt_nil; }
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
     BY_HANDLE_FILE_INFORMATION info;
     LARGE_INTEGER size;
     if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
         (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
         size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
-        CloseHandle(handle); free(bytes); return rt_nil;
+        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
         DWORD read_count = 0;
         if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
-            CloseHandle(handle); free(bytes); return rt_nil;
+            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(9);
         }
         if (read_count == 0) break;
         total += (size_t)read_count;
@@ -1852,26 +1961,27 @@ int64_t rt_file_read_regular_no_follow_bounded(
 #else
 #ifndef O_NOFOLLOW
     free(bytes);
-    return rt_nil;
+    return RT_RNF_FAIL(2);
 #else
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { free(bytes); return rt_nil; }
+    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
         (uint64_t)st.st_size > (uint64_t)max_bytes) {
-        close(fd); free(bytes); return rt_nil;
+        close(fd); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         ssize_t count = read(fd, bytes + total, capacity - total);
         if (count < 0 && errno == EINTR) continue;
-        if (count < 0) { close(fd); free(bytes); return rt_nil; }
+        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
         if (count == 0) break;
         total += (size_t)count;
     }
     close(fd);
 #endif
 #endif
-    if (total > (size_t)max_bytes) { free(bytes); return rt_nil; }
+    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    rt_rnf_last_failure = 100;
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
@@ -1949,18 +2059,53 @@ int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
 /* C-internal fsync worker: takes a genuine NUL-terminated C string. The rt_*
  * entry points below convert the compiler's (ptr, len) `text` pair into one of
  * these before calling it, so the conversion lives in exactly one place and
- * C-internal callers do not have to fake a pair. */
+ * C-internal callers do not have to fake a pair. rt_widen_long_path_rc
+ * (defined above) supplies the wide, extended-length-prefixed path. */
 static int rt_fsync_path(const char* path) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* fopen()+fflush() was doubly wrong on Windows: fopen() is an ANSI/
+     * narrow-CRT entry point capped at MAX_PATH (260 chars) -- the same bug
+     * class as rt_file_create_excl below, and a bootstrap generation path
+     * routinely exceeds it -- and fflush() only empties the CRT's userspace
+     * buffer, it gives no OS-level durability guarantee at all. Use the wide,
+     * extended-length-prefixed CreateFileW + FlushFileBuffers pair instead,
+     * exactly like rt_file_create_excl's fix; fall back to the ANSI
+     * CreateFileA + FlushFileBuffers pair only when the path cannot be
+     * widened. GENERIC_WRITE is required for FlushFileBuffers to succeed
+     * (Windows refuses it on a read-only handle with ERROR_ACCESS_DENIED).
+     * FILE_FLAG_BACKUP_SEMANTICS is required too: callers durability-sync
+     * DIRECTORIES through this same worker (native_noop_admission.spl syncs
+     * "{root}/generations" after a rename, the POSIX fsync-the-parent-dir
+     * idiom), and CreateFile refuses to open a directory handle at all
+     * without that flag (ERROR_ACCESS_DENIED). It is harmless on a regular
+     * file -- the flag only widens what CreateFile will open, it does not
+     * change file semantics. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (wide_path) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        free(wide_path);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file) != 0;
+    if (!CloseHandle(file)) ok = 0;
+    return ok ? 1 : 0;
+#else
     FILE* file = fopen(path, "rb");
     if (!file) return 0;
-#ifdef _WIN32
-    int ok = fflush(file) == 0;
-#else
     int ok = fsync(fileno(file)) == 0;
-#endif
     fclose(file);
     return ok ? 1 : 0;
+#endif
 }
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
@@ -2020,6 +2165,98 @@ int         rt_file_create_excl(const char* path, int64_t path_len,
     }
     free(path_copy);
     return 1;
+}
+
+static char* rt_m3_owned_path(const char* path, int64_t path_len) {
+    if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
+        memchr(path, '\0', (size_t)path_len) != NULL) return NULL;
+    char* owned = (char*)malloc((size_t)path_len + 1);
+    if (!owned) return NULL;
+    memcpy(owned, path, (size_t)path_len);
+    owned[path_len] = '\0';
+    return owned;
+}
+
+int rt_file_copy_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    if (!src || !dst) { free(src); free(dst); return 0; }
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        free(src); free(dst); return 0;
+    }
+    int output = open(dst,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) {
+        close(input); free(src); free(dst); return 0;
+    }
+    int ok = 1;
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            ok = 0; break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset,
+                (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { ok = 0; break; }
+            offset += written;
+        }
+        if (!ok) break;
+    }
+    if (ok && fsync(output) != 0) ok = 0;
+    if (close(output) != 0) ok = 0;
+    if (close(input) != 0) ok = 0;
+    if (!ok) unlink(dst);
+    free(src); free(dst);
+    return ok;
+#endif
+}
+
+int rt_file_link_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char* src = rt_m3_owned_path(source, source_len);
+    char* dst = rt_m3_owned_path(destination, destination_len);
+    if (!src || !dst) { free(src); free(dst); return 0; }
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        free(src); free(dst); return 0;
+    }
+    int ok = link(src, dst) == 0;
+    struct stat destination_stat;
+    if (ok && (lstat(dst, &destination_stat) != 0 ||
+            !S_ISREG(destination_stat.st_mode) ||
+            destination_stat.st_dev != source_stat.st_dev ||
+            destination_stat.st_ino != source_stat.st_ino)) {
+        unlink(dst);
+        ok = 0;
+    }
+    close(input);
+    free(src); free(dst);
+    return ok;
+#endif
 }
 
 #if !defined(_WIN32)
@@ -2548,6 +2785,22 @@ int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, 
     return 0;
 }
 
+#if defined(_WIN32)
+/* rt_secure_temp_dir collapsed every Windows failure mode into an empty string,
+ * so its one caller -- AOT diagnostic staging in
+ * driver_aot_native_output.spl:2267 -- could only report "diagnostic staging
+ * unavailable" with no way to tell WHICH step failed, which left the Stage 2
+ * sanity smoke test blocked with nothing to go on. Name the failing step and
+ * the Win32 error instead; this runs only on a path that is already failing.
+ * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
+static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
+    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, (unsigned long)GetLastError(), detail ? detail : "");
+    fflush(stderr);
+}
+#endif
+
 int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                            const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
@@ -2559,7 +2812,7 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     typedef BOOL (WINAPI *ConvertSddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
     HMODULE lib = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
     BCryptGenRandomFn fill = lib ? (BCryptGenRandomFn)GetProcAddress(lib, "BCryptGenRandom") : NULL;
-    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { if (lib) FreeLibrary(lib); return rt_string_new(NULL, 0); }
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { rt_secure_temp_dir_diag("BCryptGenRandom", parent); if (lib) FreeLibrary(lib); return rt_string_new(NULL, 0); }
     FreeLibrary(lib); char suffix[33];
     for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
     int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
@@ -2567,12 +2820,22 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     ConvertSddlFn convert = advapi ? (ConvertSddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
     if (n < 0 || (size_t)n >= sizeof(path) || !convert ||
         !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) {
+        rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path);
         if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0);
     }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes);
+    /* CreateDirectoryA is an ANSI entry point capped at MAX_PATH; `parent`
+     * (the bootstrap cache root) is routinely already close to that limit, so
+     * appending "<prefix>-<32hex>" can push `path` over it. Same fix as
+     * rt_file_publish_noreplace below: prefer the widened, extended-length-
+     * prefixed call, falling back to the ANSI call only when widening fails.
+     * Twin of the same fix in runtime_secure_staging.c's rt_secure_temp_dir. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    BOOL created = wide_path ? CreateDirectoryW(wide_path, &attributes)
+                             : CreateDirectoryA(path, &attributes);
+    free(wide_path);
     LocalFree(descriptor); FreeLibrary(advapi);
-    if (!created) return rt_string_new(NULL, 0);
+    if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
     int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
     if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
@@ -2587,9 +2850,35 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) ||
         !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
+    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
+     * underlying filesystem's real limit; the AOT native-build cache path
+     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
+     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3). Prefer the
+     * wide, extended-length-prefixed call (rt_widen_long_path_rc, already
+     * used by the bounded reader above) so both endpoints can exceed
+     * MAX_PATH. Twin of the same fix in runtime_native.c. */
+    {
+        wchar_t* wide_staged = rt_widen_long_path_rc(staged);
+        wchar_t* wide_dest = wide_staged ? rt_widen_long_path_rc(destination) : NULL;
+        if (wide_staged && wide_dest) {
+            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
+            DWORD werror = ok ? 0 : GetLastError();
+            free(wide_staged); free(wide_dest);
+            if (ok) return 1;
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+        free(wide_staged); free(wide_dest);
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError();
-    return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
@@ -2765,15 +3054,45 @@ static void _spl_atexit_handler(void) {
  * Crash Signal Handler (SIGSEGV / SIGBUS)
  * ---------------------------------------------------------------- */
 #ifndef _WIN32
+/* Classify a fault from siginfo_t.si_code.
+ *
+ * Phase 5 of doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md:
+ * si_addr alone cannot tell a wild-pointer dereference apart from a fault the
+ * process brought on itself by exhausting a resource, and the two need
+ * different operator responses (fix the pointer bug vs. raise the limit).
+ * Pure lookup, no allocation, no locking — safe to call from a signal handler. */
+static const char* _spl_fault_class(int signum, int sicode) {
+    if (sicode == SI_USER) return "delivered by kill() — not a genuine fault";
+#ifdef SI_KERNEL
+    if (sicode == SI_KERNEL) return "kernel-raised fault";
+#endif
+    if (signum == SIGSEGV) {
+        if (sicode == SEGV_MAPERR) return "address not mapped — wild/null pointer";
+        /* A guard page (stack overflow, or an mmap'd region past a limit) is
+         * mapped but not accessible, so a resource-limit violation lands here
+         * rather than on SEGV_MAPERR. */
+        if (sicode == SEGV_ACCERR) return "permission denied on a mapped page — guard page / memory-limit violation";
+#ifdef SEGV_BNDERR
+        if (sicode == SEGV_BNDERR) return "bounds-check violation";
+#endif
+        return "unclassified segmentation fault";
+    }
+    if (sicode == BUS_ADRALN) return "misaligned address";
+    if (sicode == BUS_ADRERR) return "nonexistent physical address";
+    if (sicode == BUS_OBJERR) return "object-specific hardware error";
+    return "unclassified bus error";
+}
+
 static void _spl_crash_handler(int signum, siginfo_t *info, void *ucontext) {
     (void)ucontext;
     const char *signame = (signum == SIGSEGV) ? "SIGSEGV" : "SIGBUS";
+    int sicode = info->si_code;
 
     /* Use write() not fprintf — async-signal-safe */
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
-        "\n[simple-runtime] Fatal: %s at address %p\n",
-        signame, info->si_addr);
+        "\n[simple-runtime] Fatal: %s at address %p (si_code=%d: %s)\n",
+        signame, info->si_addr, sicode, _spl_fault_class(signum, sicode));
     if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
 
     /* Backtrace */
@@ -2804,22 +3123,23 @@ int64_t rt_install_crash_handler(void) {
 int64_t rt_install_crash_handler(void) { return 0; }
 #endif
 
+#ifndef _WIN32
 int64_t rt_signal_install(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;
-#ifdef _WIN32
-    /* Windows has no sigaction; signal() is the supported registration API.
-     * SA_RESTART semantics do not exist there (no interruptible syscalls). */
-    if (signal((int)signal_num, _spl_signal_handler) == SIG_ERR) return 0;
-    return 1;
-#else
     struct sigaction sa;
     sa.sa_handler = _spl_signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     if (sigaction((int)signal_num, &sa, NULL) == -1) return 0;
     return 1;
-#endif
 }
+#else
+/* Windows has no sigaction/sigemptyset, so this function had never compiled
+ * there. Report "not installed" exactly as rt_install_crash_handler already
+ * does under the same guard a few lines above, rather than pretending a
+ * handler was registered. */
+int64_t rt_signal_install(int64_t signal_num) { (void)signal_num; return 0; }
+#endif
 
 int64_t rt_signal_check(int64_t signal_num) {
     if (signal_num < 0 || signal_num >= 32) return 0;

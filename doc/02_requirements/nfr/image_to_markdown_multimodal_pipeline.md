@@ -4,7 +4,7 @@
 Selection: N1 + C1 (approved 2026-09-08).
 
 - NFR-001 Privacy: local endpoint is the default profile; remote egress requires an explicit profile setting. Never log secrets, raw image bytes, or data URLs.
-- NFR-002 Limits: default decoded input limit is 20 MiB; bound pixels, tiles, queue depth, retries, request/response bytes, and tokens. One full-image request plus at most four uncertain-region retries by default.
+- NFR-002 Limits: default decoded input limit is 20 MiB and the conservative in-process image working-set budget is 384 MiB; bound pixels, tiles, queue depth, retries, request/response bytes, and tokens. Reject before pixel decode or Base64 construction when the estimated source/view/serialization/RGBA working set exceeds the profile budget. One full-image request plus at most four uncertain-region retries by default.
 - NFR-003 Time: default request timeout is 30 seconds with a configurable ceiling of 120 seconds.
 - NFR-004 Proxy overhead: warm p95 preprocessing plus proxy overhead, excluding model inference and network time, is under 100 ms on the repository benchmark fixture.
 - NFR-005 Structured reliability: at least 95% of responses on the acceptance corpus parse and validate without manual repair; failures remain explicit artifacts.

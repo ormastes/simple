@@ -29,19 +29,28 @@ EOF
 }
 
 strategy=normal
-output_arg=build/bootstrap
+strategy_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+strategy_repo_root=$(CDPATH= cd -- "${strategy_dir}/../.." && pwd -P) || exit 70
+. "${strategy_dir}/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "${strategy_repo_root}" || exit 70
+output_arg=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
+stage_engine_delimiter_seen=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strategy=*) strategy=${1#*=} ;;
         --output=*) output_arg=${1#*=} ;;
-        --) shift; break ;;
+        --) stage_engine_delimiter_seen=1; shift; break ;;
         --help|-h) usage; exit 0 ;;
         *) echo "bootstrap-scheduler-error: unknown supervisor option: $1" >&2; exit 2 ;;
     esac
     shift
 done
-[ "$#" -gt 0 ] || {
-    echo 'bootstrap-scheduler-error: missing stage-engine arguments after --' >&2
+# The stage engine takes no required arguments -- a plain `bootstrap-from-scratch.sh`
+# with no options is the documented default run, and forwards an EMPTY list here.
+# Fail closed on a caller that omitted the `--` delimiter entirely (which would
+# mean its option list was never terminated), not on an empty-but-delimited list.
+[ "$stage_engine_delimiter_seen" -eq 1 ] || {
+    echo 'bootstrap-scheduler-error: missing -- delimiter before stage-engine arguments' >&2
     exit 2
 }
 case "$strategy" in adhoc|normal|full) ;; *)
@@ -120,17 +129,41 @@ mkdir "$scheduler_lock" 2>/dev/null || {
 }
 engine_pid=
 qualifier_pid=
+# VERDICT-on-exit contract: every run ends with exactly one `VERDICT — ` line
+# so a killed/died scheduler run is diagnosable from its log alone. See
+# doc/07_guide/tooling/bootstrap_options.md.
+bootstrap_strategy_verdict_written=0
+bootstrap_strategy_stage=init
+bootstrap_strategy_log=
+bootstrap_strategy_verdict() {
+    bootstrap_strategy_verdict_written=1
+    line="VERDICT — $1"
+    echo "$line" >&2
+    if [ -n "$bootstrap_strategy_log" ]; then
+        echo "$line" >>"$bootstrap_strategy_log" 2>/dev/null || true
+    fi
+}
 cleanup() {
+    status=$?
+    sig=${1:-none}
     [ -z "$qualifier_pid" ] || kill "$qualifier_pid" 2>/dev/null || true
     [ -z "$engine_pid" ] || kill "$engine_pid" 2>/dev/null || true
+    if [ "$bootstrap_strategy_verdict_written" -eq 0 ]; then
+        bootstrap_strategy_verdict "ABORTED: stage=${bootstrap_strategy_stage} exit=${status} signal=${sig} reason=${bootstrap_strategy_stage}"
+    fi
     rm -rf "$scheduler_lock"
 }
-trap cleanup EXIT HUP INT TERM
+trap 'cleanup none' EXIT
+trap 'cleanup HUP' HUP
+trap 'cleanup INT' INT
+trap 'cleanup TERM' TERM
 
 epoch=$(date -u +%Y%m%dT%H%M%SZ)
 generation="bootstrap-$epoch-$$"
 generation_dir="$output/scheduler/$generation"
 mkdir -p "$generation_dir/tasks" "$generation_dir/invalidations"
+bootstrap_strategy_log="$generation_dir/scheduler.log"
+bootstrap_strategy_stage=scheduling
 
 graph_sha=$(bootstrap_scheduler_hash_file "$graph_contract") || exit 2
 policy_sha=absent
@@ -166,6 +199,10 @@ if [ -z "$memory_total" ] && [ -r /proc/meminfo ]; then
     memory_total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
 fi
 case "$memory_total" in ''|*[!0-9]*|0) memory_total=2048 ;; esac
+# Reservation used only for the engine-side critical_memory accounting
+# below; the qualifier itself intentionally runs WITHOUT a ulimit -v cap
+# (see run_qualifier) because mold's output-buffer reservation fails under
+# any finite RLIMIT_AS, and a virtual cap never bounded resident memory.
 qualification_memory=${SIMPLE_BOOTSTRAP_QUALIFICATION_MEMORY_MIB:-2048}
 memory_safety=${SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_SAFETY_MIB:-1024}
 critical_memory=${SIMPLE_BOOTSTRAP_CRITICAL_MEMORY_MIB:-}
@@ -252,6 +289,14 @@ event task-start stage-engine building
     if [ "$memory_enforcement" = ulimit-v ]; then
         ulimit -v $((critical_memory * 1024)) || exit 70
     fi
+    # An explicit job count (user --jobs or SIMPLE_NATIVE_BUILD_THREADS) is
+    # passed through untouched; the scheduler's critical_cpu split is only the
+    # default when neither is given. Validation stays in bootstrap_select_jobs.
+    forced_jobs=$critical_cpu
+    [ -z "${SIMPLE_NATIVE_BUILD_THREADS:-}" ] || forced_jobs=
+    for engine_arg in "$@"; do
+        case "$engine_arg" in --jobs|--jobs=*) forced_jobs= ;; esac
+    done
     SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
     SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER="$generation_dir/stage2-cleanup.ready" \
     SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
@@ -260,19 +305,15 @@ event task-start stage-engine building
         my $jobs = shift @ARGV;
         my $engine = shift @ARGV;
         my @out;
-        my $skip_value = 0;
         for my $arg (@ARGV) {
-            if ($skip_value) { $skip_value = 0; next; }
-            if ($arg eq "--jobs") { $skip_value = 1; next; }
-            next if $arg =~ /^--jobs=/;
             next if $arg eq "--full-cli" || $arg eq "--deploy" ||
                 $arg eq "--release" || $arg eq "--clean-release";
             push @out, $arg;
         }
-        push @out, "--jobs=$jobs";
+        push @out, "--jobs=$jobs" if length $jobs;
         exec "/bin/sh", $engine, @out;
         die "exec stage engine failed: $!";
-    ' "$critical_cpu" "$engine" "$@" \
+    ' "$forced_jobs" "$engine" "$@" \
         >"$generation_dir/stage-engine.log" 2>&1
     rc=$?
     done_tmp="$engine_done.tmp.$$"
@@ -291,9 +332,14 @@ engine_pid=$!
 
 run_qualifier() {
     (
-        if [ "$memory_enforcement" = ulimit-v ]; then
-            ulimit -v $((qualification_memory * 1024)) || exit 70
-        fi
+        # No ulimit -v here, deliberately: the broad Stage-2 gate links a
+        # native hello-world, and mold's multi-GiB output-buffer reservation
+        # fails under ANY finite RLIMIT_AS -- verified at caps from 2 GiB to
+        # 2 TiB, where the identical link succeeds with RLIMIT_AS unlimited.
+        # A virtual-address cap never bounded resident memory anyway (the
+        # qualifier's real footprint is a few hundred MiB), so it only broke
+        # the mandatory gate and got the engine TERM'd on every speculative
+        # run. Resident-memory protection remains the kill-monitor's job.
         SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
             /bin/sh "$qualifier" "$output" "$generation_dir" "$lease" \
             "$lease_sha" "$engine_done"
@@ -871,3 +917,4 @@ if [ "$promotion_required" -eq 1 ]; then
 fi
 echo "bootstrap scheduler: PASS generation=$generation overlap=$overlap_observed schedule=$schedule_mode"
 echo "bootstrap scheduler receipt: $generation_dir/lineage-admission.env"
+bootstrap_strategy_verdict "ADMITTED: stage=complete exit=0 signal=none reason=generation-qualified"

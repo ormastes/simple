@@ -1,4 +1,8 @@
 # Bootstrap callable ABI receiver accounting rejects valid calls
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed in the frozen worktree; focused Rust verification passed.
 **Observed:** 2026-08-15.
@@ -52,3 +56,4 @@ Retained logs are
 `build/native_probe/stage4-dynamic-receiver-free-theft-focused-lib.log`.
 
 Provider token usage and comparable completed-bug average: unavailable.
+

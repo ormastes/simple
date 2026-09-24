@@ -16,12 +16,42 @@
 # a verdict it has to trust.
 
 use std.io_runtime.{read_file}
+use std.nogc_sync_mut.io.process_ops.{shell_int}
 
 # Bytes to leave for the OS, the page cache and whatever else shares this
 # machine. Deliberately generous: the cost of being wrong upward is a refused
 # load, and the cost of being wrong downward is the host.
+#
+# This was a FLAT 8 GiB, which is 6.25% of the 128 GB host it was calibrated on
+# and 50%+ of an ordinary laptop -- there, an 8 GiB reserve alone exceeded what
+# was free, so NOTHING could ever be admitted regardless of size. The reserve is
+# now that same 6.25% of physical memory, so the DGX gets approximately its old
+# reserve back while a smaller host gets one proportionate to it. Approximately,
+# not exactly: Linux MemTotal excludes the kernel's own reserve, so a 128 GB box
+# lands nearer 7.5 GiB than 8 -- marginally laxer than before on the one host
+# where over-admission takes the machine down, and worth confirming there. The
+# 1 GiB floor keeps a tiny or unreadable-total host from reserving nothing.
 fn default_headroom_bytes() -> i64:
-    8 * 1024 * 1024 * 1024
+    val total = mem_total_bytes()
+    val floor_bytes = 1024 * 1024 * 1024
+    if total <= 0:
+        return 8 * 1024 * 1024 * 1024
+    val proportional = total / 16
+    if proportional < floor_bytes:
+        return floor_bytes
+    proportional
+
+# Physical memory. Distinct from mem_available_bytes: this one never changes
+# under load, which is exactly what a reserve should be sized against.
+fn mem_total_bytes() -> i64:
+    val content = read_file("/proc/meminfo")
+    for line in content.split("\n"):
+        if line.starts_with("MemTotal:"):
+            for part in line.split(" "):
+                val t = part.trim()
+                if t != "" and t != "MemTotal:" and t != "kB":
+                    return t.to_i64() * 1024
+    shell_int("sysctl -n hw.memsize", -1)
 
 struct FitVerdict:
     fits: bool
@@ -32,7 +62,16 @@ struct FitVerdict:
 
 # MemAvailable, not MemFree: free memory excludes reclaimable page cache and so
 # under-reports what a load can actually use, which would refuse loads that fit.
+#
+# Returns -1 when the host's memory cannot be established at all. That is
+# deliberately not "assume it fits": `check_fit` turns -1 into a refusal.
 fn mem_available_bytes() -> i64:
+    val linux = _mem_available_linux()
+    if linux > 0:
+        return linux
+    _mem_available_darwin()
+
+fn _mem_available_linux() -> i64:
     val content = read_file("/proc/meminfo")
     for line in content.split("\n"):
         if line.starts_with("MemAvailable:"):
@@ -41,6 +80,34 @@ fn mem_available_bytes() -> i64:
                 if t != "" and t != "MemAvailable:" and t != "kB":
                     return t.to_i64() * 1024
     -1
+
+# macOS has no /proc, so the Linux lane above returns -1 there and every load
+# was refused with "could not read MemAvailable" on a machine with plenty of
+# free memory — a fit gate that refuses everything is not a gate, it is an
+# outage. Apple silicon is also UNIFIED memory, exactly the topology the
+# headroom rule above exists for, so the check matters more here, not less.
+#
+# `vm_stat` reports pages, not bytes, and there is no MemAvailable analogue, so
+# availability is derived as total minus resident: active + wired + compressed.
+# That is CONSERVATIVE by construction — inactive and purgeable pages are
+# reclaimable and are counted as unavailable anyway — which errs toward refusing
+# a load that would have fitted, the safe direction for this gate.
+fn _mem_available_darwin() -> i64:
+    val total = shell_int("sysctl -n hw.memsize", 0)
+    if total <= 0:
+        return -1
+    val page_size = shell_int("sysctl -n hw.pagesize", 0)
+    if page_size <= 0:
+        return -1
+    # One awk pass so a slow host is not probed three times; `gsub` strips the
+    # trailing '.' vm_stat prints after every page count.
+    val pages = shell_int("vm_stat | awk '/Pages active/ {a=$3} /Pages wired down/ {w=$4} /Pages occupied by compressor/ {c=$5} END {gsub(/\\./,\"\",a); gsub(/\\./,\"\",w); gsub(/\\./,\"\",c); print a+0+w+0+c+0}'", -1)
+    if pages < 0:
+        return -1
+    val used = pages * page_size
+    if used >= total:
+        return 0
+    total - used
 
 fn _gib(bytes: i64) -> text:
     (bytes / (1024 * 1024 * 1024)).to_text() + " GiB"
@@ -55,7 +122,7 @@ fn check_fit(model_bytes: i64, overhead_bytes: i64, headroom_bytes: i64) -> FitV
     if available < 0:
         return FitVerdict(fits: false, model_bytes: model_bytes, available_bytes: -1,
             headroom_bytes: headroom_bytes,
-            reason: "could not read MemAvailable from /proc/meminfo; refusing rather than loading blind")
+            reason: "could not establish available memory (no MemAvailable in /proc/meminfo, and no usable sysctl/vm_stat); refusing rather than loading blind")
     if needed > available:
         return FitVerdict(fits: false, model_bytes: model_bytes, available_bytes: available,
             headroom_bytes: headroom_bytes,
@@ -63,4 +130,4 @@ fn check_fit(model_bytes: i64, overhead_bytes: i64, headroom_bytes: i64) -> FitV
     FitVerdict(fits: true, model_bytes: model_bytes, available_bytes: available,
         headroom_bytes: headroom_bytes, reason: "")
 
-export FitVerdict, default_headroom_bytes, mem_available_bytes, check_fit
+export FitVerdict, default_headroom_bytes, mem_available_bytes, mem_total_bytes, check_fit

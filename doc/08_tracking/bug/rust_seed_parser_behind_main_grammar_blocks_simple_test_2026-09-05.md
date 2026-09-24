@@ -1,4 +1,8 @@
 # The Rust seed's parser is behind main's grammar, so `simple test` cannot run on this host
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05 (macOS, aarch64)
 **Status:** OPEN
@@ -83,3 +87,4 @@ and raw runtime externs (`rt_file_read_text`, `rt_file_exists`,
 `rt_file_write_text`, `rt_file_hash_sha256`) — which is how
 `scripts/check/sspec-score-seed-lane.shs` runs the sspec scorer here without
 touching `src/`.
+

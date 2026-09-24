@@ -1,0 +1,133 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Reproducing spec for
+# doc/08_tracking/bug/dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09.md
+#
+# `.?` (EXPR_EXISTS_CHECK) is a value-or-nil operator: on a `T?` base it yields
+# the payload when present and nil when absent -- it is NOT a boolean
+# predicate (the AST node and the interpreter agree on this; only the call
+# sites pretended otherwise). Functions declared `-> bool` used to return
+# `x.?` directly, leaking the raw payload (or nil) to callers, and the
+# pure-Simple semantic checker accepted the `T?` body without a diagnostic.
+#
+# The checker (src/compiler/30.types/type_infer) now infers `ExistsCheck` as
+# `T?` and `infer_return_expr` rejects an optional payload in a non-optional
+# return position with a compile-time diagnostic. The examples below pin the
+# diagnostic itself plus the surrounding negative space: payload pass-through
+# to an OPTIONAL return type, explicit `!= nil` comparisons, and real bools
+# stay clean.
+use std.spec.step
+
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source}
+
+fn diagnostics_for(src: text) -> [text]:
+    simple_semantic_check_source(src, "dot_question_probe.spl").diagnostics
+
+describe "-> bool functions reject a `.?` optional payload at compile time":
+    # @manual scenario evidence
+    it "a `-> bool` fn returning `x.?` draws one non-optional-return diagnostic naming the function":
+        # @req REQ-SSPEC-UNIT
+        step("a `-> bool` fn returning `x.?` draws one non-optional-return diagnostic naming the function")
+        val src = "fn maybe(flag: bool) -> text?:\n" +
+            "    if flag:\n" +
+            "        return \"hello\"\n" +
+            "    return nil\n" +
+            "\n" +
+            "fn has_it(flag: bool) -> bool:\n" +
+            "    return maybe(flag).?\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    return 0\n"
+        val diags = diagnostics_for(src)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("cannot satisfy the non-optional return type")
+        expect(diags[0]).to_contain("of function 'has_it'")
+        expect(diags[0]).to_contain("'.?' yields T?")
+
+    it "`return nil` in a `-> bool` fn draws the same non-optional-return diagnostic":
+        # @req REQ-SSPEC-UNIT
+        step("`return nil` in a `-> bool` fn draws the same non-optional-return diagnostic")
+        # nil is an optional payload too; the runtime SFFI contract used to be
+        # the only thing that caught this case.
+        val src = "fn f() -> bool:\n" +
+            "    return nil\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    return 0\n"
+        val diags = diagnostics_for(src)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("cannot satisfy the non-optional return type")
+        expect(diags[0]).to_contain("of function 'f'")
+
+    it "a compound `a.? and b.?` body in a `-> bool` fn is rejected":
+        # @req REQ-SSPEC-UNIT
+        step("a compound `a.? and b.?` body in a `-> bool` fn is rejected")
+        # `and` operands must be bool; an optional payload cannot satisfy that.
+        val src = "fn maybe() -> text?:\n" +
+            "    nil\n" +
+            "\n" +
+            "fn has_both() -> bool:\n" +
+            "    return maybe().? and maybe().?\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    return 0\n"
+        val diags = diagnostics_for(src)
+        expect(diags.len()).to_be_greater_than(0)
+        expect(diags[0]).to_contain("type mismatch")
+
+    it "an early `return true` before the offending tail return draws exactly one diagnostic":
+        # @req REQ-SSPEC-UNIT
+        step("an early `return true` before the offending tail return draws exactly one diagnostic")
+        val src = "fn maybe(flag: bool) -> text?:\n" +
+            "    if flag:\n" +
+            "        return \"hello\"\n" +
+            "    return nil\n" +
+            "\n" +
+            "fn has_it(flag: bool) -> bool:\n" +
+            "    if flag:\n" +
+            "        return true\n" +
+            "    return maybe(flag).?\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    return 0\n"
+        val diags = diagnostics_for(src)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("cannot satisfy the non-optional return type")
+        expect(diags[0]).to_contain("of function 'has_it'")
+
+describe "the diagnostic does not over-fire":
+    # @manual scenario evidence
+    it "a `-> text?` fn returning `x.?` stays clean (optional pass-through is legal)":
+        # @req REQ-SSPEC-UNIT
+        step("a `-> text?` fn returning `x.?` stays clean (optional pass-through is legal)")
+        val src = "fn maybe(flag: bool) -> text?:\n" +
+            "    if flag:\n" +
+            "        return \"hello\"\n" +
+            "    return nil\n" +
+            "\n" +
+            "fn get_it(flag: bool) -> text?:\n" +
+            "    return maybe(flag).?\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    return 0\n"
+        expect(diagnostics_for(src).len()).to_equal(0)
+
+    it "a `-> bool` fn returning `x != nil` stays clean":
+        # @req REQ-SSPEC-UNIT
+        step("a `-> bool` fn returning `x != nil` stays clean")
+        val src = "fn has_it(x: text?) -> bool:\n" +
+            "    return x != nil\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    return 0\n"
+        expect(diagnostics_for(src).len()).to_equal(0)
+
+    it "a `-> bool` fn returning a real bool stays clean":
+        # @req REQ-SSPEC-UNIT
+        step("a `-> bool` fn returning a real bool stays clean")
+        val src = "fn ok() -> bool:\n" +
+            "    return true\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    return 0\n"
+        expect(diagnostics_for(src).len()).to_equal(0)

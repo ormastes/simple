@@ -1,4 +1,9 @@
 # `RawHandle`/`NodeId`/`TextureId` generational-handle API drift
+## Closed 2026-09-16 — ...r.rgba` unknown-static-method, now fixed by this same triage pass to a struct literal; and
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-20
 **Severity:** medium (test-only impact so far; not confirmed to affect
@@ -85,3 +90,4 @@ to a struct literal; and two genuine numeric-precision bugs in
 `pack_color`/`unpack_color` and `create_solid_color_texture` that were masked
 by the `EngineColor.rgba` compile error and are now newly visible, still
 unclassified.)
+

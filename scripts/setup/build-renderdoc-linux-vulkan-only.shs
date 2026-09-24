@@ -134,12 +134,8 @@ fetch_source() {
     git -C "$SRC_DIR" submodule update --init --recursive
 }
 
-configure_build() {
-    require_linux
-    if ! have cmake; then
-        echo "missing cmake; run --print-deps" >&2
-        exit 1
-    fi
+configure_with_python() {
+    want_python="$1"
     generator=""
     if have ninja; then
         generator="-G Ninja"
@@ -155,9 +151,34 @@ configure_build() {
         -DENABLE_VULKAN=ON \
         -DENABLE_RENDERDOCCMD=ON \
         -DENABLE_QRENDERDOC=OFF \
-        -DENABLE_PYRENDERDOC=OFF \
+        -DENABLE_PYRENDERDOC="$want_python" \
         -DVULKAN_LAYER_FOLDER="$INSTALL_DIR/etc/vulkan/implicit_layer.d" \
         $sysroot_args
+}
+
+# RENDERDOC_ENABLE_PYTHON=1 asks for the Python bindings, which is what
+# `renderdoccmd python` -- and therefore scripts/tool/renderdoc-export-events.shs
+# -- needs; without them the exporter has no subcommand to call and the web
+# diff reports blocked. It is NOT the default because the bindings drag in a
+# swig build, and it FALLS BACK to OFF when that configure fails: a lane that
+# only needs captures must never be blocked by an exporter-only capability.
+# The resolved mode is recorded, so a fallback is visible rather than silent.
+configure_build() {
+    require_linux
+    if ! have cmake; then
+        echo "missing cmake; run --print-deps" >&2
+        exit 1
+    fi
+    if [ "${RENDERDOC_ENABLE_PYTHON:-0}" = 1 ]; then
+        if configure_with_python ON; then
+            append_kv "renderdoc_vulkan_only_python_bindings" "on"
+            return 0
+        fi
+        echo "renderdoc_vulkan_only_python_configure=failed-falling-back-to-off" >&2
+        rm -rf "$BUILD_DIR"
+    fi
+    configure_with_python OFF
+    append_kv "renderdoc_vulkan_only_python_bindings" "off"
 }
 
 build_tree() {
@@ -168,6 +189,26 @@ build_tree() {
 install_tree() {
     require_linux
     with_local_sysroot_env cmake --install "$BUILD_DIR"
+    stage_python_module
+}
+
+# RenderDoc's pyrenderdoc module (qrenderdoc/Code/pyrenderdoc: `_renderdoc`
+# plus the swig-generated renderdoc.py) has NO install() rule -- it is left in
+# the build tree. Stage it into the install prefix so RDOC_HOME is
+# self-contained: the exporter adds $RDOC_HOME/pymodules to PYTHONPATH, and
+# the CI cache stores only the install prefix.
+stage_python_module() {
+    py_dir="$INSTALL_DIR/pymodules"
+    found=0
+    for f in $(find "$BUILD_DIR" -name '_renderdoc*.so' -o -name 'renderdoc.py' 2>/dev/null); do
+        mkdir -p "$py_dir"
+        cp -f "$f" "$py_dir/" && found=1
+    done
+    if [ "$found" = 1 ]; then
+        append_kv "renderdoc_vulkan_only_pymodule_dir" "$py_dir"
+    else
+        append_kv "renderdoc_vulkan_only_pymodule_dir" ""
+    fi
 }
 
 case "$MODE" in

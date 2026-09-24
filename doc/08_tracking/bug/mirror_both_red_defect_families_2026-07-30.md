@@ -1,4 +1,8 @@
 # Mirror BOTH-RED population: every failure traces to an already-documented landmine
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Lane MIRR2**, run inline by the orchestrator after two subagent attempts failed
 (the first deadlocked on a background monitor, the second was halted on an API
@@ -111,3 +115,4 @@ sample it is a small number of engine defects projected across many specs. Fixin
 `.?` lowering alone would likely turn a large fraction of the ~200 projected
 BOTH-RED specs green. That is a far better investment than per-spec repair, and it
 argues for fixing the engine before spending any more lanes on mirror triage.
+

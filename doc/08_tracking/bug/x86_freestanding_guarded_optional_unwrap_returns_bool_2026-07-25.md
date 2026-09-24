@@ -1,4 +1,8 @@
 # x86 freestanding guarded optional unwrap returns the guard boolean
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -57,3 +61,4 @@ fact. `.?` must yield the original nullable payload (or a correctly unwrapped
 payload), never the boolean result of the presence comparison. Add a native x86
 MIR/codegen regression that asserts a guarded nullable struct field access does
 not reuse `rt_native_neq` as the payload.
+

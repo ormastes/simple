@@ -1,4 +1,9 @@
 # Dot-Dir Entry-Closure Import Fallback → Bogus Module-Name Collision
+## Closed 2026-09-16 — Status FIXED (source) with rewrite entries added and duplicate dir removal verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (source) 2026-07-24 — awaiting a full T3 bootstrap/deploy to
 verify against the deployed self-hosted `bin/simple`, since this is a
@@ -117,3 +122,4 @@ canonical implementation.
 it needs a T3 full bootstrap + deploy before the fix is observable in the
 deployed `bin/simple`, and the stage-4 full-CLI native-build should be re-run
 to confirm the collision is gone end-to-end.
+

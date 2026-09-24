@@ -1,4 +1,8 @@
 # Stage 4 bootstrap blocked by zerocopy vendor checksum mismatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** claimed for the frozen Stage-4 transaction. **Observed:**
 2026-08-15.
@@ -19,3 +23,4 @@ The defect is therefore the stale `.cargo-checksum.json` entry, not a modified
 third-party source file. The scoped fix updates that one checksum token to the
 actual upstream archive hash. Cycle 2 processed zero Simple files and zero
 Simple modules; elapsed time was 17.48 seconds and peak RSS was 153,120 KiB.
+

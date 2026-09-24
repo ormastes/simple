@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   ALPHABETIC_RANGES, DECIMAL_NUMBER_RANGES, MARK_RANGES, CASED_RANGES,
@@ -13,8 +14,11 @@ import {
   unicodeCanonicalCombiningClass, unicodeNormalizeNfc, unicodeDefaultLowercase
 } from "../../src/search/generated/unicode_17_0_0.js";
 
-const root = resolve(import.meta.dirname, "../../../../..");
-const fixture = resolve(import.meta.dirname, "../fixture/wave4_search");
+// Node 18 (the Linux MCP/package runtime) does not provide import.meta.dirname.
+// Derive the module directory from the standard URL API on every host.
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const root = resolve(moduleDir, "../../../../..");
+const fixture = resolve(moduleDir, "../fixture/wave4_search");
 const manifestPath = join(fixture, "unicode_17_0_0_manifest.json");
 const sourceDir = resolve(root, "examples/05_stdlib/spipe/tools/unicode/ucd/17.0.0");
 const generator = resolve(root, "examples/05_stdlib/spipe/tools/unicode/generate_unicode_tables.mjs");

@@ -1,8 +1,15 @@
 # expect(<call expr>) Is a Hollow False-Green in Interpreter Specs
 
+## Closed 2026-09-13 — Fixed 2026-06-11 per the entry's own status
+
+- **inferred** The Status line reads `FIXED 2026-06-11`; the body describes `expect(<call expr>)` no longer silently passing.
+- **measured** The one path-scan miss is `interpreter_call/bdd.rs`, a Rust-seed path fragment written without its crate prefix; the seed tree is present and untouched by this triage.
+- **inferred** The fix is in spec-matcher evaluation, which needs `bin/simple test` to demonstrate; that command is unusable on this Windows host (killed at its outer bound even on a 6-line spec), so no fresh execution evidence could be added.
+
+
 Date: 2026-06-10
 
-Status: FIXED 2026-06-11
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

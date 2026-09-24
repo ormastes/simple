@@ -18,6 +18,7 @@ classes, functions, roles, and remaining gaps.
 | User override | `SIMPLE_LINKER`, `mold_supported_override_aliases`, CLI linker paths | Supports `mold`, `lld`, `ld.lld`, `lld-link`, `ld`, `gnu`, and `bfd` aliases in the Simple wrapper. |
 | Bundled binary install | `scripts/setup/install-mold.shs` | Installs an upstream mold binary into `bin/mold/mold`; not a source reimplementation. |
 | Completion predicate | `mold_is_pure_simple_linker_complete` | Returns `false` until a real in-process ELF/Mach-O/COFF linker is implemented. |
+| Internal engine (per capsule, 2026-09-18) | `L/mold.spl` (external engine capsule, kept) + new `L/elf/**`, `L/boot_layout/**` capsules | `MoldBackend`/external mold stays the **external engine capsule** and completion-gate oracle (design D7); each internal capsule (`link_elf_fast`, `link_elf_bounded`, boot-layout) is a separate row here as it lands. See `doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md`. |
 
 Remaining mold gaps: no pure-Simple ELF/Mach-O/COFF linker, no linker-script
 language, no archive/object parser parity, no symbol resolution/relocation

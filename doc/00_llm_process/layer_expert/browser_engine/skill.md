@@ -274,3 +274,256 @@ pixel buffer down as data. Full isolation matrix:
   [browser feature expert](../../feature_expert/browser/skill.md).
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## 2026-09-14 — byte vs codepoint indexing is a layer-wide hazard
+
+The `text` primitives this layer builds on are **mixed**: `len()`, `substring()`
+and `bytes()` are BYTE-indexed; `char_code_at()` and `char_at()` are
+CODEPOINT-indexed. On ASCII the two coincide, so a confusion here passes every
+test until one `&mdash;`, accent or `×` appears.
+
+Wrap offsets, `wrap_starts`/`wrap_ends`, and everything downstream that cuts
+with `substring` are BYTE offsets. `resolved_font_advances` is per CODEPOINT.
+The bridge between them is `style_run_byte_advances` (one advance per byte, 0 on
+continuation bytes) plus `utf8_encoded_len` / `next_codepoint_start`
+(`simple_web_html_layout_renderer_layout.spl`). Use those; do not open-code a
+UTF-8 classifier on `char_code_at` results — it cannot work, and round 16 found
+exactly that mistake sitting dead in the tree since round 12.
+
+**Round 17 closed the whole residue — the census was larger than round 16's two
+named sites.** Grepping both layout files and `…_paint_primitives.spl` for the
+pattern (a BYTE offset reaching `char_code_at`/`char_at`, or `txt.len()` used as
+a loop bound over them) found **six** live sites, not two:
+
+| helper | old behaviour on non-ASCII |
+|---|---|
+| `text_line_advance_width` | one flat advance charged per BYTE |
+| `wrap_line_end` | a CHARACTER budget spent in bytes |
+| `_lay_ellipsize_text_for_width_inner` | measured one char, emitted another |
+| `_table_text_min_content_width` | read past the end, over-sized the column |
+| `reverse_text_for_paint` | counted down from the BYTE length |
+| `fb_text_sparse_range`, `fb_text_thin_scaled_clip_range` | wrong glyph, advance per byte |
+
+All six now step by codepoint and test bytes with `bytes()`.
+`resolved_text_range_width` is **gone**: the ellipsize loop was its only caller,
+and once that loop reads the per-byte advance table the function is dead — a
+mixed-index helper left lying around is a trap for the next reader, so it was
+deleted rather than kept.
+
+Lesson for this layer: when one instance of this mix is found, **census the
+whole layer in the same pass**. Round 16 named two sites from the two it had
+debugged; three of the six above were never mentioned and had been wrong just as
+long. The grep that finds them all is `char_code_at\|char_at(` over the layer,
+then reading each hit for what index space its bound comes from.
+
+Records: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round17_2026-09-14.md`.
+
+## The UA stylesheet is a layer of this engine, and it is three hardcoded tables
+
+Round 18 (2026-09-14) fixed three unrelated-looking geometry clusters that all
+had the same shape: **the layout algorithm was right and the element never
+reached it**, because the UA-stylesheet knowledge that routes it lives in
+hardcoded tables that were incomplete.
+
+Where that knowledge lives, and what each table decides:
+
+| table | file | decides |
+|---|---|---|
+| `is_inline_tag` | `…_renderer_style.spl` | `display:inline` (applied at `…_declarations.spl:1269`) |
+| `_m14_is_inline_tag` | `layout.spl` | the same thing for the M14 public layout API — a **twin**, widen both |
+| per-tag UA branches | `…_declarations.spl` (~:1229-1420) | font, padding, border, `display` for headings, lists, form controls |
+| `replaced_default_box_w/h` | `…_renderer_layout.spl` | the §10.3.2/§10.6.2 fallback box for replaced elements |
+| the widget branch | `…_renderer_layout.spl` | `input`/`select`/`textarea` size and, critically, that they do NOT lay children out |
+
+Three rules this layer earned the hard way:
+
+1. **A missing tag reads as a layout bug.** `<bdi>` at 728 px looked like a
+   shrink-to-fit defect; the shrink-to-fit code was fine and had been for
+   rounds. Before reading a layout loop, print the element's resolved `display`
+   and compare it with Chrome's — one probe settles which layer owns the defect.
+2. **Populate these tables from measurement.** The catalog's harvested
+   `*.geom.txt` carry Chrome's own `display=` for every element; a `grep` over
+   them gives the real inline set. A list written from the HTML spec would have
+   included `ruby`/`rt` (Chrome: `display:ruby`, not `inline`) and would have
+   missed nothing useful.
+3. **Some elements must RETURN before the child recursion.** A `<select>` that
+   recurses stacks its `<option>`s as flow boxes and grows to 153 px; Chrome
+   reports every option as 0x0 because a select renders them in a popup. The
+   replaced branch and the widget branch are both "return before children"
+   branches, and that is the load-bearing part of each, not the size table.
+
+4. **Baseline rules need a TIGHTER scope than `grid_item_is_replaced`** (round
+   19). That predicate covers form controls as well as media, and this engine
+   gives `input`/`select` `display:inline`, so scoping CSS 2.1 §10.8.1's
+   "inline replaced -> bottom margin edge" rule by it silently broke a
+   `<label>`+`<select>` height (33 -> 39) with only one spec in sixteen
+   noticing. Media aligns by bottom margin edge; a form control aligns by its
+   INNER TEXT baseline. Use `replaced_media_bottom_edge_tag`, and remember
+   Chrome reports `input`/`select`/`textarea`/`button` as `inline-block`.
+   **That wrong rule scored 82 fewer mismatches on the oracle** (forms-media
+   100 -> 18) and was still rejected: the input's 6 px error did not vanish, it
+   moved from the `input` row to the `label` row, same magnitude opposite sign.
+   The correct rule, derived from values already present, is
+   `control baseline offset = pad_t + border_t + strut_baseline(control font)`
+   → ascent 21, descent 12, line 33 — satisfying both the spec and the page.
+   If `input` is ever flipped to `inline-block` to match the census, the
+   existing `inline-block && child_count==0` arm hands it bottom-edge again;
+   the form-control arm must be tested first.
+5. **The geometry differ compares a boxless element against `0,0,0,0`.** Chrome
+   gives `<wbr>` (and anything else that generates no box) an all-zero rect, so
+   a correctly-placed `<wbr>` reads as a ~9,800 px error. One such row is 80% of
+   the `html` page's whole Σ. This is an instrument convention, not a layout
+   defect — fix it in the differ or report Σ both ways, never by making layout
+   emit `0,0,0,0`.
+
+Known residue this layer still carries, measured rather than assumed: a uniform
+16-18 px line-box offset on `animation` below the media line (what is left of
+round 19's fix); `<audio>`'s FALLBACK children are laid out here and by Chrome
+are not; form controls are `inline`-displayed here and `inline-block` in Chrome;
+and a text control's `size` width is measured on the 8 px bitmap cell
+(`char_w = 6*glyph_scale`, 6 px at the 13 px UA form font) where Chrome uses the
+face's OS/2 `avgCharWidth` (7.25) — real metrics DO resolve at 13 px (avg 6.57
+over an alnum sample), so the gap is a missing metrics FIELD, not a missing
+font. None of these is papered over with a fudge.
+
+**Round 20 corrections to the paragraph above — two of its claims were wrong.**
+
+* *"a text control's `size` width … Chrome uses the face's OS/2 `avgCharWidth`
+  (7.25) … the gap is a missing metrics FIELD"* — **false**. `sfnt*.spl` parses
+  no OS/2 table at all, and more decisively, Simple resolves `sans-serif` to
+  **Helvetica**, whose `xAvgCharWidth` is 904/2048 = 0.4414 em = **5.89 px** at
+  13.33. No macOS face yields 7.25 (SFNS 7.73, SFNSRounded 7.65). Exposing the
+  field would move `size=20` from 138 to ~136 — *further* from Chrome's 163.
+  The gap is **font SELECTION** for form controls, not a missing field.
+* *"form controls are `inline` here and `inline-block` in Chrome"* — true, but
+  the baseline rule that flip is meant to enable needs **three arms**: text
+  `input` and `select` fill their line (h = the label's h, 33/35); `textarea`
+  leaves 7 px below (48 in a 55 line); checkbox/radio are 13 px boxes inside an
+  ordinary 24 px text line. One rule for all four puts checkbox on a 13 px line.
+
+**This layer now distinguishes "is a layout element" from "generates a box".**
+`_simple_web_layout_element` decides ORDINALS and must mirror the differ
+walker's `layoutEl` byte-for-byte (`wbr` is in it). `_simple_web_generates_no_box`
+decides GEOMETRY (`wbr` is out). Because the nth-path key comes from a DOM
+sibling walk and never from the emitted rows, suppressing a row cannot move any
+other element's path — round 19 believed the opposite and deferred a fix on it.
+`<audio>`/`<video>` fallback children and `<option>` in a closed `<select>` are
+still boxed here and are not by Chrome; they now surface as `extra_box` rows.
+
+## Form controls are widget boxes with their OWN width arithmetic
+
+The widget branch (`…_renderer_layout.spl`, `input`/`select`/`textarea`)
+returns before child recursion. Its intrinsic width is NOT `columns × text
+advance`: Chrome adds a fixed font-derived INTERCEPT, so `input` content =
+`size*7 + 5` and `textarea` content = `cols*8 + 17` — separate arms, because
+Chrome gives them different UA fonts and a textarea reserves a scrollbar
+gutter. **Never use `style_char_w` (the 6 px bitmap CELL the rasteriser draws
+into) as a column advance** — that was the round-21 defect, and it is a
+different quantity from both the text advance and any font's `xAvgCharWidth`.
+`<select>` does not use this path at all (max-content + `SELECT_ARROW_WIDTH_PX`).
+Control HEIGHTS are already Chrome-correct; the open gap is control POSITION.
+
+## Out-of-flow (absolute) boxes — `…_renderer_layout.spl:1626-1700`
+
+`absolute_outer_width` has FOUR arms and their ORDER is load-bearing: both
+offsets given → stretch (`padding_box − left − right`); percentage width;
+explicit width; then `width:auto` → **shrink-to-fit** (round 22). The last one
+was missing and fell through to "fill the containing block", which is only
+correct for the first arm. It takes `nodes/styles/child_index/node_i` so it can
+call `flex_item_max_content_width` — the SAME max-content measurement `<select>`
+uses; do not add a second one. `available` for the clamp subtracts whichever of
+`left`/`right` is specified, which only an overflowing box can distinguish.
+
+`absolute_child_x` resolves `right` as `parent_x + border_l + padding_box_w −
+absolute_outer_width(…) − right_px`, so **any width error becomes an x error of
+the same magnitude**. When an absolute row shows a large `dx` AND a large `dw`
+with `dy = dh = 0`, suspect the width arm, not the positioning.
+
+Known gap: `right: auto` does not clear a `right` inherited from a class rule —
+filed `doc/08_tracking/bug/absolute_right_auto_not_honoured_2026-09-14.md`.
+Fixing it touches the stretch arm's `st.right_px >= 0` test, so it needs its own
+controls.
+
+## The geometry differ is an instrument, and it can be the defect
+
+`src/app/ui/chrome_showcase/layout_geometry_diff.spl` has two "Chrome draws
+nothing" predicates, and they are not interchangeable:
+`chrome_reports_no_box` (all four zero — `<wbr>`, `<br>`) and
+`chrome_reports_not_rendered` (the walker's `rendered=` flag, from
+`el.checkVisibility()`). The second exists because Chrome returns a **non-zero
+phantom rect** for an element inside a `content-visibility:hidden` subtree.
+Both feed one arm whose asymmetry must never be relaxed: Simple drawing a REAL
+box where Chrome draws none is still an `extra_box` mismatch. The Simple-side
+test differs per predicate — all-four-zero for boxless, `w==0 and h==0`
+(`simple_renders_nothing`) for not-rendered, because Simple gives a
+not-rendered element a flow origin with no extent. 12 selftest fixtures, three
+of them controls that stop the rule widening.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
+`doc/08_tracking/bug/ifc_linebox_spec_imports_nonexistent_layout_inline_2026-09-14.md`.
+
+## Line breaking (round 23, 2026-09-14)
+
+`Style` now carries `white_space_pre` alongside `white_space_nowrap`. They are
+NOT interchangeable: `nowrap` collapses newlines, `pre` preserves them as forced
+breaks. `white_space_pre` is set by the `<pre>` UA rule
+(`..._declarations.spl:1359`) and by `white-space: pre`
+(`..._decl_apply.spl:1415`); the `#text` branch of `..._layout.spl` takes the
+`pre` arm FIRST and splits via `compute_preserved_newline_ranges`, which also
+drops one newline after the start tag and opens no trailing empty line. Paint
+needs no parallel change — `..._paint_layout.spl:1015` already draws from
+`wrap_cache.starts/ends`.
+
+`_lay_compute_style_wrap_ranges_inner` no longer chops inside a word. Order of
+arms: space break first, then intra-word chop ONLY under
+`overflow-wrap: break-word`/`anywhere` or `word-break: break-all`, else the
+whole word via `word_end_byte`. A final `endv == start` guard keeps the loop
+finite when a single space exceeds `max_width`. The float-band copy
+(`compute_style_wrap_ranges_float_band`) still has the old behaviour and no
+catalog page exercises it.
+
+`align_inline_line_baselines` returns `line_height` untouched when its node list
+is EMPTY, and `vertical-align: sub`/`super` children are never added to it — so
+a block whose only child is a `<sub>` gets the child's height, not the line's.
+Seeding `inline_line_h` from the container is the obvious fix and is
+contradicted by Chrome under a NUMBER `line-height`; see the bug record before
+trying it again.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`;
+`doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`;
+`doc/08_tracking/bug/sub_sup_line_box_strut_contradiction_2026-09-14.md`.
+
+Block-flow child loop (`simple_web_html_layout_renderer_layout.spl`, ~`:3555`
+onward): `prev_margin_b` carries the pending bottom margin of the previous
+in-flow BLOCK child and is collapsed against the next block's `margin-top`.
+Inline children do not participate in that collapse — they live in an anonymous
+block, which has no margins — so the pending margin must be FLUSHED into `cy`
+when an inline run opens (`:3629`), and `prev_margin_b` is separately zeroed
+after each inline child (`:3854`) so the block-after-inline direction collapses
+against 0. Removing either half breaks a different direction of the boundary;
+applying the flush to block siblings as well double-counts the collapse.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.
+
+`<wbr>` (same loop, `:3710`, RESOLVED round 25) is a zero-width SOFT break
+opportunity, and the DOM shape is what makes it tractable: the tag splits the
+text into separate `#text` siblings, so the opportunity is a node in the child
+list and needs no intra-run machinery — no change to
+`_lay_compute_style_wrap_ranges_inner` or to its
+`compute_style_wrap_ranges_float_band` twin. The arm sits AFTER the `<br>` arm
+and after round 24's `prev_margin_b` flush, so a `<wbr>`-opened run still gets
+the margin. Three things it must get right, each pinned by an AC:
+the element's own box is zero-sized at the pen (not 1 px — the generic inline
+path's `inline_w` floor is what made it invisible); the break is taken ONLY when
+`inline_x + first_word_advance_width(next) > iw`, because Chrome is greedy and
+passes over an opportunity whose following word still fits; and the width tested
+is the first WORD of the next run, not the whole run. A leading `<wbr>` at pen 0
+is guarded out (`inline_x > inline_start_x`) and therefore diverges from Chrome,
+which answers 48 there — recorded, not tuned for.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.

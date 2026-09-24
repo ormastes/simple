@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+workflow="$root/.github/workflows/rust-bootstrap-multiplatform.yml"
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+freebsd_stanza=$(awk '/^  freebsd:/{found=1} found{print}' "$workflow")
+[ -n "$freebsd_stanza" ] || fail 'FreeBSD workflow stanza missing'
+
+printf '%s\n' "$freebsd_stanza" | grep -Fq 'set -eu' || fail 'FreeBSD run is not fail-fast'
+[ "$(printf '%s\n' "$freebsd_stanza" | grep -Fc 'CARGO_BUILD_JOBS=1 cargo build --profile bootstrap -p simple-driver')" = 1 ] ||
+    fail 'bootstrap cargo build is not bounded to one job'
+[ "$(printf '%s\n' "$freebsd_stanza" | grep -Fc 'CARGO_BUILD_JOBS=1 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --lib')" = 1 ] ||
+    fail 'workspace cargo test is not bounded or test debug is enabled'
+
+printf '%s\n' "$freebsd_stanza" | grep -Fq 'sysctl -n hw.ncpu hw.physmem vm.swap_total' ||
+    fail 'bounded guest sysctl diagnostics missing'
+printf '%s\n' "$freebsd_stanza" | grep -Fq 'swapinfo -h' || fail 'guest swap diagnostics missing'
+printf '%s\n' "$freebsd_stanza" | grep -Fq '} | head -n 40' || fail 'guest diagnostics are unbounded'
+[ "$(printf '%s\n' "$freebsd_stanza" | grep -Fc 'dmesg 2>&1 | tail -n 80 || true')" = 2 ] ||
+    fail 'each Cargo failure path lacks bounded dmesg evidence'
+[ "$(printf '%s\n' "$freebsd_stanza" | grep -Fc 'cargo_status=$?')" = 2 ] ||
+    fail 'Cargo failure status is not captured before diagnostics'
+[ "$(printf '%s\n' "$freebsd_stanza" | grep -Fc 'exit "$cargo_status"')" = 2 ] ||
+    fail 'Cargo failure status is not returned'
+
+echo 'PASS: FreeBSD Cargo build/test bounds, full workspace test, diagnostics, and status propagation'

@@ -1,4 +1,8 @@
 # The x86 port-I/O adapter contract has decayed to one consumer; its spec is RED on `main`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-06
 **Severity:** medium — a landed architectural contract is unenforced and its spec has
@@ -72,3 +76,4 @@ Deciding between these needs the OS lane's owner. Removing assertions one at a
 time until the spec goes green would convert a real architectural finding into a
 green check, which is the failure mode this repo already documents for
 `--generate-baseline`.
+

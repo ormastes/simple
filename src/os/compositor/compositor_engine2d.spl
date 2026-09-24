@@ -1,4 +1,5 @@
 use std.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanFrameReceipt}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE, DrawIrComposition}
 use common.ui.draw_ir_patch.{draw_ir_patch_between}
@@ -198,6 +199,9 @@ class Engine2dCompositorBackend:
     window_revision_resources: [SimpleOsHostGpuImageResource] = []
     window_render_count: i64 = 0
     window_represent_count: i64 = 0
+    # Only the damaged path emits a compute-finalize receipt before present.
+    # Keep the exact snapshot so the compositor can validate both transitions.
+    window_compute_finalize_receipt: VulkanFrameReceipt? = nil
     # Explicit damage-reporting sink (WS-D3 §9 fix). `get_pixel_buffer()`
     # returns a live alias, so callers (glass_dispatch.spl, text_render.spl)
     # call `report_damage()` with the region they just touched instead of
@@ -295,7 +299,16 @@ class Engine2dCompositorBackend:
     fn window_present_enabled() -> bool:
         self.engine.window_present_enabled()
 
+    # Expose the provider-owned Vulkan receipt to the compositor surface
+    # owner without exposing the Engine2D internals or manufacturing a token.
+    me latest_vulkan_frame_receipt() -> VulkanFrameReceipt?:
+        self.engine.latest_vulkan_frame_receipt()
+
+    fn latest_window_compute_finalize_receipt() -> VulkanFrameReceipt?:
+        self.window_compute_finalize_receipt
+
     me represent_retained_window() -> bool:
+        self.window_compute_finalize_receipt = nil
         if not self.window_present_enabled():
             return false
         if not self.engine.present_window_device():
@@ -939,6 +952,7 @@ class Engine2dCompositorBackend:
         presenting: replaying a full translucent composition over partially
         updated pixels would double-blend them.
         """
+        self.window_compute_finalize_receipt = nil
         # An unchanged retained window still needs a swapchain presentation,
         # but it needs no damage plan or DrawIR replay. Check the exact key
         # before treating an empty damage list as a full-frame fallback.
@@ -1006,6 +1020,7 @@ class Engine2dCompositorBackend:
             engine2d_draw_ir_render_composition_damaged_with_images(
                 self.engine, composition, images, plan.rects, false)
         self.engine = outcome.engine
+        self.window_compute_finalize_receipt = self.engine.latest_vulkan_frame_receipt()
         # `ops_skipped` includes commands intentionally culled because their
         # bounds do not intersect this exact retained damage plan. That is the
         # point of the partial-window path, not an execution failure. Only an

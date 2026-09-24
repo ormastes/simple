@@ -1,4 +1,8 @@
 # Stage 3 aggregate copy dereferences an unregistered tagged receiver
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
 **Status:** codegen fix present; focused/static verification and canonical retry pending
@@ -65,3 +69,4 @@ weakening HIR validation.
    admits Stage 2.
 4. Exactly one cache-preserving canonical Stage-3 recovery advances beyond the
    retained fault; on failure, retain the new exact first diagnostic/IP.
+

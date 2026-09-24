@@ -1,4 +1,8 @@
 # SOSIX release lineage blocked by concurrent Rust input drift
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** open; fail-closed provenance guard worked
@@ -27,3 +31,4 @@ Resume only from a stable Rust input snapshot. Reuse the cache, keep
 `SIMPLE_NO_STUB_FALLBACK=1`, and run one full bootstrap/deploy attempt. Do not
 launch authoritative QEMU rows until the deployed binary identifies as the
 pure-Simple self-hosted compiler and its source tree is unchanged.
+

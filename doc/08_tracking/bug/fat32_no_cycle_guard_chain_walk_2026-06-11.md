@@ -1,6 +1,14 @@
 # FAT32 driver: no cycle guard for cluster-chain walks (infinite-loop hazard)
 
-- **Status:** closed — cycle guard implemented 2026-06-11
+## Closed 2026-09-13 — cycle guard present in the shipped driver
+
+- **measured** `src/lib/nogc_async_mut/fs_driver/fat32_hardening.spl:28` declares
+  `pub fn detect_cluster_cycle(start_cluster: u32, max_clusters: u32) -> Result<bool, FsError>` —
+  the guard the entry asked for exists.
+- **inferred** Entry's own status already reads `closed — cycle guard implemented 2026-06-11`.
+
+
+Status: closed 2026-09-13 (was: - **Status:** closed — cycle guard implemented 2026-06-11)
 - **Found:** 2026-06-11 by the Lean `fat32` formal model (FINDING-T3 in
   `src/verification/fat32/Fat32/Theorems.lean`)
 - **Severity:** was high (infinite loop on cyclic FAT); now guarded

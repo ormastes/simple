@@ -1,0 +1,185 @@
+"""Bounded production facade over admitted dynSMF bytes and session state.
+
+The target-correct image helper supplies bytes only.  Authority comes from the
+production trust-registry admission call; no fixture result can mint an owned
+session or query handle.
+"""
+# @cover src/os/smf/dynsmf_owned_v2.spl 90%
+# @req REQ-L06-A01
+# @req REQ-L06-A02
+# @req REQ-L06-A03
+
+use std.spec.{describe, it, expect, step}
+use os.smf.dynsmf_session.{dynsmf_policy_default}
+use os.smf.dynsmf_trust_registry.{
+    DynSmfAdmittedRegistry,
+    DynSmfTrustArtifactImage,
+    dynsmf_admitted_registry_from_values
+}
+use os.smf.dynsmf_owned_v2.{
+    DYNSMF_OWNED_OK_V2,
+    DYNSMF_OWNED_REGISTRY_NOT_ADMITTED_V2,
+    DYNSMF_OWNED_OWNER_UNKNOWN_V2,
+    DYNSMF_OWNED_ARTIFACT_UNKNOWN_V2,
+    DYNSMF_OWNED_QUERY_UNKNOWN_V2,
+    DYNSMF_OWNED_RELEASE_UNAVAILABLE_V2,
+    DYNSMF_OWNED_RETRY_UNAVAILABLE_V2,
+    DYNSMF_OWNED_COMMIT_REFUSED_V2,
+    DynSmfOwnedHandleV2,
+    DynSmfOwnedQueryHandleV2,
+    dynsmf_owned_load_v2,
+    dynsmf_owned_query_v2,
+    dynsmf_owned_observe_v2,
+    dynsmf_owned_mapping_observe_v2,
+    dynsmf_owned_commit_physical_release_v2,
+    dynsmf_owned_release_v2,
+    dynsmf_owned_retry_v2
+}
+use os.smf.smf_dynlib.{smf_dlclose, smf_dynlib_release_mappings_v1}
+use test.helpers.dynsmf_admitted_startup_fixture.{
+    DynSmfAdmittedStartupFixture,
+    dynsmf_admitted_startup_fixture
+}
+
+fn owned_fixture_v2() -> DynSmfAdmittedStartupFixture:
+    dynsmf_admitted_startup_fixture(
+        "owned_v2", "build/dynsmf/owned_v2.smf", "test.owned_v2", "1",
+        "owned_v2_call", false)
+
+fn owned_trust_source_v2(fixture: DynSmfAdmittedStartupFixture) -> text:
+    "trust_artifact:\n" +
+        "  id: owned_v2\n" +
+        "  path: build/dynsmf/owned_v2.smf\n" +
+        "  abi_version: 1\n" +
+        "  artifact_kind: precompiled_smf\n" +
+        "  content_hash: " + fixture.request.artifact.content_hash + "\n" +
+        "  binding:\n" +
+        "    facet_id: startup/owned_v2\n" +
+        "    aspect_id: startup.aspect\n" +
+        "    module_id: owned_v2.module\n" +
+        "    module_abi_hash: startup-module-abi\n" +
+        "    export_symbol: owned_v2_call\n" +
+        "    interface_abi_hash: startup-facet-abi\n"
+
+fn admitted_owned_registry_v2() -> DynSmfAdmittedRegistry:
+    val fixture = owned_fixture_v2()
+    dynsmf_admitted_registry_from_values(
+        fixture.manifest,
+        owned_trust_source_v2(fixture),
+        [DynSmfTrustArtifactImage(
+            path: fixture.manifest[0].path,
+            artifact_bytes: fixture.artifact_bytes
+        )]
+    )
+
+describe "dynSMF owned v2 production facade":
+    it "refuses a registry that has no production admission":
+        step("Present an unadmitted retained-byte registry")
+        val result = dynsmf_owned_load_v2(
+            DynSmfAdmittedRegistry(
+                ok: false, reason: "not-admitted", artifacts: [],
+                artifact_indices: {}
+            ),
+            "owned-v2-unadmitted",
+            dynsmf_policy_default()
+        )
+        expect(result.status).to_equal(DYNSMF_OWNED_REGISTRY_NOT_ADMITTED_V2)
+        expect(result.owner.opaque_handle).to_equal(0)
+
+    it "retains the returned session before publishing an opaque query":
+        step("Admit exact bytes through the production trust registry")
+        val registry = admitted_owned_registry_v2()
+        expect(registry.ok).to_equal(true)
+        val loaded = dynsmf_owned_load_v2(
+            registry, "owned-v2-query", dynsmf_policy_default())
+        expect(loaded.status).to_equal(DYNSMF_OWNED_OK_V2)
+        expect(loaded.retained_bytes > 0).to_equal(true)
+
+        step("Mutate every caller-owned registry authority field after load")
+        var caller_artifact = registry.artifacts[0]
+        caller_artifact.library_id = "caller-mutated"
+        caller_artifact.request.facet_id = "caller/mutated"
+        caller_artifact.artifact_bytes[0] = 0
+        registry.artifacts[0] = caller_artifact
+        registry.artifact_indices = {}
+        registry.ok = false
+
+        step("Query the retained admitted image through the production session")
+        val queried = dynsmf_owned_query_v2(loaded.owner, "owned_v2")
+        expect(queried.status).to_equal(DYNSMF_OWNED_OK_V2)
+        expect(queried.query.opaque_handle > 0).to_equal(true)
+        val observed = dynsmf_owned_observe_v2(queried.query)
+        expect(observed.status).to_equal(DYNSMF_OWNED_OK_V2)
+        expect(observed.live).to_equal(true)
+        expect(observed.ok).to_equal(true)
+        expect(observed.owner_identity).to_equal(loaded.owner.opaque_handle)
+        expect(observed.query_identity).to_equal(queried.query.opaque_handle)
+        expect(observed.session_id).to_equal("owned-v2-query")
+        expect(observed.library_id).to_equal("owned_v2")
+        expect(observed.facet_id).to_equal("startup/owned_v2")
+        expect(observed.native_handle > 0).to_equal(true)
+        expect(observed.library_generation > 0).to_equal(true)
+        expect(observed.mapper_instance_id != "").to_equal(true)
+        expect(observed.mapping_receipts.len() > 0).to_equal(true)
+        expect(observed.mapped_bytes > 0).to_equal(true)
+        expect(observed.segment_count > 0).to_equal(true)
+        expect(observed.outstanding_queries).to_equal(1)
+        expect(observed.retained_bytes).to_equal(loaded.retained_bytes)
+
+    it "keeps public release closed and commits one exact physical result":
+        step("Create one production-admitted retained query")
+        val registry = admitted_owned_registry_v2()
+        val loaded = dynsmf_owned_load_v2(
+            registry, "owned-v2-release", dynsmf_policy_default())
+        val queried = dynsmf_owned_query_v2(loaded.owner, "owned_v2")
+        expect(queried.status).to_equal(DYNSMF_OWNED_OK_V2)
+
+        step("Refuse release without an exact mapper association")
+        val released = dynsmf_owned_release_v2(queried.query)
+        expect(released.status).to_equal(DYNSMF_OWNED_RELEASE_UNAVAILABLE_V2)
+        expect(released.retryable).to_equal(false)
+        expect(dynsmf_owned_observe_v2(queried.query).live).to_equal(true)
+
+        step("Refuse retry because no physical attempt result was retained")
+        val retried = dynsmf_owned_retry_v2(queried.query)
+        expect(retried.status).to_equal(DYNSMF_OWNED_RETRY_UNAVAILABLE_V2)
+        expect(retried.retryable).to_equal(false)
+        expect(dynsmf_owned_observe_v2(queried.query).live).to_equal(true)
+
+        step("V3 protection refuses the legacy physical release bypass")
+        val mapping = dynsmf_owned_mapping_observe_v2(queried.query)
+        val physical = smf_dynlib_release_mappings_v1(
+            mapping.native_handle, mapping.mapping_receipts)
+        expect(physical.ok).to_equal(false)
+        expect(physical.fully_released).to_equal(false)
+        expect(smf_dlclose(mapping.native_handle).success).to_equal(false)
+
+        step("V2 caller-carried physical commits remain disabled")
+        val mismatch = dynsmf_owned_commit_physical_release_v2(
+            queried.query, mapping.library_generation + 1, physical)
+        expect(mismatch.status).to_equal(DYNSMF_OWNED_COMMIT_REFUSED_V2)
+        expect(mismatch.committed).to_equal(false)
+        expect(dynsmf_owned_observe_v2(queried.query).live).to_equal(true)
+
+    it "rejects unknown owner artifact and query identities":
+        step("Present a forged owner handle")
+        val forged_owner = DynSmfOwnedHandleV2(opaque_handle: 9223372036854775807)
+        expect(dynsmf_owned_query_v2(
+            forged_owner, "owned_v2").status).to_equal(DYNSMF_OWNED_OWNER_UNKNOWN_V2)
+
+        step("Use a real owner with an absent admitted artifact")
+        val loaded = dynsmf_owned_load_v2(
+            admitted_owned_registry_v2(), "owned-v2-absent",
+            dynsmf_policy_default())
+        expect(dynsmf_owned_query_v2(
+            loaded.owner, "other").status).to_equal(DYNSMF_OWNED_ARTIFACT_UNKNOWN_V2)
+
+        step("Present a forged query handle to every terminal API")
+        val forged_query = DynSmfOwnedQueryHandleV2(
+            opaque_handle: 9223372036854775807)
+        expect(dynsmf_owned_observe_v2(
+            forged_query).status).to_equal(DYNSMF_OWNED_QUERY_UNKNOWN_V2)
+        expect(dynsmf_owned_release_v2(
+            forged_query).status).to_equal(DYNSMF_OWNED_QUERY_UNKNOWN_V2)
+        expect(dynsmf_owned_retry_v2(
+            forged_query).status).to_equal(DYNSMF_OWNED_QUERY_UNKNOWN_V2)

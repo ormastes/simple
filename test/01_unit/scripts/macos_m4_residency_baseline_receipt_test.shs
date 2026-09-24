@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+checker="$root/scripts/check/check-macos-m4-residency-baseline-receipt.shs"
+requirements=doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md
+work=${TMPDIR:-/tmp}/macos-m4-baseline-receipt-$$
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work"
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+producer_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+server_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+write_receipt() {
+  output=$1 arch=$2
+  cat >"$output" <<EOF
+schema=macos-m4-residency-baseline-v1
+status=ADMITTED
+requirement_id=MBH-NFR-003
+selection_policy=baseline-relative-10-percent
+decision_source=user-final-performance-authority-2026-09-02
+architecture=$arch
+request_count=20
+baseline_rss_kib=1000
+baseline_evidence_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+producer_sha256=$producer_sha
+server_sha256=$server_sha
+authority_document=$requirements
+authority_document_sha256=$(sha256_file "$root/$requirements")
+EOF
+}
+must_reject() {
+  name=$1 file=$2 arch=$3 producer=${4:-$producer_sha} server=${5:-$server_sha}
+  if sh "$checker" --receipt="$file" --arch="$arch" --producer-sha256="$producer" \
+      --server-sha256="$server" >"$work/$name.out" 2>"$work/$name.err"; then
+    echo "baseline receipt mutation survived: $name" >&2
+    exit 1
+  fi
+}
+
+sh -n "$checker"
+write_receipt "$work/arm64.env" arm64
+write_receipt "$work/x86_64.env" x86_64
+sh "$checker" --receipt="$work/arm64.env" --arch=arm64 --producer-sha256="$producer_sha" --server-sha256="$server_sha" >"$work/arm64.out"
+sh "$checker" --receipt="$work/x86_64.env" --arch=x86_64 --producer-sha256="$producer_sha" --server-sha256="$server_sha" >"$work/x86_64.out"
+grep -Fxq 'architecture=arm64' "$work/arm64.out"
+grep -Fxq 'baseline_rss_kib=1000' "$work/arm64.out"
+grep -Eq '^baseline_receipt_sha256=[0-9a-f]{64}$' "$work/arm64.out"
+
+must_reject awaiting-template "$root/.spipe/policy/templates/macos_m4_residency_baseline_arm64.env.template" arm64
+must_reject cross-architecture "$work/arm64.env" x86_64
+sed 's/^status=.*/status=AWAITING_ADMISSION/' "$work/arm64.env" >"$work/status.env"
+must_reject unadmitted "$work/status.env" arm64
+sed '/^baseline_rss_kib=/d' "$work/arm64.env" >"$work/missing-baseline.env"
+must_reject missing-baseline "$work/missing-baseline.env" arm64
+sed 's/^baseline_rss_kib=.*/baseline_rss_kib=0/' "$work/arm64.env" >"$work/zero-baseline.env"
+must_reject zero-baseline "$work/zero-baseline.env" arm64
+sed 's/^baseline_evidence_sha256=.*/baseline_evidence_sha256=0/' "$work/arm64.env" >"$work/evidence.env"
+must_reject baseline-digest "$work/evidence.env" arm64
+must_reject producer-binding "$work/arm64.env" arm64 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+must_reject server-binding "$work/arm64.env" arm64 "$producer_sha" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+sed 's/^decision_source=.*/decision_source=stale-decision/' "$work/arm64.env" >"$work/decision.env"
+must_reject decision-source "$work/decision.env" arm64
+sed 's/^authority_document_sha256=./authority_document_sha256=0/' "$work/arm64.env" >"$work/document.env"
+must_reject document-digest "$work/document.env" arm64
+{ cat "$work/arm64.env"; echo 'architecture=arm64'; } >"$work/duplicate.env"
+must_reject duplicate-key "$work/duplicate.env" arm64
+cp "$work/arm64.env" "$work/unknown.env"; echo 'unreviewed_limit=1' >>"$work/unknown.env"
+must_reject unknown-key "$work/unknown.env" arm64
+sed 's/^baseline_rss_kib=.*/baseline_rss_kib=invalid/' "$work/arm64.env" >"$work/invalid-number.env"
+must_reject invalid-number "$work/invalid-number.env" arm64
+sed 's/^baseline_rss_kib=.*/baseline_rss_kib=REQUIRED_MEASURED_BASELINE/' "$work/arm64.env" >"$work/placeholder.env"
+must_reject placeholder "$work/placeholder.env" arm64
+sed 's/^selection_policy=.*/selection_policy=fixed-numeric-per-architecture/' "$work/arm64.env" >"$work/absolute-policy.env"
+must_reject deleted-absolute-policy "$work/absolute-policy.env" arm64
+sed 's/^selection_policy=.*/selection_policy=monotonic-only/' "$work/arm64.env" >"$work/monotonic-policy.env"
+must_reject deleted-monotonic-policy "$work/monotonic-policy.env" arm64
+{ cat "$work/arm64.env"; echo; } >"$work/blank-line.env"
+must_reject nonexact-schema "$work/blank-line.env" arm64
+
+echo "PASS MBH-NFR-003 baseline receipt mutation contract"

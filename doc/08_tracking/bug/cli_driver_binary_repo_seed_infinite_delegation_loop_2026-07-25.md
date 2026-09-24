@@ -1,4 +1,8 @@
 # Bug: `bin/simple run` infinite delegation loop — blocks ALL execution
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-25
 **Status:** BLOCKER — discovered while verifying the host-WM headless capture
@@ -102,3 +106,4 @@ incident pattern precisely.
 Add the same `_cli_is_current_exe(repo_seed)` guard already used on the other
 two branches of `_cli_driver_binary()`, then re-verify with the linear-scaling
 repro above (bytes vs. timeout should stop growing once the guard fires).
+

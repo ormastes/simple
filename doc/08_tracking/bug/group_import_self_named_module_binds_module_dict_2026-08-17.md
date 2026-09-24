@@ -1,4 +1,9 @@
 # `use pkg.Mod.{Mod}` binds the module namespace dict, not the class
+## Closed 2026-09-16 — Status FIXED in Rust seed source; both specs pass on rebuilt seed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-17
 **Status:** FIXED (Rust seed source; awaiting next seed/bootstrap redeploy)
@@ -59,3 +64,4 @@ both specs pass; `test/01_unit/compiler/mdsoc` unchanged at 317/324
 
 - `x is StructType` returns `false` for struct instances under `run`
   (reproduces with non-shadowed imports; unrelated to import binding).
+

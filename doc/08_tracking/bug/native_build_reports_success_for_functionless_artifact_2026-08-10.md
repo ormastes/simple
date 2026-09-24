@@ -1,5 +1,14 @@
 # native-build can report success for a function-less artifact (status: DRIVER GATE LANDED 2026-08-17; original artifact still NOT REPRODUCED)
 
+## Triage 2026-09-13
+Confirmed the doc's own conclusion still stands: the original 0-FUNC +
+"Build complete" combination was not reproduced across the three lanes this
+doc measured (positive control, bad-syntax control, cross-target Rust
+handler), and this pass did not attempt a fresh native-build run (expensive
+on this host, see prepush_hook_unpassable_native_build_oom_2026-08-17). Left
+OPEN, not asserted as a live defect, per the doc's own standard.
+
+
 Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 

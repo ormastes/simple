@@ -1,4 +1,8 @@
 # Stale untracked `.smf` stubs shadow real modules → every spec fails `unresolved name: describe`
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/lib/nogc_sync_mut/spec.smf
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-24 · **Severity:** critical (tooling) · **Status:** mitigated (quarantine), root fix open
 
@@ -60,3 +64,4 @@ normally — devhub suite verified 25 files / 517 examples / 0 failures.
   builds; cf. the Jul-17 "std.spec SMF shadowing = Rust-layer defect" note)
   remains unpinned — but with the producer dead, the cache gated, and current
   resolvers proven .spl-first, the class is closed at every reachable layer.
+

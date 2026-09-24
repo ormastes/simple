@@ -1,4 +1,8 @@
 # HIR drops members of one explicit import list, nondeterministically
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — worked around at the single call site, compiler defect NOT fixed
 **Filed:** 2026-09-04
@@ -115,3 +119,4 @@ brace import resolves correctly, as does the real module tree under
 The nondeterminism between runs A and B is the strongest lead: whatever registers
 explicit import members is order- or state-dependent at closure scale. Fixing it
 should restore the explicit list here, which is the regression test.
+

@@ -1,0 +1,232 @@
+#![allow(primitive_api)]
+
+# Closed typed verifier registry for bytes stored by the existing verified CAS.
+# Each verifier accepts only the canonical bytes owned by the corresponding
+# codec.  The registry never wraps or rewrites those bytes.
+
+use std.common.binary_io.{bytes_to_string}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.canonical_cache_codec_v1.*
+use compiler.common.cache_contract.generation_manifest_v1.{
+    generation_manifest_decode_v1, generation_manifest_encode_v1}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    three_payload_worker_result_decode_bounded_v1,
+    three_payload_worker_result_encode_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    semantic_query_read_manifest_decode_bounded_v1,
+    semantic_query_read_manifest_encode_v1}
+use compiler.common.cache_contract.diagnostic_manifest_v1.{
+    diagnostic_manifest_decode_bounded_v1, diagnostic_manifest_encode_v1}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    reverse_reference_shard_decode_v1, reverse_reference_shard_encode_v1}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_max_items_v1}
+use compiler.common.cache_contract.portable_object_ref_v1.{PortableObjectRefV1}
+use compiler.hir.portable_object_profile_v1.{PortableHirObjectV1,
+    portable_hir_semantic_verifier_available_v1,
+    portable_hir_semantic_verifier_blocker_v1,
+    portable_hir_semantic_verifier_digest_v1, verify_portable_hir_object_v1}
+
+val VERIFIED_CAS_REGISTRY_MAX_BYTES_V1: i64 = 33554432
+
+pub struct VerifiedCasKindVerificationV1:
+    ok: bool
+    kind: text
+    schema: i64
+    verifier_identity: text
+    canonical_bytes: [u8]
+    error: text
+
+fn _legacy_kind_tag_v1(kind: text) -> i64:
+    if kind == "source_blob": return canonical_cache_kind_source_blob_v1()
+    if kind == "compile_snapshot": return canonical_cache_kind_compile_snapshot_v1()
+    if kind == "public_summary": return canonical_cache_kind_public_summary_v1()
+    if kind == "file_ast": return canonical_cache_kind_file_ast_v1()
+    if kind == "semantic_read_set": return canonical_cache_kind_semantic_read_set_v1()
+    -1
+
+pub fn verified_cas_kind_known_v1(kind: text) -> bool:
+    _legacy_kind_tag_v1(kind) >= 0 or kind == "generation_manifest" or
+        kind == "worker_result" or kind == "forward_manifest" or
+        kind == "diagnostic_manifest" or kind == "reverse_reference_shard" or
+        kind == "portable_hir_object" or kind == "target_artifact"
+
+pub fn verified_cas_kind_schema_v1(kind: text) -> i64:
+    if _legacy_kind_tag_v1(kind) >= 0: return 1
+    if kind == "generation_manifest" or kind == "worker_result" or
+            kind == "forward_manifest" or kind == "diagnostic_manifest" or
+            kind == "reverse_reference_shard": return 1
+    if kind == "portable_hir_object": return 2
+    if kind == "target_artifact": return 0
+    -1
+
+pub fn verified_cas_kind_available_v1(kind: text) -> bool:
+    if _legacy_kind_tag_v1(kind) >= 0: return true
+    if kind == "generation_manifest" or kind == "worker_result" or
+            kind == "forward_manifest" or kind == "diagnostic_manifest" or
+            kind == "reverse_reference_shard": return true
+    if kind == "portable_hir_object":
+        return portable_hir_semantic_verifier_available_v1()
+    false
+
+pub fn verified_cas_kind_verifier_identity_v1(kind: text) -> text:
+    val legacy_tag = _legacy_kind_tag_v1(kind)
+    if legacy_tag >= 0:
+        return sha256_text("simple.verified-cas.cch1.v1\u0000" + kind +
+            "\u0000schema=1\u0000tag=" + legacy_tag.to_string() +
+            "\u0000digest=domain-separated-simple.cas.object.v1")
+    if kind == "generation_manifest":
+        return sha256_text("simple.verified-cas.gen1.v1\u0000schema=1\u0000canonical-reencode\u0000digest=sha256-exact-canonical-bytes")
+    if kind == "worker_result":
+        return sha256_text("simple.verified-cas.tpw1.v1\u0000schema=1\u0000bounded-canonical-reencode\u0000digest=sha256-exact-canonical-bytes")
+    if kind == "forward_manifest":
+        return sha256_text("simple.verified-cas.sqr1.v1\u0000schema=1\u0000bounded-canonical-reencode\u0000digest=sha256-exact-canonical-bytes")
+    if kind == "diagnostic_manifest":
+        return sha256_text("simple.verified-cas.dgm1.v1\u0000schema=1\u0000bounded-canonical-reencode\u0000digest=sha256-exact-canonical-bytes")
+    if kind == "reverse_reference_shard":
+        return sha256_text("simple.verified-cas.rrs1.v1\u0000schema=1\u0000bounded-canonical-reencode\u0000digest=sha256-exact-canonical-bytes")
+    if kind == "portable_hir_object":
+        return sha256_text("simple.verified-cas.portable-hir.v1\u0000schema=2\u0000semantic-verifier=" +
+            portable_hir_semantic_verifier_digest_v1() +
+            "\u0000digest=reference.content_digest-sha256-exact-hir-text")
+    if kind == "target_artifact":
+        return sha256_text("simple.verified-cas.target-artifact.unavailable.v1")
+    ""
+
+fn _registry_row_v1(kind: text) -> text:
+    val available = if verified_cas_kind_available_v1(kind): "true" else: "false"
+    kind + "\u0000" + verified_cas_kind_schema_v1(kind).to_string() + "\u0000" +
+        available + "\u0000" + verified_cas_kind_verifier_identity_v1(kind) + "\n"
+
+pub fn verified_cas_verifier_registry_canonical_v1() -> text:
+    var canonical = "simple.verified-cas.verifier-registry.v1\n"
+    for kind in ["source_blob", "compile_snapshot", "public_summary", "file_ast",
+            "semantic_read_set", "generation_manifest", "worker_result",
+            "forward_manifest", "diagnostic_manifest", "reverse_reference_shard",
+            "portable_hir_object", "target_artifact"]:
+        canonical = canonical + _registry_row_v1(kind)
+    canonical
+
+pub fn verified_cas_verifier_registry_digest_v1() -> text:
+    sha256_text(verified_cas_verifier_registry_canonical_v1())
+
+pub fn verified_cas_kind_digest_v1(kind: text, bytes: [u8]) -> text:
+    if _legacy_kind_tag_v1(kind) >= 0:
+        return canonical_cache_object_digest_v1(bytes)
+    if kind == "generation_manifest" or kind == "worker_result" or
+            kind == "forward_manifest" or kind == "diagnostic_manifest" or
+            kind == "reverse_reference_shard":
+        return sha256_u8_hex(bytes)
+    # Portable identity is supplied and checked through PortableObjectRefV1;
+    # target artifacts and unknown kinds have no admitted digest policy.
+    ""
+
+fn _verification_failure_v1(kind: text, error: text) -> VerifiedCasKindVerificationV1:
+    VerifiedCasKindVerificationV1(ok: false, kind: kind,
+        schema: verified_cas_kind_schema_v1(kind),
+        verifier_identity: verified_cas_kind_verifier_identity_v1(kind),
+        canonical_bytes: [], error: error)
+
+fn _verification_success_v1(kind: text, bytes: [u8]) -> VerifiedCasKindVerificationV1:
+    VerifiedCasKindVerificationV1(ok: true, kind: kind,
+        schema: verified_cas_kind_schema_v1(kind),
+        verifier_identity: verified_cas_kind_verifier_identity_v1(kind),
+        canonical_bytes: bytes, error: "")
+
+fn _verify_legacy_cch1_v1(kind: text, bytes: [u8]) -> bool:
+    val decoded_result = canonical_cache_decode_envelope_v1(bytes)
+    if not decoded_result.ok: return false
+    val decoded = match decoded_result.value:
+        case Some(value): value
+        case nil: return false
+    decoded.kind == _legacy_kind_tag_v1(kind) and decoded.schema == 1 and
+        canonical_cache_encode_envelope_v1(decoded.kind, decoded.schema,
+            decoded.payload) == bytes
+
+pub fn verified_cas_verify_kind_bytes_v1(kind: text,
+        bytes: [u8]) -> VerifiedCasKindVerificationV1:
+    if not verified_cas_kind_known_v1(kind):
+        return _verification_failure_v1(kind, "unknown_cas_kind")
+    if bytes.len() > VERIFIED_CAS_REGISTRY_MAX_BYTES_V1:
+        return _verification_failure_v1(kind, "cas_kind_bounds_exceeded")
+    if kind == "portable_hir_object":
+        return _verification_failure_v1(kind, "portable_hir_requires_reference_aware_api")
+    if not verified_cas_kind_available_v1(kind):
+        return _verification_failure_v1(kind, "cas_kind_verifier_unavailable")
+    if _legacy_kind_tag_v1(kind) >= 0:
+        if not _verify_legacy_cch1_v1(kind, bytes):
+            return _verification_failure_v1(kind, "noncanonical_cch1_object")
+        return _verification_success_v1(kind, bytes)
+    if kind == "generation_manifest":
+        val decoded = generation_manifest_decode_v1(bytes)
+        if not decoded.ok: return _verification_failure_v1(kind, decoded.error)
+        val value = match decoded.value:
+            case Some(item): item
+            case nil: return _verification_failure_v1(kind, "missing_generation_manifest")
+        if generation_manifest_encode_v1(value) != bytes:
+            return _verification_failure_v1(kind, "noncanonical_generation_manifest_bytes")
+        return _verification_success_v1(kind, bytes)
+    if kind == "worker_result":
+        val decoded = three_payload_worker_result_decode_bounded_v1(bytes,
+            three_payload_contract_max_items_v1())
+        if not decoded.ok: return _verification_failure_v1(kind, decoded.error)
+        val value = match decoded.value:
+            case Some(item): item
+            case nil: return _verification_failure_v1(kind, "missing_worker_result")
+        if three_payload_worker_result_encode_v1(value) != bytes:
+            return _verification_failure_v1(kind, "noncanonical_worker_result_bytes")
+        return _verification_success_v1(kind, bytes)
+    if kind == "forward_manifest":
+        val decoded = semantic_query_read_manifest_decode_bounded_v1(bytes,
+            three_payload_contract_max_items_v1())
+        if not decoded.ok: return _verification_failure_v1(kind, decoded.error)
+        val value = match decoded.value:
+            case Some(item): item
+            case nil: return _verification_failure_v1(kind, "missing_forward_manifest")
+        if semantic_query_read_manifest_encode_v1(value) != bytes:
+            return _verification_failure_v1(kind, "noncanonical_forward_manifest_bytes")
+        return _verification_success_v1(kind, bytes)
+    if kind == "diagnostic_manifest":
+        val decoded = diagnostic_manifest_decode_bounded_v1(bytes,
+            three_payload_contract_max_items_v1())
+        if not decoded.ok: return _verification_failure_v1(kind, decoded.error)
+        val value = match decoded.value:
+            case Some(item): item
+            case nil: return _verification_failure_v1(kind, "missing_diagnostic_manifest")
+        if diagnostic_manifest_encode_v1(value) != bytes:
+            return _verification_failure_v1(kind, "noncanonical_diagnostic_manifest_bytes")
+        return _verification_success_v1(kind, bytes)
+    if kind == "reverse_reference_shard":
+        val decoded = reverse_reference_shard_decode_v1(bytes)
+        if not decoded.ok: return _verification_failure_v1(kind, decoded.error)
+        val value = match decoded.value:
+            case Some(item): item
+            case nil: return _verification_failure_v1(kind, "missing_reverse_reference_shard")
+        if reverse_reference_shard_encode_v1(value) != bytes:
+            return _verification_failure_v1(kind, "noncanonical_reverse_reference_shard_bytes")
+        return _verification_success_v1(kind, bytes)
+    _verification_failure_v1(kind, "cas_kind_verifier_unavailable")
+
+pub fn verified_cas_verify_portable_hir_bytes_v1(reference: PortableObjectRefV1,
+        encoded_hir: [u8], verifier_digest: text,
+        expected_target_contract: text?) -> VerifiedCasKindVerificationV1:
+    val kind = "portable_hir_object"
+    if encoded_hir.len() > VERIFIED_CAS_REGISTRY_MAX_BYTES_V1:
+        return _verification_failure_v1(kind, "cas_kind_bounds_exceeded")
+    if reference.ir_schema != 2 or
+            verifier_digest != portable_hir_semantic_verifier_digest_v1():
+        return _verification_failure_v1(kind, "portable_hir_reference_identity_invalid")
+    if not portable_hir_semantic_verifier_available_v1():
+        return _verification_failure_v1(kind,
+            "portable_hir_semantic_verifier_unavailable:" +
+                portable_hir_semantic_verifier_blocker_v1())
+    val encoded = bytes_to_string(encoded_hir)
+    if encoded.bytes() != encoded_hir:
+        return _verification_failure_v1(kind, "portable_hir_text_encoding_invalid")
+    val object = PortableHirObjectV1(encoded_hir: encoded,
+        verifier_digest: verifier_digest, reference: reference)
+    if not verify_portable_hir_object_v1(object, expected_target_contract):
+        return _verification_failure_v1(kind, "portable_hir_verification_failed")
+    _verification_success_v1(kind, encoded_hir)
+
+export VERIFIED_CAS_REGISTRY_MAX_BYTES_V1

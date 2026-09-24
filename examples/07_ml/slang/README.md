@@ -10,14 +10,17 @@ checked out as a submodule at `examples/slang/` in the main tree.
 
 ## Status
 
-**Phase A1 — Model-loader baseline.** Stub only. The binary prints help
-and exits. The real serving pipeline (KV cache, scheduler, batcher,
-OpenAI-compatible API) lands in Phases A4–A6.
+**Resident serial engine through S3 request ownership.** The reusable engine can
+hold one model, generate through separately owned request contexts, and reuse a
+bounded set of exact-token prefix snapshots. Request handles are generation
+checked and teardown refuses active requests. Execution is still advanced by
+one serial owner: paged KV, continuous batching, spill/transport, and parallel
+request advancement are not implemented.
 
 ## Layout
 
 ```
-src/bin/slang.spl      # service entry point (A1: stub)
+src/bin/slang.spl      # product service entry point
 test/02_integration/      # TTFT / throughput benchmarks (A6+)
 doc/                   # runbooks, deployment notes
 ```

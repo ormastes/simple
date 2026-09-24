@@ -1,0 +1,218 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage4-local-deploy.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+fixture="$scratch/repo"
+mkdir -p "$fixture/scripts/bootstrap" "$fixture/scripts/check/lib" "$fixture/bin"
+cp "$root/scripts/bootstrap/promote-stage4-local.shs" "$fixture/scripts/bootstrap/"
+cp "$root/scripts/check/lib/portable-process-lock.shs" "$fixture/scripts/check/lib/"
+cp "$root/scripts/check/lib/portable-hardlink-lock.pl" "$fixture/scripts/check/lib/"
+cp "$root/bin/stage4_local_resolve.cmd" "$fixture/bin/"
+: >"$fixture/.stage4-local-fixture"
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+promoter="$fixture/scripts/bootstrap/promote-stage4-local.shs"
+release="$fixture/bin/release"
+platform=fixture-platform
+checked=0
+
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+check() { checked=$((checked + 1)); "$@" || fail "check $checked: $*"; }
+reject() {
+  checked=$((checked + 1))
+  if "$@" >/dev/null 2>&1; then
+    fail "check $checked unexpectedly accepted: $*"
+  fi
+}
+hash() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+hash_identity() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+write_program() {
+  program_path=$1 program_output=$2
+  cat >"$program_path" <<EOF
+#!/bin/sh
+printf '%s\\n' '$program_output'
+EOF
+  chmod 755 "$program_path"
+}
+
+write_admission() {
+  admission_cli=$1 admission_mcp=$2 admission_lsp=$3
+  admission_provenance=$4 admission_acceptance=$5 admission_smoke=$6
+  admission_path="${admission_cli}.toolset-admission.env"
+  cat >"$admission_path" <<EOF
+schema=simple-bootstrap-stage4-toolset-admission-v1
+status=admitted
+platform=$platform
+cli_path=$admission_cli
+cli_sha256=$(hash "$admission_cli")
+mcp_path=$admission_mcp
+mcp_sha256=$(hash "$admission_mcp")
+lsp_mcp_path=$admission_lsp
+lsp_mcp_sha256=$(hash "$admission_lsp")
+stage4_provenance_path=$admission_provenance
+stage4_provenance_sha256=$(hash "$admission_provenance")
+stage3_acceptance_path=$admission_acceptance
+stage3_acceptance_sha256=$(hash "$admission_acceptance")
+stage5_smoke_log_path=$admission_smoke
+stage5_smoke_log_sha256=$(hash "$admission_smoke")
+completed_gate=stage5-native-mcp-smoke
+EOF
+  chmod 400 "$admission_path"
+}
+
+prepare_generation() {
+  fixture_generation=$1
+  fixture_number=$2
+  candidate_dir="$fixture/build/bootstrap/full/$platform/$fixture_generation"
+  scheduler_dir="$fixture/build/bootstrap/scheduler/$fixture_generation"
+  mkdir -p "$candidate_dir" "$scheduler_dir"
+  cli="$candidate_dir/simple"
+  mcp="$candidate_dir/simple_mcp_server"
+  lsp="$candidate_dir/simple_lsp_mcp_server"
+  write_program "$cli" "cli-$fixture_number"
+  write_program "$mcp" "mcp-$fixture_number"
+  write_program "$lsp" "lsp-$fixture_number"
+
+  provenance="$cli.provenance.env"
+  cat >"$provenance" <<EOF
+schema=fixture-stage4-provenance-v1
+status=pass
+output_path=$cli
+output_sha256=$(hash "$cli")
+EOF
+  acceptance="$cli.stage3-acceptance.env"
+  cat >"$acceptance" <<EOF
+schema=simple-bootstrap-stage3-current-acceptance-v1
+status=verified
+stage4_candidate_path=$cli
+stage4_candidate_sha256=$(hash "$cli")
+stage4_provenance_path=$provenance
+stage4_provenance_sha256=$(hash "$provenance")
+EOF
+  smoke="$candidate_dir/stage5-mcp-native-smoke.log"
+  printf 'PASS: fixture native MCP smoke %s\n' "$fixture_number" >"$smoke"
+  write_admission "$cli" "$mcp" "$lsp" "$provenance" "$acceptance" "$smoke"
+  admission=$admission_path
+
+  lineage="$scheduler_dir/lineage.env"
+  printf 'schema=fixture-lineage-v1\ngeneration=%s\n' "$fixture_generation" >"$lineage"
+  stage4_result="$scheduler_dir/stage4.result.env"
+  cat >"$stage4_result" <<EOF
+schema=simple-bootstrap-stage4-scheduler-result-v1
+generation=$fixture_generation
+status=verified
+publication_status=quarantined
+stage4_path=$cli
+stage4_sha256=$(hash "$cli")
+stage4_provenance_path=$provenance
+stage4_provenance_sha256=$(hash "$provenance")
+lineage_path=$lineage
+lineage_sha256=$(hash "$lineage")
+EOF
+  lease="$scheduler_dir/generation.lease.env"
+  cat >"$lease" <<EOF
+schema=simple-bootstrap-generation-lease-v1
+generation=$fixture_generation
+status=qualified-awaiting-explicit-promotion
+EOF
+  mkdir -p "${scheduler_dir%/*}"
+  cat >"${scheduler_dir%/*}/current.env" <<EOF
+schema=simple-bootstrap-current-generation-v1
+status=qualified
+generation=$fixture_generation
+generation_dir=$scheduler_dir
+lease_sha256=$(hash "$lease")
+EOF
+  promotion="$scheduler_dir/promotion-required.env"
+  cat >"$promotion" <<EOF
+schema=simple-bootstrap-promotion-required-v1
+generation=$fixture_generation
+status=blocked-pending-explicit-continuation
+lineage_path=$lineage
+lineage_sha256=$(hash "$lineage")
+stage4_result_path=$stage4_result
+stage4_result_sha256=$(hash "$stage4_result")
+requested_deploy=true
+requested_release=false
+reason=fixture-explicit-promotion
+EOF
+}
+
+promote() {
+  env SIMPLE_STAGE4_LOCAL_FIXTURE=1 sh "$promoter" \
+    --promotion-receipt "$1" --toolset-admission "$2"
+}
+resolve() {
+  env SIMPLE_STAGE4_LOCAL_FIXTURE=1 sh "$promoter" --resolve "$1"
+}
+expect_program() {
+  expected=$1 tool=$2
+  resolved=$(resolve "$tool") || return 1
+  actual=$("$resolved") || return 1
+  [ "$actual" = "$expected" ]
+}
+
+prepare_generation scheduler-g1 1
+admission1=$admission promotion1=$promotion
+cli1=$cli mcp1=$mcp lsp1=$lsp provenance1=$provenance acceptance1=$acceptance smoke1=$smoke
+check promote "$promotion1" "$admission1"
+check expect_program cli-1 cli
+check expect_program mcp-1 mcp
+check expect_program lsp-1 lsp-mcp
+pointer_before=$(hash "$release/current.env")
+
+prepare_generation scheduler-g2 2
+admission2=$admission promotion2=$promotion
+cli2=$cli mcp2=$mcp lsp2=$lsp provenance2=$provenance acceptance2=$acceptance smoke2=$smoke
+
+# An admission that mixes one executable from the active generation is rejected
+# before it can alter the only mutable publication pointer.
+chmod 600 "$admission2"
+write_admission "$cli2" "$mcp1" "$lsp2" "$provenance2" "$acceptance2" "$smoke2"
+reject promote "$promotion2" "$admission2"
+check test "$(hash "$release/current.env")" = "$pointer_before"
+
+# A pre-existing partial generation with the exact derived identity is also
+# rejected; after removing the fixture collision, the complete triad promotes.
+chmod 600 "$admission2"
+write_admission "$cli2" "$mcp2" "$lsp2" "$provenance2" "$acceptance2" "$smoke2"
+generation2_id=$(printf 'toolset=%s\npromotion=%s\n' \
+  "$(hash "$admission2")" "$(hash "$promotion2")" | hash_identity)
+partial_dir="$release/$platform/generations/$generation2_id"
+mkdir -p "$partial_dir"
+cp "$cli2" "$partial_dir/simple"
+reject promote "$promotion2" "$admission2"
+check test "$(hash "$release/current.env")" = "$pointer_before"
+rm -rf "$partial_dir"
+
+check promote "$promotion2" "$admission2"
+check expect_program cli-2 cli
+check expect_program mcp-2 mcp
+check expect_program lsp-2 lsp-mcp
+
+check env SIMPLE_STAGE4_LOCAL_FIXTURE=1 sh "$promoter" --rollback
+check expect_program cli-1 cli
+check expect_program mcp-1 mcp
+check expect_program lsp-1 lsp-mcp
+
+# Resolution validates the whole triad. Corrupting inactive-looking MCP bytes
+# blocks CLI resolution as well, so wrappers cannot launch a mixed generation.
+active_mcp=$(resolve mcp)
+chmod 755 "$active_mcp"
+printf 'tampered\n' >>"$active_mcp"
+reject resolve cli
+
+printf 'PASS: %s atomic local Stage 4 deployment checks\n' "$checked"

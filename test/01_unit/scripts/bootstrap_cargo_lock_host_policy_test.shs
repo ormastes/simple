@@ -1,0 +1,29 @@
+#!/bin/sh
+# Execute only the lock/preparation boundary of the production Cargo entry.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+mkdir -p "$root/build/native_probe"
+work=$(mktemp -d "$root/build/native_probe/cargo-host-policy.XXXXXX")
+sed -n '/^run_rust_authority_cargo()/,/^}/p' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$work/entry.sh"
+for host in windows linux macos freebsd; do
+    ROOT="$root" WORK="$work" HOST_CASE="$host" sh -c '
+        set -eu
+        . "$WORK/entry.sh"
+        os=$HOST_CASE progress_log= PLATFORM=fixture-target
+        bootstrap_acquire_rust_authority() { printf "lock\n"; }
+        # Stop exactly at preparation; the real Cargo entry selects whether
+        # ownership is needed before reaching this mutation boundary.
+        prepare_rust_authority_workspace() { printf "prepare\n"; exit 0; }
+        run_rust_authority_cargo fixture default
+    ' >"$work/$host.order"
+    if [ "$host" = windows ]; then
+        expected=$(printf 'lock\nprepare\n')
+    else
+        expected=prepare
+    fi
+    [ "$(cat "$work/$host.order")" = "$expected" ] || {
+        echo "FAIL: Cargo lock order for $host; evidence=$work" >&2; exit 1
+    }
+done
+printf 'PASS: early Cargo authority ownership is Windows-only; Unix preparation remains independent; evidence=%s\n' "$work"

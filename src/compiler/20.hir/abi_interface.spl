@@ -1,0 +1,357 @@
+# Canonical ABI interface identity extracted from typed HIR.
+
+use compiler.hir.hir.*
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.canonical_identity.{
+    canon_str, canon_nat, canon_field, canon_seq, canonical_identity_sort_texts}
+
+pub const HIR_ABI_INTERFACE_DOMAIN_V1 = "simple/abi-interface/v1"
+
+class HirAbiInterfaceEncoderV1:
+    symbols: SymbolTable
+    module_name: text
+    error: text
+
+impl HirAbiInterfaceEncoderV1:
+    static fn new(module: HirModule) -> HirAbiInterfaceEncoderV1:
+        HirAbiInterfaceEncoderV1(module.symbols, module.name, "")
+
+    me fail(reason: text) -> text:
+        if self.error == "":
+            self.error = reason
+        canon_field("invalid", canon_str(reason))
+
+    me symbol_identity(symbol: SymbolId) -> text:
+        if not self.symbols.symbols.contains_key(symbol.id):
+            return self.fail("unresolved-symbol:{symbol.id}")
+        val resolved = self.symbols.symbols[symbol.id]
+        canon_seq([
+            canon_field("module", canon_str(resolved.defining_module ?? self.module_name)),
+            canon_field("name", canon_str(resolved.name))
+        ])
+
+    me dim_identity(dim: DimExpr) -> text:
+        match dim.kind:
+            case Literal(value): canon_field("literal", canon_nat(value))
+            case Named(name, lo, hi):
+                canon_field("named", canon_seq([
+                    canon_field("name", canon_str(name)),
+                    canon_field("lo", canon_str(if val value = lo: value.to_text() else: "none")),
+                    canon_field("hi", canon_str(if val value = hi: value.to_text() else: "none"))
+                ]))
+            case Var(id): canon_field("var", canon_nat(id))
+            case Dynamic: canon_field("dynamic", canon_seq([]))
+            case Broadcast: canon_field("broadcast", canon_seq([]))
+            case ConstParam(name): canon_field("const", canon_str(name))
+            case Add(left, right): canon_field("add", canon_seq([
+                self.dim_identity(left), self.dim_identity(right)]))
+            case Mul(left, right): canon_field("mul", canon_seq([
+                self.dim_identity(left), self.dim_identity(right)]))
+            case Div(left, right): canon_field("div", canon_seq([
+                self.dim_identity(left), self.dim_identity(right)]))
+
+    me type_list_identity(types: [HirType], sort_items: bool = false) -> text:
+        var rows: [text] = []
+        for type_ in types:
+            rows.push(self.type_identity(type_))
+        if sort_items:
+            rows = canonical_identity_sort_texts(rows)
+        canon_seq(rows)
+
+    me effect_identity(effect: Effect) -> text:
+        match effect.kind:
+            case Pure: canon_field("pure", canon_seq([]))
+            case IO: canon_field("io", canon_seq([]))
+            case Async: canon_field("async", canon_seq([]))
+            case Throws(type_): canon_field("throws", self.type_identity(type_))
+            case Mutates: canon_field("mutates", canon_seq([]))
+            case Allocates: canon_field("allocates", canon_seq([]))
+            case Custom(name): canon_field("custom", canon_str(name))
+
+    me effects_identity(effects: [Effect]) -> text:
+        var rows: [text] = []
+        for effect in effects:
+            rows.push(self.effect_identity(effect))
+        canon_seq(canonical_identity_sort_texts(rows))
+
+    me type_identity(type_: HirType) -> text:
+        match type_.kind:
+            case Int(bits, signed): canon_field("int", canon_seq([
+                canon_field("bits", canon_nat(bits)),
+                canon_field("signed", canon_nat(if signed: 1 else: 0))]))
+            case Float(bits): canon_field("float", canon_nat(bits))
+            case Bool: canon_field("bool", canon_seq([]))
+            case Char: canon_field("char", canon_seq([]))
+            case Str: canon_field("text", canon_seq([]))
+            case Unit: canon_field("unit", canon_seq([]))
+            case Tuple(elements): canon_field("tuple", self.type_list_identity(elements))
+            case Array(element, size): canon_field("array", canon_seq([
+                canon_field("element", self.type_identity(element)),
+                canon_field("size", canon_str(if val value = size: value.to_text() else: "dynamic"))]))
+            case Slice(element): canon_field("slice", self.type_identity(element))
+            case Dict(key, value): canon_field("dict", canon_seq([
+                canon_field("key", self.type_identity(key)),
+                canon_field("value", self.type_identity(value))]))
+            case Ref(inner, mutable): canon_field("ref", canon_seq([
+                canon_field("mutable", canon_nat(if mutable: 1 else: 0)),
+                canon_field("inner", self.type_identity(inner))]))
+            case Ptr(inner, mutable): canon_field("ptr", canon_seq([
+                canon_field("mutable", canon_nat(if mutable: 1 else: 0)),
+                canon_field("inner", self.type_identity(inner))]))
+            case Optional(inner): canon_field("optional", self.type_identity(inner))
+            case Result(ok, err): canon_field("result", canon_seq([
+                canon_field("ok", self.type_identity(ok)),
+                canon_field("err", self.type_identity(err))]))
+            case Named(symbol, args): canon_field("named", canon_seq([
+                canon_field("symbol", self.symbol_identity(symbol)),
+                canon_field("args", self.type_list_identity(args))]))
+            case TypeParam(name, bounds): canon_field("type-param", canon_seq([
+                canon_field("name", canon_str(name)),
+                canon_field("bounds", self.type_list_identity(bounds, true))]))
+            case Union(members): canon_field("union", self.type_list_identity(members, true))
+            case DynTrait(trait_): canon_field("dyn-trait", self.symbol_identity(trait_))
+            case Function(params, ret, effects): canon_field("function", canon_seq([
+                canon_field("params", self.type_list_identity(params)),
+                canon_field("return", self.type_identity(ret)),
+                canon_field("effects", self.effects_identity(effects))]))
+            case Projection(base, assoc_name): canon_field("projection", canon_seq([
+                canon_field("base", self.type_identity(base)),
+                canon_field("assoc", canon_str(assoc_name))]))
+            case Isolated(inner): canon_field("isolated", self.type_identity(inner))
+            case Infer(id, level): self.fail("unresolved-inference:{id}:{level}")
+            case Error: self.fail("error-type")
+            case Never: canon_field("never", canon_seq([]))
+            case Any: canon_field("any", canon_seq([]))
+            case Tensor(element, dims, device):
+                var dim_rows: [text] = []
+                for dim in dims:
+                    dim_rows.push(self.dim_identity(dim))
+                var device_name = "none"
+                if val selected = device:
+                    device_name = match selected:
+                        case CPU: "cpu"
+                        case CUDA(id): "cuda:{id}"
+                        case Vulkan(id): "vulkan:{id}"
+                canon_field("tensor", canon_seq([
+                    canon_field("element", self.type_identity(element)),
+                    canon_field("dims", canon_seq(dim_rows)),
+                    canon_field("device", canon_str(device_name))]))
+            case Layer(input, output):
+                var input_rows: [text] = []
+                for dim in input:
+                    input_rows.push(self.dim_identity(dim))
+                var output_rows: [text] = []
+                for dim in output:
+                    output_rows.push(self.dim_identity(dim))
+                canon_field("layer", canon_seq([
+                    canon_field("input", canon_seq(input_rows)),
+                    canon_field("output", canon_seq(output_rows))]))
+
+    me type_params_identity(params: [HirTypeParam]) -> text:
+        var rows: [text] = []
+        for param in params:
+            var fields: [text] = [
+                canon_field("name", canon_str(param.name)),
+                canon_field("bounds", self.type_list_identity(param.bounds, true)),
+                canon_field("has-default", canon_nat(if param.has_default: 1 else: 0))]
+            if param.has_default:
+                fields.push(canon_field("default", self.type_identity(param.default)))
+            rows.push(canon_seq(fields))
+        canon_seq(rows)
+
+    me function_identity(function: HirFunction) -> text:
+        var params: [text] = []
+        for param in function.params:
+            params.push(canon_seq([
+                canon_field("name", canon_str(param.name)),
+                canon_field("type", self.type_identity(param.type_)),
+                canon_field("mutable", canon_nat(if param.is_mutable: 1 else: 0)),
+                canon_field("has-default", canon_nat(if param.has_default: 1 else: 0))
+            ]))
+        var export_name = ""
+        var export_c = 0
+        if function.has_export_attr:
+            export_name = function.export_attr.export_name
+            export_c = if function.export_attr.is_export_c: 1 else: 0
+        canon_field("function", canon_seq([
+            canon_field("name", canon_str(function.name)),
+            canon_field("type-params", self.type_params_identity(function.type_params)),
+            canon_field("params", canon_seq(params)),
+            canon_field("return", self.type_identity(function.return_type)),
+            canon_field("effects", self.effects_identity(function.effects)),
+            canon_field("async", canon_nat(if function.is_async: 1 else: 0)),
+            canon_field("static", canon_nat(if function.is_static: 1 else: 0)),
+            canon_field("method", canon_nat(if function.is_method: 1 else: 0)),
+            canon_field("mutable", canon_nat(if function.is_mutable: 1 else: 0)),
+            canon_field("const", canon_nat(if function.is_const: 1 else: 0)),
+            canon_field("extern", canon_nat(if function.is_extern: 1 else: 0)),
+            canon_field("naked", canon_nat(if function.func_attr.is_naked: 1 else: 0)),
+            canon_field("noreturn", canon_nat(if function.func_attr.is_noreturn: 1 else: 0)),
+            canon_field("interrupt", canon_nat(if function.func_attr.is_interrupt: 1 else: 0)),
+            canon_field("section", canon_str(function.func_attr.section ?? "")),
+            canon_field("export-c", canon_nat(export_c)),
+            canon_field("export-name", canon_str(export_name))
+        ]))
+
+    me fields_identity(fields: [HirField]) -> text:
+        var rows: [text] = []
+        var ordinal = 0
+        for field in fields:
+            rows.push(canon_seq([
+                canon_field("ordinal", canon_nat(ordinal)),
+                canon_field("name", canon_str(field.name)),
+                canon_field("type", self.type_identity(field.type_)),
+                canon_field("public", canon_nat(if field.is_public: 1 else: 0)),
+                canon_field("volatile", canon_nat(if field.is_volatile: 1 else: 0)),
+                canon_field("bits", canon_str(if field.has_bits_attr: field.bits_width.to_text() else: "none")),
+                canon_field("fixed-address", canon_str(if field.has_fixed_address: field.fixed_address.to_text() else: "none"))
+            ]))
+            ordinal = ordinal + 1
+        canon_seq(rows)
+
+    me layout_identity(layout: LayoutAttr) -> text:
+        val kind = match layout.layout_kind:
+            case TypeLayoutKind.Simple: "simple"
+            case TypeLayoutKind.C: "c"
+            case TypeLayoutKind.Packed: "packed"
+            case TypeLayoutKind.Transparent: "transparent"
+        canon_seq([
+            canon_field("kind", canon_str(kind)),
+            canon_field("explicit-align", canon_str(
+                if layout.has_explicit_align: layout.explicit_align.to_text() else: "none")),
+            canon_field("packed", canon_nat(if layout.is_packed: 1 else: 0)),
+            canon_field("preserve-order", canon_nat(if layout.is_preserve_order: 1 else: 0)),
+            canon_field("compactq", canon_nat(if layout.is_compactq: 1 else: 0))
+        ])
+
+    me record_identity(kind: text, name: text, type_params: [HirTypeParam],
+                       fields: [HirField], has_layout: bool,
+                       layout: LayoutAttr) -> text:
+        canon_field(kind, canon_seq([
+            canon_field("name", canon_str(name)),
+            canon_field("type-params", self.type_params_identity(type_params)),
+            canon_field("fields", self.fields_identity(fields)),
+            canon_field("layout", if has_layout: self.layout_identity(layout) else: canon_str("none"))
+        ]))
+
+    me enum_identity(enum_: HirEnum) -> text:
+        var variants: [text] = []
+        var ordinal = 0
+        for variant in enum_.variants:
+            val payload = match variant.kind:
+                case Unit: canon_field("unit", canon_seq([]))
+                case Tuple(types): canon_field("tuple", self.type_list_identity(types))
+                case Struct(fields): canon_field("struct", self.fields_identity(fields))
+            var discriminant = canon_field("implicit", canon_nat(ordinal))
+            if variant.has_discriminant:
+                discriminant = match variant.discriminant.kind:
+                    case IntLit(value, suffix): canon_field("explicit-int", canon_seq([
+                        canon_field("value", canon_nat(value)),
+                        canon_field("suffix", canon_str(suffix ?? ""))]))
+                    case _: self.fail("non-integer-enum-discriminant:{enum_.name}:{variant.name}")
+            variants.push(canon_seq([
+                canon_field("ordinal", canon_nat(ordinal)),
+                canon_field("name", canon_str(variant.name)),
+                canon_field("payload", payload),
+                canon_field("discriminant", discriminant)
+            ]))
+            ordinal = ordinal + 1
+        canon_field("enum", canon_seq([
+            canon_field("name", canon_str(enum_.name)),
+            canon_field("type-params", self.type_params_identity(enum_.type_params)),
+            canon_field("variants", canon_seq(variants)),
+            canon_field("complete-open", canon_nat(if enum_.complete_open: 1 else: 0)),
+            canon_field("dyn-open", canon_nat(if enum_.dyn_open: 1 else: 0))
+        ]))
+
+    me bitfield_identity(bitfield: HirBitfield) -> text:
+        var fields: [text] = []
+        for field in bitfield.fields:
+            fields.push(canon_seq([
+                canon_field("name", canon_str(field.name)),
+                canon_field("type", if field.has_type_: self.type_identity(field.type_) else: canon_str("none")),
+                canon_field("width", canon_nat(field.bit_width)),
+                canon_field("offset", canon_nat(field.bit_offset)),
+                canon_field("reserved", canon_nat(if field.is_reserved: 1 else: 0))
+            ]))
+        canon_field("bitfield", canon_seq([
+            canon_field("name", canon_str(bitfield.name)),
+            canon_field("backing", self.type_identity(bitfield.backing_type)),
+            canon_field("total-bits", canon_nat(bitfield.total_bits)),
+            canon_field("fields", canon_seq(fields))
+        ]))
+
+    me trait_identity(trait_: HirTrait) -> text:
+        var methods: [text] = []
+        for method in trait_.methods:
+            methods.push(self.function_identity(method))
+        for method in trait_.defaults:
+            methods.push(self.function_identity(method))
+        var assoc_types: [text] = []
+        for assoc in trait_.assoc_types:
+            var fields: [text] = [
+                canon_field("name", canon_str(assoc.name)),
+                canon_field("bounds", self.type_list_identity(assoc.bounds, true)),
+                canon_field("has-default", canon_nat(if assoc.has_default: 1 else: 0))]
+            if assoc.has_default:
+                fields.push(canon_field("default", self.type_identity(assoc.default)))
+            assoc_types.push(canon_seq(fields))
+        canon_field("trait", canon_seq([
+            canon_field("name", canon_str(trait_.name)),
+            canon_field("type-params", self.type_params_identity(trait_.type_params)),
+            canon_field("supertraits", self.type_list_identity(trait_.supertraits, true)),
+            canon_field("methods", canon_seq(canonical_identity_sort_texts(methods))),
+            canon_field("assoc-types", canon_seq(canonical_identity_sort_texts(assoc_types)))
+        ]))
+
+pub fn hir_abi_interface_parts_v1(module: HirModule) -> Result<[text], text>:
+    var encoder = HirAbiInterfaceEncoderV1.new(module)
+    var parts: [text] = [canon_field("module", canon_str(module.name))]
+    var exports: [text] = []
+    for name in module.exports:
+        exports.push(canon_str(name))
+    parts.push(canon_field("exports", canon_seq(canonical_identity_sort_texts(exports))))
+    for function in module.functions.values():
+        if function.is_public:
+            parts.push(encoder.function_identity(function))
+    for struct_ in module.structs.values():
+        if struct_.is_public:
+            parts.push(encoder.record_identity("struct", struct_.name,
+                struct_.type_params, struct_.fields, struct_.has_layout_attr,
+                struct_.layout_attr))
+    for class_ in module.classes.values():
+        if class_.is_public:
+            parts.push(encoder.record_identity("class", class_.name,
+                class_.type_params, class_.fields, class_.has_layout_attr,
+                class_.layout_attr))
+    for enum_ in module.enums.values():
+        if enum_.is_public:
+            parts.push(encoder.enum_identity(enum_))
+    for bitfield in module.bitfields.values():
+        if bitfield.is_public:
+            parts.push(encoder.bitfield_identity(bitfield))
+    for trait_ in module.traits.values():
+        if trait_.is_public:
+            parts.push(encoder.trait_identity(trait_))
+    for constant in module.constants.values():
+        if constant.is_public:
+            parts.push(canon_field("constant", canon_seq([
+                canon_field("name", canon_str(constant.name)),
+                canon_field("type", encoder.type_identity(constant.type_)),
+                canon_field("mutable", canon_nat(if constant.is_mutable: 1 else: 0)),
+                canon_field("volatile", canon_nat(if constant.is_volatile: 1 else: 0)),
+                canon_field("fixed-address", canon_str(if constant.has_fixed_address: constant.fixed_address.to_text() else: "none"))
+            ])))
+    if encoder.error != "":
+        return Err(encoder.error)
+    Ok(parts)
+
+pub fn hir_abi_interface_digest_v1(module: HirModule) -> Result<text, text>:
+    match hir_abi_interface_parts_v1(module):
+        case Err(reason): Err(reason)
+        case Ok(parts):
+            var encoded: [text] = []
+            for part in canonical_identity_sort_texts(parts):
+                encoded.push(canon_str(part))
+            Ok(sha256_text(canon_field(HIR_ABI_INTERFACE_DOMAIN_V1, canon_seq(encoded))))

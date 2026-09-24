@@ -1,4 +1,8 @@
 # HIR shard pre-pass costs 76 min of wall clock and lowers zero modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Area:** `src/app/cli/native_build_main.spl` (`run_hir_shards`),
@@ -138,3 +142,4 @@ changing a default that lane depends on.
 - **`surface_build` being O(n^2)**: tested per-call `dt` against call index in
   deciles; noisy, 8.0 s -> ~19 s with no clean trend. Not established as
   superlinear — it is expensive per call (14.3 s), not obviously quadratic.
+

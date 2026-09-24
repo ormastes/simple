@@ -1,4 +1,8 @@
 # vcs.md overstated pre-push guard wiring; 5 green gates sat at bootstrap tier — 2026-09-01
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Ground truth (origin/main 5e09b3ef2fd)
 
@@ -96,3 +100,4 @@ push-must-check: ADVISORY push-perf-regression-tests verdict exit=1 (recorded, n
 FAIL — selftest failed; gate cannot be trusted
 push-must-check: ADVISORY push-process-wait-eintr-retry verdict exit=1 (recorded, not blocking)
 ```
+

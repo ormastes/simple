@@ -69,3 +69,24 @@ describe "SJ protected gate manifest planning":
         expect(plan_protected_gate_manifest(parse_gate_manifest(bad_bool), "base", "head").error).to_equal("push-blocking gate has no identity or command")
         val bad_tier = gate_fixture().replace("conflicts, push", "conflicts, puch")
         expect(plan_protected_gate_manifest(parse_gate_manifest(bad_tier), "base", "head").error).to_equal("push-blocking gate has no identity or command")
+
+    it "parses a `local` tier row without treating it as malformed, and never selects it as push-blocking":
+        # @req REQ-SSPEC-APP
+        step("parses a `local` tier row without treating it as malformed, and never selects it as push-blocking")
+        # `local` (goal item 2, 2026-09-24) is the slow half of the former
+        # push-blocking set, run by scripts/check/sign-local-ci-receipt.shs
+        # --tier local before a PR, not by the push hook. A `local` row must
+        # parse to a real gate_id (not "") so it never trips the
+        # `_manifest_malformed` all-entries scan in integrate_plan.spl, and it
+        # must never be selected into the push-blocking invocation set.
+        val with_local = gate_fixture() + "    local-slow-check, local, false, ref, \"sh check-slow.shs --rev\", \"slow local-only guard\"\n"
+        val entries = parse_gate_manifest(with_local)
+        expect(entries.len()).to_equal(4)
+        val local_entry = entries[3]
+        expect(local_entry.gate_id).to_equal("local-slow-check")
+        expect(local_entry.tier).to_equal("local")
+        # Still plans identically to the push-only fixture: the local row is
+        # invisible to the push-blocking planner.
+        val plan = plan_protected_gate_manifest(entries, "base-oid", "head-oid")
+        expect(plan.valid).to_be(true)
+        expect(plan.invocations.len()).to_equal(2)

@@ -10,6 +10,26 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 
+int64_t rt_parser_mask_call_u8x32(int64_t function_address,
+                                  int64_t source_address,
+                                  int64_t first, int64_t second) {
+    if (function_address <= 0 || source_address <= 0 ||
+        first < 0 || first > 255 || second < 0 || second > 255) return -1;
+    typedef uint32_t (*parser_mask_fn)(const uint8_t *, uint8_t, uint8_t);
+    parser_mask_fn function = (parser_mask_fn)(uintptr_t)function_address;
+    return (int64_t)function((const uint8_t *)(uintptr_t)source_address,
+                             (uint8_t)first, (uint8_t)second);
+}
+
+int64_t rt_parser_lexical_mask_call_u8x32(int64_t function_address,
+                                          int64_t source_address,
+                                          int64_t needle) {
+    if (function_address <= 0 || source_address <= 0 || needle < 0 || needle > 255) return -1;
+    typedef uint32_t (*parser_lexical_mask_fn)(const uint8_t *, uint8_t);
+    parser_lexical_mask_fn function = (parser_lexical_mask_fn)(uintptr_t)function_address;
+    return (int64_t)function((const uint8_t *)(uintptr_t)source_address, (uint8_t)needle);
+}
+
 #if defined(_WIN32) || defined(_WIN64)
 #  include <windows.h>
 #  if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -40,6 +60,19 @@
 #  define SIMPLE_RUNTIME_TARGET_AVX2 __attribute__((target("avx2")))
 #else
 #  define SIMPLE_RUNTIME_TARGET_AVX2
+#endif
+
+/* Same MSVC exception as SIMPLE_RUNTIME_TARGET_AVX2 above, for the AVX-512
+ * lane-explicit kernels further down this file. MSVC's cl.exe does not
+ * recognise `__attribute__` at all (not a GNU-compat parser), so an unguarded
+ * use is a hard syntax error under real MSVC (C2143/C2091/C2059), not merely
+ * a no-op like it would be on an unsupported GCC/clang target. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define SIMPLE_RUNTIME_TARGET_AVX512 __attribute__((target("avx512f")))
+#  define SIMPLE_RUNTIME_TARGET_AVX512BWDQ __attribute__((target("avx512f,avx512bw,avx512dq")))
+#else
+#  define SIMPLE_RUNTIME_TARGET_AVX512
+#  define SIMPLE_RUNTIME_TARGET_AVX512BWDQ
 #endif
 
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -98,6 +131,35 @@ bool rt_simd_has_avx2(void) {
     if (!rt_msvc_x86_os_avx_enabled()) return false;
     __cpuidex(regs, 7, 0);
     return (regs[1] & (1 << 5)) != 0;
+#else
+    return false;
+#endif
+}
+
+bool rt_x86_avx512_os_state_usable(void) {
+#if defined(SIMPLE_RUNTIME_FORCE_NO_X86_XSTATE)
+    return false;
+#elif SIMD_HAS_X86 && defined(_MSC_VER)
+    int regs[4];
+    __cpuid(regs, 1);
+    const uint32_t ecx = (uint32_t)regs[2];
+    const uint32_t xsave_osxsave = (1U << 26) | (1U << 27);
+    if ((ecx & xsave_osxsave) != xsave_osxsave) return false;
+    return simd_x86_avx512_os_state_usable_from_raw(
+        ecx, (uint64_t)_xgetbv(0));
+#elif SIMD_HAS_X86 && (defined(__GNUC__) || defined(__clang__))
+    unsigned int eax = 0;
+    unsigned int ebx = 0;
+    unsigned int ecx = 0;
+    unsigned int edx = 0;
+    const unsigned int xsave_osxsave = (1U << 26) | (1U << 27);
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
+    if ((ecx & xsave_osxsave) != xsave_osxsave) return false;
+    unsigned int xcr0_eax = 0;
+    unsigned int xcr0_edx = 0;
+    __asm__ volatile("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
+    const uint64_t xcr0 = ((uint64_t)xcr0_edx << 32) | xcr0_eax;
+    return simd_x86_avx512_os_state_usable_from_raw(ecx, xcr0);
 #else
     return false;
 #endif
@@ -2184,6 +2246,628 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
     return dst;
 }
 
+/* ---------------------------------------------------------------------------
+ * Percent-opacity constant-colour span blend (web renderer row kernel).
+ *
+ * Native twin of the interpreter bridge
+ * `rt_engine2d_blend_const_span_pct_u32` in
+ * src/compiler_rust/compiler/src/interpreter_extern/simd.rs. Both must stay
+ * bit-identical to `blend_opacity` in
+ * src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl.
+ *
+ * This is NOT rt_engine2d_simd_blend_const_span_u32. That one is straight-alpha
+ * src-over (/255, +128, alpha from the colour); this one blends by an integer
+ * PERCENT (/100, +50). Substituting one for the other shifts every rendered
+ * pixel, which is why a separate kernel exists rather than a reused one.
+ *
+ * The loop is written plainly so the compiler can auto-vectorize it; on x86-64
+ * the Rust twin additionally re-emits it under `avx512bw` and LLVM issues ZMM
+ * code for it (33 zmm instructions, verified with llvm-objdump).
+ * ------------------------------------------------------------------------- */
+SplArray* rt_engine2d_blend_const_span_pct_u32(SplArray* dst, int64_t offset,
+                                               int64_t count, int64_t color,
+                                               int64_t opacity_pct) {
+    int64_t off = 0, n = 0;
+    if (!engine2d_span_bounds(dst, offset, count, &off, &n)) return dst;
+    int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    if (!dst_data) return dst;
+
+    uint32_t s = (uint32_t)(uint64_t)color;
+    if (opacity_pct >= 100) {
+        engine2d_fill_into(dst_data + off, n, engine2d_box_pixel(s));
+        return dst;
+    }
+    if (opacity_pct <= 0) return dst;
+
+    int32_t pct = (int32_t)opacity_pct;
+    int32_t inv = 100 - pct;
+    int32_t sr = (int32_t)((s >> 16) & 255u);
+    int32_t sg = (int32_t)((s >> 8) & 255u);
+    int32_t sb = (int32_t)(s & 255u);
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
+        int32_t dr = (int32_t)((d >> 16) & 255u);
+        int32_t dg = (int32_t)((d >> 8) & 255u);
+        int32_t db = (int32_t)(d & 255u);
+        int32_t r = (sr * pct + dr * inv + 50) / 100;
+        int32_t g = (sg * pct + dg * inv + 50) / 100;
+        int32_t b = (sb * pct + db * inv + 50) / 100;
+        dst_data[off + i] = engine2d_box_pixel(
+            0xff000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b);
+    }
+    return dst;
+}
+
+/* ---------------------------------------------------------------------------
+ * DB row-bitmap word kernels and byte-span scans — native twins.
+ *
+ * These MUST exist here, not only in the interpreter registry. The seed's
+ * linker (`check_no_fake_rt_stubs`) refuses to fabricate a stub for an `rt_*`
+ * name, so an extern with no native twin makes every native build that reaches
+ * it fail to link — and `simd_scan.spl` is pulled in by http_core.spl and
+ * db/accel.spl, i.e. by every HTTP and DB consumer.
+ *
+ * Semantics mirror the Rust bridges in interpreter_extern/simd.rs exactly,
+ * including the zero-extend rule for indices past the end of an operand.
+ * ------------------------------------------------------------------------- */
+
+static int db_bitmap_span(SplArray* array, int64_t limit, int64_t* out_n) {
+    if (!array || limit <= 0) return 0;
+    int64_t len = rt_array_len(array);
+    if (limit > len) return 0;
+    *out_n = limit;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * AVX-512 tier for the bitmap AND loop.
+ *
+ * Why this exists: a NATIVE build links these C kernels, not the Rust twins,
+ * and the C side relied on plain-loop auto-vectorization. Measured on a
+ * natively-linked binary before this change: 106 ymm instructions and ZERO
+ * zmm. So every claim that "the DB server gets AVX-512" was true only of the
+ * interpreter path — a shipped binary got AVX2.
+ *
+ * The loop body is identical in all three tiers; only the target attribute
+ * differs, exactly as the Rust twins do it. Keep them textually identical: a
+ * divergence here is a wrong answer that depends on which CPU ran it.
+ * ------------------------------------------------------------------------- */
+#define DB_BITMAP_AND_BODY                                       for (int64_t i = 0; i < n; i++) {                                uint32_t a = engine2d_unbox_pixel(l[i]);                     uint32_t b = engine2d_unbox_pixel(r[i]);                     o[i] = engine2d_box_pixel(a & b);                        }
+
+/* SIMD_CAN_AVX2, not a bare `defined(__x86_64__) || defined(_M_X64)` check:
+ * this block (and its five siblings below — two more AVX-512 kernel
+ * definitions plus their three dispatch call sites) uses __m512i/__m256i
+ * types and _mm512_*, _mm256_* intrinsics from <immintrin.h>, and that header
+ * is only #included above under SIMD_CAN_AVX2 (line ~52), which deliberately
+ * excludes clang-cl (__clang__ AND _MSC_VER both defined — see
+ * SIMD_CAN_AVX2's definition in runtime_simd_dispatch.h for why: the
+ * attribute-based per-function isolation these AVX-512/AVX2 kernels rely on
+ * does not work under -fms-compatibility). Simple's in-process embedded LLVM
+ * (used by Stage 2's native-build sanity step, targeting
+ * x86_64-pc-windows-msvc) presents the same way. Gating the intrinsic-using
+ * bodies on plain x86_64 while gating the header on SIMD_CAN_AVX2 is an
+ * asymmetry: the bodies would still be compiled with __m512i/_mm512_*
+ * undeclared. Matches the established pattern in runtime_simd_case.c and
+ * runtime_simd_utf8.c, whose AVX2 kernels are already gated on
+ * SIMD_CAN_AVX2 for the identical reason. Cost: under clang-cl (and the
+ * embedded-LLVM MSVC-target path), these AVX-512 kernels compile out and the
+ * scalar loop runs instead — correct, slower, same trade-off already made
+ * and documented for AVX2 in runtime_simd_dispatch.h. Real cl.exe and the
+ * GNU-driver clang/gcc are unaffected; they still get AVX-512. */
+#if SIMD_CAN_AVX2
+/* CPUID leaf 7 sub-leaf 0: EBX bit 16 = AVX512F, bit 30 = AVX512BW. The file
+   has no existing avx512 feature predicate — only the OS-state probe — so this
+   supplies the CPUID half that must accompany it. */
+/* DQ as well as F and BW: `_mm512_mullo_epi64` is an AVX512DQ instruction, and
+   probing only F+BW would run it on a CPU that has neither. DQ ships with BW on
+   every part that has either (Skylake-X and later), so this costs no coverage. */
+static bool blend_mask_cpu_has_avx512bw(void) {
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx512f") != 0
+        && __builtin_cpu_supports("avx512bw") != 0
+        && __builtin_cpu_supports("avx512dq") != 0;
+#elif defined(_MSC_VER)
+    int regs[4];
+    __cpuidex(regs, 7, 0);
+    return ((uint32_t)regs[1] & (1U << 16)) != 0
+        && ((uint32_t)regs[1] & (1U << 30)) != 0
+        && ((uint32_t)regs[1] & (1U << 17)) != 0;
+#else
+    return false;
+#endif
+}
+
+static bool db_bitmap_cpu_has_avx512f(void) {
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx512f") != 0;
+#elif defined(_MSC_VER)
+    int regs[4];
+    __cpuidex(regs, 7, 0);
+    return ((uint32_t)regs[1] & (1U << 16)) != 0;
+#else
+    return false;
+#endif
+}
+
+/* EXPLICIT intrinsics, not an attributed copy of the scalar loop.
+ *
+ * The copy-the-body-under-a-target-attribute trick works on clang (measured:
+ * 13 zmm) and silently produces NOTHING on GCC (measured: 0 zmm, and not even
+ * a distinct symbol — identical bodies get folded together and the survivor is
+ * compiled for the baseline target). The native link on this host is MinGW
+ * GCC, so the trick bought exactly zero AVX-512 in a shipped binary while the
+ * Rust twin's 512-bit code made it look covered.
+ *
+ * Writing the lanes out removes the compiler's discretion. The transform is
+ * exact rather than approximate: box/unbox are `p << 3` and `(uint32_t)(v >> 3)`,
+ * and `(a >> 3) & (b >> 3) == (a & b) >> 3` for logical shifts, so
+ *     o = ((((l & r) >> 3) & 0xFFFFFFFF) << 3)
+ * is bit-identical to the scalar body for every input.
+ */
+SIMPLE_RUNTIME_TARGET_AVX512
+static void db_bitmap_and_avx512(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
+    int64_t i = 0;
+    const __m512i mask32 = _mm512_set1_epi64((long long)0xFFFFFFFFLL);
+    for (; i + 8 <= n; i += 8) {
+        __m512i a = _mm512_loadu_si512((const void*)(l + i));
+        __m512i b = _mm512_loadu_si512((const void*)(r + i));
+        __m512i t = _mm512_and_si512(a, b);
+        t = _mm512_srli_epi64(t, 3);
+        t = _mm512_and_si512(t, mask32);
+        t = _mm512_slli_epi64(t, 3);
+        _mm512_storeu_si512((void*)(o + i), t);
+    }
+    for (; i < n; i++) {
+        uint32_t a = engine2d_unbox_pixel(l[i]);
+        uint32_t b = engine2d_unbox_pixel(r[i]);
+        o[i] = engine2d_box_pixel(a & b);
+    }
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+static void db_bitmap_and_avx2(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
+    int64_t i = 0;
+    const __m256i mask32 = _mm256_set1_epi64x((long long)0xFFFFFFFFLL);
+    for (; i + 4 <= n; i += 4) {
+        __m256i a = _mm256_loadu_si256((const __m256i*)(l + i));
+        __m256i b = _mm256_loadu_si256((const __m256i*)(r + i));
+        __m256i t = _mm256_and_si256(a, b);
+        t = _mm256_srli_epi64(t, 3);
+        t = _mm256_and_si256(t, mask32);
+        t = _mm256_slli_epi64(t, 3);
+        _mm256_storeu_si256((__m256i*)(o + i), t);
+    }
+    for (; i < n; i++) {
+        uint32_t a = engine2d_unbox_pixel(l[i]);
+        uint32_t b = engine2d_unbox_pixel(r[i]);
+        o[i] = engine2d_box_pixel(a & b);
+    }
+}
+#endif
+
+static void db_bitmap_and_scalar(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
+    DB_BITMAP_AND_BODY
+}
+
+static void db_bitmap_and_dispatch(const int64_t* l, const int64_t* r, int64_t* o, int64_t n) {
+#if SIMD_CAN_AVX2
+    /* rt_x86_avx512_os_state_usable() checks XCR0 opmask/ZMM state, not just
+       CPUID: a CPU that reports AVX-512 while the OS has not enabled the wide
+       register state would fault on the first zmm touch. */
+    if (db_bitmap_cpu_has_avx512f() && rt_x86_avx512_os_state_usable()) {
+        db_bitmap_and_avx512(l, r, o, n);
+        return;
+    }
+    if (rt_simd_has_avx2()) {
+        db_bitmap_and_avx2(l, r, o, n);
+        return;
+    }
+#endif
+    db_bitmap_and_scalar(l, r, o, n);
+}
+
+SplArray* rt_db_bitmap_and_u32(SplArray* lhs, SplArray* rhs, int64_t limit) {
+    int64_t n = 0;
+    if (!db_bitmap_span(lhs, limit, &n)) return NULL;
+    if (!db_bitmap_span(rhs, limit, &n)) return NULL;
+    SplArray* out = rt_array_new_uninit(n);
+    if (!out) return NULL;
+    const int64_t* l = (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const int64_t* r = (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs);
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!l || !r || !o) return NULL;
+    db_bitmap_and_dispatch(l, r, o, n);
+    return out;
+}
+
+SplArray* rt_db_bitmap_or_u32(SplArray* lhs, SplArray* rhs, int64_t limit,
+                              int64_t lhs_words, int64_t rhs_words) {
+    if (limit <= 0) return NULL;
+    int64_t ll = lhs ? rt_array_len(lhs) : 0;
+    int64_t rl = rhs ? rt_array_len(rhs) : 0;
+    int64_t lw = lhs_words < ll ? lhs_words : ll;
+    int64_t rw = rhs_words < rl ? rhs_words : rl;
+    if (lw < 0) lw = 0;
+    if (rw < 0) rw = 0;
+    SplArray* out = rt_array_new_uninit(limit);
+    if (!out) return NULL;
+    const int64_t* l = lhs ? (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs) : NULL;
+    const int64_t* r = rhs ? (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs) : NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!o) return NULL;
+    for (int64_t i = 0; i < limit; i++) {
+        uint32_t a = (l && i < lw) ? engine2d_unbox_pixel(l[i]) : 0u;
+        uint32_t b = (r && i < rw) ? engine2d_unbox_pixel(r[i]) : 0u;
+        o[i] = engine2d_box_pixel(a | b);
+    }
+    return out;
+}
+
+SplArray* rt_db_bitmap_andnot_u32(SplArray* lhs, SplArray* rhs, int64_t limit,
+                                  int64_t rhs_words) {
+    int64_t n = 0;
+    if (!db_bitmap_span(lhs, limit, &n)) return NULL;
+    int64_t rl = rhs ? rt_array_len(rhs) : 0;
+    int64_t rw = rhs_words < rl ? rhs_words : rl;
+    if (rw < 0) rw = 0;
+    SplArray* out = rt_array_new_uninit(n);
+    if (!out) return NULL;
+    const int64_t* l = (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const int64_t* r = rhs ? (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs) : NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!l || !o) return NULL;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t a = engine2d_unbox_pixel(l[i]);
+        uint32_t b = (r && i < rw) ? engine2d_unbox_pixel(r[i]) : 0u;
+        o[i] = engine2d_box_pixel(a & (0xFFFFFFFFu ^ b));
+    }
+    return out;
+}
+
+int64_t rt_simd_find_byte_span(SplArray* bytes, int64_t start, int64_t needle) {
+    if (!bytes || start < 0) return -1;
+    int64_t len = rt_array_len(bytes);
+    if (start >= len) return -1;
+    /* A [u8] has TWO representations and this kernel serves both: packed bytes
+       (RT_CORE_ARRAY_FLAG_BYTES) in the native runtime, one tagged int64 slot
+       per element when boxed. The comment that used to sit here asserted the
+       tagged form unconditionally, so in a NATIVE binary this read byte values
+       out of slot-sized strides and never matched anything — measured,
+       `simd_find_byte` returned -1 for every input while the interpreter's
+       Rust twin returned the correct offsets.
+       That is not a slow path or a fallback: `_crlf_from` (http_core.spl:234)
+       is how an HTTP server finds header boundaries, so a natively built
+       server could not locate a single CRLF. Resolve the representation from
+       the array instead of assuming it. */
+    const int packed = rt_array_is_byte_packed(bytes);
+    const uint8_t* bp = (const uint8_t*)(uintptr_t)rt_array_data_ptr(bytes);
+    const int64_t* p = (const int64_t*)(uintptr_t)rt_array_data_ptr(bytes);
+    if (!bp || !p) return -1;
+    uint32_t target = (uint32_t)(needle & 0xFF);
+    for (int64_t i = start; i < len; i++) {
+        uint32_t v = packed ? (uint32_t)bp[i]
+                            : (engine2d_unbox_pixel(p[i]) & 0xFFu);
+        if (v == target) return i;
+    }
+    return -1;
+}
+
+int64_t rt_simd_bytes_equal_span(SplArray* lhs, int64_t lhs_start,
+                                 SplArray* rhs, int64_t rhs_start, int64_t len) {
+    if (!lhs || !rhs || lhs_start < 0 || rhs_start < 0 || len < 0) return 0;
+    if (lhs_start + len > rt_array_len(lhs)) return 0;
+    if (rhs_start + len > rt_array_len(rhs)) return 0;
+    /* Same two representations as rt_simd_find_byte_span, and each side is
+       resolved independently: nothing requires both arguments to be stored the
+       same way. */
+    const int lhs_packed = rt_array_is_byte_packed(lhs);
+    const int rhs_packed = rt_array_is_byte_packed(rhs);
+    const uint8_t* abp = (const uint8_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const uint8_t* bbp = (const uint8_t*)(uintptr_t)rt_array_data_ptr(rhs);
+    const int64_t* a = (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const int64_t* b = (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs);
+    if (!a || !b || !abp || !bbp) return 0;
+    for (int64_t i = 0; i < len; i++) {
+        uint32_t av = lhs_packed ? (uint32_t)abp[lhs_start + i]
+                                 : (engine2d_unbox_pixel(a[lhs_start + i]) & 0xFFu);
+        uint32_t bv = rhs_packed ? (uint32_t)bbp[rhs_start + i]
+                                 : (engine2d_unbox_pixel(b[rhs_start + i]) & 0xFFu);
+        if (av != bv) return 0;
+    }
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Glyph mask-blend span — native twin of rt_engine2d_blend_mask_span_u32.
+ *
+ * Mirrors blit_glyph (font_rasterizer.spl): straight-alpha src-over with
+ * FLOOR /255, always writing opaque alpha and ignoring the destination's.
+ * That is neither the percent blend (/100 +50) nor the general Porter-Duff
+ * path; confusing them shifts every glyph pixel.
+ *
+ * Returns ONLY the blended span, matching the Rust bridge's ABI — returning
+ * the whole destination would make the cost O(rows x buffer).
+ * ------------------------------------------------------------------------- */
+/* AVX-512 glyph mask blend, explicit lanes.
+ *
+ * The attributed-copy idiom gives GCC nothing (see
+ * doc/08_tracking/bug/native_binaries_had_no_avx512_2026-09-14.md), and text is
+ * the highest-volume path in the renderer after solid fills, so this one is
+ * written out.
+ *
+ * A [u32] is one tagged int64 slot per element, so eight pixels fill a zmm as
+ * 64-bit lanes and every channel computation has room without widening.
+ *
+ * `/255` must be EXACT, not approximated: `(x * 32897) >> 23` equals `x / 255`
+ * for every x in 0..65025, which is the entire range `fg*a + d*(255-a)` can
+ * produce with fg, d <= 255. Proven exhaustively over that range rather than
+ * argued.
+ *
+ * `a == 0` is selected back to the ORIGINAL slot rather than blended. The
+ * blend would give the right colour but would also force alpha to 0xFF, while
+ * the scalar path returns `dst` untouched — a difference that only shows on a
+ * non-opaque destination, which is exactly the kind of edge a parity test over
+ * opaque ramps would miss.
+ */
+#if SIMD_CAN_AVX2
+SIMPLE_RUNTIME_TARGET_AVX512BWDQ
+static void blend_mask_span_avx512_lanes(int64_t* dst, const uint8_t* mask,
+                                         int64_t n, uint32_t color) {
+    const __m512i c255   = _mm512_set1_epi64(255);
+    const __m512i cff    = _mm512_set1_epi64(0xFF);
+    const __m512i cmagic = _mm512_set1_epi64(32897);
+    const __m512i copaque= _mm512_set1_epi64((long long)0xFF000000ULL);
+    const __m512i fr = _mm512_set1_epi64((color >> 16) & 0xFF);
+    const __m512i fg = _mm512_set1_epi64((color >> 8) & 0xFF);
+    const __m512i fb = _mm512_set1_epi64(color & 0xFF);
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m512i v = _mm512_loadu_si512((const void*)(dst + i));
+        __m512i t = _mm512_srli_epi64(v, 3);                     /* unbox */
+        __m512i a = _mm512_cvtepu8_epi64(_mm_loadl_epi64((const __m128i*)(mask + i)));
+        __m512i inv = _mm512_sub_epi64(c255, a);
+        __m512i dr = _mm512_and_si512(_mm512_srli_epi64(t, 16), cff);
+        __m512i dg = _mm512_and_si512(_mm512_srli_epi64(t, 8), cff);
+        __m512i db = _mm512_and_si512(t, cff);
+        __m512i nr = _mm512_srli_epi64(_mm512_mullo_epi64(
+            _mm512_add_epi64(_mm512_mullo_epi64(fr, a), _mm512_mullo_epi64(dr, inv)), cmagic), 23);
+        __m512i ng = _mm512_srli_epi64(_mm512_mullo_epi64(
+            _mm512_add_epi64(_mm512_mullo_epi64(fg, a), _mm512_mullo_epi64(dg, inv)), cmagic), 23);
+        __m512i nb = _mm512_srli_epi64(_mm512_mullo_epi64(
+            _mm512_add_epi64(_mm512_mullo_epi64(fb, a), _mm512_mullo_epi64(db, inv)), cmagic), 23);
+        __m512i px = _mm512_or_si512(copaque,
+            _mm512_or_si512(_mm512_slli_epi64(nr, 16),
+                _mm512_or_si512(_mm512_slli_epi64(ng, 8), nb)));
+        __m512i boxed = _mm512_slli_epi64(px, 3);
+        /* a == 0 keeps the destination slot verbatim, alpha included. */
+        __mmask8 keep = _mm512_cmpeq_epi64_mask(a, _mm512_setzero_si512());
+        _mm512_storeu_si512((void*)(dst + i), _mm512_mask_blend_epi64(keep, boxed, v));
+    }
+    for (; i < n; i++) {
+        uint32_t av = mask[i];
+        if (av == 0) continue;
+        uint32_t d = engine2d_unbox_pixel(dst[i]);
+        uint32_t iv = 255u - av;
+        uint32_t r = (((color >> 16) & 255u) * av + ((d >> 16) & 255u) * iv) / 255u;
+        uint32_t g = (((color >> 8) & 255u) * av + ((d >> 8) & 255u) * iv) / 255u;
+        uint32_t b = ((color & 255u) * av + (d & 255u) * iv) / 255u;
+        dst[i] = engine2d_box_pixel(0xff000000u | (r << 16) | (g << 8) | b);
+    }
+}
+#endif
+
+SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
+                                          SplArray* mask, int64_t mask_offset,
+                                          int64_t count, int64_t color) {
+    if (!dst || !mask || offset < 0 || mask_offset < 0 || count <= 0) return NULL;
+    if (offset + count > rt_array_len(dst)) return NULL;
+    if (mask_offset + count > rt_array_len(mask)) return NULL;
+
+    const int64_t* dst_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    const int64_t* mask_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(mask);
+    if (!dst_data || !mask_data) return NULL;
+
+    SplArray* out = rt_array_new_uninit(count);
+    if (!out) return NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!o) return NULL;
+
+    uint32_t s = (uint32_t)(uint64_t)color;
+    /* Seed the result span with the destination so an in-place lane kernel can
+       work on `o` directly. The scalar loop below overwrites every element, so
+       this costs one memcpy only on the path that needs it. */
+    for (int64_t i = 0; i < count; i++) o[i] = dst_data[offset + i];
+    uint32_t fg_r = (s >> 16) & 255u;
+    uint32_t fg_g = (s >> 8) & 255u;
+    uint32_t fg_b = s & 255u;
+
+    /* A [u8] is PACKED BYTES in the native runtime and tagged int64 slots in
+       the boxed one, and this kernel serves both. Reading the wrong one blends
+       every glyph pixel against garbage — measured 819 mismatches out of 1640
+       in a native binary, while the interpreter path stayed green because it
+       uses the Rust twin. Resolve it from the array itself rather than
+       assuming. */
+    const int mask_packed = rt_array_is_byte_packed(mask);
+    const uint8_t* mask_bytes = (const uint8_t*)(uintptr_t)rt_array_data_ptr(mask);
+#if SIMD_CAN_AVX2
+    /* Explicit-lane path needs the packed mask; the boxed representation falls
+       through to the scalar loop below, which is the interpreter's shape and
+       already has the Rust twin's AVX-512 behind it. */
+    if (mask_packed && mask_bytes && blend_mask_cpu_has_avx512bw()
+        && rt_x86_avx512_os_state_usable()) {
+        /* `out` is a fresh copy of the destination span; blend in place. */
+        blend_mask_span_avx512_lanes(o, mask_bytes + mask_offset, count, s);
+        return out;
+    }
+#endif
+    for (int64_t i = 0; i < count; i++) {
+        uint32_t a = mask_packed
+            ? (uint32_t)mask_bytes[mask_offset + i]
+            : (engine2d_unbox_pixel(mask_data[mask_offset + i]) & 255u);
+        uint32_t inv = 255u - a;
+        uint32_t d = engine2d_unbox_pixel(dst_data[offset + i]);
+        uint32_t r = (fg_r * a + ((d >> 16) & 255u) * inv) / 255u;
+        uint32_t g = (fg_g * a + ((d >> 8) & 255u) * inv) / 255u;
+        uint32_t b = (fg_b * a + (d & 255u) * inv) / 255u;
+        o[i] = engine2d_box_pixel(0xff000000u | (r << 16) | (g << 8) | b);
+    }
+    return out;
+}
+
+/* ---------------------------------------------------------------------------
+ * Soft box-shadow coverage span — native twin of
+ * rt_engine2d_blend_cov_span_u32.
+ *
+ * Mirrors fb_soft_box_shadow's inner blend exactly: `/256` FLOOR with alpha in
+ * 0..=256 inclusive, and `cov == 0` skips the pixel entirely rather than
+ * blending with a == 0. This is NOT the mask twin above (/255, inv = 255 - a)
+ * nor the percent blend (/100 + 50); at a == 128 this computes
+ * (s*128 + d*128)/256 where the mask path computes (s*128 + d*127)/255, so
+ * substituting either shifts every partially covered shadow pixel.
+ *
+ * cov_y and alpha arrive packed as cov_y * 1024 + alpha, keeping the ABI at
+ * six arguments; both are bounded well below 1024 by construction.
+ *
+ * Returns ONLY the blended span, matching the Rust bridge's ABI — returning
+ * the whole destination would make the cost O(rows x buffer).
+ * ------------------------------------------------------------------------- */
+/* AVX-512 soft box-shadow coverage blend, explicit lanes.
+ *
+ * Same reasoning as the glyph kernel: the attributed-copy idiom gives GCC
+ * nothing, and a shadow halo covers far more pixels than the box it surrounds.
+ *
+ * Two divisions, and they are NOT the same one. `cov*cov_y` and `cov*alpha`
+ * divide by 256 and 255 respectively; the blend divides by 256. `/256` is a
+ * shift, `/255` uses the exact `(x * 32897) >> 23` (verified exhaustively over
+ * 0..65025, which covers `cov*alpha` with cov <= 256 and alpha <= 255, and
+ * `s*a + d*(256-a)` with a <= 256 giving at most 255*256 = 65280 — so the
+ * blend's /256 must stay a shift rather than borrow the /255 constant).
+ *
+ * `cov <= 0` keeps the destination slot verbatim, matching the scalar path's
+ * early `continue` rather than blending with a == 0.
+ */
+#if SIMD_CAN_AVX2
+SIMPLE_RUNTIME_TARGET_AVX512BWDQ
+static void blend_cov_span_avx512_lanes(int64_t* dst, const int64_t* colcov,
+                                        int64_t n, int64_t cov_y, int64_t alpha,
+                                        uint32_t color) {
+    const __m512i cff     = _mm512_set1_epi64(0xFF);
+    const __m512i c256    = _mm512_set1_epi64(256);
+    const __m512i cmagic  = _mm512_set1_epi64(32897);
+    const __m512i copaque = _mm512_set1_epi64((long long)0xFF000000ULL);
+    const __m512i vcovy   = _mm512_set1_epi64(cov_y);
+    const __m512i valpha  = _mm512_set1_epi64(alpha);
+    const __m512i zero    = _mm512_setzero_si512();
+    const __m512i sr = _mm512_set1_epi64((color >> 16) & 0xFF);
+    const __m512i sg = _mm512_set1_epi64((color >> 8) & 0xFF);
+    const __m512i sb = _mm512_set1_epi64(color & 0xFF);
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m512i v  = _mm512_loadu_si512((const void*)(dst + i));
+        __m512i t  = _mm512_srli_epi64(v, 3);
+        /* Coverage is [i32] and CAN be negative. `engine2d_unbox_pixel`
+           truncates UNSIGNED, so -1 would arrive as 4294967295 and blend at
+           full strength where the Simple twin skips the pixel — a real
+           divergence between the two implementations, found by testing the
+           negative domain rather than reasoning about it. Sign-extend the low
+           32 bits so both sides see the same number. */
+        __m512i cc = _mm512_srai_epi64(
+            _mm512_slli_epi64(_mm512_srli_epi64(
+                _mm512_loadu_si512((const void*)(colcov + i)), 3), 32), 32);
+        __m512i cov = _mm512_srai_epi64(_mm512_mullo_epi64(cc, vcovy), 8);   /* /256 */
+        /* a = min((cov*alpha)/255, 256) */
+        __m512i a = _mm512_srli_epi64(
+            _mm512_mullo_epi64(_mm512_mullo_epi64(cov, valpha), cmagic), 23);
+        a = _mm512_min_epi64(a, c256);
+        __m512i inv = _mm512_sub_epi64(c256, a);
+        __m512i dr = _mm512_and_si512(_mm512_srli_epi64(t, 16), cff);
+        __m512i dg = _mm512_and_si512(_mm512_srli_epi64(t, 8), cff);
+        __m512i db = _mm512_and_si512(t, cff);
+        __m512i nr = _mm512_srli_epi64(_mm512_add_epi64(
+            _mm512_mullo_epi64(sr, a), _mm512_mullo_epi64(dr, inv)), 8);
+        __m512i ng = _mm512_srli_epi64(_mm512_add_epi64(
+            _mm512_mullo_epi64(sg, a), _mm512_mullo_epi64(dg, inv)), 8);
+        __m512i nb = _mm512_srli_epi64(_mm512_add_epi64(
+            _mm512_mullo_epi64(sb, a), _mm512_mullo_epi64(db, inv)), 8);
+        __m512i px = _mm512_or_si512(copaque,
+            _mm512_or_si512(_mm512_slli_epi64(nr, 16),
+                _mm512_or_si512(_mm512_slli_epi64(ng, 8), nb)));
+        __mmask8 keep = _mm512_cmple_epi64_mask(cov, zero);
+        _mm512_storeu_si512((void*)(dst + i),
+            _mm512_mask_blend_epi64(keep, _mm512_slli_epi64(px, 3), v));
+    }
+    for (; i < n; i++) {
+        int64_t cov = ((int64_t)(int32_t)engine2d_unbox_pixel(colcov[i]) * cov_y) / 256;
+        if (cov <= 0) continue;
+        int64_t a = (cov * alpha) / 255;
+        if (a > 256) a = 256;
+        int64_t iv = 256 - a;
+        uint32_t d = engine2d_unbox_pixel(dst[i]);
+        int64_t r = ((int64_t)((color >> 16) & 255u) * a + (int64_t)((d >> 16) & 255u) * iv) / 256;
+        int64_t g = ((int64_t)((color >> 8) & 255u) * a + (int64_t)((d >> 8) & 255u) * iv) / 256;
+        int64_t b = ((int64_t)(color & 255u) * a + (int64_t)(d & 255u) * iv) / 256;
+        dst[i] = engine2d_box_pixel(0xff000000u | ((uint32_t)r << 16)
+                                    | ((uint32_t)g << 8) | (uint32_t)b);
+    }
+}
+#endif
+
+SplArray* rt_engine2d_blend_cov_span_u32(SplArray* dst, int64_t offset,
+                                         SplArray* colcov, int64_t count,
+                                         int64_t cov_y_and_alpha, int64_t color) {
+    if (!dst || !colcov || offset < 0 || count <= 0 || cov_y_and_alpha < 0) return NULL;
+    if (offset + count > rt_array_len(dst)) return NULL;
+    if (count > rt_array_len(colcov)) return NULL;
+
+    const int64_t* dst_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    const int64_t* cov_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(colcov);
+    if (!dst_data || !cov_data) return NULL;
+
+    SplArray* out = rt_array_new_uninit(count);
+    if (!out) return NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!o) return NULL;
+
+    int64_t cov_y = cov_y_and_alpha / 1024;
+    int64_t alpha = cov_y_and_alpha % 1024;
+#if SIMD_CAN_AVX2
+    if (blend_mask_cpu_has_avx512bw() && rt_x86_avx512_os_state_usable()) {
+        for (int64_t i = 0; i < count; i++) o[i] = dst_data[offset + i];
+        blend_cov_span_avx512_lanes(o, cov_data, count, cov_y, alpha,
+                                    (uint32_t)(uint64_t)color);
+        return out;
+    }
+#endif
+    uint32_t s = (uint32_t)(uint64_t)color;
+    int64_t sr = (int64_t)((s >> 16) & 255u);
+    int64_t sg = (int64_t)((s >> 8) & 255u);
+    int64_t sb = (int64_t)(s & 255u);
+
+    for (int64_t i = 0; i < count; i++) {
+        /* SplArray stores one tagged int64_t slot per element, so an [i32]
+           must be read slot-wise and unboxed rather than as packed words. */
+        /* signed: see the sign-extension note in the lane kernel above */
+        int64_t cc = (int64_t)(int32_t)engine2d_unbox_pixel(cov_data[i]);
+        uint32_t d = engine2d_unbox_pixel(dst_data[offset + i]);
+        int64_t cov = (cc * cov_y) / 256;
+        if (cov <= 0) {
+            o[i] = engine2d_box_pixel(d);
+            continue;
+        }
+        int64_t a = (cov * alpha) / 255;
+        if (a > 256) a = 256;
+        int64_t inv = 256 - a;
+        int64_t r = (sr * a + (int64_t)((d >> 16) & 255u) * inv) / 256;
+        int64_t g = (sg * a + (int64_t)((d >> 8) & 255u) * inv) / 256;
+        int64_t b = (sb * a + (int64_t)(d & 255u) * inv) / 256;
+        o[i] = engine2d_box_pixel(0xff000000u | ((uint32_t)r << 16)
+                                  | ((uint32_t)g << 8) | (uint32_t)b);
+    }
+    return out;
+}
+
 /* Scalar fallback stubs — no-op placeholders until pure Simple or
    hardware-accelerated implementations are wired in. */
 
@@ -2563,4 +3247,376 @@ int64_t rt_simd_shuffle_u8x16(int64_t a, int64_t b, int64_t mask) {
         out[i] = (int64_t)(uint64_t)r;
     }
     return rt_simd_result_vec(out, 16);
+}
+
+/* ==========================================================================
+ * Stage2 link census (doc/08_tracking/bug/
+ * stage2_link_full_undefined_symbol_census_2026-09-07.md), bucket
+ * "2-deferred: Rust-only, C-lane gap" -- the rt_simd_* i32x4/i32x8/u8x16/
+ * u64x2 family (22 symbols). Undefined in the core-C-bootstrap link because
+ * they exist only in src/compiler_rust/runtime/src/value/{simd_int_ops,
+ * simd_byte_ops,simd_aes_ops,simd_clmul_ops}.rs, which are never linked into
+ * this archive.
+ *
+ * ABI: same convention as the f32x4/f32x8/f64x4/i64x4/u32x4/u64x4 family
+ * above (rt_simd_vec_payload / rt_simd_lane_u64 / rt_simd_result_vec) --
+ * confirmed empirically against the REAL kept failed-link object set
+ * (native-objects-8HIZif/mod_842.o for i32x4/i32x8, mod_843.o for
+ * u8x16/u64x2), not from the Rust `pub extern "C"` signatures in
+ * simd_int_ops.rs / simd_byte_ops.rs, which are stale scalar-lane-array ABIs
+ * their own comments admit are provisional ("once a Vec4i marshalling layer
+ * lands they will receive the actual lane data") and are not what this
+ * archive's generated wrapper code (lib__nogc_sync_mut__simd__simd_add_i32x4
+ * etc.) actually calls: every real call site tail-calls with exactly two
+ * tagged-pointer i64 args (three for the two-vector-plus-scalar-shift and
+ * aes_round forms), matching this file's established Vec-struct convention.
+ * `rt_simd_aes_round_u8x16`/`rt_simd_aes_round_last_u8x16` additionally match
+ * the `&[I64, I64] -> &[I64]` RUNTIME_FUNCS spec already registered for them
+ * in codegen/runtime_sffi.rs:594-595.
+ *
+ * Semantics mirror the Rust lane kernels exactly:
+ *   - i32x{4,8} add/sub/mul: 32-bit wrapping (two's-complement wraparound),
+ *     matching Rust's `wrapping_{add,sub,mul}`.
+ *   - i32x{4,8} xor/and/or: bitwise.
+ *   - i32x{4,8} shl/shr: LOGICAL (zero-fill) shift, count masked to 0..31
+ *     (simd_int_ops.rs::mask_shift, `n & 31`). `shr` is logical, not
+ *     arithmetic -- matches `((x as u32).wrapping_shr(count)) as i32`.
+ *   - u8x16 add: per-lane wrapping byte add, no cross-lane carry.
+ *   - u8x16 xor: per-lane bitwise XOR.
+ *   - aes_round_u8x16(state,key)      = MixColumns(SubBytes(ShiftRows(state))) XOR key
+ *   - aes_round_last_u8x16(state,key) =            SubBytes(ShiftRows(state))  XOR key
+ *     (matches Intel `_mm_aesenc_si128` / `_mm_aesenclast_si128`; FIPS 197
+ *     column-major byte ordering and shared SBOX, mirroring
+ *     simd_aes_ops.rs's scalar fallback byte for byte).
+ *   - clmul_lo_u64(a,b) = carryless 64x64 mul of a.lo, b.lo -> [lo,hi]
+ *     (matches `_mm_clmulepi64_si128(a,b,0x00)`); Vec2u64's field order is
+ *     (lo, hi) per src/lib/nogc_sync_mut/simd_crypto.spl, i.e. lane 0 = lo,
+ *     lane 1 = hi.
+ *   - clmul_hi_u64(a,b) = carryless 64x64 mul of a.hi, b.hi -> [lo,hi]
+ *     (matches `_mm_clmulepi64_si128(a,b,0x11)`).
+ *   - xor_u64x2: lane-wise XOR.
+ * ========================================================================== */
+
+/* ---- i32x4 (Vec4i): 32-bit wrapping/bitwise ---- */
+
+#define RT_SIMD_I32X4_BINOP(NAME, EXPR)                                    \
+    int64_t NAME(int64_t a, int64_t b) {                                   \
+        const int64_t* pa = rt_simd_vec_payload(a);                        \
+        const int64_t* pb = rt_simd_vec_payload(b);                        \
+        int64_t out[4];                                                    \
+        int i;                                                             \
+        for (i = 0; i < 4; i++) {                                          \
+            uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);                \
+            uint32_t y = (uint32_t)rt_simd_lane_u64(pb, i);                \
+            out[i] = (int64_t)(int32_t)(uint32_t)(EXPR);                   \
+        }                                                                  \
+        return rt_simd_result_vec(out, 4);                                 \
+    }
+
+RT_SIMD_I32X4_BINOP(rt_simd_add_i32x4, x + y)
+RT_SIMD_I32X4_BINOP(rt_simd_sub_i32x4, x - y)
+RT_SIMD_I32X4_BINOP(rt_simd_mul_i32x4, x * y)
+RT_SIMD_I32X4_BINOP(rt_simd_xor_i32x4, x ^ y)
+RT_SIMD_I32X4_BINOP(rt_simd_and_i32x4, x & y)
+RT_SIMD_I32X4_BINOP(rt_simd_or_i32x4,  x | y)
+
+int64_t rt_simd_shl_i32x4(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x << count);
+    }
+    return rt_simd_result_vec(out, 4);
+}
+
+int64_t rt_simd_shr_i32x4(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x >> count);
+    }
+    return rt_simd_result_vec(out, 4);
+}
+
+/* ---- i32x8 (Vec8i): same semantics, 8 lanes ---- */
+
+#define RT_SIMD_I32X8_BINOP(NAME, EXPR)                                    \
+    int64_t NAME(int64_t a, int64_t b) {                                   \
+        const int64_t* pa = rt_simd_vec_payload(a);                        \
+        const int64_t* pb = rt_simd_vec_payload(b);                        \
+        int64_t out[8];                                                    \
+        int i;                                                             \
+        for (i = 0; i < 8; i++) {                                          \
+            uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);                \
+            uint32_t y = (uint32_t)rt_simd_lane_u64(pb, i);                \
+            out[i] = (int64_t)(int32_t)(uint32_t)(EXPR);                   \
+        }                                                                  \
+        return rt_simd_result_vec(out, 8);                                 \
+    }
+
+RT_SIMD_I32X8_BINOP(rt_simd_add_i32x8, x + y)
+RT_SIMD_I32X8_BINOP(rt_simd_sub_i32x8, x - y)
+RT_SIMD_I32X8_BINOP(rt_simd_mul_i32x8, x * y)
+RT_SIMD_I32X8_BINOP(rt_simd_xor_i32x8, x ^ y)
+RT_SIMD_I32X8_BINOP(rt_simd_and_i32x8, x & y)
+RT_SIMD_I32X8_BINOP(rt_simd_or_i32x8,  x | y)
+
+int64_t rt_simd_shl_i32x8(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[8];
+    int i;
+    for (i = 0; i < 8; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x << count);
+    }
+    return rt_simd_result_vec(out, 8);
+}
+
+int64_t rt_simd_shr_i32x8(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[8];
+    int i;
+    for (i = 0; i < 8; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x >> count);
+    }
+    return rt_simd_result_vec(out, 8);
+}
+
+/* ---- u8x16 (Vec16u8): add/xor ---- */
+
+int64_t rt_simd_add_u8x16(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[16];
+    int i;
+    for (i = 0; i < 16; i++) {
+        uint8_t x = (uint8_t)rt_simd_lane_u64(pa, i);
+        uint8_t y = (uint8_t)rt_simd_lane_u64(pb, i);
+        out[i] = (int64_t)(uint64_t)(uint8_t)(x + y);
+    }
+    return rt_simd_result_vec(out, 16);
+}
+
+int64_t rt_simd_xor_u8x16(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[16];
+    int i;
+    for (i = 0; i < 16; i++) {
+        uint8_t x = (uint8_t)rt_simd_lane_u64(pa, i);
+        uint8_t y = (uint8_t)rt_simd_lane_u64(pb, i);
+        out[i] = (int64_t)(uint64_t)(uint8_t)(x ^ y);
+    }
+    return rt_simd_result_vec(out, 16);
+}
+
+/* ---- u8x16 AES round primitives ----
+ * FIPS 197 SBOX, ShiftRows, MixColumns -- mirrors simd_aes_ops.rs's scalar
+ * fallback (shift_rows/sub_bytes/mix_columns/xtime) byte for byte, including
+ * its column-major state layout. */
+
+static const uint8_t rt_simd_aes_sbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+
+static void rt_simd_aes_shift_rows(const uint8_t s[16], uint8_t r[16]) {
+    r[0] = s[0];  r[4] = s[4];  r[8]  = s[8];  r[12] = s[12];
+    r[1] = s[5];  r[5] = s[9];  r[9]  = s[13]; r[13] = s[1];
+    r[2] = s[10]; r[6] = s[14]; r[10] = s[2];  r[14] = s[6];
+    r[3] = s[15]; r[7] = s[3];  r[11] = s[7];  r[15] = s[11];
+}
+
+static void rt_simd_aes_sub_bytes(uint8_t s[16]) {
+    int i;
+    for (i = 0; i < 16; i++) s[i] = rt_simd_aes_sbox[s[i]];
+}
+
+static uint8_t rt_simd_aes_xtime(uint8_t b) {
+    uint8_t shifted = (uint8_t)(b << 1);
+    return (b & 0x80) ? (uint8_t)(shifted ^ 0x1B) : shifted;
+}
+
+static void rt_simd_aes_mix_columns(uint8_t s[16]) {
+    int col;
+    for (col = 0; col < 4; col++) {
+        int base = col * 4;
+        uint8_t s0 = s[base], s1 = s[base + 1], s2 = s[base + 2], s3 = s[base + 3];
+        uint8_t t = (uint8_t)(s0 ^ s1 ^ s2 ^ s3);
+        s[base]     = (uint8_t)(s0 ^ t ^ rt_simd_aes_xtime((uint8_t)(s0 ^ s1)));
+        s[base + 1] = (uint8_t)(s1 ^ t ^ rt_simd_aes_xtime((uint8_t)(s1 ^ s2)));
+        s[base + 2] = (uint8_t)(s2 ^ t ^ rt_simd_aes_xtime((uint8_t)(s2 ^ s3)));
+        s[base + 3] = (uint8_t)(s3 ^ t ^ rt_simd_aes_xtime((uint8_t)(s3 ^ s0)));
+    }
+}
+
+static void rt_simd_aes_unpack(const int64_t* p, uint8_t out[16]) {
+    int i;
+    for (i = 0; i < 16; i++) out[i] = (uint8_t)rt_simd_lane_u64(p, i);
+}
+
+/* rt_simd_aes_round_u8x16 / rt_simd_aes_round_last_u8x16 are ALSO defined,
+ * with the exact same (I64,I64)->I64 tagged-pointer ABI and RUNTIME_FUNCS
+ * registration (codegen/runtime_sffi.rs:594-595), in
+ * src/compiler_rust/runtime/src/value/simd_aes_ops.rs as
+ * `#[no_mangle] pub extern "C" fn`s that unpack/pack the same flat Vec16u8
+ * layout used here. Unlike the other 21 symbols in this Stage2 census block
+ * (which are Rust-side dead/wrong-ABI provisional stubs -- see
+ * doc/08_tracking/bug/simple_runtime_cdylib_rt_simd_duplicate_symbol_2026-09-07.md),
+ * the Rust versions of THESE TWO are the tested, actively-registered,
+ * currently-reachable compiled-mode entry points, so deleting them would
+ * silently swap a verified implementation for a newly-added one on any
+ * Rust-linked target. Resolve the link collision the same way
+ * runtime_memtrack.c already resolves rt_heap_live_bytes/rt_heap_peak_bytes
+ * against value::heap: weak here so a link that also carries the Rust
+ * runtime keeps the Rust definition, while the standalone core-C-bootstrap
+ * Stage2 link (which never links the Rust runtime) keeps these as the sole
+ * provider. See build.rs's SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16
+ * definition for the MSVC/Windows-GNU exception, mirroring the heap-counters
+ * precedent exactly (no weak attribute on MSVC; a GNU-style weak symbol
+ * becomes a dead COFF alias under MinGW --gc-sections). */
+#if defined(SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16)
+/* Rust's value/simd_aes_ops.rs owns these; defining them here too would be a
+ * duplicate on any link that also carries the Rust runtime. */
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
+__attribute__((weak)) int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    rt_simd_aes_mix_columns(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+
+__attribute__((weak)) int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+#else
+/* MSVC (no weak attribute) and Windows-GNUC both land here; the
+ * Rust-provider case is already excluded by
+ * SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16 above, so this branch is only
+ * reached by a standalone (non-Rust-linked) Windows C build. */
+int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    rt_simd_aes_mix_columns(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+
+int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+#endif
+
+/* ---- u64x2 (Vec2u64): carryless multiply + XOR ---- */
+
+/* Scalar 64x64 -> 128 carryless (GF(2)[x]) multiply. Mirrors
+ * simd_clmul_ops.rs::clmul64_scalar's shift-and-XOR loop exactly. */
+static void rt_simd_clmul64(uint64_t a, uint64_t b, uint64_t* lo_out, uint64_t* hi_out) {
+    uint64_t lo = 0, hi = 0, bb = b;
+    unsigned i = 0;
+    while (bb != 0) {
+        if (bb & 1) {
+            if (i == 0) {
+                lo ^= a;
+            } else if (i < 64) {
+                lo ^= a << i;
+                hi ^= a >> (64 - i);
+            } else {
+                hi ^= a << (i - 64);
+            }
+        }
+        bb >>= 1;
+        i++;
+    }
+    *lo_out = lo;
+    *hi_out = hi;
+}
+
+int64_t rt_simd_clmul_lo_u64(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    uint64_t lo, hi;
+    int64_t out[2];
+    rt_simd_clmul64(rt_simd_lane_u64(pa, 0), rt_simd_lane_u64(pb, 0), &lo, &hi);
+    out[0] = (int64_t)lo;
+    out[1] = (int64_t)hi;
+    return rt_simd_result_vec(out, 2);
+}
+
+int64_t rt_simd_clmul_hi_u64(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    uint64_t lo, hi;
+    int64_t out[2];
+    rt_simd_clmul64(rt_simd_lane_u64(pa, 1), rt_simd_lane_u64(pb, 1), &lo, &hi);
+    out[0] = (int64_t)lo;
+    out[1] = (int64_t)hi;
+    return rt_simd_result_vec(out, 2);
+}
+
+int64_t rt_simd_xor_u64x2(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[2];
+    out[0] = (int64_t)(rt_simd_lane_u64(pa, 0) ^ rt_simd_lane_u64(pb, 0));
+    out[1] = (int64_t)(rt_simd_lane_u64(pa, 1) ^ rt_simd_lane_u64(pb, 1));
+    return rt_simd_result_vec(out, 2);
 }

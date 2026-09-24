@@ -1,4 +1,8 @@
 # SimpleOS WM IPC protocol: 8 status/event symbols imported by live code were never implemented
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (partially fixed) — re-verified 2026-08-17 by content grep, not
 SHA ancestry, per session correction. `WmStatus`, `WM_STATUS_OK`,
@@ -115,3 +119,4 @@ declared-symbol set (`WM_EVENT_CLOSE`, `WmInputEvent`,
 `WmCreateRequest`/`WmCloseRequest`/`WmResizeRequest`/`WmMoveRequest`) is
 identical to what this doc originally found. No fix attempted here per the
 "why this is not fixed" reasoning above, which still applies unchanged.
+

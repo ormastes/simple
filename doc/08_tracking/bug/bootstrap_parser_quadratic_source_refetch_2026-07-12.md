@@ -1,4 +1,8 @@
 # Bootstrap parser quadratic source refetch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -87,3 +91,4 @@ Acceptance requires:
    cached bootstrap shard within nine minutes, at no more than 1.5x RSS.
 4. The newly built pure-Simple compiler passes the two-module imported-enum
    text oracle before UI evidence resumes.
+

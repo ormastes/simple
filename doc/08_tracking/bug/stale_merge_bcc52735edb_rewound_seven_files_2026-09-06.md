@@ -1,4 +1,8 @@
 # `bcc52735edb` rewound landed work in seven files; six are still unrepaired
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-06
 - **Class:** stale merge snapshot / anti-revert protocol violation
@@ -278,3 +282,4 @@ hits needs the same hand-check before anyone acts on it.
 
 The prevention item at the end of this record — make the detection recipe a
 push-tier gate — should be read against these numbers, not against one incident.
+

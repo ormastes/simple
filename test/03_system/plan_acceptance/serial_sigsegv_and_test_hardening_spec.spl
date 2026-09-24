@@ -29,6 +29,21 @@ doc/05_design/app/testing/in_development_tag.md
 use std.spec.{step}
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{read_file}
+use std.nogc_sync_mut.io.signal_handlers.{
+    SIGSEGV,
+    exit_code_is_segfault,
+    on_segfault,
+    report_child_segfault,
+    signal_name
+}
+
+# Observed by the callback registered through on_segfault below. A module-level
+# counter is used rather than a captured local so the assertion reads the value
+# the REGISTERED function actually wrote, not a closure copy.
+var _observed_segfaults: i64 = 0
+
+fn _record_segfault():
+    _observed_segfaults = _observed_segfaults + 1
 
 describe "Phase 2: Runtime SIGSEGV Handler":
 
@@ -144,6 +159,21 @@ describe "Phase 5: Simple-Level Signal Wiring":
         val expected_wired = true
         expect(wires_sigsegv).to_equal(expected_wired)
 
+        step("Assert the wiring is behavioral, not a comment mentioning the name")
+        # A `.contains("SIGSEGV")` check alone passes on a source comment, so
+        # the module's own SIGSEGV constant and its signal-name mapping are
+        # exercised through the real imported symbols.
+        val expected_sigsegv_number = 11
+        expect(SIGSEGV).to_equal(expected_sigsegv_number)
+        val expected_sigsegv_name = "SIGSEGV"
+        expect(signal_name(SIGSEGV)).to_equal(expected_sigsegv_name)
+        # 139 == 128 + SIGSEGV is the shell convention for a SIGSEGV death; a
+        # SIGTERM death (143) must NOT be classified as one.
+        val expected_segv_exit_classified = true
+        expect(exit_code_is_segfault(128 + SIGSEGV)).to_equal(expected_segv_exit_classified)
+        val expected_sigterm_exit_classified = false
+        expect(exit_code_is_segfault(143)).to_equal(expected_sigterm_exit_classified)
+
     it "Distinguish a genuine segfault from a memory-limit violation via si_code":
         step("Read the crash handler in runtime.c")
         # @req REQ-SIGSEGV-HARDENING-001
@@ -180,3 +210,21 @@ describe "Phase 5: Simple-Level Signal Wiring":
         # empty.
         val expected_present = true
         expect(has_on_segfault_registration).to_equal(expected_present)
+
+        step("Register a callback and assert it actually runs for a SIGSEGV death")
+        # The grep above cannot tell an implemented API from a comment, so the
+        # registration is exercised end to end: a non-segfault status must NOT
+        # dispatch, and a SIGSEGV status must.
+        val expected_registered = true
+        expect(on_segfault(_record_segfault)).to_equal(expected_registered)
+
+        val before = _observed_segfaults
+        val expected_not_dispatched = false
+        expect(report_child_segfault(143)).to_equal(expected_not_dispatched)
+        val expected_unchanged = before
+        expect(_observed_segfaults).to_equal(expected_unchanged)
+
+        val expected_dispatched = true
+        expect(report_child_segfault(128 + SIGSEGV)).to_equal(expected_dispatched)
+        val expected_after = before + 1
+        expect(_observed_segfaults).to_equal(expected_after)

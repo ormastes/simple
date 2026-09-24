@@ -1,4 +1,9 @@
 # Aggregating-lane verdict line drops the in-development count, so every neutralised spec reads as a load failure
+## Closed 2026-09-16 — ...s a load failure **Status:** FIXED 2026-09-06 **Component:** `src/app/test_daemon/light_pr
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-09-06
 **Component:** `src/app/test_daemon/light_protocol.spl`, `src/app/test_runner_new/test_runner_main.spl`
@@ -103,3 +108,4 @@ fixture output to the producer's real bytes.
 `sweep_shard_abort_mislabels_survivors_as_load_failures_2026-09-06.md`, whose
 "15 real + 21 shard-abort collateral" reading was wrong: 15 + 21 = 36 = every
 tagged spec, which is what ruled the shard aborts out.
+

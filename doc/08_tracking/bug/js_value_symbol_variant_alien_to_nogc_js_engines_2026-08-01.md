@@ -1,4 +1,9 @@
 # `JsValue.Symbol` constructed and matched in engines whose `JsValue` has no `Symbol` variant
+## Closed 2026-09-16 — Status FIXED; 6 alien Symbol arms removed; RED-to-GREEN probe evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED — six alien `JsValue.Symbol` match arms removed.
 **Severity:** high. Under the default JIT the *whole module* silently dropped to
@@ -129,3 +134,4 @@ Deliberately **not** attempted here, and recommended as follow-up:
    so it should be *renamed or namespaced*, not merged. Converging requires
    deciding whether the tree-walking engines adopt property descriptors — out of
    scope here.
+

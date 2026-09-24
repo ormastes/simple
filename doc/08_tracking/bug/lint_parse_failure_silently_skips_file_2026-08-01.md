@@ -1,4 +1,9 @@
 # A file `lint` cannot parse is reported as one error, not as NOT LINTED — the file is silently skipped
+## Closed 2026-09-16 — Status Reporting FIXED with measured RED/GREEN evidence and regression spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** Reporting FIXED (loud + countable + fail-closed). The census of how
@@ -224,3 +229,4 @@ reason to distrust the static explanation and settle it by sabotage.
 The reporting fix is what matters regardless, and is why it was landed first and
 separately: the next grammar divergence will again mask a whole file, and until
 now nothing counted it.
+

@@ -4,6 +4,10 @@
 
 set -u
 
+. "$(dirname -- "$0")/bootstrap-windows-cl-mode.shs"
+. "$(dirname -- "$0")/bootstrap-phase-toolchain.shs"
+bootstrap_windows_preserve_cl_mode
+
 die() {
   echo "bootstrap-phase-verification: $*" >&2
   exit 2
@@ -13,6 +17,12 @@ manifest_value() {
   key=$1
   file=$2
   sed -n "s/^${key}=//p" "$file" | head -n 1
+}
+
+manifest_key_count() {
+  key=$1
+  file=$2
+  awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$file"
 }
 
 hash_file() {
@@ -32,13 +42,35 @@ validate_hosted_runtime_authority() {
   expected=$(manifest_value sha256 "$receipt")
   if [ -f "$capsule_receipt" ] && [ ! -L "$capsule_receipt" ]; then
     "$source_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$authority" >/dev/null || return 1
-    [ "$(manifest_value schema "$capsule_receipt")" = simple-phase2-runtime-capsule-v1 ] || return 1
+    capsule_schema=$(manifest_value schema "$capsule_receipt")
+    case "$capsule_schema" in
+      simple-phase2-runtime-capsule-v1)
+        [ "$(manifest_key_count artifact_layout "$capsule_receipt")" = 0 ] || return 1
+        capsule_layout=posix ;;
+      simple-phase2-runtime-capsule-v2)
+        [ "$(manifest_key_count artifact_layout "$capsule_receipt")" = 1 ] || return 1
+        capsule_layout=$(manifest_value artifact_layout "$capsule_receipt") ;;
+      *) return 1 ;;
+    esac
     [ "$(manifest_value status "$capsule_receipt")" = frozen ] || return 1
     [ "$(manifest_value compiler_sha256 "$capsule_receipt")" = "$expected_sha" ] || return 1
-    [ "$(hash_file "$authority/simple")" = "$expected_sha" ] || return 1
-    native_all="$authority/libsimple_native_all.a"
+    case "$capsule_layout" in
+      windows-msvc)
+        capsule_compiler="$authority/simple.exe"
+        native_all="$authority/simple_native_all.lib"
+        authority_stamp="$authority/simple.exe.inputs.sha256" ;;
+      posix)
+        capsule_compiler="$authority/simple"
+        native_all="$authority/libsimple_native_all.a"
+        authority_stamp="$authority/simple.inputs.sha256" ;;
+      *) return 1 ;;
+    esac
+    [ -f "$capsule_compiler" ] && [ ! -L "$capsule_compiler" ] || return 1
+    [ "$(hash_file "$capsule_compiler")" = "$expected_sha" ] || return 1
     [ -f "$native_all" ] && [ ! -L "$native_all" ] || return 1
     [ "$(hash_file "$native_all")" = "$(manifest_value native_all_sha256 "$capsule_receipt")" ] || return 1
+    [ -f "$authority_stamp" ] && [ ! -L "$authority_stamp" ] || return 1
+    [ "$(hash_file "$authority_stamp")" = "$(manifest_value seed_authority_stamp_sha256 "$capsule_receipt")" ] || return 1
     [ "$(hash_file "$authority/hosted-runtime.env")" = "$(manifest_value hosted_authority_receipt_sha256 "$capsule_receipt")" ] || return 1
     runtime_cache_identity=$(manifest_value capsule_identity_sha256 "$capsule_receipt")
   else
@@ -56,17 +88,19 @@ validate_hosted_runtime_authority() {
   fi
   case "$relative" in deps/*) ;; *) return 1 ;; esac
   hosted_leaf=${relative#deps/}
-  case "$hosted_leaf" in libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+  case "$hosted_leaf" in libspl_hosted_runtime*.rlib) ;; *) return 1 ;; esac
   case "$hosted_leaf" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
   hosted="$authority/$relative"
   [ ! -L "$authority" ] && [ ! -L "$authority/deps" ] || return 1
   [ -f "$hosted" ] && [ ! -L "$hosted" ] || return 1
   [ "$(hash_file "$hosted")" = "$expected" ] || return 1
-  [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  if [ ! -f "$capsule_receipt" ]; then
   [ "$(stat -c '%a' "$authority" 2>/dev/null || stat -f '%Lp' "$authority")" = 500 ] || return 1
   [ "$(stat -c '%a' "$authority/deps" 2>/dev/null || stat -f '%Lp' "$authority/deps")" = 500 ] || return 1
   [ "$(stat -c '%a' "$hosted" 2>/dev/null || stat -f '%Lp' "$hosted")" = 400 ] || return 1
   [ "$(stat -c '%a' "$receipt" 2>/dev/null || stat -f '%Lp' "$receipt")" = 400 ] || return 1
+  fi
   hosted_runtime_sha=$expected
   if [ -z "${runtime_cache_identity:-}" ]; then
     runtime_cache_identity=$hosted_runtime_sha
@@ -78,15 +112,18 @@ phase=""
 compiler=""
 expected_sha=""
 strategy=normal
+profile=full
 hash_policy=canonical
 work_root=""
 cache_root=""
 runtime_path=${SIMPLE_RUNTIME_PATH:-}
+runtime_path_explicit=0
 source_root=$(pwd -P)
 timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-1800}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
 native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
 build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
+test_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-1}
 
 for arg in "$@"; do
   case "$arg" in
@@ -94,10 +131,20 @@ for arg in "$@"; do
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
+    # --profile=slim is an explicit opt-in, phase=stage2 only (see
+    # stage2_slim_profile below). EVERY behavioral effect of slim mode --
+    # skipped MCP/LSP builds and checks, skipped compile-mode test
+    # duplicates, and the shared CLI/test-runner build cache -- is gated on
+    # stage2_slim_profile, so default "full" is genuinely byte-identical:
+    # every existing caller (run-linux-phase2-tests.shs,
+    # run-freebsd-phase2-tests.shs, run-macos-phase23-evidence.shs, and this
+    # script's own stage1/stage3/stage4 paths) is unaffected unless it opts
+    # in. Any new stage2_slim_profile-conditioned code must keep this true.
+    --profile=*) profile=${arg#*=} ;;
     --hash-policy=*) hash_policy=${arg#*=} ;;
     --work-root=*) work_root=${arg#*=} ;;
     --cache-root=*) cache_root=${arg#*=} ;;
-    --runtime-path=*) runtime_path=${arg#*=} ;;
+    --runtime-path=*) runtime_path=${arg#*=}; runtime_path_explicit=1 ;;
     --source-root=*) source_root=${arg#*=} ;;
     --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
@@ -106,16 +153,51 @@ done
 
 case "$phase" in stage1|stage2|stage3|stage4) ;; *) die "invalid phase" ;; esac
 case "$strategy" in normal|full) ;; *) die "verification requires normal or full" ;; esac
+case "$profile" in full|slim) ;; *) die "--profile requires full or slim" ;; esac
+[ "$profile" != slim ] || [ "$phase" = stage2 ] || die "--profile=slim is stage2-only"
+[ "$profile" != slim ] || [ "$strategy" != full ] || die "--profile=slim and --strategy=full are mutually exclusive"
 case "$hash_policy" in canonical|temporary) ;; *) die "invalid hash policy" ;; esac
 case "$timeout_seconds" in ''|*[!0-9]*|0) die "timeout must be a positive integer" ;; esac
 case "$spec_timeout_seconds" in ''|*[!0-9]*|0) die "spec timeout must be a positive integer" ;; esac
 case "$native_internal_timeout" in ''|*[!0-9]*) die "native internal timeout must be an integer" ;; esac
 [ "$native_internal_timeout" -gt 60 ] || die "native internal timeout must exceed 60 seconds"
 case "$build_threads" in ''|*[!0-9]*|0) die "build threads must be a positive integer" ;; esac
+case "$test_workers" in
+  [1-9]|1[0-2]) ;;
+  *) die "test workers must be an integer from 1 to 12" ;;
+esac
+test_mode_flag=--sequential
+test_worker_flag=
+if [ "$test_workers" -gt 1 ]; then
+  test_mode_flag=--parallel
+  test_worker_flag="--max-workers=$test_workers"
+fi
 [ -n "$compiler" ] && [ -x "$compiler" ] || die "compiler is not executable: $compiler"
 [ -n "$expected_sha" ] || die "compiler SHA-256 is required"
 [ -n "$work_root" ] || die "work root is required"
 [ -d "$source_root" ] || die "source root is not a directory"
+
+# Stage-2 slim profile (perf/memory audit of PR #1458, 2026-09-24): the
+# owner's actual ask for the stage-2 gate is "as soon as phase 2 can make
+# compiler test binary and it works and run some tests" -- not four full-CLI
+# builds, three source `check` runs, and six test suites run in both modes.
+# Opt in explicitly with `--profile=slim` (stage2-only, rejected together
+# with --strategy=full above): skip the MCP/LSP builds, their source checks,
+# their behavior integration tests, and the *_compile duplicate of each
+# remaining test task. A task skipped this way emits NO row at all:
+# `record_unsupported_task` would count as UNSUPPORTED and flip `overall` to
+# FAIL below (see the `failures=$(grep -cE
+# 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' ...)` accounting near the
+# end of this script), so silent omission -- not an unsupported row -- is the
+# only correct way to skip a task here. Default `--profile=full` keeps every
+# existing caller (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
+# run-macos-phase23-evidence.shs, and this script's own stage1/stage3/stage4
+# paths) byte-identical in behavior; only bootstrap-from-scratch.sh's own
+# stage-2 step passes --profile=slim, and only for the normal strategy.
+stage2_slim_profile=0
+if [ "$phase" = stage2 ] && [ "$profile" = slim ]; then
+  stage2_slim_profile=1
+fi
 
 mkdir -p "$work_root" || die "cannot create work root"
 work_root=$(cd "$work_root" && pwd -P)
@@ -135,9 +217,18 @@ mkdir -p "$home" "$tmp" "$cache" "$outputs" "$logs" || die "cannot isolate verif
 server_outputs="$outputs"
 mcp_build_ready=0
 lsp_build_ready=0
+stage4_tooling_receipt=""
+stage4_tooling_receipt_sha=""
 
 # Copy only an already-admitted compiler. The before/copy/after hashes make a
 # concurrent publish or accidental mutation a terminal admission failure.
+if [ "$phase" = stage1 ]; then
+  [ "$hash_policy" = canonical ] || die "Phase1 requires canonical current-generation authority"
+  phase1_tool_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+  . "$phase1_tool_root/scripts/bootstrap/bootstrap-phase1-authority.shs"
+  bootstrap_phase1_authority_init "$phase1_tool_root" "$source_root" \
+    "$compiler" "$expected_sha" "$work_root" || die "Phase1 compiler is not the current admitted artifact"
+fi
 source_before=$(hash_file "$compiler") || die "cannot hash compiler"
 cp "$compiler" "$work_root/compiler.snapshot" || die "cannot snapshot compiler"
 chmod +x "$work_root/compiler.snapshot"
@@ -151,7 +242,19 @@ if [ "$source_before" != "$source_after" ] || [ "$snapshot_sha" != "$expected_sh
   hash_status=WARN
 fi
 compiler_snapshot="$work_root/compiler.snapshot"
+if [ "$phase" = stage1 ]; then
+  bootstrap_phase1_register_tool "$compiler_snapshot" "$snapshot_sha" || die "cannot bind Phase1 compiler snapshot"
+fi
 
+if [ "$phase" = stage2 ]; then
+  bound_runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve \
+    "$compiler" "$source_root" "$work_root") || die "Phase2 runtime binding is invalid"
+  if [ "$runtime_path_explicit" = 1 ]; then
+    [ -d "$runtime_path" ] && [ "$(cd "$runtime_path" && pwd -P)" = "$bound_runtime" ] ||
+      die "Phase2 runtime path differs from the admitted capsule"
+  fi
+  runtime_path=$bound_runtime
+fi
 if [ -z "$runtime_path" ]; then
   compiler_dir=$(dirname "$compiler")
   if [ -f "$compiler_dir/phase2-runtime-capsule.env" ]; then
@@ -173,7 +276,7 @@ if [ "$phase" = stage2 ]; then
     die "Phase2 verification requires a SHA-qualified runtime capsule"
 fi
 
-: >"$summary"
+: >"$summary" || die "cannot initialize verification summary"
 {
   echo "schema=bootstrap-phase-verification-v1"
   echo "phase=$phase"
@@ -184,25 +287,366 @@ fi
   echo "compiler_hash_status=$hash_status"
   echo "runtime_path=${runtime_path:--}"
   echo "native_internal_timeout_seconds=$native_internal_timeout"
-} >>"$summary"
+  echo "timing_scope=post-admission-excludes-git-lfs-checkout"
+  if [ "$phase" = stage1 ]; then
+    echo "phase1_generation=$p1a_generation"
+    echo "phase1_admission_path=$p1a_marker"
+    echo "phase1_admission_sha256=$p1a_marker_sha"
+    echo "phase1_admitted_compiler_path=$p1a_seed"
+  fi
+} >>"$summary" || die "cannot initialize verification summary headers"
+
+rss_time=""
+rss_time_style=none
+rss_sample_interval_ms=not-applicable
+rss_sampling_overhead_scope=unavailable
+rss_probe="$tmp/phase-verification-rss-probe"
+if [ -x /usr/bin/time ] &&
+   /usr/bin/time -f '%M' -o "$rss_probe" true >/dev/null 2>&1 &&
+   grep -Eq '^[1-9][0-9]*$' "$rss_probe"; then
+  rss_time=/usr/bin/time
+  rss_time_style=gnu
+elif [ -x /usr/bin/time ] &&
+     LC_ALL=C /usr/bin/time -l -o "$rss_probe" true >/dev/null 2>&1 &&
+     grep -Eq '^[[:space:]]*[1-9][0-9]*[[:space:]]+maximum resident set size[[:space:]]*$' "$rss_probe"; then
+  rss_time=/usr/bin/time
+  case "$(uname -s)" in
+    Darwin) rss_time_style=darwin ;;
+    FreeBSD) rss_time_style=bsd-kib ;;
+  esac
+fi
+rm -f "$rss_probe"
+case "$rss_time_style" in
+  gnu) rss_measurement=gnu-time-rusage-kib ;;
+  darwin) rss_measurement=darwin-time-rusage-bytes-normalized-kib ;;
+  bsd-kib) rss_measurement=bsd-time-rusage-kib ;;
+  *)
+    rss_measurement=unavailable
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*)
+        if [ -r /proc/self/stat ]; then
+          rss_measurement=proc-group-rss-kib
+        fi
+        ;;
+    esac
+    ;;
+esac
+case "$rss_measurement" in
+  gnu-time-rusage-kib|darwin-time-rusage-bytes-normalized-kib|bsd-time-rusage-kib)
+    rss_sampling_overhead_scope=kernel-rusage ;;
+  proc-group-rss-kib)
+    rss_sample_interval_ms=50
+    rss_sampling_overhead_scope=external-ps-awk-excluded-from-rss-included-in-wall-time ;;
+esac
+echo "max_rss_measurement=$rss_measurement" >>"$summary"
+echo "max_rss_sample_interval_ms=$rss_sample_interval_ms" >>"$summary"
+echo "max_rss_sampling_overhead_scope=$rss_sampling_overhead_scope" >>"$summary"
+
+proc_tree_rss_kib() {
+  ps -l | awk -v root="$1" -v proc_root="${2:-/proc}" \
+    -f "$source_root/scripts/bootstrap/windows-process-group-rss.awk"
+}
+
+run_measured_timeout() {
+  metric_file=$1
+  measured_timeout=$2
+  measured_grace=$3
+  shift 3
+  case "$rss_time_style" in
+    gnu)
+      "$rss_time" -f '%M' -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    darwin|bsd-kib)
+      LC_ALL=C "$rss_time" -l -o "$metric_file" \
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+        "$measured_timeout" "$measured_grace" "$@" ;;
+    *)
+      if [ "$rss_measurement" = proc-group-rss-kib ]; then
+        # Preserve the caller stream before the asynchronous shell substitutes
+        # /dev/null for stdin in its child.
+        exec 4<&0
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+          "$measured_timeout" "$measured_grace" "$@" <&4 &
+        measured_pid=$!
+        exec 4<&-
+        peak_rss_kib=0
+        while kill -0 "$measured_pid" 2>/dev/null; do
+          measured_state=$(awk '{ line = $0; sub(/^.*\) /, "", line); split(line, field, " "); print field[1] }' \
+            "/proc/$measured_pid/stat" 2>/dev/null || printf 'gone\n')
+          [ "$measured_state" != Z ] && [ "$measured_state" != gone ] || break
+          sample_rss_kib=$(proc_tree_rss_kib "$measured_pid" || printf '0\n')
+          case "$sample_rss_kib" in
+            [1-9][0-9]*)
+              [ "$sample_rss_kib" -le "$peak_rss_kib" ] || peak_rss_kib=$sample_rss_kib
+              ;;
+          esac
+          sleep 0.05
+        done
+        if wait "$measured_pid"; then measured_status=0; else measured_status=$?; fi
+        if [ "$peak_rss_kib" -gt 0 ]; then
+          printf '%s\n' "$peak_rss_kib" >"$metric_file"
+        else
+          printf 'unavailable\n' >"$metric_file"
+        fi
+        return "$measured_status"
+      else
+        printf 'unavailable\n' >"$metric_file"
+        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+          "$measured_timeout" "$measured_grace" "$@"
+      fi
+      ;;
+  esac
+}
+
+read_max_rss_kib() {
+  metric_file=$1
+  [ -f "$metric_file" ] || {
+    printf 'unavailable\n'
+    return 0
+  }
+  case "$rss_time_style" in
+    darwin)
+      metric=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        printf "%.0f\n", int(($1 + 1023) / 1024)
+      }' "$metric_file" | tail -n 1) ;;
+    bsd-kib)
+      metric=$(awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+        print $1
+      }' "$metric_file" | tail -n 1) ;;
+    *) metric=$(tail -n 1 "$metric_file" 2>/dev/null || :) ;;
+  esac
+  case "$metric" in
+    [1-9][0-9]*) printf '%s\n' "$metric" ;;
+    *) printf 'unavailable\n' ;;
+  esac
+}
 
 run_with_timeout() {
-  "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-    "$timeout_seconds" 15 "$@"
+  run_measured_timeout "$active_rss_file" "$timeout_seconds" 15 "$@"
+}
+
+validate_test_runner_json_log() {
+  validated_log=$1
+  validated_status=0
+  validated_counts=$(perl "$source_root/scripts/bootstrap/validate-test-runner-json.pl" \
+    "$validated_log") || validated_status=$?
+  validated_passed=0
+  validated_failed=0
+  validated_skipped=0
+  if [ -n "$validated_counts" ]; then
+    validated_tab=$(printf '\t')
+    validated_old_ifs=$IFS
+    IFS=$validated_tab
+    set -- $validated_counts
+    IFS=$validated_old_ifs
+    if [ "$#" -eq 3 ]; then
+      validated_passed=$1
+      validated_failed=$2
+      validated_skipped=$3
+    else
+      validated_status=91
+    fi
+  elif [ "$validated_status" -eq 0 ]; then
+    validated_status=91
+  fi
+  validated_executed=$((validated_passed + validated_failed))
+  [ "$validated_status" -eq 0 ]
 }
 
 run_task() {
   task=$1
   shift
+  expected_executable=""
+  task_command_owner_receipt=""
+  task_stage4_tooling_receipt=""
+  require_test_json=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --verification-expect-executable=*)
+        expected_executable=${1#*=}
+        shift
+        ;;
+      --verification-command-owner-receipt=*)
+        task_command_owner_receipt=${1#*=}
+        shift
+        ;;
+      --verification-stage4-tooling-receipt=*)
+        task_stage4_tooling_receipt=${1#*=}
+        shift
+        ;;
+      --verification-require-test-json)
+        require_test_json=1
+        shift
+        ;;
+      *) break ;;
+    esac
+  done
   log="$logs/$task.log"
+  active_rss_file="$logs/$task.max-rss-kib"
+  rm -f "$active_rss_file"
   started=$(date +%s)
   status=0
-  (
-    cd "$source_root" || exit 125
-    HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
-      SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
-      run_with_timeout "$@"
-  ) >"$log" 2>&1 || status=$?
+  command_owner_before=not-applicable
+  command_owner_after=not-applicable
+  stage4_tooling_before=not-applicable
+  stage4_tooling_after=not-applicable
+  stage4_snapshot_before=not-applicable
+  stage4_snapshot_after=not-applicable
+  test_executed=not-applicable
+  executed=not-applicable
+  test_passed=not-applicable
+  test_failed=not-applicable
+  test_skipped=not-applicable
+  if [ "$require_test_json" -eq 1 ]; then
+    executed=0
+    test_passed=0
+    test_failed=0
+    test_skipped=0
+  fi
+  if [ -n "$task_command_owner_receipt" ]; then
+    if ! validate_command_owner_receipt "$task_command_owner_receipt"; then
+      printf 'bootstrap-phase-verification: command-owner receipt is not current before invocation: %s\n' \
+        "$task_command_owner_receipt" >"$log"
+      status=90
+      command_owner_before=mismatch
+    else
+      command_owner_before=PASS
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ -n "$task_stage4_tooling_receipt" ]; then
+    if ! validate_stage4_tooling_receipt "$task_stage4_tooling_receipt"; then
+      printf 'bootstrap-phase-verification: Stage4 tooling receipt is not current before invocation: %s\n' \
+        "$task_stage4_tooling_receipt" >"$log"
+      status=90
+      stage4_tooling_before=mismatch
+    else
+      stage4_tooling_before=PASS
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ "$phase" = stage4 ] && [ "${1:-}" = "$compiler_snapshot" ]; then
+    if validate_stage4_compiler_snapshot; then
+      stage4_snapshot_before=PASS
+    else
+      printf 'bootstrap-phase-verification: Stage4 compiler snapshot changed before producer invocation\n' >"$log"
+      status=90
+      stage4_snapshot_before=mismatch
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ -n "$expected_executable" ] && ! rm -f "$expected_executable"; then
+    printf 'bootstrap-phase-verification: cannot remove prior expected artifact: %s\n' \
+      "$expected_executable" >"$log"
+    status=88
+  elif [ "$status" -eq 0 ]; then
+    (
+      cd "$source_root" || exit 125
+      HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1
+      SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task"
+      export HOME TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NATIVE_BUILD_CACHE_DIR
+      # Bootstrap-only dispatch controls belong only to the Stage 1 native
+      # producer below.  Do not let an operator's ambient shell silently
+      # redirect version checks or later phase verification.
+      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+      if [ "$phase" = stage1 ]; then
+        bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
+      fi
+      if [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
+         [ "${2:-}" = native-build ]; then
+        # A Phase-1 seed normally dispatches native-build to the deployed
+        # pure-Simple CLI.  That ambient CLI can predate the admitted seed and
+        # current source (observed as `auto:` being rejected in a valid named
+        # argument).  Phase verification must exercise the exact snapshotted
+        # seed's bootstrap-only Rust builder and must never consult bin/simple.
+        SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1
+        SIMPLE_BINARY="$compiler_snapshot"
+        export SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+        bootstrap_phase_run_command run_with_timeout "$@"
+      else
+        bootstrap_phase_run_command run_with_timeout "$@"
+      fi
+    ) >"$log" 2>&1 || status=$?
+    if [ "$phase" = stage1 ] && [ "$status" -eq 0 ]; then
+      bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-after.env" >>"$log" 2>&1 || status=89
+    fi
+  fi
+  if [ "$status" -eq 0 ] && [ "$require_test_json" -eq 1 ]; then
+    test_json_status=0
+    test_counts=$(perl "$source_root/scripts/bootstrap/validate-test-runner-json.pl" \
+      "$log" 2>>"$log") || test_json_status=$?
+    if [ -n "$test_counts" ]; then
+      test_tab=$(printf '\t')
+      test_old_ifs=$IFS
+      IFS=$test_tab
+      set -- $test_counts
+      IFS=$test_old_ifs
+      [ "$#" -eq 3 ] || test_json_status=91
+    fi
+    if [ "$#" -eq 3 ] && [ -n "$test_counts" ]; then
+      test_passed=$1
+      test_failed=$2
+      test_skipped=$3
+      executed=$((test_passed + test_failed))
+    fi
+    status=$test_json_status
+  fi
+  if [ -n "$task_command_owner_receipt" ] && [ "$command_owner_before" = PASS ]; then
+    if validate_command_owner_receipt "$task_command_owner_receipt"; then
+      command_owner_after=PASS
+    else
+      printf 'bootstrap-phase-verification: command-owner receipt changed during invocation: %s\n' \
+        "$task_command_owner_receipt" >>"$log"
+      status=90
+      command_owner_after=mismatch
+    fi
+  fi
+  if [ -n "$task_stage4_tooling_receipt" ] && [ "$stage4_tooling_before" = PASS ]; then
+    if validate_stage4_tooling_receipt "$task_stage4_tooling_receipt"; then
+      stage4_tooling_after=PASS
+    else
+      printf 'bootstrap-phase-verification: Stage4 tooling receipt changed during invocation: %s\n' \
+        "$task_stage4_tooling_receipt" >>"$log"
+      status=90
+      stage4_tooling_after=mismatch
+    fi
+  fi
+  if [ "$stage4_snapshot_before" = PASS ]; then
+    if validate_stage4_compiler_snapshot; then
+      stage4_snapshot_after=PASS
+    else
+      printf 'bootstrap-phase-verification: Stage4 compiler snapshot changed during producer invocation\n' >>"$log"
+      status=90
+      stage4_snapshot_after=mismatch
+    fi
+  fi
+  case "$task" in
+    compiler_bootstrap_tests|compiler_bootstrap_compile_tests)
+      test_executed=0
+      test_passed=0
+      test_failed=0
+      test_skipped=0
+      if [ "$status" -eq 0 ]; then
+        validate_test_runner_json_log "$log" 2>>"$log" || status=$validated_status
+        test_executed=$validated_executed
+        test_passed=$validated_passed
+        test_failed=$validated_failed
+        test_skipped=$validated_skipped
+        if [ "$test_skipped" -gt 0 ] && [ "$status" -eq 0 ]; then
+          printf 'bootstrap-phase-verification: aggregate bootstrap row reported skipped examples; per-file category proof is unavailable\n' >>"$log"
+          status=94
+        fi
+      fi
+      ;;
+  esac
+  # The two bootstrap tasks above compute a stricter test_executed (via
+  # validate_test_runner_json_log, enforcing the zero-skip aggregate-row
+  # policy) above; every other --verification-require-test-json task (e.g.
+  # loader_interpreter_tests/loader_compile_tests) only ever populates the
+  # generic $executed from the require_test_json block earlier in this
+  # function. Fall back to that so the terminal summary line below always
+  # carries a real executed count, not the not-applicable default.
+  if [ "$test_executed" = not-applicable ] && [ "$require_test_json" -eq 1 ]; then
+    test_executed=$executed
+  fi
   # Tool help is an executable ABI sanity probe, not merely an exit-code
   # check. Native runtimes deliberately fail closed on invalid handles but may
   # return control to the program so diagnostics remain inspectable. Do not
@@ -214,7 +658,36 @@ run_task() {
       fi
       ;;
   esac
+  artifact_status=not-applicable
+  artifact_sha256=-
+  if [ -n "$expected_executable" ]; then
+    if [ "$status" -ne 0 ]; then
+      artifact_status=producer-failed
+    elif [ ! -e "$expected_executable" ]; then
+      printf 'bootstrap-phase-verification: command exited 0 but expected executable is missing: %s\n' \
+        "$expected_executable" >>"$log"
+      status=87
+      artifact_status=missing
+    elif [ -L "$expected_executable" ] || [ ! -f "$expected_executable" ] || \
+         [ ! -x "$expected_executable" ]; then
+      printf 'bootstrap-phase-verification: expected artifact is not a regular executable: %s\n' \
+        "$expected_executable" >>"$log"
+      status=87
+      artifact_status=invalid
+    else
+      artifact_status=present
+      artifact_sha256=$(hash_file "$expected_executable") || {
+        status=89
+        artifact_status=hash-failed
+        artifact_sha256=-
+      }
+    fi
+  fi
   ended=$(date +%s)
+  max_rss_kib=$(read_max_rss_kib "$active_rss_file")
+  if [ "$phase" = stage1 ] && [ "$status" -eq 0 ] && [ "$artifact_status" = present ]; then
+    bootstrap_phase1_register_tool "$expected_executable" "$artifact_sha256" || status=89
+  fi
   result=PASS
   case "$status" in
     0) result=PASS ;;
@@ -222,19 +695,205 @@ run_task() {
     134|136|139) result=CRASH ;;
     *) result=FAIL ;;
   esac
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s\n' \
-    "$task" "$result" "$status" "$((ended - started))" "$log" >>"$summary"
+  if [ -n "$expected_executable" ]; then
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
+      "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
+      "$expected_executable" "$artifact_status" "$artifact_sha256" \
+      "$stage4_snapshot_before" "$stage4_snapshot_after" "$executed" "$test_passed" \
+      "$test_failed" "$test_skipped" >>"$summary" ||
+      die "cannot append verification summary"
+  else
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|command_owner_before=%s|command_owner_after=%s|stage4_tooling_before=%s|stage4_tooling_after=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
+      "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
+      "$command_owner_before" "$command_owner_after" "$stage4_tooling_before" "$stage4_tooling_after" \
+      "$stage4_snapshot_before" "$stage4_snapshot_after" \
+      "$test_executed" "$test_passed" "$test_failed" "$test_skipped" >>"$summary" ||
+      die "cannot append verification summary"
+  fi
   [ "$status" -eq 0 ]
 }
 
+# The full CLI and test runner are distinct native products.  A receipt binds
+# every source check/test invocation to the exact pair constructed by this
+# verification run.  It is created once with noclobber and then made read-only;
+# validating both hashes before and after a command rejects a concurrent swap.
+write_command_owner_receipt() {
+  receipt=$1
+  cli=$2
+  cli_sha=$3
+  runner=$4
+  runner_sha=$5
+  mcp=$6
+  mcp_sha=$7
+  if [ -z "$mcp" ] || [ -z "$mcp_sha" ]; then
+    mcp=-
+    mcp_sha=-
+  fi
+  if [ -e "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ "$(manifest_value schema "$receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
+    [ "$(manifest_value status "$receipt")" = frozen ] || return 1
+    [ "$(manifest_value phase "$receipt")" = "$phase" ] || return 1
+    [ "$(manifest_value compiler_snapshot_sha256 "$receipt")" = "$snapshot_sha" ] || return 1
+    [ "$(manifest_value runtime_identity_sha256 "$receipt")" = "$runtime_cache_identity" ] || return 1
+    [ "$(manifest_value compiler_cli_path "$receipt")" = "$cli" ] || return 1
+    [ "$(manifest_value compiler_cli_sha256 "$receipt")" = "$cli_sha" ] || return 1
+    [ "$(manifest_value test_runner_path "$receipt")" = "$runner" ] || return 1
+    [ "$(manifest_value test_runner_sha256 "$receipt")" = "$runner_sha" ] || return 1
+    [ "$(manifest_value mcp_server_path "$receipt")" = "$mcp" ] || return 1
+    [ "$(manifest_value mcp_server_sha256 "$receipt")" = "$mcp_sha" ] || return 1
+    return 0
+  fi
+  (
+    umask 077
+    set -C
+    {
+      echo 'schema=simple-bootstrap-command-owners-v3'
+      echo 'status=frozen'
+      echo "phase=$phase"
+      echo "compiler_snapshot_sha256=$snapshot_sha"
+      echo "runtime_identity_sha256=$runtime_cache_identity"
+      echo "compiler_cli_path=$cli"
+      echo "compiler_cli_sha256=$cli_sha"
+      echo "test_runner_path=$runner"
+      echo "test_runner_sha256=$runner_sha"
+      echo "mcp_server_path=$mcp"
+      echo "mcp_server_sha256=$mcp_sha"
+    } >"$receipt"
+  ) || return 1
+  chmod 400 "$receipt" || return 1
+  [ ! -L "$receipt" ] && [ "$(hash_file "$receipt")" ]
+}
+
+validate_command_owner_receipt() {
+  vcor_receipt=$1
+  [ -n "${command_owner_receipt_sha:-}" ] || return 1
+  [ -f "$vcor_receipt" ] && [ ! -L "$vcor_receipt" ] || return 1
+  [ "$(hash_file "$vcor_receipt")" = "$command_owner_receipt_sha" ] || return 1
+  [ "$(manifest_value schema "$vcor_receipt")" = simple-bootstrap-command-owners-v3 ] || return 1
+  [ "$(manifest_value status "$vcor_receipt")" = frozen ] || return 1
+  [ "$(manifest_value phase "$vcor_receipt")" = "$phase" ] || return 1
+  [ "$(manifest_value compiler_snapshot_sha256 "$vcor_receipt")" = "$snapshot_sha" ] || return 1
+  [ "$(manifest_value runtime_identity_sha256 "$vcor_receipt")" = "$runtime_cache_identity" ] || return 1
+  vcor_cli=$(manifest_value compiler_cli_path "$vcor_receipt")
+  vcor_cli_sha=$(manifest_value compiler_cli_sha256 "$vcor_receipt")
+  vcor_runner=$(manifest_value test_runner_path "$vcor_receipt")
+  vcor_runner_sha=$(manifest_value test_runner_sha256 "$vcor_receipt")
+  vcor_mcp=$(manifest_value mcp_server_path "$vcor_receipt")
+  vcor_mcp_sha=$(manifest_value mcp_server_sha256 "$vcor_receipt")
+  [ "$vcor_cli" = "$compiler_cli" ] && [ "$vcor_cli_sha" = "$compiler_cli_sha" ] || return 1
+  [ "$vcor_runner" = "$test_runner" ] && [ "$vcor_runner_sha" = "$test_runner_sha" ] || return 1
+  [ -f "$vcor_cli" ] && [ ! -L "$vcor_cli" ] && [ -x "$vcor_cli" ] || return 1
+  [ -f "$vcor_runner" ] && [ ! -L "$vcor_runner" ] && [ -x "$vcor_runner" ] || return 1
+  [ "$(hash_file "$vcor_cli")" = "$vcor_cli_sha" ] || return 1
+  [ "$(hash_file "$vcor_runner")" = "$vcor_runner_sha" ] || return 1
+  if [ "$vcor_mcp" = - ]; then
+    [ "$vcor_mcp_sha" = - ] || return 1
+  else
+    [ "$vcor_mcp" = "$mcp_server" ] && [ "$vcor_mcp_sha" = "$mcp_server_sha" ] || return 1
+    [ -f "$vcor_mcp" ] && [ ! -L "$vcor_mcp" ] && [ -x "$vcor_mcp" ] || return 1
+    [ "$(hash_file "$vcor_mcp")" = "$vcor_mcp_sha" ] || return 1
+  fi
+}
+
+# Stage 4 must prove that every producer invocation and final tooling receipt
+# still refer to the immutable compiler snapshot taken at this verification
+# boundary. A cached expected hash alone would not detect a concurrent rewrite.
+validate_stage4_compiler_snapshot() {
+  [ "$phase" = stage4 ] || return 1
+  [ -f "$compiler_snapshot" ] && [ ! -L "$compiler_snapshot" ] && [ -x "$compiler_snapshot" ] || return 1
+  [ "$(hash_file "$compiler_snapshot")" = "$snapshot_sha" ] || return 1
+  [ "$snapshot_sha" = "$expected_sha" ] || return 1
+}
+
+# Stage 4 is the first phase that can support a release claim.  Its tool
+# evidence therefore binds the Phase-4 CLI/runner pair, runtime authority, and
+# both service binaries in one immutable receipt.  A matching Stage-3 receipt
+# or tool path cannot satisfy this phase-specific record.
+write_stage4_tooling_receipt() {
+  receipt=$1
+  mcp=$2
+  mcp_sha=$3
+  lsp=$4
+  lsp_sha=$5
+  if [ -e "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ "$(manifest_value schema "$receipt")" = simple-bootstrap-stage4-tooling-owners-v1 ] || return 1
+    [ "$(manifest_value status "$receipt")" = frozen ] || return 1
+    [ "$(manifest_value phase "$receipt")" = stage4 ] || return 1
+    [ "$(manifest_value compiler_snapshot_path "$receipt")" = "$compiler_snapshot" ] || return 1
+    [ "$(manifest_value compiler_snapshot_sha256 "$receipt")" = "$snapshot_sha" ] || return 1
+    [ "$(manifest_value command_owner_receipt_path "$receipt")" = "$command_owner_receipt" ] || return 1
+    [ "$(manifest_value command_owner_receipt_sha256 "$receipt")" = "$command_owner_receipt_sha" ] || return 1
+    [ "$(manifest_value hosted_runtime_path "$receipt")" = "$runtime_path" ] || return 1
+    [ "$(manifest_value hosted_runtime_sha256 "$receipt")" = "$hosted_runtime_sha" ] || return 1
+    [ "$(manifest_value mcp_server_path "$receipt")" = "$mcp" ] || return 1
+    [ "$(manifest_value mcp_server_sha256 "$receipt")" = "$mcp_sha" ] || return 1
+    [ "$(manifest_value lsp_server_path "$receipt")" = "$lsp" ] || return 1
+    [ "$(manifest_value lsp_server_sha256 "$receipt")" = "$lsp_sha" ] || return 1
+    return 0
+  fi
+  (
+    umask 077
+    set -C
+    {
+      echo 'schema=simple-bootstrap-stage4-tooling-owners-v1'
+      echo 'status=frozen'
+      echo 'phase=stage4'
+      echo "compiler_snapshot_path=$compiler_snapshot"
+      echo "compiler_snapshot_sha256=$snapshot_sha"
+      echo "command_owner_receipt_path=$command_owner_receipt"
+      echo "command_owner_receipt_sha256=$command_owner_receipt_sha"
+      echo "hosted_runtime_path=$runtime_path"
+      echo "hosted_runtime_sha256=$hosted_runtime_sha"
+      echo "mcp_server_path=$mcp"
+      echo "mcp_server_sha256=$mcp_sha"
+      echo "lsp_server_path=$lsp"
+      echo "lsp_server_sha256=$lsp_sha"
+    } >"$receipt"
+  ) || return 1
+  chmod 400 "$receipt" || return 1
+  [ ! -L "$receipt" ] && [ "$(hash_file "$receipt")" ]
+}
+
+validate_stage4_tooling_receipt() {
+  vstr_receipt=$1
+  [ "$phase" = stage4 ] || return 1
+  [ -n "${stage4_tooling_receipt_sha:-}" ] || return 1
+  [ -f "$vstr_receipt" ] && [ ! -L "$vstr_receipt" ] || return 1
+  [ "$(hash_file "$vstr_receipt")" = "$stage4_tooling_receipt_sha" ] || return 1
+  [ "$(manifest_value schema "$vstr_receipt")" = simple-bootstrap-stage4-tooling-owners-v1 ] || return 1
+  [ "$(manifest_value status "$vstr_receipt")" = frozen ] || return 1
+  [ "$(manifest_value phase "$vstr_receipt")" = stage4 ] || return 1
+  validate_stage4_compiler_snapshot || return 1
+  [ "$(manifest_value compiler_snapshot_path "$vstr_receipt")" = "$compiler_snapshot" ] || return 1
+  [ "$(manifest_value compiler_snapshot_sha256 "$vstr_receipt")" = "$snapshot_sha" ] || return 1
+  [ "$(manifest_value command_owner_receipt_path "$vstr_receipt")" = "$command_owner_receipt" ] || return 1
+  [ "$(manifest_value command_owner_receipt_sha256 "$vstr_receipt")" = "$command_owner_receipt_sha" ] || return 1
+  validate_command_owner_receipt "$command_owner_receipt" || return 1
+  [ "$(manifest_value hosted_runtime_path "$vstr_receipt")" = "$runtime_path" ] || return 1
+  validate_hosted_runtime_authority "$runtime_path" || return 1
+  # Revalidation refreshes hosted_runtime_sha from the current frozen authority.
+  # Compare the tooling receipt only afterward so replacing the authority and
+  # its admission record cannot retain a stale, previously matching hash.
+  [ "$(manifest_value hosted_runtime_sha256 "$vstr_receipt")" = "$hosted_runtime_sha" ] || return 1
+  for vstr_server_key in mcp_server lsp_server; do
+    vstr_server=$(manifest_value "${vstr_server_key}_path" "$vstr_receipt")
+    vstr_server_sha=$(manifest_value "${vstr_server_key}_sha256" "$vstr_receipt")
+    [ -f "$vstr_server" ] && [ ! -L "$vstr_server" ] && [ -x "$vstr_server" ] || return 1
+    [ "$(hash_file "$vstr_server")" = "$vstr_server_sha" ] || return 1
+  done
+}
+
 matrix_failed=0
+matrix_unsupported=0
 run_matrix_task() {
   task=$1
   shift
   matrix_task_passed=0
   if [ "$strategy" = normal ] && [ "$matrix_failed" -ne 0 ]; then
     printf 'task=%s|result=BLOCKED|status=blocked-upstream|elapsed_seconds=0|log=-\n' \
-      "$task" >>"$summary"
+      "$task" >>"$summary" || die "cannot append verification summary"
     return 0
   fi
   if ! run_task "$task" "$@"; then
@@ -248,8 +907,218 @@ run_matrix_task() {
 record_unsupported_task() {
   task=$1
   reason=$2
+  matrix_unsupported=$((matrix_unsupported + 1))
   printf 'task=%s|result=UNSUPPORTED|status=%s|elapsed_seconds=0|log=-\n' \
-    "$task" "$reason" >>"$summary"
+    "$task" "$reason" >>"$summary" || die "cannot append verification summary"
+}
+
+# Each inventory row owns its process, timeout, evidence and (when parallel)
+# HOME/TMP/native cache. The parent waits for a bounded batch, then publishes
+# rows in manifest order; a slow or failed row cannot suppress later evidence.
+run_inventory_row() {
+  row_task=$1
+  row_index=$2
+  row_relative=$3
+  row_runner=$4
+  row_owner=$5
+  row_mcp_server=$6
+  row_dir="$logs/${row_task}.rows"
+  row_output="$row_dir/$row_index.json.log"
+  row_diag="$row_dir/$row_index.diag.log"
+  row_rss_file="$row_dir/$row_index.max-rss-kib"
+  row_record="$row_dir/$row_index.result"
+  : >"$row_output"
+  : >"$row_diag"
+  row_status=0
+  row_executed=0
+  row_passed=0
+  row_failed=0
+  row_skipped=0
+  row_home=$home
+  row_tmp=$tmp
+  row_cache="$cache/$row_task"
+  if [ "$test_workers" -gt 1 ]; then
+    row_home="$row_dir/$row_index.home"
+    row_tmp="$row_dir/$row_index.tmp"
+    row_cache="$cache/$row_task/$row_index"
+    mkdir -p "$row_home" "$row_tmp" "$row_cache" || row_status=96
+  fi
+  if [ "$row_status" -eq 0 ] && ! validate_command_owner_receipt "$row_owner"; then
+    printf 'command-owner receipt mismatch before %s\n' "$row_relative" >>"$row_diag"
+    row_status=90
+  fi
+  if [ "$row_status" -eq 0 ]; then
+    (
+      cd "$source_root" || exit 125
+      # Match run_task dispatch isolation before binding this row's CLI owner.
+      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+      if [ -n "$row_mcp_server" ]; then
+        HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR="$row_cache" \
+          SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" \
+          SIMPLE_MCP_TEST_BINARY="$row_mcp_server" \
+          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+            "$row_runner" "$row_relative" \
+            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            --no-session-daemon "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+      else
+        HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR="$row_cache" \
+          SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" \
+          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+            "$row_runner" "$row_relative" \
+            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            --no-session-daemon "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+      fi
+    ) >"$row_output" 2>&1 || row_status=$?
+    if ! validate_command_owner_receipt "$row_owner"; then
+      printf 'command-owner receipt changed during %s\n' "$row_relative" >>"$row_diag"
+      row_status=90
+    fi
+  fi
+  if [ "$row_status" -eq 0 ]; then
+    row_json_status=0
+    row_counts=$(perl "$source_root/scripts/bootstrap/validate-test-runner-json.pl" \
+      "$row_output" 2>>"$row_diag") || row_json_status=$?
+    if [ -n "$row_counts" ]; then
+      row_tab=$(printf '\t')
+      row_old_ifs=$IFS
+      IFS=$row_tab
+      set -- $row_counts
+      IFS=$row_old_ifs
+      [ "$#" -eq 3 ] || row_json_status=91
+    fi
+    if [ "$#" -eq 3 ] && [ -n "$row_counts" ]; then
+      row_passed=$1
+      row_failed=$2
+      row_skipped=$3
+      row_executed=$((row_passed + row_failed))
+    fi
+    row_status=$row_json_status
+  fi
+  row_max_rss_kib=$(read_max_rss_kib "$row_rss_file")
+  row_result=FAIL
+  case "$row_status" in
+    0) row_result=PASS ;;
+    124|137) row_result=TIMEOUT ;;
+    134|136|139) row_result=CRASH ;;
+  esac
+  printf '%s %s %s %s %s %s %s\n' \
+    "$row_result" "$row_status" "$row_executed" "$row_passed" \
+    "$row_failed" "$row_skipped" "$row_max_rss_kib" >"$row_record.tmp" &&
+    mv "$row_record.tmp" "$row_record"
+}
+
+run_inventory_rows() {
+  task=$1
+  row_runner=$2
+  row_owner=$3
+  row_mcp_server=$4
+  manifest=$5
+  log="$logs/$task.log"
+  inventory="$logs/${task}.inventory.tsv"
+  row_dir="$logs/${task}.rows"
+  : >"$log"
+  mkdir -p "$row_dir"
+  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\tmax_rss_kib\n' >"$inventory"
+  started=$(date +%s)
+  spec_count=0
+  active_count=0
+  active_jobs=
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    spec_count=$((spec_count + 1))
+    relative=${spec#"$source_root/"}
+    # A retried lineage may already have row files. A killed worker must never
+    # inherit a prior PASS receipt or an old RSS/evidence file.
+    rm -f "$row_dir/$spec_count.result" "$row_dir/$spec_count.result.tmp" \
+      "$row_dir/$spec_count.json.log" "$row_dir/$spec_count.diag.log" \
+      "$row_dir/$spec_count.max-rss-kib" "$row_dir/$spec_count.wait-failed" ||
+      die "cannot reset inventory row before launch: $task/$spec_count"
+    run_inventory_row "$task" "$spec_count" "$relative" \
+      "$row_runner" "$row_owner" "$row_mcp_server" &
+    active_jobs="$active_jobs $spec_count:$!"
+    active_count=$((active_count + 1))
+    if [ "$active_count" -eq "$test_workers" ]; then
+      for row_job in $active_jobs; do
+        row_job_index=${row_job%%:*}
+        row_pid=${row_job#*:}
+        if wait "$row_pid"; then :; else
+          printf '%s\n' "$?" >"$row_dir/$row_job_index.wait-failed" ||
+            die "cannot record failed inventory worker: $task/$row_job_index"
+        fi
+      done
+      active_jobs=
+      active_count=0
+    fi
+  done <"$manifest"
+  for row_job in $active_jobs; do
+    row_job_index=${row_job%%:*}
+    row_pid=${row_job#*:}
+    if wait "$row_pid"; then :; else
+      printf '%s\n' "$?" >"$row_dir/$row_job_index.wait-failed" ||
+        die "cannot record failed inventory worker: $task/$row_job_index"
+    fi
+  done
+
+  failed=0
+  passed_count=0
+  timeout_count=0
+  crash_count=0
+  max_rss_kib=0
+  row_index=0
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    row_index=$((row_index + 1))
+    relative=${spec#"$source_root/"}
+    row_output="$row_dir/$row_index.json.log"
+    row_diag="$row_dir/$row_index.diag.log"
+    row_record="$row_dir/$row_index.result"
+    row_result=FAIL
+    row_status=96
+    row_executed=0
+    row_passed=0
+    row_failed=0
+    row_skipped=0
+    row_max_rss_kib=unavailable
+    if [ -f "$row_dir/$row_index.wait-failed" ]; then
+      printf 'inventory row worker exited %s before terminal receipt\n' \
+        "$(head -n 1 "$row_dir/$row_index.wait-failed")" >>"$row_diag"
+    elif [ -f "$row_record" ]; then
+      read -r row_result row_status row_executed row_passed row_failed \
+        row_skipped row_max_rss_kib <"$row_record" || row_status=96
+    fi
+    printf 'BEGIN %s\n' "$relative" >>"$log"
+    if [ -f "$row_diag" ]; then cat "$row_diag" >>"$log"; fi
+    if [ -f "$row_output" ]; then cat "$row_output" >>"$log"; fi
+    case "$row_result" in
+      PASS) passed_count=$((passed_count + 1)) ;;
+      TIMEOUT) timeout_count=$((timeout_count + 1)) ;;
+      CRASH) crash_count=$((crash_count + 1)) ;;
+    esac
+    case "$row_max_rss_kib" in
+      [1-9]|[1-9][0-9]*)
+        [ "$row_max_rss_kib" -le "$max_rss_kib" ] || max_rss_kib=$row_max_rss_kib ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$relative" "$row_result" "$row_status" "$row_executed" "$row_passed" \
+      "$row_failed" "$row_skipped" "$row_output" "$row_max_rss_kib" >>"$inventory"
+    printf 'END %s result=%s status=%s\n' "$relative" "$row_result" "$row_status" >>"$log"
+    [ "$row_status" -eq 0 ] || failed=1
+  done <"$manifest"
+  if [ "$spec_count" -eq 0 ]; then
+    printf '%s inventory is empty; no passing result can be admitted\n' "$task" >>"$log"
+    failed=1
+  fi
+  ended=$(date +%s)
+  result=PASS
+  [ "$failed" -eq 0 ] || result=FAIL
+  [ "$max_rss_kib" -gt 0 ] || max_rss_kib=unavailable
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|inventory=%s|spec_count=%s|passed_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$failed" "$((ended - started))" "$max_rss_kib" "$log" "$inventory" \
+    "$spec_count" "$passed_count" "$timeout_count" "$crash_count" \
+    "$row_owner" >>"$summary"
+  [ "$failed" -eq 0 ]
 }
 
 # A compiler unit tree is much larger than one matrix-row timeout. Materialize
@@ -257,42 +1126,206 @@ record_unsupported_task() {
 # timeout cannot discard the remaining inventory or suppress terminal receipts.
 run_compiler_unit_tests() {
   test_runner=$1
+  command_owner_receipt=$2
   task=compiler_unit_tests
   log="$logs/$task.log"
   inventory="$logs/${task}.inventory.tsv"
   manifest="$tmp/${task}.manifest"
-  find "$source_root/test/01_unit/compiler" -type f -name '*_spec.spl' -print | LC_ALL=C sort >"$manifest"
+  unsorted_manifest="$tmp/${task}.unsorted"
+  if ! find "$source_root/test/01_unit/compiler" -type f -name '*_spec.spl' -print >"$unsorted_manifest"; then
+    printf 'task=%s|result=FAIL|status=discovery-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+      "$task" "$log" "$inventory" >>"$summary"
+    return 1
+  fi
+  if ! LC_ALL=C sort "$unsorted_manifest" >"$manifest"; then
+    printf 'task=%s|result=FAIL|status=sort-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+      "$task" "$log" "$inventory" >>"$summary"
+    return 1
+  fi
+  run_inventory_rows "$task" "$test_runner" "$command_owner_receipt" "" "$manifest"
+}
+
+# Phase 3 full verification must cover the repository inventory, not only the
+# compiler subtree.  Each spec is terminalized independently so a crash or
+# timeout cannot hide later rows, and --assert-ran rejects zero-example greens.
+run_repository_full_tests() {
+  test_runner=$1
+  full_owner_receipt=$2
+  full_mcp_server=$3
+  task=repository_full_tests
+  log="$logs/$task.log"
+  inventory="$logs/${task}.inventory.tsv"
+  results="$logs/${task}.results.tsv"
+  manifest="$tmp/${task}.manifest"
+  unsorted_manifest="$tmp/${task}.unsorted"
+  if ! find "$source_root/test" -type f \
+      \( -name '*_spec.spl' -o -name '*_test.spl' \) -print >"$unsorted_manifest"; then
+    printf 'task=%s|result=FAIL|status=discovery-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+      "$task" "$log" "$inventory" >>"$summary"
+    return 1
+  fi
+  if ! LC_ALL=C sort "$unsorted_manifest" >"$manifest"; then
+    printf 'task=%s|result=FAIL|status=sort-error|elapsed_seconds=0|log=%s|inventory=%s|spec_count=0\n' \
+      "$task" "$log" "$inventory" >>"$summary"
+    return 1
+  fi
+  # NOTE: repository_full_tests intentionally does NOT route through the
+  # shared run_inventory_rows/run_inventory_row helper used above for
+  # compiler_unit_tests: this matrix's rows parse the full-repo runner's
+  # nested "spec":{...} JSON schema (grep/sed below), not the flat schema
+  # validate-test-runner-json.pl expects, and that distinction predates this
+  # merge (base already had it) — keeping it here avoids silently changing
+  # how repository-wide pass/fail counts are parsed.
+  category_count=$(awk '{ path=$0; sub(/^.*\/test\//, "", path); split(path, part, "/"); \
+      if (part[1] != "") seen[part[1]]=1 } \
+      END { for (key in seen) count++; print count+0 }' "$manifest")
   : >"$log"
-  printf 'spec\tresult\tstatus\n' >"$inventory"
+  row_dir="$logs/${task}.rows"
+  mkdir -p "$row_dir"
+  printf 'spec\tresult\tstatus\texecuted\tpassed\tfailed\tskipped\tevidence\tmax_rss_kib\n' >"$inventory"
+  printf 'runner\tpath\tresult\texecuted\tskipped\n' >"$results"
   started=$(date +%s)
   failed=0
+  spec_count=0
+  passed_count=0
+  skipped_spec_count=0
+  timeout_count=0
+  crash_count=0
+  max_rss_kib=0
   while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    spec_count=$((spec_count + 1))
     relative=${spec#"$source_root/"}
+    row_output="$row_dir/$spec_count.json.log"
+    row_rss_file="$row_dir/$spec_count.max-rss-kib"
     printf 'BEGIN %s\n' "$relative" >>"$log"
     status=0
-    (
-      cd "$source_root" || exit 125
-      HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
-        SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
-        "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-          "$spec_timeout_seconds" 15 "$test_runner" "$relative" --mode=interpreter --unstable
-    ) >>"$log" 2>&1 || status=$?
+    executed=0
+    row_passed=0
+    row_failed=0
+    row_skipped=0
+    row_disposition=execute
+    if ! validate_command_owner_receipt "$full_owner_receipt"; then
+      printf 'command-owner receipt mismatch before %s\n' "$relative" >>"$log"
+      status=90
+    else
+      (
+        cd "$source_root" || exit 125
+        # Keep ambient bootstrap routing out of direct repository-test rows;
+        # SIMPLE_BINARY below is the exact receipt-bound CLI for this matrix.
+        unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
+          SIMPLE_BINARY="$compiler_cli" \
+          SIMPLE_BIN="$compiler_cli" \
+          SIMPLE_MCP_TEST_BINARY="$full_mcp_server" \
+          run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
+            "$test_runner" "$relative" \
+            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            --no-session-daemon --sequential --json
+      ) >"$row_output" 2>&1 || status=$?
+      cat "$row_output" >>"$log"
+      if ! validate_command_owner_receipt "$full_owner_receipt"; then
+        printf 'command-owner receipt changed during %s\n' "$relative" >>"$log"
+        status=90
+      fi
+    fi
+    if [ "$status" -eq 0 ]; then
+      validate_test_runner_json_log "$row_output" 2>>"$log" || :
+      row_passed=$validated_passed
+      row_failed=$validated_failed
+      row_skipped=$validated_skipped
+      executed=$validated_executed
+      status=$validated_status
+      if [ "$row_skipped" -gt 0 ] && { [ "$status" -eq 0 ] || [ "$status" -eq 92 ]; }; then
+        skip_policy_status=0
+        skip_policy=$(sh "$source_root/scripts/bootstrap/phase3-test-skip-policy.shs" \
+          classify "$spec" "$row_skipped" "$executed" 2>>"$log") || skip_policy_status=$?
+        if [ "$skip_policy_status" -eq 0 ] && [ "$skip_policy" = 'skip|in-development' ]; then
+          status=0
+          row_disposition=skip
+        else
+          status=94
+        fi
+      fi
+    fi
+    row_max_rss_kib=$(read_max_rss_kib "$row_rss_file")
+    case "$row_max_rss_kib" in
+      [1-9][0-9]*)
+        [ "$row_max_rss_kib" -le "$max_rss_kib" ] || max_rss_kib=$row_max_rss_kib ;;
+    esac
     result=FAIL
     case "$status" in
-      0) result=PASS ;;
-      124|137) result=TIMEOUT ;;
-      134|136|139) result=CRASH ;;
+      0)
+        if [ "$row_disposition" = skip ]; then
+          result=SKIP
+          skipped_spec_count=$((skipped_spec_count + 1))
+        else
+          result=PASS
+          passed_count=$((passed_count + 1))
+        fi
+        ;;
+      124|137) result=TIMEOUT; timeout_count=$((timeout_count + 1)) ;;
+      134|136|139) result=CRASH; crash_count=$((crash_count + 1)) ;;
     esac
-    printf '%s\t%s\t%s\n' "$relative" "$result" "$status" >>"$inventory"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$relative" "$result" "$status" "$executed" "$row_passed" "$row_failed" \
+      "$row_skipped" "$row_output" "$row_max_rss_kib" >>"$inventory"
+    result_receipt=FAIL
+    [ "$result" = PASS ] && result_receipt=PASS
+    [ "$result" = SKIP ] && result_receipt=SKIP
+    printf 'simple-spec\t%s\t%s\t%s\t%s\n' "$relative" "$result_receipt" \
+      "$executed" "$row_skipped" >>"$results"
     printf 'END %s result=%s status=%s\n' "$relative" "$result" "$status" >>"$log"
     [ "$status" -eq 0 ] || failed=1
   done <"$manifest"
+  if [ "$spec_count" -eq 0 ]; then
+    printf 'repository test inventory is empty; no passing result can be admitted\n' >>"$log"
+    failed=1
+  fi
   ended=$(date +%s)
   result=PASS
   [ "$failed" -eq 0 ] || result=FAIL
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s\n' \
-    "$task" "$result" "$failed" "$((ended - started))" "$log" "$inventory" >>"$summary"
+  [ "$max_rss_kib" -gt 0 ] || max_rss_kib=unavailable
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|inventory=%s|results=%s|spec_count=%s|passed_count=%s|skipped_spec_count=%s|category_count=%s|timeout_count=%s|crash_count=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$failed" "$((ended - started))" "$max_rss_kib" "$log" "$inventory" \
+    "$results" "$spec_count" "$passed_count" "$skipped_spec_count" "$category_count" "$timeout_count" "$crash_count" \
+    "$full_owner_receipt" >>"$summary"
   [ "$failed" -eq 0 ]
+}
+
+run_phase3_expanded_tests() {
+  expanded_runner=$1
+  expanded_owner_receipt=$2
+  expanded_mcp_server=$3
+  expanded_repository_results=$4
+  task=phase3_expanded_tests
+  log="$logs/$task.log"
+  inventory="$logs/$task.inventory.tsv"
+  results="$logs/$task.results.tsv"
+  counts="$logs/$task.surface-counts.tsv"
+  nested_receipt="$logs/$task.nested-receipt.tsv"
+  started=$(date +%s)
+  status=0
+  sh "$source_root/scripts/bootstrap/phase3-test-inventory.shs" discover \
+    "$source_root" "$nested_receipt" >"$inventory" 2>"$log" || status=$?
+  if [ "$status" -eq 0 ]; then
+    PHASE3_COMMAND_OWNER_RECEIPT="$expanded_owner_receipt" \
+    PHASE3_COMMAND_OWNER_RECEIPT_SHA256="$command_owner_receipt_sha" \
+    PHASE3_TEST_RUNNER="$expanded_runner" PHASE3_COMPILER_CLI="$compiler_cli" \
+    PHASE3_MCP_SERVER="$expanded_mcp_server" PHASE3_TIMEOUT_SECONDS="$spec_timeout_seconds" \
+    PHASE3_HOME="$home" PHASE3_TMPDIR="$tmp" PHASE3_CACHE_DIR="$cache/$task" \
+      sh "$source_root/scripts/bootstrap/phase3-expanded-test-runner.shs" \
+        "$source_root" "$inventory" "$expanded_repository_results" "$results" \
+        "$counts" "$logs/$task.rows" "$nested_receipt" >>"$log" 2>&1 || status=$?
+  fi
+  ended=$(date +%s)
+  result=PASS
+  [ "$status" -eq 0 ] || result=FAIL
+  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|inventory=%s|results=%s|surface_counts=%s|nested_receipt=%s|command_owner_receipt=%s\n' \
+    "$task" "$result" "$status" "$((ended - started))" "$log" "$inventory" \
+    "$results" "$counts" "$nested_receipt" "$expanded_owner_receipt" >>"$summary"
+  [ "$status" -eq 0 ]
 }
 
 # Normal is fail-fast within a phase-local matrix; the already-running next
@@ -323,6 +1356,8 @@ else
   hosted_runtime_sha=""
   compiler_cli=""
   test_runner=""
+  command_owner_receipt=""
+  command_owner_receipt_sha=""
   compiler_cli_ready=0
   test_runner_ready=0
   if ! validate_hosted_runtime_authority "$runtime_path"; then
@@ -331,34 +1366,148 @@ else
   else
     echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
     hosted_runtime_ready=1
-    tool_cache="$cache_root/compiler-tools/$snapshot_sha/$runtime_cache_identity"
-    tool_outputs="$outputs/compiler-tools/$snapshot_sha/$runtime_cache_identity"
+    tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
+    tool_outputs="$outputs/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
     compiler_cli="$tool_outputs/simple_cli"
     test_runner="$tool_outputs/simple_test_runner"
-    mkdir -p "$tool_cache/full-cli" "$tool_cache/test-runner"
+    # Slim profile only: one shared object cache for both builds (same
+    # compiler, same --source closure of src/compiler + src/app + src/lib),
+    # so the CLI and test-runner entry points reuse each other's compiled
+    # objects instead of each paying for the whole closure independently
+    # (perf audit of PR #1458). Gated on stage2_slim_profile so every other
+    # caller (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
+    # run-macos-phase23-evidence.shs, stage1/stage3/stage4) keeps its
+    # original two-separate-caches behaviour byte-identically under
+    # --profile=full (the default).
+    if [ "$stage2_slim_profile" -eq 1 ]; then
+      tool_cache_cli="$tool_cache/shared"
+      tool_cache_runner="$tool_cache/shared"
+    else
+      tool_cache_cli="$tool_cache/full-cli"
+      tool_cache_runner="$tool_cache/test-runner"
+    fi
+    mkdir -p "$tool_cache_cli" "$tool_cache_runner"
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
-    run_matrix_task compiler_cli_build "$compiler_snapshot" native-build \
+    run_matrix_task compiler_cli_build --verification-expect-executable="$compiler_cli" \
+      "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/cli/_CliMain/main_and_help.spl --threads "$build_threads" \
-      --cache-dir "$tool_cache/full-cli" --output "$compiler_cli"
+      --cache-dir "$tool_cache_cli" --output "$compiler_cli"
     compiler_cli_ready=$matrix_task_passed
-    run_matrix_task test_runner_build "$compiler_snapshot" native-build \
+    run_matrix_task test_runner_build --verification-expect-executable="$test_runner" \
+      "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
-      --cache-dir "$tool_cache/test-runner" --output "$test_runner"
+      --cache-dir "$tool_cache_runner" --output "$test_runner"
     test_runner_ready=$matrix_task_passed
   fi
 
   if [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ]; then
-    echo "compiler_cli_sha256=$(hash_file "$compiler_cli")" >>"$summary"
-    run_matrix_task compiler_check "$compiler_cli" check src/compiler
-    run_matrix_task mcp_check "$compiler_cli" check src/app/mcp
-    run_matrix_task lsp_check "$compiler_cli" check src/app/simple_lsp_mcp
+    compiler_cli_sha=$(hash_file "$compiler_cli")
+  else
+    compiler_cli_sha=""
+  fi
+  if [ "$test_runner_ready" -eq 1 ] && [ -x "$test_runner" ]; then
+    test_runner_sha=$(hash_file "$test_runner")
+  else
+    test_runner_sha=""
+  fi
+
+  # Build the receipt-owned service binaries before any full inventory row can
+  # reach an MCP spec. The command-owner receipt below binds this MCP path and
+  # hash, so no phase can substitute an ambient bin/simple_mcp_server wrapper.
+  mcp_server=""
+  mcp_server_sha=""
+  if [ "$stage2_slim_profile" -eq 1 ]; then
+    : # slim stage-2 profile: MCP/LSP server builds are out of scope for the
+      # "compiler test binary works" proof; skip entirely (no task row --
+      # see the stage2_slim_profile note above for why no row is emitted).
+  elif [ "$hosted_runtime_ready" -eq 1 ]; then
+    tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$runtime_cache_identity"
+    server_outputs="$outputs/tool-builds/$phase/$snapshot_sha/$runtime_cache_identity"
+    mcp_server="$server_outputs/simple_mcp_server"
+    mkdir -p "$server_outputs"
+    rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
+    run_matrix_task mcp_build --verification-expect-executable="$mcp_server" \
+      "$compiler_snapshot" native-build \
+      --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+      --output "$mcp_server"
+    mcp_build_ready=$matrix_task_passed
+    run_matrix_task lsp_build --verification-expect-executable="$server_outputs/simple_lsp_mcp_server" \
+      "$compiler_snapshot" native-build \
+      --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compiler --source src/app --source src/lib --entry-closure \
+      --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+      --output "$server_outputs/simple_lsp_mcp_server"
+    lsp_build_ready=$matrix_task_passed
+    if [ "$mcp_build_ready" -eq 1 ] && [ -x "$mcp_server" ]; then
+      mcp_server_sha=$(hash_file "$mcp_server")
+    fi
+  else
+    record_unsupported_task mcp_build host-gpu-hosted-runtime-authority-unavailable
+    record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
+  fi
+
+  if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
+    command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
+      sha256sum | awk '{print $1}')
+    command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
+    write_command_owner_receipt "$command_owner_receipt" "$compiler_cli" "$compiler_cli_sha" \
+      "$test_runner" "$test_runner_sha" "$mcp_server" "$mcp_server_sha" || die "cannot freeze command-owner receipt"
+    command_owner_receipt_sha=$(hash_file "$command_owner_receipt")
+    echo "compiler_cli_sha256=$compiler_cli_sha" >>"$summary"
+    echo "test_runner_sha256=$test_runner_sha" >>"$summary"
+    echo "command_owner_receipt=$command_owner_receipt" >>"$summary"
+    echo "command_owner_receipt_sha256=$command_owner_receipt_sha" >>"$summary"
+  fi
+
+  if [ "$phase" = stage4 ]; then
+    if [ "${compiler_cli_ready:-0}" -eq 1 ] && [ "${test_runner_ready:-0}" -eq 1 ] && \
+       [ "${mcp_build_ready:-0}" -eq 1 ] && [ "${lsp_build_ready:-0}" -eq 1 ] && \
+       [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && \
+       [ -x "$server_outputs/simple_mcp_server" ] && [ -x "$server_outputs/simple_lsp_mcp_server" ] && \
+       [ -n "$command_owner_receipt" ]; then
+      validate_stage4_compiler_snapshot || die "Stage4 compiler snapshot changed before tooling receipt"
+      stage4_mcp_sha=$(hash_file "$server_outputs/simple_mcp_server")
+      stage4_lsp_sha=$(hash_file "$server_outputs/simple_lsp_mcp_server")
+      # Derive one compact filename identity from every mutable artifact bound
+      # by the frozen receipt. This avoids NAME_MAX overflow without aliasing a
+      # rebuilt MCP/LSP/runtime lineage onto an incompatible existing receipt.
+      stage4_tooling_lineage_sha=$(printf '%s\n' "$snapshot_sha" "$command_owner_receipt_sha" \
+        "$runtime_path" "$hosted_runtime_sha" "$stage4_mcp_sha" "$stage4_lsp_sha" |
+        sha256sum | awk '{print $1}')
+      stage4_tooling_receipt="$server_outputs/stage4-tooling-owners.$stage4_tooling_lineage_sha.env"
+      write_stage4_tooling_receipt "$stage4_tooling_receipt" \
+        "$server_outputs/simple_mcp_server" "$stage4_mcp_sha" \
+        "$server_outputs/simple_lsp_mcp_server" "$stage4_lsp_sha" ||
+        die "cannot freeze Stage4 tooling receipt"
+      stage4_tooling_receipt_sha=$(hash_file "$stage4_tooling_receipt")
+      echo "stage4_tooling_receipt=$stage4_tooling_receipt" >>"$summary"
+      echo "stage4_tooling_receipt_sha256=$stage4_tooling_receipt_sha" >>"$summary"
+    else
+      record_unsupported_task stage4_tooling_owners stage4-cli-runner-mcp-lsp-artifact-not-built
+    fi
+  fi
+
+  if [ "$stage2_slim_profile" -eq 1 ]; then
+    : # slim stage-2 profile: source `check` runs belong to the full matrix
+      # (--strategy=full); skip entirely (no task row).
+  elif [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ] && \
+     [ -n "$command_owner_receipt" ]; then
+    run_matrix_task compiler_check --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/compiler
+    run_matrix_task mcp_check --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/app/mcp
+    run_matrix_task lsp_check --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/app/simple_lsp_mcp
     if [ "$strategy" = full ]; then
-      run_matrix_task library_check "$compiler_cli" check src/lib
+      run_matrix_task library_check --verification-command-owner-receipt="$command_owner_receipt" \
+        env SIMPLE_BINARY="$compiler_cli" "$compiler_cli" check src/lib
     fi
   else
     record_unsupported_task compiler_check full-cli-artifact-not-built
@@ -369,81 +1518,242 @@ else
     fi
   fi
 
-  if [ "$test_runner_ready" -eq 1 ] && [ -x "$test_runner" ]; then
-    echo "test_runner_sha256=$(hash_file "$test_runner")" >>"$summary"
-    run_matrix_task compiler_bootstrap_tests "$test_runner" \
-      test/01_unit/compiler/bootstrap --mode=interpreter --unstable
-    if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner"; then
+  if [ "$compiler_cli_ready" -eq 1 ] && [ "$test_runner_ready" -eq 1 ] && \
+     [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && \
+     [ -n "$command_owner_receipt" ]; then
+    loader_oracle=test/01_unit/compiler/loader/module_loader_relocation_spec.spl
+    case "$(uname -s)" in
+      Darwin) loader_oracle=test/01_unit/compiler/loader/module_load_intent_spec.spl ;;
+    esac
+    run_matrix_task compiler_bootstrap_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/bootstrap --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      run_matrix_task compiler_bootstrap_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-require-test-json \
+        env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+        test/01_unit/compiler/bootstrap --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    fi
+    # Keep the interpreter subsystem as an explicit inventory in both modes.
+    # The full compiler walk below remains independently terminalized per file.
+    run_matrix_task interpreter_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/interpreter --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      run_matrix_task interpreter_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-require-test-json \
+        env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+        test/01_unit/compiler/interpreter --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    fi
+    # The full compiler inventory below covers loader sources in interpreter
+    # mode. Keep one explicit loader behavior oracle in both execution modes so
+    # a phase cannot claim compiler/loader coverage from the bootstrap subset
+    # or from source discovery alone.
+    run_matrix_task loader_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      "$loader_oracle" --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      run_matrix_task loader_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-require-test-json \
+        env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+        "$loader_oracle" --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    fi
+    if [ "$strategy" = full ] && ! run_compiler_unit_tests "$test_runner" "$command_owner_receipt"; then
       matrix_failed=1
     fi
+    if { [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; } && [ "$strategy" = full ] && \
+       ! run_repository_full_tests "$test_runner" "$command_owner_receipt" "$mcp_server"; then
+      matrix_failed=1
+    fi
+    if { [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; } && [ "$strategy" = full ]; then
+      if [ -f "$logs/repository_full_tests.results.tsv" ]; then
+        if ! run_phase3_expanded_tests "$test_runner" "$command_owner_receipt" "$mcp_server" \
+            "$logs/repository_full_tests.results.tsv"; then
+          matrix_failed=1
+        fi
+      else
+        record_unsupported_task phase3_expanded_tests repository-full-result-receipt-unavailable
+      fi
+    fi
   else
-    record_unsupported_task compiler_bootstrap_tests test-runner-artifact-not-built
+    if [ "$compiler_cli_ready" -ne 1 ]; then
+      test_owner_reason=full-cli-artifact-not-built
+    elif [ "$test_runner_ready" -ne 1 ]; then
+      test_owner_reason=test-runner-artifact-not-built
+    else
+      test_owner_reason=command-owner-receipt-not-built
+    fi
+    record_unsupported_task compiler_bootstrap_tests "$test_owner_reason"
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      record_unsupported_task compiler_bootstrap_compile_tests "$test_owner_reason"
+    fi
+    record_unsupported_task interpreter_interpreter_tests "$test_owner_reason"
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      record_unsupported_task interpreter_compile_tests "$test_owner_reason"
+    fi
+    record_unsupported_task loader_interpreter_tests "$test_owner_reason"
+    if [ "$stage2_slim_profile" -ne 1 ]; then
+      record_unsupported_task loader_compile_tests "$test_owner_reason"
+    fi
     if [ "$strategy" = full ]; then
-      record_unsupported_task compiler_unit_tests test-runner-artifact-not-built
+      record_unsupported_task compiler_unit_tests "$test_owner_reason"
+      if [ "$phase" = stage3 ] || [ "$phase" = stage4 ]; then
+        record_unsupported_task repository_full_tests "$test_owner_reason"
+        record_unsupported_task phase3_expanded_tests "$test_owner_reason"
+      fi
     fi
   fi
 fi
 
 if [ "$phase" = stage1 ]; then
-  run_matrix_task mcp_build "$compiler_snapshot" native-build \
+  run_matrix_task mcp_build --verification-expect-executable="$outputs/simple_mcp_server" \
+    "$compiler_snapshot" native-build \
     --source src/compiler --source src/app --source src/lib --entry-closure \
     --entry src/app/mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
     --output "$outputs/simple_mcp_server"
-  run_matrix_task lsp_build "$compiler_snapshot" native-build \
+  mcp_build_ready=$matrix_task_passed
+  run_matrix_task lsp_build --verification-expect-executable="$outputs/simple_lsp_mcp_server" \
+    "$compiler_snapshot" native-build \
     --source src/compiler --source src/app --source src/lib --entry-closure \
     --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
     --output "$outputs/simple_lsp_mcp_server"
-elif [ "$hosted_runtime_ready" -eq 1 ]; then
-  tool_build_cache="$cache/tool_builds/$snapshot_sha/$runtime_cache_identity"
-  server_outputs="$outputs/tool-builds/$snapshot_sha/$runtime_cache_identity"
-  mkdir -p "$server_outputs"
-  rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
-  run_matrix_task mcp_build "$compiler_snapshot" native-build \
-    --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
-    --source src/compiler --source src/app --source src/lib --entry-closure \
-    --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
-    --output "$server_outputs/simple_mcp_server"
-  mcp_build_ready=$matrix_task_passed
-  run_matrix_task lsp_build "$compiler_snapshot" native-build \
-    --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
-    --source src/compiler --source src/app --source src/lib --entry-closure \
-    --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
-    --output "$server_outputs/simple_lsp_mcp_server"
   lsp_build_ready=$matrix_task_passed
 else
-  record_unsupported_task mcp_build host-gpu-hosted-runtime-authority-unavailable
-  record_unsupported_task lsp_build host-gpu-hosted-runtime-authority-unavailable
-fi
-if [ "$phase" != stage1 ] && [ "${test_runner_ready:-0}" -eq 1 ] && [ -x "$test_runner" ]; then
-  run_matrix_task mcp_behavior env SIMPLE_LIB=src "$test_runner" \
-    test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable
-else
-  record_unsupported_task mcp_behavior test-runner-artifact-not-built
+  # Non-Stage1 service builds are scheduled before the source/test matrix so
+  # an MCP spec never observes an ambient wrapper.
+  :
 fi
 
-for tool in simple_mcp_server simple_lsp_mcp_server; do
-  tool_path="$outputs/$tool"
-  tool_ready=1
-  if [ "$phase" != stage1 ]; then
-    tool_path="$server_outputs/$tool"
+if [ "$stage2_slim_profile" -eq 1 ]; then
+  : # slim stage-2 profile: the MCP behavior integration test needs the
+    # skipped MCP build; skip entirely (no task row).
+elif [ "$phase" != stage1 ] && [ "${compiler_cli_ready:-0}" -eq 1 ] && \
+   [ "${test_runner_ready:-0}" -eq 1 ] && [ "${mcp_build_ready:-0}" -eq 1 ] && \
+   [ -x "$compiler_cli" ] && [ -x "$test_runner" ] && [ -x "$mcp_server" ] && \
+   [ -n "${command_owner_receipt:-}" ]; then
+  if [ "$phase" = stage4 ]; then
+    if [ -n "$stage4_tooling_receipt" ]; then
+      run_matrix_task mcp_behavior --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-stage4-tooling-receipt="$stage4_tooling_receipt" \
+        env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+        SIMPLE_MCP_TEST_BINARY="$server_outputs/simple_mcp_server" "$test_runner" \
+        test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"}
+      run_matrix_task mcp_behavior_compile --verification-command-owner-receipt="$command_owner_receipt" \
+        --verification-stage4-tooling-receipt="$stage4_tooling_receipt" \
+        env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+        SIMPLE_MCP_TEST_BINARY="$server_outputs/simple_mcp_server" "$test_runner" \
+        test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compile --unstable \
+        --assert-ran --no-cache --no-db --no-session-daemon \
+        "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"}
+    else
+      record_unsupported_task mcp_behavior stage4-tooling-owners-not-built
+      record_unsupported_task mcp_behavior_compile stage4-tooling-owners-not-built
+    fi
+  else
+    run_matrix_task mcp_behavior --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+      SIMPLE_MCP_TEST_BINARY="$mcp_server" "$test_runner" \
+      test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"}
+    run_matrix_task mcp_behavior_compile --verification-command-owner-receipt="$command_owner_receipt" \
+      env SIMPLE_LIB=src SIMPLE_BINARY="$compiler_cli" \
+      SIMPLE_MCP_TEST_BINARY="$mcp_server" "$test_runner" \
+      test/02_integration/app/mcp_stdio_integration_spec.spl --mode=compile --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"}
+  fi
+else
+  if [ "${compiler_cli_ready:-0}" -ne 1 ]; then
+    behavior_owner_reason=full-cli-artifact-not-built
+  elif [ "${test_runner_ready:-0}" -ne 1 ]; then
+    behavior_owner_reason=test-runner-artifact-not-built
+  elif [ "${mcp_build_ready:-0}" -ne 1 ]; then
+    behavior_owner_reason=mcp-server-artifact-not-built
+  else
+    behavior_owner_reason=command-owner-receipt-not-built
+  fi
+  record_unsupported_task mcp_behavior "$behavior_owner_reason"
+  record_unsupported_task mcp_behavior_compile "$behavior_owner_reason"
+fi
+
+if [ "$stage2_slim_profile" -ne 1 ]; then
+  for tool in simple_mcp_server simple_lsp_mcp_server; do
+    tool_path="$outputs/$tool"
+    tool_ready=0
+    if [ "$phase" != stage1 ]; then
+      tool_path="$server_outputs/$tool"
+    fi
     case "$tool" in
       simple_mcp_server) tool_ready=${mcp_build_ready:-0} ;;
       simple_lsp_mcp_server) tool_ready=${lsp_build_ready:-0} ;;
     esac
-  fi
-  if [ "$tool_ready" -eq 1 ] && [ -x "$tool_path" ]; then
-    run_matrix_task "${tool}_help" "$tool_path" --help
-  else
-    printf 'task=%s_help|result=BLOCKED|status=not-built|elapsed_seconds=0|log=-\n' \
-      "$tool" >>"$summary"
-  fi
-done
+    if [ "$tool_ready" -eq 1 ] && [ -x "$tool_path" ]; then
+      if [ "$phase" = stage4 ]; then
+        if [ -n "$stage4_tooling_receipt" ]; then
+          run_matrix_task "${tool}_help" \
+            --verification-stage4-tooling-receipt="$stage4_tooling_receipt" "$tool_path" --help
+        else
+          record_unsupported_task "${tool}_help" stage4-tooling-owners-not-built
+        fi
+      else
+        run_matrix_task "${tool}_help" "$tool_path" --help
+      fi
+    else
+      printf 'task=%s_help|result=BLOCKED|status=not-built|elapsed_seconds=0|log=-\n' \
+        "$tool" >>"$summary" || die "cannot append verification summary"
+    fi
+  done
+fi
 
-failures=$(grep -cE 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' "$summary" || :)
-echo "terminal_failures=$failures" >>"$summary"
-if [ "$failures" -eq 0 ]; then
-  echo "overall=PASS" >>"$summary"
+# Self-check the slim stage-2 profile's own guarantee instead of resting it
+# solely on a caller's awk gate (bootstrap-from-scratch.sh's stage2-tests
+# summary validator makes the same check today, but a verifier that can only
+# be trusted correctly by ONE caller is not actually trustworthy). These are
+# the five rows the slim profile exists to produce: proof that a compiler
+# test binary was built (compiler_cli_build, test_runner_build) AND used
+# (compiler_bootstrap_tests, interpreter_interpreter_tests,
+# loader_interpreter_tests). A summary missing any of them, or carrying one
+# that is not exactly PASS, checked nothing and must not report PASS.
+if [ "$stage2_slim_profile" -eq 1 ]; then
+  for stage2_slim_required_task in compiler_cli_build test_runner_build \
+      compiler_bootstrap_tests interpreter_interpreter_tests loader_interpreter_tests; do
+    if ! grep -q "^task=${stage2_slim_required_task}|result=PASS|" "$summary"; then
+      printf 'bootstrap-phase-verification: slim stage-2 profile is missing a required PASS row for %s\n' \
+        "$stage2_slim_required_task" >&2
+      matrix_failed=1
+    fi
+  done
+fi
+
+summary_read_status=0
+failures=$(grep -cE 'result=(FAIL|CRASH|TIMEOUT|BLOCKED|UNSUPPORTED)' "$summary") || summary_read_status=$?
+[ "$summary_read_status" -le 1 ] || die "cannot read verification summary"
+echo "terminal_failures=$failures" >>"$summary" || die "cannot append verification summary"
+echo "unsupported_tasks=$matrix_unsupported" >>"$summary" || die "cannot append verification summary"
+# A rewritten/truncated evidence file cannot erase failures already observed
+# by this process. Keep unsupported state separate from fail-fast scheduling,
+# so independent supported tasks still produce their normal evidence.
+if [ "$failures" -eq 0 ] && [ "$matrix_failed" -eq 0 ] && [ "$matrix_unsupported" -eq 0 ]; then
+  echo "overall=PASS" >>"$summary" || die "cannot append verification summary"
   exit 0
 fi
-echo "overall=FAIL" >>"$summary"
+echo "overall=FAIL" >>"$summary" || die "cannot append verification summary"
 exit 1

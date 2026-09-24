@@ -1,4 +1,13 @@
 # interp: AOT source-compile pipeline stubbed / non-functional under seed interpreter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — left OPEN: fix blocked by the concurrent bootstrap
+- **inferred**: the remedy named in this entry lands in `src/compiler/**` and/or `src/compiler_rust/**`. A bootstrap is running concurrently in this workspace, so editing either tree would desync it; no repair was attempted.
+- **measured**: the referenced product paths still exist, so there is no removed-code basis for a stale closure.
+- **inferred**: `bin/simple` on this host is the Rust seed (v1.0.0-rc.1), not the self-hosted binary; and `bin/simple test` is broken here (a trivial spec returns a false `outer-bound-timeout`), so neither arm of a verification is available.
 
 - **id**: interp_aot_source_pipeline_stubbed_non_functional_2026-06-25
 - **status**: OPEN (partial fix landed)
@@ -65,3 +74,4 @@ $SEED run src/compiler/80.driver/main.spl -c /tmp/hello.spl --target wasm32 -o /
 # before parse fix: "accessing field 'functions' on nil"
 # after parse fix:  reaches HIR/MIR stub -> empty module
 ```
+

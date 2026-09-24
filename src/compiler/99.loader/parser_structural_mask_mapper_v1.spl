@@ -1,0 +1,273 @@
+# Transactional W^X mapper for an authenticated complete parser-kernel artifact.
+# Callable addresses remain owner-private.  This module intentionally exposes
+# no invocation API until a canonical execution-capability receipt exists.
+
+use compiler.loader.parser_structural_mask_mapping_authorization_v1.*
+use compiler.driver.environment_variant_composite_publication_v1.EnvironmentCompositePublicationV1
+use compiler.loader.smf_mmap_native.{
+    native_alloc_exec_memory, native_write_exec_memory, native_make_executable,
+    native_flush_icache, native_get_function_pointer, native_free_exec_memory,
+    native_mmap_read_bytes
+}
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.EnvironmentVariantReceiptV1
+use compiler.loader.parser_lexical_mapping_authorization_v1.{ParserLexicalMappingAuthorizationV1,
+    parser_lexical_mapping_authorization_valid_v1, parser_lexical_mapping_authorize_v1}
+
+pub enum ParserStructuralMapperErrorV1:
+    AuthorizationRejected
+    AuthorizationSubstituted
+    CapacityExceeded
+    AllocationFailed
+    CopyFailed
+    SealFailed
+    CopyVerificationFailed
+    CallableUnavailable
+    UnknownOrRetired
+    Busy
+    RetainCapacityExceeded
+    ExecutionCapabilityProofMissing
+
+pub struct ParserStructuralMappedKernelV1:
+    mapped_handle: u64
+    provider_generation: u64
+    artifact_digest: std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+    code_size: u64
+
+pub struct ParserStructuralKernelCallTokenV1:
+    token_id: u64
+    mapped_handle: u64
+
+struct _ParserStructuralMappingRecordV1:
+    public_handle: ParserStructuralMappedKernelV1
+    authorization: ParserStructuralMappingAuthorizationV1
+    address: i64
+    size: i64
+    live: bool
+    retain_count: u64
+
+struct _ParserStructuralKernelRetainV1:
+    token: ParserStructuralKernelCallTokenV1
+
+pub class ParserStructuralMapperOwnerV1:
+    var records: [_ParserStructuralMappingRecordV1]
+    var next_handle: u64
+    var retains: [_ParserStructuralKernelRetainV1]
+    var next_retain_id: u64
+
+    pub static fn create() -> ParserStructuralMapperOwnerV1:
+        ParserStructuralMapperOwnerV1(records: [], next_handle: 1u64,
+            retains: [], next_retain_id: 1u64)
+
+fn _same_digest(a: std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1,
+                b: std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+fn _receipt_same(a: EnvironmentVariantReceiptV1,
+                 b: EnvironmentVariantReceiptV1) -> bool:
+    a.descriptor_size == b.descriptor_size and a.schema_version == b.schema_version and
+    a.state == b.state and _same_digest(a.provider_identity, b.provider_identity) and
+    _same_digest(a.variant_identity, b.variant_identity) and
+    _same_digest(a.artifact_digest, b.artifact_digest) and
+    _same_digest(a.environment_identity, b.environment_identity) and
+    a.environment_generation == b.environment_generation and
+    a.provider_generation == b.provider_generation and
+    _same_digest(a.metadata_digest, b.metadata_digest) and
+    _same_digest(a.eligibility_digest, b.eligibility_digest) and
+    a.mapping_handle == b.mapping_handle and a.callable_handle == b.callable_handle and
+    _same_digest(a.binding_plan_digest, b.binding_plan_digest) and
+    _same_digest(a.execution_digest, b.execution_digest) and
+    _same_digest(a.completion_digest, b.completion_digest) and
+    _same_digest(a.self_check_digest, b.self_check_digest) and
+    _same_digest(a.state_evidence_digest, b.state_evidence_digest) and
+    a.execution_count == b.execution_count and
+    a.outstanding_references == b.outstanding_references and
+    a.event_sequence == b.event_sequence
+
+fn _authorization_same(a: ParserStructuralMappingAuthorizationV1,
+                       b: ParserStructuralMappingAuthorizationV1) -> bool:
+    _same_digest(a.provider_identity, b.provider_identity) and
+    _same_digest(a.variant_identity, b.variant_identity) and
+    _same_digest(a.artifact_digest, b.artifact_digest) and
+    _same_digest(a.plan_digest, b.plan_digest) and
+    _same_digest(a.environment_identity, b.environment_identity) and
+    _same_digest(a.abi_digest, b.abi_digest) and
+    _same_digest(a.contract_identity, b.contract_identity) and
+    _same_digest(a.semantic_identity, b.semantic_identity) and
+    _same_digest(a.grammar_identity, b.grammar_identity) and
+    _same_digest(a.program_identity, b.program_identity) and
+    a.environment_generation == b.environment_generation and
+    a.provider_generation == b.provider_generation and
+    a.parser_interface_major == b.parser_interface_major and
+    a.parser_interface_minor == b.parser_interface_minor and
+    a.code_size == b.code_size and
+    a.required_cpu_features == b.required_cpu_features and
+    a.required_vector_state_mode == b.required_vector_state_mode and
+    a.required_vector_length_bits == b.required_vector_length_bits and
+    a.provider_interface_handle == b.provider_interface_handle and
+    _receipt_same(a.eligible_receipt, b.eligible_receipt)
+
+fn _find(owner: ParserStructuralMapperOwnerV1,
+         handle: ParserStructuralMappedKernelV1) -> i64:
+    var i = 0
+    while i < owner.records.len():
+        val found = owner.records[i].public_handle
+        if found.mapped_handle == handle.mapped_handle and
+           found.provider_generation == handle.provider_generation and
+           _same_digest(found.artifact_digest, handle.artifact_digest) and
+           found.code_size == handle.code_size:
+            return i
+        i = i + 1
+    -1
+
+fn _free(address: i64, size: i64):
+    if address > 0 and size > 0:
+        unsafe(capabilities: [raw_ptr]):
+            _ = native_free_exec_memory(address, size)
+
+pub fn parser_structural_mapper_map_v1(
+    owner: ParserStructuralMapperOwnerV1,
+    publication: EnvironmentCompositePublicationV1,
+    lifecycle_receipt: EnvironmentVariantReceiptV1,
+    authorization: ParserStructuralMappingAuthorizationV1,
+    callable_artifact_bytes: [i64]
+) -> Result<ParserStructuralMappedKernelV1, ParserStructuralMapperErrorV1>:
+    if owner.records.len() >= 256 or owner.next_handle == 0u64 or
+       owner.next_handle == 0xffffffffffffffffu64:
+        return Err(ParserStructuralMapperErrorV1.CapacityExceeded)
+    val current = parser_structural_mapping_authorize_v1(publication,
+        lifecycle_receipt, callable_artifact_bytes)
+    if current.is_err(): return Err(ParserStructuralMapperErrorV1.AuthorizationRejected)
+    if not _authorization_same(current.unwrap(), authorization):
+        return Err(ParserStructuralMapperErrorV1.AuthorizationSubstituted)
+    var code: [u8] = []
+    for byte in callable_artifact_bytes: code.push(byte as u8)
+    val size = code.len() as i64
+    val address = native_alloc_exec_memory(size)
+    if address == 0: return Err(ParserStructuralMapperErrorV1.AllocationFailed)
+    val written = unsafe(capabilities: [raw_ptr]): native_write_exec_memory(address, code, 0)
+    if written != size:
+        _free(address, size)
+        return Err(ParserStructuralMapperErrorV1.CopyFailed)
+    val copied = native_mmap_read_bytes(address, 0, size)
+    if copied != code:
+        _free(address, size)
+        return Err(ParserStructuralMapperErrorV1.CopyVerificationFailed)
+    val sealed = unsafe(capabilities: [raw_ptr]): native_make_executable(address, size)
+    if not sealed:
+        _free(address, size)
+        return Err(ParserStructuralMapperErrorV1.SealFailed)
+    native_flush_icache(address, size)
+    val callable = unsafe(capabilities: [raw_ptr]): native_get_function_pointer(address)
+    if callable == 0:
+        _free(address, size)
+        return Err(ParserStructuralMapperErrorV1.CallableUnavailable)
+    val handle = ParserStructuralMappedKernelV1(mapped_handle: owner.next_handle,
+        provider_generation: authorization.provider_generation,
+        artifact_digest: authorization.artifact_digest, code_size: authorization.code_size)
+    owner.next_handle = owner.next_handle + 1u64
+    owner.records.push(_ParserStructuralMappingRecordV1(public_handle: handle,
+        authorization: authorization, address: address, size: size, live: true,
+        retain_count: 0u64))
+    Ok(handle)
+
+# Exact lexical ABI entrypoint. Generic structural mapping remains available
+# for the legacy two-delimiter artifact, but cannot satisfy this authority.
+pub fn parser_lexical_mapper_map_v1(owner: ParserStructuralMapperOwnerV1,
+    publication: EnvironmentCompositePublicationV1, lifecycle: EnvironmentVariantReceiptV1,
+    authorization: ParserLexicalMappingAuthorizationV1, artifact_bytes: [i64]
+) -> Result<ParserStructuralMappedKernelV1, ParserStructuralMapperErrorV1>:
+    if not parser_lexical_mapping_authorization_valid_v1(authorization):
+        return Err(ParserStructuralMapperErrorV1.AuthorizationSubstituted)
+    val current = parser_lexical_mapping_authorize_v1(publication, lifecycle, artifact_bytes)
+    if current.is_err() or current.unwrap() != authorization:
+        return Err(ParserStructuralMapperErrorV1.AuthorizationSubstituted)
+    parser_structural_mapper_map_v1(owner, publication, lifecycle,
+        authorization.structural, artifact_bytes)
+
+pub fn parser_structural_mapper_invoke_v1(
+    owner: ParserStructuralMapperOwnerV1, handle: ParserStructuralMappedKernelV1
+) -> Result<u32, ParserStructuralMapperErrorV1>:
+    val index = _find(owner, handle)
+    if index < 0 or not owner.records[index].live:
+        return Err(ParserStructuralMapperErrorV1.UnknownOrRetired)
+    if owner.records[index].retain_count > 0u64:
+        return Err(ParserStructuralMapperErrorV1.Busy)
+    Err(ParserStructuralMapperErrorV1.ExecutionCapabilityProofMissing)
+
+pub fn parser_structural_mapper_close_v1(owner: ParserStructuralMapperOwnerV1,
+    handle: ParserStructuralMappedKernelV1
+) -> Result<(), ParserStructuralMapperErrorV1>:
+    val index = _find(owner, handle)
+    if index < 0 or not owner.records[index].live:
+        return Err(ParserStructuralMapperErrorV1.UnknownOrRetired)
+    var record = owner.records[index]
+    val freed = unsafe(capabilities: [raw_ptr]): native_free_exec_memory(record.address, record.size)
+    if not freed: return Err(ParserStructuralMapperErrorV1.UnknownOrRetired)
+    record.live = false
+    record.address = 0
+    owner.records[index] = record
+    Ok(())
+
+fn parser_structural_mapper_resolve_private_v1(owner: ParserStructuralMapperOwnerV1,
+    handle: ParserStructuralMappedKernelV1) -> Result<i64, ParserStructuralMapperErrorV1>:
+    val index = _find(owner, handle)
+    if index < 0 or not owner.records[index].live:
+        return Err(ParserStructuralMapperErrorV1.UnknownOrRetired)
+    Ok(owner.records[index].address)
+
+# Loader-owned correlation query. It exposes no address and derives liveness
+# from the owner record rather than accepting a caller assertion.
+pub fn parser_structural_mapper_authorization_live_v1(
+    owner: ParserStructuralMapperOwnerV1, handle: ParserStructuralMappedKernelV1,
+    authorization: ParserStructuralMappingAuthorizationV1) -> bool:
+    val index = _find(owner, handle)
+    index >= 0 and owner.records[index].live and
+    _authorization_same(owner.records[index].authorization, authorization)
+
+pub fn parser_structural_mapper_call_retain_v1(owner: ParserStructuralMapperOwnerV1,
+    handle: ParserStructuralMappedKernelV1,
+    authorization: ParserStructuralMappingAuthorizationV1
+) -> Result<ParserStructuralKernelCallTokenV1, ParserStructuralMapperErrorV1>:
+    val index = _find(owner, handle)
+    if index < 0 or not owner.records[index].live or
+       not _authorization_same(owner.records[index].authorization, authorization):
+        return Err(ParserStructuralMapperErrorV1.UnknownOrRetired)
+    if owner.retains.len() >= 256 or owner.next_retain_id == 0u64 or
+       owner.next_retain_id == 0xffffffffffffffffu64:
+        return Err(ParserStructuralMapperErrorV1.RetainCapacityExceeded)
+    val token = ParserStructuralKernelCallTokenV1(token_id: owner.next_retain_id,
+        mapped_handle: handle.mapped_handle)
+    owner.next_retain_id = owner.next_retain_id + 1u64
+    owner.retains.push(_ParserStructuralKernelRetainV1(token: token))
+    var record = owner.records[index]; record.retain_count = record.retain_count + 1u64
+    owner.records[index] = record
+    Ok(token)
+
+pub fn parser_structural_mapper_call_release_v1(owner: ParserStructuralMapperOwnerV1,
+    token: ParserStructuralKernelCallTokenV1) -> bool:
+    var ti: i64 = -1; var i = 0
+    while i < owner.retains.len():
+        if owner.retains[i].token == token: ti = i
+        i = i + 1
+    if ti < 0: return false
+    var ri: i64 = -1; i = 0
+    while i < owner.records.len():
+        if owner.records[i].public_handle.mapped_handle == token.mapped_handle: ri = i
+        i = i + 1
+    if ri < 0 or owner.records[ri].retain_count == 0u64: return false
+    var kept: [_ParserStructuralKernelRetainV1] = []; i = 0
+    while i < owner.retains.len():
+        if i != ti: kept.push(owner.retains[i])
+        i = i + 1
+    owner.retains = kept
+    var record = owner.records[ri]; record.retain_count = record.retain_count - 1u64
+    owner.records[ri] = record
+    true
+
+fn parser_structural_mapper_resolve_retained_private_v1(owner: ParserStructuralMapperOwnerV1,
+    handle: ParserStructuralMappedKernelV1, token: ParserStructuralKernelCallTokenV1
+) -> Result<i64, ParserStructuralMapperErrorV1>:
+    for retain in owner.retains:
+        if retain.token == token and token.mapped_handle == handle.mapped_handle:
+            return parser_structural_mapper_resolve_private_v1(owner, handle)
+    Err(ParserStructuralMapperErrorV1.UnknownOrRetired)

@@ -1,4 +1,8 @@
 # Pure-Simple text.split_lines method is missing at runtime
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source fixed; interpreter and strict dual-backend execution pending
 **Severity:** High for self-hosted compiler/tooling paths
@@ -37,3 +41,4 @@ CRLF normalization, trailing-newline suppression, repeated trailing LF, and
 lone CR match Rust `str::lines()`. The strict dual-backend parity case covers
 both names and those edge cases. Execution remains pending in the staged full
 gate; do not mark the deployment criterion complete until that gate runs.
+

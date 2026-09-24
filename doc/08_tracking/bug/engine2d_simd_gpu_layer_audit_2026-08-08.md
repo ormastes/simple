@@ -136,3 +136,7 @@ call-count stub, no real GPU required.
   nonexistent module path and is itself orphaned (never compiled, hence
   never breaks a build). Cosmetic dead-file cleanup, not a runtime defect —
   noted here for awareness but not filed as a bug.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: audit-findings record (P3) needing GPU/SIMD backend verification; no bounded single fix identified. No change made.

@@ -1,4 +1,8 @@
 # Stage-3 ModuleSurface callable dictionary payload corruption (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -54,3 +58,4 @@ the existing glob/module-route meaning.
 Callable ownership is verified, but the broader bootstrap remains blocked by
 the primary-import owner above. No further bootstrap is permitted in this
 bounded session.
+

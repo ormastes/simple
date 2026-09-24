@@ -1,4 +1,9 @@
 # `bin/simple test` never delegates to `simple_seed` when invoked via the symlink
+## Closed 2026-09-16 — source fix landed 6cf217f0febb with regression spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-24 (corrected 2026-07-25) · **Severity:** high (tooling) · **Status:** source fix landed (`6cf217f0febb`); deployed binary awaits redeploy
 
@@ -86,3 +91,4 @@ parallel session's whole-WC sync commit.
 
 - `smf_stub_shadowing_unresolved_describe_2026-07-24.md` (same symptom, different cause — check `.smf` stubs first)
 - `native_cli_run_std_hardware_brace_import_unresolved_2026-07-24.md` (deploy clobber that removed the sibling)
+

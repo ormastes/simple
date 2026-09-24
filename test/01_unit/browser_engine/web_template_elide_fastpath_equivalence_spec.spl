@@ -1,0 +1,120 @@
+"""
+## Purpose and audience
+Purpose: Prove the round-10 template-elide fast path in
+`_html_without_inert_template_sources` returns exactly what the full tag walk
+(`_html_without_inert_template_sources_scan`) returns, for every document.
+Audience: browser-engine maintainers.
+
+Web-perf round 10 (doc/10_metrics/ui/web_perf_round10_2026-09-13.md) sub-timed
+`pp_css_us` for the first time and found this one function carrying 571 ms of
+the 892 ms eight-page CSS-parse total -- it walks EVERY tag of the document and
+scans each tag name a character at a time in interpreted Simple, in order to
+elide `<template>` bodies that most documents do not contain. The fast path
+answers "can the walk's `name == "template"` branch fire at all?" and returns
+`source` unchanged when it cannot.
+
+That question is the whole spec. The oracle is
+`simple_web_layout_debug_template_elide_equivalence(html)`, which runs BOTH the
+wrapper and the walk and returns "OK" only when the two results are
+byte-identical.
+
+**The first cut (PR #910) got the question wrong and this spec is why the
+second one is right.** It probed for the contiguous substring `<template`, but
+the walk derives its tag name from `lower.substring(lt + 1, gt).trim()` -- so
+`< template>` and `</ template>` reach `name == "template"` with no contiguous
+`<template` anywhere, and the fast path returned a document whose template body
+the walk elides. Adding those rows made this spec FAIL (`[12] MISMATCH
+fast_len=68 slow_len=34`), and the probe was replaced by
+`_html_template_tag_present`, which mirrors the walk's own derivation: `<`,
+optional whitespace, optionally `/` and more whitespace, then the name.
+
+Coverage is two-tier, the same shape round 9's selector-equivalence spec used:
+the eight shared catalog pages give real documents at real scale (all of which
+take the fast path), and the adversarial fixtures below give the shapes the
+catalog never contains -- a real `<template>` body, nested templates, an
+unclosed template, a stray `</template>` with no opener, a template tag inside
+a `<script>` body and inside a `<style>` body (where the walk's script/style
+skipping means the tag is NOT a template but the probe still fires, so the slow
+walk runs and must agree), `<templatex>` (a prefix that is not the tag), a
+template whose tag carries attributes, uppercase `<TEMPLATE>`, a tagless
+document, the empty document, the three whitespace-in-tag shapes above, and a
+document carrying the bare word `template` in prose and in `grid-template`
+(which must NOT cost the fast path -- every catalog page contains it, so a
+probe on the bare word would delete the whole win).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TEMPLATE-ELIDE-FASTPATH-001 — the template-elide fast path must return exactly what the full tag walk returns.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    simple_web_layout_debug_template_elide_equivalence
+}
+use std.nogc_sync_mut.fs.{read_file}
+
+val CATALOG = "examples/06_io/ui/web_catalog/"
+
+fn catalog_verdict(page: text) -> text:
+    simple_web_layout_debug_template_elide_equivalence(
+        read_file(CATALOG + page + ".html")
+    )
+
+# Every adversarial shape named in the header, one document per entry. Each is
+# run through both paths; any disagreement names the two lengths.
+val ADVERSARIAL: [text] = [
+    "<html><body><p>no template anywhere</p></body></html>",
+    "<html><body><template><p>inert</p></template><p>live</p></body></html>",
+    "<html><body><template id=t data-x=\"1\"><p>inert</p></template><b>k</b></body></html>",
+    "<html><body><template><template><i>deep</i></template></template><b>k</b></body></html>",
+    "<html><body><template><p>never closed</p></body></html>",
+    "<html><body></template><p>stray close</p></body></html>",
+    "<html><body><script>var s = \"<template>\";</script><p>live</p></body></html>",
+    "<html><body><style>/* <template> */ p { color: red; }</style><p>live</p></body></html>",
+    "<html><body><templatex><p>not a template</p></templatex></body></html>",
+    "<html><body><TEMPLATE><p>upper</p></TEMPLATE><b>k</b></body></html>",
+    "plain text with no tags at all",
+    "",
+    # The shapes that BROKE the first cut of the fast path (PR #910), which
+    # probed for the contiguous substring `<template`. The walk derives its tag
+    # name from `lower.substring(lt + 1, gt).trim()`, so whitespace after `<`
+    # (and between `<` and `/`) still reaches `name == "template"` while the
+    # contiguous substring is absent -- the fast path returned the document
+    # unchanged where the walk elided a body.
+    "<html><body>< template><p>inert</p></template><b>k</b></body></html>",
+    "<html><body><\n\ttemplate><p>inert</p></ template><b>k</b></body></html>",
+    "<html><body><template><p>inert</p></  template><b>k</b></body></html>",
+    # The bare word `template` with no tag before it must NOT cost the fast
+    # path: every catalog page contains it (prose and `grid-template`), so a
+    # probe on the bare word would delete the whole win.
+    "<html><head><style>.g { grid-template-columns: 1fr; }</style></head>" +
+        "<body><p>a template is a pattern</p></body></html>"
+]
+
+describe "web template-elide fast path equivalence":
+    it "agrees with the full tag walk on every catalog page":
+        # oracle: every shared catalog document takes the fast path (none of
+        # them contains a template tag) and must still produce the walk output.
+        expect(catalog_verdict("overview")).to_equal("OK")
+        expect(catalog_verdict("html")).to_equal("OK")
+        expect(catalog_verdict("css-layout")).to_equal("OK")
+        expect(catalog_verdict("css-paint")).to_equal("OK")
+        expect(catalog_verdict("forms-media")).to_equal("OK")
+        expect(catalog_verdict("animation")).to_equal("OK")
+        expect(catalog_verdict("evidence")).to_equal("OK")
+        expect(catalog_verdict("tab-bar")).to_equal("OK")
+
+    it "agrees with the full tag walk on every adversarial shape":
+        # oracle: real templates, nested, unclosed, stray-close, script/style
+        # bodies mentioning the tag, a prefix that is not the tag, uppercase,
+        # attributes, a tagless document, the empty document, and the whitespace-in-tag shapes that broke the first cut.
+        var mismatches = ""
+        var i = 0
+        while i < ADVERSARIAL.len():
+            val v = simple_web_layout_debug_template_elide_equivalence(
+                ADVERSARIAL[i]
+            )
+            if v != "OK":
+                mismatches = "{mismatches} [{i}] {v}"
+            i = i + 1
+        expect(mismatches).to_equal("")

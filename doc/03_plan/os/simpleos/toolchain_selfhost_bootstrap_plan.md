@@ -179,6 +179,11 @@ producer and B-HOST-CLI sequence in the canonical x86_64 plan linked in §7.
   (`CLANG_SIMPLEOS_EMBED_LLD` short-circuit exists in the fork for later).
 - Accept: transcript of compile (in-guest) → link (in-guest) → run (in-guest)
   printing hello on the SimpleOS terminal. This is the G2 exit criterion.
+- **2026-09-18:** C4 (external `ld.lld`) stays the proof rung. New rung C4b
+  "guest `simple link` links HELLO.ELF" is added once the mold-MDSOC++
+  internal engine owns SimpleOS; C5/B4/P1 may then depend on either C4 or
+  C4b. See `doc/03_plan/os/in_guest_lld_link_ladder.md` and
+  `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` §10 row 4.
 
 ### Lane C5 — smoke matrix (after C4)
 - Rows: (1) two-TU C program linked in-guest; (2) C++ hello against `libc++.a`;

@@ -1,4 +1,8 @@
 # `bin/simple run` vs `bin/simple test` — harness divergence measurement (2026-07-28)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** MEASURED. No fixes applied (measurement task).
 **Binary under test:** `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
@@ -877,3 +881,4 @@ regression to report for this run.
 | Driver | `build/probe_divergence/fast_driver.shs` (unchanged, still correct) |
 
 All prior sections and artifacts are left in place.
+

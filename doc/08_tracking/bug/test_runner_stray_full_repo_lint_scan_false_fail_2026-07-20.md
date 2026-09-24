@@ -1,4 +1,8 @@
 # bin/simple test: stray full-repo lint scan inflates duration and flips a fully-green spec to FAIL
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Category:** GENUINE-BUG (test-runner / interpreter side effect)
@@ -99,3 +103,4 @@ edited away.
 ## Affected specs (this shard)
 
 - `test/01_unit/app/llm_caret/provider_spec.spl` (confirmed, reproduced twice)
+

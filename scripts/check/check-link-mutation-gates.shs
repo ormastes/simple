@@ -1,0 +1,370 @@
+#!/bin/sh
+# check-link-mutation-gates.shs — lane A11 (conformance/perf) mutation-sensitive
+# gates for the mold/MDSOC++ linker, per doc/01_research/compiler/linker/
+# mold_mdsocpp_linker_2026-09-15.md §11 ("Mutation-sensitive gates ... Each
+# mutation must turn its gate red") and the A11 row of
+# doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md.
+#
+# For each critical linker property this applies a small, deliberate,
+# reviewable mutation to a COPY of the source (a detached `git worktree`,
+# never this checkout) that disables or weakens the property, runs the ONE
+# spec that is supposed to catch it via
+# `$SIMPLE_BIN test --no-session-daemon <spec>`, and requires the spec to go
+# RED (fail). A mutation whose spec stays green is a VACUOUS gate — a real
+# finding, not a script bug — and fails this check. The mutated file is
+# restored (`git checkout --`) after every mutation, whether the spec caught
+# it or not.
+#
+# Mutation table (7 rows; see MUTATIONS below): archive-closure fixpoint
+# iteration, AArch64 CALL26 branch-range reject, ELF strong-duplicate-symbol
+# reject, the shared SMF relocation oracle's i32-range reject, the runtime
+# loader's use of that oracle (reject vs. silent truncation), the
+# `SIMPLE_LINKER=internal` -> `UnsupportedFeature` rejection, and the
+# `Bounded` link-policy `job_memory_limit_bytes > 0` requirement.
+#
+# Deliberately EXCLUDED (not a vacuous gate — a documented absence): "drop
+# KEEP/GC-root handling" from the research list has no target in this tree.
+# GC-root / linker-script `KEEP()` handling belongs to lane A9 (boot layout,
+# `L/boot_layout/**`, `L/linker_script.spl`), which has not landed as of this
+# writing (plan row unstarted, no deps satisfied). Re-add a row here once A9
+# ships root/KEEP handling; until then a mutation row with no matching source
+# would always report ERROR (stale pattern) and permanently block this gate,
+# which is a worse failure mode than a documented gap.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> mutation(s) each turned their gate red             exit 0
+#   FAIL — <n> checked, <k> stayed green (vacuous gate): <names>  exit 1
+#   ERROR — <r>/<n> turned red, <v> vacuous, <k> stale or
+#           unclassifiable (mutation table out of sync): <names> exit 2
+#
+# ERROR outranks FAIL (a mutation this gate cannot currently verify is worse
+# than one it verified and found bad) and covers: a mutation's sed pattern no
+# longer matching the live source exactly once — either 0 matches (stale, the
+# source moved since this row was written) or >1 (ambiguous, sed would touch
+# the wrong occurrence) — or a spec run producing no `SPEC FILE VERDICT:`
+# line at all (crashed before finishing, wrong path, etc.) so its outcome
+# cannot be classified. The count in the ERROR line is honest about how many
+# other mutations DID get checked; it never claims "nothing was checked" when
+# some rows ran fine.
+#
+# --selftest runs unconditionally and fatally before every real invocation
+# (same convention as scripts/check/check-link-corpus-baseline.shs): synthetic
+# fixtures in a throwaway git repo, with a fake spec-runner function standing
+# in for `$SIMPLE_BIN test`, prove (a) a mutation whose fake runner reports
+# green is classified VACUOUS/FAIL, (b) a mutation whose pattern is not found
+# is classified STALE/ERROR, (c) a fake runner producing no verdict line is
+# classified ERROR, and (d) a mutation whose fake runner reports red is
+# classified RED/PASS. No real .spl file, no real $SIMPLE_BIN, and no full
+# repo worktree are needed for the selftest, so it is fast and hermetic.
+set -u
+
+SELF=check-link-mutation-gates
+
+die_error() {
+    echo "$SELF: ERROR — nothing was checked ($*)"
+    exit 2
+}
+
+SIMPLE_BIN_DEFAULT="/home/yoon/dev/simple/bin/simple"
+SIMPLE_BIN="${MUTATION_GATE_SIMPLE_BIN:-$SIMPLE_BIN_DEFAULT}"
+SPEC_TIMEOUT="${MUTATION_GATE_TIMEOUT:-120}"
+
+# ============================================================================
+# Mutation table: name|relfile|pattern|replacement|spec|runner_fn
+#
+# `pattern`/`replacement` are sed BRE fragments applied as
+# `sed -i "s/${pattern}/${replacement}/"` against exactly one line; every row
+# here was hand-verified (2026-09-19) to (a) match exactly once in the live
+# source and (b) turn the named spec red when applied, then restored clean.
+# `|` cannot appear in any field (used as the table delimiter); none do.
+# ============================================================================
+MUTATIONS='
+archive_fixpoint_single_pass|src/compiler/70.backend/linker/elf/archive_closure.spl|while changed:|while changed and passes == 0:|test/01_unit/compiler/backend/linker/elf_archive_closure_spec.spl|do_real_spec_run
+reloc_call26_mask_not_reject|src/compiler/70.backend/linker/reloc_engine.spl|if v < -134217728 or v >= 134217728:|if false:|test/01_unit/compiler/backend/linker/reloc_engine_spec.spl|do_real_spec_run
+sym_resolver_skip_strong_duplicate|src/compiler/70.backend/linker/sym_resolver.spl|if is_strong(existing) and is_strong(entry):|if false:|test/01_unit/compiler/backend/linker/sym_resolver_spec.spl|do_real_spec_run
+smf_reloc_oracle_out_of_range_ok|src/compiler/70.backend/linker/gpu_smf/smf_reloc_formulas.spl|(v >= SMF_RELOC_I32_MIN) and (v <= SMF_RELOC_I32_MAX)|true|test/01_unit/compiler/linker/gpu_smf/smf_reloc_formulas_spec.spl|do_real_spec_run
+loader_reloc_value_bypass_reject|src/compiler/99.loader/module_loader_compat.spl|if computed.ok:|if true:|test/01_unit/compiler/loader/loader_reloc_oracle_spec.spl|do_real_spec_run
+simple_linker_internal_no_longer_errors|src/compiler/70.backend/linker/mold.spl|return Err("internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf")|return Ok("internal")|test/01_unit/compiler/backend/linker/link_engine_external_spec.spl|do_real_spec_run
+link_policy_bounded_limit_zero_accepted|src/lib/common/linker/link_policy_v1.spl|if is_bounded and policy.job_memory_limit_bytes == 0:|if false:|test/01_unit/lib/common/linker/link_policy_v1_spec.spl|do_real_spec_run
+'
+
+do_real_spec_run() {
+    # $1 = spec path, relative to cwd (caller has already cd'd into the worktree root).
+    timeout "$SPEC_TIMEOUT" "$SIMPLE_BIN" test --no-session-daemon "$1" 2>&1
+}
+
+# Classifies a `SPEC FILE VERDICT:` line. Prints one of RED / GREEN to
+# stdout; prints nothing and returns 1 if the line does not parse.
+classify_verdict_line() {
+    line=$1
+    outcome=$(printf '%s' "$line" | sed -n 's/.*outcome=\([A-Z_]*\).*/\1/p')
+    failed=$(printf '%s' "$line" | sed -n 's/.*failed=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$outcome" ] || return 1
+    failed=${failed:-0}
+    if [ "$outcome" = "OK" ] && [ "$failed" -eq 0 ]; then
+        echo GREEN
+    else
+        echo RED
+    fi
+}
+
+# Applies one mutation row inside $2 (a git working tree), runs its spec via
+# the named runner function, restores the file, and reports a classification.
+# Returns: 0 = RED (mutation caught, good) / 1 = VACUOUS (stayed green,
+# FAIL) / 2 = STALE-or-unclassifiable (ERROR).
+run_mutation() {
+    name=$1; root=$2; relfile=$3; pattern=$4; replacement=$5; spec=$6; runner_fn=$7
+    file="$root/$relfile"
+    if [ ! -f "$file" ]; then
+        echo "STALE $name — file not found: $relfile"
+        return 2
+    fi
+    nmatch=$(grep -c -- "$pattern" "$file")
+    if [ "$nmatch" -eq 0 ]; then
+        echo "STALE $name — pattern not found in $relfile: $pattern"
+        return 2
+    fi
+    if [ "$nmatch" -gt 1 ]; then
+        echo "STALE $name — pattern matches $nmatch times in $relfile (ambiguous, expected exactly 1): $pattern"
+        return 2
+    fi
+    ( cd "$root" && sed -i "s/${pattern}/${replacement}/" "$relfile" ) \
+        || { echo "STALE $name — sed failed to apply against $relfile"; return 2; }
+    out=$( cd "$root" && "$runner_fn" "$spec" 2>&1 )
+    ( cd "$root" && git checkout -- "$relfile" ) 2>/dev/null
+    verdict_line=$(printf '%s\n' "$out" | grep "SPEC FILE VERDICT:" | tail -1)
+    if [ -z "$verdict_line" ]; then
+        echo "ERROR $name — spec produced no SPEC FILE VERDICT line for $spec; cannot classify"
+        return 2
+    fi
+    cls=$(classify_verdict_line "$verdict_line")
+    if [ -z "$cls" ]; then
+        echo "ERROR $name — unparseable verdict line: $verdict_line"
+        return 2
+    fi
+    if [ "$cls" = "GREEN" ]; then
+        echo "VACUOUS $name — $spec stayed green under mutation: $verdict_line"
+        return 1
+    fi
+    echo "RED $name — $spec turned red as expected: $verdict_line"
+    return 0
+}
+
+# Runs every row of a mutation table ($1, same 6-field '|'-delimited format
+# as MUTATIONS) against worktree root $2. Prints one classification line per
+# mutation, then the aggregate verdict. Returns 0/1/2 per the file header's
+# verdict convention.
+run_all_mutations() {
+    table=$1
+    root=$2
+    n=0
+    n_red=0
+    n_vacuous=0
+    n_error=0
+    vacuous_names=""
+    error_names=""
+    IFS='
+'
+    for row in $table; do
+        unset IFS
+        [ -n "$row" ] || { IFS='
+'; continue; }
+        name=$(printf '%s' "$row" | cut -d'|' -f1)
+        relfile=$(printf '%s' "$row" | cut -d'|' -f2)
+        pattern=$(printf '%s' "$row" | cut -d'|' -f3)
+        replacement=$(printf '%s' "$row" | cut -d'|' -f4)
+        spec=$(printf '%s' "$row" | cut -d'|' -f5)
+        runner_fn=$(printf '%s' "$row" | cut -d'|' -f6)
+        n=$((n + 1))
+        line=$(run_mutation "$name" "$root" "$relfile" "$pattern" "$replacement" "$spec" "$runner_fn")
+        rc=$?
+        printf '%s\n' "$line"
+        case $rc in
+            0) n_red=$((n_red + 1)) ;;
+            1) n_vacuous=$((n_vacuous + 1)); vacuous_names="$vacuous_names $name" ;;
+            2) n_error=$((n_error + 1)); error_names="$error_names $name" ;;
+        esac
+        IFS='
+'
+    done
+    unset IFS
+
+    if [ "$n" -eq 0 ]; then
+        echo "ERROR — nothing was checked (empty mutation table)"
+        return 2
+    fi
+    if [ "$n_error" -gt 0 ]; then
+        echo "ERROR — $n_red/$n turned red, $n_vacuous vacuous, $n_error stale or unclassifiable (mutation table out of sync with source):$error_names"
+        return 2
+    fi
+    if [ "$n_vacuous" -gt 0 ]; then
+        echo "FAIL — $n mutation(s) checked, $n_vacuous stayed green (vacuous gate):$vacuous_names"
+        return 1
+    fi
+    echo "PASS — $n mutation(s) each turned their gate red"
+    return 0
+}
+
+# --- real dispatch ------------------------------------------------------------
+run_real_check() {
+    command -v git >/dev/null 2>&1 || die_error "git is not on PATH"
+    [ -x "$SIMPLE_BIN" ] || [ -f "$SIMPLE_BIN" ] \
+        || die_error "SIMPLE_BIN '$SIMPLE_BIN' does not exist (override with MUTATION_GATE_SIMPLE_BIN)"
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || die_error "not inside a git work tree"
+
+    wt=$(mktemp -d /tmp/link-mutation-gates.XXXXXX) || die_error "mktemp failed"
+    cleanup() { git worktree remove --force "$wt" >/dev/null 2>&1; rm -rf "$wt" 2>/dev/null; }
+    trap cleanup EXIT INT TERM
+
+    if ! git worktree add --detach "$wt" HEAD >/dev/null 2>&1; then
+        rm -rf "$wt" 2>/dev/null
+        die_error "git worktree add failed (is HEAD checked out elsewhere or dirty in a way git rejects?)"
+    fi
+
+    out=$(run_all_mutations "$MUTATIONS" "$wt")
+    rc=$?
+    printf '%s\n' "$out"
+    exit $rc
+}
+
+# --- selftest -----------------------------------------------------------------
+fake_runner_red() {
+    printf '%s\n' '[31m2 examples, 1 failure[0m'
+    printf '%s\n' "SPEC FILE VERDICT: $1 outcome=ERROR declared>=2 executed=2 passed=1 failed=1 skipped=0 dropped=0"
+}
+fake_runner_green() {
+    printf '%s\n' '[32m2 examples, 0 failures[0m'
+    printf '%s\n' "SPEC FILE VERDICT: $1 outcome=OK declared>=2 executed=2 passed=2 failed=0 skipped=0 dropped=0"
+}
+fake_runner_none() {
+    printf '%s\n' "process crashed before printing a verdict line"
+}
+
+run_selftest() {
+    td=$(mktemp -d) || die_error "mktemp failed"
+    trap 'rm -rf "$td"' EXIT
+
+    git init -q "$td" || { echo "SELFTEST FAIL: git init failed"; exit 2; }
+    printf 'val THRESHOLD: i64 = 10\nfn guard(v: i64) -> bool:\n    v < THRESHOLD\n' > "$td/src.spl"
+    : > "$td/fake_spec.spl"
+    ( cd "$td" && git add -A && git -c user.email=x@x -c user.name=x commit -q -m init ) \
+        || { echo "SELFTEST FAIL: git commit failed"; exit 2; }
+
+    # 1. RED case: fake_runner_red reports the spec failed -> mutation caught.
+    line=$(run_mutation fx_red "$td" src.spl "v < THRESHOLD" "v < THRESHOLD or true" fake_spec.spl fake_runner_red)
+    rc=$?
+    case "$line" in
+        "RED "*) : ;;
+        *) echo "SELFTEST FAIL: red fixture not classified RED: $line"; exit 2 ;;
+    esac
+    [ "$rc" -eq 0 ] || { echo "SELFTEST FAIL: red fixture rc=$rc, want 0"; exit 2; }
+    grep -q "v < THRESHOLD$" "$td/src.spl" || { echo "SELFTEST FAIL: red fixture did not restore src.spl"; exit 2; }
+
+    # 2. VACUOUS case: fake_runner_green reports the spec still passed -> FAIL.
+    line=$(run_mutation fx_green "$td" src.spl "v < THRESHOLD" "v < THRESHOLD or true" fake_spec.spl fake_runner_green)
+    rc=$?
+    case "$line" in
+        "VACUOUS "*) : ;;
+        *) echo "SELFTEST FAIL: green fixture not classified VACUOUS: $line"; exit 2 ;;
+    esac
+    [ "$rc" -eq 1 ] || { echo "SELFTEST FAIL: green fixture rc=$rc, want 1"; exit 2; }
+
+    # 3. STALE case: pattern that was never in the file -> ERROR, no mutation applied.
+    line=$(run_mutation fx_stale "$td" src.spl "this pattern does not exist anywhere" "x" fake_spec.spl fake_runner_red)
+    rc=$?
+    case "$line" in
+        "STALE "*) : ;;
+        *) echo "SELFTEST FAIL: stale fixture not classified STALE: $line"; exit 2 ;;
+    esac
+    [ "$rc" -eq 2 ] || { echo "SELFTEST FAIL: stale fixture rc=$rc, want 2"; exit 2; }
+
+    # 3b. Ambiguous pattern: "THRESHOLD" matches twice in src.spl (the decl
+    #     and the use) -> STALE/ERROR, never silently picks one occurrence.
+    line=$(run_mutation fx_ambiguous "$td" src.spl "THRESHOLD" "CEILING" fake_spec.spl fake_runner_red)
+    rc=$?
+    case "$line" in
+        "STALE "*"2 times"*) : ;;
+        *) echo "SELFTEST FAIL: ambiguous-pattern fixture not classified STALE naming the count: $line"; exit 2 ;;
+    esac
+    [ "$rc" -eq 2 ] || { echo "SELFTEST FAIL: ambiguous-pattern fixture rc=$rc, want 2"; exit 2; }
+    grep -q "THRESHOLD" "$td/src.spl" || { echo "SELFTEST FAIL: ambiguous-pattern fixture mutated src.spl despite refusing"; exit 2; }
+
+    # 4. No-verdict-line case: fake_runner_none -> ERROR (unclassifiable).
+    line=$(run_mutation fx_none "$td" src.spl "v < THRESHOLD" "v < THRESHOLD or true" fake_spec.spl fake_runner_none)
+    rc=$?
+    case "$line" in
+        "ERROR "*) : ;;
+        *) echo "SELFTEST FAIL: no-verdict fixture not classified ERROR: $line"; exit 2 ;;
+    esac
+    [ "$rc" -eq 2 ] || { echo "SELFTEST FAIL: no-verdict fixture rc=$rc, want 2"; exit 2; }
+
+    # 5. Aggregate: a 2-row table (1 red, 1 vacuous) must report overall FAIL
+    #    naming the vacuous row, proving run_all_mutations' own rollup (not
+    #    just run_mutation) reaches the right verdict and precedence.
+    table="
+fx_red|src.spl|v < THRESHOLD|v < THRESHOLD or true|fake_spec.spl|fake_runner_red
+fx_green|src.spl|v < THRESHOLD|v < THRESHOLD or true|fake_spec.spl|fake_runner_green
+"
+    out=$(run_all_mutations "$table" "$td")
+    rc=$?
+    case "$out" in
+        *"FAIL"*"fx_green"*) : ;;
+        *) echo "SELFTEST FAIL: aggregate 2-row table did not FAIL naming fx_green: $out"; exit 2 ;;
+    esac
+    [ "$rc" -eq 1 ] || { echo "SELFTEST FAIL: aggregate 2-row table rc=$rc, want 1"; exit 2; }
+
+    # 6. Aggregate: an all-red table must report overall PASS.
+    table_ok="
+fx_red|src.spl|v < THRESHOLD|v < THRESHOLD or true|fake_spec.spl|fake_runner_red
+"
+    out=$(run_all_mutations "$table_ok" "$td")
+    rc=$?
+    case "$out" in
+        *"PASS"*) : ;;
+        *) echo "SELFTEST FAIL: all-red table did not PASS: $out"; exit 2 ;;
+    esac
+    [ "$rc" -eq 0 ] || { echo "SELFTEST FAIL: all-red table rc=$rc, want 0"; exit 2; }
+
+    # 7. Aggregate precedence: a table with one RED row and one STALE row
+    #    must report overall ERROR (stale outranks a red pass elsewhere),
+    #    with an honest count (not "nothing was checked" when 1/2 did run).
+    table_mixed="
+fx_red|src.spl|v < THRESHOLD|v < THRESHOLD or true|fake_spec.spl|fake_runner_red
+fx_stale|src.spl|this pattern does not exist anywhere|x|fake_spec.spl|fake_runner_red
+"
+    out=$(run_all_mutations "$table_mixed" "$td")
+    rc=$?
+    case "$out" in
+        *"ERROR"*"1/2 turned red"*"fx_stale"*) : ;;
+        *) echo "SELFTEST FAIL: red+stale table did not ERROR honestly naming fx_stale: $out"; exit 2 ;;
+    esac
+    [ "$rc" -eq 2 ] || { echo "SELFTEST FAIL: red+stale table rc=$rc, want 2"; exit 2; }
+
+    rm -rf "$td"
+    trap - EXIT
+    echo "SELFTEST PASS — 7 fixture(s) checked"
+}
+
+# --- entry point ----------------------------------------------------------
+mode=""
+for a in "$@"; do
+    case "$a" in
+        --selftest) mode=selftest ;;
+        --list)
+            printf '%s\n' "$MUTATIONS" | sed '/^$/d'
+            exit 0
+            ;;
+        *) die_error "unknown argument: $a (use --selftest or --list)" ;;
+    esac
+done
+
+run_selftest
+sr=$?
+[ "$sr" -eq 0 ] || exit 2
+
+if [ "$mode" = "selftest" ]; then
+    exit 0
+fi
+
+run_real_check

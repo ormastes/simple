@@ -5,11 +5,41 @@
 # operation selection. Every operation is routed to the recorded instance;
 # unsupported operations fail closed.
 
-use std.fs_driver.types.{Path, StatInfo, FileStat, FileHandle, DirHandle, DirEntry, OpenFlags}
+use std.fs_driver.types.{Path, StatInfo, FileStat, FileHandle, DirHandle, DirEntry, OpenFlags, MountOptions}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{FsCapabilitySet}
 use std.fs_driver.bytes_util.{alloc_zeroed_bytes, text_to_bytes_pure}
+
+fn _driver_mount(driver: DriverInstance, opts: MountOptions) -> Result<DriverInstance, FsError>:
+    """Mount the backend before it is registered in the table.
+
+    Only FAT32 and RamFS declare a real mount()/mounted gate (Nvfs, NvfsPosix,
+    and DbFs are always-ready from construction and expose no mount() at all),
+    so those two are the only cases dispatched to a real call; the rest are a
+    deliberate no-op Ok(driver).
+
+    Returns the (possibly mutated) DriverInstance rather than (): struct
+    parameters are value types here, so a `me fn mount()` called on the `d`
+    bound inside a match arm mutates only that local copy — the caller must
+    rebuild the DriverInstance from the mutated copy and use THAT value, not
+    the original `driver` argument, or the `mounted` flag never reaches the
+    entry stored in MountTable.mounts.
+    """
+    match driver:
+        case DriverInstance.Fat32(d):
+            var mutable_d = d
+            val rc = mutable_d.mount(opts)
+            if rc.is_err(): return Err(rc.unwrap_err())
+            Ok(DriverInstance.Fat32(mutable_d))
+        case DriverInstance.Nvfs(d):      Ok(driver)
+        case DriverInstance.NvfsPosix(d): Ok(driver)
+        case DriverInstance.RamFs(d):
+            var mutable_d = d
+            val rc = mutable_d.mount(opts)
+            if rc.is_err(): return Err(rc.unwrap_err())
+            Ok(DriverInstance.RamFs(mutable_d))
+        case DriverInstance.DbFs(d):      Ok(driver)
 
 fn _bytes_to_text_prefix(buf: [u8], count: i64) -> text:
     var out = ""

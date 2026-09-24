@@ -1,4 +1,9 @@
 # Implicit-self field assignment is still a SILENT no-op in plain `fn` methods
+## Closed 2026-09-16 — Status FIXED (AST interpreter) 2026-08-31 with fail-before/pass-after guard probes; small residual noted
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-31
 **Status:** FIXED (AST interpreter) 2026-08-31 — one residual, see below
@@ -109,3 +114,4 @@ interpreter-only in the guard rather than omitted.
 
 Note `count += 1` (AugAssign on a bare field name) was checked and is NOT a
 hole: it already fails loudly with ``variable `count` not found``.
+

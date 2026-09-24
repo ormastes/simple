@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Windows bootstrap entrypoint for Git Bash/MSYS2. The shared POSIX wrapper
-# owns the pipeline so Windows follows the same pure-Simple/full-build policy.
+# Windows bootstrap entrypoint for Git Bash/MSYS2. Windows bootstrap uses
+# Clang: clang-cl for the MSVC default and target-qualified clang with llvm-ar
+# for --mingw. Keep each lane bound to its C driver.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-abi="${SIMPLE_WINDOWS_ABI:-}"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
+. "${script_dir}/bootstrap-windows-cl-mode.shs"
+bootstrap_windows_preserve_cl_mode
+abi="${SIMPLE_WINDOWS_ABI:-msvc}"
 forward=()
 
 for arg in "$@"; do
@@ -22,6 +26,17 @@ case "${abi}" in
   *) echo "error: SIMPLE_WINDOWS_ABI must be gnu or msvc" >&2; exit 1 ;;
 esac
 
+# Populate the recorded SPipe gitlink before materializing symlinks.  Several
+# tracked documentation links resolve inside it, so the strict materializer
+# must see the checked-out target rather than classify it as an unexpected
+# pending link.  `git submodule update` uses the superproject's recorded
+# commit; it does not follow a remote branch and leaves a dirty initialized
+# checkout alone when Git refuses an unsafe update.
+git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
+  echo "error: cannot initialize recorded .spipe/spipe gitlink" >&2
+  exit 1
+}
+
 # Materialize git symlinks as NTFS junctions/hardlinks before anything else
 # reads the tree. A checkout done by a Windows session that lacks a
 # fresh-logon SeCreateSymbolicLinkPrivilege token (see
@@ -32,8 +47,14 @@ esac
 # nothing, breaking the loader in confusing ways far from this root cause.
 # No-op, fast, and idempotent on a checkout where symlinks already resolved
 # correctly (e.g. an elevated or Developer-Mode-since-logon session).
-sh "${script_dir}/../setup/materialize-symlinks-windows.shs" "${script_dir}/../.." || {
-  echo "warning: symlink materialization reported failures; continuing, but the build may hit missing-source errors below" >&2
+materialized_receipt_dir="${repo_root}/build/bootstrap/materialized-links"
+materialized_receipt="${materialized_receipt_dir}/windows-materialized-links.$$.env"
+umask 077
+export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="${materialized_receipt}"
+bash "${script_dir}/../setup/materialize-symlinks-windows.shs" \
+  --strict-missing --receipt "${materialized_receipt}" "${repo_root}" || {
+  echo "error: required Windows symlink materialization failed; see ${materialized_receipt}" >&2
+  exit 1
 }
 
 exec sh "${script_dir}/bootstrap-from-scratch.sh" "${forward[@]}"

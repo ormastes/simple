@@ -1,0 +1,267 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+
+# Seed interpreter while-loop SHAPE PARITY budget.
+#
+# `exec_while` (src/compiler_rust/compiler/src/interpreter_control.rs) opens with
+# a battery of native "matchers" that execute a recognised loop shape as a Rust
+# loop instead of walking the AST. Before the fix pinned here the battery keyed on
+# the assignment being *exactly* a call:
+#
+#     acc = add(acc, i)        -> matched, ~3 ns/iteration
+#     acc = acc + add(i, 0)    -> matched NOTHING, ~4.5 us/iteration
+#
+# Two loops with identical semantics differed by ~47x, and `x = x + f(y)` is the
+# accumulate idiom `src/lib/common/**` is written in.
+# See doc/08_tracking/bug/interpreter_while_loop_fast_path_shape_cliff_2026-09-12.md
+#
+# The fix generalises the matcher to an inline INTEGER EXPRESSION (a post-order
+# step list over Add/Sub/Mul and inlinable single-expression helpers) instead of
+# adding one more literal shape. This spec therefore asserts BOTH halves:
+#
+#   perf      - the slow shape stays within 3x of the fast shape, and under an
+#               absolute us/iteration bound derived from the fast shape;
+#   semantics - wrapping i64 overflow agrees with the generic AST walk, nested
+#               helpers agree with the generic walk, and the matcher DECLINES
+#               (counter stays 0) on global capture, over-budget nesting and
+#               division.
+#
+# Non-vacuity: every child runs under SIMPLE_PERF_COUNTERS=1 with
+# SIMPLE_PERF_COUNTERS_OUT. A run whose counters file has no
+# `interp-perf-counters:` header, whose RESULT line is missing, or whose
+# iteration count is 0, FAILS - it is not silently treated as a pass.
+
+use std.spec.step
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val PERF_N = 2000000
+val SEM_N = 1000
+val FIXTURES = "test/05_perf/interp/fixtures/while_shape"
+
+# --- process plumbing -------------------------------------------------------
+
+fn sh(script: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", script])
+
+fn path_is_exec(p: text) -> bool:
+    if p.len() == 0:
+        return false
+    val (_o, _e, code) = sh("test -x '" + p + "'")
+    code == 0
+
+# Resolve the interpreter under test. `SIMPLE_PERF_SELF_BIN` wins so a lane can
+# point this spec at the candidate seed it just built; otherwise the usual
+# in-tree locations are probed. Returns "" when nothing is runnable, which the
+# scenarios turn into a FAIL rather than a skip.
+#
+# NOTE: `{` and `}` inside a Simple text literal are INTERPOLATION, so no shell
+# snippet in this file may use `${VAR}` / `${VAR:-default}` / `\{n,m\}`. Use
+# `$VAR`, an explicit `[ -n "$x" ] || x=-1` default, and `sed -E`.
+fn simple_binary() -> text:
+    val (env_out, _e, _c) = sh("printf %s \"$SIMPLE_PERF_SELF_BIN\"")
+    val override = env_out.trim()
+    if path_is_exec(override):
+        return override
+    val candidates = [
+        "src/compiler_rust/target/release/simple",
+        "bin/release/x86_64-unknown-linux-gnu/simple",
+        "bin/release/aarch64-unknown-linux-gnu/simple",
+        "bin/release/linux-x86_64/simple",
+        "bin/simple",
+    ]
+    for c in candidates:
+        if path_is_exec(c):
+            return c
+    ""
+
+struct RunOut:
+    ok: i64
+    elapsed_us: i64
+    acc: text
+    iters: i64
+    header: i64
+    counter: i64
+    rc: i64
+    raw: text
+
+# Run one fixture in a child process with the perf counters armed, and bring
+# back seven machine-readable fields.
+#
+# All extraction happens in the CHILD SHELL, and every numeric field is emitted
+# as a digit string with -1 as the "not found" sentinel, because
+# `text.to_i64()` in this seed NEVER fails: it returns 0 for "" and "abc" and
+# the character code for a one-character string ("X" -> 88), so a `?? default`
+# fallback is dead code and an unparseable field would arrive as a plausible
+# number. See doc/08_tracking/bug/text_to_i64_never_nil_2026-09-12.md.
+# The separate `ok` flag is the only thing this spec trusts to mean "the child
+# actually produced a RESULT line".
+fn run_fixture(binary: text, fixture: text) -> RunOut:
+    val script = "d=$(mktemp -d) || exit 9; "
+        + "SIMPLE_EXECUTION_MODE=interpreter SIMPLE_PERF_COUNTERS=1 "
+        + "SIMPLE_PERF_COUNTERS_OUT=\"$d/c.txt\" "
+        + "timeout 600 '" + binary + "' run '" + fixture + "' > \"$d/o.txt\" 2>\"$d/e.txt\"; rc=$?; "
+        + "line=$(grep -m1 '^RESULT ' \"$d/o.txt\" 2>/dev/null); "
+        + "el=$(printf '%s' \"$line\" | sed -nE 's/.*elapsed_us=(-?[0-9]+).*/\\1/p'); "
+        + "ac=$(printf '%s' \"$line\" | sed -nE 's/.*acc=(-?[0-9]+).*/\\1/p'); "
+        + "it=$(printf '%s' \"$line\" | sed -nE 's/.*iters=(-?[0-9]+).*/\\1/p'); "
+        + "hd=$(grep -c 'interp-perf-counters:' \"$d/c.txt\" 2>/dev/null); "
+        + "ct=$(sed -nE 's/^ +WHILE_INLINE_INT_ITERS +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "ok=1; "
+        + "[ -n \"$el\" ] || ok=0; [ -n \"$ac\" ] || ok=0; [ -n \"$it\" ] || ok=0; "
+        + "[ -n \"$el\" ] || el=-1; [ -n \"$ac\" ] || ac=-1; [ -n \"$it\" ] || it=-1; "
+        + "[ -n \"$hd\" ] || hd=-1; [ -n \"$ct\" ] || ct=-1; "
+        + "printf '%s|%s|%s|%s|%s|%s|%s' \"$ok\" \"$el\" \"$ac\" \"$it\" \"$hd\" \"$ct\" \"$rc\"; "
+        + "rm -rf \"$d\""
+    val (out, _err, _code) = sh(script)
+    val parts = out.trim().split("|")
+    if parts.len() != 7:
+        return RunOut(ok: 0, elapsed_us: -1, acc: "", iters: -1, header: -1, counter: -1, rc: -1, raw: out)
+    val ok = parts[0].trim().to_i64() ?? -1
+    val el = parts[1].trim().to_i64() ?? -1
+    val it = parts[3].trim().to_i64() ?? -1
+    val hd = parts[4].trim().to_i64() ?? -1
+    val ct = parts[5].trim().to_i64() ?? -1
+    val rc = parts[6].trim().to_i64() ?? -1
+    RunOut(ok: ok, elapsed_us: el, acc: parts[2].trim(), iters: it, header: hd, counter: ct, rc: rc, raw: out)
+
+# Fail-closed gate every scenario runs on its result before asserting anything
+# else: the child must have exited 0, emitted a counters block, and reported the
+# iteration count the fixture was written for.
+fn assert_ran(tag: text, r: RunOut, expect_iters: i64):
+    print "[perf] {tag}: ok={r.ok} rc={r.rc} iters={r.iters} elapsed_us={r.elapsed_us} counters_header={r.header} WHILE_INLINE_INT_ITERS={r.counter} acc={r.acc}"
+    expect(r.raw.len() > 0).to_equal(true)
+    expect(r.ok).to_equal(1)
+    expect(r.rc).to_equal(0)
+    # The counters block must be present: SIMPLE_PERF_COUNTERS_OUT is always
+    # written when the dump runs, and its absence means the child never reached
+    # a counted site, so nothing below can be trusted.
+    expect(r.header).to_equal(1)
+    # Non-vacuity: the loop must have run the iterations the fixture declares.
+    expect(r.iters).to_equal(expect_iters)
+    # -1 means the WHILE_INLINE_INT_ITERS row was missing from the report.
+    expect(r.counter >= 0).to_equal(true)
+
+# PERF-1 measured a ~25% single-sample flake rate for ratio probes on this host
+# (doc/08_tracking/bug/perf_ratio_specs_single_sample_flake_2026-09-12.md), so
+# every timed shape is sampled twice and the faster sample is used. Both samples
+# must be positive, so a zero-duration capture fails closed.
+fn best_of_two(binary: text, fixture: text, tag: text) -> i64:
+    val a = run_fixture(binary, fixture)
+    assert_ran(tag + "#1", a, PERF_N)
+    val b = run_fixture(binary, fixture)
+    assert_ran(tag + "#2", b, PERF_N)
+    expect(a.elapsed_us > 0).to_equal(true)
+    expect(b.elapsed_us > 0).to_equal(true)
+    expect(a.counter).to_equal(PERF_N)
+    expect(b.counter).to_equal(PERF_N)
+    if a.elapsed_us < b.elapsed_us:
+        return a.elapsed_us
+    b.elapsed_us
+
+describe "seed interpreter: equivalent while-loop shapes cost the same":
+    # @manual scenario evidence
+    it "`acc = acc + f(i, 0)` stays within 3x of `acc = f(acc, i)`":
+        step("`acc = acc + f(i, 0)` stays within 3x of `acc = f(acc, i)`")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        val fast = best_of_two(binary, FIXTURES + "/shape_fast.spl", "shape_fast")
+        val slow = best_of_two(binary, FIXTURES + "/shape_slow_right.spl", "shape_slow_right")
+        print "[perf] shape parity: fast={fast}us slow={slow}us n={PERF_N}"
+        # Ratio bound derived from the fast shape: slow <= 3 * fast.
+        expect(slow <= fast * 3).to_equal(true)
+        # Absolute bound, independent of the fast sample so it still bites if
+        # BOTH shapes regress together: 0.5 us/iteration, i.e.
+        # slow_us <= PERF_N / 2. The pre-fix slow shape measured ~4.5 us/iter,
+        # ~9x over this ceiling.
+        expect(slow * 2 <= PERF_N).to_equal(true)
+
+    # @manual scenario evidence
+    it "`acc = f(i, 0) + acc` stays within 3x of `acc = f(acc, i)`":
+        step("`acc = f(i, 0) + acc` stays within 3x of `acc = f(acc, i)`")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        val fast = best_of_two(binary, FIXTURES + "/shape_fast.spl", "shape_fast")
+        val slow = best_of_two(binary, FIXTURES + "/shape_slow_left.spl", "shape_slow_left")
+        print "[perf] shape parity (call on the left): fast={fast}us slow={slow}us n={PERF_N}"
+        expect(slow <= fast * 3).to_equal(true)
+        expect(slow * 2 <= PERF_N).to_equal(true)
+
+describe "seed interpreter: the inline-integer matcher agrees with the generic walk":
+    # @manual scenario evidence
+    it "wrapping i64 overflow is identical across fast, generalised and generic paths":
+        step("wrapping i64 overflow is identical across fast, generalised and generic paths")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        # `fast_int_binop` (interpreter/expr/ops.rs:127) wraps Add/Sub/Mul, and
+        # so must every matcher. acc starts 7 below i64::MAX and the loop adds
+        # sum(0..999) = 499500, so all three must land on the same wrapped value.
+        val f = run_fixture(binary, FIXTURES + "/ovf_fast.spl")
+        assert_ran("ovf_fast", f, SEM_N)
+        val s = run_fixture(binary, FIXTURES + "/ovf_slow.spl")
+        assert_ran("ovf_slow", s, SEM_N)
+        val g = run_fixture(binary, FIXTURES + "/ovf_generic.spl")
+        assert_ran("ovf_generic", g, SEM_N)
+        print "[perf] overflow: fast={f.acc} generalised={s.acc} generic={g.acc}"
+        expect(f.acc.len() > 0).to_equal(true)
+        expect(f.acc).to_equal(g.acc)
+        expect(s.acc).to_equal(g.acc)
+        # The generic oracle must genuinely be generic: it may not have been
+        # executed by an inline-integer matcher.
+        expect(g.counter).to_equal(0)
+        # ... and both accelerated shapes must genuinely have been accelerated.
+        expect(f.counter).to_equal(SEM_N)
+        expect(s.counter).to_equal(SEM_N)
+
+    # @manual scenario evidence
+    it "a nested inlinable helper is accelerated and agrees with the generic walk":
+        step("a nested inlinable helper is accelerated and agrees with the generic walk")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        val p = run_fixture(binary, FIXTURES + "/pos_nested.spl")
+        assert_ran("pos_nested", p, SEM_N)
+        val o = run_fixture(binary, FIXTURES + "/pos_nested_oracle.spl")
+        assert_ran("pos_nested_oracle", o, SEM_N)
+        print "[perf] nested: accelerated={p.acc} generic={o.acc}"
+        expect(p.acc.len() > 0).to_equal(true)
+        expect(p.acc).to_equal(o.acc)
+        expect(p.counter).to_equal(SEM_N)
+        expect(o.counter).to_equal(0)
+
+    # @manual scenario evidence
+    it "declines a helper that captures a module global":
+        step("declines a helper that captures a module global")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        val r = run_fixture(binary, FIXTURES + "/neg_global_capture.spl")
+        assert_ran("neg_global_capture", r, SEM_N)
+        # `biased(a, b) = a + BIAS` reads a module global. Inlining would bind
+        # BIAS in the CALLER frame, so the matcher must decline outright.
+        expect(r.counter).to_equal(0)
+        # sum over i in 0..999 of (i + 7) = 499500 + 7000
+        expect(r.acc).to_equal("506500")
+
+    # @manual scenario evidence
+    it "declines nesting deeper than the inline-expression budget":
+        step("declines nesting deeper than the inline-expression budget")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        val r = run_fixture(binary, FIXTURES + "/neg_deep_nesting.spl")
+        assert_ran("neg_deep_nesting", r, SEM_N)
+        expect(r.counter).to_equal(0)
+        # sum over i in 0..999 of (i + 8) = 499500 + 8000
+        expect(r.acc).to_equal("507500")
+
+    # @manual scenario evidence
+    it "declines division, whose error semantics the inline evaluator cannot reproduce":
+        step("declines division, whose error semantics the inline evaluator cannot reproduce")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        val r = run_fixture(binary, FIXTURES + "/neg_div_op.spl")
+        assert_ran("neg_div_op", r, SEM_N)
+        # The generic path raises a division-by-zero error for a zero divisor
+        # (interpreter/expr/ops.rs:131); a wrapping inline evaluator would not,
+        # so Div is outside the inlinable operator set.
+        expect(r.counter).to_equal(0)
+        # sum over i in 0..999 of (i / 2) = 249500
+        expect(r.acc).to_equal("249500")

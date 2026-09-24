@@ -1,4 +1,8 @@
 # wm_web_standards_showcase_gui host gets a real verdict — and it is FAIL (child-frame-timeout), not a hang
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open. **Severity:** blocks first dynamic pixel-delta verdict for
 `examples/06_io/ui/wm_web_standards_showcase_gui.spl` (lane U2, task #96 follow-up).
@@ -309,3 +313,4 @@ Expected if fixed: no `[jit-fallback] HIR lowering error ... resolved_backend`
 line; child styles 149 nodes within the 180s frame budget and the host prints
 a non-timeout verdict. If the fallback line still fires, the residual gap is
 in the seed's HIR lowering, not the .spl sources.
+

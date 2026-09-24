@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence recorded at PR #235 landing (2026-09-01)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Required by `.claude/rules/vcs.md` — landing on a divergence-delta PASS
 REQUIRES recording the pre-existing offender list. An unrecorded step-over is a
@@ -24,3 +28,4 @@ and removed 2 further orphaned mirror twins. The full offender list is at
 `/mnt/data/tmp/test_tree_divergence_preexisting.txt` as emitted by the helper.
 
 The backlog itself remains open and is not addressed here.
+

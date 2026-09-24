@@ -1,4 +1,9 @@
 # HIR: `void` type annotation unresolved on the native path (2026-08-22)
+## Closed 2026-09-16 — RESOLVED same day; void->Unit; regression spec 4/4 post-fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status: RESOLVED** (same day).
 
@@ -25,3 +30,4 @@ of its imported siblings; the actual source is
 `test/01_unit/compiler/hir/void_return_type_spec.spl` (mirrored): 3 of 4 examples
 fail pre-fix with the exact text (`-> void` local, imported-sibling signature,
 generic arg `Result<void, text>`); 4/4 post-fix.
+

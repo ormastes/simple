@@ -1,4 +1,8 @@
 # Seed JIT coverage on the self-hosted compiler: the premise was wrong — there is no per-function fallback
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-21
 **Status:** OPEN (census landed; both blockers filed as follow-ups)
@@ -423,3 +427,4 @@ passed / 52 failed — the same failure set as baseline (3 more tests pass).
    body's `i8` return, not the boxed entry.
 3. Scalar-boxing of a closure handle (refusal 3 above): `BoxInt` needs to see
    that its operand is a heap handle.
+

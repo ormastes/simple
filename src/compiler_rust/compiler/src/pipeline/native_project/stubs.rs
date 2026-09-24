@@ -6,8 +6,8 @@ use simple_common::target::TargetOS;
 
 use super::{effective_target, ModuleImports};
 use super::tools::{
-    find_c_compiler, find_runtime_library, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command,
-    target_c_compiler,
+    archive_create_command, find_archive_tool, find_c_compiler, find_runtime_library,
+    is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
 };
 
 pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
@@ -480,6 +480,34 @@ dangling and the source must be repaired.",
     ))
 }
 
+/// Refuse a freestanding weak stub for every unresolved pure-Simple module
+/// symbol. A missing `lib__*` or `os__*` provider is a closure failure, not a
+/// runtime compatibility symbol: fabricating a nil-returning body would turn a
+/// deterministic link error into silent kernel behavior.
+fn unresolved_simple_module_closure_report(
+    needs_stub: &[String],
+    defined: &std::collections::HashSet<String>,
+) -> Option<String> {
+    if let Some(report) = stale_module_move_report(needs_stub, defined) {
+        return Some(report);
+    }
+    let mut missing: Vec<&str> = needs_stub
+        .iter()
+        .filter_map(|symbol| simple_module_symbol_tail(symbol).map(|_| symbol.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    missing.sort_unstable();
+    Some(format!(
+        "freestanding link refused: {} pure-Simple module closure symbol(s) are undefined:\n  {}\n\
+A `lib__*` or `os__*` symbol must be supplied by the kernel closure; refusing to \
+fabricate a weak nil-returning stub.",
+        missing.len(),
+        missing.join("\n  ")
+    ))
+}
+
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
@@ -582,7 +610,7 @@ pub(crate) fn generate_stub_object_freestanding(
         .filter(|s| s != "main" && s != "_main")
         .collect();
 
-    // Stale-object-cache consistency check (runs BEFORE the unresolved-mode
+    // Pure-Simple closure consistency check (runs BEFORE the unresolved-mode
     // match, so `DeferToLinker` / `EmitStubs` cannot swallow it).
     //
     // An undefined `lib__*` / `os__*` symbol whose bare function name IS defined
@@ -597,7 +625,7 @@ pub(crate) fn generate_stub_object_freestanding(
     // (`cross_module_layout_fingerprint` in `native_project::mod`): it catches
     // the class even if a future key change regresses. It deliberately does NOT
     // touch the `rt_*` channels.
-    if let Some(report) = stale_module_move_report(&needs_stub, &defined) {
+    if let Some(report) = unresolved_simple_module_closure_report(&needs_stub, &defined) {
         return Err(report);
     }
 
@@ -1217,6 +1245,7 @@ the old fabricating behaviour.",
                 *s,
                 "rt_enum_new"
                     | "rt_enum_check_discriminant"
+                    | "rt_enum_check_variant"
                     | "rt_enum_id"
                     | "rt_enum_discriminant"
                     | "rt_enum_payload"
@@ -1236,8 +1265,133 @@ the old fabricating behaviour.",
         }
     }
 
-    #[cfg(target_os = "windows")]
     {
+        let target = effective_target();
+        if target.os == TargetOS::Windows {
+        // COFF archive extraction is object-granular.  Putting every strict
+        // compatibility trampoline in `_stubs.o` means that selecting one
+        // live alias also selects siblings whose targets may be unreachable.
+        // `/OPT:REF` then sees their relocations before it can discard them.
+        // Emit one real trampoline per archive member so the archive index is
+        // the liveness boundary.  This is deliberately strict-only: ordinary
+        // unresolved fallback keeps its historical C return-3 bodies.
+        if strict_no_stub_fallback {
+            let asm_cc = target_c_compiler(target);
+            let asm_cc_name = std::path::Path::new(&asm_cc)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&asm_cc)
+                .to_ascii_lowercase();
+            if asm_cc_name == "cl" {
+                return Err("strict Windows compatibility aliases require clang or clang-cl; cl.exe cannot assemble GAS trampoline sources".to_string());
+            }
+            let clang_driver = asm_cc_name.contains("clang");
+            let msvc_driver = asm_cc_name.contains("clang-cl");
+            let jmp = simple_common::platform::asm_helpers::asm_jmp_instruction(&target);
+            let mut members = Vec::with_capacity(needs_stub.len());
+
+            for (index, sym) in needs_stub.iter().enumerate() {
+                if !plat_config.is_valid_asm_label(sym) {
+                    continue;
+                }
+                let real_fn = resolve_defined_suffix_alias(sym, &defined).ok_or_else(|| {
+                    format!("strict Windows compatibility alias '{sym}' has no resolved target")
+                })?;
+                if !plat_config.is_valid_asm_label(&real_fn) {
+                    return Err(format!(
+                        "strict Windows compatibility alias target '{real_fn}' is not a valid assembly label"
+                    ));
+                }
+
+                let source = temp_dir.join(format!("_compat_alias_{index}.s"));
+                let object = temp_dir.join(format!("_compat_alias_{index}.obj"));
+                let section = format!(".text$compat_alias_{index}");
+                // The one-member-per-alias archive is the COFF liveness
+                // boundary.  Do not use the GAS `one_only` COMDAT spelling:
+                // clang-cl's COFF integrated assembler rejects it.
+                let asm = format!(
+                    ".section {section},\"xr\"\n.globl {sym}\n{sym}:\n  {jmp} {real_fn}\n"
+                );
+                std::fs::write(&source, asm)
+                    .map_err(|e| format!("write Windows compatibility alias assembly: {e}"))?;
+
+                let mut command = std::process::Command::new(&asm_cc);
+                command.arg("-c");
+                // clang/clang-cl need the requested target to prevent an x64
+                // host from silently emitting x64 COFF for an ARM64 target.
+                // A GNU cross compiler carries its target in its executable
+                // name and rejects clang's --target spelling.
+                if clang_driver {
+                    command.arg(format!("--target={}", target.triple_str()));
+                }
+                command.arg(&source);
+                if msvc_driver {
+                    command.arg(format!("-Fo{}", object.display()));
+                } else {
+                    command.arg("-o").arg(&object);
+                }
+                let output = command.output()
+                    .map_err(|e| format!("assemble Windows compatibility alias ({asm_cc}): {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "assemble Windows compatibility alias '{sym}' ({asm_cc}): {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                members.push(object);
+            }
+            if members.is_empty() {
+                return Err("strict Windows compatibility aliases produced no COFF members".to_string());
+            }
+            let archive = temp_dir.join("_compat_aliases.lib");
+            let archive_tool = find_archive_tool();
+            // `lib.exe`/`llvm-lib` receive object paths directly.  Bound each
+            // invocation by its encoded Windows command-line length, not a
+            // member count: 128 generated paths can exceed CreateProcess'
+            // 32,767 UTF-16 code-unit limit in a deep build directory.  Keep
+            // a conservative reserve for tool, archive, and quoting overhead.
+            const ARCHIVE_COMMAND_LIMIT: usize = 24_000;
+            let archive_path_len = archive.as_os_str().to_string_lossy().encode_utf16().count() + 3;
+            let mut start = 0;
+            while start < members.len() {
+                // Append commands carry the archive both as `/OUT:` and as
+                // an input member, so account for two encoded path copies.
+                let mut batch_len = 512 + archive_path_len * if start == 0 { 1 } else { 2 };
+                let mut end = start;
+                while end < members.len() {
+                    let member_len = members[end].as_os_str().to_string_lossy().encode_utf16().count() + 3;
+                    if batch_len + member_len > ARCHIVE_COMMAND_LIMIT {
+                        if end == start {
+                            return Err(format!(
+                                "Windows compatibility alias object path exceeds archive command budget: {}",
+                                members[end].display()
+                            ));
+                        }
+                        break;
+                    }
+                    batch_len += member_len;
+                    end += 1;
+                }
+                let output = archive_create_command(
+                    &archive_tool,
+                    &archive,
+                    &members[start..end],
+                    start != 0,
+                    true,
+                )
+                    .output()
+                    .map_err(|e| format!("archive Windows compatibility aliases ({archive_tool}): {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "archive Windows compatibility aliases ({archive_tool}): {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                start = end;
+            }
+            return Ok(archive);
+        }
+
         let mut c_code = String::with_capacity(needs_stub.len() * 120);
         c_code.push_str("/* Auto-generated stubs for bootstrap linking (Windows) */\n");
         c_code.push_str("#include <stdint.h>\n\n");
@@ -1275,8 +1429,8 @@ the old fabricating behaviour.",
 
         return Ok(stub_o);
     }
+    }
 
-    #[cfg(not(target_os = "windows"))]
     {
         let mut asm_code = String::with_capacity(needs_stub.len() * 100);
         asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
@@ -1501,6 +1655,52 @@ mod tests {
         // Tail extraction takes everything after the LAST separator.
         assert_eq!(simple_module_symbol_tail(live), Some("skip_wrap_spaces"));
         assert_eq!(simple_module_symbol_tail("os__kernel__mm__map_page"), Some("map_page"));
+    }
+
+    #[test]
+    fn unresolved_bytespan_method_is_refused_before_weak_stub_fallback() {
+        use std::process::Command;
+
+        let missing = "lib__common__bytes__span__ByteSpan_dot_starts_with";
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("bytespan_missing_method.c");
+        let object = dir.path().join("bytespan_missing_method.o");
+        std::fs::write(
+            &source,
+            "extern long lib__common__bytes__span__ByteSpan_dot_starts_with(void);\n\
+             long lib__common__bytes__span__ByteSpan_dot_len(void) { return 1; }\n\
+             long bytespan_probe(void) {\n\
+                 return lib__common__bytes__span__ByteSpan_dot_starts_with();\n\
+             }\n",
+        )
+        .unwrap();
+        let compile = Command::new("cc")
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+
+        let report = with_freestanding_stub_env(None, Some("1"), None, || {
+            generate_stub_object_freestanding(
+                dir.path(),
+                std::slice::from_ref(&object),
+                &[],
+                "x86_64-unknown-none",
+                "x86-64",
+                "",
+                dir.path(),
+                Path::new("bytespan-kernel.elf"),
+            )
+        })
+        .expect_err("a missing ByteSpan method must fail before a weak stub is emitted");
+        assert!(report.contains(missing));
+        assert!(report.contains("freestanding link refused"));
+        assert!(report.contains("weak nil-returning stub"));
+        assert!(!dir.path().join("_stubs_freestanding.c").exists());
+        assert!(!dir.path().join("_stubs_freestanding.o").exists());
     }
 
     #[test]

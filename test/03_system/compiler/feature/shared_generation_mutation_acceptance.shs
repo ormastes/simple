@@ -1,0 +1,134 @@
+#!/bin/sh
+set -eu
+
+REPO=${REPO:-$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)}
+RUNTIME=${SIMPLE_RUNTIME:-$REPO/bin/simple}
+SPEC=test/03_system/compiler/feature/shared_generation_publication_spec.spl
+
+if [ ! -x "$RUNTIME" ]; then
+    printf '%s\n' 'STATUS: BLOCKED — compatible self-hosted runtime unavailable'
+    exit 2
+fi
+
+run_probe() {
+    workspace=$1
+    output=$2
+    set +e
+    (cd "$workspace" &&
+        SIMPLE_CACHE_DIR="$workspace/.cache"
+        SIMPLE_BUILD_DIR="$workspace/build"
+        SIMPLE_WORKTREE_STORAGE_ROOT="$workspace/.simple/storage"
+        SIMPLE_USER_STORAGE_ROOT="$workspace/.home/.simple/storage"
+        HOME="$workspace/.home"
+        TMPDIR="$workspace/.tmp"
+        export SIMPLE_CACHE_DIR SIMPLE_BUILD_DIR SIMPLE_WORKTREE_STORAGE_ROOT
+        export SIMPLE_USER_STORAGE_ROOT HOME TMPDIR
+        "$RUNTIME" test "$SPEC" --mode=interpreter) >"$output" 2>&1
+    status=$?
+    set -e
+    return "$status"
+}
+
+run_native_acceptance() {
+    workspace=$1
+    for fixture in shared_generation_process_death_native shared_generation_writer_race_native; do
+        output="$workspace/build/$fixture"
+        mkdir -p "$workspace/build"
+        (cd "$workspace" &&
+            SIMPLE_CACHE_DIR="$workspace/.cache"
+            SIMPLE_BUILD_DIR="$workspace/build"
+            SIMPLE_WORKTREE_STORAGE_ROOT="$workspace/.simple/storage"
+            SIMPLE_USER_STORAGE_ROOT="$workspace/.home/.simple/storage"
+            HOME="$workspace/.home"
+            TMPDIR="$workspace/.tmp"
+            export SIMPLE_CACHE_DIR SIMPLE_BUILD_DIR SIMPLE_WORKTREE_STORAGE_ROOT
+            export SIMPLE_USER_STORAGE_ROOT HOME TMPDIR
+            "$RUNTIME" native-build --source src/compiler --source src/lib \
+                --source test/03_system/compiler/feature --entry-closure \
+                --entry "test/03_system/compiler/feature/$fixture.spl" \
+                --output "$output")
+        "$output"
+    done
+}
+
+copy_fixture() {
+    destination=$1
+    mkdir -p "$destination/src" "$destination/test/03_system/compiler/feature"
+    mkdir -p "$destination/.home" "$destination/.tmp"
+    cp -R "$REPO/src/." "$destination/src/"
+    cp "$REPO/$SPEC" "$destination/$SPEC"
+    cp "$REPO/test/03_system/compiler/feature/shared_generation_process_death_native.spl" \
+        "$destination/test/03_system/compiler/feature/"
+    cp "$REPO/test/03_system/compiler/feature/shared_generation_writer_race_native.spl" \
+        "$destination/test/03_system/compiler/feature/"
+}
+
+clean=$(mktemp -d "${TMPDIR:-/tmp}/simple-mbh-nfr006-clean.XXXXXX")
+mutant=
+trap 'rm -rf "$clean" "$mutant"' EXIT HUP INT TERM
+copy_fixture "$clean"
+clean_log="$clean/clean.log"
+if ! run_probe "$clean" "$clean_log"; then
+    printf '%s\n' 'STATUS: BLOCKED — clean executable acceptance unavailable'
+    exit 2
+fi
+grep -Fq 'MBH-NFR006-PASS:overflow-current-pin' "$clean_log"
+grep -Fq 'MBH-NFR006-PASS:prepublication-bound' "$clean_log"
+grep -Fq 'MBH-NFR006-PASS:gc-protection' "$clean_log"
+grep -Fq 'MBH-NFR006-PASS:identical-writer' "$clean_log"
+if ! run_native_acceptance "$clean"; then
+    printf '%s\n' 'STATUS: BLOCKED — native crash/concurrency acceptance unavailable'
+    exit 2
+fi
+
+for mutation in overflow current pin gc identical; do
+    mutant=$(mktemp -d "${TMPDIR:-/tmp}/simple-mbh-nfr006-${mutation}.XXXXXX")
+    copy_fixture "$mutant"
+    source_file="$mutant/src/compiler/80.driver/cache/shared_generation_store.spl"
+    case "$mutation" in
+        overflow)
+            perl -0pi -e 's/fn shared_generation_lease_count_admitted_v1\(count: i64\) -> bool:\n    count <= SHARED_GENERATION_MAX_ENTRIES_V1/fn shared_generation_lease_count_admitted_v1(count: i64) -> bool:\n    true/' "$source_file"
+            ;;
+        current)
+            perl -0pi -e 's/fn shared_generation_is_current_v1\(candidate: text, current: text\) -> bool:\n    candidate == current/fn shared_generation_is_current_v1(candidate: text, current: text) -> bool:\n    false/' "$source_file"
+            ;;
+        pin)
+            perl -0pi -e 's/fn shared_generation_is_pinned_v1\(candidate: text, pins: \[text\]\) -> bool:\n    pins\.contains\(candidate\)/fn shared_generation_is_pinned_v1(candidate: text, pins: [text]) -> bool:\n    false/' "$source_file"
+            ;;
+        gc)
+            perl -0pi -e 's/shared_generation_is_pinned_v1\(candidate, pins\) or\n        newest < retain_generations/newest < retain_generations/' "$source_file"
+            begin_marker='MBH-NFR006-BEGIN:gc-protection'
+            pass_marker='MBH-NFR006-PASS:gc-protection'
+            ;;
+        identical)
+            perl -0pi -e 's/if current == generation and\n                shared_generation_matches_encoded_v1\(root, generation, encoded\):/if false:/' "$source_file"
+            begin_marker='MBH-NFR006-BEGIN:identical-writer'
+            pass_marker='MBH-NFR006-PASS:identical-writer'
+            ;;
+    esac
+    if [ "$mutation" != gc ] && [ "$mutation" != identical ]; then
+        begin_marker='MBH-NFR006-BEGIN:overflow-current-pin'
+        pass_marker='MBH-NFR006-PASS:overflow-current-pin'
+    fi
+    cmp -s "$source_file" "$REPO/src/compiler/80.driver/cache/shared_generation_store.spl" && {
+        printf 'FAIL: %s mutation did not alter production source\n' "$mutation"
+        exit 1
+    }
+    mutant_log="$mutant/mutant.log"
+    if run_probe "$mutant" "$mutant_log"; then
+        printf 'FAIL: %s mutation stayed green\n' "$mutation"
+        exit 1
+    fi
+    grep -Fq "$begin_marker" "$mutant_log" || {
+        printf 'STATUS: BLOCKED — %s mutation did not reach behavioral case\n' "$mutation"
+        exit 2
+    }
+    if grep -Fq "$pass_marker" "$mutant_log"; then
+        printf 'FAIL: %s mutation passed protected behavior\n' "$mutation"
+        exit 1
+    fi
+    rm -rf "$mutant"
+    mutant=
+done
+
+printf '%s\n' 'STATUS: PASS — MBH-NFR-006 executable acceptance and 5/5 mutations red'

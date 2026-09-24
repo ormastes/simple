@@ -1,4 +1,8 @@
 # SimpleOS focused emit-object stage4 MIR diagnostic corruption
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -67,3 +71,4 @@ The failed experiment was reverted to the live-proven 16,384-page production bas
 The reviewed 32,768-page arena mapped successfully and reached the same CPL3 post-HIR nil-receiver trap. A second run with fail-only `_user_heap_bump` telemetry emitted no OOM marker. Therefore the immediate failure is not exhaustion of the bare-exec bump arena; the next diagnostic must distinguish a nonpositive `rt_alloc` request from a failure inside `simpleos_dlmalloc`.
 
 Evidence: `build/os/elfexec/emit_llvm_profile_run13.out` and `build/os/elfexec/emit_llvm_profile_run14.out`.
+

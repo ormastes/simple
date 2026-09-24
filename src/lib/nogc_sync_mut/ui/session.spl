@@ -802,7 +802,20 @@ impl UISession:
         if self.access_events.len() == 0:
             return
         val latest = self.access_events[self.access_events.len() - 1]
-        match self.access_persistence.insert_event_fn(latest):
+        # Read the closure-typed field into a local, then call the local
+        # (no dot on the call). Calling it as `self.access_persistence.
+        # insert_event_fn(latest)` directly made the LLVM backend treat the
+        # dotted call as a CLASS METHOD lookup on `UiAccessPersistence`
+        # (which has no such method -- `insert_event_fn` is a field), leaving
+        # an undefined `_UiAccessPersistence.insert_event_fn` at the Stage-4
+        # macOS final link (2026-09-07). This clears the LINK failure only --
+        # calling ANY closure value under native codegen still SIGSEGVs/aborts
+        # (a separate, deeper defect, not fixed here; see
+        # doc/08_tracking/bug/native_closure_value_indirect_call_segv_2026-09-07.md).
+        # Not hit by default: `access_persistence` is nil unless a caller
+        # explicitly attaches one.
+        val insert_event = self.access_persistence.insert_event_fn
+        match insert_event(latest):
             Ok(_):
                 pass_dn
             Err(_):
@@ -812,7 +825,11 @@ impl UISession:
         if self.access_persistence == nil:
             return
         val snapshot = ui_access_snapshot_persistable(self.access_snapshot())
-        match self.access_persistence.persist_snapshot_fn(snapshot):
+        # Same field-vs-method dot-call ambiguity as _persist_latest_access_event
+        # above; see its comment (including the still-open native closure-call
+        # SEGV this does NOT fix).
+        val persist_snapshot = self.access_persistence.persist_snapshot_fn
+        match persist_snapshot(snapshot):
             Ok(_):
                 pass_dn
             Err(_):

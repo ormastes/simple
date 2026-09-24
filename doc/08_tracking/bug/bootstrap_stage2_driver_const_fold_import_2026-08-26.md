@@ -1,4 +1,9 @@
 # Stage 2 stale HIR const-fold import
+## Closed 2026-09-16 — Fixed on branch 2df527fe598; focused quarantine spec PASS, retry passed E1034
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Fixed on isolated work branch; protected integration pending  
 **Observed:** 2026-08-26  
@@ -38,3 +43,4 @@ release-line comparison proves the stale references are also present there,
 backport the integrated fix through a separate release-targeted work branch
 with renewed evidence. Never repoint or merge the whole release branch into
 `main`.
+

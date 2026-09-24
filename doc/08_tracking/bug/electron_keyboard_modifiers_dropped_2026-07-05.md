@@ -1,4 +1,8 @@
 # Electron keyboard input drops all modifier state and most non-printable keys
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -23,3 +27,4 @@ Any app-level keyboard shortcut bound to modifier combo or non-whitelisted speci
 
 ## Next Step
 Add modifier-field to protocol; read and forward `ctrlKey`/`metaKey`/`altKey`/`shiftKey`; consolidate duplicated allowlist. Separately: implement missing `request_fetch` and other round-trip handlers in bridge.js (currently latent traps).
+

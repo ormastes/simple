@@ -1,0 +1,95 @@
+# Two nested `fn`s that share a name in DIFFERENT scopes must not collide.
+#
+# Bug: doc/08_tracking/bug/nested_fn_name_collision_across_scopes_2026-09-19.md
+#
+# `exec_block_closure_into` registers a nested `fn` twice: in the flat
+# `functions` map (keyed by the BARE NAME, so the body can recurse) and in the
+# block scope as a closure over the block's locals. When two different scopes
+# each declare a `fn` of the same name, the second flat registration overwrites
+# the first, and dispatch ran whichever one the map happened to hold -- a
+# closure whose block has already finished, so its locals are gone:
+#
+#     semantic: variable `base` not found
+#
+# The control that proved it was the NAME and nothing else: renaming one of the
+# two, with identical bodies and identical call order, made both pass.
+#
+# Unlike the sibling JIT-lowering defect, a spec CAN guard this one, because it
+# lives on the interpret route that `bin/simple test` uses.
+#
+# Measured through the spec runner:
+#
+#   seed without the dispatch widening   4 passed, 2 failed
+#   seed with it                         6 passed, 0 failed
+#
+# The two that fail without it are the two that reach a module-level helper
+# whose nested fn name is also declared in an `it` block: `variable base not
+# found` and `variable k not found`. The other four pass either way and are
+# controls -- a probe made only of those reports green on a broken binary.
+
+use std.spec
+
+# Same nested-fn name as the one declared inside the `it` blocks below. That is
+# the entire point: this module-level helper and those blocks are different
+# scopes, and both must keep their own.
+fn helper_scope_fact() -> i64:
+    val base = 10
+    fn fact(n: i64) -> i64:
+        if n <= 1:
+            return base
+        n * fact(n - 1)
+    fact(4)
+
+fn helper_scope_compute() -> i64:
+    val k = 100
+    fn compute(n: i64) -> i64:
+        n + k
+    compute(1)
+
+describe "same-named nested fns in different scopes keep their own scope":
+    it "runs the it-block's own fact against the it-block's local":
+        val base = 10
+        fn fact(n: i64) -> i64:
+            if n <= 1:
+                return base
+            n * fact(n - 1)
+        expect(fact(4)).to_equal(240)
+
+    it "runs the module-level helper's fact against the helper's local":
+        # Before the fix this failed with `variable base not found`, because it
+        # resolved to the `it` block's `fact` above, whose scope had ended.
+        expect(helper_scope_fact()).to_equal(240)
+
+    it "keeps both answers when the bodies would BOTH resolve":
+        # The nastier shape: both closures reference an identifier named `k`, so
+        # a wrong resolution could have returned a plausible number instead of
+        # erroring. Measured, the pre-fix binary still errored rather than
+        # answering 2 -- loud, not silent -- but the values are pinned here so a
+        # future change cannot make it quiet.
+        val k = 1
+        fn compute(n: i64) -> i64:
+            n + k
+        expect(compute(1)).to_equal(2)
+
+    it "runs the module-level compute against ITS k, not the it-block's":
+        expect(helper_scope_compute()).to_equal(101)
+
+describe "renaming is no longer needed to make the shapes coexist":
+    it "still works when the nested fn names are distinct":
+        # The control from the bug record, kept as a regression anchor: this
+        # shape passed even before the fix, so if it ever breaks the cause is
+        # the dispatch change rather than the collision.
+        val base = 10
+        fn uniquely_named_fact(n: i64) -> i64:
+            if n <= 1:
+                return base
+            n * uniquely_named_fact(n - 1)
+        expect(uniquely_named_fact(4)).to_equal(240)
+
+    it "lets a nested fn shadow a module-level function of the same name":
+        # The general rule the fix rests on: an inner binding shadows an outer
+        # one. `helper_scope_compute` exists at module scope; a local `fn` of
+        # that name must win inside this block.
+        fn helper_scope_compute() -> i64:
+            7
+        expect(helper_scope_compute()).to_equal(7)

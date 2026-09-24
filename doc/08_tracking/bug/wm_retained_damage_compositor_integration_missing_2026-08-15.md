@@ -1,4 +1,9 @@
 # WM retained-damage compositor integration missing (specs RED)
+## Closed 2026-09-16 — ...*Date:** 2026-08-15 **Status:** RESOLVED 2026-08-15 — implementation landed and runtime-ve
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-15
 **Status:** RESOLVED 2026-08-15 — implementation landed and runtime-verified: wm_retained_damage_contract_spec 2/2 PASS, wm_multiscale_retained_damage_consumer_contract_spec 4/4 PASS, wm_pixel_pipeline_spec regression 18/18 PASS (load avg ~3, Rust seed binary, SIMPLE_TIMEOUT_SECONDS=540)
@@ -95,3 +100,4 @@ SIMPLE_TIMEOUT_SECONDS=540 bin/simple test test/01_unit/check/wm_multiscale_reta
 SIMPLE_TIMEOUT_SECONDS=540 bin/simple test test/02_integration/rendering/wm_pixel_pipeline_spec.spl  # regression
 ```
 No PASS is claimed until those run.
+

@@ -1,4 +1,9 @@
 # `rt_dir_list` C platform-header helper collides with the real extern
+## Closed 2026-09-16 — Status FIXED, verified by content grep 2026-08-17; rename landed rt_dir_list_cpath
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-10
 **Status:** FIXED — verified by content grep 2026-08-17 (os/runtime lane). The
@@ -82,3 +87,4 @@ still mid-flight on them at the time this was found. Editing files another live
 session owns is how this same afternoon produced a 133-file clobber; the rename
 is small and unambiguous, so it is recorded here for that session to apply
 rather than raced.
+

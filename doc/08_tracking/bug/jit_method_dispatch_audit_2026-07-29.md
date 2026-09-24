@@ -1,4 +1,8 @@
 # Bug: Cranelift JIT builtin-method dispatch audit — what's left after the index_of/first/last/pop/... fixes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-29
 **Component:** `src/compiler_rust/compiler/src/codegen/instr/{calls,closures_structs,methods}.rs`,
@@ -216,3 +220,4 @@ not committed to the repo (scratch, not requested for git).
 
 **Lambda ABI** still blocked — see jit_lambda_abi_scoping_2026-07-29.md
 (rt_closure_new never declared in the runtime-import table).
+

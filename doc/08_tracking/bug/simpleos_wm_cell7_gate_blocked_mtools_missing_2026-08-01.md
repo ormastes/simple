@@ -1,4 +1,8 @@
 # Showcase cell #7 gate reaches branch 29/52 and fails closed on a missing `mcopy` (mtools) — 2026-08-01
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -242,3 +246,4 @@ Initial value is `reason=not-run` (line 782). QEMU is launched with OVMF pflash
   the gate's own configuration, gated in turn by the
   `config/freestanding_fabricated_stub_baseline.sdn` ratchet, which is what
   actually refuses new nil-returning stubs.
+

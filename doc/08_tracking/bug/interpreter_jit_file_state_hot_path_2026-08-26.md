@@ -1,4 +1,8 @@
 # Interpreter JIT file-state hot path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -25,3 +29,4 @@ recovery solely to improve a microbenchmark.
 Raw file and PID declarations are removed. Canonical owners preserve existing
 operation counts, typed read failure, exact one-call writes, and validated PID
 identity. No extra I/O was added by the SFFI authority migration.
+

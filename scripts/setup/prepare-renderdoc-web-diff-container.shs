@@ -1,0 +1,99 @@
+#!/bin/sh
+# Container twin of the RenderDoc web capture lane, so any Linux host with
+# Docker can produce the same captures the GitHub Actions lane produces.
+#
+#   sh scripts/setup/prepare-renderdoc-web-diff-container.shs --contract
+#   sh scripts/setup/prepare-renderdoc-web-diff-container.shs --build [TAG]
+#   sh scripts/setup/prepare-renderdoc-web-diff-container.shs --check [TAG]
+#   sh scripts/setup/prepare-renderdoc-web-diff-container.shs --run [TAG] [--page NAME]...
+#
+# --run bind-mounts the repo READ-ONLY at /repo (per the spipe "Container test
+# runs" rule: never COPY the repo into an image) and writes captures to a
+# separate writable mount, so the image can never carry a stale source
+# snapshot and a run can never mutate the checkout.
+#
+# Fail-closed: missing runtime or missing image is BLOCKED (exit 2), never a
+# pass; the image is always addressed by its immutable sha256 id, never by tag.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+DOCKERFILE="${RDOC_WEB_DOCKERFILE:-$ROOT/tools/docker/Dockerfile.renderdoc-web-diff}"
+DEFAULT_TAG=simple-renderdoc-web-diff:local
+OUT_HOST="${RDOC_WEB_CONTAINER_OUT:-$ROOT/build/renderdoc}"
+
+fail() { echo "renderdoc_web_container_status=failed reason=$1" >&2; exit 1; }
+blocked() { echo "renderdoc_web_container_status=blocked reason=$1" >&2; exit 2; }
+require_docker() { command -v docker >/dev/null 2>&1 || blocked missing-container-runtime; }
+
+image_id() {
+    id=$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null) || blocked missing-container-image
+    printf '%s\n' "$id" | grep -Eq '^sha256:[0-9a-f]{64}$' || fail invalid-container-image-id
+    printf '%s\n' "$id"
+}
+
+check_contract() {
+    [ -f "$DOCKERFILE" ] || fail missing-dockerfile
+    grep -Fq 'ARG UBUNTU_BASE' "$DOCKERFILE" || fail unparameterized-base
+    grep -Fq 'snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}' "$DOCKERFILE" || fail mutable-package-repository
+    grep -Eq 'mesa-vulkan-drivers' "$DOCKERFILE" || fail lavapipe-icd-missing
+    grep -Eq 'vulkan-tools' "$DOCKERFILE" || fail vulkan-tools-missing
+    grep -Eq '(^|[[:space:]])renderdoc([[:space:]]|\\)' "$DOCKERFILE" || fail renderdoc-missing
+    grep -Fq 'google-chrome' "$DOCKERFILE" || fail chrome-missing
+    ! grep -Eq '^[[:space:]]*COPY[[:space:]]+\.' "$DOCKERFILE" || fail repo-copy-forbidden
+    grep -Fq 'org.simple-lang.driver-model="mesa-lavapipe-software-icd"' "$DOCKERFILE" || fail driver-model-label-missing
+    echo renderdoc_web_container_contract=pass
+}
+
+build_image() {
+    tag="${1:-$DEFAULT_TAG}"
+    require_docker
+    check_contract
+    docker build -f "$DOCKERFILE" -t "$tag" "$(dirname "$DOCKERFILE")" || fail image-build-failed
+    id=$(image_id "$tag")
+    echo "renderdoc_web_container_status=built image_id=$id"
+}
+
+check_image() {
+    tag="${1:-$DEFAULT_TAG}"
+    require_docker
+    id=$(image_id "$tag")
+    docker run --rm --network=none --cap-drop=ALL --security-opt=no-new-privileges \
+        --entrypoint /bin/sh "$id" -lc '
+          set -eu
+          command -v vulkaninfo >/dev/null
+          command -v renderdoccmd >/dev/null
+          command -v google-chrome >/dev/null
+          vulkaninfo --summary 2>/dev/null | grep -qiE "llvmpipe|lavapipe"
+        ' >/dev/null || fail image-contract-runtime-check
+    echo "renderdoc_web_container_status=pass image_id=$id"
+}
+
+run_lane() {
+    tag="${1:-$DEFAULT_TAG}"
+    shift 2>/dev/null || true
+    require_docker
+    id=$(image_id "$tag")
+    mkdir -p "$OUT_HOST"
+    # Repo READ-ONLY; captures land on a separate writable mount.
+    docker run --rm --network=none \
+        --cap-drop=ALL --security-opt=no-new-privileges \
+        -v "$ROOT:/repo:ro" \
+        -v "$OUT_HOST:/out" \
+        -e RDOC_WEB_OUT_DIR=/out \
+        -w /repo \
+        --entrypoint /bin/sh "$id" -lc \
+        "sh scripts/check/check-renderdoc-web-capture-lane.shs $*" || rc=$?
+    rc=${rc:-0}
+    echo "renderdoc_web_container_lane_exit=$rc"
+    return "$rc"
+}
+
+mode="${1:---contract}"
+[ $# -gt 0 ] && shift
+case "$mode" in
+    --contract) check_contract ;;
+    --build) build_image "${1:-}" ;;
+    --check) check_image "${1:-}" ;;
+    --run) run_lane "$@" ;;
+    *) echo "usage: $0 --contract|--build [TAG]|--check [TAG]|--run [TAG] [--page NAME]..." >&2; exit 2 ;;
+esac

@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect, step}
-use app.io.mod.{process_spawn_async}
+use app.io.mod.{process_spawn_async, process_kill}
 use app.llm_caret.agent_plan.{AgentLaunchRequest}
 use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
 use app.llm_caret.agent_tmux.{build_agent_tmux_embed}
@@ -67,6 +67,32 @@ describe "LLM Caret multi-process manager reports process truth":
 
         step("With the survivor gone the team is fully exited, not degraded")
         expect(poll_multi_caret_manager(mixed).status).to_equal("exited")
+
+    it "keeps reconciling a degraded team until every survivor is terminal (CARET-H001)":
+        step("Spawn one real survivor alongside a slot that never spawned")
+        val pid = process_spawn_async("/bin/sleep", ["30"])
+        expect(pid > 0).to_equal(true)
+        val running = _manager_over([
+            AgentProcess(agent_id: "alive", status: "started",
+                reason: "process_spawned", pid: pid),
+            AgentProcess(agent_id: "dead", status: "started",
+                reason: "process_spawned", pid: -1)])
+
+        step("First poll: the team is degraded, not terminal")
+        val degraded = poll_multi_caret_manager(running)
+        expect(degraded.status).to_equal("degraded")
+
+        step("The survivor dies without going through stop_multi_caret_manager")
+        expect(process_kill(pid)).to_equal(true)
+
+        step("Polling the DEGRADED manager (not a 'running' one) must still " +
+            "reconcile the now-dead survivor instead of freezing")
+        val reconciled = poll_multi_caret_manager(degraded)
+        expect(reconciled.status).to_equal("exited")
+
+        step("No duplicate launch happened: the roster is still the same 2 " +
+            "processes, never re-spawned")
+        expect(list_multi_caret_agents(reconciled).len()).to_equal(2)
 
     it "leaves a manager that is not running untouched by a poll":
         step("Poll an admission failure that never owned a process")

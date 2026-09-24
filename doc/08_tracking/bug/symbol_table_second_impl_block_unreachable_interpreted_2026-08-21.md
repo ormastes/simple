@@ -1,4 +1,8 @@
 # `SymbolTable`'s second `impl` block reported unreachable when interpreted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-21
 
@@ -71,3 +75,4 @@ across `src/compiler` are led by `HirLowering` (23), `CompilerDriver` (20),
 `test/01_unit/compiler/hir/symbol_table_cross_file_impl_spec.spl` (byte-identical
 mirror at `test/unit/compiler/hir/...`) pins all three import shapes above so a
 real future merge failure is caught. 3 examples, 0 failures.
+

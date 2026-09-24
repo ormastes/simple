@@ -154,6 +154,71 @@ Performance/durability blocker:
 Until all evidence exists, `DBD_CAPABILITY_STATE` must remain blocked and the
 daemon must fail closed instead of accepting network clients.
 
+## Durable DBFS authority integrated at source scope (2026-09-23)
+
+DBD no longer accepts root/durable-sync/transactional-replace booleans from its
+launcher. The filesystem-process descriptors currently route through the
+FAT32 syscall registration, while the mount capability describes a different
+in-kernel DBFS driver. Because those authorities are disconnected, the
+filesystem-launched constructor now fails closed with
+`filesystem-vfs-dbfs-operation-authority-unavailable`; it cannot mint a false
+receipt from a capability snapshot.
+
+The directly device-backed `DbFsDriver` path returns
+`DbdDbfsCommitReceiptV1` only after serialized staging, complete write,
+backing-device flush, atomic namespace replacement, a second namespace flush,
+and exact bounded readback of the published bytes. Its staging name is
+generation-scoped under the DBFS transaction owner; it is not claimed to use
+the filesystem syscall path's exclusive-open operation. Post-publication
+close or readback failures quarantine the adapter and report an uncertain
+outcome; they cannot be acknowledged as an abort or success.
+
+The underlying `DbFsDriver` path remains admitted only when its serialized
+device owner is registered. Its `fsync` advances the durable checkpoint only
+after the same stored `BlockDevice.flush()` returns success. The deterministic
+`dbfs_durable_commit_spec.spl` crash device separates volatile from durable
+media and covers acknowledged recovery, flush failure retaining the prior
+checkpoint, torn checkpoint rejection, and corrupt-slot failure. The DBD unit
+contract covers removal of caller claims, generation pinning, receipt issuance,
+exact readback, and fail-closed quarantine. Runtime/native/QEMU execution is
+deferred until the admitted phase environment is ready.
+
+TODO(environment/baseline): compilation is not claimed by this source-only
+slice. The inherited
+`src/lib/nogc_sync_mut/db/dbfs_driver/namespace_io.spl` currently initializes
+`content_generation` twice in existing inode constructors; that unrelated
+baseline compiler blocker was intentionally not edited in this isolated DBD
+authority change. Once the baseline is repaired and an admitted Phase-2
+runtime exists, execute the focused DBD adapter and DBFS crash/recovery specs.
+
+## Boot credential owner closed at source scope (2026-09-23)
+
+The canonical `/SERVERS.ELF` launch path now feeds the bounded credential file
+into `DbdBootCredentialOwnerV1.admit_source`. Hashing and compiler-resistant
+wipe/readback occur in one owner operation over the same authoritative mutable
+source; no independent or replayable wipe receipt is accepted. The owner retains only an
+incremental SHA-256 state, admits its digest-only provider only after exact
+volatile wipe/readback of the sole source buffer, and volatile-wipes the hash
+state and schedule before admission. Overflow, short input, mismatched wipe
+evidence, hash failure, reload, and revocation all fail closed. The previous
+public `DbdServer.provision_service(principal, credential, ...)` raw-array
+bypass is removed; TLS admission accepts only the admitted digest owner.
+
+This closes only the boot credential item. Production startup remains blocked
+at `tls-owner-unavailable`, followed by durable DBFS commit authority. Streaming
+adds constant memory and at most 128 boot-only byte updates; it does not change
+the authenticated request hot path.
+
+TODO(environment): once an admitted Phase-2 test-capable Simple runtime is
+available, run `test/01_unit/os/apps/dbd/dbd_boot_credential_owner_spec.spl`,
+`dbd_provisioning_spec.spl`, `dbd_protocol_hardening_spec.spl`,
+`dbd_launch_spec.spl`, and
+`test/01_unit/os/apps/servers_user/dbd_filesystem_provisioning_spec.spl`; then
+run the SimpleOS QEMU `/SERVERS.ELF` negative boot matrix with missing, short,
+oversized, and revoked `/SYS/SRVDB.KEY`. Optimized-native disassembly must also
+retain volatile source/workspace wipe calls before this deferred target gate is
+closed.
+
 ## tls13_accept entropy bypass closed 2026-08-21 (record stays open)
 
 This record named the bypass exactly: "A canonical typed entropy owner does

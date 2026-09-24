@@ -1,0 +1,132 @@
+#!/bin/sh
+# Guards two regressions found in .github/workflows/simple-llvm-cross.yml's
+# "Linux host + Windows cross (LLVM)" job (origin/main red 2026-09-20):
+#
+#   1. The "Preflight (llc/ld.lld)" step ran BEFORE the "Install LLVM, LLD,
+#      Clang, MinGW" step that actually installs llc/ld.lld, so the preflight
+#      always failed with "llc: command not found" — it could never observe
+#      the tools it exists to check.
+#   2. The "Show tool versions" / "Link Windows exe" steps invoked
+#      `x86_64-w64-windows-gnu-gcc`, a binary the Debian/Ubuntu `mingw-w64`
+#      apt package does not provide (it installs `x86_64-w64-mingw32-gcc`).
+#
+# Both are line-order / literal-text checks on the committed workflow file,
+# not a live GitHub Actions run.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+self_test=0
+
+fail() { echo "llvm-cross preflight-order FAIL: $*" >&2; exit 1; }
+
+# check_workflow FILE JOB_NAME
+check_workflow() {
+    file=$1
+    job_name=$2
+    [ -f "$file" ] || fail "workflow file missing: $file"
+
+    # Restrict the search to the named job's step block: from its "name: <job_name>"
+    # line up to (but not including) the next top-level job (2-space indented key)
+    # or end of file.
+    job_start=$(grep -n "name: $job_name\$" "$file" | head -1 | cut -d: -f1)
+    [ -n "$job_start" ] || fail "job '$job_name' not found in $file"
+
+    next_job=$(awk -v start="$job_start" '
+        NR > start && /^  [A-Za-z0-9_-]+:$/ { print NR; exit }
+    ' "$file")
+    if [ -n "$next_job" ]; then
+        block=$(sed -n "${job_start},$((next_job - 1))p" "$file")
+    else
+        block=$(sed -n "${job_start},\$p" "$file")
+    fi
+
+    install_line=$(printf '%s\n' "$block" | grep -n 'name: Install LLVM' | head -1 | cut -d: -f1)
+    preflight_line=$(printf '%s\n' "$block" | grep -n 'name: Preflight (llc/ld.lld)' | head -1 | cut -d: -f1)
+    [ -n "$install_line" ] || fail "'$job_name': no Install LLVM step found"
+    [ -n "$preflight_line" ] || fail "'$job_name': no Preflight step found"
+    [ "$install_line" -lt "$preflight_line" ] || \
+        fail "'$job_name': Preflight (line $preflight_line) runs before Install (line $install_line) — llc/ld.lld cannot exist yet"
+
+    if printf '%s\n' "$block" | grep -q 'x86_64-w64-windows-gnu-gcc'; then
+        fail "'$job_name': references nonexistent binary x86_64-w64-windows-gnu-gcc (mingw-w64 apt package ships x86_64-w64-mingw32-gcc)"
+    fi
+}
+
+run_selftest() {
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    good="$tmp/good.yml"
+    cat > "$good" <<'EOF'
+jobs:
+  linux-and-windows:
+    name: Linux host + Windows cross (LLVM)
+    steps:
+      - name: Install LLVM
+        run: apt-get install -y llvm lld
+      - name: Preflight (llc/ld.lld)
+        run: llc --version
+      - name: Show tool versions
+        run: x86_64-w64-mingw32-gcc -v
+  other-job:
+    name: Other
+    steps:
+      - name: Preflight (llc/ld.lld)
+        run: llc --version
+EOF
+    if ! (check_workflow "$good" "Linux host + Windows cross (LLVM)") ; then
+        fail "selftest: well-ordered fixture must PASS"
+    fi
+
+    bad_order="$tmp/bad_order.yml"
+    cat > "$bad_order" <<'EOF'
+jobs:
+  linux-and-windows:
+    name: Linux host + Windows cross (LLVM)
+    steps:
+      - name: Preflight (llc/ld.lld)
+        run: llc --version
+      - name: Install LLVM
+        run: apt-get install -y llvm lld
+EOF
+    if (check_workflow "$bad_order" "Linux host + Windows cross (LLVM)") 2>/dev/null; then
+        fail "selftest: mis-ordered fixture (replays the incident) must FAIL"
+    fi
+
+    bad_binary="$tmp/bad_binary.yml"
+    cat > "$bad_binary" <<'EOF'
+jobs:
+  linux-and-windows:
+    name: Linux host + Windows cross (LLVM)
+    steps:
+      - name: Install LLVM
+        run: apt-get install -y llvm lld
+      - name: Preflight (llc/ld.lld)
+        run: llc --version
+      - name: Show tool versions
+        run: x86_64-w64-windows-gnu-gcc -v
+EOF
+    if (check_workflow "$bad_binary" "Linux host + Windows cross (LLVM)") 2>/dev/null; then
+        fail "selftest: nonexistent-binary fixture must FAIL"
+    fi
+
+    rm -rf "$tmp"
+    trap - EXIT
+    echo "llvm-cross preflight-order selftest: PASS (3 fixtures)"
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) self_test=1 ;;
+    esac
+done
+
+run_selftest
+
+if [ "$self_test" -eq 1 ]; then
+    exit 0
+fi
+
+check_workflow "$root/.github/workflows/simple-llvm-cross.yml" "Linux host + Windows cross (LLVM)"
+check_workflow "$root/.github/workflows/simple-llvm-cross.yml" "FreeBSD cross (LLVM)"
+echo "llvm-cross preflight-order: PASS — 2 job(s) checked, Install precedes Preflight, no nonexistent mingw binary referenced"

@@ -1,4 +1,8 @@
 # `cannot convert tuple to int` from a spec has no file:line
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (diagnostic quality only — the four affected specs are fixed in `4ffc3db47a9`)
 **Filed:** 2026-09-03
@@ -52,3 +56,4 @@ diagnostic on the spec compile path, so the message names the `return ()` line.
 
 - Fix commit: `4ffc3db47a9`
 - Origin: `b657337c997` (feat(spipe): search providers, #149)
+

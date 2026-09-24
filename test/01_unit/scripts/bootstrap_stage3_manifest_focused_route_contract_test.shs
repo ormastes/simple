@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+verifier="$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage3-focused-verifier.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+focused_contract() {
+    candidate=$1
+    block="$tmp/block.$$.txt"
+    sed -n '/bootstrap_stage3_abi_policy=/,/bootstrap_stage3_output=/p' \
+        "$candidate" >"$block"
+    [ "$(grep -F -c '"SIMPLE_BOOTSTRAP_STAGE3=1"' "$block")" = 1 ] || return 1
+    [ "$(grep -F -c '"SIMPLE_ABI_POLICY=$bootstrap_stage3_abi_policy"' "$block")" = 2 ] || return 1
+    [ "$(grep -F -c '"SIMPLE_KERNEL_K1_POLICY=$bootstrap_stage3_k1_policy"' "$block")" = 2 ] || return 1
+    [ "$(grep -F -c '"SIMPLE_FRONTEND_CACHE=$bootstrap_stage3_frontend_cache"' "$block")" = 2 ] || return 1
+    [ "$(grep -F -c -- '--source "$bootstrap_stage3_k1_root"' "$block")" = 2 ] || return 1
+    [ "$(grep -F -c -- '--source src/compiler --source src/app --source src/lib' "$block")" = 4 ] || return 1
+    [ "$(grep -F -c -- '--entry-closure --threads "$bootstrap_stage3_stage3_threads"' "$block")" = 2 ] || return 1
+    [ "$(grep -F -c -- '--entry src/app/cli/bootstrap_main.spl' "$block")" = 4 ] || return 1
+    ! grep -Fq -- '--timeout "$bootstrap_stage3_stage3_timeout"' "$block" || return 1
+    ! grep -Fq 'SIMPLE_FRONTEND_CACHE=0' "$block" || return 1
+}
+
+sh -n "$verifier" || fail 'manifest verifier shell syntax'
+focused_contract "$verifier" || fail 'canonical focused Stage3 route missing'
+
+mutation=0
+for marker in \
+    '"SIMPLE_BOOTSTRAP_STAGE3=1"' \
+    '"SIMPLE_ABI_POLICY=$bootstrap_stage3_abi_policy"' \
+    '"SIMPLE_KERNEL_K1_POLICY=$bootstrap_stage3_k1_policy"' \
+    '"SIMPLE_FRONTEND_CACHE=$bootstrap_stage3_frontend_cache"' \
+    '--source "$bootstrap_stage3_k1_root"' \
+    '--source src/compiler --source src/app --source src/lib' \
+    '--entry-closure --threads "$bootstrap_stage3_stage3_threads"' \
+    '--entry src/app/cli/bootstrap_main.spl'; do
+    mutation=$((mutation + 1))
+    mutated="$tmp/mutation-$mutation.shs"
+    awk -v marker="$marker" '
+        !removed && index($0, marker) { removed=1; next }
+        { print }
+    ' "$verifier" >"$mutated"
+    if focused_contract "$mutated"; then
+        fail "mutation $mutation did not fail closed: $marker"
+    fi
+done
+
+echo "PASS: focused Stage3 verifier route rejects $mutation static mutations"

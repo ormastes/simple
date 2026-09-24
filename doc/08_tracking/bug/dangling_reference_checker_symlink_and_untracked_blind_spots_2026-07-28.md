@@ -1,4 +1,8 @@
 # check-dangling-references: two false-positive classes — symlinked source trees and untracked providers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** checker defect (false positives)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
@@ -85,3 +89,4 @@ treats a SYMBOL finding as proof of a missing implementation will chase these.
 In the `src/app/{cli,dashboard}` slice they are 2 of 25 (8%); the symlink class
 is likely much larger repo-wide, since the numbered compiler tier directories
 are all reached through symlinks.
+

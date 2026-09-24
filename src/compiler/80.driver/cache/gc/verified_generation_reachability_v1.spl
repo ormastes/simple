@@ -1,0 +1,456 @@
+#![allow(primitive_api)]
+
+# Verified generation reachability is a diagnostic checker over the existing
+# CAS, action journal, generation manifest, reader pins/leases, and catalog
+# projection. It performs no filesystem mutation and creates no authority.
+# Until a descriptor-bound host issuer exists, sweep and recovery both refuse;
+# a typed closure result is useful error evidence only.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_decode_v1}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1}
+use compiler.common.cache_contract.portable_object_ref_v1.{PortableObjectRefV1}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_available_v1, verified_cas_kind_digest_v1,
+    verified_cas_kind_verifier_identity_v1,
+    verified_cas_verify_kind_bytes_v1,
+    verified_cas_verify_portable_hir_bytes_v1,
+    verified_cas_verifier_registry_digest_v1}
+use compiler.driver.cache.journal.action_root_journal_v1.{
+    ActionRootJournalV1, recover_action_root_journal_v1}
+
+pub struct VerifiedCasTypedIdentityV1:
+    kind: text
+    digest: text
+
+pub struct VerifiedGenerationRootV1:
+    generation: i64
+    manifest_digest: text
+
+pub struct VerifiedGenerationPinV1:
+    pin_id: text
+    root: VerifiedGenerationRootV1
+
+pub struct VerifiedGenerationLeaseRootV1:
+    lease_id: text
+    active: bool
+    root: VerifiedGenerationRootV1
+
+pub struct VerifiedGenerationPinSnapshotV1:
+    epoch: i64
+    roots: [VerifiedGenerationRootV1]
+    snapshot_digest: text
+
+# Bytes are copied into this finite logical read set.  They are candidates, not
+# recovery authority: every reached entry is independently digest-checked and
+# dispatched through the canonical verified-CAS kind registry before a closure
+# receipt can be issued.
+pub struct VerifiedCasReadObjectV1:
+    identity: VerifiedCasTypedIdentityV1
+    canonical_bytes: [u8]
+
+# GC-owned diagnostic input for a future writer/catalog owner's durable
+# receipt. Presence of this public DTO is never authority: checksums only
+# establish internal consistency, not a held root gate or durable publication.
+pub struct VerifiedGenerationDurableBindingV1:
+    generation: i64
+    sequence: i64
+    writer_epoch: i64
+    operation_digest: text
+    host_receipt_digest: text
+    journal_digest: text
+    accepted_journal_bytes: i64
+    accepted_journal_prefix_digest: text
+    projection_applied: bool
+    projection_digest: text
+
+pub struct VerifiedCasClosureReceiptV1:
+    generation: i64
+    root_manifest_digest: text
+    ordered_closure: [VerifiedCasTypedIdentityV1]
+    closure_digest: text
+    verifier_registry_digest: text
+    pin_epoch: i64
+    pin_snapshot_digest: text
+    accepted_journal_bytes: i64
+    accepted_journal_prefix_digest: text
+    durable_journal_receipt_digest: text
+    catalog_owner_receipt_digest: text
+    owner_seal_digest: text
+
+pub struct VerifiedGenerationClosureResultV1:
+    ok: bool
+    receipt: VerifiedCasClosureReceiptV1?
+    error: text
+
+pub enum VerifiedGenerationSweepDecisionV1:
+    Refused
+    Protected
+    Eligible
+
+pub struct VerifiedGenerationRecoveryProjectionV1:
+    generation: i64
+    root_manifest_digest: text
+    closure_digest: text
+    catalog_digest: text
+    journal_prefix_digest: text
+
+pub struct VerifiedGenerationRecoveryResultV1:
+    ok: bool
+    projection: VerifiedGenerationRecoveryProjectionV1?
+    error: text
+
+fn _digest_valid_v1(value: text) -> bool:
+    three_payload_contract_digest_valid_v1(value)
+
+fn _text_identity_valid_v1(value: text) -> bool:
+    value != "" and value.len() <= 256 and not value.contains("\u0000") and
+        not value.contains("\n")
+
+fn _root_key_v1(root: VerifiedGenerationRootV1) -> text:
+    root.generation.to_string() + "\u0000" + root.manifest_digest
+
+fn _root_valid_v1(root: VerifiedGenerationRootV1) -> bool:
+    root.generation >= 0 and _digest_valid_v1(root.manifest_digest)
+
+fn _identity_key_v1(identity: VerifiedCasTypedIdentityV1) -> text:
+    identity.kind + "\u0000" + identity.digest
+
+fn _identity_valid_v1(identity: VerifiedCasTypedIdentityV1) -> bool:
+    _text_identity_valid_v1(identity.kind) and _digest_valid_v1(identity.digest)
+
+fn _root_present_v1(roots: [VerifiedGenerationRootV1],
+        expected: VerifiedGenerationRootV1) -> bool:
+    for root in roots:
+        if root.generation == expected.generation and
+                root.manifest_digest == expected.manifest_digest:
+            return true
+    false
+
+fn _append_root_unique_v1(roots: [VerifiedGenerationRootV1],
+        root: VerifiedGenerationRootV1) -> [VerifiedGenerationRootV1]:
+    if _root_present_v1(roots, root): return roots
+    var out = roots
+    out.push(root)
+    out
+
+fn _roots_sorted_v1(values: [VerifiedGenerationRootV1]) -> [VerifiedGenerationRootV1]:
+    var out = values
+    var index: i64 = 1
+    while index < out.len():
+        val current = out[index]
+        var position = index
+        while position > 0 and _root_key_v1(current) < _root_key_v1(out[position - 1]):
+            out[position] = out[position - 1]
+            position = position - 1
+        out[position] = current
+        index = index + 1
+    out
+
+fn _pin_snapshot_canonical_v1(epoch: i64,
+        roots: [VerifiedGenerationRootV1]) -> text:
+    var canonical = "simple.verified-generation.pin-snapshot.v1\n" +
+        epoch.to_string() + "\n"
+    for root in roots:
+        canonical = canonical + _root_key_v1(root) + "\n"
+    canonical
+
+pub fn verified_generation_pin_snapshot_v1(
+    epoch: i64,
+    pins: [VerifiedGenerationPinV1],
+    leases: [VerifiedGenerationLeaseRootV1],
+) -> Result<VerifiedGenerationPinSnapshotV1, text>:
+    if epoch < 0 or pins.len() + leases.len() > three_payload_contract_max_items_v1():
+        return Err("pin_snapshot_bounds_invalid")
+    var roots: [VerifiedGenerationRootV1] = []
+    var pin_ids: Dict<text, bool> = {}
+    for pin in pins:
+        if not _text_identity_valid_v1(pin.pin_id) or
+                pin_ids.contains_key(pin.pin_id) or not _root_valid_v1(pin.root):
+            return Err("pin_snapshot_invalid")
+        pin_ids[pin.pin_id] = true
+        roots = _append_root_unique_v1(roots, pin.root)
+    var lease_ids: Dict<text, bool> = {}
+    for lease in leases:
+        if not _text_identity_valid_v1(lease.lease_id) or
+                lease_ids.contains_key(lease.lease_id) or not _root_valid_v1(lease.root):
+            return Err("lease_root_invalid")
+        lease_ids[lease.lease_id] = true
+        if lease.active: roots = _append_root_unique_v1(roots, lease.root)
+    if roots.len() == 0: return Err("pin_snapshot_has_no_active_roots")
+    roots = _roots_sorted_v1(roots)
+    val canonical = _pin_snapshot_canonical_v1(epoch, roots)
+    Ok(VerifiedGenerationPinSnapshotV1(epoch: epoch, roots: roots,
+        snapshot_digest: sha256_text(canonical)))
+
+fn _pin_snapshot_valid_v1(snapshot: VerifiedGenerationPinSnapshotV1) -> bool:
+    if snapshot.epoch < 0 or snapshot.roots.len() == 0 or
+            snapshot.roots.len() > three_payload_contract_max_items_v1(): return false
+    var previous = ""
+    var first = true
+    for root in snapshot.roots:
+        if not _root_valid_v1(root): return false
+        val key = _root_key_v1(root)
+        if not first and key <= previous: return false
+        previous = key
+        first = false
+    sha256_text(_pin_snapshot_canonical_v1(snapshot.epoch, snapshot.roots)) ==
+        snapshot.snapshot_digest
+
+fn _durable_receipt_canonical_v1(receipt: VerifiedGenerationDurableBindingV1) -> text:
+    "simple.verified-generation.durable-binding.v1\u0000" +
+        receipt.generation.to_string() + "\u0000" + receipt.sequence.to_string() +
+        "\u0000" + receipt.writer_epoch.to_string() + "\u0000" +
+        receipt.operation_digest + "\u0000" + receipt.host_receipt_digest + "\u0000" +
+        receipt.journal_digest + "\u0000" + receipt.accepted_journal_bytes.to_string() +
+        "\u0000" + receipt.accepted_journal_prefix_digest + "\u0000" +
+        (if receipt.projection_applied: "true" else: "false") + "\u0000" +
+        receipt.projection_digest
+
+fn _durable_receipt_digest_v1(receipt: VerifiedGenerationDurableBindingV1) -> text:
+    sha256_text(_durable_receipt_canonical_v1(receipt))
+
+fn _catalog_owner_receipt_digest_v1(receipt: VerifiedGenerationDurableBindingV1) -> text:
+    sha256_text("simple.pure-database.catalog-owner.binding.v1\u0000" +
+        _durable_receipt_canonical_v1(receipt))
+
+fn _durable_receipt_valid_v1(receipt: VerifiedGenerationDurableBindingV1) -> bool:
+    receipt.generation >= 0 and receipt.sequence >= 0 and receipt.writer_epoch >= 0 and
+        _digest_valid_v1(receipt.operation_digest) and
+        _digest_valid_v1(receipt.host_receipt_digest) and
+        _digest_valid_v1(receipt.journal_digest) and
+        receipt.accepted_journal_bytes >= 0 and
+        _digest_valid_v1(receipt.accepted_journal_prefix_digest) and
+        receipt.journal_digest == receipt.accepted_journal_prefix_digest and
+        _digest_valid_v1(receipt.projection_digest)
+
+fn _closure_canonical_v1(closure: [VerifiedCasTypedIdentityV1]) -> text:
+    var canonical = "simple.verified-cas.typed-closure.v1\n"
+    for identity in closure:
+        canonical = canonical + _identity_key_v1(identity) + "\n"
+    canonical
+
+fn _receipt_canonical_v1(receipt: VerifiedCasClosureReceiptV1) -> text:
+    "simple.verified-cas.closure-receipt.v1\u0000" +
+        receipt.generation.to_string() + "\u0000" +
+        receipt.root_manifest_digest + "\u0000" + receipt.closure_digest + "\u0000" +
+        receipt.verifier_registry_digest + "\u0000" +
+        receipt.pin_epoch.to_string() + "\u0000" + receipt.pin_snapshot_digest + "\u0000" +
+        receipt.accepted_journal_bytes.to_string() + "\u0000" +
+        receipt.accepted_journal_prefix_digest + "\u0000" +
+        receipt.durable_journal_receipt_digest + "\u0000" +
+        receipt.catalog_owner_receipt_digest
+
+fn _receipt_valid_v1(receipt: VerifiedCasClosureReceiptV1) -> bool:
+    if receipt.generation < 0 or not _digest_valid_v1(receipt.root_manifest_digest) or
+            receipt.ordered_closure.len() == 0 or
+            receipt.ordered_closure.len() > three_payload_contract_max_items_v1() or
+            receipt.pin_epoch < 0 or receipt.accepted_journal_bytes < 0:
+        return false
+    for identity in receipt.ordered_closure:
+        if not _identity_valid_v1(identity): return false
+    if receipt.ordered_closure[0].kind != "generation_manifest" or
+            receipt.ordered_closure[0].digest != receipt.root_manifest_digest:
+        return false
+    val closure_digest = sha256_text(_closure_canonical_v1(receipt.ordered_closure))
+    if closure_digest != receipt.closure_digest or
+            receipt.verifier_registry_digest != verified_cas_verifier_registry_digest_v1():
+        return false
+    if (not _digest_valid_v1(receipt.pin_snapshot_digest) or
+            not _digest_valid_v1(receipt.accepted_journal_prefix_digest) or
+            not _digest_valid_v1(receipt.durable_journal_receipt_digest) or
+            not _digest_valid_v1(receipt.catalog_owner_receipt_digest)):
+        return false
+    sha256_text(_receipt_canonical_v1(receipt)) == receipt.owner_seal_digest
+
+fn _closure_failure_v1(error: text) -> VerifiedGenerationClosureResultV1:
+    VerifiedGenerationClosureResultV1(ok: false, receipt: nil, error: error)
+
+fn _object_index_v1(objects: [VerifiedCasReadObjectV1],
+        expected: VerifiedCasTypedIdentityV1) -> i64:
+    for index in 0..objects.len():
+        if objects[index].identity.kind == expected.kind and
+                objects[index].identity.digest == expected.digest:
+            return index
+    -1
+
+fn _digest_has_other_kind_v1(objects: [VerifiedCasReadObjectV1],
+        expected: VerifiedCasTypedIdentityV1) -> bool:
+    for object in objects:
+        if object.identity.digest == expected.digest and
+                object.identity.kind != expected.kind: return true
+    false
+
+fn _objects_addressable_v1(objects: [VerifiedCasReadObjectV1]) -> bool:
+    if objects.len() > three_payload_contract_max_items_v1(): return false
+    var seen: Dict<text, bool> = {}
+    for object in objects:
+        if not _identity_valid_v1(object.identity): return false
+        val key = _identity_key_v1(object.identity)
+        if seen.contains_key(key): return false
+        seen[key] = true
+    true
+
+fn _verify_reached_object_v1(objects: [VerifiedCasReadObjectV1],
+        expected: VerifiedCasTypedIdentityV1,
+        portable_reference: PortableObjectRefV1?) -> text:
+    if not verified_cas_kind_available_v1(expected.kind):
+        return "child_verifier_unavailable:" + expected.kind
+    val index = _object_index_v1(objects, expected)
+    if index < 0:
+        if _digest_has_other_kind_v1(objects, expected):
+            return "child_kind_mismatch:" + expected.kind
+        return "child_missing:" + expected.kind
+    val object = objects[index]
+    val computed_digest = if expected.kind == "portable_hir_object":
+        sha256_u8_hex(object.canonical_bytes)
+    else:
+        verified_cas_kind_digest_v1(expected.kind, object.canonical_bytes)
+    if computed_digest == "" or computed_digest != expected.digest:
+        return "child_digest_mismatch:" + expected.kind
+    if val reference = portable_reference:
+        val verified = verified_cas_verify_portable_hir_bytes_v1(reference,
+            object.canonical_bytes,
+            verified_cas_kind_verifier_identity_v1(expected.kind), nil)
+        if not verified.ok: return "child_verification_failed:" + verified.error
+        return ""
+    val verified = verified_cas_verify_kind_bytes_v1(expected.kind,
+        object.canonical_bytes)
+    if not verified.ok: return "child_verification_failed:" + verified.error
+    ""
+
+fn _closure_append_v1(closure: [VerifiedCasTypedIdentityV1], kind: text,
+        digest: text) -> [VerifiedCasTypedIdentityV1]:
+    var out = closure
+    out.push(VerifiedCasTypedIdentityV1(kind: kind, digest: digest))
+    out
+
+fn _manifest_closure_v1(root: VerifiedGenerationRootV1,
+        manifest: GenerationManifestV1) -> [VerifiedCasTypedIdentityV1]:
+    var closure: [VerifiedCasTypedIdentityV1] = [
+        VerifiedCasTypedIdentityV1(kind: "generation_manifest",
+            digest: root.manifest_digest),
+        VerifiedCasTypedIdentityV1(kind: "compile_snapshot",
+            digest: manifest.snapshot_digest)]
+    for digest in manifest.summary_refs:
+        closure = _closure_append_v1(closure, "public_summary", digest)
+    for digest in manifest.scope_refs:
+        closure = _closure_append_v1(closure, "worker_result", digest)
+    for digest in manifest.rr_shard_refs:
+        closure = _closure_append_v1(closure, "reverse_reference_shard", digest)
+    for digest in manifest.forward_manifest_refs:
+        closure = _closure_append_v1(closure, "forward_manifest", digest)
+    for reference in manifest.portable_refs:
+        closure = _closure_append_v1(closure, "portable_hir_object",
+            reference.content_digest)
+    for digest in manifest.diagnostic_refs:
+        closure = _closure_append_v1(closure, "diagnostic_manifest", digest)
+    for digest in manifest.target_refs:
+        closure = _closure_append_v1(closure, "target_artifact", digest)
+    closure
+
+fn _portable_reference_v1(manifest: GenerationManifestV1,
+        identity: VerifiedCasTypedIdentityV1) -> PortableObjectRefV1?:
+    if identity.kind != "portable_hir_object": return nil
+    for reference in manifest.portable_refs:
+        if reference.content_digest == identity.digest: return Some(reference)
+    nil
+
+fn _journal_binding_error_v1(root: VerifiedGenerationRootV1,
+        manifest: GenerationManifestV1, journal: ActionRootJournalV1,
+        durable: VerifiedGenerationDurableBindingV1, pin_epoch: i64) -> text:
+    if not _durable_receipt_valid_v1(durable) or
+            durable.generation != root.generation or
+            durable.projection_digest != manifest.catalog_digest:
+        return "catalog_owner_receipt_mismatch"
+    if durable.writer_epoch != pin_epoch:
+        return "durable_epoch_mismatch"
+    val recovery = recover_action_root_journal_v1(journal.bytes, journal.generation)
+    if recovery.quarantined_tail or recovery.accepted_bytes != journal.bytes.len() or
+            recovery.generation != root.generation or
+            recovery.accepted_bytes != durable.accepted_journal_bytes or
+            sha256_text(journal.bytes) != durable.journal_digest or
+            sha256_text(journal.bytes.slice(0, durable.accepted_journal_bytes)) !=
+                durable.accepted_journal_prefix_digest:
+        return "durable_journal_receipt_mismatch"
+    var rooted = false
+    for record in recovery.records:
+        if record.sequence == durable.sequence and
+                record.manifest_digest == root.manifest_digest:
+            rooted = true
+    if not rooted: return "journal_generation_root_mismatch"
+    ""
+
+pub fn verify_generation_closure_v1(
+    root: VerifiedGenerationRootV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    objects: [VerifiedCasReadObjectV1],
+    journal: ActionRootJournalV1,
+    durable: VerifiedGenerationDurableBindingV1,
+) -> VerifiedGenerationClosureResultV1:
+    if not _pin_snapshot_valid_v1(pins): return _closure_failure_v1("pin_snapshot_invalid")
+    if not _root_present_v1(pins.roots, root): return _closure_failure_v1("generation_root_unpinned")
+    if not _objects_addressable_v1(objects): return _closure_failure_v1("cas_read_snapshot_invalid")
+    val root_identity = VerifiedCasTypedIdentityV1(kind: "generation_manifest",
+        digest: root.manifest_digest)
+    val root_error = _verify_reached_object_v1(objects, root_identity, nil)
+    if root_error != "": return _closure_failure_v1(root_error)
+    val root_index = _object_index_v1(objects, root_identity)
+    if root_index < 0: return _closure_failure_v1("generation_manifest_missing")
+    val decoded = generation_manifest_decode_v1(objects[root_index].canonical_bytes)
+    if not decoded.ok: return _closure_failure_v1("generation_manifest_invalid:" + decoded.error)
+    val manifest = match decoded.value:
+        case Some(value): value
+        case nil: return _closure_failure_v1("generation_manifest_missing")
+    val binding_error = _journal_binding_error_v1(root, manifest, journal, durable,
+        pins.epoch)
+    if binding_error != "": return _closure_failure_v1(binding_error)
+    val closure = _manifest_closure_v1(root, manifest)
+    if closure.len() > three_payload_contract_max_items_v1():
+        return _closure_failure_v1("generation_closure_bounds_exceeded")
+    for index in 1..closure.len():
+        val identity = closure[index]
+        val error = _verify_reached_object_v1(objects, identity,
+            _portable_reference_v1(manifest, identity))
+        if error != "": return _closure_failure_v1(error)
+    val closure_digest = sha256_text(_closure_canonical_v1(closure))
+    val prefix_digest = sha256_text(journal.bytes)
+    val durable_digest = _durable_receipt_digest_v1(durable)
+    val catalog_receipt_digest = _catalog_owner_receipt_digest_v1(durable)
+    var receipt = VerifiedCasClosureReceiptV1(
+        generation: root.generation, root_manifest_digest: root.manifest_digest,
+        ordered_closure: closure, closure_digest: closure_digest,
+        verifier_registry_digest: verified_cas_verifier_registry_digest_v1(),
+        pin_epoch: pins.epoch, pin_snapshot_digest: pins.snapshot_digest,
+        accepted_journal_bytes: journal.bytes.len(),
+        accepted_journal_prefix_digest: prefix_digest,
+        durable_journal_receipt_digest: durable_digest,
+        catalog_owner_receipt_digest: catalog_receipt_digest,
+        owner_seal_digest: "")
+    receipt.owner_seal_digest = sha256_text(_receipt_canonical_v1(receipt))
+    VerifiedGenerationClosureResultV1(ok: true, receipt: Some(receipt), error: "")
+
+pub fn verified_generation_sweep_decision_v1(
+    pins: VerifiedGenerationPinSnapshotV1,
+    receipts: [VerifiedCasClosureReceiptV1],
+    candidate: VerifiedCasTypedIdentityV1,
+    current_epoch: i64,
+) -> VerifiedGenerationSweepDecisionV1:
+    # Public records and reproducible seals cannot prove complete pin/root
+    # enumeration or authorize unlink. Keep every candidate until the future
+    # descriptor-bound host issuer can validate them while holding the gate.
+    VerifiedGenerationSweepDecisionV1.Refused
+
+fn _recovery_failure_v1(error: text) -> VerifiedGenerationRecoveryResultV1:
+    VerifiedGenerationRecoveryResultV1(ok: false, projection: nil, error: error)
+
+pub fn verified_generation_recovery_projection_v1(
+    pins: VerifiedGenerationPinSnapshotV1,
+    receipt: VerifiedCasClosureReceiptV1,
+    durable: VerifiedGenerationDurableBindingV1,
+) -> VerifiedGenerationRecoveryResultV1:
+    # A restarted owner must obtain an opaque exact-operation recovery receipt;
+    # caller-created hashes and an in-memory pin snapshot cannot substitute.
+    _recovery_failure_v1("recovery_host_issuer_unavailable")

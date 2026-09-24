@@ -451,8 +451,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::For)?;
 
-        // Check for enumerate shorthand: `for i, item in items:`
-        let (pattern, auto_enumerate) = self.parse_for_pattern()?;
+        // A bare comma pattern (`for a, b in e:`) is a tuple destructure.
+        let pattern = self.parse_for_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
@@ -500,7 +500,6 @@ impl<'a> Parser<'a> {
                 body,
                 simd_requested: false,
                 is_suspend: false,
-                auto_enumerate,
                 invariants,
                 label,
             }))
@@ -528,40 +527,71 @@ impl<'a> Parser<'a> {
                 body,
                 simd_requested: false,
                 is_suspend: false,
-                auto_enumerate,
                 invariants: vec![],
                 label,
             }))
         }
     }
 
-    /// Parse for loop pattern, detecting enumerate shorthand `for i, item in items:`
-    /// Returns (pattern, auto_enumerate)
-    fn parse_for_pattern(&mut self) -> Result<(Pattern, bool), ParseError> {
-        // Check if this looks like enumerate shorthand: bare `ident, pattern`
-        // (not a tuple pattern which uses parentheses)
-        if let TokenKind::Identifier { name, .. } = &self.current.kind {
-            let index_name = name.clone();
-            let index_span = self.current.span;
-            self.advance();
-
-            // If followed by comma (enumerate shorthand), parse the item pattern
-            if self.check(&TokenKind::Comma) {
-                self.advance(); // consume comma
-                let item_pattern = self.parse_pattern()?;
-
-                // Create tuple pattern for (index, item)
-                let tuple_pattern = Pattern::Tuple(vec![Pattern::Identifier(index_name), item_pattern]);
-                return Ok((tuple_pattern, true));
+    /// Parse a for loop's binding pattern.
+    ///
+    /// A bare comma list — `for a, b in e:`, `for a, b, c in e:` — is
+    /// ALWAYS a tuple destructure, of any arity, exactly like the
+    /// parenthesized `for (a, b) in e:`. The iterable is never consulted:
+    /// both spellings produce the same `Pattern::Tuple([...])` here, so no
+    /// later stage can tell them apart, which is the point.
+    ///
+    /// This matches the pure-Simple compiler, which is the language's
+    /// reference semantics: `parse_for_stmt` +`encode_for_tuple_binding`
+    /// (src/compiler/10.frontend/core/parser_stmts.spl) joins an arbitrary
+    /// bare name list into the same `"(a,b,c)"` pattern the parenthesized
+    /// spelling produces, unconditionally, and the HIR lowering
+    /// (src/compiler/20.hir/hir_lowering/statements.spl, `StmtKind.For`)
+    /// emits one `let name = __for_tuple_elem[i]` per name.
+    ///
+    /// There is NO "enumerate shorthand". Until 2026-09-12 the seed tagged a
+    /// bare two-name pattern `auto_enumerate = true` and the interpreter
+    /// index-wrapped every element (`i` = the loop's own position, `item` =
+    /// the element), a feature the pure-Simple compiler has never had and
+    /// the seed's own JIT never implemented. Enumerate intent is now written
+    /// `for i, x in xs.enumerate():` in every lane. See
+    /// doc/08_tracking/bug/
+    /// seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+    fn parse_for_pattern(&mut self) -> Result<Pattern, ParseError> {
+        // A bare comma list can only start with a plain name or `_`.
+        // Anything else — `for (a, b) in e:`, `for [a, b] in e:`, a literal —
+        // is a complete pattern on its own and is parsed exactly as before.
+        let first = match &self.current.kind {
+            TokenKind::Identifier { name, .. } => {
+                let name = name.clone();
+                self.advance();
+                Pattern::Identifier(name)
             }
+            TokenKind::Underscore => {
+                self.advance();
+                Pattern::Wildcard
+            }
+            _ => return self.parse_pattern(),
+        };
 
-            // Not enumerate shorthand - just a regular identifier pattern
-            return Ok((Pattern::Identifier(index_name), false));
+        if !self.check(&TokenKind::Comma) {
+            return Ok(first);
         }
 
-        // Fall back to standard pattern parsing (handles tuples, wildcards, etc.)
-        let pattern = self.parse_pattern()?;
-        Ok((pattern, false))
+        let mut patterns = vec![first];
+        while self.check(&TokenKind::Comma) {
+            self.advance(); // consume the separator
+            // NOT `parse_pattern`: a `,` here separates BINDINGS, so it must
+            // not be swallowed as a comma or-pattern. Until 2026-09-12 this
+            // used `parse_pattern`, which is why `for a, b, c in e:` parsed
+            // as `(a, b | c)` — a two-element tuple whose second element was
+            // an Or pattern — and then silently bound nothing at all,
+            // skipping every iteration. Same reasoning as
+            // `parse_enum_payload_patterns` and the struct-pattern field
+            // list, which both avoid `parse_pattern` for this exact reason.
+            patterns.push(self.parse_pattern_no_comma_or()?);
+        }
+        Ok(Pattern::Tuple(patterns))
     }
 
     pub(crate) fn parse_while(&mut self) -> Result<Node, ParseError> {
@@ -1163,8 +1193,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::ForSuspend)?;
 
-        // Check for enumerate shorthand: `for~ i, item in items:`
-        let (pattern, auto_enumerate) = self.parse_for_pattern()?;
+        // A bare comma pattern (`for a, b in e:`) is a tuple destructure.
+        let pattern = self.parse_for_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
@@ -1203,7 +1233,6 @@ impl<'a> Parser<'a> {
             body,
             simd_requested: false,
             is_suspend: true,
-            auto_enumerate,
             invariants,
             label: None,
         }))

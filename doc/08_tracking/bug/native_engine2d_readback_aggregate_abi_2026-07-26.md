@@ -1,4 +1,8 @@
 # Native Engine2DReadback Aggregate ABI
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -48,3 +52,4 @@ Deploy the name-keyed field-layout precedence fix from
 `native_engine2d_readback_cross_module_field_layout_2026-07-26.md`, then require
 device readback, positive handle/device identity, zero mismatches, and passing
 strict/parity specs.
+

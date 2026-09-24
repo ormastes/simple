@@ -1,4 +1,8 @@
 # Stage4 redeploy blocker — seed `llvm-lib` method-call arity + extern-signature codegen bug (2026-07-06)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Context:** the ~130 source fixes on `main` are frozen behind a redeploy (a fresh
 self-hosted compiler build). This doc characterizes why the **seed `llvm-lib`** path
@@ -43,3 +47,4 @@ the extern signature registration for `rt_dir_create`.
 Hits a frozen MIR-empty bug ("MIR module has no functions" for the entry) — not a viable
 redeploy path on the deployed binary. So redeploy cannot bootstrap through the deployed
 binary either; it must go through a fixed seed backend.
+

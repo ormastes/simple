@@ -1,0 +1,156 @@
+# Simple-owned lifecycle for the canonical runtime AVX2 affinity lease.
+use std.nogc_sync_mut.io.thread.{thread_avx2_affinity_acquire,
+    thread_avx2_affinity_generation, thread_avx2_affinity_thread_id,
+    thread_avx2_affinity_cpu, thread_avx2_affinity_validate,
+    thread_avx2_affinity_release}
+use std.nogc_sync_mut.io.thread.{thread_avx2_affinity_call_enter,
+    thread_avx2_affinity_call_exit}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentSnapshotV1, ENV_ARCH_X86_64_V1}
+
+pub enum ExecutionDomainAffinityLeaseErrorV1:
+    InvalidSnapshot
+    CapacityExceeded
+    Unavailable
+    InvalidRuntimeReceipt
+    UnknownOrForged
+    StaleGeneration
+    NotLive
+    ReleaseFailed
+    CallAlreadyEntered
+    CallNotEntered
+
+pub struct ExecutionDomainAffinityLeaseV1:
+    lease_id: u64
+    lease_generation: u64
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    execution_domain_identity: EnvironmentDigest256V1
+    execution_domain_generation: u64
+    native_thread_id: i64
+    cpu_id: i64
+
+pub struct ExecutionDomainAffinityCallTokenV1:
+    call_id: u64
+    lease_id: u64
+
+struct _AffinityRecordV1:
+    lease: ExecutionDomainAffinityLeaseV1
+    runtime_handle: i64
+    live: bool
+    call_id: u64
+
+pub class ExecutionDomainAffinityLeaseOwnerV1:
+    var records: [_AffinityRecordV1]
+    var next_call_id: u64
+    pub static fn create() -> ExecutionDomainAffinityLeaseOwnerV1:
+        ExecutionDomainAffinityLeaseOwnerV1(records: [], next_call_id: 1u64)
+
+fn _declared(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+fn _same_digest(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _same(a: ExecutionDomainAffinityLeaseV1, b: ExecutionDomainAffinityLeaseV1) -> bool:
+    a.lease_id == b.lease_id and a.lease_generation == b.lease_generation and
+    _same_digest(a.environment_identity, b.environment_identity) and
+    a.environment_generation == b.environment_generation and
+    _same_digest(a.execution_domain_identity, b.execution_domain_identity) and
+    a.execution_domain_generation == b.execution_domain_generation and
+    a.native_thread_id == b.native_thread_id and a.cpu_id == b.cpu_id
+fn _find(owner: ExecutionDomainAffinityLeaseOwnerV1, id: u64) -> i64:
+    var i = 0
+    while i < owner.records.len():
+        if owner.records[i].lease.lease_id == id: return i
+        i = i + 1
+    -1
+
+pub fn execution_domain_affinity_lease_acquire_v1(owner: ExecutionDomainAffinityLeaseOwnerV1,
+    snapshot: EnvironmentSnapshotV1) -> Result<ExecutionDomainAffinityLeaseV1, ExecutionDomainAffinityLeaseErrorV1>:
+    if snapshot.execution_architecture != ENV_ARCH_X86_64_V1 or
+       not _declared(snapshot.snapshot_identity) or snapshot.snapshot_generation == 0u64 or
+       not _declared(snapshot.execution_domain_identity):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.InvalidSnapshot)
+    if owner.records.len() >= 256:
+        return Err(ExecutionDomainAffinityLeaseErrorV1.CapacityExceeded)
+    val handle = thread_avx2_affinity_acquire()
+    if handle <= 0: return Err(ExecutionDomainAffinityLeaseErrorV1.Unavailable)
+    val generation = thread_avx2_affinity_generation(handle)
+    val native_thread = thread_avx2_affinity_thread_id(handle)
+    val cpu = thread_avx2_affinity_cpu(handle)
+    if generation <= 0 or native_thread <= 0 or cpu < 0 or
+       not thread_avx2_affinity_validate(handle, generation, native_thread, cpu):
+        _ = thread_avx2_affinity_release(handle, generation, native_thread)
+        return Err(ExecutionDomainAffinityLeaseErrorV1.InvalidRuntimeReceipt)
+    val lease = ExecutionDomainAffinityLeaseV1(lease_id: handle as u64,
+        lease_generation: generation as u64, environment_identity: snapshot.snapshot_identity,
+        environment_generation: snapshot.snapshot_generation,
+        execution_domain_identity: snapshot.execution_domain_identity,
+        execution_domain_generation: generation as u64,
+        native_thread_id: native_thread, cpu_id: cpu)
+    owner.records.push(_AffinityRecordV1(lease: lease, runtime_handle: handle, live: true,
+        call_id: 0u64))
+    Ok(lease)
+
+pub fn execution_domain_affinity_lease_validate_v1(owner: ExecutionDomainAffinityLeaseOwnerV1,
+    snapshot: EnvironmentSnapshotV1, lease: ExecutionDomainAffinityLeaseV1
+) -> Result<(), ExecutionDomainAffinityLeaseErrorV1>:
+    val index = _find(owner, lease.lease_id)
+    if index < 0 or not _same(owner.records[index].lease, lease):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.UnknownOrForged)
+    if not owner.records[index].live: return Err(ExecutionDomainAffinityLeaseErrorV1.NotLive)
+    if not _same_digest(snapshot.snapshot_identity, lease.environment_identity) or
+       snapshot.snapshot_generation != lease.environment_generation or
+       not _same_digest(snapshot.execution_domain_identity, lease.execution_domain_identity):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.StaleGeneration)
+    if not thread_avx2_affinity_validate(owner.records[index].runtime_handle,
+            lease.lease_generation as i64, lease.native_thread_id, lease.cpu_id):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.NotLive)
+    Ok(())
+
+pub fn execution_domain_affinity_lease_release_v1(owner: ExecutionDomainAffinityLeaseOwnerV1,
+    lease: ExecutionDomainAffinityLeaseV1) -> Result<(), ExecutionDomainAffinityLeaseErrorV1>:
+    val index = _find(owner, lease.lease_id)
+    if index < 0 or not _same(owner.records[index].lease, lease):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.UnknownOrForged)
+    if not owner.records[index].live: return Err(ExecutionDomainAffinityLeaseErrorV1.NotLive)
+    if not thread_avx2_affinity_release(owner.records[index].runtime_handle,
+            lease.lease_generation as i64, lease.native_thread_id):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.ReleaseFailed)
+    var kept: [_AffinityRecordV1] = []; var i = 0
+    while i < owner.records.len():
+        if i != index: kept.push(owner.records[i])
+        i = i + 1
+    owner.records = kept
+    Ok(())
+
+pub fn execution_domain_affinity_call_enter_v1(owner: ExecutionDomainAffinityLeaseOwnerV1,
+    snapshot: EnvironmentSnapshotV1, lease: ExecutionDomainAffinityLeaseV1
+) -> Result<ExecutionDomainAffinityCallTokenV1, ExecutionDomainAffinityLeaseErrorV1>:
+    val valid = execution_domain_affinity_lease_validate_v1(owner, snapshot, lease)
+    if valid.is_err(): return Err(valid.unwrap_err())
+    val index = _find(owner, lease.lease_id)
+    if owner.records[index].call_id != 0u64: return Err(ExecutionDomainAffinityLeaseErrorV1.CallAlreadyEntered)
+    if owner.next_call_id == 0u64 or owner.next_call_id == 0xffffffffffffffffu64:
+        return Err(ExecutionDomainAffinityLeaseErrorV1.CapacityExceeded)
+    if not thread_avx2_affinity_call_enter(owner.records[index].runtime_handle,
+            lease.lease_generation as i64, lease.native_thread_id, lease.cpu_id):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.NotLive)
+    val token = ExecutionDomainAffinityCallTokenV1(call_id: owner.next_call_id,
+        lease_id: lease.lease_id)
+    owner.next_call_id = owner.next_call_id + 1u64
+    var record = owner.records[index]; record.call_id = token.call_id; owner.records[index] = record
+    Ok(token)
+
+pub fn execution_domain_affinity_call_exit_v1(owner: ExecutionDomainAffinityLeaseOwnerV1,
+    lease: ExecutionDomainAffinityLeaseV1, token: ExecutionDomainAffinityCallTokenV1
+) -> Result<(), ExecutionDomainAffinityLeaseErrorV1>:
+    val index = _find(owner, lease.lease_id)
+    if index < 0 or not _same(owner.records[index].lease, lease) or
+       token.lease_id != lease.lease_id or owner.records[index].call_id != token.call_id or
+       token.call_id == 0u64:
+        return Err(ExecutionDomainAffinityLeaseErrorV1.CallNotEntered)
+    if not thread_avx2_affinity_call_exit(owner.records[index].runtime_handle,
+            lease.lease_generation as i64, lease.native_thread_id, lease.cpu_id):
+        return Err(ExecutionDomainAffinityLeaseErrorV1.ReleaseFailed)
+    var record = owner.records[index]; record.call_id = 0u64; owner.records[index] = record
+    Ok(())

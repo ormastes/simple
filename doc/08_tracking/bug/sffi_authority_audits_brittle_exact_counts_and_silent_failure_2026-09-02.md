@@ -1,4 +1,8 @@
 # SFFI-v2 authority audits: brittle exact-count assertions + silent failure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-02
 - Status: fixed for 5 of 46 guards (group 1); same class open in the rest
@@ -75,3 +79,4 @@ audit's assertions were left unchanged.
 Do not bump a count to green without reading what moved it. An exact-count
 assertion that dropped because raw FFI was migrated to typed aliases is drift;
 an annotation or wrapper that vanished is a violation and the source is wrong.
+

@@ -1,4 +1,8 @@
 # Bug: interpreter binds the first param of *some* multi-param `me` methods to value×8
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-06-29
 **Status:** Open — **reclassified 2026-08-01** (see *Triage 2026-08-01* below)
@@ -214,3 +218,4 @@ repro would not be a genuine test of the defect. **Conclusion: STILL
 BROKEN** (unverifiable-in-isolation, but demonstrably not fixed at the
 source level named by the doc). The `bug_db.sdn` status label for this row
 is simply wrong.
+

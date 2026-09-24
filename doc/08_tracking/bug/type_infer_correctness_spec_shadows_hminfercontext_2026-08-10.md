@@ -1,4 +1,8 @@
 # type_infer_correctness_spec.spl shadows HmInferContext with a 1-field stand-in
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **STATUS: RESOLVED 2026-08-10 (spec) — but the rewrite is RED on two newly
 exposed product defects, deliberately left failing.**
@@ -86,3 +90,4 @@ Rewrite against the real `HmInferContext` struct in
 `src/compiler/30.types/type_infer_types.spl`, including at least one
 exercise of level-based generalization (`enter_level`/`exit_level` or
 equivalent) and the dimension solver, not just field presence.
+

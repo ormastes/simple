@@ -1,4 +1,8 @@
 # The TODO scanner accepts only `.spl` and `.md`, so `todo_db.sdn` structurally under-reports
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06 · **Status:** RECORDED (needs a scoping decision, not a reflex fix) ·
 **Measured at:** `a12a19eb775` (worktree checkout of `origin/main`). No build was run.
@@ -94,3 +98,4 @@ So the change is at least two coupled edits, and the scope of the second is a de
   carry meaningful TODOs — as opposed to few or none — is unknown. It is possible the
   under-reporting is structural but empirically small. That would change the priority, not
   the correctness of the finding.
+

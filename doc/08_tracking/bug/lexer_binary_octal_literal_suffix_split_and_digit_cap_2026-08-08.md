@@ -1,4 +1,9 @@
 # CoreLexer: binary/octal literals lost their type suffix; radix digit runs capped at 64
+## Closed 2026-09-16 — Status FIXED re-verified; suffix scan + while-true loops; RED-to-GREEN 9 examples
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -105,3 +110,4 @@ The octal branch accepts `8` and `9` (`is_digit(oc)` rather than an octal-digit
 test), so `0o789` lexes as a valid octal literal and
 `parse_int_literal_text` evaluates it with base-8 arithmetic on out-of-range
 digits. Closing it needs a new lexer error path, not a scanner tweak.
+

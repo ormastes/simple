@@ -1,4 +1,8 @@
 # x86_32 QEMU Release Lineage, Nonce, and Clean-Source Gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** OPEN  
@@ -32,3 +36,4 @@ once. Retain all source/compiler/kernel/image/QEMU/argv/nonce identities.
 
 - Owner: x86_32 SimpleOS execution lane
 - Final reviewer: independent normal/highest-capability reviewer
+

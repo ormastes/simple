@@ -1,4 +1,9 @@
 # Legacy editor SDL rectangle glyphs
+## Closed 2026-09-16 — fixed in source; Draw IR bridge + regression spec; runtime confirmation pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Fixed in source; runtime confirmation pending a refreshed self-host.
 
@@ -22,3 +27,4 @@ requiring resolved/shaped Draw IR metadata, Engine2D lowering and shutdown,
 zero-skipped-command failure handling, SDL channel conversion, and absence of
 the former rectangle helper. Pixel/runtime confirmation remains pending the
 refreshed self-host noted above.
+

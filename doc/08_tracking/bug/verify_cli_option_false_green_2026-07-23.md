@@ -1,4 +1,8 @@
 # `simple verify` option false-green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source fixed; focused bootstrap contract pending.
 
@@ -21,3 +25,4 @@ scope. It now enumerates Git-tracked project files for that report; test-quality
 verification already uses its dedicated full-scan path. The all-scope contract
 uses synthetic changed/tracked inputs to prove the selection cannot regress to
 the changed-file set.
+

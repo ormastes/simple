@@ -1,4 +1,9 @@
 # DNS AAAA query does not carry QTYPE=28
+## Closed 2026-09-16 — CLOSED 2026-08-17: spec off-by-two, encoder RFC-correct; 35/35; commit 7b85841e0e7
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: OPEN
 - Status: CLOSED (2026-08-17)
@@ -80,3 +85,4 @@ after:  Results: 3 total, 3 passed, 0 failed
 ```
 
 Commit: `7b85841e0e7`.
+

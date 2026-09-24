@@ -14,9 +14,12 @@
 
 use app.io.mod (file_read, get_args, exit)
 use std.mcp.session.{McpState}
-use std.mcp.helpers.{LB, RB, get_clean_args, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_error_response, make_result_response}
+use std.mcp.helpers.{LB, RB, get_clean_args, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_error_response, make_result_response, make_tool_result}
 use std.mcp.schema.{get_all_tool_schemas, init_core_schemas}
 use std.string.{NL}
+use std.io.{cwd}
+use std.json.{json_parse, json_object_get, json_get_type, json_to_string}
+use std.nogc_async_mut.mcp.bugdb_resource.{get_bug_by_id, add_bug_from_json, update_bug_from_json}
 
 # Import handler functions
 use std.nogc_async_mut.mcp.diag_read_tools.{handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status}
@@ -240,9 +243,44 @@ fn dispatch_diag(id: text, tool_name: text, body: text) -> text:
     else:
         make_error_response(id, -32601, "Unknown diagnostic tool: " + tool_name)
 
+# Bug database tools operate on the project bug DB at its canonical tracked
+# location (same path the compiler stats tools and MCP bugdb resources use).
+fn bugdb_db_path() -> text:
+    cwd() + "/doc/08_tracking/bug/bug_db.sdn"
+
+# Pull a string argument out of the tools/call `arguments` object. Uses the
+# real JSON parser rather than the scan-based extract helpers so an embedded
+# JSON document (bugdb_add's `bug` string) survives unescaping intact.
+fn bugdb_arg(body: text, key: text) -> text:
+    val root = json_parse(body)
+    if root == nil or json_get_type(root) != "object":
+        return ""
+    val params = json_object_get(root, "params")
+    if params == nil or json_get_type(params) != "object":
+        return ""
+    val args = json_object_get(params, "arguments")
+    if args == nil or json_get_type(args) != "object":
+        return ""
+    json_to_string(json_object_get(args, key)) ?? ""
+
 fn dispatch_bugdb(id: text, tool_name: text, body: text) -> text:
-    # TODO: Import bugdb handlers when available
-    val content = "BugDB handler for {tool_name} - integration pending"
-    val result_content = LB() + jp("type", js("text")) + "," + jp("text", js(content)) + RB()
-    val result = LB() + jp("content", "[" + result_content + "]") + "," + jp("isError", "false") + RB()
-    make_result_response(id, result)
+    if tool_name == "bugdb_get":
+        val bug_id = bugdb_arg(body, "id")
+        if bug_id == "":
+            return make_error_response(id, -32602, "Missing required parameter: id")
+        return make_tool_result(id, get_bug_by_id(bugdb_db_path(), bug_id))
+    elif tool_name == "bugdb_add":
+        val bug_json = bugdb_arg(body, "bug")
+        if bug_json == "":
+            return make_error_response(id, -32602, "Missing required parameter: bug")
+        return make_tool_result(id, add_bug_from_json(bugdb_db_path(), bug_json))
+    elif tool_name == "bugdb_update":
+        val bug_id = bugdb_arg(body, "id")
+        val bug_json = bugdb_arg(body, "bug")
+        if bug_id == "":
+            return make_error_response(id, -32602, "Missing required parameter: id")
+        if bug_json == "":
+            return make_error_response(id, -32602, "Missing required parameter: bug")
+        return make_tool_result(id, update_bug_from_json(bugdb_db_path(), bug_id, bug_json))
+    else:
+        make_error_response(id, -32601, "Unknown bugdb tool: " + tool_name)

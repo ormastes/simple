@@ -30,6 +30,10 @@ describe "settlement export updates are transactional":
         val container = SettlementContainer.create()
         expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
         expect(container.add_module("B", "/b.smf").is_ok()).to_equal(true)
+        expect(container.module_count()).to_equal(2)
+        expect(container.stats().total_modules).to_equal(2)
+        expect(container.add_module("A", "/duplicate.smf").is_err()).to_equal(true)
+        expect(container.module_count()).to_equal(2)
         expect(container.set_exports("A", [export_symbol("stable", 10, "A", SymbolBinding.Strong)]).is_ok()).to_equal(true)
 
         val result = container.set_exports("B", [
@@ -37,6 +41,7 @@ describe "settlement export updates are transactional":
             export_symbol("stable", 30, "B", SymbolBinding.Strong)
         ])
         expect(result.is_err()).to_equal(true)
+        expect(container.linker.stats().total_exports).to_equal(1)
         expect(container.linker.get_export("new_b") == nil).to_equal(true)
         expect(container.modules["B"].exports.len()).to_equal(0)
         match container.linker.get_export("stable"):
@@ -53,6 +58,7 @@ describe "settlement export updates are transactional":
             export_symbol("old", 10, "A", SymbolBinding.Strong),
             export_symbol("keep", 20, "A", SymbolBinding.Strong)
         ]).is_ok()).to_equal(true)
+        expect(container.linker.stats().total_exports).to_equal(2)
         expect(container.set_exports("A", [
             export_symbol("keep", 30, "A", SymbolBinding.Strong),
             export_symbol("new", 40, "A", SymbolBinding.Strong)
@@ -123,6 +129,8 @@ describe "settlement export updates are transactional":
             case Some(symbol): expect(symbol.module_id).to_equal("provider")
             case nil: expect(false).to_equal(true)
         expect(container.remove_module("provider").is_ok()).to_equal(true)
+        expect(container.module_count()).to_equal(1)
+        expect(container.stats().total_modules).to_equal(1)
         match container.linker.get_export("service"):
             case Some(symbol):
                 expect(symbol.module_id).to_equal("__jit__")
@@ -149,6 +157,7 @@ describe "settlement export updates are transactional":
         expect(container.add_module("provider", "/provider-old.smf").is_ok()).to_equal(true)
         expect(container.add_dependency("consumer", "provider").is_ok()).to_equal(true)
         expect(container.set_imports("consumer", [import_symbol("service", "consumer")]).is_ok()).to_equal(true)
+        expect(container.linker.stats().total_imports).to_equal(1)
         expect(container.set_exports("provider", [export_symbol("service", 10, "provider", SymbolBinding.Strong)]).is_ok()).to_equal(true)
         expect(container.link().is_ok()).to_equal(true)
 
@@ -156,12 +165,14 @@ describe "settlement export updates are transactional":
         expect(container.modules.contains("provider")).to_equal(false)
         expect(container.linker.modules.contains("provider")).to_equal(false)
         expect(container.linker.get_export("service") == nil).to_equal(true)
+        expect(container.linker.stats().total_exports).to_equal(0)
         expect(container.modules["consumer"].dependencies.contains("provider")).to_equal(false)
         expect(container.load_order.len()).to_equal(0)
         expect(container.link().is_err()).to_equal(true)
         expect(container.linker.stats().unresolved).to_equal(1)
 
         expect(container.add_module("provider", "/provider-new.smf").is_ok()).to_equal(true)
+        expect(container.module_count()).to_equal(2)
         expect(container.add_dependency("consumer", "provider").is_ok()).to_equal(true)
         expect(container.set_exports("provider", [export_symbol("service", 20, "provider", SymbolBinding.Strong)]).is_ok()).to_equal(true)
         expect(container.link().is_ok()).to_equal(true)

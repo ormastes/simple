@@ -1,4 +1,9 @@
 # Parser: local named `grid` corrupts parse with misleading "expected Colon, found Dot" (no line number)
+## Closed 2026-09-16 — Status RESOLVED 2026-08-17; source fix confirmed in both compilers; regressions cover original shape
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-04
 **Severity:** high (silent parser corruption, error points nowhere near the cause)
@@ -49,3 +54,4 @@ shape and preserve `grid:` literals. Execution is pending.
 
 [[interp_array_param_indexing_2026-07-03]] (same formula.spl battleground),
 guide quirk ledger doc/07_guide/app/office/writing_calc_functions.md.
+

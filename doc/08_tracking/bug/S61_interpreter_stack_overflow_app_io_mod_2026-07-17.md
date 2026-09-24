@@ -1,4 +1,8 @@
 # S61: Interpreter Stack Overflow on app.io.mod Imports
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open  
 **Defect Type:** Interpreter module loader / missing cycle detection  
@@ -159,3 +163,4 @@ probe on a freshly built seed. The loader-hardening change drafted from this
 doc's theory (in-flight cycle tracking, lane S64) is held un-landed: plausible
 defense-in-depth, but its motivating bug is unconfirmed and it is unverifiable
 until redeploy.
+

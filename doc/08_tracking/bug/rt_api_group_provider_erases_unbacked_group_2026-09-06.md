@@ -1,4 +1,8 @@
 # Naming a provider DELETES an unbacked rt_* group instead of owning it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-06
 - **Component:** `scripts/check/gen-api-registry.shs`, `scripts/check/check-rt-api-groups.shs`
@@ -86,3 +90,4 @@ functions. They were being counted as rt_* API symbols and as direct call
 sites. Allowlisting their file removed them, which happens to be the right
 answer, but the classifier should not have admitted them in the first place —
 a `__fallback` suffix on a Simple `fn` is not a runtime boundary.
+

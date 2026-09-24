@@ -21,6 +21,7 @@ use app.devhub.adapter_jira_curl.{
     _status_message, _status_ok,
     _adf_doc, _json_escape,
     _normalize_base,
+    jira_resolve_gateway_url, _jira_gateway_argv,
 }
 
 
@@ -58,7 +59,9 @@ describe "Jira curl adapter":
             # If a future change silently interpolates the braces or
             # strips the backslashes, this test catches it.
             val argv = _build_curl_argv_get("Basic xyz", "https://x/rest/api/3/issue/X-1")
-            expect(argv.contains("\n%\{http_code\}")).to_equal(true)
+            # A literal backslash-n (curl expands it), never a real newline:
+            # Windows cannot pass a newline argument to a .cmd curl shim.
+            expect(argv.contains("\\n%\{http_code\}")).to_equal(true)
 
         it "GET argv carries Authorization and Accept headers":
             val argv = _build_curl_argv_get("Basic xyz", "https://x/rest/api/3/issue/X-1")
@@ -190,3 +193,44 @@ describe "Jira curl adapter":
 
         it "strips a trailing slash":
             expect(_normalize_base("https://x.atlassian.net/")).to_equal("https://x.atlassian.net")
+
+    context "gateway routing":
+
+        it "rewrites the Jira REST root and attaches every ordered configured header":
+            val client = JiraClient(base_url: "https://acme.atlassian.net", email: "a@b", api_token: "tok", curl_path: "curl", deployment: "cloud", auth_scheme: "", gateway_url: "https://gateway.example/jira", headers: ["X-Classification: restricted", "X-Scope: team"])
+            val direct_url = "https://acme.atlassian.net/rest/api/3/issue/PROJ-1"
+            val routed_url = jira_resolve_gateway_url(client, direct_url)
+            expect(routed_url).to_equal("https://gateway.example/jira/issue/PROJ-1")
+            match _jira_gateway_argv(client, _build_curl_argv_put(client.auth_header(), direct_url, "{}")):
+                Err(message):
+                    expect(message).to_equal("")
+                Ok(argv):
+                    expect(argv.contains("Authorization: Basic YUBiOnRvaw==")).to_equal(true)
+                    expect(argv.contains("X-Classification: restricted")).to_equal(true)
+                    expect(argv.contains("X-Scope: team")).to_equal(true)
+                    expect(argv.contains("{}")).to_equal(true)
+                    expect(argv[argv.len() - 1]).to_equal(routed_url)
+
+        it "uses the complete gateway API prefix when the direct Jira URL is absent":
+            val client = JiraClient(base_url: "", email: "a@b", api_token: "tok", curl_path: "curl", deployment: "cloud", auth_scheme: "", gateway_url: "https://gateway.example/jira", headers: [])
+            expect(jira_resolve_gateway_url(client, "/issue/PROJ-2?fields=summary")).to_equal("https://gateway.example/jira/issue/PROJ-2?fields=summary")
+
+        it "preserves direct URLs and omits gateway headers when no gateway is configured":
+            val client = JiraClient(base_url: "https://acme.atlassian.net", email: "a@b", api_token: "tok", curl_path: "curl", deployment: "cloud", auth_scheme: "", gateway_url: "", headers: ["X-Classification: restricted"])
+            val direct_url = "https://acme.atlassian.net/rest/api/3/issue/PROJ-3"
+            match _jira_gateway_argv(client, _build_curl_argv_get(client.auth_header(), direct_url)):
+                Err(message):
+                    expect(message).to_equal("")
+                Ok(argv):
+                    expect(argv.contains("X-Classification: restricted")).to_equal(false)
+                    expect(argv[argv.len() - 1]).to_equal(direct_url)
+
+        it "does not rewrite or disclose gateway headers to an unrelated download URL":
+            val client = JiraClient(base_url: "https://jira.example", email: "a@b", api_token: "tok", curl_path: "curl", deployment: "datacenter", auth_scheme: "", gateway_url: "https://gateway.example/jira", headers: ["X-Classification: restricted"])
+            val download_url = "https://cdn.example/secure/attachment/123/file.bin"
+            match _jira_gateway_argv(client, _build_curl_argv_download(client.auth_header(), download_url, "/tmp/file.bin")):
+                Err(message):
+                    expect(message).to_equal("")
+                Ok(argv):
+                    expect(argv.contains("X-Classification: restricted")).to_equal(false)
+                    expect(argv[argv.len() - 1]).to_equal(download_url)

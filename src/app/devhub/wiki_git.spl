@@ -146,6 +146,15 @@ pub fn wiki_git_clone_or_pull(clone_url: text, cache_dir: text) -> (bool, text):
     val _mk = dir_create_all(_parent_dir(cache_dir))
     val (_out, err, code) = process_run_bounded("git", ["clone", clone_url, cache_dir], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
     if code != 0:
+        # The seed runtime executes a spawned command twice and returns the
+        # second result, so a successful first clone surfaces here as
+        # "destination ... already exists". When a checkout materialised
+        # anyway, verify it with a fast-forward pull instead of failing.
+        if is_dir("{cache_dir}/.git"):
+            val (_pout, perr, pcode) = process_run_bounded("git", ["-C", cache_dir, "pull", "--ff-only"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+            if pcode != 0:
+                return (false, perr.trim())
+            return (true, "")
         return (false, err.trim())
     (true, "")
 
@@ -213,10 +222,16 @@ pub fn wiki_git_delete(cache_dir: text, page: text, message: text) -> (bool, tex
                 return (false, "page not found: {page}")
             val (_rm_out, rm_err, rm_code) = process_run_bounded("git", ["-C", cache_dir, "rm", "{safe_page}.md"], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
             if rm_code != 0:
-                return (false, rm_err.trim())
+                # As in wiki_git_write: the seed runtime runs the spawn twice,
+                # so the second `git rm` can report the already-removed
+                # pathspec. Only a still-present page is a real failure.
+                if file_exists(path):
+                    return (false, rm_err.trim())
             val commit_msg = if message != "": message else: "Delete {safe_page} via devhub"
-            val (_commit_out, commit_err, commit_code) = process_run_bounded("git", ["-C", cache_dir, "-c", "user.email=devhub@localhost", "-c", "user.name=devhub", "commit", "-m", commit_msg], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
+            val (commit_out, commit_err, commit_code) = process_run_bounded("git", ["-C", cache_dir, "-c", "user.email=devhub@localhost", "-c", "user.name=devhub", "commit", "-m", commit_msg], GIT_TIMEOUT_MS, GIT_MAX_OUTPUT_BYTES)
             if commit_code != 0:
+                if commit_out.contains("nothing to commit") or commit_err.contains("nothing to commit"):
+                    return (true, "")
                 return (false, commit_err.trim())
             (true, "")
 

@@ -1,4 +1,8 @@
 # SimpleOS installer host file read TOCTOU and allocation bound
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: BLOCKED; unsafe admission removed on 2026-08-20
 - Owner: `src/os/installer/image_bounded_file_reader.spl`
@@ -31,3 +35,4 @@ inode/generation identity, or fstat plus pread on the retained descriptor. A
 correct fix needs one canonical facade that performs no-follow open, fstat,
 bounded chunk reads, EOF/growth detection, and close on every path without
 reopening the name. Until it lands, this tracker remains release-blocking.
+

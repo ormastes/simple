@@ -1,0 +1,122 @@
+use std.spec.*
+use compiler.loader.parser_structural_mask_batch_v2.*
+use std.nogc_sync_mut.composition.environment_variants.structural_mask_leases_v1.*
+
+fn bytes31() -> [u8]:
+    var out: [u8] = []
+    for i in 0..31:
+        if i % 5 == 0: out.push(10u8)
+        else if i % 7 == 0: out.push(34u8)
+        else: out.push(255u8)
+    out
+
+describe "staged parser structural mask batch V2":
+    it "commits zero and 31-byte scalar-only batches without SIMD evidence":
+        val leases = StructuralMaskLeaseOwnerV1.create()
+        val empty = stable_source_buffer_lease_create_v1(leases, 1u64, [], 0u32).unwrap()
+        val empty_session = structural_mask_scalar_session_create_v1(leases, empty, 10u8, 34u8).unwrap()
+        val owner = ParserStructuralMaskBatchOwnerV2.create()
+        val zero_token = parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            empty_session, empty, 0u64, 0u64).unwrap()
+        val zero = parser_structural_mask_batch_commit_v2(owner, leases, zero_token,
+            empty_session, empty).unwrap()
+        expect(zero.masks.len()).to_equal(0)
+        expect(zero.positions.len()).to_equal(0)
+        expect(zero.executed_provider).to_equal(false)
+        expect(parser_structural_mask_batch_commit_v2(owner, leases, zero_token,
+            empty_session, empty)).to_equal(
+            Err(ParserStructuralMaskBatchErrorV2.UnknownOrReplayed))
+
+        val source = stable_source_buffer_lease_create_v1(leases, 2u64, bytes31(), 0u32).unwrap()
+        val session = structural_mask_scalar_session_create_v1(leases, source, 10u8, 34u8).unwrap()
+        val token = parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            session, source, 0u64, 31u64).unwrap()
+        val result = parser_structural_mask_batch_commit_v2(owner, leases, token,
+            session, source).unwrap()
+        expect(result.executed_provider).to_equal(false)
+        expect(result.positions).to_equal([0u64, 5u64, 7u64, 10u64, 14u64,
+            15u64, 20u64, 21u64, 25u64, 28u64, 30u64])
+
+    it "handles duplicate delimiters and rejects block requests without publishing":
+        val leases = StructuralMaskLeaseOwnerV1.create()
+        val source = stable_source_buffer_lease_create_v1(leases, 3u64,
+            [10u8, 255u8, 10u8, 34u8], 0u32).unwrap()
+        val session = structural_mask_scalar_session_create_v1(leases, source, 10u8, 10u8).unwrap()
+        val owner = ParserStructuralMaskBatchOwnerV2.create()
+        val token = parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            session, source, 0u64, 4u64).unwrap()
+        expect(parser_structural_mask_batch_commit_v2(owner, leases, token,
+            session, source).unwrap().positions).to_equal(
+            [0u64, 2u64])
+        val before = owner.stages.len()
+        expect(parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            session, source, 0u64, 32u64)).to_equal(
+            Err(ParserStructuralMaskBatchErrorV2.SimdContextRequired))
+        expect(parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            session, source, 0u64, 33u64)).to_equal(
+            Err(ParserStructuralMaskBatchErrorV2.SimdContextRequired))
+        expect(owner.stages.len()).to_equal(before)
+
+    it "rejects stale session substitution and cancellation replay":
+        val leases = StructuralMaskLeaseOwnerV1.create()
+        val source = stable_source_buffer_lease_create_v1(leases, 4u64, [1u8, 10u8], 0u32).unwrap()
+        val session = structural_mask_scalar_session_create_v1(leases, source, 10u8, 34u8).unwrap()
+        val owner = ParserStructuralMaskBatchOwnerV2.create()
+        var forged = session; forged.session_generation = forged.session_generation + 1u64
+        expect(parser_structural_mask_batch_stage_scalar_v2(owner, leases, forged,
+            source, 0u64, 2u64)).to_equal(Err(ParserStructuralMaskBatchErrorV2.InvalidSession))
+        val token = parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            session, source, 0u64, 2u64).unwrap()
+        expect(parser_structural_mask_batch_cancel_v2(owner, token)).to_equal(true)
+        expect(parser_structural_mask_batch_cancel_v2(owner, token)).to_equal(false)
+        expect(parser_structural_mask_batch_commit_v2(owner, leases, token, session, source)).to_equal(
+            Err(ParserStructuralMaskBatchErrorV2.UnknownOrReplayed))
+
+    it "rejects stale staged sessions and cross-owner tokens before commit":
+        val leases = StructuralMaskLeaseOwnerV1.create()
+        val source = stable_source_buffer_lease_create_v1(leases, 5u64, [10u8, 1u8], 0u32).unwrap()
+        val session = structural_mask_scalar_session_create_v1(leases, source, 10u8, 34u8).unwrap()
+        val owner = ParserStructuralMaskBatchOwnerV2.create()
+        val other = ParserStructuralMaskBatchOwnerV2.create()
+        val token = parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            session, source, 0u64, 2u64).unwrap()
+        expect(parser_structural_mask_batch_commit_v2(other, leases, token,
+            session, source)).to_equal(Err(ParserStructuralMaskBatchErrorV2.UnknownOrReplayed))
+        expect(structural_mask_session_release_v1(leases, session)).to_equal(
+            STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(parser_structural_mask_batch_commit_v2(owner, leases, token,
+            session, source)).to_equal(Err(ParserStructuralMaskBatchErrorV2.ValidationFailed))
+        expect(owner.stages.len()).to_equal(1)
+
+    it "rejects staged positions or masks that do not exactly correspond":
+        val leases = StructuralMaskLeaseOwnerV1.create()
+        val source = stable_source_buffer_lease_create_v1(leases, 6u64, [10u8, 1u8], 0u32).unwrap()
+        val session = structural_mask_scalar_session_create_v1(leases, source, 10u8, 34u8).unwrap()
+        val owner = ParserStructuralMaskBatchOwnerV2.create()
+        val token = parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+            session, source, 0u64, 2u64).unwrap()
+        var stage = owner.stages[0]
+        stage.result.positions = [1u64]
+        owner.stages[0] = stage
+        expect(parser_structural_mask_batch_commit_v2(owner, leases, token,
+            session, source)).to_equal(Err(ParserStructuralMaskBatchErrorV2.ValidationFailed))
+        val owner2 = ParserStructuralMaskBatchOwnerV2.create()
+        val token2 = parser_structural_mask_batch_stage_scalar_v2(owner2, leases,
+            session, source, 0u64, 2u64).unwrap()
+        stage = owner2.stages[0]
+        stage.result.masks.push(0u32)
+        owner2.stages[0] = stage
+        expect(parser_structural_mask_batch_commit_v2(owner2, leases, token2,
+            session, source)).to_equal(Err(ParserStructuralMaskBatchErrorV2.ValidationFailed))
+
+    it "reclaims terminal slots so capacity bounds concurrent work only":
+        val leases = StructuralMaskLeaseOwnerV1.create()
+        val source = stable_source_buffer_lease_create_v1(leases, 7u64, [10u8], 0u32).unwrap()
+        val session = structural_mask_scalar_session_create_v1(leases, source, 10u8, 34u8).unwrap()
+        val owner = ParserStructuralMaskBatchOwnerV2.create()
+        for i in 0..300:
+            val token = parser_structural_mask_batch_stage_scalar_v2(owner, leases,
+                session, source, 0u64, 1u64).unwrap()
+            expect(parser_structural_mask_batch_commit_v2(owner, leases, token,
+                session, source).is_ok()).to_equal(true)
+        expect(owner.stages.len()).to_equal(0)

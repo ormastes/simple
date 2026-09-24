@@ -1,4 +1,9 @@
 # A method call on a parenthesised float literal returns the receiver, not the result
+## Closed 2026-09-16 — Status FIXED, re-verified; truth table red to green; checks 28/28, 34/34, 48/48
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-10
 - Status: FIXED
@@ -125,3 +130,4 @@ SIMPLE_JIT_STRICT=1 simple repro.spl   # 16.0
 
 - `doc/08_tracking/bug/float_returning_method_in_argument_position_prints_tagged_bits_2026-08-10.md`
 - `doc/08_tracking/bug/float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md`
+

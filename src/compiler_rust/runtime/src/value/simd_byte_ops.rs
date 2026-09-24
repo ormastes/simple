@@ -159,13 +159,13 @@ fn xor_u8x16_impl(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
 }
 
 // ---------------------------------------------------------------------------
-// `pub extern "C"` symbol for compiled-mode linkage parity.
+// Rust-callable wrappers for lane-kernel tests.
 //
-// Mirrors Phase 1's lane-array-shaped ABI: 16 + 16 + *mut u8 = 33 args.
-// Once a Vec16u8 marshalling layer lands, this signature can be tightened.
+// Compiled Simple code uses the tagged-value ABI owned by
+// `src/runtime/runtime_simd_dispatch.c`; these helpers deliberately keep Rust
+// symbol mangling so they cannot collide with that canonical external owner.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_simd_add_u8x16(
     a0: u8,
@@ -213,7 +213,6 @@ pub extern "C" fn rt_simd_add_u8x16(
     }
 }
 
-#[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_simd_xor_u8x16(
     a0: u8,

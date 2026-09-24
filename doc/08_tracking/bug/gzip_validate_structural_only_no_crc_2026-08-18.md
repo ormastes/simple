@@ -1,4 +1,9 @@
 # gzip_validate passes a corrupted stream — structural checks only, no CRC
+## Closed 2026-09-16 — RESOLVED: full decode+CRC validate; repro spec 6/6 post-fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-08-18)
 **Filed:** 2026-08-18
@@ -43,3 +48,4 @@ All existing gzip specs remain green:
 `test/01_unit/lib/common/compress/gzip_header_spec.spl`,
 `test/01_unit/lib/nogc_sync_mut/compression/gzip_inflate_negative_offset_guard_spec.spl`,
 `test/01_unit/lib/common/compress/compression_utilities_spec.spl`.
+

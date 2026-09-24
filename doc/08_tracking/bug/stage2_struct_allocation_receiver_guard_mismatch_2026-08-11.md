@@ -1,4 +1,8 @@
 # Stage-2 struct allocation and receiver-guard mismatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -123,3 +127,4 @@ dereferencing it. Regression coverage in
 `cranelift_aggregate_runtime_abi_spec.spl` binds these paired surfaces. This is
 source evidence only: in-flight bootstraps started before the edit must fail
 their source-consistency gate and cannot qualify the repair.
+

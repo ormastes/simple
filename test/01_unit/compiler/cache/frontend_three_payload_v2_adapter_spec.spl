@@ -1,0 +1,540 @@
+# Purpose and audience: strict V2 frontend closure and physical TLD proof.
+# @req REQ-CSM-027
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.physical_tld_v1.{
+    PhysicalTldHeaderV1, PhysicalTldObjectV1, TldPayloadRoleV1, TldSectionRefV1,
+    physical_tld_header_encode_v1, physical_tld_section_table_digest_v1,
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1,
+}
+use compiler.common.cache_contract.snapshot_contract_v1.{CacheObjectRefV1}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadClosureSealV2, ThreePayloadFallbackV1,
+    ThreePayloadSemanticBinding, ThreePayloadSemanticRefV2,
+    closure_coverage_dimension_v1,
+}
+use compiler.frontend.cache_artifact.{
+    FrontendThreePayloadSemanticFactV2, PhysicalTldDecodeBoundsV1,
+    build_three_payload_semantic_refs_v2, decode_physical_tld_index_v1,
+    encode_physical_tld_v1, validate_three_payload_closure_seal_v2,
+    semantic_refs_bound_to_physical_tld_v2, three_payload_closure_seal_digest_checked_v2,
+    ThreePayloadSemanticAuthorityState, ThreePayloadSemanticBindBounds,
+    bind_three_payload_semantic_inputs,
+    resolve_three_payload_semantic_input, build_three_payload_semantic_read_manifest,
+}
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn section(index: i64, object_digest: text) -> TldSectionRefV1:
+    TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld, section_index: index,
+        kind: "semantic-body", semantic_object_digest: object_digest,
+        offset: 0, stored_bytes: 4, decoded_bytes: 4, encoding_profile: "raw-v1")
+
+fn fact(kind: ThreePayloadSemanticRefKindV1, name: text, body: text,
+        embedded: TldSectionRefV1?) -> FrontendThreePayloadSemanticFactV2:
+    FrontendThreePayloadSemanticFactV2(kind: kind, stable_entity_id: name,
+        callable_signature_digest: digest("signature:{name}"),
+        effect_digest: digest("effects:{name}"), body_or_object_digest: body,
+        embedded: embedded, selection_contract_digest: digest("selection:{name}"))
+
+fn complete_roots() -> [ClosureCoverageRootV1]:
+    var roots: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        roots.push(ClosureCoverageRootV1(
+            dimension: closure_coverage_dimension_v1(index),
+            root_digest: digest("root:{index}"), coverage: SemanticCoverageV1.Complete))
+        index = index + 1
+    roots
+
+fn owned_section(role: TldPayloadRoleV1, index: i64, offset: i64,
+                 bytes: [u8]) -> TldSectionRefV1:
+    TldSectionRefV1(role: role, section_index: index, kind: "semantic-body",
+        semantic_object_digest: sha256_u8_hex(bytes), offset: offset,
+        stored_bytes: bytes.len(), decoded_bytes: bytes.len(), encoding_profile: "raw-v1")
+
+fn object(role: TldPayloadRoleV1, label: text,
+          sections: [TldSectionRefV1], bodies: [[u8]]) -> PhysicalTldObjectV1:
+    var payload_bytes: i64 = 0
+    for body in bodies: payload_bytes = payload_bytes + body.len()
+    PhysicalTldObjectV1(header: PhysicalTldHeaderV1(schema: 1, role: role,
+        semantic_record_digest: digest(label),
+        section_table_digest: physical_tld_section_table_digest_v1(sections),
+        payload_bytes: payload_bytes, sections: sections), canonical_sections: bodies)
+
+fn binding(kind: ThreePayloadSemanticRefKindV1, name: text, object_digest: text,
+           embedded: TldSectionRefV1?, profile: text, access: text,
+           selection_suffix: text = "") -> ThreePayloadSemanticBinding:
+    ThreePayloadSemanticBinding(stable_entity_id: name, semantic_use_kind: kind,
+        object_ref: CacheObjectRefV1(kind: "portable_hir_object", schema: 2,
+            object_digest: object_digest),
+        embedded_role: match embedded:
+            case Some(value): Some(value.role)
+            case nil: nil,
+        embedded_section_index: match embedded:
+            case Some(value): Some(value.section_index)
+            case nil: nil,
+        raw_section_digest: match embedded:
+            case Some(value): Some(value.semantic_object_digest)
+            case nil: nil,
+        access_policy_digest: access, semantic_profile_digest: profile,
+        callable_signature_digest: digest("signature:{name}"),
+        effect_digest: digest("effects:{name}"),
+        selection_contract_digest: digest("selection:{name}{selection_suffix}"))
+
+fn bind_bounds(profile: text, access: text, generation: text,
+               max_bytes: i64 = 65536) -> ThreePayloadSemanticBindBounds:
+    val receipt = digest("owner-receipt")
+    ThreePayloadSemanticBindBounds(max_bindings: 32, max_sections: 32,
+        max_retained_bytes: max_bytes, max_decoded_bytes: max_bytes,
+        expected_input_generation_digest: generation,
+        expected_access_policy_digest: access,
+        expected_owner_receipt_digest: receipt,
+        presented_owner_receipt_digest: receipt,
+        expected_module_id: "demo", presented_module_id: "demo")
+
+fn query(name: text, profile: text, selection_suffix: text = "") -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "compile_query", stable_entity_id: "consumer",
+        semantic_profile_digest: profile,
+        parameter_digest: digest("selection:{name}{selection_suffix}"))
+
+fn seal_for(prior: PhysicalTldObjectV1?, init: PhysicalTldObjectV1,
+            refs: [ThreePayloadSemanticRefV2],
+            generation: text, profile: text) -> ThreePayloadClosureSealV2:
+    val init_bytes = encode_physical_tld_v1(init.header, init.canonical_sections).unwrap()
+    var prior_digest: text? = nil
+    var prior_count: i64 = 0
+    var prior_bytes: i64 = 0
+    match prior:
+        case Some(value):
+            val bytes = encode_physical_tld_v1(value.header, value.canonical_sections).unwrap()
+            prior_digest = Some(sha256_u8_hex(bytes))
+            prior_count = value.header.sections.len()
+            prior_bytes = bytes.len()
+        case nil: pass
+    ThreePayloadClosureSealV2(schema: 2, input_generation_digest: generation,
+        snapshot_digest: digest("snapshot"), source_digest: digest("source"),
+        prior_tld_digest: prior_digest, init_tld_digest: sha256_u8_hex(init_bytes),
+        compiler_semantics_digest: profile, consumed_inputs_digest: digest("inputs"),
+        semantic_refs: refs, coverage_roots: complete_roots(),
+        section_count: prior_count + init.header.sections.len(),
+        payload_bytes: prior_bytes + init_bytes.len(),
+        max_decode_bytes: prior_bytes + init_bytes.len())
+
+describe "strict V2 frontend three-payload adapter":
+    it "embeds bodies, keeps aspect calls symbolic, and binds selection contracts":
+        step("Build semantic references with embedded executable bodies and symbolic aspect calls")
+        val body = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8()]
+        val body_digest = sha256_u8_hex(body)
+        val refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.before",
+                digest("aspect-object"), nil),
+            fact(ThreePayloadSemanticRefKindV1.GenericBody, "generic.make",
+                body_digest, Some(section(0, body_digest))),
+        ], 1, 8).unwrap()
+        expect(refs.len()).to_equal(2)
+        expect(refs[0].kind).to_equal(ThreePayloadSemanticRefKindV1.AspectCallable)
+        expect(refs[0].embedded).to_equal(nil)
+        expect(refs[1].kind).to_equal(ThreePayloadSemanticRefKindV1.GenericBody)
+        expect(refs[1].embedded.is_some()).to_equal(true)
+        expect(build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.bad",
+                digest("aspect-object"), Some(section(0, digest("aspect-object")))),
+        ], 1, 8).is_err()).to_equal(true)
+
+    it "requires complete ordered coverage and proves physical bytes by decoding":
+        step("Validate complete closure roots and bounded physical TLD bytes")
+        val body = [1.to_u8(), 2.to_u8(), 3.to_u8(), 4.to_u8()]
+        val body_digest = sha256_u8_hex(body)
+        val refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.GenericBody, "generic.make",
+                body_digest, Some(section(0, body_digest))),
+        ], 1, 8).unwrap()
+        val roots = complete_roots()
+        val seal = ThreePayloadClosureSealV2(schema: 2,
+            input_generation_digest: digest("generation"), snapshot_digest: digest("snapshot"),
+            source_digest: digest("source"), prior_tld_digest: nil,
+            init_tld_digest: digest("init"), compiler_semantics_digest: digest("compiler"),
+            consumed_inputs_digest: digest("inputs"), semantic_refs: refs,
+            coverage_roots: roots, section_count: 1, payload_bytes: 4, max_decode_bytes: 4)
+        expect(validate_three_payload_closure_seal_v2(seal)).to_equal(true)
+        expect(three_payload_closure_seal_digest_checked_v2(seal) == "").to_equal(false)
+        val tld_section = section(0, body_digest)
+        val header = PhysicalTldHeaderV1(schema: 1, role: TldPayloadRoleV1.PackageInitTld,
+            semantic_record_digest: digest("record"),
+            section_table_digest: physical_tld_section_table_digest_v1([tld_section]),
+            payload_bytes: 4, sections: [tld_section])
+        val encoded = encode_physical_tld_v1(header, [body]).unwrap()
+        val decoded = decode_physical_tld_index_v1(encoded,
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: 4,
+                max_decoded_bytes: 8)).unwrap()
+        expect(decoded.role).to_equal(TldPayloadRoleV1.PackageInitTld)
+        expect(decoded.sections[0].semantic_object_digest).to_equal(body_digest)
+        expect(semantic_refs_bound_to_physical_tld_v2(refs, header)).to_equal(true)
+        expect(decode_physical_tld_index_v1(encoded,
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: 0,
+                max_decoded_bytes: 8)).is_err()).to_equal(true)
+        expect(decode_physical_tld_index_v1(encoded,
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: 1,
+                max_decoded_bytes: 3)).is_err()).to_equal(true)
+        expect(decode_physical_tld_index_v1(encoded,
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: -1,
+                max_decoded_bytes: 8)).is_err()).to_equal(true)
+        expect(decode_physical_tld_index_v1(encoded,
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: 1,
+                max_decoded_bytes: -1)).is_err()).to_equal(true)
+        var mutated = encoded
+        mutated[mutated.len() - 1] = 0.to_u8()
+        expect(decode_physical_tld_index_v1(mutated,
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: 4,
+                max_decoded_bytes: 8)).is_err()).to_equal(true)
+        expect(decode_physical_tld_index_v1(encoded[0..(encoded.len() - 1)],
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: 4,
+                max_decoded_bytes: 8)).is_err()).to_equal(true)
+        expect(encode_physical_tld_v1(header, [body, body]).is_err()).to_equal(true)
+        val wrong_owner = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 0, kind: "semantic-body", semantic_object_digest: digest("other-owner"),
+            offset: 0, stored_bytes: 4, decoded_bytes: 4, encoding_profile: "raw-v1")
+        val wrong_header = PhysicalTldHeaderV1(schema: 1, role: TldPayloadRoleV1.PackageInitTld,
+            semantic_record_digest: digest("record"),
+            section_table_digest: physical_tld_section_table_digest_v1([wrong_owner]),
+            payload_bytes: 4, sections: [wrong_owner])
+        expect(encode_physical_tld_v1(wrong_header, [body]).is_err()).to_equal(true)
+        expect(semantic_refs_bound_to_physical_tld_v2(refs, wrong_header)).to_equal(false)
+        val second_body = [5.to_u8(), 6.to_u8(), 7.to_u8(), 8.to_u8()]
+        val second_section = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 1, kind: "semantic-body", semantic_object_digest: sha256_u8_hex(second_body),
+            offset: 4, stored_bytes: 4, decoded_bytes: 4, encoding_profile: "raw-v1")
+        val two_header = PhysicalTldHeaderV1(schema: 1, role: TldPayloadRoleV1.PackageInitTld,
+            semantic_record_digest: digest("two-record"),
+            section_table_digest: physical_tld_section_table_digest_v1([tld_section, second_section]),
+            payload_bytes: 8, sections: [tld_section, second_section])
+        val two_encoded = encode_physical_tld_v1(two_header, [body, second_body]).unwrap()
+        val two_header_bytes = physical_tld_header_encode_v1(two_header)
+        var reordered = two_encoded.copy()
+        var reorder_index: i64 = 0
+        while reorder_index < 4:
+            reordered[two_header_bytes.len() + reorder_index] =
+                two_encoded[two_header_bytes.len() + 4 + reorder_index]
+            reordered[two_header_bytes.len() + 4 + reorder_index] =
+                two_encoded[two_header_bytes.len() + reorder_index]
+            reorder_index = reorder_index + 1
+        expect(decode_physical_tld_index_v1(reordered,
+            PhysicalTldDecodeBoundsV1(max_index_bytes: 4096, max_sections: 4,
+                max_decoded_bytes: 8)).is_err()).to_equal(true)
+
+    it "keeps equal local section indexes separate across warm roles and preserves both identities":
+        step("Bind exact semantic objects")
+        val profile = digest("semantic-profile")
+        val access = digest("access-policy")
+        val generation = digest("generation")
+        val prior_body = [11.to_u8(), 12.to_u8()]
+        val init_body = [21.to_u8(), 22.to_u8(), 23.to_u8()]
+        val prior_section = owned_section(TldPayloadRoleV1.PriorModuleTld, 0, 0, prior_body)
+        val init_section = owned_section(TldPayloadRoleV1.PackageInitTld, 0, 0, init_body)
+        val prior = object(TldPayloadRoleV1.PriorModuleTld, "prior", [prior_section], [prior_body])
+        val init = object(TldPayloadRoleV1.PackageInitTld, "init", [init_section], [init_body])
+        val refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.GenericBody, "generic.prior",
+                prior_section.semantic_object_digest, Some(prior_section)),
+            fact(ThreePayloadSemanticRefKindV1.TraitDefaultBody, "trait.init",
+                init_section.semantic_object_digest, Some(init_section)),
+        ], 2, 8).unwrap()
+        val prior_cas = digest("typed-cas-prior")
+        val init_cas = digest("typed-cas-init")
+        val seal = seal_for(Some(prior), init, refs, generation, profile)
+        val view = bind_three_payload_semantic_inputs(seal, Some(prior), init, [
+            binding(ThreePayloadSemanticRefKindV1.TraitDefaultBody, "trait.init",
+                init_cas, Some(init_section), profile, access),
+            binding(ThreePayloadSemanticRefKindV1.GenericBody, "generic.prior",
+                prior_cas, Some(prior_section), profile, access),
+        ], bind_bounds(profile, access, generation)).unwrap()
+        expect(view.prior_binding_indexes.len()).to_equal(1)
+        expect(view.init_binding_indexes.len()).to_equal(1)
+        expect(view.prior_binding_indexes[0] == view.init_binding_indexes[0]).to_equal(false)
+        expect(view.authority_state).to_equal(
+            ThreePayloadSemanticAuthorityState.TypedObjectAuthorityUnavailable)
+        expect(view.ordered_bindings[0].raw_section_digest).to_equal(
+            Some(prior_section.semantic_object_digest))
+        expect(view.ordered_bindings[0].object_ref.object_digest).to_equal(prior_cas)
+        expect(prior_cas == prior_section.semantic_object_digest).to_equal(false)
+        step("Resolve embedded compile inputs")
+        match resolve_three_payload_semantic_input(view,
+                query("generic.prior", profile), ThreePayloadSemanticRefKindV1.GenericBody,
+                "generic.prior"):
+            case Err(ThreePayloadFallbackV1.UnsupportedSemantics): pass
+            case _: fail("unqualified body bytes were promoted to semantic success")
+        val forged_view = bind_three_payload_semantic_inputs(seal, Some(prior), init, [
+            binding(ThreePayloadSemanticRefKindV1.GenericBody, "generic.prior",
+                digest("forged-embedded-cas"), Some(prior_section), profile, access),
+            binding(ThreePayloadSemanticRefKindV1.TraitDefaultBody, "trait.init",
+                init_cas, Some(init_section), profile, access),
+        ], bind_bounds(profile, access, generation)).unwrap()
+        expect(forged_view.authority_state).to_equal(
+            ThreePayloadSemanticAuthorityState.TypedObjectAuthorityUnavailable)
+        match resolve_three_payload_semantic_input(forged_view,
+                query("generic.prior", profile), ThreePayloadSemanticRefKindV1.GenericBody,
+                "generic.prior"):
+            case Err(ThreePayloadFallbackV1.UnsupportedSemantics): pass
+            case _: fail("forged embedded CAS identity gained semantic authority")
+
+    it "requires the complete macro helper closure and exact invocation witness":
+        step("Reject incomplete closure")
+        val profile = digest("semantic-profile")
+        val access = digest("access-policy")
+        val generation = digest("generation")
+        val macro_body = [31.to_u8(), 32.to_u8()]
+        val helper_body = [41.to_u8(), 42.to_u8()]
+        val macro_section = owned_section(TldPayloadRoleV1.PackageInitTld, 0, 0, macro_body)
+        val helper_section = owned_section(TldPayloadRoleV1.PackageInitTld, 1, 2, helper_body)
+        val init = object(TldPayloadRoleV1.PackageInitTld, "macro-init",
+            [macro_section, helper_section], [macro_body, helper_body])
+        val refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.invoke",
+                macro_section.semantic_object_digest, Some(macro_section)),
+            fact(ThreePayloadSemanticRefKindV1.GenericBody, "macro.helper",
+                helper_section.semantic_object_digest, Some(helper_section)),
+        ], 2, 8).unwrap()
+        val seal = seal_for(nil, init, refs, generation, profile)
+        val macro_binding = binding(ThreePayloadSemanticRefKindV1.MacroExpansion,
+            "macro.invoke", digest("typed-macro"), Some(macro_section), profile, access)
+        match bind_three_payload_semantic_inputs(seal, nil, init, [macro_binding],
+                bind_bounds(profile, access, generation)):
+            case Err(ThreePayloadFallbackV1.ExternalBodyRequired): pass
+            case _: fail("missing macro helper closure was accepted")
+        val view = bind_three_payload_semantic_inputs(seal, nil, init, [macro_binding,
+            binding(ThreePayloadSemanticRefKindV1.GenericBody, "macro.helper",
+                digest("typed-helper"), Some(helper_section), profile, access),
+        ], bind_bounds(profile, access, generation)).unwrap()
+        var forged_macro = macro_binding
+        forged_macro.selection_contract_digest = digest("forged-negative-witness")
+        match bind_three_payload_semantic_inputs(seal, nil, init, [forged_macro,
+                binding(ThreePayloadSemanticRefKindV1.GenericBody, "macro.helper",
+                    digest("typed-helper"), Some(helper_section), profile, access),
+            ], bind_bounds(profile, access, generation)):
+            case Err(ThreePayloadFallbackV1.ExternalBodyRequired): pass
+            case _: fail("forged macro invocation witness was accepted")
+        match resolve_three_payload_semantic_input(view, query("macro.invoke", profile),
+                ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.invoke"):
+            case Err(ThreePayloadFallbackV1.UnsupportedSemantics): pass
+            case _: fail("byte binding was mislabeled as macro compilation")
+
+    it "keeps trait and aspect callables symbolic while refusing body-sensitive reads":
+        step("Keep symbolic advice calls")
+        val profile = digest("semantic-profile")
+        val access = digest("access-policy")
+        val generation = digest("generation")
+        val init = object(TldPayloadRoleV1.PackageInitTld, "symbolic-init", [], [])
+        val refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "trait.call",
+                digest("trait-object"), nil),
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.after",
+                digest("aspect-after-object"), nil),
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.before",
+                digest("aspect-before-object"), nil),
+        ], 0, 0).unwrap()
+        val seal = seal_for(nil, init, refs, generation, profile)
+        val view = bind_three_payload_semantic_inputs(seal, nil, init, [
+            binding(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.before",
+                digest("aspect-before-object"), nil, profile, access),
+            binding(ThreePayloadSemanticRefKindV1.TraitCallable, "trait.call",
+                digest("trait-object"), nil, profile, access),
+            binding(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.after",
+                digest("aspect-after-object"), nil, profile, access),
+        ], bind_bounds(profile, access, generation)).unwrap()
+        val trait_call = resolve_three_payload_semantic_input(view,
+            query("trait.call", profile), ThreePayloadSemanticRefKindV1.TraitCallable,
+            "trait.call").unwrap()
+        expect(trait_call.symbolic_call).to_equal(true)
+        expect(trait_call.section_bytes).to_equal(nil)
+        val before = resolve_three_payload_semantic_input(view,
+            query("aspect.before", profile), ThreePayloadSemanticRefKindV1.AspectCallable,
+            "aspect.before").unwrap()
+        val after = resolve_three_payload_semantic_input(view,
+            query("aspect.after", profile), ThreePayloadSemanticRefKindV1.AspectCallable,
+            "aspect.after").unwrap()
+        expect(before.binding.effect_digest).to_equal(digest("effects:aspect.before"))
+        expect(after.binding.selection_contract_digest).to_equal(digest("selection:aspect.after"))
+        match resolve_three_payload_semantic_input(view, query("aspect.before", profile),
+                ThreePayloadSemanticRefKindV1.GenericBody, "aspect.before"):
+            case Err(ThreePayloadFallbackV1.ExternalBodyRequired): pass
+            case _: fail("body-sensitive advice read escaped the symbolic contract")
+
+    it "rejects forged binding fields coverage generation and owner receipts":
+        step("Reject incomplete closure")
+        val profile = digest("semantic-profile")
+        val access = digest("access-policy")
+        val generation = digest("generation")
+        val init = object(TldPayloadRoleV1.PackageInitTld, "forgery-init", [], [])
+        val refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "trait.call",
+                digest("trait-object"), nil),
+        ], 0, 0).unwrap()
+        val seal = seal_for(nil, init, refs, generation, profile)
+        val good = binding(ThreePayloadSemanticRefKindV1.TraitCallable, "trait.call",
+            digest("trait-object"), nil, profile, access)
+        var forged = good
+        forged.object_ref = CacheObjectRefV1(kind: "reverse_reference_shard", schema: 1,
+            object_digest: digest("trait-object"))
+        expect(bind_three_payload_semantic_inputs(seal, nil, init, [forged],
+            bind_bounds(profile, access, generation)).is_err()).to_equal(true)
+        forged = good
+        forged.object_ref = CacheObjectRefV1(kind: "portable_hir_object", schema: 1,
+            object_digest: digest("trait-object"))
+        expect(bind_three_payload_semantic_inputs(seal, nil, init, [forged],
+            bind_bounds(profile, access, generation)).is_err()).to_equal(true)
+        forged = good
+        forged.semantic_profile_digest = digest("forged-profile")
+        expect(bind_three_payload_semantic_inputs(seal, nil, init, [forged],
+            bind_bounds(profile, access, generation)).is_err()).to_equal(true)
+        forged = good
+        forged.access_policy_digest = digest("forged-access")
+        expect(bind_three_payload_semantic_inputs(seal, nil, init, [forged],
+            bind_bounds(profile, access, generation)).is_err()).to_equal(true)
+        forged = good
+        forged.callable_signature_digest = digest("forged-signature")
+        expect(bind_three_payload_semantic_inputs(seal, nil, init, [forged],
+            bind_bounds(profile, access, generation)).is_err()).to_equal(true)
+        forged = good
+        forged.effect_digest = digest("forged-effects")
+        expect(bind_three_payload_semantic_inputs(seal, nil, init, [forged],
+            bind_bounds(profile, access, generation)).is_err()).to_equal(true)
+        expect(bind_three_payload_semantic_inputs(seal, nil, init, [good, forged],
+            bind_bounds(profile, access, generation)).is_err()).to_equal(true)
+        var wrong_generation = bind_bounds(profile, access, digest("other-generation"))
+        match bind_three_payload_semantic_inputs(seal, nil, init, [good], wrong_generation):
+            case Err(ThreePayloadFallbackV1.ScopeGenerationMismatch): pass
+            case _: fail("changed input generation was accepted")
+        var stale = bind_bounds(profile, access, generation)
+        stale.presented_owner_receipt_digest = digest("stale-owner-receipt")
+        match bind_three_payload_semantic_inputs(seal, nil, init, [good], stale):
+            case Err(ThreePayloadFallbackV1.AuthorityUnavailable): pass
+            case _: fail("stale owner receipt was accepted")
+        var wrong_module = bind_bounds(profile, access, generation)
+        wrong_module.presented_module_id = "other-module"
+        match bind_three_payload_semantic_inputs(seal, nil, init, [good], wrong_module):
+            case Err(ThreePayloadFallbackV1.ScopeGenerationMismatch): pass
+            case _: fail("module identity mismatch was accepted")
+        var incomplete = seal
+        incomplete.coverage_roots[0] = ClosureCoverageRootV1(
+            dimension: closure_coverage_dimension_v1(0), root_digest: digest("root:0"),
+            coverage: SemanticCoverageV1.Unknown)
+        match bind_three_payload_semantic_inputs(incomplete, nil, init, [good],
+                bind_bounds(profile, access, generation)):
+            case Err(ThreePayloadFallbackV1.WitnessIncomplete): pass
+            case _: fail("unknown coverage was accepted")
+
+    it "keeps call-only fingerprints stable across body provenance changes":
+        step("Keep symbolic advice calls")
+        val profile = digest("semantic-profile")
+        val access = digest("access-policy")
+        val generation = digest("generation")
+        val init = object(TldPayloadRoleV1.PackageInitTld, "fingerprint-init", [], [])
+        val first_refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.contract",
+                digest("advice-body-v1"), nil),
+        ], 0, 0).unwrap()
+        val first_view = bind_three_payload_semantic_inputs(
+            seal_for(nil, init, first_refs, generation, profile), nil, init, [
+                binding(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.contract",
+                    digest("advice-body-v1"), nil, profile, access),
+            ], bind_bounds(profile, access, generation)).unwrap()
+        val consumer = SemanticQueryKeyV1(kind: "compile_query", stable_entity_id: "consumer",
+            semantic_profile_digest: profile, parameter_digest: digest("consumer-parameters"))
+        val first = resolve_three_payload_semantic_input(first_view, consumer,
+            ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.contract").unwrap()
+
+        val second_refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.contract",
+                digest("advice-body-v2"), nil),
+        ], 0, 0).unwrap()
+        val second_view = bind_three_payload_semantic_inputs(
+            seal_for(nil, init, second_refs, generation, profile), nil, init, [
+                binding(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.contract",
+                    digest("advice-body-v2"), nil, profile, access),
+            ], bind_bounds(profile, access, generation)).unwrap()
+        val second = resolve_three_payload_semantic_input(second_view, consumer,
+            ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.contract").unwrap()
+        expect(first.binding.object_ref.object_digest ==
+            second.binding.object_ref.object_digest).to_equal(false)
+        expect(first.read.consumed_fingerprint).to_equal(second.read.consumed_fingerprint)
+
+        var changed_ref = second_refs[0]
+        changed_ref.effect_digest = digest("effects:aspect.contract:v2")
+        var changed_binding = binding(ThreePayloadSemanticRefKindV1.AspectCallable,
+            "aspect.contract", digest("advice-body-v2"), nil, profile, access)
+        changed_binding.effect_digest = changed_ref.effect_digest
+        val changed_view = bind_three_payload_semantic_inputs(
+            seal_for(nil, init, [changed_ref], generation, profile), nil, init,
+            [changed_binding], bind_bounds(profile, access, generation)).unwrap()
+        val changed = resolve_three_payload_semantic_input(changed_view, consumer,
+            ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.contract").unwrap()
+        expect(changed.read.consumed_fingerprint ==
+            second.read.consumed_fingerprint).to_equal(false)
+
+    it "accounts aggregate bytes first and emits deterministic repeated-read manifests":
+        step("Bind exact semantic objects")
+        val profile = digest("semantic-profile")
+        val access = digest("access-policy")
+        val generation = digest("generation")
+        val body = [51.to_u8(), 52.to_u8(), 53.to_u8()]
+        val body_section = owned_section(TldPayloadRoleV1.PackageInitTld, 0, 0, body)
+        val body_init = object(TldPayloadRoleV1.PackageInitTld, "bounded-init",
+            [body_section], [body])
+        val body_refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.GenericBody, "generic.bound",
+                body_section.semantic_object_digest, Some(body_section)),
+        ], 1, 4).unwrap()
+        val body_seal = seal_for(nil, body_init, body_refs, generation, profile)
+        match bind_three_payload_semantic_inputs(body_seal, nil, body_init, [
+                binding(ThreePayloadSemanticRefKindV1.GenericBody, "generic.bound",
+                    digest("typed-bound"), Some(body_section), profile, access),
+            ], bind_bounds(profile, access, generation, 2)):
+            case Err(ThreePayloadFallbackV1.BoundsExceeded): pass
+            case _: fail("aggregate retained-byte limit was checked too late")
+
+        val init = object(TldPayloadRoleV1.PackageInitTld, "reads-init", [], [])
+        val refs = build_three_payload_semantic_refs_v2([
+            fact(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.z",
+                digest("aspect-z"), nil),
+            fact(ThreePayloadSemanticRefKindV1.TraitCallable, "trait.a",
+                digest("trait-a"), nil),
+        ], 0, 0).unwrap()
+        val seal = seal_for(nil, init, refs, generation, profile)
+        val view = bind_three_payload_semantic_inputs(seal, nil, init, [
+            binding(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.z",
+                digest("aspect-z"), nil, profile, access),
+            binding(ThreePayloadSemanticRefKindV1.TraitCallable, "trait.a",
+                digest("trait-a"), nil, profile, access),
+        ], bind_bounds(profile, access, generation)).unwrap()
+        val consumer = SemanticQueryKeyV1(kind: "compile_query", stable_entity_id: "consumer",
+            semantic_profile_digest: profile, parameter_digest: digest("consumer-parameters"))
+        val aspect = resolve_three_payload_semantic_input(view, consumer,
+            ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.z").unwrap()
+        val trait = resolve_three_payload_semantic_input(view, consumer,
+            ThreePayloadSemanticRefKindV1.TraitCallable, "trait.a").unwrap()
+        var forged = aspect
+        var forged_read = aspect.read
+        forged_read.facet = "forged_facet"
+        forged_read.consumed_fingerprint = digest("forged-consumed")
+        forged_read.witness_digest = digest("forged-witness")
+        forged_read.partition_id = "forged:9"
+        forged_read.completeness = SemanticCoverageV1.Conservative
+        forged.read = forged_read
+        val forward = build_three_payload_semantic_read_manifest(view, consumer,
+            [forged, trait, aspect]).unwrap()
+        val reversed = build_three_payload_semantic_read_manifest(view, consumer,
+            [aspect, trait, forged]).unwrap()
+        expect(forward).to_equal(reversed)
+        expect(forward.ordered_reads.len()).to_equal(2)
+        expect(forward.ordered_reads[0].ordinal).to_equal(0)
+        expect(forward.ordered_reads[0].producer.stable_entity_id).to_equal("aspect.z")
+        expect(forward.ordered_reads[0].facet).to_equal("aspect_callable")
+        expect(forward.ordered_reads[0].partition_id).to_equal("portable_hir_object:2")
+        expect(forward.ordered_reads[1].ordinal).to_equal(1)
+        expect(forward.ordered_reads[1].producer.stable_entity_id).to_equal("trait.a")

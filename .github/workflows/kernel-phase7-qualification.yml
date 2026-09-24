@@ -1,0 +1,73 @@
+name: Kernel Phase 7 Qualification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/kernel-phase7-qualification.yml'
+      - 'scripts/bootstrap/**'
+      - 'scripts/setup/platform-detect.shs'
+      - 'scripts/setup/llvm-toolchain-env.shs'
+      - 'scripts/check/check-kernel-phase7-matrix.shs'
+      - 'scripts/check/check-bootstrap-kernel-inputs.shs'
+      - 'scripts/check/prepare-kernel-phase7-runtime.shs'
+      - 'scripts/check/prepare-kernel-phase7-llvm-toolchain.shs'
+      - 'scripts/check/run-kernel-phase7-runtime-prerequisite.shs'
+      - 'scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs'
+      - 'scripts/check/test-kernel-phase7-runtime-prerequisite-contract.shs'
+      - 'scripts/check/lib/kernel-phase7-runtime-admission.shs'
+      - 'scripts/check/lib/stage4-candidate-provenance.shs'
+      - 'scripts/check/lib/bootstrap-stage3-provenance.shs'
+      - 'src/compiler/70.backend/**'
+      - 'src/lib/common/plugin/**'
+      - 'src/plugins/**'
+      - 'test/02_integration/aop/coverage_aspect_pack_spec.spl'
+      - 'test/03_system/compiler/kernel_phase7_qualification_spec.spl'
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        policy: [llvm-cranelift]
+        coverage: [atomic-apk-only]
+        mode: [one-binary, dynload]
+        abi: [v1]
+        manifest: [simple-sdn]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provision repo-pinned LLVM 18
+        run: |
+          brew install llvm@18
+          sh scripts/check/prepare-kernel-phase7-llvm-toolchain.shs \
+            build/check/kernel-phase7/llvm-toolchain.env "$GITHUB_ENV"
+      - name: Generate Phase 5 backend relocation evidence
+        run: sh scripts/check/generate-phase5-backend-relocation-audit.shs
+      - name: Build and admit full pure-Simple Phase 7 runtime
+        env:
+          SIMPLE_NO_STUB_FALLBACK: "1"
+        run: |
+          sh scripts/check/run-kernel-phase7-runtime-prerequisite.shs \
+            build/check/kernel-phase7/runtime-bootstrap \
+            build/check/kernel-phase7/runtime.env \
+            phase7-runtime.env
+      - name: Qualify matrix row
+        env:
+          SIMPLE_PHASE7_RECEIPT_DIR: build/check/kernel-phase7
+        run: |
+          sh scripts/check/check-kernel-phase7-matrix.shs \
+            --policy=${{ matrix.policy }} \
+            --coverage=${{ matrix.coverage }} \
+            --mode=${{ matrix.mode }} \
+            --abi=${{ matrix.abi }} \
+            --manifest=${{ matrix.manifest }} \
+            --execute --ci | tee build-phase7.log
+          grep -q '^STATUS: PASS' build-phase7.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phase7-${{ matrix.policy }}-${{ matrix.coverage }}-${{ matrix.mode }}-${{ matrix.abi }}-${{ matrix.manifest }}
+          path: |
+            build/check/kernel-phase7/*.env
+            build/check/kernel-phase7/runtime-bootstrap/logs/**
+            build-phase7.log

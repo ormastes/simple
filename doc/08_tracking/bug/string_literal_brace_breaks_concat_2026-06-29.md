@@ -1,9 +1,14 @@
 # Bug: unescaped `{` in a string literal corrupts `+` concatenation in the same expression
 
+## Closed 2026-09-13 — brace-containing literals concatenate correctly
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's own three-line fence now prints `a VAL b`, `p { VAL }`, `p { q: VAL; }` — all three correct; the reported verbatim `" + x + "` output does not occur.
+
 - **ID:** string_literal_brace_breaks_concat_2026-06-29
 - **Severity:** P2 (silently emits the source `" + var + "` verbatim → invalid CSS/JSON, blank web render)
 - **Area:** language / interpreter (string-literal interpolation lexing)
-- **Status:** open — minimal repro confirmed; app-level workaround landed in `src/os/compositor/simple_web_window_renderer.spl`
+- **Status:** Closed (fixed) 2026-09-13 — repro no longer reproduces
 
 ## Summary
 When a string literal containing an **unescaped single `{`** is part of a `+`

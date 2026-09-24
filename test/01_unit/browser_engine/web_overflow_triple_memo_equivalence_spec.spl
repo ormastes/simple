@@ -1,0 +1,123 @@
+"""
+## Purpose and audience
+Purpose: Prove the round-11 per-block overflow triple memo
+(`_overflow_triple` / `_overflow_triple_build`) answers exactly what the
+per-axis scanning originals (`_final_overflow_axis_in_decls`,
+`_scrollbar_width_in_decls`) answer, for every declaration block.
+Audience: browser-engine maintainers.
+
+Web-perf round 10 (doc/10_metrics/ui/web_perf_round10_2026-09-13.md) sub-timed
+`cas_tail` and found `_normalize_final_overflow_axes` carrying ~271 ms of the
+eight-page catalog: it asked twelve questions per node (two axes x four cascade
+origins, plus four `scrollbar-width` lookups) over only FOUR distinct strings,
+each question paying a `decl_table_build` probe keyed on a multi-kilobyte block
+plus a backwards linear scan of a several-hundred-entry table.
+
+Round 10 tried two fixes and measured both WORSE, and named the constraint:
+anything that moves the TABLE across a function boundary loses, because arrays
+copy on rebind in this interpreter. Round 11 therefore memoizes the three
+ANSWERS per block -- a three-element array of short strings -- so a hit builds,
+probes and scans nothing.
+
+That substitution is the whole spec. The oracle is
+`simple_web_layout_debug_overflow_triple_equivalence(decls)`, which runs BOTH
+the memoized triple and the two scanning originals on the same block and
+returns "OK" only when all three answers agree.
+
+The fixtures attack the memo's own assumption -- that one pass over the table
+can reproduce a per-axis resolver that compares each longhand's entry index
+against the shorthand's. So they carry: shorthand before longhand and longhand
+before shorthand (the ordering the `axis_at > shorthand_at` test decides);
+duplicate shorthands and duplicate longhands (last-wins, which is why the
+lookups walk BACKWARDS); one-token and two-token shorthands; a three-token
+shorthand (invalid CSS, but the original returns `parts[1]`, so the memo must
+too); a shorthand whose value is blank; mixed case and padding (both sides
+trim+lower); `scrollbar-width` first, last, and duplicated; a block with a
+property whose name merely CONTAINS `overflow` (`overflow-anchor`), which must
+not be mistaken for either axis; entries with no colon (skipped by the table
+build); the empty block; and a block with no overflow properties at all.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-OVERFLOW-TRIPLE-MEMO-001 — the memoized per-block overflow triple must equal the per-axis scanning resolvers.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    simple_web_layout_debug_overflow_triple_equivalence,
+    overflow_triple_memo_reset
+}
+
+# Every adversarial block named in the header, one entry per shape.
+val BLOCKS: [text] = [
+    "",
+    "color: red; font-size: 12px",
+    "overflow: hidden",
+    "overflow: hidden auto",
+    "overflow: hidden auto scroll",
+    "overflow:",
+    "overflow:   ",
+    "overflow-x: scroll",
+    "overflow-y: clip",
+    "overflow-x: scroll; overflow-y: hidden",
+    # Ordering: the longhand wins only when it comes AFTER the shorthand.
+    "overflow-x: scroll; overflow: hidden",
+    "overflow: hidden; overflow-x: scroll",
+    "overflow: hidden auto; overflow-y: visible",
+    "overflow-y: visible; overflow: hidden auto",
+    # Last-wins on duplicates, which is why the scans walk backwards.
+    "overflow: hidden; overflow: auto",
+    "overflow-x: scroll; overflow-x: clip",
+    "overflow: hidden; overflow-x: scroll; overflow: auto",
+    # Case and padding: both sides trim and lower.
+    "OVERFLOW:   HIDDEN   AUTO  ",
+    "Overflow-X:  Scroll ",
+    # A property that merely CONTAINS the probed names.
+    "overflow-anchor: none",
+    "overflow-anchor: none; overflow: hidden",
+    "overflow-wrap: break-word; overflow-y: scroll",
+    # scrollbar-width in every position, and duplicated.
+    "scrollbar-width: none",
+    "scrollbar-width: none; overflow: auto",
+    "overflow: auto; scrollbar-width: thin",
+    "scrollbar-width: none; scrollbar-width: thin",
+    "SCROLLBAR-WIDTH:  NONE ",
+    # Entries the table build skips (no colon before the `;`).
+    "overflow hidden; overflow-y: scroll",
+    "overflow: hidden; ; overflow-x: clip",
+    ";;;",
+    # A realistic merged block of the shape the cascade actually hands over.
+    "display: block; margin: 0; overflow: hidden; color: #333; " +
+        "overflow-y: auto; scrollbar-width: none; padding: 4px"
+]
+
+describe "web overflow triple memo equivalence":
+    it "agrees with the scanning resolvers on every adversarial block":
+        # oracle: shorthand/longhand ordering, duplicates, token counts, case,
+        # padding, containing-name properties, colonless entries and the empty
+        # block all resolve identically through the memo and through the scans.
+        overflow_triple_memo_reset()
+        var mismatches = ""
+        var i = 0
+        while i < BLOCKS.len():
+            val v = simple_web_layout_debug_overflow_triple_equivalence(
+                BLOCKS[i]
+            )
+            if v != "OK":
+                mismatches = "{mismatches} [{i}] {v}"
+            i = i + 1
+        expect(mismatches).to_equal("")
+
+    it "agrees again on a second pass, so a memo hit equals a memo miss":
+        # oracle: the first pass above populated the memo; replaying the same
+        # blocks exercises the HIT path, which must return what the miss built.
+        var mismatches = ""
+        var i = 0
+        while i < BLOCKS.len():
+            val v = simple_web_layout_debug_overflow_triple_equivalence(
+                BLOCKS[i]
+            )
+            if v != "OK":
+                mismatches = "{mismatches} [{i}] {v}"
+            i = i + 1
+        expect(mismatches).to_equal("")

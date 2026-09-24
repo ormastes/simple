@@ -1,4 +1,8 @@
 # Test-tree divergence — sample 10 (15 pairs, `NR%65==10`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Tenth sampling pass over `scripts/check/test_tree_divergence_baseline.txt`
 (956 lines), continuing the reconciliation series (samples 1-9 covered
@@ -115,3 +119,4 @@ actual implementation, over shadow's stale/wrong assertions):
   docstring says `a0` is explicitly NOT used for that (stack-based ABI).
 - **`app/todo/todo_parser_spec.spl`** — shadow's extra `use tooling.TodoItem.*`
   import didn't resolve, breaking an otherwise-trivial spec.
+

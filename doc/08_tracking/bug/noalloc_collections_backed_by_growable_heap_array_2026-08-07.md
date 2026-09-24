@@ -1,4 +1,8 @@
 # `nogc_async_mut_noalloc/collections/*` claim "no heap allocation" but are backed by a real heap `[T]` array — partially fixed, root cause stays open
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-07
 **Severity:** high — undermines the allocation-class lattice (WP-12) the whole
@@ -215,3 +219,4 @@ instead of being discarded).
 
 Tracked as WP-12 input in
 `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`.
+

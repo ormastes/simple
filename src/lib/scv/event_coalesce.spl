@@ -52,8 +52,9 @@ fn scv_coalesce_add(c: ScvCoalescer, ev: FsWatchEvent, klass: text, now_ms: i64)
     var i = 0
     while i < next.pending.len():
         if next.pending[i].path == ev.path and next.pending[i].kind == ev.kind:
-            next.pending[i].due_ms = due
-            next.pending[i].related = ev.related
+            next.pending[i] = ScvCoalescePending(seq: next.pending[i].seq, kind: next.pending[i].kind,
+                                                 path: next.pending[i].path, related: ev.related,
+                                                 klass: next.pending[i].klass, due_ms: due)
             return next
         i = i + 1
     next.pending.push(ScvCoalescePending(seq: ev.seq, kind: ev.kind, path: ev.path,
@@ -83,11 +84,14 @@ fn scv_coalesce_bulk_begin(c: ScvCoalescer) -> ScvCoalescer:
 fn scv_coalesce_bulk_end(c: ScvCoalescer) -> ScvCoalescer:
     var next = c
     next.bulk_active = false
-    var i = 0
-    while i < next.pending.len():
-        if next.pending[i].due_ms < 0:
-            next.pending[i].due_ms = 0
-        i = i + 1
+    var released: [ScvCoalescePending] = []
+    for p in next.pending:
+        if p.due_ms < 0:
+            released.push(ScvCoalescePending(seq: p.seq, kind: p.kind, path: p.path,
+                                             related: p.related, klass: p.klass, due_ms: 0))
+        else:
+            released.push(p)
+    next.pending = released
     next
 
 fn _scv_atomic_has(events: [FsWatchEvent], kind: text, path: text) -> bool:

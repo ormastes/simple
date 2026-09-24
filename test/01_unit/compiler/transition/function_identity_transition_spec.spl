@@ -1,0 +1,100 @@
+# @tag: compiler, transition, function-identity, call-typing
+# @req REQ-FID-TRANSITION-001
+#
+# Corpus contract for the FunctionIdentity transition. The fixtures are kept
+# disjoint so a resolver change cannot accidentally satisfy every case through
+# one shared source spelling. This first layer intentionally checks the frozen
+# names and semantic inputs; the lowering harness can add executable identity
+# assertions when Sol's FunctionIdentity interface lands.
+
+use std.spec
+use std.io_runtime.{file_exists, file_read}
+
+val FID_FIXTURE_ROOT = "test/fixtures/compiler/function_identity_transition/"
+val FID_DUPLICATES = FID_FIXTURE_ROOT + "duplicate_externs_and_destinations.spl"
+val FID_REEXPORTS = FID_FIXTURE_ROOT + "reexports_shadow_and_collisions.spl"
+val FID_TYPED_EDGES = FID_FIXTURE_ROOT + "typed_edges_and_backend_parity.spl"
+
+fn fixture(path: text) -> text:
+    if not file_exists(path):
+        fail("missing FunctionIdentity fixture: {path}")
+        return ""
+    file_read(path)
+
+fn step_duplicate_bare_extern_names() -> text:
+    fixture(FID_DUPLICATES)
+
+fn step_two_hop_selective_reexport_alias() -> text:
+    fixture(FID_REEXPORTS)
+
+fn step_preserve_bitcast_f64() -> text:
+    fixture(FID_TYPED_EDGES)
+
+fn step_preserve_optional_array_len() -> text:
+    fixture(FID_TYPED_EDGES)
+
+fn step_local_shadow_does_not_capture_alias() -> text:
+    fixture(FID_REEXPORTS)
+
+fn step_method_name_collision() -> text:
+    fixture(FID_REEXPORTS)
+
+fn step_incompatible_signature_fail_closed() -> text:
+    fixture(FID_TYPED_EDGES)
+
+fn step_bodyless_extern_closure_retention() -> text:
+    fixture(FID_DUPLICATES)
+
+fn step_call_destination_types() -> text:
+    fixture(FID_DUPLICATES)
+
+fn step_backend_parity() -> text:
+    fixture(FID_TYPED_EDGES)
+
+fn step_import_order_permutation() -> text:
+    fixture(FID_REEXPORTS)
+
+describe "FunctionIdentity transition corpus contract":
+    it "freezes duplicate bare f32/f64 extern names and destination forms":
+        val source = step_duplicate_bare_extern_names()
+        expect(source).to_contain("@fixture fi_duplicate_bare_extern_names")
+        expect(source).to_contain("@decl f32: extern fn fi_numeric(value: f32) -> f32")
+        expect(source).to_contain("@decl f64: extern fn fi_numeric(value: f64) -> f64")
+        val calls = step_call_destination_types()
+        expect(calls).to_contain("@call-form Call: fi_numeric_f32")
+        expect(calls).to_contain("@call-form MethodCallStatic: FiReceiver.read_f64")
+        expect(calls).to_contain("@call-form InterpCall: fi_numeric_f64")
+
+    it "freezes bodyless extern closure retention":
+        expect(step_bodyless_extern_closure_retention()).to_contain("@fixture fi_bodyless_extern_closure_retention")
+
+    it "freezes the two-hop selective re-export alias and local shadow cases":
+        val source = step_two_hop_selective_reexport_alias()
+        expect(source).to_contain("@hop leaf -> facade")
+        expect(source).to_contain("@hop facade -> entry")
+        expect(step_local_shadow_does_not_capture_alias()).to_contain("@shadow imported alias: fi_answer")
+
+    it "freezes method-name collisions and import-order permutations":
+        val source = step_method_name_collision()
+        expect(source).to_contain("@collision method: FiLeft.read")
+        expect(source).to_contain("@collision method: FiRight.read")
+        val permutations = step_import_order_permutation()
+        expect(permutations).to_contain("@permutation order-a")
+        expect(permutations).to_contain("@permutation order-b")
+
+    it "freezes F64 bitcast and optional-array len edges":
+        expect(step_preserve_bitcast_f64()).to_contain("@fixture fi_bitcast_f64")
+        val source = step_preserve_optional_array_len()
+        expect(source).to_contain("@optional-array parameter: [f64]?")
+        expect(source).to_contain("@optional-array operation: len")
+
+    it "freezes incompatible signatures as a fail-closed case":
+        val source = step_incompatible_signature_fail_closed()
+        expect(source).to_contain("@fixture fi_incompatible_signature_fail_closed")
+        expect(source).to_contain("expected: fail closed")
+
+    it "freezes Cranelift and LLVM parity as one exact-bits oracle":
+        val source = step_backend_parity()
+        expect(source).to_contain("@backend cranelift")
+        expect(source).to_contain("@backend llvm")
+        expect(source).to_contain("@oracle exact-f64-bits")

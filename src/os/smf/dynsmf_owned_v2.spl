@@ -1,0 +1,1226 @@
+"""Bounded production owner for admitted dynSMF bytes and session transitions.
+
+`load` deep-copies an already-admitted registry into owner-private storage; it
+does not reopen a path, retain a caller-mutable alias, or mint trust from caller
+fields. `query` delegates to the existing dynSMF session and
+stores the returned session before publishing an opaque query handle. Public
+handles contain only monotonically issued indices; all artifact, session, and
+facet-reference state remains in this module.
+
+Packet-1 deviation: `release` and `retry` validate their opaque handle but
+return typed, non-mutating unavailable results because the final-unpin bridge,
+not this session facade, owns physical attempts and retained retries. The
+narrow commit port accepts only the canonical dynlib owner's exact successful
+receipt batch, confirms that owner no longer retains the handle, then performs
+the logical terminal transition without a second native call.
+"""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.smf.aspect_pack_directory.{
+    AspectPackDirectoryEntry,
+    AspectPackDirectory,
+    AspectPackArtifactIdentity,
+    AspectPackExportContract,
+    AspectPackLookupRequest,
+    aspect_pack_directory_validate_against_manifest
+}
+use std.common.aspect_pack.{
+    AspectFacetDescriptor,
+    AspectPackBinding,
+    AspectCatalogEntry,
+    AspectCatalog
+}
+use os.smf.dynsmf_session.{
+    DynSmfPolicy,
+    DynSmfSession,
+    DynSmfLoadedLibrary,
+    DynSmfEvidenceRow,
+    DynSmfFacetRef,
+    dynsmf_session_new,
+    dynsmf_session_first_use_facet_admitted_protected_v3,
+    dynsmf_session_validate_facet_ref,
+    dynsmf_session_release_facet_ref_v3,
+    _dynsmf_revoke_library_facet_refs
+}
+use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
+use os.smf.dynsmf_trust_registry.{
+    DynSmfAdmittedRegistry,
+}
+use os.smf.smf_dynlib.{
+    DynSmfMappingReleaseV1,
+    DynSmfReleaseAttemptV3,
+    smf_dynlib_mapping_observe_v1,
+    _smf_dynlib_arm_release_handle_v3,
+    _smf_dynlib_release_observe_for_owner_v3,
+    _smf_dynlib_release_completion_v3
+}
+use std.common.structural.parallel_commit.executable_mapping_receipt.{
+    ExecutableMappingReceiptV1,
+    ExecutableMappingReleaseOutcomeV1,
+    executable_mapping_receipt_v1_well_formed,
+    executable_mapping_receipt_v1_same_identity,
+    executable_mapping_release_result_v1_well_formed
+}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.nogc_sync_mut.concurrent.thread.{thread_yield}
+
+val DYNSMF_OWNED_OK_V2: i32 = 0
+val DYNSMF_OWNED_INVALID_ARGUMENT_V2: i32 = 1
+val DYNSMF_OWNED_REGISTRY_NOT_ADMITTED_V2: i32 = 2
+val DYNSMF_OWNED_REGISTRY_MALFORMED_V2: i32 = 3
+val DYNSMF_OWNED_RETAINED_BYTES_EXCEEDED_V2: i32 = 4
+val DYNSMF_OWNED_OWNER_CAPACITY_EXHAUSTED_V2: i32 = 5
+val DYNSMF_OWNED_OWNER_UNKNOWN_V2: i32 = 6
+val DYNSMF_OWNED_ARTIFACT_UNKNOWN_V2: i32 = 7
+val DYNSMF_OWNED_QUERY_REFUSED_V2: i32 = 8
+val DYNSMF_OWNED_QUERY_CAPACITY_EXHAUSTED_V2: i32 = 9
+val DYNSMF_OWNED_QUERY_UNKNOWN_V2: i32 = 10
+val DYNSMF_OWNED_RELEASE_UNAVAILABLE_V2: i32 = 11
+val DYNSMF_OWNED_RETRY_UNAVAILABLE_V2: i32 = 12
+val DYNSMF_OWNED_COORDINATE_MISMATCH_V2: i32 = 13
+val DYNSMF_OWNED_COMMIT_REFUSED_V2: i32 = 14
+val DYNSMF_OWNED_QUERY_TERMINAL_V2: i32 = 15
+
+# Frozen finite policy. Identities are never removed or reused in V2.
+val DYNSMF_OWNED_MAX_OWNERS_V2: i64 = 64
+val DYNSMF_OWNED_MAX_ARTIFACTS_PER_OWNER_V2: i64 = 256
+val DYNSMF_OWNED_MAX_QUERIES_V2: i64 = 16384
+val DYNSMF_OWNED_MAX_RETAINED_BYTES_V2: i64 = 67108864
+val DYNSMF_OWNED_MAX_SESSION_ID_BYTES_V2: i64 = 256
+val DYNSMF_OWNED_MAX_LIBRARY_ID_BYTES_V2: i64 = 256
+val DYNSMF_OWNED_MAX_FACET_ID_BYTES_V2: i64 = 1024
+val DYNSMF_OWNED_MAX_PATH_BYTES_V2: i64 = 4096
+val DYNSMF_OWNED_MAX_MAPPING_RECEIPTS_V2: i64 = 4096
+val DYNSMF_OWNED_MAX_MAPPED_BYTES_V2: i64 = 1073741824
+val DYNSMF_OWNED_MAX_POLICY_DISABLED_IDS_V2: i64 = 256
+val DYNSMF_OWNED_MAX_POLICY_SOURCE_BYTES_V2: i64 = 1024
+
+struct DynSmfOwnedHandleV2:
+    opaque_handle: i64
+
+struct DynSmfOwnedQueryHandleV2:
+    opaque_handle: i64
+
+class DynSmfOwnedLoadResultV2:
+    status: i32
+    reason: text
+    owner: DynSmfOwnedHandleV2
+    retained_bytes: i64
+    artifact_count: i64
+
+class DynSmfOwnedQueryResultV2:
+    status: i32
+    reason: text
+    owner: DynSmfOwnedHandleV2
+    query: DynSmfOwnedQueryHandleV2
+
+class DynSmfOwnedObservationV2:
+    ok: bool
+    status: i32
+    reason: text
+    live: bool
+    owner_identity: i64
+    query_identity: i64
+    session_id: text
+    library_id: text
+    facet_id: text
+    session_generation: i64
+    native_handle: i64
+    library_generation: i64
+    mapper_instance_id: text
+    mapping_receipts: [ExecutableMappingReceiptV1]
+    mapped_bytes: i64
+    segment_count: i64
+    retained_bytes: i64
+    outstanding_queries: i64
+
+class DynSmfOwnedReleaseResultV2:
+    status: i32
+    reason: text
+    query: DynSmfOwnedQueryHandleV2
+    live: bool
+    physical_release_started: bool
+    retryable: bool
+
+class DynSmfOwnedPhysicalCommitResultV2:
+    status: i32
+    reason: text
+    query: DynSmfOwnedQueryHandleV2
+    committed: bool
+    already_committed: bool
+
+class _DynSmfOwnedRegistryCheckV2:
+    status: i32
+    reason: text
+    retained_bytes: i64
+
+class _DynSmfOwnedArtifactV2:
+    library_id: text
+    request: AspectPackLookupRequest
+    artifact_bytes: [u8]
+
+class _DynSmfOwnedRegistryV2:
+    artifacts: [_DynSmfOwnedArtifactV2]
+    artifact_indices: Dict<text, i64>
+
+# Load validates the public admission value once and deep-copies every nested
+# mutable class/array into these private rows. No later operation dereferences
+# the caller-owned registry alias.
+var _dynsmf_owned_registries_v2: [_DynSmfOwnedRegistryV2] = []
+var _dynsmf_owned_sessions_v2: [DynSmfSession] = []
+var _dynsmf_owned_retained_bytes_v2: [i64] = []
+var _dynsmf_owned_query_counts_v2: [i64] = []
+
+# Query rows retain only the existing session owner's facet reference. They do
+# not issue a second lifecycle generation or physical mapping identity.
+var _dynsmf_owned_query_owner_ids_v2: [i64] = []
+var _dynsmf_owned_query_library_ids_v2: [text] = []
+var _dynsmf_owned_query_facet_ids_v2: [text] = []
+var _dynsmf_owned_query_refs_v2: [DynSmfFacetRef] = []
+var _dynsmf_owned_query_session_ids_v2: [text] = []
+var _dynsmf_owned_query_native_handles_v2: [i64] = []
+var _dynsmf_owned_query_library_generations_v2: [i64] = []
+var _dynsmf_owned_query_mapper_instance_ids_v2: [text] = []
+var _dynsmf_owned_query_mapping_receipts_v2: [[ExecutableMappingReceiptV1]] = []
+var _dynsmf_owned_query_mapped_bytes_v2: [i64] = []
+var _dynsmf_owned_query_segment_counts_v2: [i64] = []
+var _dynsmf_owned_query_live_v2: [bool] = []
+
+# V3 close reservations stay in the same canonical dynSMF owner as the V2
+# query rows.  They are deliberately not part of the V2 public release path.
+val DYNSMF_OWNED_CLOSE_RESERVATION_UNKNOWN_V3: i32 = 40
+val DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3: i32 = 41
+val DYNSMF_OWNED_CLOSE_COMMIT_REFUSED_V3: i32 = 42
+val DYNSMF_OWNED_CLOSE_COMMITTED_V3: i32 = 43
+
+struct DynSmfOwnedCloseReservationV3:
+    opaque_reservation: i64
+
+class DynSmfOwnedCloseReserveResultV3:
+    ok: bool
+    status: i32
+    reason: text
+    reservation: DynSmfOwnedCloseReservationV3
+    native_handle: i64
+
+class DynSmfOwnedCloseCommitResultV3:
+    ok: bool
+    status: i32
+    reason: text
+    committed: bool
+    reservation: DynSmfOwnedCloseReservationV3
+
+class DynSmfOwnedQueryReleaseResultV3:
+    ok: bool
+    reason: text
+
+class _DynSmfOwnedCloseRowV3:
+    reservation_id: i64
+    query: DynSmfOwnedQueryHandleV2
+    owner_id: i64
+    library_id: text
+    library_generation: i64
+    native_handle: i64
+    committed: bool
+
+var _dynsmf_owned_close_rows_v3: [_DynSmfOwnedCloseRowV3] = []
+var _dynsmf_owned_close_by_library_v3: Dict<text, i64> = {}
+val DYNSMF_OWNED_GATE_WAIT_V3: i64 = 65536
+var _dynsmf_owned_gate_v3: AtomicI64 = atomic_i64_new(0)
+
+fn _dynsmf_owned_enter_v3() -> bool:
+    var waits: i64 = 0
+    while waits < DYNSMF_OWNED_GATE_WAIT_V3:
+        if _dynsmf_owned_gate_v3.compare_exchange(
+                0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return true
+        thread_yield()
+        waits = waits + 1
+    false
+
+fn _dynsmf_owned_exit_v3() -> bool:
+    _dynsmf_owned_gate_v3.compare_exchange(
+        1, 0, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+
+fn _dynsmf_owned_copy_bytes_v2(source: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for value in source:
+        copied.push(value)
+    copied
+
+fn _dynsmf_owned_copy_texts_v2(source: [text]) -> [text]:
+    var copied: [text] = []
+    for value in source:
+        copied.push(value)
+    copied
+
+fn _dynsmf_owned_copy_policy_v2(source: DynSmfPolicy) -> DynSmfPolicy:
+    val disabled_ids = _dynsmf_owned_copy_texts_v2(source.disabled_ids)
+    var disabled_index: Dict<text, bool> = {}
+    for id in disabled_ids:
+        disabled_index[id] = true
+    DynSmfPolicy(
+        disabled_all: source.disabled_all, disabled_ids: disabled_ids,
+        source: source.source, _disabled_id_index: disabled_index)
+
+fn _dynsmf_owned_policy_valid_v2(policy: DynSmfPolicy) -> bool:
+    if (policy.source == "" or
+            policy.source.len() > DYNSMF_OWNED_MAX_POLICY_SOURCE_BYTES_V2 or
+            policy.disabled_ids.len() >
+                DYNSMF_OWNED_MAX_POLICY_DISABLED_IDS_V2):
+        return false
+    for id in policy.disabled_ids:
+        if id == "" or id.len() > DYNSMF_OWNED_MAX_LIBRARY_ID_BYTES_V2:
+            return false
+    true
+
+fn _dynsmf_owned_total_retained_bytes_v2() -> i64:
+    var total: i64 = 0
+    for retained in _dynsmf_owned_retained_bytes_v2:
+        if retained > DYNSMF_OWNED_MAX_RETAINED_BYTES_V2 - total:
+            return DYNSMF_OWNED_MAX_RETAINED_BYTES_V2
+        total = total + retained
+    total
+
+fn _dynsmf_owned_copy_directory_v2(source: AspectPackDirectory
+    ) -> AspectPackDirectory:
+    var entries: [AspectPackDirectoryEntry] = []
+    for entry in source.entries:
+        entries.push(AspectPackDirectoryEntry(
+            module_id: entry.module_id, aspect_id: entry.aspect_id,
+            module_abi_hash: entry.module_abi_hash,
+            required_core_public_abi_hash: entry.required_core_public_abi_hash,
+            required_core_layout_hash: entry.required_core_layout_hash,
+            variant_fingerprint: entry.variant_fingerprint,
+            cluster_id: entry.cluster_id, payload_offset: entry.payload_offset,
+            compressed_size: entry.compressed_size,
+            uncompressed_size: entry.uncompressed_size,
+            member_offset: entry.member_offset, member_size: entry.member_size,
+            chunk_id: entry.chunk_id, chunk_kind: entry.chunk_kind,
+            chunk_flags: entry.chunk_flags, alignment: entry.alignment,
+            content_crc32: entry.content_crc32))
+    AspectPackDirectory(
+        schema_version: source.schema_version, flags: source.flags,
+        total_size: source.total_size, content_hash: source.content_hash,
+        entries: entries)
+
+fn _dynsmf_owned_copy_catalog_v2(source: AspectCatalog) -> AspectCatalog:
+    var entries: [AspectCatalogEntry] = []
+    for entry in source.entries:
+        val descriptor = entry.descriptor
+        val binding = entry.binding
+        entries.push(AspectCatalogEntry(
+            descriptor: AspectFacetDescriptor(
+                facet_id: descriptor.facet_id,
+                export_symbol: descriptor.export_symbol,
+                interface_abi_hash: descriptor.interface_abi_hash),
+            binding: AspectPackBinding(
+                facet_id: binding.facet_id, aspect_id: binding.aspect_id,
+                library_id: binding.library_id,
+                library_path: binding.library_path,
+                library_abi_version: binding.library_abi_version,
+                module_id: binding.module_id,
+                module_abi_hash: binding.module_abi_hash,
+                pack_content_hash: binding.pack_content_hash,
+                placement: binding.placement)))
+    AspectCatalog(schema_version: source.schema_version, entries: entries)
+
+fn _dynsmf_owned_copy_manifest_v2(source: [DynSmfManifestEntry]
+    ) -> [DynSmfManifestEntry]:
+    var copied: [DynSmfManifestEntry] = []
+    for entry in source:
+        copied.push(DynSmfManifestEntry(
+            id: entry.id, path: entry.path,
+            artifact_kind: entry.artifact_kind,
+            abi_version: entry.abi_version,
+            default_autoload: entry.default_autoload,
+            exports: _dynsmf_owned_copy_texts_v2(entry.exports)))
+    copied
+
+fn _dynsmf_owned_copy_exports_v2(source: [AspectPackExportContract]
+    ) -> [AspectPackExportContract]:
+    var copied: [AspectPackExportContract] = []
+    for entry in source:
+        copied.push(AspectPackExportContract(
+            library_id: entry.library_id,
+            export_symbol: entry.export_symbol,
+            interface_abi_hash: entry.interface_abi_hash))
+    copied
+
+fn _dynsmf_owned_copy_request_v2(source: AspectPackLookupRequest
+    ) -> AspectPackLookupRequest:
+    AspectPackLookupRequest(
+        directory: _dynsmf_owned_copy_directory_v2(source.directory),
+        catalog: _dynsmf_owned_copy_catalog_v2(source.catalog),
+        manifest: _dynsmf_owned_copy_manifest_v2(source.manifest),
+        artifact: AspectPackArtifactIdentity(
+            library_id: source.artifact.library_id,
+            path: source.artifact.path,
+            content_hash: source.artifact.content_hash),
+        export_contracts:
+            _dynsmf_owned_copy_exports_v2(source.export_contracts),
+        facet_id: source.facet_id)
+
+fn _dynsmf_owned_snapshot_registry_v2(registry: DynSmfAdmittedRegistry
+    ) -> _DynSmfOwnedRegistryV2:
+    var artifacts: [_DynSmfOwnedArtifactV2] = []
+    var indices: Dict<text, i64> = {}
+    var index: i64 = 0
+    while index < registry.artifacts.len():
+        val artifact = registry.artifacts[index]
+        artifacts.push(_DynSmfOwnedArtifactV2(
+            library_id: artifact.library_id,
+            request: _dynsmf_owned_copy_request_v2(artifact.request),
+            artifact_bytes:
+                _dynsmf_owned_copy_bytes_v2(artifact.artifact_bytes)))
+        indices[artifact.library_id] = index
+        index = index + 1
+    _DynSmfOwnedRegistryV2(artifacts: artifacts, artifact_indices: indices)
+
+fn _dynsmf_owned_registry_find_v2(registry: _DynSmfOwnedRegistryV2,
+        library_id: text) -> _DynSmfOwnedArtifactV2?:
+    if not registry.artifact_indices.has(library_id):
+        return nil
+    Some(registry.artifacts[registry.artifact_indices[library_id]])
+
+fn _dynsmf_owned_close_library_key_v3(owner_id: i64, library_id: text) -> text:
+    "dynsmf-owned-close-v3\0" + owner_id.to_string() + "\0" + library_id
+
+fn _dynsmf_owned_live_library_query_count_v3(owner_id: i64,
+        library_id: text) -> i64:
+    var count: i64 = 0
+    var index: i64 = 0
+    while index < _dynsmf_owned_query_live_v2.len():
+        if (_dynsmf_owned_query_live_v2[index] and
+                _dynsmf_owned_query_owner_ids_v2[index] == owner_id and
+                _dynsmf_owned_query_library_ids_v2[index] == library_id):
+            count = count + 1
+        index = index + 1
+    count
+
+fn _dynsmf_owned_copy_receipts_v2(source: [ExecutableMappingReceiptV1]
+    ) -> [ExecutableMappingReceiptV1]:
+    var copied: [ExecutableMappingReceiptV1] = []
+    for receipt in source:
+        copied.push(receipt)
+    copied
+
+fn _dynsmf_owned_receipt_batch_valid_v2(
+        receipts: [ExecutableMappingReceiptV1], mapper_instance_id: text,
+        mapped_bytes: i64, segment_count: i64) -> bool:
+    if (mapper_instance_id == "" or receipts.len() <= 0 or
+            receipts.len() > DYNSMF_OWNED_MAX_MAPPING_RECEIPTS_V2 or
+            mapped_bytes <= 0 or mapped_bytes > DYNSMF_OWNED_MAX_MAPPED_BYTES_V2 or
+            segment_count <= 0):
+        return false
+    var bytes: i64 = 0
+    var segments: i64 = 0
+    for receipt in receipts:
+        if (receipt.mapper_instance_id != mapper_instance_id or
+                receipt.mapped_bytes >
+                    DYNSMF_OWNED_MAX_MAPPED_BYTES_V2 - bytes or
+                receipt.segment_count > 9223372036854775807 - segments):
+            return false
+        bytes = bytes + receipt.mapped_bytes
+        segments = segments + receipt.segment_count
+    bytes == mapped_bytes and segments == segment_count
+
+fn _dynsmf_owned_receipt_totals_v2(receipts: [ExecutableMappingReceiptV1]
+    ) -> [i64]:
+    if receipts.len() <= 0 or
+            receipts.len() > DYNSMF_OWNED_MAX_MAPPING_RECEIPTS_V2:
+        return []
+    var bytes: i64 = 0
+    var segments: i64 = 0
+    val instance_id = receipts[0].mapper_instance_id
+    for receipt in receipts:
+        if (not executable_mapping_receipt_v1_well_formed(receipt) or
+                receipt.mapper_instance_id != instance_id or
+                receipt.mapped_bytes <= 0 or
+                receipt.mapped_bytes >
+                    DYNSMF_OWNED_MAX_MAPPED_BYTES_V2 - bytes or
+                receipt.segment_count <= 0 or
+                receipt.segment_count > 9223372036854775807 - segments):
+            return []
+        bytes = bytes + receipt.mapped_bytes
+        segments = segments + receipt.segment_count
+    [bytes, segments]
+
+fn _dynsmf_owned_receipt_batches_match_v2(
+        left: [ExecutableMappingReceiptV1],
+        right: [ExecutableMappingReceiptV1]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index: i64 = 0
+    while index < left.len():
+        if not executable_mapping_receipt_v1_same_identity(
+                left[index], right[index]):
+            return false
+        index = index + 1
+    true
+
+fn _dynsmf_owned_empty_owner_v2() -> DynSmfOwnedHandleV2:
+    DynSmfOwnedHandleV2(opaque_handle: 0)
+
+fn _dynsmf_owned_empty_query_v2() -> DynSmfOwnedQueryHandleV2:
+    DynSmfOwnedQueryHandleV2(opaque_handle: 0)
+
+fn _dynsmf_owned_owner_index_v2(owner: DynSmfOwnedHandleV2) -> i64:
+    val index = owner.opaque_handle - 1
+    if owner.opaque_handle <= 0 or index < 0 or
+            index >= _dynsmf_owned_sessions_v2.len():
+        return -1
+    index
+
+fn _dynsmf_owned_query_index_v2(query: DynSmfOwnedQueryHandleV2) -> i64:
+    val index = query.opaque_handle - 1
+    if query.opaque_handle <= 0 or index < 0 or
+            index >= _dynsmf_owned_query_refs_v2.len():
+        return -1
+    index
+
+fn _dynsmf_owned_registry_error_v2(status: i32, reason: text
+    ) -> _DynSmfOwnedRegistryCheckV2:
+    _DynSmfOwnedRegistryCheckV2(
+        status: status, reason: reason, retained_bytes: 0)
+
+fn _dynsmf_owned_registry_check_v2(registry: DynSmfAdmittedRegistry
+    ) -> _DynSmfOwnedRegistryCheckV2:
+    if not registry.ok or registry.reason != "admitted":
+        return _dynsmf_owned_registry_error_v2(
+            DYNSMF_OWNED_REGISTRY_NOT_ADMITTED_V2,
+            "dynsmf-owned-registry-not-admitted")
+    if registry.artifacts.len() <= 0 or
+            registry.artifacts.len() > DYNSMF_OWNED_MAX_ARTIFACTS_PER_OWNER_V2 or
+            registry.artifact_indices.len() != registry.artifacts.len():
+        return _dynsmf_owned_registry_error_v2(
+            DYNSMF_OWNED_REGISTRY_MALFORMED_V2,
+            "dynsmf-owned-registry-cardinality-invalid")
+
+    var retained_bytes: i64 = 0
+    var index: i64 = 0
+    while index < registry.artifacts.len():
+        val artifact = registry.artifacts[index]
+        val request = artifact.request
+        val artifact_bytes = artifact.artifact_bytes.len() as i64
+        if artifact.library_id == "" or
+                artifact.library_id.len() > DYNSMF_OWNED_MAX_LIBRARY_ID_BYTES_V2 or
+                request.facet_id == "" or
+                request.facet_id.len() > DYNSMF_OWNED_MAX_FACET_ID_BYTES_V2 or
+                request.artifact.path == "" or
+                request.artifact.path.len() > DYNSMF_OWNED_MAX_PATH_BYTES_V2 or
+                request.artifact.content_hash.len() != 64 or artifact_bytes <= 0:
+            return _dynsmf_owned_registry_error_v2(
+                DYNSMF_OWNED_REGISTRY_MALFORMED_V2,
+                "dynsmf-owned-artifact-identity-invalid")
+        if artifact_bytes > DYNSMF_OWNED_MAX_RETAINED_BYTES_V2 - retained_bytes:
+            return _dynsmf_owned_registry_error_v2(
+                DYNSMF_OWNED_RETAINED_BYTES_EXCEEDED_V2,
+                "dynsmf-owned-retained-byte-capacity-exceeded")
+        if not registry.artifact_indices.has(artifact.library_id) or
+                registry.artifact_indices[artifact.library_id] != index:
+            return _dynsmf_owned_registry_error_v2(
+                DYNSMF_OWNED_REGISTRY_MALFORMED_V2,
+                "dynsmf-owned-artifact-index-invalid")
+        if artifact.library_id != request.artifact.library_id or
+                sha256_u8_hex(artifact.artifact_bytes) !=
+                    request.artifact.content_hash:
+            return _dynsmf_owned_registry_error_v2(
+                DYNSMF_OWNED_REGISTRY_MALFORMED_V2,
+                "dynsmf-owned-artifact-digest-invalid")
+        val validation = aspect_pack_directory_validate_against_manifest(
+            request.directory, request.catalog, request.manifest,
+            request.artifact, request.export_contracts)
+        if not validation.ok:
+            return _dynsmf_owned_registry_error_v2(
+                DYNSMF_OWNED_REGISTRY_MALFORMED_V2,
+                "dynsmf-owned-artifact-contract-invalid:" +
+                    validation.error_code)
+        retained_bytes = retained_bytes + artifact_bytes
+        index = index + 1
+    _DynSmfOwnedRegistryCheckV2(
+        status: DYNSMF_OWNED_OK_V2, reason: "dynsmf-owned-registry-retained",
+        retained_bytes: retained_bytes)
+
+fn _dynsmf_owned_load_error_v2(status: i32, reason: text
+    ) -> DynSmfOwnedLoadResultV2:
+    DynSmfOwnedLoadResultV2(
+        status: status, reason: reason, owner: _dynsmf_owned_empty_owner_v2(),
+        retained_bytes: 0, artifact_count: 0)
+
+fn _dynsmf_owned_load_locked_v3(registry: DynSmfAdmittedRegistry, session_id: text,
+        policy: DynSmfPolicy) -> DynSmfOwnedLoadResultV2:
+    if session_id == "" or
+            session_id.len() > DYNSMF_OWNED_MAX_SESSION_ID_BYTES_V2:
+        return _dynsmf_owned_load_error_v2(
+            DYNSMF_OWNED_INVALID_ARGUMENT_V2,
+            "dynsmf-owned-session-id-invalid")
+    if not _dynsmf_owned_policy_valid_v2(policy):
+        return _dynsmf_owned_load_error_v2(
+            DYNSMF_OWNED_INVALID_ARGUMENT_V2,
+            "dynsmf-owned-policy-invalid")
+    val checked = _dynsmf_owned_registry_check_v2(registry)
+    if checked.status != DYNSMF_OWNED_OK_V2:
+        return _dynsmf_owned_load_error_v2(checked.status, checked.reason)
+    if _dynsmf_owned_sessions_v2.len() >= DYNSMF_OWNED_MAX_OWNERS_V2:
+        return _dynsmf_owned_load_error_v2(
+            DYNSMF_OWNED_OWNER_CAPACITY_EXHAUSTED_V2,
+            "dynsmf-owned-owner-capacity-exhausted")
+    val total_retained = _dynsmf_owned_total_retained_bytes_v2()
+    if checked.retained_bytes >
+            DYNSMF_OWNED_MAX_RETAINED_BYTES_V2 - total_retained:
+        return _dynsmf_owned_load_error_v2(
+            DYNSMF_OWNED_RETAINED_BYTES_EXCEEDED_V2,
+            "dynsmf-owned-global-retained-byte-capacity-exceeded")
+
+    val owner_id = _dynsmf_owned_sessions_v2.len() + 1
+    val snapshot = _dynsmf_owned_snapshot_registry_v2(registry)
+    _dynsmf_owned_registries_v2 =
+        _dynsmf_owned_registries_v2.push(snapshot)
+    _dynsmf_owned_sessions_v2 = _dynsmf_owned_sessions_v2.push(
+        dynsmf_session_new(session_id, _dynsmf_owned_copy_policy_v2(policy)))
+    _dynsmf_owned_retained_bytes_v2 =
+        _dynsmf_owned_retained_bytes_v2.push(checked.retained_bytes)
+    _dynsmf_owned_query_counts_v2 = _dynsmf_owned_query_counts_v2.push(0)
+    DynSmfOwnedLoadResultV2(
+        status: DYNSMF_OWNED_OK_V2, reason: "dynsmf-owned-session-retained",
+        owner: DynSmfOwnedHandleV2(opaque_handle: owner_id),
+        retained_bytes: checked.retained_bytes,
+        artifact_count: registry.artifacts.len())
+
+fn dynsmf_owned_load_v2(registry: DynSmfAdmittedRegistry, session_id: text,
+        policy: DynSmfPolicy) -> DynSmfOwnedLoadResultV2:
+    if not _dynsmf_owned_enter_v3():
+        return _dynsmf_owned_load_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-gate-unavailable")
+    val loaded = _dynsmf_owned_load_locked_v3(registry, session_id, policy)
+    _ = _dynsmf_owned_exit_v3()
+    loaded
+
+fn _dynsmf_owned_query_error_v2(status: i32, reason: text,
+        owner: DynSmfOwnedHandleV2) -> DynSmfOwnedQueryResultV2:
+    DynSmfOwnedQueryResultV2(
+        status: status, reason: reason, owner: owner,
+        query: _dynsmf_owned_empty_query_v2())
+
+fn _dynsmf_owned_query_locked_v3(owner: DynSmfOwnedHandleV2,
+        library_id: text) -> DynSmfOwnedQueryResultV2:
+    val owner_index = _dynsmf_owned_owner_index_v2(owner)
+    if owner_index < 0:
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_OWNER_UNKNOWN_V2,
+            "dynsmf-owned-owner-unknown", owner)
+    if library_id == "" or library_id.len() > DYNSMF_OWNED_MAX_LIBRARY_ID_BYTES_V2:
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_INVALID_ARGUMENT_V2,
+            "dynsmf-owned-library-id-invalid", owner)
+    if _dynsmf_owned_query_refs_v2.len() >= DYNSMF_OWNED_MAX_QUERIES_V2:
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_CAPACITY_EXHAUSTED_V2,
+            "dynsmf-owned-query-capacity-exhausted", owner)
+
+    val registry = _dynsmf_owned_registries_v2[owner_index]
+    val found = _dynsmf_owned_registry_find_v2(registry, library_id)
+    if found == nil:
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_ARTIFACT_UNKNOWN_V2,
+            "dynsmf-owned-artifact-unknown", owner)
+    if _dynsmf_owned_close_by_library_v3.has(
+            _dynsmf_owned_close_library_key_v3(owner.opaque_handle, library_id)):
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-library-closing-v3", owner)
+    val artifact = found!
+    val lease = dynsmf_session_first_use_facet_admitted_protected_v3(
+        _dynsmf_owned_sessions_v2[owner_index], library_id,
+        artifact.request, artifact.artifact_bytes)
+
+    # This assignment precedes every success/refusal return. The mapper and
+    # issued-facet-ref mutations belong to the returned session value.
+    var sessions = _dynsmf_owned_sessions_v2
+    sessions[owner_index] = lease.session
+    _dynsmf_owned_sessions_v2 = sessions
+
+    if lease.facet_ref == nil:
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-facet-query-refused", owner)
+    val facet_ref = lease.facet_ref!
+    if not dynsmf_session_validate_facet_ref(lease.session, facet_ref):
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-facet-query-not-live", owner)
+    if not lease.session._loaded_indices.has(library_id):
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-mapping-coordinate-missing", owner)
+    val loaded = lease.session.loaded[
+        lease.session._loaded_indices[library_id]]
+    if loaded.status != "loaded" or loaded.handle <= 0 or loaded.generation <= 0:
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-mapping-coordinate-invalid", owner)
+    val physical = smf_dynlib_mapping_observe_v1(loaded.handle)
+    val totals = _dynsmf_owned_receipt_totals_v2(physical.mapping_receipts)
+    if (not physical.ok or physical.handle_id != loaded.handle or
+            physical.mapper_instance_id == "" or totals.len() != 2 or
+            not _dynsmf_owned_receipt_batch_valid_v2(
+                physical.mapping_receipts, physical.mapper_instance_id,
+                if totals.len() == 2: totals[0] else: 0,
+                if totals.len() == 2: totals[1] else: 0)):
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-physical-mapping-observation-invalid", owner)
+    val query_id = _dynsmf_owned_query_refs_v2.len() + 1
+    _dynsmf_owned_query_owner_ids_v2 =
+        _dynsmf_owned_query_owner_ids_v2.push(owner.opaque_handle)
+    _dynsmf_owned_query_library_ids_v2 =
+        _dynsmf_owned_query_library_ids_v2.push(library_id)
+    _dynsmf_owned_query_facet_ids_v2 =
+        _dynsmf_owned_query_facet_ids_v2.push(artifact.request.facet_id)
+    _dynsmf_owned_query_refs_v2 = _dynsmf_owned_query_refs_v2.push(facet_ref)
+    _dynsmf_owned_query_session_ids_v2 =
+        _dynsmf_owned_query_session_ids_v2.push(lease.session.session_id)
+    _dynsmf_owned_query_native_handles_v2 =
+        _dynsmf_owned_query_native_handles_v2.push(loaded.handle)
+    _dynsmf_owned_query_library_generations_v2 =
+        _dynsmf_owned_query_library_generations_v2.push(loaded.generation)
+    _dynsmf_owned_query_mapper_instance_ids_v2 =
+        _dynsmf_owned_query_mapper_instance_ids_v2.push(
+            physical.mapper_instance_id)
+    _dynsmf_owned_query_mapping_receipts_v2 =
+        _dynsmf_owned_query_mapping_receipts_v2.push(
+            _dynsmf_owned_copy_receipts_v2(physical.mapping_receipts))
+    _dynsmf_owned_query_mapped_bytes_v2 =
+        _dynsmf_owned_query_mapped_bytes_v2.push(totals[0])
+    _dynsmf_owned_query_segment_counts_v2 =
+        _dynsmf_owned_query_segment_counts_v2.push(totals[1])
+    _dynsmf_owned_query_live_v2 = _dynsmf_owned_query_live_v2.push(true)
+    var counts = _dynsmf_owned_query_counts_v2
+    counts[owner_index] = counts[owner_index] + 1
+    _dynsmf_owned_query_counts_v2 = counts
+    DynSmfOwnedQueryResultV2(
+        status: DYNSMF_OWNED_OK_V2, reason: "dynsmf-owned-query-retained",
+        owner: owner, query: DynSmfOwnedQueryHandleV2(
+            opaque_handle: query_id))
+
+fn dynsmf_owned_query_v2(owner: DynSmfOwnedHandleV2,
+        library_id: text) -> DynSmfOwnedQueryResultV2:
+    if not _dynsmf_owned_enter_v3():
+        return _dynsmf_owned_query_error_v2(
+            DYNSMF_OWNED_QUERY_REFUSED_V2,
+            "dynsmf-owned-gate-unavailable", owner)
+    val queried = _dynsmf_owned_query_locked_v3(owner, library_id)
+    _ = _dynsmf_owned_exit_v3()
+    queried
+
+fn _dynsmf_owned_observation_error_v2(status: i32, reason: text
+    ) -> DynSmfOwnedObservationV2:
+    DynSmfOwnedObservationV2(
+        ok: false, status: status, reason: reason, live: false,
+        owner_identity: 0, query_identity: 0, session_id: "", library_id: "",
+        facet_id: "", session_generation: 0, native_handle: 0,
+        library_generation: 0, mapper_instance_id: "", mapping_receipts: [],
+        mapped_bytes: 0, segment_count: 0, retained_bytes: 0,
+        outstanding_queries: 0)
+
+fn _dynsmf_owned_observe_locked_v3(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedObservationV2:
+    val query_index = _dynsmf_owned_query_index_v2(query)
+    if query_index < 0:
+        return _dynsmf_owned_observation_error_v2(
+            DYNSMF_OWNED_QUERY_UNKNOWN_V2,
+            "dynsmf-owned-query-unknown")
+    if not _dynsmf_owned_query_live_v2[query_index]:
+        return _dynsmf_owned_observation_error_v2(
+            DYNSMF_OWNED_QUERY_TERMINAL_V2,
+            "dynsmf-owned-query-terminal")
+    val owner_id = _dynsmf_owned_query_owner_ids_v2[query_index]
+    val owner_index = _dynsmf_owned_owner_index_v2(
+        DynSmfOwnedHandleV2(opaque_handle: owner_id))
+    if owner_index < 0:
+        return _dynsmf_owned_observation_error_v2(
+            DYNSMF_OWNED_OWNER_UNKNOWN_V2,
+            "dynsmf-owned-owner-unknown")
+    val session = _dynsmf_owned_sessions_v2[owner_index]
+    val library_id = _dynsmf_owned_query_library_ids_v2[query_index]
+    if (session.session_id != _dynsmf_owned_query_session_ids_v2[query_index] or
+            not session._loaded_indices.has(library_id)):
+        return _dynsmf_owned_observation_error_v2(
+            DYNSMF_OWNED_COORDINATE_MISMATCH_V2,
+            "dynsmf-owned-current-mapping-missing")
+    val loaded = session.loaded[session._loaded_indices[library_id]]
+    val live = dynsmf_session_validate_facet_ref(
+        session, _dynsmf_owned_query_refs_v2[query_index])
+    if (not live or loaded.status != "loaded" or loaded.handle <= 0 or
+            loaded.generation <= 0 or
+            loaded.handle != _dynsmf_owned_query_native_handles_v2[query_index] or
+            loaded.generation !=
+                _dynsmf_owned_query_library_generations_v2[query_index]):
+        return _dynsmf_owned_observation_error_v2(
+            DYNSMF_OWNED_COORDINATE_MISMATCH_V2,
+            "dynsmf-owned-current-mapping-coordinate-mismatch")
+    val physical = smf_dynlib_mapping_observe_v1(loaded.handle)
+    if (not physical.ok or physical.handle_id != loaded.handle or
+            physical.mapper_instance_id !=
+                _dynsmf_owned_query_mapper_instance_ids_v2[query_index] or
+            not _dynsmf_owned_receipt_batches_match_v2(
+                physical.mapping_receipts,
+                _dynsmf_owned_query_mapping_receipts_v2[query_index])):
+        return _dynsmf_owned_observation_error_v2(
+            DYNSMF_OWNED_COORDINATE_MISMATCH_V2,
+            "dynsmf-owned-current-physical-receipt-mismatch")
+    DynSmfOwnedObservationV2(
+        ok: true,
+        status: DYNSMF_OWNED_OK_V2,
+        reason: "dynsmf-owned-query-live",
+        live: true,
+        owner_identity: owner_id,
+        query_identity: query.opaque_handle,
+        session_id: session.session_id,
+        library_id: library_id,
+        facet_id: _dynsmf_owned_query_facet_ids_v2[query_index],
+        session_generation: session.generation,
+        native_handle: loaded.handle,
+        library_generation: loaded.generation,
+        mapper_instance_id: physical.mapper_instance_id,
+        mapping_receipts:
+            _dynsmf_owned_copy_receipts_v2(physical.mapping_receipts),
+        mapped_bytes: _dynsmf_owned_query_mapped_bytes_v2[query_index],
+        segment_count: _dynsmf_owned_query_segment_counts_v2[query_index],
+        retained_bytes: _dynsmf_owned_retained_bytes_v2[owner_index],
+        outstanding_queries: _dynsmf_owned_query_counts_v2[owner_index])
+
+fn dynsmf_owned_observe_v2(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedObservationV2:
+    if not _dynsmf_owned_enter_v3():
+        return _dynsmf_owned_observation_error_v2(
+            DYNSMF_OWNED_COORDINATE_MISMATCH_V2,
+            "dynsmf-owned-gate-unavailable")
+    val observed = _dynsmf_owned_observe_locked_v3(query)
+    _ = _dynsmf_owned_exit_v3()
+    observed
+
+# Narrow loader bridge port. The returned coordinates are observations, never
+# authority to release memory; the physical endpoint must authenticate them.
+fn dynsmf_owned_mapping_observe_v2(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedObservationV2:
+    dynsmf_owned_observe_v2(query)
+
+fn _dynsmf_owned_close_empty_v3() -> DynSmfOwnedCloseReservationV3:
+    DynSmfOwnedCloseReservationV3(opaque_reservation: 0)
+
+fn _dynsmf_owned_close_row_index_v3(
+        reservation: DynSmfOwnedCloseReservationV3) -> i64:
+    if reservation.opaque_reservation <= 0 or
+            reservation.opaque_reservation > _dynsmf_owned_close_rows_v3.len():
+        return -1
+    val index = reservation.opaque_reservation - 1
+    if _dynsmf_owned_close_rows_v3[index].reservation_id !=
+            reservation.opaque_reservation:
+        return -1
+    index
+
+fn _dynsmf_owned_release_query_locked_v3(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedQueryReleaseResultV3:
+    """Drain one non-closing query through the retained session owner."""
+    val query_index = _dynsmf_owned_query_index_v2(query)
+    if query_index < 0 or not _dynsmf_owned_query_live_v2[query_index]:
+        return DynSmfOwnedQueryReleaseResultV3(
+            ok: false, reason: "dynsmf-owned-query-not-live")
+    val owner_id = _dynsmf_owned_query_owner_ids_v2[query_index]
+    val owner_index = _dynsmf_owned_owner_index_v2(
+        DynSmfOwnedHandleV2(opaque_handle: owner_id))
+    if owner_index < 0:
+        return DynSmfOwnedQueryReleaseResultV3(
+            ok: false, reason: "dynsmf-owned-query-owner-unknown")
+    val library_id = _dynsmf_owned_query_library_ids_v2[query_index]
+    val library_key = _dynsmf_owned_close_library_key_v3(owner_id, library_id)
+    if _dynsmf_owned_close_by_library_v3.has(library_key):
+        val close_id = _dynsmf_owned_close_by_library_v3[library_key]
+        if (close_id <= 0 or close_id > _dynsmf_owned_close_rows_v3.len() or
+                _dynsmf_owned_close_rows_v3[close_id - 1].query.opaque_handle ==
+                    query.opaque_handle):
+            return DynSmfOwnedQueryReleaseResultV3(
+                ok: false, reason: "dynsmf-owned-closing-query-is-final-pin")
+    var session = _dynsmf_owned_sessions_v2[owner_index]
+    if not dynsmf_session_validate_facet_ref(
+            session, _dynsmf_owned_query_refs_v2[query_index]):
+        return DynSmfOwnedQueryReleaseResultV3(
+            ok: false, reason: "dynsmf-owned-query-facet-not-live")
+    session = dynsmf_session_release_facet_ref_v3(
+        session, _dynsmf_owned_query_refs_v2[query_index])
+    var sessions = _dynsmf_owned_sessions_v2
+    sessions[owner_index] = session
+    _dynsmf_owned_sessions_v2 = sessions
+    var live = _dynsmf_owned_query_live_v2
+    live[query_index] = false
+    _dynsmf_owned_query_live_v2 = live
+    var counts = _dynsmf_owned_query_counts_v2
+    if counts[owner_index] <= 0:
+        return DynSmfOwnedQueryReleaseResultV3(
+            ok: false, reason: "dynsmf-owned-query-count-inconsistent")
+    counts[owner_index] = counts[owner_index] - 1
+    _dynsmf_owned_query_counts_v2 = counts
+    DynSmfOwnedQueryReleaseResultV3(ok: true,
+        reason: "dynsmf-owned-query-released")
+
+fn dynsmf_owned_release_query_v3(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedQueryReleaseResultV3:
+    if not _dynsmf_owned_enter_v3():
+        return DynSmfOwnedQueryReleaseResultV3(
+            ok: false, reason: "dynsmf-owned-gate-unavailable")
+    val released = _dynsmf_owned_release_query_locked_v3(query)
+    _ = _dynsmf_owned_exit_v3()
+    released
+
+fn _dynsmf_owned_reserve_close_locked_v3(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedCloseReserveResultV3:
+    """Make one library Closing and refuse new query admission.
+
+    Only the final remaining query can reserve close.  This drains ordinary
+    query pins before any native release attempt and gives the loader an
+    opaque reservation rather than a caller-owned receipt/result value.
+    """
+    val observed = _dynsmf_owned_observe_locked_v3(query)
+    if not observed.ok or not observed.live:
+        return DynSmfOwnedCloseReserveResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3,
+            reason: "dynsmf-owned-close-query-not-live",
+            reservation: _dynsmf_owned_close_empty_v3(), native_handle: 0)
+    val library_key = _dynsmf_owned_close_library_key_v3(
+        observed.owner_identity, observed.library_id)
+    if _dynsmf_owned_close_by_library_v3.has(library_key):
+        val known_id = _dynsmf_owned_close_by_library_v3[library_key]
+        if known_id > 0 and known_id <= _dynsmf_owned_close_rows_v3.len():
+            val known = _dynsmf_owned_close_rows_v3[known_id - 1]
+            if known.query.opaque_handle == query.opaque_handle:
+                if _dynsmf_owned_live_library_query_count_v3(
+                        observed.owner_identity, observed.library_id) != 1:
+                    return DynSmfOwnedCloseReserveResultV3(
+                        ok: false,
+                        status: DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3,
+                        reason: "dynsmf-owned-library-query-drain-pending",
+                        reservation: DynSmfOwnedCloseReservationV3(
+                            opaque_reservation: known_id),
+                        native_handle: known.native_handle)
+                if not _smf_dynlib_arm_release_handle_v3(known.native_handle):
+                    return DynSmfOwnedCloseReserveResultV3(
+                        ok: false,
+                        status: DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3,
+                        reason: "dynsmf-owned-physical-release-arm-refused",
+                        reservation: DynSmfOwnedCloseReservationV3(
+                            opaque_reservation: known_id),
+                        native_handle: known.native_handle)
+                return DynSmfOwnedCloseReserveResultV3(
+                    ok: true, status: DYNSMF_OWNED_CLOSE_COMMITTED_V3,
+                    reason: "dynsmf-owned-close-already-reserved",
+                    reservation: DynSmfOwnedCloseReservationV3(
+                        opaque_reservation: known_id),
+                    native_handle: known.native_handle)
+        return DynSmfOwnedCloseReserveResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3,
+            reason: "dynsmf-owned-library-closing-by-other-query",
+            reservation: _dynsmf_owned_close_empty_v3(), native_handle: 0)
+    val reservation_id = _dynsmf_owned_close_rows_v3.len() + 1
+    val row = _DynSmfOwnedCloseRowV3(
+        reservation_id: reservation_id, query: query,
+        owner_id: observed.owner_identity, library_id: observed.library_id,
+        library_generation: observed.library_generation,
+        native_handle: observed.native_handle, committed: false)
+    _dynsmf_owned_close_rows_v3 = _dynsmf_owned_close_rows_v3.push(row)
+    _dynsmf_owned_close_by_library_v3[library_key] = reservation_id
+    if _dynsmf_owned_live_library_query_count_v3(
+            observed.owner_identity, observed.library_id) != 1:
+        return DynSmfOwnedCloseReserveResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3,
+            reason: "dynsmf-owned-library-query-drain-pending",
+            reservation: DynSmfOwnedCloseReservationV3(
+                opaque_reservation: reservation_id),
+            native_handle: observed.native_handle)
+    if not _smf_dynlib_arm_release_handle_v3(observed.native_handle):
+        return DynSmfOwnedCloseReserveResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3,
+            reason: "dynsmf-owned-physical-release-arm-refused",
+            reservation: DynSmfOwnedCloseReservationV3(
+                opaque_reservation: reservation_id),
+            native_handle: observed.native_handle)
+    DynSmfOwnedCloseReserveResultV3(
+        ok: true, status: DYNSMF_OWNED_CLOSE_COMMITTED_V3,
+        reason: "dynsmf-owned-library-closing",
+        reservation: DynSmfOwnedCloseReservationV3(
+            opaque_reservation: reservation_id),
+        native_handle: observed.native_handle)
+
+fn _dynsmf_owned_reserve_close_for_loader_v3(
+        query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedCloseReserveResultV3:
+    if not _dynsmf_owned_enter_v3():
+        return DynSmfOwnedCloseReserveResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_RESERVATION_REFUSED_V3,
+            reason: "dynsmf-owned-gate-unavailable",
+            reservation: _dynsmf_owned_close_empty_v3(), native_handle: 0)
+    val reserved = _dynsmf_owned_reserve_close_locked_v3(query)
+    _ = _dynsmf_owned_exit_v3()
+    reserved
+
+fn _dynsmf_owned_commit_close_locked_v3(
+        reservation: DynSmfOwnedCloseReservationV3,
+        attempt: DynSmfReleaseAttemptV3) -> DynSmfOwnedCloseCommitResultV3:
+    """Commit the retained dynlib completion, never a caller-supplied result."""
+    val row_index = _dynsmf_owned_close_row_index_v3(reservation)
+    if row_index < 0:
+        return DynSmfOwnedCloseCommitResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_RESERVATION_UNKNOWN_V3,
+            reason: "dynsmf-owned-close-reservation-unknown", committed: false,
+            reservation: reservation)
+    var row = _dynsmf_owned_close_rows_v3[row_index]
+    if row.committed:
+        return DynSmfOwnedCloseCommitResultV3(
+            ok: true, status: DYNSMF_OWNED_CLOSE_COMMITTED_V3,
+            reason: "dynsmf-owned-close-already-committed", committed: true,
+            reservation: reservation)
+    val observed_attempt = _smf_dynlib_release_observe_for_owner_v3(attempt)
+    val completion = _smf_dynlib_release_completion_v3(attempt)
+    if (not observed_attempt.physical_complete or
+            observed_attempt.handle_id != row.native_handle or
+            completion == nil):
+        return DynSmfOwnedCloseCommitResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_COMMIT_REFUSED_V3,
+            reason: "dynsmf-owned-close-physical-completion-missing",
+            committed: false, reservation: reservation)
+    val committed = _dynsmf_owned_commit_physical_release_v3(
+        row.query, row.library_generation, completion!)
+    if not committed.committed:
+        return DynSmfOwnedCloseCommitResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_COMMIT_REFUSED_V3,
+            reason: committed.reason, committed: false, reservation: reservation)
+    row.committed = true
+    _dynsmf_owned_close_rows_v3[row_index] = row
+    DynSmfOwnedCloseCommitResultV3(
+        ok: true, status: DYNSMF_OWNED_CLOSE_COMMITTED_V3,
+        reason: "dynsmf-owned-close-committed", committed: true,
+        reservation: reservation)
+
+fn _dynsmf_owned_commit_close_for_loader_v3(
+        reservation: DynSmfOwnedCloseReservationV3,
+        attempt: DynSmfReleaseAttemptV3) -> DynSmfOwnedCloseCommitResultV3:
+    if not _dynsmf_owned_enter_v3():
+        return DynSmfOwnedCloseCommitResultV3(
+            ok: false, status: DYNSMF_OWNED_CLOSE_COMMIT_REFUSED_V3,
+            reason: "dynsmf-owned-gate-unavailable", committed: false,
+            reservation: reservation)
+    val committed = _dynsmf_owned_commit_close_locked_v3(
+        reservation, attempt)
+    _ = _dynsmf_owned_exit_v3()
+    committed
+
+fn _dynsmf_owned_commit_result_v2(status: i32, reason: text,
+        query: DynSmfOwnedQueryHandleV2, committed: bool,
+        already_committed: bool
+    ) -> DynSmfOwnedPhysicalCommitResultV2:
+    DynSmfOwnedPhysicalCommitResultV2(
+        status: status, reason: reason, query: query, committed: committed,
+        already_committed: already_committed)
+
+fn _dynsmf_owned_release_batch_matches_v2(query_index: i64,
+        physical: DynSmfMappingReleaseV1) -> bool:
+    val expected = _dynsmf_owned_query_mapping_receipts_v2[query_index]
+    if (not physical.ok or not physical.fully_released or
+            physical.attempted_count != expected.len() or
+            physical.results.len() != expected.len() or
+            expected.len() <= 0):
+        return false
+    var index: i64 = 0
+    while index < expected.len():
+        val result = physical.results[index]
+        if (not executable_mapping_release_result_v1_well_formed(result) or
+                not executable_mapping_receipt_v1_same_identity(
+                    result.receipt, expected[index]) or
+                (result.outcome != ExecutableMappingReleaseOutcomeV1.Released and
+                    result.outcome !=
+                        ExecutableMappingReleaseOutcomeV1.AlreadyReleased)):
+            return false
+        index = index + 1
+    true
+
+fn _dynsmf_owned_terminalize_library_v2(owner_index: i64,
+        library_id: text) -> bool:
+    var session = _dynsmf_owned_sessions_v2[owner_index]
+    if not session._loaded_indices.has(library_id):
+        return false
+    val slot = session._loaded_indices[library_id]
+    val loaded = session.loaded[slot]
+    if loaded.status != "loaded" or session.generation == 9223372036854775807:
+        return false
+    session.loaded[slot] = DynSmfLoadedLibrary(
+        id: loaded.id, handle: loaded.handle, generation: loaded.generation,
+        status: "unloaded", symbol_registry: "", path: loaded.path,
+        abi_version: loaded.abi_version, content_hash: loaded.content_hash)
+    session.generation = session.generation + 1
+    session.evidence.push(DynSmfEvidenceRow(
+        library_id: library_id, action: "physical_release_commit",
+        policy_source: session.policy.source, status: "unloaded",
+        handle: loaded.handle, generation: session.generation,
+        reason: "smf-dynlib-exact-release-receipts"))
+    session._loaded_indices = session._loaded_indices.remove(library_id)
+    session = _dynsmf_revoke_library_facet_refs(session, library_id)
+    var sessions = _dynsmf_owned_sessions_v2
+    sessions[owner_index] = session
+    _dynsmf_owned_sessions_v2 = sessions
+
+    var live = _dynsmf_owned_query_live_v2
+    var retired: i64 = 0
+    var index: i64 = 0
+    while index < live.len():
+        if (live[index] and
+                _dynsmf_owned_query_owner_ids_v2[index] == owner_index + 1 and
+                _dynsmf_owned_query_library_ids_v2[index] == library_id):
+            live[index] = false
+            retired = retired + 1
+        index = index + 1
+    _dynsmf_owned_query_live_v2 = live
+    var counts = _dynsmf_owned_query_counts_v2
+    if retired > counts[owner_index]:
+        return false
+    counts[owner_index] = counts[owner_index] - retired
+    _dynsmf_owned_query_counts_v2 = counts
+    true
+
+# Logical owner commit after, and only after, the loader bridge has obtained an
+# authenticated successful native release. This function performs no native
+# close and cannot turn a failed physical attempt into success.
+fn _dynsmf_owned_commit_physical_release_v3(
+        query: DynSmfOwnedQueryHandleV2, library_generation: i64,
+        physical: DynSmfMappingReleaseV1
+    ) -> DynSmfOwnedPhysicalCommitResultV2:
+    val query_index = _dynsmf_owned_query_index_v2(query)
+    if query_index < 0:
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_QUERY_UNKNOWN_V2, "dynsmf-owned-query-unknown",
+            query, false, false)
+    val native_handle = _dynsmf_owned_query_native_handles_v2[query_index]
+    if (native_handle <= 0 or library_generation <= 0 or
+            physical.handle_id != native_handle or
+            library_generation !=
+                _dynsmf_owned_query_library_generations_v2[query_index]):
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_COORDINATE_MISMATCH_V2,
+            "dynsmf-owned-physical-commit-coordinate-mismatch",
+            query, false, false)
+    if not _dynsmf_owned_release_batch_matches_v2(query_index, physical):
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_COMMIT_REFUSED_V2,
+            "dynsmf-owned-physical-release-result-invalid",
+            query, false, false)
+    if not _dynsmf_owned_query_live_v2[query_index]:
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_OK_V2,
+            "dynsmf-owned-physical-release-already-committed",
+            query, true, true)
+
+    # A copied result cannot mint success while the canonical dynlib owner
+    # still owns the handle. Successful release removes that exact handle.
+    if smf_dynlib_mapping_observe_v1(native_handle).ok:
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_COMMIT_REFUSED_V2,
+            "dynsmf-owned-physical-handle-still-live",
+            query, false, false)
+    val owner_id = _dynsmf_owned_query_owner_ids_v2[query_index]
+    val owner_index = _dynsmf_owned_owner_index_v2(
+        DynSmfOwnedHandleV2(opaque_handle: owner_id))
+    if owner_index < 0:
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_OWNER_UNKNOWN_V2, "dynsmf-owned-owner-unknown",
+            query, false, false)
+    val session = _dynsmf_owned_sessions_v2[owner_index]
+    val library_id = _dynsmf_owned_query_library_ids_v2[query_index]
+    if (not session._loaded_indices.has(library_id) or
+            session.loaded[session._loaded_indices[library_id]].handle !=
+                native_handle or
+            session.loaded[session._loaded_indices[library_id]].generation !=
+                library_generation):
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_COORDINATE_MISMATCH_V2,
+            "dynsmf-owned-logical-session-coordinate-mismatch",
+            query, false, false)
+    if not _dynsmf_owned_terminalize_library_v2(owner_index, library_id):
+        return _dynsmf_owned_commit_result_v2(
+            DYNSMF_OWNED_COMMIT_REFUSED_V2,
+            "dynsmf-owned-logical-terminal-commit-refused",
+            query, false, false)
+    _dynsmf_owned_commit_result_v2(
+        DYNSMF_OWNED_OK_V2, "dynsmf-owned-physical-release-committed",
+        query, true, false)
+
+fn dynsmf_owned_commit_physical_release_v2(
+        query: DynSmfOwnedQueryHandleV2, library_generation: i64,
+        physical: DynSmfMappingReleaseV1
+    ) -> DynSmfOwnedPhysicalCommitResultV2:
+    # V2 accepted a caller-carried physical result. V3 intentionally closes
+    # that authority bypass; only the retained close reservation can reach the
+    # private commit above.
+    val _ignored_generation = library_generation
+    val _ignored_physical = physical
+    _dynsmf_owned_commit_result_v2(
+        DYNSMF_OWNED_COMMIT_REFUSED_V2,
+        "dynsmf-owned-v2-physical-commit-disabled",
+        query, false, false)
+
+fn _dynsmf_owned_release_result_v2(status: i32, reason: text,
+        query: DynSmfOwnedQueryHandleV2, live: bool
+    ) -> DynSmfOwnedReleaseResultV2:
+    DynSmfOwnedReleaseResultV2(
+        status: status, reason: reason, query: query, live: live,
+        physical_release_started: false, retryable: false)
+
+fn dynsmf_owned_release_v2(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedReleaseResultV2:
+    val observed = dynsmf_owned_observe_v2(query)
+    if observed.status != DYNSMF_OWNED_OK_V2:
+        return _dynsmf_owned_release_result_v2(
+            observed.status, observed.reason, query, false)
+    _dynsmf_owned_release_result_v2(
+        DYNSMF_OWNED_RELEASE_UNAVAILABLE_V2,
+        "dynsmf-owned-exact-physical-release-association-unavailable",
+        query, observed.live)
+
+fn dynsmf_owned_retry_v2(query: DynSmfOwnedQueryHandleV2
+    ) -> DynSmfOwnedReleaseResultV2:
+    val observed = dynsmf_owned_observe_v2(query)
+    if observed.status != DYNSMF_OWNED_OK_V2:
+        return _dynsmf_owned_release_result_v2(
+            observed.status, observed.reason, query, false)
+    _dynsmf_owned_release_result_v2(
+        DYNSMF_OWNED_RETRY_UNAVAILABLE_V2,
+        "dynsmf-owned-no-retained-physical-release-result",
+        query, observed.live)
+
+export DYNSMF_OWNED_OK_V2, DYNSMF_OWNED_INVALID_ARGUMENT_V2
+export DYNSMF_OWNED_REGISTRY_NOT_ADMITTED_V2, DYNSMF_OWNED_REGISTRY_MALFORMED_V2
+export DYNSMF_OWNED_RETAINED_BYTES_EXCEEDED_V2
+export DYNSMF_OWNED_OWNER_CAPACITY_EXHAUSTED_V2, DYNSMF_OWNED_OWNER_UNKNOWN_V2
+export DYNSMF_OWNED_ARTIFACT_UNKNOWN_V2, DYNSMF_OWNED_QUERY_REFUSED_V2
+export DYNSMF_OWNED_QUERY_CAPACITY_EXHAUSTED_V2, DYNSMF_OWNED_QUERY_UNKNOWN_V2
+export DYNSMF_OWNED_RELEASE_UNAVAILABLE_V2, DYNSMF_OWNED_RETRY_UNAVAILABLE_V2
+export DYNSMF_OWNED_COORDINATE_MISMATCH_V2, DYNSMF_OWNED_COMMIT_REFUSED_V2
+export DYNSMF_OWNED_QUERY_TERMINAL_V2
+export DYNSMF_OWNED_MAX_OWNERS_V2, DYNSMF_OWNED_MAX_ARTIFACTS_PER_OWNER_V2
+export DYNSMF_OWNED_MAX_QUERIES_V2, DYNSMF_OWNED_MAX_RETAINED_BYTES_V2
+export DYNSMF_OWNED_MAX_SESSION_ID_BYTES_V2, DYNSMF_OWNED_MAX_LIBRARY_ID_BYTES_V2
+export DYNSMF_OWNED_MAX_FACET_ID_BYTES_V2, DYNSMF_OWNED_MAX_PATH_BYTES_V2
+export DYNSMF_OWNED_MAX_MAPPING_RECEIPTS_V2, DYNSMF_OWNED_MAX_MAPPED_BYTES_V2
+export DYNSMF_OWNED_MAX_POLICY_DISABLED_IDS_V2
+export DYNSMF_OWNED_MAX_POLICY_SOURCE_BYTES_V2
+export DynSmfOwnedHandleV2, DynSmfOwnedQueryHandleV2
+export DynSmfOwnedLoadResultV2, DynSmfOwnedQueryResultV2
+export DynSmfOwnedObservationV2, DynSmfOwnedReleaseResultV2
+export DynSmfOwnedPhysicalCommitResultV2
+export DynSmfOwnedCloseReservationV3, DynSmfOwnedCloseReserveResultV3
+export DynSmfOwnedCloseCommitResultV3
+export DynSmfOwnedQueryReleaseResultV3
+export dynsmf_owned_load_v2, dynsmf_owned_query_v2, dynsmf_owned_observe_v2
+export dynsmf_owned_release_v2, dynsmf_owned_retry_v2
+export dynsmf_owned_mapping_observe_v2
+export dynsmf_owned_release_query_v3

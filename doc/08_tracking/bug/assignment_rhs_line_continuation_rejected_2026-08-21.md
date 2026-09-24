@@ -1,4 +1,9 @@
 # Parser rejects an assignment whose RHS is on the next line
+## Closed 2026-09-16 — ...ncomplete and should be corrected. Fixed by renaming to `pass_index`. Confirmed on a fresh
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-21
 - Area: compiler / parser (grammar gap)
@@ -82,3 +87,4 @@ failure is attributed to the SPEC that imported it, not to the file that failed,
 so the reader sees `worker_static_file_spec: 1 total, 0 passed, 1 failed` and
 has to chase the real file by hand. Surfacing the failing file and line in the
 spec verdict would have made all three self-diagnosing.
+

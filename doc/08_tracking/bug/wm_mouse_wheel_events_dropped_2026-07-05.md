@@ -1,4 +1,8 @@
 # Mouse wheel/scroll events completely dropped in both real WM entrypoints
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open — **driver half fixed, upper-layer half still open** (2026-08-06, WS-C/C3).
@@ -84,3 +88,4 @@ Completed 2026-08-10 in commit `e57b019ca2d75ae4380c9a2013b987200297290d`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+

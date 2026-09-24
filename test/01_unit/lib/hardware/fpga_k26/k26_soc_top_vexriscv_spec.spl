@@ -8,7 +8,7 @@
 
 # @cover src/lib/hardware/fpga_k26/k26_soc_top.spl 0%
 """
-# K26 SoC Top VexRiscv-SMP Integration Specification
+# K26 SoC Top Level Integration Specification
 
 **Feature IDs:** opensource-riscv-rtl-simpleos
 **Category:** Infrastructure
@@ -19,94 +19,136 @@
 
 ## Overview
 
-Verifies AC-2: k26_soc_top wires VexRiscv-SMP .v + AXI-HP bridge +
-soc_rtl peripherals (CLINT, PLIC, UART16550). Tests that the generated
-VHDL/SV top-level text references VexRiscv-SMP, CLINT, PLIC, and UART.
+Verifies AC-2: k26_soc_top integrates the SoC around the PS-PL
+AxiLite-to-Wishbone bridge and reports core status on the LED bundle.
+The top level carries UART TX/RX to PMOD pins, answers AXI requests
+from the PS through the bridge, and encodes core state (running,
+halted, trap, heartbeat) in the 4-bit LED output.
 
 Covers:
-- AC-2 (SOC integration: core wired to CLINT+PLIC+UART16550)
+- AC-2 (SOC integration: AXI-Lite bridge wired to the SoC bus,
+  LED status encoding reflects core state)
 """
 
 use std.spec.step
 
 use std.spipe.*
 use lib.hardware.fpga_k26.k26_soc_top.{
-    generate_k26_soc_top_vexriscv,
-    k26_vexriscv_soc_config,
-    K26VexRiscvSocConfig
+    k26_soc_create,
+    k26_update_leds,
+    k26_handle_axi,
+    k26_get_wb_master,
+    k26_get_axi_response,
+    k26_soc_ports,
+    LED_RUNNING,
+    LED_HALTED,
+    LED_TRAP,
+    LED_HEART
 }
+use lib.hardware.fpga_k26.k26_ps_pl_bridge.{AxiLiteRequest, WbSlaveResponse}
 
 
 # ============================================================================
-# Helper
+# AC-2: SoC Top Initial State Sanity
 # ============================================================================
 
-fn default_soc_config() -> K26VexRiscvSocConfig:
-    return k26_vexriscv_soc_config()
-
-fn soc_top_sv() -> text:
-    val cfg = default_soc_config()
-    return generate_k26_soc_top_vexriscv(cfg)
-
-
-# ============================================================================
-# AC-2: SoC Top Configuration Sanity
-# ============================================================================
-
-describe "K26VexRiscvSocConfig":
+describe "K26 SoC Top initial state":
     # @manual scenario evidence
-    it "AC-2: default config hart_count is 1":
+
+    it "AC-2: fresh SoC reports RUNNING on the LED bundle":
         # @req REQ-SSPEC-LIB
         # @req REQ-2
-        step("AC-2: default config hart_count is 1")
-        val cfg = default_soc_config()
-        expect(cfg.hart_count).to_equal(1)  # oracle: pinned constant asserted by this scenario
+        step("AC-2: fresh SoC reports RUNNING on the LED bundle")
+        val st = k26_soc_create()
+        expect(st.led_status).to_equal(LED_RUNNING)  # oracle: create() initialises the LED register to LED_RUNNING
 
-    it "AC-2: default config axi_data_width is 128":
+    it "AC-2: fresh SoC is not halted":
         # @req REQ-SSPEC-LIB
-        step("AC-2: default config axi_data_width is 128")
-        val cfg = default_soc_config()
-        expect(cfg.axi_data_width).to_equal(128)  # oracle: pinned constant asserted by this scenario
+        # @req REQ-2
+        step("AC-2: fresh SoC is not halted")
+        val st = k26_soc_create()
+        expect(st.core_halted).to_equal(false)  # oracle: halt status latch starts cleared
+
+    it "AC-2: fresh SoC heartbeat counter starts at zero":
+        # @req REQ-SSPEC-LIB
+        # @req REQ-2
+        step("AC-2: fresh SoC heartbeat counter starts at zero")
+        val st = k26_soc_create()
+        expect(st.heartbeat_cnt).to_equal(0)  # oracle: heartbeat counter starts at zero
 
 
 # ============================================================================
-# AC-2: SoC Top Generated Output
+# AC-2: LED Status Encoding Reflects Core State
 # ============================================================================
 
-describe "K26 SoC Top VexRiscv-SMP Wiring":
-    it "AC-2: generated text contains VexRiscv reference":
+describe "K26 SoC Top LED encoding":
+    it "AC-2: a halted core lights the HALTED LED and latches the halt":
         # @req REQ-SSPEC-LIB
-        step("AC-2: generated text contains VexRiscv reference")
-        val sv = soc_top_sv()
-        expect(sv).to_contain("VexRiscv")
+        # @req REQ-2
+        step("AC-2: a halted core lights the HALTED LED and latches the halt")
+        val st = k26_update_leds(k26_soc_create(), true, false)
+        expect((st.led_status & LED_HALTED) != 0).to_equal(true)
+        expect(st.core_halted).to_equal(true)
 
-    it "AC-2: generated text references CLINT":
+    it "AC-2: a running core lights the RUNNING LED while the halt latch stays sticky":
         # @req REQ-SSPEC-LIB
-        step("AC-2: generated text references CLINT")
-        val sv = soc_top_sv()
-        expect(sv).to_contain("clint")
+        # @req REQ-2
+        step("AC-2: a running core lights the RUNNING LED while the halt latch stays sticky")
+        var halted = k26_soc_create()
+        halted.core_halted = true
+        val st = k26_update_leds(halted, false, false)
+        expect((st.led_status & LED_RUNNING) != 0).to_equal(true)
+        expect(st.core_halted).to_equal(true)  # oracle: the latch is sticky — only an explicit reset path clears it
 
-    it "AC-2: generated text references PLIC":
+    it "AC-2: a trapping core lights the TRAP LED":
         # @req REQ-SSPEC-LIB
-        step("AC-2: generated text references PLIC")
-        val sv = soc_top_sv()
-        expect(sv).to_contain("plic")
+        # @req REQ-2
+        step("AC-2: a trapping core lights the TRAP LED")
+        val st = k26_update_leds(k26_soc_create(), false, true)
+        expect((st.led_status & LED_TRAP) != 0).to_equal(true)
 
-    it "AC-2: generated text references UART":
-        # @req REQ-SSPEC-LIB
-        step("AC-2: generated text references UART")
-        val sv = soc_top_sv()
-        expect(sv).to_contain("uart")
 
-    it "AC-2: generated text references AXI HP bridge":
-        # @req REQ-SSPEC-LIB
-        step("AC-2: generated text references AXI HP bridge")
-        val sv = soc_top_sv()
-        expect(sv).to_contain("HP0")
+# ============================================================================
+# AC-2: AXI-Lite to Wishbone Bridge Wiring
+# ============================================================================
 
-    it "AC-2: generated text is non-empty":
+describe "K26 SoC Top AXI bridge wiring":
+    it "AC-2: a valid AXI read request drives a Wishbone master cycle":
         # @req REQ-SSPEC-LIB
-        step("AC-2: generated text is non-empty")
-        val sv = soc_top_sv()
-        val len = sv.length()
-        expect(len).to_be_greater_than(0)
+        # @req REQ-2
+        step("AC-2: a valid AXI read request drives a Wishbone master cycle")
+        val req = AxiLiteRequest(addr: 0x1000, wdata: 0, we: false, valid: true)
+        val wb = k26_get_wb_master(req)
+        expect(wb.cyc).to_equal(true)  # oracle: valid AXI request starts a Wishbone cycle
+        expect(wb.stb).to_equal(true)
+        expect(wb.adr).to_equal(0x1000)  # oracle: bridge passes the AXI address through untouched
+        expect(wb.we).to_equal(false)
+
+    it "AC-2: a Wishbone acknowledge becomes a ready AXI response with read data":
+        # @req REQ-SSPEC-LIB
+        # @req REQ-2
+        step("AC-2: a Wishbone acknowledge becomes a ready AXI response with read data")
+        val resp = k26_get_axi_response(WbSlaveResponse(dat_r: 0xABCD, ack: true))
+        expect(resp.ready).to_equal(true)  # oracle: wb ack maps to AXI response ready
+        expect(resp.rdata).to_equal(0xABCD)  # oracle: wb read data passes through to AXI rdata
+        expect(resp.resp_ok).to_equal(true)
+
+    it "AC-2: the top-level ports bundle bridges UART passthrough and core status":
+        # @req REQ-SSPEC-LIB
+        # @req REQ-2
+        step("AC-2: the top-level ports bundle bridges UART passthrough and core status")
+        val st = k26_update_leds(k26_soc_create(), true, false)
+        val ports = k26_soc_ports(st, true, WbSlaveResponse(dat_r: 0, ack: true))
+        expect(ports.uart_tx).to_equal(true)  # oracle: UART TX is carried straight to the PMOD pin
+        expect(ports.halted).to_equal(true)  # oracle: the latched core halt reaches the halted port
+        expect(ports.led).to_equal(st.led_status)  # oracle: the LED port mirrors the LED status register
+
+    it "AC-2: handling an AXI request advances the bridge transaction state":
+        # @req REQ-SSPEC-LIB
+        # @req REQ-2
+        step("AC-2: handling an AXI request advances the bridge transaction state")
+        val st = k26_soc_create()
+        val req = AxiLiteRequest(addr: 0x2000, wdata: 0x55, we: true, valid: true)
+        val out = k26_handle_axi(st, req, WbSlaveResponse(dat_r: 0, ack: false))
+        expect(out.bridge.pending).to_equal(true)  # oracle: a valid write request leaves a transaction pending in the bridge
+        expect(out.bridge.pending_addr).to_equal(0x2000)

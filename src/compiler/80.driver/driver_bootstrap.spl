@@ -4,7 +4,7 @@
 # helpers used during the self-hosted bootstrap process.
 
 use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
-use std.io_runtime.{file_copy}
+use std.io_runtime.{file_copy, file_delete}
 use std.env.{env_get}
 use compiler.hir.hir.*
 use compiler.mir.mir.*
@@ -14,7 +14,7 @@ use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
 use compiler.backend.llvm_backend.{MirToLlvm}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, compile_ir_to_object}
-use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_text}
+use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_text}
 use compiler.backend.llvm_ir_builder.{llvm_ir_builder_handle}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
@@ -62,6 +62,32 @@ pub fn bootstrap_llvm_ir_path_from_object_path(obj_path: text) -> text:
         obj_path.slice(0, obj_path.len() - 1) + "ll"
     else:
         obj_path + ".ll"
+
+pub fn bootstrap_llvm_success_cleanup_paths(obj_path: text, keep_ir: bool) -> [text]:
+    """Temporary LLVM artifacts removable after the object is copied."""
+    var paths = [obj_path]
+    if not keep_ir:
+        paths.push(bootstrap_llvm_ir_path_from_object_path(obj_path))
+    paths
+
+pub fn bootstrap_llvm_success_cleanup_paths_with_policy(
+    obj_path: text, keep_intermediates: bool, keep_ir: bool
+) -> [text]:
+    if keep_intermediates:
+        []
+    else:
+        bootstrap_llvm_success_cleanup_paths(obj_path, keep_ir)
+
+fn bootstrap_cleanup_llvm_success_artifacts(obj_path: text):
+    val keep_intermediates = env_get("SIMPLE_KEEP_BUILD_INTERMEDIATES") == "1"
+    val keep_ir = env_get("SIMPLE_KEEP_LLVM_IR") == "1"
+    val print_paths = env_get("SIMPLE_PRINT_BUILD_INTERMEDIATES") == "1"
+    if keep_intermediates and print_paths:
+        print "[native-build] retained intermediate: {obj_path}"
+        print "[native-build] retained intermediate: {bootstrap_llvm_ir_path_from_object_path(obj_path)}"
+    for path in bootstrap_llvm_success_cleanup_paths_with_policy(
+        obj_path, keep_intermediates, keep_ir):
+        file_delete(path)
 
 pub fn bootstrap_llvm_phase_message(phase: text, subject: text, detail: text) -> text:
     "Bootstrap LLVM {phase} failed ({subject}): {detail}"
@@ -329,13 +355,22 @@ fn bootstrap_emit_llvm_trailer(translator: MirToLlvm):
         translator.builder.emit("; String constants")
         translator.builder.emit(string_globals)
 
+pub fn bootstrap_real_llvm_translator() -> MirToLlvm:
+    """Create an armed translator for the direct-emit bootstrap LLVM paths."""
+    var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    # Direct emit bypasses translate_module_with_entry_policy, which normally
+    # arms and clears the accumulator read by bootstrap_emit_llvm_trailer.
+    translator.bootstrap_string_globals_active = true
+    llvm_bootstrap_string_globals_reset()
+    translator
+
 pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
     log_phase("aot:bootstrap_real_llvm:start")
     val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
     val temp_obj = llvm_bootstrap_last_object_path()
     val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
-    var translator: MirToLlvm = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    var translator: MirToLlvm = bootstrap_real_llvm_translator()
     val bootstrap_ir_handle = llvm_ir_builder_handle(translator.builder)
     translator.builder.emit_module_header()
     translator.emit_runtime_declarations()
@@ -358,6 +393,7 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
     val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
     if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+        bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
         log_phase("aot:bootstrap_real_llvm:copied_obj")
         return CompileResult.Success(obj_path)
     CompileResult.CodegenError(
@@ -376,7 +412,7 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
     val temp_obj = llvm_bootstrap_last_object_path()
     val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
-    var translator: MirToLlvm = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    var translator: MirToLlvm = bootstrap_real_llvm_translator()
     translator.builder.emit_module_header()
     translator.emit_runtime_declarations()
     val fn_count = module.functions.keys().len()
@@ -412,6 +448,7 @@ pub fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, o
     val bootstrap_obj = temp_obj
     val obj_path = output + ".app.cli.bootstrap_main.o"
     if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+        bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
         log_phase("aot:bootstrap_real_llvm_module:copied_obj")
         return CompileResult.Success(obj_path)
     CompileResult.CodegenError(
@@ -462,6 +499,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
             )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
         if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+            bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
             log_phase("aot:bootstrap_native_context:copied_obj")
         else:
             return CompileResult.CodegenError(
@@ -530,6 +568,7 @@ pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_na
             )
         val bootstrap_obj = llvm_bootstrap_last_object_path()
         if bootstrap_obj != "" and file_copy(bootstrap_obj, obj_path):
+            bootstrap_cleanup_llvm_success_artifacts(bootstrap_obj)
             log_phase("aot:bootstrap_native_local_real:copied_obj")
         else:
             return CompileResult.CodegenError(

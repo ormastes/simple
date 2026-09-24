@@ -1,4 +1,9 @@
 # Decimal `u64` literals rejected through the signed range guard
+## Closed 2026-09-16 — Status fixed in Stage-4 lane 2026-08-04; u64-suffix decoder + regression spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -27,3 +32,4 @@ Unsuffixed and other suffixed literals retain the existing signed ceiling.
 The streaming module-surface lifecycle spec covers the FNV basis and u64 max
 inside synthetic source text, exercising the exact Stage-4 parser path without
 requiring the test harness itself to pre-parse those numeric tokens.
+

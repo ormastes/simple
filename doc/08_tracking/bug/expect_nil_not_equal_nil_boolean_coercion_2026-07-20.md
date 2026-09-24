@@ -1,4 +1,8 @@
 # `expect(nil != nil)` yields nil instead of boolean false (only when both sides are nil)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -84,3 +88,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
   via the known `.?` bug (not fixed in-file, see note above); "returns nil
   for unknown name" specifically will still fail with this doc's distinct
   `nil != nil` defect even after the `.?` -> `!= nil` migration is applied.
+

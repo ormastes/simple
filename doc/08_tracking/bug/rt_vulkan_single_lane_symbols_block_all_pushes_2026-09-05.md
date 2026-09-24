@@ -1,4 +1,8 @@
 # Four new single-lane `rt_vulkan_*` symbols block every push
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — blocks the `push-rt-dual-implementation` BLOCKING gate for all sessions
 **Found:** 2026-09-05, while pushing an unrelated lane
@@ -63,3 +67,4 @@ Until it is resolved, every push from this repo either fails or is forced with
 `--no-verify`, which nullifies all 18 push-tier gates rather than just this one.
 That is a much worse state than one red gate, and is the reason this record
 exists rather than a silent workaround.
+

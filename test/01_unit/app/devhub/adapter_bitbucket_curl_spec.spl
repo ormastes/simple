@@ -20,6 +20,8 @@ use app.devhub.adapter_bitbucket_curl.{
     bbc_pr_collection_url,
     bbc_pr_url,
     bbc_pr_sub_url,
+    bbc_resolve_gateway_url,
+    _bbc_gateway_argv,
     _argv_curl_get,
     _argv_curl_post,
     _argv_curl_delete,
@@ -317,3 +319,37 @@ describe "bbc ready-to-merge (via shared bb_eval_ready_to_merge)":
         val (ready, reason) = bb_eval_ready_to_merge(json_parse(FIXTURE_PR_APPROVED_OPEN), json_parse(FIXTURE_STATUSES_FAIL))
         expect(ready).to_equal(false)
         expect(reason).to_contain("FAILED")
+
+
+describe "curl Bitbucket gateway routing":
+    it "rewrites the API root and attaches configured headers without dropping argv":
+        val client = BbCurlClient(base_url: "https://api.bitbucket.org/2.0", workspace: "acme", repo: "widgets", token: "t", curl_path: "curl", deployment: "cloud", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: ["X-Classification: restricted", "X-Scope: team"])
+        val url = bbc_resolve_gateway_url(client, "https://api.bitbucket.org/2.0/repositories/acme/widgets/pullrequests")
+        expect(url).to_equal("https://gateway.example/bitbucket/repositories/acme/widgets/pullrequests")
+        match _bbc_gateway_argv(client, _argv_curl_post(url, client.auth_header(), "{}")):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(argv):
+                expect(argv.contains("Authorization: Bearer t")).to_equal(true)
+                expect(argv.contains("X-Classification: restricted")).to_equal(true)
+                expect(argv.contains("X-Scope: team")).to_equal(true)
+                expect(argv[argv.len() - 1]).to_equal(url)
+
+    it "routes a Data Center build-status request through the gateway with configured headers":
+        val client = BbCurlClient(base_url: "https://bb.example/bitbucket", workspace: "KEY", repo: "widgets", token: "t", curl_path: "curl", deployment: "datacenter", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: ["X-Classification: restricted"])
+        val direct_url = "https://bb.example/bitbucket/rest/build-status/1.0/commits/deadbeef"
+        match _bbc_gateway_argv(client, _argv_curl_get(direct_url, client.auth_header())):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(argv):
+                expect(argv.contains("Authorization: Bearer t")).to_equal(true)
+                expect(argv.contains("X-Classification: restricted")).to_equal(true)
+                expect(argv[argv.len() - 1]).to_equal("https://gateway.example/bitbucket/commits/deadbeef")
+
+    it "does not attach gateway headers to an unrelated direct URL":
+        val client = BbCurlClient(base_url: "https://api.bitbucket.org/2.0", workspace: "acme", repo: "widgets", token: "t", curl_path: "curl", deployment: "cloud", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: ["X-Classification: restricted"])
+        match _bbc_gateway_argv(client, _argv_curl_get("https://other.example/resource", client.auth_header())):
+            Err(message): expect(message).to_equal("")
+            Ok(argv):
+                expect(argv.contains("X-Classification: restricted")).to_equal(false)
+                expect(argv[argv.len() - 1]).to_equal("https://other.example/resource")

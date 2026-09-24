@@ -1,4 +1,8 @@
 # `test/01_unit` "Process exited with code 1" cluster (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** runner-side opacity FIXED (this commit); the 102 underlying spec
 failures remain OPEN as genuine behavioural REDs (see buckets below).
@@ -89,3 +93,4 @@ Directory-mode `bin/simple test <dir>` on a pristine `origin/main` checkout
 on the 2026-08-26 seed. The shared worktree that ran the sweep carries an
 uncommitted local edit removing that MCDC block, which is why the sweep ran.
 Not addressed here.
+

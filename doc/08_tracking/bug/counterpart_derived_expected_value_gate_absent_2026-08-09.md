@@ -1,4 +1,9 @@
 # Counterpart: the "converter derives expected value from candidate output" gate does not exist
+## Closed 2026-09-16 — Status: FIXED; redteam scenario 21/21 plus sabotage probes verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-09
 - **Lane:** F9 (foundation red-team), Counterpart Conformance Wave 1
@@ -104,3 +109,4 @@ converter obtains an expected value. Naming the candidate there is refused:
 Breaking the registry guard reproduces exactly the 20/21 F9 originally
 measured, which confirms the probe reaches the reported defect and not a
 neighbouring one.
+

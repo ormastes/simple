@@ -1,0 +1,91 @@
+# Purpose and audience: executable unified lint truth evidence for lint-kernel maintainers.
+# @req REQ-KPF-009
+# @cover src/lib/common/lint_kernel 80%
+# @tag: unit, lint_kernel, coverage, deterministic, mutation
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.*
+use common.lint_kernel.model.*
+use std.nogc_async_mut.lint_kernel.scheduler.*
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(hi: 0, lo: value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: 0, w2: 0, w3: 0)
+
+fn coverage() -> AnalysisCoverageV1:
+    AnalysisCoverageV1(requested_unit_count: 2, admitted_unit_count: 2, completed_unit_count: 2, partial_unit_count: 0, not_analyzed_unit_count: 0, requested_rule_count: 3, completed_rule_count: 3, skipped_rule_count: 0, requested_phase_bits: 7, completed_phase_bits: 7, provider_receipt_digest: digest(11), input_revision_digest: digest(12))
+
+fn artifact(path: u64) -> ArtifactKeyV1:
+    ArtifactKeyV1(workspace_id: id(1), language_id: id(2), path_id: id(path), target_id: id(3), configuration_digest: digest(4))
+
+fn diagnostic(path: u64, start: u64, rule: u64, fix: u64) -> DiagnosticV1:
+    DiagnosticV1(rule_id: id(rule), provider_id: id(8), severity: 2, category: 1, primary_span: SourceSpanV1(artifact: artifact(path), revision: 5, start_byte: start, end_byte: start + 1), message_id: id(9), fix_digest: digest(fix))
+
+fn rule(rule_id: u64, facts: u64, batch: u32) -> RuleDescriptorV1:
+    RuleDescriptorV1(rule_id: id(rule_id), provider_id: id(10), language_id: id(2), required_phase_bits: 1, required_fact_bits: facts, default_severity: 2, determinism_class: 1, batch_granularity: batch)
+
+describe "REQ-KPF-009 lint verdict proof":
+    it "permits clean only for non-vacuous complete coverage":
+        step("proves every requested unit rule and phase completed")
+        val result = lint_run_result(coverage(), 0, 0, 0, false, false)
+        assert_true(lint_coverage_complete(result.coverage))
+        assert_equal(result.verdict, LintVerdict.CompleteClean)
+
+    it "mutations to units rules phases and findings cannot remain clean":
+        step("rejects each false-clean mutation")
+        var changed = coverage()
+        changed.requested_unit_count = 0
+        assert_equal(lint_run_result(changed, 0, 0, 0, false, false).verdict, LintVerdict.Partial)
+        changed = coverage()
+        changed.admitted_unit_count = 1
+        assert_equal(lint_run_result(changed, 0, 0, 0, false, false).verdict, LintVerdict.Partial)
+        changed = coverage()
+        changed.completed_unit_count = 1
+        assert_equal(lint_run_result(changed, 0, 0, 0, false, false).verdict, LintVerdict.Partial)
+        changed = coverage()
+        changed.completed_rule_count = 2
+        assert_equal(lint_run_result(changed, 0, 0, 0, false, false).verdict, LintVerdict.Partial)
+        changed = coverage()
+        changed.completed_phase_bits = 3
+        assert_equal(lint_run_result(changed, 0, 0, 0, false, false).verdict, LintVerdict.Partial)
+        assert_equal(lint_run_result(coverage(), 1, 0, 1, false, false).verdict, LintVerdict.CompleteWithFindings)
+
+    it "distinguishes not analyzed cancellation and infrastructure failure":
+        step("preserves every terminal non-clean state")
+        var absent = coverage()
+        absent.completed_unit_count = 0
+        absent.not_analyzed_unit_count = 2
+        assert_equal(lint_run_result(absent, 0, 0, 0, false, false).verdict, LintVerdict.NotAnalyzed)
+        assert_equal(lint_run_result(coverage(), 0, 0, 0, true, false).verdict, LintVerdict.Cancelled)
+        assert_equal(lint_run_result(coverage(), 0, 0, 0, false, true).verdict, LintVerdict.Failed)
+
+describe "REQ-KPF-009 deterministic diagnostics":
+    it "sorts by canonical location and identity and removes exact duplicates":
+        step("sorts and deduplicates independent of provider arrival order")
+        val first = diagnostic(4, 2, 7, 1)
+        val second = diagnostic(3, 9, 6, 1)
+        val distinct_fix = diagnostic(4, 2, 7, 2)
+        val merged = lint_sort_and_deduplicate([first, second, first, distinct_fix])
+        assert_equal(merged.len(), 3)
+        assert_equal(merged[0].primary_span.artifact.path_id.lo, 3u64)
+        assert_equal(merged[1].fix_digest.w0, 1u64)
+        assert_equal(merged[2].fix_digest.w0, 2u64)
+
+describe "REQ-KPF-009 bounded rule scheduling":
+    it "plans only rules whose facts are available and reports missing facts":
+        step("requires declared facts without exposing a language AST")
+        val plan = lint_build_bounded_schedule(LintScheduleInputV1(rules: [rule(1, 1, 4), rule(2, 4, 2)], available_fact_bits: 1, maximum_rules: 2, maximum_batch_items: 4))
+        assert_equal(plan.status, LintScheduleStatus.RequiredFactsUnavailable)
+        assert_equal(plan.planned_rule_count, 1u32)
+        assert_equal(plan.missing_fact_rule_count, 1u32)
+        assert_equal(plan.work[0].rule_id.lo, 1u64)
+
+    it "fails closed when rule or batch capacity is exceeded":
+        step("enforces both bounded scheduling dimensions")
+        val too_many = lint_build_bounded_schedule(LintScheduleInputV1(rules: [rule(1, 1, 1), rule(2, 1, 1)], available_fact_bits: 1, maximum_rules: 1, maximum_batch_items: 4))
+        assert_equal(too_many.status, LintScheduleStatus.CapacityExceeded)
+        val too_large = lint_build_bounded_schedule(LintScheduleInputV1(rules: [rule(1, 1, 5)], available_fact_bits: 1, maximum_rules: 1, maximum_batch_items: 4))
+        assert_equal(too_large.status, LintScheduleStatus.CapacityExceeded)

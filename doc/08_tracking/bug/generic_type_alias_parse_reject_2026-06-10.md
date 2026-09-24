@@ -1,8 +1,15 @@
 # Generic Type Alias `type X<T> = ...` Rejected by Parser
 
+## Closed 2026-09-13 — Does not reproduce: `type Alias<T> = Result<T, text>` parses and runs
+
+- **measured** Wrote exactly the reported repro (`type Alias<T> = Result<T, text>` plus a `main` printing `ok`) and ran it on the Rust seed `v1.0.0-rc.1`: output `ok`, no `E0002 unexpected token` at the `<`.
+- **measured** No parse diagnostic and no JIT bailout appeared in the run output.
+- **inferred** Matches the entry's recorded resolution (`parse_type_alias` now calls `parse_generic_params_as_strings()`); the deployed seed evidently carries that fix.
+
+
 Date: 2026-06-10
 
-Status: resolved (2026-06-14)
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Resolution (2026-06-14)
 

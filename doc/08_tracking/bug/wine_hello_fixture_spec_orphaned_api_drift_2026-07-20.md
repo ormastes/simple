@@ -1,4 +1,8 @@
 # wine_hello_fixture_spec.spl: imports 4 symbols that no longer exist (orphaned from an old Wine-exe-probe API)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Category:** GENUINE-BUG (API drift — not a simple rename; result shape changed)
@@ -95,3 +99,4 @@ Either:
 ## Affected specs
 
 - `test/01_unit/lib_standalone/common/.spipe_matchers_wine_hello_fixture_spec.spl` (sole affected spec in this shard)
+

@@ -1,4 +1,8 @@
 # BUG: fat32 stream_open returns 0 in merged SSH kernel (prod entry reads 13888)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** RESOLVED (2026-07-10) — `ssh -p 2222 root@127.0.0.1 /FSEXEC.ELF`
 now runs the on-disk clang ELF in ring-3 to `hello from clang on simpleos` +
@@ -203,3 +207,4 @@ init clobbers the FAT/NVMe DMA state and the fix is ordering.
 - Prior open blocker (memory): "raw_blob returns empty … single-cluster reader"
   — this may be the same FAT read-path integration gap surfacing in the SSH
   kernel.
+

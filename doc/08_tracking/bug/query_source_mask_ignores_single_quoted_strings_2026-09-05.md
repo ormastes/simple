@@ -1,4 +1,9 @@
 # `query_source_mask` cannot see single-quoted strings — `'"""'` swallows the file
+## Closed 2026-09-16 — ...` swallows the file ## Status **Resolved in PR #373** (branch `parser-sharing-2026-09-05`)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -71,3 +76,4 @@ outside them. `check_tier` computes `simple_code_lines`/
 
 - `doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md`
 - `doc/00_llm_process/feature_expert/parser_sharing/skill.md`
+

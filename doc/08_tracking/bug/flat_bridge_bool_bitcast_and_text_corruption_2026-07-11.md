@@ -1,4 +1,9 @@
 # BUG: flat bootstrap AST bridge — invalid `bitcast i64 to i1` on bool tail-merge + text value corruption
+## Closed 2026-09-16 — Status RESOLVED, runtime-verified 2026-07-17
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (runtime-verified 2026-07-17)
 
@@ -39,3 +44,4 @@ representation loss.
 ## Runtime verification (2026-07-17)
 
 Source read of `module_assembly.spl:109`: `flat_ast_to_module` only returns `flat_empty_module` when `flat_bootstrap_enabled() and not flat_is_bootstrap_entry_path(path)` — gated behind `SIMPLE_BOOTSTRAP=="1"` (preferred fix landed). Native-built with `SIMPLE_BOOTSTRAP` unset: both bool if/elif/else and text Option unwrap ran correctly without bitcast crash or corruption. Residual scope (actual `SIMPLE_BOOTSTRAP=1` stage2 self-compile) untested under hard rules.
+

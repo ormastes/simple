@@ -1,0 +1,109 @@
+"""Pure-Simple Vulkan context admission and DrawIR packet contract.
+
+This spec is intentionally device-free.  It proves that a production
+Engine2D caller cannot promote a local session/device handle to async
+authority while the canonical provider binding operation is absent.
+"""
+
+# @req: REQ-LIB-GPU-VULKAN-CONTEXT-ADMISSION-001
+# @cover src/lib/gc_async_mut/gpu/engine2d/vulkan_context_admission.spl
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl
+
+use std.spec.{describe, it, expect, assert_false}
+use std.spec.step
+use std.common.ui.draw_ir.{
+    DrawIrComposition, draw_ir_composition, draw_ir_batch,
+    draw_ir_embedding_config, draw_ir_rect
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition_window_present_with_images
+}
+use std.gc_async_mut.gpu.engine2d.vulkan_context_admission.{
+    VULKAN_CONTEXT_ADMISSION_UNAVAILABLE,
+    VULKAN_CONTEXT_ADMISSION_REJECTED,
+    vulkan_context_admit, vulkan_context_admission_summary,
+    vulkan_context_draw_ir_packet
+}
+
+fn empty_composition() -> DrawIrComposition:
+    val embedding = draw_ir_embedding_config(
+        "surface", "component", 0, 0, 8, 8, 0, 1000, false)
+    val batch = draw_ir_batch(
+        "batch", "gpu", embedding,
+        [draw_ir_rect("rect", 0, 0, 4, 4, 0xffff0000u32)])
+    draw_ir_composition("admission-test", "scene", "gpu", [batch])
+
+describe "Pure Simple Vulkan context admission":
+
+    it "rejects an invalid bounded capacity before provider work":
+        step("Ask the CPU Engine2D production consumer for capacity two")
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        val admission = engine.vulkan_async_admission(2)
+        expect(admission.status).to_equal(VULKAN_CONTEXT_ADMISSION_REJECTED)
+        expect(admission.reason).to_equal("async-capacity-out-of-range")
+        assert_false(admission.async_claim)
+
+    it "keeps the unavailable production path free of packet serialization":
+        step("Query the consumer gate on an Engine2D without Vulkan")
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        val admission = engine.vulkan_async_admission(3)
+        expect(admission.status).to_equal(VULKAN_CONTEXT_ADMISSION_UNAVAILABLE)
+        expect(admission.packet.ok).to_equal(false)
+        expect(admission.packet.bytes.len()).to_equal(0)
+        expect(admission.packet.checksum).to_equal(0)
+        assert_false(admission.async_claim)
+        expect(admission.context_binding_supported).to_equal(false)
+
+    it "encodes actual canonical DrawIR and rejects a malformed candidate":
+        step("Encode the immutable packet independently of provider authority")
+        val packet = vulkan_context_draw_ir_packet(empty_composition())
+        expect(packet.ok).to_equal(true)
+        expect(packet.bytes.len()).to_be_greater_than(0)
+        expect(packet.command_count).to_equal(1)
+        step("Offer a composition with no canonical identity")
+        val malformed = draw_ir_composition("", "scene", "gpu", [])
+        val rejected = vulkan_context_draw_ir_packet(malformed)
+        expect(rejected.ok).to_equal(false)
+        expect(rejected.reason).to_equal("missing-composition-id")
+
+    it "does not publish caller-populated handles as provider identities":
+        step("Populate a backend-shaped value without a provider binding")
+        var backend = VulkanBackend.create()
+        backend.initialized = true
+        backend.owns_session = true
+        backend.d_framebuffer = 99
+        var session = backend.session
+        session.is_initialized = true
+        session.device = 77
+        session.generation = 12
+        backend.session = session
+        val admission = vulkan_context_admit(backend, 3)
+        expect(admission.status).to_equal(VULKAN_CONTEXT_ADMISSION_UNAVAILABLE)
+        expect(admission.device_identity).to_equal(0)
+        expect(admission.session_generation).to_equal(0)
+        expect(admission.surface_identity).to_equal(0)
+        assert_false(admission.async_claim)
+
+    it "preserves synchronous rendering when async admission is unavailable":
+        step("Render through the production window-present consumer")
+        var engine = Engine2D.create_with_backend(8, 8, "software")
+        val result = engine2d_draw_ir_adv_composition_window_present_with_images(
+            engine, empty_composition(), [])
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.fallback_reason).to_equal("vulkan-window-present-failed")
+        expect(result.async_admission_status).to_equal(
+            VULKAN_CONTEXT_ADMISSION_UNAVAILABLE)
+        expect(result.async_packet_checksum).to_equal(0)
+        assert_false(result.async_claim)
+        engine.shutdown()
+
+    it "summary exposes packet and authority evidence without a fabricated identity":
+        step("Render the gate summary for review evidence")
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        val admission = engine.vulkan_async_admission(3)
+        val summary = vulkan_context_admission_summary(admission)
+        expect(summary).to_contain("packet_ok=false")
+        expect(summary).to_contain("context_binding=false")
+        expect(summary).to_contain("async_claim=false")

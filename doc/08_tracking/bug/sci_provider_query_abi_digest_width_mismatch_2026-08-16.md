@@ -21,6 +21,38 @@ provider that writes only 60 bytes leaves a nonzero reserved suffix and fails
 closed. Focused fixtures cover canonical parsing, exact match, mismatch,
 partial legacy writes, reserved bytes, and provider round-trip.
 
+## Re-check 2026-09-13 (BUGFIX-7 lane)
+
+`app.simple_core.provider_dispatch.simple_core_provider_abi_digest_verdict_v1`,
+the host-side admission function this record's own contract implies, did not
+exist in the tree (`test/01_unit/app/simple_core/provider_abi_digest_admission_spec.spl`
+RED: `semantic: function 'simple_core_provider_abi_digest_verdict_v1' not
+found`, 7 of 11 examples failing). Implemented it in
+`src/app/simple_core/provider_dispatch.spl` per the spec's own contract
+(exact-match -> `""`, prefix-collision/unrelated mismatch ->
+`"provider-abi-digest-mismatch"`, all-zero provided digest ->
+`"provider-abi-digest-not-declared"`, malformed locked hex -> a
+`"provider-abi-digest-locked-invalid:..."` diagnostic), using the existing
+`simple_abi_digest_parse_hex_v1`/`simple_abi_digest_equals_v1`/`simple_abi_digest_is_zero_v1`
+helpers in `abi_digest.spl`.
+
+```
+Before: bin/simple test test/01_unit/app/simple_core/provider_abi_digest_admission_spec.spl
+        Results: 11 total, 4 passed, 7 failed
+After:  Results: 11 total, 9 passed, 2 failed
+```
+
+The remaining 2 failures are a separate, larger defect (a missing V2 wire
+codec plus stale digest-type imports in `os/smf/provider_query_wire.spl` and
+sibling files) — filed as
+`doc/08_tracking/bug/provider_query_result_v2_wire_codec_missing_2026-09-13.md`.
+Directory sweep before/after (`test/01_unit/app/simple_core/`):
+`29 total, 11 passed, 18 failed` -> `29 total, 16 passed, 13 failed` — only
+this spec's numbers moved.
+
+Status: PARTIALLY FIXED (2026-09-13) — verdict function implemented and
+green; V2 wire codec remains open in the sibling record above.
+
 ## Explicit exclusion
 
 Mutable pathname replacement and same-handle loader TOCTOU protection are not

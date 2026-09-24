@@ -1,7 +1,12 @@
 # Linker Script Generation from SDN: Configuration Design
 
 **Date**: 2026-02-05
-**Status**: Draft
+**Status**: Draft. **2026-09-18 amendment:** the consumer of this generation
+path becomes `BootLayoutPlan` (mold-MDSOC++ linker design §9); the GNU LD
+`.ld` text output described below is kept as the external-linker projection
+of that plan, not the sole consumer. See
+`doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md` and
+`doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md` §10 row 9.
 **Related**: `doc/06_spec/layout.sdn`, `doc/format/smf_specification.md`
 
 ---

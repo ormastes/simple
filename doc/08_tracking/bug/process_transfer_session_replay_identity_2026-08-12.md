@@ -1,4 +1,12 @@
 ## Triage 2026-08-17 — OPEN, design work not re-verifiable by inspection
+
+## Triage 2026-09-13
+Re-ran test/01_unit/lib/nogc_async_mut/parent_commit_authenticated_session_spec.spl
+(the V2 HMAC boundary spec named in this doc): GREEN, 3 examples, 0 failures.
+The doc's own 2026-08-17 re-triage remains accurate for the rest: the legacy
+FNV-1a session-identity path in src/lib/common/structural/transfer/process_frame_codec.spl
+is still live alongside the newer HMAC authority, and the crypto-wire-hash
+design gap is unresolved. OPEN, out of scope for a single-pass close.
 ## Production integration 2026-08-17 — source complete; executable evidence pending
 
 Status: source-complete / focused pure-Simple execution pending

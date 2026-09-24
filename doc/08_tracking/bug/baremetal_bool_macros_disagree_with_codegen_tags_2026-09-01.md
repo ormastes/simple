@@ -1,4 +1,8 @@
 # Baremetal C runtime encodes `bool` as 8/0 while codegen encodes it as 11/19
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN
 - Date: 2026-09-01
@@ -55,3 +59,4 @@ runtime (both `baremetal_stubs.c`, whose definitions win the link, and
 `baremetal_runtime_core.inc.c`), decide the single canonical bool encoding, and
 make the header agree with codegen — with a per-DEFINITION guard, since a
 tree-wide grep cannot tell which definition the linker actually selected.
+

@@ -264,6 +264,26 @@ fn sanitized_enum_constructor_call_lowers_to_enum_with() {
         MirInst::EnumWith { enum_name, variant_name, .. }
             if enum_name == "Type" && variant_name == "Int"
     )));
+    let has_payload_capacity = mir.functions.iter().any(|function| {
+        function.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                let MirInst::Call { dest: Some(array_reg), target, args } = inst else {
+                    return false;
+                };
+                target == &CallTarget::from_name("rt_array_new")
+                    && args.len() == 1
+                    && block.instructions.iter().any(|candidate| {
+                        matches!(candidate, MirInst::ConstInt { dest, value }
+                            if *dest == args[0] && *value == 2)
+                    })
+                    && block.instructions.iter().any(|candidate| {
+                        matches!(candidate, MirInst::EnumWith { enum_name, variant_name, payload, .. }
+                            if enum_name == "Type" && variant_name == "Int" && payload == array_reg)
+                    })
+            })
+        })
+    });
+    assert!(has_payload_capacity, "two-field enum payload must pass capacity 2 to rt_array_new");
     assert!(!has_inst(&mir, |i| matches!(
         i,
         MirInst::Call { target, .. } if target.name() == "Type_dot_Int"
@@ -409,6 +429,24 @@ fn primitive_to_text_method_call_is_builtin_qualified() {
     assert!(
         !has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })),
         "an i64 receiver must NOT be BoxInt-tagged before rendering -- that is the lossy path 610ce80229e removed"
+    );
+}
+
+#[test]
+fn char_to_text_uses_unicode_scalar_runtime_bridge() {
+    let mir = compile_to_mir("fn test() -> text:\n    return (123 as char).to_text()\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_char_from_code") && args.len() == 1
+    )));
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::Call { target, .. }
+                if target == &CallTarget::from_name("rt_value_to_string")
+        )),
+        "a raw char must never be decoded as a tagged RuntimeValue"
     );
 }
 

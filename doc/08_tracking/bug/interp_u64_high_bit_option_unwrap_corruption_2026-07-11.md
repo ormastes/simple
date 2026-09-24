@@ -1,4 +1,8 @@
 # u64 struct field >= 2^63 corrupts `if val` Option unwrap after JIT shared-pointer bail
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found while implementing Lane C nested content frames
 (`test/02_integration/rendering/wm_nested_content_frame_spec.spl`,
@@ -106,3 +110,4 @@ tagged-value handling on the JIT-bailout interpreter path for
 
 Tracked in `doc/08_tracking/bug/bug_db.sdn` as
 `interp_u64_high_bit_option_unwrap_corruption`.
+

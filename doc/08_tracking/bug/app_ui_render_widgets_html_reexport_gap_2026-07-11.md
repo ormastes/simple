@@ -1,4 +1,9 @@
 # app.ui.render.widgets does not re-export render_html_widget/render_html_tree (pre-existing, unrelated to Lane A/C)
+## Closed 2026-09-16 — ...s rendering-inside-rendering work. ## Fix applied (2026-07-11, same day) `src/app/ui.rende
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-11 · **Status:** fixed (re-export + LayoutKind rename + stale assertions retargeted)
 **Found:** Lane E ("rendering-inside-rendering") baseline run of the existing
@@ -117,3 +122,4 @@ Noted for separate follow-up (pre-existing, unrelated to this bug):
 before the rename. Also `runtime_layout_verification_spec`/
 `mir_exported_types_spec` fail on legacy `from hir_definitions import`
 module resolution, pre-existing.
+

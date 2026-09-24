@@ -1,0 +1,1111 @@
+"""Provider-neutral, fail-closed Process Observation V4 receipts.
+
+This is deliberately a pure schema and reducer boundary.  It has no clock,
+filesystem, process, FFI, or mutable host authority.  The 64-word packet is a
+stable cross-owner ABI; a provider must never infer an unavailable child RSS
+from a tree metric or the collector's own RSS.
+"""
+
+use std.common.process.deadline_v4.{ProcessObservationPhaseV4}
+use std.common.string_core.{bytes_to_text}
+
+pub const PROCESS_OBSERVATION_V4_VERSION: i64 = 4
+pub const PROCESS_OBSERVATION_V4_WORDS: i64 = 64
+pub const PROCESS_OBSERVATION_V4_DIGEST_BYTES: i64 = 32
+pub const PROCESS_OBSERVATION_REQUEST_CODEC_V4: i64 = 1
+
+# Fixed header and field positions. Host code must import these constants rather
+# than duplicate magic indexes.
+pub const POV4_VERSION: i64 = 0
+pub const POV4_PACKET_KIND: i64 = 1
+pub const POV4_WORD_COUNT: i64 = 2
+pub const POV4_STATUS: i64 = 3
+pub const POV4_REQUEST_ID_HIGH: i64 = 4
+pub const POV4_REQUEST_ID_LOW: i64 = 5
+pub const POV4_TICKET_HIGH: i64 = 6
+pub const POV4_TICKET_LOW: i64 = 7
+pub const POV4_PHASE: i64 = 8
+pub const POV4_VALIDITY: i64 = 9
+pub const POV4_FAILURE_PHASE: i64 = 10
+pub const POV4_FAILURE_REASON: i64 = 11
+pub const POV4_ERRNO: i64 = 12
+pub const POV4_EXEC_STATE: i64 = 13
+pub const POV4_EXEC_ERRNO: i64 = 14
+pub const POV4_PID: i64 = 15
+pub const POV4_RAW_WAIT: i64 = 16
+pub const POV4_EXIT_CODE: i64 = 17
+pub const POV4_SIGNAL: i64 = 18
+pub const POV4_REQUEST_STARTED_NS: i64 = 19
+pub const POV4_PREPARED_NS: i64 = 20
+pub const POV4_PROCESS_STARTED_NS: i64 = 21
+pub const POV4_EXEC_CONFIRMED_NS: i64 = 22
+pub const POV4_LEADER_WAITED_NS: i64 = 23
+pub const POV4_TREE_EMPTY_NS: i64 = 24
+pub const POV4_EXECUTION_DEADLINE_NS: i64 = 25
+pub const POV4_KILL_DEADLINE_NS: i64 = 26
+pub const POV4_CLEANUP_DEADLINE_NS: i64 = 27
+pub const POV4_TERM_ATTEMPTED: i64 = 28
+pub const POV4_TERM_SENT: i64 = 29
+pub const POV4_KILL_ATTEMPTED: i64 = 30
+pub const POV4_KILL_SENT: i64 = 31
+pub const POV4_CLOCK_ID: i64 = 32
+pub const POV4_CLOCK_NOMINAL_RES_NS: i64 = 33
+pub const POV4_CLOCK_EFFECTIVE_RES_NS: i64 = 34
+pub const POV4_CLOCK_CPU_RES_NS: i64 = 35
+pub const POV4_USER_CPU_NS: i64 = 36
+pub const POV4_SYSTEM_CPU_NS: i64 = 37
+pub const POV4_TOTAL_CPU_NS: i64 = 38
+pub const POV4_CHILD_DIRECT_RSS_BYTES: i64 = 39
+pub const POV4_TREE_METRIC_KIND: i64 = 40
+pub const POV4_TREE_PEAK_BYTES: i64 = 41
+pub const POV4_ENFORCEMENT_KIND: i64 = 42
+pub const POV4_MEMORY_LIMIT_BYTES: i64 = 43
+pub const POV4_LIMIT_EVENT_BITS: i64 = 44
+pub const POV4_TREE_ACCOUNTING_AVAILABLE: i64 = 45
+pub const POV4_TREE_CONTROL_AVAILABLE: i64 = 46
+pub const POV4_LEADER_REAPED: i64 = 47
+pub const POV4_TREE_EMPTY: i64 = 48
+pub const POV4_STDOUT_STATE: i64 = 49
+pub const POV4_STDOUT_ERRNO: i64 = 50
+pub const POV4_STDOUT_SEEN: i64 = 51
+pub const POV4_STDOUT_RETAINED: i64 = 52
+pub const POV4_STDOUT_DELIVERED: i64 = 53
+pub const POV4_STDERR_STATE: i64 = 54
+pub const POV4_STDERR_ERRNO: i64 = 55
+pub const POV4_STDERR_SEEN: i64 = 56
+pub const POV4_STDERR_RETAINED: i64 = 57
+pub const POV4_STDERR_DELIVERED: i64 = 58
+pub const POV4_EINTR_RETRIES: i64 = 59
+pub const POV4_STDOUT_PAYLOAD_LENGTH: i64 = 60
+pub const POV4_STDERR_PAYLOAD_LENGTH: i64 = 61
+pub const POV4_BINDING_LENGTH: i64 = 62
+pub const POV4_RESERVED: i64 = 63
+
+pub const POV4_VALID_REQUEST: i64 = 1
+pub const POV4_VALID_EXEC_CONFIRMED: i64 = 2
+pub const POV4_VALID_CLOCK: i64 = 4
+pub const POV4_VALID_DIRECT_RSS: i64 = 8
+pub const POV4_VALID_TREE_METRIC: i64 = 16
+pub const POV4_VALID_TREE_ACCOUNTING: i64 = 32
+pub const POV4_VALID_TREE_CONTROL: i64 = 64
+pub const POV4_VALID_FROZEN: i64 = 128
+pub const POV4_VALIDITY_MASK: i64 = 255
+
+pub enum ProcessObservationPacketKindV4:
+    Unknown = 0
+    Poll = 1
+    Frozen = 2
+    Ack = 3
+    CleanupFrozen = 4
+    CleanupAck = 5
+
+pub enum ProcessObservationStatusV4:
+    Unknown = 0
+    Running = 1
+    Terminal = 2
+    Rejected = 3
+    CleanupPending = 4
+    ProviderFailed = 5
+
+pub enum ProcessObservationFailurePhaseV4:
+    Unknown = 0
+    Admission = 1
+    Execution = 2
+    Wait = 3
+    StreamDrain = 4
+    Cleanup = 5
+    Collection = 6
+    Acknowledgement = 7
+
+pub enum ProcessObservationFailureReasonV4:
+    Unknown = 0
+    InvalidRequest = 1
+    InvalidSchema = 2
+    ClockFailure = 3
+    ExecFailure = 4
+    WaitFailure = 5
+    StreamReadFailure = 6
+    ExecutionDeadline = 7
+    CleanupDeadline = 8
+    MemoryUnavailable = 9
+    ProviderFailure = 10
+    BindingMismatch = 11
+
+pub enum ProcessObservationExecStateV4:
+    Unknown = 0
+    Prepared = 1
+    Pending = 2
+    Confirmed = 3
+    Failed = 4
+
+pub enum ProcessObservationStreamStateV4:
+    Unknown = 0
+    Open = 1
+    Eof = 2
+    ReadError = 3
+    DeadlineClosed = 4
+
+pub enum ProcessObservationTreeMetricKindV4:
+    Unknown = 0
+    ChildDirectRssBytes = 1
+    ProcessTreePeakBytes = 2
+    CgroupCurrentBytes = 3
+    CgroupPeakBytes = 4
+
+pub enum ProcessObservationEnforcementKindV4:
+    Unknown = 0
+    None = 1
+    CgroupV2MemoryMax = 2
+    RlimitAs = 3
+    JobObject = 4
+    ExternalSupervisor = 5
+
+pub enum ProcessObservationDescendantPolicyV4:
+    Unknown = 0
+    LeaderOnly = 1
+    ProcessGroup = 2
+    Cgroup = 3
+
+pub enum ProcessObservationClockKindV4:
+    Unknown = 0
+    Monotonic = 1
+    Boottime = 2
+    MonotonicRaw = 3
+
+pub struct ProcessObservationEnvironmentV4:
+    key: text
+    value: text
+
+pub struct ProcessObservationRequestV4:
+    argv: [text]
+    environment: [ProcessObservationEnvironmentV4]
+    canonical_cwd: text
+    canonical_pinned_directory: text
+    executable_pin: i64
+    executable_digest: [u8]
+    cwd_pin_claim: i64
+    cwd_identity_digest: [u8]
+    capability_bits: i64
+    wall_budget_ns: i64
+    term_grace_ns: i64
+    cleanup_budget_ns: i64
+    stdout_limit_bytes: i64
+    stderr_limit_bytes: i64
+    memory_limit_bytes: i64
+    enforcement_kind: ProcessObservationEnforcementKindV4
+    descendant_policy: ProcessObservationDescendantPolicyV4
+    max_clock_resolution_ns: i64
+
+pub struct ProcessObservationWireV4:
+    words: [i64]
+    stdout: [u8]
+    stderr: [u8]
+    binding: [u8]
+
+pub struct ProcessObservationStreamV4:
+    state: ProcessObservationStreamStateV4
+    errno_value: i64
+    seen_bytes: i64
+    retained_bytes: i64
+    delivered_bytes: i64
+
+pub struct ProcessObservationPacketV4:
+    packet_kind: ProcessObservationPacketKindV4
+    status: ProcessObservationStatusV4
+    request_id_high: i64
+    request_id_low: i64
+    ticket_high: i64
+    ticket_low: i64
+    phase: ProcessObservationPhaseV4
+    validity_bits: i64
+    failure_phase: ProcessObservationFailurePhaseV4
+    failure_reason: ProcessObservationFailureReasonV4
+    errno_value: i64
+    exec_state: ProcessObservationExecStateV4
+    exec_errno: i64
+    pid: i64
+    raw_wait_status: i64
+    exit_code: i64
+    signal_number: i64
+    request_started_ns: i64
+    prepared_ns: i64
+    process_started_ns: i64
+    exec_confirmed_ns: i64
+    leader_waited_ns: i64
+    tree_empty_ns: i64
+    execution_deadline_ns: i64
+    kill_deadline_ns: i64
+    cleanup_deadline_ns: i64
+    term_attempted: bool
+    term_sent: bool
+    kill_attempted: bool
+    kill_sent: bool
+    clock_kind: ProcessObservationClockKindV4
+    clock_nominal_resolution_ns: i64
+    clock_effective_resolution_ns: i64
+    clock_cpu_resolution_ns: i64
+    user_cpu_ns: i64
+    system_cpu_ns: i64
+    total_cpu_ns: i64
+    child_direct_rss_bytes: i64
+    tree_metric_kind: ProcessObservationTreeMetricKindV4
+    tree_peak_bytes: i64
+    enforcement_kind: ProcessObservationEnforcementKindV4
+    memory_limit_bytes: i64
+    limit_event_bits: i64
+    tree_accounting_available: bool
+    tree_control_available: bool
+    leader_reaped: bool
+    tree_empty: bool
+    stdout: ProcessObservationStreamV4
+    stderr: ProcessObservationStreamV4
+    eintr_retries: i64
+
+pub struct ProcessObservationReceiptV4:
+    packet: ProcessObservationPacketV4
+    stdout: [u8]
+    stderr: [u8]
+    binding_digest: [u8]
+
+pub class ProcessObservationFrozenReceiptV4:
+    packet: ProcessObservationPacketV4
+    stdout: [u8]
+    stderr: [u8]
+    binding_digest: [u8]
+    var acknowledged: bool
+
+pub class ProcessObservationCleanupFrozenReceiptV4:
+    packet: ProcessObservationPacketV4
+    stdout: [u8]
+    stderr: [u8]
+    binding_digest: [u8]
+    var acknowledged: bool
+
+struct Pov4ReadU64:
+    value: i64
+    offset: i64
+
+struct Pov4ReadText:
+    value: text
+    offset: i64
+
+fn pov4_packet_kind(value: i64) -> Result<ProcessObservationPacketKindV4, text>:
+    match value:
+        1: Ok(ProcessObservationPacketKindV4.Poll)
+        2: Ok(ProcessObservationPacketKindV4.Frozen)
+        3: Ok(ProcessObservationPacketKindV4.Ack)
+        4: Ok(ProcessObservationPacketKindV4.CleanupFrozen)
+        5: Ok(ProcessObservationPacketKindV4.CleanupAck)
+        _: Err("process observation V4 packet kind is invalid")
+
+fn pov4_status(value: i64) -> Result<ProcessObservationStatusV4, text>:
+    match value:
+        1: Ok(ProcessObservationStatusV4.Running)
+        2: Ok(ProcessObservationStatusV4.Terminal)
+        3: Ok(ProcessObservationStatusV4.Rejected)
+        4: Ok(ProcessObservationStatusV4.CleanupPending)
+        5: Ok(ProcessObservationStatusV4.ProviderFailed)
+        _: Err("process observation V4 status is invalid")
+
+fn pov4_phase(value: i64) -> Result<ProcessObservationPhaseV4, text>:
+    match value:
+        1: Ok(ProcessObservationPhaseV4.Prepared)
+        2: Ok(ProcessObservationPhaseV4.Running)
+        3: Ok(ProcessObservationPhaseV4.TermRequested)
+        4: Ok(ProcessObservationPhaseV4.KillRequested)
+        5: Ok(ProcessObservationPhaseV4.CleanupPending)
+        6: Ok(ProcessObservationPhaseV4.Terminal)
+        7: Ok(ProcessObservationPhaseV4.Frozen)
+        8: Ok(ProcessObservationPhaseV4.Acknowledged)
+        9: Ok(ProcessObservationPhaseV4.Rejected)
+        _: Err("process observation V4 phase is invalid")
+
+fn pov4_failure_phase(value: i64) -> Result<ProcessObservationFailurePhaseV4, text>:
+    match value:
+        0: Ok(ProcessObservationFailurePhaseV4.Unknown)
+        1: Ok(ProcessObservationFailurePhaseV4.Admission)
+        2: Ok(ProcessObservationFailurePhaseV4.Execution)
+        3: Ok(ProcessObservationFailurePhaseV4.Wait)
+        4: Ok(ProcessObservationFailurePhaseV4.StreamDrain)
+        5: Ok(ProcessObservationFailurePhaseV4.Cleanup)
+        6: Ok(ProcessObservationFailurePhaseV4.Collection)
+        7: Ok(ProcessObservationFailurePhaseV4.Acknowledgement)
+        _: Err("process observation V4 failure phase is invalid")
+
+fn pov4_failure_reason(value: i64) -> Result<ProcessObservationFailureReasonV4, text>:
+    match value:
+        0: Ok(ProcessObservationFailureReasonV4.Unknown)
+        1: Ok(ProcessObservationFailureReasonV4.InvalidRequest)
+        2: Ok(ProcessObservationFailureReasonV4.InvalidSchema)
+        3: Ok(ProcessObservationFailureReasonV4.ClockFailure)
+        4: Ok(ProcessObservationFailureReasonV4.ExecFailure)
+        5: Ok(ProcessObservationFailureReasonV4.WaitFailure)
+        6: Ok(ProcessObservationFailureReasonV4.StreamReadFailure)
+        7: Ok(ProcessObservationFailureReasonV4.ExecutionDeadline)
+        8: Ok(ProcessObservationFailureReasonV4.CleanupDeadline)
+        9: Ok(ProcessObservationFailureReasonV4.MemoryUnavailable)
+        10: Ok(ProcessObservationFailureReasonV4.ProviderFailure)
+        11: Ok(ProcessObservationFailureReasonV4.BindingMismatch)
+        _: Err("process observation V4 failure reason is invalid")
+
+fn pov4_exec_state(value: i64) -> Result<ProcessObservationExecStateV4, text>:
+    match value:
+        1: Ok(ProcessObservationExecStateV4.Prepared)
+        2: Ok(ProcessObservationExecStateV4.Pending)
+        3: Ok(ProcessObservationExecStateV4.Confirmed)
+        4: Ok(ProcessObservationExecStateV4.Failed)
+        _: Err("process observation V4 execution state is invalid")
+
+fn pov4_stream_state(value: i64) -> Result<ProcessObservationStreamStateV4, text>:
+    match value:
+        1: Ok(ProcessObservationStreamStateV4.Open)
+        2: Ok(ProcessObservationStreamStateV4.Eof)
+        3: Ok(ProcessObservationStreamStateV4.ReadError)
+        4: Ok(ProcessObservationStreamStateV4.DeadlineClosed)
+        _: Err("process observation V4 stream state is invalid")
+
+fn pov4_tree_metric_kind(value: i64) -> Result<ProcessObservationTreeMetricKindV4, text>:
+    match value:
+        0: Ok(ProcessObservationTreeMetricKindV4.Unknown)
+        1: Ok(ProcessObservationTreeMetricKindV4.ChildDirectRssBytes)
+        2: Ok(ProcessObservationTreeMetricKindV4.ProcessTreePeakBytes)
+        3: Ok(ProcessObservationTreeMetricKindV4.CgroupCurrentBytes)
+        4: Ok(ProcessObservationTreeMetricKindV4.CgroupPeakBytes)
+        _: Err("process observation V4 tree metric kind is invalid")
+
+fn pov4_enforcement_kind(value: i64) -> Result<ProcessObservationEnforcementKindV4, text>:
+    match value:
+        1: Ok(ProcessObservationEnforcementKindV4.None)
+        2: Ok(ProcessObservationEnforcementKindV4.CgroupV2MemoryMax)
+        3: Ok(ProcessObservationEnforcementKindV4.RlimitAs)
+        4: Ok(ProcessObservationEnforcementKindV4.JobObject)
+        5: Ok(ProcessObservationEnforcementKindV4.ExternalSupervisor)
+        _: Err("process observation V4 enforcement kind is invalid")
+
+fn pov4_enforcement_value(value: ProcessObservationEnforcementKindV4) -> i64:
+    match value:
+        ProcessObservationEnforcementKindV4.None: 1
+        ProcessObservationEnforcementKindV4.CgroupV2MemoryMax: 2
+        ProcessObservationEnforcementKindV4.RlimitAs: 3
+        ProcessObservationEnforcementKindV4.JobObject: 4
+        ProcessObservationEnforcementKindV4.ExternalSupervisor: 5
+        _: 0
+
+fn pov4_descendant_policy(value: i64) -> Result<ProcessObservationDescendantPolicyV4, text>:
+    match value:
+        1: Ok(ProcessObservationDescendantPolicyV4.LeaderOnly)
+        2: Ok(ProcessObservationDescendantPolicyV4.ProcessGroup)
+        3: Ok(ProcessObservationDescendantPolicyV4.Cgroup)
+        _: Err("process observation V4 descendant policy is invalid")
+
+fn pov4_descendant_policy_value(value: ProcessObservationDescendantPolicyV4) -> i64:
+    match value:
+        ProcessObservationDescendantPolicyV4.LeaderOnly: 1
+        ProcessObservationDescendantPolicyV4.ProcessGroup: 2
+        ProcessObservationDescendantPolicyV4.Cgroup: 3
+        _: 0
+
+fn pov4_clock_kind(value: i64) -> Result<ProcessObservationClockKindV4, text>:
+    match value:
+        0: Ok(ProcessObservationClockKindV4.Unknown)
+        1: Ok(ProcessObservationClockKindV4.Monotonic)
+        2: Ok(ProcessObservationClockKindV4.Boottime)
+        3: Ok(ProcessObservationClockKindV4.MonotonicRaw)
+        _: Err("process observation V4 clock kind is invalid")
+
+fn pov4_bool(value: i64, label: text) -> Result<bool, text>:
+    if value == 0: return Ok(false)
+    if value == 1: return Ok(true)
+    Err("process observation V4 {label} must be zero or one")
+
+fn pov4_bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+# Request binding is `POV4REQ\\0`, codec version one, then every integer as
+# unsigned little-endian u64. This follows the repository's canonical codec
+# convention, not host byte order. Text is length-prefixed exact UTF-8. The
+# CWD claim and digest bind the semantic directory identity; host-only opaque
+# directory handles must match both and are never serialized as capabilities.
+fn pov4_append_u64_le(output: [u8], value: i64) -> Result<[u8], text>:
+    if value < 0: return Err("process observation V4 cannot encode a negative request integer")
+    var result = output
+    var remaining = value
+    var index = 0
+    while index < 8:
+        result.push((remaining & 255) as u8)
+        remaining = remaining >> 8
+        index = index + 1
+    Ok(result)
+
+fn pov4_read_u64_le(input: [u8], offset: i64) -> Result<Pov4ReadU64, text>:
+    if offset < 0 or offset > input.len() - 8 or input[offset + 7] > 127u8:
+        return Err("process observation V4 request integer is truncated or out of range")
+    var value = 0
+    var index = 0
+    while index < 8:
+        value = value | ((input[offset + index] as i64) << (index * 8))
+        index = index + 1
+    Ok(Pov4ReadU64(value: value, offset: offset + 8))
+
+fn pov4_append_text(output: [u8], value: text) -> Result<[u8], text>:
+    val bytes = value.bytes()
+    var result = pov4_append_u64_le(output, bytes.len())?
+    var index = 0
+    while index < bytes.len():
+        result.push(bytes[index])
+        index = index + 1
+    Ok(result)
+
+fn pov4_utf8_continuation(value: u8) -> bool:
+    value >= 128u8 and value <= 191u8
+
+# This is deliberately a bounded byte validator. `bytes_to_text` is a raw
+# byte carrier on some native paths and therefore cannot establish UTF-8
+# validity by a round trip.
+fn pov4_valid_utf8(bytes: [u8]) -> bool:
+    var index = 0
+    while index < bytes.len():
+        val first = bytes[index]
+        if first <= 127u8:
+            index = index + 1
+        else if first >= 194u8 and first <= 223u8:
+            if index > bytes.len() - 2 or not pov4_utf8_continuation(bytes[index + 1]):
+                return false
+            index = index + 2
+        else if first == 224u8:
+            if index > bytes.len() - 3 or bytes[index + 1] < 160u8 or bytes[index + 1] > 191u8 or
+                    not pov4_utf8_continuation(bytes[index + 2]):
+                return false
+            index = index + 3
+        else if (first >= 225u8 and first <= 236u8) or (first >= 238u8 and first <= 239u8):
+            if index > bytes.len() - 3 or not pov4_utf8_continuation(bytes[index + 1]) or
+                    not pov4_utf8_continuation(bytes[index + 2]):
+                return false
+            index = index + 3
+        else if first == 237u8:
+            if index > bytes.len() - 3 or bytes[index + 1] < 128u8 or bytes[index + 1] > 159u8 or
+                    not pov4_utf8_continuation(bytes[index + 2]):
+                return false
+            index = index + 3
+        else if first == 240u8:
+            if index > bytes.len() - 4 or bytes[index + 1] < 144u8 or bytes[index + 1] > 191u8 or
+                    not pov4_utf8_continuation(bytes[index + 2]) or not pov4_utf8_continuation(bytes[index + 3]):
+                return false
+            index = index + 4
+        else if first >= 241u8 and first <= 243u8:
+            if index > bytes.len() - 4 or not pov4_utf8_continuation(bytes[index + 1]) or
+                    not pov4_utf8_continuation(bytes[index + 2]) or not pov4_utf8_continuation(bytes[index + 3]):
+                return false
+            index = index + 4
+        else if first == 244u8:
+            if index > bytes.len() - 4 or bytes[index + 1] < 128u8 or bytes[index + 1] > 143u8 or
+                    not pov4_utf8_continuation(bytes[index + 2]) or not pov4_utf8_continuation(bytes[index + 3]):
+                return false
+            index = index + 4
+        else:
+            return false
+    true
+
+fn pov4_read_text(input: [u8], offset: i64) -> Result<Pov4ReadText, text>:
+    val length = pov4_read_u64_le(input, offset)?
+    if length.value > input.len() - length.offset:
+        return Err("process observation V4 request text is truncated")
+    val bytes = input[length.offset:length.offset + length.value]
+    if not pov4_valid_utf8(bytes):
+        return Err("process observation V4 request text is not canonical UTF-8")
+    val value = bytes_to_text(bytes)
+    Ok(Pov4ReadText(value: value, offset: length.offset + length.value))
+
+pub fn canonical_encode_process_observation_request_v4(
+    request: ProcessObservationRequestV4
+) -> Result<[u8], text>:
+    if not process_observation_request_valid_v4(request):
+        return Err("process observation V4 cannot encode an invalid request")
+    var output: [u8] = [80u8, 79u8, 86u8, 52u8, 82u8, 69u8, 81u8, 0u8]
+    output = pov4_append_u64_le(output, PROCESS_OBSERVATION_REQUEST_CODEC_V4)?
+    output = pov4_append_u64_le(output, request.capability_bits)?
+    output = pov4_append_u64_le(output, request.wall_budget_ns)?
+    output = pov4_append_u64_le(output, request.term_grace_ns)?
+    output = pov4_append_u64_le(output, request.cleanup_budget_ns)?
+    output = pov4_append_u64_le(output, request.stdout_limit_bytes)?
+    output = pov4_append_u64_le(output, request.stderr_limit_bytes)?
+    output = pov4_append_u64_le(output, request.memory_limit_bytes)?
+    output = pov4_append_u64_le(output, pov4_enforcement_value(request.enforcement_kind))?
+    output = pov4_append_u64_le(output, pov4_descendant_policy_value(request.descendant_policy))?
+    output = pov4_append_u64_le(output, request.max_clock_resolution_ns)?
+    output = pov4_append_u64_le(output, request.executable_pin)?
+    var digest_index = 0
+    while digest_index < PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        output.push(request.executable_digest[digest_index])
+        digest_index = digest_index + 1
+    output = pov4_append_text(output, request.canonical_cwd)?
+    output = pov4_append_text(output, request.canonical_pinned_directory)?
+    output = pov4_append_u64_le(output, request.cwd_pin_claim)?
+    digest_index = 0
+    while digest_index < PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        output.push(request.cwd_identity_digest[digest_index])
+        digest_index = digest_index + 1
+    output = pov4_append_u64_le(output, request.argv.len())?
+    var argv_index = 0
+    while argv_index < request.argv.len():
+        output = pov4_append_text(output, request.argv[argv_index])?
+        argv_index = argv_index + 1
+    output = pov4_append_u64_le(output, request.environment.len())?
+    var environment_index = 0
+    while environment_index < request.environment.len():
+        output = pov4_append_text(output, request.environment[environment_index].key)?
+        output = pov4_append_text(output, request.environment[environment_index].value)?
+        environment_index = environment_index + 1
+    Ok(output)
+
+pub fn canonical_decode_process_observation_request_v4(
+    input: [u8]
+) -> Result<ProcessObservationRequestV4, text>:
+    if input.len() < 8 or input[0] != 80u8 or input[1] != 79u8 or input[2] != 86u8 or
+            input[3] != 52u8 or input[4] != 82u8 or input[5] != 69u8 or input[6] != 81u8 or input[7] != 0u8:
+        return Err("process observation V4 request magic is invalid")
+    val version = pov4_read_u64_le(input, 8)?
+    if version.value != PROCESS_OBSERVATION_REQUEST_CODEC_V4:
+        return Err("process observation V4 request codec version is invalid")
+    val capability = pov4_read_u64_le(input, version.offset)?
+    val wall = pov4_read_u64_le(input, capability.offset)?
+    val grace = pov4_read_u64_le(input, wall.offset)?
+    val cleanup = pov4_read_u64_le(input, grace.offset)?
+    val stdout_limit = pov4_read_u64_le(input, cleanup.offset)?
+    val stderr_limit = pov4_read_u64_le(input, stdout_limit.offset)?
+    val memory_limit = pov4_read_u64_le(input, stderr_limit.offset)?
+    val enforcement_word = pov4_read_u64_le(input, memory_limit.offset)?
+    val descendant_word = pov4_read_u64_le(input, enforcement_word.offset)?
+    val clock_resolution = pov4_read_u64_le(input, descendant_word.offset)?
+    val executable_pin = pov4_read_u64_le(input, clock_resolution.offset)?
+    if executable_pin.offset > input.len() - PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        return Err("process observation V4 request digest is truncated")
+    val digest = input[executable_pin.offset:executable_pin.offset + PROCESS_OBSERVATION_V4_DIGEST_BYTES]
+    val cwd = pov4_read_text(input, executable_pin.offset + PROCESS_OBSERVATION_V4_DIGEST_BYTES)?
+    val pinned_directory = pov4_read_text(input, cwd.offset)?
+    val cwd_pin_claim = pov4_read_u64_le(input, pinned_directory.offset)?
+    if cwd_pin_claim.offset > input.len() - PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        return Err("process observation V4 request cwd identity digest is truncated")
+    val cwd_identity_digest = input[cwd_pin_claim.offset:cwd_pin_claim.offset + PROCESS_OBSERVATION_V4_DIGEST_BYTES]
+    val argc = pov4_read_u64_le(input, cwd_pin_claim.offset + PROCESS_OBSERVATION_V4_DIGEST_BYTES)?
+    if argc.value == 0 or argc.value > input.len() - argc.offset:
+        return Err("process observation V4 argv count is invalid")
+    var argv: [text] = []
+    var offset = argc.offset
+    var argv_index = 0
+    while argv_index < argc.value:
+        val item = pov4_read_text(input, offset)?
+        argv.push(item.value)
+        offset = item.offset
+        argv_index = argv_index + 1
+    val environment_count = pov4_read_u64_le(input, offset)?
+    if environment_count.value > (input.len() - environment_count.offset) / 16:
+        return Err("process observation V4 environment count is invalid")
+    offset = environment_count.offset
+    var environment: [ProcessObservationEnvironmentV4] = []
+    var environment_index = 0
+    while environment_index < environment_count.value:
+        val key = pov4_read_text(input, offset)?
+        val value = pov4_read_text(input, key.offset)?
+        environment.push(ProcessObservationEnvironmentV4(key: key.value, value: value.value))
+        offset = value.offset
+        environment_index = environment_index + 1
+    if offset != input.len():
+        return Err("process observation V4 request has trailing bytes")
+    val request = ProcessObservationRequestV4(argv: argv, environment: environment,
+        canonical_cwd: cwd.value, canonical_pinned_directory: pinned_directory.value,
+        executable_pin: executable_pin.value, executable_digest: digest,
+        cwd_pin_claim: cwd_pin_claim.value, cwd_identity_digest: cwd_identity_digest,
+        capability_bits: capability.value, wall_budget_ns: wall.value, term_grace_ns: grace.value,
+        cleanup_budget_ns: cleanup.value, stdout_limit_bytes: stdout_limit.value,
+        stderr_limit_bytes: stderr_limit.value, memory_limit_bytes: memory_limit.value,
+        enforcement_kind: pov4_enforcement_kind(enforcement_word.value)?,
+        descendant_policy: pov4_descendant_policy(descendant_word.value)?,
+        max_clock_resolution_ns: clock_resolution.value)
+    if not process_observation_request_valid_v4(request):
+        return Err("process observation V4 request is semantically invalid")
+    Ok(request)
+
+fn pov4_stream_valid(stream: ProcessObservationStreamV4, payload_length: i64) -> bool:
+    if stream.errno_value < 0 or stream.seen_bytes < 0 or stream.retained_bytes < 0 or
+            stream.delivered_bytes < 0 or payload_length < 0:
+        return false
+    if stream.retained_bytes > stream.seen_bytes or stream.delivered_bytes > stream.retained_bytes or
+            payload_length > stream.delivered_bytes:
+        return false
+    if stream.state == ProcessObservationStreamStateV4.Eof:
+        return stream.errno_value == 0
+    if stream.state == ProcessObservationStreamStateV4.ReadError:
+        return stream.errno_value > 0
+    stream.errno_value == 0
+
+fn pov4_stream_closed_v4(stream: ProcessObservationStreamV4) -> bool:
+    stream.state == ProcessObservationStreamStateV4.Eof or
+        stream.state == ProcessObservationStreamStateV4.ReadError or
+        stream.state == ProcessObservationStreamStateV4.DeadlineClosed
+
+fn pov4_cleanup_kind_v4(packet_kind: ProcessObservationPacketKindV4) -> bool:
+    packet_kind == ProcessObservationPacketKindV4.CleanupFrozen or
+        packet_kind == ProcessObservationPacketKindV4.CleanupAck
+
+fn pov4_cleanup_status_v4(status: ProcessObservationStatusV4) -> bool:
+    status == ProcessObservationStatusV4.CleanupPending or
+        status == ProcessObservationStatusV4.ProviderFailed
+
+fn pov4_canonical_directory(value: text) -> bool:
+    value.len() > 0 and value.starts_with("/") and value != "/" and
+        not value.ends_with("/") and not value.contains("\0") and
+        not value.contains("//") and not value.contains("/./") and
+        not value.ends_with("/.") and not value.contains("/../") and not value.ends_with("/..")
+
+pub fn process_observation_request_valid_v4(request: ProcessObservationRequestV4) -> bool:
+    if request.argv.len() == 0 or request.argv[0] == "" or request.executable_pin <= 0 or
+            request.executable_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
+            request.cwd_pin_claim <= 0 or request.cwd_identity_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
+            request.capability_bits <= 0 or request.wall_budget_ns <= 0 or
+            request.term_grace_ns < 0 or request.cleanup_budget_ns < 0 or
+            request.stdout_limit_bytes < 0 or request.stderr_limit_bytes < 0 or
+            request.memory_limit_bytes < 0 or request.max_clock_resolution_ns <= 0 or
+            not pov4_canonical_directory(request.canonical_cwd) or
+            not pov4_canonical_directory(request.canonical_pinned_directory) or
+            request.enforcement_kind == ProcessObservationEnforcementKindV4.Unknown or
+            request.descendant_policy == ProcessObservationDescendantPolicyV4.Unknown:
+        return false
+    var argument_index = 0
+    while argument_index < request.argv.len():
+        if request.argv[argument_index].contains("\0"):
+            return false
+        argument_index = argument_index + 1
+    var environment_index = 0
+    while environment_index < request.environment.len():
+        val item = request.environment[environment_index]
+        if item.key == "" or item.key.contains("\0") or item.key.contains("=") or item.value.contains("\0"):
+            return false
+        if environment_index > 0 and request.environment[environment_index - 1].key >= item.key:
+            return false
+        environment_index = environment_index + 1
+    true
+
+pub fn decode_process_observation_v4(wire: ProcessObservationWireV4) -> Result<ProcessObservationReceiptV4, text>:
+    val words = wire.words
+    if words.len() != PROCESS_OBSERVATION_V4_WORDS or words[POV4_VERSION] != PROCESS_OBSERVATION_V4_VERSION or
+            words[POV4_WORD_COUNT] != PROCESS_OBSERVATION_V4_WORDS or words[POV4_RESERVED] != 0:
+        return Err("process observation V4 receipt has an invalid fixed schema")
+    if words[POV4_VALIDITY] < 0 or (words[POV4_VALIDITY] & ~POV4_VALIDITY_MASK) != 0:
+        return Err("process observation V4 validity bits are invalid")
+    if words[POV4_REQUEST_ID_HIGH] < 0 or words[POV4_REQUEST_ID_LOW] < 0 or
+            words[POV4_TICKET_HIGH] < 0 or words[POV4_TICKET_LOW] < 0 or words[POV4_PID] < 0:
+        return Err("process observation V4 identity words are invalid")
+    val packet_kind = pov4_packet_kind(words[POV4_PACKET_KIND])?
+    val status = pov4_status(words[POV4_STATUS])?
+    val phase = pov4_phase(words[POV4_PHASE])?
+    val failure_phase = pov4_failure_phase(words[POV4_FAILURE_PHASE])?
+    val failure_reason = pov4_failure_reason(words[POV4_FAILURE_REASON])?
+    val exec_state = pov4_exec_state(words[POV4_EXEC_STATE])?
+    val tree_metric_kind = pov4_tree_metric_kind(words[POV4_TREE_METRIC_KIND])?
+    val enforcement_kind = pov4_enforcement_kind(words[POV4_ENFORCEMENT_KIND])?
+    val clock_kind = pov4_clock_kind(words[POV4_CLOCK_ID])?
+    val term_attempted = pov4_bool(words[POV4_TERM_ATTEMPTED], "TERM attempted")?
+    val term_sent = pov4_bool(words[POV4_TERM_SENT], "TERM sent")?
+    val kill_attempted = pov4_bool(words[POV4_KILL_ATTEMPTED], "KILL attempted")?
+    val kill_sent = pov4_bool(words[POV4_KILL_SENT], "KILL sent")?
+    val tree_accounting_available = pov4_bool(words[POV4_TREE_ACCOUNTING_AVAILABLE], "tree accounting availability")?
+    val tree_control_available = pov4_bool(words[POV4_TREE_CONTROL_AVAILABLE], "tree control availability")?
+    val leader_reaped = pov4_bool(words[POV4_LEADER_REAPED], "leader reaped")?
+    val tree_empty = pov4_bool(words[POV4_TREE_EMPTY], "tree empty")?
+    val cleanup_kind = pov4_cleanup_kind_v4(packet_kind)
+    # CleanupPending is also the bounded post-exec drain phase for an admitted
+    # process.  Only absent exec-confirmation plus Pending/Failed identifies the
+    # retained startup-cleanup authority governed by CleanupFrozen/CleanupAck.
+    val cleanup_status = pov4_cleanup_status_v4(status) and
+        exec_state != ProcessObservationExecStateV4.Confirmed and
+        (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) == 0
+    val cleanup_clock_unavailable = cleanup_status and
+        (words[POV4_VALIDITY] & POV4_VALID_CLOCK) == 0
+    val stdout = ProcessObservationStreamV4(state: pov4_stream_state(words[POV4_STDOUT_STATE])?,
+        errno_value: words[POV4_STDOUT_ERRNO], seen_bytes: words[POV4_STDOUT_SEEN],
+        retained_bytes: words[POV4_STDOUT_RETAINED], delivered_bytes: words[POV4_STDOUT_DELIVERED])
+    val stderr = ProcessObservationStreamV4(state: pov4_stream_state(words[POV4_STDERR_STATE])?,
+        errno_value: words[POV4_STDERR_ERRNO], seen_bytes: words[POV4_STDERR_SEEN],
+        retained_bytes: words[POV4_STDERR_RETAINED], delivered_bytes: words[POV4_STDERR_DELIVERED])
+    if words[POV4_STDOUT_PAYLOAD_LENGTH] != wire.stdout.len() or
+            words[POV4_STDERR_PAYLOAD_LENGTH] != wire.stderr.len() or
+            words[POV4_BINDING_LENGTH] != wire.binding.len() or
+            not pov4_stream_valid(stdout, words[POV4_STDOUT_PAYLOAD_LENGTH]) or
+            not pov4_stream_valid(stderr, words[POV4_STDERR_PAYLOAD_LENGTH]):
+        return Err("process observation V4 stream payload receipt is inconsistent")
+    if (packet_kind == ProcessObservationPacketKindV4.Frozen or
+            packet_kind == ProcessObservationPacketKindV4.CleanupFrozen) and
+            (words[POV4_STDOUT_PAYLOAD_LENGTH] != stdout.delivered_bytes or
+            words[POV4_STDERR_PAYLOAD_LENGTH] != stderr.delivered_bytes or
+            stdout.delivered_bytes != stdout.retained_bytes or
+            stderr.delivered_bytes != stderr.retained_bytes):
+        return Err("process observation V4 frozen receipt must preserve every delivered byte")
+    if (packet_kind == ProcessObservationPacketKindV4.Ack or
+            packet_kind == ProcessObservationPacketKindV4.CleanupAck) and
+            (wire.stdout.len() != 0 or wire.stderr.len() != 0 or
+            words[POV4_STDOUT_PAYLOAD_LENGTH] != 0 or
+            words[POV4_STDERR_PAYLOAD_LENGTH] != 0):
+        return Err("process observation V4 acknowledgement payload must be empty")
+    if term_sent and not term_attempted or kill_sent and not kill_attempted or
+            words[POV4_ERRNO] < 0 or words[POV4_EXEC_ERRNO] < 0 or words[POV4_SIGNAL] < 0 or
+            words[POV4_EINTR_RETRIES] < 0 or words[POV4_CHILD_DIRECT_RSS_BYTES] < 0 or
+            words[POV4_TREE_PEAK_BYTES] < 0 or words[POV4_MEMORY_LIMIT_BYTES] < 0 or
+            words[POV4_LIMIT_EVENT_BITS] < 0 or words[POV4_CLOCK_NOMINAL_RES_NS] < 0 or
+            words[POV4_CLOCK_EFFECTIVE_RES_NS] < 0 or words[POV4_CLOCK_CPU_RES_NS] < 0 or
+            words[POV4_USER_CPU_NS] < 0 or words[POV4_SYSTEM_CPU_NS] < 0 or
+            words[POV4_TOTAL_CPU_NS] < 0:
+        return Err("process observation V4 scalar receipt is invalid")
+    if words[POV4_PROCESS_STARTED_NS] < -1 or words[POV4_EXEC_CONFIRMED_NS] < -1 or
+            words[POV4_LEADER_WAITED_NS] < -1 or words[POV4_TREE_EMPTY_NS] < -1 or
+            words[POV4_EXECUTION_DEADLINE_NS] < -1 or
+            words[POV4_KILL_DEADLINE_NS] < -1 or
+            words[POV4_CLEANUP_DEADLINE_NS] < -1:
+        return Err("process observation V4 event timestamp uses an invalid absence sentinel")
+    if words[POV4_USER_CPU_NS] > 9223372036854775807 - words[POV4_SYSTEM_CPU_NS] or
+            words[POV4_TOTAL_CPU_NS] != words[POV4_USER_CPU_NS] + words[POV4_SYSTEM_CPU_NS]:
+        return Err("process observation V4 CPU receipt is inconsistent")
+    if (words[POV4_VALIDITY] & POV4_VALID_CLOCK) != 0 and
+            (clock_kind == ProcessObservationClockKindV4.Unknown or
+            words[POV4_CLOCK_NOMINAL_RES_NS] <= 0 or words[POV4_CLOCK_EFFECTIVE_RES_NS] <= 0):
+        return Err("process observation V4 valid clock lacks resolution evidence")
+    if (words[POV4_VALIDITY] & POV4_VALID_CLOCK) == 0 and
+            (clock_kind != ProcessObservationClockKindV4.Unknown or
+            words[POV4_CLOCK_NOMINAL_RES_NS] != 0 or words[POV4_CLOCK_EFFECTIVE_RES_NS] != 0 or
+            words[POV4_CLOCK_CPU_RES_NS] != 0):
+        return Err("process observation V4 unavailable clock must use absent tags")
+    if words[POV4_REQUEST_STARTED_NS] < 0 or words[POV4_PREPARED_NS] < words[POV4_REQUEST_STARTED_NS]:
+        return Err("process observation V4 absolute deadline order is invalid")
+    if status != ProcessObservationStatusV4.Rejected and
+            (words[POV4_EXECUTION_DEADLINE_NS] < words[POV4_REQUEST_STARTED_NS] or
+            words[POV4_KILL_DEADLINE_NS] < words[POV4_EXECUTION_DEADLINE_NS] or
+            words[POV4_CLEANUP_DEADLINE_NS] < words[POV4_KILL_DEADLINE_NS]):
+        return Err("process observation V4 absolute deadline order is invalid")
+    if status != ProcessObservationStatusV4.Rejected and
+            words[POV4_PROCESS_STARTED_NS] < words[POV4_PREPARED_NS] and
+            not (cleanup_clock_unavailable and words[POV4_PROCESS_STARTED_NS] == -1):
+        return Err("process observation V4 process start time is invalid")
+    if status == ProcessObservationStatusV4.Rejected and
+            (words[POV4_PROCESS_STARTED_NS] != -1 or words[POV4_EXEC_CONFIRMED_NS] != -1 or
+            words[POV4_LEADER_WAITED_NS] != -1 or words[POV4_TREE_EMPTY_NS] != -1 or
+            words[POV4_EXECUTION_DEADLINE_NS] != -1 or words[POV4_KILL_DEADLINE_NS] != -1 or
+            words[POV4_CLEANUP_DEADLINE_NS] != -1 or leader_reaped or tree_empty or
+            stdout.seen_bytes != 0 or stdout.retained_bytes != 0 or stdout.delivered_bytes != 0 or
+            stderr.seen_bytes != 0 or stderr.retained_bytes != 0 or stderr.delivered_bytes != 0 or
+            (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) != 0):
+        return Err("process observation V4 rejected receipt has invalid absent event fields")
+    if status == ProcessObservationStatusV4.Rejected and
+            (words[POV4_TICKET_HIGH] != 0 or words[POV4_TICKET_LOW] != 0 or
+            words[POV4_PID] != 0):
+        return Err("process observation V4 rejected receipt cannot retain child authority")
+    if status != ProcessObservationStatusV4.Rejected and
+            (words[POV4_REQUEST_ID_HIGH] <= 0 or words[POV4_REQUEST_ID_LOW] <= 0 or
+            words[POV4_TICKET_HIGH] <= 0 or words[POV4_TICKET_LOW] <= 0 or
+            words[POV4_PID] <= 0):
+        return Err("process observation V4 owned receipt lacks positive authority")
+    if (words[POV4_VALIDITY] & POV4_VALID_DIRECT_RSS) == 0 and words[POV4_CHILD_DIRECT_RSS_BYTES] != 0:
+        return Err("process observation V4 cannot substitute unavailable direct RSS")
+    if (words[POV4_VALIDITY] & POV4_VALID_TREE_METRIC) == 0 and words[POV4_TREE_PEAK_BYTES] != 0:
+        return Err("process observation V4 cannot publish an unavailable tree metric")
+    if (words[POV4_VALIDITY] & POV4_VALID_TREE_METRIC) == 0 and
+            tree_metric_kind != ProcessObservationTreeMetricKindV4.Unknown:
+        return Err("process observation V4 unavailable tree metric must use an absent tag")
+    if (words[POV4_VALIDITY] & POV4_VALID_TREE_METRIC) != 0 and
+            tree_metric_kind == ProcessObservationTreeMetricKindV4.Unknown:
+        return Err("process observation V4 valid tree metric lacks a metric tag")
+    if tree_metric_kind == ProcessObservationTreeMetricKindV4.ChildDirectRssBytes and
+            (words[POV4_VALIDITY] & POV4_VALID_DIRECT_RSS) == 0:
+        return Err("process observation V4 cannot relabel a tree metric as direct RSS")
+    if tree_accounting_available != ((words[POV4_VALIDITY] & POV4_VALID_TREE_ACCOUNTING) != 0) or
+            tree_control_available != ((words[POV4_VALIDITY] & POV4_VALID_TREE_CONTROL) != 0):
+        return Err("process observation V4 tree availability bits disagree")
+    if packet_kind == ProcessObservationPacketKindV4.Poll and wire.binding.len() != 0:
+        return Err("process observation V4 poll must not publish a collection binding")
+    if packet_kind != ProcessObservationPacketKindV4.Poll and wire.binding.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        return Err("process observation V4 frozen and acknowledgement packets require an exact digest")
+    if packet_kind == ProcessObservationPacketKindV4.Frozen and
+            (status != ProcessObservationStatusV4.Terminal or phase != ProcessObservationPhaseV4.Frozen or
+            (words[POV4_VALIDITY] & POV4_VALID_FROZEN) == 0 or not leader_reaped or
+            exec_state != ProcessObservationExecStateV4.Confirmed or
+            (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) == 0):
+        return Err("process observation V4 frozen packet lacks frozen authority")
+    if packet_kind == ProcessObservationPacketKindV4.Ack and
+            (status != ProcessObservationStatusV4.Terminal or
+            phase != ProcessObservationPhaseV4.Acknowledged or
+            (words[POV4_VALIDITY] & POV4_VALID_FROZEN) == 0 or
+            exec_state != ProcessObservationExecStateV4.Confirmed or
+            (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) == 0 or
+            not leader_reaped):
+        return Err("process observation V4 acknowledgement lacks frozen authority")
+    if cleanup_kind and
+            (status != ProcessObservationStatusV4.ProviderFailed or
+            (words[POV4_VALIDITY] & POV4_VALID_REQUEST) == 0 or
+            (words[POV4_VALIDITY] & POV4_VALID_FROZEN) == 0 or
+            not leader_reaped or not pov4_stream_closed_v4(stdout) or
+            not pov4_stream_closed_v4(stderr) or
+            failure_phase == ProcessObservationFailurePhaseV4.Unknown or
+            failure_reason == ProcessObservationFailureReasonV4.Unknown or
+            (exec_state != ProcessObservationExecStateV4.Pending and
+             exec_state != ProcessObservationExecStateV4.Failed) or
+            (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) != 0 or
+            words[POV4_EXEC_CONFIRMED_NS] != -1 or tree_accounting_available or
+            tree_control_available or tree_empty or words[POV4_TREE_EMPTY_NS] != -1 or
+            tree_metric_kind != ProcessObservationTreeMetricKindV4.Unknown or
+            words[POV4_TREE_PEAK_BYTES] != 0):
+        return Err("process observation V4 cleanup snapshot lacks retained cleanup authority")
+    if packet_kind == ProcessObservationPacketKindV4.CleanupFrozen and
+            phase != ProcessObservationPhaseV4.Frozen:
+        return Err("process observation V4 cleanup freeze has an invalid phase")
+    if packet_kind == ProcessObservationPacketKindV4.CleanupAck and
+            phase != ProcessObservationPhaseV4.Acknowledged:
+        return Err("process observation V4 cleanup acknowledgement has an invalid phase")
+    if failure_phase == ProcessObservationFailurePhaseV4.Unknown and failure_reason != ProcessObservationFailureReasonV4.Unknown or
+            failure_phase != ProcessObservationFailurePhaseV4.Unknown and failure_reason == ProcessObservationFailureReasonV4.Unknown:
+        return Err("process observation V4 failure fields disagree")
+    if cleanup_status and
+            ((words[POV4_VALIDITY] & POV4_VALID_REQUEST) == 0 or
+            failure_phase == ProcessObservationFailurePhaseV4.Unknown or
+            failure_reason == ProcessObservationFailureReasonV4.Unknown or
+            (exec_state != ProcessObservationExecStateV4.Pending and
+             exec_state != ProcessObservationExecStateV4.Failed) or
+            (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) != 0 or
+            words[POV4_EXEC_CONFIRMED_NS] != -1 or
+            tree_accounting_available or tree_control_available or tree_empty or
+            words[POV4_TREE_EMPTY_NS] != -1 or
+            tree_metric_kind != ProcessObservationTreeMetricKindV4.Unknown or
+            words[POV4_TREE_PEAK_BYTES] != 0):
+        return Err("process observation V4 cleanup status lacks startup-failure evidence")
+    if cleanup_status and exec_state == ProcessObservationExecStateV4.Failed and
+            (words[POV4_EXEC_ERRNO] <= 0 or
+            failure_reason != ProcessObservationFailureReasonV4.ExecFailure):
+        return Err("process observation V4 failed exec lacks an authoritative child error")
+    if cleanup_status and exec_state == ProcessObservationExecStateV4.Pending and
+            (words[POV4_EXEC_ERRNO] != 0 or
+            failure_reason == ProcessObservationFailureReasonV4.ExecFailure):
+        return Err("process observation V4 pending exec cannot claim a child error")
+    if status == ProcessObservationStatusV4.CleanupPending and
+            phase != ProcessObservationPhaseV4.CleanupPending:
+        return Err("process observation V4 cleanup status requires cleanup phase")
+    if status == ProcessObservationStatusV4.ProviderFailed and
+            packet_kind == ProcessObservationPacketKindV4.Poll and
+            (phase != ProcessObservationPhaseV4.Terminal or not leader_reaped or
+            not pov4_stream_closed_v4(stdout) or not pov4_stream_closed_v4(stderr)):
+        return Err("process observation V4 terminal cleanup receipt is incomplete")
+    if exec_state == ProcessObservationExecStateV4.Confirmed and
+            (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) == 0:
+        return Err("process observation V4 confirmed exec requires validity evidence")
+    if (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) != 0 and
+            (exec_state != ProcessObservationExecStateV4.Confirmed or
+            words[POV4_EXEC_CONFIRMED_NS] < words[POV4_PROCESS_STARTED_NS]):
+        return Err("process observation V4 confirmed exec lacks a confirmed event")
+    if (words[POV4_VALIDITY] & POV4_VALID_EXEC_CONFIRMED) == 0 and
+            words[POV4_EXEC_CONFIRMED_NS] != -1:
+        return Err("process observation V4 unconfirmed exec must keep its event absent")
+    if (leader_reaped and words[POV4_LEADER_WAITED_NS] == -1 and
+            not cleanup_clock_unavailable) or
+            (leader_reaped and words[POV4_LEADER_WAITED_NS] >= 0 and
+            words[POV4_PROCESS_STARTED_NS] >= 0 and
+            words[POV4_LEADER_WAITED_NS] < words[POV4_PROCESS_STARTED_NS]) or
+            (not leader_reaped and words[POV4_LEADER_WAITED_NS] != -1):
+        return Err("process observation V4 leader reap presence is inconsistent")
+    if (tree_empty and words[POV4_TREE_EMPTY_NS] == -1 and
+            not cleanup_clock_unavailable) or
+            (tree_empty and words[POV4_TREE_EMPTY_NS] >= 0 and
+            words[POV4_PROCESS_STARTED_NS] >= 0 and
+            words[POV4_TREE_EMPTY_NS] < words[POV4_PROCESS_STARTED_NS]) or
+            (not tree_empty and words[POV4_TREE_EMPTY_NS] != -1):
+        return Err("process observation V4 tree empty presence is inconsistent")
+    if status != ProcessObservationStatusV4.Rejected and
+            (words[POV4_PROCESS_STARTED_NS] >= 0 and
+            ((words[POV4_EXEC_CONFIRMED_NS] >= 0 and
+              words[POV4_EXEC_CONFIRMED_NS] < words[POV4_PROCESS_STARTED_NS]) or
+             (words[POV4_LEADER_WAITED_NS] >= 0 and
+              words[POV4_LEADER_WAITED_NS] < words[POV4_PROCESS_STARTED_NS]) or
+             (words[POV4_TREE_EMPTY_NS] >= 0 and
+              words[POV4_TREE_EMPTY_NS] < words[POV4_PROCESS_STARTED_NS]))):
+        return Err("process observation V4 event times are invalid")
+    Ok(ProcessObservationReceiptV4(packet: ProcessObservationPacketV4(
+        packet_kind: packet_kind, status: status, request_id_high: words[POV4_REQUEST_ID_HIGH],
+        request_id_low: words[POV4_REQUEST_ID_LOW], ticket_high: words[POV4_TICKET_HIGH],
+        ticket_low: words[POV4_TICKET_LOW], phase: phase, validity_bits: words[POV4_VALIDITY],
+        failure_phase: failure_phase, failure_reason: failure_reason, errno_value: words[POV4_ERRNO],
+        exec_state: exec_state, exec_errno: words[POV4_EXEC_ERRNO], pid: words[POV4_PID],
+        raw_wait_status: words[POV4_RAW_WAIT], exit_code: words[POV4_EXIT_CODE], signal_number: words[POV4_SIGNAL],
+        request_started_ns: words[POV4_REQUEST_STARTED_NS], prepared_ns: words[POV4_PREPARED_NS],
+        process_started_ns: words[POV4_PROCESS_STARTED_NS], exec_confirmed_ns: words[POV4_EXEC_CONFIRMED_NS],
+        leader_waited_ns: words[POV4_LEADER_WAITED_NS], tree_empty_ns: words[POV4_TREE_EMPTY_NS],
+        execution_deadline_ns: words[POV4_EXECUTION_DEADLINE_NS], kill_deadline_ns: words[POV4_KILL_DEADLINE_NS],
+        cleanup_deadline_ns: words[POV4_CLEANUP_DEADLINE_NS], term_attempted: term_attempted,
+        term_sent: term_sent, kill_attempted: kill_attempted, kill_sent: kill_sent, clock_kind: clock_kind,
+        clock_nominal_resolution_ns: words[POV4_CLOCK_NOMINAL_RES_NS],
+        clock_effective_resolution_ns: words[POV4_CLOCK_EFFECTIVE_RES_NS],
+        clock_cpu_resolution_ns: words[POV4_CLOCK_CPU_RES_NS], user_cpu_ns: words[POV4_USER_CPU_NS],
+        system_cpu_ns: words[POV4_SYSTEM_CPU_NS], total_cpu_ns: words[POV4_TOTAL_CPU_NS],
+        child_direct_rss_bytes: words[POV4_CHILD_DIRECT_RSS_BYTES], tree_metric_kind: tree_metric_kind,
+        tree_peak_bytes: words[POV4_TREE_PEAK_BYTES], enforcement_kind: enforcement_kind,
+        memory_limit_bytes: words[POV4_MEMORY_LIMIT_BYTES], limit_event_bits: words[POV4_LIMIT_EVENT_BITS],
+        tree_accounting_available: tree_accounting_available, tree_control_available: tree_control_available,
+        leader_reaped: leader_reaped, tree_empty: tree_empty, stdout: stdout, stderr: stderr,
+        eintr_retries: words[POV4_EINTR_RETRIES]), stdout: wire.stdout, stderr: wire.stderr,
+        binding_digest: wire.binding))
+
+pub fn freeze_process_observation_receipt_v4(
+    receipt: ProcessObservationReceiptV4
+) -> Result<ProcessObservationFrozenReceiptV4, text>:
+    if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen or
+            receipt.packet.status != ProcessObservationStatusV4.Terminal or
+            receipt.packet.phase != ProcessObservationPhaseV4.Frozen or
+            (receipt.packet.validity_bits & POV4_VALID_FROZEN) == 0 or
+            not receipt.packet.leader_reaped or
+            receipt.packet.leader_waited_ns < receipt.packet.process_started_ns or
+            (receipt.packet.tree_empty and receipt.packet.tree_empty_ns < receipt.packet.process_started_ns) or
+            (not receipt.packet.tree_empty and receipt.packet.tree_empty_ns != -1) or
+            receipt.packet.exec_state != ProcessObservationExecStateV4.Confirmed or
+            (receipt.packet.validity_bits & POV4_VALID_EXEC_CONFIRMED) == 0 or
+            receipt.packet.exec_confirmed_ns < receipt.packet.process_started_ns or
+            receipt.stdout.len() != receipt.packet.stdout.delivered_bytes or
+            receipt.stderr.len() != receipt.packet.stderr.delivered_bytes or
+            not pov4_stream_valid(receipt.packet.stdout, receipt.stdout.len()) or
+            not pov4_stream_valid(receipt.packet.stderr, receipt.stderr.len()) or
+            receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        return Err("process observation V4 only freezes an exact frozen receipt")
+    Ok(ProcessObservationFrozenReceiptV4(packet: receipt.packet, stdout: receipt.stdout,
+        stderr: receipt.stderr, binding_digest: receipt.binding_digest, acknowledged: false))
+
+pub fn freeze_process_observation_cleanup_receipt_v4(
+    receipt: ProcessObservationReceiptV4
+) -> Result<ProcessObservationCleanupFrozenReceiptV4, text>:
+    val packet = receipt.packet
+    val clock_unavailable = (packet.validity_bits & POV4_VALID_CLOCK) == 0
+    if packet.validity_bits < 0 or (packet.validity_bits & ~POV4_VALIDITY_MASK) != 0 or
+            packet.request_id_high <= 0 or packet.request_id_low <= 0 or
+            packet.ticket_high <= 0 or packet.ticket_low <= 0 or packet.pid <= 0 or
+            packet.errno_value <= 0 or packet.exec_errno < 0 or packet.signal_number < 0 or
+            packet.eintr_retries < 0 or packet.child_direct_rss_bytes < 0 or
+            packet.tree_peak_bytes < 0 or packet.memory_limit_bytes < 0 or
+            packet.limit_event_bits < 0 or packet.clock_nominal_resolution_ns < 0 or
+            packet.clock_effective_resolution_ns < 0 or packet.clock_cpu_resolution_ns < 0 or
+            packet.user_cpu_ns < 0 or packet.system_cpu_ns < 0 or packet.total_cpu_ns < 0 or
+            packet.user_cpu_ns > 9223372036854775807 - packet.system_cpu_ns or
+            packet.total_cpu_ns != packet.user_cpu_ns + packet.system_cpu_ns or
+            packet.packet_kind != ProcessObservationPacketKindV4.CleanupFrozen or
+            packet.status != ProcessObservationStatusV4.ProviderFailed or
+            packet.phase != ProcessObservationPhaseV4.Frozen or
+            packet.enforcement_kind == ProcessObservationEnforcementKindV4.Unknown or
+            (packet.validity_bits & POV4_VALID_REQUEST) == 0 or
+            (packet.validity_bits & POV4_VALID_FROZEN) == 0 or
+            (packet.validity_bits & POV4_VALID_EXEC_CONFIRMED) != 0 or
+            packet.exec_confirmed_ns != -1 or not packet.leader_reaped or
+            packet.leader_waited_ns < -1 or
+            (packet.leader_waited_ns < 0 and not clock_unavailable) or
+            (packet.leader_waited_ns >= 0 and packet.process_started_ns >= 0 and
+             packet.leader_waited_ns < packet.process_started_ns) or
+            packet.request_started_ns < 0 or packet.prepared_ns < packet.request_started_ns or
+            packet.execution_deadline_ns < packet.request_started_ns or
+            packet.kill_deadline_ns < packet.execution_deadline_ns or
+            packet.cleanup_deadline_ns < packet.kill_deadline_ns or
+            (packet.process_started_ns < packet.prepared_ns and
+             not (clock_unavailable and packet.process_started_ns == -1)) or
+            (clock_unavailable and
+             (packet.clock_kind != ProcessObservationClockKindV4.Unknown or
+              packet.clock_nominal_resolution_ns != 0 or
+              packet.clock_effective_resolution_ns != 0 or
+              packet.clock_cpu_resolution_ns != 0)) or
+            (not clock_unavailable and
+             (packet.clock_kind == ProcessObservationClockKindV4.Unknown or
+              packet.clock_nominal_resolution_ns <= 0 or
+              packet.clock_effective_resolution_ns <= 0)) or
+            (packet.term_sent and not packet.term_attempted) or
+            (packet.kill_sent and not packet.kill_attempted) or
+            not pov4_stream_closed_v4(packet.stdout) or
+            not pov4_stream_closed_v4(packet.stderr) or
+            packet.failure_phase == ProcessObservationFailurePhaseV4.Unknown or
+            packet.failure_reason == ProcessObservationFailureReasonV4.Unknown or
+            (packet.exec_state != ProcessObservationExecStateV4.Pending and
+             packet.exec_state != ProcessObservationExecStateV4.Failed) or
+            (packet.exec_state == ProcessObservationExecStateV4.Pending and
+             (packet.exec_errno != 0 or
+              packet.failure_reason == ProcessObservationFailureReasonV4.ExecFailure)) or
+            (packet.exec_state == ProcessObservationExecStateV4.Failed and
+             (packet.exec_errno <= 0 or
+              packet.failure_reason != ProcessObservationFailureReasonV4.ExecFailure)) or
+            packet.tree_accounting_available or packet.tree_control_available or
+            packet.tree_empty or packet.tree_empty_ns != -1 or
+            packet.tree_metric_kind != ProcessObservationTreeMetricKindV4.Unknown or
+            packet.tree_peak_bytes != 0 or
+            ((packet.validity_bits & POV4_VALID_TREE_METRIC) != 0) or
+            ((packet.validity_bits & POV4_VALID_TREE_ACCOUNTING) != 0) or
+            ((packet.validity_bits & POV4_VALID_TREE_CONTROL) != 0) or
+            ((packet.validity_bits & POV4_VALID_DIRECT_RSS) == 0 and
+             packet.child_direct_rss_bytes != 0) or
+            receipt.stdout.len() != packet.stdout.delivered_bytes or
+            receipt.stderr.len() != packet.stderr.delivered_bytes or
+            packet.stdout.delivered_bytes != packet.stdout.retained_bytes or
+            packet.stderr.delivered_bytes != packet.stderr.retained_bytes or
+            not pov4_stream_valid(packet.stdout, receipt.stdout.len()) or
+            not pov4_stream_valid(packet.stderr, receipt.stderr.len()) or
+            receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        return Err("process observation V4 only freezes an exact cleanup snapshot")
+    Ok(ProcessObservationCleanupFrozenReceiptV4(packet: packet, stdout: receipt.stdout,
+        stderr: receipt.stderr, binding_digest: receipt.binding_digest,
+        acknowledged: false))
+
+impl ProcessObservationFrozenReceiptV4:
+    me fn acknowledge(binding_digest: [u8]) -> Result<ProcessObservationPacketV4, text>:
+        if self.acknowledged:
+            return Err("process observation V4 frozen receipt was already acknowledged")
+        if not pov4_bytes_equal(self.binding_digest, binding_digest):
+            return Err("process observation V4 acknowledgement digest does not bind this frozen receipt")
+        self.acknowledged = true
+        Ok(self.packet)
+
+impl ProcessObservationCleanupFrozenReceiptV4:
+    me fn acknowledge(binding_digest: [u8]) -> Result<ProcessObservationPacketV4, text>:
+        if self.acknowledged:
+            return Err("process observation V4 cleanup receipt was already acknowledged")
+        if not pov4_bytes_equal(self.binding_digest, binding_digest):
+            return Err("process observation V4 cleanup acknowledgement digest does not bind this snapshot")
+        self.acknowledged = true
+        Ok(self.packet)
+
+export PROCESS_OBSERVATION_V4_VERSION, PROCESS_OBSERVATION_V4_WORDS
+export PROCESS_OBSERVATION_V4_DIGEST_BYTES, PROCESS_OBSERVATION_REQUEST_CODEC_V4
+export POV4_VERSION, POV4_PACKET_KIND, POV4_WORD_COUNT, POV4_STATUS
+export POV4_REQUEST_ID_HIGH, POV4_REQUEST_ID_LOW, POV4_TICKET_HIGH, POV4_TICKET_LOW
+export POV4_PHASE, POV4_VALIDITY, POV4_FAILURE_PHASE, POV4_FAILURE_REASON
+export POV4_ERRNO, POV4_EXEC_STATE, POV4_EXEC_ERRNO, POV4_PID, POV4_RAW_WAIT
+export POV4_EXIT_CODE, POV4_SIGNAL, POV4_REQUEST_STARTED_NS, POV4_PREPARED_NS
+export POV4_PROCESS_STARTED_NS, POV4_EXEC_CONFIRMED_NS, POV4_LEADER_WAITED_NS
+export POV4_TREE_EMPTY_NS, POV4_EXECUTION_DEADLINE_NS, POV4_KILL_DEADLINE_NS
+export POV4_CLEANUP_DEADLINE_NS, POV4_TERM_ATTEMPTED, POV4_TERM_SENT
+export POV4_KILL_ATTEMPTED, POV4_KILL_SENT, POV4_CLOCK_ID, POV4_CLOCK_NOMINAL_RES_NS
+export POV4_CLOCK_EFFECTIVE_RES_NS, POV4_CLOCK_CPU_RES_NS, POV4_USER_CPU_NS
+export POV4_SYSTEM_CPU_NS, POV4_TOTAL_CPU_NS, POV4_CHILD_DIRECT_RSS_BYTES
+export POV4_TREE_METRIC_KIND, POV4_TREE_PEAK_BYTES, POV4_ENFORCEMENT_KIND
+export POV4_MEMORY_LIMIT_BYTES, POV4_LIMIT_EVENT_BITS, POV4_TREE_ACCOUNTING_AVAILABLE
+export POV4_TREE_CONTROL_AVAILABLE, POV4_LEADER_REAPED, POV4_TREE_EMPTY
+export POV4_STDOUT_STATE, POV4_STDOUT_ERRNO, POV4_STDOUT_SEEN, POV4_STDOUT_RETAINED
+export POV4_STDOUT_DELIVERED, POV4_STDERR_STATE, POV4_STDERR_ERRNO, POV4_STDERR_SEEN
+export POV4_STDERR_RETAINED, POV4_STDERR_DELIVERED, POV4_EINTR_RETRIES
+export POV4_STDOUT_PAYLOAD_LENGTH, POV4_STDERR_PAYLOAD_LENGTH, POV4_BINDING_LENGTH
+export POV4_RESERVED, POV4_VALID_REQUEST, POV4_VALID_EXEC_CONFIRMED, POV4_VALID_CLOCK
+export POV4_VALID_DIRECT_RSS, POV4_VALID_TREE_METRIC, POV4_VALID_TREE_ACCOUNTING
+export POV4_VALID_TREE_CONTROL, POV4_VALID_FROZEN, POV4_VALIDITY_MASK
+export ProcessObservationPacketKindV4, ProcessObservationStatusV4
+export ProcessObservationFailurePhaseV4, ProcessObservationFailureReasonV4
+export ProcessObservationExecStateV4, ProcessObservationStreamStateV4
+export ProcessObservationTreeMetricKindV4, ProcessObservationEnforcementKindV4
+export ProcessObservationDescendantPolicyV4, ProcessObservationClockKindV4
+export ProcessObservationEnvironmentV4, ProcessObservationRequestV4, ProcessObservationWireV4
+export ProcessObservationStreamV4, ProcessObservationPacketV4, ProcessObservationReceiptV4
+export ProcessObservationFrozenReceiptV4, ProcessObservationCleanupFrozenReceiptV4
+export process_observation_request_valid_v4, decode_process_observation_v4
+export freeze_process_observation_receipt_v4
+export freeze_process_observation_cleanup_receipt_v4
+export canonical_encode_process_observation_request_v4
+export canonical_decode_process_observation_request_v4

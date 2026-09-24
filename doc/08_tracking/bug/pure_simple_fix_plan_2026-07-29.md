@@ -1,4 +1,8 @@
 # Pure-Simple Divergence-Bug Fix Plan (2026-07-29)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Synthesis of 9 read-only investigation reports mapping the divergence-bug family
 (already fixed in the Rust seed) into the **pure-Simple compiler + C/Simple
@@ -201,3 +205,4 @@ routing hunk with Batch A.
   method arm ONLY if that pattern must work — mirror the remove/delete arm at
   `method_calls_literals.spl:1296` (emit `rt_dict_set`, then `return
   receiver_local`).
+

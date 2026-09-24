@@ -210,6 +210,7 @@ const RT_SIGNAL_MAX: usize = 32;
 static RT_SIGNAL_FLAGS: [std::sync::atomic::AtomicBool; RT_SIGNAL_MAX] =
     [const { std::sync::atomic::AtomicBool::new(false) }; RT_SIGNAL_MAX];
 
+#[cfg(unix)]
 extern "C" fn rt_signal_handler(signum: libc::c_int) {
     if signum >= 0 && (signum as usize) < RT_SIGNAL_MAX {
         RT_SIGNAL_FLAGS[signum as usize].store(true, std::sync::atomic::Ordering::SeqCst);
@@ -224,14 +225,21 @@ pub fn rt_signal_install(args: &[Value]) -> Result<Value, CompileError> {
     if !(0..RT_SIGNAL_MAX as i64).contains(&signal_num) {
         return Ok(Value::Int(0));
     }
-    let ok = unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = rt_signal_handler as usize;
-        libc::sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = libc::SA_RESTART;
-        libc::sigaction(signal_num as libc::c_int, &sa, std::ptr::null_mut()) == 0
-    };
-    Ok(Value::Int(if ok { 1 } else { 0 }))
+    #[cfg(unix)]
+    {
+        let ok = unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = rt_signal_handler as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigaction(signal_num as libc::c_int, &sa, std::ptr::null_mut()) == 0
+        };
+        Ok(Value::Int(if ok { 1 } else { 0 }))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::Int(0))
+    }
 }
 
 /// `rt_signal_check(signal_num)` — read-and-clear the latch for

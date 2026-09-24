@@ -1,0 +1,69 @@
+# codex-system-test
+# Typed fail-closed adapters for the five existing semantic phase owners.
+# @req REQ-CSM-003 REQ-CSM-006 REQ-CSM-008 REQ-CSM-017
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.cache_contract.three_payload_compile_v2.{ThreePayloadFallbackV1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser.macro_registry.{MacroRegistry}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName,
+    module_surfaces_from_modules}
+use compiler.traits.trait_coherence.{CoherenceChecker}
+use compiler.driver.cache.gateway.declaration_phase_live_capability_v1.{
+    declaration_phase_live_owner_v1,
+    declaration_phase_live_capability_available_v1}
+use compiler.driver.cache.gateway.syntax_phase_live_capability_v1.{
+    syntax_phase_live_capability_available_v1}
+use compiler.driver.cache.gateway.type_phase_live_capability_v1.{
+    type_phase_live_capability_available_v1}
+use compiler.driver.cache.gateway.trait_phase_live_capability_v1.{
+    trait_phase_live_owner_v1, trait_phase_live_capability_available_v1}
+use compiler.driver.cache.gateway.macro_phase_live_capability_v1.{
+    macro_phase_live_owner_v1, macro_phase_live_capability_available_v1}
+use compiler.driver.cache.gateway.declaration_semantic_issuer_install_boundary_v1.{
+    declaration_semantic_issuer_install_available_v1}
+
+fn capability_surfaces_v1() -> ModuleSurfacesByName:
+    val source = "pub fn live_capability() -> i64:\n    1\n"
+    var modules = {}
+    modules["live.capability"] = parse_full_frontend(source, "live.capability",
+        "live.capability", Logger(level: 0))
+    module_surfaces_from_modules(modules, [SourceFile(path: "live.capability",
+        content: source, module_name: "live.capability")]).unwrap()
+
+describe "semantic phase live capability adapters V1":
+    it "does not mint declaration handles from a retained owner DTO":
+        step("Require an owner-controlled generation and invalidation seam")
+        expect(declaration_phase_live_owner_v1(capability_surfaces_v1()).unwrap_err())
+            .to_equal(ThreePayloadFallbackV1.AuthorityUnavailable)
+        expect(declaration_phase_live_capability_available_v1()).to_equal(false)
+
+    it "does not mint trait or macro handles from mutable registries":
+        step("Keep mutable phase objects typed but non-authorizing")
+        expect(trait_phase_live_owner_v1(CoherenceChecker.create()).unwrap_err())
+            .to_equal(ThreePayloadFallbackV1.AuthorityUnavailable)
+        expect(macro_phase_live_owner_v1(MacroRegistry.default()).unwrap_err())
+            .to_equal(ThreePayloadFallbackV1.AuthorityUnavailable)
+
+    it "keeps all five phase capabilities and aggregate installation closed":
+        expect(syntax_phase_live_capability_available_v1()).to_equal(false)
+        expect(type_phase_live_capability_available_v1()).to_equal(false)
+        expect(trait_phase_live_capability_available_v1()).to_equal(false)
+        expect(macro_phase_live_capability_available_v1()).to_equal(false)
+        expect(declaration_semantic_issuer_install_available_v1()).to_equal(false)
+
+    it "has no lifecycle mint seam for stale, revoke, overflow, or cross-owner bypass":
+        step("Keep capability constructors private until real owner lifecycle APIs exist")
+        val source = read_file_text(
+            "src/compiler/80.driver/cache/gateway/declaration_phase_live_capability_v1.spl")
+        expect(source.contains("struct DeclarationPhaseLiveHandleV1:")).to_equal(true)
+        expect(source.contains("pub struct DeclarationPhaseLiveHandleV1:")).to_equal(false)
+        expect(source.contains("pub fn issue_handle_v1")).to_equal(false)
+        expect(source.contains("pub me revoke_v1")).to_equal(false)
+        expect(source.contains("9223372036854775807")).to_equal(false)
+        expect(source.contains("surfaces.generation")).to_equal(false)
+        expect(source.contains("owner_generation =")).to_equal(false)
+

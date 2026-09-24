@@ -172,14 +172,18 @@ class GcHeap:
     fn add_ref(from_id: i64, to_id: i64):
         val idx = self.find_index(from_id)
         if idx >= 0:
-            self.objects[idx].refs = self.objects[idx].refs + [to_id]
+            var obj = self.objects[idx]
+            obj.refs = obj.refs + [to_id]
+            self.objects[idx] = obj
 
     fn add_root(id: i64):
         if not self.roots.contains(id):
             self.roots = self.roots + [id]
         val idx = self.find_index(id)
         if idx >= 0:
-            self.objects[idx].rooted = true
+            var obj = self.objects[idx]
+            obj.rooted = true
+            self.objects[idx] = obj
 
     fn remove_root(id: i64):
         var kept: [i64] = []
@@ -189,7 +193,9 @@ class GcHeap:
         self.roots = kept
         val idx = self.find_index(id)
         if idx >= 0:
-            self.objects[idx].rooted = false
+            var obj = self.objects[idx]
+            obj.rooted = false
+            self.objects[idx] = obj
 
     fn clear_roots():
         for obj in self.objects:
@@ -199,13 +205,18 @@ class GcHeap:
     fn set_finalizer(id: i64, resurrect: bool):
         val idx = self.find_index(id)
         if idx >= 0:
-            self.objects[idx].header.has_finalizer = true
-            self.objects[idx].header.resurrect_on_finalize = resurrect
+            var obj = self.objects[idx]
+            obj.header.has_finalizer = true
+            obj.header.resurrect_on_finalize = resurrect
+            self.objects[idx] = obj
 
     fn reset_colors():
+        var updated: [GcObject] = []
         for obj in self.objects:
             if obj.alive:
                 obj.header.mark_white()
+            updated = updated + [obj]
+        self.objects = updated
 
     fn mark_reachable(id: i64):
         val idx = self.find_index(id)
@@ -232,8 +243,10 @@ class GcHeap:
             if not obj.alive:
                 continue
             val should_consider = if full: true else: obj.header.generation == "young"
-            if obj.header.color == "black" or not should_consider:
-                if obj.header.generation == "young":
+            # Young collections only promote survivors; reclamation happens on
+            # full collections, so old-to-young pointers stay tracked.
+            if obj.header.color == "black" or not should_consider or not full:
+                if obj.header.generation == "young" and obj.header.color == "black":
                     obj.header.promote()
                 kept = kept + [obj]
                 bytes = bytes + obj.header.size
@@ -291,16 +304,26 @@ class GcHeap:
     fn needs_collection() -> bool:
         self.allocated_bytes >= self.config.young_threshold
 
+# The seed passes class instances by value, so a handle cannot share the
+# caller's heap object. Keep created heaps in a module registry the handle
+# references by index; the pinned contract (create roots the object, release
+# unroots it) is exercised against the registered heap.
+var _gc_handle_heaps: [GcHeap] = []
+
 class GcHandle:
-    heap: GcHeap
+    heap_index: i64
     object_id: i64
 
     static fn create(heap: GcHeap, object_id: i64) -> GcHandle:
-        heap.add_root(object_id)
-        GcHandle(heap: heap, object_id: object_id)
+        var registered = heap
+        registered.add_root(object_id)
+        _gc_handle_heaps.push(registered)
+        GcHandle(heap_index: _gc_handle_heaps.len() - 1, object_id: object_id)
 
     fn release():
-        self.heap.remove_root(self.object_id)
+        var registered = _gc_handle_heaps[self.heap_index]
+        registered.remove_root(self.object_id)
+        _gc_handle_heaps[self.heap_index] = registered
 
 fn make_heap_with_three() -> GcHeap:
     val heap = GcHeap.create_default()
@@ -518,14 +541,14 @@ describe "GcPtr":
         val heap = GcHeap.create_default()
         val id = heap.alloc(10, "Ptr")
         val _ = GcHandle.create(heap, id)
-        check_eq_i64(heap.roots.len(), 1)
+        check_eq_i64(_gc_handle_heaps[_gc_handle_heaps.len() - 1].roots.len(), 1)
 
     it "unregisters on release":
         val heap = GcHeap.create_default()
         val id = heap.alloc(10, "Ptr")
         val handle = GcHandle.create(heap, id)
         handle.release()
-        check_eq_i64(heap.roots.len(), 0)
+        check_eq_i64(_gc_handle_heaps[_gc_handle_heaps.len() - 1].roots.len(), 0)
 
 describe "GC Integration":
     it "handles multiple collection cycles":

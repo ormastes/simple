@@ -1,4 +1,8 @@
 # Ad-hoc bootstrap tool blocked by Stage3 text/array MIR method lowering
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -55,3 +59,4 @@ without producing a replacement full compiler, so no newer admissible producer
 is available in this workspace. Do not retry the same Stage3 binary; resume
 only after its MIR receiver-method crash is fixed or a newer verified producer
 exists.
+

@@ -24,9 +24,9 @@ Extend `/spipe` (formerly `/spipe`) into a daily-operating dev pipe with bug-rep
 | `src/lib/nogc_sync_mut/aws_sigv4.spl` | SigV4 helper (driven by MinIO test vector `aeeed9bb…`) |
 | `src/lib/nogc_sync_mut/oauth2.spl` | OAuth2 client-credentials + token cache (driven by Graph) |
 | `.claude/skills/company_bug_report.md` | Dispatcher: mail → jira → minio → triage |
-| `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_setup.md` | Install + Repo Access Token |
-| `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_push.md` | Push + PR create |
-| `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_pull_req_review.md` | PR review pass |
+| `tools/claude-plugin/repo-and-pull-req/skills/bb_setup/SKILL.md` | Install + Repo Access Token |
+| `tools/claude-plugin/repo-and-pull-req/skills/bb_push/SKILL.md` | Push + PR create |
+| `tools/claude-plugin/repo-and-pull-req/skills/bb_pull_req_review/SKILL.md` | PR review pass |
 
 Touched (extended, not rewritten):
 - `tools/claude-plugin/repo-and-pull-req/agents/review_loop.md` — add `--level=1|2|3`

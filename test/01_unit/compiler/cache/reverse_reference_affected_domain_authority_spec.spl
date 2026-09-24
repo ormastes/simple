@@ -1,0 +1,162 @@
+# Purpose: pin the coordinator-only affected-domain authority boundary, exact
+# old/new membership and absence identity, zero-match evidence, and RR deltas.
+# @req REQ-CSM-016 REQ-CSM-017 REQ-CSM-023 REQ-CSM-024
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1,
+}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceEdgeV1, ReverseReferenceShardV1,
+}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    ChangedSemanticFacetV1, OldNewMembershipV1, VerifiedSccGroupV1,
+    VerifiedAffectedDomainV1, VerifiedForwardManifestV1,
+    affected_query_domain_digest_v1, verified_affected_domain_receipt_v1,
+    verified_scc_group_receipt_v1, plan_affected_queries_v1,
+    stage_reverse_delta_v1, AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+}
+
+fn digest(label: text) -> text: sha256_text(label)
+
+fn query(label: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "resolve", stable_entity_id: label,
+        semantic_profile_digest: digest("profile"),
+        parameter_digest: digest("parameter"))
+
+fn verified_empty_domain(consumer: SemanticQueryKeyV1) -> VerifiedForwardManifestV1:
+    val manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+        ordered_reads: [])
+    val group_id = digest("group")
+    val members = [consumer]
+    val group = VerifiedSccGroupV1(partition_id: "partition-a",
+        group_identity: group_id, member_queries: members,
+        receipt_digest: verified_scc_group_receipt_v1(
+            "partition-a", group_id, members))
+    var domain = VerifiedAffectedDomainV1(dimension: "membership",
+        candidate_root_digest: digest("candidate-root"),
+        membership_root_digest: digest("membership-root"),
+        absence_root_digest: digest("absence-root"),
+        coverage: SemanticCoverageV1.Complete, receipt_digest: "")
+    domain.receipt_digest = verified_affected_domain_receipt_v1(domain)
+    VerifiedForwardManifestV1(
+        manifest_digest: sha256_u8_hex(semantic_query_read_manifest_encode_v1(manifest)),
+        manifest: manifest, scc_group: group, affected_domains: [domain])
+
+fn empty_shard() -> ReverseReferenceShardV1:
+    ReverseReferenceShardV1(schema: 1, partition_id: "partition-a",
+        coverage: SemanticCoverageV1.Complete, sorted_edges: [])
+
+describe "reverse-reference affected-domain authority":
+    it "binds old/new membership and explicit zero-match absence":
+        step("Bind old and new membership to one authenticated domain identity")
+        val owner = query("owner")
+        val old_a = query("old-a")
+        val old_b = query("old-b")
+        val new_a = query("new-a")
+        val new_b = query("new-b")
+        val verified = verified_empty_domain(query("consumer"))
+        val membership = OldNewMembershipV1(owner: owner, dimension: "membership",
+            old_candidates: [old_b, old_a], new_candidates: [new_b, new_a],
+            absence_witness_digest: digest("absence-transition"),
+            coverage: SemanticCoverageV1.Complete)
+        val canonical = affected_query_domain_digest_v1([], [membership],
+            [verified], [empty_shard()])
+        var reordered = membership
+        reordered.old_candidates = [old_a, old_b]
+        reordered.new_candidates = [new_a, new_b]
+        expect(canonical.len()).to_equal(64)
+        expect(affected_query_domain_digest_v1([], [reordered], [verified],
+            [empty_shard()])).to_equal(canonical)
+
+        var swapped = membership
+        swapped.old_candidates = membership.new_candidates
+        swapped.new_candidates = membership.old_candidates
+        expect(affected_query_domain_digest_v1([], [swapped], [verified],
+            [empty_shard()]) != canonical).to_be(true)
+
+        var changed_absence = membership
+        changed_absence.absence_witness_digest = digest("different-absence")
+        expect(affected_query_domain_digest_v1([], [changed_absence], [verified],
+            [empty_shard()]) != canonical).to_be(true)
+
+        var zero_match = membership
+        zero_match.new_candidates = []
+        val zero_digest = affected_query_domain_digest_v1([], [zero_match],
+            [verified], [empty_shard()])
+        expect(zero_digest.len()).to_equal(64)
+        expect(zero_digest != canonical).to_be(true)
+
+        var duplicate = membership
+        duplicate.old_candidates = [old_a, old_a]
+        expect(affected_query_domain_digest_v1([], [duplicate], [verified],
+            [empty_shard()])).to_equal("")
+
+    it "keeps copied domain receipts outside the legacy success path":
+        step("Require the opaque semantic-completeness grant")
+        val producer = query("producer")
+        val verified = verified_empty_domain(query("consumer"))
+        val membership = OldNewMembershipV1(owner: producer,
+            dimension: "membership", old_candidates: [], new_candidates: [],
+            absence_witness_digest: digest("zero-match-absence"),
+            coverage: SemanticCoverageV1.Complete)
+        val plan = plan_affected_queries_v1([], [membership], [verified], [empty_shard()])
+        expect(plan.accepted).to_equal(false)
+        expect(plan.rejection_reason).to_equal("affected_domain_authority_unavailable")
+
+        val source = file_read(
+            "src/compiler/80.driver/cache/reference/reverse_reference_coordinator_v1.spl")
+        expect(source.contains("struct AuthenticatedAffectedDomainV1:")).to_equal(true)
+        expect(source.contains("pub struct AuthenticatedAffectedDomainV1:")).to_equal(false)
+        expect(source.contains("pub fn plan_affected_queries_with_authority_v1(")).to_equal(true)
+        expect(source.contains("writer_validate_semantic_completeness_v1(")).to_equal(true)
+        expect(source.contains("_frame_v1(\"zero_match\"")).to_equal(true)
+        expect(source.contains("_frame_v1(\"authority_generation\"")).to_equal(true)
+
+    it "stages inserted and deleted reverse edges without worker reads":
+        step("Stage reverse changes without worker reads")
+        val producer = query("producer")
+        val consumer = query("consumer")
+        val old_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("old"),
+            witness_digest: digest("old-witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val new_read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+            facet: "membership", ordinal: 0, consumed_fingerprint: digest("new"),
+            witness_digest: digest("new-witness"), partition_id: "partition-a",
+            completeness: SemanticCoverageV1.Complete)
+        val old_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [old_read])
+        val new_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [new_read])
+        val changed = stage_reverse_delta_v1(Some(old_manifest), new_manifest)
+        expect(changed.inserted.len()).to_equal(1)
+        expect(changed.removed.len()).to_equal(1)
+        expect(changed.inserted[0].consumed_fingerprint).to_equal(digest("new"))
+        expect(changed.removed[0].consumed_fingerprint).to_equal(digest("old"))
+
+        val empty_manifest = SemanticQueryReadManifestV1(schema: 1,
+            consumer: consumer, ordered_reads: [])
+        val deleted = stage_reverse_delta_v1(Some(old_manifest), empty_manifest)
+        expect(deleted.inserted.len()).to_equal(0)
+        expect(deleted.removed.len()).to_equal(1)
+
+        val source = file_read(
+            "src/compiler/80.driver/cache/reference/reverse_reference_coordinator_v1.spl")
+        expect(source.contains("request_reverse_reference")).to_equal(false)
+        expect(source.contains("run_three_payload_worker_v1")).to_equal(false)
+
+    it "refuses an over-budget domain before legacy planning":
+        step("Reject oversized affected-domain evidence before planning")
+        val oversized_facet = "x".repeat(AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1)
+        val change = ChangedSemanticFacetV1(producer: query("producer"),
+            facet: oversized_facet, dimension: "membership",
+            old_fingerprint: Some(digest("old")),
+            new_fingerprint: Some(digest("new")))
+        val plan = plan_affected_queries_v1([change], [], [], [])
+        expect(plan.accepted).to_equal(false)
+        expect(plan.rejection_reason).to_equal("affected_domain_bounds_exceeded")

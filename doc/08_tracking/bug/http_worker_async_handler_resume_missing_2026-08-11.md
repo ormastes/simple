@@ -1,4 +1,8 @@
 # HTTP worker cannot safely resume asynchronous SSR handlers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Impact
 
@@ -13,4 +17,5 @@ Add a typed async handler lifecycle owned by the existing worker/connection path
 - Concurrent slow SSR and fast static requests prove the fast response is not head-of-line blocked.
 - Disconnect, timeout, queue-full, and shutdown scenarios reclaim the pending job exactly once.
 - Live SSR evidence traverses web semantic/layout, emits `DrawIrComposition`, lowers through Engine2D, and captures independent semantic and pixel/readback evidence.
+
 

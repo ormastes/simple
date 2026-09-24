@@ -1,4 +1,8 @@
 # Engine2D Has No Completed-Frame Evidence Snapshot
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -26,3 +30,4 @@ caller-provided fields.
 The common record/diff validator remains verified, but no live Engine2D record
 is accepted until this seam exists. This prevents CPU mirrors or pre-present
 device reads from being represented as completed hardware frames.
+

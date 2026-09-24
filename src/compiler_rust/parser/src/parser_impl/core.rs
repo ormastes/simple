@@ -818,6 +818,11 @@ impl<'a> Parser<'a> {
                         | TokenKind::String(_)
                         | TokenKind::RawString(_)
                         | TokenKind::FString(_)
+                        // A bare `context` at a line, block, or file boundary
+                        // is an identifier, not a context DSL header.
+                        | TokenKind::Newline
+                        | TokenKind::Dedent
+                        | TokenKind::Eof
                 ) {
                     self.parse_expression_or_assignment()
                 } else {

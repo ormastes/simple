@@ -1,4 +1,9 @@
 # No non-blocking Vulkan compute submit exists — `rt_vulkan_submit_and_wait_fence` always blocks on `u64::MAX`, so a host-side fence timeout can never fire
+## Closed 2026-09-16 — Status RESOLVED 2026-08-20; verified live on RTX A6000, spec 2/2 x4 runs
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-08-20) — verified on a live NVIDIA RTX A6000, see
 "Resolution" at the end of this file. Not committed/pushed by the fixing
@@ -209,3 +214,4 @@ succeed on that path. Because the established spec idiom asserts
 as a PASS with `skipped=0`. Filed separately as
 `doc/08_tracking/bug/run_path_extern_text_corruption_causes_false_gpu_skip_2026-08-20.md`.
 All evidence in this record is from the `test` path, which is unaffected.
+

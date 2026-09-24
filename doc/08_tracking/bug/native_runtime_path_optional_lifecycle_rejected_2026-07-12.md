@@ -1,4 +1,8 @@
 # Native runtime path rejects archives without optional lifecycle hooks
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-15):** source implemented; fresh native-all bootstrap
 execution remains pending.
@@ -23,3 +27,4 @@ Strict daemon linking then exposed that the Vulkan runtime archive declared no
 `rt_volatile_read/write_u{8,16,32,64}` owners. The runtime now provides those
 primitive volatile operations directly; application code continues through the
 existing `app.io.volatile_ops` facade.
+

@@ -94,6 +94,29 @@ tool_snapshot=$admission_root/tool-authority-before.txt
 sanity=$admission_root/stage2-sanity.env
 receiver=$admission_root/stage2-receiver.env
 
+# The scheduler spawns this qualifier with the caller's raw environment.
+# bootstrap-from-scratch.sh execs the scheduler before its policy block
+# runs, and --bootstrap-receipt only establishes the canonical policies for
+# the engine -- so SIMPLE_ABI_POLICY is routinely unset here. The admission
+# replay below refuses an unset policy (fail-closed against cross-policy
+# replay), which made the qualifier kill every full-bootstrap engine with
+# 'Stage-2 smoke admission receipt did not re-verify'. Default the replay
+# policy from the same kernel authority the admission writer used; the
+# receipt is still checked against the canonical policy, and a receipt
+# recorded under any other policy still fails.
+if [ -z "${SIMPLE_ABI_POLICY:-}" ]; then
+    SIMPLE_ABI_POLICY=$(
+        awk '$1 == "simple_abi_policy:" { count++; value=$2 }
+             END { if (count == 1 && value != "") print value }' \
+            "$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
+    )
+    [ -n "$SIMPLE_ABI_POLICY" ] || {
+        echo 'qualification-error: kernel policy authority unavailable for replay policy' >&2
+        exit 1
+    }
+    export SIMPLE_ABI_POLICY
+fi
+
 case "$candidate" in "$output"/*) ;; *)
     echo 'qualification-error: admitted candidate escapes scheduler output' >&2
     exit 1

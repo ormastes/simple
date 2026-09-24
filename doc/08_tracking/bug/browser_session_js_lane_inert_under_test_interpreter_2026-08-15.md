@@ -1,4 +1,8 @@
 # BrowserSession JS script lane inert under the test interpreter (2026-08-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Area:** `src/lib/gc_async_mut/web/browser_session*.spl`, `src/lib/*/js/engine/**`
@@ -62,3 +66,4 @@ step: reproduce the internal bootstrap failure in isolation and determine
 which JS parser implementation actually receives the source in this closure
 (instrument the WARN site), then de-duplicate the colliding js-engine symbol
 sets so dispatch is deterministic.
+

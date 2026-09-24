@@ -1,0 +1,206 @@
+use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
+use compiler.driver.action_graph.coordinator.{
+    BuildActionClaimTransferV1, BuildActionClaimV1,
+    BuildActionCommitTransferV1, coordinator_cancel_v1,
+    coordinator_claim_v1, coordinator_commit_v1
+}
+use compiler.driver.action_graph.demand_compile_integration.{DemandCompileExecutionV1}
+use lib.compiler_artifact_service.profile.{
+    ArtifactServiceProfileV1, artifact_service_profile_digest_v1
+}
+use lib.compiler_artifact_service.protocol.{
+    ArtifactFrameStreamV1, ArtifactResultFrameV1, ArtifactResultV1,
+    artifact_result_frame_v1
+}
+use lib.compiler_artifact_service.service.{
+    ArtifactLeaseV1, ArtifactQueueEntryV1, ArtifactRequestStateV1, ArtifactRequestV1,
+    ArtifactServiceV1, artifact_service_cancel_v1,
+    artifact_service_claim_v1, artifact_service_complete_v1,
+    artifact_service_enqueue_v1
+}
+
+struct DemandArtifactRouteV1:
+    valid: bool
+    reason: text
+    execution: DemandCompileExecutionV1
+    service: ArtifactServiceV1
+    daemon_available: bool
+    owner_id: text
+    lease_generation: i64
+
+struct DemandArtifactClaimTransferV1:
+    route: DemandArtifactRouteV1
+    claim: BuildActionClaimV1
+
+struct DemandArtifactCommitTransferV1:
+    route: DemandArtifactRouteV1
+    accepted: bool
+
+fn demand_artifact_route_v1(
+    execution: DemandCompileExecutionV1, profile: ArtifactServiceProfileV1,
+    daemon_available: bool, owner_id: text, lease_generation: i64
+) -> DemandArtifactRouteV1:
+    if not execution.valid or execution.coordinator == nil:
+        return DemandArtifactRouteV1(
+            false, execution.reason, execution,
+            ArtifactServiceV1(profile, []), daemon_available, owner_id,
+            lease_generation)
+    if artifact_service_profile_digest_v1(profile) == "" or
+            owner_id == "" or lease_generation < 0:
+        return DemandArtifactRouteV1(
+            false, "artifact-service-authority-invalid", execution,
+            ArtifactServiceV1(profile, []), daemon_available, owner_id,
+            lease_generation)
+    var service = ArtifactServiceV1(profile, [])
+    for action in execution.coordinator!.graph.actions:
+        service = artifact_service_enqueue_v1(service, ArtifactRequestV1(
+            action.action_id, profile.compatibility_id,
+            action.snapshot_revision,
+            profile.foreground_priority + action.priority,
+            action.memory_budget_bytes))
+    DemandArtifactRouteV1(
+        true, "ok", execution, service, daemon_available, owner_id,
+        lease_generation)
+
+fn demand_artifact_claim_v1(
+    route: &mut DemandArtifactRouteV1, action_id: text,
+    lease_id: text, available_memory_bytes: i64
+) -> BuildActionClaimV1:
+    if not route.valid:
+        return BuildActionClaimV1(false, route.reason, nil, "")
+    var service = artifact_service_claim_action_v1(
+        route.service, action_id, route.owner_id, lease_id,
+        route.lease_generation, available_memory_bytes)
+    val lease = artifact_service_lease_for_action_v1(service, action_id)
+    if lease == nil:
+        return BuildActionClaimV1(false, "artifact-service-not-ready", nil, "")
+    var execution = route.execution
+    var coordinator = execution.coordinator!
+    val claim_transfer = coordinator_claim_v1(coordinator, action_id, lease!.lease_id)
+    coordinator = claim_transfer.coordinator
+    val claim = claim_transfer.claim
+    execution.coordinator = Some(coordinator)
+    route.execution = execution
+    route.service = service
+    claim
+
+fn demand_artifact_commit_v1(
+    route: &mut DemandArtifactRouteV1, result: BuildActionResultV1
+) -> bool:
+    if not route.valid or result.output_identity == "":
+        return false
+    val lease = artifact_service_lease_for_action_v1(route.service, result.action_id)
+    if lease == nil:
+        return false
+    var staged_execution = route.execution
+    var staged_coordinator = staged_execution.coordinator!
+    val commit_transfer = coordinator_commit_v1(
+        staged_coordinator, lease!.lease_id, result)
+    staged_coordinator = commit_transfer.coordinator
+    val committed = commit_transfer.commit
+    if not committed.accepted:
+        return false
+    val artifact_result = ArtifactResultV1(
+        result.action_id, route.service.profile.compatibility_id,
+        result.snapshot_revision,
+        if result.success: result.output_identity else: "",
+        demand_artifact_frames_v1(result), result.success, result.cancelled,
+        if result.success or result.cancelled: "" else: "action-failed")
+    val staged_service = artifact_service_complete_v1(
+        route.service, lease!, artifact_result)
+    if not artifact_service_result_is_authoritative_v1(
+            staged_service, result.action_id, result.success,
+            result.output_identity):
+        return false
+    staged_execution.coordinator = Some(staged_coordinator)
+    route.execution = staged_execution
+    route.service = staged_service
+    true
+
+fn demand_artifact_claim_owned_v1(
+    route: DemandArtifactRouteV1, action_id: text,
+    lease_id: text, available_memory_bytes: i64
+) -> DemandArtifactClaimTransferV1:
+    var owned = route
+    val claim = demand_artifact_claim_v1(
+        &mut owned, action_id, lease_id, available_memory_bytes)
+    DemandArtifactClaimTransferV1(owned, claim)
+
+fn demand_artifact_commit_owned_v1(
+    route: DemandArtifactRouteV1, result: BuildActionResultV1
+) -> DemandArtifactCommitTransferV1:
+    var owned = route
+    val accepted = demand_artifact_commit_v1(&mut owned, result)
+    DemandArtifactCommitTransferV1(owned, accepted)
+
+fn demand_artifact_cancel_v1(route: &mut DemandArtifactRouteV1, action_id: text):
+    var execution = route.execution
+    if execution.coordinator != nil:
+        var coordinator = execution.coordinator!
+        coordinator_cancel_v1(&mut coordinator)
+        execution.coordinator = Some(coordinator)
+    route.execution = execution
+    route.service = artifact_service_cancel_v1(route.service, action_id)
+
+fn artifact_service_claim_action_v1(
+    service: ArtifactServiceV1, action_id: text, owner_id: text,
+    lease_id: text, generation: i64, available_memory_bytes: i64
+) -> ArtifactServiceV1:
+    var isolated = service
+    var entries = isolated.entries
+    for index in 0..entries.len():
+        if entries[index].request.action_id != action_id and
+                entries[index].state == ArtifactRequestStateV1.queued:
+            entries[index] = ArtifactQueueEntryV1(
+                entries[index].request, ArtifactRequestStateV1.rejected,
+                nil, "", "claim-deferred")
+    isolated.entries = entries
+    var claimed = artifact_service_claim_v1(
+        isolated, owner_id, lease_id, generation,
+        available_memory_bytes, -1)
+    var restored = claimed.entries
+    for index in 0..restored.len():
+        if restored[index].error_code == "claim-deferred":
+            restored[index] = service.entries[index]
+    claimed.entries = restored
+    claimed
+
+fn artifact_service_lease_for_action_v1(
+    service: ArtifactServiceV1, action_id: text
+) -> ArtifactLeaseV1?:
+    for entry in service.entries:
+        if entry.request.action_id == action_id and
+                entry.state == ArtifactRequestStateV1.leased:
+            return entry.lease
+    nil
+
+fn demand_artifact_frames_v1(result: BuildActionResultV1) -> [ArtifactResultFrameV1]:
+    var frames: [ArtifactResultFrameV1] = []
+    var sequence: i64 = 0
+    for diagnostic in result.diagnostic_frames:
+        frames = frames.push(artifact_result_frame_v1(
+            result.action_id, sequence,
+            ArtifactFrameStreamV1.diagnostic, diagnostic))
+        sequence = sequence + 1
+    frames
+
+fn artifact_service_result_is_authoritative_v1(
+    service: ArtifactServiceV1, action_id: text,
+    success: bool, output_identity: text
+) -> bool:
+    for entry in service.entries:
+        if entry.request.action_id != action_id:
+            continue
+        if success:
+            return entry.state == ArtifactRequestStateV1.completed and
+                entry.cas_artifact_digest == output_identity and
+                output_identity != ""
+        return entry.state == ArtifactRequestStateV1.failed or
+            entry.state == ArtifactRequestStateV1.cancelled
+    false
+
+export DemandArtifactRouteV1
+export DemandArtifactClaimTransferV1, DemandArtifactCommitTransferV1
+export demand_artifact_route_v1, demand_artifact_claim_v1
+export demand_artifact_commit_v1, demand_artifact_cancel_v1
+export demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1

@@ -1,4 +1,8 @@
 # Stage-3 callable dependency named/glob precedence (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -182,3 +186,4 @@ glob-re-exporting it, a consumer globbing both plus the extern) was written and
 does not fire: mechanism (2) needs a facade surface that materializes re-exports
 into its declaration arrays, which a plain `use pkg.term.*` chain does not
 create. Building that minimal repro remains open work.
+

@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+LC_ALL=C; export LC_ALL
+
+fail() { echo "STATUS: FAIL runtime-binary-size-startup-cohort-producer — $*" >&2; exit 1; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+percentile() { LC_ALL=C sort -n "$1" | sed -n "$2"p; }
+
+MODE= OUTPUT= SAMPLES= SIMPLE= C_BINARY= STAGE4= NOGC= PROVIDERS= ALLOWANCE=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --mode) MODE=$2; shift 2;; --output-dir) OUTPUT=$2; shift 2;; --samples) SAMPLES=$2; shift 2;;
+        --simple-binary) SIMPLE=$2; shift 2;; --c-binary) C_BINARY=$2; shift 2;;
+        --stage4-receipt) STAGE4=$2; shift 2;; --nogc-inventory) NOGC=$2; shift 2;;
+        --provider-trace) PROVIDERS=$2; shift 2;; --format-allowance-bytes) ALLOWANCE=$2; shift 2;;
+        *) fail "unknown-argument-$1";;
+    esac
+done
+case "$MODE" in development) minimum=30;; release) minimum=100;; *) fail invalid-mode;; esac
+case "$OUTPUT" in ''|/*|..|../*|*/../*|*/..) fail unsafe-output-dir;; esac
+case "$ALLOWANCE" in ''|*[!0-9]*) fail invalid-format-allowance;; esac
+for file in "$SAMPLES" "$SIMPLE" "$C_BINARY" "$STAGE4" "$NOGC" "$PROVIDERS"; do
+    [ -f "$file" ] && [ ! -L "$file" ] || fail missing-or-symlinked-input
+done
+[ "$(grep -c '^stage=4$' "$STAGE4" || true)" -eq 1 ] || fail admitted-stage4-required
+case "$(sed -n 's/^compiler_kind=//p' "$STAGE4")" in *seed*|*rust*) fail old-seed-is-diagnostic-only;; esac
+sample_count=$(awk -F'|' '$1=="sample"&&$2=="simple"{n++} END{print n+0}' "$SAMPLES")
+[ "$sample_count" -ge "$minimum" ] || fail insufficient-samples
+[ "$(awk -F'|' '$1=="sample"&&$2=="python"{n++} END{print n+0}' "$SAMPLES")" -eq "$sample_count" ] || fail asymmetric-cohort
+[ ! -e "$OUTPUT" ] || fail output-exists
+mkdir -p "$(dirname -- "$OUTPUT")"; mkdir "$OUTPUT"; trap 'rm -rf "$OUTPUT"' HUP INT TERM
+cp "$SAMPLES" "$OUTPUT/samples.tsv"; cp "$NOGC" "$OUTPUT/nogc-inventory.tsv"; cp "$PROVIDERS" "$OUTPUT/provider-trace.tsv"
+work=$(mktemp -d "${TMPDIR:-/tmp}/bs7-producer.XXXXXX"); trap 'rm -rf "$work"; rm -rf "$OUTPUT"' HUP INT TERM
+for lane in simple python; do
+    awk -F'|' -v l="$lane" '$1=="sample"&&$2==l{print $4}' "$SAMPLES" >"$work/$lane.time"
+    awk -F'|' -v l="$lane" '$1=="sample"&&$2==l{print $5}' "$SAMPLES" >"$work/$lane.rss"
+done
+p50=$(( (sample_count + 1) / 2 )); p95=$(( (sample_count * 95 + 99) / 100 ))
+cat >"$OUTPUT/receipt.env" <<EOF
+schema=simple.runtime-binary-size-startup-cohort/v1
+cohort_mode=$MODE
+qualification=ADMITTED_STAGE4
+stage4_receipt_sha256=$(hash_file "$STAGE4")
+host_id_sha256=$( { uname -n; uname -m; } | if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | awk '{print $1}')
+host_os=$(uname -s)
+host_arch=$(uname -m)
+sample_count=$sample_count
+simple_binary_sha256=$(hash_file "$SIMPLE")
+simple_binary_bytes=$(wc -c <"$SIMPLE" | tr -d ' ')
+c_binary_sha256=$(hash_file "$C_BINARY")
+c_binary_bytes=$(wc -c <"$C_BINARY" | tr -d ' ')
+format_allowance_bytes=$ALLOWANCE
+samples_sha256=$(hash_file "$SAMPLES")
+nogc_inventory_sha256=$(hash_file "$NOGC")
+provider_trace_sha256=$(hash_file "$PROVIDERS")
+simple_time_p50=$(percentile "$work/simple.time" "$p50")
+simple_time_p95=$(percentile "$work/simple.time" "$p95")
+python_time_p50=$(percentile "$work/python.time" "$p50")
+python_time_p95=$(percentile "$work/python.time" "$p95")
+simple_rss_p50=$(percentile "$work/simple.rss" "$p50")
+simple_rss_p95=$(percentile "$work/simple.rss" "$p95")
+python_rss_p50=$(percentile "$work/python.rss" "$p50")
+python_rss_p95=$(percentile "$work/python.rss" "$p95")
+final_verdict=PASS
+EOF
+"$(dirname -- "$0")/check-runtime-binary-size-startup-cohort.shs" --receipt "$OUTPUT/receipt.env" \
+  --samples "$OUTPUT/samples.tsv" --simple-binary "$SIMPLE" --c-binary "$C_BINARY" \
+  --stage4-receipt "$STAGE4" --nogc-inventory "$OUTPUT/nogc-inventory.tsv" \
+  --provider-trace "$OUTPUT/provider-trace.tsv" >/dev/null
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+echo "STATUS: PASS runtime-binary-size-startup-cohort-producer — mode=$MODE samples=$sample_count output=$OUTPUT"

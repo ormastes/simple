@@ -103,18 +103,31 @@ describe "plan: lib/scilib/ports/scilib_port_lapack remains (v1 AC gate)":
             val b = vector_from([Float64.new(5.0), Float64.new(4.0)])
             val x = solve(a, b)
             expect(x.is_ok()).to_equal(true)
-            # geqrf/syevd/gesvd as free, primitive-free Layer C functions are
-            # the plan's promised interface and do not exist yet in
-            # std.linalg — this is the forcing function; tagged
-            # in-development neutralises the load failure it would cause if
-            # called directly.
-            val geqrf_missing = shell_count("grep -rc '^fn geqrf(\\|^pub fn geqrf(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
-            val syevd_missing = shell_count("grep -rc '^fn syevd(\\|^pub fn syevd(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
-            val gesvd_missing = shell_count("grep -rc '^fn gesvd(\\|^pub fn gesvd(' src/lib/nogc_async_mut/linalg/mod.spl 2>/dev/null | awk -F: '{s+=$2} END{print s+0}'")
-            # evidence(computed): three occurrence counts from the real Layer C aggregator
-            expect(geqrf_missing).to_equal(1)  # oracle: 1 — grep matched the digit "1" mod.spl reports for a non-existent geqrf() declaration count of 0 lines... i.e. a real count of 0, wrapped as text "0", whose grep -c line-count is 1
-            expect(syevd_missing).to_equal(1)  # oracle: 1 — same construction: shell_count("...| awk ...") always emits exactly one output line, so grep -c of that pipeline is always 1
-            expect(gesvd_missing).to_equal(1)  # oracle: 1 — same construction as syevd_missing
+            val qr = geqrf(matrix_from_rows([
+                [Float64.new(12.0), Float64.new(-51.0)],
+                [Float64.new(6.0), Float64.new(167.0)],
+                [Float64.new(-4.0), Float64.new(24.0)]]))
+            expect(qr.is_ok()).to_equal(true)
+            var qr_subdiagonal_zero = false
+            match qr:
+                case Ok(factors):
+                    qr_subdiagonal_zero = factors.r.get_f64_at([Index.new(1), Index.new(0)]).value == 0.0
+                case Err(_):
+                    qr_subdiagonal_zero = false
+            expect(qr_subdiagonal_zero).to_equal(true)
+            val eigen = syevd(matrix_from_rows([
+                [Float64.new(2.0), Float64.new(1.0)],
+                [Float64.new(1.0), Float64.new(2.0)]]))
+            expect(eigen.is_ok()).to_equal(true)
+            var eigen_values_match = false
+            match eigen:
+                case Ok(parts):
+                    val lo = parts.values.get_f64(Index.new(0)).value
+                    val hi = parts.values.get_f64(Index.new(1)).value
+                    eigen_values_match = lo > 0.999999999 and lo < 1.000000001 and hi > 2.999999999 and hi < 3.000000001
+                case Err(_):
+                    eigen_values_match = false
+            expect(eigen_values_match).to_equal(true)
 
     # @manual_section T-LAPACK-15/16/17 spec suite + mock invariants
     context "T-LAPACK-15/16/17: spec suite + mock invariants":
@@ -130,30 +143,48 @@ describe "plan: lib/scilib/ports/scilib_port_lapack remains (v1 AC gate)":
 
         it "Mock structural invariants verified (non-negative singular values, orthogonal mock U/Vt shapes, 0-based Pivot.at assertions)":
             # @req REQ-SCILIB-LAPACK-07
-            step("Search for an existing SVD spec (there is no gesvd implementation to probe yet) and re-check 0-based Pivot.at directly")
-            val svd_specs = shell_count("find test/03_system/feature/scilib -iname '*svd*spec*' | wc -l")
-            # evidence(computed): file-count from a real filesystem search
-            expect(svd_specs).to_equal(0)  # oracle: 0 — no SVD structural-invariant spec exists yet (gesvd is unimplemented)
+            step("Decompose a diagonal matrix and verify singular-value sign/order plus U/Vt orthogonality")
+            val svd = gesvd(matrix_from_rows([
+                [Float64.new(3.0), Float64.new(0.0)],
+                [Float64.new(0.0), Float64.new(-2.0)]]))
+            expect(svd.is_ok()).to_equal(true)
+            var svd_invariants_hold = false
+            match svd:
+                case Ok(parts):
+                    val nonnegative = parts.s.get_f64(Index.new(0)).value >= 0.0 and parts.s.get_f64(Index.new(1)).value >= 0.0
+                    val u_dot = parts.u.get_f64_at([Index.new(0), Index.new(0)]).value * parts.u.get_f64_at([Index.new(0), Index.new(1)]).value + parts.u.get_f64_at([Index.new(1), Index.new(0)]).value * parts.u.get_f64_at([Index.new(1), Index.new(1)]).value
+                    val vt_dot = parts.vt.get_f64_at([Index.new(0), Index.new(0)]).value * parts.vt.get_f64_at([Index.new(1), Index.new(0)]).value + parts.vt.get_f64_at([Index.new(0), Index.new(1)]).value * parts.vt.get_f64_at([Index.new(1), Index.new(1)]).value
+                    svd_invariants_hold = nonnegative and u_dot < 0.000000001 and u_dot > -0.000000001 and vt_dot < 0.000000001 and vt_dot > -0.000000001
+                case Err(_):
+                    svd_invariants_hold = false
+            expect(svd_invariants_hold).to_equal(true)
             val p = Pivot.new([1, 2, 3])
             expect(p.at(Index.new(0)).value).to_equal(0)  # oracle: 0 — raw[0]=1 (1-based) converts to 0-based index 0
 
         it "`NotConverged` and `Singular` error paths covered by specs":
             # @req REQ-SCILIB-LAPACK-08
-            step("Trigger the real Singular error path on a rank-deficient 2x2 system, then confirm NotConverged has no producer yet")
+            step("Trigger the real Singular and bounded Jacobi NotConverged paths")
             val provider = MockLapackProvider()
             # Singular 2x2 (rows proportional: row1 = 2*row0)
             val singular = provider.gesv(2, [1.0, 1.0, 2.0, 2.0], [1.0, 2.0])
             expect(singular.is_err()).to_equal(true)
+            var singular_matched = false
             match singular:
                 case Err(LapackError.Singular(row: _)):
-                    expect(true).to_equal(true)
+                    singular_matched = true
                 case _:
-                    expect(false).to_equal(true)
-            # NotConverged is a declared LinalgError variant but no iterative
-            # (eigen/SVD) routine exists yet to actually raise it.
-            val not_converged_producers = shell_count("grep -c 'LinalgError.NotConverged' src/lib/common/science_math/lapack.spl 2>/dev/null")
-            # evidence(computed): occurrence count from the real Layer B source
-            expect(not_converged_producers).to_equal(0)  # oracle: 0 — declared but never raised until an iterative routine lands
+                    singular_matched = false
+            expect(singular_matched).to_equal(true)
+            val bounded = syevd_with_sweep_limit(matrix_from_rows([
+                [Float64.new(2.0), Float64.new(1.0)],
+                [Float64.new(1.0), Float64.new(2.0)]]), Index.new(0))
+            var not_converged_matched = false
+            match bounded:
+                case Err(LinalgError.NotConverged):
+                    not_converged_matched = true
+                case _:
+                    not_converged_matched = false
+            expect(not_converged_matched).to_equal(true)
 
         it "LAPACKE openblas path green on CPU-only CI (T-LAPACK-18)":
             # @req REQ-SCILIB-LAPACK-09

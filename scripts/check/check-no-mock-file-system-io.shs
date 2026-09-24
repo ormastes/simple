@@ -82,19 +82,23 @@ MOCK_IO_NAMES='file_write_text|file_read_text|file_write_bytes|file_read_bytes|f
 scan() {
     # $1 = tree root. Emits "<relpath>:<name>" per offending import, sorted.
     _root=$1
-    find "$_root/src" -name '*.spl' -type f 2>/dev/null \
+    # One recursive grep + one awk, not a five-process pipeline per file: the
+    # per-file form cost 28s over 16.8k .spl (measured 2026-09-23, twice) and
+    # was the single slowest blocking push gate after the demotions. Same
+    # output contract: "<relpath>:<name>" for every mock name inside a
+    # `use ... .file_system.{...}` import list, vendored paths excluded, sorted.
+    grep -rHE --include='*.spl' '^[[:space:]]*use[[:space:]]+(std|lib)(\.[a-z_]+)?\.file_system\.\{' "$_root/src" 2>/dev/null \
     | grep -v '/vendor/' \
-    | while IFS= read -r f; do
-        # Only the mock module family, and only `use ... .{...}` import lists.
-        grep -hE '^[[:space:]]*use[[:space:]]+(std|lib)(\.[a-z_]+)?\.file_system\.\{' "$f" 2>/dev/null \
-        | tr -d ' \t' \
-        | sed 's/.*{//; s/}.*//' \
-        | tr ',' '\n' \
-        | grep -xE "$MOCK_IO_NAMES" \
-        | while IFS= read -r n; do
-            printf '%s:%s\n' "${f#"$_root"/}" "$n"
-          done
-      done | LC_ALL=C sort -u
+    | awk -v root="$_root/" -v names="$MOCK_IO_NAMES" '
+        BEGIN { n = split(names, arr, "|"); for (i = 1; i <= n; i++) want[arr[i]] = 1 }
+        {
+            p = index($0, ":"); f = substr($0, 1, p - 1); line = substr($0, p + 1)
+            gsub(/[ \t]/, "", line)
+            sub(/^[^{]*\{/, "", line); sub(/\}.*$/, "", line)
+            rel = (index(f, root) == 1) ? substr(f, length(root) + 1) : f
+            k = split(line, items, ",")
+            for (i = 1; i <= k; i++) if (items[i] in want) print rel ":" items[i]
+        }' | LC_ALL=C sort -u
 }
 
 selftest() {
@@ -200,8 +204,11 @@ if [ -n "$REV" ]; then
     mkdir -p "$WORK/rev"
     # The baseline is archived alongside the sources on purpose: scanning the
     # committed tree while comparing it against the WORKING COPY's baseline is
-    # still a wrong-tree verdict.
-    ( cd "$ROOT" && git archive "$REV" -- ':(glob)src/**/*.spl' \
+    # still a wrong-tree verdict. core.autocrlf=false: `git archive` applies
+    # working-tree EOL conversion, so on a host with system autocrlf=true (Git
+    # for Windows' default) the baseline came out CRLF, `comm` matched nothing,
+    # and selftest fixture 6 failed (2026-09-24) — committed bytes, not smudged.
+    ( cd "$ROOT" && git -c core.autocrlf=false archive "$REV" -- ':(glob)src/**/*.spl' \
         scripts/check/mock_file_system_io_baseline.txt ) 2>/dev/null \
         | tar -x -C "$WORK/rev" 2>/dev/null
     if [ ! -d "$WORK/rev/src" ]; then

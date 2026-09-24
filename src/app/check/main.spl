@@ -12,6 +12,7 @@ use app.check.sspec_source.{check_sspec_guidance}
 use app.check.targets.{expand_check_targets}
 use app.check.check_options.{check_option_error}
 use app.check.concurrency_lint.{run_concurrency_api_lint}
+use compiler.tools.lint.semantic_check.{simple_semantic_check_source, simple_check_is_clean}
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
@@ -58,13 +59,14 @@ fn print_help():
     print "  --dots | --count | --no-progress"
     print "  --quiet | --verbose"
     print "  --phase-profile              Emit coarse phase timings (suppressed by --json)"
+    print "  --syntax-only                Parse only; semantic coverage is not claimed"
     print "  -h, --help                   Show this help"
 
 fn is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--quiet" or arg == "--verbose" or arg == "--dots" or
         arg == "--count" or arg == "--no-progress" or
-        arg == "--phase-profile" or
+        arg == "--phase-profile" or arg == "--syntax-only" or
         arg == "--log-mode" or arg == "--surface" or arg == "--progress" or
         arg.starts_with("--log-mode=") or arg.starts_with("--surface=") or
         arg.starts_with("--progress=")
@@ -82,6 +84,9 @@ fn wants_json(args: [text]) -> bool:
 
 fn wants_phase_profile(args: [text]) -> bool:
     args.contains("--phase-profile")
+
+fn wants_syntax_only(args: [text]) -> bool:
+    args.contains("--syntax-only")
 
 fn check_phase_mark(enabled: bool, phase: text, started_us: i64, path: text, done: i64, total: i64, terminal: text) -> i64:
     if not enabled:
@@ -207,9 +212,9 @@ fn check_one(path: text, as_json: bool) -> i64:
     Phase profiling needs the progress counters, so it lives on
     `check_one_profiled`; callers that only want the verdict use this.
     """
-    check_one_profiled(path, as_json, false, 0, 0)
+    check_one_profiled(path, as_json, false, false, 0, 0)
 
-fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, done: i64, total: i64) -> i64:
+fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_only: bool, done: i64, total: i64) -> i64:
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
     if phase_profile:
@@ -257,6 +262,18 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, done: i64,
                     print "{path}: check failed"
             val total = errors.len() + concurrency_errors.len()
             failure_count = if total > 0: total else: 1
+        elif not syntax_only:
+            ast_reset()
+            val semantic_result = simple_semantic_check_source(source, path)
+            if phase_profile:
+                phase_started_us = check_phase_mark(true, "semantic", phase_started_us, path, done, total, "running")
+            if not simple_check_is_clean(semantic_result):
+                if not as_json:
+                    for diagnostic in semantic_result.diagnostics:
+                        print diagnostic
+                    if semantic_result.diagnostics.len() == 0:
+                        print "{path}: semantic check incomplete"
+                failure_count = if semantic_result.diagnostics.len() > 0: semantic_result.diagnostics.len() else: 1
 
     if not checker_end_file_scope():
         if not as_json:
@@ -272,6 +289,7 @@ fn main() -> i64:
     val args = get_cli_args()
     val as_json = wants_json(args)
     val phase_profile = wants_phase_profile(args) and not as_json
+    val syntax_only = wants_syntax_only(args)
     var command_started_us: i64 = 0
     if phase_profile:
         command_started_us = unsafe(capabilities: [ffi]): rt_time_now_micros()
@@ -302,7 +320,7 @@ fn main() -> i64:
             print "ERROR: {directory}: no Simple source files found"
     for file in files:
         checked = checked + 1
-        val failed = check_one_profiled(file, as_json, phase_profile, checked, files.len())
+        val failed = check_one_profiled(file, as_json, phase_profile, syntax_only, checked, files.len())
         if failed != 0:
             errors = errors + failed
             files_with_errors = files_with_errors + 1
@@ -311,9 +329,14 @@ fn main() -> i64:
     if phase_profile:
         val _command_mark = check_phase_mark(true, "command_total", command_started_us, "all", checked, files.len(), status)
     if as_json:
-        print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
+        val coverage = if syntax_only: "syntax-only" else: "semantic"
+        val semantic_complete = if syntax_only: "false" elif errors == 0: "true" else: "false"
+        print "{\"command\":\"check\",\"status\":\"{status}\",\"coverage\":\"{coverage}\",\"semantic_complete\":{semantic_complete},\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
     elif errors == 0:
-        print "All checks passed ({checked} file(s))"
+        if syntax_only:
+            print "Syntax-only check passed ({checked} file(s)); semantic coverage was not requested"
+        else:
+            print "Semantic check passed with complete syntax and semantic coverage ({checked} file(s))"
     else:
         print "{errors} error(s) found in {files_with_errors} of {checked} file(s)"
 

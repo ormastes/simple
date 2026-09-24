@@ -1,4 +1,8 @@
 # Nested value-struct scalar loss: minimal reproducer audit
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -47,3 +51,4 @@ layer at a time (registry owner, registry arrays, dispatch result, then kernel
 state) until the first failing shape is found. Only then claim and change the
 pure-Simple constructor/call/return owner. The focused probes above must remain
 green as adjacent regressions.
+

@@ -1,0 +1,147 @@
+"""
+A text control's intrinsic width is NOT `columns x text advance`.
+
+`form_control_widget_box_spec` fixed these controls' HEIGHTS and recorded their
+widths as stated residue: `<input size=20>` came out 138 against Chrome's 163,
+`<textarea cols=20>` 138 against 195. The branch multiplied the column count by
+`style_char_w`, the 6 px bitmap CELL this engine rasterises glyphs into.
+
+Two things were wrong, and the second is why a single measurement could not
+find the first. Chrome adds a fixed, font-derived INTERCEPT on top of the
+per-column term, so dividing one control's width by its `size` recovers neither
+number — it silently folds the intercept into the slope. Round 20 divided
+`(163 - 18)` by 20, got 7.25, and concluded the defect was that this engine
+resolves Helvetica where Chrome resolves the macOS system UI font. Fitting a
+LINE through several sizes instead of a point shows all of that to be false:
+
+* Chrome's computed `fontFamily` for a form control on this host is literally
+  **`Arial`**, not `-apple-system` and not SF Pro. There is no `SFNSText.ttf`
+  on this host at all.
+* Arial's OS/2 `xAvgCharWidth` is **904/2048**, byte-identical to Helvetica's
+  904 — Arial is metric-compatible with Helvetica by design, and `measureText`
+  agrees ('0' = 7.4135 px in both). So the face this engine loads is already
+  metrically the face Chrome uses, and there is no face-selection gap.
+* `xAvgCharWidth` is not the quantity anyway: it would give 5.885 px where the
+  measured slope is 7.0.
+
+Measured with Chrome 152 `--headless=new --window-size=900,20000`, fitting
+sizes 1,2,3,4,5,6,10,20,40 on two independent pages — the catalog's
+forms-media author CSS (`*{box-sizing:border-box}`,
+`input,select,textarea,button{padding:8px;border:1px}` = 18 px) and a bare page
+carrying only the UA's own 8 px. The CONTENT width agreed at 145 px on both,
+which is what makes these content-box constants rather than a fit to one page:
+
+    <input size=N>     content = N * 7 + 5
+    <textarea cols=N>  content = N * 8 + 17
+
+`input` and `textarea` are separate arms because Chrome gives them different UA
+fonts — `input` proportional (Arial), `textarea` monospace, whose '0' advance
+is 8.0253 — and because a textarea reserves a ~15 px scrollbar gutter, which is
+the bulk of its larger intercept.
+
+Chrome's border-box widths under the catalog CSS, every one harvested rather
+than predicted:
+
+| control                  | Chrome | before | after |
+|--------------------------|--------|--------|-------|
+| `<input value="Simple">` |   163  |   138  |  163  |
+| `<input size=10>`        |    93  |    78  |   93  |
+| `<input size=5>`         |    58  |    48  |   58  |
+| `<textarea>` (cols=20)   |   195  |   138  |  195  |
+| `<textarea cols=10>`     |   115  |    78  |  115  |
+| `<textarea cols=40>`     |   356  |   258  |  355  |
+
+STATED, not glossed: `cols=40` lands **1 px short** (355 against 356). The real
+monospace '0' advance is 8.0253, not 8, and the engine's width arithmetic is
+integer, so the dropped fraction accumulates to a whole pixel somewhere past 30
+columns. It is below the geometry differ's 1 px tolerance, so no catalog page
+can see it; it is recorded here rather than absorbed into the intercept, which
+would have traded an exact answer at 10/20 for an exact answer at 40.
+
+SABOTAGE (run before landing, each with `grep -c` confirming the edit applied):
+
+* `INPUT_COL_ADVANCE_PX` 7 -> 6 fails AC-1/2/3 at 138/78/48 while **every
+  textarea row still passes** — the two arms are independent, not one constant.
+* `INPUT_CONTENT_INTERCEPT_PX` 5 -> 0 fails AC-1/2/3 by exactly 5 px each and
+  leaves the textarea rows green — the intercept is a real term, not padding
+  already counted elsewhere.
+* `TEXTAREA_CONTENT_INTERCEPT_PX` 17 -> 5 fails AC-4/5/6 while AC-1/2/3 stay
+  green — which is the proof the two intercepts are genuinely different and
+  that one shared number could not have fitted both.
+
+The controls below are the other half: they pin that this change reaches ONLY
+sized text controls, and moves neither the heights the sibling spec fixed, nor
+`<select>`'s max-content width, nor text advance anywhere outside a control.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FORMS-003 — a text control's intrinsic content width is its column count times a per-column advance plus a fixed font-derived intercept, with `<input>` and `<textarea>` carrying separate constants.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}label{display:block;margin:8px 0}input,select,textarea,button{padding:8px;border:1px solid #94a3b8}</style></head><body><form>"
+
+fn probe(inner: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</form></body></html>", VW, VH, "x", prop)
+
+fn w_of(inner: text) -> text:
+    probe(inner, "w")
+
+fn h_of(inner: text) -> text:
+    probe(inner, "h")
+
+describe "sized text controls take Chrome's per-column advance plus an intercept":
+    it "AC-1: <input> with the HTML default size=20 is Chrome's 163, not 138":
+        step("20 * 7 + 5 = 145 content, plus the author's 18 px padding+border")
+        expect(w_of("<label>Name <input id=\"x\" value=\"Simple\"></label>")).to_equal("163")
+
+    it "AC-2: an explicit size=10 gives Chrome's 93":
+        step("10 * 7 + 5 = 75 — the column term scales, it is not a constant")
+        expect(w_of("<label>Ten <input id=\"x\" size=\"10\"></label>")).to_equal("93")
+
+    it "AC-3: an explicit size=5 gives Chrome's 58":
+        step("5 * 7 + 5 = 40; a third point is what separates slope from intercept")
+        expect(w_of("<label>Five <input id=\"x\" size=\"5\"></label>")).to_equal("58")
+
+    it "AC-4: <textarea> with the HTML default cols=20 is Chrome's 195, not 138":
+        step("20 * 8 + 17 = 177 — a different advance AND a different intercept")
+        expect(w_of("<label>Notes <textarea id=\"x\">Editable text</textarea></label>")).to_equal("195")
+
+    it "AC-5: an explicit cols=10 gives Chrome's 115":
+        step("10 * 8 + 17 = 97, so the textarea intercept survives at another width")
+        expect(w_of("<label>Narrow <textarea id=\"x\" cols=\"10\">t</textarea></label>")).to_equal("115")
+
+    it "AC-6: cols=40 lands 355 against Chrome's 356 — the stated 1 px residue":
+        step("integer arithmetic drops monospace '0' = 8.0253 down to 8; recorded, not hidden")
+        expect(w_of("<label>Wide <textarea id=\"x\" cols=\"40\">t</textarea></label>")).to_equal("355")
+
+    it "AC-7 (control): the heights the sibling spec fixed do not move":
+        step("this change touches the width branch only; 33 and 48 must be untouched")
+        expect(h_of("<label>Name <input id=\"x\" value=\"Simple\"></label>")).to_equal("33")
+
+    it "AC-8 (control): the textarea height likewise stays at Chrome's 48":
+        step("rows x line + padding + border is a separate term from cols")
+        expect(h_of("<label>Notes <textarea id=\"x\">Editable text</textarea></label>")).to_equal("48")
+
+    it "AC-9 (control): checkbox keeps the UA 13x13 box and never sees this path":
+        step("a checkbox has no size attribute; widening it would be a regression")
+        expect(w_of("<label><input id=\"x\" type=\"checkbox\" checked> Enabled</label>")).to_equal("13")
+
+    it "AC-10 (control): <select> still takes max-content + the arrow, not columns":
+        step("select width comes from its widest option; it must not join the cols arm")
+        expect(w_of("<label>Choice <select id=\"x\"><option>Alpha</option><option>Beta</option></select></label>")).to_equal("73")
+
+    it "AC-11 (control): an explicit CSS width still wins over the intrinsic one":
+        step("a UA default that overrode an author's width would be a regression")
+        expect(w_of("<input id=\"x\" style=\"width:200px\" value=\"a\">")).to_equal("200")
+
+    it "AC-12 (control): text advance OUTSIDE a control is unchanged":
+        step("the new constants are control-scoped; a paragraph must not resize")
+        expect(w_of("<p id=\"x\">Editable text</p>")).to_equal("900")

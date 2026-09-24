@@ -5,17 +5,16 @@
 
 use spipe.*
 
-## Operator workflow
-
-1. Run `bin/simple test test/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
-
-## Compatibility and limitations
-
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
-"""
+# Operator workflow
+#
+# 1. Run bin/simple test test/01_unit/app/interpreter/collections/persistent_dict_intensive_spec.spl.
+# 2. Every scenario must pass; a failure is a regression in the
+#    behavior under test.
+#
+# Compatibility and limitations
+#
+# Covers the interpreter and native lanes for the constructs
+# asserted here; platform-specific behavior is out of scope.
 
 use std.spec
 
@@ -26,51 +25,71 @@ use std.spec
 
 # @manual: primary
 
-describe "Executed behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
+# Local immutable-dictionary harness (parser-safe; mirrors the persistent
+# intent with plain arrays instead of the runtime HAMT implementation).
+class PersistentDict:
+    keys_: [text]
+    values_: [i64]
 
-    it "array sorting and mapping":
-        step("Verify: array sorting and mapping")
-        # @req: REQ-APP-COLLECTIONS-001
-        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
-        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
+    static fn new() -> PersistentDict:
+        PersistentDict(keys_: [], values_: [])
 
-    it "string case and strip methods":
-        step("Verify: string case and strip methods")
-        # @req: REQ-APP-COLLECTIONS-001
-        expect("AbC".to_lower()).to_equal("abc")
-        expect("AbC".to_upper()).to_equal("ABC")
-        expect("  x ".trim()).to_equal("x")
+    static fn from_entries(entries: [(text, i64)]) -> PersistentDict:
+        var dict = PersistentDict.new()
+        for entry in entries:
+            dict = dict.set(entry.0, entry.1)
+        dict
 
-    it "nil option falls to else arm":
-        step("Verify: nil option falls to else arm")
-        # @req: REQ-APP-COLLECTIONS-001
-        val opt = nil
-        var chosen = 1
-        match opt:
-            Some(x): chosen = x
-            nil: chosen = -1
-        expect(chosen).to_equal(-1)  # oracle: nil arm taken
+    fn len() -> i64:
+        self.keys_.len()
 
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
+    fn is_empty() -> bool:
+        self.keys_.len() == 0
 
-    it "integer arithmetic precedence":
-        step("Verify: integer arithmetic precedence")
-        # @req: REQ-APP-COLLECTIONS-001
-        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
-        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
-        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+    fn find_index(key: text) -> i64:
+        var i = 0
+        while i < self.keys_.len():
+            if self.keys_[i] == key:
+                return i
+            i = i + 1
+        -1
 
-    it "dict literal access":
-        step("Verify: dict literal access")
-        # @req: REQ-APP-COLLECTIONS-001
-        val d = {"k": "v"}
-        expect(d["k"]).to_equal("v")
+    fn get(key: text):
+        val idx = self.find_index(key)
+        if idx < 0:
+            nil
+        else:
+            Some(self.values_[idx])
+
+    fn set(key: text, value: i64) -> PersistentDict:
+        val idx = self.find_index(key)
+        if idx >= 0:
+            var values: [i64] = []
+            var i = 0
+            while i < self.values_.len():
+                if i == idx:
+                    values = values + [value]
+                else:
+                    values = values + [self.values_[i]]
+                i = i + 1
+            PersistentDict(keys_: self.keys_, values_: values)
+        else:
+            PersistentDict(keys_: self.keys_ + [key], values_: self.values_ + [value])
+
+    fn remove(key: text) -> PersistentDict:
+        val idx = self.find_index(key)
+        if idx < 0:
+            self
+        else:
+            var keys: [text] = []
+            var values: [i64] = []
+            var i = 0
+            while i < self.keys_.len():
+                if i != idx:
+                    keys = keys + [self.keys_[i]]
+                    values = values + [self.values_[i]]
+                i = i + 1
+            PersistentDict(keys_: keys, values_: values)
 
     fn merge(other: PersistentDict) -> PersistentDict:
         var merged = self
@@ -120,6 +139,82 @@ describe "Additional behavior oracles":
             result = result + [self.values_[i]]
             i = i + 1
         result
+
+fn array_insert(arr: [i64], index: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < arr.len():
+        if i == index:
+            result = result + [value]
+        result = result + [arr[i]]
+        i = i + 1
+    result
+
+fn array_update(arr: [i64], index: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < arr.len():
+        if i == index:
+            result = result + [value]
+        else:
+            result = result + [arr[i]]
+        i = i + 1
+    result
+
+fn array_remove(arr: [i64], index: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < arr.len():
+        if i != index:
+            result = result + [arr[i]]
+        i = i + 1
+    result
+
+describe "Executed behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "array sorting and mapping":
+        step("Verify: array sorting and mapping")
+        # @req: REQ-APP-COLLECTIONS-001
+        expect([3, 1, 2].sorted()).to_equal([1, 2, 3])
+        expect([1, 2, 3].map(fn(x: i64): x * 2)).to_equal([2, 4, 6])
+
+    it "string case and strip methods":
+        step("Verify: string case and strip methods")
+        # @req: REQ-APP-COLLECTIONS-001
+        expect("AbC".to_lower()).to_equal("abc")
+        expect("AbC".to_upper()).to_equal("ABC")
+        expect("  x ".trim()).to_equal("x")
+
+    it "nil option falls to else arm":
+        step("Verify: nil option falls to else arm")
+        # @req: REQ-APP-COLLECTIONS-001
+        val opt = nil
+        var chosen = 1
+        match opt:
+            Some(x): chosen = x
+            nil: chosen = -1
+        expect(chosen).to_equal(-1)  # oracle: nil arm taken
+
+describe "Additional behavior oracles":
+    """
+    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
+    """
+
+    it "integer arithmetic precedence":
+        step("Verify: integer arithmetic precedence")
+        # @req: REQ-APP-COLLECTIONS-001
+        expect(2 + 3 * 4).to_equal(14)  # oracle: * binds tighter than +
+        expect(10 - 2 * 3).to_equal(4)  # oracle: multiplication precedes subtraction
+        expect((2 + 3) * 4).to_equal(20)  # oracle: parentheses force additive group first
+
+    it "dict literal access":
+        step("Verify: dict literal access")
+        # @req: REQ-APP-COLLECTIONS-001
+        val d = {"k": "v"}
+        expect(d["k"]).to_equal("v")
 
 fn entries_has(entries, key: text, value: i64) -> bool:
     for entry in entries:

@@ -8,7 +8,10 @@ use std::sync::{Mutex, OnceLock};
 use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path};
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
-use super::linker::{add_extra_link_objects, split_extra_link_objects, validate_extra_link_objects};
+use super::linker::{
+    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed, split_extra_link_objects,
+    validate_extra_link_objects,
+};
 use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
@@ -32,6 +35,28 @@ fn source_defines_callable(path: &Path, name: &str) -> bool {
         matches!(item, simple_parser::ast::Node::Function(def)
             if def.name == name && !def.body.statements.is_empty())
     })
+}
+
+#[test]
+fn boot_source_discovery_keeps_required_core_and_skips_fragments() {
+    assert!(is_boot_c_translation_unit(Path::new("boot_entry.c")));
+    // This legacy file is intentionally still a standalone TU: it owns unique
+    // runtime definitions until it is wrapped by a real .c source.
+    assert!(is_boot_c_translation_unit(Path::new("baremetal_runtime_core.inc.c")));
+    assert!(!is_boot_c_translation_unit(Path::new("runtime_tail.inc.c")));
+    assert!(!is_boot_c_translation_unit(Path::new("crt0.S")));
+}
+
+#[test]
+fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
+    assert!(minimal_boot_source_allowed("boot_entry", false));
+    assert!(minimal_boot_source_allowed("baremetal_runtime_core.inc", false));
+    assert!(minimal_boot_source_allowed("freestanding_runtime", false));
+    assert!(minimal_boot_source_allowed("baremetal_stubs", false));
+    assert!(minimal_boot_source_allowed("rv64_display_backend", false));
+    assert!(!minimal_boot_source_allowed("full_networking_runtime", false));
+    assert!(minimal_boot_source_allowed("full_networking_runtime", true));
+    assert!(!minimal_boot_source_allowed("unrelated_service", false));
 }
 
 #[test]
@@ -351,15 +376,15 @@ fn simpleos_entry_closure_compatibility_owners_are_explicit() {
     assert!(accessors.contains("platform_target_catalog.{simpleos_platform_targets}"));
     assert!(part1.contains("intentionally compatibility-public"));
     assert_eq!(
-        explicit_names(&facade, "simpleos_multiplatform_build_part1."),
+        explicit_names(&facade, "build_target_contracts."),
         explicit_names(&part1, "build_target_contracts.")
     );
     assert_eq!(
-        explicit_names(&facade, "simpleos_multiplatform_build_part2."),
+        explicit_names(&facade, "platform_target_catalog."),
         explicit_names(&part2, "platform_target_catalog.")
     );
     assert_eq!(
-        explicit_names(&facade, "simpleos_multiplatform_build_part3."),
+        explicit_names(&facade, "platform_target_accessors."),
         explicit_names(&part3, "platform_target_accessors.")
     );
 }
@@ -629,6 +654,76 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     ));
 }
 
+/// Site 18 (macOS Stage 2, 2026-09-13): HIR folds the enum-id argument of
+/// `rt_enum_check_variant` into an integer from the BARE enum name, while the
+/// constructor's `EnumUnit` name is qualified by `qualify_enum_runtime_names`.
+/// The check therefore expected `hash("Mixed")` against a value stamped
+/// `hash("pkg.owner.Mixed")`, every arm failed and the match fell to its last
+/// arm -- `BackendKind.to_text()` returned the wrong text and the K1 backend
+/// table validator refused the Stage 2 composition. Both sides must agree.
+fn enum_match_check_ids_after_qualify(module_name: &str) -> (Vec<i64>, Vec<String>) {
+    use crate::mir::MirInst;
+
+    let source = "enum Mixed:\n    A\n    B\n    Custom(text)\n\nfn pick(m: Mixed) -> i64:\n    match m:\n        case A: 10\n        case B: 20\n        case Custom(_): 30\n\nfn build() -> Mixed:\n    Mixed.B\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let lowered = crate::hir::Lowerer::new().lower_module(&ast).expect("enum match module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("enum match module should reach MIR");
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        module_name,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let mut check_ids = Vec::new();
+    let mut ctor_names = Vec::new();
+    for func in &mir.functions {
+        let mut const_ints = std::collections::HashMap::new();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::ConstInt { dest, value } = inst {
+                    const_ints.insert(*dest, *value);
+                }
+            }
+        }
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Call { target, args, .. } if target.name() == "rt_enum_check_variant" => {
+                        check_ids.push(const_ints[&args[1]]);
+                    }
+                    MirInst::EnumUnit { enum_name, .. } => ctor_names.push(enum_name.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(!check_ids.is_empty(), "expected rt_enum_check_variant calls in the lowered match");
+    assert!(!ctor_names.is_empty(), "expected an EnumUnit constructor");
+    (check_ids, ctor_names)
+}
+
+#[test]
+fn enum_match_check_id_is_qualified_like_its_constructor() {
+    let qualified = crate::codegen::shared::enum_runtime_type_id("pkg.owner.Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("pkg.owner");
+    assert!(ctor_names.iter().all(|name| name == "pkg.owner.Mixed"), "{ctor_names:?}");
+    assert!(
+        check_ids.iter().all(|&id| id == i64::from(qualified)),
+        "check ids {check_ids:?} must equal the qualified ctor id {qualified}"
+    );
+}
+
+#[test]
+fn enum_match_check_id_stays_bare_without_a_module_name() {
+    let bare = crate::codegen::shared::enum_runtime_type_id("Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("");
+    assert!(ctor_names.iter().all(|name| name == "Mixed"), "{ctor_names:?}");
+    assert!(check_ids.iter().all(|&id| id == i64::from(bare)), "{check_ids:?} vs {bare}");
+}
+
 #[test]
 fn enum_runtime_identity_collision_is_reported_before_codegen() {
     let root = std::path::PathBuf::from("/tmp/enum-runtime-identity/src");
@@ -883,6 +978,35 @@ fn llvm_ar_archive_commands_keep_gnu_argument_forms() {
     assert_eq!(command_args(&list), ["t", "libout.a"]);
 }
 
+#[test]
+fn archive_batches_keep_long_windows_object_paths_within_command_line_limit() {
+    let archive = PathBuf::from("D:/cache/native-objects/output/libspl_objects.a");
+    let objects: Vec<PathBuf> = (0..430)
+        .map(|index| PathBuf::from(format!(
+            "D:/cache/compiler-tools/stage2/very-long-producer-sha/very-long-closure-sha/native-objects/object_{index:04}_{}.obj",
+            "segment".repeat(14)
+        )))
+        .collect();
+    let batches = super::linker::archive_object_batches("lib.exe", &archive, &objects).unwrap();
+    assert!(batches.len() > 3, "long absolute paths must be split by length");
+    assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), objects.len());
+    for (index, batch) in batches.iter().enumerate() {
+        assert!(!batch.is_empty());
+        let command = archive_create_command("lib.exe", &archive, batch, index > 0, false);
+        let budget = super::linker::archive_arg_budget(command.get_program())
+            + command.get_args().map(super::linker::archive_arg_budget).sum::<usize>();
+        assert!(budget <= super::linker::ARCHIVE_BATCH_ARG_LIMIT);
+    }
+}
+
+#[test]
+fn archive_batch_rejects_an_object_path_too_long_for_one_command() {
+    let object = PathBuf::from("x".repeat(super::linker::ARCHIVE_BATCH_ARG_LIMIT));
+    let error = super::linker::archive_object_batches("lib.exe", Path::new("out.lib"), &[object])
+        .unwrap_err();
+    assert!(error.contains("archive object path exceeds Windows command-line budget"));
+}
+
 fn test_host_object_extension() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -921,7 +1045,7 @@ fn hosted_freebsd_cross_target_build_fails_closed() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn build_compiler_backfill_test_archive(root: &Path, name: &str, sources: &[&str]) -> PathBuf {
     let mut objects = Vec::new();
     for (index, source) in sources.iter().enumerate() {
@@ -1567,10 +1691,21 @@ fn test_collect_spl_files() {
     std::fs::write(dir.join("b.txt"), "not spl").unwrap();
     std::fs::create_dir(dir.join("sub")).unwrap();
     std::fs::write(dir.join("sub/c.spl"), "# test").unwrap();
+    std::fs::create_dir_all(dir.join("cli")).unwrap();
+    std::fs::write(dir.join("cli/check.spl"), "# production check command").unwrap();
+    std::fs::write(dir.join("cli/arch_check.spl"), "# production check command").unwrap();
+    std::fs::create_dir_all(dir.join("check.spl.assets")).unwrap();
+    std::fs::write(dir.join("check.spl.assets/ordinary.spl"), "# nested production module").unwrap();
 
     let mut files = Vec::new();
     collect_spl_files_recursive(dir, &mut files);
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), 5);
+    assert!(files.contains(&dir.join("a.spl")));
+    assert!(files.contains(&dir.join("sub/c.spl")));
+    assert!(files.contains(&dir.join("cli/check.spl")));
+    assert!(files.contains(&dir.join("cli/arch_check.spl")));
+    assert!(files.contains(&dir.join("check.spl.assets/ordinary.spl")));
+    assert!(!files.contains(&dir.join("b.txt")));
 }
 
 #[test]
@@ -1615,8 +1750,8 @@ fn test_security_registry_init_source_filters_and_escapes() {
         "capability == \"engine2d-composited-glass-material-v1\" or ready\n"
     ));
 
-    let escaped = cxx_raw_string_literal("before )SECURITY_SDN\" after");
-    assert!(!escaped.contains(")SECURITY_SDN\""));
+    let escaped = c_string_literal("before \\ and \"quote\"\n after");
+    assert_eq!(escaped, "before \\\\ and \\\"quote\\\"\\n\"\n\" after");
 }
 
 #[test]
@@ -2064,6 +2199,7 @@ fn test_discover_files_includes_explicit_entry_outside_source_dirs() {
     let entry_file = tools_dir.join("main.spl");
     std::fs::write(&lib_file, "fn helper(): pass").unwrap();
     std::fs::write(&entry_file, "fn main(): pass").unwrap();
+    assert!(entry_file.is_absolute());
 
     let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
         .config(NativeBuildConfig {
@@ -2626,6 +2762,18 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
+    for symbol in [
+        "rt_file_view_open_beneath_no_follow_v1",
+        "rt_file_view_pread_exact_v1",
+        "rt_file_view_close_v1",
+        "rt_pinned_archive_open_beneath_v1",
+        "rt_pinned_archive_close_v1",
+    ] {
+        assert!(
+            core_c_symbols.contains(symbol),
+            "core-c runtime archive must include file-view provider `{symbol}`"
+        );
+    }
     assert!(core_c_symbols.contains("rt_bytes_alloc"));
     for symbol in [
         "rt_getpid",
@@ -3853,6 +4001,53 @@ __attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_e
     assert_eq!(archive_members(&output).unwrap(), ["stage4_rust_runtime_local.o"]);
 }
 
+// Reproduces the macOS Stage4 link gate 2026-09-07: Rust's own C-ABI runtime
+// exports (`#[no_mangle] pub extern "C" fn rt_array_get`, etc. in
+// runtime/src/value/collections.rs) are always STRONG on stable Rust -- there
+// is no portable `#[linkage = "weak"]`. When one of those symbols shares an
+// object/codegen-unit with a requested root, `ld -r` cannot drop it from the
+// closure, so it rides along even though nothing requested it. If that
+// symbol is also owned by the core-C providers (an `allowed_external`
+// runtime symbol), the projection must demote it to WEAK so the outer C
+// definition can still win the final link -- the whole point of
+// `allowed_external`. Before the 2026-09-07 fix this fixture failed with
+// "Stage4 runtime capsule defines owner-provided runtime symbols STRONGLY".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_stage4_rust_runtime_projection_weakens_owner_provided_passenger_symbol() {
+    let temp = tempfile::tempdir().unwrap();
+    // `rt_passenger_owned` sits in the SAME translation unit as the requested
+    // root `rt_projected_root2`, mimicking a Rust codegen unit that bundles
+    // multiple `#[no_mangle]` exports into one object: pulling in the root
+    // for liveness necessarily pulls in the passenger too, strong and all.
+    let rust_runtime = build_compiler_backfill_test_archive(
+        temp.path(),
+        "stage4_rust_runtime_source2",
+        &[r#"
+void rt_projected_root2(void) { }
+void rt_passenger_owned(void) { }
+"#],
+    );
+    let output = build_stage4_rust_runtime_projection_archive(
+        &rust_runtime,
+        &["rt_projected_root2".to_string()],
+        &["rt_passenger_owned".to_string()],
+        &temp.path().join("projection2"),
+    )
+    .unwrap();
+
+    let (defined, _undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    let weak = super::tools::archive_weak_global_symbols(&output).unwrap();
+    assert!(
+        defined.keys().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "passenger symbol must still be present (kept global, not localized): {defined:?}"
+    );
+    assert!(
+        weak.iter().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
+        "owner-provided passenger symbol must be demoted to WEAK so the outer C definition can override it, found strong: {weak:?}"
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry() {
@@ -4185,7 +4380,7 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
     for entry in [focused_entry, full_entry, os_entry] {
         for (bundle, expected) in [
             ("hosted", "removed Rust-hosted runtime bundles"),
-            ("simple-core", "requires the core-c-bootstrap runtime lane"),
+            ("simple-core", "requires the core-c-bootstrap or dynamic-runtime runtime lane"),
         ] {
             let mut rejected = NativeBuildConfig {
                 runtime_path: Some(runtime_path.clone()),
@@ -4514,7 +4709,7 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -4532,6 +4727,10 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         "rt_mem_snapshot_open",
         "rt_mem_snapshot_record",
         "rt_mem_snapshot_close",
+        "rt_file_create_excl",
+        "rt_file_sync",
+        "rt_simple_abi_version",
+        "rt_simple_abi_version_deferred",
     ]
     .into_iter()
     .map(str::to_string)
@@ -4852,6 +5051,89 @@ fn test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe() {
 }
 
 #[test]
+fn selective_alias_prefers_exact_owner_over_nested_same_named_wrapper() {
+    let owner = "compiler__loader__smf_mmap_native__native_munmap".to_string();
+    let wrapper = "compiler__loader__loader__smf_mmap_native__native_munmap".to_string();
+    let all_mangled = std::collections::HashMap::from([
+        ("native_munmap".to_string(), vec![wrapper, owner.clone()]),
+        (
+            "stderr_write".to_string(),
+            vec!["lib__nogc_sync_mut__io__stderr_ops__stderr_write".to_string()],
+        ),
+    ]);
+    let source = "use compiler.loader.smf_mmap_native.{native_munmap as owner_munmap}\n\
+                  use std.io.stderr_ops.{stderr_write}\n\
+                  fn native_munmap(address: i64, size: i64) -> bool:\n    owner_munmap(address, size)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(
+        &ast,
+        &all_mangled,
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(use_map.get("owner_munmap"), Some(&owner));
+    let reduced_owner = "loader__owner__native_probe_value".to_string();
+    let reduced = std::collections::HashMap::from([(
+        "native_probe_value".to_string(),
+        vec![
+            "loader__loader__owner__native_probe_value".to_string(),
+            reduced_owner.clone(),
+        ],
+    )]);
+    let reduced_ast = simple_parser::Parser::new(
+        "use loader.owner.{native_probe_value as owner_probe_value}\n",
+    )
+    .parse()
+    .unwrap();
+    let reduced_use_map = super::imports::build_use_map_from_ast(
+        &reduced_ast,
+        &reduced,
+        &std::collections::HashMap::new(),
+    );
+    assert_eq!(reduced_use_map.get("owner_probe_value"), Some(&reduced_owner));
+    // The tier-inserted std/lib spelling has no exact path. Preserve its
+    // existing subsequence fallback while fixing the nested-owner collision.
+    assert_eq!(
+        use_map.get("stderr_write").map(String::as_str),
+        Some("lib__nogc_sync_mut__io__stderr_ops__stderr_write"),
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn selective_alias_nested_owner_archive_has_no_bare_alias_reference() {
+    let repo_root = repo_root_for_native_project_tests();
+    let source_root = repo_root.join("test/fixtures/macos_alias_link");
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("libalias_probe.a");
+    NativeProjectBuilder::new(repo_root, archive.clone())
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            entry_closure: true,
+            incremental: false,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_root.clone())
+        .entry_file(source_root.join("main.spl"))
+        .build()
+        .unwrap();
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let stdout = String::from_utf8_lossy(&symbols.stdout);
+    assert!(stdout.contains("loader__owner__native_probe_value"));
+    assert!(stdout.contains("loader__loader__owner__native_probe_value"));
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "U _owner_probe_value" || line.trim() == "U owner_probe_value"),
+        "unresolved selective-import alias survived object emission:\n{stdout}"
+    );
+}
+
+#[test]
 fn test_build_use_map_glob_import_populates_symbol_entries() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
@@ -4897,7 +5179,7 @@ fn native_project_fs_platform_aliases_keep_the_sync_path_owner() {
         src_root.join("lib/nogc_sync_mut/platform.spl"),
         src_root.join("lib/nogc_async_mut/path.spl"),
         src_root.join("lib/nogc_async_mut/platform.spl"),
-        src_root.join("std/platform.spl"),
+        src_root.join("lib/platform.spl"),
         src_root.join("lib/nogc_sync_mut/fs.spl"),
         src_root.join("lib/nogc_async_mut/fs.spl"),
     ];
@@ -5531,6 +5813,51 @@ fn test_build_import_map_records_primitive_return_types() {
         result.fn_return_types.get("vmm_read_pte"),
         Some(&simple_parser::Type::Simple("u64".to_string()))
     );
+}
+
+#[test]
+fn test_duplicate_imported_functions_keep_selected_owner_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let int_path = lib_root.join("int_api.spl");
+    let text_path = lib_root.join("text_api.spl");
+    let caller_path = lib_root.join("caller.spl");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    std::fs::write(&int_path, "pub fn convert(value: i64) -> i64:\n    value + 1\n").unwrap();
+    std::fs::write(&text_path, "pub fn convert(value: i64) -> text:\n    \"wrong\"\n").unwrap();
+    std::fs::write(
+        &caller_path,
+        "use lib.int_api.convert\n\nfn answer() -> i64:\n    val result = convert(41)\n    result\n",
+    )
+    .unwrap();
+
+    let paths = [&int_path, &text_path, &caller_path];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let imports = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    assert!(imports.fn_return_types.get("convert").is_none());
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&caller_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let selected = use_map.get("convert").expect("selective import must resolve an owner");
+    assert_eq!(
+        imports.fn_return_types.get(selected),
+        Some(&simple_parser::Type::Simple("i64".to_string()))
+    );
+
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types.clone()));
+    lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map));
+    let lowered = lowerer.lower_module(&ast).unwrap();
+    let answer = lowered.functions.iter().find(|function| function.name == "answer").unwrap();
+    let result = answer.locals.iter().find(|local| local.name == "result").unwrap();
+    assert_eq!(result.ty, crate::hir::TypeId::I64);
 }
 
 #[test]
@@ -8895,4 +9222,157 @@ fn test_build_import_map_records_struct_inline_method_return_type() {
         Some(&simple_parser::Type::Simple("i64".to_string())),
         "struct inline `me get` return type missing from fn_return_types"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Same-named instance methods on sibling types must not collapse.
+// doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
+// ---------------------------------------------------------------------------
+
+fn ints_suffix_index() -> std::collections::HashMap<String, Vec<String>> {
+    std::collections::HashMap::from([(
+        "store".to_string(),
+        vec![
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ],
+    )])
+}
+
+fn mir_with_method_calls(names: &[&str]) -> crate::mir::MirModule {
+    let mut mir = crate::mir::MirModule::new();
+    let mut func = crate::mir::MirFunction::new(
+        "main".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    for name in names {
+        func.blocks[0].instructions.push(crate::mir::MirInst::MethodCallStatic {
+            dest: None,
+            receiver: crate::mir::VReg(0),
+            func_name: (*name).to_string(),
+            args: vec![],
+        });
+    }
+    func.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(func);
+    mir
+}
+
+fn mangled_method_names(mir: &crate::mir::MirModule) -> Vec<String> {
+    mir.functions[0].blocks[0]
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            crate::mir::MirInst::MethodCallStatic { func_name, .. } => func_name.clone(),
+            other => panic!("expected static method call, got {other:?}"),
+        })
+        .collect()
+}
+
+/// (a) Two sibling types with same-named instance methods each keep their own
+/// target, so both bodies stay referenced and both get emitted.
+#[test]
+fn test_sibling_types_same_named_methods_each_resolve_to_their_own_owner() {
+    let mut mir = mir_with_method_calls(&["U16le.store", "U32be.store"]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &ints_suffix_index(),
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec![
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ],
+        "same-named sibling methods collapsed onto one implementation"
+    );
+}
+
+/// (b) A typed receiver whose own method is absent must NOT be bound to an
+/// arbitrary same-named method of an unrelated type.
+///
+/// Scope note: a SINGLE same-named candidate still binds, because a struct
+/// calling an inherited trait default legitimately reaches the resolver as
+/// `Button.render` against the trait's lone `Widget.render`
+/// (`qualified_enum_helpers_never_rebind_in_resolve_call_target` pins that).
+/// What must never happen is choosing one of SEVERAL, which is the shape that
+/// collapsed the six `ints.spl` types.
+#[test]
+fn test_qualified_receiver_never_falls_back_to_unrelated_candidates() {
+    let suffix_index = std::collections::HashMap::from([(
+        "store".to_string(),
+        vec![
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+            "lib__common__bytes__ints__U64be_dot_store".to_string(),
+        ],
+    )]);
+    let mut mir = mir_with_method_calls(&["U16le.store"]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &suffix_index,
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec!["U16le.store".to_string()],
+        "qualified receiver was rebound to an unrelated type's method"
+    );
+}
+
+/// (c) A bare (erased-receiver) name with more than one candidate must refuse
+/// to bind rather than pick an arbitrary one.
+#[test]
+fn test_bare_method_with_multiple_candidates_refuses_to_bind() {
+    let mut mir = mir_with_method_calls(&["store"]);
+    let use_map = std::collections::HashMap::from([
+        (
+            "U16le.store".to_string(),
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+        ),
+        (
+            "U32be.store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ),
+    ]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &use_map,
+        &ints_suffix_index(),
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec!["store".to_string()],
+        "an ambiguous bare method name was bound to an arbitrary candidate"
+    );
+}
+
+#[test]
+fn test_method_owner_matches_accepts_both_mangled_spellings() {
+    assert!(super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U16le_dot_store",
+        "U16le"
+    ));
+    assert!(super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U16le.store",
+        "U16le"
+    ));
+    assert!(!super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U32be_dot_store",
+        "U16le"
+    ));
+    assert!(!super::mangle::method_owner_matches("store", "U16le"));
 }

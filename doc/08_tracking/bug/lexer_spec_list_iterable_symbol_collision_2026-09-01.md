@@ -1,4 +1,8 @@
 # `compiler/lexer_spec.spl`: co-compiled `List` symbol collision breaks `Iterable` trait check
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-01
@@ -55,3 +59,4 @@ should attempt.
 B=src/compiler_rust/target/release/simple.exe
 SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/compiler/lexer_spec.spl 2>&1 | grep -E "warning:|error:"
 ```
+

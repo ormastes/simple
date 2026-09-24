@@ -1,6 +1,10 @@
-# Bug: graphics_2d full runner could not JIT/native lower framebuffer mutation
+## Closed 2026-09-13 — verified fixed, graphics_2d runner completes with framebuffer mutation
 
-Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+Status: RESOLVED — verified by running 2026-09-13 (Windows x86_64, seed `bin/simple` v1.0.0-rc.1). `bin/simple run test/05_perf/graphics_2d/simple_runner.spl` completes and prints all three `SCENE_RESULT` rows (fill_1080p, blit_tiles, clipped_scroll) with NO `W1006 mutation without mut capability` diagnostic and NO `JIT compilation failed, falling back to interpreter` line (that fallback line does still appear for other files on this binary, so its absence here is a positive signal, not a suppressed log).
+
+---
+
+# Bug: graphics_2d full runner could not JIT/native lower framebuffer mutation
 
 ## Date
 

@@ -1,4 +1,75 @@
 # BUG: a `bool`-declared parameter accepts a non-bool silently — and the JIT corrupts it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Re-measured 2026-09-13 — still OPEN. Both halves live; the corruption now renders as `error`, and the lanes disagree three ways
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`),
+Windows.
+
+### Half 1 — the missing check: UNCHANGED, still unenforced on BOTH lanes
+
+`fn takes_bool(b: bool)` accepts an `i64`, a `text`, a bare `nil` and an
+`i64?` without any diagnostic on either lane. Nothing rejects. `coerce_param`
+still has no bool arm, as the sibling entry pins.
+
+### Half 2 — what the parameter actually holds, `print "{b}"` inside the callee
+
+| argument | JIT (default) | interpret |
+|---|---|---|
+| `true` | `true` | `true` |
+| `1` | `true` | `true` |
+| `0` | `false` | **`true`** |
+| `nil` | **`error`** | `false` |
+| `opt_nil()` (`i64?` = nil) | **`error`** | `false` |
+| `"x"` | `true` | `true` |
+
+and the branch each one selects in `if b:`:
+
+| argument | JIT | interpret |
+|---|---|---|
+| `0` | ELSE | **THEN** |
+| `nil` | **THEN** | ELSE |
+| `opt_nil()` | **THEN** | ELSE |
+
+Three things this pins down that the original report could not:
+
+1. **The JIT re-tagging half is still live.** The reported garbage tag
+   `<special:N>` is gone as a *rendering*, but the value is still corrupt: a
+   `bool` parameter handed `nil` stringifies as the literal text `error` and is
+   simultaneously **truthy**. That is strictly worse than a visible
+   `<special:N>` — it looks like a legitimate error string.
+2. **The two lanes now disagree in both directions**, so neither can serve as
+   the oracle for the other. `0` is falsy on the JIT and truthy in the
+   interpreter; `nil` is truthy on the JIT and falsy in the interpreter. A spec
+   asserting either behaviour is green on one runner and red on the other,
+   which is the cross-runner hazard this cluster was filed about.
+3. **The JIT `nil`-is-truthy row is the same defect** as the reopened
+   `not_over_nil_returns_false_in_run_engine_2026-08-04.md` (literal `not nil`
+   is `false` on the JIT, `true` in the interpreter). Fixing nil truthiness on
+   the JIT should move both.
+
+Note the interpreter's `0` -> `true` row is not in the original report and may
+be new: passing integer `0` to a `bool` parameter yields a truthy `true` there.
+
+Entry stays OPEN. Not fixed here — `src/compiler_rust/**` was off-limits during
+this pass (concurrent bootstrap).
+
+**The "fix once, close all of these" list is now three, not four.**
+`exists_operator_returns_payload_not_bool_2026-08-04.md` was closed 2026-09-13
+as an **invalid premise**: `.?` evaluating to `T?` rather than `bool` is the
+ratified contract
+(`doc/07_guide/quick_reference/syntax_quick_reference.md:539-550`, `num.?  #
+i64?: Some(num)`), the same call already made on its sibling
+`exists_check_on_optional_i64_returns_payload_2026-08-01.md` on 2026-08-08.
+Its 158 red examples were remediated spec-side (sampled 8 of the 36
+`branch_coverage_*` files: 630 examples, 1 failure). So that report was never
+evidence for a compiler defect, and the real defect behind this cluster is the
+missing bool coercion measured above — `coerce_param` having no bool arm —
+together with the JIT's nil-truthiness.
+
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -166,3 +237,58 @@ have had `check(opt.?)` rewritten to `check(opt != nil)`, which is why those
 two files are green while the other 28 identical files are red. That workaround
 hid the defect rather than removing it, and it should be reverted once the real
 fix lands.
+
+
+## Re-measurement 2026-09-18 — reproduces on BOTH lanes, and it belongs to a family
+
+Binary: `bin/simple` as redeployed 2026-09-18 (`308de6af84db5c26e2c0`, built from
+`origin/main`). Measurements on this host before 2026-09-18 17:00 used a binary
+with its own silent wrong answers and are not comparable.
+
+```simple
+enum Evt:
+    Click(x: i64)
+    Key(code: i64)
+
+fn make() -> Evt?:
+    Some(Evt.Click(x: 5))
+
+fn main() -> i64:
+    match make():
+        case Evt.Click(x): print "direct=click{x}"
+        case Evt.Key(c):   print "direct=key{c}"
+        case _:            print "direct=WILDCARD"
+    0
+```
+
+| shape | interpret | JIT |
+|---|---|---|
+| `Evt?` matched against BARE variant patterns | **WILDCARD** | **WILDCARD** |
+| same value matched as `case Some(Evt.Click(x))` | `click5` | `click5` |
+
+So it still reproduces, both engines agree, and the `Some(...)`-wrapped form is
+the one that works. Whether a bare variant pattern *should* match an optional
+scrutinee is a design question and this entry does not settle it — but silently
+selecting the wildcard is the worst of the three available answers, because it
+produces a plausible wrong branch rather than either a match or a diagnostic.
+With no wildcard arm present the same shape falls through silently instead
+(`match_enum_fallthrough_silent_2026-08-01`).
+
+### It is one family with two other open entries
+
+All three are the same missing check — pattern/argument type agreement is not
+enforced, so a mismatch resolves to a silent answer instead of a diagnostic:
+
+| entry | shape | today |
+|---|---|---|
+| this one | non-Option pattern vs **Option** scrutinee | silently takes `_` |
+| `option_pattern_accepted_on_non_option_scrutinee_2026-07-27` | Option pattern vs **non-Option** scrutinee | silently accepted, engines bind different values |
+| `bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04` | `i64` argument vs **`bool`** parameter | silently accepted, `take_bool(5)` prints `got=true` |
+
+They are mirror images of one another and should be priced as one job. Note
+before attempting it: enforcement has blast radius, which is exactly why
+`match_enum_fallthrough_silent_2026-08-01` chose a runtime diagnostic over a
+compile-time checker after measuring 286 candidate sites and 336 enum names
+declared more than once. Any fix here deserves the same measurement first.
+`src/compiler/30.types/bidirectional_checking.spl` is where argument agreement
+lives; PR #1077 is open on the sibling `type_infer/*` files.

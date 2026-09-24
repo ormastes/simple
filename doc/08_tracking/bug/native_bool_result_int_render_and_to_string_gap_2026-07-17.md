@@ -1,4 +1,8 @@
 # Native path: bool-returning string methods print as "1"/"0"; `.to_string()` on primitives unresolved outside SIMPLE_BOOTSTRAP=1 (and type-unaware even when gated on)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** Medium-High (silent wrong output for the first half; loud build
@@ -140,3 +144,4 @@ this lane's mandate says never to do.
   `env -u SIMPLE_BOOTSTRAP bin/simple run` (oracle) and
   `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH bin/simple native-build`
   (native).
+

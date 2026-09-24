@@ -1,4 +1,9 @@
 # Push gates were unrunnable on macOS: two BSD-awk incompatibilities
+## Closed 2026-09-16 — both awk fixes verified present upstream 2026-09-04; gate runs on macOS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-03  **Status:** both fixed, but NOT by this change — see below; a third, pre-existing blocker documented below
 
@@ -103,3 +108,4 @@ to `src`.
 `land.shs: submitted work/...` while the underlying `git push` had failed with
 `error: failed to push some refs`. It does not propagate the push's exit status,
 so a blocked push reads as a successful landing.
+

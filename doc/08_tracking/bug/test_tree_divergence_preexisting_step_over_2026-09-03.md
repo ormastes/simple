@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence stepped over by chore/repo-cleanup-2026-09-03
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-03
 **Status:** RECORD ONLY — no divergence introduced, none fixed
@@ -47,3 +51,4 @@ This record does not claim the divergence is harmless, and does not shrink it.
 `check-test-tree-divergence` is NOT one of the 12 `push,` rows of
 `config/check/must_check_gates.sdn`, so it does not gate a push today — that gap
 is itself worth its own record and is not addressed here.
+

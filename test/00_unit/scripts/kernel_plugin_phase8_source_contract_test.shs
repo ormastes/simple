@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+CLI=$ROOT/src/app/cli/_CliMain/main_and_help.spl
+LOCK=$ROOT/src/app/lock/main.spl
+UPDATE=$ROOT/src/app/update/main.spl
+RANGE=$ROOT/src/app/pkg/requires_range.spl
+
+require() {
+    grep -Fq -- "$2" "$1" || {
+        echo "FAIL: missing Phase 8 contract: $2" >&2
+        exit 1
+    }
+}
+
+reject() {
+    if grep -Fq -- "$2" "$1"; then
+        echo "FAIL: forbidden Phase 8 path remains: $2" >&2
+        exit 1
+    fi
+}
+
+require "$CLI" 'use app.lock.main.{run_lock_command}'
+require "$CLI" 'use app.update.main.{run_update_command}'
+require "$CLI" 'return run_lock_command(_cli_args_from(filtered_args, 1))'
+require "$CLI" 'return run_update_command(_cli_args_from(filtered_args, 1))'
+reject "$CLI" 'cli_run_file("src/app/lock/main.spl"'
+reject "$CLI" 'cli_run_file("src/app/update/main.spl"'
+
+require "$LOCK" 'fn run_lock_command(args: [text]) -> i64:'
+require "$UPDATE" 'fn run_update_command(args: [text]) -> i64:'
+require "$LOCK" 'file_atomic_write(lockfile_path, lock_content)'
+require "$UPDATE" 'file_atomic_write(lockfile_path, lock_content)'
+require "$RANGE" 'plugin_manifest_location: "simple.sdn"'
+require "$RANGE" 'provide.provider < current.provider'
+require "$RANGE" 'case Ok(base): satisfies_caret(version, base)'
+require "$RANGE" 'case Ok(base): satisfies_tilde(version, base)'
+
+echo 'PASS: Phase 8 uses compiled root CLI dispatch, deterministic range selection, manifest identity, and atomic lock publication'

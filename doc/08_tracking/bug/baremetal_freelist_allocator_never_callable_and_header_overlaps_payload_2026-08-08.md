@@ -1,4 +1,8 @@
 # Baremetal FreeListAllocator was never callable; BlockHeader overlapped the payload it hands out
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-08
 - Status: FIXED
@@ -218,3 +222,4 @@ module remains runnable on the physical board, not just the host test harness.
 
 **Board-runnable:** no QEMU-only mechanism is involved; this is a pure
 `.spl` library change with no `-kernel` or `isa-debug-exit` dependency.
+

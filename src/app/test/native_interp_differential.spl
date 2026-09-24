@@ -1,0 +1,398 @@
+# native_interp_differential — reduce a native-vs-interpreter transcript set to a census.
+#
+# Driven by scripts/check/check-native-interp-differential.shs, which does all process
+# work (running each spec on the seed interpreter and as a seed-native-built dynload
+# binary) and leaves, per spec, three transcripts plus a manifest row.
+#
+# This file owns ONLY the pure logic: parse the two transcripts, diff the per-example
+# verdicts, classify each divergence, and emit native_interp_diff.sdn + .md plus the
+# verdict line. Keeping it process-free is what makes the guard's --selftest cheap:
+# fixtures are canned transcripts, so the selftest never depends on a live defect.
+#
+# manifest.tsv row: spec \t interp_rc \t build_rc \t native_rc \t bypass \t slug
+#
+# Usage:
+#   <seed> run src/app/test/native_interp_differential.spl --work DIR --report-dir DIR
+#                                                          [--seed-id S] [--selftest]
+
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_exists}
+use app.io.cli_ops.{exit, get_args}
+
+# ---------------------------------------------------------------------------
+# transcript parsing
+# ---------------------------------------------------------------------------
+
+# Strip SGR escape sequences. The interpreter colourises when it thinks it has a tty
+# and the two lanes must be compared on plain text, not on whether they were coloured.
+fn pf(b: bool) -> text:
+    if b:
+        return "pass"
+    return "fail"
+
+fn strip_ansi(s: text) -> text:
+    val esc = "\u{1b}"
+    if not s.contains(esc):
+        return s
+    val parts = s.split(esc)
+    var out = parts[0]
+    var i = 1
+    while i < parts.len():
+        val p = parts[i]
+        val m = p.index_of("m")
+        if m >= 0:
+            out = out + p.substring(m + 1, p.len())
+        else:
+            out = out + p
+        i = i + 1
+    return out
+
+# One example's verdict, as written by either lane.
+#   interpreter: "  <check> NAME"  /  "  <cross> NAME"
+#   native:      "  NAME pass"     /  "  NAME fail"
+# Returns "" when the line is not an example line at all.
+fn example_name_of(line: text) -> text:
+    val t: text = line.trim()
+    if t == "":
+        return ""
+    if t.starts_with("✓ ") or t.starts_with("✗ ") or t.starts_with("× "):
+        # The marker is multi-byte and substring() is byte-indexed, so cut at the
+        # first space rather than at a fixed character offset.
+        val sp = t.index_of(" ")
+        val a: text = t.substring(sp + 1, t.len())
+        return a.trim()
+    if t.ends_with(" pass"):
+        val b: text = t.substring(0, t.len() - 5)
+        return b.trim()
+    if t.ends_with(" fail"):
+        val b: text = t.substring(0, t.len() - 5)
+        return b.trim()
+    return ""
+
+fn example_passed(line: text) -> bool:
+    val t: text = line.trim()
+    if t.starts_with("✓ "):
+        return true
+    if t.ends_with(" pass"):
+        return true
+    return false
+
+# The summary line every lane prints: "N examples, M failures".
+fn summary_failures_of(body: text) -> i64:
+    val lines = body.split("\n")
+    var found = -1
+    for line in lines:
+        val ln: text = line
+        val t: text = ln.trim()
+        if t.contains(" examples, ") and t.ends_with(" failures"):
+            val head0: text = t.substring(0, t.len() - 9)
+            val head: text = head0.trim()
+            val idx = head.last_index_of(" ")
+            if idx >= 0:
+                val tail0: text = head.substring(idx + 1, head.len())
+                val tail1: text = tail0.trim()
+                found = tail1.to_i64()
+    return found
+
+fn summary_examples_of(body: text) -> i64:
+    val lines = body.split("\n")
+    var found = -1
+    for line in lines:
+        val ln2: text = line
+        val t: text = ln2.trim()
+        if t.contains(" examples, ") and t.ends_with(" failures"):
+            val idx = t.index_of(" examples,")
+            if idx > 0:
+                val h0: text = t.substring(0, idx)
+                val h1: text = h0.trim()
+                found = h1.to_i64()
+    return found
+
+# ---------------------------------------------------------------------------
+# classification
+# ---------------------------------------------------------------------------
+# The class is a HINT derived from the native-side text, not a diagnosis. It exists so
+# a 60-spec census can be grouped for triage; the smallest reproducer per class is the
+# real product. Order matters — the first match wins, most specific first.
+fn classify(detail: text, build_log: text, build_rc: i64, native_rc: i64) -> text:
+    if build_rc != 0:
+        if build_log.contains("no definition in any linked object"):
+            return "link"
+        return "build-failed"
+    if native_rc == 124:
+        return "crash"
+    if native_rc >= 128 or native_rc < 0:
+        return "crash"
+    val d: text = detail.to_lower()
+    if d == "":
+        return "unclassified"
+    if d.contains("nil") or d.contains("null") or d.contains("none") or d.contains("option"):
+        return "nil-payload"
+    if d.contains("index_of") or d.contains("sentinel") or d.contains("-1"):
+        return "sentinel"
+    if d.contains(".?") or d.contains("truthy") or d.contains("falsy") or d.contains("taken"):
+        return "truthiness"
+    if d.contains("unwrap") or d.contains("poll") or d.contains("rebind") or d.contains("no method"):
+        return "rebind"
+    if d.contains("<<") or d.contains(">>") or d.contains("u64") or d.contains("u32") or d.contains("u16") or d.contains("u8"):
+        return "int-width-bitops"
+    if d.contains("dict") or d.contains("map[") or d.contains(".get("):
+        return "dict"
+    return "other"
+
+# The native spec runner prints a bare `  NAME fail` with NO failure detail, so the
+# failure TEXT cannot classify a divergence — classifying on it labelled every real
+# codegen divergence `missing-example`. The SOURCE of the failing `it` block is both
+# available and a better input: every class name here is a code-shape name (`.?` is
+# truthiness, `.unwrap`/`Poll` is the mangler rebind, `index_of`/`-1` is the sentinel
+# family, shifts and sized ints are the width family), so the shape that diverged is
+# what we want to read.
+fn it_block_source(spec_path: text, name: text) -> text:
+    if not file_exists(spec_path):
+        return ""
+    val src = file_read(spec_path)
+    val lines = src.split("\n")
+    var i = 0
+    var found = -1
+    while i < lines.len():
+        val li: text = lines[i]
+        val lt: text = li.trim()
+        if lt.starts_with("it ") and lt.contains(name):
+            found = i
+        i = i + 1
+    if found < 0:
+        return ""
+    var out = ""
+    var k = found + 1
+    while k < lines.len():
+        val lk: text = lines[k]
+        val t: text = lk.trim()
+        if t.starts_with("it ") or t.starts_with("describe "):
+            break
+        out = out + t + " "
+        k = k + 1
+    return out
+
+# Collect the lines that follow a failing example, as its failure detail.
+fn detail_after(body: text, name: text) -> text:
+    val lines = body.split("\n")
+    var i = 0
+    var found = -1
+    while i < lines.len():
+        if example_name_of(lines[i]) == name and not example_passed(lines[i]):
+            found = i
+        i = i + 1
+    if found < 0:
+        return ""
+    var out = ""
+    var k = found + 1
+    var taken = 0
+    while k < lines.len() and taken < 8:
+        val lk: text = lines[k]
+        val t: text = lk.trim()
+        if example_name_of(lines[k]) != "":
+            break
+        if t.contains(" examples, "):
+            break
+        if t != "":
+            out = out + t + " "
+            taken = taken + 1
+        k = k + 1
+    val o: text = out
+    return o.trim()
+
+# ---------------------------------------------------------------------------
+# report emission
+# ---------------------------------------------------------------------------
+
+fn sdn_escape(s: text) -> text:
+    val a: text = s.replace("\"", "'")
+    return a.replace("\n", " ")
+
+fn main() -> i64:
+    val args = get_args()
+    var work = ""
+    var report_dir = ""
+    var seed_id = "unknown"
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--work" and i + 1 < args.len():
+            work = args[i + 1]
+            i = i + 1
+        else:
+            if a == "--report-dir" and i + 1 < args.len():
+                report_dir = args[i + 1]
+                i = i + 1
+            else:
+                if a == "--seed-id" and i + 1 < args.len():
+                    seed_id = args[i + 1]
+                    i = i + 1
+        i = i + 1
+
+    if work == "":
+        print "ERROR — nothing was checked (no --work directory given)"
+        return 2
+    if report_dir == "":
+        report_dir = work
+
+    val manifest_path = work + "/manifest.tsv"
+    if not file_exists(manifest_path):
+        print "ERROR — nothing was checked (no manifest at {manifest_path})"
+        return 2
+
+    val manifest = file_read(manifest_path)
+    val rows = manifest.split("\n")
+
+    var compared = 0
+    var divergent = 0
+    var no_oracle = 0
+    var md_rows = ""
+    var sdn_rows = ""
+    var class_counts = ""
+
+    for row in rows:
+        val rw: text = row
+        if rw.trim() == "":
+            continue
+        val cols = rw.split("\t")
+        if cols.len() < 6:
+            continue
+        val spec: text = cols[0]
+        val brc: text = cols[2]
+        val build_rc = brc.trim().to_i64()
+        val nrc: text = cols[3]
+        val native_rc = nrc.trim().to_i64()
+        val bypass: text = cols[4]
+        val slg: text = cols[5]
+        val slug: text = slg.trim()
+
+        val interp_path = work + "/" + slug + ".interp.txt"
+        val native_path = work + "/" + slug + ".native.txt"
+        val build_path = work + "/" + slug + ".build.txt"
+        if not file_exists(interp_path):
+            continue
+
+        val interp_body = strip_ansi(file_read(interp_path))
+        var native_body = ""
+        if file_exists(native_path):
+            native_body = strip_ansi(file_read(native_path))
+        var build_log = ""
+        if file_exists(build_path):
+            build_log = file_read(build_path)
+
+        # A spec whose INTERPRETER run produced no examples cannot discriminate: the
+        # oracle itself said nothing, so "the two lanes agree" would be a vacuous pass.
+        # Such a spec is NOT counted as compared — it is counted separately as
+        # `no-oracle`, and if nothing survives this filter the run is an ERROR.
+        val interp_n = summary_examples_of(interp_body)
+        if interp_n <= 0:
+            no_oracle = no_oracle + 1
+            continue
+
+        compared = compared + 1
+
+        if build_rc != 0:
+            # A spec that fails to native-build IS a divergence, never a skip.
+            val cls = classify("", build_log, build_rc, native_rc)
+            divergent = divergent + 1
+            md_rows = md_rows + "| `" + spec + "` | (whole spec) | " + interp_n.to_text() + " examples ran | native-build failed | " + cls + " |\n"
+            sdn_rows = sdn_rows + "  - spec: \"" + sdn_escape(spec) + "\"\n    example: \"(whole spec)\"\n    interp: \"ran\"\n    native: \"build-failed\"\n    class: \"" + cls + "\"\n"
+            class_counts = class_counts + cls + "\n"
+            continue
+
+        if native_rc >= 128 or native_rc == 124:
+            divergent = divergent + 1
+            val cls2 = classify("", build_log, build_rc, native_rc)
+            md_rows = md_rows + "| `" + spec + "` | (whole spec) | " + interp_n.to_text() + " examples ran | rc=" + native_rc.to_text() + " | " + cls2 + " |\n"
+            sdn_rows = sdn_rows + "  - spec: \"" + sdn_escape(spec) + "\"\n    example: \"(whole spec)\"\n    interp: \"ran\"\n    native: \"rc=" + native_rc.to_text() + "\"\n    class: \"" + cls2 + "\"\n"
+            class_counts = class_counts + cls2 + "\n"
+            continue
+
+        # The SUMMARY pair is the primary oracle; per-example names only refine it.
+        #
+        # Why: a spec's own `print` output interleaves on the same line as the native
+        # runner's example verdict (`  test full line 1tokens: [t, t]\nlen: 2\n pass`),
+        # so name-keyed matching alone reported `_cmm_debug_spec.spl` as 2 divergences
+        # when both lanes in fact said `2 examples, 0 failures`. Two lanes that agree on
+        # (examples, failures) have not diverged, whatever the line layout did. Only when
+        # the pair differs — or one lane cannot be parsed — is the per-example diff run,
+        # and then it is naming WHICH example, not deciding THAT there was a divergence.
+        val native_n = summary_examples_of(native_body)
+        val interp_f = summary_failures_of(interp_body)
+        val native_f = summary_failures_of(native_body)
+        if native_n == interp_n and native_f == interp_f and native_f >= 0:
+            continue
+
+        if native_n < 0:
+            # The native lane printed no summary at all: it died partway through the
+            # suite. That is a divergence in itself and the per-example diff below
+            # will name the last example it reached.
+            divergent = divergent + 1
+            md_rows = md_rows + "| `" + spec + "` | (whole spec) | " + interp_n.to_text() + " examples, " + interp_f.to_text() + " failures | no summary line (rc=" + native_rc.to_text() + ") | truncated-run |\n"
+            sdn_rows = sdn_rows + "  - spec: \"" + sdn_escape(spec) + "\"\n    example: \"(whole spec)\"\n    interp: \"" + interp_n.to_text() + "/" + interp_f.to_text() + "\"\n    native: \"no summary, rc=" + native_rc.to_text() + "\"\n    class: \"truncated-run\"\n"
+            class_counts = class_counts + "truncated-run\n"
+            continue
+
+        # per-example diff
+        val ilines = interp_body.split("\n")
+        for il in ilines:
+            val ilt: text = il
+            val name = example_name_of(ilt)
+            if name == "":
+                continue
+            val ipass = example_passed(ilt)
+            var npass = false
+            var seen = false
+            val nlines = native_body.split("\n")
+            for nl in nlines:
+                val nlt: text = nl
+                if example_name_of(nlt) == name:
+                    seen = true
+                    npass = example_passed(nlt)
+            if not seen:
+                divergent = divergent + 1
+                val cls3 = "missing-example"
+                md_rows = md_rows + "| `" + spec + "` | " + name + " | " + pf(ipass) + " | absent | " + cls3 + " |\n"
+                sdn_rows = sdn_rows + "  - spec: \"" + sdn_escape(spec) + "\"\n    example: \"" + sdn_escape(name) + "\"\n    interp: \"" + pf(ipass) + "\"\n    native: \"absent\"\n    class: \"" + cls3 + "\"\n"
+                class_counts = class_counts + cls3 + "\n"
+                continue
+            if ipass == npass:
+                continue
+            divergent = divergent + 1
+            var detail = ""
+            if not npass:
+                detail = detail_after(native_body, name)
+            else:
+                detail = detail_after(interp_body, name)
+            # Prefer the failing `it` block's SOURCE. The native runner emits no
+            # failure detail at all, so transcript text alone classifies nothing.
+            var basis = it_block_source(spec, name)
+            if basis == "":
+                basis = detail
+            val cls4 = classify(basis, build_log, build_rc, native_rc)
+            md_rows = md_rows + "| `" + spec + "` | " + name + " | " + pf(ipass) + " | " + pf(npass) + " | " + cls4 + " |\n"
+            sdn_rows = sdn_rows + "  - spec: \"" + sdn_escape(spec) + "\"\n    example: \"" + sdn_escape(name) + "\"\n    interp: \"" + pf(ipass) + "\"\n    native: \"" + pf(npass) + "\"\n    class: \"" + cls4 + "\"\n    detail: \"" + sdn_escape(detail) + "\"\n    bypass: \"" + sdn_escape(bypass) + "\"\n"
+            class_counts = class_counts + cls4 + "\n"
+
+    if compared == 0:
+        print "ERROR — nothing was checked ({no_oracle} spec(s) produced no interpreter examples; none could discriminate)"
+        return 2
+
+    val md = "# native vs interpreter differential census\n\nseed: `" + seed_id + "`\nspecs compared: " + compared.to_text() + "\ndivergent rows: " + divergent.to_text() + "\n\n| spec | example | interp | native | class |\n|---|---|---|---|---|\n" + md_rows
+    file_write(report_dir + "/native_interp_diff.md", md)
+
+    val sdn = "native_interp_diff:\n  seed: \"" + sdn_escape(seed_id) + "\"\n  compared: " + compared.to_text() + "\n  divergent: " + divergent.to_text() + "\n  rows:\n" + sdn_rows
+    file_write(report_dir + "/native_interp_diff.sdn", sdn)
+
+    print md_rows
+    print "report: {report_dir}/native_interp_diff.md"
+    print "classes seen:"
+    print class_counts
+
+    if divergent == 0:
+        print "PASS — {compared} spec(s) compared ({no_oracle} no-oracle, excluded), 0 divergent"
+        return 0
+    print "FAIL — {compared} spec(s) compared ({no_oracle} no-oracle, excluded), {divergent} divergent"
+    return 1
+
+exit(main())

@@ -1,4 +1,8 @@
 # Stage 2 shared-WM readback is outside the core bootstrap ABI
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -20,3 +24,4 @@ runtime, provide a bootstrap-safe readback implementation, or defer this exact
 production closure to an attested Phase 3 compiler/runtime. After resolution,
 build and execute the fixture, then use the attested ARM64 desktop artifact for
 the QEMU screendump gate.
+

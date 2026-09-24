@@ -1,4 +1,9 @@
 # BUG: `.?` in tail position of `-> bool` functions leaks the payload (42 sites)
+## Closed 2026-09-16 — Status FIXED, re-verified; 16 sites fixed, regression spec 6/6 on both engines
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-09
 - **Lane:** G4 (NILQ follow-on)
@@ -149,3 +154,4 @@ Its `has()` helper previously returned a truthy payload for every lookup, so the
 spec could never distinguish present from absent. The 5 residual failures are
 real BTree delete/rebalance defects that the broken predicate had been masking;
 they are pre-existing and out of scope for this fix.
+

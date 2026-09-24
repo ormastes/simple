@@ -1,5 +1,20 @@
 # Interpreter state corruption around interpreted parse_module (hex-literal conversion)
 
+## Not closed 2026-09-13 — left open; seed-interpreter defect, and the fix surface is off limits
+
+- **inferred** The entry isolates the trigger precisely (`parse_module(src, name)` fails iff
+  `name` is a path to a REAL existing file, dying on the `0xff` hex literal in
+  `src/lib/bitwise_utils.spl` with `cannot parse 'f' as i64`), and locates it in the Rust
+  seed interpreter, not in `.spl` code.
+- **measured** The referenced source still exists and still contains the hex literal, so the
+  entry is not stale by removed code.
+- **inferred** Its own repro harnesses (`tmp/site12/name_matrix.spl`,
+  `tmp/site12/lean_parse_sweep.spl`) are gone from this tree, so the isolation cannot be
+  replayed as written without rebuilding them.
+- Left OPEN: the fix is in `src/compiler_rust`, which must not be edited while a bootstrap
+  is running; the documented fake-module-name workaround remains valid.
+
+
 - **ID:** interp_state_corruption_parse_module
 - **Severity:** P2
 - **Date:** 2026-06-12

@@ -1,0 +1,136 @@
+# @cover src/compiler/00.common/dynamic_identity/kpf_closure.spl 80%
+
+use std.common.kernel_plugin.ids.{KpfId128, kpf_id128_equal}
+use compiler.common.dynamic_identity.closure.Closure
+use compiler.common.dynamic_identity.persistent_id.PersistentExtensionId
+use compiler.common.dynamic_identity.dense_tag_map.{TagCapacity, DenseTagMap}
+use compiler.common.dynamic_identity.kpf_closure.{
+    KpfClosureError, KpfConstructorClaim, KpfConstructorSeal,
+    kpf_constructor_id, kpf_operation_id, kpf_constructor_claim, seal_kpf_constructors
+}
+
+fn identity(provider: text, name: text, ordinal: i64) -> PersistentExtensionId:
+    PersistentExtensionId(owner_enum: "hir.HirExpr", provider_module: provider,
+        constructor_name: name, local_ordinal: ordinal, schema_abi_version: 1)
+
+fn verify_op() -> KpfId128:
+    kpf_operation_id("hir.HirExpr", "verify")
+
+fn lower_op() -> KpfId128:
+    kpf_operation_id("hir.HirExpr", "lower")
+
+fn claim(provider: text, name: text, ordinal: i64, closure: Closure) -> KpfConstructorClaim:
+    kpf_constructor_claim(identity(provider, name, ordinal), closure,
+        [verify_op(), lower_op()], [lower_op(), verify_op()])
+
+fn capacity() -> TagCapacity:
+    TagCapacity(static_capacity: 8, dense_capacity: 16)
+
+fn error_code(claims: [KpfConstructorClaim], critical: bool) -> text:
+    match seal_kpf_constructors(claims, capacity(), critical):
+        case Ok(value): "UNEXPECTED-OK"
+        case Err(error): error.code()
+
+fn seal(claims: [KpfConstructorClaim], critical: bool) -> KpfConstructorSeal:
+    match seal_kpf_constructors(claims, capacity(), critical):
+        case Ok(value): value
+        case Err(error): KpfConstructorSeal(
+            dense_map: DenseTagMap(
+                entries: [], static_count: -1, sealed_count: -1, seal_hash: error.code()),
+            constructors: [], ignored_dyn_count: -1)
+
+describe "KPF constructor identity adapter":
+    it "derives a stable KPF ID from the full persistent constructor tuple":
+        val first = identity("ext.gpu", "Launch", 0)
+        val same = identity("ext.gpu", "Launch", 0)
+        val changed = identity("ext.gpu", "Launch", 1)
+        assert_true(kpf_id128_equal(kpf_constructor_id(first), kpf_constructor_id(same)))
+        assert_false(kpf_id128_equal(kpf_constructor_id(first), kpf_constructor_id(changed)))
+
+    it "rejects a forged claimed KPF constructor ID":
+        val base = claim("ext.gpu", "Launch", 0, Closure.Complete)
+        val forged = KpfConstructorClaim(identity: base.identity,
+            claimed_constructor_id: KpfId128(hi: 1, lo: 2), closure: base.closure,
+            required_operations: base.required_operations,
+            provided_operations: base.provided_operations)
+        expect(error_code([forged], false)).to_equal("KPF-CONSTRUCTOR-ID-MISMATCH")
+
+describe "required operation completeness":
+    it "seals a constructor only when every required operation is present":
+        val result = seal([claim("compiler.hir", "Literal", 0, Closure.Static)], true)
+        expect(result.constructors.len()).to_equal(1)
+        expect(result.constructors[0].operation_table.len()).to_equal(2)
+
+    it "generates the same operation table regardless of declaration order":
+        val base = identity("ext.gpu", "Launch", 0)
+        val forward = kpf_constructor_claim(base, Closure.Complete,
+            [verify_op()], [verify_op(), lower_op()])
+        val reverse = kpf_constructor_claim(base, Closure.Complete,
+            [verify_op()], [lower_op(), verify_op()])
+        val first = seal([forward], false).constructors[0].operation_table
+        val second = seal([reverse], false).constructors[0].operation_table
+        assert_true(kpf_id128_equal(first[0], second[0]))
+        assert_true(kpf_id128_equal(first[1], second[1]))
+
+    it "rejects a missing required operation":
+        val base = identity("ext.gpu", "Launch", 0)
+        val incomplete = kpf_constructor_claim(base, Closure.Complete,
+            [verify_op(), lower_op()], [verify_op()])
+        expect(error_code([incomplete], false)).to_equal("KPF-OPERATION-MISSING")
+
+    it "rejects duplicate operation entries instead of masking table defects":
+        val base = identity("ext.gpu", "Launch", 0)
+        val duplicate = kpf_constructor_claim(base, Closure.Complete,
+            [verify_op()], [verify_op(), verify_op()])
+        expect(error_code([duplicate], false)).to_equal("KPF-OPERATION-DUPLICATE")
+
+describe "Static Complete Dyn closure":
+    it "seals static and complete constructors into generation-local dense tags":
+        val result = seal([
+            claim("ext.gpu", "Launch", 0, Closure.Complete),
+            claim("compiler.hir", "Literal", 0, Closure.Static)
+        ], true)
+        expect(result.dense_map.static_count).to_equal(1)
+        expect(result.dense_map.sealed_count).to_equal(2)
+        expect(result.constructors[0].dense_tag).to_equal(0)
+        expect(result.constructors[1].dense_tag).to_equal(1)
+
+    it "rejects Dyn in a critical composition":
+        expect(error_code([claim("ext.live", "Probe", 0, Closure.Dyn)], true))
+            .to_equal("KPF-DYN-CRITICAL")
+
+    it "keeps noncritical Dyn outside the sealed dense table":
+        val result = seal([
+            claim("compiler.hir", "Literal", 0, Closure.Static),
+            claim("ext.live", "Probe", 0, Closure.Dyn)
+        ], false)
+        expect(result.constructors.len()).to_equal(1)
+        expect(result.ignored_dyn_count).to_equal(1)
+
+    it "is extension-order independent":
+        val forward = seal([
+            claim("compiler.hir", "Literal", 0, Closure.Static),
+            claim("ext.gpu", "Launch", 0, Closure.Complete),
+            claim("ext.simd", "Splat", 0, Closure.Complete)
+        ], true)
+        val reverse = seal([
+            claim("ext.simd", "Splat", 0, Closure.Complete),
+            claim("ext.gpu", "Launch", 0, Closure.Complete),
+            claim("compiler.hir", "Literal", 0, Closure.Static)
+        ], true)
+        expect(reverse.dense_map.seal_hash).to_equal(forward.dense_map.seal_hash)
+        var i = 0
+        while i < forward.constructors.len():
+            assert_true(kpf_id128_equal(
+                forward.constructors[i].constructor_id,
+                reverse.constructors[i].constructor_id))
+            i = i + 1
+
+    it "rejects a KPF ID collision between distinct persistent tuples":
+        val left = claim("ext.gpu", "Launch", 0, Closure.Complete)
+        val right_base = claim("ext.simd", "Splat", 0, Closure.Complete)
+        val right = KpfConstructorClaim(identity: right_base.identity,
+            claimed_constructor_id: left.claimed_constructor_id, closure: right_base.closure,
+            required_operations: right_base.required_operations,
+            provided_operations: right_base.provided_operations)
+        expect(error_code([left, right], false)).to_equal("KPF-CONSTRUCTOR-ID-COLLISION")

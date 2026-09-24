@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect, assert_true}
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_delete, file_read_bytes, file_write_bytes}
+use compiler.loader.smf_mmap_native.{
+    MAP_PRIVATE, PROT_READ, PROT_WRITE,
+    native_mmap_file, native_mmap_read_bytes, native_munmap,
+    native_write_exec_memory
+}
+
+val WINDOWS_FILE_MMAP_DIR = "build/native_probe/windows_smf_file_mmap_spec"
+val WINDOWS_FILE_MMAP_PATH = WINDOWS_FILE_MMAP_DIR + "/fixture.smf"
+
+extern fn rt_open_fd(path: text, flags: i64, mode: i64) -> i64
+extern fn rt_close_fd(fd: i64) -> i64
+extern fn rt_mmap_raw(
+    addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64
+) -> i64
+
+fn windows_file_mmap_fixture() -> [u8]:
+    [0x53u8, 0x4du8, 0x46u8, 0u8, 1u8, 2u8, 3u8, 4u8]
+
+fn write_windows_file_mmap_fixture() -> [u8]:
+    val bytes = windows_file_mmap_fixture()
+    assert_true(dir_create_all(WINDOWS_FILE_MMAP_DIR))
+    _ = file_delete(WINDOWS_FILE_MMAP_PATH)
+    assert_true(file_write_bytes(WINDOWS_FILE_MMAP_PATH, bytes))
+    bytes
+
+describe "Windows SMF file-backed raw mapping":
+    it "maps and releases an SMF through the production loader API":
+        step("Map an on-disk SMF through native_mmap_file and verify every byte")
+        val expected = write_windows_file_mmap_fixture()
+        val mapped = native_mmap_file(
+            WINDOWS_FILE_MMAP_PATH, PROT_READ, MAP_PRIVATE, 0,
+            expected.len() as i64)
+        assert_true(mapped[0] > 0)
+        expect(mapped[1]).to_equal(expected.len() as i64)
+        expect(native_mmap_read_bytes(mapped[0], 0, mapped[1])).to_equal(expected)
+        assert_true(native_munmap(mapped[0], mapped[1]))
+        assert_true(file_delete(WINDOWS_FILE_MMAP_PATH))
+
+    it "keeps a writable private mapping copy-on-write":
+        step("Mutate a MAP_PRIVATE view and prove the SMF file stays unchanged")
+        val original = write_windows_file_mmap_fixture()
+        val mapped = native_mmap_file(
+            WINDOWS_FILE_MMAP_PATH, PROT_READ | PROT_WRITE, MAP_PRIVATE, 0,
+            original.len() as i64)
+        assert_true(mapped[0] > 0)
+        val replacement: [u8] = [0x58u8]
+        expect(native_write_exec_memory(mapped[0], replacement, 0)).to_equal(1)
+        expect(native_mmap_read_bytes(mapped[0], 0, 1)[0]).to_equal(0x58u8)
+        assert_true(native_munmap(mapped[0], mapped[1]))
+        expect(file_read_bytes(WINDOWS_FILE_MMAP_PATH)).to_equal(original)
+        assert_true(file_delete(WINDOWS_FILE_MMAP_PATH))
+
+    it "rejects a closed descriptor without terminating the process":
+        step("Close a real SMF descriptor before asking the raw provider to map it")
+        val expected = write_windows_file_mmap_fixture()
+        val fd = rt_open_fd(WINDOWS_FILE_MMAP_PATH, 0, 0)
+        assert_true(fd >= 0)
+        expect(rt_close_fd(fd)).to_equal(0)
+        expect(rt_mmap_raw(0, expected.len() as i64, PROT_READ, MAP_PRIVATE, fd, 0)).to_equal(-1)
+        assert_true(file_delete(WINDOWS_FILE_MMAP_PATH))

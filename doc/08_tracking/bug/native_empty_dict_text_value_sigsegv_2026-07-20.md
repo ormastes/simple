@@ -50,3 +50,38 @@ into erased-element-type containers; root-cause properly before patching.
   i64, and mixed f64/int through the identical path all pass rc 30.
 - See `seed_f64_array_element_precision_mask_2026-07-19.md` (hardening-sweep
   banner) for the sibling f64 fix this was found alongside.
+
+## Attempted re-measurement 2026-09-18 — NOT reproduced, and not refuted either
+
+This entry could not be re-measured on Linux aarch64 today, and the reason is
+worth recording so the next attempt does not spend the same hour.
+
+The repro command above (`native-build --entry repro.spl`) never reaches
+codegen on this host. Working through it in order:
+
+1. `native-build` first refused with `SCV-E-ADMISSION:
+   compile-event-journal-missing`, whose named remedy
+   (`SIMPLE_SCV_INVENTORY_COLD_INIT=1`) then published an EMPTY inventory and
+   wedged the cache permanently — a separate defect found while chasing this
+   one, fixed fail-closed in PR #1084 and recorded in
+   `seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md`.
+2. With a sound binary and a clean cache the inventory builds correctly
+   (16,797 entries), and the build then stops at `SCV-E-SNAPSHOT:
+   snapshot-inventory-empty`, cleared by the documented opt-in
+   `SIMPLE_SCV_FREEZE_FALLBACK=1` (these fixtures live outside the `src` root
+   the freeze covers).
+3. Past that it stops at `error: persistent package index admission failed:
+   scv-authority-missing`, and `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` then leads to
+   `filesystem-event-journal-missing`. That is where it ends: **no native
+   artifact is produced, so there is nothing to run and nothing to observe.**
+
+So the interpret and JIT lanes return rc 30 as this entry already says, and the
+native lane — the only one where this bug lives — cannot be exercised here at
+all. Treat this entry as UNVERIFIED-since-2026-07-20 rather than as reproduced
+or fixed; a native row measured under any of the workarounds above would be
+manufactured, not observed.
+
+The same blocker is why `check-engine-differential`'s native lane answers 0 of
+19 fixtures (see that gate's DEGRADED COVERAGE line). Whoever clears the
+persistent package index unblocks both at once, and this entry becomes
+measurable again.

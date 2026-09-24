@@ -1,0 +1,59 @@
+# @req KPM-REQ-005 KPM-REQ-008 KPM-REQ-009 KPM-REQ-013 KPM-NFR-001 KPM-NFR-002 KPM-NFR-004 KPM-NFR-006
+use std.spec.*
+use common.plugin.aspect_params.{AspectParamsV1, aspect_coverage_cutover_policy_v1}
+use common.plugin.instrumentation_aspect_pack.{
+    COVERAGE_RUNTIME_COLLECTOR_V1,
+    InstrumentationActivationModeV1,
+    InstrumentationLaneV1, build_instrumentation_aspect_bundle_v1,
+    activate_instrumentation_coverage_startup_v1,
+    instrumentation_activation_mode_v1
+}
+use std.common.aspect_pack.{APK_ACT_LAZY_FACET, APK_ACT_STARTUP, APK_ACT_STATIC}
+use std.io.{file_read}
+
+describe "coverage and logging aspect packs":
+    it "uses static bootstrap activation and startup/lazy test activation":
+        val bootstrap = build_instrumentation_aspect_bundle_v1(
+            InstrumentationLaneV1.Bootstrap, AspectParamsV1.defaults())
+        val test_lane = build_instrumentation_aspect_bundle_v1(
+            InstrumentationLaneV1.Test, AspectParamsV1.defaults())
+        expect(bootstrap.pack.ok).to_equal(true)
+        expect(bootstrap.catalog.ok).to_equal(true)
+        expect(bootstrap.coverage_activation).to_equal(APK_ACT_STATIC)
+        expect(bootstrap.logging_activation).to_equal(APK_ACT_STATIC)
+        expect(test_lane.coverage_activation).to_equal(APK_ACT_STARTUP)
+        expect(test_lane.logging_activation).to_equal(APK_ACT_LAZY_FACET)
+
+    it "keeps activation semantics explicit while selecting atomic APK-only coverage":
+        expect(instrumentation_activation_mode_v1(InstrumentationActivationModeV1.Static)).to_equal(APK_ACT_STATIC)
+        expect(instrumentation_activation_mode_v1(InstrumentationActivationModeV1.Startup)).to_equal(APK_ACT_STARTUP)
+        expect(instrumentation_activation_mode_v1(InstrumentationActivationModeV1.LazyFacet)).to_equal(APK_ACT_LAZY_FACET)
+        expect(aspect_coverage_cutover_policy_v1("atomic-apk-only").ok.unwrap()).to_equal("atomic-apk-only")
+        expect(aspect_coverage_cutover_policy_v1("").ok.unwrap()).to_equal("atomic-apk-only")
+        expect(aspect_coverage_cutover_policy_v1("dual").is_err()).to_be(true)
+
+    it "wires the selected atomic APK-only state at the production coverage boundary":
+        val runner = file_read("src/app/test_runner_new/test_runner_single.spl") ?? ""
+        val cli = file_read("src/app/cli/_CliMain/main_and_help.spl") ?? ""
+        expect(runner).to_contain("SIMPLE_COVERAGE_CUTOVER_STATE")
+        expect(runner).to_contain("SIMPLE_PHASE7_CHILD_APK_REQUIRED")
+        expect(runner).to_contain("SIMPLE_PHASE7_CHILD_APK_RECEIPT")
+        expect(runner).to_contain("runtime_evidence_is_child_owned")
+        expect(runner).to_contain("aspect_coverage_cutover_policy_v1")
+        expect(runner).to_contain("phase7-coverage-source-rewrite=0")
+        expect(runner.contains("_cov_instrument_for_coverage")).to_be(false)
+        expect(runner.contains("SIMPLE_PHASE7_LEGACY_EVIDENCE")).to_be(false)
+        expect(cli).to_contain("activate_required_child_coverage_apk")
+        expect(cli).to_contain("PLUG-E-COVERAGE-POLICY")
+        expect(cli).to_contain("aspect_coverage_cutover_policy_v1")
+        expect(cli).to_contain("phase7-apk-child-startup")
+        expect(cli).to_contain("SIMPLE_NO_BOOTSTRAP_DELEGATE")
+
+    it "registers and activates a resident production STARTUP binding":
+        val receipt = activate_instrumentation_coverage_startup_v1(
+            AspectParamsV1.defaults())
+        expect(receipt.ok).to_equal(true)
+        expect(receipt.activation_count).to_equal(1)
+        expect(receipt.generation).to_be_greater_than(0)
+        expect(receipt.payload_size).to_be_greater_than(0)
+        expect(receipt.consumer_mode).to_equal(COVERAGE_RUNTIME_COLLECTOR_V1)

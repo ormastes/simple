@@ -1,4 +1,9 @@
 # `i64.to_char()` was implemented only in the LLVM backend — FIXED
+## Closed 2026-09-16 — body says FIXED 2026-08-05 with verification: spec 6/5 fail -> 11/11 pass, second defect also fixed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-05 (T-07, x25519mlkem768_acceleration campaign)
 **Component:** `src/compiler_rust/compiler/src/interpreter_method/primitives.rs`
@@ -126,3 +131,4 @@ AC-9 benchmark lane, T-05) to the extent that it depends on a completing
 browser-engine HTTP/1.1 client request. It does not by itself prove a full
 TLS 1.3 handshake latency benchmark — that is T-05's own deliverable and
 outside this task's scope.
+

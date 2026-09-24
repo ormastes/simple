@@ -1,4 +1,8 @@
 # In-guest Simple interpreter faults in rt_string_join on nil array (freestanding module-init + optimizer guard fold)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Target:** `bin/release/x86_64-unknown-simpleos/simple` (the in-guest Simple
 interpreter, cross-built with the Rust seed for x86_64-unknown-simpleos).
@@ -68,3 +72,4 @@ available: the fault is in the in-guest interpreter's own runtime C helpers
 codegen path itself, not in `.spl` source that a spec-level workaround could
 route around. Leaving OPEN/ARCHITECTURAL; re-attempt requires a session that
 can run a full bootstrap and touch `src/compiler_rust/`.
+

@@ -1,4 +1,8 @@
 # ByteSpan.equals faults 93x on a boxed integer in a pointer slot (SimpleOS WM guest)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN — producer located and characterized, fix NOT landed
 - Filed: 2026-07-28
@@ -190,3 +194,4 @@ of faulting.
 Verify any candidate patch is not a no-op before a lane run:
 
     --emit-archive --target x86_64-unknown-none   # ~6s/module, byte-compare archives
+

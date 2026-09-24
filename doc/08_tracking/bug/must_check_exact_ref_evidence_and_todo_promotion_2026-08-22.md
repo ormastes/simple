@@ -1,4 +1,9 @@
 # Must-check exact-ref evidence and TODO promotion
+## Closed 2026-09-16 — ...ce and TODO promotion - Status: RESOLVED - Owner: primary Codex must-check lane - Date: 20
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED
 - Owner: primary Codex must-check lane
@@ -32,3 +37,4 @@ unchanged carry-forward, independence from modified/removed live-worktree
 bytes, rejection when the pushed revision itself omits the evidence blob, and
 bounded one/two-ref hook paths. Cycle 1 completed in 8.73 seconds; cycle 2 after
 the Sdoctest/registry follow-up completed in 8.25 seconds.
+

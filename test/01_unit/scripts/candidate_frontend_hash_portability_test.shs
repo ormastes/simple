@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/candidate-hash-portability.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+. "$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+printf abc >"$work/input with spaces"
+expected=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+# The caller may supply the exact PATH captured by a bootstrap transcript.
+# This macOS default also deliberately excludes Homebrew's GNU coreutils.
+(
+    PATH=${CANDIDATE_FRONTEND_TEST_SANITIZED_PATH:-/usr/bin:/bin}
+    export PATH
+    actual=$(candidate_frontend_hash_file "$work/input with spaces") || fail 'sanitized PATH hashing'
+    [ "$actual" = "$expected" ] || fail 'sanitized PATH digest'
+    [ "${#actual}" -eq 64 ] || fail 'sanitized PATH empty/malformed digest'
+)
+
+# Exercise the fallback deterministically even when GNU tools are installed.
+mkdir "$work/shasum-only" "$work/no-hasher"
+ln -s "$(command -v shasum)" "$work/shasum-only/shasum"
+ln -s "$(command -v perl)" "$work/shasum-only/perl"
+(
+    PATH=$work/shasum-only
+    export PATH
+    actual=$(candidate_frontend_hash_file "$work/input with spaces") || fail 'shasum fallback'
+    [ "$actual" = "$expected" ] || fail 'shasum fallback digest'
+)
+(
+    PATH=$work/no-hasher
+    export PATH
+    if actual=$(candidate_frontend_hash_file "$work/input with spaces"); then
+        fail 'missing hash tool accepted'
+    fi
+    [ -z "$actual" ] || fail 'missing hash tool emitted a digest'
+)
+if actual=$(candidate_frontend_hash_file "$work/missing"); then
+    fail 'missing input accepted'
+fi
+[ -z "$actual" ] || fail 'missing input emitted a digest'
+
+# Prefer sha256sum when present, but never turn its failure or malformed
+# output into success through the exit status of a trailing pipeline command.
+(
+    sha256sum() { printf '%s  %s\n' "$expected" "$2"; }
+    shasum() { fail 'sha256sum was not preferred'; }
+    actual=$(candidate_frontend_hash_file "$work/input with spaces") || fail 'sha256sum priority'
+    [ "$actual" = "$expected" ] || fail 'sha256sum digest'
+    sha256sum() { printf '%s\n' broken; return 7; }
+    if actual=$(candidate_frontend_hash_file "$work/input with spaces"); then
+        fail 'hash tool failure accepted'
+    fi
+    [ -z "$actual" ] || fail 'failed tool emitted a digest'
+    sha256sum() { printf '%s\n' broken; }
+    if actual=$(candidate_frontend_hash_file "$work/input with spaces"); then
+        fail 'malformed digest accepted'
+    fi
+    [ -z "$actual" ] || fail 'malformed tool emitted a digest'
+)
+echo 'PASS: frontend portable hashing with sanitized PATH and fail-closed errors'

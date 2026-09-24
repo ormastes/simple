@@ -390,3 +390,61 @@ By area: src/app 2, test/01_unit 25, test/02_integration 1, test/cert 1, test/in
 
 - `doc/08_tracking/bug/` — enum payload sub-pattern always-matches (separate defect)
 - `src/compiler/80.driver/driver_pipeline_lowering.spl:119` — `_mir_error_is_fatal` allowlist
+
+## Re-measurement 2026-09-18 — the live defect is now a LANE SPLIT, and the named casualties are remediated
+
+Binary: `bin/simple` redeployed today from current source (sha256
+`308de6af84db5c26e2c0`, 51,645,288 B). Anything measured on this host before
+2026-09-18 17:00 used a binary with its own silent-wrong-answer defects
+(`seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md`), so the rows below
+supersede earlier ones taken here.
+
+### Expression form — one lane now fails closed, the other still fabricates a value
+
+```simple
+fn classify(k: Kind) -> i64:      # enum Kind: A / B / C
+    match k:
+        case Kind.A: 10
+        case Kind.B: 20
+```
+
+| lane | `classify(Kind.C)` |
+|---|---|
+| interpret | `error: semantic: missing return in non-unit function 'classify'` — **fails closed** |
+| JIT (default for `run`) | **`0`**, exit 0, no diagnostic |
+
+Two corrections to the record above:
+
+1. **The uncovered-variant value is `0` here, not `3`.** The nil-sentinel
+   encoding the original text describes no longer reproduces on this probe. The
+   propagating-wrong-value hazard is unchanged in kind; the number is not.
+2. **"no diagnostic on any lane" is no longer true.** The interpret lane rejects
+   this program at semantic-check time. The JIT lane accepts and runs the very
+   same program. So the remaining defect is **engine parity** — a program one
+   engine declares invalid still executes on the other and yields a fabricated
+   value — which is a materially smaller and better-defined job than the
+   deferred "full enforcement" the record scoped.
+
+The **statement form** is unchanged: it still falls through silently on both
+lanes, exit 0, no diagnostic.
+
+### The named casualties are already fixed
+
+The "Real findings" section lists `src/lib/nogc_sync_mut/redis/client.spl` lines
+80, 99, 118, 136, 155, 174, 195, 214, 233 and 252 as matching only 2 of 6
+`RedisReply` variants, so "an unexpected reply type is silently read as `3`".
+Checked today: the file has 10 `match reply` blocks and **10 wildcard arms**, one
+within 20 lines of every one of those line numbers. All ten are exhaustive now.
+
+That claim should not be cited as a live casualty without re-verifying. The
+blast-radius table (286 sites, 63 reliable) was produced on 2026-08-01 and has
+not been regenerated here; treat its individual rows the same way.
+
+### What is worth doing next
+
+Parity, not a new checker: make the JIT lane run the semantic check the
+interpret lane already applies, so a non-exhaustive match expression in a
+non-unit function is refused by both engines rather than silently yielding `0` in
+one of them. The record's own argument for preferring a runtime observation over
+a bare-name compile-time checker is unaffected — 336 enum names are declared more
+than once, and that has not changed.

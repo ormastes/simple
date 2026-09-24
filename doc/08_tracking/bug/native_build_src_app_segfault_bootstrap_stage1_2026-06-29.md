@@ -1,4 +1,8 @@
 # Bug: seed `native-build` of `src/app` segfaults — blocks bootstrap Stage 1
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-06-29
 **Area:** native-build / bootstrap (seed compiler AOT path)
@@ -60,3 +64,4 @@ Capture the core / run under a debug seed to localize the segfault in the
 native-build pipeline (likely codegen/linker stage given `--backend=llvm-lib`).
 Until fixed, binary-level verification of self-hosted compiler changes must use
 an alternate path (e.g. Rust-seed cargo build for resolver parity).
+

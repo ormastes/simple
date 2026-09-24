@@ -1,4 +1,8 @@
 # Bug: member-path stores silently lost inside BDD it-block closures
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** Medium-High — silently no-ops writes, producing false test
@@ -63,3 +67,4 @@ instead of the underlying object handle. Fix in the interpreter's compound
 assignment/store path for closure frames so `obj.field[i]` / `obj.a.b`
 resolve the same object identity as in plain function frames. Add the four
 store shapes above as an interpreter regression spec.
+

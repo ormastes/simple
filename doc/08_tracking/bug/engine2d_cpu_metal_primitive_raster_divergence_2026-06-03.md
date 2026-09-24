@@ -1,6 +1,12 @@
 # BUG: engine2d CPU↔Metal primitive rasterization diverges (line/circle/rounded_rect)
 
-Status: resolved (2026-06-05)
+## Closed 2026-09-13 — Resolved 2026-06-05 per the entry's own parity evidence; not re-runnable here
+
+- **inferred** The entry records all four primitives bit-exact CPU<->Metal with genuine GPU readback (`gpu_frame_complete=true`, `line/circle/rounded_rect/triangle: MATCH mismatches=0/1024`) and names the kernel changes that achieved it.
+- **measured** Metal is a macOS-only backend; the triage host is Windows 11 x86_64, so the parity harness cannot be re-executed to add fresh evidence.
+- **inferred** Closing on the recorded resolution rather than leaving a resolved entry open in a status sweep.
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 - id: engine2d-cpu-metal-primitive-raster-divergence
 - date: 2026-06-03

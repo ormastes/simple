@@ -18,7 +18,9 @@ use super::interpreter_control::{
     assert_stmt_failure, exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with,
     is_condition_present,
 };
-use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
+use super::interpreter_state::{
+    mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, GLOBAL_ENUMS, IMMUTABLE_VARS, MODULE_GLOBALS,
+};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
 use crate::interpreter_unit::{
     is_unit_type, register_standalone_unit_locals, register_unit_family_locals, validate_unit_constraints,
@@ -617,10 +619,16 @@ pub(crate) fn exec_node(
         // See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
         Node::UseStmt(use_stmt) => {
             let current_file = super::get_current_file();
-            // `enums` is borrowed immutably in this signature; enum imports
-            // reach the interpreter through the GLOBAL_ENUMS thread-local
-            // rather than this map, so a local copy satisfies the loader
-            // without dropping them.
+            // `enums` is borrowed immutably in this signature, so the loader
+            // gets a local clone to register the imported closure's enums
+            // into -- and that clone used to be dropped on the floor. The old
+            // comment here claimed those enums "reach the interpreter through
+            // the GLOBAL_ENUMS thread-local"; nothing on this path put them
+            // there, so a block-scoped import of a module whose closure defines
+            // an enum loaded the FUNCTIONS and lost the ENUMS, and the first use
+            // failed at run time with "enum `X` not found in this scope".
+            // Publish them below.
+            // See doc/08_tracking/bug/function_local_use_loses_enum_scope_2026-09-12.md
             let mut merged_enums = enums.clone();
             let loaded = crate::interpreter::interpreter_module::load_and_merge_module(
                 use_stmt,
@@ -629,6 +637,19 @@ pub(crate) fn exec_node(
                 classes,
                 &mut merged_enums,
             )?;
+            // Publish enums the import brought in to the cross-module registry
+            // every enum lookup already falls back to (expr/calls.rs,
+            // interpreter_call/mod.rs, interpreter_method/mod.rs). Only names
+            // the local map does not already carry are published, so a local
+            // definition is never clobbered by an import.
+            GLOBAL_ENUMS.with(|cell| {
+                let mut registry = cell.borrow_mut();
+                for (enum_name, enum_def) in merged_enums.iter() {
+                    if !enums.contains_key(enum_name) {
+                        registry.insert(enum_name.clone(), Arc::clone(enum_def));
+                    }
+                }
+            });
             if let Value::Dict(exports) = &loaded {
                 // Same unpack rules as module scope: Group binds only the named
                 // items, Glob binds everything, Single/Aliased bind the module
@@ -1757,112 +1778,106 @@ pub(crate) fn exec_assignment(
                 // Handle nested field access: self.ctx.dict[key] = value
                 // This is obj.field1.field2[index] = value
                 if let Expr::Identifier(root_name) = inner_obj_expr.as_ref() {
-                    if let Some(Value::Object {
-                        class: r_class,
-                        fields: r_fields,
-                    }) = env.get(root_name).cloned()
-                    {
-                        let mut root_fields = r_fields;
-                        let root_class = r_class;
-                        if let Some(Value::Object {
-                            class: i_class,
-                            fields: i_fields,
-                        }) = root_fields.get(inner_field_name).cloned()
-                        {
-                            let mut inner_fields = i_fields;
-                            let inner_class = i_class;
-                            if let Some(container) = inner_fields.get(field_name).cloned() {
-                                let new_container = match container {
-                                    Value::Array(mut arc) => {
-                                        let arr = Arc::make_mut(&mut arc);
-                                        let idx = index_val.as_int()? as usize;
-                                        if idx < arr.len() {
-                                            arr[idx] = value;
-                                        } else {
-                                            while arr.len() < idx {
-                                                arr.push(Value::Nil);
-                                            }
-                                            arr.push(value);
-                                        }
-                                        Value::Array(arc)
+                    // Walk root -> inner -> leaf through `env.get_mut` with
+                    // `Arc::make_mut` at each hop, instead of cloning each level
+                    // out of `env` first. The previous shape cloned the root
+                    // object, then the inner object, then the leaf container --
+                    // so the leaf `Arc` was ALIASED and the `Arc::make_mut` in the
+                    // arms below deep-copied the WHOLE dict/array on every single
+                    // write. `self.inner.d[k] = v` was therefore quadratic
+                    // (12,497,500 entries copied over 5,000 writes at n = 5,000)
+                    // while its one-level sibling `self.d[k] = v` was O(1). Every
+                    // arm below is unchanged, including the array/byte-array
+                    // auto-extend and both out-of-range errors; only *where* the
+                    // container lives while it is mutated is different, and
+                    // `Arc::make_mut` keeps the copy-on-write contract intact at
+                    // each hop (a genuinely aliased object/dict/array still
+                    // deep-copies exactly once, before it is touched).
+                    let container_slot = match env.get_mut(root_name) {
+                        Some(Value::Object {
+                            fields: root_fields, ..
+                        }) => match Arc::make_mut(root_fields).get_mut(inner_field_name) {
+                            Some(Value::Object {
+                                fields: inner_fields, ..
+                            }) => Arc::make_mut(inner_fields).get_mut(field_name),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(slot) = container_slot {
+                        match slot {
+                            Value::Array(arc) => {
+                                let arr = Arc::make_mut(arc);
+                                let idx = index_val.as_int()? as usize;
+                                if idx < arr.len() {
+                                    arr[idx] = value;
+                                } else {
+                                    while arr.len() < idx {
+                                        arr.push(Value::Nil);
                                     }
-                                    // Same runtime-allocator buffer case as the
-                                    // ClassInstance path above (`rt_byte_array_new` /
-                                    // `rt_bytes_alloc` hand back a `Value::ByteArray`,
-                                    // not a `Value::Array`). Frozen variants stay
-                                    // rejected on purpose.
-                                    Value::ByteArray(mut arc) => {
-                                        let idx = index_val.as_int()? as usize;
-                                        let byte = value.as_int()? as u8;
-                                        let bytes = Arc::make_mut(&mut arc);
-                                        if idx < bytes.len() {
-                                            bytes[idx] = byte;
-                                        } else {
-                                            while bytes.len() < idx {
-                                                bytes.push(0);
-                                            }
-                                            bytes.push(byte);
-                                        }
-                                        Value::ByteArray(arc)
+                                    arr.push(value);
+                                }
+                            }
+                            // Same runtime-allocator buffer case as the
+                            // ClassInstance path above (`rt_byte_array_new` /
+                            // `rt_bytes_alloc` hand back a `Value::ByteArray`,
+                            // not a `Value::Array`). Frozen variants stay
+                            // rejected on purpose.
+                            Value::ByteArray(arc) => {
+                                let idx = index_val.as_int()? as usize;
+                                let byte = value.as_int()? as u8;
+                                let bytes = Arc::make_mut(arc);
+                                if idx < bytes.len() {
+                                    bytes[idx] = byte;
+                                } else {
+                                    while bytes.len() < idx {
+                                        bytes.push(0);
                                     }
-                                    Value::FixedSizeArray { mut data, size } => {
-                                        let idx = index_val.as_int()? as usize;
-                                        if idx < data.len() {
-                                            data[idx] = value;
-                                            Value::FixedSizeArray { data, size }
-                                        } else {
-                                            let ctx = ErrorContext::new()
-                                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                                .with_help(format!("array has {} element(s)", data.len()))
-                                                .with_note(format!("index {} is out of bounds", idx));
-                                            return Err(CompileError::semantic_with_context(
-                                                format!(
-                                                    "index out of bounds: array index {} out of bounds (len={})",
-                                                    idx,
-                                                    data.len()
-                                                ),
-                                                ctx,
-                                            ));
-                                        }
-                                    }
-                                    Value::Dict(mut dict) => {
-                                        let key = index_val.to_key_string();
-                                        let stored = Value::wrap_dict_entry(&index_val, value);
-                                        Arc::make_mut(&mut dict).insert(key, stored);
-                                        Value::Dict(dict)
-                                    }
-                                    _ => {
-                                        let ctx = ErrorContext::new()
-                                            .with_code(codes::INVALID_ASSIGNMENT)
-                                            .with_help("nested index assignment requires an array or dict");
-                                        return Err(CompileError::semantic_with_context(
-                                            format!(
-                                                "invalid assignment: cannot index assign to field `{}` of type {}",
-                                                field_name,
-                                                container.type_name()
-                                            ),
-                                            ctx,
-                                        ));
-                                    }
-                                };
-                                Arc::make_mut(&mut inner_fields).insert(field_name.clone(), new_container);
-                                let new_inner_obj = Value::Object {
-                                    class: inner_class,
-                                    fields: inner_fields,
-                                };
-                                Arc::make_mut(&mut root_fields).insert(inner_field_name.clone(), new_inner_obj);
-                                env.insert(
-                                    root_name.clone(),
-                                    Value::Object {
-                                        class: root_class,
-                                        fields: root_fields,
-                                    },
-                                );
-                                return Ok(Control::Next);
+                                    bytes.push(byte);
+                                }
+                            }
+                            Value::FixedSizeArray { data, .. } => {
+                                let idx = index_val.as_int()? as usize;
+                                if idx < data.len() {
+                                    data[idx] = value;
+                                } else {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                        .with_help(format!("array has {} element(s)", data.len()))
+                                        .with_note(format!("index {} is out of bounds", idx));
+                                    return Err(CompileError::semantic_with_context(
+                                        format!(
+                                            "index out of bounds: array index {} out of bounds (len={})",
+                                            idx,
+                                            data.len()
+                                        ),
+                                        ctx,
+                                    ));
+                                }
+                            }
+                            Value::Dict(dict) => {
+                                let key = index_val.to_key_string();
+                                let stored = Value::wrap_dict_entry(&index_val, value);
+                                Arc::make_mut(dict).insert(key, stored);
+                            }
+                            other => {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::INVALID_ASSIGNMENT)
+                                    .with_help("nested index assignment requires an array or dict");
+                                return Err(CompileError::semantic_with_context(
+                                    format!(
+                                        "invalid assignment: cannot index assign to field `{}` of type {}",
+                                        field_name,
+                                        other.type_name()
+                                    ),
+                                    ctx,
+                                ));
                             }
                         }
+                        return Ok(Control::Next);
                     }
                 }
+
                 // General place fallback: an arbitrary projection chain rooted at a
                 // variable (`self.a[i].b[k] = v`, `self.rows[i].cols[j] = v`).
                 // `place::resolve_place` + `write_place` already walk any depth with

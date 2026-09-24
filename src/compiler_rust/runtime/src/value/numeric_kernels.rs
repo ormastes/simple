@@ -54,7 +54,7 @@ fn provider_for_tier(tier: SimdTier) -> NumericKernelProvider {
             sum_f64: scalar_sum_f64,
             dot_f64: scalar_dot_f64,
         },
-        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => NumericKernelProvider {
+        SimdTier::X86_64Avx2 => NumericKernelProvider {
             tier: SimdTier::X86_64Avx2,
             add_f32: avx2_add_f32,
             mul_f32: avx2_mul_f32,
@@ -68,6 +68,21 @@ fn provider_for_tier(tier: SimdTier) -> NumericKernelProvider {
             fma_f64: avx2_fma_f64,
             sum_f64: avx2_sum_f64,
             dot_f64: avx2_dot_f64,
+        },
+        SimdTier::X86_64Avx512 => NumericKernelProvider {
+            tier: SimdTier::X86_64Avx512,
+            add_f32: avx512_add_f32,
+            mul_f32: avx512_mul_f32,
+            fma_f32: avx512_fma_f32,
+            dot_f32: avx512_dot_f32,
+            sum_f32: avx512_sum_f32,
+            min_f32: avx512_min_f32,
+            max_f32: avx512_max_f32,
+            add_f64: avx512_add_f64,
+            mul_f64: avx512_mul_f64,
+            fma_f64: avx512_fma_f64,
+            sum_f64: avx512_sum_f64,
+            dot_f64: avx512_dot_f64,
         },
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => NumericKernelProvider {
             tier: SimdTier::Aarch64Neon,
@@ -861,6 +876,375 @@ unsafe fn avx2_dot_f64_impl(lhs: &[f64], rhs: &[f64]) -> f64 {
     total
 }
 
+// AVX-512 variants. Same shape as the AVX2 kernels above but 512-bit wide
+// (16 x f32 / 8 x f64 per step, vs. AVX2's 8 x f32 / 4 x f64), with the tail
+// delegated to the AVX2 kernel — which has its own 256-bit path and falls
+// all the way back to scalar. All the float ops used here (`_mm512_*_ps`,
+// `_mm512_*_pd`, including `_mm512_fmadd_*` and the `_mm512_reduce_*`
+// horizontal reductions) are part of AVX512F alone; no `avx512bw` gate is
+// needed for the numeric kernels, unlike the byte/UTF-8 kernels.
+fn avx512_add_f32(lhs: &[f32], rhs: &[f32], out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            avx512_add_f32_impl(lhs, rhs, out);
+            return;
+        }
+    }
+    avx2_add_f32(lhs, rhs, out)
+}
+
+fn avx512_mul_f32(lhs: &[f32], rhs: &[f32], out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            avx512_mul_f32_impl(lhs, rhs, out);
+            return;
+        }
+    }
+    avx2_mul_f32(lhs, rhs, out)
+}
+
+fn avx512_fma_f32(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            avx512_fma_f32_impl(a, b, c, out);
+            return;
+        }
+    }
+    avx2_fma_f32(a, b, c, out)
+}
+
+fn avx512_dot_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            return avx512_dot_f32_impl(lhs, rhs);
+        }
+    }
+    avx2_dot_f32(lhs, rhs)
+}
+
+fn avx512_sum_f32(values: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            return avx512_sum_f32_impl(values);
+        }
+    }
+    avx2_sum_f32(values)
+}
+
+fn avx512_min_f32(values: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            return avx512_min_f32_impl(values);
+        }
+    }
+    avx2_min_f32(values)
+}
+
+fn avx512_max_f32(values: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            return avx512_max_f32_impl(values);
+        }
+    }
+    avx2_max_f32(values)
+}
+
+fn avx512_add_f64(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            avx512_add_f64_impl(lhs, rhs, out);
+            return;
+        }
+    }
+    avx2_add_f64(lhs, rhs, out)
+}
+
+fn avx512_mul_f64(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            avx512_mul_f64_impl(lhs, rhs, out);
+            return;
+        }
+    }
+    avx2_mul_f64(lhs, rhs, out)
+}
+
+fn avx512_fma_f64(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            avx512_fma_f64_impl(a, b, c, out);
+            return;
+        }
+    }
+    avx2_fma_f64(a, b, c, out)
+}
+
+fn avx512_sum_f64(values: &[f64]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            return avx512_sum_f64_impl(values);
+        }
+    }
+    avx2_sum_f64(values)
+}
+
+fn avx512_dot_f64(lhs: &[f64], rhs: &[f64]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if std::is_x86_feature_detected!("avx512f") {
+            return avx512_dot_f64_impl(lhs, rhs);
+        }
+    }
+    avx2_dot_f64(lhs, rhs)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_add_f32_impl(lhs: &[f32], rhs: &[f32], out: &mut [f32]) {
+    let width = 16;
+    let len = lhs.len().min(rhs.len()).min(out.len());
+    let simd_len = len / width * width;
+    let mut index = 0;
+    while index < simd_len {
+        let a = unsafe { _mm512_loadu_ps(lhs.as_ptr().add(index)) };
+        let b = unsafe { _mm512_loadu_ps(rhs.as_ptr().add(index)) };
+        let sum = _mm512_add_ps(a, b);
+        unsafe { _mm512_storeu_ps(out.as_mut_ptr().add(index), sum) };
+        index += width;
+    }
+    avx2_add_f32(&lhs[simd_len..len], &rhs[simd_len..len], &mut out[simd_len..len]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_mul_f32_impl(lhs: &[f32], rhs: &[f32], out: &mut [f32]) {
+    let width = 16;
+    let len = lhs.len().min(rhs.len()).min(out.len());
+    let simd_len = len / width * width;
+    let mut index = 0;
+    while index < simd_len {
+        let a = unsafe { _mm512_loadu_ps(lhs.as_ptr().add(index)) };
+        let b = unsafe { _mm512_loadu_ps(rhs.as_ptr().add(index)) };
+        let product = _mm512_mul_ps(a, b);
+        unsafe { _mm512_storeu_ps(out.as_mut_ptr().add(index), product) };
+        index += width;
+    }
+    avx2_mul_f32(&lhs[simd_len..len], &rhs[simd_len..len], &mut out[simd_len..len]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_fma_f32_impl(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
+    let width = 16;
+    let len = a.len().min(b.len()).min(c.len()).min(out.len());
+    let simd_len = len / width * width;
+    let mut index = 0;
+    while index < simd_len {
+        let av = unsafe { _mm512_loadu_ps(a.as_ptr().add(index)) };
+        let bv = unsafe { _mm512_loadu_ps(b.as_ptr().add(index)) };
+        let cv = unsafe { _mm512_loadu_ps(c.as_ptr().add(index)) };
+        let result = _mm512_fmadd_ps(av, bv, cv);
+        unsafe { _mm512_storeu_ps(out.as_mut_ptr().add(index), result) };
+        index += width;
+    }
+    avx2_fma_f32(
+        &a[simd_len..len],
+        &b[simd_len..len],
+        &c[simd_len..len],
+        &mut out[simd_len..len],
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_dot_f32_impl(lhs: &[f32], rhs: &[f32]) -> f32 {
+    let width = 16;
+    let len = lhs.len().min(rhs.len());
+    let simd_len = len / width * width;
+    let mut acc = _mm512_setzero_ps();
+    let mut index = 0;
+    while index < simd_len {
+        let a = unsafe { _mm512_loadu_ps(lhs.as_ptr().add(index)) };
+        let b = unsafe { _mm512_loadu_ps(rhs.as_ptr().add(index)) };
+        acc = _mm512_fmadd_ps(a, b, acc);
+        index += width;
+    }
+    let mut total = _mm512_reduce_add_ps(acc);
+    total += avx2_dot_f32(&lhs[simd_len..len], &rhs[simd_len..len]);
+    total
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_sum_f32_impl(values: &[f32]) -> f32 {
+    let width = 16;
+    let len = values.len();
+    let simd_len = len / width * width;
+    let mut acc = _mm512_setzero_ps();
+    let mut index = 0;
+    while index < simd_len {
+        let chunk = unsafe { _mm512_loadu_ps(values.as_ptr().add(index)) };
+        acc = _mm512_add_ps(acc, chunk);
+        index += width;
+    }
+    _mm512_reduce_add_ps(acc) + avx2_sum_f32(&values[simd_len..])
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_min_f32_impl(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let width = 16;
+    let len = values.len();
+    if len < width {
+        return avx2_min_f32(values);
+    }
+    let simd_len = len / width * width;
+    let mut acc = unsafe { _mm512_loadu_ps(values.as_ptr()) };
+    let mut index = width;
+    while index < simd_len {
+        let chunk = unsafe { _mm512_loadu_ps(values.as_ptr().add(index)) };
+        acc = _mm512_min_ps(acc, chunk);
+        index += width;
+    }
+    let mut total = _mm512_reduce_min_ps(acc);
+    if simd_len < len {
+        total = total.min(avx2_min_f32(&values[simd_len..]));
+    }
+    total
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_max_f32_impl(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let width = 16;
+    let len = values.len();
+    if len < width {
+        return avx2_max_f32(values);
+    }
+    let simd_len = len / width * width;
+    let mut acc = unsafe { _mm512_loadu_ps(values.as_ptr()) };
+    let mut index = width;
+    while index < simd_len {
+        let chunk = unsafe { _mm512_loadu_ps(values.as_ptr().add(index)) };
+        acc = _mm512_max_ps(acc, chunk);
+        index += width;
+    }
+    let mut total = _mm512_reduce_max_ps(acc);
+    if simd_len < len {
+        total = total.max(avx2_max_f32(&values[simd_len..]));
+    }
+    total
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_add_f64_impl(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    let width = 8;
+    let len = lhs.len().min(rhs.len()).min(out.len());
+    let simd_len = len / width * width;
+    let mut index = 0;
+    while index < simd_len {
+        let a = unsafe { _mm512_loadu_pd(lhs.as_ptr().add(index)) };
+        let b = unsafe { _mm512_loadu_pd(rhs.as_ptr().add(index)) };
+        let sum = _mm512_add_pd(a, b);
+        unsafe { _mm512_storeu_pd(out.as_mut_ptr().add(index), sum) };
+        index += width;
+    }
+    avx2_add_f64(&lhs[simd_len..len], &rhs[simd_len..len], &mut out[simd_len..len]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_mul_f64_impl(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    let width = 8;
+    let len = lhs.len().min(rhs.len()).min(out.len());
+    let simd_len = len / width * width;
+    let mut index = 0;
+    while index < simd_len {
+        let a = unsafe { _mm512_loadu_pd(lhs.as_ptr().add(index)) };
+        let b = unsafe { _mm512_loadu_pd(rhs.as_ptr().add(index)) };
+        let product = _mm512_mul_pd(a, b);
+        unsafe { _mm512_storeu_pd(out.as_mut_ptr().add(index), product) };
+        index += width;
+    }
+    avx2_mul_f64(&lhs[simd_len..len], &rhs[simd_len..len], &mut out[simd_len..len]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_fma_f64_impl(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
+    let width = 8;
+    let len = a.len().min(b.len()).min(c.len()).min(out.len());
+    let simd_len = len / width * width;
+    let mut index = 0;
+    while index < simd_len {
+        let av = unsafe { _mm512_loadu_pd(a.as_ptr().add(index)) };
+        let bv = unsafe { _mm512_loadu_pd(b.as_ptr().add(index)) };
+        let cv = unsafe { _mm512_loadu_pd(c.as_ptr().add(index)) };
+        let result = _mm512_fmadd_pd(av, bv, cv);
+        unsafe { _mm512_storeu_pd(out.as_mut_ptr().add(index), result) };
+        index += width;
+    }
+    avx2_fma_f64(
+        &a[simd_len..len],
+        &b[simd_len..len],
+        &c[simd_len..len],
+        &mut out[simd_len..len],
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_sum_f64_impl(values: &[f64]) -> f64 {
+    let width = 8;
+    let len = values.len();
+    let simd_len = len / width * width;
+    let mut acc = _mm512_setzero_pd();
+    let mut index = 0;
+    while index < simd_len {
+        let chunk = unsafe { _mm512_loadu_pd(values.as_ptr().add(index)) };
+        acc = _mm512_add_pd(acc, chunk);
+        index += width;
+    }
+    _mm512_reduce_add_pd(acc) + avx2_sum_f64(&values[simd_len..])
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_dot_f64_impl(lhs: &[f64], rhs: &[f64]) -> f64 {
+    let width = 8;
+    let len = lhs.len().min(rhs.len());
+    let simd_len = len / width * width;
+    let mut acc = _mm512_setzero_pd();
+    let mut index = 0;
+    while index < simd_len {
+        let a = unsafe { _mm512_loadu_pd(lhs.as_ptr().add(index)) };
+        let b = unsafe { _mm512_loadu_pd(rhs.as_ptr().add(index)) };
+        acc = _mm512_fmadd_pd(a, b, acc);
+        index += width;
+    }
+    let mut total = _mm512_reduce_add_pd(acc);
+    total += avx2_dot_f64(&lhs[simd_len..len], &rhs[simd_len..len]);
+    total
+}
+
 fn neon_add_f32(lhs: &[f32], rhs: &[f32], out: &mut [f32]) {
     scalar_add_f32(lhs, rhs, out)
 }
@@ -1374,6 +1758,99 @@ mod tests {
 
         let sum = rt_numeric_sum_f64(runtime_array_from_f64(&lhs));
         assert!((sum.as_float() - scalar_sum_f64(&lhs)).abs() < 0.000001);
+    }
+
+    // These stay correct on a host without AVX-512: the dispatchers fall
+    // back to the AVX2 kernel, which falls back to scalar. The tier must
+    // never change the ANSWER, only how fast it is reached. Sizes straddle
+    // both the 16-lane f32 boundary and the 8-lane f64 boundary (64 bytes
+    // either way), plus 0/1 for degenerate input.
+    #[test]
+    fn avx512_f32_kernels_match_scalar_across_lane_boundaries() {
+        for len in [0usize, 1, 15, 16, 17, 31, 32, 50, 63, 64, 65, 127, 128, 200] {
+            let lhs: Vec<f32> = (0..len).map(|i| i as f32 * 0.5 - 3.0).collect();
+            let rhs: Vec<f32> = (0..len).map(|i| i as f32 * -0.25 + 1.0).collect();
+            let c: Vec<f32> = (0..len).map(|i| i as f32 * 0.1 + 0.3).collect();
+
+            let mut out_avx512 = vec![0.0f32; len];
+            let mut out_scalar = vec![0.0f32; len];
+
+            avx512_add_f32(&lhs, &rhs, &mut out_avx512);
+            scalar_add_f32(&lhs, &rhs, &mut out_scalar);
+            assert_eq!(out_avx512, out_scalar, "add mismatch len={len}");
+
+            avx512_mul_f32(&lhs, &rhs, &mut out_avx512);
+            scalar_mul_f32(&lhs, &rhs, &mut out_scalar);
+            assert_eq!(out_avx512, out_scalar, "mul mismatch len={len}");
+
+            avx512_fma_f32(&lhs, &rhs, &c, &mut out_avx512);
+            scalar_fma_f32(&lhs, &rhs, &c, &mut out_scalar);
+            assert_eq!(out_avx512, out_scalar, "fma mismatch len={len}");
+
+            let dot_diff = (avx512_dot_f32(&lhs, &rhs) - scalar_dot_f32(&lhs, &rhs)).abs();
+            assert!(dot_diff < 0.01, "dot mismatch len={len}: diff={dot_diff}");
+
+            let sum_diff = (avx512_sum_f32(&lhs) - scalar_sum_f32(&lhs)).abs();
+            assert!(sum_diff < 0.01, "sum mismatch len={len}: diff={sum_diff}");
+
+            if len > 0 {
+                assert_eq!(avx512_min_f32(&lhs), scalar_min_f32(&lhs), "min mismatch len={len}");
+                assert_eq!(avx512_max_f32(&lhs), scalar_max_f32(&lhs), "max mismatch len={len}");
+            }
+        }
+    }
+
+    #[test]
+    fn avx512_f64_kernels_match_scalar_across_lane_boundaries() {
+        for len in [0usize, 1, 7, 8, 9, 15, 16, 25, 63, 64, 65, 127, 128, 200] {
+            let lhs: Vec<f64> = (0..len).map(|i| i as f64 * 0.5 - 3.0).collect();
+            let rhs: Vec<f64> = (0..len).map(|i| i as f64 * -0.25 + 1.0).collect();
+            let c: Vec<f64> = (0..len).map(|i| i as f64 * 0.1 + 0.3).collect();
+
+            let mut out_avx512 = vec![0.0f64; len];
+            let mut out_scalar = vec![0.0f64; len];
+
+            avx512_add_f64(&lhs, &rhs, &mut out_avx512);
+            scalar_add_f64(&lhs, &rhs, &mut out_scalar);
+            assert_eq!(out_avx512, out_scalar, "add mismatch len={len}");
+
+            avx512_mul_f64(&lhs, &rhs, &mut out_avx512);
+            scalar_mul_f64(&lhs, &rhs, &mut out_scalar);
+            assert_eq!(out_avx512, out_scalar, "mul mismatch len={len}");
+
+            avx512_fma_f64(&lhs, &rhs, &c, &mut out_avx512);
+            scalar_fma_f64(&lhs, &rhs, &c, &mut out_scalar);
+            assert_eq!(out_avx512, out_scalar, "fma mismatch len={len}");
+
+            let dot_diff = (avx512_dot_f64(&lhs, &rhs) - scalar_dot_f64(&lhs, &rhs)).abs();
+            assert!(dot_diff < 0.0001, "dot mismatch len={len}: diff={dot_diff}");
+
+            let sum_diff = (avx512_sum_f64(&lhs) - scalar_sum_f64(&lhs)).abs();
+            assert!(sum_diff < 0.0001, "sum mismatch len={len}: diff={sum_diff}");
+        }
+    }
+
+    #[test]
+    fn avx512_provider_wires_through_packed_externs() {
+        with_simd_tier_override("x86_64_avx512", || {
+            assert_eq!(active_numeric_kernel_tier(), SimdTier::X86_64Avx512);
+
+            let lhs: Vec<f32> = (0..80).map(|i| i as f32 * 0.5).collect();
+            let rhs: Vec<f32> = (0..80).map(|i| (i as f32) - 4.0).collect();
+            let add = rt_numeric_add_f32(runtime_array_from_f32(&lhs), runtime_array_from_f32(&rhs));
+            let add_values = runtime_array_to_f64s(add);
+            for index in 0..lhs.len() {
+                assert!((add_values[index] - (lhs[index] + rhs[index]) as f64).abs() < 0.001);
+            }
+
+            let sum = rt_numeric_sum_f32(runtime_array_from_f32(&lhs));
+            assert!((sum.as_float() - scalar_sum_f32(&lhs) as f64).abs() < 0.01);
+
+            let lhs64: Vec<f64> = (0..48).map(|i| i as f64 * 0.25).collect();
+            let rhs64: Vec<f64> = (0..48).map(|i| (i as f64) + 1.0).collect();
+            let dot = rt_numeric_dot_f64(runtime_array_from_f64(&lhs64), runtime_array_from_f64(&rhs64));
+            assert!((dot.as_float() - scalar_dot_f64(&lhs64, &rhs64)).abs() < 0.0001);
+        });
     }
 
     #[test]

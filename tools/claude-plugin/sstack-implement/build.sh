@@ -17,7 +17,7 @@ if [ ! -f "${SCRIPT_DIR}/.claude-plugin/plugin.json" ]; then
 fi
 
 # Validate referenced files exist
-for f in skills/implement.md agents/implement.md; do
+for f in skills/implement/SKILL.md agents/implement.md; do
     if [ ! -f "${SCRIPT_DIR}/${f}" ]; then
         echo "ERROR: Referenced file ${f} not found"
         exit 1

@@ -1,8 +1,12 @@
 # Bug: fault_detection_enhanced_spec — module-level var mutation inside fn not visible in test runner
 
+## Closed 2026-09-13 — module-level `var` writes from inside a `fn` now propagate
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`): a repro with module-level `var _flag/_num/_name` mutated inside `fn set_signal(6, "SIGABRT")` printed `flag=true`, `num=6`, `name=SIGABRT` after return — exactly the three values this entry reports as lost.
+- **inferred**: the spec itself was not re-run; `bin/simple test` is broken on this Windows host (a trivial 1-assertion spec also reports a false `outer-bound-timeout budget_ms=930000`).
+
 **Date:** 2026-06-26
 **Spec:** test/01_unit/lib/common/fault_detection_enhanced_spec.spl
-**Status:** Open
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Symptom
 

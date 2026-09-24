@@ -10,6 +10,10 @@ use std.nogc_sync_mut.io.file_ops.{
     file_exists, file_read, file_atomic_write, file_lock, file_unlock
 }
 use std.database.sql.types.{DbValue, DbRow, DbError}
+use nogc_sync_mut.database.pure_sql.schema.{
+    PureColumnTypeV1, PureColumnSchemaV1, PureTableSchemaV1,
+    _pure_column_type_v1_from_tag, _pure_column_type_v1_from_sql_name
+}
 use nogc_sync_mut.db.dbfs_engine.sql_parser.{
     sql_parse, SqlStmtKind, SqlExprKind, SqlExpr,
     SqlColumnType, SqlColumnDef, SqlSelect, SqlInsert,
@@ -22,6 +26,7 @@ use nogc_sync_mut.db.dbfs_engine.mvcc.{
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
 use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
 use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
+use std.common.crypto.sha256.{sha256_text}
 
 class PureDatabase:
     _path: text
@@ -39,6 +44,9 @@ class PureDatabase:
     _last_rowid: i64
     _last_changes: i64
     _in_transaction: bool
+    # Exact durable image from which the current in-memory rows were loaded.
+    # BEGIN compares it while holding the same stable lock used by COMMIT.
+    _loaded_disk_image: text
     _txn_disk_base: text
     _dirty: bool
     _auto_checkpoint: bool
@@ -47,14 +55,20 @@ class PureDatabase:
     _snap_tbl_names: [text]
     _snap_tbl_cols: [[text]]
     _snap_row_tidx: [i32]
-    _snap_row_data: [text]
+    _snap_rows: [[DbValue]]
     _snap_tbl_rowids: [i64]
     _snap_indexes: [[[text]]]
     _snap_index_unique: [[bool]]
     _snap_tbl_pk_col: [i32]
     _snap_tbl_pk_name: [text]
+    _snap_tbl_schema_known: [bool]
+    _snap_tbl_col_types: [[PureColumnTypeV1]]
+    _snap_dirty: bool
+    _snap_tbl_dirty: [bool]
     _tbl_typed: [[[DbValue]]]
     _tbl_pk_col: [i32]
+    _tbl_schema_known: [bool]
+    _tbl_col_types: [[PureColumnTypeV1]]
     _tbl_pk_map: [Dict<text, i32>]
     _tbl_dirty: [bool]
     _tbl_name_idx: Dict<text, i32>
@@ -91,6 +105,7 @@ class PureDatabase:
             _last_rowid: 0,
             _last_changes: 0,
             _in_transaction: false,
+            _loaded_disk_image: "",
             _txn_disk_base: "",
             _dirty: false,
             _auto_checkpoint: true,
@@ -99,14 +114,20 @@ class PureDatabase:
             _snap_tbl_names: [],
             _snap_tbl_cols: [],
             _snap_row_tidx: [],
-            _snap_row_data: [],
+            _snap_rows: [],
             _snap_tbl_rowids: [],
             _snap_indexes: [],
             _snap_index_unique: [],
             _snap_tbl_pk_col: [],
             _snap_tbl_pk_name: [],
+            _snap_tbl_schema_known: [],
+            _snap_tbl_col_types: [],
+            _snap_dirty: false,
+            _snap_tbl_dirty: [],
             _tbl_typed: [],
             _tbl_pk_col: [],
+            _tbl_schema_known: [],
+            _tbl_col_types: [],
             _tbl_pk_map: [],
             _tbl_dirty: [],
             _tbl_name_idx: {},
@@ -160,6 +181,13 @@ class PureDatabase:
         self._auto_checkpoint = enabled
 
     me checkpoint() -> Result<(), DbError>:
+        # Publishing during a transaction would make uncommitted rows durable
+        # and rebind the loaded-image identity away from the rollback snapshot.
+        if self._in_transaction:
+            return Err(DbError.QueryFailed(
+                sql: "CHECKPOINT",
+                message: "cannot checkpoint while a transaction is active"
+            ))
         if self._dirty:
             var si: i32 = 0
             while si < self._tbl_mvcc_stale.len() as i32:
@@ -550,6 +578,11 @@ class PureDatabase:
             ti = _find_idx(self._tbl_names, table)
         if ti < 0:
             return Err(DbError.QueryFailed(sql: "PUT", message: "no such table: {table}"))
+        if values.len() != self._tbl_cols[ti].len():
+            return Err(DbError.QueryFailed(
+                sql: "PUT",
+                message: "row arity does not match table columns"
+            ))
         val all_vis = ti < self._tbl_all_visible.len() as i32 and self._tbl_all_visible[ti]
         if all_vis:
             var typed_put = self._tbl_typed[ti]
@@ -1027,14 +1060,76 @@ class PureDatabase:
             self._scan_cache_res[ti] = rows
         Ok(rows)
 
-    me _serialize_disk() -> text:
-        var lines: [text] = ["simple-pure-db-v1"]
+    me _serialize_disk() -> Result<text, DbError>:
+        var lines: [text] = []
+        var serialized_names: [text] = []
         var ti: i32 = 0
         while ti < self._tbl_names.len() as i32:
             val table_name = self._tbl_names[ti]
-            lines.push("table|" + table_name + "|" + _join_text(self._tbl_cols[ti], ","))
+            if table_name == "" or _find_idx(serialized_names, table_name) >= 0:
+                return Err(DbError.Other(message: "PureDatabase table names are empty or duplicated"))
+            serialized_names.push(table_name)
+            if (ti >= self._tbl_schema_known.len() as i32 or
+                    ti >= self._tbl_col_types.len() as i32 or
+                    ti >= self._tbl_pk_col.len() as i32 or
+                    ti >= self._tbl_pk_name.len() as i32):
+                return Err(DbError.Other(message: "PureDatabase schema metadata arrays are incomplete"))
+            var encoded_columns: [DbValue] = []
+            var encoded_owner_values: [DbValue] = [DbValue.Text(value: table_name)]
+            val encoded_table_owner = _pdb_v2_escape(_serialize_row_v2(encoded_owner_values))
+            var serialized_columns: [text] = []
+            var nci: i32 = 0
+            while nci < self._tbl_cols[ti].len() as i32:
+                val column_name = self._tbl_cols[ti][nci]
+                if column_name == "" or _find_idx(serialized_columns, column_name) >= 0:
+                    return Err(DbError.Other(message: "PureDatabase column names are empty or duplicated"))
+                serialized_columns.push(column_name)
+                encoded_columns.push(DbValue.Text(value: column_name))
+                nci = nci + 1
+            if encoded_columns.len() == 0:
+                return Err(DbError.Other(message: "PureDatabase table has no columns"))
+            lines.push("table|" + encoded_table_owner + "|" +
+                _pdb_v2_escape(_serialize_row_v2(encoded_columns)))
+            var encoded_schema: [DbValue] = []
+            if self._tbl_schema_known[ti]:
+                if self._tbl_col_types[ti].len() != self._tbl_cols[ti].len():
+                    return Err(DbError.Other(message: "PureDatabase schema type count does not match columns"))
+                val pk_index = self._tbl_pk_col[ti]
+                if pk_index < -1 or pk_index >= self._tbl_cols[ti].len() as i32:
+                    return Err(DbError.Other(message: "PureDatabase schema primary-key index is invalid"))
+                val expected_pk_name = if pk_index >= 0: self._tbl_cols[ti][pk_index] else: ""
+                if ti >= self._tbl_pk_name.len() as i32 or self._tbl_pk_name[ti] != expected_pk_name:
+                    return Err(DbError.Other(message: "PureDatabase primary-key name does not match its index"))
+                encoded_schema.push(DbValue.Text(value: "known-v1"))
+                encoded_schema.push(DbValue.Integer(value: pk_index as i64))
+                var sci: i32 = 0
+                while sci < self._tbl_col_types[ti].len() as i32:
+                    encoded_schema.push(DbValue.Text(
+                        value: self._tbl_col_types[ti][sci].canonical_tag()
+                    ))
+                    sci = sci + 1
+            else:
+                if self._tbl_col_types[ti].len() != 0:
+                    return Err(DbError.Other(message: "PureDatabase legacy-unknown schema contains declared types"))
+                if self._tbl_pk_col[ti] != -1 or self._tbl_pk_name[ti] != "":
+                    return Err(DbError.Other(message: "PureDatabase legacy-unknown schema contains primary-key metadata"))
+                encoded_schema.push(DbValue.Text(value: "legacy-unknown"))
+            lines.push("schema|" + encoded_table_owner + "|" +
+                _pdb_v2_escape(_serialize_row_v2(encoded_schema)))
             if self._fts_columns[ti].len() > 0:
-                lines.push("fts|" + table_name + "|" + _join_text(self._fts_columns[ti], ","))
+                var encoded_fts_columns: [DbValue] = []
+                var serialized_fts_columns: [text] = []
+                var fci: i32 = 0
+                while fci < self._fts_columns[ti].len() as i32:
+                    val fts_column = self._fts_columns[ti][fci]
+                    if (_find_idx(self._tbl_cols[ti], fts_column) < 0 or
+                            _find_idx(serialized_fts_columns, fts_column) >= 0):
+                        return Err(DbError.Other(message: "PureDatabase FTS metadata contains an invalid column"))
+                    serialized_fts_columns.push(fts_column)
+                    encoded_fts_columns.push(DbValue.Text(value: fts_column))
+                    fci = fci + 1
+                lines.push("fts|" + encoded_table_owner + "|" +
+                    _pdb_v2_escape(_serialize_row_v2(encoded_fts_columns)))
             val snap = self._txn.snapshot()
             var tbl = self._tbl_data[ti]
             val typed = self._tbl_typed[ti]
@@ -1043,17 +1138,26 @@ class PureDatabase:
                 var si: i32 = 0
                 while si < tbl.tuples.len() as i32:
                     if mvcc_is_visible(tbl.tuples[si], snap):
-                        lines.push("row|" + table_name + "|" + _serialize_row(typed[si]))
+                        if typed[si].len() != self._tbl_cols[ti].len():
+                            return Err(DbError.Other(message: "PureDatabase row arity does not match table schema"))
+                        lines.push("row|" + encoded_table_owner + "|" +
+                            _pdb_v2_escape(_serialize_row_v2(typed[si])))
                     si = si + 1
             else:
                 val visible = tbl.scan(snap)
                 var ri: i32 = 0
                 while ri < visible.len() as i32:
-                    lines.push("row|" + table_name + "|" + visible[ri])
+                    val legacy_values = _deserialize_row(visible[ri])
+                    if legacy_values.len() != self._tbl_cols[ti].len():
+                        return Err(DbError.Other(message: "PureDatabase row arity does not match table schema"))
+                    lines.push("row|" + encoded_table_owner + "|" +
+                        _pdb_v2_escape(_serialize_row_v2(legacy_values)))
                     ri = ri + 1
             self._tbl_data[ti] = tbl
             ti = ti + 1
-        lines.join("\n")
+        val payload = lines.join("\n")
+        Ok("simple-pure-db-v3\n" + payload.len().to_text() + "\n" +
+            sha256_text(payload) + "\n" + payload)
 
     me _persist() -> Result<(), DbError>:
         if self._path == "":
@@ -1061,9 +1165,26 @@ class PureDatabase:
         # Publication must be a single rename, not delete followed by write:
         # readers may open the database concurrently and must never observe a
         # missing or partially-written durable image.
-        if file_atomic_write(self._path, self._serialize_disk()):
-            return Ok(())
-        Err(DbError.ConnectionFailed(path: self._path, message: "failed to persist pure database"))
+        val next_image = self._serialize_disk()?
+        val lock_handle = file_lock(self._path + ".commit.lock", 10)
+        if lock_handle < 0:
+            return Err(DbError.ConnectionFailed(
+                path: self._path,
+                message: "failed to acquire pure database commit lock"
+            ))
+        val current_image = if file_exists(self._path): file_read(self._path) else: ""
+        if current_image != self._loaded_disk_image:
+            file_unlock(lock_handle)
+            return Err(DbError.QueryFailed(
+                sql: "CHECKPOINT",
+                message: "concurrent checkpoint conflict: durable database changed since load"
+            ))
+        val published = file_atomic_write(self._path, next_image)
+        file_unlock(lock_handle)
+        if not published:
+            return Err(DbError.ConnectionFailed(path: self._path, message: "failed to persist pure database"))
+        self._loaded_disk_image = next_image
+        Ok(())
 
     me _persist_transaction_if_current() -> Result<(), DbError>:
         if self._path == "":
@@ -1073,7 +1194,7 @@ class PureDatabase:
         # section contains only compare-and-publish. The lock makes the
         # durable-image comparison and atomic replacement one indivisible
         # commit decision across independently opened PureDatabase handles.
-        val next_image = self._serialize_disk()
+        val next_image = self._serialize_disk()?
         # Lock a stable sidecar rather than the database inode: atomic replace
         # swaps that inode, which could otherwise split concurrent lockers
         # between the retired and newly published files.
@@ -1102,82 +1223,294 @@ class PureDatabase:
                 path: self._path,
                 message: "failed to atomically publish pure database transaction"
             ))
+        self._loaded_disk_image = next_image
         Ok(())
 
     me _load_from_disk() -> Result<PureDatabase, DbError>:
         val content = file_read(self._path)
         if content == "":
-            return Ok(self)
+            return Err(DbError.ConnectionFailed(
+                path: self._path,
+                message: "empty pure database image"
+            ))
         val lines = content.split("\n")
-        if lines.len() == 0 or lines[0].trim() != "simple-pure-db-v1":
+        if lines.len() == 0:
             return Err(DbError.ConnectionFailed(path: self._path, message: "unsupported pure database format"))
+        val format = lines[0]
+        var disk_v2 = false
+        var disk_v3 = false
         var i: i32 = 1
+        if format == "simple-pure-db-v2" or format == "simple-pure-db-v3":
+            if format == "simple-pure-db-v2":
+                disk_v2 = true
+            else:
+                disk_v3 = true
+            if lines.len() < 4:
+                return Err(DbError.ConnectionFailed(path: self._path, message: "truncated pure database envelope"))
+            val declared_length = _pdb_v2_decimal_length(lines[1])
+            if declared_length.is_none():
+                return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database payload length"))
+            var payload_lines: [text] = []
+            var payload_i: i32 = 3
+            while payload_i < lines.len() as i32:
+                payload_lines.push(lines[payload_i])
+                payload_i = payload_i + 1
+            val payload = payload_lines.join("\n")
+            if payload.len() as i32 != declared_length.unwrap() or sha256_text(payload) != lines[2]:
+                return Err(DbError.ConnectionFailed(path: self._path, message: "truncated or corrupt pure database payload"))
+            i = 3
+        elif format != "simple-pure-db-v1":
+            return Err(DbError.ConnectionFailed(path: self._path, message: "unsupported pure database format"))
+        var schema_seen: [bool] = []
         while i < lines.len() as i32:
-            val line = lines[i].trim()
+            val line = if disk_v2 or disk_v3: lines[i] else: lines[i].trim()
             if line == "":
                 i = i + 1
                 continue
             val parts = line.split("|")
-            if parts.len() >= 3:
-                val kind = parts[0]
-                val table_name = parts[1]
-                if kind == "table":
-                    val load_ti = self._tbl_names.len() as i32
-                    val load_cols = _split_csv(parts[2])
-                    self._tbl_names.push(table_name)
-                    self._tbl_cols.push(load_cols)
-                    self._tbl_data.push(MvccTable.new())
-                    self._tbl_rowids.push(0)
-                    self._fts_indexes.push(FtsEngine.new())
-                    self._fts_valid.push(false)
-                    self._fts_columns.push([])
-                    self._fts_rows.push([])
-                    self._tbl_vis.push([])
-                    self._tbl_vis_xmax.push(-1)
-                    self._fts_search_key.push("")
-                    self._fts_search_res.push([])
-                    self._sel_cache_key.push("")
-                    self._sel_cache_res.push([])
-                    self._scan_cache_key.push("")
-                    self._scan_cache_res.push([])
-                    self._tbl_all_visible.push(true)
-                    self._tbl_pk_dirty.push(false)
-                    self._tbl_mvcc_stale.push(false)
-                    self._indexes.push([])
-                    self._index_unique.push([])
-                    self._tbl_fts_next_doc_id.push(0)
-                    self._tbl_fts_doc_ids.push([])
-                    var empty_typed: [[DbValue]] = []
-                    self._tbl_typed.push(empty_typed)
-                    self._tbl_pk_col.push(-1)
-                    self._tbl_pk_name.push("")
-                    var empty_pk: Dict<text, i32> = {}
-                    self._tbl_pk_map.push(empty_pk)
-                    self._tbl_dirty.push(false)
-                    # Update name→index and column→index caches
-                    self._tbl_name_idx[table_name] = load_ti
-                    self._tbl_col_idx.push(_build_col_map(load_cols))
-                elif kind == "fts":
-                    val ti = _find_idx(self._tbl_names, table_name)
-                    if ti >= 0:
-                        self._fts_columns[ti] = _split_csv(parts[2])
-                        self._fts_valid[ti] = false
-                elif kind == "row":
-                    val ti = _find_idx(self._tbl_names, table_name)
-                    if ti >= 0:
-                        val handle = self._txn.begin()
-                        val tid = handle.txn_id
-                        var tbl = self._tbl_data[ti]
-                        tbl.insert(tid, parts[2])
-                        self._tbl_data[ti] = tbl
-                        self._txn.commit(tid)
-                        val row_vals = _deserialize_row(parts[2])
-                        var typed_load = self._tbl_typed[ti]
-                        typed_load.push(row_vals)
-                        self._tbl_typed[ti] = typed_load
-                        self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
-                        self._last_rowid = self._tbl_rowids[ti]
+            if parts.len() != 3:
+                return Err(DbError.ConnectionFailed(
+                    path: self._path,
+                    message: "malformed pure database record"
+                ))
+            val kind = parts[0]
+            var table_name = parts[1]
+            var record_payload = parts[2]
+            if disk_v2 or disk_v3:
+                val decoded_table = _pdb_v2_unescape(table_name)
+                val decoded_payload = _pdb_v2_unescape(record_payload)
+                if decoded_table.is_none() or decoded_payload.is_none():
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database record escape"))
+                table_name = decoded_table.unwrap()
+                record_payload = decoded_payload.unwrap()
+                if disk_v3 and (_pdb_v2_escape(table_name) != parts[1] or _pdb_v2_escape(record_payload) != parts[2]):
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "noncanonical pure database v3 record escape"))
+                if disk_v3:
+                    val decoded_owner = _deserialize_row_v2(table_name)
+                    if decoded_owner.is_none():
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 table owner"))
+                    val owner_values = decoded_owner.unwrap()
+                    if owner_values.len() != 1 or _serialize_row_v2(owner_values) != table_name:
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "noncanonical pure database v3 table owner"))
+                    match owner_values[0]:
+                        case DbValue.Text(value): table_name = value
+                        case _:
+                            return Err(DbError.ConnectionFailed(path: self._path, message: "non-text pure database v3 table owner"))
+            if kind == "table":
+                if table_name == "" or self._tbl_name_idx.has(table_name):
+                    return Err(DbError.ConnectionFailed(
+                        path: self._path,
+                        message: "duplicate or empty pure database table"
+                    ))
+                val load_ti = self._tbl_names.len() as i32
+                var load_cols: [text] = []
+                if disk_v3:
+                    val decoded_columns = _deserialize_row_v2(record_payload)
+                    if decoded_columns.is_none():
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 column metadata"))
+                    val column_values = decoded_columns.unwrap()
+                    if _serialize_row_v2(column_values) != record_payload:
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "noncanonical pure database v3 column metadata"))
+                    var ci: i32 = 0
+                    while ci < column_values.len() as i32:
+                        match column_values[ci]:
+                            case DbValue.Text(value):
+                                if value == "" or _find_idx(load_cols, value) >= 0:
+                                    return Err(DbError.ConnectionFailed(path: self._path, message: "duplicate or empty pure database column"))
+                                load_cols.push(value)
+                            case _:
+                                return Err(DbError.ConnectionFailed(path: self._path, message: "non-text pure database v3 column name"))
+                        ci = ci + 1
+                else:
+                    load_cols = _split_csv(record_payload)
+                if load_cols.len() == 0:
+                    return Err(DbError.ConnectionFailed(
+                        path: self._path,
+                        message: "pure database table has no columns"
+                    ))
+                self._tbl_names.push(table_name)
+                self._tbl_cols.push(load_cols)
+                self._tbl_data.push(MvccTable.new())
+                self._tbl_rowids.push(0)
+                self._fts_indexes.push(FtsEngine.new())
+                self._fts_valid.push(false)
+                self._fts_columns.push([])
+                self._fts_rows.push([])
+                self._tbl_vis.push([])
+                self._tbl_vis_xmax.push(-1)
+                self._fts_search_key.push("")
+                self._fts_search_res.push([])
+                self._sel_cache_key.push("")
+                self._sel_cache_res.push([])
+                self._scan_cache_key.push("")
+                self._scan_cache_res.push([])
+                self._tbl_all_visible.push(true)
+                self._tbl_pk_dirty.push(false)
+                self._tbl_mvcc_stale.push(false)
+                self._indexes.push([])
+                self._index_unique.push([])
+                self._tbl_fts_next_doc_id.push(0)
+                self._tbl_fts_doc_ids.push([])
+                var empty_typed: [[DbValue]] = []
+                self._tbl_typed.push(empty_typed)
+                self._tbl_pk_col.push(-1)
+                self._tbl_pk_name.push("")
+                self._tbl_schema_known.push(false)
+                var empty_types: [PureColumnTypeV1] = []
+                self._tbl_col_types.push(empty_types)
+                var empty_pk: Dict<text, i32> = {}
+                self._tbl_pk_map.push(empty_pk)
+                self._tbl_dirty.push(false)
+                schema_seen.push(false)
+                # Update name→index and column→index caches
+                self._tbl_name_idx[table_name] = load_ti
+                self._tbl_col_idx.push(_build_col_map(load_cols))
+            elif kind == "schema":
+                if not disk_v3:
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "schema record requires pure database v3"))
+                val ti = if self._tbl_name_idx.has(table_name):
+                    self._tbl_name_idx[table_name]
+                else:
+                    -1
+                if ti < 0:
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "pure database schema references unknown table"))
+                if schema_seen[ti]:
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "duplicate pure database schema record"))
+                val decoded_schema = _deserialize_row_v2(record_payload)
+                if decoded_schema.is_none():
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 schema metadata"))
+                val schema_values = decoded_schema.unwrap()
+                if _serialize_row_v2(schema_values) != record_payload:
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "noncanonical pure database v3 schema metadata"))
+                if schema_values.len() == 1:
+                    match schema_values[0]:
+                        case DbValue.Text(value):
+                            if value != "legacy-unknown":
+                                return Err(DbError.ConnectionFailed(path: self._path, message: "unknown pure database v3 schema marker"))
+                        case _:
+                            return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 legacy schema marker"))
+                    self._tbl_schema_known[ti] = false
+                else:
+                    if schema_values.len() != self._tbl_cols[ti].len() + 2:
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "pure database v3 schema type count mismatch"))
+                    match schema_values[0]:
+                        case DbValue.Text(value):
+                            if value != "known-v1":
+                                return Err(DbError.ConnectionFailed(path: self._path, message: "unknown pure database v3 schema marker"))
+                        case _:
+                            return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 schema marker"))
+                    var pk_index: i32 = -2
+                    match schema_values[1]:
+                        case DbValue.Integer(value):
+                            if value < -1 or value >= self._tbl_cols[ti].len() as i64:
+                                return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 primary-key index"))
+                            pk_index = value as i32
+                        case _:
+                            return Err(DbError.ConnectionFailed(path: self._path, message: "non-integer pure database v3 primary-key index"))
+                    var decoded_types: [PureColumnTypeV1] = []
+                    var sti: i32 = 2
+                    while sti < schema_values.len() as i32:
+                        match schema_values[sti]:
+                            case DbValue.Text(value):
+                                val decoded_type = _pure_column_type_v1_from_tag(value)
+                                if decoded_type.is_none():
+                                    return Err(DbError.ConnectionFailed(path: self._path, message: "unknown pure database v3 column type"))
+                                decoded_types.push(decoded_type.unwrap())
+                            case _:
+                                return Err(DbError.ConnectionFailed(path: self._path, message: "non-text pure database v3 column type"))
+                        sti = sti + 1
+                    self._tbl_schema_known[ti] = true
+                    self._tbl_col_types[ti] = decoded_types
+                    self._tbl_pk_col[ti] = pk_index
+                    self._tbl_pk_name[ti] = if pk_index >= 0: self._tbl_cols[ti][pk_index] else: ""
+                    self._tbl_pk_dirty[ti] = pk_index >= 0
+                schema_seen[ti] = true
+            elif kind == "fts":
+                val ti = if self._tbl_name_idx.has(table_name):
+                    self._tbl_name_idx[table_name]
+                else:
+                    -1
+                if ti < 0:
+                    return Err(DbError.ConnectionFailed(
+                        path: self._path,
+                        message: "pure database FTS record references unknown table"
+                    ))
+                if disk_v3 and not schema_seen[ti]:
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "pure database v3 schema must precede table data"))
+                if disk_v3:
+                    val decoded_fts = _deserialize_row_v2(record_payload)
+                    if decoded_fts.is_none():
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 FTS metadata"))
+                    val fts_values = decoded_fts.unwrap()
+                    if _serialize_row_v2(fts_values) != record_payload:
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "noncanonical pure database v3 FTS metadata"))
+                    var fts_columns: [text] = []
+                    var fci: i32 = 0
+                    while fci < fts_values.len() as i32:
+                        match fts_values[fci]:
+                            case DbValue.Text(value):
+                                if (_find_idx(self._tbl_cols[ti], value) < 0 or
+                                        _find_idx(fts_columns, value) >= 0):
+                                    return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database v3 FTS column"))
+                                fts_columns.push(value)
+                            case _:
+                                return Err(DbError.ConnectionFailed(path: self._path, message: "non-text pure database v3 FTS column"))
+                        fci = fci + 1
+                    self._fts_columns[ti] = fts_columns
+                else:
+                    self._fts_columns[ti] = _split_csv(record_payload)
+                self._fts_valid[ti] = false
+            elif kind == "row":
+                val ti = if self._tbl_name_idx.has(table_name):
+                    self._tbl_name_idx[table_name]
+                else:
+                    -1
+                if ti < 0:
+                    return Err(DbError.ConnectionFailed(
+                        path: self._path,
+                        message: "pure database row references unknown table"
+                    ))
+                if disk_v3 and not schema_seen[ti]:
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "pure database v3 schema must precede table rows"))
+                val handle = self._txn.begin()
+                val tid = handle.txn_id
+                var tbl = self._tbl_data[ti]
+                var row_vals: [DbValue] = []
+                if disk_v2 or disk_v3:
+                    if disk_v3 and not _pdb_v3_row_encoding_is_canonical(record_payload):
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "noncanonical pure database v3 row"))
+                    val decoded_row = _deserialize_row_v2(record_payload)
+                    if decoded_row.is_none():
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "invalid pure database framed row"))
+                    row_vals = decoded_row.unwrap()
+                    if row_vals.len() != self._tbl_cols[ti].len():
+                        return Err(DbError.ConnectionFailed(path: self._path, message: "pure database row arity mismatch"))
+                else:
+                    row_vals = _deserialize_row(record_payload)
+                val row_storage = _serialize_row(row_vals)
+                tbl.insert(tid, row_storage)
+                self._tbl_data[ti] = tbl
+                self._txn.commit(tid)
+                var typed_load = self._tbl_typed[ti]
+                typed_load.push(row_vals)
+                self._tbl_typed[ti] = typed_load
+                self._tbl_rowids[ti] = self._tbl_rowids[ti] + 1
+                self._last_rowid = self._tbl_rowids[ti]
+            else:
+                return Err(DbError.ConnectionFailed(
+                    path: self._path,
+                    message: "unknown pure database record kind"
+                ))
             i = i + 1
+        if disk_v3:
+            var si: i32 = 0
+            while si < schema_seen.len() as i32:
+                if not schema_seen[si]:
+                    return Err(DbError.ConnectionFailed(path: self._path, message: "missing pure database v3 schema record"))
+                si = si + 1
+        # Assign only after the complete image has validated and loaded. A
+        # failed parse must not make partially loaded rows authoritative.
+        self._loaded_disk_image = content
         Ok(self)
 
     me exec(sql: text, params: [DbValue]) -> Result<i64, DbError>:
@@ -1365,6 +1698,48 @@ class PureDatabase:
         if self._tbl_name_idx.has(name):
             return true
         _find_idx(self._tbl_names, name) >= 0
+
+    # Return a detached, deterministic inventory.  Mutating the returned array
+    # cannot alter the database's table-name authority.
+    fn table_names() -> Result<[text], DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        var names: [text] = []
+        var i: i32 = 0
+        while i < self._tbl_names.len() as i32:
+            names.push(self._tbl_names[i])
+            i = i + 1
+        names.sort()
+        Ok(names)
+
+    # A nil schema means that the table came from a v1/v2 image whose declared
+    # types and primary key were never persisted. Missing tables are errors;
+    # nil is reserved for explicit legacy-unknown metadata.
+    fn describe_table(name: text) -> Result<PureTableSchemaV1?, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        val ti = if self._tbl_name_idx.has(name):
+            self._tbl_name_idx[name]
+        else:
+            _find_idx(self._tbl_names, name)
+        if ti < 0:
+            return Err(DbError.NotFound(description: "table '{name}'"))
+        if ti >= self._tbl_schema_known.len() as i32 or not self._tbl_schema_known[ti]:
+            return Ok(nil)
+        if ti >= self._tbl_col_types.len() as i32 or self._tbl_col_types[ti].len() != self._tbl_cols[ti].len():
+            return Err(DbError.Other(message: "PureDatabase schema metadata invariant failed for table '{name}'"))
+        var columns: [PureColumnSchemaV1] = []
+        var ci: i32 = 0
+        while ci < self._tbl_cols[ti].len() as i32:
+            columns.push(PureColumnSchemaV1(
+                name: self._tbl_cols[ti][ci],
+                declared_type: self._tbl_col_types[ti][ci]
+            ))
+            ci = ci + 1
+        Ok(Some(PureTableSchemaV1(
+            columns: columns,
+            primary_key_index: self._tbl_pk_col[ti]
+        )))
 
     fn last_insert_rowid() -> i64:
         self._last_rowid
@@ -1605,17 +1980,28 @@ class PureDatabase:
         self._snap_tbl_names = []
         self._snap_tbl_cols = []
         self._snap_row_tidx = []
-        self._snap_row_data = []
+        self._snap_rows = []
         self._snap_tbl_rowids = []
         self._snap_indexes = []
         self._snap_index_unique = []
         self._snap_tbl_pk_col = []
         self._snap_tbl_pk_name = []
+        self._snap_tbl_schema_known = []
+        self._snap_tbl_col_types = []
+        self._snap_dirty = self._dirty
+        self._snap_tbl_dirty = []
         var ti: i32 = 0
         while ti < self._tbl_names.len() as i32:
             self._snap_tbl_names.push(self._tbl_names[ti])
             self._snap_tbl_pk_col.push(self._tbl_pk_col[ti])
             self._snap_tbl_pk_name.push(self._tbl_pk_name[ti])
+            self._snap_tbl_schema_known.push(self._tbl_schema_known[ti])
+            var types_copy: [PureColumnTypeV1] = []
+            var tci: i32 = 0
+            while tci < self._tbl_col_types[ti].len() as i32:
+                types_copy.push(self._tbl_col_types[ti][tci])
+                tci = tci + 1
+            self._snap_tbl_col_types.push(types_copy)
             # Deep copy columns
             var cols_copy: [text] = []
             var ci: i32 = 0
@@ -1626,31 +2012,36 @@ class PureDatabase:
             self._snap_tbl_rowids.push(self._tbl_rowids[ti])
             self._snap_indexes.push(self._indexes[ti])
             self._snap_index_unique.push(self._index_unique[ti])
-            # Serialize visible rows for snapshot
+            self._snap_tbl_dirty.push(self._tbl_dirty[ti])
+            # A deferred typed put has not reached MVCC yet. Synchronize only
+            # the in-memory representation before selecting visible rows; no
+            # durable publication occurs here.
+            self._ensure_mvcc_sync(ti)
             val snap = self._txn.snapshot()
             var tbl = self._tbl_data[ti]
-            val visible = tbl.scan(snap)
-            self._tbl_data[ti] = tbl
-            # An MvccTuple's `data` is NOT always a serialized row: the typed
-            # fast INSERT path stores a positional handle ("{tuple_pos}") that
-            # indexes _tbl_typed, while the slow path stores _serialize_row(..).
-            # Snapshotting `data` verbatim therefore captured "0"/"1" for
-            # fast-path tables, and ROLLBACK restored rows that deserialized to
-            # a single NULL cell — row counts looked right while every value was
-            # destroyed. Normalize to a serialized row here so the snapshot has
-            # exactly one representation.
             val typed_now = self._tbl_typed[ti]
-            var ri: i32 = 0
-            while ri < visible.len() as i32:
-                val raw = visible[ri]
-                var row_ser = raw
-                if _is_numeric_text(raw):
-                    val pos = raw.to_int() ?? -1
-                    if pos >= 0 and pos < typed_now.len() as i64:
-                        row_ser = _serialize_row(typed_now[pos as i32])
-                self._snap_row_tidx.push(ti)
-                self._snap_row_data.push(row_ser)
-                ri = ri + 1
+            if typed_now.len() == tbl.tuples.len():
+                var ri: i32 = 0
+                while ri < tbl.tuples.len() as i32:
+                    if mvcc_is_visible(tbl.tuples[ri], snap):
+                        self._snap_row_tidx.push(ti)
+                        self._snap_rows.push(self._copy_values(typed_now[ri]))
+                    ri = ri + 1
+            else:
+                # Compatibility fallback for an older mixed representation.
+                val visible = tbl.scan(snap)
+                var ri: i32 = 0
+                while ri < visible.len() as i32:
+                    val raw = visible[ri]
+                    var row_values = _deserialize_row(raw)
+                    if _is_numeric_text(raw):
+                        val pos = raw.to_int() ?? -1
+                        if pos >= 0 and pos < typed_now.len() as i64:
+                            row_values = self._copy_values(typed_now[pos as i32])
+                    self._snap_row_tidx.push(ti)
+                    self._snap_rows.push(row_values)
+                    ri = ri + 1
+            self._tbl_data[ti] = tbl
             ti = ti + 1
 
     me _restore_from_snapshot():
@@ -1683,6 +2074,8 @@ class PureDatabase:
         self._tbl_pk_name = []
         self._tbl_typed = []
         self._tbl_pk_col = []
+        self._tbl_schema_known = []
+        self._tbl_col_types = []
         self._tbl_pk_map = []
         self._tbl_fts_next_doc_id = []
         self._tbl_fts_doc_ids = []
@@ -1716,13 +2109,20 @@ class PureDatabase:
             self._indexes.push(self._snap_indexes[ti])
             self._index_unique.push(self._snap_index_unique[ti])
             self._tbl_pk_col.push(self._snap_tbl_pk_col[ti])
+            self._tbl_schema_known.push(self._snap_tbl_schema_known[ti])
+            var restored_types: [PureColumnTypeV1] = []
+            var rtci: i32 = 0
+            while rtci < self._snap_tbl_col_types[ti].len() as i32:
+                restored_types.push(self._snap_tbl_col_types[ti][rtci])
+                rtci = rtci + 1
+            self._tbl_col_types.push(restored_types)
             var restore_pk_map: Dict<text, i32> = {}
             self._tbl_pk_map.push(restore_pk_map)
             self._tbl_fts_next_doc_id.push(0)
             self._tbl_fts_doc_ids.push([])
             var restore_typed: [[DbValue]] = []
             self._tbl_typed.push(restore_typed)
-            self._tbl_dirty.push(true)
+            self._tbl_dirty.push(self._snap_tbl_dirty[ti])
             restore_ni[self._snap_tbl_names[ti]] = ti
             restore_ci.push(_build_col_map(self._snap_tbl_cols[ti]))
             ti = ti + 1
@@ -1732,12 +2132,12 @@ class PureDatabase:
         var ri: i32 = 0
         while ri < self._snap_row_tidx.len() as i32:
             val idx = self._snap_row_tidx[ri]
-            val row_data = self._snap_row_data[ri]
+            val row_values = self._snap_rows[ri]
             if idx >= 0 and idx < self._tbl_data.len() as i32:
                 val handle = self._txn.begin()
                 val tid = handle.txn_id
                 var tbl = self._tbl_data[idx]
-                tbl.insert(tid, row_data)
+                tbl.insert(tid, _serialize_row(row_values))
                 self._tbl_data[idx] = tbl
                 self._txn.commit(tid)
                 # _tbl_typed is read directly by every fast read path and is
@@ -1745,22 +2145,40 @@ class PureDatabase:
                 # with the MVCC re-insert. Extract-mutate-write-back: a
                 # two-hop mutating chain loses the write on the interpreter.
                 var typed_acc = self._tbl_typed[idx]
-                typed_acc.push(_deserialize_row(row_data))
+                typed_acc.push(self._copy_values(row_values))
                 self._tbl_typed[idx] = typed_acc
                 # _tbl_vis is left empty on purpose: _tbl_vis_xmax is -1 here,
                 # which forces the visibility cache to recompute on next read.
             ri = ri + 1
+        # ROLLBACK restores the caller's pre-BEGIN publication obligation. It
+        # must neither mark a clean snapshot dirty nor erase deferred edits
+        # that existed before the transaction.
+        self._dirty = self._snap_dirty
 
     me _do_begin() -> Result<i64, DbError>:
         if self._in_transaction:
             return Err(DbError.QueryFailed(sql: "BEGIN", message: "already in transaction"))
-        # Retain the exact durable image read by this transaction. Reads stay
-        # on the in-memory snapshot; COMMIT validates this image under the
-        # publication lock so a concurrent writer cannot be silently lost.
-        self._txn_disk_base = if self._path != "" and file_exists(self._path):
-            file_read(self._path)
+        if self._path != "":
+            # BEGIN must bind the transaction to the image that produced its
+            # rows, not merely to whatever happens to be newest on disk. Use
+            # COMMIT's stable sidecar lock so comparison cannot race a publish.
+            val lock_handle = file_lock(self._path + ".commit.lock", 10)
+            if lock_handle < 0:
+                return Err(DbError.ConnectionFailed(
+                    path: self._path,
+                    message: "failed to acquire pure database commit lock"
+                ))
+            val current_image = if file_exists(self._path): file_read(self._path) else: ""
+            if current_image != self._loaded_disk_image:
+                file_unlock(lock_handle)
+                return Err(DbError.QueryFailed(
+                    sql: "BEGIN",
+                    message: "stale database handle: durable database changed since open; reopen before BEGIN"
+                ))
+            self._txn_disk_base = current_image
+            file_unlock(lock_handle)
         else:
-            ""
+            self._txn_disk_base = ""
         self._snapshot_tables()
         self._in_transaction = true
         self._last_changes = 0
@@ -1779,15 +2197,25 @@ class PureDatabase:
             # ROLLBACK. No durable bytes have been published in that case.
             self._persist_transaction_if_current()?
             self._dirty = false
+            var ci: i32 = 0
+            while ci < self._tbl_dirty.len() as i32:
+                self._tbl_dirty[ci] = false
+                ci = ci + 1
         self._in_transaction = false
         self._txn_disk_base = ""
         self._snap_tbl_names = []
         self._snap_tbl_cols = []
         self._snap_row_tidx = []
-        self._snap_row_data = []
+        self._snap_rows = []
         self._snap_tbl_rowids = []
         self._snap_indexes = []
         self._snap_index_unique = []
+        self._snap_tbl_pk_col = []
+        self._snap_tbl_pk_name = []
+        self._snap_tbl_schema_known = []
+        self._snap_tbl_col_types = []
+        self._snap_tbl_dirty = []
+        self._snap_dirty = false
         self._last_changes = 0
         if self._auto_checkpoint:
             self.checkpoint()?
@@ -1802,12 +2230,17 @@ class PureDatabase:
         self._snap_tbl_names = []
         self._snap_tbl_cols = []
         self._snap_row_tidx = []
-        self._snap_row_data = []
+        self._snap_rows = []
         self._snap_tbl_rowids = []
         self._snap_indexes = []
         self._snap_index_unique = []
+        self._snap_tbl_pk_col = []
+        self._snap_tbl_pk_name = []
+        self._snap_tbl_schema_known = []
+        self._snap_tbl_col_types = []
+        self._snap_tbl_dirty = []
+        self._snap_dirty = false
         self._last_changes = 0
-        self.checkpoint()?
         Ok(0)
 
     # ── Internal: ALTER TABLE ADD COLUMN ─────────────────────────────────
@@ -1819,59 +2252,72 @@ class PureDatabase:
                 sql: "ALTER TABLE",
                 message: "no such table: {table_name}"
             ))
+        if col_name == "" or _find_idx(self._tbl_cols[ti], col_name) >= 0:
+            return Err(DbError.QueryFailed(
+                sql: "ALTER TABLE",
+                message: "duplicate or empty column: {col_name}"
+            ))
+        val declared_type = _pure_column_type_v1_from_sql_name(col_type)
+        if declared_type.is_none():
+            return Err(DbError.QueryFailed(
+                sql: "ALTER TABLE",
+                message: "unsupported column type: {col_type}"
+            ))
+        # Deferred direct puts live in the typed owner until MVCC is needed.
+        # Materialize them before rebuilding the table so ALTER cannot drop
+        # rows that have not yet reached the MVCC mirror.
+        self._ensure_mvcc_sync(ti)
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val old_typed = self._tbl_typed[ti]
+        if old_typed.len() != tbl.tuples.len():
+            return Err(DbError.QueryFailed(
+                sql: "ALTER TABLE",
+                message: "typed row authority is incomplete; refusing lossy ALTER"
+            ))
         # Add the new column name
         var cols = self._tbl_cols[ti]
         val new_col_idx = cols.len() as i32
         cols.push(col_name)
         self._tbl_cols[ti] = cols
+        if self._tbl_schema_known[ti]:
+            var types = self._tbl_col_types[ti]
+            types.push(declared_type.unwrap())
+            self._tbl_col_types[ti] = types
         # Update column→index cache
         if ti < self._tbl_col_idx.len() as i32:
             var acm = self._tbl_col_idx[ti]
             acm[col_name] = new_col_idx
             self._tbl_col_idx[ti] = acm
         # Rewrite existing rows to append NULL for the new column
-        val snap = self._txn.snapshot()
-        var tbl = self._tbl_data[ti]
-        val old_typed = self._tbl_typed[ti]
-        val use_typed_alter = old_typed.len() == tbl.tuples.len()
         var new_tbl = MvccTable.new()
         val handle = self._txn.begin()
         val tid = handle.txn_id
         var new_typed_rows: [[DbValue]] = []
-        if use_typed_alter:
-            # Table uses typed/placeholder storage — serialize with new null col
-            var ai: i32 = 0
-            while ai < tbl.tuples.len() as i32:
-                if mvcc_is_visible(tbl.tuples[ai], snap):
-                    var new_vals: [DbValue] = []
-                    var ci2: i32 = 0
-                    while ci2 < old_typed[ai].len() as i32:
-                        new_vals.push(old_typed[ai][ci2])
-                        ci2 = ci2 + 1
-                    new_vals.push(DbValue.Null)
-                    new_tbl.insert(tid, _serialize_row(new_vals))
-                    new_typed_rows.push(new_vals)
-                ai = ai + 1
-        else:
-            val visible = tbl.scan(snap)
-            var ri: i32 = 0
-            while ri < visible.len() as i32:
-                val old_row = visible[ri]
-                var new_row = old_row
-                if old_row != "":
-                    new_row = old_row + "\tN:"
-                else:
-                    new_row = "N:"
-                new_tbl.insert(tid, new_row)
-                ri = ri + 1
+        var ai: i32 = 0
+        while ai < tbl.tuples.len() as i32:
+            if mvcc_is_visible(tbl.tuples[ai], snap):
+                var new_vals: [DbValue] = []
+                var ci2: i32 = 0
+                while ci2 < old_typed[ai].len() as i32:
+                    new_vals.push(old_typed[ai][ci2])
+                    ci2 = ci2 + 1
+                new_vals.push(DbValue.Null)
+                new_tbl.insert(tid, _serialize_row(new_vals))
+                new_typed_rows.push(new_vals)
+            ai = ai + 1
         self._tbl_data[ti] = new_tbl
         self._txn.commit(tid)
-        # Reset typed cache — new_tbl has serialized rows, typed len won't match
-        var empty_typed_alt: [[DbValue]] = []
-        self._tbl_typed[ti] = empty_typed_alt
+        # Keep the typed owner aligned with the rebuilt MVCC table. This is
+        # required to retain delimiter-bearing Text and actual Blob bytes;
+        # the legacy tab codec is only a compatibility mirror.
+        self._tbl_typed[ti] = new_typed_rows
+        self._tbl_mvcc_stale[ti] = false
+        self._tbl_pk_dirty[ti] = self._tbl_pk_col[ti] >= 0
+        self._pk_flat = {}
         self._invalidate_fts(ti)
         self._last_changes = 0
-        self._mark_dirty()?
+        self._mark_table_dirty(ti)?
         Ok(0)
 
     # ── Internal: CREATE INDEX ──────────────────────────────────────────
@@ -2097,10 +2543,34 @@ class PureDatabase:
                 message: "table already exists: {ct.table}"
             ))
         var col_names: [text] = []
+        var col_types: [PureColumnTypeV1] = []
+        var pk_ci: i32 = -1
         var ci: i32 = 0
         while ci < ct.columns.len() as i32:
-            col_names.push(ct.columns[ci].name)
+            val cdef = ct.columns[ci]
+            if cdef.name == "" or _find_idx(col_names, cdef.name) >= 0:
+                return Err(DbError.QueryFailed(
+                    sql: "CREATE TABLE",
+                    message: "duplicate or empty column: {cdef.name}"
+                ))
+            col_names.push(cdef.name)
+            val declared_type = match cdef.col_type:
+                case SqlColumnType.Integer: PureColumnTypeV1.Integer
+                case SqlColumnType.Real: PureColumnTypeV1.Real
+                case SqlColumnType.Text: PureColumnTypeV1.Text
+                case SqlColumnType.Blob: PureColumnTypeV1.Blob
+                case SqlColumnType.Boolean: PureColumnTypeV1.Boolean
+            col_types.push(declared_type)
+            if cdef.primary_key:
+                if pk_ci >= 0:
+                    return Err(DbError.QueryFailed(
+                        sql: "CREATE TABLE",
+                        message: "multiple primary keys are not supported"
+                    ))
+                pk_ci = ci
             ci = ci + 1
+        if col_names.len() == 0:
+            return Err(DbError.QueryFailed(sql: "CREATE TABLE", message: "table requires at least one column"))
         val new_ti = self._tbl_names.len() as i32
         self._tbl_names.push(ct.table)
         self._tbl_cols.push(col_names)
@@ -2127,18 +2597,13 @@ class PureDatabase:
         self._tbl_fts_doc_ids.push([])
         var empty_typed: [[DbValue]] = []
         self._tbl_typed.push(empty_typed)
-        var pk_ci: i32 = -1
-        var pki: i32 = 0
-        while pki < ct.columns.len() as i32:
-            val cdef = ct.columns[pki]
-            if cdef.primary_key:
-                pk_ci = pki
-            pki = pki + 1
         self._tbl_pk_col.push(pk_ci)
         if pk_ci >= 0:
             self._tbl_pk_name.push(col_names[pk_ci])
         else:
             self._tbl_pk_name.push("")
+        self._tbl_schema_known.push(true)
+        self._tbl_col_types.push(col_types)
         var empty_pk_map: Dict<text, i32> = {}
         self._tbl_pk_map.push(empty_pk_map)
         self._tbl_dirty.push(true)
@@ -2182,6 +2647,10 @@ class PureDatabase:
         var new_all_visible: [bool] = []
         var new_pk_dirty: [bool] = []
         var new_mvcc_stale: [bool] = []
+        var new_tbl_dirty: [bool] = []
+        var new_pk_name: [text] = []
+        var new_schema_known: [bool] = []
+        var new_col_types: [[PureColumnTypeV1]] = []
         var new_indexes: [[[text]]] = []
         var new_index_unique: [[bool]] = []
         var i: i32 = 0
@@ -2206,6 +2675,10 @@ class PureDatabase:
                 new_all_visible.push(self._tbl_all_visible[i])
                 new_pk_dirty.push(self._tbl_pk_dirty[i])
                 new_mvcc_stale.push(self._tbl_mvcc_stale[i])
+                new_tbl_dirty.push(self._tbl_dirty[i])
+                new_pk_name.push(self._tbl_pk_name[i])
+                new_schema_known.push(self._tbl_schema_known[i])
+                new_col_types.push(self._tbl_col_types[i])
                 new_indexes.push(self._indexes[i])
                 new_index_unique.push(self._index_unique[i])
             i = i + 1
@@ -2228,6 +2701,10 @@ class PureDatabase:
         self._tbl_all_visible = new_all_visible
         self._tbl_pk_dirty = new_pk_dirty
         self._tbl_mvcc_stale = new_mvcc_stale
+        self._tbl_dirty = new_tbl_dirty
+        self._tbl_pk_name = new_pk_name
+        self._tbl_schema_known = new_schema_known
+        self._tbl_col_types = new_col_types
         self._indexes = new_indexes
         self._index_unique = new_index_unique
         # Rebuild typed storage + pk index without the dropped table

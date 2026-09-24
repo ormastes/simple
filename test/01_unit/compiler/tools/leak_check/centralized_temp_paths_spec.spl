@@ -1,0 +1,50 @@
+"""
+# Leak-check Centralized Temporary Paths
+
+Compiler leak checking keeps all generated source, binaries, and runtime dumps
+below the configured worktree storage root.
+"""
+
+use std.io_runtime.{read_file_text}
+use std.spec.step
+use app.io.mod.{env_get, env_set}
+use compiler.tools.leak_check.temp_paths.{leak_check_temp_root}
+
+describe "leak-check temporary storage policy":
+    it "uses the configured worktree storage root at runtime":
+        step("Project a dedicated worktree storage root")
+        val previous = env_get("SIMPLE_WORKTREE_STORAGE_ROOT")
+        env_set("SIMPLE_WORKTREE_STORAGE_ROOT", "/workspace/.simple/storage/")
+
+        step("Resolve the compiler leak-check subtree")
+        expect(leak_check_temp_root()).to_equal("/workspace/.simple/storage/tmp/compiler/leak-check")
+
+        step("Restore the caller environment")
+        env_set("SIMPLE_WORKTREE_STORAGE_ROOT", previous)
+
+    it "derives its structured temporary root from the worktree storage root":
+        step("Load the leak-check path owner")
+        val source = read_file_text("src/compiler/90.tools/leak_check/temp_paths.spl")
+
+        step("Require the centralized environment contract and structured subtree")
+        expect(source).to_contain("SIMPLE_WORKTREE_STORAGE_ROOT")
+        expect(source).to_contain("/.simple/storage")
+        expect(source).to_contain("/tmp/compiler/leak-check")
+
+        step("Reject direct operating-system temporary roots")
+        expect(source).to_not_contain("TMPDIR")
+        expect(source).to_not_contain("\"/tmp")
+        expect(source).to_not_contain("mktemp")
+
+    it "routes both leak-check modes through the path owner":
+        step("Load both production runners")
+        val external = read_file_text("src/compiler/90.tools/leak_check/external_runner.spl")
+        val runtime = read_file_text("src/compiler/90.tools/leak_check/main.spl")
+
+        step("Require centralized external and runtime paths")
+        expect(external).to_contain("leak_check_create_run_dir()")
+        expect(runtime).to_contain("leak_check_runtime_dump_path()")
+
+        step("Reject the legacy direct temporary producers")
+        expect(external).to_not_contain("mktemp -d /tmp/simple_leak_check")
+        expect(runtime).to_not_contain("/tmp/simple_leak_check_runtime.txt")

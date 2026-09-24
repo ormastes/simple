@@ -1,4 +1,8 @@
 # Phase 2 native selected-font byte loading returns invalid
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -50,3 +54,4 @@ All three attempts used `SIMPLE_NO_STUB_FALLBACK=1`; no output was admitted and
 the experimental producer edit was reverted. The next compiler fix must make a
 narrow owner import reachable without wildcard-facade loss or unrelated I/O
 closure expansion. Do not bypass this with a copied executable or weak stubs.
+

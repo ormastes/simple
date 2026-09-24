@@ -1,4 +1,8 @@
 # The deployed binary reads `src/lib` from the worktree it was BUILT in, not the tree you are working in (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. **Severity: HIGH — this silently invalidates stdlib evidence.** Not a GPU bug;
 it was found while investigating one, and it is the actual cause of that "GPU bug".
@@ -97,3 +101,4 @@ why "strace before trusting stdlib results" is already standing advice.
 Any measurement of `src/lib/**` behaviour taken with this deployed binary, from any worktree other
 than `parsefix-iso`, is **unverified** — it may have exercised either tree. This includes green
 results: a spec that passes may be passing against foreign source.
+

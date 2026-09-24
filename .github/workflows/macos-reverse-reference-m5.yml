@@ -1,0 +1,404 @@
+name: macOS reverse-reference M5 universal promotion
+
+env:
+  SIMPLE_WORKTREE_STORAGE_ROOT: ${{ github.workspace }}/build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Exact source revision shared by both admitted M4 runs
+        required: true
+        type: string
+      arm64_run_id:
+        description: M4 workflow run containing the admitted arm64 Phase3+M4 artifact
+        required: true
+        type: string
+      arm64_run_attempt:
+        description: Exact M4 workflow attempt containing the arm64 artifacts
+        required: true
+        type: string
+      x86_64_run_id:
+        description: M4 workflow run containing the admitted x86_64 Phase3+M4 artifact
+        required: true
+        type: string
+      x86_64_run_attempt:
+        description: Exact M4 workflow attempt containing the x86_64 artifacts
+        required: true
+        type: string
+      arm64_artifact:
+        description: Artifact containing simple, admission.env, m4.env, and the M4 manifest for arm64
+        required: true
+        type: string
+      x86_64_artifact:
+        description: Artifact containing simple, admission.env, m4.env, and the M4 manifest for x86_64
+        required: true
+        type: string
+      arm64_evidence_artifact:
+        description: Full retained native M4 evidence artifact for arm64
+        required: true
+        type: string
+      x86_64_evidence_artifact:
+        description: Full retained native M4 evidence artifact for x86_64
+        required: true
+        type: string
+      arm64_runner:
+        description: Native Apple Silicon runner label
+        required: true
+        default: macos-15
+        type: string
+      x86_64_runner:
+        description: Native Intel runner label
+        required: true
+        type: string
+      expected_current_digest:
+        description: CAS precondition for promotion (NONE or exact current signed candidate SHA-256)
+        required: true
+        default: NONE
+        type: string
+
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+
+jobs:
+  package:
+    runs-on: ${{ inputs.arm64_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.arm64_artifact }}
+          run-id: ${{ inputs.arm64_run_id }}
+          github-token: ${{ github.token }}
+          path: build/m5/thin/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.x86_64_artifact }}
+          run-id: ${{ inputs.x86_64_run_id }}
+          github-token: ${{ github.token }}
+          path: build/m5/thin/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.arm64_evidence_artifact }}
+          run-id: ${{ inputs.arm64_run_id }}
+          github-token: ${{ github.token }}
+          path: build/m5/m4-evidence/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.x86_64_evidence_artifact }}
+          run-id: ${{ inputs.x86_64_run_id }}
+          github-token: ${{ github.token }}
+          path: build/m5/m4-evidence/x86_64
+      - name: Authenticate exact M4 workflow runs and artifacts
+        id: m4
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          ARM_RUN: ${{ inputs.arm64_run_id }}
+          ARM_ATTEMPT: ${{ inputs.arm64_run_attempt }}
+          ARM_ARTIFACT: ${{ inputs.arm64_artifact }}
+          ARM_EVIDENCE: ${{ inputs.arm64_evidence_artifact }}
+          X86_RUN: ${{ inputs.x86_64_run_id }}
+          X86_ATTEMPT: ${{ inputs.x86_64_run_attempt }}
+          X86_ARTIFACT: ${{ inputs.x86_64_artifact }}
+          X86_EVIDENCE: ${{ inputs.x86_64_evidence_artifact }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          bind_m4() {
+            label=$1 run_id=$2 attempt=$3 artifact=$4 evidence=$5
+            run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")
+            test "$(jq -r '.repository.full_name' <<<"$run_json")" = "$GITHUB_REPOSITORY"
+            test "$(jq -r '.head_sha' <<<"$run_json")" = "$SOURCE_REVISION"
+            test "$(jq -r '.run_attempt' <<<"$run_json")" = "$attempt"
+            test "$(jq -r '.path' <<<"$run_json")" = .github/workflows/macos-reverse-reference-m4.yml
+            test "$(jq -r '.status + ":" + .conclusion' <<<"$run_json")" = completed:success
+            branch=$(jq -r '.head_branch' <<<"$run_json"); test -n "$branch"; test "$branch" != null
+            workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/macos-reverse-reference-m4.yml@refs/heads/${branch}"
+            workflow_sha=$(git show "${SOURCE_REVISION}:.github/workflows/macos-reverse-reference-m4.yml" | shasum -a 256 | awk '{print $1}')
+            artifacts=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")
+            for binding in artifact:"$artifact" evidence_artifact:"$evidence"; do
+              key=${binding%%:*}; name=${binding#*:}
+              test "$(jq --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length' <<<"$artifacts")" = 1
+              id=$(jq -r --arg name "$name" '.artifacts[] | select(.name == $name and .expired == false) | .id' <<<"$artifacts")
+              digest=$(jq -r --arg name "$name" '.artifacts[] | select(.name == $name and .expired == false) | .digest' <<<"$artifacts")
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              echo "${label}_${key}_id=$id" >>"$GITHUB_OUTPUT"
+              echo "${label}_${key}_digest=$digest" >>"$GITHUB_OUTPUT"
+            done
+            echo "${label}_repository=$GITHUB_REPOSITORY" >>"$GITHUB_OUTPUT"
+            echo "${label}_workflow_ref=$workflow_ref" >>"$GITHUB_OUTPUT"
+            echo "${label}_workflow_sha=$workflow_sha" >>"$GITHUB_OUTPUT"
+            echo "${label}_head_sha=$SOURCE_REVISION" >>"$GITHUB_OUTPUT"
+          }
+          bind_m4 arm64 "$ARM_RUN" "$ARM_ATTEMPT" "$ARM_ARTIFACT" "$ARM_EVIDENCE"
+          bind_m4 x86_64 "$X86_RUN" "$X86_ATTEMPT" "$X86_ARTIFACT" "$X86_EVIDENCE"
+          gh attestation verify build/m5/thin/arm64/simple --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh attestation verify build/m5/thin/x86_64/simple --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh attestation verify build/m5/m4-evidence/arm64/status.env --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh attestation verify build/m5/m4-evidence/x86_64/status.env --repo "$GITHUB_REPOSITORY" >/dev/null
+      - name: Validate local M4/M5 workflow contract
+        run: sh scripts/check/check-macos-m4-workflow-readiness.shs
+      - name: Bind thin artifacts to retained M4 evidence
+        run: |
+          cmp build/m5/thin/arm64/m4-evidence-files.sha256 \
+            build/m5/m4-evidence/arm64/evidence-files.sha256
+          cmp build/m5/thin/x86_64/m4-evidence-files.sha256 \
+            build/m5/m4-evidence/x86_64/evidence-files.sha256
+      - name: Compose without rebuilding
+        run: |
+          test '${{ inputs.arm64_run_id }}' != '${{ inputs.x86_64_run_id }}'
+          sh scripts/release/macos-universal-m5.shs --compose \
+            --arm64-candidate=build/m5/thin/arm64/simple \
+            --arm64-admission=build/m5/thin/arm64/admission.env \
+            --arm64-m4=build/m5/thin/arm64/m4.env \
+            --arm64-m4-evidence-dir=build/m5/m4-evidence/arm64 \
+            --arm64-m4-run-id='${{ inputs.arm64_run_id }}' \
+            --arm64-m4-run-attempt='${{ inputs.arm64_run_attempt }}' \
+            --arm64-m4-artifact='${{ inputs.arm64_artifact }}' \
+            --arm64-m4-evidence-artifact='${{ inputs.arm64_evidence_artifact }}' \
+            --arm64-m4-repository='${{ steps.m4.outputs.arm64_repository }}' \
+            --arm64-m4-workflow-ref='${{ steps.m4.outputs.arm64_workflow_ref }}' \
+            --arm64-m4-workflow-sha='${{ steps.m4.outputs.arm64_workflow_sha }}' \
+            --arm64-m4-head-sha='${{ steps.m4.outputs.arm64_head_sha }}' \
+            --arm64-m4-artifact-id='${{ steps.m4.outputs.arm64_artifact_id }}' \
+            --arm64-m4-artifact-digest='${{ steps.m4.outputs.arm64_artifact_digest }}' \
+            --arm64-m4-evidence-artifact-id='${{ steps.m4.outputs.arm64_evidence_artifact_id }}' \
+            --arm64-m4-evidence-artifact-digest='${{ steps.m4.outputs.arm64_evidence_artifact_digest }}' \
+            --x86_64-candidate=build/m5/thin/x86_64/simple \
+            --x86_64-admission=build/m5/thin/x86_64/admission.env \
+            --x86_64-m4=build/m5/thin/x86_64/m4.env \
+            --x86_64-m4-evidence-dir=build/m5/m4-evidence/x86_64 \
+            --x86_64-m4-run-id='${{ inputs.x86_64_run_id }}' \
+            --x86_64-m4-run-attempt='${{ inputs.x86_64_run_attempt }}' \
+            --x86_64-m4-artifact='${{ inputs.x86_64_artifact }}' \
+            --x86_64-m4-evidence-artifact='${{ inputs.x86_64_evidence_artifact }}' \
+            --x86_64-m4-repository='${{ steps.m4.outputs.x86_64_repository }}' \
+            --x86_64-m4-workflow-ref='${{ steps.m4.outputs.x86_64_workflow_ref }}' \
+            --x86_64-m4-workflow-sha='${{ steps.m4.outputs.x86_64_workflow_sha }}' \
+            --x86_64-m4-head-sha='${{ steps.m4.outputs.x86_64_head_sha }}' \
+            --x86_64-m4-artifact-id='${{ steps.m4.outputs.x86_64_artifact_id }}' \
+            --x86_64-m4-artifact-digest='${{ steps.m4.outputs.x86_64_artifact_digest }}' \
+            --x86_64-m4-evidence-artifact-id='${{ steps.m4.outputs.x86_64_evidence_artifact_id }}' \
+            --x86_64-m4-evidence-artifact-digest='${{ steps.m4.outputs.x86_64_evidence_artifact_digest }}' \
+            --expected-source-revision='${{ inputs.source_revision }}' \
+            --output-root=build/m5
+          candidate=$(find build/m5/universal -mindepth 1 -maxdepth 1 -type d)
+          test "$(printf '%s\n' "$candidate" | wc -l | tr -d ' ')" = 1
+          printf '%s\n' "$candidate" > build/m5/candidate-path
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-m5-universal-packaged-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/m5/universal
+            build/m5/candidate-path
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-arm64:
+    needs: package
+    runs-on: ${{ inputs.arm64_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-universal-packaged-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5
+      - name: Run universal natively on arm64
+        run: |
+          candidate=$(find build/m5/universal -mindepth 1 -maxdepth 1 -type d)
+          sh scripts/release/macos-universal-m5.shs --verify-native \
+            --candidate-dir="$candidate" --arch=arm64 \
+            --out-receipt=build/m5/arm64-verification.env
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-m5-arm64-verification-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/m5/arm64-verification.env
+            build/m5/arm64-version.log
+            build/m5/arm64-test.log
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-x86_64:
+    needs: package
+    runs-on: ${{ inputs.x86_64_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-universal-packaged-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5
+      - name: Run universal natively on x86_64
+        run: |
+          candidate=$(find build/m5/universal -mindepth 1 -maxdepth 1 -type d)
+          sh scripts/release/macos-universal-m5.shs --verify-native \
+            --candidate-dir="$candidate" --arch=x86_64 \
+            --out-receipt=build/m5/x86_64-verification.env
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-m5-x86_64-verification-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/m5/x86_64-verification.env
+            build/m5/x86_64-version.log
+            build/m5/x86_64-test.log
+          if-no-files-found: error
+          retention-days: 30
+
+  authorize-release:
+    needs: [package, verify-arm64, verify-x86_64]
+    runs-on: ${{ inputs.arm64_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-universal-packaged-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-arm64-verification-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5/verification
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-x86_64-verification-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5/verification
+      - name: Authorize signing and notarization only after both native passes
+        run: |
+          candidate=$(find build/m5/universal -mindepth 1 -maxdepth 1 -type d)
+          sh scripts/release/macos-universal-m5.shs --finalize \
+            --candidate-dir="$candidate" \
+            --arm64-verification=build/m5/verification/arm64-verification.env \
+            --x86_64-verification=build/m5/verification/x86_64-verification.env \
+            --out-receipt=build/m5/verified.env
+          grep -Fxq signing_authorized=true build/m5/verified.env
+          grep -Fxq notarization_authorized=true build/m5/verified.env
+      - name: Codesign, notarize, staple, and publish a new immutable signed candidate
+        env:
+          M5_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          M5_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+        run: |
+          candidate=$(find build/m5/universal -mindepth 1 -maxdepth 1 -type d)
+          sh scripts/release/macos-universal-m5.shs --sign-notarize \
+            --candidate-dir="$candidate" \
+            --verification-receipt=build/m5/verified.env \
+            --arm64-verification=build/m5/verification/arm64-verification.env \
+            --x86_64-verification=build/m5/verification/x86_64-verification.env \
+            --signing-identity="$M5_CODESIGN_IDENTITY" \
+            --notary-profile="$M5_NOTARY_PROFILE" \
+            --output-root=build/m5 \
+            --out-receipt=build/m5/signing-status.env
+          grep -Fxq status=SIGNED_NOTARIZED build/m5/signing-status.env
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-m5-signed-candidate-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/m5/verified.env
+            build/m5/signing-status.env
+            build/m5/signed
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-signed-arm64:
+    needs: authorize-release
+    runs-on: ${{ inputs.arm64_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-signed-candidate-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5
+      - name: Run signed and stapled candidate natively on arm64
+        run: |
+          candidate=$(find build/m5/signed -mindepth 1 -maxdepth 1 -type d)
+          sh scripts/release/macos-universal-m5.shs --verify-signed-native \
+            --candidate-dir="$candidate" --arch=arm64 \
+            --out-receipt=build/m5/arm64-post-sign-verification.env
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-m5-arm64-post-sign-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/m5/arm64-post-sign-verification.env
+            build/m5/arm64-post-sign-version.log
+            build/m5/arm64-post-sign-test.log
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-signed-x86_64:
+    needs: authorize-release
+    runs-on: ${{ inputs.x86_64_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-signed-candidate-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5
+      - name: Run signed and stapled candidate natively on x86_64
+        run: |
+          candidate=$(find build/m5/signed -mindepth 1 -maxdepth 1 -type d)
+          sh scripts/release/macos-universal-m5.shs --verify-signed-native \
+            --candidate-dir="$candidate" --arch=x86_64 \
+            --out-receipt=build/m5/x86_64-post-sign-verification.env
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-m5-x86_64-post-sign-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            build/m5/x86_64-post-sign-verification.env
+            build/m5/x86_64-post-sign-version.log
+            build/m5/x86_64-post-sign-test.log
+          if-no-files-found: error
+          retention-days: 30
+
+  promote:
+    needs: [authorize-release, verify-signed-arm64, verify-signed-x86_64]
+    runs-on: ${{ inputs.arm64_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-signed-candidate-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-arm64-post-sign-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5/post-sign
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-m5-x86_64-post-sign-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5/post-sign
+      - name: CAS-promote only the signed digest with both post-sign native passes
+        run: |
+          candidate=$(find build/m5/signed -mindepth 1 -maxdepth 1 -type d)
+          sh scripts/release/macos-universal-m5.shs --promote \
+            --candidate-dir="$candidate" \
+            --arm64-post-sign-verification=build/m5/post-sign/arm64-post-sign-verification.env \
+            --x86_64-post-sign-verification=build/m5/post-sign/x86_64-post-sign-verification.env \
+            --expected-current='${{ inputs.expected_current_digest }}' \
+            --pointer=build/m5/promotion/current \
+            --out-receipt=build/m5/promotion/promotion.env
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-m5-promoted-reference-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m5/promotion
+          if-no-files-found: error
+          retention-days: 30

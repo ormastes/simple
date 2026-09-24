@@ -61,7 +61,7 @@ pub fn standard_resource_budget(resource_class: ExecutionResourceClass) -> Resou
     """Return explicit quantities; history is never consulted here."""
     match resource_class:
         case ExecutionResourceClass.Unit:
-            ResourceBudget(max_wall_ms: 300_000, max_cpu_ms: 600_000, max_tree_charge_bytes: 2_147_483_648, max_direct_child_rss_bytes: 2_147_483_648, max_io_read_bytes: 8_589_934_592, max_io_write_bytes: 2_147_483_648, max_pids: 128, max_fds: 256)
+            ResourceBudget(max_wall_ms: 300_000, max_cpu_ms: 600_000, max_tree_charge_bytes: 3_221_225_472, max_direct_child_rss_bytes: 3_221_225_472, max_io_read_bytes: 8_589_934_592, max_io_write_bytes: 2_147_483_648, max_pids: 128, max_fds: 256)
         case ExecutionResourceClass.Integration:
             ResourceBudget(max_wall_ms: 900_000, max_cpu_ms: 3_600_000, max_tree_charge_bytes: 4_294_967_296, max_direct_child_rss_bytes: 4_294_967_296, max_io_read_bytes: 34_359_738_368, max_io_write_bytes: 8_589_934_592, max_pids: 512, max_fds: 512)
         case ExecutionResourceClass.System:
@@ -479,6 +479,26 @@ fn _unavailable_usage(wall_ms: i64, exit_code: i64) -> ResourceUsage:
         exit_code: exit_code
     )
 
+fn _legacy_process_fallback(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64, reported_error: i64) -> ObservedProcessResult:
+    val legacy_started = time_now_unix_micros()
+    val (legacy_stdout, legacy_stderr, legacy_exit) = process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
+    val legacy_ended = time_now_unix_micros()
+    val legacy_wall_ms = if legacy_ended >= legacy_started: (legacy_ended - legacy_started) / 1000 else: 0
+    val legacy_timed_out = process_bounded_timed_out(legacy_exit, legacy_stderr)
+    val legacy_signal = process_bounded_kill_signal(legacy_exit)
+    val legacy_usage = ResourceUsage(
+        wall_ms: legacy_wall_ms, user_cpu_ms: 0, system_cpu_ms: 0,
+        peak_tree_charge_bytes: 0, peak_direct_child_rss_bytes: 0,
+        heap_live_end_bytes: 0, heap_peak_bytes: 0,
+        io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
+        evidence_quality: ResourceEvidenceQuality.Unavailable,
+        termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
+        signal: legacy_signal, exit_code: legacy_exit)
+    ObservedProcessResult(
+        stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
+        stdout_truncated: false, stderr_truncated: false,
+        runtime_error: if legacy_exit == -1 and not legacy_timed_out: reported_error else: 0)
+
 fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ObservedProcessResult:
     val started = time_now_unix_micros()
     proc_slot_acquire()
@@ -487,6 +507,12 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
     val ended = time_now_unix_micros()
     val wall_ms = if ended >= started: (ended - started) / 1000 else: 0
     if fields.len() != 30 or fields[0] != 1 or fields[19] != 2:
+        # A malformed/short payload here does NOT prove the child never ran
+        # (unlike the explicit ENOTSUP lifecycle_error below, which is a
+        # clean pre-spawn refusal) -- re-running via the legacy facade could
+        # execute a side-effecting command (rm, git push, a bootstrap step)
+        # twice. Fail hard and closed, as before; only the explicit
+        # ENOTSUP-family lifecycle_error case below is safe to retry.
         return ObservedProcessResult(
             stdout: stdout,
             stderr: stderr,
@@ -505,25 +531,17 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
     # Windows and non-pidfd Unix runtimes may not yet implement the additive
     # observed ABI. Preserve execution through the established bounded facade
     # while reporting resource evidence as unavailable.
-    if lifecycle_error == 95 or lifecycle_error == 45 or lifecycle_error == 10045:
-        val legacy_started = time_now_unix_micros()
-        val (legacy_stdout, legacy_stderr, legacy_exit) = process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
-        val legacy_ended = time_now_unix_micros()
-        val legacy_wall_ms = if legacy_ended >= legacy_started: (legacy_ended - legacy_started) / 1000 else: 0
-        val legacy_timed_out = process_bounded_timed_out(legacy_exit, legacy_stderr)
-        val legacy_signal = process_bounded_kill_signal(legacy_exit)
-        val legacy_usage = ResourceUsage(
-            wall_ms: legacy_wall_ms, user_cpu_ms: 0, system_cpu_ms: 0,
-            peak_tree_charge_bytes: 0, peak_direct_child_rss_bytes: 0,
-            heap_live_end_bytes: 0, heap_peak_bytes: 0,
-            io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
-            evidence_quality: ResourceEvidenceQuality.Unavailable,
-            termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
-            signal: legacy_signal, exit_code: legacy_exit)
-        return ObservedProcessResult(
-            stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
-            stdout_truncated: false, stderr_truncated: false,
-            runtime_error: if legacy_exit == -1 and not legacy_timed_out: lifecycle_error else: 0)
+    # 95 = Linux ENOTSUP, 45 = some BSD ENOTSUP, 10045 = Winsock WSAEOPNOTSUPP.
+    # 129 = Windows UCRT's own `errno.h` ENOTSUP (distinct from all three) --
+    # measured 2026-09-24: even after the 2026-09-13 Win32 sync-family
+    # implementation landed (see the comment on that branch in
+    # src/runtime/runtime_process_owned.c), a deployed x86_64-pc-windows-msvc
+    # seed still answered every call through the RT_OWNED_WIN32_SYNC_IMPLEMENTED
+    # ENOTSUP stub with lifecycle_error == 129, so this branch never matched
+    # and every simple_ctx_execute/simple_ctx_batch_execute call hard-failed
+    # with exit_code -1 and empty stdout/stderr regardless of command or shell.
+    if lifecycle_error == 95 or lifecycle_error == 45 or lifecycle_error == 10045 or lifecycle_error == 129:
+        return _legacy_process_fallback(cmd, args, timeout_ms, max_output_bytes, lifecycle_error)
     val has_tree = (evidence_flags & 2) != 0
     val has_sampled_tree = (evidence_flags & 8) != 0
     val has_direct = (evidence_flags & 1) != 0

@@ -26,11 +26,38 @@ use os.smf.dynsmf_session.{
     dynsmf_policy_default,
     dynsmf_session_new,
     dynsmf_session_load_admitted,
+    dynsmf_session_first_use_facet_admitted,
     dynsmf_session_unload,
     dynsmf_session_lookup_facet,
     dynsmf_session_validate_facet_ref
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol, SmfWriterSymbolBinding, SmfWriterSymbolType, smf_build_aspect_pack_image}
+
+fn _aspect_nested_module_bytes(code: [u8]) -> [u8]:
+    var writer = SmfWriter.create()
+    var words: [i64] = []
+    for byte in code:
+        words.push(byte as i64)
+    writer.add_code_section("code", words)
+    writer.add_symbol(SmfWriterSymbol(
+        name: "trace_facet_v1",
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0,
+        value: 0,
+        size: words.len(),
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false
+    ))
+    val built = writer.write()
+    if built.is_err():
+        return []
+    var bytes: [u8] = []
+    for word in built.unwrap():
+        bytes.push(word as u8)
+    bytes
 
 fn _aspect_pack_test_bytes() -> [u8]:
     val modules = [
@@ -40,7 +67,7 @@ fn _aspect_pack_test_bytes() -> [u8]:
             module_abi_hash: "module-abi-7",
             required_core_public_abi_hash: "core-abi-3",
             variant_fingerprint: "linux-x86_64",
-            payload: [11 as u8, 22 as u8, 33 as u8]
+            payload: _aspect_nested_module_bytes([195 as u8])
         )
     ]
     val built = apk_build_pack_v2(modules)
@@ -54,7 +81,7 @@ fn _aspect_pack_other_bytes() -> [u8]:
             module_abi_hash: "module-abi-7",
             required_core_public_abi_hash: "core-abi-3",
             variant_fingerprint: "linux-x86_64",
-            payload: [99 as u8, 88 as u8, 77 as u8]
+            payload: _aspect_nested_module_bytes([144 as u8, 195 as u8])
         )
     ]
     val built = apk_build_pack_v2(modules)
@@ -81,6 +108,42 @@ fn _aspect_fixture_append(bytes: [u8], suffix: [u8]) -> [u8]:
     var index = 0
     while index < suffix.len():
         out.push(suffix[index])
+        index = index + 1
+    out
+
+fn _aspect_fixture_read_u64(bytes: [u8], offset: i64) -> i64:
+    var value = 0i64
+    var index = 0
+    while index < 8:
+        value = value | ((bytes[offset + index] as i64) << (index * 8))
+        index = index + 1
+    value
+
+fn _aspect_fixture_write_u64(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var out = bytes
+    var index = 0
+    while index < 8:
+        out[offset + index] = ((value >> (index * 8)) & 0xff) as u8
+        index = index + 1
+    out
+
+fn _aspect_fixture_two_section_outer() -> [u8]:
+    var writer = SmfWriter.create()
+    writer.add_code_section("cold-provider-code", [1, 2, 3, 4])
+    writer.add_aspect_pack_section(_aspect_pack_test_bytes())
+    val raw = writer.write().unwrap()
+    var out: [u8] = []
+    for byte in raw:
+        out.push(byte as u8)
+    out
+
+fn _aspect_fixture_swap_rows(bytes: [u8], left: i64, right: i64) -> [u8]:
+    var out = bytes
+    var index = 0
+    while index < 64:
+        val held = out[left + index]
+        out[left + index] = out[right + index]
+        out[right + index] = held
         index = index + 1
     out
 
@@ -113,7 +176,7 @@ fn _aspect_fixture_header(section_table: i64, symbol_table: i64) -> [u8]:
     var out: [u8] = [83 as u8, 77 as u8, 70 as u8, 0 as u8, 1 as u8, 1 as u8, 1 as u8, 0 as u8]
     out = _aspect_fixture_append_u32(out, 0x21)  # executable + aspect-pack
     out = _aspect_fixture_append(out, [0 as u8, 0 as u8, 0 as u8, 0 as u8])
-    out = _aspect_fixture_append_u32(out, 2)
+    out = _aspect_fixture_append_u32(out, 3)
     out = _aspect_fixture_append_u64(out, section_table)
     out = _aspect_fixture_append_u64(out, symbol_table)
     out = _aspect_fixture_append_u32(out, 1)
@@ -134,19 +197,19 @@ fn _aspect_smf_bytes(code: [u8], pack_bytes: [u8]) -> [u8]:
     val section_table = out.len()
     out = _aspect_fixture_append(out, _aspect_fixture_section(1, 5, 0, code.len(), 16))
     out = _aspect_fixture_append(out, _aspect_fixture_section(16, 1, pack_offset, pack_bytes.len(), 8))
-    val symbol_table = out.len()
+    val symbol_table = section_table + 3 * 64
+    val string_table = symbol_table + 56
+    out = _aspect_fixture_append(out, _aspect_fixture_section(6, 1, string_table, 16, 1))
     out = _aspect_fixture_append(out, _aspect_fixture_symbol(code.len()))
     out.push(0 as u8)
     out = _aspect_fixture_append(out, [116 as u8, 114 as u8, 97 as u8, 99 as u8, 101 as u8, 95 as u8, 102 as u8, 97 as u8, 99 as u8, 101 as u8, 116 as u8, 95 as u8, 118 as u8, 49 as u8, 0 as u8])
     _aspect_fixture_append(out, _aspect_fixture_header(section_table, symbol_table))
 
 fn _aspect_smf_test_bytes() -> [u8]:
-    # x86-64 `ret`; lookup only resolves its mapped address and never calls it.
-    _aspect_smf_bytes([195 as u8], _aspect_pack_test_bytes())
+    smf_build_aspect_pack_image(_aspect_pack_test_bytes()).unwrap()
 
 fn _aspect_smf_other_bytes() -> [u8]:
-    # A distinct, still-valid code body under the same logical library id.
-    _aspect_smf_bytes([144 as u8, 195 as u8], _aspect_pack_other_bytes())
+    smf_build_aspect_pack_image(_aspect_pack_other_bytes()).unwrap()
 
 fn _aspect_directory_from_smf(artifact_bytes: [u8]) -> AspectPackDirectory:
     aspect_pack_directory_parse_from_outer_smf_bytes(artifact_bytes).directory
@@ -236,6 +299,22 @@ describe "dynamic aspect pack directory parser":
         expect(parsed.ok).to_equal(true)
         expect(parsed.directory.content_hash).to_equal(sha256_u8_hex(_aspect_pack_test_bytes()))
         expect(parsed.directory.entries[0].module_id).to_equal("trace.module")
+
+    it "accepts unordered non-overlapping outer sections and rejects overlap":
+        var unordered = _aspect_fixture_two_section_outer()
+        val unordered_header = unordered.len() - 128
+        val unordered_table = _aspect_fixture_read_u64(unordered, unordered_header + 20)
+        unordered = _aspect_fixture_swap_rows(unordered, unordered_table, unordered_table + 64)
+        expect(aspect_pack_directory_parse_from_outer_smf_bytes(unordered).ok).to_equal(true)
+
+        var overlapping = _aspect_fixture_two_section_outer()
+        val overlap_header = overlapping.len() - 128
+        val overlap_table = _aspect_fixture_read_u64(overlapping, overlap_header + 20)
+        val first_offset = _aspect_fixture_read_u64(overlapping, overlap_table + 8)
+        overlapping = _aspect_fixture_write_u64(overlapping, overlap_table + 64 + 8, first_offset + 2)
+        val rejected = aspect_pack_directory_parse_from_outer_smf_bytes(overlapping)
+        expect(rejected.ok).to_equal(false)
+        expect(rejected.error_code).to_equal("ASPECT_PACK_OUTER_SECTION_OVERLAP")
 
     it "rejects unbounded outer table offsets before constructing a general reader":
         var outer = _aspect_smf_test_bytes()
@@ -391,7 +470,45 @@ describe "dynSMF facet reference generation":
             artifact_bytes
         )
         expect(loaded.loaded.len()).to_equal(0)
-        expect(loaded.evidence[0].reason).to_equal("trusted_aspect_admission_invalid")
+        expect(loaded.evidence[0].reason).to_start_with("trusted_aspect_admission_invalid:")
+
+    it "loads a typed facet on first use and reuses the exact mapped generation":
+        val artifact_bytes = _aspect_smf_test_bytes()
+        val directory = _aspect_directory_from_smf(artifact_bytes)
+        val manifest = _aspect_manifest(["trace_facet_v1"])
+        val request = _aspect_lookup_request(
+            directory,
+            _aspect_catalog("module-abi-7", "trace_facet_v1", directory.content_hash),
+            manifest,
+            sha256_u8_hex(artifact_bytes)
+        )
+        val empty = dynsmf_session_new("aspect-first-use", dynsmf_policy_default())
+
+        val first = dynsmf_session_first_use_facet_admitted(empty, "trace_pack", request, artifact_bytes)
+        expect(first.session.evidence.len()).to_equal(1)
+        expect(first.session.evidence[0].reason).to_equal("smf_dlopen_admitted")
+        expect(first.facet_ref != nil).to_equal(true)
+        expect(first.session.loaded.len()).to_equal(1)
+        if first.facet_ref == nil or first.session.loaded.len() == 0:
+            return
+        expect(dynsmf_session_validate_facet_ref(first.session, first.facet_ref!)).to_equal(true)
+
+        # A cache hit issues a fresh capability but does not re-read/remap the
+        # admitted image or append another load receipt.
+        val second = dynsmf_session_first_use_facet_admitted(first.session, "trace_pack", request, [])
+        expect(second.facet_ref != nil).to_equal(true)
+        expect(second.session.loaded.len()).to_equal(1)
+        expect(second.session.evidence.len()).to_equal(1)
+        expect(dynsmf_session_validate_facet_ref(second.session, first.facet_ref!)).to_equal(true)
+        expect(dynsmf_session_validate_facet_ref(second.session, second.facet_ref!)).to_equal(true)
+
+        val rejected = dynsmf_session_first_use_facet_admitted(
+            dynsmf_session_new("aspect-first-use-reject", dynsmf_policy_default()),
+            "trace_pack", request, [1, 2, 3])
+        expect(rejected.facet_ref == nil).to_equal(true)
+        expect(rejected.session.loaded.len()).to_equal(0)
+        expect(rejected.session.evidence[0].reason).to_equal("artifact_content_hash_mismatch")
+        _ = dynsmf_session_unload(second.session, "trace_pack")
 
     it "loads exact content, issues an opaque facet ref, and revokes it on reload":
         val artifact_bytes = _aspect_smf_test_bytes()
@@ -409,7 +526,11 @@ describe "dynSMF facet reference generation":
         val request = _aspect_lookup_request(directory, catalog, manifest, sha256_u8_hex(artifact_bytes))
         val empty = dynsmf_session_new("aspect-ref-generation", dynsmf_policy_default())
         val loaded = dynsmf_session_load_admitted(empty, "trace_pack", request, artifact_bytes)
+        expect(loaded.evidence.len()).to_equal(1)
+        expect(loaded.evidence[0].reason).to_equal("smf_dlopen_admitted")
         expect(loaded.loaded.len()).to_equal(1)
+        if loaded.loaded.len() == 0:
+            return
         expect(loaded.loaded[0].content_hash).to_equal(request.artifact.content_hash)
         val first_lease = dynsmf_session_lookup_facet(loaded, request)
         expect(first_lease.facet_ref != nil).to_equal(true)

@@ -161,3 +161,10 @@ runner's compiled mode returns empty for even literal arithmetic.
 (`evaluate_formula_display_text`) for UI surfaces; the spec
 `test/01_unit/app/office/sheets/formula_harden_spec.spl` asserts only the
 termination behavior that the runner can execute.
+
+## Triage 2026-09-13 — LEFT OPEN (the buggy executor is not deployed here)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the minimal repro prints `pre` then `OK`. That is the EXPECTED answer and it clears nothing — the entry designates the Rust seed as the confirmed-correct oracle; the defect is in stage4's self-hosted executor (`bin/release/simple`), which is not deployed on this host.
+- **inferred**: closing this needs a deployed self-hosted stage4 binary to run the same probe and get `BAD`. Building one is out of bounds for this session (a bootstrap is running concurrently and `src/compiler/**` edits would desync it).
+- **inferred**: the two secondary defects the entry parks in `src/compiler/95.interp/mir_interpreter.spl` (unhandled `LocalAddr`, truncating `f64_to_bits = v as i64`) are separate latent issues, explicitly not this bug.
+- Verdict: OPEN — unverifiable on the Windows seed, not disproven.

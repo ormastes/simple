@@ -1,4 +1,9 @@
 # `rt_*` extern ABI divergence across the three runtime implementations
+## Closed 2026-09-16 — Status RESOLVED, all 19 rows fixed; gate PASS 470 symbols 0 new
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-10
 **Status:** RESOLVED -- all 19 rows fixed. Class-2 (4) fixed in `52c6089581c`/`3997bffde05`/`1abc0c9d7a7`; Class-1 (15 symbols / 21 baseline rows) fixed 2026-08-10, see "Resolution" at the end. `scripts/check/extern_abi_signature_baseline.txt` is now EMPTY.
@@ -545,3 +550,4 @@ implementation provides and no caller uses. The signature gate does not read the
 generator templates, so it does not see this. It is a stale generator spec, not
 a live miscompile; filed here rather than fixed so the fix is not confused with
 the ABI work.
+

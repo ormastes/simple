@@ -1,4 +1,8 @@
 # Rendering/hosted specs red at HEAD on the test-runner interpreter lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-26
 - Found via: sspec modernization dual-check sampling of bulk TRC-003 comment edits.
@@ -17,3 +21,4 @@ Left RED per testing rules (correct specs failing document real defects). Same f
 `scv_spec_interpreter_file_rename_recursion_2026-08-26.md` — interpreter test-lane
 divergence vs the JIT path. Unblock: investigate the interpreter failures for these two
 spec families.
+

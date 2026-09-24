@@ -1,4 +1,9 @@
 # Every Stage-3 attempt clobbers `admission.env`, breaking the NEXT receipt producer
+## Closed 2026-09-16 — ...e 2 for nothing. ## Scope note — RESOLVED 2026-09-02 The "only the trust-root branch write
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN
 **Filed:** 2026-09-02
@@ -87,3 +92,4 @@ confirmed to be the trust-root branch of `bootstrap-from-scratch.sh:2864-2890`.
 
 (The workaround above never depended on this claim, but the claim is now established
 rather than assumed.)
+

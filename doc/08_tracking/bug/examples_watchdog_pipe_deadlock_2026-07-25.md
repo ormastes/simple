@@ -1,4 +1,8 @@
 # Bug: examples/ isolation watchdog deadlocks on >64KB output
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler_rust/driver/src/cli/examples_safety.rs:115-166
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-25  
 **Lane:** L5 (examples safety isolation check)  
@@ -24,3 +28,4 @@ Reference implementation: `examples_safety.rs` branch fix (in progress).
 ## Status
 
 Fix blocks all current example verification runs. High priority for examples lane unblock.
+

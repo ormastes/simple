@@ -1,4 +1,8 @@
 # Stage 4 streaming lexer early-release SIGSEGV
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -37,3 +41,4 @@ Refreshed-producer probe:
 `build/focused/stage4-streaming-lexer-release/full-build-refreshed.log`.
 Both completed the 1,726-file closure and terminated with SIGSEGV immediately
 after `phase2:surface:file:released ... seq=1`. No candidate exists.
+

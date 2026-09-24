@@ -1,4 +1,8 @@
 # check-perf-regression-tests.shs: 4 mechanisms RED (2026-09-05)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -110,3 +114,4 @@ reverted.
   still hold. Resolving each item requires actually re-verifying the
   behavior described in its linked `doc/08_tracking/bug/` record, not just
   restoring string-match.
+

@@ -1,4 +1,8 @@
 # Stage 4 direct range and slice values fail open
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: fixed in the LLVM 23.1 Phase 4 integration lane
 - Severity: P1 bootstrap/native correctness
@@ -25,3 +29,4 @@ existing direct lowering path.
 both fatal diagnostics and rejects generic `self.lower_range` dispatch.
 `test/fixtures/compiler/stage4_range_hir_owner.spl` executes two independent
 counted loops and distinguishes the supported path.
+

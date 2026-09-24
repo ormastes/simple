@@ -1,4 +1,8 @@
 # SimpleOS `umask` needs end-to-end permission ownership
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -19,3 +23,4 @@ mode through both open-create and mkdir atomically.  The owner must retain the
 per-process mask, enforce/read back permissions, and provide regressions for
 open-create and mkdir under changed masks.  Until then this API cannot support
 permission-sensitive deployment claims.
+

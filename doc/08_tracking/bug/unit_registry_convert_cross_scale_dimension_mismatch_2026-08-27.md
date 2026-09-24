@@ -1,4 +1,9 @@
 # Unit registry convert() rejects every cross-scale conversion (dimension mismatch)
+## Closed 2026-09-16 — ...m/h must convert to exactly 5 m/s. ## Fix direction `unit_registry.spl` should compare fac
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-27
 - Found by: sspec modernization batch (resid6_part_02), behavioral rewrite of
@@ -33,3 +38,4 @@ legitimate failure, left failing on purpose: 18 km/h must convert to exactly
 `unit_registry.spl` should compare factor sets only (scale-insensitive
 dimension equality), keeping `unit_expression_equivalent` for exact-equality
 uses, or `unit_expression_equivalent` needs a scale-tolerant sibling.
+

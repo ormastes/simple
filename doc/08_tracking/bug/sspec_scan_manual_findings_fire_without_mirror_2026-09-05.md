@@ -1,4 +1,8 @@
 # `sspec-maintain scan` charges manual-content rules against a mirror that does not exist (2026-09-05)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -174,3 +178,4 @@ make both specs above go GREEN with their assertions unchanged. This bug
 record intentionally does NOT implement either fix — a scoring change here
 shifts every score in the repo and needs explicit human sign-off (test-runner
 gate default min score 80).
+

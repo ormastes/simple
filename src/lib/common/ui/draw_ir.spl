@@ -110,13 +110,12 @@ struct DrawIrComposition:
     scene_key: text
     backend_target: text
     batches: [DrawIrBatch]
-    # Process-unique identity of this composition VALUE, handed out by
-    # draw_ir_next_composition_generation(). 0 means "unassigned" — a consumer
-    # must never memoize on 0, because every unassigned composition carries it.
-    # A non-zero value is never reused, so two compositions with different
-    # content can never share one; the converse does NOT hold — rebuilding
-    # identical content yields a new generation. Consumers may therefore use it
-    # to detect staleness, not to prove two builds are equal.
+    # Serial producer-domain identity of this composition VALUE, handed out by
+    # draw_ir_next_composition_generation(). 0 means "unassigned/exhausted" — a
+    # consumer must never memoize on 0. A non-zero value is not reused in that
+    # process domain; rebuilding identical content deliberately gets a new
+    # generation. This is a staleness token, never content-equality proof and
+    # never authority for concurrent producers without a higher-level owner.
     generation: i64 = 0
 
 struct DrawIrEventTargetContext:
@@ -525,10 +524,14 @@ fn draw_ir_batch(batch_id: text, backend_target: text, embedding: DrawIrEmbeddin
 
 var _draw_ir_composition_generation: i64 = 0
 
-# Hand out the next composition generation. Strictly monotonic within a
-# process and never zero, so a value that was issued once is never issued
-# again for different content.
+# Hand out the next composition generation in the current serial producer
+# domain. Exhaustion fails closed with 0 rather than wrapping to a reusable
+# positive identity. Concurrent render producers must obtain generations from
+# their session owner; this module-global compatibility allocator is not an
+# atomic cross-thread authority.
 pub fn draw_ir_next_composition_generation() -> i64:
+    if _draw_ir_composition_generation >= 9223372036854775807:
+        return 0
     _draw_ir_composition_generation = _draw_ir_composition_generation + 1
     _draw_ir_composition_generation
 

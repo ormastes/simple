@@ -1,0 +1,248 @@
+# Native SIMD kernel probe — run as a NATIVE BINARY, not in the interpreter.
+#
+# The interpreter uses the Rust kernels; a native binary links the C ones.
+# Every AVX-512 claim in this tree was verified against the interpreter, and a
+# native binary turned out to contain ZERO zmm while every span-returning C
+# kernel silently returned an empty array (`rt_array_new_uninit` never set
+# `len`), so the Simple callers read "extern not backed" and fell back to
+# scalar. Nothing failed; the lane was simply never taken.
+#
+# This program is the content check that catches that class: it verifies the C
+# kernels RETURN THE RIGHT BYTES, not merely a plausible length. Driven by
+# scripts/check/check-native-simd-kernels-real.shs, which also disassembles the
+# binary it builds.
+# @req REQ-SSPEC-LIB
+
+use std.common.simd_scan.{simd_find_byte, scalar_find_byte}
+use std.nogc_sync_mut.db.accel.{
+    row_bitmap_and_words, _scalar_row_bitmap_and_words,
+    row_bitmap_or_words, _scalar_row_bitmap_or_words,
+    row_bitmap_andnot_words, _scalar_row_bitmap_andnot_words
+}
+
+@unsafe(reason: "native SIMD kernel probe", capabilities: [ffi])
+extern fn rt_db_bitmap_and_u32(lhs: [u32], rhs: [u32], limit: i64) -> [u32]
+@unsafe(reason: "native SIMD kernel probe", capabilities: [ffi])
+extern fn rt_engine2d_blend_mask_span_u32(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]
+@unsafe(reason: "native SIMD kernel probe", capabilities: [ffi])
+extern fn rt_engine2d_blend_cov_span_u32(dst: [u32], offset: i64, colcov: [i32], count: i64, cov_y_and_alpha: i64, color: u32) -> [u32]
+
+fn oracle_mask_blend(dst: u32, alpha: i64, color: u32) -> u32:
+    val fr = ((color >> 16) & 0xFFu32) as i64
+    val fg = ((color >> 8) & 0xFFu32) as i64
+    val fb = (color & 0xFFu32) as i64
+    if alpha >= 255:
+        return 0xFF000000u32 | ((fr as u32) << 16) | ((fg as u32) << 8) | (fb as u32)
+    if alpha <= 0:
+        return dst
+    val dr = ((dst >> 16) & 0xFFu32) as i64
+    val dg = ((dst >> 8) & 0xFFu32) as i64
+    val db = (dst & 0xFFu32) as i64
+    val inv = 255 - alpha
+    0xFF000000u32 | ((((fr * alpha + dr * inv) / 255) as u32) << 16)
+        | ((((fg * alpha + dg * inv) / 255) as u32) << 8)
+        | (((fb * alpha + db * inv) / 255) as u32)
+
+fn oracle_cov_blend(dst: u32, cov: i64, cov_y: i64, alpha: i64, color: u32) -> u32:
+    val c = (cov * cov_y) / 256
+    if c <= 0:
+        return dst
+    var a = (c * alpha) / 255
+    if a > 256:
+        a = 256
+    val sr = ((color >> 16) & 0xFFu32) as i64
+    val sg = ((color >> 8) & 0xFFu32) as i64
+    val sb = (color & 0xFFu32) as i64
+    val dr = ((dst >> 16) & 0xFFu32) as i64
+    val dg = ((dst >> 8) & 0xFFu32) as i64
+    val db = (dst & 0xFFu32) as i64
+    val inv = 256 - a
+    0xFF000000u32 | ((((sr * a + dr * inv) / 256) as u32) << 16)
+        | ((((sg * a + dg * inv) / 256) as u32) << 8)
+        | (((sb * a + db * inv) / 256) as u32)
+
+fn main():
+    var bad: i64 = 0
+    var checked: i64 = 0
+    var bad_db: i64 = 0
+    var bad_mask: i64 = 0
+    var bad_cov: i64 = 0
+
+    # --- DB bitmap AND: lengths straddling the 8-lane int64 AVX-512 body ---
+    var n: i64 = 1
+    while n <= 40:
+        var a: [u32] = []
+        var b: [u32] = []
+        var i: i64 = 0
+        while i < n:
+            a.push(((i * 2654435761) % 4294967291) as u32)
+            b.push(((i * 40503 + 12345) % 4294967291) as u32)
+            i = i + 1
+        val got = rt_db_bitmap_and_u32(a, b, n)
+        if got.len() != n:
+            bad = bad + 1
+        else:
+            i = 0
+            while i < n:
+                checked = checked + 1
+                if got[i.to_i32()] != (a[i.to_i32()] & b[i.to_i32()]):
+                    bad = bad + 1
+                    bad_db = bad_db + 1
+                i = i + 1
+        n = n + 1
+
+    # --- glyph mask blend: content, not just length ---
+    n = 1
+    while n <= 40:
+        var dst: [u32] = []
+        var mask: [u8] = []
+        var i: i64 = 0
+        while i < n:
+            dst.push(0xFF000000u32 | ((i * 13 + 7) as u32))
+            mask.push(((i * 37) % 256) as u8)
+            i = i + 1
+        val got = rt_engine2d_blend_mask_span_u32(dst, 0, mask, 0, n, 0xFF3366CCu32)
+        if got.len() != n:
+            bad = bad + 1
+        else:
+            i = 0
+            while i < n:
+                checked = checked + 1
+                if got[i.to_i32()] != oracle_mask_blend(dst[i.to_i32()], (mask[i.to_i32()]).to_i64(), 0xFF3366CCu32):
+                    bad = bad + 1
+                    bad_mask = bad_mask + 1
+                i = i + 1
+        n = n + 1
+
+    # --- soft-shadow coverage blend: content ---
+    n = 1
+    while n <= 40:
+        var dst: [u32] = []
+        var cov: [i32] = []
+        var i: i64 = 0
+        while i < n:
+            dst.push(0xFF000000u32 | ((i * 17 + 11) as u32))
+            cov.push(((i * 37) % 257) as i32)
+            i = i + 1
+        val cy: i64 = 200
+        val al: i64 = 180
+        val got = rt_engine2d_blend_cov_span_u32(dst, 0, cov, n, cy * 1024 + al, 0xFF3366CCu32)
+        if got.len() != n:
+            bad = bad + 1
+        else:
+            i = 0
+            while i < n:
+                checked = checked + 1
+                if got[i.to_i32()] != oracle_cov_blend(dst[i.to_i32()], (cov[i.to_i32()]).to_i64(), cy, al, 0xFF3366CCu32):
+                    bad = bad + 1
+                    bad_cov = bad_cov + 1
+                i = i + 1
+        n = n + 1
+
+    # --- soft-shadow with NEGATIVE coverage ---
+    #
+    # The lane kernel divides `cov*cov_y` by 256 with an arithmetic shift,
+    # which floors; C integer division truncates toward zero. They differ for
+    # negative products — floor(-200/256) = -1 versus -200/256 = 0 — so this
+    # was previously reasoned to be safe rather than tested. The argument is
+    # that BOTH results are <= 0 and both paths then skip the pixel, leaving
+    # the destination untouched. That is a claim about output, and output is
+    # testable, so it is tested here instead of argued.
+    n = 1
+    while n <= 24:
+        var dst: [u32] = []
+        var cov: [i32] = []
+        var i: i64 = 0
+        while i < n:
+            dst.push(0xFF000000u32 | ((i * 17 + 11) as u32))
+            # a spread of negative magnitudes, including ones whose product
+            # with cov_y lands just inside and just outside a 256 boundary
+            cov.push((0 - (1 + (i * 97) % 400)) as i32)
+            i = i + 1
+        val cy2: i64 = 200
+        val al2: i64 = 180
+        val got = rt_engine2d_blend_cov_span_u32(dst, 0, cov, n, cy2 * 1024 + al2, 0xFF3366CCu32)
+        if got.len() != n:
+            bad = bad + 1
+        else:
+            i = 0
+            while i < n:
+                checked = checked + 1
+                # every negative coverage must leave the destination verbatim
+                if got[i.to_i32()] != dst[i.to_i32()]:
+                    bad = bad + 1
+                    bad_cov = bad_cov + 1
+                i = i + 1
+        n = n + 1
+
+    # --- the DB LIBRARY's own public functions, not the raw externs ---
+    #
+    # `row_bitmap_and_words` and its siblings are what a query engine calls.
+    # Checking them rather than the extern is the difference between "the
+    # kernel is in the binary" and "the code a server runs reaches it": the
+    # library wraps every call in a length check and falls back to its scalar
+    # twin when the extern looks unbacked, which is exactly how a dead kernel
+    # stayed invisible for so long.
+    n = 1
+    while n <= 48:
+        var la: [u32] = []
+        var lb: [u32] = []
+        var i: i64 = 0
+        while i < n:
+            la.push(((i * 2654435761) % 4294967291) as u32)
+            lb.push(((i * 40503 + 12345) % 4294967291) as u32)
+            i = i + 1
+        val ka = row_bitmap_and_words(la, lb, n)
+        val sa = _scalar_row_bitmap_and_words(la, lb, n)
+        val ko = row_bitmap_or_words(la, lb, n, n, n)
+        val so = _scalar_row_bitmap_or_words(la, lb, n, n, n)
+        val kn = row_bitmap_andnot_words(la, lb, n, n)
+        val sn = _scalar_row_bitmap_andnot_words(la, lb, n, n)
+        if ka.len() != sa.len() or ko.len() != so.len() or kn.len() != sn.len():
+            bad = bad + 1
+            bad_db = bad_db + 1
+        else:
+            i = 0
+            while i < n:
+                checked = checked + 3
+                if ka[i.to_i32()] != sa[i.to_i32()]:
+                    bad = bad + 1
+                    bad_db = bad_db + 1
+                if ko[i.to_i32()] != so[i.to_i32()]:
+                    bad = bad + 1
+                    bad_db = bad_db + 1
+                if kn[i.to_i32()] != sn[i.to_i32()]:
+                    bad = bad + 1
+                    bad_db = bad_db + 1
+                i = i + 1
+        n = n + 1
+
+    # --- the WEB SERVER's CRLF scanner ---
+    #
+    # `_crlf_from` (http_core.spl:234) -> `simd_find_byte` ->
+    # `rt_simd_find_byte_span` is how an HTTP server finds header boundaries in
+    # a received buffer. Natively this returned -1 for EVERY input — it read a
+    # packed [u8] as tagged int64 slots — so a natively built server could not
+    # locate a single CRLF, while the interpreter's Rust twin was correct and
+    # every gate stayed green.
+    var bad_scan: i64 = 0
+    n = 1
+    while n <= 200:
+        var sb: [u8] = []
+        var i: i64 = 0
+        while i < n:
+            if i % 17 == 16 or i == n - 2:
+                sb.push(13u8)
+            else:
+                sb.push((65 + (i % 26)) as u8)
+            i = i + 1
+        var from: i64 = 0
+        while from <= n:
+            checked = checked + 1
+            if simd_find_byte(sb, from, 13u8) != scalar_find_byte(sb, from, 13u8):
+                bad = bad + 1
+                bad_scan = bad_scan + 1
+            from = from + 7
+        n = n + 1
+
+    print("NATIVE-SIMD checked={checked} mismatches={bad} db={bad_db} mask={bad_mask} cov={bad_cov} scan={bad_scan}")

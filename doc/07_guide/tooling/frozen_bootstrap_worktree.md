@@ -73,3 +73,16 @@ The shared checkout is not a place a bootstrap can succeed. Do not retry there.
 
 Which bootstrap script is the sanctioned one (`scripts/bootstrap/bootstrap-from-scratch.sh`), and how `bin/simple build bootstrap` differs from it, is in
 `.claude/rules/bootstrap.md`.
+
+Authority directory snapshots use bounded workers controlled by
+`SIMPLE_NATIVE_BUILD_THREADS` (use `12` for the current bootstrap lane), capped
+by online CPUs, 64 workers, and the 1024-file-per-worker floor. The worker path
+manifest is NUL-delimited, so newline-bearing filenames retain the same
+regular-file binding, output permissions, and atomic publication as other
+names. The public snapshot record format remains sorted `file-hex` records.
+Worker failures reject publication and clean their temporary directories.
+The focused path contract is
+`sh test/01_unit/scripts/bootstrap_stage3_snapshot_path_contract_test.shs`.
+Linux host checks do not admit FreeBSD bootstrap or establish guest memory
+usage; the outstanding guest evidence is tracked in
+`doc/10_metrics/startup/bootstrap_authority_snapshot_parallel_2026-09-21.md`.

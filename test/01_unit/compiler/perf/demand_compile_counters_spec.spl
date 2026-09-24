@@ -1,0 +1,98 @@
+use app.spipe.testing.*
+use compiler.driver.perf.demand_compile_counters.{
+    DemandCompileCountersV1, DemandCompilePhaseCounterV1,
+    demand_compile_counters_canonical_v1, demand_compile_counters_empty_v1,
+    demand_compile_counters_validate_v1, demand_compile_phase_names_v1
+}
+use app.perf.demand_compile_receipt.{
+    DemandCompileReceiptV1, demand_compile_receipt_digest_v1,
+    demand_compile_receipt_validate_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn measured_counters() -> DemandCompileCountersV1:
+    val empty = demand_compile_counters_empty_v1()
+    DemandCompileCountersV1(
+        phases: empty.phases,
+        source_open_count: 2,
+        section_read_count: 7,
+        action_scheduled_count: 3,
+        action_completed_count: 3,
+        cache_hit_count: 5,
+        cache_miss_count: 1,
+        lexical_scalar_scan_count: 2,
+        lexical_simd_scan_count: 1,
+        lexical_divergence_fallback_count: 0,
+        lexical_gpu_notification_count: 0,
+        lexical_scanned_byte_count: 4096)
+
+fn unsigned_receipt(counters: DemandCompileCountersV1) -> DemandCompileReceiptV1:
+    DemandCompileReceiptV1(
+        schema_version: 1,
+        snapshot_digest: sha256_text("snapshot"),
+        binary_digest: sha256_text("binary"),
+        host_digest: sha256_text("host"),
+        command_digest: sha256_text("command"),
+        fixture_digest: sha256_text("fixture"),
+        counters: counters,
+        receipt_digest: "")
+
+describe "demand compile observability":
+    it "freezes stable ordered phase and operation counters":
+        val counters = measured_counters()
+        expect(demand_compile_phase_names_v1().len()).to_equal(10)
+        expect(demand_compile_counters_validate_v1(counters)).to_equal("ok")
+        val canonical = demand_compile_counters_canonical_v1(counters)
+        expect(canonical).to_contain("phase=snapshot-admission:0")
+        expect(canonical).to_contain("source-open=2")
+        expect(canonical).to_contain("section-read=7")
+        expect(canonical).to_contain("action-completed=3")
+        expect(canonical).to_contain("cache-hit=5")
+        expect(canonical).to_contain("lexical-simd-scan=1")
+        expect(canonical).to_contain("lexical-scanned-byte=4096")
+
+    it "rejects reordered phases negative counters and impossible actions":
+        val invalid_phase = DemandCompileCountersV1(
+            phases: [DemandCompilePhaseCounterV1("total", 0)],
+            source_open_count: 0, section_read_count: 0,
+            action_scheduled_count: 0, action_completed_count: 0,
+            cache_hit_count: 0, cache_miss_count: 0,
+            lexical_scalar_scan_count: 0, lexical_simd_scan_count: 0,
+            lexical_divergence_fallback_count: 0,
+            lexical_gpu_notification_count: 0, lexical_scanned_byte_count: 0)
+        expect(demand_compile_counters_validate_v1(invalid_phase)).to_equal(
+            "demand-counter-phase-set-invalid")
+        val invalid_count = DemandCompileCountersV1(
+            phases: demand_compile_counters_empty_v1().phases,
+            source_open_count: -1, section_read_count: 0,
+            action_scheduled_count: 0, action_completed_count: 1,
+            cache_hit_count: 0, cache_miss_count: 0,
+            lexical_scalar_scan_count: 0, lexical_simd_scan_count: 0,
+            lexical_divergence_fallback_count: 0,
+            lexical_gpu_notification_count: 0, lexical_scanned_byte_count: 0)
+        expect(demand_compile_counters_validate_v1(invalid_count)).to_equal(
+            "demand-counter-value-invalid")
+
+    it "binds snapshot binary host command fixture and counters":
+        val unsigned = unsigned_receipt(measured_counters())
+        val receipt = DemandCompileReceiptV1(
+            schema_version: unsigned.schema_version,
+            snapshot_digest: unsigned.snapshot_digest,
+            binary_digest: unsigned.binary_digest,
+            host_digest: unsigned.host_digest,
+            command_digest: unsigned.command_digest,
+            fixture_digest: unsigned.fixture_digest,
+            counters: unsigned.counters,
+            receipt_digest: demand_compile_receipt_digest_v1(unsigned))
+        expect(demand_compile_receipt_validate_v1(receipt)).to_equal("ok")
+        val changed = DemandCompileReceiptV1(
+            schema_version: receipt.schema_version,
+            snapshot_digest: receipt.snapshot_digest,
+            binary_digest: receipt.binary_digest,
+            host_digest: receipt.host_digest,
+            command_digest: sha256_text("other-command"),
+            fixture_digest: receipt.fixture_digest,
+            counters: receipt.counters,
+            receipt_digest: receipt.receipt_digest)
+        expect(demand_compile_receipt_validate_v1(changed)).to_equal(
+            "demand-compile-receipt-digest-mismatch")

@@ -61,8 +61,11 @@ use std.common.aspect_pack.{
     apk_module_identity_v1,
     apk_prepare_facet_v1, apk_publish_prepared_facet_v1, apk_try_facet,
     apk_facet_pin_v1, apk_facet_unpin_v1,
-    apk_activation_stack_enter_v1, apk_activation_stack_exit_v1
+    apk_activation_stack_enter_v1, apk_activation_stack_exit_v1,
+    apk_loader_set_host_offer_v1
 }
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
 use std.io_runtime.{file_write_bytes, file_read_bytes, mkdir_p}
 
 fn _read_smf() -> [u8]:
@@ -70,6 +73,11 @@ fn _read_smf() -> [u8]:
 
 fn _pack_path() -> text:
     "build/test/aspect_pack_wiring.smf"
+
+fn _provider_offer() -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0),
+        0, true, "aspect-pack-wiring-spec",
+        [IfaceId("Widget/Debuggable", 1, 0, "abi-debug-1")], [], [], [])
 
 fn _payload(tag: text) -> [u8]:
     # Complete ordinary SMF with a real Abs64 relocation.  The payload is
@@ -114,6 +122,13 @@ fn _catalog_bytes() -> [u8]:
         entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: "abi-debug-1"))
     val built = apk_build_catalog_v2(entries)
     built.bytes
+
+fn _catalog_wrong_digest_bytes() -> [u8]:
+    apk_build_catalog_v2([ApkCatalogEntryV2(
+        facet_key: "Widget/Debuggable", pack_path: _pack_path(),
+        module_id: "debug.core", entry_kind: APK_ENTRY_FACET,
+        activation: APK_ACT_LAZY_FACET,
+        abi_hash: "abi-debug-mutated")]).bytes
 
 fn _catalog_two_keys_bytes() -> [u8]:
     var entries: [ApkCatalogEntryV2] = []
@@ -236,10 +251,30 @@ describe "aspect pack is a registered SMF section reachable from the load path":
                 panic("load: {message}")
             case _:
                 panic("unexpected loader result")
-        val aspect_loader = moduleloader_aspect_loader_handle(loader)
-        val got = apk_load_facet(aspect_loader, _catalog_bytes(), "Widget/Debuggable")
+        var facet_ref = moduleloader_aspect_facet(
+            loader, _catalog_bytes(), "Widget/Debuggable")
+        val got = facet_ref.load
         expect(got.error_code).to_equal("")
         expect(got.module_id).to_equal("debug.core")
+        expect(got.found).to_equal(true)
+        val aspect_loader = moduleloader_aspect_loader_handle(loader)
+        expect(apk_loader_generation(aspect_loader)).to_equal(1)
+        expect(apk_try_facet(aspect_loader, "Widget/Debuggable").found).to_equal(true)
+        expect(modulefacetref_release(facet_ref)).to_equal(true)
+
+    it "publishes only after facet-interface and full digest agreement":
+        step("Reject a catalog digest mutation without publishing a facet")
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case LoadResult.Success(_): pass
+            case _: panic("initial load failed")
+        var refused = moduleloader_aspect_facet(
+            loader, _catalog_wrong_digest_bytes(), "Widget/Debuggable")
+        expect(refused.load.error_code).to_equal("APK_ABI_MISMATCH")
+        val aspect_loader = moduleloader_aspect_loader_handle(loader)
+        expect(apk_loader_generation(aspect_loader)).to_equal(0)
+        expect(apk_try_facet(aspect_loader, "Widget/Debuggable").found).to_equal(false)
 
     it "REQ-APKW-04 a facet routes through the catalog into the pack that load() opened":
         # @req: REQ-APKW-04
@@ -479,15 +514,21 @@ describe "aspect pack is a registered SMF section reachable from the load path":
         match loader.load(_pack_path()):
             case LoadResult.Success(_): pass
             case _: panic("initial load failed")
+        var first = moduleloader_aspect_facet(
+            loader, _catalog_bytes(), "Widget/Debuggable")
         val handle = moduleloader_aspect_loader_handle(loader)
-        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(true)
+        expect(first.load.found).to_equal(true)
+        expect(first.release()).to_equal(true)
         loader.unload(_pack_path())
         expect(loader.is_loaded(_pack_path())).to_equal(false)
-        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(false)
+        expect(apk_try_facet(handle, "Widget/Debuggable").found).to_equal(false)
         match loader.load(_pack_path()):
             case LoadResult.Success(_): pass
             case _: panic("reload failed")
-        expect(apk_load_facet(handle, _catalog_bytes(), "Widget/Debuggable").found).to_equal(true)
+        var reloaded = moduleloader_aspect_facet(
+            loader, _catalog_bytes(), "Widget/Debuggable")
+        expect(reloaded.load.found).to_equal(true)
+        expect(reloaded.release()).to_equal(true)
 
     it "pinned and activating facets block pack removal without partial unload":
         step("Exercise both lifecycle refusal branches, then release cleanly")
@@ -498,7 +539,9 @@ describe "aspect pack is a registered SMF section reachable from the load path":
             case _: panic("initial load failed")
         val handle = moduleloader_aspect_loader_handle(loader)
         val key = "Widget/Debuggable"
-        expect(apk_load_facet(handle, _catalog_bytes(), key).found).to_equal(true)
+        var loaded = moduleloader_aspect_facet(loader, _catalog_bytes(), key)
+        expect(loaded.load.found).to_equal(true)
+        expect(loaded.release()).to_equal(true)
         expect(apk_facet_pin_v1(handle, key)).to_equal(true)
         loader.unload(_pack_path())
         expect(loader.is_loaded(_pack_path())).to_equal(true)
@@ -530,6 +573,7 @@ describe "aspect pack is a registered SMF section reachable from the load path":
             case Err(e): panic("reader: {e}")
         val ld = apk_loader_new()
         expect(smf_register_aspect_pack(ld, _pack_path(), reader)).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        apk_loader_set_host_offer_v1(ld, _provider_offer())
         val got = apk_load_facet(ld, _catalog_bytes(), "Widget/Debuggable")
         # Without the registration above this is APK_PACK_MISSING.
         expect(got.error_code).to_equal("")

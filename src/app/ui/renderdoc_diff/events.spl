@@ -1,0 +1,139 @@
+"""`renderdoc-events/v1` event model (MDSOC+ domain layer).
+
+One `RdocEvent` per RenderDoc action that the exporter admitted. Fields mirror the
+exporter contract in `scripts/tool/renderdoc-export-events.shs`; every field is
+present on every event, with `""`/`0` standing for "not applicable to this type"
+(a dispatch has no vertex count, a clear has no shader hashes).
+
+`ordinal` is assigned HERE, not by the exporter: it is the 0-based position of the
+event inside its own type bucket, in capture order. Alignment uses it to name the
+`order` class, so it must be derived from the parsed list rather than trusted from
+the file.
+"""
+
+use app.ui.renderdoc_diff.jsonflat.{JsonPair, json_flatten, json_pair_lookup, json_pair_has_prefix}
+
+val RDOC_EVENTS_SCHEMA: text = "renderdoc-events/v1"
+
+class RdocEvent:
+    event_id: i64
+    name: text
+    event_type: text
+    pipeline: text
+    vs_hash: text
+    ps_hash: text
+    cs_hash: text
+    viewport: text
+    scissor: text
+    target_id: i64
+    target_width: i64
+    target_height: i64
+    target_format: text
+    target_count: i64
+    vertex_count: i64
+    instance_count: i64
+    groups_x: i64
+    groups_y: i64
+    groups_z: i64
+    output_sha256: text
+    thumb_format: text
+    thumb_base64: text
+    ordinal: i64
+
+class RdocEventSet:
+    schema: text
+    capture: text
+    events: [RdocEvent]
+    error: text
+
+fn _i64_of(raw: text) -> i64:
+    if raw == "":
+        return 0
+    raw.to_i64()
+
+fn rdoc_events_parse(src: text) -> RdocEventSet:
+    """Parse an events.json document. A schema other than v1 is an error, not events."""
+    val pairs = json_flatten(src)
+    val schema = json_pair_lookup(pairs, "schema")
+    val capture = json_pair_lookup(pairs, "capture")
+    var empty: [RdocEvent] = []
+    if schema == "":
+        return RdocEventSet(schema: "", capture: capture, events: empty, error: "missing schema")
+    if schema != RDOC_EVENTS_SCHEMA:
+        return RdocEventSet(schema: schema, capture: capture, events: empty,
+            error: "unsupported schema " + schema)
+    var out: [RdocEvent] = []
+    var counts: [text] = []
+    var count_vals: [i64] = []
+    var idx = 0
+    while true:
+        val base = "events[" + idx.to_text() + "]"
+        if not json_pair_has_prefix(pairs, base):
+            break
+        val etype = json_pair_lookup(pairs, base + ".type")
+        var bucket = -1
+        var b = 0
+        while b < counts.len():
+            if counts[b] == etype:
+                bucket = b
+            b = b + 1
+        if bucket < 0:
+            counts.push(etype)
+            count_vals.push(0)
+            bucket = counts.len() - 1
+        val ordinal = count_vals[bucket]
+        count_vals[bucket] = ordinal + 1
+        out.push(RdocEvent(
+            event_id: _i64_of(json_pair_lookup(pairs, base + ".eventId")),
+            name: json_pair_lookup(pairs, base + ".name"),
+            event_type: etype,
+            pipeline: json_pair_lookup(pairs, base + ".pipeline"),
+            vs_hash: json_pair_lookup(pairs, base + ".vsHash"),
+            ps_hash: json_pair_lookup(pairs, base + ".psHash"),
+            cs_hash: json_pair_lookup(pairs, base + ".csHash"),
+            viewport: json_pair_lookup(pairs, base + ".viewport"),
+            scissor: json_pair_lookup(pairs, base + ".scissor"),
+            target_id: _i64_of(json_pair_lookup(pairs, base + ".targets[0].id")),
+            target_width: _i64_of(json_pair_lookup(pairs, base + ".targets[0].width")),
+            target_height: _i64_of(json_pair_lookup(pairs, base + ".targets[0].height")),
+            target_format: json_pair_lookup(pairs, base + ".targets[0].format"),
+            target_count: _rdoc_target_count(pairs, base),
+            vertex_count: _i64_of(json_pair_lookup(pairs, base + ".vertexCount")),
+            instance_count: _i64_of(json_pair_lookup(pairs, base + ".instanceCount")),
+            groups_x: _i64_of(json_pair_lookup(pairs, base + ".groupsX")),
+            groups_y: _i64_of(json_pair_lookup(pairs, base + ".groupsY")),
+            groups_z: _i64_of(json_pair_lookup(pairs, base + ".groupsZ")),
+            output_sha256: json_pair_lookup(pairs, base + ".outputSha256"),
+            thumb_format: json_pair_lookup(pairs, base + ".thumbFormat"),
+            thumb_base64: json_pair_lookup(pairs, base + ".thumbBase64"),
+            ordinal: ordinal
+        ))
+        idx = idx + 1
+    RdocEventSet(schema: schema, capture: capture, events: out, error: "")
+
+fn _rdoc_target_count(pairs: [JsonPair], base: text) -> i64:
+    var n = 0
+    while json_pair_has_prefix(pairs, base + ".targets[" + n.to_text() + "]"):
+        n = n + 1
+    n
+
+fn rdoc_event_dims_key(e: RdocEvent) -> text:
+    """The render-target identity both alignment passes fold in: WxH and format.
+
+    The DIMENSIONS belong here, and this is the single place either pass can lose them.
+    Reduce this to the format alone and two draws that differ only in target size pair
+    by position, so a genuine reordering is reported as `size-mismatch` instead of
+    `order` — the sabotage the spec pins.
+    """
+    e.target_width.to_text() + "x" + e.target_height.to_text() + "|" + e.target_format
+
+fn rdoc_event_signature(e: RdocEvent) -> text:
+    """Full alignment key: type, pipeline, render-target identity, draw params, name."""
+    e.event_type + "|" + e.pipeline + "|" + rdoc_event_dims_key(e) + "|"
+        + e.vertex_count.to_text() + "/" + e.instance_count.to_text() + "|"
+        + e.groups_x.to_text() + "," + e.groups_y.to_text() + "," + e.groups_z.to_text()
+        + "|" + e.name
+
+fn rdoc_event_target_key(e: RdocEvent) -> text:
+    """Relaxed alignment key: the render-target identity only."""
+    rdoc_event_dims_key(e)

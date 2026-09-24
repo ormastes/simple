@@ -1,7 +1,20 @@
 # Multicore Green Release Binary Stale Evidence
 
+## Closed 2026-09-13 — stale: the artifact layout it polices no longer exists as filed
+
+- **inferred** Entry status was already `mitigated (release platform binary is a generated
+  deploy artifact)` — i.e. the checked-in wrapper was accepted as non-authoritative.
+- **measured** `bin/release/` on this host is a per-triple tree
+  (`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `x86_64-pc-windows-gnu`,
+  `aarch64-unknown-linux-gnu`, `riscv64-unknown-linux-gnu`, …), not the single
+  `bin/release/simple` wrapper-plus-delegate arrangement the entry compares against.
+- **inferred** The staleness concern is now covered structurally: `bin/simple` announces its
+  own provenance (`WARNING: this Rust-built Simple binary is a bootstrap seed only`), which
+  is the evidence-attribution the entry was asking for.
+
+
 Date: 2026-06-11
-Status: mitigated (release platform binary is a generated deploy artifact)
+Status: closed 2026-09-13 (was: Status: mitigated (release platform binary is a generated deploy artifact))
 Owner: multicore-green lane
 
 ## Summary

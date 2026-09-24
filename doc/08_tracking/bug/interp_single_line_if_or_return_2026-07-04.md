@@ -1,4 +1,9 @@
 # Interpreter: single-line `if A or B: return X` matches everything and swallows the function tail
+## Closed 2026-09-16 — Status CLOSED/RESOLVED: not reproducible on deployed seed; regression gate landed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - id: interp_single_line_if_or_return_2026-07-04
 - Status: CLOSED (not reproducible)
@@ -67,3 +72,4 @@ needed. Regression gate landed:
 failures`).
 
 **Status: RESOLVED** (verified fixed upstream, no code change required).
+

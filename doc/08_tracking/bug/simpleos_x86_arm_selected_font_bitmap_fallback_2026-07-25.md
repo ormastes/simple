@@ -1,4 +1,8 @@
 # SimpleOS x86/ARM selected-font bitmap fallback
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Fixed in source; guest runtime evidence pending a refreshed
 pure-Simple self-host.
@@ -24,3 +28,4 @@ path.
 The production desktop and font-staging specs require mount → shared
 registration → Engine2D ordering, both fatal paths, and absence of the former
 `font unavailable fallback=bitmap` branch.
+

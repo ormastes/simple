@@ -1,4 +1,8 @@
 # PostgreSQL mimic native daemon traps before bind
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -126,3 +130,4 @@ and `logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
 This independently reproduces the same invalid-receiver class before either
 server starts. The Stage2 artifact is diagnostic only and must not be used for
 web, database, runtime-capsule, or performance acceptance.
+

@@ -1,4 +1,8 @@
 # native-build's parser rejects a module-level `var x: T = ...` the seed accepts
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (P1 — blocks every push)
 **Filed:** 2026-08-17
@@ -74,3 +78,4 @@ accept — but the divergence itself is the defect and will recur elsewhere.
 - Whether other module-level `var` initialisers exist in `src/compiler/**` and
   would fail the same way (only the first was bisected).
 - Whether the seed's acceptance is deliberate or itself a laxity bug.
+

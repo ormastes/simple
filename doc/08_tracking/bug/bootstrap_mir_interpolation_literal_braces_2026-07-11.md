@@ -1,4 +1,8 @@
 # Bootstrap MIR: string interpolation `{expr}` printed literally, not evaluated
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-11 · **Status:** RESOLVED (root-cause gate fixed) 2026-07-17 — see
 "Fix landed" below. One unrelated pre-existing blocker remains for full E2E
@@ -151,3 +155,4 @@ still exists before un-gating interps.
   lower in bootstrap; similar pattern (expression not lowered → null/zero constant emitted).
 - **print_loss_bisect_report.md:** Interpreter-side `.join()` produces corrupted pointer
   (upstream of this bug in severity; this one is raw-literal loss).
+

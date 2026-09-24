@@ -22,6 +22,13 @@ use std.js.types.pair.{Pair}
 
 extern fn rt_file_read_text(path: text) -> text
 
+struct RedirectExpectation:
+    status: i64
+    method: text
+    expected_method: text
+    expected_body_len: i64
+    keep_body_headers: bool
+
 describe "Browser TLS negotiated protocol policy":
     # @manual scenario evidence
 
@@ -39,7 +46,7 @@ describe "Browser TLS negotiated protocol policy":
         ) ?? ""
         expect(h1).to_contain("val _ = browser_runtime_string_free(chunk)")
         expect(h1).to_contain("self.tls.handshake_address(")
-        expect(tls).to_contain("val _ = browser_runtime_string_free(negotiated)")
+        expect(tls).to_contain("val _ = browser_runtime_string_free(negotiated_text)")
         expect(dns).to_contain("val _ = browser_runtime_string_free(raw_system_addrs)")
 
     it "accepts supported versions and rejects downgrade or missing protocol":
@@ -139,10 +146,10 @@ describe "Browser TLS negotiated protocol policy":
 
         step("Register the HTTPS redirect matrix")
         var index = 0
-        for case in cases:
+        for scenario in cases:
             registry.register_with_headers(
                 "https://secure.test/{index}-start",
-                case.status,
+                scenario.status,
                 [Pair("Location", "https://secure.test/{index}-final")],
                 ""
             )
@@ -169,8 +176,8 @@ describe "Browser TLS negotiated protocol policy":
 
         step("Follow every HTTPS redirect case")
         index = 0
-        for case in cases:
-            val body = if case.method == "HEAD" or case.method == "GET":
+        for scenario in cases:
+            val body = if scenario.method == "HEAD" or scenario.method == "GET":
                 []
             else:
                 [112u8, 97u8, 121u8]
@@ -178,7 +185,7 @@ describe "Browser TLS negotiated protocol policy":
                 url: Url.parse_or_opaque(
                     "https://secure.test/{index}-start"
                 ),
-                method: case.method,
+                method: scenario.method,
                 headers: request_headers,
                 body: body,
                 mode: RequestMode.SameOrigin,
@@ -188,16 +195,16 @@ describe "Browser TLS negotiated protocol policy":
 
         step("Verify redirected methods and bodies")
         index = 0
-        for case in cases:
+        for scenario in cases:
             val observed = observed_mock_request(
                 "https://secure.test/{index}-final"
             ).unwrap()
-            expect(observed.method).to_equal(case.expected_method)
-            expect(observed.body.len()).to_equal(case.expected_body_len)
+            expect(observed.method).to_equal(scenario.expected_method)
+            expect(observed.body.len()).to_equal(scenario.expected_body_len)
             expect(observed.headers).to_contain("X-Keep: yes")
             for header in body_headers:
                 expect(observed.headers.contains(header)).to_be(
-                    case.keep_body_headers
+                    scenario.keep_body_headers
                 )
             index = index + 1
         set_mock_registry(MockResponseRegistry.create())

@@ -1,4 +1,16 @@
 # `rt_file_is_char_device`: whole-repo de-JIT (stale seed) + dual-ABI wrong answer
+## Closed 2026-09-16 — Triage 2026-09-13 CLOSED; both defects resolved per doc body content checks
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
+
+## Triage 2026-09-13 — CLOSED, both defects already resolved per the doc's own body
+Defect A (whole-repo de-JIT): doc's own re-verification already found it no
+longer reproduces on the deployed seed. Defect B (dual ABI): doc's own body
+says "FIXED". Confirmed src/lib/nogc_sync_mut/io_runtime.spl:52's
+rt_file_is_char_device declaration is unchanged and was always correct per
+the doc. No further action.
 
 **Date:** 2026-08-10
 **Status:** RED (defect B); defect A fixed in source, stale in deployed binary
@@ -150,3 +162,4 @@ been closed by the newer deployed seed.
 
 Recommend: close. No change was needed in `src/lib/nogc_sync_mut/io_runtime.spl`
 — its declaration at line 52 was always the correct one.
+

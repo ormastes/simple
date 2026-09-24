@@ -93,7 +93,7 @@ impl LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM call to '{}' failed: {}", name, e))?;
         result
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| format!("'{}' did not return a value", name))
     }
 
@@ -336,7 +336,11 @@ impl LlvmEmitter<'_> {
             "char_code_at" => Some("rt_string_char_code_at"),
             "byte_at" => Some("rt_string_byte_at"),
             "join" => Some("rt_string_join"),
-            "trim" => Some("rt_string_trim"),
+            // "strip"/"trimmed" are synonyms for "trim" (see
+            // interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
+            // Missing here left `.strip()` on a text receiver unresolved as
+            // `str.strip` at the final Stage-4 macOS link (2026-09-07).
+            "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
             "trim_start" => Some("rt_string_trim_start"),
             "trim_end" => Some("rt_string_trim_end"),
             "split" => Some("rt_string_split"),
@@ -361,7 +365,22 @@ impl LlvmEmitter<'_> {
             "get" => Some("rt_index_get"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
-            "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+            // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+            // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+            // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+            // the representation `rt_is_some`/`rt_is_none` already accept) is not
+            // one -- so every `.unwrap()` on a flat optional silently produced nil
+            // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+            // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+            // implements the flat-nullable convention ("not a boxed enum: return
+            // the value unchanged") and traps only on a genuine None/Err.
+            // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+            // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+            // exported err-trap twin, and routing it through the Ok-trap helper
+            // would abort on the very receiver it exists to read.
+            "unwrap" => Some("rt_unwrap_or_trap"),
+            "unwrap_or" => Some("rt_unwrap_or_value"),
+            "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
         }
     }
@@ -596,7 +615,11 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
         if matches!(method, "unwrap" | "unwrap_err") && args.len() == 1 {
             let recv = self.get(args[0])?;
-            let result = self.call_runtime("rt_enum_payload", &[recv])?;
+            // See the redirect table above: `rt_enum_payload` returns NIL for a
+            // FLAT nullable, so `.unwrap()` must go to `rt_unwrap_or_trap`.
+            // `unwrap_err` keeps the raw reader (no exported err-trap twin).
+            let helper = if method == "unwrap" { "rt_unwrap_or_trap" } else { "rt_enum_payload" };
+            let result = self.call_runtime(helper, &[recv])?;
             if let Some(d) = dest {
                 self.set(*d, result);
             }
@@ -606,8 +629,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         if matches!(method, "is_ok" | "is_err") && args.len() == 1 {
             let recv = self.get(args[0])?;
             let variant = if method == "is_ok" { "Ok" } else { "Err" };
+            let enum_id = self.i64_const(0);
             let disc = self.i64_const(Self::enum_variant_discriminant(variant));
-            let result = self.call_runtime("rt_enum_check_discriminant", &[recv, disc])?;
+            let result = self.call_runtime("rt_enum_check_variant", &[recv, enum_id, disc])?;
             if let Some(d) = dest {
                 self.set(*d, result);
             }
@@ -635,7 +659,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM call failed: {}", e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 self.set(*d, ret_val);
             }
         }
@@ -688,7 +712,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .map_err(|e| format!("LLVM rt_alloc call failed: {}", e))?;
             let argv_raw = alloc_call
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .ok_or_else(|| "LLVM rt_alloc missing return value".to_string())?
                 .into_int_value();
             let argv_ptr = self
@@ -741,7 +765,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM interp_call failed: {}", e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 self.set(*d, ret_val);
             }
         }
@@ -762,7 +786,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .build_call(interp_eval, &[idx.into()], "eval")
             .map_err(|e| format!("LLVM interp_eval failed: {}", e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             self.set(dest, ret_val);
         }
         Ok(())
@@ -847,6 +871,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                         inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(t) => {
+                            t.fn_type(&llvm_param_types, false)
+                        }
                     }
                 };
 
@@ -856,7 +883,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                     .map_err(|e| format!("indirect call failed: {}", e))?;
 
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         self.set(*d, ret_val);
                     }
                 }
@@ -949,7 +976,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .build_call(dict_new, &[capacity.into()], "dict")
             .map_err(|e| format!("dict_new call failed: {}", e))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| "dict_new returned void".to_string())?;
 
         for (key, value) in keys.iter().zip(values.iter()) {
@@ -1051,7 +1078,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             )
             .map_err(|e| format!("slice call failed: {}", e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             self.set(dest, ret_val);
         }
         Ok(())
@@ -1396,7 +1423,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("rt_alloc call failed: {}", e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| "rt_alloc did not return a value".to_string())?;
         let closure_ptr = match alloc_value {
             BasicValueEnum::PointerValue(ptr) => self
@@ -2391,6 +2418,99 @@ mod tests {
         assert_eq!(LlvmEmitter::runtime_method_name("repeat"), None);
         assert_eq!(LlvmEmitter::runtime_method_name("unwrap_err"), Some("rt_enum_payload"));
         assert_eq!(LlvmEmitter::runtime_method_name("to_string"), Some("rt_to_string"));
+    }
+
+    /// `.unwrap()` must NOT reach `rt_enum_payload` under LLVM.
+    ///
+    /// `rt_enum_payload` (runtime/src/value/objects.rs:519) returns
+    /// `RuntimeValue::NIL` for every receiver that is not a boxed heap Enum.
+    /// A FLAT nullable -- a `text?` holding a bare text pointer, which is the
+    /// representation `rt_is_some`/`rt_is_none` already accept as present --
+    /// is not one, so this mapping made EVERY `.unwrap()` on a flat optional
+    /// evaluate to nil under LLVM while the Cranelift path
+    /// (`codegen/instr/closures_structs.rs`, pinned by
+    /// `codegen_bare_unwrap_calls_rt_unwrap_or_self_not_rt_enum_payload`) and
+    /// the tree-walk interpreter (`interpreter_helpers/method_dispatch.rs`,
+    /// which returns the receiver itself for a non-enum) both returned the
+    /// value. One backend was fixed in 2026-08-11; LLVM was never brought
+    /// along, and there was no LLVM-side assertion to notice.
+    ///
+    /// Measured consequence (2026-09-13, macOS Stage 2): `find_mold_path()`
+    /// returns `text?`, so `Ok(mold_path.unwrap())` in
+    /// `src/compiler/70.backend/linker/mold.spl` constructed `Ok(nil)`;
+    /// `find_linker_path()`'s caller then unwrapped a real `Ok` enum and got
+    /// that nil back, `darwin_resolve_link_tool` failed `file_exists` on it,
+    /// and the link died as `Linking failed: no error payload`. The bare
+    /// print of the nil rendered as `0`, consistent with NIL's special
+    /// sentinel read through an int decode.
+    ///
+    /// Each assertion pairs the dead mapping being gone with the live one
+    /// being present, so deleting an arm cannot satisfy this test.
+    /// `unwrap_err` deliberately KEEPS `rt_enum_payload`: no err-trap twin is
+    /// exported, and the Ok-trap helper would abort on the very `Err`
+    /// receiver `unwrap_err` exists to read.
+    #[test]
+    fn llvm_unwrap_family_routes_to_the_flat_nullable_aware_helpers() {
+        assert_eq!(LlvmEmitter::runtime_method_name("unwrap"), Some("rt_unwrap_or_trap"));
+        assert_ne!(LlvmEmitter::runtime_method_name("unwrap"), Some("rt_enum_payload"));
+
+        // `.unwrap_or(d)` was mapped to the SAME one-argument helper, which
+        // dropped `d` entirely; `rt_unwrap_or_value` is the two-argument one.
+        assert_eq!(LlvmEmitter::runtime_method_name("unwrap_or"), Some("rt_unwrap_or_value"));
+        assert_ne!(LlvmEmitter::runtime_method_name("unwrap_or"), Some("rt_enum_payload"));
+
+        assert_eq!(LlvmEmitter::runtime_method_name("unwrap_err"), Some("rt_enum_payload"));
+    }
+
+    /// The emitter's table is only ONE of the four `unwrap` redirect tables in
+    /// the LLVM backend (`functions.rs`, `functions/calls.rs` x2 are inline
+    /// `match` closures that no unit test can call), plus two direct-call
+    /// sites. They were all copies of the same arm, and a partial fix would
+    /// leave the live one broken -- which is exactly the failure mode that
+    /// let this survive: `emitter.rs` is not the table the native pipeline
+    /// actually used. Assert the invariant over the SOURCE so no table can be
+    /// repaired in isolation.
+    #[test]
+    fn no_llvm_redirect_table_still_sends_unwrap_to_rt_enum_payload() {
+        let sources: [(&str, &str); 3] = [
+            ("emitter.rs", include_str!("emitter.rs")),
+            ("functions.rs", include_str!("functions.rs")),
+            ("functions/calls.rs", include_str!("functions/calls.rs")),
+        ];
+        let mut offenders: Vec<String> = Vec::new();
+        let mut live_mappings = 0usize;
+        for (name, text) in sources {
+            for (line_no, line) in text.lines().enumerate() {
+                let code = line.split('#').next().unwrap_or(line);
+                let code = if let Some(idx) = code.find("//") { &code[..idx] } else { code };
+                // A line that names BOTH helpers is one of the two direct-call
+                // sites' `if method == "unwrap" { trap } else { payload }`
+                // ternaries (or this test's own assert_ne), which are correct.
+                // Only a line that sends `"unwrap"` to the payload reader and
+                // nowhere else is an offender.
+                if code.contains("rt_unwrap_or_trap") || code.contains("assert_ne!") {
+                    if code.contains("\"unwrap\"") && code.contains("rt_unwrap_or_trap") {
+                        live_mappings += 1;
+                    }
+                    continue;
+                }
+                if code.contains("\"unwrap\"") && code.contains("rt_enum_payload") {
+                    offenders.push(format!("{}:{}: {}", name, line_no + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "an LLVM unwrap redirect still names rt_enum_payload: {:?}",
+            offenders
+        );
+        // Non-vacuity: an empty offender list proves nothing if the scan found
+        // no unwrap mapping at all (a rename would silently pass otherwise).
+        assert!(
+            live_mappings >= 4,
+            "expected at least 4 live `unwrap -> rt_unwrap_or_trap` mappings across the LLVM backend, found {}",
+            live_mappings
+        );
     }
 
     /// The type-BLIND table must not send a receiver-polymorphic method to a

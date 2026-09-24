@@ -1,4 +1,9 @@
 # Importing `std.nogc_sync_mut.io_runtime` fails native-build on a borrow-checker error
+## Closed 2026-09-16 — Status FIXED 2026-08-24 in 9e3eb1adccd; both defects fixed, regression gate PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-24) in `9e3eb1adccd` — TWO sequential defects, both fixed. See "Resolution" below.
 **Still blocked downstream by a THIRD, separate defect:** `doc/08_tracking/bug/llvm_backend_no_result_match_semantic_2026-08-24.md`
@@ -256,3 +261,4 @@ An `i64` Option payload binds left-shifted by 3 under the seed (`Some(40)`
 reads back as `320`). That is a **separate, pre-existing** tagging defect — it
 reproduces identically in the STATEMENT form — so the gate uses a `text`
 payload deliberately. Do not "fix" the gate by encoding the shifted value.
+

@@ -1,4 +1,8 @@
 # check-hook-installation rejects the shared-worktree pre-push launcher
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-08-24
 - Component: `scripts/check/check-hook-installation.shs`
@@ -69,3 +73,4 @@ introduced), runtime-api-regression PASS (2834 symbols, 0 removed), and
 seed-builds PASS. The push was then made with `--no-verify`. That is acceptable
 only because every guard was executed and its verdict recorded; it is not a
 precedent for skipping them.
+

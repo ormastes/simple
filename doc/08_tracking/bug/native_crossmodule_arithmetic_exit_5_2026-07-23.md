@@ -1,4 +1,9 @@
 # Native cross-module arithmetic probe exits 5
+## Closed 2026-09-16 — ...embly proved the bootstrap seed resolved both `dest_id` and `src_id` dictionary keys as `s
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -71,3 +76,4 @@ rebuild Stage2/3 incrementally and run the unchanged cross-module fixture once.
 If it still fails, disassemble the keys before considering the separate
 `translate_load` provenance audit. Do not weaken or delete the fixture, and do
 not advance to Stage4/QEMU until it passes.
+

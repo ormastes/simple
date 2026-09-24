@@ -1,4 +1,8 @@
 # Bug: cross-module function calls lose in-place `Dict` mutation on an out-parameter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** P1 — silent no-op (function reports success, caller's collection
@@ -117,3 +121,4 @@ A parallel, less-developed copy exists at
 per `doc/04_architecture/lib/runtime_family_tier_defaults.md`) but does not
 share this out-parameter shape and was not touched — out of scope for this
 change.
+

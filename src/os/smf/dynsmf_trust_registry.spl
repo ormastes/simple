@@ -12,6 +12,7 @@ use std.common.aspect_pack.{
     aspect_catalog_build
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use os.smf.aspect_pack_directory.{
     AspectPackArtifactIdentity,
     AspectPackExportContract,
@@ -20,10 +21,7 @@ use os.smf.aspect_pack_directory.{
     aspect_pack_directory_validate_against_manifest
 }
 use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
-
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_bytes(path: text) -> [u8]
-extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable, file_read_bytes}
 
 class DynSmfTrustBindingConfig:
     facet_id: text
@@ -59,6 +57,7 @@ class DynSmfAdmittedRegistry:
     ok: bool
     reason: text
     artifacts: [DynSmfAdmittedArtifact]
+    artifact_indices: Dict<text, i64>
 
 fn _dynsmf_trust_binding_default() -> DynSmfTrustBindingConfig:
     DynSmfTrustBindingConfig(
@@ -84,64 +83,35 @@ fn _dynsmf_trust_parse_error(reason: text) -> DynSmfTrustConfigParse:
     DynSmfTrustConfigParse(ok: false, reason: reason, artifacts: [])
 
 fn _dynsmf_trust_registry_error(reason: text) -> DynSmfAdmittedRegistry:
-    DynSmfAdmittedRegistry(ok: false, reason: reason, artifacts: [])
+    DynSmfAdmittedRegistry(ok: false, reason: reason, artifacts: [], artifact_indices: {})
 
 fn _dynsmf_trust_binding_valid(binding: DynSmfTrustBindingConfig) -> bool:
     (binding.facet_id != "" and binding.aspect_id != "" and
         binding.module_id != "" and binding.module_abi_hash != "" and
         binding.export_symbol != "" and binding.interface_abi_hash != "")
 
-fn _dynsmf_trust_digest_valid(digest: text) -> bool:
-    if digest.len() != 64:
-        return false
-    var index = 0
-    while index < digest.len():
-        val ch = digest.slice(index, index + 1)
-        if not "0123456789abcdef".contains(ch):
-            return false
-        index = index + 1
-    true
-
 fn _dynsmf_trust_artifact_valid(artifact: DynSmfTrustArtifactConfig) -> bool:
     (artifact.library_id != "" and artifact.path != "" and
         artifact.abi_version != "" and artifact.artifact_kind != "" and
-        _dynsmf_trust_digest_valid(artifact.content_hash) and
+        sha256_lower_hex_valid(artifact.content_hash) and
         artifact.bindings.len() > 0)
 
-fn _dynsmf_trust_binding_duplicate(bindings: [DynSmfTrustBindingConfig], binding: DynSmfTrustBindingConfig) -> bool:
-    var index = 0
-    while index < bindings.len():
-        if (bindings[index].facet_id == binding.facet_id or
-            bindings[index].export_symbol == binding.export_symbol):
-            return true
-        index = index + 1
-    false
-
-fn _dynsmf_trust_finish_binding(artifact: DynSmfTrustArtifactConfig, binding: DynSmfTrustBindingConfig, have_binding: bool) -> text:
+fn _dynsmf_trust_finish_binding(artifact: DynSmfTrustArtifactConfig, binding: DynSmfTrustBindingConfig, have_binding: bool, seen_facet_ids: Dict<text, bool>, seen_export_symbols: Dict<text, bool>) -> text:
     if not have_binding:
         return ""
     if not _dynsmf_trust_binding_valid(binding):
         return "incomplete_binding:" + artifact.library_id
-    if _dynsmf_trust_binding_duplicate(artifact.bindings, binding):
+    if seen_facet_ids.contains_key(binding.facet_id) or seen_export_symbols.contains_key(binding.export_symbol):
         return "duplicate_binding:" + artifact.library_id + ":" + binding.export_symbol
     artifact.bindings.push(binding)
     ""
 
-fn _dynsmf_trust_artifact_duplicate(artifacts: [DynSmfTrustArtifactConfig], artifact: DynSmfTrustArtifactConfig) -> bool:
-    var index = 0
-    while index < artifacts.len():
-        if (artifacts[index].library_id == artifact.library_id or
-            artifacts[index].path == artifact.path):
-            return true
-        index = index + 1
-    false
-
-fn _dynsmf_trust_finish_artifact(artifacts: [DynSmfTrustArtifactConfig], artifact: DynSmfTrustArtifactConfig, have_artifact: bool) -> text:
+fn _dynsmf_trust_finish_artifact(artifacts: [DynSmfTrustArtifactConfig], artifact: DynSmfTrustArtifactConfig, have_artifact: bool, seen_library_ids: Dict<text, bool>, seen_paths: Dict<text, bool>) -> text:
     if not have_artifact:
         return ""
     if not _dynsmf_trust_artifact_valid(artifact):
         return "incomplete_artifact:" + artifact.library_id
-    if _dynsmf_trust_artifact_duplicate(artifacts, artifact):
+    if seen_library_ids.contains_key(artifact.library_id) or seen_paths.contains_key(artifact.path):
         return "duplicate_artifact:" + artifact.library_id
     artifacts.push(artifact)
     ""
@@ -163,6 +133,10 @@ fn _dynsmf_trust_finish_artifact(artifacts: [DynSmfTrustArtifactConfig], artifac
 #       interface_abi_hash: <exact-interface-abi>
 pub fn dynsmf_trust_config_parse(source: text) -> DynSmfTrustConfigParse:
     var artifacts: [DynSmfTrustArtifactConfig] = []
+    var seen_library_ids: Dict<text, bool> = {}
+    var seen_paths: Dict<text, bool> = {}
+    var seen_facet_ids: Dict<text, bool> = {}
+    var seen_export_symbols: Dict<text, bool> = {}
     var artifact = _dynsmf_trust_artifact_default()
     var binding = _dynsmf_trust_binding_default()
     var have_artifact = false
@@ -175,23 +149,34 @@ pub fn dynsmf_trust_config_parse(source: text) -> DynSmfTrustConfigParse:
         if line == "" or line.starts_with("#"):
             continue
         if line == "trust_artifact:":
-            val binding_error = _dynsmf_trust_finish_binding(artifact, binding, have_binding)
+            val binding_error = _dynsmf_trust_finish_binding(artifact, binding, have_binding, seen_facet_ids, seen_export_symbols)
             if binding_error != "":
                 return _dynsmf_trust_parse_error(binding_error)
-            val artifact_error = _dynsmf_trust_finish_artifact(artifacts, artifact, have_artifact)
+            if have_binding:
+                seen_facet_ids[binding.facet_id] = true
+                seen_export_symbols[binding.export_symbol] = true
+            val artifact_error = _dynsmf_trust_finish_artifact(artifacts, artifact, have_artifact, seen_library_ids, seen_paths)
             if artifact_error != "":
                 return _dynsmf_trust_parse_error(artifact_error)
+            if have_artifact:
+                seen_library_ids[artifact.library_id] = true
+                seen_paths[artifact.path] = true
             artifact = _dynsmf_trust_artifact_default()
             binding = _dynsmf_trust_binding_default()
+            seen_facet_ids = {}
+            seen_export_symbols = {}
             have_artifact = true
             have_binding = false
             continue
         if line == "binding:":
             if not have_artifact:
                 return _dynsmf_trust_parse_error("binding_without_artifact")
-            val binding_error = _dynsmf_trust_finish_binding(artifact, binding, have_binding)
+            val binding_error = _dynsmf_trust_finish_binding(artifact, binding, have_binding, seen_facet_ids, seen_export_symbols)
             if binding_error != "":
                 return _dynsmf_trust_parse_error(binding_error)
+            if have_binding:
+                seen_facet_ids[binding.facet_id] = true
+                seen_export_symbols[binding.export_symbol] = true
             binding = _dynsmf_trust_binding_default()
             have_binding = true
             continue
@@ -232,41 +217,45 @@ pub fn dynsmf_trust_config_parse(source: text) -> DynSmfTrustConfigParse:
                 artifact.content_hash = value
             else:
                 return _dynsmf_trust_parse_error("unknown_artifact_key:" + key)
-    val binding_error = _dynsmf_trust_finish_binding(artifact, binding, have_binding)
+    val binding_error = _dynsmf_trust_finish_binding(artifact, binding, have_binding, seen_facet_ids, seen_export_symbols)
     if binding_error != "":
         return _dynsmf_trust_parse_error(binding_error)
-    val artifact_error = _dynsmf_trust_finish_artifact(artifacts, artifact, have_artifact)
+    if have_binding:
+        seen_facet_ids[binding.facet_id] = true
+        seen_export_symbols[binding.export_symbol] = true
+    val artifact_error = _dynsmf_trust_finish_artifact(artifacts, artifact, have_artifact, seen_library_ids, seen_paths)
     if artifact_error != "":
         return _dynsmf_trust_parse_error(artifact_error)
+    if have_artifact:
+        seen_library_ids[artifact.library_id] = true
+        seen_paths[artifact.path] = true
     if artifacts.len() == 0:
         return _dynsmf_trust_parse_error("trust_registry_empty")
     DynSmfTrustConfigParse(ok: true, reason: "parsed", artifacts: artifacts)
 
-fn _dynsmf_trust_manifest_entry(manifest: [DynSmfManifestEntry], library_id: text) -> DynSmfManifestEntry?:
-    var found: DynSmfManifestEntry? = nil
-    var matches = 0
+fn _dynsmf_trust_manifest_indices(manifest: [DynSmfManifestEntry]) -> Dict<text, i64>:
+    var indices: Dict<text, i64> = {}
     var index = 0
     while index < manifest.len():
-        if manifest[index].id == library_id:
-            found = manifest[index]
-            matches = matches + 1
+        val library_id = manifest[index].id
+        if indices.has(library_id):
+            indices[library_id] = -2
+        else:
+            indices[library_id] = index
         index = index + 1
-    if matches == 1:
-        return found
-    nil
+    indices
 
-fn _dynsmf_trust_image(images: [DynSmfTrustArtifactImage], path: text) -> DynSmfTrustArtifactImage?:
-    var found: DynSmfTrustArtifactImage? = nil
-    var matches = 0
+fn _dynsmf_trust_image_indices(images: [DynSmfTrustArtifactImage]) -> Dict<text, i64>:
+    var indices: Dict<text, i64> = {}
     var index = 0
     while index < images.len():
-        if images[index].path == path:
-            found = images[index]
-            matches = matches + 1
+        val path = images[index].path
+        if indices.has(path):
+            indices[path] = -2
+        else:
+            indices[path] = index
         index = index + 1
-    if matches == 1:
-        return found
-    nil
+    indices
 
 fn _dynsmf_trust_exports_exact(entry: DynSmfManifestEntry, bindings: [DynSmfTrustBindingConfig]) -> bool:
     if entry.exports.len() != bindings.len():
@@ -291,14 +280,15 @@ fn _dynsmf_trust_admit_parsed(manifest: [DynSmfManifestEntry], parsed: DynSmfTru
         return _dynsmf_trust_registry_error("trust_config_invalid:" + parsed.reason)
     if images.len() != parsed.artifacts.len():
         return _dynsmf_trust_registry_error("trust_image_count_mismatch")
+    val manifest_indices = _dynsmf_trust_manifest_indices(manifest)
+    val image_indices = _dynsmf_trust_image_indices(images)
     var admitted: [DynSmfAdmittedArtifact] = []
     var artifact_index = 0
     while artifact_index < parsed.artifacts.len():
         val config = parsed.artifacts[artifact_index]
-        val manifest_entry = _dynsmf_trust_manifest_entry(manifest, config.library_id)
-        if manifest_entry == nil:
+        if not manifest_indices.has(config.library_id) or manifest_indices[config.library_id] < 0:
             return _dynsmf_trust_registry_error("manifest_identity_missing_or_ambiguous:" + config.library_id)
-        val entry = manifest_entry!
+        val entry = manifest[manifest_indices[config.library_id]]
         if entry.path != config.path:
             return _dynsmf_trust_registry_error("manifest_path_mismatch:" + config.library_id)
         if entry.abi_version != config.abi_version:
@@ -307,10 +297,9 @@ fn _dynsmf_trust_admit_parsed(manifest: [DynSmfManifestEntry], parsed: DynSmfTru
             return _dynsmf_trust_registry_error("manifest_kind_mismatch:" + config.library_id)
         if not _dynsmf_trust_exports_exact(entry, config.bindings):
             return _dynsmf_trust_registry_error("manifest_exports_mismatch:" + config.library_id)
-        val image = _dynsmf_trust_image(images, config.path)
-        if image == nil:
+        if not image_indices.has(config.path) or image_indices[config.path] < 0:
             return _dynsmf_trust_registry_error("artifact_image_missing_or_ambiguous:" + config.library_id)
-        val retained = _dynsmf_trust_copy_bytes(image!.artifact_bytes)
+        val retained = _dynsmf_trust_copy_bytes(images[image_indices[config.path]].artifact_bytes)
         if sha256_u8_hex(retained) != config.content_hash:
             return _dynsmf_trust_registry_error("artifact_digest_mismatch:" + config.library_id)
         val parsed_outer = aspect_pack_directory_parse_from_outer_smf_bytes(retained)
@@ -376,43 +365,40 @@ fn _dynsmf_trust_admit_parsed(manifest: [DynSmfManifestEntry], parsed: DynSmfTru
             artifact_bytes: retained
         ))
         artifact_index = artifact_index + 1
-    DynSmfAdmittedRegistry(ok: true, reason: "admitted", artifacts: admitted)
+    var artifact_indices: Dict<text, i64> = {}
+    var admitted_index = 0
+    while admitted_index < admitted.len():
+        artifact_indices[admitted[admitted_index].library_id] = admitted_index
+        admitted_index = admitted_index + 1
+    DynSmfAdmittedRegistry(ok: true, reason: "admitted", artifacts: admitted, artifact_indices: artifact_indices)
 
 pub fn dynsmf_admitted_registry_from_values(manifest: [DynSmfManifestEntry], config_source: text, images: [DynSmfTrustArtifactImage]) -> DynSmfAdmittedRegistry:
     _dynsmf_trust_admit_parsed(manifest, dynsmf_trust_config_parse(config_source), images)
 
 pub fn dynsmf_admitted_registry_load(manifest: [DynSmfManifestEntry], config_path: text) -> DynSmfAdmittedRegistry:
-    if config_path == "" or not rt_file_exists(config_path):
+    if config_path == "" or not file_exists(config_path):
         return _dynsmf_trust_registry_error("trust_config_missing:" + config_path)
-    val parsed = dynsmf_trust_config_parse(rt_file_read_text(config_path))
+    val parsed = dynsmf_trust_config_parse(file_read_nullable(config_path) ?? "")
     if not parsed.ok:
         return _dynsmf_trust_registry_error("trust_config_invalid:" + parsed.reason)
     var images: [DynSmfTrustArtifactImage] = []
     var index = 0
     while index < parsed.artifacts.len():
         val path = parsed.artifacts[index].path
-        if not rt_file_exists(path):
+        if not file_exists(path):
             return _dynsmf_trust_registry_error("artifact_file_missing:" + parsed.artifacts[index].library_id)
         # Exactly one artifact content read. The registry retains this value and
         # all startup consumers receive it directly.
-        images.push(DynSmfTrustArtifactImage(path: path, artifact_bytes: rt_file_read_bytes(path)))
+        images.push(DynSmfTrustArtifactImage(path: path, artifact_bytes: file_read_bytes(path)))
         index = index + 1
     _dynsmf_trust_admit_parsed(manifest, parsed, images)
 
 pub fn dynsmf_admitted_registry_find(registry: DynSmfAdmittedRegistry, library_id: text) -> DynSmfAdmittedArtifact?:
     if not registry.ok:
         return nil
-    var found: DynSmfAdmittedArtifact? = nil
-    var matches = 0
-    var index = 0
-    while index < registry.artifacts.len():
-        if registry.artifacts[index].library_id == library_id:
-            found = registry.artifacts[index]
-            matches = matches + 1
-        index = index + 1
-    if matches == 1:
-        return found
-    nil
+    if not registry.artifact_indices.has(library_id):
+        return nil
+    Some(registry.artifacts[registry.artifact_indices[library_id]])
 
 pub fn dynsmf_trust_registry_default_path() -> text:
     "simple_dynsmf_trust.sdn"

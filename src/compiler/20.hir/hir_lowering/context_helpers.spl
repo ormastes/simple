@@ -41,6 +41,32 @@ impl HirLowering:
                 unwound = unwound.push(in_progress)
         self.imported_type_methods_in_progress = unwound
 
+    # Re-entrancy stack accessors for `materialized_payload_in_progress`.
+    #
+    # Declared and reached exactly like the three above, and for the same
+    # reason: a newly added field on this class must not be read bare from
+    # `_Items/*.spl` or native-build's semantic pass aborts the worker with
+    # "class `HirLowering` has no field named ...". Do NOT inline these.
+    #
+    # This guards the enum-payload closure cycle, which the Dict memo
+    # `materialized_payload_origins` fails to break -- see the essay on the
+    # field declaration in types.spl for the 13,415-vs-2,546 measurement.
+    me materialized_payload_in_progress_has(key: text) -> bool:
+        for in_progress in self.materialized_payload_in_progress:
+            if in_progress == key:
+                return true
+        false
+
+    me materialized_payload_in_progress_push(key: text):
+        self.materialized_payload_in_progress = self.materialized_payload_in_progress.push(key)
+
+    me materialized_payload_in_progress_pop(key: text):
+        var unwound: [text] = []
+        for in_progress in self.materialized_payload_in_progress:
+            if in_progress != key:
+                unwound = unwound.push(in_progress)
+        self.materialized_payload_in_progress = unwound
+
     me begin_module(filename: text):
         """Reset transient module state without replacing retained owners."""
         # Diagnostics are stable no-GC owners. Clear them in place.
@@ -65,6 +91,11 @@ impl HirLowering:
         self.imported_traits = {}
         self.imported_enums = {}
         self.imported_enum_owners = {}
+        # This scalar-safe owner mirror is queried during the current
+        # module's import build only. It may contain scoped interpolation
+        # text, so carrying it into the next module would retain and
+        # misattribute the prior module's enum aliases.
+        self.imported_enum_owner_rows = []
         self.materialized_payload_origins = {}
         self.materialized_payload_bindings = {}
         # Must already be empty here (the guard pops what it pushes, and the
@@ -72,6 +103,11 @@ impl HirLowering:
         # stale entry would silently SKIP a needed method registration rather
         # than recurse, which is the quieter and more dangerous failure.
         self.imported_type_methods_in_progress = []
+        # Same belt-and-braces for the enum-payload closure breaker, for the
+        # same reason and with the same danger profile: a key leaked across a
+        # module boundary would silently SKIP a needed payload registration
+        # rather than recurse.
+        self.materialized_payload_in_progress = []
         # RISDONE (2026-08-21): the completed-registration memo describes ONE
         # importer's symbol table -- the table `reset_module` above just wiped
         # -- so it must not outlive the module it was built for. (The wrapper
@@ -79,10 +115,26 @@ impl HirLowering:
         # `module_filename` changes; this is the explicit half of that pair.)
         self.registered_import_memo = {}
         self.registered_import_memo_owner = filename
+        # Scalar read authority resets with the Dict (BOOT-20 2026-09-18):
+        # begin_module pre-seeds the owner above, so the lazy owner-change
+        # check in register_imported_symbol alone would carry these chains
+        # across the importer boundary.
+        self.registered_import_memo_keys = []
+        self.registered_import_memo_hash_buckets = []
+        self.registered_import_memo_hash_next = []
+        self.registered_import_memo_hash_mask = 0
         # DEPTAIL (2026-08-24): the dependency-tail memo describes the same
         # just-wiped importer table, for the same reason.
         self.dep_tail_memo = {}
         self.dep_tail_memo_owner = filename
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict,
+        # for the same begin_module-pre-seeds-the-owner reason as RISDONE
+        # (the lazy owner-change check alone would carry the chains across
+        # the importer boundary).
+        self.dep_tail_memo_keys = []
+        self.dep_tail_memo_hash_buckets = []
+        self.dep_tail_memo_hash_next = []
+        self.dep_tail_memo_hash_mask = 0
         self.struct_field_types_by_name = {}
         self.local_struct_types = {}
         self.struct_field_order_by_name = {}
@@ -91,6 +143,13 @@ impl HirLowering:
         self.registering_import_symbols = false
         self.fn_tuple_returns = {}
         self.glob_expand_memo = {}
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict;
+        # begin_module is one of the three glob_expand_memo reset sites.
+        self.glob_expand_memo_keys = []
+        self.glob_expand_memo_values = []
+        self.glob_expand_memo_hash_buckets = []
+        self.glob_expand_memo_hash_next = []
+        self.glob_expand_memo_hash_mask = 0
         self.reexport_visit_surface_indices = []
         self.reexport_visit_wanted = []
         self.reexport_visit_depths = []

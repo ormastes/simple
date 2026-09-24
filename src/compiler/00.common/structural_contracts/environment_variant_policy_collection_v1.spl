@@ -1,0 +1,139 @@
+# codex-impl
+# Pure product-policy collection. Owners supply already-read values; this
+# module performs no environment, file, CLI, process, or device access.
+
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+
+pub const ENVIRONMENT_VARIANT_POLICY_COLLECTION_SCHEMA_V1: u16 = 1u16
+
+pub enum EnvironmentVariantPolicyCollectionErrorV1:
+    ConflictingParserKeys
+    InvalidParserSelector
+    ExplicitEmptyValue
+
+pub struct EnvironmentVariantRawValueV1:
+    present: bool
+    value: text
+
+pub struct EnvironmentVariantRawPolicyLayerV1:
+    parser_impl: EnvironmentVariantRawValueV1
+    parser_prefer: EnvironmentVariantRawValueV1
+    parser_require: EnvironmentVariantRawValueV1
+    host_cpu_max: EnvironmentVariantRawValueV1
+    frontend_offload: EnvironmentVariantRawValueV1
+    frontend_fallback: EnvironmentVariantRawValueV1
+    target_cpu: EnvironmentVariantRawValueV1
+    target_cpu_features: EnvironmentVariantRawValueV1
+
+pub struct EnvironmentVariantPolicyPresenceV1:
+    cli_host_present: bool
+    env_host_present: bool
+    project_host_present: bool
+    user_host_present: bool
+    admin_present: bool
+    cli_target_present: bool
+    env_target_present: bool
+    project_target_present: bool
+    user_target_present: bool
+
+pub struct EnvironmentVariantPolicyCollectionReceiptV1:
+    schema_version: u16
+    presence: EnvironmentVariantPolicyPresenceV1
+    host_source_order: text
+    target_cpu_source: text
+    target_cpu_features_source: text
+    target_cpu_present: bool
+    target_cpu_features_present: bool
+
+pub struct EnvironmentVariantPolicyCollectionV1:
+    policy_inputs: EnvironmentVariantPolicyInputsV1
+    target_cpu: text
+    target_cpu_features: text
+    receipt: EnvironmentVariantPolicyCollectionReceiptV1
+
+fn _host_present(v: EnvironmentVariantRawPolicyLayerV1) -> bool:
+    v.parser_impl.present or v.parser_prefer.present or v.parser_require.present or
+    v.host_cpu_max.present or v.frontend_offload.present or v.frontend_fallback.present
+fn _target_present(v: EnvironmentVariantRawPolicyLayerV1) -> bool:
+    v.target_cpu.present or v.target_cpu_features.present
+fn _raw_valid(v: EnvironmentVariantRawValueV1) -> bool:
+    not v.present or v.value != ""
+fn _layer_valid(v: EnvironmentVariantRawPolicyLayerV1) -> bool:
+    _raw_valid(v.parser_impl) and _raw_valid(v.parser_prefer) and _raw_valid(v.parser_require) and
+    _raw_valid(v.host_cpu_max) and _raw_valid(v.frontend_offload) and _raw_valid(v.frontend_fallback) and
+    _raw_valid(v.target_cpu) and _raw_valid(v.target_cpu_features)
+
+fn _normalize_layer(v: EnvironmentVariantRawPolicyLayerV1
+) -> Result<EnvironmentVariantPolicyLayerV1, EnvironmentVariantPolicyCollectionErrorV1>:
+    if not _layer_valid(v): return Err(EnvironmentVariantPolicyCollectionErrorV1.ExplicitEmptyValue)
+    var prefer = if v.parser_prefer.present: v.parser_prefer.value else: ""
+    var require = if v.parser_require.present: v.parser_require.value else: ""
+    if v.parser_impl.present:
+        if v.parser_prefer.present or v.parser_require.present:
+            return Err(EnvironmentVariantPolicyCollectionErrorV1.ConflictingParserKeys)
+        if v.parser_impl.value == "auto" or v.parser_impl.value == "scalar" or v.parser_impl.value == "simd":
+            prefer = v.parser_impl.value
+        elif v.parser_impl.value == "prefer:scalar": prefer = "scalar"
+        elif v.parser_impl.value == "prefer:simd": prefer = "simd"
+        elif v.parser_impl.value == "require:scalar": require = "scalar"
+        elif v.parser_impl.value == "require:simd": require = "simd"
+        else: return Err(EnvironmentVariantPolicyCollectionErrorV1.InvalidParserSelector)
+    val normalized = EnvironmentVariantPolicyLayerV1(
+        parser_prefer: prefer, parser_require: require,
+        host_cpu_max: if v.host_cpu_max.present: v.host_cpu_max.value else: "",
+        frontend_offload: if v.frontend_offload.present: v.frontend_offload.value else: "",
+        frontend_fallback: if v.frontend_fallback.present: v.frontend_fallback.value else: "")
+    match environment_variant_policy_layer_validate_v1(normalized):
+        case Ok(value): Ok(value)
+        case Err(_): Err(EnvironmentVariantPolicyCollectionErrorV1.InvalidParserSelector)
+
+fn _target_value(cli: EnvironmentVariantRawValueV1, env: EnvironmentVariantRawValueV1,
+                 project: EnvironmentVariantRawValueV1, user: EnvironmentVariantRawValueV1) -> text:
+    if cli.present: return cli.value
+    if env.present: return env.value
+    if project.present: return project.value
+    if user.present: return user.value
+    ""
+fn _value_source(cli: EnvironmentVariantRawValueV1, env: EnvironmentVariantRawValueV1,
+                 project: EnvironmentVariantRawValueV1, user: EnvironmentVariantRawValueV1) -> text:
+    if cli.present: return "cli"
+    if env.present: return "env"
+    if project.present: return "project"
+    if user.present: return "user"
+    "absent"
+
+pub fn environment_variant_policy_collect_v1(
+    cli: EnvironmentVariantRawPolicyLayerV1,
+    env: EnvironmentVariantRawPolicyLayerV1,
+    project: EnvironmentVariantRawPolicyLayerV1,
+    user: EnvironmentVariantRawPolicyLayerV1,
+    admin: EnvironmentVariantAdminRestrictionsV1
+) -> Result<EnvironmentVariantPolicyCollectionV1, EnvironmentVariantPolicyCollectionErrorV1>:
+    val cli_layer = _normalize_layer(cli)?
+    val env_layer = _normalize_layer(env)?
+    val project_layer = _normalize_layer(project)?
+    val user_layer = _normalize_layer(user)?
+    # target_cpu models --cpu and target_cpu_features models
+    # SIMPLE_CPU_FEATURES. They never populate host_cpu_max.
+    val target_cpu = _target_value(cli.target_cpu, env.target_cpu, project.target_cpu, user.target_cpu)
+    val target_features = _target_value(cli.target_cpu_features, env.target_cpu_features,
+        project.target_cpu_features, user.target_cpu_features)
+    val presence = EnvironmentVariantPolicyPresenceV1(cli_host_present: _host_present(cli),
+        env_host_present: _host_present(env), project_host_present: _host_present(project),
+        user_host_present: _host_present(user), admin_present: admin.parser_provider != "" or
+            admin.host_cpu_max != "" or admin.frontend_offload_max != "" or admin.frontend_fallback != "",
+        cli_target_present: _target_present(cli), env_target_present: _target_present(env),
+        project_target_present: _target_present(project), user_target_present: _target_present(user))
+    Ok(EnvironmentVariantPolicyCollectionV1(policy_inputs: EnvironmentVariantPolicyInputsV1(
+        cli: cli_layer, env: env_layer, project: project_layer, user: user_layer, admin: admin),
+        target_cpu: target_cpu, target_cpu_features: target_features,
+        receipt: EnvironmentVariantPolicyCollectionReceiptV1(
+            schema_version: ENVIRONMENT_VARIANT_POLICY_COLLECTION_SCHEMA_V1,
+            presence: presence, host_source_order: "cli>env>project>user>default",
+            target_cpu_source: _value_source(cli.target_cpu, env.target_cpu,
+                project.target_cpu, user.target_cpu),
+            target_cpu_features_source: _value_source(cli.target_cpu_features,
+                env.target_cpu_features, project.target_cpu_features, user.target_cpu_features),
+        target_cpu_present: cli.target_cpu.present or env.target_cpu.present or project.target_cpu.present or user.target_cpu.present,
+        target_cpu_features_present: cli.target_cpu_features.present or env.target_cpu_features.present or
+            project.target_cpu_features.present or user.target_cpu_features.present)))

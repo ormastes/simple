@@ -42,6 +42,13 @@ Use the worktree-pinned Electron only:
 sh test/fixtures/chromium_primitive_oracle/run_real_chromium_prepared_host.shs
 ```
 
+The negative pinning gate uses a schema-valid request with deliberately wrong
+broker/lockfile hashes and must fail before rendering:
+
+```sh
+sh test/fixtures/chromium_primitive_oracle/run_manifest_rejection.shs
+```
+
 If the pinned `tools/electron-shell/node_modules/.bin/electron` is absent, the
 runner exits `2` with `REAL_CHROMIUM_ORACLE_UNAVAILABLE`; install it with the
 pinned `npm ci` in that directory. A successful runner receipt is browser

@@ -1,0 +1,225 @@
+#![allow(primitive_api)]
+
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_magic,
+    wire_put_envelope, wire_put_u32, wire_put_u64}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractBudgetV1,
+    ThreePayloadContractReaderV1, three_payload_contract_budget_v1,
+    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1,
+    three_payload_contract_max_payload_bytes_v1,
+    three_payload_contract_put_blob_v1, three_payload_contract_put_digest_v1,
+    three_payload_contract_put_optional_digest_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticQueryReadManifestV1,
+    semantic_query_read_manifest_encode_v1,
+    semantic_query_read_manifest_decode_bounded_v1, semantic_query_read_manifest_valid_v1,
+    semantic_query_read_manifest_wire_bytes_v1}
+use compiler.common.cache_contract.portable_object_ref_v1.{PortableObjectRefV1,
+    portable_object_ref_budget_v1, portable_object_ref_key_v1,
+    portable_object_ref_put_v1, portable_object_ref_read_v1,
+    portable_object_ref_valid_v1}
+
+pub struct ThreePayloadInputIdentityV1:
+    source_digest: text
+    prior_tld_digest: text?
+    init_tld_digest: text
+    seal_digest: text
+
+# Shared immutable worker policy.  The live driver owner retains this value,
+# while the worker IO module re-exports the name for source compatibility.
+# It is configuration only and carries no descriptor or execution authority.
+pub struct ThreePayloadWorkerPolicyV1:
+    executor_digest: text
+    max_read_bytes: i64
+    max_decode_bytes: i64
+    max_decoded_sections: i64
+    request_external_input: bool
+    request_reverse_reference: bool
+
+pub struct ThreePayloadReadReceiptV1:
+    input_identity: ThreePayloadInputIdentityV1
+    executor_digest: text
+    distinct_source: i64
+    distinct_prior: i64
+    distinct_init: i64
+    external_input_count: i64
+    rr_input_count: i64
+    open_calls: i64
+    read_calls: i64
+    read_bytes: i64
+    decoded_sections: i64
+    peak_decode_bytes: i64
+    denied_io_attempts: i64
+
+pub struct ThreePayloadWorkerResultV1:
+    input_identity: ThreePayloadInputIdentityV1
+    new_summary_digest: text
+    query_reads: SemanticQueryReadManifestV1
+    portable_refs: [PortableObjectRefV1]
+    diagnostic_digest: text
+    read_receipt: ThreePayloadReadReceiptV1
+
+pub struct ThreePayloadWorkerResultDecodeV1:
+    ok: bool
+    value: ThreePayloadWorkerResultV1?
+    error: text
+
+pub fn three_payload_input_identity_valid_v1(value: ThreePayloadInputIdentityV1) -> bool:
+    if not three_payload_contract_digest_valid_v1(value.source_digest) or
+            not three_payload_contract_digest_valid_v1(value.init_tld_digest) or
+            not three_payload_contract_digest_valid_v1(value.seal_digest): return false
+    match value.prior_tld_digest:
+        case Some(digest): three_payload_contract_digest_valid_v1(digest)
+        case nil: true
+
+pub fn three_payload_input_identity_equal_v1(left: ThreePayloadInputIdentityV1,
+        right: ThreePayloadInputIdentityV1) -> bool:
+    left.source_digest == right.source_digest and left.prior_tld_digest == right.prior_tld_digest and
+        left.init_tld_digest == right.init_tld_digest and left.seal_digest == right.seal_digest
+
+fn _identity_put_v1(out: [u8], value: ThreePayloadInputIdentityV1) -> [u8]:
+    var bytes = three_payload_contract_put_digest_v1(out, value.source_digest)
+    bytes = three_payload_contract_put_optional_digest_v1(bytes, value.prior_tld_digest)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.init_tld_digest)
+    three_payload_contract_put_digest_v1(bytes, value.seal_digest)
+
+fn _identity_budget_v1(budget: ThreePayloadContractBudgetV1,
+        value: ThreePayloadInputIdentityV1):
+    budget.add_digest(value.source_digest)
+    budget.add_optional_digest(value.prior_tld_digest)
+    budget.add_digest(value.init_tld_digest)
+    budget.add_digest(value.seal_digest)
+
+fn _identity_read_v1(reader: ThreePayloadContractReaderV1) -> ThreePayloadInputIdentityV1:
+    ThreePayloadInputIdentityV1(source_digest: reader.read_digest(),
+        prior_tld_digest: reader.read_optional_digest(), init_tld_digest: reader.read_digest(),
+        seal_digest: reader.read_digest())
+
+pub fn three_payload_read_receipt_valid_v1(value: ThreePayloadReadReceiptV1) -> bool:
+    if not three_payload_input_identity_valid_v1(value.input_identity) or
+            not three_payload_contract_digest_valid_v1(value.executor_digest): return false
+    val expected_prior = if value.input_identity.prior_tld_digest.is_some(): 1 else: 0
+    val distinct_inputs = 2 + expected_prior
+    value.distinct_source == 1 and value.distinct_prior == expected_prior and
+        value.distinct_init == 1 and value.external_input_count == 0 and value.rr_input_count == 0 and
+        value.open_calls >= distinct_inputs and value.read_calls >= value.open_calls and
+        value.read_bytes >= 0 and value.decoded_sections >= 0 and value.peak_decode_bytes >= 0 and
+        value.peak_decode_bytes <= value.read_bytes and value.denied_io_attempts == 0
+
+fn _receipt_put_v1(out: [u8], value: ThreePayloadReadReceiptV1) -> [u8]:
+    var bytes = _identity_put_v1(out, value.input_identity)
+    bytes = three_payload_contract_put_digest_v1(bytes, value.executor_digest)
+    for number in [value.distinct_source, value.distinct_prior, value.distinct_init,
+            value.external_input_count, value.rr_input_count, value.open_calls, value.read_calls,
+            value.read_bytes, value.decoded_sections, value.peak_decode_bytes,
+            value.denied_io_attempts]:
+        bytes = wire_put_u64(bytes, number)
+    bytes
+
+fn _receipt_budget_v1(budget: ThreePayloadContractBudgetV1,
+        value: ThreePayloadReadReceiptV1):
+    _identity_budget_v1(budget, value.input_identity)
+    budget.add_digest(value.executor_digest)
+    budget.add_bytes(11 * 8)
+
+fn _receipt_read_v1(reader: ThreePayloadContractReaderV1) -> ThreePayloadReadReceiptV1:
+    ThreePayloadReadReceiptV1(input_identity: _identity_read_v1(reader),
+        executor_digest: reader.read_digest(), distinct_source: reader.read_u64_nonnegative(),
+        distinct_prior: reader.read_u64_nonnegative(), distinct_init: reader.read_u64_nonnegative(),
+        external_input_count: reader.read_u64_nonnegative(), rr_input_count: reader.read_u64_nonnegative(),
+        open_calls: reader.read_u64_nonnegative(), read_calls: reader.read_u64_nonnegative(),
+        read_bytes: reader.read_u64_nonnegative(), decoded_sections: reader.read_u64_nonnegative(),
+        peak_decode_bytes: reader.read_u64_nonnegative(), denied_io_attempts: reader.read_u64_nonnegative())
+
+fn _portable_refs_valid_v1(values: [PortableObjectRefV1]) -> bool:
+    if values.len() > three_payload_contract_max_items_v1(): return false
+    var prior = ""
+    var first = true
+    for value in values:
+        if not portable_object_ref_valid_v1(value): return false
+        val key = portable_object_ref_key_v1(value)
+        if not first and key <= prior: return false
+        prior = key
+        first = false
+    true
+
+pub fn three_payload_worker_result_valid_v1(value: ThreePayloadWorkerResultV1) -> bool:
+    val fields_valid = three_payload_input_identity_valid_v1(value.input_identity) and
+        three_payload_contract_digest_valid_v1(value.new_summary_digest) and
+        semantic_query_read_manifest_valid_v1(value.query_reads) and
+        _portable_refs_valid_v1(value.portable_refs) and
+        three_payload_contract_digest_valid_v1(value.diagnostic_digest) and
+        three_payload_read_receipt_valid_v1(value.read_receipt) and
+        three_payload_input_identity_equal_v1(value.input_identity, value.read_receipt.input_identity)
+    if not fields_valid: return false
+    if value.query_reads.ordered_reads.len() >
+            three_payload_contract_max_items_v1() - value.portable_refs.len(): return false
+    val query_bytes = semantic_query_read_manifest_wire_bytes_v1(value.query_reads)
+    if query_bytes < 0: return false
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len())
+    _identity_budget_v1(budget, value.input_identity)
+    budget.add_digest(value.new_summary_digest)
+    budget.add_bytes(4 + query_bytes)
+    budget.add_bytes(4)
+    budget.add_items(value.portable_refs.len())
+    for reference in value.portable_refs: portable_object_ref_budget_v1(budget, reference)
+    budget.add_digest(value.diagnostic_digest)
+    _receipt_budget_v1(budget, value.read_receipt)
+    budget.ok
+
+pub fn three_payload_worker_result_encode_v1(value: ThreePayloadWorkerResultV1) -> [u8]:
+    if not three_payload_worker_result_valid_v1(value): return []
+    val query_bytes = semantic_query_read_manifest_encode_v1(value.query_reads)
+    if query_bytes.len() == 0: return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("TPW1"), 1)
+    out = _identity_put_v1(out, value.input_identity)
+    out = three_payload_contract_put_digest_v1(out, value.new_summary_digest)
+    out = three_payload_contract_put_blob_v1(out, query_bytes)
+    out = wire_put_u32(out, value.portable_refs.len())
+    for reference in value.portable_refs: out = portable_object_ref_put_v1(out, reference)
+    out = three_payload_contract_put_digest_v1(out, value.diagnostic_digest)
+    _receipt_put_v1(out, value.read_receipt)
+
+fn _worker_result_failure_v1(error: text) -> ThreePayloadWorkerResultDecodeV1:
+    ThreePayloadWorkerResultDecodeV1(ok: false, value: nil, error: error)
+
+pub fn three_payload_worker_result_decode_bounded_v1(bytes: [u8],
+        max_items: i64) -> ThreePayloadWorkerResultDecodeV1:
+    if max_items < 0 or max_items > three_payload_contract_max_items_v1():
+        return _worker_result_failure_v1("invalid_worker_item_limit")
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _worker_result_failure_v1("worker_result_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("TPW1"), 1): return _worker_result_failure_v1("three_payload_worker_v1_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val identity = _identity_read_v1(reader)
+    val summary = reader.read_digest()
+    val query = semantic_query_read_manifest_decode_bounded_v1(reader.read_blob(), max_items)
+    if not query.ok: return _worker_result_failure_v1("invalid_worker_query_manifest")
+    val query_value = match query.value:
+        case Some(value): value
+        case nil: return _worker_result_failure_v1("missing_worker_query_manifest")
+    val nested_items = query_value.ordered_reads.len()
+    if nested_items > max_items - reader.retained_items:
+        return _worker_result_failure_v1("worker_item_limit_exceeded")
+    reader.retained_items = reader.retained_items + nested_items
+    val portable_count = reader.read_count()
+    if not reader.ok: return _worker_result_failure_v1(reader.error)
+    if portable_count > max_items - nested_items:
+        return _worker_result_failure_v1("worker_item_limit_exceeded")
+    var portable: [PortableObjectRefV1] = []
+    var index: i64 = 0
+    while reader.ok and index < portable_count:
+        portable.push(portable_object_ref_read_v1(reader))
+        index = index + 1
+    val diagnostic = reader.read_digest()
+    val receipt = _receipt_read_v1(reader)
+    if not reader.finished(): return _worker_result_failure_v1(if reader.error == "": "trailing_worker_result_bytes" else: reader.error)
+    val value = ThreePayloadWorkerResultV1(input_identity: identity,
+        new_summary_digest: summary, query_reads: query_value, portable_refs: portable,
+        diagnostic_digest: diagnostic, read_receipt: receipt)
+    if not three_payload_worker_result_valid_v1(value): return _worker_result_failure_v1("noncanonical_worker_result")
+    ThreePayloadWorkerResultDecodeV1(ok: true, value: Some(value), error: "")
+
+pub fn three_payload_worker_result_decode_v1(bytes: [u8]) -> ThreePayloadWorkerResultDecodeV1:
+    three_payload_worker_result_decode_bounded_v1(bytes,
+        three_payload_contract_max_items_v1())

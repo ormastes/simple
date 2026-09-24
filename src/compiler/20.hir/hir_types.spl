@@ -111,24 +111,34 @@ struct HirSymbol:
     is_public: bool
     is_mutable: bool
     defining_module: text?   # Which module defined this symbol (for visibility checking)
-    builtin_method_tag: i64  # 0=None, 1=StrStrip, 2=StrLines
+    builtin_method_tag: i64  # Scalar BuiltinMethodTag value.
 
 val BUILTIN_METHOD_NONE = 0
 val BUILTIN_METHOD_STR_STRIP = 1
 val BUILTIN_METHOD_STR_LINES = 2
+val BUILTIN_METHOD_STR_LEN = 3
+val BUILTIN_METHOD_STR_CONTAINS = 4
+val BUILTIN_METHOD_STR_STARTS_WITH = 5
 
 fn hir_builtin_method_tag(qualified_name: text) -> i64:
     # This classifier runs while building the compiler itself. Keep it wholly
     # scalar: staged text equality would admit a frozen Rust runtime CGU and a
     # second LLVM option registry into the successor.
-    if qualified_name.len() != 9:
+    val name_len = qualified_name.len()
+    if name_len < 7:
         return BUILTIN_METHOD_NONE
     if char_code(qualified_name[0]) != 115 or char_code(qualified_name[1]) != 116 or char_code(qualified_name[2]) != 114 or char_code(qualified_name[3]) != 46:
         return BUILTIN_METHOD_NONE
-    if char_code(qualified_name[4]) == 115 and char_code(qualified_name[5]) == 116 and char_code(qualified_name[6]) == 114 and char_code(qualified_name[7]) == 105 and char_code(qualified_name[8]) == 112:
+    if name_len == 7 and char_code(qualified_name[4]) == 108 and char_code(qualified_name[5]) == 101 and char_code(qualified_name[6]) == 110:
+        return BUILTIN_METHOD_STR_LEN
+    if name_len == 9 and char_code(qualified_name[4]) == 115 and char_code(qualified_name[5]) == 116 and char_code(qualified_name[6]) == 114 and char_code(qualified_name[7]) == 105 and char_code(qualified_name[8]) == 112:
         return BUILTIN_METHOD_STR_STRIP
-    if char_code(qualified_name[4]) == 108 and char_code(qualified_name[5]) == 105 and char_code(qualified_name[6]) == 110 and char_code(qualified_name[7]) == 101 and char_code(qualified_name[8]) == 115:
+    if name_len == 9 and char_code(qualified_name[4]) == 108 and char_code(qualified_name[5]) == 105 and char_code(qualified_name[6]) == 110 and char_code(qualified_name[7]) == 101 and char_code(qualified_name[8]) == 115:
         return BUILTIN_METHOD_STR_LINES
+    if name_len == 12 and char_code(qualified_name[4]) == 99 and char_code(qualified_name[5]) == 111 and char_code(qualified_name[6]) == 110 and char_code(qualified_name[7]) == 116 and char_code(qualified_name[8]) == 97 and char_code(qualified_name[9]) == 105 and char_code(qualified_name[10]) == 110 and char_code(qualified_name[11]) == 115:
+        return BUILTIN_METHOD_STR_CONTAINS
+    if name_len == 15 and char_code(qualified_name[4]) == 115 and char_code(qualified_name[5]) == 116 and char_code(qualified_name[6]) == 97 and char_code(qualified_name[7]) == 114 and char_code(qualified_name[8]) == 116 and char_code(qualified_name[9]) == 115 and char_code(qualified_name[10]) == 95 and char_code(qualified_name[11]) == 119 and char_code(qualified_name[12]) == 105 and char_code(qualified_name[13]) == 116 and char_code(qualified_name[14]) == 104:
+        return BUILTIN_METHOD_STR_STARTS_WITH
     BUILTIN_METHOD_NONE
 
 fn hir_symbol_visibility_or_private(visibility: Visibility) -> Visibility:
@@ -251,6 +261,9 @@ fn qualified_symbol_key(module_name: text, member_name: text) -> text:
     join this cannot alias ("a.b", "c") onto ("a", "b.c")."""
     module_name + "#" + member_name
 
+fn qualified_type_key(module_name: text, member_name: text) -> text:
+    _hir_symbol_owner_module(module_name) + "#" + member_name
+
 class SymbolTable:
     """Symbol table for name resolution."""
     symbols: Dict<i64, HirSymbol>
@@ -345,7 +358,7 @@ impl SymbolTable:
     fn gpu_function_backend_order(name: text) -> text:
         if self.gpu_function_backend_orders.has(name): self.gpu_function_backend_orders[name] else: ""
 
-    me define(name: text, kind: SymbolKind, type_: HirType?, span: Span, visibility: Visibility, is_mutable: bool, defining_module: text?) -> SymbolId:
+    me define(name: text, kind: SymbolKind, type_: HirType?, span: Span, visibility: Visibility, is_mutable: bool, defining_module: text?, bind_lexical: bool = true) -> SymbolId:
         """Define a new symbol in current scope.
 
         For type-level symbols (Class, Struct, Enum, Trait): first-write-wins.
@@ -379,12 +392,22 @@ impl SymbolTable:
         if self.current_scope.id < 0 or self.current_scope.id >= self.next_scope_id:
             self.current_scope = ScopeId(id: 0)
 
+        # A lexical spelling is only a binding, never a type identity.  Two
+        # modules may both export `class Cell`; retain a distinct canonical
+        # declaration for each owner and let the first short spelling remain
+        # the unqualified binding in this scope.
+        val is_canonical_class = kind == SymbolKind.Class
         if is_type_symbol:
+            if is_canonical_class:
+                if val owner = defining_module:
+                    val canonical_id = self.lookup_qualified_type_raw(owner, name)
+                    if canonical_id >= 0:
+                        return SymbolId(id: canonical_id)
             # SCOPEROW (2026-08-22): probe the scope row IN PLACE. `val scope =
             # self.scopes[id]` copied the Scope value (VT_OBJECT_FIELD_CLONES
             # exactly 1 per define on the seed) on every type-symbol define.
             val existing = self.scopes[self.current_scope.id].symbols.get(name)
-            if existing != nil:
+            if existing != nil and not is_canonical_class:
                 # Already registered — return the existing id (first-write-wins).
                 # Bracket-index read: same stage4 lane hardening as `lookup`.
                 return SymbolId(id: self.scopes[self.current_scope.id].symbols[name])
@@ -415,17 +438,22 @@ impl SymbolTable:
         )
 
         self.symbols[raw_id] = symbol
-        if not self.exact_symbols.has(name):
+        if bind_lexical and not self.exact_symbols.has(name):
             self.exact_symbols[name] = raw_id
         if val defining_module_name = defining_module:
             self.index_module_callable(defining_module_name, name, raw_id)
+            if is_canonical_class:
+                self.bind_qualified_type(defining_module_name, name, id)
 
         # SCOPEIP (2026-08-21): write the scope's symbol dict IN PLACE. The
         # read-modify-write round trip this replaces was mandatory because
         # a nested assignment target was unsupported; it is supported now
         # (344f277cc45), and the round trip copied the whole scope row on
         # every define -- 1,529 defines for one module in the real closure.
-        self.scopes[self.current_scope.id].symbols[name] = raw_id
+        # Preserve the first unqualified spelling.  Qualified lookup reaches
+        # the canonical declaration above, including aliases and re-exports.
+        if bind_lexical and (not is_canonical_class or self.scopes[self.current_scope.id].symbols.get(name) == nil):
+            self.scopes[self.current_scope.id].symbols[name] = raw_id
 
         id
 
@@ -454,10 +482,15 @@ impl SymbolTable:
         # QTYPEIDX (2026-08-22): first binding wins, matching the append-only
         # parallel-array scan this replaces (which returned early on a hit and
         # therefore never overwrote an existing row).
-        val key = qualified_symbol_key(module_name, member_name)
+        val key = qualified_type_key(module_name, member_name)
         if self.qualified_types.contains_key(key):
             return
         self.qualified_types[key] = id.id
+
+    me bind_local_type_if_free(name: text, id: SymbolId):
+        """Publish a lexical alias without changing canonical ownership."""
+        if self.scopes[self.current_scope.id].symbols.get(name) == nil:
+            self.scopes[self.current_scope.id].symbols[name] = id.id
 
     fn lookup_qualified_type(module_name: text, member_name: text) -> SymbolId?:
         val raw_id = self.lookup_qualified_type_raw(module_name, member_name)
@@ -490,7 +523,7 @@ impl SymbolTable:
         `.` allowed ("a.b", "c") and ("a", "b.c") to collide.
         doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md
         """
-        val key = qualified_symbol_key(module_name, member_name)
+        val key = qualified_type_key(module_name, member_name)
         if self.qualified_types.contains_key(key):
             return self.qualified_types[key]
         -1
@@ -605,6 +638,28 @@ enum HirTypeKind:
     # Tensor and Layer types (for dimension checking)
     Tensor(element: HirType, dims: [DimExpr], device: DeviceType?)
     Layer(input: [DimExpr], output: [DimExpr])
+
+fn hir_type_metadata_symbol_free(type_: HirType) -> bool:
+    # A global name-keyed cache may transport primitive/composite shapes, but
+    # cannot transport a Named/DynTrait ID or inference variable without its
+    # defining SymbolTable. Consumer-local signatures own those types.
+    match type_.kind:
+        case Named(_, _) | DynTrait(_) | Infer(_, _) | TypeParam(_, _): return false
+        case Tuple(items) | Union(items):
+            for item in items:
+                if not hir_type_metadata_symbol_free(item): return false
+        case Array(inner, _) | Slice(inner) | Ref(inner, _) | Ptr(inner, _) | Optional(inner) | Isolated(inner):
+            return hir_type_metadata_symbol_free(inner)
+        case Dict(left, right) | Result(left, right):
+            return hir_type_metadata_symbol_free(left) and hir_type_metadata_symbol_free(right)
+        case Function(params, ret, _):
+            for param in params:
+                if not hir_type_metadata_symbol_free(param): return false
+            return hir_type_metadata_symbol_free(ret)
+        case Projection(base, _): return hir_type_metadata_symbol_free(base)
+        case Tensor(elem, _, _): return hir_type_metadata_symbol_free(elem)
+        case _: ()
+    true
 
 impl HirType:
     static fn named(name: text) -> HirType:
@@ -743,6 +798,7 @@ export HirModule, HirImport, HirImportItem, HirDomainBlock
 export SymbolId, HirSymbol, SymbolKind, MethodResolution
 export ScopeId, Scope, ScopeKind, SymbolTable
 export HirType, HirTypeKind
+export hir_type_metadata_symbol_free
 export DimExpr, DimExprKind
 export DeviceType, MemorySpace, LayerType, ParamShape
 

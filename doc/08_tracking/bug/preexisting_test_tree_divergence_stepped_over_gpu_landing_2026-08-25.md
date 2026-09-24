@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence stepped over by the GPU hardening landing (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** RECORD ONLY — not introduced here, not fixed here.
 
@@ -19,3 +23,4 @@ delta-PASS provided the pre-existing offender list is recorded. It is:
 New specs in this landing live only under `test/01_unit/` and are **not** copied into the
 `test/unit/` mirror (`.claude/rules` forbids cp between mirror trees); the delta helper confirms
 they add no offender.
+

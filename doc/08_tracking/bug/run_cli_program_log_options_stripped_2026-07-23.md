@@ -1,4 +1,8 @@
 # Bug: `simple run` stripped program flags that matched wrapper log options
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Fixed in source; fresh Stage 4 runtime qualification pending.
 
@@ -24,3 +28,4 @@ sandbox/resource flags of the delegated CLI, including `--lang VALUE`/`=` and
 
 `test/01_unit/app/run_cli_argument_boundary_contract_check.spl` covers a
 leading wrapper option and post-file/`--` program flags.
+

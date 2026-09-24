@@ -1,0 +1,246 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+
+# Seed interpreter CALL-ENTRY GLOBAL PUBLISH: the scan must not grow with the
+# CALLER frame's width.
+#
+# `publish_and_repoint` runs on every call out of a frame
+# (src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs) and
+# used to walk the caller's WHOLE overlay twice -- once in
+# `publish_live_bound_globals`, once in `CowEnv::drop_published_globals` --
+# paying two string hashes per entry in `is_local` to discard almost all of
+# them. That is the mechanism behind PERF-7's unexplained finding that the
+# per-call cost grows with the caller frame's width
+# (doc/08_tracking/bug/interpreter_call_entry_publish_scans_the_whole_caller_frame_2026-09-13.md).
+#
+# Measured 2026-09-13 on the BASE seed (sha256 633b3aabe70c149b9400, built from
+# 2cb951036a4), 2,000,000 calls, `SIMPLE_PERF_COUNTERS=1`:
+#
+#   narrow caller (3 locals)  PUBLISH_GLOBALS_SCANNED = 3 per call
+#   wide caller (+20 locals)  PUBLISH_GLOBALS_SCANNED = 23 per call
+#   ... and across BOTH whole runs, PUBLISH_GLOBALS_NONLOCAL = 1 and
+#   PUBLISH_GLOBALS_PUBLISHED = 0. Forty-six million string hashes to publish
+#   nothing.
+#
+# `CowEnv` now maintains `nonlocal_overlay`, a SUPERSET of the overlay keys the
+# frame does not declare local, so both walks are O(global aliases) instead of
+# O(frame width): the same two runs report SCANNED = 1 TOTAL.
+#
+# THE LOCK IS A COUNT, NOT A TIME. Wall clock does not survive its own control
+# on this host (doc/08_tracking/bug/perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md),
+# and the counts are exact: what this spec forbids is the scan becoming
+# proportional to the caller's frame again. The narrow/wide pair is the whole
+# point -- the two fixtures differ ONLY by twenty `val`s in the caller, so any
+# difference in SCANNED is attributable to frame width and nothing else.
+#
+# Non-vacuity, fail-closed at every step: a child that exits non-zero, prints
+# no RESULT line, reports the wrong iteration count, or whose counters file has
+# no `interp-perf-counters:` header or no `PUBLISH_GLOBALS_CALLS` row, FAILS.
+# A seed without these counters reports every field as -1 and cannot pass. The
+# publish scenario additionally requires PUBLISHED >= one per call, so a
+# superset that had gone empty -- which would make SCANNED look wonderful and
+# silently drop every global write the CALLING frame made -- fails there rather
+# than passing.
+
+use std.spec.step
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Iterations the two scaling fixtures declare, and the extra caller locals the
+# wide one carries. Both must track the fixtures.
+val CALL_N = 400000
+val EXTRA_CALLER_LOCALS = 20
+val SEM_N = 200
+val FIXTURES = "test/05_perf/interp/fixtures/publish_scan"
+
+# --- process plumbing (same shape as block_scope_shadow_parity_spec.spl) -----
+
+fn sh(script: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", script])
+
+fn path_is_exec(p: text) -> bool:
+    if p.len() == 0:
+        return false
+    val (_o, _e, code) = sh("test -x '" + p + "'")
+    code == 0
+
+# Resolve the interpreter under test. `SIMPLE_PERF_SELF_BIN` then
+# `SIMPLE_BINARY` win, so a lane can point this spec at the candidate seed it
+# just built; otherwise the usual in-tree locations are probed. Returns "" when
+# nothing is runnable, which every scenario turns into a FAIL, never a skip.
+#
+# The resolved path is PRINTED before any assertion: a directory-mode run
+# (`simple test <dir>`) drops the override and silently measures whatever
+# `bin/simple` points at, which in a fresh worktree can predate the change
+# under test. The first `[perf] binary=` line says what was actually measured.
+#
+# NOTE: `{` and `}` inside a Simple text literal are INTERPOLATION, so no shell
+# snippet here may use `${VAR}`; use `$VAR` with an explicit default.
+fn simple_binary() -> text:
+    val (env_out, _e, _c) = sh("printf %s \"$SIMPLE_PERF_SELF_BIN\"")
+    val override = env_out.trim()
+    if path_is_exec(override):
+        return override
+    val (env2, _e2, _c2) = sh("printf %s \"$SIMPLE_BINARY\"")
+    val override2 = env2.trim()
+    if path_is_exec(override2):
+        return override2
+    val candidates = [
+        "src/compiler_rust/target/release/simple",
+        "bin/release/x86_64-unknown-linux-gnu/simple",
+        "bin/release/aarch64-unknown-linux-gnu/simple",
+        "bin/release/linux-x86_64/simple",
+        "bin/simple",
+    ]
+    for c in candidates:
+        if path_is_exec(c):
+            return c
+    ""
+
+struct RunOut:
+    ok: i64
+    elapsed_us: i64
+    acc: text
+    iters: i64
+    header: i64
+    calls: i64
+    scanned: i64
+    published: i64
+    rc: i64
+    raw: text
+
+# Run one fixture in a child process with the perf counters armed.
+#
+# Every numeric field is extracted in the CHILD SHELL and emitted as a digit
+# string with -1 as the "not found" sentinel, because `text.to_i64()` in this
+# seed NEVER fails: it returns 0 for "" and "abc" and the character code for a
+# one-character string, so an unparseable field would otherwise arrive as a
+# plausible number (doc/08_tracking/bug/text_to_i64_never_nil_2026-09-12.md).
+# The separate `ok` flag is the only thing this spec trusts to mean "the child
+# produced a RESULT line".
+fn run_fixture(binary: text, fixture: text) -> RunOut:
+    val script = "d=$(mktemp -d) || exit 9; "
+        + "SIMPLE_EXECUTION_MODE=interpreter SIMPLE_PERF_COUNTERS=1 "
+        + "SIMPLE_PERF_COUNTERS_OUT=\"$d/c.txt\" "
+        + "timeout 900 '" + binary + "' run '" + fixture + "' > \"$d/o.txt\" 2>\"$d/e.txt\"; rc=$?; "
+        + "line=$(grep -m1 '^RESULT ' \"$d/o.txt\" 2>/dev/null); "
+        + "el=$(printf '%s' \"$line\" | sed -nE 's/.*elapsed_us=(-?[0-9]+).*/\\1/p'); "
+        + "ac=$(printf '%s' \"$line\" | sed -nE 's/.*acc=([-0-9:]+).*/\\1/p'); "
+        + "it=$(printf '%s' \"$line\" | sed -nE 's/.*iters=(-?[0-9]+).*/\\1/p'); "
+        + "hd=$(grep -c 'interp-perf-counters:' \"$d/c.txt\" 2>/dev/null); "
+        + "cl=$(sed -nE 's/^ +PUBLISH_GLOBALS_CALLS +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "sc=$(sed -nE 's/^ +PUBLISH_GLOBALS_SCANNED +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "pu=$(sed -nE 's/^ +PUBLISH_GLOBALS_PUBLISHED +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "ok=1; "
+        + "[ -n \"$el\" ] || ok=0; [ -n \"$it\" ] || ok=0; "
+        + "[ -n \"$el\" ] || el=-1; [ -n \"$ac\" ] || ac=-1; [ -n \"$it\" ] || it=-1; "
+        + "[ -n \"$hd\" ] || hd=-1; [ -n \"$cl\" ] || cl=-1; "
+        + "[ -n \"$sc\" ] || sc=-1; [ -n \"$pu\" ] || pu=-1; "
+        + "printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' \"$ok\" \"$el\" \"$ac\" \"$it\" \"$hd\" \"$cl\" \"$sc\" \"$pu\" \"$rc\"; "
+        + "rm -rf \"$d\""
+    val (out, _err, _code) = sh(script)
+    val parts = out.trim().split("|")
+    if parts.len() != 9:
+        return RunOut(ok: 0, elapsed_us: -1, acc: "", iters: -1, header: -1, calls: -1,
+                      scanned: -1, published: -1, rc: -1, raw: out)
+    val ok = parts[0].trim().to_i64() ?? -1
+    val el = parts[1].trim().to_i64() ?? -1
+    val it = parts[3].trim().to_i64() ?? -1
+    val hd = parts[4].trim().to_i64() ?? -1
+    val cl = parts[5].trim().to_i64() ?? -1
+    val sc = parts[6].trim().to_i64() ?? -1
+    val pu = parts[7].trim().to_i64() ?? -1
+    val rc = parts[8].trim().to_i64() ?? -1
+    RunOut(ok: ok, elapsed_us: el, acc: parts[2].trim(), iters: it, header: hd, calls: cl,
+           scanned: sc, published: pu, rc: rc, raw: out)
+
+# Fail-closed gate every scenario runs before asserting anything else. A seed
+# with no PUBLISH_GLOBALS_CALLS row reports calls = -1 and fails HERE, which is
+# what makes this spec RED on a seed that predates the counters rather than
+# passing vacuously.
+fn assert_ran(tag: text, r: RunOut, expect_iters: i64):
+    print "[perf] {tag}: ok={r.ok} rc={r.rc} iters={r.iters} elapsed_us={r.elapsed_us} header={r.header} CALLS={r.calls} SCANNED={r.scanned} PUBLISHED={r.published} acc={r.acc}"
+    expect(r.raw.len() > 0).to_equal(true)
+    expect(r.ok).to_equal(1)
+    expect(r.rc).to_equal(0)
+    expect(r.header).to_equal(1)
+    expect(r.iters).to_equal(expect_iters)
+    expect(r.calls >= expect_iters).to_equal(true)
+    expect(r.scanned >= 0).to_equal(true)
+    expect(r.published >= 0).to_equal(true)
+
+describe "seed interpreter: the call-entry global publish is independent of caller frame width":
+    # @manual scenario evidence
+    it "scans no more entries for a caller with twenty extra locals":
+        step("scans no more entries for a caller with twenty extra locals")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        val narrow = run_fixture(binary, FIXTURES + "/narrow_caller.spl")
+        assert_ran("narrow_caller", narrow, CALL_N)
+        val wide = run_fixture(binary, FIXTURES + "/wide_caller.spl")
+        assert_ran("wide_caller", wide, CALL_N)
+        val extra = wide.scanned - narrow.scanned
+        val budget = CALL_N * EXTRA_CALLER_LOCALS
+        print "[perf] publish scan: narrow={narrow.scanned} wide={wide.scanned} extra={extra} width_budget={budget}"
+        # THE PIN. On the base seed `extra` was CALL_N * EXTRA_CALLER_LOCALS
+        # exactly (8,000,000 for 400,000 calls and 20 locals). It must now stay
+        # below one hundredth of one entry per call, i.e. essentially zero and
+        # nowhere near proportional to the caller's width.
+        expect(extra < CALL_N / 100).to_equal(true)
+        # Neither fixture may pay a per-call scan at all: both frames declare
+        # every local they hold, so the publishable set is empty and the whole
+        # run's scan total stays far below one entry per call.
+        expect(narrow.scanned < CALL_N / 100).to_equal(true)
+        expect(wide.scanned < CALL_N / 100).to_equal(true)
+        # The path really ran: one publish per call out of the frame, and the
+        # loop makes one call per iteration.
+        expect(narrow.calls >= CALL_N).to_equal(true)
+        expect(wide.calls >= CALL_N).to_equal(true)
+        # Neither fixture aliases a module global from its calling frame, so
+        # nothing is published; the semantics scenario covers the case that
+        # does publish.
+        expect(narrow.published).to_equal(0)
+        expect(wide.published).to_equal(0)
+
+describe "seed interpreter: the publish still publishes":
+    # @manual scenario evidence
+    it "publishes a global the CALLING frame wrote, on every call":
+        step("publishes a global the CALLING frame wrote, on every call")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        val r = run_fixture(binary, FIXTURES + "/sem_caller_global_publish.spl")
+        assert_ran("sem_caller_global_publish", r, SEM_N)
+        # `main` writes the module global `g` and then calls `read_g()`. The
+        # write lives in the CALLING frame's overlay as a non-local alias --
+        # exactly the shape the call-entry publish exists for -- so the callee
+        # reads a stale value unless it is published first. Oracle recorded
+        # from the BASE seed (633b3aabe70c149b9400) before the change: the
+        # callee's last read and the caller's own final value are both 200.
+        print "[perf] sem_caller_global_publish: acc={r.acc} CALLS={r.calls} SCANNED={r.scanned} PUBLISHED={r.published}"
+        expect(r.acc).to_equal("200:200")
+        # THE ANTI-VACUITY ASSERTION. A superset that silently went empty would
+        # make SCANNED look wonderful in the scenario above AND drop this
+        # write. One publish per call is the floor.
+        expect(r.published >= SEM_N).to_equal(true)
+        # The superset is not over-approximating either: it names one alias per
+        # call here, not the whole frame.
+        expect(r.scanned <= SEM_N * 2 + 10).to_equal(true)
+
+    # @manual scenario evidence
+    it "carries a cross-module global write through every call":
+        step("carries a cross-module global write through every call")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        val r = run_fixture(binary, FIXTURES + "/sem_global_roundtrip.spl")
+        assert_ran("sem_global_roundtrip", r, SEM_N)
+        # 200 calls each adding 2 to a global owned by ANOTHER module: the
+        # value the last call returned and a later direct read must both be
+        # 400. That write returns through `sync_owned_captured_globals`, not
+        # through the call-entry publish -- which is why PUBLISHED is 0 here
+        # and why this scenario asserts semantics only. Oracle recorded from
+        # the BASE seed (633b3aabe70c149b9400).
+        print "[perf] sem_global_roundtrip: acc={r.acc} PUBLISHED={r.published}"
+        expect(r.acc).to_equal("400:400")

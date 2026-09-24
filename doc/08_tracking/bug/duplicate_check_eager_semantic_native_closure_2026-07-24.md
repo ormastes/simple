@@ -1,4 +1,8 @@
 # Duplicate-check eager semantic native closure — 2026-07-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** INTERPRETED SOURCE FIXED / NATIVE CLOSURE OPEN
 
@@ -39,3 +43,4 @@ either support a capability-aware optional semantic closure or provide the
 required canonical runtime symbols in the admitted full-CLI lane. Then build one
 fresh Stage-4 CLI and run the focused phase-2 spec plus essential-tools smoke
 once. The three-cycle cap for this session is exhausted; do not retry unchanged.
+

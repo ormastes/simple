@@ -1,0 +1,305 @@
+"""
+# L08 PureDatabase durable-recovery acceptance v2
+
+The L08 primary scenarios require item-specific production calls. The physical
+multi-process cache journal, root issuer, pin/GC owner, and crash-injection
+admission endpoint do not exist as one production surface yet. Each primary
+scenario therefore fails explicitly. Static scans, synthetic journals, a
+native SQL backend, or self-authored receipts cannot turn those failures into
+acceptance. The direct PureDatabase and ContextStore controls are explicitly
+supplementary: they test real owners but cannot earn L08/L06 cache credit.
+
+Run after the physical endpoint exists:
+`bin/simple test test/03_system/optimization/l08_pure_database_acceptance_v2_spec.spl --native`
+"""
+# codex-system-test
+# @tag: in-development, system, optimization, pure-database, durable-recovery
+# @manual_section: L08 PureDatabase durable-recovery acceptance
+# @req REQ-CSM-001 REQ-CSM-002 REQ-CSM-003 REQ-CSM-007 REQ-CSM-008 REQ-CSM-012 REQ-CSM-021 REQ-CSM-023 REQ-CSM-024 REQ-CSM-030
+
+use std.spec.{describe, it, expect, step}
+use std.database.pure_sql.{PureDatabase}
+use std.io_runtime.{file_exists, file_read, file_write}
+use app.io.context_ops.{context_sql_put_pack}
+use app.io.context_pure_database_importer.{context_sql_import_facade_to_pure_v2}
+use app.io.context_store_v1.{ContextPackV1, ContextStoreErrorV1, ContextStoreV1}
+use test.system.optimization.fixtures.l08_pure_database_acceptance_v2.{
+    l08_fixture_path_v2, l08_remove_fixture_v2, l08_require_live_durable_owner_v2
+}
+
+describe "L08 PureDatabase durable-recovery acceptance v2 [importance=critical; importance_weight=3]":
+
+    describe "supplemental PureDatabase controls not eligible for L08 cache acceptance [importance=critical; importance_weight=3]":
+        # @scenario: SUP-L08-PUREDB-001 class=supplemental-owner-control owner=std.database.pure_sql.PureDatabase reason=database-reopen-is-not-cache-snapshot resume=bind-live-snapshot-freeze-worker
+        it "should preserve ordered PureDatabase rows after checkpoint and reopen [importance=critical; importance_weight=3]":
+            step("Supplemental control: write ordered rows through PureDatabase and reopen its durable v3 image")
+            val path = l08_fixture_path_v2("ordered-reopen")
+            l08_remove_fixture_v2(path)
+            var writer = PureDatabase.open_deferred(path).unwrap()
+            expect(writer.exec_sql("CREATE TABLE ordered_rows (id INTEGER, value TEXT)").is_ok()).to_equal(true)
+            expect(writer.exec_sql("INSERT INTO ordered_rows (id, value) VALUES (2, 'second')").is_ok()).to_equal(true)
+            expect(writer.exec_sql("INSERT INTO ordered_rows (id, value) VALUES (1, 'first')").is_ok()).to_equal(true)
+            expect(writer.checkpoint().is_ok()).to_equal(true)
+            var reader = PureDatabase.open_deferred(path).unwrap()
+            val rows = reader.query("SELECT id, value FROM ordered_rows ORDER BY id", []).unwrap()
+            expect(rows.len()).to_equal(2)
+            expect(rows[0].values[0].to_text()).to_equal("1")
+            expect(rows[1].values[1].to_text()).to_equal("second")
+            l08_remove_fixture_v2(path)
+
+        # @scenario: SUP-L08-PUREDB-002 class=supplemental-owner-control owner=std.database.pure_sql.PureDatabase reason=database-decoder-is-not-cache-object-decoder resume=bind-live-bounded-decoder-worker
+        it "should round-trip valid UTF-8 through the existing PureDatabase v2 decoder [importance=critical; importance_weight=3]":
+            step("Supplemental control: persist valid UTF-8 through PureDatabase and reopen its v3 image")
+            val path = l08_fixture_path_v2("utf8")
+            l08_remove_fixture_v2(path)
+            var writer = PureDatabase.open_deferred(path).unwrap()
+            expect(writer.exec_sql("CREATE TABLE utf8_rows (id TEXT PRIMARY KEY, value TEXT)").is_ok()).to_equal(true)
+            expect(writer.exec_sql("INSERT INTO utf8_rows (id, value) VALUES ('key', '한글-✓')").is_ok()).to_equal(true)
+            expect(writer.checkpoint().is_ok()).to_equal(true)
+            var reader = PureDatabase.open_deferred(path).unwrap()
+            val rows = reader.query("SELECT value FROM utf8_rows WHERE id = 'key'", []).unwrap()
+            expect(rows.len()).to_equal(1)
+            expect(rows[0].values[0].to_text()).to_equal("한글-✓")
+            l08_remove_fixture_v2(path)
+
+        # @scenario: SUP-L08-PUREDB-003 class=supplemental-owner-control owner=std.database.pure_sql.PureDatabase reason=database-truncation-is-not-cache-object-decode resume=bind-live-bounded-decoder-worker
+        it "should reject truncated PureDatabase v2 bytes before decoding table state [importance=critical; importance_weight=3]":
+            step("Supplemental control: truncate a real PureDatabase v3 image and require decoder refusal")
+            val source = l08_fixture_path_v2("truncated-source")
+            val truncated = l08_fixture_path_v2("truncated")
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(truncated)
+            var writer = PureDatabase.open_deferred(source).unwrap()
+            expect(writer.exec_sql("CREATE TABLE bounded_rows (id TEXT PRIMARY KEY, value TEXT)").is_ok()).to_equal(true)
+            expect(writer.exec_sql("INSERT INTO bounded_rows (id, value) VALUES ('key', 'value')").is_ok()).to_equal(true)
+            expect(writer.checkpoint().is_ok()).to_equal(true)
+            val image = file_read(source)
+            expect(file_write(truncated, image.slice(0, image.len() - 1))).to_equal(true)
+            expect(PureDatabase.open_deferred(truncated).is_err()).to_equal(true)
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(truncated)
+
+    describe "supplemental importer controls not eligible for L08 concurrent-publication acceptance [importance=critical; importance_weight=3]":
+        # @scenario: SUP-L08-IMPORTER-001 class=supplemental-owner-control owner=app.io.context_pure_database_importer reason=sequential-import-is-not-concurrent-publication resume=bind-concurrent-importer-worker
+        it "should preserve source rows through the existing sequential PureDatabase importer [importance=critical; importance_weight=3]":
+            step("Supplemental control: create a facade source then invoke the existing PureDatabase importer")
+            val source = l08_fixture_path_v2("import-source")
+            val stage = l08_fixture_path_v2("import-stage")
+            val destination = l08_fixture_path_v2("import-destination")
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(stage)
+            l08_remove_fixture_v2(destination)
+            expect(context_sql_put_pack("src/l08.spl", "l08", "ordered-content", source, "text")).to_contain("status: ready")
+            val source_before = file_read(source)
+            val receipt = context_sql_import_facade_to_pure_v2(source, stage, destination)
+            expect(receipt.status).to_equal("ready")
+            expect(receipt.reason).to_equal("verified")
+            expect(receipt.source_bytes_digest_before).to_equal(receipt.source_bytes_digest_after)
+            expect(receipt.stage_bytes_digest).to_equal(receipt.destination_bytes_digest)
+            expect(file_read(source)).to_equal(source_before)
+            expect(file_exists(stage)).to_equal(false)
+            expect(file_read(destination)).to_start_with("simple-pure-db-v3\n")
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(stage)
+            l08_remove_fixture_v2(destination)
+
+        # @scenario: SUP-L08-IMPORTER-002 class=supplemental-owner-control owner=app.io.context_pure_database_importer reason=sequential-existing-destination-is-not-concurrent-publication resume=bind-concurrent-importer-worker
+        it "should refuse a sequential existing destination without clobbering it [importance=critical; importance_weight=3]":
+            step("Supplemental control: create an existing destination and invoke the existing importer")
+            val source = l08_fixture_path_v2("destination-conflict-source")
+            val stage = l08_fixture_path_v2("destination-conflict-stage")
+            val destination = l08_fixture_path_v2("destination-conflict-destination")
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(stage)
+            l08_remove_fixture_v2(destination)
+            expect(context_sql_put_pack("src/l08-conflict.spl", "l08", "source", source, "text")).to_contain("status: ready")
+            expect(file_write(destination, "other-publisher")).to_equal(true)
+            val receipt = context_sql_import_facade_to_pure_v2(source, stage, destination)
+            expect(receipt.status).to_equal("failed")
+            expect(receipt.reason).to_equal("destination_already_exists")
+            expect(file_read(destination)).to_equal("other-publisher")
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(stage)
+            l08_remove_fixture_v2(destination)
+
+        # @scenario: SUP-L08-IMPORTER-003 class=supplemental-owner-control owner=app.io.context_pure_database_importer reason=sequential-stage-conflict-is-not-crash-safe-publication resume=bind-concurrent-importer-worker
+        it "should refuse a sequential preexisting stage without changing source bytes [importance=critical; importance_weight=3]":
+            step("Supplemental control: create an owned stage and invoke the existing importer")
+            val source = l08_fixture_path_v2("stage-conflict-source")
+            val stage = l08_fixture_path_v2("stage-conflict-stage")
+            val destination = l08_fixture_path_v2("stage-conflict-destination")
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(stage)
+            l08_remove_fixture_v2(destination)
+            expect(context_sql_put_pack("src/l08-stage.spl", "l08", "source", source, "text")).to_contain("status: ready")
+            val source_before = file_read(source)
+            expect(file_write(stage, "other-stage")).to_equal(true)
+            val receipt = context_sql_import_facade_to_pure_v2(source, stage, destination)
+            expect(receipt.status).to_equal("failed")
+            expect(receipt.reason).to_equal("stage_already_exists")
+            expect(file_read(source)).to_equal(source_before)
+            expect(file_read(stage)).to_equal("other-stage")
+            l08_remove_fixture_v2(source)
+            l08_remove_fixture_v2(stage)
+            l08_remove_fixture_v2(destination)
+
+    describe "supplemental L06-A06 ContextStore contract controls [importance=critical; importance_weight=3]":
+        # @scenario: SUP-L06-A06-001 class=supplemental-owner-control owner=app.io.context_store_v1 reason=in-memory-owner-does-not-prove-restart resume=bind-to-persistent-contextstore-owner
+        it "should round trip ordered ContextStore rows through its actual PureDatabase owner [importance=critical; importance_weight=3]":
+            step("Supplemental L06-A06 success control: store and query real ContextStore rows")
+            val store = ContextStoreV1.memory().unwrap()
+            val rows = [
+                ContextPackV1(id: 2, source: "src/b.spl", target: "beta", status: "ready", lines: 1, token_estimate: 2, content: "second"),
+                ContextPackV1(id: 1, source: "src/a.spl", target: "alpha", status: "ready", lines: 1, token_estimate: 1, content: "first")]
+            expect(store.replace_all(rows).is_ok()).to_equal(true)
+            val exact = store.get_exact("src/a.spl").unwrap()
+            expect(exact.len()).to_equal(1)
+            expect(exact[0].id).to_equal(1)
+            expect(store.query_literal("src/").unwrap().len()).to_equal(2)
+
+        # @scenario: SUP-L06-A06-002 class=supplemental-owner-control owner=app.io.context_store_v1 reason=in-memory-owner-does-not-prove-restart resume=bind-to-persistent-contextstore-owner
+        it "should allocate a boundary zero identity through the actual ContextStore owner [importance=critical; importance_weight=3]":
+            step("Supplemental L06-A06 boundary control: let ContextStore allocate a zero identity")
+            val store = ContextStoreV1.memory().unwrap()
+            expect(store.put(ContextPackV1(id: 0, source: "src/zero.spl", target: "zero", status: "ready", lines: 0, token_estimate: 0, content: "zero")).is_ok()).to_equal(true)
+            val exact = store.get_exact("src/zero.spl").unwrap()
+            expect(exact.len()).to_equal(1)
+            expect(exact[0].id).to_be_greater_than(0)
+
+        # @scenario: SUP-L06-A06-003 class=supplemental-owner-control owner=app.io.context_store_v1 reason=in-memory-owner-does-not-prove-restart resume=bind-to-persistent-contextstore-owner
+        it "should retain prior ContextStore rows after an invalid replacement [importance=critical; importance_weight=3]":
+            step("Supplemental L06-A06 error control: reject negative identity without replacing prior rows")
+            val store = ContextStoreV1.memory().unwrap()
+            expect(store.put(ContextPackV1(id: 1, source: "src/old.spl", target: "old", status: "ready", lines: 1, token_estimate: 1, content: "old")).is_ok()).to_equal(true)
+            val invalid = [ContextPackV1(id: -1, source: "src/bad.spl", target: "bad", status: "ready", lines: 1, token_estimate: 1, content: "bad")]
+            val refused = store.replace_all(invalid)
+            expect(refused.is_err()).to_equal(true)
+            expect(refused.unwrap_err()).to_equal(ContextStoreErrorV1.InvalidIdentity)
+            expect(store.get_exact("src/old.spl").unwrap().len()).to_equal(1)
+
+    describe "L06-A06 durable ContextStore migration [importance=critical; importance_weight=3]":
+        # @scenario: L06-A06-success class=blocked owner=app.io.context_store_v1 reason=no-persistent-contextstore-owner-entrypoint resume=bind-to-persistent-contextstore-owner
+        it "should preserve ordered ContextStore data across a production restart [importance=critical; importance_weight=3]":
+            step("Require a persistent ContextStore owner restart receipt")
+            l08_require_live_durable_owner_v2("L06-A06 persistent ContextStore restart")
+
+        # @scenario: L06-A06-boundary class=blocked owner=app.io.context_store_v1 reason=no-persistent-contextstore-owner-entrypoint resume=bind-to-persistent-contextstore-owner
+        it "should reject a destination conflict through the durable ContextStore owner [importance=critical; importance_weight=3]":
+            step("Require a persistent ContextStore destination-conflict receipt")
+            l08_require_live_durable_owner_v2("L06-A06 persistent ContextStore destination conflict")
+
+        # @scenario: L06-A06-refusal class=blocked owner=app.io.context_store_v1 reason=no-persistent-contextstore-owner-entrypoint resume=bind-to-persistent-contextstore-owner
+        it "should refuse an unsupported SQL or native backend substitute [importance=critical; importance_weight=3]":
+            step("Require durable ContextStore backend-identity refusal evidence")
+            l08_require_live_durable_owner_v2("L06-A06 ContextStore backend substitute refusal")
+
+    describe "L08-A01 coherent snapshot freeze [importance=critical; importance_weight=3]":
+        # @scenario: L08-A01-success class=blocked owner=compiler.cache.snapshot reason=no-item-specific-snapshot-entrypoint resume=bind-live-snapshot-freeze-worker
+        it "should freeze one coherent source and resolution snapshot before publication [importance=critical; importance_weight=3]":
+            step("Require an item-specific production snapshot freeze call rather than a database reopen")
+            l08_require_live_durable_owner_v2("L08-A01 coherent snapshot freeze")
+
+        # @scenario: L08-A01-boundary class=blocked owner=compiler.cache.snapshot reason=no-item-specific-snapshot-entrypoint resume=bind-live-snapshot-freeze-worker
+        it "should allow exactly one verified mutation restart without publishing a mixed root [importance=critical; importance_weight=3]":
+            step("Require the production snapshot owner to observe one restart and retain the old active root")
+            l08_require_live_durable_owner_v2("L08-A01 one mutation restart")
+
+        # @scenario: L08-A01-refusal class=blocked owner=compiler.cache.snapshot reason=no-item-specific-snapshot-entrypoint resume=bind-live-snapshot-freeze-worker
+        it "should refuse a second mutation before any mixed-generation root is published [importance=critical; importance_weight=3]":
+            step("Require the production snapshot owner to reject the second mutation before publication")
+            l08_require_live_durable_owner_v2("L08-A01 second mutation refusal")
+
+    describe "L08-A02 bounded decoder [importance=critical; importance_weight=3]":
+        # @scenario: L08-A02-success class=blocked owner=compiler.cache.object_decoder reason=no-item-specific-cache-decoder-entrypoint resume=bind-live-bounded-decoder-worker
+        it "should accept a valid bounded cache object through its owning decoder [importance=critical; importance_weight=3]":
+            step("Require an item-specific cache object decoder call rather than a PureDatabase reopen")
+            l08_require_live_durable_owner_v2("L08-A02 valid cache object decoder")
+
+        # @scenario: L08-A02-boundary class=blocked owner=compiler.cache.object_decoder reason=no-item-specific-cache-decoder-entrypoint resume=bind-live-bounded-decoder-worker
+        it "should reject truncated cache-object bytes before semantic decode [importance=critical; importance_weight=3]":
+            step("Require an item-specific cache object decoder refusal rather than a PureDatabase file check")
+            l08_require_live_durable_owner_v2("L08-A02 truncated cache object decoder")
+
+        # @scenario: L08-A02-refusal class=blocked owner=compiler.cache.object_decoder reason=no-item-specific-cache-decoder-entrypoint resume=bind-live-bounded-decoder-worker
+        it "should reject malformed oversized and noncanonical payloads through the production decoder boundary [importance=critical; importance_weight=3]":
+            step("Require a production bounded-decoder receipt; a hand-made payload is not a substitute")
+            l08_require_live_durable_owner_v2("L08-A02 malformed oversized and noncanonical decoder")
+
+    describe "L08-A03 epoch pin and root closure [importance=critical; importance_weight=3]":
+        # @scenario: L08-A03-success class=blocked owner=compiler.cache.root_authority reason=no-typed-root-pin-gc-entrypoint resume=bind-live-root-authority-worker
+        it "should validate a complete typed closure issued by the durable authority [importance=critical; importance_weight=3]":
+            step("Require the production root issuer to validate the entire typed transitive closure")
+            l08_require_live_durable_owner_v2("L08-A03 complete typed root closure")
+
+        # @scenario: L08-A03-boundary class=blocked owner=compiler.cache.root_authority reason=no-typed-root-pin-gc-entrypoint resume=bind-live-root-authority-worker
+        it "should reject a stale root without changing the active root [importance=critical; importance_weight=3]":
+            step("Require a live stale-root barrier and old-root observation")
+            l08_require_live_durable_owner_v2("L08-A03 stale root")
+
+        # @scenario: L08-A03-refusal-forged-pin class=blocked owner=compiler.cache.root_authority reason=no-typed-root-pin-gc-entrypoint resume=bind-live-root-authority-worker
+        it "should reject a forged pin at the all-root barrier [importance=critical; importance_weight=3]":
+            step("Require a live forged-pin barrier observation")
+            l08_require_live_durable_owner_v2("L08-A03 forged pin")
+
+        # @scenario: SUP-L08-A03-001 class=supplemental-missing-evidence owner=compiler.cache.root_authority reason=extra-revoked-root-case-does-not-substitute-for-three-primary-cases resume=bind-live-root-authority-worker
+        it "should reject a revoked root without granting generic durable credit [importance=critical; importance_weight=3]":
+            step("Require a live revoked-root observation from the issuer")
+            l08_require_live_durable_owner_v2("L08-A03 revoked root")
+
+    describe "L08-A04 crash replay and checkpoint [importance=critical; importance_weight=3]":
+        # @scenario: L08-A04-success class=blocked owner=compiler.cache.journal_replay reason=no-process-crash-replay-entrypoint resume=bind-live-crash-replay-worker
+        it "should replay an observed process crash at a publication boundary [importance=critical; importance_weight=3]":
+            step("Require actual process termination and a fresh production replay reader")
+            l08_require_live_durable_owner_v2("L08-A04 process crash replay")
+
+        # @scenario: L08-A04-boundary class=blocked owner=compiler.cache.journal_replay reason=no-process-crash-replay-entrypoint resume=bind-live-crash-replay-worker
+        it "should distinguish a checkpoint from a missing process-crash replay [importance=critical; importance_weight=3]":
+            step("Require a physical crash-point receipt instead of an in-process checkpoint model")
+            l08_require_live_durable_owner_v2("L08-A04 checkpoint versus crash")
+
+        # @scenario: L08-A04-refusal-torn-journal class=blocked owner=compiler.cache.journal_replay reason=no-process-crash-replay-entrypoint resume=bind-live-crash-replay-worker
+        it "should reject a torn or synthetic journal before root promotion [importance=critical; importance_weight=3]":
+            step("Require the actual checksummed journal reader to reject torn records")
+            l08_require_live_durable_owner_v2("L08-A04 torn and synthetic journal")
+
+        # @scenario: SUP-L08-A04-001 class=supplemental-missing-evidence owner=compiler.cache.journal_replay reason=extra-missing-cas-case-does-not-substitute-for-three-primary-cases resume=bind-live-crash-replay-worker
+        it "should reject replay when a referenced CAS closure is missing [importance=critical; importance_weight=3]":
+            step("Require the production replay path to observe a missing CAS object")
+            l08_require_live_durable_owner_v2("L08-A04 missing CAS closure")
+
+    describe "L08-A05 verified importer [importance=critical; importance_weight=3]":
+        # @scenario: L08-A05-success class=blocked owner=compiler.cache.durable_importer reason=no-concurrent-source-stage-destination-publication-entrypoint resume=bind-live-concurrent-importer-worker
+        it "should preserve source rows through the existing verified PureDatabase importer [importance=critical; importance_weight=3]":
+            step("Require an item-specific concurrent importer publication rather than a sequential importer call")
+            l08_require_live_durable_owner_v2("L08-A05 verified importer success")
+
+        # @scenario: L08-A05-boundary class=blocked owner=compiler.cache.durable_importer reason=no-concurrent-source-stage-destination-publication-entrypoint resume=bind-live-concurrent-importer-worker
+        it "should reject a concurrent destination publication conflict rather than clobber it [importance=critical; importance_weight=3]":
+            step("Require two live publishers and a production no-clobber observation")
+            l08_require_live_durable_owner_v2("L08-A05 destination conflict")
+
+        # @scenario: L08-A05-refusal-stage class=blocked owner=compiler.cache.durable_importer reason=no-concurrent-source-stage-destination-publication-entrypoint resume=bind-live-concurrent-importer-worker
+        it "should reject a preexisting stage conflict without changing source bytes [importance=critical; importance_weight=3]":
+            step("Require a live stage-conflict outcome and exact source preservation")
+            l08_require_live_durable_owner_v2("L08-A05 stage conflict")
+
+        # @scenario: SUP-L08-A05-001 class=supplemental-missing-evidence owner=compiler.cache.durable_importer reason=extra-native-substitute-case-does-not-substitute-for-three-primary-cases resume=bind-live-concurrent-importer-worker
+        it "should refuse a native SQL substitute even when ordered rows look correct [importance=critical; importance_weight=3]":
+            step("Require the PureDatabase owner identity at the importer boundary")
+            l08_require_live_durable_owner_v2("L08-A05 native SQL substitute refusal")
+
+    describe "L08-A06 cross-process pin GC and recovery [importance=critical; importance_weight=3]":
+        # @scenario: L08-A06-success class=blocked owner=compiler.cache.reader_gc reason=no-cross-process-pin-gc-entrypoint resume=bind-live-reader-gc-worker
+        it "should retain a live object while a cross-process reader pin is active [importance=critical; importance_weight=3]":
+            step("Require the production cross-process reader/pin/GC owner")
+            l08_require_live_durable_owner_v2("L08-A06 live reader pin")
+
+        # @scenario: L08-A06-boundary class=blocked owner=compiler.cache.reader_gc reason=no-cross-process-pin-gc-entrypoint resume=bind-live-reader-gc-worker
+        it "should delete expired or tombstoned objects only after required generations [importance=critical; importance_weight=3]":
+            step("Require the production GC generations and expiry observation")
+            l08_require_live_durable_owner_v2("L08-A06 expiry and tombstone")
+
+        # @scenario: L08-A06-refusal class=blocked owner=compiler.cache.reader_gc reason=no-cross-process-pin-gc-entrypoint resume=bind-live-reader-gc-worker
+        it "should quarantine corruption rather than promote missing durable evidence [importance=critical; importance_weight=3]":
+            step("Require the production quarantine observation after corrupt durable bytes")
+            l08_require_live_durable_owner_v2("L08-A06 corruption quarantine")

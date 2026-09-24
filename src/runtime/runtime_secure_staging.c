@@ -21,10 +21,185 @@
 
 #define RT_SECURE_PATH_MAX 4096
 
+/* These four functions are needed by bootstrap_main but their historical
+ * owners (runtime.c/runtime_native.c) cannot be compiled into native_all:
+ * they collide with hundreds of Rust-owned rt_* definitions.  Keep the
+ * native_all-only mirrors in this deliberately narrow translation unit. */
+int64_t rt_simple_abi_version(void) {
+    return (int64_t)SIMPLE_ABI_VERSION;
+}
+
+int64_t rt_simple_abi_version_deferred(void) {
+    return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
+}
+
 static int secure_copy_path(const uint8_t* ptr, uint64_t len, char* out, size_t cap) {
     if (!ptr || !out || len == 0 || len >= cap || memchr(ptr, 0, (size_t)len)) return 0;
     memcpy(out, ptr, (size_t)len); out[len] = 0; return 1;
 }
+
+#if defined(_WIN32)
+/* Forward declaration -- defined below, ahead of its other two call sites.
+ * rt_file_create_excl needs it too: see the call site for why. */
+static int spl_secure_widen_long_path(const char* path, wchar_t* out);
+#endif
+
+int rt_file_create_excl(const char* path_ptr, int64_t path_len,
+                        const char* content_ptr, int64_t content_len) {
+    char path[RT_SECURE_PATH_MAX];
+    if (path_len <= 0 || content_len < 0 ||
+        !secure_copy_path((const uint8_t*)path_ptr, (uint64_t)path_len,
+                          path, sizeof(path)) ||
+        (content_len > 0 && !content_ptr)) return 0;
+#if defined(_WIN32)
+    /* CreateFileA is an ANSI entry point and is capped at MAX_PATH (260)
+     * regardless of the underlying filesystem's real limit. The exclusive-
+     * stage candidate path built by native_noop_exclusive_stage_v1 --
+     * <repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/noop-v1/<64-hex>/generations/<64-hex
+     * generation>.tmp.<64-hex nonce> -- measured 310 chars on this host,
+     * so CreateFileA failed identically on all 8 differently-nonced retry
+     * attempts (same MAX_PATH ceiling, not a real collision), and
+     * native_noop_exclusive_stage_v1 exhausted its retry budget and returned
+     * "" -- surfacing four layers up as "exclusive-stage-conflict" even
+     * though no other process or stale claim was ever involved. Prefer the
+     * wide, extended-length-prefixed call so the path can exceed MAX_PATH,
+     * exactly like rt_secure_temp_dir/rt_file_publish_noreplace above; keep
+     * the ANSI call as the fallback for a path that cannot be widened. */
+    HANDLE file = INVALID_HANDLE_VALUE;
+    wchar_t wide_path[32768];
+    if (spl_secure_widen_long_path(path, wide_path)) {
+        file = CreateFileW(wide_path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    } else {
+        file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    DWORD written = 0;
+    int ok = content_len <= (int64_t)UINT32_MAX;
+    if (ok && content_len > 0)
+        ok = WriteFile(file, content_ptr, (DWORD)content_len, &written, NULL) &&
+            written == (DWORD)content_len;
+    if (!CloseHandle(file)) ok = 0;
+    return ok;
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return 0;
+    int64_t done = 0;
+    while (done < content_len) {
+        ssize_t n = write(fd, content_ptr + done, (size_t)(content_len - done));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        done += n;
+    }
+    int ok = done == content_len && close(fd) == 0;
+    if (!ok) { if (done != content_len) close(fd); unlink(path); }
+    return ok;
+#endif
+}
+
+int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_SECURE_PATH_MAX];
+    if (!secure_copy_path(path_ptr, path_len, path, sizeof(path))) return 0;
+#if defined(_WIN32)
+    /* Same bug class as rt_file_create_excl above: CreateFileA is an ANSI
+     * entry point capped at MAX_PATH. Prefer the wide, extended-length-
+     * prefixed call so a bootstrap-length path is not silently rejected;
+     * fall back to the ANSI call only when the path cannot be widened. */
+    /* FILE_FLAG_BACKUP_SEMANTICS: harmless on a regular file, but required
+     * for CreateFile to open a directory handle at all -- durability-syncing
+     * a directory (the POSIX fsync-the-parent-dir-after-rename idiom) is a
+     * real caller shape elsewhere in this bug class (rt_file_fsync in
+     * runtime.c/runtime_native.c), so this twin is made consistent too. */
+    HANDLE file = INVALID_HANDLE_VALUE;
+    wchar_t wide_path[32768];
+    if (spl_secure_widen_long_path(path, wide_path)) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file);
+    if (!CloseHandle(file)) ok = 0;
+    return ok;
+#else
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return 0;
+    int ok = fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    return ok;
+#endif
+}
+
+#if defined(_WIN32)
+/* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
+ * leaves it long, add the extended-length ("\\?\") prefix so a WIDE Win32
+ * call is not itself capped at MAX_PATH (a wide call is not exempt on its
+ * own -- only the prefix lifts the ceiling, to ~32767). `out` must hold at
+ * least 32768 wchar_t. Returns 0 (leaving `out` untouched) when the path
+ * cannot be widened/qualified at all, so callers fall back to the ANSI call
+ * for a normal-length or otherwise-unrepresentable path. Named without the
+ * rt_ prefix (unlike its Simple-facing siblings in this file) because it is
+ * a pure file-local helper with no runtime-API surface of its own -- see
+ * scripts/check/check-rt-dual-implementation-ratchet.shs, which treats any
+ * new rt_-prefixed definition as a fresh single-lane primitive requiring a
+ * Simple twin. The path separator and prefix are built from the numeric
+ * code point (92) rather than written literally, purely to keep this source
+ * free of escape sequences. */
+static int spl_secure_widen_long_path(const char* path, wchar_t* out) {
+    static const wchar_t sep = (wchar_t)92;
+    wchar_t wide[32768], full[32768];
+    wchar_t* scan;
+    DWORD n;
+    size_t len;
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide,
+                            (int)(sizeof(wide) / sizeof(wide[0]))) == 0) {
+        return 0;
+    }
+    for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+    n = GetFullPathNameW(wide, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
+    if (n == 0 || n >= sizeof(full) / sizeof(full[0])) return 0;
+    /* Already extended-length, or a UNC path: hand it over unchanged. */
+    if (full[0] == sep && full[1] == sep) {
+        memcpy(out, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        return 1;
+    }
+    len = wcslen(full);
+    if (len + 5 >= 32768) return 0;
+    out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+    memcpy(out + 4, full, (len + 1) * sizeof(wchar_t));
+    return 1;
+}
+
+/* Create a directory without the MAX_PATH ceiling. See the call site for why. */
+static BOOL rt_secure_create_directory_long(const char* path,
+                                            SECURITY_ATTRIBUTES* attributes) {
+    wchar_t prefixed[32768];
+    if (!spl_secure_widen_long_path(path, prefixed)) {
+        return CreateDirectoryA(path, attributes);
+    }
+    return CreateDirectoryW(prefixed, attributes);
+}
+#endif
+
+#if defined(_WIN32)
+/* Canonical implementation of the secure-staging pair (this file's own header
+ * says "implemented once, in C"). Every Windows failure mode returned an empty
+ * string, so the AOT diagnostic-staging caller could only ever say "diagnostic
+ * staging unavailable". Name the failing step and the Win32 error.
+ * SIMPLE_QUIET_SECURE_TEMP_DIAG=1 silences. */
+static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
+    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, (unsigned long)GetLastError(), detail ? detail : "");
+    fflush(stderr);
+}
+#endif
 
 int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                            const uint8_t* prefix_ptr, uint64_t prefix_len) {
@@ -37,16 +212,26 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     typedef BOOL (WINAPI *SddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
     HMODULE bcrypt = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
     RandomFn fill = bcrypt ? (RandomFn)GetProcAddress(bcrypt, "BCryptGenRandom") : NULL;
-    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { if (bcrypt) FreeLibrary(bcrypt); return rt_string_new(NULL, 0); }
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { rt_secure_temp_dir_diag("BCryptGenRandom", parent); if (bcrypt) FreeLibrary(bcrypt); return rt_string_new(NULL, 0); }
     FreeLibrary(bcrypt); char suffix[33];
     for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
     int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
     HMODULE advapi = LoadLibraryA("advapi32.dll"); PSECURITY_DESCRIPTOR descriptor = NULL;
     SddlFn convert = advapi ? (SddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
-    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
+    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path); if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes); LocalFree(descriptor); FreeLibrary(advapi);
-    if (!created) return rt_string_new(NULL, 0);
+    /* CreateDirectoryA is capped at MAX_PATH, and for a DIRECTORY the usable
+     * limit is MAX_PATH-12 (248) because Windows reserves room for an 8.3 name
+     * plus a separator. The bootstrap's staging parent --
+     * <repo>/.simple/storage/build/bootstrap/stage3/<triple>/stage2-home/
+     * .cache/simple/v1/projects/<64-hex>/native-build/ -- lands at 258 chars,
+     * so this returned ERROR_FILENAME_EXCED_RANGE (206) and the empty result
+     * surfaced four layers up as "diagnostic staging unavailable", failing
+     * Stage 2 sanity. The wide API with the extended-length prefix lifts the
+     * limit to ~32767. */
+    BOOL created = rt_secure_create_directory_long(path, &attributes);
+    LocalFree(descriptor); FreeLibrary(advapi);
+    if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
     int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
     if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
@@ -61,8 +246,34 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (!secure_copy_path(staged_ptr, staged_len, staged, sizeof(staged)) ||
         !secure_copy_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
+    /* The AOT native-build cache path nests <repo>/.simple/storage/.../
+     * stage2-home/.cache/simple/v1/projects/<64-hex>/native-build/
+     * simple-aot-diagnostic-<32-hex>/message.module.o -- routinely over 260
+     * chars. MoveFileExA is an ANSI entry point and is capped at MAX_PATH
+     * regardless of the underlying filesystem's real limit, so this "second"
+     * move destination -- the one already inside that long tree -- failed
+     * with ERROR_PATH_NOT_FOUND (3), rendered four layers up as the opaque
+     * "AOT object publication failed". Prefer the wide, extended-length-
+     * prefixed call so both endpoints can exceed MAX_PATH; keep the ANSI
+     * call as the fallback for a path that cannot be widened. */
+    {
+        wchar_t wide_staged[32768], wide_dest[32768];
+        if (spl_secure_widen_long_path(staged, wide_staged) &&
+            spl_secure_widen_long_path(destination, wide_dest)) {
+            if (MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH)) return 1;
+            DWORD werror = GetLastError();
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;

@@ -1,4 +1,8 @@
 # `proton_session_plan_command_spec.spl`: `stderr == ""` fails because `bin/simple run` emits style-lint warnings to stderr
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `bin/simple run` diagnostic-warning output (style-lint
@@ -49,3 +53,4 @@ Spec left unmodified — the `stderr == ""` contract is a reasonable thing to
 want for a "clean" CLI plan-printing command; whether the fix is
 suppressing lint noise from `run` globally, or scoping it away from this
 app's dependency chain, needs product input.
+

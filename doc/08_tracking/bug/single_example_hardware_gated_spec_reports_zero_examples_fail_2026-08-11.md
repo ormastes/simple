@@ -1,4 +1,8 @@
 # A hardware-gated spec whose only example is `skip_if`-skipped reports file-level FAIL, not SKIP
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11
 **Found by:** two lanes writing forward-looking hardware-gated system specs, independently
@@ -67,3 +71,4 @@ as written (correct `it`-level skip behavior, correct reason text) since
 rewriting them to dodge this runner quirk (e.g. padding with a dummy always-run
 example) would obscure their actual purpose. The file-level FAIL is a known,
 accepted cosmetic issue until the runner is fixed.
+

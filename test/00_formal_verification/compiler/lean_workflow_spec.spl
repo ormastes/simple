@@ -31,7 +31,7 @@ string-aware scanner regressed; start at ProofChecker.check_file.
 # doc/05_design/simple_formal_verification_2_0.md
 
 use std.spipe.*
-use std.nogc_sync_mut.io.{file_exists, file_read_text}
+use std.nogc_sync_mut.io.{file_exists, file_read_text, dir_remove_all, dir_create_all}
 use verification.lean.runner.{LeanCheckResult, VerificationSummary}
 use verification.models.contracts.{FunctionContract, ContractClause, ContractExpr}
 use verification.proofs.obligations.{ProofObligation, ProofStatus, extract_from_contract}
@@ -175,7 +175,18 @@ describe "Lean Verification Workflow Core":
             val temp_root = "/tmp/simple-lean-workflow-unit"
             # Hermetic: the fixture content carries no generated-marker header, so a
             # leftover file from a previous run makes the writer refuse to overwrite.
+            # Both cleanups: shell rm covers the POSIX view; on a Windows host the
+            # file facade resolves the same path under the drive root, so the
+            # facade removal cleans that view too.
             shell("rm -rf {temp_root}")
+            dir_remove_all(temp_root)
+            # Pre-create the native-view directory: on a Windows host the file
+            # facade resolves /tmp under the drive root while a shell mkdir
+            # inside the writer lands in the Git userland tmp, so the writer's
+            # own directory creation and its file write can disagree about the
+            # directory that must exist. Creating it through the facade first
+            # keeps the write on a directory that exists in the facade's view.
+            dir_create_all(temp_root + "/src/verification/demo/src")
             val sample = {"src/verification/demo/src/Demo.lean": "theorem demo : True := by rfl"}
             val written = write_regenerated_files(sample, temp_root)
 
@@ -200,6 +211,9 @@ describe "Lean Verification Workflow Core":
             step("Run the strict checker over a sorry-bearing theorem file")
             val temp_root = "/tmp/simple-lean-workflow-strict"
             shell("rm -rf {temp_root}")
+            dir_remove_all(temp_root)
+            # Same native-view pre-creation as the writer scenario above.
+            dir_create_all(temp_root + "/src/verification/demo/src")
             val written = write_regenerated_files(
                 {"src/verification/demo/src/Demo.lean": "theorem demo : True := by sorry"},
                 temp_root

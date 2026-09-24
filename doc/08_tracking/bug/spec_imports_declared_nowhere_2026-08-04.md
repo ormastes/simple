@@ -1,4 +1,8 @@
 # Spec imports that resolve to no declaration anywhere in owned `src/`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ARCHITECTURAL/OUT-OF-SCOPE-OPEN (triaged 2026-08-10)  
 **Filed:** 2026-08-04  
@@ -734,4 +738,5 @@ python3 census2.py <path> out.json     # census (walk MUST follow symlinks)
 python3 validate.py <path> out.json val.json   # independent zero-occurrence confirmation
 python3 classify.py <path> out.json rows.json  # module-resolves / does-not-resolve split
 ```
+
 

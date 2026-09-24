@@ -1,4 +1,8 @@
 # native-build fails on hello world unless SIMPLE_BOOTSTRAP=1, and says nothing useful
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-03
 Host: Windows 11, MSVC ABI, `. scripts/setup/windows-msvc-bootstrap-env.shs` sourced.
@@ -70,3 +74,4 @@ path at all.
 `impl Box<T>`) SEGVs (rc=139) after monomorphize, even with the working
 invocation. See
 `hir_generic_type_param_unresolved_cross_module_2026-09-03.md` § Related.
+

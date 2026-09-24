@@ -1,4 +1,9 @@
 # ROOT CAUSE FOUND: `u8.to_i64()` mis-dispatches to `VfsFileSize.to_i64()` (method-name collision)
+## Closed 2026-09-16 — ...init.VfsFileSize`, so `.to_i64()` resolved to the primitive conversion. The full sshd/OS c
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Target:** `native-build --backend cranelift --target x86_64-unknown-none`
 (SimpleOS freestanding). **Status:** ROOT-CAUSED via asm dump. NOT a backend
@@ -98,3 +103,4 @@ representation in the cranelift lowering, so `rt_push_byte`-style helpers are
 safe again. The separately-retracted
 `x64_freestanding_chained_len_cast_miscompile.md` was a mis-attribution of THIS
 corruption to a chained cast.
+

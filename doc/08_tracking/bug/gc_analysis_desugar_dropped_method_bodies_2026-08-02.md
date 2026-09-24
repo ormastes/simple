@@ -1,4 +1,8 @@
 # gc_analysis: desugaring dropped method bodies, whole subsystem is non-executable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-02
 - Status: OPEN (P1)
@@ -366,3 +370,4 @@ unimplemented.
 - `doc/08_tracking/bug/vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02.md`
   — corpus census; `PASS_ONLY` is one of the two example classes safe to act on
   without re-review, and this is the highest-value instance of it.
+

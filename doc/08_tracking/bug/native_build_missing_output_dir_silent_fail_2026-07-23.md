@@ -1,4 +1,8 @@
 # native-build: missing --output directory → silent worker exit 1
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-23
 - **Severity:** minor (UX) — cost two full ~25-min rebuild cycles to diagnose
@@ -12,3 +16,4 @@
 - **Fix sketch:** in the native-build worker's final write step
   (`src/app/cli/native_build_worker.spl` output emission), create the parent dir
   or report the write failure with the path and OS error.
+

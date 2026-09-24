@@ -1,5 +1,16 @@
 # browser_renderer_spec — 22 residual failures (sequence-dependent + :has(> ) direct-child)
 
+## Not closed 2026-09-13 — still open; re-verification blocked on this host
+
+- **measured** `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
+  (Rust seed v1.0.0-rc.1, Windows) ends `reason=outer-bound-timeout budget_ms=930000`,
+  `executed=1 passed=0 failed=1 timeout=1` — the 98-test spec cannot complete here,
+  so the 76/22 split can neither be confirmed nor refuted.
+- **inferred** The `:has(> .badge)` cluster is a source-level defect in the renderer,
+  untouched by anything since; nothing in the tree indicates it was fixed.
+- Left OPEN: needs a Linux host where the spec finishes inside the runner budget.
+
+
 Date: 2026-06-11
 Status: open
 Owner: gui-render-watch lane (gpu-backend-dx-harden session)

@@ -1,0 +1,74 @@
+# RenderDoc web capture-lane receipt classification.
+#
+# This is the AUTHORITY for two rules the capture lane enforces; the shell twin
+# `scripts/check/check-renderdoc-web-capture-lane.shs` implements the same two
+# rules so a Linux runner needs no Simple binary to classify:
+#
+#   1. Chrome Vulkan backing is a PASS only when the Chrome log carries a
+#      POSITIVE line proving ANGLE actually initialised on Vulkan. Absence of
+#      proof is `vulkan-angle-unavailable` -- never a pass. Any known ANGLE
+#      failure marker is also `vulkan-angle-unavailable`, even if a positive
+#      line appears earlier in the same log.
+#   2. The lane verdict is PASS only when at least one page was captured on
+#      BOTH sides and no page failed; zero pages examined is ERROR, never PASS.
+
+# Known ANGLE/GPU-process failure markers (same strings the existing
+# gui-web-2d vulkan env + electron gate scripts grep for).
+fn _angle_failure_markers() -> [text]:
+    ["Exiting GPU process due to errors during initialization",
+     "ANGLE Display::initialize error",
+     "GLDisplayEGL::Initialize failed",
+     "eglInitialize failed", "Internal Vulkan error"]
+
+fn _has_angle_failure(log: text) -> bool:
+    # "Requested GL implementation (gl=none,angle=vulkan) not found" -- the
+    # marker only counts when both halves are present.
+    if log.contains("angle=vulkan") and log.contains("not found"):
+        return true
+    val markers = _angle_failure_markers()
+    var i = 0
+    while i < markers.len():
+        if log.contains(markers[i]):
+            return true
+        i = i + 1
+    false
+
+# Positive proof that ANGLE is running on Vulkan. Chrome prints the resolved
+# renderer as e.g. `GL_RENDERER: ANGLE (Mesa, llvmpipe (LLVM 15), Vulkan 1.3)`.
+fn _has_angle_vulkan_proof(log: text) -> bool:
+    if log.contains("ANGLE (") and log.contains("Vulkan"):
+        return true
+    if log.contains("GL_RENDERER") and log.contains("Vulkan"):
+        return true
+    log.contains("ANGLE Vulkan")
+
+# -> "pass" | "vulkan-angle-unavailable"
+fn classify_chrome_vulkan_log(log: text) -> text:
+    if log == "":
+        return "vulkan-angle-unavailable"
+    if _has_angle_failure(log):
+        return "vulkan-angle-unavailable"
+    if _has_angle_vulkan_proof(log):
+        return "pass"
+    "vulkan-angle-unavailable"
+
+# `RDOC` is the RenderDoc capture magic; the first four bytes of any .rdc.
+fn classify_rdc_magic(magic: text) -> text:
+    if magic == "RDOC": "pass" else: "fail"
+
+# Lane verdict from per-page counters. Returns the full verdict line.
+fn receipt_verdict(pages_checked: i64, pages_both: i64, pages_failed: i64) -> text:
+    if pages_checked <= 0:
+        return "ERROR — nothing was checked"
+    if pages_failed > 0 or pages_both <= 0:
+        return "FAIL — {pages_checked} page(s) checked, {pages_failed} failed, {pages_both} captured on both sides"
+    "PASS — {pages_both} page(s) captured on both sides"
+
+fn receipt_exit_code(verdict: text) -> i64:
+    if verdict.starts_with("PASS"):
+        return 0
+    if verdict.starts_with("FAIL"):
+        return 1
+    2
+
+export classify_chrome_vulkan_log, classify_rdc_magic, receipt_verdict, receipt_exit_code

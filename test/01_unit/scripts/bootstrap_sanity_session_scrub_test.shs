@@ -1,0 +1,49 @@
+#!/bin/sh
+# Actual fresh/resume sanity scrub followed by the real bounded-log collector.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=${SANITY_SESSION_TEST_OUTPUT:-$(mktemp -d)}
+mkdir -p "$work"
+work=$(CDPATH= cd -- "$work" && pwd -P)
+export TMPDIR="$work"
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+for lane in bootstrap-from-scratch.sh resume-stage3-from-admitted.sh; do
+    dir=$work/$lane
+    mkdir -p "$dir/home" "$dir/tmp"
+    # Keep the production function prefix through the environment scrub. The
+    # remaining compiler checks are replaced with a real collector SID probe.
+    awk '/^bootstrap_stage_sanity\(\) \(/{f=1} f{print} f&&/^  export HOME TMPDIR PATH LC_ALL LANG$/{exit}' \
+        "$root/scripts/bootstrap/$lane" >"$dir/probe.sh"
+    cat >>"$dir/probe.sh" <<'INNER'
+  CANDIDATE_FRONTEND_ROOT=$sanity_repo_root
+  . "$sanity_repo_root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+  candidate_frontend_capture_setup "$HOME" || exit 126
+  candidate_frontend_collect --output-parent="$CANDIDATE_FRONTEND_CAPTURE_PARENT" \
+    --log-leaf=probe.log --receipt-leaf=probe.env --max-bytes=4096 --timeout-seconds=3 --term-grace-seconds=0 -- \
+    /bin/sh -eu -c 'sleep 0.3; test -z "${SANITY_UNPLANNED+x}"; test "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" = monitor; "$SIMPLE_BOOTSTRAP_SESSION_EXEC" --check; printf "%s\n" "$SIMPLE_BOOTSTRAP_SESSION_ID"'
+)
+set -eu
+root=$1 repo_root=$1
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+bootstrap_stage_sanity unused "$2/evidence" "$2/home" "$2/tmp" /usr/bin:/bin
+INNER
+    SANITY_UNPLANNED=reject SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor \
+        perl "$guard" --receipt="$dir/outer.env" -- sh "$dir/probe.sh" "$root" "$dir"
+    grep -Fxq status=complete "$dir/outer.env"
+    grep -Fxq quiescent=1 "$dir/outer.env"
+    grep -Fxq process_group=setpgid "$dir/home/probe.env"
+    grep -Fxq raw_status=0 "$dir/home/probe.env"
+    sid=$(sed -n 's/^session_id=//p' "$dir/outer.env")
+    grep -Fxq "$sid" "$dir/home/probe.log"
+    for attack in partial empty; do
+        code=0
+        if [ "$attack" = partial ]; then
+            SIMPLE_BOOTSTRAP_SESSION_ID=1 sh "$dir/probe.sh" "$root" "$dir" >"$dir/$attack.log" 2>&1 || code=$?
+        else
+            SIMPLE_BOOTSTRAP_SESSION_ID= SIMPLE_BOOTSTRAP_SESSION_EXEC= sh "$dir/probe.sh" "$root" "$dir" >"$dir/$attack.log" 2>&1 || code=$?
+        fi
+        [ "$code" -eq 125 ] || { echo "FAIL $lane $attack: $code"; exit 1; }
+    done
+done
+echo 'PASS: fresh/resume scrub preserves same SID and monitor mode; partial/empty fail closed'

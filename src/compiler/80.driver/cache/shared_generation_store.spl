@@ -1,0 +1,502 @@
+use std.common.crypto.sha256.{sha256_text}
+use std.io.{file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+extern fn rt_file_write(path: text, content: text) -> bool
+extern fn rt_file_rename(from_path: text, to_path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_fsync(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_monotonic_ns() -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_start_identity(pid: i64) -> i64
+
+val SHARED_GENERATION_SCHEMA_V1: text = "simple-shared-generation-v1"
+val SHARED_GENERATION_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
+val SHARED_GENERATION_MAX_ENTRIES_V1: i64 = 4096
+
+struct SharedGenerationReadV1:
+    valid: bool
+    reason: text
+    generation: text
+    payload: text
+    lease_id: text
+
+struct SharedGenerationGcV1:
+    valid: bool
+    reason: text
+    retained: [text]
+    removed: [text]
+    retained_bytes: i64
+
+struct SharedGenerationLeaseV1:
+    generation: text
+    owner_identity: text
+    expires_ns: i64
+
+fn shared_generation_name_valid_v1(value: text) -> bool:
+    value.len() == 64 and not value.contains("/") and
+        not value.contains("\n") and not value.contains("\r")
+
+fn shared_generation_lease_count_admitted_v1(count: i64) -> bool:
+    count <= SHARED_GENERATION_MAX_ENTRIES_V1
+
+fn shared_generation_is_current_v1(candidate: text, current: text) -> bool:
+    candidate == current
+
+fn shared_generation_is_pinned_v1(candidate: text, pins: [text]) -> bool:
+    pins.contains(candidate)
+
+fn shared_generation_gc_protected_v1(
+    candidate: text, current: text, pins: [text], newest: i64,
+    retain_generations: i64
+) -> bool:
+    shared_generation_is_current_v1(candidate, current) or
+        shared_generation_is_pinned_v1(candidate, pins) or
+        newest < retain_generations
+
+fn shared_generation_encode_v1(
+    parent: text, ordinal: i64, payload: text
+) -> (text, text):
+    if ordinal < 0 or payload.len() <= 0 or payload.len() > SHARED_GENERATION_MAX_BYTES_V1:
+        return ("", "")
+    val body = [
+        SHARED_GENERATION_SCHEMA_V1, "parent={parent}",
+        "ordinal={ordinal}", "payload-bytes={payload.len()}", payload,
+    ].join("\n")
+    (sha256_text(body), body)
+
+fn shared_generation_decode_v1(content: text, expected: text) -> (i64, text)? :
+    if content.len() <= 0 or content.len() > SHARED_GENERATION_MAX_BYTES_V1 or
+            sha256_text(content) != expected:
+        return nil
+    val lines = content.split("\n")
+    if lines.len() < 5 or lines[0] != SHARED_GENERATION_SCHEMA_V1 or
+            not lines[2].starts_with("ordinal=") or
+            not lines[3].starts_with("payload-bytes="):
+        return nil
+    val ordinal = lines[2].substring(8).to_i64()
+    val payload_bytes = lines[3].substring(14).to_i64()
+    val payload = lines.slice(4).join("\n")
+    if ordinal == nil or ordinal! < 0 or payload_bytes == nil or
+            payload_bytes! != payload.len():
+        return nil
+    Some((ordinal!, payload))
+
+fn shared_generation_read_name_v1(root: text) -> text:
+    val current = rt_file_read_regular_no_follow_bounded("{root}/CURRENT", 128)
+    if current == nil or not shared_generation_name_valid_v1(current!):
+        return ""
+    current!
+
+fn shared_generation_matches_encoded_v1(
+    root: text, generation: text, encoded: text
+) -> bool:
+    val existing = rt_file_read_regular_no_follow_bounded(
+        "{root}/generations/{generation}.generation",
+        SHARED_GENERATION_MAX_BYTES_V1)
+    existing != nil and existing! == encoded
+
+fn shared_generation_publish_v1(
+    root: text, expected_parent: text, ordinal: i64, payload: text
+) -> text:
+    shared_generation_publish_bounded_v1(
+        root, expected_parent, ordinal, payload, SHARED_GENERATION_MAX_BYTES_V1)
+
+fn shared_generation_exclusive_stage_v1(
+    base: text, content: text, seed: text
+) -> text:
+    var attempt: i64 = 0
+    while attempt < 8:
+        val nonce = sha256_text(
+            "{rt_getpid()}|{rt_time_monotonic_ns()}|{seed}|{attempt}")
+        val path = "{base}.tmp.{nonce}"
+        if file_create_excl(path, content):
+            return path
+        attempt = attempt + 1
+    ""
+
+fn shared_generation_publish_bounded_v1(
+    root: text, expected_parent: text, ordinal: i64, payload: text,
+    max_bytes: i64
+) -> text:
+    if max_bytes <= 0:
+        return "publication-bound-invalid"
+    shared_generation_publish_fault_v1(
+        root, expected_parent, ordinal, payload, "", max_bytes)
+
+fn shared_generation_reclaim_orphan_stages_v1(root: text) -> bool:
+    var changed = false
+    for name in dir_list(root) ?? []:
+        if name.starts_with("CURRENT.tmp."):
+            if not rt_file_delete("{root}/{name}"):
+                return false
+            changed = true
+    for name in dir_list("{root}/generations") ?? []:
+        if name.contains(".generation.tmp."):
+            if not rt_file_delete("{root}/generations/{name}"):
+                return false
+            changed = true
+    if changed:
+        return rt_file_fsync(root) and rt_file_fsync("{root}/generations")
+    true
+
+fn shared_generation_store_bytes_v1(root: text) -> i64:
+    var total: i64 = 0
+    for name in dir_list(root) ?? []:
+        val path = "{root}/{name}"
+        if rt_file_is_regular_no_follow(path):
+            val size = rt_file_size(path)
+            if size < 0:
+                return -1
+            total = total + size
+    for directory in ["generations", "leases"]:
+        val names = dir_list("{root}/{directory}") ?? []
+        if names.len() > SHARED_GENERATION_MAX_ENTRIES_V1:
+            return -1
+        for name in names:
+            val path = "{root}/{directory}/{name}"
+            if rt_file_is_regular_no_follow(path):
+                val size = rt_file_size(path)
+                if size < 0:
+                    return -1
+                total = total + size
+    total
+
+fn shared_generation_publish_fault_v1(
+    root: text, expected_parent: text, ordinal: i64, payload: text,
+    fault: text, max_bytes: i64 = SHARED_GENERATION_MAX_BYTES_V1
+) -> text:
+    val (generation, encoded) = shared_generation_encode_v1(
+        expected_parent, ordinal, payload)
+    if root == "" or generation == "":
+        return "generation-invalid"
+    if not rt_dir_create_all("{root}/generations") or
+            not rt_dir_create_all("{root}/leases"):
+        return "storage-unavailable"
+    val lock = file_lock("{root}/authority.lock", 10)
+    if lock < 0:
+        return "authority-lock-unavailable"
+    val current = shared_generation_read_name_v1(root)
+    if current != expected_parent:
+        if current == generation and
+                shared_generation_matches_encoded_v1(root, generation, encoded):
+            val _ = file_unlock(lock)
+            return generation
+        val _ = file_unlock(lock)
+        return "parent-generation-changed"
+    if not shared_generation_reclaim_orphan_stages_v1(root):
+        val _ = file_unlock(lock)
+        return "orphan-stage-reclaim-failed"
+    val resident_bytes = shared_generation_store_bytes_v1(root)
+    if resident_bytes < 0:
+        val _ = file_unlock(lock)
+        return "store-accounting-failed"
+    val generation_path = "{root}/generations/{generation}.generation"
+    val generation_growth = if rt_file_exists(generation_path): 0 else: encoded.len()
+    if resident_bytes > max_bytes or generation_growth > max_bytes - resident_bytes or
+            generation.len() > max_bytes - resident_bytes - generation_growth:
+        val _ = file_unlock(lock)
+        return "publication-exceeds-bound"
+    if rt_file_exists(generation_path):
+        val existing = rt_file_read_regular_no_follow_bounded(
+            generation_path, SHARED_GENERATION_MAX_BYTES_V1)
+        if existing == nil or existing! != encoded:
+            val _ = file_unlock(lock)
+            return "immutable-generation-conflict"
+    else:
+        val staged = shared_generation_exclusive_stage_v1(
+            generation_path, encoded, generation)
+        if staged == "" or fault == "generation-fsync" or
+                not rt_file_fsync(staged) or fault == "generation-rename" or
+                not rt_file_rename(staged, generation_path) or
+                not rt_file_fsync("{root}/generations"):
+            rt_file_delete(staged)
+            val _ = file_unlock(lock)
+            return "generation-publication-failed"
+    if fault == "before-pointer":
+        val _ = file_unlock(lock)
+        return "injected-crash-before-pointer"
+    val pointer_stage = shared_generation_exclusive_stage_v1(
+        "{root}/CURRENT", generation, "pointer|{generation}")
+    if pointer_stage == "" or fault == "pointer-fsync" or
+            not rt_file_fsync(pointer_stage) or fault == "pointer-rename" or
+            not rt_file_rename(pointer_stage, "{root}/CURRENT") or
+            fault == "directory-fsync" or not rt_file_fsync(root):
+        rt_file_delete(pointer_stage)
+        val _ = file_unlock(lock)
+        return "pointer-publication-failed"
+    val _ = file_unlock(lock)
+    generation
+
+fn shared_generation_pin_current_v1(
+    root: text, lease_id: text
+) -> SharedGenerationReadV1:
+    shared_generation_pin_current_owned_v1(
+        root, lease_id, "pid:{rt_getpid()}:legacy", 9223372036854775807)
+
+fn shared_generation_pin_current_owned_v1(
+    root: text, lease_id: text, owner_identity: text, expires_ns: i64
+) -> SharedGenerationReadV1:
+    if root == "" or lease_id == "" or lease_id.contains("/") or
+            lease_id.contains("\n") or owner_identity == "" or
+            owner_identity.contains("\n") or expires_ns <= 0:
+        return SharedGenerationReadV1(false, "lease-invalid", "", "", "")
+    val lock = file_lock("{root}/authority.lock", 10)
+    if lock < 0:
+        return SharedGenerationReadV1(false, "authority-lock-unavailable", "", "", "")
+    val generation = shared_generation_read_name_v1(root)
+    if generation == "":
+        val _ = file_unlock(lock)
+        return SharedGenerationReadV1(false, "current-invalid", "", "", "")
+    val lease_path = "{root}/leases/{lease_id}.lease"
+    val lease_content = ["simple-shared-generation-lease-v1",
+        "generation={generation}", "owner={owner_identity}",
+        "expires-ns={expires_ns}"].join("\n")
+    if not file_create_excl(lease_path, lease_content) or not rt_file_fsync(lease_path) or
+            not rt_file_fsync("{root}/leases"):
+        rt_file_delete(lease_path)
+        val _ = file_unlock(lock)
+        return SharedGenerationReadV1(false, "lease-publication-failed", "", "", "")
+    val _ = file_unlock(lock)
+    val content = rt_file_read_regular_no_follow_bounded(
+        "{root}/generations/{generation}.generation",
+        SHARED_GENERATION_MAX_BYTES_V1)
+    if content == nil:
+        rt_file_delete(lease_path)
+        return SharedGenerationReadV1(false, "pinned-generation-missing", generation, "", lease_id)
+    val decoded = shared_generation_decode_v1(content!, generation)
+    if decoded == nil:
+        rt_file_delete(lease_path)
+        return SharedGenerationReadV1(false, "pinned-generation-invalid", generation, "", lease_id)
+    SharedGenerationReadV1(true, "ok", generation, decoded!.1, lease_id)
+
+fn shared_generation_release_v1(root: text, lease_id: text) -> bool:
+    if lease_id == "" or lease_id.contains("/"):
+        return false
+    val lock = file_lock("{root}/authority.lock", 10)
+    if lock < 0:
+        return false
+    val removed = rt_file_delete("{root}/leases/{lease_id}.lease")
+    val synced = rt_file_fsync("{root}/leases")
+    val _ = file_unlock(lock)
+    removed and synced
+
+fn shared_generation_lease_decode_v1(content: text) -> SharedGenerationLeaseV1?:
+    val lines = content.split("\n")
+    if lines.len() != 4 or lines[0] != "simple-shared-generation-lease-v1" or
+            not lines[1].starts_with("generation=") or
+            not lines[2].starts_with("owner=") or
+            not lines[3].starts_with("expires-ns="):
+        return nil
+    val expires = lines[3].substring(11).to_i64()
+    val generation = lines[1].substring(11)
+    val owner = lines[2].substring(6)
+    if expires == nil or expires! <= 0 or
+            not shared_generation_name_valid_v1(generation) or owner == "":
+        return nil
+    Some(SharedGenerationLeaseV1(generation, owner, expires!))
+
+fn shared_generation_active_pins_v1(root: text) -> Result<[text], text>:
+    var pins: [text] = []
+    val names = dir_list("{root}/leases") ?? []
+    if not shared_generation_lease_count_admitted_v1(names.len()):
+        return Err("lease-count-unbounded")
+    for name in names.sorted():
+        if not name.ends_with(".lease"):
+            continue
+        val value = rt_file_read_regular_no_follow_bounded(
+            "{root}/leases/{name}", 128)
+        if value == nil:
+            return Err("lease-unreadable")
+        val lease = shared_generation_lease_decode_v1(value!)
+        if lease == nil:
+            return Err("lease-invalid")
+        if not pins.contains(lease!.generation):
+            pins.push(lease!.generation)
+    Ok(pins)
+
+fn shared_generation_reclaim_dead_leases_v1(
+    root: text, now_ns: i64, live_owner_identities: [text]
+) -> Result<i64, text>:
+    val lock = file_lock("{root}/authority.lock", 10)
+    if lock < 0:
+        return Err("authority-lock-unavailable")
+    val names = dir_list("{root}/leases") ?? []
+    if not shared_generation_lease_count_admitted_v1(names.len()):
+        val _ = file_unlock(lock)
+        return Err("lease-count-unbounded")
+    var reclaimed: i64 = 0
+    for name in names.sorted():
+        if not name.ends_with(".lease"):
+            continue
+        val path = "{root}/leases/{name}"
+        val content = rt_file_read_regular_no_follow_bounded(path, 1024)
+        if content == nil:
+            val _ = file_unlock(lock)
+            return Err("lease-unreadable")
+        val lease = shared_generation_lease_decode_v1(content!)
+        if lease == nil:
+            val _ = file_unlock(lock)
+            return Err("lease-invalid")
+        val owner_fields = lease!.owner_identity.split(":")
+        if owner_fields.len() < 3 or owner_fields[0] != "pid":
+            val _ = file_unlock(lock)
+            return Err("lease-owner-identity-invalid")
+        val owner_pid = owner_fields[1].to_i64()
+        if owner_pid == nil or owner_pid! <= 0:
+            val _ = file_unlock(lock)
+            return Err("lease-owner-identity-invalid")
+        val owner_start = owner_fields[2].to_i64()
+        if owner_start == nil or owner_start! <= 0:
+            val _ = file_unlock(lock)
+            return Err("lease-owner-identity-invalid")
+        val observed_start = rt_process_start_identity(owner_pid!)
+        val owner_alive = rt_process_is_running(owner_pid!) and
+            observed_start > 0 and observed_start == owner_start!
+        if lease!.expires_ns <= now_ns and not owner_alive and
+                not live_owner_identities.contains(lease!.owner_identity):
+            if not rt_file_delete(path):
+                val _ = file_unlock(lock)
+                return Err("lease-reclaim-failed")
+            reclaimed = reclaimed + 1
+    if reclaimed > 0 and not rt_file_fsync("{root}/leases"):
+        val _ = file_unlock(lock)
+        return Err("lease-reclaim-fsync-failed")
+    val _ = file_unlock(lock)
+    Ok(reclaimed)
+
+fn shared_generation_delete_v1(root: text, generation: text) -> text:
+    if not shared_generation_name_valid_v1(generation):
+        return "generation-invalid"
+    val lock = file_lock("{root}/authority.lock", 10)
+    if lock < 0:
+        return "authority-lock-unavailable"
+    if shared_generation_is_current_v1(
+            generation, shared_generation_read_name_v1(root)):
+        val _ = file_unlock(lock)
+        return "current-generation-protected"
+    val pins_result = shared_generation_active_pins_v1(root)
+    if pins_result.is_err():
+        val _ = file_unlock(lock)
+        return pins_result.unwrap_err()
+    if shared_generation_is_pinned_v1(generation, pins_result.unwrap()):
+        val _ = file_unlock(lock)
+        return "pinned-generation-protected"
+    if not rt_file_delete("{root}/generations/{generation}.generation"):
+        val _ = file_unlock(lock)
+        return "generation-delete-failed"
+    val synced = rt_file_fsync("{root}/generations")
+    val _ = file_unlock(lock)
+    if not synced: return "generation-delete-fsync-failed"
+    "ok"
+
+fn shared_generation_gc_v1(
+    root: text, max_bytes: i64, retain_generations: i64
+) -> SharedGenerationGcV1:
+    if max_bytes <= 0 or retain_generations < 1:
+        return SharedGenerationGcV1(false, "bounds-invalid", [], [], 0)
+    val lock = file_lock("{root}/authority.lock", 10)
+    if lock < 0:
+        return SharedGenerationGcV1(false, "authority-lock-unavailable", [], [], 0)
+    val current = shared_generation_read_name_v1(root)
+    if current == "":
+        val _ = file_unlock(lock)
+        return SharedGenerationGcV1(false, "current-invalid", [], [], 0)
+    val pins_result = shared_generation_active_pins_v1(root)
+    if pins_result.is_err():
+        val _ = file_unlock(lock)
+        return SharedGenerationGcV1(
+            false, pins_result.unwrap_err(), [], [], 0)
+    val pins = pins_result.unwrap()
+    val names = dir_list("{root}/generations") ?? []
+    if names.len() > SHARED_GENERATION_MAX_ENTRIES_V1:
+        val _ = file_unlock(lock)
+        return SharedGenerationGcV1(false, "generation-count-unbounded", [], [], 0)
+    var rows: [(i64, text, i64)] = []
+    for name in names:
+        if not name.ends_with(".generation"):
+            continue
+        val generation = name.substring(0, name.len() - 11)
+        if not shared_generation_name_valid_v1(generation):
+            continue
+        val path = "{root}/generations/{name}"
+        val content = rt_file_read_regular_no_follow_bounded(
+            path, SHARED_GENERATION_MAX_BYTES_V1)
+        if content == nil:
+            continue
+        val decoded = shared_generation_decode_v1(content!, generation)
+        if decoded != nil:
+            rows.push((decoded!.0, generation, rt_file_size(path)))
+    rows = rows.sorted()
+    var protected_bytes: i64 = 0
+    var protected_newest: i64 = 0
+    var protected_index = rows.len() - 1
+    while protected_index >= 0:
+        val protected_row = rows[protected_index]
+        if shared_generation_gc_protected_v1(
+                protected_row.1, current, pins, protected_newest,
+                retain_generations):
+            protected_bytes = protected_bytes + protected_row.2
+            protected_newest = protected_newest + 1
+        protected_index = protected_index - 1
+    if protected_bytes > max_bytes:
+        val _ = file_unlock(lock)
+        return SharedGenerationGcV1(
+            false, "protected-generations-exceed-bound", [], [], protected_bytes)
+    var retained: [text] = []
+    var removed: [text] = []
+    var retained_bytes: i64 = 0
+    var index = rows.len() - 1
+    var newest_kept: i64 = 0
+    while index >= 0:
+        val row = rows[index]
+        val protected = shared_generation_gc_protected_v1(
+            row.1, current, pins, newest_kept, retain_generations)
+        if protected:
+            retained.push(row.1)
+            retained_bytes = retained_bytes + row.2
+            newest_kept = newest_kept + 1
+        elif retained_bytes + row.2 <= max_bytes:
+            retained.push(row.1)
+            retained_bytes = retained_bytes + row.2
+        else:
+            if not rt_file_delete("{root}/generations/{row.1}.generation"):
+                val _ = file_unlock(lock)
+                return SharedGenerationGcV1(false, "generation-delete-failed", retained, removed, retained_bytes)
+            removed.push(row.1)
+        index = index - 1
+    val synced = rt_file_fsync("{root}/generations")
+    val _ = file_unlock(lock)
+    if not synced:
+        return SharedGenerationGcV1(false, "gc-fsync-failed", retained, removed, retained_bytes)
+    SharedGenerationGcV1(true, "ok", retained.sorted(), removed.sorted(), retained_bytes)
+
+fn shared_generation_read_valid_v1(read: SharedGenerationReadV1) -> bool:
+    read.valid
+
+fn shared_generation_read_generation_v1(read: SharedGenerationReadV1) -> text:
+    read.generation
+
+fn shared_generation_read_payload_v1(read: SharedGenerationReadV1) -> text:
+    read.payload
+
+fn shared_generation_gc_valid_v1(gc: SharedGenerationGcV1) -> bool:
+    gc.valid
+
+export SharedGenerationReadV1, SharedGenerationGcV1
+export shared_generation_publish_v1, shared_generation_publish_fault_v1
+export shared_generation_publish_bounded_v1
+export shared_generation_pin_current_v1, shared_generation_pin_current_owned_v1
+export shared_generation_release_v1, shared_generation_gc_v1
+export shared_generation_reclaim_dead_leases_v1
+export shared_generation_delete_v1
+export shared_generation_read_valid_v1, shared_generation_read_generation_v1
+export shared_generation_read_payload_v1
+export shared_generation_gc_valid_v1

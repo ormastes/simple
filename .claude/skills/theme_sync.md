@@ -8,7 +8,7 @@ Full background and architecture decisions are in the approved plan: `/Users/orm
 
 | Artifact | Check | If Missing |
 |----------|-------|------------|
-| Stitch MCP | `.mcp.json` has `stitch` entry | Configure streamable-http transport |
+| Stitch MCP | `stitch` in user MCP config (removed from project `.mcp.json` 2026-09-24) | Add `stitch` to your user-level MCP config manually |
 | Stitch API key | `STITCH_API_KEY` env var | Get from stitch.withgoogle.com Settings |
 | Glass tokens | `src/lib/common/ui/glass_tokens.spl` | Already exists — Phase 1 of plan extends it |
 | Stitch snapshots | `doc/05_design/ui/stitch_snapshots/` | Run Phase 1 (Pull) below |

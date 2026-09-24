@@ -21,6 +21,7 @@ use std.spec.step
 use std.spec.*
 use std.database.pure_sql.{PureDatabase}
 use nogc_sync_mut.database.sql.types.{DbValue}
+use std.io_runtime.{file_delete, file_read, file_write}
 
 fn fresh() -> PureDatabase:
     val db = PureDatabase.memory().unwrap()
@@ -62,6 +63,79 @@ fn main() -> ():
             db.set_auto_checkpoint(true)
             expect(count(db, sql)).to_equal(1)
             expect(count_bound(db, "SELECT value FROM mm WHERE id = ?", DbValue.Text(value: "schema_version"))).to_equal(1)
+        )
+
+        it("reopens a checkpointed NOT NULL schema", fn() -> ():
+            val path = "/tmp/pure_sql_select_cache_not_null_reopen.db"
+            file_delete(path)
+            val first = PureDatabase.open_deferred(path).unwrap()
+            expect(first.exec_sql("CREATE TABLE mm (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok()).to_equal(true)
+            expect(first.exec_sql("INSERT INTO mm (id,value) VALUES ('schema_version','1')").is_ok()).to_equal(true)
+            expect(first.checkpoint().is_ok()).to_equal(true)
+            val reopened = PureDatabase.open_deferred(path).unwrap()
+            expect(reopened.exec_sql("CREATE TABLE IF NOT EXISTS mm (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok()).to_equal(true)
+            expect(reopened.exec_sql("INSERT INTO mm (id,value) VALUES ('schema_version_2','2')").is_ok()).to_equal(true)
+            expect(reopened.checkpoint().is_ok()).to_equal(true)
+            val reopened_again = PureDatabase.open_deferred(path).unwrap()
+            expect(count(reopened_again, "SELECT value FROM mm")).to_equal(2)
+            file_delete(path)
+        )
+
+        it("round-trips disk-v3 delimiter and control text and rejects truncation", fn() -> ():
+            val path = "/tmp/pure_sql_select_cache_framed_text.db"
+            val truncated_path = "/tmp/pure_sql_select_cache_framed_text_truncated.db"
+            file_delete(path)
+            file_delete(truncated_path)
+            val exact = "left|right\tline1\r\nline2%tail"
+            val first = PureDatabase.open_deferred(path).unwrap()
+            expect(first.exec_sql("CREATE TABLE framed (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok()).to_equal(true)
+            expect(first.exec("INSERT INTO framed (id,value) VALUES (?, ?)", [
+                DbValue.Text(value: "key"), DbValue.Text(value: exact)
+            ]).is_ok()).to_equal(true)
+            expect(first.checkpoint().is_ok()).to_equal(true)
+            val reopened = PureDatabase.open_deferred(path).unwrap()
+            val value = reopened.query_value("SELECT value FROM framed WHERE id = ?", [DbValue.Text(value: "key")]).unwrap().unwrap()
+            match value:
+                case Text(actual): expect(actual).to_equal(exact)
+                case _: assert_true(false)
+
+            val durable = file_read(path)
+            expect(durable.starts_with("simple-pure-db-v3\n")).to_equal(true)
+            expect(file_write(truncated_path, durable.slice(0, durable.len() - 1))).to_equal(true)
+            expect(PureDatabase.open_deferred(truncated_path).is_err()).to_equal(true)
+            file_delete(path)
+            file_delete(truncated_path)
+        )
+
+        it("reads an unambiguous v1 image and migrates it only on publication", fn() -> ():
+            val path = "/tmp/pure_sql_select_cache_v1_compat.db"
+            val ambiguous_path = "/tmp/pure_sql_select_cache_v1_ambiguous.db"
+            file_delete(path)
+            file_delete(ambiguous_path)
+            expect(file_write(ambiguous_path,
+                "simple-pure-db-v1\ntable|legacy|id,value\nrow|legacy|T:key\tT:left|right"
+            )).to_equal(true)
+            expect(PureDatabase.open_deferred(ambiguous_path).is_err()).to_equal(true)
+            expect(file_write(path,
+                "simple-pure-db-v1\ntable|legacy|id,value\nrow|legacy|T:key\tT:old"
+            )).to_equal(true)
+            val legacy = PureDatabase.open_deferred(path).unwrap()
+            val before = legacy.query_value("SELECT value FROM legacy WHERE id = ?", [
+                DbValue.Text(value: "key")
+            ]).unwrap().unwrap()
+            match before:
+                case Text(actual): expect(actual).to_equal("old")
+                case _: assert_true(false)
+            expect(file_read(path).starts_with("simple-pure-db-v1\n")).to_equal(true)
+            expect(legacy.exec("INSERT INTO legacy (id,value) VALUES (?, ?)", [
+                DbValue.Text(value: "key2"), DbValue.Text(value: "new|value\twith\nlines")
+            ]).is_ok()).to_equal(true)
+            expect(legacy.checkpoint().is_ok()).to_equal(true)
+            expect(file_read(path).starts_with("simple-pure-db-v3\n")).to_equal(true)
+            val migrated = PureDatabase.open_deferred(path).unwrap()
+            expect(migrated.query("SELECT value FROM legacy", []).unwrap().len()).to_equal(2)
+            file_delete(path)
+            file_delete(ambiguous_path)
         )
 
         it("single-quoted literal with spaces", fn() -> ():

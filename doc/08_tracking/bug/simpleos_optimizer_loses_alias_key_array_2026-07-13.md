@@ -1,4 +1,8 @@
 # SimpleOS optimizer passes tagged nil as `local_ids`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — source fixed; SimpleOS target verification pending.
 
@@ -42,6 +46,44 @@ that target proof. The historical serial fault remains the red evidence. Keep
 this issue open until an admitted SimpleOS target runs the original path without
 the `local_count_index` nil-receiver fault.
 
+## 2026-09-22 independent reproduction audit
+
+The scale regression was restored after a tournament merge had removed it. It
+now drives the production analyzer with 256 distinct MIR locals, a `Copy` alias
+for every local, and a second definition for every source local. It checks the
+exact count, safety decision, and ordered JIT facts.
+
+This is a behavioral scale guard, not red-before evidence for the SimpleOS
+fault. The identical test also passed at `5d614ae9904^` (21/21), so hosted
+execution cannot attribute the target-only tagged-nil receiver. The candidate
+run passed 21/21 in 2.25 s with 350,760 KiB host max RSS; the historical parent
+run passed 21/21 in 6.48 s with 302,960 KiB host max RSS. These single samples
+used the same executable digest but different source closures, so they are
+diagnostic only: no speed or memory claim is admitted. Both produced the same
+analysis facts and test outcome.
+
+The live target command remains blocked before QEMU launch:
+
+`sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=x86_64`
+
+It reports `x86_64-compiler-filesystem-guest-workflow-not-wired` because the
+production guest caller is still disabled. Fake-runner contract evidence is not
+accepted as target proof. Closure still requires immutable parent/candidate
+guest images running the original filesystem `compile --emit-llvm /HELLO.SPL`
+path; the parent must reproduce the fault, while the candidate must complete
+without `local_count_index`/`CR2=0x8`. If the parent does not reproduce under
+the same image, toolchain, vCPU, and memory envelope, record `NO-REPRO` rather
+than closing this issue.
+
 SOSIX compatibility: the change is internal to the MIR optimizer. The exported
 `analyze_var_reassign_blocks` signature and the JIT specialization-provider
 call path are unchanged; the focused test exercises that provider path.
+
+## Deferred environment verification TODO
+
+- [ ] When an admitted Phase 2 compiler and the production SimpleOS filesystem
+  guest workflow are available, run immutable parent/candidate QEMU images for
+  `compile --emit-llvm /HELLO.SPL`; retain digests and serial output, require
+  the parent fault (or record `NO-REPRO`), and require the candidate to finish
+  without `local_count_index` or `CR2=0x8`. This commit claims only test/audit
+  coverage, not a target fix.

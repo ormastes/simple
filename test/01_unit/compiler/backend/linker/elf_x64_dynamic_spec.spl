@@ -1,0 +1,193 @@
+# Internal ELF linker: x86_64 dynamic linking — lane B2 (A7 hardening)
+#
+# x86_64 lazy PLT (ld.lld encoding: PLT0 `pushq GOTPLT+8(%rip); jmpq
+# *GOTPLT+16(%rip); nopl`, PLTn `jmpq *slot(%rip); pushq $n; jmp PLT0`),
+# .got.plt ([0] = _DYNAMIC, slots start at PLTn+6), R_X86_64_JUMP_SLOT per
+# PLT entry, R_X86_64_GLOB_DAT for GOT-referenced imports and PT_INTERP
+# /lib64/ld-linux-x86-64.so.2. The build host has no x86_64 glibc/ld.so, so
+# these outputs are validated STRUCTURALLY only (readelf -l -S -d -r and PLT
+# disassembly vs ld.lld on the same inputs, evidence in the lane report).
+# Until an execution proof exists the default elf_link keeps x86_64 dynamic
+# behind a named UnsupportedFeature; elf_link_structural opts in.
+#
+# Inputs: test/fixtures/linker/elf/pic_start_x64.o (REX_GOTPCRELX msg at
+# _start+4, PLT32 add_val at _start+0x1f) against libadd_x64.so.1 (ld.lld
+# -shared of pic_lib_x64.o, recipe in RECIPE.md).
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/synthetic_sections.spl
+# @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
+
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, elf_link_structural, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+val FIX: text = "test/fixtures/linker/elf"
+val INTERP: text = "/lib64/ld-linux-x86-64.so.2"
+val PT_INTERP: i64 = 3
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn s32(v: i64) -> i64:
+    if v >= 0x80000000:
+        return v - 0x100000000
+    v
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn shdr_by_name(b: [i64], name: text) -> i64:
+    val shoff = rd64(b, 0x28)
+    val shnum = rd16(b, 0x3c)
+    val stroff = rd64(b, shoff + rd16(b, 0x3e) * 64 + 24)
+    var i: i64 = 0
+    while i < shnum:
+        val h = shoff + i * 64
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return h
+        i = i + 1
+    -1
+
+fn sec_addr(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 16)
+
+fn sec_off(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 24)
+
+fn sec_size(b: [i64], name: text) -> i64:
+    rd64(b, shdr_by_name(b, name) + 32)
+
+# file offset of virtual address v (inside section name)
+fn at(b: [i64], name: text, v: i64) -> i64:
+    sec_off(b, name) + v - sec_addr(b, name)
+
+fn dyn_tag(b: [i64], tag: i64) -> i64:
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag:
+            return rd64(b, o + 8)
+        o = o + 16
+    -1
+
+fn dynsym_name(b: [i64], idx: i64) -> text:
+    cstr(b, sec_off(b, ".dynstr") + rd32(b, sec_off(b, ".dynsym") + idx * 24))
+
+fn request(mode: i64) -> ElfLinkRequest:
+    ElfLinkRequest(objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+        shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+        target: RelocArch.X86_64, mode: mode, interp: INTERP)
+
+fn structural(mode: i64) -> [i64]:
+    val r = elf_link_structural(request(mode))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "elf_link - x86_64 dynamic gate":
+    it "is a named UnsupportedFeature by default (no execution proof on this host)":
+        val r = elf_link(request(ELF_LINK_DYNAMIC_EXEC))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("UnsupportedFeature")).to_equal(true)
+        expect(r.unwrap_err().contains("x86_64")).to_equal(true)
+
+describe "elf_link_structural - x86_64 dynamic ET_EXEC":
+    it "has PT_INTERP naming ld-linux-x86-64 and DT_NEEDED libadd_x64.so":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        expect(b.len() > 64).to_equal(true)
+        expect(rd16(b, 16)).to_equal(2)
+        expect(rd16(b, 18)).to_equal(62)
+        var ip: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            if rd32(b, rd64(b, 32) + i * 56) == PT_INTERP:
+                ip = rd64(b, 32) + i * 56
+            i = i + 1
+        expect(cstr(b, rd64(b, ip + 8))).to_equal(INTERP)
+        expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, 1))).to_equal("libadd_x64.so")
+
+    it "writes ld.lld's lazy PLT0 and PLT1 encodings":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val plt = sec_addr(b, ".plt")
+        val po = sec_off(b, ".plt")
+        val gp = sec_addr(b, ".got.plt")
+        expect(sec_size(b, ".plt")).to_equal(32)
+        expect(b[po]).to_equal(0xff)
+        expect(b[po + 1]).to_equal(0x35)
+        expect(plt + 6 + s32(rd32(b, po + 2))).to_equal(gp + 8)
+        expect(b[po + 6]).to_equal(0xff)
+        expect(b[po + 7]).to_equal(0x25)
+        expect(plt + 12 + s32(rd32(b, po + 8))).to_equal(gp + 16)
+        expect(rd32(b, po + 12)).to_equal(0x00401f0f)
+        expect(b[po + 16]).to_equal(0xff)
+        expect(b[po + 17]).to_equal(0x25)
+        expect(plt + 22 + s32(rd32(b, po + 18))).to_equal(gp + 24)
+        expect(b[po + 22]).to_equal(0x68)
+        expect(rd32(b, po + 23)).to_equal(0)
+        expect(b[po + 27]).to_equal(0xe9)
+        expect(plt + 32 + s32(rd32(b, po + 28))).to_equal(plt)
+
+    it "seeds .got.plt with _DYNAMIC and the PLT1 push, bound by one JUMP_SLOT":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val gpo = sec_off(b, ".got.plt")
+        val gp = sec_addr(b, ".got.plt")
+        expect(sec_size(b, ".got.plt")).to_equal(32)
+        expect(rd64(b, gpo)).to_equal(sec_addr(b, ".dynamic"))
+        expect(rd64(b, gpo + 24)).to_equal(sec_addr(b, ".plt") + 22)
+        expect(dyn_tag(b, 3)).to_equal(gp)
+        val ro = sec_off(b, ".rela.plt")
+        expect(sec_size(b, ".rela.plt")).to_equal(24)
+        expect(rd64(b, ro)).to_equal(gp + 24)
+        expect(rd32(b, ro + 8)).to_equal(7)
+        expect(dynsym_name(b, rd32(b, ro + 12))).to_equal("add_val")
+
+    it "binds the imported msg through a GLOB_DAT GOT slot (mov kept, not relaxed)":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val rd = sec_off(b, ".rela.dyn")
+        expect(sec_size(b, ".rela.dyn")).to_equal(24)
+        expect(rd64(b, rd)).to_equal(sec_addr(b, ".got"))
+        expect(rd32(b, rd + 8)).to_equal(6)
+        expect(dynsym_name(b, rd32(b, rd + 12))).to_equal("msg")
+        val e = rd64(b, 24)
+        expect(b[at(b, ".text", e + 2)]).to_equal(0x8b)
+        expect(e + 8 + s32(rd32(b, at(b, ".text", e + 4)))).to_equal(sec_addr(b, ".got"))
+
+    it "routes the add_val call to PLT1":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        val e = rd64(b, 24)
+        expect(b[at(b, ".text", e + 0x1e)]).to_equal(0xe8)
+        expect(e + 0x23 + s32(rd32(b, at(b, ".text", e + 0x1f)))).to_equal(sec_addr(b, ".plt") + 16)
+
+describe "elf_link_structural - x86_64 dynamic PIE":
+    it "is ET_DYN with DT_FLAGS_1 PIE and the same PLT/GOT shape":
+        val b = structural(ELF_LINK_DYNAMIC_PIE)
+        expect(rd16(b, 16)).to_equal(3)
+        expect(dyn_tag(b, 0x6ffffffb)).to_equal(0x08000000)
+        expect(sec_size(b, ".plt")).to_equal(32)
+        expect(rd64(b, sec_off(b, ".got.plt") + 24)).to_equal(sec_addr(b, ".plt") + 22)
+        expect(rd32(b, sec_off(b, ".rela.plt") + 8)).to_equal(7)

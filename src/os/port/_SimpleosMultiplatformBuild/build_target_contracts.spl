@@ -68,60 +68,6 @@ class SimpleOsLaneContract:
     board_adapter_id: text
     media_path_hint: text
 
-class SimpleOsMachineTargetProjection:
-    """Machine/runner fields projected from one resolved platform catalog row."""
-    canonical_name: text
-    arch: Architecture
-    bits: i64
-    isa: text
-    abi: text
-    userland_target: text
-    native_target: text
-    platform_slug: text
-    default_entry: text
-    linker_script: text
-    kernel_output: text
-    disk_image_output: text
-    qemu_system: text
-    qemu_machine: text
-    qemu_cpu: text
-    qemu_serial_kind: text
-    qemu_serial_base: u64
-    qemu_smoke_lane: SimpleOsLaneContract
-    qemu_acceptance_lane: SimpleOsLaneContract
-    qemu_additional_lanes: [SimpleOsLaneContract]
-
-    fn has_qemu_lane(lane_name: text) -> bool:
-        if self.qemu_smoke_lane.name == lane_name:
-            return true
-        if self.qemu_acceptance_lane.name == lane_name:
-            return true
-        for lane in self.qemu_additional_lanes:
-            if lane.name == lane_name:
-                return true
-        false
-
-    fn qemu_lane_or_smoke(lane_name: text) -> SimpleOsLaneContract:
-        if self.qemu_smoke_lane.name == lane_name:
-            return self.qemu_smoke_lane
-        if self.qemu_acceptance_lane.name == lane_name:
-            return self.qemu_acceptance_lane
-        for lane in self.qemu_additional_lanes:
-            if lane.name == lane_name:
-                return lane
-        self.qemu_smoke_lane
-
-    fn default_qemu_lane() -> SimpleOsLaneContract:
-        """Return the single catalog-owned default used by `simple os run`."""
-        if (self.arch == Architecture.Arm64 or self.arch == Architecture.Arm32 or
-            self.arch == Architecture.Riscv32):
-            return self.qemu_acceptance_lane
-        if self.arch == Architecture.Riscv64:
-            if self.has_qemu_lane("riscv64-virtio-fat32-smf"):
-                return self.qemu_lane_or_smoke("riscv64-virtio-fat32-smf")
-            return self.qemu_acceptance_lane
-        self.qemu_smoke_lane
-
 class SimpleOsPlatformBuildTarget:
     name: text
     aliases: [text]
@@ -131,11 +77,19 @@ class SimpleOsPlatformBuildTarget:
     isa: text
     abi: text
     float_abi: text
-    # Kernel build targets intentionally remain freestanding `-none` triples.
-    # This is the distinct target-native SimpleOS userland identity.
-    userland_target: text
-    userland_abi: text
-    userland_firmware_contract: SimpleOsFirmwareContractKind
+    # Hosted-userland contract for targets that stage a userland toolchain.
+    # Declared with defaults because only some catalog entries carry one: an
+    # empty triple/abi means "this target stages no hosted userland", and
+    # BareMetal means "no userland firmware handoff". Three catalog entries
+    # (riscv64-starfive-jh7110, x86_64, i686) already passed these three named
+    # arguments while the class declared none of them, which made EVERY
+    # construction of this class a hard `semantic: class
+    # SimpleOsPlatformBuildTarget has no field named userland_target` — i.e.
+    # `simple os targets` and the whole platform catalog were dead.
+    # Bug: doc/08_tracking/bug/app_modules_referenced_by_specs_exist_nowhere_2026-08-04.md
+    userland_target: text = ""
+    userland_abi: text = ""
+    userland_firmware_contract: SimpleOsFirmwareContractKind = SimpleOsFirmwareContractKind.BareMetal
     native_target: text
     clang_target: text
     qemu_system: text

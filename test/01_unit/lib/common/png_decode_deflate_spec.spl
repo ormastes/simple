@@ -18,6 +18,8 @@ Audience: engineers maintaining this component and its specs.
 """
 
 use std.spec.{describe, context, it, expect}
+use std.common.compress.utilities.{crc32_bytes}
+use std.hash.adler32.{adler32}
 use std.common.image.png_decode.{
     decode_png_to_argb, PngImage, decompress_idat, reconstruct_scanlines, paeth_predictor}
 
@@ -37,6 +39,15 @@ fn write_u32_be(val_: u32) -> [u8]:
     out = out + [(val_ & 0xFF).to_u8()]
     out
 
+
+fn _chunk_with_crc(type_and_data: [u8]) -> [u8]:
+    """Append the PNG CRC (type + data) to a chunk body."""
+    var crc = crc32_bytes(type_and_data)
+    [((crc >> 24u32) & 0xFFu32).to_u8(),
+     ((crc >> 16u32) & 0xFFu32).to_u8(),
+     ((crc >> 8u32) & 0xFFu32).to_u8(),
+     (crc & 0xFFu32).to_u8()]
+
 fn make_ihdr_chunk(width: i32, height: i32, color_type: u8) -> [u8]:
     """Build an IHDR chunk (no CRC — decoder doesn't check CRC)."""
     var chunk: [u8] = []
@@ -54,8 +65,7 @@ fn make_ihdr_chunk(width: i32, height: i32, color_type: u8) -> [u8]:
     chunk = chunk + [color_type]
     # Compression, filter, interlace: 0, 0, 0
     chunk = chunk + [0, 0, 0]
-    # CRC (dummy — decoder doesn't validate CRC)
-    chunk = chunk + [0, 0, 0, 0]
+    chunk = chunk + _chunk_with_crc(chunk[4:])
     chunk
 
 fn make_idat_chunk(data: [u8]) -> [u8]:
@@ -66,8 +76,7 @@ fn make_idat_chunk(data: [u8]) -> [u8]:
     chunk = chunk + [73, 68, 65, 84]
     for b in data:
         chunk = chunk + [b]
-    # CRC (dummy)
-    chunk = chunk + [0, 0, 0, 0]
+    chunk = chunk + _chunk_with_crc([73, 68, 65, 84] + data)
     chunk
 
 fn make_iend_chunk() -> [u8]:
@@ -77,8 +86,7 @@ fn make_iend_chunk() -> [u8]:
     chunk = chunk + [0, 0, 0, 0]
     # Type: IEND = [73, 69, 78, 68]
     chunk = chunk + [73, 69, 78, 68]
-    # CRC (dummy)
-    chunk = chunk + [0, 0, 0, 0]
+    chunk = chunk + _chunk_with_crc([73, 69, 78, 68])
     chunk
 
 fn make_zlib_stored(raw: [u8]) -> [u8]:
@@ -100,7 +108,25 @@ fn make_zlib_stored(raw: [u8]) -> [u8]:
     # Raw data
     for b in raw:
         out = out + [b]
+    # zlib Adler-32 trailer (big-endian)
+    val adler = adler32(raw).to_i32()
+    out = out + [((adler >> 24) & 0xFF).to_u8(), ((adler >> 16) & 0xFF).to_u8(),
+                 ((adler >> 8) & 0xFF).to_u8(), (adler & 0xFF).to_u8()]
     out
+
+fn make_png_stored(width: i32, height: i32, color_type: u8, raw_scanline: [u8]) -> [u8]:
+    """Build a PNG from raw scanline bytes using a stored DEFLATE block."""
+    val compressed = make_zlib_stored(raw_scanline)
+    var png: [u8] = []
+    for b in PNG_SIG:
+        png = png + [b]
+    for b in make_ihdr_chunk(width, height, color_type):
+        png = png + [b]
+    for b in make_idat_chunk(compressed):
+        png = png + [b]
+    for b in make_iend_chunk():
+        png = png + [b]
+    png
 
 fn make_1x1_rgb_png_stored() -> [u8]:
     """Build a minimal 1x1 RGB PNG using stored DEFLATE block.
@@ -161,7 +187,7 @@ describe "PngDecode — DEFLATE decompression":
             step("Verify: AC-1: decodes 1x1 RGB PNG with stored DEFLATE block")
             val png = make_1x1_rgb_png_stored()
             val result = decode_png_to_argb(png)
-            expect(result.error?).to_equal(false)
+            expect(result.is_err()).to_equal(false)
 
         it "AC-1: 1x1 PNG produces exactly 1 pixel":
             # @req: REQ-COMMON-PngDecodeDeflate-001
@@ -263,7 +289,7 @@ describe "PngDecode — filter reconstruction":
             step("Verify: AC-1: None filter passes through raw bytes")
             # 1x1 RGB: filter=0, R=100, G=200, B=50
             val raw: [u8] = [0, 100, 200, 50]
-            val result = reconstruct_scanlines(raw, 1, 1, 3, 4)
+            val result = reconstruct_scanlines(raw, 1, 1, 3, 3)
             # After reconstruction, should be [100, 200, 50]
             expect(result.len().to_i32()).to_equal(3)  # oracle: value fixed by the spec contract
 

@@ -1,4 +1,8 @@
 # Engine2D factory returns a module-namespace dict under the test runner (match-arm binding shadowed by MODULE_GLOBALS)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** `engine2d_factory_returns_dict_under_test_runner_2026-08-19`
 - Status: OPEN (P1)
@@ -109,3 +113,4 @@ basenames.
   vs `use ...engine2d.color`, and a `for` / `if-let` pattern binding variant.
 - After fix: `bin/simple test test/02_integration/rendering/engine2d_drawing_spec.spl`
   (2/2), `vulkan_strict_spec.spl`, `cuda_strict_spec.spl` stay green.
+

@@ -1,0 +1,166 @@
+# codex-impl
+# Product-facing pure collect -> prepare boundary. Raw policy is normalized once
+# and cannot be replaced with caller-constructed typed policy inputs.
+
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.EnvironmentVariantCatalogPolicyAuthorityV1
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.environment_variant_policy_digest256_v1
+use compiler.driver.environment_variant_preparation_coordinator_v1.*
+use compiler.driver.environment_publication_activation_coordinator_v1.*
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.EnvironmentDependencyResolutionV1
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.PublicationArtifactEvidenceV1
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
+
+pub enum EnvironmentVariantSealedPreparationErrorV1:
+    CollectionFailed
+    AdminAuthorityFailed
+    PreparationFailed
+
+pub struct EnvironmentVariantSealedPreparationInputV1:
+    cli: EnvironmentVariantRawPolicyLayerV1
+    env: EnvironmentVariantRawPolicyLayerV1
+    project: EnvironmentVariantRawPolicyLayerV1
+    user: EnvironmentVariantRawPolicyLayerV1
+    admin: EnvironmentVariantAdminRestrictionsV1
+    admin_policy_digest: EnvironmentDigest256V1
+    admin_trust_receipt: ArtifactTrustVerificationReceiptV1
+    policy_authority: EnvironmentVariantCatalogPolicyAuthorityV1
+    snapshot: EnvironmentSnapshotV1
+    arena_bytes: [u8]
+    feature_words: [u64]
+    gpu_devices: [EnvironmentGpuDeviceV1]
+    root: VariantDescriptorV1
+    descriptors: [VariantDescriptorV1]
+    dependencies: [VariantDependencyV1]
+    resolution: EnvironmentDependencyResolutionV1
+    evidence: [PublicationArtifactEvidenceV1]
+    catalog_generation: u64
+    publication_generation: u64
+    bindings: [VariantFacetBindingV1]
+
+pub struct EnvironmentVariantSealedPreparationV1:
+    collection_receipt: EnvironmentVariantPolicyCollectionReceiptV1
+    target_cpu: text
+    target_cpu_features: text
+    preparation: EnvironmentVariantPreparationV1
+
+# Additive owner-backed boundary. V1 remains available for analysis and legacy
+# tests, but new execution-facing consumers must retain this opaque activation.
+pub enum EnvironmentVariantSealedActivationErrorV1:
+    CollectionFailed
+    AdminAuthorityFailed
+    PolicyFailed
+    PolicyAuthorityFailed
+    ActivationFailed
+
+pub struct EnvironmentVariantSealedActivationV1:
+    collection_receipt: EnvironmentVariantPolicyCollectionReceiptV1
+    target_cpu: text
+    target_cpu_features: text
+    decision: EnvironmentVariantPolicyDecisionInputV1
+    projection: EnvironmentVariantCatalogPolicyProjectionV1
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1
+    selected_variant_identities: [EnvironmentDigest256V1]
+    rejections: [VariantRejectionV1]
+    dependency_closure_digest: EnvironmentDigest256V1
+    catalog_digest: EnvironmentDigest256V1
+    dependency_lock_digest: EnvironmentDigest256V1
+    canonical_base_plan_digest: EnvironmentDigest256V1
+    plan_digest: EnvironmentDigest256V1
+    catalog_generation: u64
+    publication_generation: u64
+
+pub fn environment_variant_admin_policy_digest_v1(
+    admin: EnvironmentVariantAdminRestrictionsV1
+) -> EnvironmentDigest256V1:
+    val material = "{admin.parser_provider.len()}:{admin.parser_provider}|" +
+        "{admin.host_cpu_max.len()}:{admin.host_cpu_max}|" +
+        "{admin.frontend_offload_max.len()}:{admin.frontend_offload_max}|" +
+        "{admin.frontend_fallback.len()}:{admin.frontend_fallback}"
+    environment_variant_policy_digest256_v1(sha256_text(material)).unwrap()
+
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+fn _sealed_admin_valid_v1(input: EnvironmentVariantSealedPreparationInputV1) -> bool:
+    val canonical = environment_variant_admin_policy_digest_v1(input.admin)
+    _same(canonical, input.admin_policy_digest) and
+        artifact_trust_receipt_valid_v1(input.admin_trust_receipt) and
+        input.admin_trust_receipt.authentication_status == ENV_ARTIFACT_TRUST_AUTHENTICATED_V1 and
+        _same(input.admin_trust_receipt.artifact_digest, canonical)
+
+pub fn environment_variant_collect_and_prepare_v1(
+    input: EnvironmentVariantSealedPreparationInputV1
+) -> Result<EnvironmentVariantSealedPreparationV1, EnvironmentVariantSealedPreparationErrorV1>:
+    if not _sealed_admin_valid_v1(input):
+        return Err(EnvironmentVariantSealedPreparationErrorV1.AdminAuthorityFailed)
+    val collection = match environment_variant_policy_collect_v1(
+        input.cli, input.env, input.project, input.user, input.admin):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantSealedPreparationErrorV1.CollectionFailed)
+    val preparation = match environment_variant_prepare_v1(EnvironmentVariantPreparationInputV1(
+        policy_inputs: collection.policy_inputs, policy_authority: input.policy_authority,
+        snapshot: input.snapshot, arena_bytes: input.arena_bytes,
+        feature_words: input.feature_words, gpu_devices: input.gpu_devices,
+        root: input.root, descriptors: input.descriptors, dependencies: input.dependencies,
+        resolution: input.resolution, evidence: input.evidence,
+        catalog_generation: input.catalog_generation,
+        publication_generation: input.publication_generation, bindings: input.bindings)):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantSealedPreparationErrorV1.PreparationFailed)
+    Ok(EnvironmentVariantSealedPreparationV1(
+        collection_receipt: collection.receipt,
+        target_cpu: collection.target_cpu,
+        target_cpu_features: collection.target_cpu_features,
+        preparation: preparation))
+
+pub fn environment_variant_collect_and_activate_v1(
+    owner: EnvironmentPublicationActivationCoordinatorV1,
+    pre: ProviderPrePublicationEvidenceV2,
+    input: EnvironmentVariantSealedPreparationInputV1
+) -> Result<EnvironmentVariantSealedActivationV1, EnvironmentVariantSealedActivationErrorV1>:
+    if not _sealed_admin_valid_v1(input):
+        return Err(EnvironmentVariantSealedActivationErrorV1.AdminAuthorityFailed)
+    val collection = match environment_variant_policy_collect_v1(
+        input.cli, input.env, input.project, input.user, input.admin):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantSealedActivationErrorV1.CollectionFailed)
+    val decision = match environment_variant_policy_resolve_v1(collection.policy_inputs):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantSealedActivationErrorV1.PolicyFailed)
+    val projection = match environment_variant_catalog_policy_project_v1(
+        decision, input.policy_authority):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantSealedActivationErrorV1.PolicyAuthorityFailed)
+    val token = match environment_publication_activation_prepare_v1(owner, pre,
+        input.snapshot, input.arena_bytes, input.feature_words, input.gpu_devices,
+        input.root, input.descriptors, input.dependencies, input.resolution,
+        input.evidence, input.catalog_generation, input.publication_generation,
+        input.bindings, projection):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentVariantSealedActivationErrorV1.ActivationFailed)
+    # The publication copy is used only to construct scalar/copy metadata. It is
+    # not returned, and failure rolls back the just-created activation.
+    val publication = match environment_publication_activation_publication_v1(owner, token):
+        case Ok(value): value
+        case Err(_):
+            _ = environment_publication_activation_release_v1(owner, token)
+            return Err(EnvironmentVariantSealedActivationErrorV1.ActivationFailed)
+    var selected: [EnvironmentDigest256V1] = []
+    for row in publication.selected_variant_identities: selected.push(row)
+    var rejected: [VariantRejectionV1] = []
+    for row in publication.rejections: rejected.push(row)
+    Ok(EnvironmentVariantSealedActivationV1(collection_receipt: collection.receipt,
+        target_cpu: collection.target_cpu, target_cpu_features: collection.target_cpu_features,
+        decision: decision, projection: projection, activation_token: token,
+        selected_variant_identities: selected, rejections: rejected,
+        dependency_closure_digest: publication.admission.dependency_closure_digest,
+        catalog_digest: publication.admission.plan.catalog_digest,
+        dependency_lock_digest: publication.admission.plan.dependency_lock_digest,
+        canonical_base_plan_digest: publication.canonical_base_plan_digest,
+        plan_digest: publication.admission.plan.plan_digest,
+        catalog_generation: publication.admission.plan.catalog_generation,
+        publication_generation: publication.admission.plan.publication_generation))

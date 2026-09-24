@@ -1,4 +1,8 @@
 # Compiler entry-closure build CPU/RSS regression (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -85,3 +89,4 @@ The compiler may allocate during compilation, but closure discovery must remain
 linear in admitted source bytes plus import edges, avoid value-copy insertion,
 and remain within explicit source/import cardinality limits. No retry loop may
 hide a failing preflight or trade lower wall time for unbounded RSS.
+

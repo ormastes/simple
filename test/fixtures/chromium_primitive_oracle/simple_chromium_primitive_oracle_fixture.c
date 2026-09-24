@@ -90,8 +90,8 @@ uint32_t simple_chromium_oracle_abi_version(void) {
 }
 
 int64_t simple_chromium_oracle_create(const uint8_t *config, uint64_t config_len) {
-    if (config == NULL || config_len > SIMPLE_CHROMIUM_ORACLE_MAX_REQUEST_BYTES ||
-        !request_has(config, config_len, "{")) {
+    if (config_len > SIMPLE_CHROMIUM_ORACLE_MAX_REQUEST_BYTES ||
+        (config_len > 0 && (config == NULL || !request_has(config, config_len, "{")))) {
         return 0;
     }
     if (session_count >= ORACLE_MAX_SESSIONS) return 0;

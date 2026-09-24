@@ -1,0 +1,321 @@
+# Purpose: focused L8 evidence for pinned, typed generation closure and receipt-only recovery.
+# @req REQ-CSM-008 REQ-CSM-012 REQ-CSM-024
+# @cover src/compiler/80.driver/cache/gc/verified_generation_reachability_v1.spl 85%
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1, canonical_cache_kind_compile_snapshot_v1,
+    canonical_cache_kind_public_summary_v1}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_encode_v1}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectRefV1, PortableObjectStageV1, PortablePortabilityV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadManifestV1,
+    semantic_query_read_manifest_encode_v1}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    ThreePayloadInputIdentityV1, ThreePayloadReadReceiptV1,
+    ThreePayloadWorkerResultV1, three_payload_worker_result_encode_v1}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceShardV1, reverse_reference_shard_encode_v1}
+use compiler.common.cache_contract.diagnostic_manifest_v1.{
+    DiagnosticManifestV1, diagnostic_manifest_encode_v1}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_digest_v1}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.*
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1}
+
+fn d(label: text) -> text: sha256_text(label)
+
+fn compile_bytes(schema: i64 = 1) -> [u8]:
+    canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_compile_snapshot_v1(), schema, [1 as u8, 2 as u8])
+
+fn summary_bytes() -> [u8]:
+    canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_public_summary_v1(), 1, [3 as u8, 4 as u8])
+
+fn query(name: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "type", stable_entity_id: name,
+        semantic_profile_digest: d("semantic-profile"),
+        parameter_digest: d("parameters"))
+
+fn forward_bytes() -> [u8]:
+    semantic_query_read_manifest_encode_v1(SemanticQueryReadManifestV1(
+        schema: 1, consumer: query("consumer"), ordered_reads: []))
+
+fn worker_bytes() -> [u8]:
+    val identity = ThreePayloadInputIdentityV1(source_digest: d("source"),
+        prior_tld_digest: nil, init_tld_digest: d("init"), seal_digest: d("seal"))
+    val receipt = ThreePayloadReadReceiptV1(input_identity: identity,
+        executor_digest: d("executor"), distinct_source: 1, distinct_prior: 0,
+        distinct_init: 1, external_input_count: 0, rr_input_count: 0,
+        open_calls: 2, read_calls: 2, read_bytes: 64, decoded_sections: 1,
+        peak_decode_bytes: 32, denied_io_attempts: 0)
+    three_payload_worker_result_encode_v1(ThreePayloadWorkerResultV1(
+        input_identity: identity, new_summary_digest: d("summary"),
+        query_reads: SemanticQueryReadManifestV1(schema: 1,
+            consumer: query("consumer"), ordered_reads: []), portable_refs: [],
+        diagnostic_digest: d("diagnostic"), read_receipt: receipt))
+
+fn rr_bytes() -> [u8]:
+    reverse_reference_shard_encode_v1(ReverseReferenceShardV1(schema: 1,
+        partition_id: "package", coverage: SemanticCoverageV1.Complete,
+        sorted_edges: []))
+
+fn diagnostic_bytes() -> [u8]:
+    diagnostic_manifest_encode_v1(DiagnosticManifestV1(schema: 1,
+        sorted_entries: []))
+
+fn base_manifest(snapshot_digest: text) -> GenerationManifestV1:
+    GenerationManifestV1(schema: 1, snapshot_digest: snapshot_digest,
+        catalog_digest: d("catalog"), summary_refs: [], scope_refs: [],
+        rr_shard_refs: [], forward_manifest_refs: [], portable_refs: [],
+        target_refs: [], diagnostic_refs: [])
+
+class ReachabilityFixtureV1:
+    root: VerifiedGenerationRootV1
+    pins: VerifiedGenerationPinSnapshotV1
+    objects: [VerifiedCasReadObjectV1]
+    journal: ActionRootJournalV1
+    durable: VerifiedGenerationDurableBindingV1
+
+fn fixture_for(manifest: GenerationManifestV1,
+        children: [VerifiedCasReadObjectV1]) -> ReachabilityFixtureV1:
+    val manifest_bytes = generation_manifest_encode_v1(manifest)
+    val manifest_digest = verified_cas_kind_digest_v1("generation_manifest",
+        manifest_bytes)
+    val root = VerifiedGenerationRootV1(generation: 7,
+        manifest_digest: manifest_digest)
+    val pins = verified_generation_pin_snapshot_v1(11,
+        [VerifiedGenerationPinV1(pin_id: "release-pin", root: root)], []).unwrap()
+    var objects: [VerifiedCasReadObjectV1] = [VerifiedCasReadObjectV1(
+        identity: VerifiedCasTypedIdentityV1(kind: "generation_manifest",
+            digest: manifest_digest), canonical_bytes: manifest_bytes)]
+    for child in children: objects.push(child)
+    val journal = ActionRootJournalV1.empty(7)
+    val prepared = journal.prepare(d("action"), "public_summary", d("object"),
+        manifest_digest).unwrap()
+    journal.accept_durable(prepared).unwrap()
+    val prefix = sha256_text(journal.bytes)
+    val durable = VerifiedGenerationDurableBindingV1(generation: 7, sequence: 0,
+        writer_epoch: 11, operation_digest: prepared.operation_digest,
+        host_receipt_digest: d("host-durable-receipt"), journal_digest: prefix,
+        accepted_journal_bytes: journal.bytes.len(),
+        accepted_journal_prefix_digest: prefix, projection_applied: true,
+        projection_digest: manifest.catalog_digest)
+    ReachabilityFixtureV1(root: root, pins: pins, objects: objects,
+        journal: journal, durable: durable)
+
+fn base_fixture() -> ReachabilityFixtureV1:
+    val bytes = compile_bytes()
+    val digest = verified_cas_kind_digest_v1("compile_snapshot", bytes)
+    val child = VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+        kind: "compile_snapshot", digest: digest), canonical_bytes: bytes)
+    fixture_for(base_manifest(digest), [child])
+
+fn closure_receipt(fixture: ReachabilityFixtureV1) -> VerifiedCasClosureReceiptV1:
+    verify_generation_closure_v1(fixture.root, fixture.pins, fixture.objects,
+        fixture.journal, fixture.durable).receipt.unwrap()
+
+describe "Verified generation reachability V1":
+    it "issues an ordered typed closure from an immutable pin snapshot":
+        step("Verify every fixed available GEN1 edge through its registered kind")
+        val compile = compile_bytes()
+        val summary = summary_bytes()
+        val worker = worker_bytes()
+        val rr = rr_bytes()
+        val forward = forward_bytes()
+        val diagnostic = diagnostic_bytes()
+        val compile_digest = verified_cas_kind_digest_v1("compile_snapshot", compile)
+        val summary_digest = verified_cas_kind_digest_v1("public_summary", summary)
+        val worker_digest = verified_cas_kind_digest_v1("worker_result", worker)
+        val rr_digest = verified_cas_kind_digest_v1("reverse_reference_shard", rr)
+        val forward_digest = verified_cas_kind_digest_v1("forward_manifest", forward)
+        val diagnostic_digest = verified_cas_kind_digest_v1("diagnostic_manifest", diagnostic)
+        val manifest = GenerationManifestV1(schema: 1,
+            snapshot_digest: compile_digest, catalog_digest: d("catalog"),
+            summary_refs: [summary_digest], scope_refs: [worker_digest],
+            rr_shard_refs: [rr_digest], forward_manifest_refs: [forward_digest],
+            portable_refs: [], target_refs: [], diagnostic_refs: [diagnostic_digest])
+        val children = [
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "compile_snapshot", digest: compile_digest), canonical_bytes: compile),
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "public_summary", digest: summary_digest), canonical_bytes: summary),
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "worker_result", digest: worker_digest), canonical_bytes: worker),
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "reverse_reference_shard", digest: rr_digest), canonical_bytes: rr),
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "forward_manifest", digest: forward_digest), canonical_bytes: forward),
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "diagnostic_manifest", digest: diagnostic_digest), canonical_bytes: diagnostic)]
+        val fixture = fixture_for(manifest, children)
+        val result = verify_generation_closure_v1(fixture.root, fixture.pins,
+            fixture.objects, fixture.journal, fixture.durable)
+        expect(result.ok).to_equal(true)
+        val receipt = result.receipt.unwrap()
+        expect(receipt.ordered_closure.len()).to_equal(7)
+        expect(receipt.ordered_closure[0].kind).to_equal("generation_manifest")
+        expect(receipt.ordered_closure[1].kind).to_equal("compile_snapshot")
+        expect(receipt.ordered_closure[2].kind).to_equal("public_summary")
+        expect(receipt.ordered_closure[3].kind).to_equal("worker_result")
+        expect(receipt.ordered_closure[4].kind).to_equal("reverse_reference_shard")
+        expect(receipt.ordered_closure[5].kind).to_equal("forward_manifest")
+        expect(receipt.ordered_closure[6].kind).to_equal("diagnostic_manifest")
+
+    it "aborts closure for a missing child and a wrong typed kind":
+        step("Treat absence and digest-equal kind substitution as different failures")
+        val bytes = compile_bytes()
+        val digest = verified_cas_kind_digest_v1("compile_snapshot", bytes)
+        val missing = fixture_for(base_manifest(digest), [])
+        expect(verify_generation_closure_v1(missing.root, missing.pins,
+            missing.objects, missing.journal, missing.durable).error).to_equal(
+                "child_missing:compile_snapshot")
+        val wrong = fixture_for(base_manifest(digest), [VerifiedCasReadObjectV1(
+            identity: VerifiedCasTypedIdentityV1(kind: "public_summary", digest: digest),
+            canonical_bytes: bytes)])
+        expect(verify_generation_closure_v1(wrong.root, wrong.pins,
+            wrong.objects, wrong.journal, wrong.durable).error).to_equal(
+                "child_kind_mismatch:compile_snapshot")
+
+    it "rejects wrong schema and digest before issuing a receipt":
+        step("Keep malformed CCH1 schema and changed bytes outside the typed closure")
+        val wrong_schema = compile_bytes(2)
+        val wrong_schema_digest = verified_cas_kind_digest_v1("compile_snapshot",
+            wrong_schema)
+        val schema_fixture = fixture_for(base_manifest(wrong_schema_digest), [
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "compile_snapshot", digest: wrong_schema_digest),
+                canonical_bytes: wrong_schema)])
+        expect(verify_generation_closure_v1(schema_fixture.root, schema_fixture.pins,
+            schema_fixture.objects, schema_fixture.journal,
+            schema_fixture.durable).error).to_equal(
+                "child_verification_failed:noncanonical_cch1_object")
+        val good = compile_bytes()
+        val good_digest = verified_cas_kind_digest_v1("compile_snapshot", good)
+        val digest_fixture = fixture_for(base_manifest(good_digest), [
+            VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+                kind: "compile_snapshot", digest: good_digest),
+                canonical_bytes: wrong_schema)])
+        expect(verify_generation_closure_v1(digest_fixture.root, digest_fixture.pins,
+            digest_fixture.objects, digest_fixture.journal,
+            digest_fixture.durable).error).to_equal("child_digest_mismatch:compile_snapshot")
+
+    it "fails closed while portable and target verifiers are unavailable":
+        step("Do not reinterpret reserved children as opaque CAS bytes")
+        val bytes = compile_bytes()
+        val digest = verified_cas_kind_digest_v1("compile_snapshot", bytes)
+        var portable_manifest = base_manifest(digest)
+        portable_manifest.portable_refs = [PortableObjectRefV1(
+            content_digest: d("portable"), stage: PortableObjectStageV1.Base,
+            portability: PortablePortabilityV1.Portable, ir_schema: 2,
+            required_semantics_digest: d("semantics"), target_contract_digest: nil,
+            verification_receipt_digest: d("verification"))]
+        val child = VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "compile_snapshot", digest: digest), canonical_bytes: bytes)
+        val portable_fixture = fixture_for(portable_manifest, [child])
+        expect(verify_generation_closure_v1(portable_fixture.root,
+            portable_fixture.pins, portable_fixture.objects,
+            portable_fixture.journal, portable_fixture.durable).error).to_equal(
+                "child_verifier_unavailable:portable_hir_object")
+        var target_manifest = base_manifest(digest)
+        target_manifest.target_refs = [d("target")]
+        val target_fixture = fixture_for(target_manifest, [child])
+        expect(verify_generation_closure_v1(target_fixture.root,
+            target_fixture.pins, target_fixture.objects,
+            target_fixture.journal, target_fixture.durable).error).to_equal(
+                "child_verifier_unavailable:target_artifact")
+
+    it "protects pinned closure members and refuses an unpinned sweep":
+        step("Classify only against the immutable root snapshot that issued the receipt")
+        val fixture = base_fixture()
+        val receipt = closure_receipt(fixture)
+        expect(verified_generation_sweep_decision_v1(fixture.pins, [receipt],
+            receipt.ordered_closure[1], 11)).to_equal(
+                VerifiedGenerationSweepDecisionV1.Refused)
+        expect(verified_generation_sweep_decision_v1(fixture.pins, [receipt],
+            VerifiedCasTypedIdentityV1(kind: "source_blob", digest: d("unrelated")),
+            11)).to_equal(VerifiedGenerationSweepDecisionV1.Refused)
+        val other_root = VerifiedGenerationRootV1(generation: 7,
+            manifest_digest: d("other-root"))
+        val other_pins = verified_generation_pin_snapshot_v1(11,
+            [VerifiedGenerationPinV1(pin_id: "other", root: other_root)], []).unwrap()
+        expect(verified_generation_sweep_decision_v1(other_pins, [receipt],
+            receipt.ordered_closure[1], 11)).to_equal(
+                VerifiedGenerationSweepDecisionV1.Refused)
+        val two_root_pins = verified_generation_pin_snapshot_v1(11,
+            [VerifiedGenerationPinV1(pin_id: "release-pin", root: fixture.root),
+             VerifiedGenerationPinV1(pin_id: "other", root: other_root)], []).unwrap()
+        expect(verified_generation_sweep_decision_v1(two_root_pins, [receipt],
+            receipt.ordered_closure[1], 11)).to_equal(
+                VerifiedGenerationSweepDecisionV1.Refused)
+
+    it "includes active lease roots and excludes inactive lease roots":
+        step("Freeze lease liveness before traversal instead of consulting it during sweep")
+        val pinned = VerifiedGenerationRootV1(generation: 1, manifest_digest: d("pinned"))
+        val leased = VerifiedGenerationRootV1(generation: 2, manifest_digest: d("leased"))
+        val inactive = VerifiedGenerationRootV1(generation: 3, manifest_digest: d("inactive"))
+        val snapshot = verified_generation_pin_snapshot_v1(4,
+            [VerifiedGenerationPinV1(pin_id: "p", root: pinned)],
+            [VerifiedGenerationLeaseRootV1(lease_id: "live", active: true, root: leased),
+             VerifiedGenerationLeaseRootV1(lease_id: "dead", active: false, root: inactive)]).unwrap()
+        expect(snapshot.roots.len()).to_equal(2)
+        expect(snapshot.snapshot_digest == "").to_equal(false)
+
+    it "rejects stale epochs prefixes and catalog owner bindings":
+        step("Bind the closure to one writer epoch journal prefix and PureDatabase projection")
+        val fixture = base_fixture()
+        val receipt = closure_receipt(fixture)
+        var changed_epoch = fixture.durable
+        changed_epoch.writer_epoch = 12
+        expect(verify_generation_closure_v1(fixture.root, fixture.pins,
+            fixture.objects, fixture.journal, changed_epoch).error).to_equal(
+                "durable_epoch_mismatch")
+        val stale_pins = verified_generation_pin_snapshot_v1(12,
+            [VerifiedGenerationPinV1(pin_id: "release-pin", root: fixture.root)], []).unwrap()
+        expect(verified_generation_recovery_projection_v1(stale_pins, receipt,
+            fixture.durable).error).to_equal("recovery_host_issuer_unavailable")
+        var changed_prefix = fixture.durable
+        changed_prefix.journal_digest = d("changed-prefix")
+        changed_prefix.accepted_journal_prefix_digest = d("changed-prefix")
+        expect(verified_generation_recovery_projection_v1(fixture.pins, receipt,
+            changed_prefix).error).to_equal("recovery_host_issuer_unavailable")
+        var changed_catalog = fixture.durable
+        changed_catalog.projection_digest = d("changed-catalog")
+        expect(verify_generation_closure_v1(fixture.root, fixture.pins,
+            fixture.objects, fixture.journal, changed_catalog).error).to_equal(
+                "catalog_owner_receipt_mismatch")
+
+    it "rejects a forged closure receipt without trusting its public fields":
+        step("Recompute receipt validity instead of treating construction as authority")
+        val fixture = base_fixture()
+        val receipt = closure_receipt(fixture)
+        var forged = receipt
+        forged.closure_digest = d("forged-closure")
+        expect(verified_generation_sweep_decision_v1(fixture.pins, [forged],
+            receipt.ordered_closure[1], 11)).to_equal(
+                VerifiedGenerationSweepDecisionV1.Refused)
+        expect(verified_generation_recovery_projection_v1(fixture.pins, forged,
+            fixture.durable).error).to_equal("recovery_host_issuer_unavailable")
+
+    it "refuses caller-constructed receipts until the host issuer exists":
+        step("A public hash-consistent receipt is diagnostic evidence, never recovery authority")
+        val fixture = base_fixture()
+        val receipt = closure_receipt(fixture)
+        val restarted_pins = verified_generation_pin_snapshot_v1(11,
+            [VerifiedGenerationPinV1(pin_id: "release-pin", root: fixture.root)], []).unwrap()
+        val recovered = verified_generation_recovery_projection_v1(restarted_pins,
+            receipt, fixture.durable)
+        expect(recovered.ok).to_equal(false)
+        expect(recovered.error).to_equal("recovery_host_issuer_unavailable")
+
+    it "keeps journal-committed recovery independent of catalog projection state":
+        step("Do not reject durable journal evidence merely because projection is pending")
+        val fixture = base_fixture()
+        var pending_projection = fixture.durable
+        pending_projection.projection_applied = false
+        expect(verify_generation_closure_v1(fixture.root, fixture.pins,
+            fixture.objects, fixture.journal, pending_projection).error).to_equal("")

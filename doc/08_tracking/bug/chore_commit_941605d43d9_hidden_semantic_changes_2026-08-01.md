@@ -1,4 +1,9 @@
 # Audit: semantic compiler changes hidden inside "chore" commit `941605d43d9`
+## Closed 2026-09-16 — audit complete; both bootstrap-gating changes measured and CLEARED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** Audit complete; the two changes that gated a bootstrap were then
@@ -428,3 +433,4 @@ The remaining Rust seed changes in this commit have still never run. Two of
 them now have their own entries: the parser continuation regression (fixed in
 `fba46571d6a`) and the implicit-self hint. The rest await the next seed
 rebuild, and this audit remains the checklist for attributing any failure.
+

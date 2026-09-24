@@ -873,3 +873,105 @@ Scope note: this run measured the **Rust seed's** interpreter. The package
 attributed the row to
 `src/compiler/10.frontend/core/interpreter/eval_calls.spl`; that is a heuristic
 path mapping, and the pure-Simple interpreter was not separately measured here.
+
+## Re-measurement 2026-09-18 — still open, and the interpreter row has CHANGED
+
+Binary: a seed built from `origin/main` `c8fa65bf714` (2026-09-18), 51,645,288 B,
+sha256 `308de6af84db5c26e2c0`; the same probe on the 2026-09-14 seed answers
+identically, so this is not a one-build artifact.
+
+Probe (`n` is a bare `i64 = 6`, no `index_of` involved):
+
+```simple
+fn main() -> i64:
+    val n = 6
+    match n:
+        case Some(i):
+            print "B match_Some_arm_taken i=" + i.to_text()
+        case _:
+            print "C wildcard_arm_taken"
+    print "D unwrap_or=" + n.unwrap_or(-99).to_text()
+    if val Some(k) = n:
+        print "E if_val_Some_taken k=" + k.to_text()
+    else:
+        print "F if_val_not_taken"
+    0
+```
+
+| row | interpret lane | JIT lane |
+|---|---|---|
+| `match n: case Some(i)` | **Some arm taken, binds `6`** | Some arm taken, binds **`<value:0x6>`** |
+| `n.unwrap_or(-99)` | `6` | **`<value:0x6>`** |
+| `if val Some(k) = n` | **taken, binds `6`** | taken, binds **`<value:0x6>`** |
+
+What changed since the original table, and what did not:
+
+- **Changed:** the interpreter no longer "matches neither arm". It now takes the
+  `Some` arm and binds the raw scalar. The original report's second defect (a
+  `_` wildcard that failed to match) therefore no longer reproduces on this
+  probe — it should not be cited as live without re-measuring.
+- **Unchanged, and still the core defect:** both engines silently ACCEPT
+  `Some(_)`, `if val Some(...)` and `.unwrap_or` on a plain `i64`. No compile
+  error on either lane.
+- **Unchanged:** the two engines still DISAGREE on what gets bound — the raw
+  scalar on the interpret lane, a tag box that stringifies as `<value:0x6>` on
+  the JIT lane. The record's point that fixing one engine alone widens the gap
+  stands.
+
+The fix direction in the section above (reject the pattern at type-check time,
+so the three engines cannot disagree about a program that should not compile)
+is unaffected by this re-measurement.
+
+**Coordination note (2026-09-18):** PR #1077 is open and edits
+`src/compiler/30.types/type_infer/{context,inference_control,inference_expr}.spl`
+for the adjacent dot-question/non-optional-return enforcement in the same HM
+checker. A pattern-side fix should land after it, or be written against its
+tree, rather than underneath it.
+
+## 2026-09-21 semantic-owner pattern slice — source green, row stays open
+
+Base: exact `origin/main` `e0dd873da1b7828389db4eb60e82972cc8245313`.
+PR #1077 is merged at this base, so its type-inference changes are already
+present. The selected owner is
+`src/compiler/30.types/type_infer/inference_control.spl::infer_pattern`, before
+interpreter, JIT, or native pattern lowering.
+
+Direct diagnostic probes with the checked-in Rust bootstrap seed
+(`bin/simple.exe`, 39,066,112 bytes, SHA-256
+`e2a42543d62f794a8df8389de70c4200ff95675b5c48b60f0103b1f47a77e78c`)
+reproduced the accepted bad programs on both execution modes:
+
+| probe | interpreter | JIT |
+|---|---|---|
+| `match 6: case Some(i)` | exit 0, `some=6` | exit 0, `some=<value:0x6>` |
+| `if val Some(k) = 6` | exit 0, `bound=6` | exit 0, `bound=<value:0x6>` |
+| `6.unwrap_or(-99)` | exit 0, `uo=6` | exit 0, `uo=<value:0x6>` |
+| genuine `val o: i64? = 42` | exit 0, `ok=42` | exit 0, `ok=42` |
+
+This seed evidence is diagnostic only. It is not admission or self-hosted
+compiler evidence.
+
+`bin/simple.exe check src/compiler` also failed closed with
+`no admitted cached self-hosted check worker artifact is available`; it was not
+retried and is not counted as a compiler-check pass.
+
+The focused pure-Simple owner spec is
+`test/01_unit/compiler/type_infer/option_pattern_scrutinee_spec.spl`. Before the
+source change it passed 1/5 examples: `Some` and `None` on concrete non-Option
+types were accepted, genuine Option payload bindings were not typed, and an
+unresolved scrutinee was not constrained. After the source change it passes
+6/6 through the seed diagnostic runner. Controls prove that a genuine
+`Optional<i64>` is accepted with an `i64` payload binding, an unresolved type is
+constrained to `Optional<T>`, `Ref<Optional<i64>>` retains match
+auto-dereference, and a named user enum may retain a variant called `Some`.
+
+The earlier subprocess class spec is not sufficient acceptance evidence: its
+negative cases discard process status and stderr and assert only that stdout
+lacks a success marker. A missing shell, bad binary path, or compiler crash can
+therefore make those negative cases pass.
+
+This slice does not close the bug row. `.unwrap_or` on non-Option receivers is
+unchanged, named HIR types cannot yet distinguish a user enum from a struct for
+exhaustive pattern-shape rejection, and no admitted Stage 2/3 artifact and
+receipt were available for native/interpreter proof. Keep `bug_db.sdn` at
+`P1, open` until those gaps and admitted cross-engine evidence are resolved.

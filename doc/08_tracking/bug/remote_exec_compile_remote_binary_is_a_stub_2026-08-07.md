@@ -1,4 +1,8 @@
 # `compile_remote_binary` is a fixed stub, not a compiler (blocks Notebook RemoteExec cross-cell VALUE state)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-07
 **Context:** Stream K, task K4 (`RemoteExec` NotebookExecutor) —
@@ -75,3 +79,4 @@ lands.
 Not proven: no `Results:` line —
 `test/02_integration/app/tools/notebook/remote_exec_qemu_rv32_spec.spl` needs a
 QEMU lane and was not run while the bootstrap holds the host.
+

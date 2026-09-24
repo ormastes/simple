@@ -1,5 +1,15 @@
 # Bug: native-build incremental object cache key omits the compiler/seed version
 
+## Closed 2026-09-13 — already fixed: the object cache key folds the compiler fingerprint
+- **measured** — in `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`,
+  `fn compiler_fingerprint()` is defined at `:1494` and
+  `compiler_fingerprint().hash(&mut hasher)` appears inside `object_cache_key` (`:1589`,
+  hash call at `:1607`), plus a second fold at `:1547`.
+- **inferred** — `compiler_fingerprint` hashes the running `current_exe`'s bytes, so a
+  rebuilt seed yields a different key and cannot reuse a stale `.o`. `.claude/rules/commands.md`
+  documents the same mechanism plus a per-lane cache scope layered on top. Not re-executed
+  against a real seed rebuild.
+
 - **ID:** native_object_cache_key_omits_seed_version_2026-06-15
 - **Severity:** P2 (silent: stale `.o` from an older compiler are reused after a
   codegen change, so the new codegen never reaches the link)

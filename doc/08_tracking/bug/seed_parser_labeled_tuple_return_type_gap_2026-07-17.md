@@ -1,4 +1,8 @@
 # Parser cannot parse labeled-tuple return types (`-> (name: type, ...)`) — Stage-1 bootstrap blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Scope:** shared `.spl` frontend parser (`src/compiler/10.frontend/core/...`),
@@ -132,3 +136,4 @@ is out of scope for this parse-blocker fix.
 ## Status (2026-07-18)
 
 OPEN (parser gap in both seeds). Workaround applied aee3289936b: reverted process_run to unlabeled tuple. Stage-1 now proceeds to next blocker. Parser fix + seed redeploy remain pending; see cross-ref to mcp_main_lazy_json doc UNRESOLVABLE-at-call-site analysis.
+

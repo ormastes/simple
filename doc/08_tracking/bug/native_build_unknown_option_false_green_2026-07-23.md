@@ -1,4 +1,9 @@
 # BUG: native-build ignored unknown options
+## Closed 2026-09-16 — ...ack for a token starting with `-`. ## Fix and regression `cli_native_build_option_error` v
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Reproduction
 
@@ -22,3 +27,4 @@ without invoking the compiler.
 
 A sole help flag exits 0. Any malformed argument list, including one that also
 contains help, exits 2 before the worker or output staging is reached.
+

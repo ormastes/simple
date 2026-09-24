@@ -1,4 +1,9 @@
 # `rt_env_cwd` Simple wrapper shadowed the runtime extern → infinite recursion (2026-08-25)
+## Closed 2026-09-16 — Status FIXED in this change; todo-scan crash to Scan complete evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED in this change. **Symptom:** every `bin/simple todo-scan` on clean `origin/main`
 died with `error: stack overflow: recursion depth 1000 exceeded limit 1000 in function 'rt_env_cwd'`.
@@ -23,3 +28,4 @@ the import line and the export list textually, still holds.
 
 ## Evidence
 `bin/simple todo-scan` in a clean `origin/main` worktree: crash → `Scan complete: 239 TODOs found`.
+

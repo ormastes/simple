@@ -1,0 +1,205 @@
+# codex-impl
+# Product policy-source adapter. It snapshots the process environment once and
+# parses project/user SDN independently so source precedence is never rebuilt
+# from a merged CompilerConfig.
+
+use app.io.env_ops.{env_vars}
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use compiler.common.structural_contracts.environment_variant_policy_v1.{
+    EnvironmentVariantAdminRestrictionsV1
+}
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.*
+
+pub enum EnvironmentVariantPolicySourceErrorV1:
+    EnvironmentSnapshotFailed
+    InvalidCli
+    InvalidProjectConfig
+    InvalidUserConfig
+    InvalidPolicyLayer
+
+# `source_identity` is diagnostic provenance only. Selection, trust, and cache
+# identity derive from normalized effective policy and downstream authorities.
+pub struct EnvironmentVariantConfigSourceV1:
+    present: bool
+    source_identity: text
+    content: text
+
+fn _absent() -> EnvironmentVariantRawValueV1:
+    EnvironmentVariantRawValueV1(present: false, value: "")
+
+fn _supplied(value: text) -> EnvironmentVariantRawValueV1:
+    EnvironmentVariantRawValueV1(present: true, value: value)
+
+fn _empty_layer() -> EnvironmentVariantRawPolicyLayerV1:
+    EnvironmentVariantRawPolicyLayerV1(
+        parser_impl: _absent(), parser_prefer: _absent(),
+        parser_require: _absent(), host_cpu_max: _absent(),
+        frontend_offload: _absent(), frontend_fallback: _absent(),
+        target_cpu: _absent(), target_cpu_features: _absent())
+
+fn _known_cli_key(key: text) -> bool:
+    key == "--parser-impl" or key == "--parser-prefer" or
+        key == "--parser-require" or key == "--host-cpu-max" or
+        key == "--frontend-offload" or
+        key == "--frontend-offload-fallback" or key == "--cpu"
+
+fn _set_raw_value(
+    layer: EnvironmentVariantRawPolicyLayerV1, key: text, value: text
+) -> Result<EnvironmentVariantRawPolicyLayerV1, EnvironmentVariantPolicySourceErrorV1>:
+    var out = layer
+    if key == "--parser-impl":
+        if out.parser_impl.present: return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+        out.parser_impl = _supplied(value)
+    elif key == "--parser-prefer":
+        if out.parser_prefer.present: return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+        out.parser_prefer = _supplied(value)
+    elif key == "--parser-require":
+        if out.parser_require.present: return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+        out.parser_require = _supplied(value)
+    elif key == "--host-cpu-max":
+        if out.host_cpu_max.present: return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+        out.host_cpu_max = _supplied(value)
+    elif key == "--frontend-offload":
+        if out.frontend_offload.present: return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+        out.frontend_offload = _supplied(value)
+    elif key == "--frontend-offload-fallback":
+        if out.frontend_fallback.present: return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+        out.frontend_fallback = _supplied(value)
+    elif key == "--cpu":
+        if out.target_cpu.present: return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+        out.target_cpu = _supplied(value)
+    else:
+        return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+    Ok(out)
+
+fn _cli_layer(args: [text]) -> Result<EnvironmentVariantRawPolicyLayerV1, EnvironmentVariantPolicySourceErrorV1>:
+    var out = _empty_layer()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        var key = ""
+        var value = ""
+        var recognized = false
+        val eq = arg.index_of("=")
+        if eq >= 0:
+            val candidate = arg.substring(0, eq)
+            if _known_cli_key(candidate):
+                key = candidate
+                value = arg.substring(eq + 1)
+                recognized = true
+        elif _known_cli_key(arg):
+            key = arg
+            if i + 1 >= args.len() or args[i + 1].starts_with("--"):
+                return Err(EnvironmentVariantPolicySourceErrorV1.InvalidCli)
+            i = i + 1
+            value = args[i]
+            recognized = true
+        if recognized:
+            out = _set_raw_value(out, key, value)?
+        i = i + 1
+    Ok(out)
+
+fn _environment_value(snapshot: [(text, text)], name: text) -> EnvironmentVariantRawValueV1:
+    for entry in snapshot:
+        if entry.0 == name:
+            return _supplied(entry.1)
+    _absent()
+
+fn _environment_layer(snapshot: [(text, text)]) -> EnvironmentVariantRawPolicyLayerV1:
+    EnvironmentVariantRawPolicyLayerV1(
+        parser_impl: _environment_value(snapshot, "SIMPLE_PARSER_IMPL"),
+        parser_prefer: _environment_value(snapshot, "SIMPLE_PARSER_PREFER"),
+        parser_require: _environment_value(snapshot, "SIMPLE_PARSER_REQUIRE"),
+        host_cpu_max: _environment_value(snapshot, "SIMPLE_HOST_CPU_MAX"),
+        frontend_offload: _environment_value(snapshot, "SIMPLE_FRONTEND_OFFLOAD"),
+        frontend_fallback: _environment_value(snapshot, "SIMPLE_FRONTEND_OFFLOAD_FALLBACK"),
+        target_cpu: _environment_value(snapshot, "SIMPLE_NATIVE_CPU"),
+        target_cpu_features: _environment_value(snapshot, "SIMPLE_CPU_FEATURES"))
+
+fn _config_value(
+    root: SdnValue, key: text
+) -> Result<EnvironmentVariantRawValueV1, EnvironmentVariantPolicySourceErrorV1>:
+    match root.get_path("environment_variants.{key}"):
+        case Some(node):
+            match node.as_str():
+                case Some(value): Ok(_supplied(value))
+                case None: Err(EnvironmentVariantPolicySourceErrorV1.InvalidProjectConfig)
+        case None: Ok(_absent())
+
+fn _config_layer(
+    source: EnvironmentVariantConfigSourceV1,
+    invalid: EnvironmentVariantPolicySourceErrorV1
+) -> Result<EnvironmentVariantRawPolicyLayerV1, EnvironmentVariantPolicySourceErrorV1>:
+    if not source.present:
+        return Ok(_empty_layer())
+    val parsed = match parse(source.content):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    match parsed.get_path("environment_variants"):
+        case Some(section):
+            if section.as_dict() == nil:
+                return Err(invalid)
+        case None:
+            return Ok(_empty_layer())
+    # `_config_value` uses one structural error internally; remap it to the
+    # caller's project/user identity at this boundary.
+    val parser_impl = match _config_value(parsed, "parser_impl"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    val parser_prefer = match _config_value(parsed, "parser_prefer"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    val parser_require = match _config_value(parsed, "parser_require"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    val host_cpu_max = match _config_value(parsed, "host_cpu_max"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    val frontend_offload = match _config_value(parsed, "frontend_offload"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    val frontend_fallback = match _config_value(parsed, "frontend_fallback"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    val target_cpu = match _config_value(parsed, "target_cpu"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    val target_cpu_features = match _config_value(parsed, "target_cpu_features"):
+        case Ok(value): value
+        case Err(_): return Err(invalid)
+    Ok(EnvironmentVariantRawPolicyLayerV1(parser_impl: parser_impl,
+        parser_prefer: parser_prefer, parser_require: parser_require,
+        host_cpu_max: host_cpu_max, frontend_offload: frontend_offload,
+        frontend_fallback: frontend_fallback, target_cpu: target_cpu,
+        target_cpu_features: target_cpu_features))
+
+pub fn environment_variant_policy_sources_collect_from_snapshot_v1(
+    args: [text], environment: [(text, text)],
+    resolved_project_config: EnvironmentVariantConfigSourceV1,
+    resolved_user_config: EnvironmentVariantConfigSourceV1,
+    admin: EnvironmentVariantAdminRestrictionsV1
+) -> Result<EnvironmentVariantPolicyCollectionV1, EnvironmentVariantPolicySourceErrorV1>:
+    val cli = _cli_layer(args)?
+    val project = _config_layer(resolved_project_config,
+        EnvironmentVariantPolicySourceErrorV1.InvalidProjectConfig)?
+    val user = _config_layer(resolved_user_config,
+        EnvironmentVariantPolicySourceErrorV1.InvalidUserConfig)?
+    match environment_variant_policy_collect_v1(cli, _environment_layer(environment),
+        project, user, admin):
+        case Ok(value): Ok(value)
+        case Err(_): Err(EnvironmentVariantPolicySourceErrorV1.InvalidPolicyLayer)
+
+pub fn environment_variant_policy_sources_collect_v1(
+    args: [text], resolved_project_config: EnvironmentVariantConfigSourceV1,
+    resolved_user_config: EnvironmentVariantConfigSourceV1,
+    admin: EnvironmentVariantAdminRestrictionsV1
+) -> Result<EnvironmentVariantPolicyCollectionV1, EnvironmentVariantPolicySourceErrorV1>:
+    match env_vars():
+        case Some(snapshot): environment_variant_policy_sources_collect_from_snapshot_v1(
+            args, snapshot, resolved_project_config, resolved_user_config, admin)
+        case None: Err(EnvironmentVariantPolicySourceErrorV1.EnvironmentSnapshotFailed)
+
+export EnvironmentVariantPolicySourceErrorV1, EnvironmentVariantConfigSourceV1
+export environment_variant_policy_sources_collect_from_snapshot_v1
+export environment_variant_policy_sources_collect_v1

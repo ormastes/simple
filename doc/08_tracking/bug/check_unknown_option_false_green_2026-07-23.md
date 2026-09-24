@@ -1,4 +1,9 @@
 # `simple check` unknown option false-green
+## Closed 2026-09-16 — source fixed, check_option_error contract spec passes (Stage 4 qual pending)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** source fixed; focused bootstrap contract passes; fresh Stage 4 qualification remains pending.
 
@@ -14,3 +19,4 @@ exit code 2 before file discovery. It accepts only canonical `log-mode`
 `test/01_unit/app/check_cli_option_validation_contract_check.spl` covers the
 fail-closed and accepted forms and passes through the temporary bootstrap
 interpreter. Fresh Stage 4 runtime evidence remains pending.
+

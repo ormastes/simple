@@ -1,4 +1,8 @@
 # SimpleOS VFS round-trip blocker 2: 64-bit PCI BAR truncated, and unaligned MMIO reads silently return 0
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Gate: `scripts/check/check-simpleos-vfs-server-roundtrip-ovmf.shs`
@@ -108,3 +112,4 @@ PD with `0x83` (PS|RW|P) — no PCD/PWT, so the NVMe BAR is mapped write-back
 cacheable. QEMU dispatches MMIO by physical address regardless of guest
 cacheability, so this is not the QEMU symptom, but it is a real defect for the
 board-runnable rule and should be `0x9B` (PS|RW|P|PCD|PWT) on hardware.
+

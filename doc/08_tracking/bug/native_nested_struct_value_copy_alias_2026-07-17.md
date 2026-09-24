@@ -1,4 +1,8 @@
 # Native nested struct copies retain aliases
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-07-17
 - Status: source fixed; execution pending
@@ -35,3 +39,4 @@ their hosted matrix, and FreeBSD selects it under both LLVM and Cranelift.
 
 Execution remains pending under the current no-runtime/no-compiler-command
 restriction.
+

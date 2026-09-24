@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence, and the mirror the ed25519 fix missed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (backlog pre-existing); the newly-introduced pair is FIXED here.
 
@@ -35,3 +39,4 @@ check-test-tree-divergence-delta: PASS — 19 pre-existing offender(s),
 The full 829-entry list captured at the base is stored alongside this file as
 `test_tree_divergence_preexisting_2026-08-17.txt`. This backlog is owned by
 whichever lane last touched the duplicate trees; nothing here widens it.
+

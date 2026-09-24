@@ -1,4 +1,8 @@
 # Interpreter: `Dict<K, ClassInstance>.get()`/`.set()` copies the value — mutations through the fetched instance are silently lost
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-07-06
 - Severity: high (silent state loss — any cache/accumulator held in a Dict misbehaves)
@@ -99,3 +103,16 @@ completely (6 of 7 checks fail). **Conclusion: PARTIALLY FIXED.** The
 production-relevant JIT path (`bin/simple run`, the default engine) is fixed;
 the interpreter path (what `bin/simple test` spec BODIES execute, and what
 this bug was originally filed against) is not.
+
+
+## Suite-fix rerun 2026-09-20 — REPRODUCED on post-spawn-fix seed
+
+Suite-fix lane (`suite-2026-09-18`, Windows) re-ran
+`test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl` with the
+rebuilt seed carrying the test-mode child-spawn fix (0b28248caa3,
+1f557a02987). Child spawns now work, so the real residual pin is visible
+unmasked: examples 1-3 (JIT probe) pass; example 4 (both-engines parity) fails
+with `expected true to equal false` because the direct interpreter probe still
+prints the identical 6-of-7 failure block quoted above. No change vs the
+2026-09-06 verdict — the interpreter-lane class-instance copy remains a
+semantics-change debt, deliberately not folded into the spawn-fix lane.

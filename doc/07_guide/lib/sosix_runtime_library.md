@@ -68,6 +68,26 @@ read costs about 38× a direct positioned read — interpreter tax on ~40 calls,
 one ring hop, no allocation on the hot path. Report:
 `doc/10_metrics/runtime/sosix_unification_perf_report_2026-09-05.md`.
 
+### Windows and macOS native provider status (2026-09-21)
+
+`SosixHostedFileDriver.service` performs its positioned read or write before
+publishing the completion. Its passing filesystem specs establish the portable
+fallback's behavior; they do not establish asynchronous OS file submission.
+There is no platform provider selection in this driver.
+
+Native backend source exists in `src/runtime/platform/async_windows.c` (IOCP)
+and `async_macos.c` (kqueue with a file worker pool). However, those files and
+their `async_driver.c` bridge are absent from all three runtime source lists.
+The bridge also disagrees with `runtime.h` on three function signatures. On
+Windows, LLVM 23.1.1 compiles the IOCP file by itself, but rejects the bridge
+when checked against that public header. The Rust seed's separate
+`rt_driver_*` implementation returns `-38` for Windows file operations.
+
+TODO 306 remains **OPEN**. A native provider requires a reviewed runtime ABI
+and build integration, a SOSIX adapter that retains operations and buffers
+until completion or cancellation, and platform behavioral evidence. See the
+[blocker report and reproduction](../../08_tracking/todo/sosix_c5_native_provider_runtime_blockers_2026-09-21.md).
+
 ## Exact POSIX leg (backed by the seed deployed 2026-09-05)
 
 `std.nogc_async_mut.sosix.posix` — `sosix_posix_open/close/pread/pwrite`,
@@ -78,12 +98,34 @@ The externs `rt_fd_pread`/`rt_fd_pwrite` exist in the seed source as of
 (`posix_spec` 3/3 on `bin/simple`); on an older binary they return nil and the
 spec is red. The surface is re-exported from the capsule `__init__`.
 
+## File mapping: two distinct operations (2026-09-19)
+
+`std.nogc_async_mut.sosix.file_map` is the ONLY host-mapping path in Simple
+product code; `std.nogc_sync_mut.io.file_ops` no longer carries `file_mmap`
+(the raw `rt_mmap`/`rt_munmap`/`rt_madvise` externs live behind
+`std.nogc_sync_mut.sffi.fs` aliases and are not imported anywhere else).
+
+| Op | Purpose | POSIX | Windows |
+|---|---|---|---|
+| `sosix_file_map(path, size, offset, readonly) -> i64` + `sosix_file_unmap(addr, size)` | ACTUAL access: read (or write) the bytes through the address | `mmap(2)` / `munmap` | `CreateFileMapping` + `MapViewOfFile` / `UnmapViewOfFile` |
+| `sosix_file_map_prefetch(path, size, offset) -> bool` | CACHING: startup warm-up of the page cache | `mmap` + `madvise(WILLNEED)` + `munmap`, composed in Simple | **no-op, returns true, maps nothing** |
+
+Bounds contract (runtime-owned, identical in the Rust owner, `runtime_native.c`
+and the `platform/*` headers): 0 on any failure, `size > 0`, `offset >= 0`,
+`offset + size` must not overflow and must lie inside the file; `offset` must be
+page-aligned as `mmap` requires. The Rust owner additionally consults the
+sandbox (`READ_FILE`, and `WRITE_FILE` for `readonly: false`); the core-C
+runtime has no sandbox and this facade adds no policy hook. Verified on Linux
+by `scripts/check/check-file-map-c.shs` (both C owners) and the interpreter
+probe in this change's report; the Windows branches are written, not compiled.
+
 ## Not available (do not advertise)
 
 - **Exact POSIX aliases** (`sosix.posix.pread`/`pwrite`): blocked on runtime-owned
   `rt_fd_pread`/`rt_fd_pwrite` externs (plan task C1). No stub exists.
-- **Linux io_uring, macOS, Windows providers**: blocked rows in the plan; the
-  only hosted provider is the software ring.
+- **Linux io_uring, macOS, Windows native providers**: blocked rows in the
+  plan. `SosixHostedFileDriver` provides synchronous host filesystem service
+  through the ring; Windows/macOS native backend source is not integrated.
 - **GPU proxy (SOSIX-G G1) and SimpleOS device-initiated queues**: blocked rows.
 - **Renaming re-export** (`export use m.f as g`): still `E1002`; facades use
   `@always_inline` pass-throughs.

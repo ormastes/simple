@@ -1,4 +1,8 @@
 # Bug: `excel_floor`/`excel_ceiling` mishandle negative `significance` (should use `abs(significance)`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-20
 
@@ -83,3 +87,4 @@ pub fn excel_ceiling(x: f64, significance: f64) -> f64:
 ## Affected
 
 - `test/01_unit/app/office/sheets/math_bridge_extended_spec.spl` (4 of 23 examples)
+

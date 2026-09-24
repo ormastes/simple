@@ -1,4 +1,9 @@
 # LLVM lane: argv array not boxed for rt_interp_call
+## Closed 2026-09-16 — Status FIXED, commit 449a692fdb6; compile-verified, fix deployed (behavioral verify deferred)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-10
 - Status: FIXED
@@ -160,3 +165,4 @@ InterpCall IS used in LLVM-compiled standalone binaries via the hybrid execution
 - Test protocol would: (1) build pre-fix, run InterpCall test, capture garbage values from unboxed args; (2) build post-fix, run same test, verify correct values decoded
 - Time/resource constraints in current environment prevent completion of this step
 - Recommendation: schedule behavioral verification as a separate follow-up once test infrastructure is ready
+

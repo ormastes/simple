@@ -1,7 +1,15 @@
 # std.io_runtime.env_get returns corrupted text under `bin/simple run`
 
+## Closed 2026-09-13 — does not reproduce: `env_get` returns the exact value
+- **measured** — with `TRIAGE03_PROBE=hello_world_123` in the environment,
+  `io_runtime.env_get("TRIAGE03_PROBE") ?? ""` under `bin/simple run` (Rust seed
+  v1.0.0-rc.1, Windows) prints `hello_world_123` and length `15` — no corruption, no
+  truncation.
+- **inferred** — filed against `bin/simple run` on Linux; the seed lane matches, the host
+  does not.
+
 Date: 2026-06-19
-Status: open (workaround in place)
+Status: CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 Severity: P2
 Related: memory note "f64 Unreliable All Backends", "Text-only API byte cliffs"
 

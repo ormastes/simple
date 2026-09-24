@@ -1,4 +1,9 @@
 # `std.math.special.sqrt_f64` is not correctly rounded (diverges from `rt_math_sqrt`)
+## Closed 2026-09-16 — ...quietly become a permanent excuse. ## Fix direction (not attempted here) Add a final Newto
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN. **Found:** 2026-09-01, by the tranche-2 dual-run pair
 `sqrt_f64_vs_rt_math_sqrt` added to
@@ -53,3 +58,4 @@ It cannot quietly become a permanent excuse.
 Add a final Newton-Raphson iteration in the `f64` domain, or round the last
 step through the same correctly-rounded primitive the runtime uses. Any fix
 must be landed together with the spec update described above.
+

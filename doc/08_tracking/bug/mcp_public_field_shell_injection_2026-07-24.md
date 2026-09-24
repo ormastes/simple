@@ -1,4 +1,9 @@
 # MCP public-field shell injection
+## Closed 2026-09-16 — FIXED IN SOURCE; residual inventory shows no public fields reaching shell in active handlers
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED IN SOURCE / STAGE 4 QUALIFICATION PENDING
 **Scope:** `src/app/mcp` source-mode server; the issue is independent of the
@@ -39,3 +44,4 @@ active handlers. Constant, no-public-input shell pipelines remain allowed.
 `main_dispatch_core.spl` is an inactive legacy copy and remains separately
 tracked; a fresh Stage 4 native MCP handshake is still required before runtime
 qualification.
+

@@ -53,6 +53,7 @@ Runtime notes:
 - `|>` pipe-forward and `>>` composition work in interpreter mode, including placeholder-lambda forms (`5 |> (_1 * 3)`). Native (compiled) support must still be proven with `SIMPLE_NO_STUB_FALLBACK=1`.
 - `:=` is documented as a walrus-style `val` shorthand in older guidance, but current executable coverage does not prove the actual token. Use `val name = expr` until parser/runtime tests pass.
 - Keep `\_:` for constant callbacks that must still be functions, such as `headers.map(\_: "---")`; replacing them with the constant expression would change the value passed to the higher-order call.
+- Language contract: placeholder lambdas are ordinary callable values after parsing. An admitted interpreter or native candidate must give `_1 + 1` the same result as `\x: x + 1` or a named function when passed through a user function parameter and invoked there.
 - Use explicit lambdas or helper functions once the expression has side effects, nested decisions, or non-obvious runtime behavior.
 
 ---
@@ -884,7 +885,17 @@ for i in 0..10:
 
 for key, value in dict.items():
     print "{key}: {value}"
+
+for i, item in items.enumerate():     # index + item — `.enumerate()` is required
+    print "{i}: {item}"
 ```
+
+A bare comma pattern is **always** a tuple destructure, of any arity, and
+means exactly what the parenthesized spelling means: `for a, b in xs:` ==
+`for (a, b) in xs:`. The iterable is never consulted. There is no
+"enumerate shorthand" — `for i, x in xs:` over a plain array does NOT give
+you the index; it tries to unpack each element and binds `nil` for the parts
+a non-tuple does not have. Write `xs.enumerate()` when you want positions.
 
 ### While Loops
 

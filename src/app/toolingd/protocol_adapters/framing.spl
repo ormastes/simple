@@ -1,0 +1,35 @@
+use std.common.json.parser.json_parse_with_error
+use app.toolingd.protocol_adapters.model.*
+
+fn _decimal(value: text) -> i64:
+    if value.len() == 0:
+        return -1
+    var result: i64 = 0
+    for index in 0..value.len():
+        val byte = value.byte_at(index)
+        if byte < 48 or byte > 57:
+            return -1
+        result = result * 10 + (byte - 48)
+    result
+
+pub fn tooling_edge_decode_frame_v1(frame: text) -> ToolingEdgeFrameResultV1:
+    val separator = frame.find("\r\n\r\n")
+    if separator < 0:
+        return ToolingEdgeFrameResultV1(status: ToolingEdgeStatusV1.IncompleteFrame, body: "", consumed_bytes: 0)
+    val header = frame.slice(0, separator)
+    if not header.starts_with("Content-Length: "):
+        return ToolingEdgeFrameResultV1(status: ToolingEdgeStatusV1.MalformedFrame, body: "", consumed_bytes: 0)
+    val length = _decimal(header.slice(16, header.len()))
+    if length < 0:
+        return ToolingEdgeFrameResultV1(status: ToolingEdgeStatusV1.MalformedFrame, body: "", consumed_bytes: 0)
+    val body_start = separator + 4
+    if body_start + length > frame.len():
+        return ToolingEdgeFrameResultV1(status: ToolingEdgeStatusV1.IncompleteFrame, body: "", consumed_bytes: 0)
+    val body = frame.slice(body_start, body_start + length)
+    val (_, parse_error) = json_parse_with_error(body)
+    if parse_error != "":
+        return ToolingEdgeFrameResultV1(status: ToolingEdgeStatusV1.MalformedFrame, body: "", consumed_bytes: 0)
+    ToolingEdgeFrameResultV1(status: ToolingEdgeStatusV1.Ok, body: body, consumed_bytes: (body_start + length) as u64)
+
+pub fn tooling_edge_encode_frame_v1(body: text) -> text:
+    "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
