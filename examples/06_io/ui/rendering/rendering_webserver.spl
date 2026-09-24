@@ -1,0 +1,232 @@
+# Rendering showcases — web-server GUI on the pure-Simple server (lane L8)
+#
+# lane: webserver
+# tier: full
+# core: std.nogc_sync_mut.http_server
+#
+# Serves the shared item list rendering_items.ui.sdn over HTTP so a browser
+# shows the UI (REQ-001, web-server GUI). The `bin/simple ui web` WebServer
+# serve loop is BLOCKED by a recorded bug (doc/08_tracking/bug/ui_web_seed_exits_
+# before_bind_2026-09-24.md), so this entry serves the SAME rendered HTML
+# through the pure-Simple std.nogc_sync_mut.http_server stack directly — the
+# secure pure-Simple web server owner (llm_wiki). No FFI, no node wrapper, no
+# ui.web serve loop, and never a silent fallback to another server.
+#
+# Pipeline: parse the .ui.sdn (nogc_sync_mut.ui.parse.sdn_tree.parse_ui_to_tree)
+# -> UISession -> UIState -> app.ui.web.html.generate_html_page (the exact HTML
+# generation `bin/simple ui web` uses; only the transport is ours) -> one route
+# GET / returning that HTML with a text/html Content-Type.
+#
+# Bounded serve mechanism (documented per lane contract): the library's
+# start_plaintext() runs an unbounded blocking accept loop (stop() cannot
+# unblock a parked accept), so the entry drives the SAME production connection
+# path at entry level: TcpListener.bind + listener.accept_timeout(deadline)
+# + SimpleHttpServer.router.dispatch + write_response_limited, all from
+# std.nogc_sync_mut.http_server / io.tcp. The loop exits after the first
+# successful GET / (readiness) or when SIMPLE_SHOWCASE_SERVE_MAX_SECONDS
+# elapses without one (`showcase status=blocked no-request timeout`).
+#
+# Env knobs: SIMPLE_SHOWCASE_PORT (default 8080), SIMPLE_SHOWCASE_BIND
+# (default 127.0.0.1), SIMPLE_SHOWCASE_DOC (default
+# examples/06_io/ui/rendering/rendering_items.ui.sdn),
+# SIMPLE_SHOWCASE_SERVE_MAX_SECONDS (default 30, safety cap).
+#
+# Honest-fail lines: `showcase status=blocked <reason>` (exit 1) /
+# `showcase status=pass http://<bind>:<port> served=<n> bytes=<len>` (exit 0).
+
+use std.io_runtime.{env_get, file_exists, time_now_monotonic_ms, cwd}
+use std.io.types.{IoErrorKind}
+use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, plaintext_development_capability, request_parse_error_status}
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.parser.{parse_request_with_policy_limits}
+use std.nogc_sync_mut.http_server.response.{write_response_limited, write_error_limited, with_default_security_headers}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, http_method_to_text}
+use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
+use nogc_sync_mut.ui.session.{UISession}
+use app.ui.web.html.{generate_html_page}
+
+val DEFAULT_DOC: text = "examples/06_io/ui/rendering/rendering_items.ui.sdn"
+# Marker item string from the sdn (web_list item 2) — the HTTP probe asserts
+# the served body contains it.
+val MARKER: text = "scrollbar"
+
+fn main() -> i64:
+    val bind = env_text("SIMPLE_SHOWCASE_BIND", "127.0.0.1")
+    val port = env_i64("SIMPLE_SHOWCASE_PORT", 8080).to_i32()
+    val max_seconds = env_i64("SIMPLE_SHOWCASE_SERVE_MAX_SECONDS", 30)
+    val doc_path = resolve_doc_path()
+    if doc_path == "":
+        print "showcase status=blocked missing-doc path={DEFAULT_DOC}"
+        return 1
+
+    match render_doc_html(doc_path, port):
+        Err(e):
+            print "showcase status=blocked parse reason={e}"
+            return 1
+        Ok(html):
+            return serve_showcase(bind, port, html, max_seconds)
+
+# ---------------------------------------------------------------------------
+# sdn -> HTML (reuse the ui.web HTML generation; only the transport is ours)
+# ---------------------------------------------------------------------------
+
+fn render_doc_html(doc_path: text, port: i32) -> Result<text, text>:
+    match parse_ui_to_tree(doc_path):
+        Err(e):
+            Err(e)
+        Ok(tree):
+            var session = UISession.new(tree)
+            session.set_active_backend("web")
+            Ok(generate_html_page(session.current_state(), port))
+
+# ---------------------------------------------------------------------------
+# Bounded pure-Simple HTTP serve
+# ---------------------------------------------------------------------------
+
+fn serve_showcase(bind: text, port: i32, html: text, max_seconds: i64) -> i64:
+    var router = Router.new()
+    router.get("/", \req: HttpResponse.html(html))
+
+    match plaintext_development_capability(
+            "rendering_webserver showcase: audited plaintext development serving"):
+        Err(e):
+            print "showcase status=blocked capability reason={e}"
+            return 1
+        Ok(capability):
+            var server = SimpleHttpServer.new(bind, port, router)
+            server.with_policy(SecureServerPolicy.plaintext_dev(capability))
+            match TcpListener.bind("{bind}:{port}"):
+                Err(e):
+                    print "showcase status=blocked bind reason={e}"
+                    return 1
+                Ok(listener):
+                    print "Rendering items served at http://{bind}:{port}/ (marker: {MARKER})"
+                    val outcome = serve_bounded(server, listener, max_seconds)
+                    val _ = listener.close()
+                    match outcome:
+                        Err(reason):
+                            print "showcase status=blocked {reason}"
+                            return 1
+                        Ok(served):
+                            print "showcase status=pass http://{bind}:{port} served={served} bytes={text_to_bytes(html).len()}"
+                            return 0
+
+# Accept loop bounded by the max-seconds cap: accept_timeout parks only until
+# the deadline, so a no-request window still exits with the blocked status.
+# The first successful GET / marks readiness and ends the loop.
+fn serve_bounded(server: SimpleHttpServer, listener: TcpListener, max_seconds: i64) -> Result<i64, text>:
+    val deadline = time_now_monotonic_ms() + max_seconds * 1000
+    var served: i64 = 0
+    while served < 1:
+        val remaining = deadline - time_now_monotonic_ms()
+        if remaining <= 0:
+            return Err("no-request timeout")
+        match listener.accept_timeout(remaining):
+            Err(e):
+                if e.kind == IoErrorKind.TimedOut:
+                    return Err("no-request timeout")
+                return Err("accept-error {e.message}")
+            Ok(stream):
+                if serve_connection(server, stream):
+                    served = served + 1
+    Ok(served)
+
+# One connection through the same production pieces SimpleHttpServer's
+# handle_connection uses (parse with policy limits -> router.dispatch ->
+# bounded write with default security headers), but entry-bounded and with a
+# readiness verdict: true only for a written 200 GET /.
+fn serve_connection(server: SimpleHttpServer, stream: TcpStream) -> bool:
+    if not stream.set_read_timeout_status(server.policy.read_timeout_ms):
+        val _ = stream.close()
+        return false
+    match stream.set_write_timeout(Some(server.policy.write_timeout_ms)):
+        Err(_):
+            val _ = stream.close()
+            return false
+        Ok(_):
+            pass
+    var remote_addr = ""
+    match stream.peer_addr():
+        Ok(peer):
+            remote_addr = peer
+        Err(_):
+            val _ = stream.close()
+            return false
+    match parse_request_with_policy_limits(stream, server.policy.max_request_line,
+            server.policy.max_header_count, server.policy.max_header_line,
+            server.policy.max_body, server.policy.max_read_iters):
+        Ok(req):
+            var request = req
+            request.remote_addr = remote_addr
+            val resp = with_default_security_headers(server.router.dispatch(request), false)
+            val wrote = write_response_limited(stream, resp, server.policy.max_response_bytes)
+            val _ = stream.close()
+            return wrote
+                and http_method_to_text(request.method) == "GET"
+                and request.path == "/"
+                and resp.status_code() == 200
+        Err(e):
+            val _ = write_error_limited(stream, request_parse_error_status(e), e,
+                server.policy.max_response_bytes)
+            val _ = stream.close()
+            return false
+
+# ---------------------------------------------------------------------------
+# Env + path resolution (same algorithm as rendering_switch.spl)
+# ---------------------------------------------------------------------------
+
+fn env_text(key: text, default: text) -> text:
+    val value = env_get(key) ?? ""
+    if value.trim() == "":
+        return default
+    value
+
+fn env_i64(key: text, default: i64) -> i64:
+    val raw = (env_get(key) ?? "").trim()
+    if raw == "":
+        return default
+    val zero = "0".to_i64()
+    var result: i64 = 0
+    var i = 0
+    val n = raw.len()
+    if raw.char_at(0) == "-":
+        return default
+    while i < n:
+        val digit = raw.char_at(i).to_i64() - zero
+        if digit < 0 or digit > 9:
+            return default
+        result = result * 10 + digit
+        i = i + 1
+    result
+
+fn resolve_doc_path() -> text:
+    val explicit = env_get("SIMPLE_SHOWCASE_DOC") ?? ""
+    if explicit.trim() != "":
+        return explicit
+    if file_exists(DEFAULT_DOC):
+        return DEFAULT_DOC
+    val root = resolve_repo_root()
+    if root != "":
+        val candidate = path_join(root, DEFAULT_DOC)
+        if file_exists(candidate):
+            return candidate
+    ""
+
+fn resolve_repo_root() -> text:
+    val explicit = env_get("SIMPLE_REPO_ROOT") ?? ""
+    if explicit != "":
+        return explicit
+    val lib = env_get("SIMPLE_LIB") ?? ""
+    if lib.ends_with("/src") or lib.ends_with("\\src"):
+        return lib.substring(0, lib.len() - 4)
+    val here = cwd()
+    if file_exists(path_join(here, "bin/simple")):
+        return here
+    ""
+
+fn path_join(root: text, rel: text) -> text:
+    if root.ends_with("/") or root.ends_with("\\"):
+        return root + rel
+    root + "/" + rel

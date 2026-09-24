@@ -2,6 +2,28 @@
 
 The canonical app IDs are `graphics_2d_showcase`, `web_standards_showcase`, and `gui_widget_showcase`. Readiness is recorded in `src/lib/common/ui/showcase_catalog.spl`; a false entry means the surface is not yet accepted even if an older demo window exists.
 
+## Canonical rendering showcases (2026-09-24)
+
+The current canonical set lives in `examples/06_io/ui/rendering/` — ten
+entries (`rendering_{tui,gui,wm}_{core,full}.spl`,
+`rendering_{2d,web}_{core,extended}.spl`) plus the shared
+`rendering_items.ui.sdn` item list, the `rendering_switch.spl` UI-base
+switch, and a per-directory `doc.md` run table. Tier split is file-based
+(extended imports core); every entry prints honest-fail
+`showcase status=blocked|pass` lines. Headless verification:
+
+```text
+SIMPLE_LIB=src SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_2d_core.spl
+SIMPLE_LIB=src SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_wm_full.spl
+bin/simple test test/03_system/ui_showcase/rendering_showcases_spec.spl --mode=interpreter
+sh scripts/check/check-rendering-showcase-captures.shs
+```
+
+Web-server GUI (REQ-001): `bin/simple ui web examples/06_io/ui/rendering/rendering_items.ui.sdn --port 8080`
+— currently blocked by `doc/08_tracking/bug/ui_web_seed_exits_before_bind_2026-09-24.md`.
+The legacy standalone entries below remain as-is; new work should extend the
+canonical subtree, not add flat demos.
+
 ## Standalone
 
 ```text
