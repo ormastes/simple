@@ -1,4 +1,4 @@
-<!-- llm-process-gen: managed source=claude_release_command source_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b content_sha256=e8588da3b96d5a3385d37ec151b1281264c582915dd9c946849ac1ca3e30bd2f -->
+<!-- llm-process-gen: managed source=claude_release_command source_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b content_sha256=83bc0f6a9e2f552b310b737869b09ea1761b92012789270be4b15aef2a7db2b0 -->
 # Release Skill
 
 Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
@@ -80,7 +80,7 @@ There are 17 of them, and the list is the authority, not this table:
 |-------|-------|
 | plain | `VERSION` |
 | `.sdn` | `src/app/simple.sdn`, `src/lib/simple.sdn`, `src/compiler/simple.sdn`, `src/compiler/00.common/simple.sdn`, `src/compiler_rust/simple.sdn` |
-| cargo | `src/compiler_rust/Cargo.toml` (`[workspace.package] version`), `src/compiler_rust/Cargo.lock` (all 11 product packages, or the file reads `<ambiguous>`) |
+| cargo | `src/compiler_rust/Cargo.toml` (`[workspace.package] version`), `src/compiler_rust/Cargo.lock` (every workspace product package — 12 as of 1.0.0-rc.1, or the file reads `<ambiguous>`) |
 | `.spl` | `src/app/cli/bootstrap_identity.spl`, `src/app/cli/cli_helpers.spl`, `src/app/cli/_CliMain/args_and_os_commands.spl`, `src/app/simple_core/main.spl` (`SIMPLE_CORE_VERSION_V1`), `src/app/simpleos_tool/main.spl` (`print "Simple v..."`) |
 | registry | `tools/mcp-registry/{package,server}.json`, `tools/lsp-mcp-registry/{package,server}.json` — `server.json` carries the version **twice** and both must match, or the file reads `<ambiguous>` |
 
