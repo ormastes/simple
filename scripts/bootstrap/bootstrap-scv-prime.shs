@@ -1,0 +1,128 @@
+#!/bin/sh
+# One-time SCV compile-source inventory prime for phase verification.
+#
+# Every full-CLI entrypoint that compiles (`check`, `run`, `test`, ...) passes
+# compiler_entrypoint_admit_v1 (src/app/compiler_entrypoint/admission.spl),
+# which fails closed with `SCV-E-ADMISSION: compile-event-journal-missing`
+# until build/scv/compile-events/CURRENT exists in the source root. A fresh
+# bootstrap worktree has none, so every spec child of the phase test matrix
+# failed (Windows stage-2, bootstrap35, 2026-09-25). CI and the FreeBSD lane
+# export SIMPLE_SCV_INVENTORY_COLD_INIT=1 into the whole run instead, which
+# makes EVERY child re-list and re-hash the tree. This primes once, with the
+# just-built CLI, and only when no valid journal exists; children never see
+# SIMPLE_SCV_INVENTORY_COLD_INIT.
+#
+# Sourced by bootstrap-phase-verification.shs. `sh bootstrap-scv-prime.shs
+# --selftest` exercises the skip / prime / fail-closed paths with fixtures.
+
+# Mirrors compiler_inventory_cursor_decode_v1 (inventory_events.spl): exactly
+# six lines, the v1 magic, a 40/64-hex git head, integer rows, two 64-char
+# digests and an integer generation.
+bootstrap_scv_journal_valid() {
+    [ -f "$1" ] || return 1
+    awk '
+        { sub(/\r$/, "") }
+        NR == 1 { ok = ($0 == "simple-compile-event-cursor-v1") }
+        NR == 2 { v = $0; ok = ok && sub(/^git_head=/, "", v) && (length(v) == 40 || length(v) == 64) }
+        NR == 3 { v = $0; ok = ok && sub(/^filesystem_rows=/, "", v) && v ~ /^[0-9]+$/ }
+        NR == 4 { v = $0; ok = ok && sub(/^filesystem_digest=/, "", v) && length(v) == 64 }
+        NR == 5 { v = $0; ok = ok && sub(/^inventory_digest=/, "", v) && length(v) == 64 }
+        NR == 6 { v = $0; ok = ok && sub(/^inventory_generation=/, "", v) && v ~ /^[0-9]+$/ }
+        END { exit !(ok && NR == 6) }
+    ' "$1"
+}
+
+# bootstrap_scv_prime <source_root> <cli> <home> <tmp> <log> <probe_file>
+# Prints one `scv-inventory-prime:` line with the outcome and timing.
+# Returns 0 when a valid journal exists afterwards, 1 otherwise.
+bootstrap_scv_prime() {
+    bsp_root=$1 bsp_cli=$2 bsp_home=$3 bsp_tmp=$4 bsp_log=$5 bsp_probe=$6
+    bsp_cursor="$bsp_root/build/scv/compile-events/CURRENT"
+    if bootstrap_scv_journal_valid "$bsp_cursor"; then
+        echo "scv-inventory-prime: skipped (valid journal present: $bsp_cursor)"
+        return 0
+    fi
+    bsp_timeout=${BOOTSTRAP_SCV_PRIME_TIMEOUT:-3600}
+    bsp_start=$(date +%s)
+    (
+        cd "$bsp_root" || exit 125
+        HOME="$bsp_home" TMPDIR="$bsp_tmp" SIMPLE_BINARY="$bsp_cli" \
+            SIMPLE_SCV_INVENTORY_COLD_INIT=1
+        export HOME TMPDIR SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
+        if command -v timeout >/dev/null 2>&1; then
+            exec timeout "$bsp_timeout" "$bsp_cli" check "$bsp_probe"
+        fi
+        exec "$bsp_cli" check "$bsp_probe"
+    ) >"$bsp_log" 2>&1
+    bsp_rc=$?
+    bsp_elapsed=$(( $(date +%s) - bsp_start ))
+    # The journal, not the check verdict, is the evidence: admission writes it
+    # before `check` does any work of its own.
+    if bootstrap_scv_journal_valid "$bsp_cursor"; then
+        echo "scv-inventory-prime: primed in ${bsp_elapsed}s (check rc=$bsp_rc, log $bsp_log)"
+        return 0
+    fi
+    echo "scv-inventory-prime: FAILED after ${bsp_elapsed}s (rc=$bsp_rc): no valid $bsp_cursor; every full-CLI child would fail SCV-E-ADMISSION. Log: $bsp_log" >&2
+    return 1
+}
+
+bootstrap_scv_prime_selftest() {
+    st=$(mktemp -d 2>/dev/null || mktemp -d -t scvprime)
+    [ -n "$st" ] && [ -d "$st" ] || { echo "scv-prime selftest: ERROR — no temp dir"; return 2; }
+    fails=0
+    head40=0123456789abcdef0123456789abcdef01234567
+    d64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    write_cursor() {
+        mkdir -p "$1/build/scv/compile-events"
+        printf 'simple-compile-event-cursor-v1\ngit_head=%s\nfilesystem_rows=0\nfilesystem_digest=%s\ninventory_digest=%s\ninventory_generation=%s' \
+            "$head40" "$d64" "$d64" "${2:-0}" >"$1/build/scv/compile-events/CURRENT"
+    }
+    expect() { # name expected_rc actual_rc
+        if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1 (expected rc=$2, got $3)"; fails=$((fails + 1)); fi
+    }
+
+    # A CLI that records it was called and writes a valid cursor.
+    printf '#!/bin/sh\necho called >"%s/called"\nhead40=%s d64=%s\nmkdir -p build/scv/compile-events\nprintf "simple-compile-event-cursor-v1\\ngit_head=$head40\\nfilesystem_rows=0\\nfilesystem_digest=$d64\\ninventory_digest=$d64\\ninventory_generation=0" >build/scv/compile-events/CURRENT\nexit 1\n' \
+        "$st" "$head40" "$d64" >"$st/good_cli"
+    # A CLI that writes nothing.
+    printf '#!/bin/sh\necho called >"%s/called"\nexit 0\n' "$st" >"$st/bad_cli"
+    chmod +x "$st/good_cli" "$st/bad_cli"
+
+    # 1. valid journal present -> skip, CLI never invoked
+    mkdir -p "$st/r1"; write_cursor "$st/r1"; rm -f "$st/called"
+    bootstrap_scv_prime "$st/r1" "$st/bad_cli" "$st" "$st" "$st/l1" probe >/dev/null; expect "skip when valid journal present" 0 $?
+    [ ! -f "$st/called" ]; expect "skip does not invoke the CLI" 0 $?
+    # 2. no journal -> CLI primes -> success even though check rc != 0
+    mkdir -p "$st/r2"; rm -f "$st/called"
+    bootstrap_scv_prime "$st/r2" "$st/good_cli" "$st" "$st" "$st/l2" probe >/dev/null; expect "prime writes journal -> success" 0 $?
+    # 3. no journal and CLI writes none -> fail closed
+    mkdir -p "$st/r3"
+    bootstrap_scv_prime "$st/r3" "$st/bad_cli" "$st" "$st" "$st/l3" probe >/dev/null 2>&1; expect "no journal after prime -> fail closed" 1 $?
+    # 4. malformed journals are not valid (re-prime rather than skip)
+    mkdir -p "$st/r4/build/scv/compile-events"
+    printf 'simple-compile-event-cursor-v1\ngit_head=abc\n' >"$st/r4/build/scv/compile-events/CURRENT"
+    bootstrap_scv_journal_valid "$st/r4/build/scv/compile-events/CURRENT"; expect "truncated cursor is invalid" 1 $?
+    write_cursor "$st/r4" -1
+    bootstrap_scv_journal_valid "$st/r4/build/scv/compile-events/CURRENT"; expect "negative generation is invalid" 1 $?
+    # 5. CRLF-terminated valid cursor still validates
+    write_cursor "$st/r4"; sed 's/$/\r/' "$st/r4/build/scv/compile-events/CURRENT" >"$st/crlf" 2>/dev/null
+    bootstrap_scv_journal_valid "$st/crlf"; expect "CRLF cursor is valid" 0 $?
+
+    rm -rf "$st"
+    if [ "$fails" -eq 0 ]; then
+        echo "PASS — 7 scv-prime check(s)"
+        return 0
+    fi
+    echo "FAIL — $fails scv-prime check(s) failed"
+    return 1
+}
+
+# Only when executed directly: a sourcing script's own `$1` must not trigger it.
+case "$0" in
+    *bootstrap-scv-prime.shs)
+        if [ "${1:-}" = "--selftest" ]; then
+            bootstrap_scv_prime_selftest
+            exit $?
+        fi
+        ;;
+esac
