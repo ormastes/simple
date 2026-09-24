@@ -10,15 +10,6 @@ fn _slice_text(s: text, start: i64, end: i64) -> text:
     # the previous O(n^2) per-char concat loop.
     s.substring(start, end)
 
-fn strip_last(s: text) -> text:
-    val n = s.len()
-    if n <= 0:
-        return ""
-    _slice_text(s, 0, n - 1)
-
-fn strip_first_last(s: text) -> text:
-    strip_last(_slice_text(s, 1, s.len()))
-
 fn first_n_chars(s: text, n: i64) -> text:
     val limit = if n < s.len(): n else: s.len()
     s.substring(0, limit)
@@ -260,34 +251,6 @@ fn make_error(id: text, code: i64, message: text) -> text:
 
 # --- MCP Tool Result helpers ---
 
-fn infer_json_value_type(raw: text) -> text:
-    val t = raw.trim()
-    if t == "":
-        return "empty"
-    if t.starts_with("{"):
-        return "object"
-    if t.starts_with("["):
-        return "array"
-    if t.starts_with(Q()):
-        return "string"
-    if t == "true" or t == "false":
-        return "boolean"
-    if t == "null":
-        return "null"
-    var has_digit = false
-    var all_num = true
-    for ch in t:
-        if ch >= "0" and ch <= "9":
-            has_digit = true
-        elif ch == "." or ch == "-" or ch == "+":
-            pass
-        else:
-            all_num = false
-            break
-    if has_digit and all_num:
-        return "number"
-    "text"
-
 fn top_level_item_count(raw: text) -> i64:
     val t = raw.trim()
     if t == "":
@@ -331,71 +294,6 @@ fn top_level_item_count(raw: text) -> i64:
             return 0
     count
 
-fn summarize_json_shape(raw: text, depth: i64) -> text:
-    val value_type = infer_json_value_type(raw)
-    if depth <= 0:
-        return value_type
-    if value_type == "array":
-        var inner = raw.trim()
-        if inner.len() >= 2:
-            inner = strip_first_last(inner).trim()
-        var first = ""
-        var d = 0
-        var in_s = false
-        var esc = false
-        var parts: [text] = []
-        for ch in inner:
-            if in_s:
-                parts.push(ch)
-                if esc:
-                    esc = false
-                elif ch == "\\":
-                    esc = true
-                elif ch == Q():
-                    in_s = false
-                continue
-            if ch == Q():
-                in_s = true
-                parts.push(ch)
-            elif ch == "[" or ch == "{":
-                d = d + 1
-                parts.push(ch)
-            elif ch == "]" or ch == "}":
-                d = d - 1
-                parts.push(ch)
-            elif ch == "," and d == 0:
-                first = parts.join("").trim()
-                break
-            else:
-                parts.push(ch)
-        if first == "":
-            first = parts.join("").trim()
-        var elem_shape = "unknown"
-        if first != "":
-            elem_shape = summarize_json_shape(first, depth - 1)
-        return "array<" + elem_shape + ">"
-    if value_type == "object":
-        var pair_count = 0
-        var in_s = false
-        var esc = false
-        for ch in raw:
-            if in_s:
-                if esc:
-                    esc = false
-                elif ch == "\\":
-                    esc = true
-                elif ch == Q():
-                    in_s = false
-                continue
-            if ch == Q():
-                in_s = true
-            elif ch == ":":
-                pair_count = pair_count + 1
-        val lb = "{"
-        val rb = "}"
-        return "object" + lb + "pairs=" + str(pair_count) + rb
-    value_type
-
 fn make_tool_result(id: text, output: text) -> text:
     make_tool_result_status(id, output, false)
 
@@ -407,17 +305,10 @@ fn make_tool_result_status(id: text, output: text, is_error: bool) -> text:
     val escaped = escape_json(output)
     val quoted = Q() + escaped + Q()
     val content = SB_L() + jo2(p1: jp(key: "type", value: js("text")), p2: jp(key: "text", value: quoted)) + SB_R()
-    val inferred = infer_json_value_type(output)
-    val shape = summarize_json_shape(output, 2)
-    val structured = jo2(
-        p1: jp(key: "inferredType", value: js(inferred)),
-        p2: jp(key: "shape", value: js(shape))
-    )
     val err_flag = if is_error: "true" else: "false"
-    val result = jo3(
+    val result = jo2(
         p1: jp(key: "content", value: content),
-        p2: jp(key: "isError", value: err_flag),
-        p3: jp(key: "structuredContent", value: structured)
+        p2: jp(key: "isError", value: err_flag)
     )
     make_json_result(id: id, result: result)
 
