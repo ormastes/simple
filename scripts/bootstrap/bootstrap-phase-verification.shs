@@ -88,13 +88,13 @@ validate_hosted_runtime_authority() {
   fi
   case "$relative" in deps/*) ;; *) return 1 ;; esac
   hosted_leaf=${relative#deps/}
-  case "$hosted_leaf" in libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+  case "$hosted_leaf" in libspl_hosted_runtime*.rlib) ;; *) return 1 ;; esac
   case "$hosted_leaf" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
   hosted="$authority/$relative"
   [ ! -L "$authority" ] && [ ! -L "$authority/deps" ] || return 1
   [ -f "$hosted" ] && [ ! -L "$hosted" ] || return 1
   [ "$(hash_file "$hosted")" = "$expected" ] || return 1
-  [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  [ "$(find "$authority" -maxdepth 2 -type f -name 'libspl_hosted_runtime*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
   if [ ! -f "$capsule_receipt" ]; then
   [ "$(stat -c '%a' "$authority" 2>/dev/null || stat -f '%Lp' "$authority")" = 500 ] || return 1
   [ "$(stat -c '%a' "$authority/deps" 2>/dev/null || stat -f '%Lp' "$authority/deps")" = 500 ] || return 1
@@ -262,6 +262,8 @@ fi
 
 rss_time=""
 rss_time_style=none
+rss_sample_interval_ms=not-applicable
+rss_sampling_overhead_scope=unavailable
 rss_probe="$tmp/phase-verification-rss-probe"
 if [ -x /usr/bin/time ] &&
    /usr/bin/time -f '%M' -o "$rss_probe" true >/dev/null 2>&1 &&
@@ -293,7 +295,16 @@ case "$rss_time_style" in
     esac
     ;;
 esac
+case "$rss_measurement" in
+  gnu-time-rusage-kib|darwin-time-rusage-bytes-normalized-kib|bsd-time-rusage-kib)
+    rss_sampling_overhead_scope=kernel-rusage ;;
+  proc-group-rss-kib)
+    rss_sample_interval_ms=50
+    rss_sampling_overhead_scope=external-ps-awk-excluded-from-rss-included-in-wall-time ;;
+esac
 echo "max_rss_measurement=$rss_measurement" >>"$summary"
+echo "max_rss_sample_interval_ms=$rss_sample_interval_ms" >>"$summary"
+echo "max_rss_sampling_overhead_scope=$rss_sampling_overhead_scope" >>"$summary"
 
 proc_tree_rss_kib() {
   ps -l | awk -v root="$1" -v proc_root="${2:-/proc}" \
@@ -316,9 +327,13 @@ run_measured_timeout() {
         "$measured_timeout" "$measured_grace" "$@" ;;
     *)
       if [ "$rss_measurement" = proc-group-rss-kib ]; then
+        # Preserve the caller stream before the asynchronous shell substitutes
+        # /dev/null for stdin in its child.
+        exec 4<&0
         "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
-          "$measured_timeout" "$measured_grace" "$@" &
+          "$measured_timeout" "$measured_grace" "$@" <&4 &
         measured_pid=$!
+        exec 4<&-
         peak_rss_kib=0
         while kill -0 "$measured_pid" 2>/dev/null; do
           measured_state=$(awk '{ line = $0; sub(/^.*\) /, "", line); split(line, field, " "); print field[1] }' \
@@ -1463,6 +1478,20 @@ else
       test/01_unit/compiler/bootstrap --mode=compile --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    # Keep the interpreter subsystem as an explicit inventory in both modes.
+    # The full compiler walk below remains independently terminalized per file.
+    run_matrix_task interpreter_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/interpreter --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    run_matrix_task interpreter_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/interpreter --mode=compile --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
     # The full compiler inventory below covers loader sources in interpreter
     # mode. Keep one explicit loader behavior oracle in both execution modes so
     # a phase cannot claim compiler/loader coverage from the bootstrap subset
@@ -1506,6 +1535,8 @@ else
     fi
     record_unsupported_task compiler_bootstrap_tests "$test_owner_reason"
     record_unsupported_task compiler_bootstrap_compile_tests "$test_owner_reason"
+    record_unsupported_task interpreter_interpreter_tests "$test_owner_reason"
+    record_unsupported_task interpreter_compile_tests "$test_owner_reason"
     record_unsupported_task loader_interpreter_tests "$test_owner_reason"
     record_unsupported_task loader_compile_tests "$test_owner_reason"
     if [ "$strategy" = full ]; then

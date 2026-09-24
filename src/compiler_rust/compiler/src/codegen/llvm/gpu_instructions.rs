@@ -30,7 +30,7 @@ impl LlvmBackend {
             .build_call(gpu_global_id, &[dim_val.into()], "global_id")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU global_id intrinsic should return a value");
@@ -59,7 +59,7 @@ impl LlvmBackend {
             .build_call(gpu_local_id, &[dim_val.into()], "local_id")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU local_id intrinsic should return a value");
@@ -88,7 +88,7 @@ impl LlvmBackend {
             .build_call(gpu_group_id, &[dim_val.into()], "group_id")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU group_id intrinsic should return a value");
@@ -117,7 +117,7 @@ impl LlvmBackend {
             .build_call(gpu_global_size, &[dim_val.into()], "global_size")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU global_size intrinsic should return a value");
@@ -146,7 +146,7 @@ impl LlvmBackend {
             .build_call(gpu_local_size, &[dim_val.into()], "local_size")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU local_size intrinsic should return a value");
@@ -175,7 +175,7 @@ impl LlvmBackend {
             .build_call(gpu_num_groups, &[dim_val.into()], "num_groups")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU num_groups intrinsic should return a value");
@@ -272,7 +272,7 @@ impl LlvmBackend {
             .build_call(atomic_fn, &[ptr.into(), value.into()], "atomic")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU atomic operation should return a value");
@@ -303,7 +303,7 @@ impl LlvmBackend {
             .build_call(cmpxchg_fn, &[ptr.into(), expected.into(), desired.into()], "cmpxchg")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU compare-exchange operation should return a value");
@@ -332,7 +332,7 @@ impl LlvmBackend {
             .build_call(gpu_shared_alloc, &[size_val.into()], "shared_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site.try_as_basic_value().left().ok_or_else(|| {
+        call_site.try_as_basic_value().basic().ok_or_else(|| {
             let ctx = ErrorContext::new()
                 .with_code(codes::UNSUPPORTED_FEATURE)
                 .with_help("GPU shared memory allocation should return a pointer");

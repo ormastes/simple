@@ -2,8 +2,8 @@
 
 ## Status
 
-Fixed by synchronizing the bootstrap seed LLVM method table; the pure-Simple
-compiler counterpart already had the correct `write_span` lowering.
+Open. Bootstrap seed synchronization is required; the pure-Simple compiler
+counterpart already has the correct `write_span` lowering.
 
 ## Reproduction
 
@@ -45,7 +45,7 @@ The pure-Simple compiler is already synchronized:
 
 ## Required fix
 
-The fix synchronizes only the bootstrap seed LLVM method table by adding
+Synchronize only the bootstrap seed LLVM method table by adding
 `"write_span" => Some("rt_array_write_span")`, with a focused LLVM backend
 regression that constructs an `Array.write_span` static method call and asserts
 the emitted IR calls `rt_array_write_span`.

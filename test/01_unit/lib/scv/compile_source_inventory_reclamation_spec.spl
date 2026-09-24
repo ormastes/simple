@@ -1,0 +1,47 @@
+# Native-runtime regression: unlike peak RSS, registered live objects count
+# scratch that is actually still owned. Run on a native-capable SSpec runner.
+use std.spec.*
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceEventV1, compile_source_inventory_git_event_v1}
+use std.nogc_sync_mut.sffi.fs.{fs_read_text}
+
+extern fn rt_heap_registry_count() -> i64
+
+fn inventory_live_object_delta(scoped: bool) -> i64:
+    val fixture = "test/fixtures/scv_inventory_memory/main.spl"
+    var retained: [CompileSourceEventV1] = []
+    val before = rt_heap_registry_count()
+    var index = 0
+    while index < 8:
+        val event = if scoped:
+            compiler_inventory_file_event_v1("create", fixture, fixture)
+        else:
+            Some(compile_source_inventory_git_event_v1("create", fixture, fs_read_text(fixture) ?? ""))
+        if event == nil:
+            return -1
+        retained = retained.push(event!)
+        index = index + 1
+    val delta = rt_heap_registry_count() - before
+    for event in retained:
+        expect(event.source_identity).to_equal(fixture)
+        expect(event.byte_count).to_be_greater_than(0)
+    delta
+
+describe "SCV event scopes actually reclaim canonicalization scratch":
+    it "leaves less than half the unscoped live objects with identical retained events":
+        # Warm both routes before measuring to exclude one-time literal caches.
+        inventory_live_object_delta(false)
+        inventory_live_object_delta(true)
+        val baseline = inventory_live_object_delta(false)
+        val scoped = inventory_live_object_delta(true)
+        expect(baseline).to_be_greater_than(0)
+        expect(scoped).to_be_greater_than(0)
+        expect(scoped * 2).to_be_less_than(baseline)
+
+    it "rejects the original unscoped implementation as its own reclaimed counterpart":
+        inventory_live_object_delta(false)
+        val baseline = inventory_live_object_delta(false)
+        val unreclaimed = inventory_live_object_delta(false)
+        expect(baseline).to_be_greater_than(0)
+        expect(unreclaimed).to_be_greater_than(0)
+        expect(unreclaimed * 2 < baseline).to_equal(false)

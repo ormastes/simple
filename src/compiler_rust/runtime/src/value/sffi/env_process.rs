@@ -994,9 +994,9 @@ fn rt_mcp_environment_w(wrapper: &std::path::Path) -> Vec<(std::ffi::OsString, s
 fn rt_mcp_duplicate_std(
     which: windows::Win32::System::Console::STD_HANDLE,
 ) -> Option<windows::Win32::Foundation::HANDLE> {
-    use windows::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
     use windows::Win32::System::Console::GetStdHandle;
-    use windows::Win32::System::Threading::{DuplicateHandle, GetCurrentProcess};
+    use windows::Win32::System::Threading::GetCurrentProcess;
     unsafe {
         let source = GetStdHandle(which).ok()?;
         if source.is_invalid() {

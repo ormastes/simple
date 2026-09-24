@@ -93,7 +93,7 @@ impl LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM call to '{}' failed: {}", name, e))?;
         result
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| format!("'{}' did not return a value", name))
     }
 
@@ -659,7 +659,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM call failed: {}", e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 self.set(*d, ret_val);
             }
         }
@@ -712,7 +712,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 .map_err(|e| format!("LLVM rt_alloc call failed: {}", e))?;
             let argv_raw = alloc_call
                 .try_as_basic_value()
-                .left()
+                .basic()
                 .ok_or_else(|| "LLVM rt_alloc missing return value".to_string())?
                 .into_int_value();
             let argv_ptr = self
@@ -765,7 +765,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("LLVM interp_call failed: {}", e))?;
 
         if let Some(d) = dest {
-            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                 self.set(*d, ret_val);
             }
         }
@@ -786,7 +786,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .build_call(interp_eval, &[idx.into()], "eval")
             .map_err(|e| format!("LLVM interp_eval failed: {}", e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             self.set(dest, ret_val);
         }
         Ok(())
@@ -871,6 +871,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                         inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::ScalableVectorType(t) => {
+                            t.fn_type(&llvm_param_types, false)
+                        }
                     }
                 };
 
@@ -880,7 +883,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                     .map_err(|e| format!("indirect call failed: {}", e))?;
 
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         self.set(*d, ret_val);
                     }
                 }
@@ -973,7 +976,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .build_call(dict_new, &[capacity.into()], "dict")
             .map_err(|e| format!("dict_new call failed: {}", e))?
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| "dict_new returned void".to_string())?;
 
         for (key, value) in keys.iter().zip(values.iter()) {
@@ -1075,7 +1078,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             )
             .map_err(|e| format!("slice call failed: {}", e))?;
 
-        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
             self.set(dest, ret_val);
         }
         Ok(())
@@ -1420,7 +1423,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             .map_err(|e| format!("rt_alloc call failed: {}", e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| "rt_alloc did not return a value".to_string())?;
         let closure_ptr = match alloc_value {
             BasicValueEnum::PointerValue(ptr) => self

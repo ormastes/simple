@@ -14,7 +14,8 @@ trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/runtime/deps" \
-  "$tmp/source/test/01_unit/compiler" "$tmp/source/test/01_unit/compiler/loader" \
+  "$tmp/source/test/01_unit/compiler" "$tmp/source/test/01_unit/compiler/interpreter" \
+  "$tmp/source/test/01_unit/compiler/loader" \
   "$tmp/source/test/02_integration/app" \
   "$tmp/source/test/01_unit/lib" "$tmp/source/src/lib" "$tmp/source/tools" \
   "$tmp/work" "$tmp/stage2-admitted" "$tmp/bin"
@@ -70,7 +71,7 @@ cat >"$tmp/tool" <<'EOF'
 #!/bin/sh
 printf '%s\t%s\t%s\n' "$(basename "$0")" "${SIMPLE_BINARY:-}" "$*" >>"$PHASE_EXECUTIONS"
 case "${1:-}" in
-  test/01_unit/compiler/bootstrap|test/01_unit/compiler/loader/module_loader_relocation_spec.spl|test/01_unit/compiler/loader/module_load_intent_spec.spl)
+  test/01_unit/compiler/bootstrap|test/01_unit/compiler/interpreter|test/01_unit/compiler/loader/module_loader_relocation_spec.spl|test/01_unit/compiler/loader/module_load_intent_spec.spl)
     [ "${SIMPLE_BIN:-}" = "${SIMPLE_BINARY:-}" ] || exit 24
     # The positive RSS assertion needs a live sample window on Windows.
     # Negative routing cases below do not incur this fixture-only delay.
@@ -225,6 +226,10 @@ grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/
   "$tmp/executions" || fail "interpreter test was not bound to the full CLI"
 grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/bootstrap --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "compile test was not bound to the full CLI"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/interpreter --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+  "$tmp/executions" || fail "interpreter inventory was not bound to the full CLI"
+grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+test/01_unit/compiler/interpreter --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
+  "$tmp/executions" || fail "compiled interpreter inventory was not bound to the full CLI"
 grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+$loader_oracle --mode=interpreter --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
   "$tmp/executions" || fail "loader interpreter oracle was not bound to the full CLI"
 grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/simple_cli[[:space:]]+$loader_oracle --mode=compile --unstable --assert-ran --no-cache --no-db --no-session-daemon --sequential --json$" \
@@ -232,11 +237,25 @@ grep -Eq -- "^simple_test_runner[[:space:]]+$tmp/work/outputs/compiler-tools/.*/
 grep -Fq 'timing_scope=post-admission-excludes-git-lfs-checkout' "$tmp/work/summary.env" ||
   fail "post-admission timing scope was not retained"
 case "$(sed -n 's/^max_rss_measurement=//p' "$tmp/work/summary.env")" in
-  gnu-time-rusage-kib|proc-group-rss-kib|darwin-time-rusage-bytes-normalized-kib|bsd-time-rusage-kib) rss_value='[1-9][0-9]*' ;;
+  gnu-time-rusage-kib|darwin-time-rusage-bytes-normalized-kib|bsd-time-rusage-kib)
+    rss_value='[1-9][0-9]*'
+    grep -Fqx 'max_rss_sample_interval_ms=not-applicable' "$tmp/work/summary.env" ||
+      fail "kernel rusage RSS unexpectedly reports a polling interval"
+    grep -Fqx 'max_rss_sampling_overhead_scope=kernel-rusage' "$tmp/work/summary.env" ||
+      fail "kernel rusage RSS overhead scope is absent"
+    ;;
+  proc-group-rss-kib)
+    rss_value='[1-9][0-9]*'
+    grep -Fqx 'max_rss_sample_interval_ms=50' "$tmp/work/summary.env" ||
+      fail "Windows RSS polling interval is absent"
+    grep -Fqx 'max_rss_sampling_overhead_scope=external-ps-awk-excluded-from-rss-included-in-wall-time' \
+      "$tmp/work/summary.env" || fail "Windows RSS overhead scope is absent"
+    ;;
   unavailable) rss_value=unavailable ;;
   *) fail "unknown RSS measurement authority" ;;
 esac
 for measured_task in compiler_bootstrap_tests compiler_bootstrap_compile_tests \
+    interpreter_interpreter_tests interpreter_compile_tests \
     loader_interpreter_tests loader_compile_tests; do
   grep -E "^task=$measured_task\\|.*\\|elapsed_seconds=[0-9]+\\|max_rss_kib=$rss_value([|]|$).*\\|executed=[1-9][0-9]*\\|passed=[1-9][0-9]*\\|failed=0\\|skipped=[0-9]+([|]|$)" \
     "$tmp/work/summary.env" >/dev/null ||
