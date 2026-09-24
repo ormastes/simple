@@ -6,22 +6,38 @@
 ## Overview
 
 `ctx_run_bounded` must mark a capture that hit the per-command cap and count
-it in `simple_ctx_stats` as `capture_truncations`. The runtime usually
-reports the cap through the `stdout_truncated` process receipt flag — but the
-legacy bounded fallback (platforms without the owned-observed process ABI)
-drops that flag and instead leaves the runtime's own
-`[output truncated: N bytes omitted]` marker inside the retained stream. The
-handler detects the cap from either signal; without the marker fallback the
-truncation was silently uncounted (2026-09-24 regression: a 50 KB capture
-under a 4096-byte cap indexed 4184 bytes with `capture_truncations: 0`).
+it in `simple_ctx_stats` as `capture_truncations`. Truncation is detected
+SOLELY from the structured `stdout_truncated`/`stderr_truncated` process
+receipt flags — never by scanning the retained stream's text for the
+runtime's own `[output truncated: N bytes omitted]` marker. A prior version
+of this detector used `contains(prefix) and contains(suffix)` as two
+INDEPENDENT substring checks, which both under-counted (dropped on the
+legacy bounded fallback, which used to hardcode the flag to `false`:
+2026-09-24 regression, a 50 KB capture under a 4096-byte cap indexed 4184
+bytes with `capture_truncations: 0`) and over-counted (false-positived on
+ordinary output that merely mentions both marker fragments unrelated to each
+other, such as this repo's own runtime source). The fix instead makes the
+flag itself honest everywhere: the owned-observed provider already reports
+it as a real ABI receipt, and the legacy bounded fallback (platforms without
+that ABI) now derives it structurally, from a length-vs-cap comparison
+against the numeric budget the caller requested
+(`resource_scope.spl:_legacy_process_fallback`), since every one of that
+facade's runtime implementations appends its marker strictly OUTSIDE the
+requested byte budget on truncation and never otherwise. The runtime's own
+marker text, when present, is still recognized (via an exact, anchored
+shape — prefix, a decimal byte count, suffix, nothing else between) to avoid
+printing a redundant cosmetic note, but this recognition affects formatting
+only, never the truncated/count decision.
 
 ## Behavior
 
 - A batch command whose output exceeds `capture_bytes` is marked
   `[capture truncated at N bytes]` in the batch line and counted once in
-  `capture_truncations`, on both the receipt-flag and the runtime-marker path.
+  `capture_truncations`, on both the owned-observed and legacy-fallback path.
 - A capture under the cap is neither marked nor counted.
 - The stderr summary reports a truncated stderr stream.
+- Ordinary output that merely mentions the runtime's marker fragments,
+  unrelated to any real truncation, is neither marked nor counted.
 """
 
 # @feature mcp_ctx_tools
@@ -86,3 +102,24 @@ describe "capture cap accounting":
         val runtime = res.stdout.contains("[output truncated: 19488 bytes omitted]")
         assert_true(ours != runtime)
         assert_equal(_truncations(), 1)
+
+    it "does not treat unrelated text mentioning both marker fragments as truncated":
+        _fresh_store()
+        # Regression for a false positive the marker detector used to have:
+        # it was `contains(prefix) and contains(suffix)` as two INDEPENDENT
+        # substring checks, so ordinary output that merely spells both
+        # fragments (unrelated to each other, no byte count between them) —
+        # exactly what grepping this repo's own runtime source produces,
+        # since it spells `"[output truncated: "` and `" bytes omitted]"` as
+        # separate string literals on different lines — was misclassified as
+        # a truncated capture. The marker must now be one contiguous,
+        # correctly-shaped token (prefix, decimal byte count, suffix) to
+        # count; small unrelated output must never be marked or counted.
+        val (sh_path, sh_args) = resolve_shell_argv(
+            "printf 'prefix seen: [output truncated: ' && " +
+            "printf 'in docs; suffix mentioned separately' && " +
+            "printf ' bytes omitted] used only as an example'")
+        val res = ctx_run_bounded(sh_path, sh_args, 15000, 1048576)
+        assert_false(res.truncated)
+        assert_false(res.stdout.contains("[capture truncated"))
+        assert_equal(_truncations(), 0)

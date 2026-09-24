@@ -494,9 +494,37 @@ fn _legacy_process_fallback(cmd: text, args: [text], timeout_ms: i64, max_output
         evidence_quality: ResourceEvidenceQuality.Unavailable,
         termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
         signal: legacy_signal, exit_code: legacy_exit)
+    # `process_run_bounded` (rt_process_run_bounded) has no receipt flag for
+    # "hit the cap" — it returns only (stdout, stderr, exit_code). Verified
+    # directly against all three parallel runtime implementations that this
+    # facade can resolve to, that a truncated stream is always STRICTLY
+    # LONGER than the requested `max_output_bytes`, so a plain length
+    # comparison is an exact structural substitute for the missing flag:
+    #   - interpreter_extern/system.rs: cuts the stream to exactly
+    #     `max_bytes` then appends the marker AFTER it (comment at :866,
+    #     "the marker is outside the byte budget") -> final len = max_bytes +
+    #     marker_len, always > max_bytes when truncated.
+    #   - runtime_fork.c (POSIX) / runtime_process.c (Windows,
+    #     `win_capture_finish`): a head+tail-split capture where
+    #     `capture->limit` is set to `max_output_bytes` exactly
+    #     (runtime_fork.c:295, runtime_process.c:386-387) and
+    #     `head_limit + tail_limit == capture->limit`. Truncation (`total >
+    #     head_len + tail_len`) only occurs once both the head buffer and the
+    #     tail ring are saturated, so `head_len == head_limit` and
+    #     `tail_len == tail_limit` at that point, and the marker is inserted
+    #     BETWEEN them: final len = head_limit + marker_len + tail_limit =
+    #     `max_output_bytes` + marker_len, again always > max_output_bytes.
+    # A stream that was NOT truncated is always at or under the cap on all
+    # three (no marker is ever inserted). This is a structural length check
+    # against the numeric cap the caller itself requested — not a scan of the
+    # stream's text content — and it is exact for this facade's contract on
+    # every backend, unlike scanning for the marker text (which sits at the
+    # very end on the first implementation but in the MIDDLE of the buffer,
+    # before the retained tail, on the other two).
     ObservedProcessResult(
         stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
-        stdout_truncated: false, stderr_truncated: false,
+        stdout_truncated: legacy_stdout.len() > max_output_bytes,
+        stderr_truncated: legacy_stderr.len() > max_output_bytes,
         runtime_error: if legacy_exit == -1 and not legacy_timed_out: reported_error else: 0)
 
 fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ObservedProcessResult:

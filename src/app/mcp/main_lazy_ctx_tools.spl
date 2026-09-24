@@ -651,8 +651,22 @@ fn ctx_unescape_json(s: text) -> text:
 # body, and request bodies can carry arbitrary bytes.
 #
 # The closing quote of an element is the next '"' preceded by an EVEN
-# run of backslashes; escape runs are short, so backslash parity is
-# computed by stripping "\\" pairs with native ends_with/substring.
+# run of backslashes. Backslash parity is computed with a single backward
+# `char_code_at` scan from the candidate quote (bounded by the run length
+# itself, not by the element length) — NOT by re-slicing
+# `t.substring(open + 1, cand)` and repeatedly stripping "\\" pairs off it,
+# which re-copies and re-scans the WHOLE prefix on every candidate quote and
+# is quadratic in the number of escaped quotes inside one element (each
+# additional escaped quote adds another candidate, and each candidate's
+# substring grows with the element so far).
+fn _ctx_trailing_backslash_run(t: text, end_exclusive: i64, lower_bound: i64) -> i64:
+    var i = end_exclusive - 1
+    var count: i64 = 0
+    while i >= lower_bound and t.char_code_at(i) == 92:
+        count = count + 1
+        i = i - 1
+    count
+
 fn ctx_parse_string_array(raw: text) -> [text]:
     var out: [text] = []
     val t = raw.trim()
@@ -677,13 +691,7 @@ fn ctx_parse_string_array(raw: text) -> [text]:
             val cand = t.index_of("\"", scan) ?? -1
             if cand < 0:
                 break
-            var backslashes: i64 = 0
-            var tail = t.substring(open + 1, cand)
-            while tail.ends_with("\\\\"):
-                tail = tail.substring(0, tail.len() - 2)
-                backslashes = backslashes + 2
-            if tail.ends_with("\\"):
-                backslashes = backslashes + 1
+            val backslashes = _ctx_trailing_backslash_run(t, cand, open + 1)
             if backslashes % 2 == 0:
                 close = cand
                 break
@@ -740,17 +748,67 @@ fn _ctx_summarize_stderr(stderr: text, truncated: bool) -> text:
         s = s + " [truncated]"
     s
 
-# The runtime's bounded-capture marker, left inside a retained stream that
-# hit the output cap. The legacy bounded fallback (platforms without the
-# owned-observed process ABI) drops the `stdout_truncated` receipt flag but
-# still leaves this marker in the stream, so the cap is detected from the
-# marker too — otherwise a truncated capture is never counted on those
-# platforms.
+# Whether a retained stream already carries the runtime's OWN inline
+# truncation marker text, so the cosmetic note below is never appended
+# twice. This is NOT how truncation is detected or counted (that is
+# `p.stdout_truncated`/`p.stderr_truncated`, a structured receipt flag —
+# see `_legacy_process_fallback` in `resource_scope.spl`, which now derives
+# the flag from a length-vs-cap comparison rather than leaving it hardcoded
+# false); it only decides which human-readable note to show. A loose
+# `contains(A) and contains(B)` here would misfire on ordinary output that
+# merely mentions both marker fragments unrelated to each other (e.g.
+# grepping this repo's own runtime source, which spells
+# `"[output truncated: "` and `" bytes omitted]"` as separate string
+# literals on different lines,
+# `src/compiler_rust/compiler/src/interpreter_extern/system.rs:66,109`), so
+# this requires the exact contiguous shape — prefix, a decimal byte count,
+# then suffix — with nothing else between.
+fn _ctx_str_matches_at(s: text, at: i64, needle: text) -> bool:
+    val n = needle.len()
+    if at < 0 or at + n > s.len():
+        return false
+    var i = 0
+    while i < n:
+        if s.char_code_at(at + i) != needle.char_code_at(i):
+            return false
+        i = i + 1
+    true
+
 fn _ctx_has_rt_truncation_marker(s: text) -> bool:
-    s.contains("[output truncated: ") and s.contains(" bytes omitted]")
+    val prefix = "[output truncated: "
+    val suffix = " bytes omitted]"
+    val n = s.len()
+    var pos = 0
+    while pos + prefix.len() <= n:
+        if _ctx_str_matches_at(s, pos, prefix):
+            var i = pos + prefix.len()
+            var digits = 0
+            while i < n and s.char_code_at(i) >= 48 and s.char_code_at(i) <= 57:
+                i = i + 1
+                digits = digits + 1
+            if digits > 0 and _ctx_str_matches_at(s, i, suffix):
+                return true
+        pos = pos + 1
+    false
 
 # `capture_max` bounds each stream AT THE READER (runtime-enforced), so the
 # server's memory is bounded by the cap regardless of what the child prints.
+#
+# Truncation is detected SOLELY from the structured receipt flags
+# (`p.stdout_truncated`/`p.stderr_truncated`) — never by scanning the
+# retained stream's text for a marker. Both the owned-observed provider (a
+# real ABI flag) and the legacy bounded fallback (a length-vs-cap
+# comparison, see `resource_scope.spl`) now report this flag honestly, so
+# no output-text scan is needed to decide whether a capture was truncated.
+# Cosmetic-only marker check bound: above this size, skip the exact-shape
+# scan entirely and just append our own note (worst case, a capture that
+# already carried the runtime's own marker shows both — harmless, still
+# correct information, never wrong). This keeps the check O(1) regardless of
+# `capture_max` (default 8 MiB) instead of an O(capture_max) scan on every
+# truncated capture, which at the interpreter's ~6.5us/char per the module
+# header would cost tens of seconds on a large truncated capture.
+const _CTX_MARKER_SCAN_MAX_BYTES: i64 = 4096
+
 fn ctx_run_bounded(cmd: text, args: [text], timeout_ms: i64, capture_max: i64) -> CtxExecResult:
     val scope = execution_resource_scope(ExecutionResourceClass.Large, timeout_ms, capture_max)
     val r = run_in_execution_resource_scope(scope, cmd, args)
@@ -758,18 +816,21 @@ fn ctx_run_bounded(cmd: text, args: [text], timeout_ms: i64, capture_max: i64) -
     val exit_code = p.usage.exit_code
     val timed_out = p.usage.termination == TerminationCause.WallTimeout
     var out = p.stdout
-    var truncated = p.stdout_truncated
-    if not truncated and _ctx_has_rt_truncation_marker(out):
-        truncated = true
+    val truncated = p.stdout_truncated
     if truncated:
-        # The stream may already carry the runtime's own truncation marker;
-        # only add ours when it does not, so a capture is marked exactly once.
-        if not _ctx_has_rt_truncation_marker(out):
+        # The stream may already carry the runtime's own truncation marker
+        # text (the legacy fallback's bounded facade always leaves one on
+        # truncation); only add ours when it does not, purely so a capture
+        # is marked exactly once in the human-readable text. This lookup
+        # affects formatting only — `truncated` and the stats count above
+        # are already decided from the receipt flag, never from this check.
+        val already_marked = out.len() <= _CTX_MARKER_SCAN_MAX_BYTES and _ctx_has_rt_truncation_marker(out)
+        if not already_marked:
             out = out + "\n[capture truncated at " + str(capture_max) + " bytes]"
         _ctx_stats_bump("capture_truncations", 1)
     CtxExecResult(
         stdout: out,
-        stderr_summary: _ctx_summarize_stderr(p.stderr, p.stderr_truncated or _ctx_has_rt_truncation_marker(p.stderr)),
+        stderr_summary: _ctx_summarize_stderr(p.stderr, p.stderr_truncated),
         exit_code: exit_code,
         timed_out: timed_out,
         wall_ms: p.usage.wall_ms,
