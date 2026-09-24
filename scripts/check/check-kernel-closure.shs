@@ -32,19 +32,28 @@ done
 
 manifest_rows() { sed -E -n 's/^[[:space:]]*-[[:space:]]*(K0|K1|P_STATIC|P_DYN)\|/\1|/p' "$1"; }
 
-run_check() {
+# run_check is a SUBSHELL function ( ... ) rather than a { ... } function: it
+# is invoked ~15 times per --selftest run, and a `trap ... EXIT` set inside a
+# plain function is process-global, so each invocation's trap OVERWRITES the
+# previous one without it ever firing — every earlier invocation's temp_dir
+# leaked until the whole process finally exited. A subshell gets its own,
+# independent trap table that fires when the subshell itself exits, so N
+# invocations clean up N times with no cross-invocation overwrite. `return`
+# becomes `exit` accordingly; stdout/exit-status propagate to the caller
+# exactly as a normal function's would.
+run_check() (
     check_root=$1; check_manifest=$2
     case "$check_manifest" in /*) ;; *) check_manifest=$check_root/$check_manifest ;; esac
-    [ -f "$check_manifest" ] || { echo "ERROR — manifest missing: $check_manifest"; return 2; }
-    grep -q '^schema: simple/compiler/kernel-closure/v1$' "$check_manifest" || { echo "ERROR — unsupported or missing kernel closure schema"; return 2; }
+    [ -f "$check_manifest" ] || { echo "ERROR — manifest missing: $check_manifest"; exit 2; }
+    grep -q '^schema: simple/compiler/kernel-closure/v1$' "$check_manifest" || { echo "ERROR — unsupported or missing kernel closure schema"; exit 2; }
     temp_dir=$(mktemp -d); trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
     rows=$temp_dir/rows; files=$temp_dir/files; index=$temp_dir/index
     imports=$temp_dir/imports; violations_file=$temp_dir/violations
     unresolved_file=$temp_dir/unresolved
     manifest_rows "$check_manifest" > "$rows"
-    [ -s "$rows" ] || { echo "ERROR — no classification rows"; return 2; }
+    [ -s "$rows" ] || { echo "ERROR — no classification rows"; exit 2; }
     (cd "$check_root" && find src/compiler -type f -name '*.spl' -print | LC_ALL=C sort) > "$files"
-    [ -s "$files" ] || { echo "ERROR — nothing was checked"; return 2; }
+    [ -s "$files" ] || { echo "ERROR — nothing was checked"; exit 2; }
     classification_errors=$temp_dir/classification-errors
     classify_main=$temp_dir/classify_main.awk
     cat > "$classify_main" <<'AWKEOF'
@@ -67,7 +76,7 @@ AWKEOF
         count=$(wc -l < "$index" | tr -d ' ')
         unclassified=$(wc -l < "$classification_errors" | tr -d ' ')
         echo "FAIL — $count classified, $unclassified unclassified"
-        return 1
+        exit 1
     fi
     count=$(wc -l < "$index" | tr -d ' ')
     # `pub use` / `export use` are re-exports AND imports: the re-exporting
@@ -75,8 +84,22 @@ AWKEOF
     # both must be scanned too. Widened 2026-09-24 (WP-05) to also match the
     # `plugins.` / `app.` / `os.` / `weaving.` roots — the previous version
     # matched only `compiler.` and was blind to every edge into those roots.
-    (cd "$check_root" && xargs grep -H -E '^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+(compiler|plugins|app|os|weaving)\.' < "$files" 2>/dev/null || true) |
-        sed -E -n 's/^([^:]*):[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+((compiler|plugins|app|os|weaving)\.[A-Za-z0-9_.]*).*/\1|\3/p' > "$imports"
+    #
+    # `grep` exits 1 for "no file matched" (routine — most files import
+    # nothing from these roots) and >=1 via xargs for any per-batch non-zero,
+    # which conflates that routine case with a real grep failure. The two are
+    # told apart by STDERR instead of the exit code: a genuine error (a file
+    # vanishing between `find` and `grep`, an argument-list-too-long, ...)
+    # prints to stderr, while "matched nothing" prints nothing at all there.
+    grep_stderr=$temp_dir/grep-stderr
+    (cd "$check_root" && xargs grep -H -E '^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+(compiler|plugins|app|os|weaving)\.' < "$files" 2>"$grep_stderr") \
+        > "$temp_dir/grep-raw" || true
+    if [ -s "$grep_stderr" ]; then
+        cat "$grep_stderr" >&2
+        echo "ERROR — grep failed while scanning imports"
+        exit 2
+    fi
+    sed -E -n 's/^([^:]*):[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+((compiler|plugins|app|os|weaving)\.[A-Za-z0-9_.]*).*/\1|\3/p' "$temp_dir/grep-raw" > "$imports"
     violation_main=$temp_dir/violation_main.awk
     cat > "$violation_main" <<'AWKEOF'
         BEGIN {
@@ -119,6 +142,31 @@ AWKEOF
             }
             close(index_file)
         }
+        # try_parent2: resolve via the parent-dir.basename index only.
+        function try_parent2(leaf,    n, lparts, two) {
+            n = split(leaf, lparts, /[.]/)
+            if (n < 2) return ""
+            two = lparts[n - 1] "." lparts[n]
+            if ((two in parent_class) && !(two in parent_ambiguous)) return parent_class[two]
+            return ""
+        }
+        # try_basename: resolve via the plain-basename index only. This is
+        # the least precise fallback (a single dotted component can collide
+        # with an unrelated file anywhere in the tree — e.g. plain
+        # "compiler" matches 70.backend/backend/compiler.spl) so it is used
+        # ONLY on the original, un-shortened leaf, never on a
+        # symbol-shortened candidate: shortening already discards one real
+        # piece of the import path, and basename-matching the result too is
+        # two lossy steps compounded, which is exactly how
+        # `compiler.core.compiler.mir_codegen` (dangling — no such file
+        # exists) used to falsely resolve via the unrelated compiler.spl.
+        function try_basename(leaf,    n, lparts, base) {
+            n = split(leaf, lparts, /[.]/)
+            base = lparts[n]
+            if ((base in basename_class) && !(base in basename_ambiguous)) return basename_class[base]
+            return ""
+        }
+
         {
             path = $1; imported = $2; probe = imported
             sub(/[.]$/, "", probe)
@@ -140,23 +188,24 @@ AWKEOF
                     sub(/[.][^.]*$/, "", probe)
                 }
                 if (target == "") {
-                    # Fall back to the parent-dir.basename index, then the
-                    # plain basename index, before declaring dangling.
+                    # The trailing dotted component may be a bare SYMBOL name
+                    # rather than a submodule (`use a.b.Module.Symbol`), e.g.
+                    # `compiler.monomorphize.types.ConcreteType` names the
+                    # symbol ConcreteType inside module
+                    # compiler.monomorphize.types, not a submodule named
+                    # ConcreteType. Retry one level shorter FIRST — before the
+                    # parent/basename fallback runs on the un-shortened
+                    # string, which would otherwise key off "types.ConcreteType"
+                    # and never find the real monomorphize/types.spl file
+                    # (mirrors WP-09's resolve(), which does the same
+                    # exact-then-shortened retry before its own suffix scan).
                     leaf = imported
                     sub(/[.]$/, "", leaf)
-                    n = split(leaf, lparts, /[.]/)
-                    if (n >= 2) {
-                        two = lparts[n - 1] "." lparts[n]
-                        if ((two in parent_class) && !(two in parent_ambiguous)) target = parent_class[two]
-                    }
-                }
-                if (target == "") {
-                    leaf = imported
-                    sub(/[.]$/, "", leaf)
-                    sub(/^.*[.]/, "", leaf)
-                    if ((leaf in basename_class) && !(leaf in basename_ambiguous)) {
-                        target = basename_class[leaf]
-                    }
+                    shortened = leaf
+                    sub(/[.][^.]*$/, "", shortened)
+                    if (shortened != leaf) target = try_parent2(shortened)
+                    if (target == "") target = try_parent2(leaf)
+                    if (target == "") target = try_basename(leaf)
                 }
                 if (target == "") {
                     print "FAIL KERNEL-CLOSURE-004 unresolved: " path " -> " imported >> unresolved_out
@@ -174,7 +223,10 @@ AWKEOF
                     print "FAIL KERNEL-CLOSURE-006 K1 imports " target ": " path " -> " imported
                     k1_to_p++
                 }
-            } else if (target == "APP" || target == "OS") {
+                # A P_STATIC/P_DYN/PLUGIN file importing another plugin-family
+                # module is not a kernel-boundary violation at all — only K0
+                # and K1 sources are kernel.
+            } else if ((target == "APP" || target == "OS") && (source == "K0" || source == "K1")) {
                 print "FAIL KERNEL-CLOSURE-005 " source " imports " target ": " path " -> " imported
                 kernel_to_appos++
             }
@@ -194,9 +246,9 @@ AWKEOF
         echo "PASS — $count classified, 0 unclassified, 0 K0->P, 0 K1->P, 0 kernel->app/os, 0 unresolved"
     else
         echo "FAIL — $count classified, 0 unclassified, $k0_to_p K0->P, $k1_to_p K1->P, $kernel_to_appos kernel->app/os, $unresolved unresolved"
-        return 1
+        exit 1
     fi
-}
+)
 
 run_selftest() {
     fixture=$(mktemp -d); trap 'rm -rf "$fixture"' EXIT HUP INT TERM
@@ -235,11 +287,26 @@ run_selftest() {
     out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test K0->plugins went undetected"; return 1; }
     printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-003 K0 imports PLUGIN' || { echo "self-test K0->plugins did not classify PLUGIN"; return 1; }
 
-    # --- K1 -> app.* (previously invisible — WP-05) ---
+    # --- K1 -> app.* (previously invisible — WP-05) --- manifest must
+    # actually classify 90.tools as K1 here, not the P_STATIC row the
+    # previous block left behind (that bug made this fixture pass for the
+    # wrong reason: K1->APP and P_STATIC->APP happened to print the same
+    # source-class-agnostic message before the K0/K1-only fix below).
+    printf '%s\n' 'schema: simple/compiler/kernel-closure/v1' 'entries:' '  - K0|src/compiler/10.frontend/**' '  - K1|src/compiler/90.tools/**' > "$fixture/closure.sdn"
     reset_fixture
     printf 'use app.io.sysinfo_ops.{whoami}\n' >> "$fixture/src/compiler/90.tools/k1thing.spl"
     out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test K1->app went undetected"; return 1; }
-    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-005 P_STATIC imports APP' || { echo "self-test K1->app did not report kernel->app/os"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-005 K1 imports APP' || { echo "self-test K1->app did not report kernel->app/os"; return 1; }
+
+    # --- P_STATIC -> app.* must NOT fire KERNEL-CLOSURE-005: only K0/K1 are
+    # kernel; a plugin importing app.* is not a kernel-boundary violation
+    # (this is the exact false-positive class the K0/K1-only fix removes —
+    # the 90.tools/**->APP edges, which a P_STATIC-blind checker used to
+    # miscount as "kernel->app/os"). ---
+    printf '%s\n' 'schema: simple/compiler/kernel-closure/v1' 'entries:' '  - K0|src/compiler/10.frontend/**' '  - P_STATIC|src/compiler/90.tools/**' > "$fixture/closure.sdn"
+    reset_fixture
+    printf 'use app.io.sysinfo_ops.{whoami}\n' >> "$fixture/src/compiler/90.tools/k1thing.spl"
+    run_check "$fixture" "$fixture/closure.sdn" >/dev/null || { echo "self-test P_STATIC->app was wrongly flagged as kernel->app/os"; return 1; }
 
     # --- K0 -> os.* (previously invisible — WP-05) ---
     reset_fixture
@@ -262,7 +329,19 @@ run_selftest() {
     rm -f "$fixture/src/compiler/10.frontend/clean.spl" "$fixture/src/compiler/90.tools/k1thing.spl"
     if run_check "$fixture" "$fixture/closure.sdn" >/dev/null 2>&1; then echo "self-test empty fixture unexpectedly passed"; return 1; fi
 
-    echo "kernel closure self-test OK (10 fixtures)"
+    echo "kernel closure self-test OK (11 fixtures)"
 }
 
-if [ "$selftest" -eq 1 ]; then run_selftest; else run_check "$root" "$manifest"; fi
+# The selftest runs fatally before EVERY scan, not only when --selftest is
+# passed explicitly — same convention as the other push-tier checkers in
+# this repo (e.g. check-c-runtime-compiles-push.shs, check-tree-size-push.shs):
+# a checker that can silently regress its own correctness is worse than one
+# that costs a little more per invocation. Only --selftest itself skips the
+# production scan; every other invocation pays the selftest cost first and
+# aborts fail-closed if it does not pass.
+if [ "$selftest" -eq 1 ]; then
+    run_selftest
+else
+    selftest_out=$(run_selftest 2>&1) || { echo "ERROR — selftest failed, refusing to run production scan:"; printf '%s\n' "$selftest_out" >&2; exit 2; }
+    run_check "$root" "$manifest"
+fi
