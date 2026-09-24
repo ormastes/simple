@@ -1,0 +1,138 @@
+#!/bin/sh
+# Regression for the WP1 rewrite of check-no-conflict-markers-push.shs
+# (doc/03_plan .../push_hook_plan.md section D, 2026-09-24): the guard was
+# rewritten to use a CONSTANT number of git processes (git diff --raw -z for
+# paths+modes, one git cat-file --batch-check, one git grep per marker kind)
+# instead of one `git ls-tree -d --format=...` + one `git show` + two `grep`
+# PER CHANGED FILE. Two things needed their own coverage:
+#
+#  1. The old gitlink check used `git ls-tree -d --format='%(objectmode)'`,
+#     which needs git >= 2.36 and fails closed (wrong classification) on
+#     git 2.34 (Ubuntu 22.04) -- see A.3 in the plan. The new mode-160000
+#     check comes directly from `git diff --raw`'s NEW MODE field, so it
+#     needs no `--format` flag and no git-2.36 feature at all. This fixture
+#     proves a gitlink is still classified correctly (skipped, counted, and
+#     named in the PASS verdict) without that dependency.
+#  2. The per-file loop used to cost ~200ms/file (13.7s for 68 files on
+#     Windows). This fixture proves correctness is preserved at 200 changed
+#     files, including finding the one planted marker pair among them.
+#
+# Builds a throwaway git repo and runs the REAL guard, so this cannot pass by
+# agreeing with a stale copy of the parsing logic.
+set -e
+
+GUARD=$(cd "$(dirname "$0")/../../.." && pwd)/scripts/check/check-no-conflict-markers-push.shs
+[ -x "$GUARD" ] || { echo "FAIL: guard not found at $GUARD"; exit 1; }
+
+TMPD=$(mktemp -d)
+trap 'rm -rf "$TMPD"' EXIT
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+repo="$TMPD/r"
+mkdir -p "$repo/scripts/check"
+env -u GIT_DIR git -C "$repo" init -q
+env -u GIT_DIR git -C "$repo" config user.email t@t
+env -u GIT_DIR git -C "$repo" config user.name t
+# The guard fails closed on "script lives in repo X but cwd is repo Y" -- run
+# a byte copy of it from inside the fixture repo, same as the sibling
+# conflict_marker_guard_width_test.shs does.
+cp "$GUARD" "$repo/scripts/check/g.shs"
+chmod +x "$repo/scripts/check/g.shs"
+GUARD="$repo/scripts/check/g.shs"
+
+echo base > "$repo/f.txt"
+env -u GIT_DIR git -C "$repo" add -A
+env -u GIT_DIR git -C "$repo" commit -qm base
+BASE=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+
+fails=0
+check() { # <label> <actual> <expected>
+    if [ "$2" = "$3" ]; then
+        echo "ok   $1 (exit $2)"
+    else
+        echo "FAIL $1: expected exit $3, got $2"
+        fails=$((fails + 1))
+    fi
+}
+
+# --- fixture 1: gitlink (mode 160000) classified from `git diff --raw` -----
+# alone, alongside an ordinary file edit so the range is not gitlink-only
+# (a gitlink-only range hits a separate, pre-existing "0 scanned" ERROR path
+# shared with the old script -- not this rewrite's concern).
+env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
+fakesha=$(printf 'x' | env -u GIT_DIR git -C "$repo" hash-object --stdin -w)
+env -u GIT_DIR git -C "$repo" update-index --add --cacheinfo 160000,"$fakesha",vendor/sub
+echo "modified, clean content" > "$repo/f.txt"
+env -u GIT_DIR git -C "$repo" add f.txt
+env -u GIT_DIR git -C "$repo" commit -qm "add gitlink + normal edit"
+gtip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+gout="$TMPD/gout"
+grc=0
+( cd "$repo" && "$GUARD" "$BASE..$gtip" ) >"$gout" 2>&1 || grc=$?
+check "gitlink + edit range passes (mode-160000 classification, no ls-tree --format)" "$grc" 0
+if ! grep -q "1 submodule gitlink(s) skipped" "$gout"; then
+    echo "FAIL: verdict does not name the skipped gitlink"
+    cat "$gout"
+    fails=$((fails + 1))
+else
+    echo "ok   gitlink named in verdict"
+fi
+
+# --- fixture 2: 200 changed files, exactly one carries a matching pair ----
+env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
+i=1
+while [ "$i" -le 200 ]; do
+    if [ "$i" -eq 137 ]; then
+        printf '<<<<<<< Conflict 1 of 1\nours\n%%%%%%%%%%%% base to side 1\ntheirs\n>>>>>>> Conflict 1 of 1 ends\n' \
+            > "$repo/bulk_$i.txt"
+    else
+        printf 'content for file %s\n' "$i" > "$repo/bulk_$i.txt"
+    fi
+    i=$((i + 1))
+done
+env -u GIT_DIR git -C "$repo" add -A
+env -u GIT_DIR git -C "$repo" commit -qm "200 files, one poisoned"
+btip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+berr="$TMPD/berr"
+brc=0
+( cd "$repo" && "$GUARD" "$BASE..$btip" ) >"$TMPD/bout" 2>"$berr" || brc=$?
+check "200-file range flags the single planted marker" "$brc" 1
+if ! grep -q "bulk_137.txt" "$berr"; then
+    echo "FAIL: the planted file bulk_137.txt was not named"
+    cat "$berr"
+    fails=$((fails + 1))
+else
+    echo "ok   planted file named correctly among 200"
+fi
+# every OTHER file must not be flagged
+other_flagged=$(grep -c '^CONFLICT MARKERS:' "$berr" 2>/dev/null || echo 0)
+check "exactly one file flagged among 200" "$other_flagged" 1
+
+# --- fixture 3: a range whose ONLY changed path is a gitlink (e.g. bumping
+# .spipe/spipe) must PASS outright, not ERROR. This is the actual defect A.3
+# describes: the OLD script's per-file `git ls-tree --format` gitlink probe
+# needs git >= 2.36 and misclassified the path on git 2.34, so `git show`
+# then failed "bad object" and the whole push ERRORed. Even after routing the
+# mode through `git diff --raw` (no git-2.36 dependency), a naive port still
+# ERRORed here via the separate "0 files scanned" bailout, because that
+# bailout only recognised deletions/explicit --allow as legitimate reasons
+# for scanning nothing -- an all-gitlink range needed its own carve-out.
+env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
+fakesha2=$(printf 'y' | env -u GIT_DIR git -C "$repo" hash-object --stdin -w)
+env -u GIT_DIR git -C "$repo" update-index --add --cacheinfo 160000,"$fakesha2",vendor/only_gitlink
+env -u GIT_DIR git -C "$repo" commit -qm "gitlink-only change"
+oltip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+olout="$TMPD/olout"
+olrc=0
+( cd "$repo" && "$GUARD" "$BASE..$oltip" ) >"$olout" 2>&1 || olrc=$?
+check "gitlink-only range PASSes outright" "$olrc" 0
+if ! grep -q "PASS" "$olout"; then
+    echo "FAIL: gitlink-only range did not PASS"
+    cat "$olout"
+    fails=$((fails + 1))
+else
+    echo "ok   gitlink-only range verdict is PASS"
+fi
+
+[ "$fails" -eq 0 ] || exit 1
+echo "PASS - conflict_marker_guard_raw_diff_test (all fixtures)"
