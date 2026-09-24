@@ -185,9 +185,23 @@ bootstrap_build_jobs_memory_clamp() {
   # worker, far past any real setting.
   case "$bbj_budget" in ''|*[!0-9]*|0) bbj_budget=$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT ;; esac
   [ "${#bbj_budget}" -le 7 ] || bbj_budget=$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT
-  [ -r "$bbj_meminfo" ] || { printf '%s\n' "$bbj_want"; return 0; }
-  bbj_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' "$bbj_meminfo" 2>/dev/null)
-  case "$bbj_avail_kb" in ''|*[!0-9]*) printf '%s\n' "$bbj_want"; return 0 ;; esac
+
+  bbj_avail_kb=""
+  if [ -r "$bbj_meminfo" ]; then
+    bbj_avail_kb=$(awk '/^MemAvailable:/ { print $2; exit }' "$bbj_meminfo" 2>/dev/null)
+    case "$bbj_avail_kb" in ''|*[!0-9]*) bbj_avail_kb="" ;; esac
+  fi
+  # /proc/meminfo (or its BOOTSTRAP_MEMINFO_PATH fixture override) covers
+  # Linux and MSYS/Windows, which emulates it. It does not exist on macOS or
+  # FreeBSD, and a non-MSYS Windows POSIX layer may lack it too -- those
+  # hosts fell through to "leave the count untouched" with no clamp at all,
+  # which is the same unbounded-worker-count OOM risk this function exists
+  # to bound. Try an OS-specific probe before giving up.
+  if [ -z "$bbj_avail_kb" ]; then
+    bbj_avail_kb=$(bootstrap_build_jobs_available_kib_fallback)
+    case "$bbj_avail_kb" in ''|*[!0-9]*) bbj_avail_kb="" ;; esac
+  fi
+  [ -n "$bbj_avail_kb" ] || { printf '%s\n' "$bbj_want"; return 0; }
   bbj_fit=$(( bbj_avail_kb / 1024 / bbj_budget ))
   [ "$bbj_fit" -ge 1 ] || bbj_fit=1
   if [ "$bbj_want" -gt "$bbj_fit" ]; then
@@ -195,4 +209,64 @@ bootstrap_build_jobs_memory_clamp() {
   else
     printf '%s\n' "$bbj_want"
   fi
+}
+
+# Available-memory probe for hosts without /proc/meminfo (or its
+# BOOTSTRAP_MEMINFO_PATH fixture override): macOS via hw.pagesize + vm_stat,
+# FreeBSD via hw.pagesize + vm.stats.vm.v_free_count/v_inactive_count, and a
+# non-MSYS Windows POSIX layer via PowerShell's Win32_OperatingSystem
+# .FreePhysicalMemory (already KiB). Same tool choice per OS as the Stage-2
+# free-memory probe in bootstrap-from-scratch.sh (not shared code -- that one
+# is scoped to Stage-2 test-thread sizing -- but there is no reason to
+# reinvent the per-OS tool selection here). Prints available KiB on success
+# and nothing on any failure; an empty result is not an error, matching this
+# function's existing "leave the count untouched" contract for unreadable
+# meminfo. BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE is a fixture hook (parallel to
+# BOOTSTRAP_MEMINFO_PATH) for exercising one branch without faking `uname`.
+bootstrap_build_jobs_available_kib_fallback() {
+  case "${BOOTSTRAP_BUILD_JOBS_OS_OVERRIDE:-$(uname -s 2>/dev/null || :)}" in
+    Darwin)
+      bbj_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+      bbj_vmstat=$(vm_stat 2>/dev/null || :)
+      bbj_free_pages=$(printf '%s\n' "$bbj_vmstat" | awk '
+        /^Pages free:/ { gsub(/\./, "", $3); sum += $3 }
+        /^Pages inactive:/ { gsub(/\./, "", $3); sum += $3 }
+        /^Pages purgeable:/ { gsub(/\./, "", $3); sum += $3 }
+        /^Pages speculative:/ { gsub(/\./, "", $3); sum += $3 }
+        END { print sum + 0 }
+      ')
+      case "$bbj_page_size" in ''|*[!0-9]*) bbj_page_size="" ;; esac
+      case "$bbj_free_pages" in ''|*[!0-9]*) bbj_free_pages="" ;; esac
+      if [ -n "$bbj_page_size" ] && [ -n "$bbj_free_pages" ]; then
+        printf '%s\n' "$(( bbj_page_size * bbj_free_pages / 1024 ))"
+      fi
+      ;;
+    FreeBSD)
+      bbj_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+      bbj_free_count=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || :)
+      bbj_inactive_count=$(sysctl -n vm.stats.vm.v_inactive_count 2>/dev/null || :)
+      case "$bbj_page_size" in ''|*[!0-9]*) bbj_page_size="" ;; esac
+      case "$bbj_free_count" in ''|*[!0-9]*) bbj_free_count="" ;; esac
+      case "$bbj_inactive_count" in ''|*[!0-9]*) bbj_inactive_count="" ;; esac
+      if [ -n "$bbj_page_size" ] && [ -n "$bbj_free_count" ]; then
+        bbj_free_pages=$(( bbj_free_count + ${bbj_inactive_count:-0} ))
+        printf '%s\n' "$(( bbj_page_size * bbj_free_pages / 1024 ))"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v powershell.exe >/dev/null 2>&1; then
+        if command -v timeout >/dev/null 2>&1; then
+          bbj_kib=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
+            "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" \
+            </dev/null 2>/dev/null | tr -d '\r\n ') || :
+        else
+          bbj_kib=$(powershell.exe -NoProfile -NonInteractive -Command \
+            "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" \
+            </dev/null 2>/dev/null | tr -d '\r\n ') || :
+        fi
+        case "$bbj_kib" in ''|*[!0-9]*) bbj_kib="" ;; esac
+        [ -z "$bbj_kib" ] || printf '%s\n' "$bbj_kib"
+      fi
+      ;;
+  esac
 }
