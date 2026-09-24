@@ -117,21 +117,34 @@ mcp_bd_log() {
   printf '%s\n' "$*" >&2
 }
 
-mcp_bd_hash_file() {
-  file=$1
+# Fail closed: check the underlying tool's own exit status directly (never
+# through an awk pipe, whose exit status is awk's, not the hasher's), and
+# validate the result is exactly 64 lowercase hex characters before ever
+# printing it. A silently-broken tool returning empty/garbage output must
+# never be mistaken for a real digest by a caller comparing two hashes.
+mcp_bd_hash_file() (
+  mbhf_file=$1
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "${file}" | awk '{print $1}'
+    mbhf_out=$(sha256sum "${mbhf_file}") || { mcp_bd_log "error: sha256sum failed on ${mbhf_file}"; return 126; }
+    mbhf_digest=${mbhf_out%% *}
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "${file}" | awk '{print $1}'
+    mbhf_out=$(shasum -a 256 "${mbhf_file}") || { mcp_bd_log "error: shasum failed on ${mbhf_file}"; return 126; }
+    mbhf_digest=${mbhf_out%% *}
   elif command -v sha256 >/dev/null 2>&1; then
-    sha256 -q "${file}"
+    mbhf_digest=$(sha256 -q "${mbhf_file}") || { mcp_bd_log "error: sha256 failed on ${mbhf_file}"; return 126; }
   elif command -v openssl >/dev/null 2>&1; then
-    openssl dgst -sha256 "${file}" | awk '{print $NF}'
+    mbhf_out=$(openssl dgst -sha256 "${mbhf_file}") || { mcp_bd_log "error: openssl dgst failed on ${mbhf_file}"; return 126; }
+    mbhf_digest=${mbhf_out##* }
   else
     mcp_bd_log "error: no sha256sum/shasum/sha256/openssl available"
-    return 1
+    return 126
   fi
-}
+  [ "${#mbhf_digest}" -eq 64 ] || { mcp_bd_log "error: computed digest for ${mbhf_file} is not 64 hex chars: '${mbhf_digest}'"; return 126; }
+  case "$mbhf_digest" in
+    *[!0-9a-f]*) mcp_bd_log "error: computed digest for ${mbhf_file} is not hex: '${mbhf_digest}'"; return 126 ;;
+  esac
+  printf '%s\n' "$mbhf_digest"
+)
 
 # Escape a value for embedding inside a JSON double-quoted string. Handles the
 # two characters that actually occur in real inputs here (paths): backslash

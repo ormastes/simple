@@ -14,22 +14,75 @@
 
 # Keep the GNU checksum record format on macOS, where shasum is the system
 # provider. Both providers accept multiple files for the runtime snapshot.
+#
+# Fail closed: every arm's tool is exit-status-checked directly (never
+# through an awk pipe, whose exit status is awk's, not the hasher's), and
+# the digest field of every produced record -- including sha256sum/shasum's
+# own trusted output, since a corrupted record must not silently pass
+# through either -- is validated as exactly 64 hex characters before
+# anything is printed. Supports both callers: bootstrap_planner_v2_hash_stdin
+# (zero operands, hashes stdin) and produce-bootstrap-planner-admission-v2.shs's
+# multi-file snapshot call (`-- file1 file2 ...`). The leading `--` option
+# terminator is stripped before the sha256(1)/openssl(1) fallback arms,
+# which loop over operands one at a time -- neither accepts multiple file
+# operands the way GNU sha256sum/shasum does.
 bootstrap_planner_v2_sha256() {
+    [ "${1:-}" != -- ] || shift
+    bpv2_out=""
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$@"
+        bpv2_out=$(sha256sum "$@") || return 126
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$@"
+        bpv2_out=$(shasum -a 256 "$@") || return 126
     elif command -v sha256 >/dev/null 2>&1; then
-        for _bpv2_f in "$@"; do
-            printf '%s  %s\n' "$(sha256 -q "$_bpv2_f")" "$_bpv2_f"
-        done
+        if [ "$#" -eq 0 ]; then
+            bpv2_digest=$(sha256 -q) || return 126
+            bpv2_out="${bpv2_digest}  -"
+        else
+            for bpv2_f in "$@"; do
+                bpv2_digest=$(sha256 -q "$bpv2_f") || return 126
+                if [ -n "$bpv2_out" ]; then
+                    bpv2_out="${bpv2_out}
+${bpv2_digest}  ${bpv2_f}"
+                else
+                    bpv2_out="${bpv2_digest}  ${bpv2_f}"
+                fi
+            done
+        fi
     elif command -v openssl >/dev/null 2>&1; then
-        for _bpv2_f in "$@"; do
-            printf '%s  %s\n' "$(openssl dgst -sha256 "$_bpv2_f" | awk '{print $NF}')" "$_bpv2_f"
-        done
+        if [ "$#" -eq 0 ]; then
+            bpv2_raw=$(openssl dgst -sha256) || return 126
+            bpv2_digest=${bpv2_raw##* }
+            bpv2_out="${bpv2_digest}  -"
+        else
+            for bpv2_f in "$@"; do
+                bpv2_raw=$(openssl dgst -sha256 "$bpv2_f") || return 126
+                bpv2_digest=${bpv2_raw##* }
+                if [ -n "$bpv2_out" ]; then
+                    bpv2_out="${bpv2_out}
+${bpv2_digest}  ${bpv2_f}"
+                else
+                    bpv2_out="${bpv2_digest}  ${bpv2_f}"
+                fi
+            done
+        fi
     else
-        return 1
+        return 126
     fi
+    bpv2_oifs=$IFS
+    set -f
+    IFS='
+'
+    for bpv2_line in $bpv2_out; do
+        IFS=$bpv2_oifs
+        bpv2_line_digest=${bpv2_line%% *}
+        [ "${#bpv2_line_digest}" -eq 64 ] || { set +f; return 126; }
+        case "$bpv2_line_digest" in *[!0-9a-fA-F]*) set +f; return 126 ;; esac
+        IFS='
+'
+    done
+    set +f
+    IFS=$bpv2_oifs
+    printf '%s\n' "$bpv2_out"
 }
 
 bootstrap_planner_v2_hash_stdin() {

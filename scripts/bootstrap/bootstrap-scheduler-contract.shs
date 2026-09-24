@@ -2,34 +2,55 @@
 # Typed helpers for the compatibility bootstrap scheduler. This file never
 # starts a compiler; state-changing helpers only retire scheduler-owned trust.
 
-bootstrap_scheduler_hash_stream() {
+# Fail closed: check the underlying tool's own exit status directly (never
+# through an awk pipe, whose exit status is awk's, not the hasher's) and
+# validate the result is exactly 64 lowercase hex characters before ever
+# printing it. Every caller in this file compares this output against an
+# expected hash with `[ "$(...)" = "$expected" ]`; a broken tool that
+# silently produced empty/garbage output would otherwise only fail that
+# comparison when $expected also happened to be non-matching, not
+# structurally. Mirrors candidate_frontend_hash_file in
+# scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs.
+bootstrap_scheduler_hash_stream() (
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum | awk '{print $1}'
+        bsh_out=$(sha256sum) || return 126
+        bsh_digest=${bsh_out%% *}
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 | awk '{print $1}'
+        bsh_out=$(shasum -a 256) || return 126
+        bsh_digest=${bsh_out%% *}
     elif command -v sha256 >/dev/null 2>&1; then
-        sha256 -q
+        bsh_digest=$(sha256 -q) || return 126
     elif command -v openssl >/dev/null 2>&1; then
-        openssl dgst -sha256 | awk '{print $NF}'
+        bsh_out=$(openssl dgst -sha256) || return 126
+        bsh_digest=${bsh_out##* }
     else
-        return 1
+        return 126
     fi
-}
+    [ "${#bsh_digest}" -eq 64 ] || return 126
+    case "$bsh_digest" in *[!0-9a-f]*) return 126 ;; esac
+    printf '%s\n' "$bsh_digest"
+)
 
-bootstrap_scheduler_hash_file() {
+bootstrap_scheduler_hash_file() (
     [ -f "$1" ] && [ ! -L "$1" ] || return 1
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum -- "$1" | awk '{print $1}'
+        bsh_out=$(sha256sum -- "$1") || return 126
+        bsh_digest=${bsh_out%% *}
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 -- "$1" | awk '{print $1}'
+        bsh_out=$(shasum -a 256 -- "$1") || return 126
+        bsh_digest=${bsh_out%% *}
     elif command -v sha256 >/dev/null 2>&1; then
-        sha256 -q "$1"
+        bsh_digest=$(sha256 -q "$1") || return 126
     elif command -v openssl >/dev/null 2>&1; then
-        openssl dgst -sha256 "$1" | awk '{print $NF}'
+        bsh_out=$(openssl dgst -sha256 "$1") || return 126
+        bsh_digest=${bsh_out##* }
     else
-        return 1
+        return 126
     fi
-}
+    [ "${#bsh_digest}" -eq 64 ] || return 126
+    case "$bsh_digest" in *[!0-9a-f]*) return 126 ;; esac
+    printf '%s\n' "$bsh_digest"
+)
 
 bootstrap_scheduler_manifest_value() {
     bootstrap_scheduler_value_key=$1
