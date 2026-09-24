@@ -51,21 +51,56 @@ kill_tree() {
     kill -TERM "$kt_pid" 2>/dev/null
 }
 
+# cont_tree <pid> — SIGCONT pid and every descendant, depth first.
+# (2026-09-24, selftest-hang fix — see
+# doc/08_tracking/bug/test_tree_divergence_delta_selftest_hang_2026-09-24.md)
+# A process that is currently STOPPED (state T — e.g. it took SIGTTIN/SIGTTOU
+# from job-control terminal contention while backgrounded with no controlling
+# tty, which on a host where `set -m` did not actually grant a separate
+# process group can stop the WHOLE shared process group at once, not just one
+# process) does not act on any further signal except SIGCONT/SIGKILL until it
+# is resumed: a plain SIGTERM sent to it is only QUEUED, never delivered/run,
+# so the process just sits in T state forever and its own trap-based cleanup
+# never gets a chance to execute. Reproduced on both Windows Git Bash and WSL
+# Ubuntu 22.04: the selftest's own "fallback" fixture left a grandchild
+# `sleep 300` alive indefinitely because the SIGTERM aimed at it (via a
+# stopped intermediate process) was never processed. Always wake the tree
+# with SIGCONT immediately before sending SIGTERM, so a stopped target
+# resumes, observes the (now-pending-or-following) SIGTERM, and actually
+# terminates.
+cont_tree() {
+    ct_pid="$1"
+    for ct_child in $(pgrep -P "$ct_pid" 2>/dev/null); do
+        cont_tree "$ct_child"
+    done
+    kill -CONT "$ct_pid" 2>/dev/null
+}
+
 cleanup() {
     cl_status=${1:-$?}
     trap - EXIT HUP INT TERM QUIT PIPE
     if [ -n "$child_pid" ]; then
-        # Signal the child's whole PROCESS GROUP, not just the child. run_side
-        # launches the guard under job control (`set -m`), so the child is a
-        # process-group leader and `-PID` reaches its descendants too — the
-        # guard's own git/awk children, which are what actually kept running
-        # after `timeout 900` on 2026-09-12. Plain `kill PID` is the fallback
-        # for a shell that did not grant the job its own group.
-        # dash refuses job control without a controlling tty ("can't access
-        # tty; job control turned off"), so on a tty-less Linux harness the
-        # child is NOT a group leader and the group kill fails. The recursive
-        # pgrep walk is the fallback for exactly that host, so orphan-freedom
-        # does not depend on `set -m` succeeding. Both paths are fixtured.
+        # Wake the whole tree FIRST (both the process-group form, in case
+        # child_pid ever IS its own process-group leader by some other means,
+        # and the recursive per-pid walk, which is the one path this no
+        # longer relies on `set -m` to make meaningful) -- see cont_tree()
+        # above. A stopped descendant ignores SIGTERM until resumed.
+        kill -CONT -"$child_pid" 2>/dev/null
+        cont_tree "$child_pid"
+        # Try the child's whole PROCESS GROUP first — harmless if child_pid
+        # never became a real process-group leader (the kill just fails with
+        # ESRCH and the `||` falls through). run_side() no longer calls
+        # `set -m` (2026-09-24, selftest-hang fix — see
+        # doc/08_tracking/bug/test_tree_divergence_delta_selftest_hang_2026-09-24.md:
+        # enabling job control from a shell that is not itself a
+        # terminal-foreground leader could itself raise SIGTTOU and stop the
+        # WHOLE shared process group, including this script), so `child_pid`
+        # is essentially never a distinct group leader in practice and this
+        # branch normally falls straight through to `kill_tree()` below,
+        # which needs no process-group support at all — orphan-freedom no
+        # longer depends on job control succeeding on this host. Both branches
+        # stay fixtured (`TTD_DELTA_NO_PGKILL`) to keep covering the case where
+        # a group kill DOES succeed for some other reason.
         if [ "${TTD_DELTA_NO_PGKILL:-0}" = "1" ] || ! kill -TERM -"$child_pid" 2>/dev/null; then
             kill_tree "$child_pid"
         fi
@@ -136,17 +171,35 @@ FAKE
         ( cd "$fx" && FAKE_CHILD_PIDFILE="$pidfile" \
             TEST_TREE_DIVERGENCE_DELTA_GUARD="$fx/fake_guard.shs" \
             TTD_DELTA_SELFTEST_CHILD=1 TTD_DELTA_NO_PGKILL="$st_nopg" \
-            exec sh "$SELF_PATH" "$fxref" "$fxref" > "$outfile" 2>/dev/null ) &
+            exec sh "$SELF_PATH" "$fxref" "$fxref" < /dev/null > "$outfile" 2>/dev/null ) &
         delta_pid=$!
         i=0
         while [ ! -s "$pidfile" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
         [ -s "$pidfile" ] || { rm -rf "$st_root"; die 2 "selftest: fake guard never started a child ($st_mode)"; }
         grandchild=$(cat "$pidfile")
+        # Wake before terminating (see cont_tree() above): $delta_pid itself
+        # can be STOPPED at this point (job-control terminal contention with
+        # no controlling tty can stop the whole shared process group, not
+        # just one member), in which case a bare SIGTERM would just queue and
+        # $delta_pid would never run its own trap/cleanup() to reach
+        # $grandchild at all. Both plain-pid and process-group forms, since
+        # whether $delta_pid ended up as a distinct group leader depends on
+        # whether job control was actually available in this shell.
+        kill -CONT "$delta_pid" 2>/dev/null
+        kill -CONT -"$delta_pid" 2>/dev/null
         kill -TERM "$delta_pid" 2>/dev/null
         wait "$delta_pid" 2>/dev/null
         i=0
-        while kill -0 "$grandchild" 2>/dev/null && [ "$i" -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
+        while kill -0 "$grandchild" 2>/dev/null && [ "$i" -lt 50 ]; do
+            i=$((i + 1))
+            # Belt-and-suspenders: also wake+term the grandchild directly,
+            # independent of whether $delta_pid's own cleanup() ever ran.
+            kill -CONT "$grandchild" 2>/dev/null
+            kill -TERM "$grandchild" 2>/dev/null
+            sleep 0.1
+        done
         if kill -0 "$grandchild" 2>/dev/null; then
+            kill -CONT "$grandchild" 2>/dev/null
             kill -KILL "$grandchild" 2>/dev/null
             echo "$SELF: selftest: FAIL ($st_n) orphan-free termination [$st_mode] — child $grandchild survived SIGTERM" >&2
             st_fail=$((st_fail + 1))
@@ -229,11 +282,33 @@ run_side() {
     # Backgrounded on purpose: `wait` is interruptible, so a SIGTERM to this
     # helper reaches cleanup(), which signals the child. A foreground child
     # would be left running (the 2026-09-12 orphan).
-    set -m 2>/dev/null || true
+    #
+    # NO `set -m` here (2026-09-24, selftest-hang fix — see
+    # doc/08_tracking/bug/test_tree_divergence_delta_selftest_hang_2026-09-24.md).
+    # The 2026-09-12 hardening pass enabled job control here specifically so
+    # the backgrounded job became its own process-group leader for
+    # `kill -TERM -PID` in cleanup(). But `set -m`, invoked from a shell that
+    # is not itself a session/terminal-foreground leader (which is exactly
+    # what this shell is: many levels deep in a non-interactive
+    # script/subshell/recursive-selftest chain), can itself trigger
+    # SIGTTOU when the shell attempts terminal-process-group bookkeeping as
+    # part of turning monitor mode on — and because that same no-tty-ownership
+    # condition means no NEW process group actually gets created either, the
+    # stop signal lands on the CURRENT (shared) process group, stopping this
+    # whole script and its callers, not just the intended background job.
+    # Reproduced on WSL Ubuntu 22.04 (dash): the stop happened during the very
+    # FIRST selftest iteration ("pgkill" mode, before `cleanup()`'s kill logic
+    # ever ran), with `< /dev/null` already in place, proving `set -m` itself
+    # — not stdin inheritance — was the trigger. `kill_tree()` (the recursive
+    # pgrep-based walk) does not need job control or a distinct process group
+    # at all, so it is now the ONLY termination path: `cleanup()` still tries
+    # a process-group kill first (harmless if child_pid never became a real
+    # pgid — the kill just fails and falls through) but no longer relies on
+    # `set -m` to make that attempt meaningful. `< /dev/null` is kept as
+    # defense-in-depth against a background stdin-read trigger on other hosts.
     TEST_TREE_DIVERGENCE_OUT="$work/$name.offenders" \
-        sh "$GUARD" --ref "$sref" > "$work/$name.out" 2> "$work/$name.err" &
+        sh "$GUARD" --ref "$sref" < /dev/null > "$work/$name.out" 2> "$work/$name.err" &
     child_pid=$!
-    set +m
     wait "$child_pid"
     rc=$?
     child_pid=""
