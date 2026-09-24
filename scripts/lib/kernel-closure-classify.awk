@@ -71,21 +71,3 @@ function import_root_class(imported,    root) {
     if (root == "compiler") return ""
     return "UNKNOWN"
 }
-
-# path_root_class: classify a FILE PATH (not an import string) by its
-# top-level source directory, for reuse by callers that walk a file tree
-# rather than an import list (e.g. the core-lib closure checker, WP-09).
-# Returns PLUGIN / APP / OS / LIB for src/{plugins,app,os,lib}/**, or ""
-# for anything else (notably src/compiler/**, which the manifest classifies).
-function path_root_class(path,    p, root) {
-    p = path
-    if (p !~ /^src\//) return ""
-    p = substr(p, 5)
-    root = p
-    sub(/\/.*$/, "", root)
-    if (root == "plugins") return "PLUGIN"
-    if (root == "app") return "APP"
-    if (root == "os") return "OS"
-    if (root == "lib") return "LIB"
-    return ""
-}
