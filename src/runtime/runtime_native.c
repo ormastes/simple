@@ -19,14 +19,11 @@
  * runtime.c + platform headers. We must NOT include platform/platform.h
  * here to avoid duplicate symbol definitions. */
 #include "runtime.h"
-#include "runtime_fd_stat_v1.h"
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
-
-#define SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1 1
-#include "runtime_hosted_safe_artifact_v1.c"
-#undef SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1
+#include "simple_gui_html_provider_abi_v1.h"
+#include "simple_gui_event_provider_abi_v1.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,21 +58,18 @@ typedef SSIZE_T ssize_t;
 #endif
 #include <sys/types.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #if defined(_WIN32)
 #include <direct.h>
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
-#endif
-
-#if defined(SIMPLE_RUNTIME_FREESTANDING_V2)
-/* Hosted host-file exports are intentionally absent in freestanding subsets. */
-#elif defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
-#define SIMPLE_RUNTIME_HOST_FILE_EXPORTS_OWNER_V2 1
-#include "runtime_host_file_exports.c"
-#undef SIMPLE_RUNTIME_HOST_FILE_EXPORTS_OWNER_V2
-#else
-#error "runtime_native.c has no proven hosted/freestanding host-file profile"
+#include "platform/windows_raw_mapping.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -84,6 +78,10 @@ typedef SSIZE_T ssize_t;
  * shadow MinGW's real implementations. */
 #define popen  _popen
 #define pclose _pclose
+
+/* MSVC has no strtok_r; strtok_s takes the same (str, delim, &context)
+ * argument order, so a straight #define is safe. */
+#define strtok_r(str, delim, saveptr) strtok_s((str), (delim), (saveptr))
 
 /* MSVC has no ftruncate; _chsize_s is the CRT equivalent. */
 static int rt_msvc_ftruncate(int fd, long long length) {
@@ -144,7 +142,9 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 #include <dirent.h>
 #include <netdb.h>
 #include <dlfcn.h>
+#include <sched.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
@@ -603,13 +603,24 @@ bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t h
     return false;
 }
 
-/* WebGPU backfill (hosted wgpu backend lives in the Rust runtime only). */
+/* WebGPU backfill (hosted wgpu backend lives in the Rust runtime only).
+ *
+ * The teardown half was missing: std.gpu.engine2d.webgpu_sffi declares six
+ * rt_webgpu_* externs, this file backfilled only is_available/init/
+ * create_surface, and a core-C Stage-4 link of any closure reaching that
+ * module therefore failed with "requested symbols have no archive owner:
+ * rt_webgpu_destroy_surface, rt_webgpu_shutdown" (macOS, 2026-09-06).
+ * Same fail-closed contract as the three above: this lane has no wgpu
+ * provider, so acquisition already returns unavailable and teardown has
+ * nothing to release. */
 bool rt_webgpu_is_available(void) { return false; }
 bool rt_webgpu_init(void) { return false; }
 int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
     (void)width; (void)height;
     return 0;
 }
+bool rt_webgpu_shutdown(void) { return false; }
+bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
 int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
@@ -665,6 +676,32 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_sdl2_create_window(const char* title,
     (void)title; (void)width; (void)height;
     return 0;
 }
+/* Present is reached from std.io.window_sffi's frame path, which the io
+   package hub re-exports, so a core-C Stage-4 link of almost any CLI closure
+   requests it even though nothing calls it here. Missing while its two
+   siblings above were present; same weak fail-closed contract, and
+   rt_sdl2_create_window already returned 0, so no window can exist to
+   present to. runtime_sdl2.c owns the real implementation and overrides this
+   weak definition whenever that TU is in the link. */
+SPL_HOSTED_UNAVAILABLE_WEAK bool rt_sdl2_present_rgba(int64_t window_handle,
+                                                       SplArray* pixels,
+                                                       int64_t width,
+                                                       int64_t height) {
+    (void)window_handle; (void)pixels; (void)width; (void)height;
+    return false;
+}
+
+/* Host-surface selector. The real implementation is Rust-only
+   (src/runtime/hosted/select.rs); a core-C link has no hosted surface at all,
+   so it must answer SEL_REFUSED (-2) = "no verified native arm".
+   NOT 0 — that is SEL_WINIT, a real selector that os/compositor/
+   hosted_backend.spl brings up as SDL2, so returning it here would claim a
+   surface this lane cannot provide. -1 is SEL_NONE ("unset, fall through to
+   host default") and would be just as wrong. Keep in sync with the constants
+   at select.rs:46-57. */
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_hosted_select_surface(void) {
+    return -2;
+}
 #if defined(SIMPLE_CORE_C_STANDALONE)
 bool rt_is_interpreter_runtime(void) {
     return false;
@@ -684,6 +721,32 @@ int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_o
     (void)path; (void)args; (void)gc_log; (void)gc_off;
     fprintf(stderr, "simple: --fork requires hosted interpreter support\n");
     return 1;
+}
+
+/* Raw mmap for the SMF loader (src/compiler/99.loader/smf_mmap_native.spl).
+   Exactly the runtime.c-not-an-archive-member case documented above: the only
+   definition is platform/unix_common.h:365, reached solely through
+   platform/platform.h, which runtime.c:35 is the sole TU to include -- and
+   runtime.c is not a core-C archive member. Without this, a core-C Stage-4
+   link of the full CLI failed with "requested symbols have no archive owner:
+   rt_mmap_raw" (macOS, 2026-09-06). This is real functionality, not a
+   fail-closed backfill: the loader must actually map. Kept byte-for-byte
+   equivalent to the unix_common.h implementation, including its refusal to
+   admit W|X, and confined to the standalone lane so it can never collide with
+   that definition in a link that does carry runtime.c. */
+int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
+                    int64_t fd, int64_t offset) {
+#if defined(_WIN32)
+    return spl_windows_mmap_raw(addr, length, prot, flags, fd, offset);
+#else
+    if (length <= 0 || offset < 0) return -1;
+    /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
+    void* result = mmap((void*)(uintptr_t)addr, (size_t)length, (int)prot,
+                        (int)flags, (int)fd, (off_t)offset);
+    if (result == MAP_FAILED) return -1;
+    return (int64_t)(uintptr_t)result;
+#endif
 }
 #endif
 
@@ -716,6 +779,148 @@ SPL_CORE_C_WEAK bool rt_atomic_int_compare_exchange(int64_t handle, int64_t curr
     RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
     return value && atomic_compare_exchange_strong_explicit(
         &value->value, &current, new_value, memory_order_seq_cst, memory_order_seq_cst);
+}
+
+/* Stage2 bootstrap link (core-C-only lane): the rest of the `rt_atomic_int_*`
+ * / `rt_atomic_bool_*` family (store, swap, fetch ops, free, and the whole bool
+ * side) was missing from this archive -- new/load/compare_exchange above were
+ * the only three ever ported here. `runtime.c` implements the complete
+ * family already (see its "Atomic handles" section) but that file cannot be
+ * added to this archive wholesale (collides with Rust-owned rt_* APIs; see
+ * `build_c_runtime_library` in native_project/tools.rs), so this mirrors its
+ * exact semantics (SplAtomicInt/SplAtomicBool, seq_cst throughout,
+ * malloc/free-backed handles) under the existing `SPL_CORE_C_WEAK` fallback
+ * convention used by the three functions immediately above. */
+SPL_CORE_C_WEAK void rt_atomic_int_store(int64_t handle, int64_t new_value) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return;
+    atomic_store_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_swap(int64_t handle, int64_t new_value) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_exchange_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_add(int64_t handle, int64_t delta) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_add_explicit(&value->value, delta, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_sub(int64_t handle, int64_t delta) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_sub_explicit(&value->value, delta, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_and(int64_t handle, int64_t operand) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_and_explicit(&value->value, operand, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_or(int64_t handle, int64_t operand) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_or_explicit(&value->value, operand, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_xor(int64_t handle, int64_t operand) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return 0;
+    return atomic_fetch_xor_explicit(&value->value, operand, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK void rt_atomic_int_free(int64_t handle) {
+    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
+    if (!value) return;
+    free(value);
+}
+
+typedef struct RtCoreAtomicBool {
+    atomic_bool value;
+} RtCoreAtomicBool;
+
+SPL_CORE_C_WEAK int64_t rt_atomic_bool_new(bool initial) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)malloc(sizeof(RtCoreAtomicBool));
+    if (!value) return 0;
+    atomic_init(&value->value, initial);
+    return (int64_t)(intptr_t)value;
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_load(int64_t handle) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    return value ? atomic_load_explicit(&value->value, memory_order_seq_cst) : false;
+}
+
+SPL_CORE_C_WEAK void rt_atomic_bool_store(int64_t handle, bool new_value) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return;
+    atomic_store_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_swap(int64_t handle, bool new_value) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    return atomic_exchange_explicit(&value->value, new_value, memory_order_seq_cst);
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_compare_exchange(int64_t handle, bool current, bool new_value) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    return value && atomic_compare_exchange_strong_explicit(
+        &value->value, &current, new_value, memory_order_seq_cst, memory_order_seq_cst);
+}
+
+/* `<stdatomic.h>` has no `atomic_fetch_and/or_explicit` overload accepted
+ * uniformly for `atomic_bool` across toolchains (GCC's generic-atomics
+ * expansion rejects it: "operand type incompatible with argument 1 of
+ * __atomic_fetch_and", though clang accepts it). A CAS-retry loop is
+ * portable and has the exact same seq_cst fetch-then-combine semantics as
+ * the fetch_add/fetch_and family above, just spelled out instead of using
+ * the (here, non-portable) built-in fetch primitive. No `atomic_fetch_not`
+ * exists in `<stdatomic.h>` either; fetch-not is fetch-xor(true) (0^1=1,
+ * 1^1=0), the same reduction Rust's `rt_atomic_bool_fetch_not` uses
+ * (`fetch_xor(true, SeqCst)`, runtime/src/value/sffi/atomic.rs). */
+SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_and(int64_t handle, bool operand) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
+    while (!atomic_compare_exchange_weak_explicit(
+        &value->value, &current, current && operand,
+        memory_order_seq_cst, memory_order_seq_cst)) {
+        /* current is refreshed by a failed CAS; retry with the new value. */
+    }
+    return current;
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_or(int64_t handle, bool operand) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
+    while (!atomic_compare_exchange_weak_explicit(
+        &value->value, &current, current || operand,
+        memory_order_seq_cst, memory_order_seq_cst)) {
+    }
+    return current;
+}
+
+SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_not(int64_t handle) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return false;
+    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
+    while (!atomic_compare_exchange_weak_explicit(
+        &value->value, &current, !current,
+        memory_order_seq_cst, memory_order_seq_cst)) {
+    }
+    return current;
+}
+
+SPL_CORE_C_WEAK void rt_atomic_bool_free(int64_t handle) {
+    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
+    if (!value) return;
+    free(value);
 }
 
 /* rt_thread_sleep is NOT defined here.  runtime_thread.c is the canonical
@@ -1157,6 +1362,14 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+extern int32_t rt_transient_raw_scope_begin(void);
+extern int32_t rt_transient_raw_scope_pause(void);
+extern int64_t rt_transient_raw_words(
+    int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr);
+extern int32_t rt_transient_raw_promote(uintptr_t ptr);
+extern int32_t rt_transient_raw_scope_end(void);
+#endif
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -1394,6 +1607,12 @@ int8_t rt_transient_array_scope_begin(void) {
         atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
         return 0;
     }
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_scope_begin()) {
+        atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
+        return 0;
+    }
+#endif
     rt_core_transient_array_scope_id = next_id;
     rt_core_transient_array_scope_active = 1;
     rt_core_transient_array_scope_paused = 0;
@@ -1404,6 +1623,9 @@ int8_t rt_transient_array_scope_pause(void) {
     if (!rt_core_transient_array_scope_active ||
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_scope_pause()) return 0;
+#endif
     rt_core_transient_array_scope_paused = 1;
     return 1;
 }
@@ -1417,7 +1639,16 @@ int8_t rt_transient_array_scope_end(void) {
     rt_core_transient_array_scope_paused = 0;
 
     rt_core_reclaim_transient_immortal(scope_id);
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
     rt_core_reclaim_transient_raw();
+    if (!rt_transient_raw_scope_end()) return 0;
+    /* runtime_memory.c owns the bytes, but all owner-mode registrations live
+     * in this canonical table. Its scope-end only closes the allocator-side
+     * lifecycle; reclaim and clear this table here so a later scope can begin. */
+    rt_core_reclaim_transient_raw();
+#else
+    rt_core_reclaim_transient_raw();
+#endif
     atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
     return 1;
 }
@@ -1520,6 +1751,12 @@ static int rt_core_transient_raw_grow(void) {
     size_t next_cap = rt_core_transient_raw_alloc_cap == 0
         ? 256
         : rt_core_transient_raw_alloc_cap * 2;
+    /* Reclaim retired slots without retaining a larger table for every HIR
+     * module. Grow only when live allocations need the additional capacity. */
+    if (rt_core_transient_raw_alloc_cap != 0 &&
+        (rt_core_transient_raw_alloc_len + 1) * 10 < rt_core_transient_raw_alloc_cap * 6) {
+        next_cap = rt_core_transient_raw_alloc_cap;
+    }
     if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
     RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
         next_cap, sizeof(RtCoreTransientRawAlloc));
@@ -1622,6 +1859,12 @@ static void rt_core_reclaim_transient_raw(void) {
         if (entry->ptr == 0 || entry->ptr == RT_CORE_TRANSIENT_RAW_TOMBSTONE) continue;
         if (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) {
             void* raw = (void*)entry->ptr;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+            /* The composed allocator may add hardening headers, quarantine,
+             * or guarded mappings. Reclaim through its canonical ABI; rt_free
+             * also unregisters this entry safely while the table is scanned. */
+            rt_free(raw);
+#else
             rt_struct_alloc_unregister(raw);
             /* Now that sampled guard slots are registered here too, reclaim
              * must not hand one to free(): a slot is a page-aligned mmap
@@ -1633,6 +1876,7 @@ static void rt_core_reclaim_transient_raw(void) {
             } else {
                 free(raw);
             }
+#endif
         }
     }
     rt_core_transient_raw_clear();
@@ -1953,6 +2197,182 @@ static inline RtCoreString* rt_core_as_string(int64_t value) {
     return s;
 }
 
+/* Optional HTML GUI provider. Loading is deferred until the GUI is actually
+ * used; ordinary compiler/CLI startup never loads AppKit or a GUI dylib.
+ * One process-lifetime handle is retained, and the hot path does one atomic
+ * readiness check plus one borrowed-byte call (no repeated dlopen/dlsym). */
+static atomic_bool rt_gui_html_ready = ATOMIC_VAR_INIT(false);
+static atomic_flag rt_gui_html_init_lock = ATOMIC_FLAG_INIT;
+static void *rt_gui_html_library = NULL;
+static int64_t (*rt_gui_html_present)(const uint8_t *, uint64_t) = NULL;
+#if !defined(_WIN32)
+static _Thread_local int rt_gui_html_initializing = 0;
+#endif
+
+static void rt_gui_html_refuse(const char *reason) {
+    fprintf(stderr, "[simple-gui] HTML provider unavailable: %s\n", reason);
+    fflush(stderr);
+    exit(70);
+}
+
+static void rt_gui_html_load(void) {
+#if defined(_WIN32)
+    rt_gui_html_refuse("dynamic HTML provider unsupported on this host");
+#else
+    if (rt_gui_html_initializing) rt_gui_html_refuse("provider initialization reentry");
+    if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_acquire)) {
+        while (atomic_flag_test_and_set_explicit(&rt_gui_html_init_lock, memory_order_acquire)) {
+            sched_yield();
+        }
+        if (!atomic_load_explicit(&rt_gui_html_ready, memory_order_relaxed)) {
+            rt_gui_html_initializing = 1;
+            const char *path = getenv("SIMPLE_GUI_HTML_PROVIDER_PATH");
+            if (!path || path[0] != '/') rt_gui_html_refuse("absolute provider path required");
+            void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+            if (!library) rt_gui_html_refuse("provider load failed");
+            union { void *symbol; int64_t (*call)(void); } version;
+            union { void *symbol; int64_t (*call)(const uint8_t *, uint64_t); } present;
+            version.symbol = dlsym(library, "simple_gui_html_provider_abi_v1");
+            present.symbol = dlsym(library, "simple_gui_present_html_v1");
+            if (!version.call || !present.call ||
+                version.call() != SIMPLE_GUI_HTML_PROVIDER_ABI_VERSION_V1) {
+                dlclose(library);
+                rt_gui_html_refuse("provider ABI mismatch");
+            }
+            rt_gui_html_library = library;
+            rt_gui_html_present = present.call;
+            atomic_store_explicit(&rt_gui_html_ready, true, memory_order_release);
+            rt_gui_html_initializing = 0;
+        }
+        atomic_flag_clear_explicit(&rt_gui_html_init_lock, memory_order_release);
+    }
+#endif
+}
+
+/* Event sessions are deliberately separate from the concurrent, standalone
+ * HTML v1 API. All session state is owned by the macOS main thread. */
+static bool rt_gui_event_active = false;
+static bool rt_gui_event_ready = false;
+/* Nonnegative = admitted standalone calls; -1 = exclusive event session.
+ * Reserve before provider admission, and release only after callbacks finish. */
+static atomic_int rt_gui_call_gate = ATOMIC_VAR_INIT(0);
+static _Thread_local bool rt_gui_event_in_callback = false;
+static int64_t (*rt_gui_event_poll)(uint8_t *, uint64_t, uint64_t) = NULL;
+static int64_t (*rt_gui_event_shutdown)(void) = NULL;
+static int64_t splc_utf8_valid_up_to(const uint8_t *bytes, int64_t length);
+
+static void rt_gui_event_owner(void) {
+#if defined(__APPLE__)
+    if (!pthread_main_np()) rt_gui_html_refuse("GUI session requires main thread");
+#else
+    rt_gui_html_refuse("GUI event sessions require macOS");
+#endif
+    if (rt_gui_event_in_callback) rt_gui_html_refuse("GUI callback reentry");
+}
+
+void rt_gui_present_html(int64_t tagged_html) {
+    if (rt_gui_event_in_callback) rt_gui_html_refuse("GUI callback reentry");
+    RtCoreString *html = rt_core_as_string(tagged_html);
+    if (!html) rt_gui_html_refuse("invalid tagged text");
+    int calls = atomic_load_explicit(&rt_gui_call_gate, memory_order_acquire);
+    do {
+        if (calls < 0 || calls == INT_MAX)
+            rt_gui_html_refuse("standalone HTML overlaps GUI session");
+    } while (!atomic_compare_exchange_weak_explicit(&rt_gui_call_gate, &calls,
+                calls + 1, memory_order_acq_rel, memory_order_acquire));
+    rt_gui_event_in_callback = true;
+    rt_gui_html_load();
+    if (!rt_gui_html_library || !rt_gui_html_present ||
+        rt_gui_html_present((const uint8_t *)html->data, html->len) != 1) {
+        rt_gui_html_refuse("provider rejected frame");
+    }
+    rt_gui_event_in_callback = false;
+    atomic_fetch_sub_explicit(&rt_gui_call_gate, 1, memory_order_release);
+}
+
+void rt_gui_begin_session(void) {
+    rt_gui_event_owner();
+    if (rt_gui_event_active) rt_gui_html_refuse("GUI session already active");
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&rt_gui_call_gate, &expected,
+                -1, memory_order_acq_rel, memory_order_acquire))
+        rt_gui_html_refuse("GUI session overlaps standalone HTML");
+    rt_gui_event_in_callback = true;
+    rt_gui_html_load();
+    rt_gui_event_in_callback = false;
+#if !defined(_WIN32)
+    if (!rt_gui_event_ready) {
+        union { void *symbol; int64_t (*call)(void); } version, shutdown;
+        union { void *symbol; int64_t (*call)(uint8_t *, uint64_t, uint64_t); } poll;
+        version.symbol = dlsym(rt_gui_html_library, "simple_gui_event_provider_abi_v1");
+        poll.symbol = dlsym(rt_gui_html_library, "simple_gui_poll_event_v1");
+        shutdown.symbol = dlsym(rt_gui_html_library, "simple_gui_shutdown_v1");
+        if (!version.call || !poll.call || !shutdown.call)
+            rt_gui_html_refuse("provider event capability missing");
+        rt_gui_event_in_callback = true;
+        int64_t abi = version.call();
+        rt_gui_event_in_callback = false;
+        if (abi != SIMPLE_GUI_EVENT_PROVIDER_ABI_VERSION_V1)
+            rt_gui_html_refuse("provider event ABI mismatch");
+        rt_gui_event_poll = poll.call;
+        rt_gui_event_shutdown = shutdown.call;
+        rt_gui_event_ready = true;
+    }
+#endif
+    rt_gui_event_active = true;
+}
+
+void rt_gui_session_present_html(int64_t tagged_html) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    RtCoreString *html = rt_core_as_string(tagged_html);
+    if (!html) rt_gui_html_refuse("invalid tagged text");
+    rt_gui_event_in_callback = true;
+    int64_t accepted = rt_gui_html_present((const uint8_t *)html->data, html->len);
+    rt_gui_event_in_callback = false;
+    if (accepted != 1) rt_gui_html_refuse("provider rejected frame");
+}
+
+int64_t rt_gui_poll_event(void) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    uint8_t packet[SIMPLE_GUI_EVENT_PACKET_CAPACITY_V1] = {0};
+    rt_gui_event_in_callback = true;
+    int64_t count = rt_gui_event_poll(packet, sizeof(packet), SIMPLE_GUI_EVENT_WAIT_MS_V1);
+    rt_gui_event_in_callback = false;
+    if (count < 0 || count > (int64_t)sizeof(packet))
+        rt_gui_html_refuse("provider event length invalid");
+    if (count == 0) {
+        int64_t empty = rt_string_new_literal((const uint8_t *)"", 0);
+        if (!rt_core_as_string(empty)) rt_gui_html_refuse("event text allocation failed");
+        return empty;
+    }
+    int64_t delimiter = 0;
+    while (delimiter < count && packet[delimiter] != '\n') {
+        uint8_t byte = packet[delimiter];
+        if (delimiter >= 31 || !((byte >= 'a' && byte <= 'z') || byte == '-'))
+            rt_gui_html_refuse("provider event kind invalid");
+        delimiter++;
+    }
+    if (delimiter == 0 || delimiter == count || memchr(packet, 0, (size_t)count) ||
+        splc_utf8_valid_up_to(packet, count) != count)
+        rt_gui_html_refuse("provider event packet invalid");
+    int64_t copied = rt_string_new(packet, (uint64_t)count);
+    if (!rt_core_as_string(copied)) rt_gui_html_refuse("event text allocation failed");
+    return copied;
+}
+
+void rt_gui_end_session(void) {
+    rt_gui_event_owner();
+    if (!rt_gui_event_active) rt_gui_html_refuse("GUI session not active");
+    rt_gui_event_active = false;
+    rt_gui_event_in_callback = true;
+    int64_t closed = rt_gui_event_shutdown();
+    rt_gui_event_in_callback = false;
+    if (closed != 1) rt_gui_html_refuse("provider shutdown failed");
+    atomic_store_explicit(&rt_gui_call_gate, 0, memory_order_release);
+}
+
 static atomic_bool rt_core_invalid_array_reported = ATOMIC_VAR_INIT(false);
 
 static void rt_core_report_invalid_array_once(int64_t value) {
@@ -2113,6 +2533,16 @@ static int rt_core_transient_plan_push(
 
 /* 1 = tracked node, 0 = immediate or persistent string, -1 = invalid node. */
 static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    uintptr_t raw_ptr = 0;
+    int64_t word_count = rt_transient_raw_words(value, NULL, &raw_ptr);
+    if (word_count >= 0) {
+        *node = (RtCoreTransientNode){
+            (void*)raw_ptr, RT_CORE_TRANSIENT_RAW,
+            (size_t)word_count * sizeof(uintptr_t)};
+        return 1;
+    }
+#else
     uintptr_t raw = (uintptr_t)value;
     uintptr_t raw_ptr = raw & RT_VALUE_TAG_MASK ? raw & ~RT_VALUE_TAG_MASK : raw;
     RtCoreTransientRawAlloc* allocation = rt_core_transient_raw_lookup(raw_ptr);
@@ -2122,6 +2552,7 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
             allocation->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK};
         return 1;
     }
+#endif
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
@@ -2222,9 +2653,13 @@ int8_t rt_transient_heap_promote(int64_t value) {
                 case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_RAW: {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+                    if (!rt_transient_raw_promote((uintptr_t)node.ptr)) ok = 0;
+#else
                     RtCoreTransientRawAlloc* raw =
                         rt_core_transient_raw_lookup((uintptr_t)node.ptr);
                     if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+#endif
                     break;
                 }
             }
@@ -4457,6 +4892,29 @@ int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
 }
 
+/* Presence predicate for the postfix `.?` operator -- the C twin of the Rust
+ * runtime's rt_is_present (compiler_rust/runtime/src/value/objects.rs) and of
+ * rt_is_present in src/runtime/simple_core/core_string.spl.
+ *
+ * `.?` is absent for nil/None AND for an EMPTY array, dict or string; every
+ * other value (including 0, false, tuples, closures and structs) is present.
+ * That is exactly the tree-walk interpreter's Expr::ExistsCheck arm. Using
+ * rt_is_some here instead made a natively compiled `while arr.?:` loop forever
+ * on an empty-but-allocated array while `.len()` read 0 in the same binary --
+ * doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md */
+int8_t rt_is_present(int64_t value) {
+    if (rt_is_none(value)) return 0;
+    int64_t payload = rt_unwrap_or_self(value);
+    if (payload == rt_core_nil()) return 0;
+    RtCoreString* s = rt_core_as_string(payload);
+    if (s) return s->len > 0;
+    RtCoreArray* a = rt_core_as_registered_array(payload);
+    if (a) return a->len > 0;
+    RtCoreDict* d = rt_core_as_dict(payload);
+    if (d) return rt_dict_len(payload) > 0;
+    return 1;
+}
+
 /* Repeat a string `count` times.
  *
  * Mirrors the tree-walking interpreter (interpreter_method/string.rs, arm
@@ -5176,6 +5634,116 @@ int64_t rt_sort(int64_t receiver) {
 bool rt_array_sort(int64_t receiver) {
     (void)rt_sort(receiver);
     return true;
+}
+
+static int rt_sorted_byte_cmp(const void* lhs, const void* rhs) {
+    uint8_t a = *(const uint8_t*)lhs;
+    uint8_t b = *(const uint8_t*)rhs;
+    return (a > b) - (a < b);
+}
+
+static int rt_sorted_u64_cmp(const void* lhs, const void* rhs) {
+    uint64_t a = *(const uint64_t*)lhs;
+    uint64_t b = *(const uint64_t*)rhs;
+    return (a > b) - (a < b);
+}
+
+/* Match the hosted rt_array_sorted comparator, not rt_sort's interpreter
+ * comparator: unsigned boxes compare as u64 (including against tagged ints),
+ * tagged ints precede floats, and all other mixed types compare Equal. */
+static int rt_sorted_value_cmp(int64_t a, int64_t b) {
+    RtCoreUInt* unsigned_a = rt_core_as_heap_uint(a);
+    RtCoreUInt* unsigned_b = rt_core_as_heap_uint(b);
+    if (unsigned_a && unsigned_b) {
+        return (unsigned_a->value > unsigned_b->value) -
+               (unsigned_a->value < unsigned_b->value);
+    }
+    if (unsigned_a && rt_core_is_int(b)) {
+        int64_t integer_b = rt_core_as_int(b);
+        if (integer_b < 0) return 1;
+        return (unsigned_a->value > (uint64_t)integer_b) -
+               (unsigned_a->value < (uint64_t)integer_b);
+    }
+    if (unsigned_b && rt_core_is_int(a)) {
+        int64_t integer_a = rt_core_as_int(a);
+        if (integer_a < 0) return -1;
+        return ((uint64_t)integer_a > unsigned_b->value) -
+               ((uint64_t)integer_a < unsigned_b->value);
+    }
+    int integer_a = rt_core_is_int(a);
+    int integer_b = rt_core_is_int(b);
+    int float_a = rt_core_is_float(a);
+    int float_b = rt_core_is_float(b);
+    if (integer_a && integer_b) {
+        int64_t x = rt_core_as_int(a), y = rt_core_as_int(b);
+        return (x > y) - (x < y);
+    }
+    if (float_a && float_b) {
+        double x = rt_core_as_float(a), y = rt_core_as_float(b);
+        return (x > y) - (x < y); /* NaN compares Equal, as in Rust. */
+    }
+    if (integer_a && float_b) return -1;
+    if (float_a && integer_b) return 1;
+    return 0;
+}
+
+/* Non-mutating `sorted`: preserve both the input and its storage shape.
+ * Byte and u64-packed arrays carry RAW elements, not tagged RuntimeValues;
+ * feeding those slots to rt_sort_cmp can interpret integers as pointers.
+ * Duplicate packed scalars are identical, so qsort's stability is immaterial.
+ * Generic tagged elements use a stable O(n log n) bottom-up merge, avoiding
+ * rt_sort's O(n^2) insertion-sort cost for a new public entrypoint. */
+int64_t rt_array_sorted(int64_t receiver) {
+    if (!rt_core_as_array(receiver)) return rt_core_nil();
+    SplArray* copy = rt_array_copy((SplArray*)(uintptr_t)receiver);
+    if (!copy) return rt_core_nil();
+    RtCoreArray* array = rt_core_as_array((int64_t)(uintptr_t)copy);
+    if (!array) return rt_core_nil();
+    size_t n = (size_t)array->len;
+    if (n < 2) return (int64_t)(uintptr_t)copy;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        qsort(array->data, n, sizeof(uint8_t), rt_sorted_byte_cmp);
+        return (int64_t)(uintptr_t)copy;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        qsort(array->data, n, sizeof(uint64_t), rt_sorted_u64_cmp);
+        return (int64_t)(uintptr_t)copy;
+    }
+    if (n > SIZE_MAX / sizeof(int64_t)) {
+        rt_array_free(copy);
+        return rt_core_nil();
+    }
+    int64_t* scratch = (int64_t*)malloc(n * sizeof(int64_t));
+    if (!scratch) {
+        rt_array_free(copy);
+        return rt_core_nil();
+    }
+    int64_t* data = (int64_t*)array->data;
+    int64_t* src = data;
+    int64_t* dst = scratch;
+    for (size_t width = 1; width < n; ) {
+        for (size_t left = 0; left < n; ) {
+            size_t middle = left + (width < n - left ? width : n - left);
+            size_t right = middle + (width < n - middle ? width : n - middle);
+            size_t i = left;
+            size_t j = middle;
+            size_t out = left;
+            while (i < middle && j < right) {
+                dst[out++] = rt_sorted_value_cmp(src[i], src[j]) <= 0 ? src[i++] : src[j++];
+            }
+            while (i < middle) dst[out++] = src[i++];
+            while (j < right) dst[out++] = src[j++];
+            left = right;
+        }
+        int64_t* next = src;
+        src = dst;
+        dst = next;
+        if (width >= n - width) break;
+        width *= 2;
+    }
+    if (src != data) memcpy(data, src, n * sizeof(int64_t));
+    free(scratch);
+    return (int64_t)(uintptr_t)copy;
 }
 
 int64_t rt_array_max(int64_t receiver) {
@@ -5952,7 +6520,9 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
     }
     if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
             >= rt_struct_alloc_cap * 7) {
-        if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
+        if ((rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 6) {
+            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
+        } else if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
         } else if (rt_struct_alloc_tombs > rt_struct_alloc_len / 4) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
@@ -6301,6 +6871,148 @@ double rt_math_pow(double base, double exponent) {
     return pow(base, exponent);
 }
 
+/* Stage2 bootstrap link (core-C-only lane): `rt_simple_abi_version` and
+ * `rt_simple_abi_version_deferred` are already defined in `runtime.c`
+ * (lines 35-41) but that file is excluded from this archive wholesale
+ * (collides with Rust-owned rt_* APIs; see the `build_c_runtime_library`
+ * comment in native_project/tools.rs). Both are one-line reads of the same
+ * `SIMPLE_ABI_VERSION`/`SIMPLE_ABI_VERSION_DEFERRED` macros `runtime.h`
+ * already defines and this file already includes -- verbatim mirror. */
+int64_t rt_simple_abi_version(void) {
+    return (int64_t)SIMPLE_ABI_VERSION;
+}
+
+int64_t rt_simple_abi_version_deferred(void) {
+    return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
+}
+
+/* Stage2 bootstrap link (core-C-only lane, no Rust runtime): these eleven
+ * inverse-trig/log/hyperbolic wrappers are `extern fn` in `.spl` and already
+ * implemented natively in Rust (runtime/src/value/sffi/math.rs, each a
+ * one-line libm passthrough), but that Rust crate is not linked into this
+ * lane, and `runtime.c` -- which also has no independent implementation of
+ * these, only the C standard library does -- is excluded from the bootstrap
+ * archive wholesale (collides with Rust-owned rt_* APIs; see the
+ * `build_c_runtime_library` comment in native_project/tools.rs). Mirrors the
+ * Rust side's semantics exactly: a direct <math.h> passthrough, same as
+ * `rt_math_pow` immediately above. */
+double rt_math_asin(double x) {
+    return asin(x);
+}
+
+double rt_math_acos(double x) {
+    return acos(x);
+}
+
+double rt_math_atan(double x) {
+    return atan(x);
+}
+
+double rt_math_atan2(double y, double x) {
+    return atan2(y, x);
+}
+
+double rt_math_sinh(double x) {
+    return sinh(x);
+}
+
+double rt_math_cosh(double x) {
+    return cosh(x);
+}
+
+double rt_math_tanh(double x) {
+    return tanh(x);
+}
+
+double rt_math_floor(double x) {
+    return floor(x);
+}
+
+double rt_math_ceil(double x) {
+    return ceil(x);
+}
+
+double rt_math_log(double x) {
+    return log(x);
+}
+
+double rt_math_log10(double x) {
+    return log10(x);
+}
+
+double rt_math_log2(double x) {
+    return log2(x);
+}
+
+/* Stage2 bootstrap link (core-C-only lane): `rt_math_sqrt` is the twelfth
+ * member of the libm passthrough family above and had NO C definition at all,
+ * so the CoreCBootstrap lane could not link any program that reaches
+ * `math.sqrt` -- observed as the `link` class of the native-vs-interpreter
+ * differential census (doc/10_metrics/infra/
+ * native_interp_differential_2026-09-13.md). Byte-for-byte twin of the Rust
+ * side (runtime/src/value/sffi/math.rs: `x.sqrt()`), which is `f64::sqrt` ->
+ * the IEEE-754 correctly-rounded square root; C99 `sqrt` is the same
+ * correctly-rounded operation, so the two agree on every input including
+ * -0.0 (-> -0.0), negative (-> NaN) and infinities. */
+double rt_math_sqrt(double x) {
+    return sqrt(x);
+}
+
+/* Same lane, same census, same shape as the eleven above and as rt_math_sqrt:
+ * eight more libm passthroughs that existed only in the Rust crate
+ * (runtime/src/value/sffi/math.rs), each a one-line method call. They surfaced
+ * as the NEXT unresolved set once the six symbols of this change stopped
+ * blocking `test/01_unit/compiler/backend/llvm_ir_builder_spec.spl`, so closing
+ * them here is what actually moves that row off the `link` class rather than
+ * trading one unresolved name for another.
+ *
+ * min/max mirror Rust's `f64::min`/`f64::max`, which are the IEEE-754
+ * minNum/maxNum operations -- they return the non-NaN operand when exactly one
+ * side is NaN. C99 `fmin`/`fmax` are specified as the same operations, so a
+ * naive `a < b ? a : b` would NOT be a twin and is deliberately not used. */
+double rt_math_exp(double x) {
+    return exp(x);
+}
+
+double rt_math_cbrt(double x) {
+    return cbrt(x);
+}
+
+double rt_math_sin(double x) {
+    return sin(x);
+}
+
+double rt_math_cos(double x) {
+    return cos(x);
+}
+
+double rt_math_tan(double x) {
+    return tan(x);
+}
+
+double rt_math_hypot(double x, double y) {
+    return hypot(x, y);
+}
+
+/* A fused operation is required here: x*y+z can round twice. */
+double rt_math_fma(double x, double y, double z) {
+    return fma(x, y, z);
+}
+
+/* The Simple SFFI spells this boundary rt_f64_to_bits; core memory owns the
+ * identical bit-preserving operation under its original spl_ name. */
+int64_t rt_f64_to_bits(double value) {
+    return spl_f64_to_bits(value);
+}
+
+double rt_math_min(double a, double b) {
+    return fmin(a, b);
+}
+
+double rt_math_max(double a, double b) {
+    return fmax(a, b);
+}
+
 /* Fault limits are process policy for the pure-Simple runner and its child
  * compiler/test processes. Keep this provider independent from the legacy
  * Rust CLI CGU (which also owns seed-delegating rt_cli_run_tests). The names
@@ -6571,12 +7283,75 @@ SplArray* rt_array_new(int64_t cap) {
     return rt_core_array_new(cap, 0);
 }
 
+/* Typed Simple arrays use the ordinary tagged-slot array ABI. The interpreter
+ * allocates the requested length and fills every slot with numeric zero. */
+static SplArray* rt_core_zero_array_alloc(int64_t len, int floating) {
+    if (len < 0) len = 0;
+    SplArray* array = rt_array_new(len);
+    if (!array) return NULL;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t zero = floating ? rt_value_float(0.0) : rt_value_int(0);
+        if (!rt_array_push(array, zero)) {
+            rt_array_free(array);
+            return NULL;
+        }
+    }
+    return array;
+}
+
+SplArray* rt_f64_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 1);
+}
+
+SplArray* rt_f32_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 1);
+}
+
+SplArray* rt_i64_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 0);
+}
+
 SplArray* rt_array_new_uninit(int64_t cap) {
-    return rt_core_array_new_fill(cap, 0, 0);
+    /* `cap` elements that EXIST but hold undefined values — that is what
+       "uninit" means to every caller, all of which allocate n, fill n and
+       return. `rt_core_array_new_fill` only sets `cap`; `len` stays 0 from the
+       calloc of the header, so without this the array comes back with correct
+       data and a length of ZERO.
+       That is not a crash, which is why it survived: a Simple caller checks
+       `span.len() != n`, reads it as "extern not backed", and silently falls
+       back to the scalar path. Measured in a native binary, EVERY
+       span-returning C kernel was dead this way — the DB bitmap ops, the glyph
+       mask blend, and the soft-shadow coverage blend — while the in-place
+       kernels next to them worked fine and made the lane look healthy.
+       `rt_array_repeat` already sets `len` by hand after the same call; this
+       makes the constructor itself honest instead of requiring every caller to
+       remember. */
+    SplArray* a = rt_core_array_new_fill(cap, 0, 0);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (array) {
+        array->len = cap > 0 ? cap : 0;
+    }
+    return a;
 }
 
 SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
+}
+
+/* Is this array stored as PACKED BYTES rather than tagged int64 slots?
+ *
+ * `[u8]` takes the packed representation (RT_CORE_ARRAY_FLAG_BYTES); every
+ * other element type takes one tagged slot each. A kernel in another
+ * translation unit cannot see the flag, so it has to guess — and
+ * `rt_engine2d_blend_mask_span_u32` guessed "tagged slots" for its glyph mask,
+ * read packed bytes as int64 words, and blended every glyph pixel against
+ * garbage. It went unnoticed because the interpreter path uses the Rust twin,
+ * which unpacks correctly.
+ */
+int rt_array_is_byte_packed(SplArray* value) {
+    RtCoreArray* array = rt_core_array_ptr(value);
+    if (!array) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
 }
 
 void rt_array_free(SplArray* value) {
@@ -7017,6 +7792,71 @@ SplArray* rt_byte_array_new_len(uint64_t len) {
         array->len = (int64_t)len;
     }
     return a;
+}
+
+/* The [u8] SFFI boundary returns a packed byte array. Entropy failure is
+ * reported as NIL, never as a zero-filled buffer that looks random. */
+int64_t rt_random_bytes_c(uint64_t count) {
+    if (count > INT64_MAX || count > SIZE_MAX) return rt_core_nil();
+    SplArray* result = rt_byte_array_new_len(count);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) return rt_core_nil();
+    uint8_t* bytes = (uint8_t*)array->data;
+    size_t length = (size_t)count;
+    if (length == 0) return (int64_t)(uintptr_t)result;
+#if defined(_WIN32)
+    typedef long (WINAPI *RtBCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+    wchar_t bcrypt_path[MAX_PATH];
+    static const wchar_t bcrypt_leaf[] = L"\\bcrypt.dll";
+    UINT system_len = GetSystemDirectoryW(bcrypt_path, MAX_PATH);
+    HMODULE bcrypt = NULL;
+    if (system_len != 0 &&
+        system_len <= MAX_PATH - (sizeof(bcrypt_leaf) / sizeof(bcrypt_leaf[0]))) {
+        memcpy(bcrypt_path + system_len, bcrypt_leaf, sizeof(bcrypt_leaf));
+        bcrypt = LoadLibraryW(bcrypt_path);
+    }
+    RtBCryptGenRandomFn fill = bcrypt ?
+        (RtBCryptGenRandomFn)GetProcAddress(bcrypt, "BCryptGenRandom") : NULL;
+    int ok = fill != NULL;
+    size_t offset = 0;
+    while (ok && offset < length) {
+        unsigned long chunk = (unsigned long)((length - offset) > 1048576u ? 1048576u : (length - offset));
+        ok = fill(NULL, bytes + offset, chunk, 0x00000002) == 0;
+        offset += chunk;
+    }
+    if (bcrypt) FreeLibrary(bcrypt);
+#else
+    int ok = 1;
+    int fd = -1;
+    if (length != 0) {
+#ifdef O_CLOEXEC
+        fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+#else
+        fd = open("/dev/urandom", O_RDONLY);
+        if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+            close(fd);
+            fd = -1;
+        }
+#endif
+        ok = fd >= 0;
+    }
+    size_t offset = 0;
+    while (ok && offset < length) {
+        size_t chunk = length - offset > 1048576u ? 1048576u : length - offset;
+        ssize_t n = read(fd, bytes + offset, chunk);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = 0; break; }
+        offset += (size_t)n;
+    }
+    if (fd >= 0) close(fd);
+#endif
+    if (!ok) {
+        volatile uint8_t* wipe = bytes;
+        for (size_t i = 0; i < length; i++) wipe[i] = 0;
+        rt_array_free(result);
+        return rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
 }
 
 SplArray* rt_bytes_alloc(int64_t len) {
@@ -8195,6 +9035,13 @@ int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     return e && (int64_t)e->discriminant == expected;
 }
 
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e || (int64_t)e->discriminant != expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+}
+
 int64_t rt_enum_payload(int64_t value) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e ? e->payload : rt_core_nil();
@@ -8704,6 +9551,288 @@ int64_t rt_array_pop(SplArray* a) {
     return value;
 }
 
+/* ===========================================================================
+ * Core-C-only lane twins: rt_utf8_* / rt_numeric_dot_f64 / rt_array_remove
+ *
+ * These five were Rust-runtime-only. The CoreCBootstrap lane -- the lane the
+ * self-hosted Stage 2/3 binaries link against -- never links that crate, so
+ * any program reaching them failed to LINK. That is the `link` class of the
+ * native-vs-interpreter differential census
+ * (doc/10_metrics/infra/native_interp_differential_2026-09-13.md, 9 rows) and
+ * doc/08_tracking/bug/
+ * core_c_bootstrap_runtime_lane_missing_rt_utf8_math_array_symbols_2026-09-13.md.
+ * They are live call targets, never bypassed.
+ *
+ * They are written HERE, beside rt_array_pop, for the reason stated in the
+ * comment immediately below it: RtCoreArray, rt_core_as_array and the
+ * rt_core_is_int/as_int/is_float/as_float tag helpers are all file-local to
+ * this translation unit, and re-declaring RtCoreArray elsewhere is exactly the
+ * layout drift that links cleanly and corrupts silently.
+ *
+ * Every body below mirrors its Rust twin's SEMANTICS, not its code shape; the
+ * one deliberate, stated exception is the packed-SIMD reassociation noted on
+ * rt_numeric_dot_f64.
+ * ======================================================================== */
+
+/* Twin of Rust's `runtime_value_array_to_bytes`
+ * (runtime/src/value/utf8_kernels.rs): every element must be an integer in
+ * 0..=255, or the whole decode refuses (Rust's `None`).
+ *
+ * Rust reaches elements through `rt_array_get`, which RE-TAGS the packed
+ * layouts before returning them. This lane's `rt_array_get` hands back a RAW
+ * byte for FLAG_BYTES instead, so routing through it would make a byte-backed
+ * array decode differently from a generic one. The layouts are therefore read
+ * directly here. Returns the byte count, or -1 for refusal; on success *out
+ * owns a malloc'd buffer (NULL when the length is 0).
+ *
+ * A zero-length array is Some(empty) in Rust even when its data pointer is
+ * null, so the length check precedes the data check. */
+static int64_t splc_utf8_array_to_bytes(int64_t value, uint8_t** out) {
+    RtCoreArray* array = rt_core_as_array(value);
+    *out = NULL;
+    if (!array) return -1;
+    int64_t len = array->len;
+    if (len < 0) return -1;
+    if (len == 0) return 0;
+    if (!array->data) return -1;
+    uint8_t* buf = (uint8_t*)malloc((size_t)len);
+    if (!buf) return -1;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t elem;
+        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+            elem = (int64_t)((uint8_t*)array->data)[i];
+        } else if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+            elem = (int64_t)((uint64_t*)array->data)[i];
+        } else {
+            int64_t tagged = ((int64_t*)array->data)[i];
+            if (!rt_core_is_int(tagged)) { free(buf); return -1; }
+            elem = rt_core_as_int(tagged);
+        }
+        if (elem < 0 || elem > 255) { free(buf); return -1; }
+        buf[i] = (uint8_t)elem;
+    }
+    *out = buf;
+    return len;
+}
+
+/* Twin of what `std::str::from_utf8` runs (core's run_utf8_validation), which
+ * is what Rust's `scalar_validate` / `scalar_find_invalid` call. Returns the
+ * number of leading bytes that form valid UTF-8: `len` when the whole input is
+ * valid, otherwise Rust's `Utf8Error::valid_up_to()`, which is the offset of
+ * the FIRST BYTE of the offending sequence (not of the offending byte).
+ *
+ * RFC 3629 strictness, encoded in the lead/second-byte ranges below: C0/C1
+ * overlong leads, 3-byte overlongs (E0 80..9F), UTF-16 surrogates
+ * (ED A0..BF => U+D800..U+DFFF), 4-byte overlongs (F0 80..8F), anything above
+ * U+10FFFF (F4 90.. and F5..FF), bare continuation bytes, and truncated
+ * sequences are all invalid. Truncation reports the sequence start too.
+ *
+ * All of Rust's SIMD tiers (avx2/avx512/neon) are documented in
+ * utf8_kernels.rs as byte-for-byte identical to the scalar result for every
+ * input including malformed UTF-8 -- they only skip a pure-ASCII prefix -- so
+ * one scalar twin covers every tier. */
+static int64_t splc_utf8_valid_up_to(const uint8_t* b, int64_t len) {
+    int64_t i = 0;
+    while (i < len) {
+        uint8_t first = b[i];
+        if (first < 0x80) { i++; continue; }
+        int width;
+        if (first < 0xC2) return i;       /* continuation byte, or overlong C0/C1 lead */
+        else if (first < 0xE0) width = 2;
+        else if (first < 0xF0) width = 3;
+        else if (first < 0xF5) width = 4;
+        else return i;                    /* F5..FF: beyond U+10FFFF */
+        if (i + width > len) return i;    /* truncated: reported at the start */
+        uint8_t second = b[i + 1];
+        if (width == 2) {
+            if (second < 0x80 || second > 0xBF) return i;
+        } else if (width == 3) {
+            int ok = (first == 0xE0 && second >= 0xA0 && second <= 0xBF)
+                  || (first >= 0xE1 && first <= 0xEC && second >= 0x80 && second <= 0xBF)
+                  || (first == 0xED && second >= 0x80 && second <= 0x9F)
+                  || (first >= 0xEE && second >= 0x80 && second <= 0xBF);
+            if (!ok) return i;
+            if (b[i + 2] < 0x80 || b[i + 2] > 0xBF) return i;
+        } else {
+            int ok = (first == 0xF0 && second >= 0x90 && second <= 0xBF)
+                  || (first >= 0xF1 && first <= 0xF3 && second >= 0x80 && second <= 0xBF)
+                  || (first == 0xF4 && second >= 0x80 && second <= 0x8F);
+            if (!ok) return i;
+            if (b[i + 2] < 0x80 || b[i + 2] > 0xBF) return i;
+            if (b[i + 3] < 0x80 || b[i + 3] > 0xBF) return i;
+        }
+        i += width;
+    }
+    return len;
+}
+
+/* Twin of rt_utf8_count_codepoints. NOT validation-based, deliberately: Rust
+ * walks lead bytes with `sequence_len(..).unwrap_or(1)` and counts one
+ * codepoint per step, so malformed input still yields a number rather than an
+ * error, and a stray continuation byte counts as one. The width table is
+ * `sequence_len`'s exactly (<0x80 => 1, <0xC0 => None, <0xE0 => 2, <0xF0 => 3,
+ * <0xF8 => 4, else None), with None spelled as the unwrap_or(1) step. A final
+ * truncated sequence may step past the end, which simply ends the loop -- same
+ * as Rust. A refused decode returns 0, matching the Rust `else` arm. */
+int64_t rt_utf8_count_codepoints(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int64_t count = 0;
+    int64_t i = 0;
+    while (i < len) {
+        uint8_t byte = buf[i];
+        int step;
+        if (byte < 0x80) step = 1;
+        else if (byte < 0xC0) step = 1;   /* sequence_len None -> unwrap_or(1) */
+        else if (byte < 0xE0) step = 2;
+        else if (byte < 0xF0) step = 3;
+        else if (byte < 0xF8) step = 4;
+        else step = 1;                    /* sequence_len None -> unwrap_or(1) */
+        i += step;
+        count++;
+    }
+    free(buf);
+    return count;
+}
+
+/* Twin of rt_utf8_validate. Rust returns `bool`, whose extern "C" ABI is a
+ * single byte holding 0 or 1 -- int8_t here, the spelling this file already
+ * uses for every other boolean-returning rt_* export. A refused decode is
+ * `false`, matching the Rust `else` arm. */
+int8_t rt_utf8_validate(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int8_t ok = (splc_utf8_valid_up_to(buf, len) == len) ? 1 : 0;
+    free(buf);
+    return ok;
+}
+
+/* Twin of rt_utf8_find_invalid: -1 when the input is entirely valid, otherwise
+ * the byte offset of the first invalid sequence. A refused decode returns 0,
+ * matching the Rust `else` arm -- note that this collides with "invalid at
+ * offset 0"; the convention is mirrored rather than improved, because the two
+ * lanes must answer identically. */
+int64_t rt_utf8_find_invalid(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int64_t at = splc_utf8_valid_up_to(buf, len);
+    free(buf);
+    return (at == len) ? -1 : at;
+}
+
+/* Twin of Rust's `runtime_numeric_to_f64`: floats pass through, integers widen,
+ * everything else refuses. Order matters only in that both lanes accept the
+ * same set. */
+static int splc_numeric_to_f64(int64_t value, double* out) {
+    if (rt_core_is_float(value)) { *out = rt_core_as_float(value); return 1; }
+    if (rt_core_is_int(value)) { *out = (double)rt_core_as_int(value); return 1; }
+    return 0;
+}
+
+/* Element read that re-tags the packed layouts, i.e. what Rust's rt_array_get
+ * does and what this lane's rt_array_get does NOT (see
+ * splc_utf8_array_to_bytes). Returns 0 for an out-of-range index. */
+static int splc_array_numeric_at(RtCoreArray* array, int64_t index, double* out) {
+    if (!array->data || index < 0 || index >= array->len) return 0;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        *out = (double)(int64_t)((uint8_t*)array->data)[index];
+        return 1;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        *out = (double)(int64_t)((uint64_t*)array->data)[index];
+        return 1;
+    }
+    return splc_numeric_to_f64(((int64_t*)array->data)[index], out);
+}
+
+/* Scalar parity for the hosted `rt_numeric_sum_f64` fallback. The core-C
+ * provider uses its own array and float boxes, so this cannot be linked from
+ * the Rust runtime. Accumulate in source order, refusing non-numeric elements
+ * and malformed arrays with tagged NIL. No temporary vector is allocated. */
+int64_t rt_numeric_sum_f64(int64_t array_value) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    if (!array || array->len < 0) return rt_core_nil();
+    double sum = 0.0;
+    for (int64_t i = 0; i < array->len; i++) {
+        double item = 0.0;
+        if (!splc_array_numeric_at(array, i, &item)) return rt_core_nil();
+        sum += item;
+    }
+    return rt_value_float(sum);
+}
+
+/* Twin of rt_numeric_dot_f64 -> packed_dot_f64 -> scalar_dot_runtime_f64:
+ * lengths must match, every element must be numeric, and the accumulation is
+ * `acc = a.mul_add(b, acc)` -- a fused multiply-add, one rounding per term.
+ * C99 `fma` is the same operation, so the scalar lane agrees bit-for-bit.
+ * A non-array receiver, a length mismatch or a non-numeric element yields NIL
+ * (the tagged special `3`), never 0.0 -- a 0.0 would read as a legitimate dot
+ * product of orthogonal vectors.
+ *
+ * STATED LIMIT, not an oversight: when BOTH operands are all-float arrays of
+ * length >= 24 (PACK_THRESHOLD_F64), Rust hands the pair to the active SIMD
+ * provider, whose lane-wise reassociation can differ in the last ulp from the
+ * sequential fma above. That variance already exists WITHIN the Rust lane
+ * across SIMD tiers, so it is not a C-vs-Rust property; reproducing one
+ * particular tier's blocking here would pin the C lane to whichever host built
+ * it. The sequential fma is the semantics every tier is a reassociation of. */
+int64_t rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value) {
+    RtCoreArray* lhs = rt_core_as_array(lhs_value);
+    RtCoreArray* rhs = rt_core_as_array(rhs_value);
+    if (!lhs || !rhs) return rt_core_nil();
+    if (lhs->len < 0 || lhs->len != rhs->len) return rt_core_nil();
+    double acc = 0.0;
+    for (int64_t i = 0; i < lhs->len; i++) {
+        double a, b;
+        if (!splc_array_numeric_at(lhs, i, &a)) return rt_core_nil();
+        if (!splc_array_numeric_at(rhs, i, &b)) return rt_core_nil();
+        acc = fma(a, b, acc);
+    }
+    return rt_value_float(acc);
+}
+
+/* Twin of rt_array_remove: remove the element at `index`, shift the tail down
+ * one slot, shrink the length, and RETURN THE REMOVED ELEMENT. A non-array
+ * receiver, a null data pointer, a negative index or an index >= len is NIL --
+ * note that, unlike this lane's rt_array_get, a negative index does NOT count
+ * from the end; Rust refuses it, so this refuses it.
+ *
+ * All three storage layouts are handled exactly as Rust does. Byte- and
+ * u64-packed arrays store raw scalars, so their element is read through the
+ * correctly-sized pointer and RE-TAGGED on the way out; handing back the raw
+ * scalar would be misdecoded by the caller. memmove is required, not memcpy:
+ * source and destination overlap by design. */
+int64_t rt_array_remove(int64_t array_value, int64_t index) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    if (!array) return rt_core_nil();
+    int64_t len = array->len;
+    if (!array->data || index < 0 || index >= len) return rt_core_nil();
+    int64_t tail = len - 1 - index;
+
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        uint8_t* base = (uint8_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail);
+        array->len -= 1;
+        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        uint64_t* base = (uint64_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail * sizeof(uint64_t));
+        array->len -= 1;
+        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+    }
+    int64_t* base = (int64_t*)array->data;
+    int64_t removed = base[index];
+    memmove(base + index, base + index + 1, (size_t)tail * sizeof(int64_t));
+    array->len -= 1;
+    return removed;
+}
+
 /* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
  *
  * These had NO C definition anywhere (only the Rust runtime's
@@ -9191,6 +10320,562 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
+/* -----------------------------------------------------------------------
+ * Bucket 2 (Rust-only, core-C-bootstrap lane gap) additions -- 2026-09-07.
+ * See doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md.
+ * Every symbol below has a genuine `#[no_mangle] extern "C"` Rust twin (or,
+ * where noted, a C twin in a file this archive cannot link wholesale) --
+ * mirrored here so build_core_c_runtime_library's archive
+ * (native_project/tools.rs) carries a definition too. rt_time_now_seconds,
+ * rt_remove and rt_file_fsync also live in runtime.c; rt_progress_* also
+ * live in runtime_timestamp.c; both are compiled alongside this file in the
+ * pure-Simple backend lane (70.backend/backend/runtime_compiler.spl:515-516),
+ * so those seven are `weak` -- exactly the existing rt_atomic_* convention
+ * above -- so linking both TUs together still resolves to one definition.
+ * ------------------------------------------------------------------------- */
+#if defined(_MSC_VER)
+#define SPL_CORE_C_WEAK
+#else
+#define SPL_CORE_C_WEAK __attribute__((weak))
+#endif
+
+/* ---- mirrors runtime.c (rt_time_now_seconds / rt_remove / rt_file_fsync) --- */
+
+SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
+    return (int64_t)time(NULL);
+}
+
+/* Same POSIX file-deletion semantics as runtime.c's rt_remove, but NOT its
+ * `const char* path` signature: `extern fn rt_remove(path: text) -> i64`
+ * (src/lib/nogc_sync_mut/io/dir_entry_ops.spl:13) has no
+ * codegen/runtime_sffi.rs / text_arg_indices entry, so `path` is never
+ * expanded into a (ptr,len) pair -- disassembling the real call site in the
+ * kept failed-link object set (mod_765.o,
+ * lib__nogc_async_mut__io__file__AsyncDir.remove: `str x30,[sp,#-16]!; bl
+ * rt_remove` with ZERO argument setup) confirms the caller passes exactly
+ * ONE machine word straight through in x0, which in every other single-word
+ * `text` call site in this file (rt_http_get's url_value, rt_file_atomic_write's
+ * path_value) is the boxed RuntimeValue handle, not a raw C-string pointer.
+ * runtime.c's own `const char*` signature therefore looks like the same
+ * pre-existing single-word-vs-raw-pointer defect this file's rt_file_open_stream
+ * comment warns about elsewhere -- out of scope to fix here (different file,
+ * different lane), so this weak definition decodes the boxed handle via
+ * rt_core_string_to_cpath, matching rt_file_atomic_write's convention, rather
+ * than copying runtime.c's apparently-unsound signature verbatim. */
+SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) { int64_t rc = -(int64_t)errno; free(path); return rc; }
+    int64_t rc;
+    if (S_ISDIR(st.st_mode)) {
+        rc = rmdir(path) == 0 ? 0 : -(int64_t)errno;
+    } else {
+        rc = unlink(path) == 0 ? 0 : -(int64_t)errno;
+    }
+    free(path);
+    return rc;
+}
+
+#if defined(_WIN32)
+/* rt_widen_long_path_rc is defined later in this file (twin of runtime.c's
+ * copy, same name, see that definition's comment); forward-declare it here so
+ * the fsync worker above that point can use it too. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path);
+#endif
+static int rt_bucket2_fsync_path(const char* path) {
+    if (!path) return 0;
+#if defined(_WIN32)
+    /* Same fix as runtime.c's rt_fsync_path twin: fopen()+fflush() is both
+     * MAX_PATH-capped (ANSI/narrow-CRT) and not actually durable (fflush()
+     * only empties the CRT's userspace buffer). Use CreateFileW (widened,
+     * extended-length-prefixed) + FlushFileBuffers, falling back to
+     * CreateFileA only when the path cannot be widened. GENERIC_WRITE is
+     * required for FlushFileBuffers to succeed. FILE_FLAG_BACKUP_SEMANTICS is
+     * required too: callers durability-sync DIRECTORIES through this same
+     * worker (native_noop_admission.spl syncs "{root}/generations" after a
+     * rename, the POSIX fsync-the-parent-dir idiom), and CreateFile refuses
+     * to open a directory handle at all without it (ERROR_ACCESS_DENIED);
+     * harmless on a regular file. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (wide_path) {
+        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        free(wide_path);
+    } else {
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    }
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file) != 0;
+    if (!CloseHandle(file)) ok = 0;
+    return ok ? 1 : 0;
+#else
+    FILE* file = fopen(path, "rb");
+    if (!file) return 0;
+    int ok = fsync(fileno(file)) == 0;
+    fclose(file);
+    return ok ? 1 : 0;
+#endif
+}
+SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_bucket2_fsync_path(path);
+}
+
+/* ---- mirrors runtime_timestamp.c (rt_progress_* thread-local clock ABI) --- */
+
+#if defined(_MSC_VER)
+#define RT_BUCKET2_TLS __declspec(thread)
+#else
+#define RT_BUCKET2_TLS _Thread_local __attribute__((tls_model("initial-exec")))
+#endif
+static RT_BUCKET2_TLS bool rt_bucket2_progress_initialized = false;
+static RT_BUCKET2_TLS int64_t rt_bucket2_progress_start_nanos = 0;
+
+SPL_CORE_C_WEAK int64_t rt_progress_clock_now_nanos(void) {
+    struct timespec now = {0, 0};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (int64_t)now.tv_sec * 1000000000LL + (int64_t)now.tv_nsec;
+}
+SPL_CORE_C_WEAK bool rt_progress_tls_is_initialized(void) { return rt_bucket2_progress_initialized; }
+SPL_CORE_C_WEAK int64_t rt_progress_tls_start_nanos(void) { return rt_bucket2_progress_start_nanos; }
+SPL_CORE_C_WEAK void rt_progress_tls_store_start_nanos(int64_t start_nanos) {
+    rt_bucket2_progress_start_nanos = start_nanos;
+    rt_bucket2_progress_initialized = true;
+}
+SPL_CORE_C_WEAK void rt_progress_tls_clear(void) {
+    rt_bucket2_progress_start_nanos = 0;
+    rt_bucket2_progress_initialized = false;
+}
+
+#undef SPL_CORE_C_WEAK
+
+/* ---- lib.rs: rt_load_barrier / rt_store_barrier -- plain memory fences --- */
+
+void rt_load_barrier(void) { atomic_thread_fence(memory_order_acquire); }
+void rt_store_barrier(void) { atomic_thread_fence(memory_order_release); }
+
+/* ---- file_io/path.rs: rt_path_basename / rt_path_ext / rt_path_separator -- */
+
+/* Mirrors Rust's Path::file_name(): last non-empty component, "" if the path
+ * is empty or ends in a final ".."/"." component or is all separators. */
+static void rt_bucket2_path_basename_into(const char* path, size_t len, const char** out, size_t* out_len) {
+    size_t end = len;
+    while (end > 0 && path[end - 1] == '/') end--;
+    if (end == 0) { *out = ""; *out_len = 0; return; }
+    size_t start = end;
+    while (start > 0 && path[start - 1] != '/') start--;
+    size_t comp_len = end - start;
+    if (comp_len == 0 || (comp_len == 1 && path[start] == '.') ||
+        (comp_len == 2 && path[start] == '.' && path[start + 1] == '.')) {
+        *out = ""; *out_len = 0; return;
+    }
+    *out = path + start; *out_len = comp_len;
+}
+int64_t rt_path_basename(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr && path_len != 0) return rt_string_new(NULL, 0);
+    const char* base; size_t base_len;
+    rt_bucket2_path_basename_into((const char*)path_ptr, (size_t)path_len, &base, &base_len);
+    return rt_string_new((const uint8_t*)base, (uint64_t)base_len);
+}
+/* Mirrors Rust's Path::extension(): text after the last '.' in the basename,
+ * unless the basename has no '.' or the '.' is its first byte (e.g. ".bashrc"
+ * has no extension per Rust semantics). */
+int64_t rt_path_ext(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr && path_len != 0) return rt_string_new(NULL, 0);
+    const char* base; size_t base_len;
+    rt_bucket2_path_basename_into((const char*)path_ptr, (size_t)path_len, &base, &base_len);
+    for (size_t i = base_len; i > 0; i--) {
+        if (base[i - 1] == '.') {
+            if (i - 1 == 0) break; /* leading dot: no extension */
+            return rt_string_new((const uint8_t*)(base + i), (uint64_t)(base_len - i));
+        }
+    }
+    return rt_string_new(NULL, 0);
+}
+int64_t rt_path_separator(void) {
+    static const uint8_t sep[1] = { '/' };
+    return rt_string_new(sep, 1);
+}
+
+/* ---- sffi/random.rs: rt_random_randint / rt_random_uniform -------------- */
+
+/* This archive cannot link the real rt_random_next/rt_random_seed (Rust-only,
+ * not part of this bucket), so this mirrors random.rs's self-contained LCG
+ * (LCG_A=1_664_525, LCG_C=1_013_904_223, LCG_M=2^32, seeded from wall-clock
+ * microseconds) with an independent static state -- not thread-safe, matching
+ * this lane's general no-locking convention (e.g. rt_atomic_* excepted). */
+static uint64_t rt_bucket2_random_state = 0;
+static int rt_bucket2_random_initialized = 0;
+#define RT_BUCKET2_LCG_A 1664525ULL
+#define RT_BUCKET2_LCG_C 1013904223ULL
+#define RT_BUCKET2_LCG_M 4294967296ULL /* 2^32 */
+#define RT_BUCKET2_LCG_M_F 4294967296.0
+static uint64_t rt_bucket2_random_next(void) {
+    if (!rt_bucket2_random_initialized) {
+        struct timespec ts = {0, 0};
+        uint64_t micros = 0;
+        if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+            micros = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000);
+        }
+        rt_bucket2_random_state = micros % RT_BUCKET2_LCG_M;
+        rt_bucket2_random_initialized = 1;
+    }
+    rt_bucket2_random_state = (RT_BUCKET2_LCG_A * rt_bucket2_random_state + RT_BUCKET2_LCG_C) % RT_BUCKET2_LCG_M;
+    return rt_bucket2_random_state;
+}
+int64_t rt_random_randint(int64_t min, int64_t max) {
+    if (min > max) return min;
+    uint64_t range = (uint64_t)(max - min + 1);
+    return min + (int64_t)(rt_bucket2_random_next() % range);
+}
+double rt_random_random(void) {
+    return (double)rt_bucket2_random_next() / RT_BUCKET2_LCG_M_F;
+}
+double rt_random_uniform(double min, double max) {
+    return min + rt_random_random() * (max - min);
+}
+
+/* ---- collections.rs: rt_typed_bytes_u8_data_at --------------------------- */
+
+int64_t rt_typed_bytes_u8_data_at(int64_t data_ptr, int64_t index) {
+    return (int64_t)(*((const uint8_t*)(intptr_t)data_ptr + index));
+}
+
+/* ---- heap.rs: rt_mem_attr_enabled / rt_mem_attr_set_owner ---------------- */
+
+static int rt_bucket2_mem_attr_gate = -1; /* -1 unresolved, 0 off, 1 on */
+int64_t rt_mem_attr_enabled(void) {
+    if (rt_bucket2_mem_attr_gate < 0) {
+        const char* v = getenv("SIMPLE_MEM_ATTR");
+        rt_bucket2_mem_attr_gate = (v && strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    return rt_bucket2_mem_attr_gate;
+}
+/* heap.rs's rt_mem_attr_set_owner records a thread-local "current owner" tag
+ * consulted by the Rust allocator's attribution bookkeeping (per-owner live/
+ * peak/alloc counters). This lane's allocator (runtime_memory.c, compiled
+ * with -DSIMPLE_RUNTIME_MEMORY_OWNER=1) has no such attribution table to
+ * consult, so there is nothing for the tag to feed here -- mirrored only to
+ * the documented calling convention (null check, enabled gate, bounded
+ * thread-local copy), with no attribution side effect since none exists in
+ * this lane. Known limitation, not invented behaviour. */
+#define RT_BUCKET2_MEM_ATTR_OWNER_MAX 128
+static _Thread_local char rt_bucket2_mem_attr_owner[RT_BUCKET2_MEM_ATTR_OWNER_MAX];
+void rt_mem_attr_set_owner(const uint8_t* name_ptr, uint64_t name_len) {
+    if (!name_ptr || !rt_mem_attr_enabled()) return;
+    size_t n = (size_t)name_len;
+    if (n >= RT_BUCKET2_MEM_ATTR_OWNER_MAX) n = RT_BUCKET2_MEM_ATTR_OWNER_MAX - 1;
+    memcpy(rt_bucket2_mem_attr_owner, name_ptr, n);
+    rt_bucket2_mem_attr_owner[n] = '\0';
+}
+
+/* ---- log_sffi.rs: rt_log_* family ----------------------------------------
+ * .spl declares these with raw i64 params (app/io/mod.spl:133-145), not
+ * `text` -- the (ptr,len) split already happens at the Simple call site, so
+ * no codegen/runtime_sffi.rs or text_arg_indices registration is needed
+ * (same as the pre-existing rt_log_target_device_write_bytes(ptr,len)
+ * externs in nogc_async_mut_noalloc/log/targets.spl). Not thread-safe
+ * (single static level + a bounded linear-scan scope table), matching this
+ * lane's general no-locking convention; the Rust twin uses a Mutex<HashMap>.
+ * --------------------------------------------------------------------- */
+static int64_t rt_bucket2_log_global_level = 4; /* INFO, matches log_sffi.rs default */
+#define RT_BUCKET2_LOG_SCOPE_MAX 64
+#define RT_BUCKET2_LOG_SCOPE_NAME_MAX 64
+typedef struct { char name[RT_BUCKET2_LOG_SCOPE_NAME_MAX]; size_t name_len; uint8_t level; } RtBucket2LogScope;
+static RtBucket2LogScope rt_bucket2_log_scopes[RT_BUCKET2_LOG_SCOPE_MAX];
+static size_t rt_bucket2_log_scope_count = 0;
+
+void rt_log_set_global_level(int64_t level) {
+    if (level < 0) level = 0;
+    if (level > 10) level = 10;
+    rt_bucket2_log_global_level = level;
+}
+int64_t rt_log_get_global_level(void) { return rt_bucket2_log_global_level; }
+
+static RtBucket2LogScope* rt_bucket2_log_scope_find(const uint8_t* scope_ptr, uint64_t scope_len) {
+    if (!scope_ptr || scope_len == 0) return NULL;
+    for (size_t i = 0; i < rt_bucket2_log_scope_count; i++) {
+        if (rt_bucket2_log_scopes[i].name_len == (size_t)scope_len &&
+            memcmp(rt_bucket2_log_scopes[i].name, scope_ptr, (size_t)scope_len) == 0) {
+            return &rt_bucket2_log_scopes[i];
+        }
+    }
+    return NULL;
+}
+void rt_log_set_scope_level(const uint8_t* scope_ptr, uint64_t scope_len, int64_t level) {
+    if (!scope_ptr || scope_len == 0) return;
+    if (level < 0) level = 0;
+    if (level > 10) level = 10;
+    RtBucket2LogScope* existing = rt_bucket2_log_scope_find(scope_ptr, scope_len);
+    if (existing) { existing->level = (uint8_t)level; return; }
+    if (scope_len >= RT_BUCKET2_LOG_SCOPE_NAME_MAX) return; /* name too long to record */
+    if (rt_bucket2_log_scope_count >= RT_BUCKET2_LOG_SCOPE_MAX) return; /* table full */
+    RtBucket2LogScope* slot = &rt_bucket2_log_scopes[rt_bucket2_log_scope_count++];
+    memcpy(slot->name, scope_ptr, (size_t)scope_len);
+    slot->name_len = (size_t)scope_len;
+    slot->level = (uint8_t)level;
+}
+int64_t rt_log_get_scope_level(const uint8_t* scope_ptr, uint64_t scope_len) {
+    RtBucket2LogScope* existing = rt_bucket2_log_scope_find(scope_ptr, scope_len);
+    if (existing) return existing->level;
+    return rt_log_get_global_level();
+}
+void rt_log_clear_scope_levels(void) { rt_bucket2_log_scope_count = 0; }
+
+void rt_log_emit(int64_t level, const uint8_t* scope_ptr, uint64_t scope_len,
+                  const uint8_t* msg_ptr, uint64_t msg_len) {
+    int64_t current_level = rt_log_get_scope_level(scope_ptr, scope_len);
+    if (level > current_level) return;
+    const char* prefix;
+    switch (level) {
+        case 0: return; /* Off */
+        case 1: prefix = "[FATAL]"; break;
+        case 2: prefix = "[ERROR]"; break;
+        case 3: prefix = "[WARN] "; break;
+        case 4: prefix = "[INFO] "; break;
+        case 5: prefix = "[DEBUG]"; break;
+        case 6: prefix = "[TRACE]"; break;
+        case 7: prefix = "[VERB] "; break;
+        default: prefix = "[LOG]  "; break;
+    }
+    if (!scope_ptr || scope_len == 0) { scope_ptr = (const uint8_t*)"app"; scope_len = 3; }
+    if (!msg_ptr || msg_len == 0) { msg_ptr = (const uint8_t*)""; msg_len = 0; }
+    fprintf(stderr, "%s [%.*s] %.*s\n", prefix, (int)scope_len, (const char*)scope_ptr,
+            (int)msg_len, (const char*)msg_ptr);
+}
+int64_t rt_log_is_enabled(int64_t level, const uint8_t* scope_ptr, uint64_t scope_len) {
+    int64_t current_level = rt_log_get_scope_level(scope_ptr, scope_len);
+    return level <= current_level ? 1 : 0;
+}
+
+/* ---- file_ops.rs: rt_mmap ------------------------------------------------- */
+/* ACTUAL-access mapping (the SOSIX `sosix_file_map` op). Same bounds contract
+ * as the Rust owner: size > 0, offset >= 0, offset + size must not overflow
+ * and must lie inside an existing file, read-only vs read-write selected by
+ * `readonly`; 0 on any failure. POSIX maps with mmap(2); Windows with
+ * CreateFileMapping + MapViewOfFile (released by UnmapViewOfFile in
+ * rt_munmap). The CACHING op (`sosix_file_map_prefetch`) is composed in
+ * Simple from this + rt_madvise + rt_munmap on POSIX and is a no-op on
+ * Windows, so no second runtime symbol exists for it. The core-C lane has no
+ * runtime sandbox (no C file op consults one), so there is no capability gate
+ * to mirror; the Rust owner keeps its READ_FILE/WRITE_FILE gate.
+ *
+ * Strong (not SPL_CORE_C_WEAK) on purpose: every lane that links the core-C
+ * archive resolves this symbol statically from it. */
+int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
+    if (size <= 0 || offset < 0) return 0;
+    const uint8_t* bytes = rt_string_data(path_value);
+    int64_t len = rt_string_len(path_value);
+    char path[4096];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(path)) return 0;
+    memcpy(path, bytes, (size_t)len);
+    path[len] = '\0';
+    if (strlen(path) != (size_t)len) return 0;
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset) return 0;
+#if defined(_WIN32)
+    DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0 ||
+        (uint64_t)file_size.QuadPart < end) {
+        CloseHandle(file);
+        return 0;
+    }
+    HANDLE mapping = CreateFileMappingA(file, NULL, readonly ? PAGE_READONLY : PAGE_READWRITE,
+                                        0, 0, NULL);
+    if (!mapping) {
+        CloseHandle(file);
+        return 0;
+    }
+    void* address = MapViewOfFile(mapping, readonly ? FILE_MAP_READ : FILE_MAP_WRITE,
+                                  (DWORD)((uint64_t)offset >> 32),
+                                  (DWORD)((uint64_t)offset & 0xFFFFFFFFu), (SIZE_T)size);
+    /* The view keeps the file and section alive; the handles can go now. */
+    CloseHandle(mapping);
+    CloseHandle(file);
+    if (!address) return 0;
+    if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
+        UnmapViewOfFile(address);
+        return 0;
+    }
+    return (int64_t)(intptr_t)address;
+#else
+    int fd = open(path, (readonly ? O_RDONLY : O_RDWR) | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
+        close(fd);
+        return 0;
+    }
+    int protection = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
+    void* address = mmap(NULL, (size_t)size, protection, MAP_SHARED, fd, (off_t)offset);
+    close(fd);
+    if (address == MAP_FAILED) return 0;
+    if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
+        munmap(address, (size_t)size);
+        return 0;
+    }
+    return (int64_t)(intptr_t)address;
+#endif
+}
+
+/* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
+
+bool rt_munmap(int64_t addr, int64_t size) {
+    if (addr <= 0 || size <= 0) return false;
+#if defined(_WIN32)
+    /* Pairs with rt_mmap above (a MapViewOfFile view), never with rt_mmap_raw:
+     * VirtualAlloc reservations from rt_mmap_raw are released by rt_munmap_raw
+     * (runtime_legacy_core.c), and no Simple call site unmaps one through here.
+     * UnmapViewOfFile takes the base address only. */
+    (void)size;
+    return UnmapViewOfFile((void*)(intptr_t)addr) != 0;
+#else
+    return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
+#endif
+}
+bool rt_msync(int64_t addr, int64_t size) {
+    if (addr <= 0 || size <= 0) return false;
+#if defined(__simpleos__)
+    /* SOSIX does not expose a synchronous mapped-file flush primitive yet. */
+    return false;
+#elif defined(_WIN32)
+    return FlushViewOfFile((void*)(intptr_t)addr, (SIZE_T)size) != 0;
+#else
+    return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
+#endif
+}
+bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
+    if (addr <= 0 || size <= 0) return false;
+#if defined(__simpleos__)
+    /* Advice is optional, but unknown advice remains a contract error. */
+    return advice >= 0 && advice <= 4;
+#elif defined(_WIN32)
+    /* Advice is a hint everywhere. Windows offers no VirtualAlloc equivalent
+     * for these five, so honour the contract that matters to callers: reject an
+     * unknown advice code exactly as the POSIX branch does, accept a known one.
+     */
+    switch (advice) {
+        case 0: case 1: case 2: case 3: case 4: return true;
+        default: return false;
+    }
+#else
+    int native_advice;
+    switch (advice) {
+        case 0: native_advice = MADV_NORMAL; break;
+        case 1: native_advice = MADV_RANDOM; break;
+        case 2: native_advice = MADV_SEQUENTIAL; break;
+        case 3: native_advice = MADV_WILLNEED; break;
+        case 4: native_advice = MADV_DONTNEED; break;
+        default: return false;
+    }
+    return madvise((void*)(intptr_t)addr, (size_t)size, native_advice) == 0;
+#endif
+}
+
+/* ---- file_ops.rs: rt_file_lock / rt_file_unlock -------------------------- */
+
+/* Acquire an exclusive OS file lock (flock); mirrors file_ops.rs's
+ * rt_file_lock exactly, including its EINTR-retry / timeout-poll shape. The
+ * returned descriptor must be consumed exactly once by rt_file_unlock. */
+int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+#if defined(_WIN32)
+    /* LockFileEx over the descriptor's underlying HANDLE is the Windows
+     * equivalent of flock, and keeps this function's contract intact: the
+     * returned descriptor is still consumed exactly once by rt_file_unlock.
+     * LOCKFILE_EXCLUSIVE_LOCK alone blocks; adding LOCKFILE_FAIL_IMMEDIATELY
+     * gives the LOCK_NB poll the timeout path needs. The whole file is locked
+     * (MAXDWORD:MAXDWORD), matching flock's whole-file semantics. */
+    int fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY, _S_IREAD | _S_IWRITE);
+    if (fd < 0) return -1;
+    HANDLE handle = (HANDLE)_get_osfhandle(fd);
+    if (handle == INVALID_HANDLE_VALUE) { _close(fd); return -1; }
+    OVERLAPPED overlapped;
+    if (timeout_secs <= 0) {
+        memset(&overlapped, 0, sizeof(overlapped));
+        if (LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0,
+                       MAXDWORD, MAXDWORD, &overlapped)) {
+            return (int64_t)fd;
+        }
+        _close(fd);
+        return -1;
+    }
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_secs * 1000ULL;
+    for (;;) {
+        memset(&overlapped, 0, sizeof(overlapped));
+        if (LockFileEx(handle,
+                       LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+                       MAXDWORD, MAXDWORD, &overlapped)) {
+            return (int64_t)fd;
+        }
+        DWORD error = GetLastError();
+        if (error != ERROR_LOCK_VIOLATION && error != ERROR_IO_PENDING) {
+            _close(fd);
+            return -1;
+        }
+        if (GetTickCount64() >= deadline) { _close(fd); return -1; }
+        Sleep(50); /* 50ms, matching the POSIX branch's poll interval */
+    }
+#else
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    if (timeout_secs <= 0) {
+        for (;;) {
+            if (flock(fd, LOCK_EX) == 0) return (int64_t)fd;
+            if (errno != EINTR) { close(fd); return -1; }
+        }
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_secs;
+    for (;;) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return (int64_t)fd;
+        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) { close(fd); return -1; }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+            close(fd);
+            return -1;
+        }
+        struct timespec sleep_for = {0, 50000000L}; /* 50ms */
+        nanosleep(&sleep_for, NULL);
+    }
+#endif
+}
+bool rt_file_unlock(int64_t handle) {
+    int fd = (int)handle;
+    if (fd < 0) return false;
+#if defined(_WIN32)
+    HANDLE native = (HANDLE)_get_osfhandle(fd);
+    bool unlocked = false;
+    if (native != INVALID_HANDLE_VALUE) {
+        OVERLAPPED overlapped;
+        memset(&overlapped, 0, sizeof(overlapped));
+        unlocked = UnlockFileEx(native, 0, MAXDWORD, MAXDWORD, &overlapped) != 0;
+    }
+    bool closed = _close(fd) == 0;
+    return unlocked && closed;
+#else
+    bool unlocked = flock(fd, LOCK_UN) == 0;
+    bool closed = close(fd) == 0;
+    return unlocked && closed;
+#endif
+}
+
 /* Canonical descriptor provider for std.nogc_sync_mut.io.FileHandle. Mode
  * encoding matches runtime/src/value/sffi/file_io/io_file.rs exactly:
  * 0 read, 1 write/create/truncate, 2 read/write/create, 3 append/create. */
@@ -9260,6 +10945,284 @@ int64_t rt_io_file_read_all(int64_t fd) {
     if (len != 0) memcpy(array->data, bytes, len);
     free(bytes);
     return (int64_t)(uintptr_t)result;
+}
+
+/* ---------------------------------------------------------------------------
+ * Stage2 link census (doc/08_tracking/bug/
+ * stage2_link_full_undefined_symbol_census_2026-09-07.md), fd-based
+ * rt_io_file_* family. These back std.nogc_sync_mut.io.file's `FileHandle`/
+ * `File` exactly like rt_io_file_open/_close/_read_all above; the reference
+ * semantics are runtime/src/value/sffi/file_io/io_file.rs, which is never
+ * linked into this core-C-bootstrap archive. `rt_io_file_exists` and
+ * `rt_io_file_delete` are the only two of this group that take a `text`
+ * (path) rather than an `fd`; both are already registered in the seed's
+ * (ptr,len) text-ABI tables (codegen/instr/calls.rs:2603,
+ * codegen/runtime_sffi.rs:2101-2102), confirmed by symbol-grep -- no codegen
+ * change is needed here.
+ * ------------------------------------------------------------------------- */
+
+/* Read up to `size` bytes from `fd` via a single read() call (NOT a
+ * read-to-EOF loop like rt_io_file_read_all above) -- matches
+ * io_file.rs::rt_io_file_read exactly: buffer sized to `size`, truncated to
+ * the actual byte count returned. Empty (not NIL) at EOF; NIL on error. */
+int64_t rt_io_file_read(int64_t fd, int64_t size) {
+    if (fd < 0 || fd > INT_MAX) return rt_core_nil();
+    if (size < 0) return rt_core_nil();
+    uint64_t usize = (uint64_t)size;
+    uint8_t* buf = NULL;
+    if (usize != 0) {
+        buf = (uint8_t*)malloc((size_t)usize);
+        if (!buf) return rt_core_nil();
+    }
+#if defined(_WIN32)
+    int n = 0;
+    if (usize != 0) {
+        n = _read((int)fd, buf, (unsigned int)(usize > UINT_MAX ? UINT_MAX : usize));
+    }
+#else
+    ssize_t n = 0;
+    if (usize != 0) {
+        do { n = read((int)fd, buf, (size_t)usize); } while (n < 0 && errno == EINTR);
+    }
+#endif
+    if (n < 0) { free(buf); return rt_core_nil(); }
+    SplArray* result = rt_byte_array_new_len((uint64_t)n);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) { free(buf); return rt_core_nil(); }
+    if (n != 0) memcpy(array->data, buf, (size_t)n);
+    free(buf);
+    return (int64_t)(uintptr_t)result;
+}
+
+/* Read one newline-terminated line, byte at a time -- matches
+ * io_file.rs::rt_io_file_read_line exactly: leaves fd positioned exactly
+ * after the newline (a buffered reader would over-consume and desync any
+ * subsequent seek/read on the same fd). NIL at EOF with nothing read. Any
+ * read() error discards everything accumulated so far and returns NIL --
+ * this is the Rust reference's behavior verbatim, not a partial-line
+ * fallback. */
+int64_t rt_io_file_read_line(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return rt_core_nil();
+    size_t cap = 64, len = 0;
+    uint8_t* line = (uint8_t*)malloc(cap);
+    if (!line) return rt_core_nil();
+    for (;;) {
+        uint8_t byte_val;
+#if defined(_WIN32)
+        int n = _read((int)fd, &byte_val, 1);
+#else
+        ssize_t n;
+        do { n = read((int)fd, &byte_val, 1); } while (n < 0 && errno == EINTR);
+#endif
+        if (n == 0) break;
+        if (n < 0) { free(line); return rt_core_nil(); }
+        if (len == cap) {
+            size_t next_cap = cap * 2;
+            uint8_t* grown = (uint8_t*)realloc(line, next_cap);
+            if (!grown) { free(line); return rt_core_nil(); }
+            line = grown;
+            cap = next_cap;
+        }
+        line[len++] = byte_val;
+        if (byte_val == '\n') break;
+    }
+    if (len == 0) { free(line); return rt_core_nil(); }
+    int64_t result = rt_string_new(line, (uint64_t)len);
+    free(line);
+    return result;
+}
+
+/* Write `data` to `fd` via a single write() call. Returns the byte count
+ * written, or -1 on error -- matches io_file.rs::rt_io_file_write. */
+int64_t rt_io_file_write(int64_t fd, const uint8_t* data_ptr, uint64_t data_len) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    if (data_len != 0 && !data_ptr) return -1;
+#if defined(_WIN32)
+    int n = _write((int)fd, data_ptr, (unsigned int)(data_len > UINT_MAX ? UINT_MAX : data_len));
+    return (n < 0) ? -1 : (int64_t)n;
+#else
+    ssize_t n;
+    do { n = write((int)fd, data_ptr, (size_t)data_len); } while (n < 0 && errno == EINTR);
+    return (n < 0) ? -1 : (int64_t)n;
+#endif
+}
+
+/* Write all of `data` to `fd`, looping until every byte is written or an
+ * error/short-write occurs. Matches io_file.rs::rt_io_file_write_all
+ * (`file.write_all(data).is_ok()`). */
+bool rt_io_file_write_all(int64_t fd, const uint8_t* data_ptr, uint64_t data_len) {
+    if (fd < 0 || fd > INT_MAX) return false;
+    if (data_len != 0 && !data_ptr) return false;
+    uint64_t written = 0;
+    while (written < data_len) {
+        uint64_t remaining = data_len - written;
+#if defined(_WIN32)
+        int n = _write((int)fd, data_ptr + written,
+            (unsigned int)(remaining > UINT_MAX ? UINT_MAX : remaining));
+        if (n <= 0) return false;
+#else
+        ssize_t n;
+        do { n = write((int)fd, data_ptr + written, (size_t)remaining); } while (n < 0 && errno == EINTR);
+        if (n <= 0) return false;
+#endif
+        written += (uint64_t)n;
+    }
+    return true;
+}
+
+/* Seek. `whence`: 0 SEEK_SET, 1 SEEK_CUR, 2 SEEK_END. Returns the new
+ * absolute position, or -1 on error. Matches io_file.rs::rt_io_file_seek. */
+int64_t rt_io_file_seek(int64_t fd, int64_t offset, int64_t whence) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    int native_whence;
+    switch (whence) {
+        case 0:
+            if (offset < 0) return -1;
+            native_whence = SEEK_SET;
+            break;
+        case 1: native_whence = SEEK_CUR; break;
+        case 2: native_whence = SEEK_END; break;
+        default: return -1;
+    }
+#if defined(_WIN32)
+    __int64 pos = _lseeki64((int)fd, offset, native_whence);
+    return (pos < 0) ? -1 : (int64_t)pos;
+#else
+    off_t pos = lseek((int)fd, (off_t)offset, native_whence);
+    return (pos < 0) ? -1 : (int64_t)pos;
+#endif
+}
+
+/* Flush userspace buffers and sync data to disk. Rust: `file.flush()`
+ * (always Ok for a raw File) `&& file.sync_data()` (fdatasync semantics --
+ * data plus only the metadata needed to retrieve it, not full metadata).
+ * Matches io_file.rs::rt_io_file_flush. */
+bool rt_io_file_flush(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return false;
+#if defined(_WIN32)
+    return _commit((int)fd) == 0;
+#elif defined(__linux__) || defined(__ANDROID__)
+    int r;
+    do { r = fdatasync((int)fd); } while (r < 0 && errno == EINTR);
+    return r == 0;
+#else
+    int r;
+    do { r = fsync((int)fd); } while (r < 0 && errno == EINTR);
+    return r == 0;
+#endif
+}
+
+/* Toggle the read-only bit on the file behind `fd`. Matches Rust's
+ * `std::fs::Permissions::set_readonly` on Unix exactly: `true` clears all
+ * write bits (chmod a-w); `false` sets only the owner write bit (chmod u+w)
+ * -- NOT "restore previous mode". Matches io_file.rs::rt_io_file_set_permissions. */
+bool rt_io_file_set_permissions(int64_t fd, bool readonly) {
+    if (fd < 0 || fd > INT_MAX) return false;
+#if defined(_WIN32)
+    /* No fd-level readonly toggle in the Win32 CRT; report failure rather
+     * than silently doing nothing. The Rust reference is unix-only here
+     * (io_file.rs uses std::fs::Permissions, whose readonly semantics on
+     * Windows differ entirely from the Unix mode bits mirrored above). */
+    (void)readonly;
+    return false;
+#else
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return false;
+    mode_t mode = st.st_mode;
+    if (readonly) {
+        mode &= ~(mode_t)0222;
+    } else {
+        mode |= (mode_t)0200;
+    }
+    return fchmod((int)fd, mode) == 0;
+#endif
+}
+
+/* File size in bytes, or -1 on error. Matches io_file.rs::rt_io_file_meta_size. */
+int64_t rt_io_file_meta_size(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return -1;
+    return (int64_t)st.st_size;
+}
+
+/* Packed metadata flags, or -1 on error: bit0 is_file, bit1 is_dir,
+ * bit2 is_symlink, bit3 readonly. fstat resolves through the fd, so a
+ * symlink is never observable here (the fd already refers to its resolved
+ * target) -- matches Rust's `file.metadata()`, which fstats the same live
+ * descriptor and has the identical limitation. Matches
+ * io_file.rs::rt_io_file_meta_flags. */
+int64_t rt_io_file_meta_flags(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return -1;
+    int64_t flags = 0;
+    if (S_ISREG(st.st_mode)) flags |= 1;
+    if (S_ISDIR(st.st_mode)) flags |= 2;
+#if defined(S_ISLNK)
+    if (S_ISLNK(st.st_mode)) flags |= 4;
+#endif
+    if ((st.st_mode & 0222) == 0) flags |= 8;
+    return flags;
+}
+
+/* Modification time in seconds since the Unix epoch, 0 if unavailable.
+ * Matches io_file.rs::rt_io_file_meta_modified. */
+int64_t rt_io_file_meta_modified(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return 0;
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return 0;
+    return (int64_t)st.st_mtime;
+}
+
+/* Creation ("birth") time in seconds since the Unix epoch, 0 if unavailable
+ * -- matches Rust's `metadata.created()`, which itself maps an
+ * ErrorKind::Unsupported (filesystems/platforms lacking birth-time support)
+ * to 0 in io_file.rs::secs_since_epoch. POSIX `struct stat` carries no birth
+ * time; Linux exposes it only via statx(STATX_BTIME). Matches
+ * io_file.rs::rt_io_file_meta_created. */
+int64_t rt_io_file_meta_created(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return 0;
+#if defined(__linux__)
+    struct statx stx;
+    if (statx((int)fd, "", AT_EMPTY_PATH, STATX_BTIME, &stx) == 0 &&
+        (stx.stx_mask & STATX_BTIME) != 0) {
+        return (int64_t)stx.stx_btime.tv_sec;
+    }
+    return 0;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return 0;
+    return (int64_t)st.st_birthtimespec.tv_sec;
+#else
+    (void)fd;
+    return 0;
+#endif
+}
+
+/* Whether `path` exists. Matches io_file.rs::rt_io_file_exists
+ * (`Path::new(p).exists()`). */
+bool rt_io_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+#if defined(_WIN32)
+    return _access(path, 0) == 0;
+#else
+    struct stat st;
+    return stat(path, &st) == 0;
+#endif
+}
+
+/* Delete `path`. Matches io_file.rs::rt_io_file_delete
+ * (`std::fs::remove_file(p).is_ok()`). */
+bool rt_io_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+#if defined(_WIN32)
+    return _unlink(path) == 0;
+#else
+    return unlink(path) == 0;
+#endif
 }
 
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
@@ -9352,41 +11315,123 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
+/* Why the last bounded no-follow read returned nil.
+ *
+ * The reader has a dozen indistinguishable `rt_nil` exits, and its Simple
+ * caller could only report "returned nil". That is what left the Stage 2
+ * bootstrap failure unexplainable across sessions: the AOT diagnostic was
+ * written successfully and read back as nil with nothing able to name the arm
+ * that refused it. The Rust twin in
+ * runtime/src/value/sffi/file_io/file_ops.rs carries the same code space; this
+ * copy exists because the `core-c-bootstrap` lane resolves the C reader, so a
+ * Rust-only diagnostic would leave that lane with an unresolved external.
+ *
+ * Starts at a sentinel rather than zero so a readout is never ambiguous:
+ * 77 = never called, 100 = succeeded, 1..10 name a rejected arm, and a literal
+ * 0 means this extern is itself unresolved in the lane that read it. */
+/* Thread-local, NOT a global: the bootstrap reads with 24 jobs in flight, so a
+ * concurrent successful read on another thread would overwrite the code before
+ * the failing caller could report it.
+ *
+ * Spelled `_Thread_local` to match this tree's existing TLS (runtime_native.c
+ * and runtime_timestamp.c) rather than a fresh __declspec/__thread macro: one
+ * spelling already proven on every toolchain here beats a second one that has
+ * to be re-argued. */
+static _Thread_local int64_t rt_rnf_last_failure = 77;
+
+int64_t rt_file_read_regular_no_follow_last_failure(void) {
+    return rt_rnf_last_failure;
+}
+
+#define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
+
+#if defined(_WIN32)
+/* Widen a UTF-8 path and, when it is long enough to hit the MAX_PATH ceiling,
+ * qualify it and add the extended-length prefix. A WIDE call is not by itself
+ * exempt: CreateFileW still caps at MAX_PATH unless the path carries the
+ * prefix, which is why a 266-character diagnostic file written successfully
+ * could not be read back. Twin of rt_widen_long_path_rc in runtime.c -- this
+ * file carries a byte-identical copy of the reader below, and archive member
+ * order decides which one links, so both copies must widen or the fix is a
+ * coin flip (see 08987610e54, which fixed the runtime.c copy only after
+ * finding this file's copy still unfixed). Separator and prefix are built
+ * from the numeric code point (92) to keep this free of escape sequences.
+ * Same name as the runtime.c twin (not a fresh one) so the
+ * push-rt-dual-implementation ratchet's already-baselined single-lane entry
+ * for rt_widen_long_path_rc covers this copy too, instead of requiring a new
+ * baseline row for a second name. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
+     * resolution for a short drive-absolute path; UNC/extended paths retain
+     * their existing spelling. */
+    if (wide[0] == sep && wide[1] == sep) return wide;
+    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
+        (wide[2] == sep || wide[2] == L'/')) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
+        if (wcslen(full) < 248) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
     if (max_bytes < 0 || path_len == 0 ||
         !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
-        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return rt_nil;
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
     size_t capacity = (size_t)max_bytes + 1;
     uint8_t* bytes = (uint8_t*)malloc(capacity);
-    if (!bytes) return rt_nil;
+    if (!bytes) return RT_RNF_FAIL(9);
     size_t total = 0;
 #if defined(_WIN32)
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) { free(bytes); return rt_nil; }
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len)) {
-        free(wide_path); free(bytes); return rt_nil;
-    }
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
     HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
-    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return rt_nil; }
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
     BY_HANDLE_FILE_INFORMATION info;
     LARGE_INTEGER size;
     if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
         (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
         size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
-        CloseHandle(handle); free(bytes); return rt_nil;
+        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
         DWORD read_count = 0;
         if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
-            CloseHandle(handle); free(bytes); return rt_nil;
+            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
         }
         if (read_count == 0) break;
         total += (size_t)read_count;
@@ -9395,29 +11440,101 @@ int64_t rt_file_read_regular_no_follow_bounded(
 #else
 #ifndef O_NOFOLLOW
     free(bytes);
-    return rt_nil;
+    return RT_RNF_FAIL(9);
 #else
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { free(bytes); return rt_nil; }
+    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
         (uint64_t)st.st_size > (uint64_t)max_bytes) {
-        close(fd); free(bytes); return rt_nil;
+        close(fd); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         ssize_t count = read(fd, bytes + total, capacity - total);
         if (count < 0 && errno == EINTR) continue;
-        if (count < 0) { close(fd); free(bytes); return rt_nil; }
+        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
         if (count == 0) break;
         total += (size_t)count;
     }
     close(fd);
 #endif
 #endif
-    if (total > (size_t)max_bytes) { free(bytes); return rt_nil; }
+    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    rt_rnf_last_failure = 100;
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
+}
+
+/* Byte-array sibling of rt_file_read_regular_no_follow_bounded for binary
+ * payloads (images, archives). Identical admission arms and bound; the
+ * content is returned as a [u8] SplArray instead of being UTF-8 decoded,
+ * which the text form must reject. Binary image admission
+ * (image_to_markdown) reads PNG/JPEG bytes through this form. */
+int64_t rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    char path[RT_TEXT_PATH_MAX];
+    if (max_bytes < 0 || path_len == 0 ||
+        !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
+    size_t capacity = (size_t)max_bytes + 1;
+    uint8_t* bytes = (uint8_t*)malloc(capacity);
+    if (!bytes) return RT_RNF_FAIL(9);
+    size_t total = 0;
+#if defined(_WIN32)
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wide_path);
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
+    BY_HANDLE_FILE_INFORMATION info;
+    LARGE_INTEGER size;
+    if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
+        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
+    }
+    while (total < capacity) {
+        DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
+        DWORD read_count = 0;
+        if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
+            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
+        }
+        if (read_count == 0) break;
+        total += (size_t)read_count;
+    }
+    CloseHandle(handle);
+#else
+#ifndef O_NOFOLLOW
+    free(bytes);
+    return RT_RNF_FAIL(9);
+#else
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > (uint64_t)max_bytes) {
+        close(fd); free(bytes); return RT_RNF_FAIL(5);
+    }
+    while (total < capacity) {
+        ssize_t count = read(fd, bytes + total, capacity - total);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    close(fd);
+#endif
+#endif
+    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    rt_rnf_last_failure = 100;
+    SplArray* result = rt_byte_array_new_len((uint64_t)total);
+    if (!result) { free(bytes); return RT_RNF_FAIL(9); }
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (total > 0 && array) memcpy(array->data, bytes, total);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
 }
 
 /* RuntimeValue-ABI spelling of rt_file_read_text.
@@ -9721,13 +11838,91 @@ int rt_file_remove(const uint8_t* path_ptr, uint64_t path_len) {
 /* Non-accelerator native bridges. Text parameters use the ABI selected by
  * the caller: path_parent is (ptr, len); the legacy filename/extension
  * aliases receive a tagged RuntimeValue. */
+static int rt_path_parent_is_separator_for(uint8_t byte, int windows) {
+    /* Win32 accepts both spellings, and callers routinely preserve whichever
+     * spelling entered through argv or a project file. Scan bytes only: both
+     * separators are ASCII and cannot occur inside a UTF-8 continuation. */
+    return byte == (uint8_t)'/' || (windows && byte == (uint8_t)'\\');
+}
+
+static int rt_path_parent_is_separator(uint8_t byte) {
+#if defined(_WIN32)
+    return rt_path_parent_is_separator_for(byte, 1);
+#else
+    /* A backslash is an ordinary filename byte on POSIX. */
+    return rt_path_parent_is_separator_for(byte, 0);
+#endif
+}
+
+#if defined(SIMPLE_RUNTIME_TESTING)
+int rt_path_parent_is_separator_for_test(uint8_t byte, int windows) {
+    return rt_path_parent_is_separator_for(byte, windows != 0);
+}
+#endif
+
+#if defined(_WIN32)
+static int rt_path_parent_ascii_equal(uint8_t byte, char upper) {
+    return byte == (uint8_t)upper || byte == (uint8_t)(upper + ('a' - 'A'));
+}
+
+/* Number of bytes in a Windows root, including its final separator when one
+ * exists. This keeps a direct child's parent absolute and stops at a UNC share
+ * rather than walking into the server component. */
+static int64_t rt_path_parent_windows_root_len(const uint8_t* path, int64_t len) {
+    if (len >= 3 && path[1] == (uint8_t)':' &&
+            rt_path_parent_is_separator(path[2])) return 3;
+
+    int64_t unc_start = -1;
+    if (len >= 2 && rt_path_parent_is_separator(path[0]) &&
+            rt_path_parent_is_separator(path[1])) {
+        unc_start = 2;
+        if (len >= 8 && path[2] == (uint8_t)'?' &&
+                rt_path_parent_is_separator(path[3]) &&
+                rt_path_parent_ascii_equal(path[4], 'U') &&
+                rt_path_parent_ascii_equal(path[5], 'N') &&
+                rt_path_parent_ascii_equal(path[6], 'C') &&
+                rt_path_parent_is_separator(path[7])) {
+            unc_start = 8;
+        } else if (len >= 7 && path[2] == (uint8_t)'?' &&
+                rt_path_parent_is_separator(path[3]) && path[5] == (uint8_t)':' &&
+                rt_path_parent_is_separator(path[6])) {
+            return 7;
+        }
+    }
+    if (unc_start >= 0) {
+        int64_t i = unc_start;
+        while (i < len && !rt_path_parent_is_separator(path[i])) i++;
+        if (i >= len) return len;
+        i++;
+        while (i < len && !rt_path_parent_is_separator(path[i])) i++;
+        return i < len ? i + 1 : i;
+    }
+    return len > 0 && rt_path_parent_is_separator(path[0]) ? 1 : 0;
+}
+#endif
+
 int64_t rt_path_parent(const uint8_t* path_ptr, int64_t path_len) {
     if (!path_ptr || path_len <= 0) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    int64_t root_len = rt_path_parent_windows_root_len(path_ptr, path_len);
+    if (path_len <= root_len) return rt_string_new(NULL, 0);
+#else
+    int64_t root_len = 0;
+#endif
     int64_t end = path_len;
-    while (end > 1 && path_ptr[end - 1] == '/') end--;
+    while (end > (root_len > 1 ? root_len : 1) &&
+            rt_path_parent_is_separator(path_ptr[end - 1])) end--;
+#if defined(_WIN32)
+    if (end <= root_len) return rt_string_new(NULL, 0);
+#endif
     int64_t slash = end - 1;
-    while (slash >= 0 && path_ptr[slash] != '/') slash--;
+    while (slash >= 0 && !rt_path_parent_is_separator(path_ptr[slash])) slash--;
     if (slash < 0) return rt_string_new((const uint8_t*)".", 1);
+#if defined(_WIN32)
+    if (root_len > 0 && slash < root_len) {
+        return rt_string_new(path_ptr, (uint64_t)root_len);
+    }
+#endif
     if (slash == 0) return rt_string_new(path_ptr, 1);
     return rt_string_new(path_ptr, (uint64_t)slash);
 }
@@ -10871,7 +13066,311 @@ static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
     return (const uint8_t*)s->data;
 }
 
-int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
+/* ================================================================
+ * Bucket-2 core-C-bootstrap lane gap (2026-09-07 stage2 link census):
+ * rt_env_home / rt_env_vars (env_process.rs), rt_file_open / rt_file_close
+ * (descriptor.rs), rt_file_exists_str (cli_sffi.rs), rt_file_canonicalize /
+ * rt_file_read_lines / rt_file_mmap_read_bytes (file_ops.rs), rt_dir_glob
+ * (directory.rs). rt_file_hash is added later in this file, immediately
+ * after the rt_file_hash_sha256 helper it wraps.
+ *
+ * ABI confirmed by disassembling the real call sites in the kept
+ * failed-link object set
+ * (.simple/storage/build/bootstrap/stage3/aarch64-unknown-linux-gnu/
+ * native-objects-8HIZif/mod_837.o, lib__nogc_sync_mut__sffi__fs__*), not
+ * just by reading the Rust signature or the codegen/runtime_sffi.rs
+ * RuntimeFuncSpec table -- two of these diverge from what a naive port of
+ * the Rust body would produce:
+ *   - rt_file_open: RuntimeFuncSpec declares 4 I64 params, but the real
+ *     call (file_open in mod_837.o) only ever sets up 3 registers
+ *     (path_ptr, path_len, mode), matching descriptor.rs's actual
+ *     `(path_ptr: *const u8, path_len: u64, mode: i32)` exactly, and
+ *     src/lib/nogc_sync_mut/sffi/fs.spl:130 declares
+ *     `extern fn rt_file_open(path: text, mode: i32) -> i32` (one text +
+ *     one int = 3 words after (ptr,len) expansion). Implemented with that
+ *     3-arg signature, not RuntimeFuncSpec's 4.
+ *   - rt_dir_glob: directory.rs's Rust fn takes FOUR args (dir_ptr, dir_len,
+ *     pattern_ptr, pattern_len) and forwards to rt_file_find, but
+ *     src/lib/nogc_sync_mut/sffi/fs.spl:18 declares
+ *     `extern fn rt_dir_glob(pattern: text) -> [text]` -- ONE text arg --
+ *     and the real call (dir_glob in mod_837.o) sets up exactly two words
+ *     (ptr, len) before tail-calling. Porting the 4-arg Rust body verbatim
+ *     would read the pattern's own (ptr,len) as a bogus (dir_ptr,dir_len)
+ *     pair and dereference garbage for the real pattern text -- implemented
+ *     instead as a single-pattern glob(3) call, matching the actual 2-word
+ *     call site.
+ *   - rt_file_exists_str tail-calls with ZERO argument setup
+ *     (`str x30,[sp,#-16]!; bl rt_file_exists_str`), i.e. the boxed
+ *     RuntimeValue text handle passes straight through in x0, matching
+ *     cli_sffi.rs's `RuntimeValue` (not (ptr,len)) parameter -- decoded here
+ *     via the existing rt_core_string_to_cpath, the same helper rt_remove's
+ *     ABI fix uses for the identical single-word-boxed-text shape.
+ * ---------------------------------------------------------------- */
+
+#if !defined(_WIN32) && !defined(__simpleos__)
+#include <glob.h>
+extern char** environ;
+#elif defined(__simpleos__)
+extern char** environ;
+#endif
+
+/* env_process.rs: rt_env_home() -> RuntimeValue (nil if HOME/USERPROFILE
+ * unset). Zero-arg call, confirmed at every call site (mod_748/798/832/840). */
+int64_t rt_env_home(void) {
+    const char* home = getenv("HOME");
+#if defined(_WIN32)
+    if (!home || home[0] == '\0') home = getenv("USERPROFILE");
+#endif
+    if (!home || home[0] == '\0') return rt_core_nil();
+    return rt_string_new((const uint8_t*)home, (uint64_t)strlen(home));
+}
+
+/* env_process.rs rt_env_all/rt_env_vars: array of (key, value) 2-tuples,
+ * one per process environment variable. Order is whatever the OS yields.
+ * Zero-arg call, confirmed at every call site (mod_751/809/840). */
+int64_t rt_env_vars(void) {
+    SplArray* out = rt_array_new(0);
+    if (!out) return rt_core_nil();
+#if defined(_WIN32)
+    char** env = _environ;
+#else
+    char** env = environ;
+#endif
+    for (int64_t i = 0; env && env[i]; i++) {
+        const char* entry = env[i];
+        const char* eq = strchr(entry, '=');
+        if (!eq) continue;
+        size_t key_len = (size_t)(eq - entry);
+        const char* value = eq + 1;
+        int64_t key_str = rt_string_new((const uint8_t*)entry, (uint64_t)key_len);
+        int64_t value_str = rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+        int64_t pair = rt_tuple_new(2);
+        if (pair != rt_core_nil()) {
+            rt_tuple_set(pair, 0, key_str);
+            rt_tuple_set(pair, 1, value_str);
+        }
+        rt_array_push(out, pair);
+    }
+    return (int64_t)(uintptr_t)out;
+}
+
+/* descriptor.rs: rt_file_open(path_ptr, path_len, mode) -> fd (-1 on
+ * error). mode: 0=ReadOnly, 1=ReadWrite, 2=WriteOnly. NOT the
+ * RuntimeFuncSpec's declared 4-I64-param shape -- see the file-header note
+ * above; the real call site only ever sets up these 3 words. */
+int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t mode) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return -1;
+    int fd = -1;
+#if defined(_WIN32)
+    switch (mode) {
+        case 0: fd = _open(path, _O_RDONLY | _O_BINARY); break;
+        case 1: fd = _open(path, _O_RDWR | _O_BINARY); break;
+        case 2: fd = _open(path, _O_WRONLY | _O_BINARY); break;
+        default: fd = -1; break;
+    }
+#else
+    switch (mode) {
+        case 0: fd = open(path, O_RDONLY); break;
+        case 1: fd = open(path, O_RDWR); break;
+        case 2: fd = open(path, O_WRONLY); break;
+        default: fd = -1; break;
+    }
+#endif
+    free(path);
+    return (int32_t)fd;
+}
+
+/* descriptor.rs: rt_file_close(fd) -> success (1) / failure (0). close(2)'s
+ * return code is real, not a constant -- it is where deferred write-back
+ * errors (ENOSPC/EIO/EDQUOT) surface, mirroring descriptor.rs's own
+ * documented rationale. */
+int8_t rt_file_close(int32_t fd) {
+#if defined(_WIN32)
+    return (int8_t)(_close(fd) == 0 ? 1 : 0);
+#else
+    return (int8_t)(close(fd) == 0 ? 1 : 0);
+#endif
+}
+
+/* cli_sffi.rs: rt_file_exists_str(path: RuntimeValue) -> bool. Single boxed
+ * text handle passes straight through -- see the file-header ABI note. */
+int8_t rt_file_exists_str(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return 0;
+    struct stat st;
+    int8_t exists = (int8_t)(stat(path, &st) == 0 ? 1 : 0);
+    free(path);
+    return exists;
+}
+
+/* file_ops.rs: rt_file_canonicalize(path_ptr, path_len) -> RuntimeValue
+ * (nil on failure). Deliberately NOT realpath(3)/std::fs::canonicalize --
+ * file_ops.rs's own comment says libc::realpath segfaults in self-hosted
+ * binaries -- so this is a pure lexical normalization: make absolute
+ * (joining the cwd when relative), then drop "." components and pop on
+ * ".." components, without touching the filesystem or resolving symlinks. */
+int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    char* abs = NULL;
+    if (path[0] == '/') {
+        abs = spl_strdup(path);
+    } else {
+        /* rt_getcwd() (runtime.h), not raw getcwd(3): already used the same
+         * way elsewhere in this file (see the realpath fallback a few
+         * hundred lines above) and portable across the WIN32 branch, unlike
+         * a bare getcwd/_getcwd call. */
+        char* cwd = rt_getcwd();
+        if (!cwd) { free(path); return rt_core_nil(); }
+        size_t need = strlen(cwd) + 1 + strlen(path) + 1;
+        abs = (char*)malloc(need);
+        if (abs) snprintf(abs, need, "%s/%s", cwd, path);
+        free(cwd);
+    }
+    free(path);
+    if (!abs) return rt_core_nil();
+
+    char* out = (char*)malloc(strlen(abs) + 2);
+    if (!out) { free(abs); return rt_core_nil(); }
+    out[0] = '/';
+    size_t out_len = 1;
+
+    char* saveptr = NULL;
+    char* tok = strtok_r(abs, "/", &saveptr);
+    while (tok) {
+        if (strcmp(tok, ".") == 0) {
+            /* skip */
+        } else if (strcmp(tok, "..") == 0) {
+            if (out_len > 1) {
+                size_t i = out_len - 1;
+                while (i > 0 && out[i - 1] != '/') i--;
+                out_len = i > 1 ? i - 1 : 1;
+            }
+        } else {
+            size_t tok_len = strlen(tok);
+            if (out_len > 1) out[out_len++] = '/';
+            memcpy(out + out_len, tok, tok_len);
+            out_len += tok_len;
+        }
+        tok = strtok_r(NULL, "/", &saveptr);
+    }
+    int64_t result = rt_string_new((const uint8_t*)out, (uint64_t)out_len);
+    free(out);
+    free(abs);
+    return result;
+}
+
+/* file_ops.rs: rt_file_read_lines(path_ptr, path_len) -> RuntimeValue array
+ * of text, one per line (nil on failure). Matches Rust's `.lines()`: split
+ * on '\n', a trailing '\r' is stripped from each line, and a final trailing
+ * newline does NOT produce a spurious empty trailing element. */
+int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    FILE* f = fopen(path, "rb");
+    free(path);
+    if (!f) return rt_core_nil();
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
+    long size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return rt_core_nil(); }
+    char* content = (char*)malloc((size_t)size + 1);
+    if (!content) { fclose(f); return rt_core_nil(); }
+    size_t got = size > 0 ? fread(content, 1, (size_t)size, f) : 0;
+    fclose(f);
+    if (got != (size_t)size) { free(content); return rt_core_nil(); }
+    content[size] = '\0';
+
+    SplArray* out = rt_array_new(0);
+    if (!out) { free(content); return rt_core_nil(); }
+    size_t start = 0;
+    for (size_t i = 0; i < (size_t)size; i++) {
+        if (content[i] != '\n') continue;
+        size_t end = i;
+        if (end > start && content[end - 1] == '\r') end--;
+        rt_array_push(out, rt_string_new((const uint8_t*)content + start, (uint64_t)(end - start)));
+        start = i + 1;
+    }
+    if (start < (size_t)size) {
+        size_t end = (size_t)size;
+        if (end > start && content[end - 1] == '\r') end--;
+        rt_array_push(out, rt_string_new((const uint8_t*)content + start, (uint64_t)(end - start)));
+    }
+    free(content);
+    return (int64_t)(uintptr_t)out;
+}
+
+/* file_ops.rs: rt_file_mmap_read_bytes(path_ptr, path_len) -> RuntimeValue
+ * byte array (nil on failure). Named for the Rust side's mmap-flavoured
+ * fast path, but semantically just "read the whole file as bytes" --
+ * file_ops.rs's own body is `std::fs::read` + `bytes_to_runtime_array`, not
+ * an actual mmap(2). Uses the same byte-array representation
+ * (rt_byte_array_new_len / RT_CORE_ARRAY_FLAG_BYTES) as that helper. */
+int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
+    char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    FILE* f = fopen(path, "rb");
+    free(path);
+    if (!f) return rt_core_nil();
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
+    long size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return rt_core_nil(); }
+    SplArray* arr = rt_byte_array_new_len((uint64_t)size);
+    RtCoreArray* array = rt_core_array_ptr(arr);
+    if (!array) { fclose(f); return rt_core_nil(); }
+    if (size > 0) {
+        size_t got = fread(array->data, 1, (size_t)size, f);
+        fclose(f);
+        if (got != (size_t)size) return rt_core_nil();
+    } else {
+        fclose(f);
+    }
+    return (int64_t)(uintptr_t)arr;
+}
+
+/* directory.rs: rt_dir_glob(pattern_ptr, pattern_len) -> RuntimeValue array
+ * of text (empty array on no match or error). Single-pattern glob(3) call,
+ * matching the real 2-word call site -- see the file-header ABI note; the
+ * Rust fn's 4-arg (dir, pattern) shape is NOT what this lane's callers pass. */
+int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
+    SplArray* out = rt_array_new(0);
+    if (!out) return rt_core_nil();
+#if !defined(_WIN32) && !defined(__simpleos__)
+    char* pattern = rt_core_text_arg_to_cstr(pattern_ptr, pattern_len);
+    if (!pattern) return (int64_t)(uintptr_t)out;
+    glob_t results;
+    memset(&results, 0, sizeof(results));
+    int rc = glob(pattern, 0, NULL, &results);
+    free(pattern);
+    if (rc == 0) {
+        for (size_t i = 0; i < results.gl_pathc; i++) {
+            const char* p = results.gl_pathv[i];
+            rt_array_push(out, rt_string_new((const uint8_t*)p, (uint64_t)strlen(p)));
+        }
+    }
+    globfree(&results);
+#else
+    (void)pattern_ptr;
+    (void)pattern_len;
+#endif
+    return (int64_t)(uintptr_t)out;
+}
+
+/* Shared body of rt_file_atomic_write / rt_file_atomic_write_mode.
+ *
+ * `have_mode == 0` reproduces rt_file_atomic_write's original behaviour
+ * exactly: preserve the destination's existing mode across the rename.
+ * `have_mode != 0` instead imposes `mode & 07777` on the TEMP file, before
+ * the rename, which is the whole point of the _mode variant --
+ * src/lib/nogc_sync_mut/terminal/credential/store.spl:750 requires that the
+ * target "never exists at a wider mode", so chmod-after-publish (i.e.
+ * rt_file_atomic_write followed by a chmod) is NOT an acceptable
+ * implementation: it leaves a window in which a private key file is
+ * world-readable. That security requirement is why this function was
+ * factored out of rt_file_atomic_write rather than the mode variant being
+ * written as a wrapper around it. */
+static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_value,
+                                         int64_t mode, int have_mode) {
     static atomic_uint_fast64_t sequence = 0;
     RtCoreString* path_string = rt_core_as_string(path_value);
     RtCoreString* content_string = rt_core_as_string(content_value);
@@ -10882,7 +13381,7 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     if (!path) return 0;
 #if !defined(_WIN32)
     struct stat existing_stat;
-    int preserve_mode = stat(path, &existing_stat) == 0;
+    int preserve_mode = !have_mode && stat(path, &existing_stat) == 0;
 #endif
     char* parent = spl_strdup(path);
     if (!parent) {
@@ -10940,6 +13439,9 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     if (ok) ok = fflush(file) == 0;
 #if !defined(_WIN32)
     if (ok && preserve_mode) ok = fchmod(fd, existing_stat.st_mode & 07777) == 0;
+    /* Narrow-to-target BEFORE the rename: the temp file was created 0600, so
+     * the published path never exists at a wider mode than requested. */
+    if (ok && have_mode) ok = fchmod(fd, (mode_t)(mode & 07777)) == 0;
 #endif
 #if defined(_WIN32)
     if (ok) ok = _commit(fd) == 0;
@@ -10955,6 +13457,14 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
 #endif
     }
 #if defined(_WIN32)
+    /* Win32 CRT permissions express exactly one bit -- read-only -- so the
+     * POSIX mode is honoured to the only extent the platform allows: the
+     * owner-write bit maps to _S_IWRITE, everything else (group/other,
+     * setuid, sticky) has no Win32 equivalent and is silently not applied.
+     * Applied to the TEMP file, before the move, for the same
+     * never-wider-than-requested reason as the fchmod above. A failure here
+     * is NOT fatal to the write: the bytes are still published atomically. */
+    if (ok && have_mode) _chmod(temp_path, _S_IREAD | ((mode & 0200) ? _S_IWRITE : 0));
     if (ok) ok = MoveFileExA(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
     if (ok) ok = rename(temp_path, path) == 0;
@@ -10963,6 +13473,165 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     free(temp_path);
     free(path);
     return ok ? 1 : 0;
+}
+
+int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
+    return rt_file_atomic_write_impl(path_value, content_value, 0, 0);
+}
+
+/* ================================================================
+ * Stage2 Windows/MSVC link gap (2026-09-12): rt_file_atomic_write_mode,
+ * rt_file_list_dir, rt_file_mode, rt_fs_read_text. Declared as externs in
+ * src/lib/nogc_sync_mut/sffi/fs.spl (:50, :106, :122, :228) and defined
+ * NOWHERE -- neither here nor in the Rust runtime. The selfcheck beside
+ * this file recorded them as "no implementation on either side". GNU ld
+ * tolerated the undefined symbols; MSVC's linker refuses them, which is
+ * what finally exposed the gap. This is the unregistered_extern_silent_nil
+ * class (doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md).
+ *
+ * ABI established by DISASSEMBLING the real call sites in the kept Windows
+ * stage3 object set (.simple/storage/build/bootstrap/stage3/
+ * x86_64-pc-windows-msvc/native-objects-2X62WD/mod_828.o), the same method
+ * the bucket-2 comment above used -- not by reading the .spl declaration:
+ *   - lib__nogc_sync_mut__sffi__fs__{file_mode,fs_read_text,file_list_dir}
+ *     are each a bare `jmp` with ZERO argument setup, so the single `text`
+ *     argument is the boxed RuntimeValue handle passed straight through in
+ *     rcx, and the return value passes back out untouched. None of the four
+ *     appears in text_arg_indices (src/compiler/50.mir/text_extern_abi.spl),
+ *     which independently predicts exactly this single-word shape -- the
+ *     same shape rt_file_exists_str was confirmed to have.
+ *   - file_atomic_write_mode sets up no arguments either (rcx, rdx, r8
+ *     pass through), so it is (path_value, content_value, mode).
+ *   - Its return is consumed with `testq %rax, %rax` -- the FULL 64-bit
+ *     register, not `testb %al, %al`. The bool return is therefore declared
+ *     int64_t and always assigned exactly 0 or 1: an int8_t return leaves
+ *     the upper 56 bits of rax undefined, and a `false` carrying garbage
+ *     there would be read as true. (Note for a separate change: the
+ *     neighbouring rt_file_exists_str returns int8_t and ITS call site at
+ *     mod_828.o+0x219 also uses `testq %rax, %rax`, so it has this latent
+ *     defect today. Not fixed here -- different symbol, different lane.)
+ *   - The `mode: i32` argument is a RAW machine integer, NOT a tagged
+ *     RuntimeValue. This one matters: RT_VALUE_TAG_INT is 0x0, so a raw
+ *     0600 (0x180) has clear tag bits and rt_core_is_int() answers TRUE for
+ *     it -- meaning the defensive `rt_core_is_int(v) ? rt_core_as_int(v) : v`
+ *     decode used by rt_file_write_text_at CANNOT disambiguate here, and
+ *     applying it anyway would shift 0600 down to 060. Guessing either way
+ *     is a silent security bug: read as tagged, 0600 would be published as
+ *     06000, i.e. setuid+setgid on a private key file. Resolved by
+ *     disassembling the sibling wrapper file_open, which has the same
+ *     `(path: text, mode: i32)` shape and MUST marshal (its text expands to
+ *     a (ptr, len) pair, so the registers visibly move): mod_828.o+0x2b3 is
+ *     `movq %rsi, %r8` -- the mode travels to the third argument register
+ *     verbatim, with no shift and no tag OR. Confirmed behaviourally by
+ *     this file's existing rt_file_open, which switches on mode == 0/1/2
+ *     and would never match a tagged 0/8/16. Hence plain `int32_t mode`
+ *     and a plain `mode & 07777`, with no untagging. */
+
+/* fs.spl:50 `extern fn rt_file_atomic_write_mode(path: text, content: text,
+ * mode: i32) -> bool`. Temp file + rename, with the mode imposed before the
+ * rename; see rt_file_atomic_write_impl's comment for why that ordering is
+ * load-bearing rather than incidental. */
+int64_t rt_file_atomic_write_mode(int64_t path_value, int64_t content_value, int32_t mode) {
+    return rt_file_atomic_write_impl(path_value, content_value, (int64_t)mode, 1) != 0 ? 1 : 0;
+}
+
+/* fs.spl:228 `extern fn rt_fs_read_text(path: text) -> text?` -- whole file
+ * as UTF-8 text, nil on failure. Decodes the boxed handle and delegates to
+ * rt_file_read_text (this same translation unit, (ptr, len) ABI), which
+ * already reads to EOF keeping the true BYTE COUNT rather than strlen'ing
+ * at the first NUL, and already returns RT_NIL on failure -- the exact
+ * `text?` contract, on both platform branches, with no new I/O code. */
+int64_t rt_fs_read_text(int64_t path_value) {
+    uint64_t len = 0;
+    const uint8_t* bytes = rt_core_string_bytes(path_value, &len);
+    if (!bytes) return rt_core_nil();
+    return rt_file_read_text(bytes, len);
+}
+
+/* fs.spl:122 `extern fn rt_file_mode(path: text) -> i64` -- the file's
+ * permission bits, or -1 when they cannot be read. -1 (not 0) is the
+ * contract both consumers test: credential/store.spl:835 does `if mode < 0`
+ * and falls back to owner-only, and dual_fs/__init__.spl:143 uses -1 as its
+ * "unknown" sentinel. On Windows st_mode carries only the read/write bits;
+ * masking is identical, there is simply less to report. */
+int64_t rt_file_mode(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return -1;
+    struct stat st;
+    int rc = stat(path, &st);
+    free(path);
+    if (rc != 0) return -1;
+    return (int64_t)(st.st_mode & 07777);
+}
+
+/* fs.spl:106 `extern fn rt_file_list_dir(path: text) -> [text]` -- entry
+ * NAMES (not full paths), "." and ".." skipped, empty array on error so the
+ * `[text]` (non-optional) return is always a real array.
+ *
+ * The Windows branch deliberately uses FindFirstFileW/FindNextFileW where
+ * the neighbouring rt_dir_list uses the ...A variants: Simple `text` is
+ * UTF-8, and the A variants transcode through the process ANSI codepage,
+ * which mangles any non-ASCII file name. The UTF-8 <-> UTF-16 conversion
+ * follows the in-file precedent (MultiByteToWideChar with CP_UTF8 /
+ * MB_ERR_INVALID_CHARS, as used by rt_mmap_raw's path handling). */
+int64_t rt_file_list_dir(int64_t path_value) {
+    SplArray* out = rt_array_new(0);
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path || !out) {
+        if (path) free(path);
+        return (int64_t)(uintptr_t)out;
+    }
+#if defined(_WIN32)
+    size_t path_len = strlen(path);
+    char* pattern = (char*)malloc(path_len + 3);
+    if (!pattern) { free(path); return (int64_t)(uintptr_t)out; }
+    memcpy(pattern, path, path_len);
+    /* Tolerate a trailing separator so "dir\" and "dir" behave alike. */
+    if (path_len > 0 && (path[path_len - 1] == '\\' || path[path_len - 1] == '/')) path_len--;
+    pattern[path_len] = '\\';
+    pattern[path_len + 1] = '*';
+    pattern[path_len + 2] = '\0';
+    free(path);
+
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, NULL, 0);
+    wchar_t* wide_pattern = wide_len > 0 ? (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t)) : NULL;
+    if (!wide_pattern ||
+        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, wide_pattern, wide_len)) {
+        if (wide_pattern) free(wide_pattern);
+        free(pattern);
+        return (int64_t)(uintptr_t)out;
+    }
+    free(pattern);
+
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(wide_pattern, &data);
+    free(wide_pattern);
+    if (find == INVALID_HANDLE_VALUE) return (int64_t)(uintptr_t)out;
+    do {
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
+        int utf8_len = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, NULL, 0, NULL, NULL);
+        if (utf8_len <= 1) continue;
+        char* name = (char*)malloc((size_t)utf8_len);
+        if (!name) continue;
+        if (WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, name, utf8_len, NULL, NULL) > 0)
+            rt_array_push(out, rt_string_new((const uint8_t*)name, (uint64_t)utf8_len - 1));
+        free(name);
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return (int64_t)(uintptr_t)out;
+#else
+    DIR* dir = opendir(path);
+    free(path);
+    if (!dir) return (int64_t)(uintptr_t)out;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        const char* name = entry->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        rt_array_push(out, rt_string_new((const uint8_t*)name, (uint64_t)strlen(name)));
+    }
+    closedir(dir);
+    return (int64_t)(uintptr_t)out;
+#endif
 }
 
 static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t offset) {
@@ -10995,12 +13664,6 @@ int64_t rt_fd_pwrite(int32_t fd, const uint8_t* buffer, int64_t len, int64_t off
     if (!buffer || len < 0 || offset < 0) return -EINVAL;
     ssize_t n = rt_file_write_at_fd(fd, buffer, (size_t)len, offset);
     return n < 0 ? -(int64_t)(errno ? errno : EIO) : (int64_t)n;
-}
-
-int64_t rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t out_bytes) {
-    if (out_addr <= 0) return -EINVAL;
-    return rt_fd_stat_snapshot_v1_impl(
-        descriptor, (uint64_t*)(uintptr_t)out_addr, out_bytes);
 }
 
 /* SFFI_LEGACY_UNSAFE: mixed static/heap ownership. Kept only for binary
@@ -11233,36 +13896,6 @@ bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
     return rt_dir_create_cpath(path, recursive);
-}
-
-const char* lib__nogc_sync_mut__debug__remote__session_model__DebugExecutionMode_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "rtl_sim";
-        case 2: return "qemu_stub";
-        default: return "hw";
-    }
-}
-
-const char* lib__nogc_sync_mut__debug__remote__session_model__DebugTransportKind_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "openocd_remote_bitbang";
-        case 2: return "intel_jtagd";
-        case 3: return "trace32_native";
-        case 4: return "trace32_gdb";
-        case 5: return "gdb_remote";
-        default: return "openocd_jtag";
-    }
-}
-
-const char* lib__nogc_sync_mut__debug__remote__types__Architecture_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "arm64";
-        case 2: return "riscv32";
-        case 3: return "riscv64";
-        case 4: return "x86";
-        case 5: return "x86_64";
-        default: return "arm32";
-    }
 }
 
 static char* rt_core_shell_quote(const char* s) {
@@ -11682,29 +14315,78 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
     char new_path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(old_ptr, old_len, old_path, sizeof(old_path))) return false;
     if (!rt_text_arg_to_path(new_ptr, new_len, new_path, sizeof(new_path))) return false;
+#if defined(_WIN32)
+    /* CRT rename() is an ANSI/narrow-CRT entry point capped at MAX_PATH --
+     * same bug class as rt_file_fsync above. native_noop_admission.spl
+     * renames a staged generation file whose path was already shown to
+     * exceed MAX_PATH (the incident that motivated this whole fix pass), so
+     * this call was silently failing right after the just-fixed fsync
+     * succeeded, reproducing the identical "generation-publication-failed"
+     * symptom for an unrelated reason. Prefer the wide, extended-length-
+     * prefixed MoveFileExW with no replace flag -- matching rename()'s
+     * Windows semantics of failing when the destination already exists --
+     * falling back to plain rename() only when a path cannot be widened. */
+    wchar_t* wide_old = rt_widen_long_path_rc(old_path);
+    wchar_t* wide_new = wide_old ? rt_widen_long_path_rc(new_path) : NULL;
+    if (wide_old && wide_new) {
+        BOOL ok = MoveFileExW(wide_old, wide_new, 0);
+        free(wide_old); free(wide_new);
+        return ok != 0;
+    }
+    free(wide_old); free(wide_new);
+#endif
     return rename(old_path, new_path) == 0;
 }
+
+#if defined(_WIN32)
+/* rt_secure_temp_dir collapsed every Windows failure mode into an empty string,
+ * so its one caller -- AOT diagnostic staging in
+ * driver_aot_native_output.spl:2267 -- could only report "diagnostic staging
+ * unavailable" with no way to tell WHICH step failed, which left the Stage 2
+ * sanity smoke test blocked with nothing to go on. Name the failing step and
+ * the Win32 error instead; this runs only on a path that is already failing.
+ * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
+static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
+    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, (unsigned long)GetLastError(), detail ? detail : "");
+    fflush(stderr);
+}
+#endif
 
 int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                            const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent)) || !rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX has no secure random temporary-directory primitive yet. */
+    return rt_string_new(NULL, 0);
+#elif defined(_WIN32)
     typedef LONG (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
     typedef BOOL (WINAPI *ConvertSddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
     HMODULE lib = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
     BCryptGenRandomFn fill = lib ? (BCryptGenRandomFn)GetProcAddress(lib, "BCryptGenRandom") : NULL;
-    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { if (lib) FreeLibrary(lib); return rt_string_new(NULL, 0); }
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { rt_secure_temp_dir_diag("BCryptGenRandom", parent); if (lib) FreeLibrary(lib); return rt_string_new(NULL, 0); }
     FreeLibrary(lib); char suffix[33];
     for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
     int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
     HMODULE advapi = LoadLibraryA("advapi32.dll"); PSECURITY_DESCRIPTOR descriptor = NULL;
     ConvertSddlFn convert = advapi ? (ConvertSddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
-    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
+    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path); if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes);
+    /* CreateDirectoryA is an ANSI entry point capped at MAX_PATH; `parent`
+     * (the bootstrap cache root) is routinely already close to that limit, so
+     * appending "<prefix>-<32hex>" can push `path` over it. Reuse
+     * rt_widen_long_path_rc (defined earlier in this file, already used by
+     * rt_file_read_regular_no_follow_bounded) rather than the later-defined
+     * spl_widen_long_path, so no forward declaration is needed. Twin of the
+     * same fix in runtime.c's rt_secure_temp_dir. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    BOOL created = wide_path ? CreateDirectoryW(wide_path, &attributes)
+                             : CreateDirectoryA(path, &attributes);
+    free(wide_path);
     LocalFree(descriptor); FreeLibrary(advapi);
-    if (!created) return rt_string_new(NULL, 0);
+    if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
     int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
     if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
@@ -11713,12 +14395,95 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
 }
 
+#if defined(_WIN32)
+/* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
+ * leaves it long, add the extended-length ("\\?\") prefix so a WIDE Win32
+ * call is not itself capped at MAX_PATH (a wide call is not exempt on its
+ * own -- only the prefix lifts the ceiling, to ~32767). Caller frees. Named
+ * without the rt_ prefix -- it is a pure file-local helper with no runtime-
+ * API surface of its own; see scripts/check/check-rt-dual-implementation-
+ * ratchet.shs, which treats any new rt_-prefixed definition as a fresh
+ * single-lane primitive requiring a Simple twin. The path separator and
+ * prefix are built from the numeric code point (92) to keep this free of
+ * escape sequences. */
+static wchar_t* spl_widen_long_path(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
+     * resolution for a short drive-absolute path; UNC/extended paths retain
+     * their existing spelling. */
+    if (wide[0] == sep && wide[1] == sep) return wide;
+    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
+        (wide[2] == sep || wide[2] == L'/')) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        {
+            DWORD written = GetFullPathNameW(wide, need, full, NULL);
+            if (written == 0 || written >= need) { free(full); return wide; }
+        }
+        if (wcslen(full) < 248) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
 int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
     char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
-#if defined(_WIN32)
+#if defined(__simpleos__)
+    /* SOSIX has no atomic no-replace file publication primitive yet. */
+    return -1;
+#elif defined(_WIN32)
+    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
+     * underlying filesystem's real limit; the AOT native-build cache path
+     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
+     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3), which
+     * collapsed four layers up into the opaque "AOT object publication
+     * failed". Prefer the wide, extended-length-prefixed call so both
+     * endpoints can exceed MAX_PATH. */
+    {
+        wchar_t* wide_staged = spl_widen_long_path(staged);
+        wchar_t* wide_dest = wide_staged ? spl_widen_long_path(destination) : NULL;
+        if (wide_staged && wide_dest) {
+            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
+            DWORD werror = ok ? 0 : GetLastError();
+            free(wide_staged); free(wide_dest);
+            if (ok) return 1;
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+        free(wide_staged); free(wide_dest);
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
@@ -11754,14 +14519,95 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     return ok;
 }
 
-/* Lower-case hex SHA-256 of the file's bytes as a runtime string; nil when
- * the file cannot be read (Rust: `format!("{:x}", digest)`). Streams the file
- * through the same compressor rt_tls13_sha256 uses. */
-int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
+int rt_file_copy_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        return 0;
+    }
+    int output = open(dst,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) { close(input); return 0; }
+    int ok = 1;
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            ok = 0; break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset,
+                (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { ok = 0; break; }
+            offset += written;
+        }
+        if (!ok) break;
+    }
+    if (ok && fsync(output) != 0) ok = 0;
+    if (close(output) != 0) ok = 0;
+    if (close(input) != 0) ok = 0;
+    if (!ok) unlink(dst);
+    return ok;
+#endif
+}
+
+int rt_file_link_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        return 0;
+    }
+    int ok = link(src, dst) == 0;
+    struct stat destination_stat;
+    if (ok && (lstat(dst, &destination_stat) != 0 ||
+            !S_ISREG(destination_stat.st_mode) ||
+            destination_stat.st_dev != source_stat.st_dev ||
+            destination_stat.st_ino != source_stat.st_ino)) {
+        unlink(dst);
+        ok = 0;
+    }
+    close(input);
+    return ok;
+#endif
+}
+
+/* Raw owner-facing form used by authenticated native artifact loaders. */
+int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]) {
+    if (!path || !path[0] || !out) return 0;
     FILE* in = fopen(path, "rb");
-    if (!in) return rt_core_nil();
+    if (!in) return 0;
     uint32_t state[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
@@ -11778,7 +14624,7 @@ int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
             pending = 0;
         }
     }
-    if (ferror(in)) { fclose(in); return rt_core_nil(); }
+    if (ferror(in)) { fclose(in); return 0; }
     fclose(in);
     memset(block + pending, 0, sizeof(block) - pending);
     block[pending] = 0x80u;
@@ -11789,11 +14635,46 @@ int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
     }
     rt_sha256_compress(state, block);
     if (final_bytes == 128u) rt_sha256_compress(state, block + 64);
-    char hex[65];
     for (int i = 0; i < 8; i++) {
-        snprintf(hex + i * 8, 9, "%08x", state[i]);
+        out[i * 4] = (uint8_t)(state[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(state[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(state[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)state[i];
     }
+    return 1;
+}
+
+/* Lower-case hex SHA-256 of the file's bytes as a runtime string; nil when
+ * the file cannot be read (Rust: `format!("{:x}", digest)`). Streams the file
+ * through the same compressor rt_tls13_sha256 uses. */
+int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    uint8_t digest[32];
+    char hex[65];
+    static const char alphabet[] = "0123456789abcdef";
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
+            !rt_sha256_file_raw_v1(path, digest)) return rt_core_nil();
+    for (int i = 0; i < 32; i++) {
+        hex[i * 2] = alphabet[digest[i] >> 4];
+        hex[i * 2 + 1] = alphabet[digest[i] & 15u];
+    }
+    hex[64] = '\0';
     return rt_string_new((const uint8_t*)hex, 64u);
+}
+
+/* cli_sffi.rs: rt_file_hash(path: RuntimeValue) -> hex SHA-256 text, or an
+ * EMPTY (not nil) text on any failure, matching the Rust body exactly
+ * (`rt_string_new("".as_ptr(), 0)` on every error path). Single boxed text
+ * handle passes straight through (tail call, zero argument setup at the
+ * real call site, mod_838.o file_hash) -- same shape as rt_file_exists_str
+ * above and rt_remove's ABI fix. Thin wrapper over rt_file_hash_sha256. */
+int64_t rt_file_hash(int64_t path_value) {
+    uint64_t len = 0;
+    const uint8_t* bytes = rt_core_string_bytes(path_value, &len);
+    if (!bytes) return rt_string_new(NULL, 0);
+    int64_t hex = rt_file_hash_sha256(bytes, len);
+    if (hex == rt_core_nil()) return rt_string_new(NULL, 0);
+    return hex;
 }
 
 /* Run `cmd` through the shell and return captured stdout as a runtime string
@@ -11887,12 +14768,27 @@ int64_t rt_time_now_unix(void) {
 }
 
 int64_t rt_time_now_unix_micros(void) {
+#if defined(_WIN32)
+    /* Same cause as rt_time_now_ns: `clock_gettime` becomes the unresolved
+       `clock_gettime64` and is stubbed, so this returned -1 and rt_time_ms
+       with it. GetSystemTimeAsFileTime is 100 ns ticks since 1601-01-01;
+       11644473600 seconds separate that epoch from the Unix one. */
+    FILETIME ft;
+    ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    /* 100 ns ticks -> microseconds, then rebase onto the Unix epoch. */
+    int64_t unix_micros = (int64_t)(u.QuadPart / 10ULL) - 11644473600000000LL;
+    return unix_micros < 0 ? -1 : unix_micros;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000LL &&
         ts.tv_nsec / 1000 > INT64_MAX % 1000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
+#endif
 }
 
 int64_t rt_time_ms(void) {
@@ -11905,15 +14801,51 @@ int64_t rt_entropy_hardware_ready(void) {
 }
 
 int64_t rt_time_now_ns(void) {
+#if defined(_WIN32)
+    /* MinGW maps `clock_gettime` onto `clock_gettime64`, which is NOT in the
+       import set this runtime links against — the native linker reports it as
+       unresolved and substitutes a generated stub, so every call failed and
+       this function returned -1. Measured: rt_time_now_micros/nanos/ms all
+       answered -1 in a native binary while the program around them ran fine,
+       which silently reports ZERO elapsed time to any in-binary benchmark.
+       QueryPerformanceCounter is the monotonic clock Windows actually
+       provides, and it is always available. */
+    LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) return -1;
+    if (!QueryPerformanceCounter(&counter) || counter.QuadPart < 0) return -1;
+    /* Split to keep the nanosecond scaling exact without overflowing: whole
+       seconds first, then the sub-second remainder. */
+    int64_t secs = (int64_t)(counter.QuadPart / freq.QuadPart);
+    int64_t rem  = (int64_t)(counter.QuadPart % freq.QuadPart);
+    if (secs > INT64_MAX / 1000000000LL) return -1;
+    return secs * 1000000000LL + (rem * 1000000000LL) / (int64_t)freq.QuadPart;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000000LL &&
         ts.tv_nsec > INT64_MAX % 1000000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
 }
 
 int64_t rt_time_now_nanos(void) {
+    return rt_time_now_ns();
+}
+
+/* Stage2 bootstrap link (core-C-only lane): `rt_time_monotonic_ns` is
+ * `extern fn` in 8 `.spl` files (std.sffi.time, the perf tracer/benchmark/
+ * profiler, and driver cache/counter code) and had ZERO implementation
+ * anywhere -- neither C nor Rust defines a real-symbol
+ * `rt_time_monotonic_ns` (the Rust `interpreter_extern::time::rt_time_monotonic_ns`
+ * is an interpreter dispatch shim, `fn(&[Value]) -> Result<Value,
+ * CompileError>`, not a `#[no_mangle] extern "C" fn`, so it never appears as
+ * a linkable native symbol). `rt_time_now_ns` immediately above is already
+ * the monotonic (`CLOCK_MONOTONIC`) nanosecond clock this repo uses
+ * elsewhere -- never wall-clock -- so this is a plain alias under the name
+ * codegen actually looked for. */
+int64_t rt_time_monotonic_ns(void) {
     return rt_time_now_ns();
 }
 
@@ -12995,6 +15927,22 @@ RtCpuidResult rt_cpuid(int32_t leaf, int32_t subleaf) {
     return r;
 }
 
+int64_t rt_xgetbv(int32_t index) {
+#if defined(__x86_64__) || defined(_M_X64)
+#  if defined(_MSC_VER)
+    return (int64_t)_xgetbv((unsigned int)index);
+#  else
+    uint32_t eax = 0;
+    uint32_t edx = 0;
+    __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"((uint32_t)index));
+    return (int64_t)(((uint64_t)edx << 32) | eax);
+#  endif
+#else
+    (void)index;
+    return 0;
+#endif
+}
+
 int32_t rt_cpu_is_x86_64(void) {
 #if defined(__x86_64__) || defined(_M_X64)
     return 1;
@@ -13017,6 +15965,65 @@ int32_t rt_cpu_is_riscv64(void) {
 #else
     return 0;
 #endif
+}
+
+int64_t rt_getauxval(int64_t key) {
+#if defined(__linux__)
+    return (int64_t)getauxval((unsigned long)key);
+#else
+    (void)key;
+    return 0;
+#endif
+}
+
+bool rt_is_darwin_arm64(void) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+int32_t rt_sysctlbyname_i32(int64_t name) {
+#if defined(__APPLE__)
+    const uint8_t* bytes = rt_string_data(name);
+    int64_t len = rt_string_len(name);
+    int32_t value = 0;
+    size_t value_len = sizeof(value);
+    char stack_name[128];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(stack_name)) return 0;
+    memcpy(stack_name, bytes, (size_t)len);
+    stack_name[len] = '\0';
+    if (sysctlbyname(stack_name, &value, &value_len, NULL, 0) != 0 ||
+        value_len != sizeof(value)) return 0;
+    return value;
+#else
+    (void)name;
+    return 0;
+#endif
+}
+
+int32_t rt_riscv_read_vlenb(void) {
+#if defined(__riscv) && defined(__riscv_vector)
+    uintptr_t value = 0;
+    __asm__ volatile("csrr %0, vlenb" : "=r"(value));
+    return value <= INT32_MAX ? (int32_t)value : 0;
+#else
+    return 0;
+#endif
+}
+
+bool rt_riscv_has_v_ext(void) {
+#if defined(__linux__) && defined(__riscv)
+    return (getauxval(16) & (1UL << ('V' - 'A'))) != 0;
+#else
+    return false;
+#endif
+}
+
+int32_t rt_cuda_sm_version(int32_t device) {
+    (void)device;
+    return 0;
 }
 
 /* ================================================================
@@ -13694,3 +16701,19 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
 
 /* collections.rs:1708 -- remove by key/index from array or dict. */
 SPL_RT_TRAP2(rt_collection_remove)
+
+/* collections.rs:1902 -- erased receiver.set(key, value). Real semantics for
+ * the one type Rust actually supports here (Dict): mutate in place and return
+ * the receiver, exactly like rt_dict_set. Rust routes every other receiver
+ * type (Array, Tuple, ...) to rt_method_not_found, which has no C-lane
+ * equivalent to call; that path traps loudly by name rather than silently
+ * returning a wrong value. */
+int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
+    RtCoreDict* d = rt_core_as_dict(receiver);
+    if (d != NULL) {
+        rt_core_dict_put(d, key, value);
+        return receiver;
+    }
+    rt_trap_unimplemented("rt_collection_set");
+    return 0;
+}
