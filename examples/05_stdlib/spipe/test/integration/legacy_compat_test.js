@@ -107,7 +107,7 @@ try {
   assert.ok(byId.get(9).result.content[0].text.length > 100);
   assert.ok(byId.get(10).result.content[0].text.includes("attempt_id:"));
 
-  const legacyError = responses.find((item) => item.id === null);
+  const legacyError = responses.find((item) => Object.hasOwn(item, "error"));
   assert.equal(legacyError.id, mcp.legacyError.id);
   assert.equal(legacyError.error.code, mcp.legacyError.code);
   assert.equal(legacyError.error.message, mcp.legacyError.message);
