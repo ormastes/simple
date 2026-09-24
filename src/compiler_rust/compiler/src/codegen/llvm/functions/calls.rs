@@ -2189,6 +2189,37 @@ impl LlvmBackend {
         if let Some(dot_pos) = qualified_name.rfind('.') {
             let method = &qualified_name[dot_pos + 1..];
 
+            // Builtin `text` statics. Without this the call fell through with
+            // its dotted name (`text.from_char_code` / `text.from_bytes`), which
+            // no runtime defines: the Windows stage-2 links trap-stubbed both
+            // (2026-09-25). Route to the canonical runtime ABI -- the same
+            // targets the pure-Simple backend uses (core_codegen.spl).
+            if &qualified_name[..dot_pos] == "text"
+                && matches!(method, "from_char_code" | "from_bytes")
+                && args.len() == 1
+            {
+                let rt_name = if method == "from_char_code" {
+                    "rt_char_from_code"
+                } else {
+                    "rt_bytes_to_text"
+                };
+                let arg = self.get_vreg(&args[0], vreg_map)?;
+                let arg = self.coerce_value_to_type(arg, Some(i64_type.into()), builder)?;
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                let rt_func = module
+                    .get_function(rt_name)
+                    .unwrap_or_else(|| module.add_function(rt_name, fn_type, None));
+                let call_site = builder
+                    .build_call(rt_func, &[arg.into()], "text_static")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("text static builtin call", &e))?;
+                if let Some(d) = dest {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
+                        vreg_map.insert(d, ret_val);
+                    }
+                }
+                return Ok(());
+            }
+
             if matches!(method, "min" | "max") && args.len() >= 2 {
                 let lhs = self.get_vreg(&args[0], vreg_map)?;
                 let rhs = self.get_vreg(&args[1], vreg_map)?;
