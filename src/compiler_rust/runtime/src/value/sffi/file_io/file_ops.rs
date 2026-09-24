@@ -1365,9 +1365,24 @@ pub extern "C" fn rt_file_read_text_at_checked(path: i64, offset: i64, size: i64
     if file.seek(SeekFrom::Start(offset as u64)).is_err() {
         return RuntimeValue::NIL.to_raw() as i64;
     }
-    let Ok(size) = usize::try_from(size) else {
+    let Ok(mut size) = usize::try_from(size) else {
         return RuntimeValue::NIL.to_raw() as i64;
     };
+    // `size` is a caller cap, not the expected length (the SCV inventory
+    // passes 1 GiB for every source). Reserving and zero-filling the cap per
+    // file dominated cold inventory init; allocate only what the file holds.
+    // Twin of the same clamp in runtime_native.c.
+    if let Ok(meta) = file.metadata() {
+        if meta.is_file() {
+            let remaining = meta.len().saturating_sub(offset as u64);
+            if let Ok(remaining) = usize::try_from(remaining) {
+                size = size.min(remaining);
+            }
+        }
+    }
+    if size == 0 {
+        return string_to_tagged_text("");
+    }
     let mut buf = Vec::new();
     if buf.try_reserve_exact(size).is_err() {
         return RuntimeValue::NIL.to_raw() as i64;
