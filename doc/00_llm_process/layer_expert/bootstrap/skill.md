@@ -43,6 +43,72 @@ native sysroot/CRLF output before POSIX path validation and bind actual `.exe`
 files on Windows; retain strict policy/PATH checks. A successful focused
 resolver probe does not admit the seed generation or prove Stage 4 readiness.
 
+## Windows MSVC host: install, antivirus, traps (2026-09-24)
+
+The guide is
+`doc/07_guide/infra/toolchain/windows_install_deploy_antivirus_2026-09-24.md`.
+
+- **Entry:** in Git Bash, run
+  `. scripts/setup/windows-msvc-bootstrap-env.shs`, then
+  `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2`.
+  A bare `--full-bootstrap` stops at the receipt gate. The env script pins
+  VS `14.44.35207`, SDK `10.0.26100.0`, MSYS2 and LLVM 23.1.1 paths. Only
+  `LLVM_SYS_231_PREFIX` can override them. Its header still names
+  `bootstrap-windows.sh --msvc`, which is stale.
+- **Fixes this path depends on:** #1457 (drive-letter `LLVM_CONFIG`
+  canonicalization; without it the fingerprint aborts silently), #1459
+  (inkwell 0.9 `.basic()`; without it the seed fails with E0599), #1461
+  (`VCToolsInstallDir` export; without it preflight cannot find the Rust
+  MSVC-target `link.exe`).
+- **Clang-only:** `clang-cl` on Windows. `link.exe` survives only as the Rust
+  MSVC-target linker.
+- **Dev Drive first:** run `fsutil devdrv query <drive>` (needs admin). A
+  trusted Dev Drive with no filter attached is not scanned at all, so
+  exclusions for paths on it add nothing. D: on the reference host is such a
+  volume. Build there, and exclude only what must live on a normal volume.
+- **Diagnose with Defender's profiler:**
+  `New-MpPerformanceRecording -RecordTo <etl outside checkout> -Seconds 30`,
+  then `Get-MpPerformanceReport -Path <etl> -TopProcesses N -TopFiles N -TopExtensions N`
+  (both need admin). Measured 2026-09-24:
+  - `grep.exe` accounted for 27.3 s of 30 s of scan time over 2,847 `.spl`
+    files in the C: checkout.
+  - `git.exe` accounted for 2.5 s over `.idx` pack indexes.
+
+  Recursive grep over sources on a normal volume is the dominant cost. The fix
+  is a Dev Drive checkout. Never exclude the sources.
+- **Defender:** `sh scripts/setup/windows-defender-exclusions.shs {list|add|remove}`
+  excludes generated build output only, never the source tree. #1460 was the
+  initial version. #1462 resolves the scope from
+  `scripts/lib/storage-roots.shs`. It covers the whole `.simple/storage` and
+  `<user storage>/cache/compiler`, and it adds the Stage 2/3 compilers as
+  processes at their expected paths. A process exclusion covers the files the
+  compiler opens (sources); a path exclusion does not.
+- **Defender behaviour:** the script elevates only the Defender call, through
+  one UAC prompt. Declining gives `FAIL — add not applied`. It verifies by
+  reading `Get-MpPreference` back. The exclusions take effect immediately,
+  with no reboot. It is per checkout, because paths come from the script's
+  location. Re-run `add` after the first deploy.
+- **Defender only:** nothing in the repo detects or configures third-party
+  antivirus. ESET, Kaspersky, and Bitdefender GravityZone have CLIs, but each
+  needs the owner or admin to enable something first, and ESET and Kaspersky
+  import a whole config. V3, ALYac, Norton, and the others are GUI or console
+  only. The third-party facts come from search extracts and are unverified.
+  `root/SecurityCenter2` detection is not sufficient on its own. It listed
+  only Defender on a host with `C:\Program Files\AhnLab\Safe Transaction`
+  installed, so also check well-known install directories.
+- **Traps:**
+  - Never add files to a checkout, or write logs into it, while preflight is
+    running. Preflight aborts with `source, Git state, configuration, seed,
+    or checker changed during preflight`.
+  - Do not run the bootstrap as Administrator.
+  - The Stage 2 pre-exec refusal (`log was NEVER CREATED ... wrapper
+    PRECONDITION refusal ... UNDIAGNOSABLE`, about 220 s) is **not
+    Defender**. It reproduced with every stage compiler process-excluded, and
+    again on the unfiltered Dev Drive. Its cause is still open.
+- **End users:** an installer must never silently add antivirus exclusions.
+  Code signing helps SmartScreen and false positives for downloads but does
+  not exempt files from scanning.
+
 ## SimpleOS 32-bit cross-target boundary
 
 The shared consumer contract is
