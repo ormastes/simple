@@ -301,18 +301,63 @@ bootstrap_deploy_tx_pointer_swap() {
   [ "$(bootstrap_deploy_tx_pointer_value)" = "$1" ] || return 1
   bootstrap_deploy_tx_pointer_tmp="${bootstrap_deploy_tx_release_root}/.${bootstrap_deploy_tx_platform}.pointer.$$"
   [ ! -e "$bootstrap_deploy_tx_pointer_tmp" ] && [ ! -L "$bootstrap_deploy_tx_pointer_tmp" ] || return 1
-  ln -s "$2" "$bootstrap_deploy_tx_pointer_tmp" || return 1
+  # Under Git Bash's default MSYS mode (no `winsymlinks:nativestrict`), `ln -s`
+  # to a directory silently makes a COPY instead of a real symlink, so the
+  # `[ -L ]` check below is false and every consumer that expects the pointer
+  # to be a real filesystem symlink (readlink, the recovery/rollback paths,
+  # `bootstrap_deploy_tx_abort`'s `[ -L ... ] && rm`) would be operating on a
+  # stale full copy instead. Force real symlinks on MINGW/MSYS/CYGWIN by
+  # requesting `nativestrict` mode for this one `ln -s` call; this only
+  # succeeds when the process can create symlinks (Developer Mode, or an
+  # elevated/admin shell) — see bootstrap_deploy_tx_pointer_symlink_hint below
+  # for the failure diagnostic when it cannot.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$2" "$bootstrap_deploy_tx_pointer_tmp" || return 1
+      ;;
+    *)
+      ln -s "$2" "$bootstrap_deploy_tx_pointer_tmp" || return 1
+      ;;
+  esac
+  if [ ! -L "$bootstrap_deploy_tx_pointer_tmp" ]; then
+    bootstrap_deploy_tx_pointer_symlink_hint
+    rm -rf "$bootstrap_deploy_tx_pointer_tmp"
+    return 1
+  fi
   [ "$(bootstrap_deploy_tx_pointer_value)" = "$1" ] || {
     rm -f "$bootstrap_deploy_tx_pointer_tmp"
     return 1
   }
-  perl -e 'rename($ARGV[0], $ARGV[1]) or die "$!\n"' \
-    "$bootstrap_deploy_tx_pointer_tmp" "$bootstrap_deploy_tx_platform_path" || {
+  # Same-filesystem `mv` is `rename(2)` (POSIX) / MoveFileEx (Windows) and is
+  # atomic exactly like the perl rename it replaces, without the perl
+  # dependency (.claude/rules/commands.md, .claude/rules/code-style.md: ALL
+  # code in .spl/.shs, no non-bootstrap-script exceptions).
+  mv -f "$bootstrap_deploy_tx_pointer_tmp" "$bootstrap_deploy_tx_platform_path" || {
     rm -f "$bootstrap_deploy_tx_pointer_tmp"
     return 1
   }
   [ "$(bootstrap_deploy_tx_pointer_value)" = "$2" ] || return 1
   bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_release_root"
+}
+
+# Clear, actionable diagnostic for the one Windows-specific failure mode: the
+# host cannot create real symlinks. Printed once, at the point of failure,
+# instead of a bare `return 1` that looked identical to every other abort.
+bootstrap_deploy_tx_pointer_symlink_hint() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      {
+        echo "bootstrap-deploy-transaction: failed to create a real filesystem"
+        echo "  symlink for the ${bootstrap_deploy_tx_platform} release pointer."
+        echo "  Git Bash only creates real symlinks when the process is allowed"
+        echo "  to (MSYS=winsymlinks:nativestrict was requested for this call)."
+        echo "  Fix one of:"
+        echo "    - enable Windows Developer Mode (Settings > For developers), or"
+        echo "    - run this shell elevated (as Administrator), or"
+        echo "    - grant the account the SeCreateSymbolicLinkPrivilege right."
+      } >&2
+      ;;
+  esac
 }
 
 bootstrap_deploy_tx_quarantine() {
