@@ -603,9 +603,54 @@ bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t h
     return false;
 }
 
-/* WebGPU backfill: moved to runtime_webgpu_backfill.c (its own archive
- * member) so it no longer collides with the hosted Rust runtime's real
- * rt_webgpu_* definitions whenever runtime_native.obj is pulled. */
+/* WebGPU backfill for core-C lanes (the hosted wgpu backend lives in the
+ * Rust runtime only, src/runtime/hosted/webgpu.rs). std.gpu.engine2d.
+ * webgpu_sffi declares these externs; a core-C link with no wgpu provider
+ * must still resolve them (macOS Stage-4, 2026-09-06), fail-closed:
+ * acquisition reports unavailable and teardown has nothing to release.
+ *
+ * COFF (MSVC ABI) has no ELF weak / -z muldefs equivalent, and lld-link binds
+ * an undefined symbol to the FIRST archive on the line that defines it. In the
+ * Windows host-gpu link the core-C lib precedes the hosted rlib, so plain
+ * definitions here (or in a separate member) won and then collided with the
+ * rlib's real ones (bootstrap28/29). On the MSVC ABI the backfill therefore
+ * has private names plus /alternatename defaults: the linker binds
+ * rt_webgpu_* to the backfill ONLY when nothing else supplies them,
+ * regardless of link order. Verified with lld-link: core-only archive ->
+ * backfill; core before/after a real provider -> real, no duplicate. Every
+ * other target keeps plain definitions. */
+#if defined(_MSC_VER)
+bool rt_webgpu_is_available__core_c_backfill(void) { return false; }
+bool rt_webgpu_init__core_c_backfill(void) { return false; }
+int64_t rt_webgpu_create_surface__core_c_backfill(int32_t width, int32_t height) {
+    (void)width; (void)height;
+    return 0;
+}
+bool rt_webgpu_shutdown__core_c_backfill(void) { return false; }
+bool rt_webgpu_destroy_surface__core_c_backfill(int64_t handle) { (void)handle; return false; }
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_rt_webgpu_is_available=_rt_webgpu_is_available__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_init=_rt_webgpu_init__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_create_surface=_rt_webgpu_create_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_shutdown=_rt_webgpu_shutdown__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_destroy_surface=_rt_webgpu_destroy_surface__core_c_backfill")
+#else
+#pragma comment(linker, "/alternatename:rt_webgpu_is_available=rt_webgpu_is_available__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_init=rt_webgpu_init__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_create_surface=rt_webgpu_create_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_shutdown=rt_webgpu_shutdown__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_destroy_surface=rt_webgpu_destroy_surface__core_c_backfill")
+#endif
+#else
+bool rt_webgpu_is_available(void) { return false; }
+bool rt_webgpu_init(void) { return false; }
+int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
+    (void)width; (void)height;
+    return 0;
+}
+bool rt_webgpu_shutdown(void) { return false; }
+bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
+#endif
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
 int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
