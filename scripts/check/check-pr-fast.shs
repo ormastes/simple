@@ -93,6 +93,12 @@ NOTE_REF=pr-fast-receipts
 RECEIPT_MANIFEST_REL=config/check/pr_fast_gates.sdn
 RECEIPT_TIER=pr
 RECEIPT_ROW=pr-fast-changed
+# Enforced by verify_receipt() against the session_id binding (review
+# follow-up finding #1): the manifest description advertises "inside a 60s
+# budget", so a receipt claiming a larger one is not honoring the check it
+# claims to be, whatever its rows say. Bumping this requires updating both
+# this constant and the manifest description together.
+MAX_ACCEPTED_BUDGET=60
 
 error_verdict() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
 fail_verdict()  { printf 'FAIL — %s\n' "$1"; exit 1; }
@@ -267,7 +273,14 @@ run_bucket() {
         _outc=$(printf '%s\n' "$_line" | sed -n 's/.* outcome=\([A-Za-z_]*\).*/\1/p')
         [ -n "$_exec" ] || _exec=0
         [ -n "$_fail" ] || _fail=0
-        if [ "$_rc" -eq 124 ]; then _st=budget
+        # rc 124 = timeout's own TERM; rc 137 = the child ignored TERM and was
+        # SIGKILLed after -k's grace period (GNU coreutils timeout convention:
+        # 128+9). Both are the SAME outcome from this script's point of view —
+        # the run did not finish inside the budget — and reporting 137 as
+        # "printed no verdict" (its literal symptom) hid the real reason; see
+        # S13 in the selftest, which killed a TERM-ignoring spec and got
+        # exactly this misclassification before this fix.
+        if [ "$_rc" -eq 124 ] || [ "$_rc" -eq 137 ]; then _st=budget
         elif [ -z "$_line" ]; then _st=noverdict
         elif [ "$_rc" -ne 0 ] || [ "$_fail" -ne 0 ] || [ "$_outc" != OK ]; then _st=fail
         elif [ "$_exec" -eq 0 ]; then _st=vacuous
@@ -277,18 +290,55 @@ run_bucket() {
     done < "$_bucket"
 }
 
+
+# Windows' CreateProcess has a ~32K-character command-line limit, and a PR
+# touching several hundred files can walk `$(cat "$W/compile")` straight past
+# it — a real change set, not a hostile one, failing with an opaque exec
+# error. This batches the compile file list into chunks that stay well under
+# that limit (COMPILE_BATCH_BUDGET chars per invocation, default 20000,
+# leaving headroom for the binary path, flags and quoting) and runs `simple
+# check` once per batch, all against the SAME shrinking deadline. Any batch
+# that times out or is killed makes the whole compile step `budget`; any
+# batch that fails makes it `fail` (with that batch's own rc); all batches
+# passing makes it `pass`. Below the limit this is one invocation, identical
+# to before. Overridable via SIMPLE_PR_FAST_COMPILE_BATCH_BUDGET so the
+# selftest can force multiple batches without needing hundreds of fixture
+# files (see S16).
+COMPILE_BATCH_BUDGET=${SIMPLE_PR_FAST_COMPILE_BATCH_BUDGET:-20000}
+compile_batches() {
+    awk -v budget="$COMPILE_BATCH_BUDGET" -v outpfx="$1" '
+        BEGIN { n = 0; total = 0; bi = 0; out = outpfx ".0"; }
+        {
+            l = length($0) + 1
+            if (n > 0 && total + l > budget) { close(out); bi++; out = outpfx "." bi; n = 0; total = 0 }
+            print > out
+            n++; total += l
+        }
+        END { if (n == 0 && bi == 0) print "" > out }
+    ' "$W/compile"
+}
+
 run_compile() {
     _out=$1
-    _left=$((DEADLINE - $(now_s)))
-    if [ "$_left" -le 0 ]; then printf 'budget\n' > "$_out.status"; return; fi
     if [ "$SEMANTIC" = 1 ]; then _flag=""; else _flag="--syntax-only"; fi
-    # shellcheck disable=SC2086
-    ( cd "$ROOT" && "$TIMEOUT_BIN" -k "$TIMEOUT_GRACE" "$_left" "$BIN" check $_flag $(cat "$W/compile") ) > "$_out" 2>&1
-    _rc=$?
+    compile_batches "$W/compile.batch"
+    : > "$_out"
+    _rc_overall=0; _budget_hit=0; _bi=0
+    while [ -f "$W/compile.batch.$_bi" ]; do
+        _left=$((DEADLINE - $(now_s)))
+        if [ "$_left" -le 0 ]; then _budget_hit=1; break; fi
+        # shellcheck disable=SC2086
+        ( cd "$ROOT" && "$TIMEOUT_BIN" -k "$TIMEOUT_GRACE" "$_left" "$BIN" check $_flag $(cat "$W/compile.batch.$_bi") ) >> "$_out" 2>&1
+        _rc=$?
+        if [ "$_rc" -eq 124 ] || [ "$_rc" -eq 137 ]; then _budget_hit=1; break; fi
+        [ "$_rc" -eq 0 ] || _rc_overall=$_rc
+        _bi=$((_bi + 1))
+    done
+    printf '%s\n' "$_bi" > "$_out.batches"
     printf '%s\n' "$(( $(now_s) - START ))" > "$_out.elapsed"
-    if [ "$_rc" -eq 124 ]; then printf 'budget\n' > "$_out.status"
-    elif [ "$_rc" -eq 0 ] && grep -q 'check passed (' "$_out"; then printf 'pass\n' > "$_out.status"
-    else printf 'fail %s\n' "$_rc" > "$_out.status"
+    if [ "$_budget_hit" -eq 1 ]; then printf 'budget\n' > "$_out.status"
+    elif [ "$_rc_overall" -eq 0 ] && grep -q 'check passed (' "$_out"; then printf 'pass\n' > "$_out.status"
+    else printf 'fail %s\n' "$_rc_overall" > "$_out.status"
     fi
 }
 
@@ -324,6 +374,11 @@ main() {
     [ "$CUR_SHA" = "$HEAD_SHA" ] ||
         error_verdict "range head $HEAD_SHA is not the checked-out HEAD $CUR_SHA; the check runs the working tree, so check out the head first"
 
+    W=$(mktempdir) || error_verdict "cannot create a temp directory"
+    trap 'rm -rf "$W"' EXIT
+    mkdir -p "$W/logs" || error_verdict "cannot create a log directory"
+    : > "$W/spl"; : > "$W/compile"; : > "$W/specs"; : > "$W/unmapped"; : > "$W/mapreport"; : > "$W/outofscope"
+
     if [ -n "$SIGN_KEY" ]; then
         [ -n "$SIGN_ID" ] || error_verdict "--sign-key needs --sign-identity"
         # `git diff --quiet HEAD --` alone only sees TRACKED changes, so an
@@ -335,23 +390,56 @@ main() {
         # ~109k-file tree, vs. a `git worktree add --detach HEAD` materialize
         # of the same tree measured at 86s (plus 26s to remove) — well over
         # the 60s budget, so a detached-worktree check was rejected on cost.
-        # Residual, stated rather than papered over: this still cannot see a
-        # gitignored path (e.g. under build/); `--ignored` would report the
-        # repo's normal ignored tree here and always refuse, so it is not
-        # used. A change that depends on a gitignored file is out of scope for
-        # this guard, same as it always was.
         _untracked=$(git -C "$ROOT" status --porcelain --untracked-files=all -- 2>/dev/null)
         _status_rc=$?
         [ "$_status_rc" -eq 0 ] ||
             error_verdict "git status --porcelain --untracked-files=all failed (exit $_status_rc)"
         [ -z "$_untracked" ] ||
             error_verdict "working tree has tracked or untracked changes; a receipt binds HEAD's tree, so the checked content must be exactly HEAD ($(printf '%s\n' "$_untracked" | wc -l | tr -d ' ') path(s), e.g. $(printf '%s\n' "$_untracked" | head -n 1))"
-    fi
 
-    W=$(mktempdir) || error_verdict "cannot create a temp directory"
-    trap 'rm -rf "$W"' EXIT
-    mkdir -p "$W/logs" || error_verdict "cannot create a log directory"
-    : > "$W/spl"; : > "$W/compile"; : > "$W/specs"; : > "$W/unmapped"; : > "$W/mapreport"; : > "$W/outofscope"
+        # GITIGNORED-.SPL GAP (review follow-up, finding #2): .gitignore:110
+        # `build/` matches any path with a build/ path component, and there
+        # are TRACKED .spl under such dirs (src/app/build, src/app/build/targets,
+        # src/lib/{gc_async_mut,nogc_async_mut,nogc_sync_mut}/engine/build) — a
+        # NEW .spl dropped into one of those same directories is invisible to
+        # `git status --porcelain --untracked-files=all` above (git ignores it),
+        # yet `use app.build.foo` still resolves and loads it from disk, so a
+        # local run can PASS while the signed HEAD tree lacks the file. A
+        # blanket "0 ignored .spl anywhere" refusal does not work: this repo
+        # generates .spl under ignored dirs on purpose (e.g. src/std/**), so
+        # ignored .spl in a directory that holds ONLY generated/ignored .spl is
+        # fine. The actual hazard is narrower: an ignored .spl sitting in a
+        # directory that ALSO holds a TRACKED .spl, because that is exactly the
+        # "importable package with an invisible extra file" shape. One
+        # `ls-tree -r` over the whole tracked src/test tree builds the
+        # directory set once (measured ~1.6s here, 43,249 tracked .spl), so
+        # per-ignored-file cost is a single in-memory awk lookup rather than a
+        # git call per file.
+        git -C "$ROOT" ls-tree -r --name-only "$HEAD_SHA" -- src test 2>/dev/null |
+            grep '\.spl$' | sed 's#/[^/]*$##' | sort -u > "$W/tracked_spl_dirs"
+        _lstd_rc=$?
+        [ "$_lstd_rc" -eq 0 ] || error_verdict "git ls-tree for tracked .spl directories failed (exit $_lstd_rc)"
+        _ignored_spl=$(git -C "$ROOT" ls-files --others --ignored --exclude-standard -- 'src/*.spl' 'test/*.spl' 2>/dev/null)
+        _ig_rc=$?
+        [ "$_ig_rc" -eq 0 ] || error_verdict "git ls-files --others --ignored --exclude-standard failed (exit $_ig_rc)"
+        if [ -n "$_ignored_spl" ]; then
+            _hazard=$(printf '%s\n' "$_ignored_spl" | awk -v dirs="$W/tracked_spl_dirs" '
+                BEGIN { while ((getline d < dirs) > 0) trackeddir[d] = 1 }
+                {
+                    f = $0; dir = f
+                    sub(/\/[^\/]*$/, "", dir)
+                    if (dir in trackeddir) print f
+                }
+            ')
+            [ -z "$_hazard" ] ||
+                error_verdict "gitignored .spl file(s) sit in a directory that also holds tracked .spl — invisible to git status but importable locally, so a receipt could bind a HEAD tree missing them: $(printf '%s' "$_hazard" | tr '\n' ' ')"
+        fi
+        # Residual, reported rather than fixed here: .gitignore:110's blanket
+        # `build/` pattern is the underlying hazard for anyone adding a new
+        # file under those tracked-.spl packages, not just for this signer —
+        # see doc note filed alongside this change. This guard only prevents a
+        # false-PASS receipt; it does not remove the ignore-pattern collision.
+    fi
 
     git -C "$ROOT" diff --no-renames --name-only --diff-filter=ACM "$BASE_SHA" "$HEAD_SHA" > "$W/changed_all"
     _diff_rc=$?
@@ -403,7 +491,7 @@ main() {
     if [ "$NCOMPILE" -gt 0 ]; then
         run_compile "$W/compile.out" &
     else
-        printf 'pass\n' > "$W/compile.out.status"; printf '0\n' > "$W/compile.out.elapsed"
+        printf 'pass\n' > "$W/compile.out.status"; printf '0\n' > "$W/compile.out.elapsed"; printf '0\n' > "$W/compile.out.batches"
     fi
     _i=0
     while [ "$_i" -lt "$JOBS" ]; do
@@ -422,7 +510,7 @@ main() {
     add_reason() { if [ -z "$reasons" ]; then reasons=$1; else reasons="$reasons; $1"; fi; }
 
     case "$CSTATUS" in
-        pass) printf 'pr-fast: compile %s file(s): pass (done at %ss)\n' "$NCOMPILE" "$(cat "$W/compile.out.elapsed" 2>/dev/null)" ;;
+        pass) printf 'pr-fast: compile %s file(s) in %s batch(es): pass (done at %ss)\n' "$NCOMPILE" "$(cat "$W/compile.out.batches" 2>/dev/null)" "$(cat "$W/compile.out.elapsed" 2>/dev/null)" ;;
         budget) add_reason "compile did not finish inside the ${BUDGET}s budget" ;;
         *)  printf 'pr-fast: compile output (tail):\n'
             grep -v -e 'gc-warning' -e '^warning: public function' "$W/compile.out" | tail -n 20 | sed 's/^/pr-fast:   /'
@@ -526,21 +614,20 @@ sign_receipt() {
     # positional token binding mode, budget, binary size and binary content
     # hash. This is a v1 workaround, not a schema change — a real v2 field
     # belongs to that shared lane's owner.
+    #
+    # TOCTOU (review follow-up): the size/hash are NOT recomputed here. They
+    # were captured once at process start, before compile or any spec ran (see
+    # BIN_SIZE_START/BIN_SHA_START in the arg-parsing tail) — bin/simple is
+    # routinely a symlink another agent redeploys mid-session, so hashing here,
+    # after the run, could describe a different binary than the one that
+    # actually produced these results.
     _mode=syntax-only; [ "$SEMANTIC" = 1 ] && _mode=semantic
-    _binsize=$(wc -c < "$BIN" 2>/dev/null | tr -d '[:space:]')
-    [ -n "$_binsize" ] && [ "$_binsize" -gt 0 ] 2>/dev/null ||
-        fail_verdict "checks passed but cannot stat simple binary \"$BIN\" for the receipt's binary-identity field"
-    _binsha=$(sha256_file "$BIN")
-    _binsha_rc=$?
-    if [ "$_binsha_rc" -eq 0 ] && [ -n "$_binsha" ]; then
-        printf '%s' "$_binsha" | grep -qE '^[0-9a-f]{64}$' || _binsha_rc=1
-    else
-        _binsha_rc=1
-    fi
-    [ "$_binsha_rc" -eq 0 ] ||
-        fail_verdict "checks passed but no sha256 tool (sha256sum, shasum -a 256 or openssl) produced a valid 64-hex digest of the simple binary for the receipt"
+    _binsize=$BIN_SIZE_START
+    _binsha=$BIN_SHA_START
+    [ -n "$_binsize" ] && [ -n "$_binsha" ] ||
+        fail_verdict "checks passed but the binary identity captured at startup is missing; no receipt signed"
     _session_id="prfast.v1.$_mode.$BUDGET.$_binsize.$_binsha"
-    printf 'pr-fast: binary identity for the receipt: path=%s size=%s sha256=%s\n' "$BIN" "$_binsize" "$_binsha"
+    printf 'pr-fast: binary identity for the receipt (captured at startup): path=%s size=%s sha256=%s\n' "$BIN" "$_binsize" "$_binsha"
 
     receipt_tool "$_signer" --root "$ROOT" --key "$SIGN_KEY" --identity "$SIGN_ID" \
         --results "$W/receipt_results" --rev "$HEAD_SHA" --changes "$BASE_SHA..$HEAD_SHA" \
@@ -634,6 +721,32 @@ verify_receipt() {
     [ -n "$_v_session" ] ||
         fail_verdict "receipt for $V_HEAD carries no valid session_id binary-identity binding (expected prfast.v1.<syntax-only|semantic>.<budget>.<binsize>.<sha256>; got \"$_v_session_raw\")"
     printf 'pr-fast-verify: binding %s\n' "$_v_session"
+
+    # ENFORCEMENT, not just disclosure (review follow-up finding #1): until
+    # now this only recorded the budget; a receipt claiming --budget 999999
+    # (or a fake --simple-bin) still verified. The manifest's own description
+    # (config/check/pr_fast_gates.sdn) advertises "inside a 60s budget", so a
+    # receipt binding a larger one is not the check it claims to be. Reject
+    # any budget over MAX_ACCEPTED_BUDGET here, in the field this script
+    # itself controls.
+    #
+    # Binary hash: deliberately NOT checked against an allowlist. A committed
+    # allowlist of "known-good" simple binary sha256 values would need to be
+    # updated on every redeploy of bin/simple — this repo's own docs record
+    # that the binary is routinely rebuilt and swapped mid-session by other
+    # agents (.claude/rules/commands.md), so a static list would either go
+    # stale within hours (silently locking out real runs) or turn into a
+    # rubber-stamp nobody actually curates. Building a list nobody will
+    # maintain is worse than not building one, so this stays budget-only
+    # enforcement; the sha256 is printed above (in `binding ...`) so a human
+    # reviewer can eyeball it, and disclosure is still strictly better than
+    # the pre-fix state of recording nothing at all.
+    _v_budget=$(printf '%s' "$_v_session" | awk -F. '{print $4}')
+    case "$_v_budget" in
+        ''|*[!0-9]*) fail_verdict "receipt for $V_HEAD carries a non-numeric budget in its session_id binding: \"$_v_budget\"" ;;
+    esac
+    [ "$_v_budget" -le "$MAX_ACCEPTED_BUDGET" ] ||
+        fail_verdict "receipt for $V_HEAD binds a budget of ${_v_budget}s, over the ${MAX_ACCEPTED_BUDGET}s this check is allowed to claim"
 
     printf 'PASS — 1 pr-fast receipt checked for %s..%s: %s (binding %s)\n' "$V_BASE" "$V_HEAD" "$_v_last" "$_v_session"
     exit 0
@@ -781,6 +894,65 @@ EOF
         st_bad=$((st_bad + 1)); printf 'selftest: BAD S14 untracked-file guard not exercised (ssh-keygen missing)\n'
     fi
 
+    # S15 (review follow-up finding #2): a GITIGNORED .spl sitting in a
+    # directory that also holds a TRACKED .spl must block --sign-key too —
+    # `git status --porcelain --untracked-files=all` alone cannot see it
+    # (that is the whole point of .gitignore), yet `use`-resolution would
+    # still load it locally. Reproduces the real repo's src/app/build shape
+    # (a tracked .spl living under a directory an ignore pattern also
+    # matches) inside the fixture.
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        git -C "$R" checkout -q --detach "$BASE" && git -C "$R" reset -q --hard "$BASE"
+        mkdir -p "$R/src/lib/common/build"
+        printf 'fn tracked() -> i64:\n    9\n' > "$R/src/lib/common/build/tracked.spl"
+        printf 'build/\n' > "$R/.gitignore"
+        ( cd "$R" && printf '# edit\n' >> src/lib/common/foo.spl &&
+          git add .gitignore src/lib/common/foo.spl && git add -f src/lib/common/build/tracked.spl &&
+          git commit -q -m S15base )
+        printf 'fn hidden() -> i64:\n    1\n' > "$R/src/lib/common/build/hidden.spl"
+        ssh-keygen -q -t ed25519 -N '' -C s15 -f "$T/s15key" > /dev/null 2>&1
+        st_verdict "S15 gitignored .spl beside a tracked .spl blocks --sign-key" 2 "ERROR — nothing was checked" "also holds tracked .spl" \
+            sh "$SELF" --root "$R" --range "$BASE..HEAD" --simple-bin "$FAKE" --jobs 2 \
+            --sign-key "$T/s15key" --sign-identity s15@fixture
+        rm -rf "$R/src/lib/common/build" "$R/.gitignore"
+    else
+        st_bad=$((st_bad + 1)); printf 'selftest: BAD S15 gitignored-.spl guard not exercised (ssh-keygen missing)\n'
+    fi
+
+    # S16 (review follow-up LOW): a compile file list that would blow past
+    # Windows' argv-length limit must still get every file compiled, split
+    # across multiple `simple check` invocations. SIMPLE_PR_FAST_COMPILE_BATCH_BUDGET
+    # is set tiny here so 12 small fixture files force several batches
+    # (~25-30 chars per path with a budget of 40 forces a new batch roughly
+    # every file) without needing hundreds of real files to hit the true
+    # 20000-char default.
+    git -C "$R" checkout -q --detach "$BASE" && git -C "$R" reset -q --hard "$BASE"
+    (
+        cd "$R" &&
+        _i=0
+        while [ "$_i" -lt 12 ]; do
+            printf 'fn many_%s() -> i64:\n    %s\n' "$_i" "$_i" > "src/lib/common/many_$_i.spl"
+            printf 'use std.spec\nuse std.common.many_%s.{many_%s}\n' "$_i" "$_i" > "test/01_unit/lib/common/many_${_i}_spec.spl"
+            printf 'use std.common.many_%s\n' "$_i" > "test/03_system/feature/many_${_i}_feature_spec.spl"
+            _i=$((_i + 1))
+        done &&
+        git add -A && git commit -q -m S16
+    )
+    _s16_out=$(SIMPLE_PR_FAST_COMPILE_BATCH_BUDGET=40 sh "$SELF" --root "$R" --range "$BASE..HEAD" --simple-bin "$FAKE" --budget 60 --jobs 2 2>&1)
+    _s16_rc=$?
+    _s16_last=$(printf '%s\n' "$_s16_out" | tail -n 1)
+    _s16_batches=$(printf '%s\n' "$_s16_out" | sed -n 's/.* in \([0-9][0-9]*\) batch(es):.*/\1/p')
+    [ -n "$_s16_batches" ] || _s16_batches=0
+    case "$_s16_last" in
+        "PASS"*"compile=syntax-only 12 file(s)"*) _s16_ok=1 ;;
+        *) _s16_ok=0 ;;
+    esac
+    if [ "$_s16_rc" -eq 0 ] && [ "$_s16_ok" = 1 ] && [ "$_s16_batches" -gt 1 ]; then
+        st_ok=$((st_ok + 1)); printf 'selftest: ok  S16 batched compile ran %s batches and still compiled every changed file -> %s\n' "$_s16_batches" "$_s16_last"
+    else
+        st_bad=$((st_bad + 1)); printf 'selftest: BAD S16 batched compile (rc %s, %s batch(es)) -> %s\n' "$_s16_rc" "$_s16_batches" "$_s16_last"
+    fi
+
     # --- receipt round trip: local sign+publish, remote verify -------------
     # Uses the REAL shared signer/verifier (copied from this checkout) and a
     # bare repository standing in for origin.
@@ -864,6 +1036,19 @@ EOF
         else
             st_bad=$((st_bad + 1)); printf 'selftest: BAD V6 fixture (direct signer call failed, exit %s): %s\n' "$_v6_sign_rc" "$(tail -n 1 "$T/v6_sign.out")"
         fi
+
+        # V7 (review follow-up finding #1): a receipt honestly binding an
+        # inflated budget (999999s, still way under this fixture's fast fake
+        # run) must be REJECTED by remote verify, not merely disclosed — the
+        # binding used to be recorded but never enforced.
+        git -C "$R" checkout -q --detach "$PBASE" && git -C "$R" reset -q --hard "$PBASE"
+        ( cd "$R" && printf '# v7\n' >> src/lib/common/foo.spl && git add -A && git commit -q -m v7 )
+        H5=$(git -C "$R" rev-parse HEAD)
+        st_verdict "V7 PASS signs + publishes with an inflated budget" 0 "PASS" "pushed to origin" \
+            sh "$SELF" --root "$R" --range "$PBASE..HEAD" --simple-bin "$FAKE" --jobs 2 --budget 999999 \
+            --sign-key "$T/key" --sign-identity st@fixture --publish origin
+        st_verdict "V7 remote verify rejects the inflated budget" 1 "FAIL" "over the 60s" \
+            sh "$SELF" --verify-receipt --root "$R" --base "$PBASE" --head "$H5" --notes-remote origin
     else
         st_bad=$((st_bad + 1)); printf 'selftest: BAD receipt round trip not exercised (ssh-keygen or the shared signer/verifier missing)\n'
     fi
@@ -922,5 +1107,28 @@ fi
 [ -f "$BIN" ] && [ -x "$BIN" ] ||
     error_verdict "simple binary \"$BIN\" is not an executable file (pass --simple-bin or SIMPLE_BIN; bin/simple is created by scripts/setup/setup.shs)"
 case "$BIN" in /*|[A-Za-z]:*) ;; *) BIN="$(pwd)/$BIN" ;; esac
+
+# TOCTOU (review follow-up, LOW): hash BIN HERE, before compile or any spec
+# runs, not after — bin/simple is routinely a symlink other agents redeploy
+# mid-session (.claude/rules/commands.md), so hashing it after the run could
+# bind a receipt to a DIFFERENT binary than the one that actually produced the
+# results. Computed unconditionally (negligible cost, ~0.15s measured on this
+# binary) so it is available even if --sign-key is added by a later flag order
+# convention; only used when signing.
+BIN_SIZE_START=""; BIN_SHA_START=""
+if [ -n "$SIGN_KEY" ]; then
+    BIN_SIZE_START=$(wc -c < "$BIN" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$BIN_SIZE_START" ] && [ "$BIN_SIZE_START" -gt 0 ] 2>/dev/null ||
+        error_verdict "cannot stat simple binary \"$BIN\" for the receipt's binary-identity field"
+    BIN_SHA_START=$(sha256_file "$BIN")
+    _bhs_rc=$?
+    if [ "$_bhs_rc" -eq 0 ] && [ -n "$BIN_SHA_START" ]; then
+        printf '%s' "$BIN_SHA_START" | grep -qE '^[0-9a-f]{64}$' || _bhs_rc=1
+    else
+        _bhs_rc=1
+    fi
+    [ "$_bhs_rc" -eq 0 ] ||
+        error_verdict "no sha256 tool (sha256sum, shasum -a 256 or openssl) produced a valid 64-hex digest of the simple binary for the receipt"
+fi
 
 main
