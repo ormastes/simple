@@ -317,8 +317,8 @@ a mismatch.**
 | tier | manifest | what it covers | who consumes it |
 |---|---|---|---|
 | `ci` | `config/check/must_check_gates.sdn`, 27 rows, `ci_job=code-idiom-gates` (still 27 as of 2026-09-24) | the extended, non-required `code-idiom-gates` job's gate steps | `code-idiom-gates.yml`'s importer, via a note on `refs/notes/ci-receipts` |
-| `local` | same file, 6 rows (`local-sdn-crc32-sealed`, `local-rust-duplicate-reexport`, `local-no-stale-snapshot-rewind`, `local-range-shs-hygiene`, `local-rt-dual-implementation`, `local-linux-phase2-test-runner-contract`), all `ci_job=-` | the gates the 10 s push hook demoted on 2026-09-24 for being too slow for that budget (22-53 s each on Windows) | **nobody, server-side.** `sign-local-ci-receipt.shs --tier local --run` is a way to run and record them locally before pushing; no workflow imports a `local`-tier receipt today, and `code-idiom-gates.yml` re-runs the equivalent checks itself as its own "Push-tier core gates" step regardless. **Do not `--note`/`--push-note` a `local`-tier receipt expecting it to skip anything in CI** — the CI verifier call is always `--tier ci`, and a `local`-tier note would simply FAIL the tier check |
-| `pr` | a **separate** manifest, `config/check/pr_fast_gates.sdn`, 1 row (`pr-fast-changed`) | the non-required `<1 min PR fast check` (changed-file compile + unit/feature specs) | `pr-fast-check.yml`, via a note on `refs/notes/pr-fast-receipts`; §12 |
+| `local` | same file, 6 rows (`local-sdn-crc32-sealed`, `local-rust-duplicate-reexport`, `local-no-stale-snapshot-rewind`, `local-range-shs-hygiene`, `local-rt-dual-implementation`, `local-linux-phase2-test-runner-contract`), all `ci_job=fast-gates` (2026-09-24, WP3 — was `-`) | the gates the 10 s push hook demoted on 2026-09-24 for being too slow for that budget (22-53 s each on Windows) | `scripts/check/run-gate-tier.shs --tier local ...` runs them (plus the push tier's own 4 push_blocking=true rows, unioned in — see that script's header) both locally, fed to `sign-local-ci-receipt.shs --results`, and remotely as `.github/workflows/repo-hygiene.yml`'s required `fast-gates` job. `code-idiom-gates.yml` still re-runs the equivalent checks itself as its own "Push-tier core gates" step. **Do not `--note`/`--push-note` a `local`-tier receipt expecting it to skip anything in the `ci`-tier verifier** — that call is always `--tier ci`, and a `local`-tier note would simply FAIL the tier check |
+| `pr` | same file, 1 row (`pr-fast-changed`) — folded in from the former standalone `config/check/pr_fast_gates.sdn` on 2026-09-24, WP3 | the non-required `<1 min PR fast check` (changed-file compile + unit/feature specs) | `pr-fast-check.yml`, via a note on `refs/notes/pr-fast-receipts`; §12 |
 
 This section covers the `ci` lane. The manifest columns are:
 
@@ -691,10 +691,12 @@ A second, independent receipt lane exists alongside the `ci`/`local` tiers
 above: `.github/workflows/pr-fast-check.yml` runs
 `scripts/check/check-pr-fast.shs`, which compiles changed `.spl` files
 (syntax-only by default) and runs their mapped unit and feature specs inside a
-60 s budget. It reads its own one-row manifest,
-`config/check/pr_fast_gates.sdn` (tier `pr`, row `pr-fast-changed`, kept
-separate from `must_check_gates.sdn` because that file is owned by another
-lane), not the `ci`/`local` manifest above.
+60 s budget. It reads its `pr`-tier row (`pr-fast-changed`) out of the same
+`config/check/must_check_gates.sdn` as the `ci`/`local` tiers above — folded
+in from the former standalone `config/check/pr_fast_gates.sdn` on 2026-09-24
+(WP3) — via `RECEIPT_MANIFEST_REL` in `check-pr-fast.shs`, which is now the
+same default `sign-local-ci-receipt.shs` / `verify-local-ci-receipt.shs`
+already use.
 
 ```bash
 sh scripts/check/check-pr-fast.shs \

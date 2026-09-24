@@ -10,7 +10,9 @@
 # the `publish` job fails on every PR for exactly that reason), so the remote
 # side verifies a SIGNED receipt that this script produced over the exact head
 # tree: `--sign-key/--sign-identity` feeds scripts/check/sign-local-ci-receipt.shs
-# with the manifest config/check/pr_fast_gates.sdn (tier `pr`), and
+# with the manifest config/check/must_check_gates.sdn (tier `pr`, row
+# `pr-fast-changed` -- folded in from the former standalone
+# config/check/pr_fast_gates.sdn on 2026-09-24, WP3), and
 # .github/workflows/pr-fast-check.yml verifies it with
 # scripts/check/verify-local-ci-receipt.shs. No check logic lives in YAML.
 #
@@ -82,15 +84,27 @@
 #   Fetches refs/notes/pr-fast-receipts, reads the note on HEAD, and runs the
 #   BASE copy of scripts/check/verify-local-ci-receipt.shs against the BASE
 #   copy of config/check/ci_receipt_allowed_signers, with
-#   SIMPLE_CI_RECEIPT_MANIFEST_REL=config/check/pr_fast_gates.sdn, --tier pr,
-#   --rev HEAD, --changes BASE..HEAD. A PR that edits pr_fast_gates.sdn cannot
-#   admit itself. No note, no valid signature, a different tree or change set:
-#   FAIL. Fail-closed; there is no skip path.
+#   SIMPLE_CI_RECEIPT_MANIFEST_REL=config/check/must_check_gates.sdn, --tier pr,
+#   --rev HEAD, --changes BASE..HEAD. A PR that edits the `pr-fast-changed` row
+#   of must_check_gates.sdn (now the whole file, since the row folded in --
+#   see RECEIPT_MANIFEST_REL below) cannot admit itself: the base/head manifest
+#   blob-id check at V_BASE/V_HEAD below fails closed on ANY change to this
+#   file, not just to the one row, which is strictly stronger than the old
+#   pr_fast_gates.sdn-only scope. No note, no valid signature, a different
+#   tree or change set: FAIL. Fail-closed; there is no skip path.
 set -u
 export LC_ALL=C
 
 NOTE_REF=pr-fast-receipts
-RECEIPT_MANIFEST_REL=config/check/pr_fast_gates.sdn
+# Folded from the former standalone config/check/pr_fast_gates.sdn into the
+# shared manifest on 2026-09-24 (WP3, goal item 5: one manifest for every
+# tier). sign-local-ci-receipt.shs / verify-local-ci-receipt.shs already
+# default SIMPLE_CI_RECEIPT_MANIFEST_REL to exactly this path, so the
+# override below is now redundant with their own default -- kept explicit
+# (not removed) so RECEIPT_MANIFEST_REL stays the single place every
+# reference in this file (the V_BASE/V_HEAD tamper check, the selftest
+# fixtures, the --verify-receipt materialization) reads from.
+RECEIPT_MANIFEST_REL=config/check/must_check_gates.sdn
 RECEIPT_TIER=pr
 RECEIPT_ROW=pr-fast-changed
 # Enforced by verify_receipt() against the session_id binding (review
@@ -584,14 +598,19 @@ main() {
 # Runs one of the shared receipt tools against the pr-fast manifest.
 #
 # Both tools run a mandatory --selftest before every real operation, and that
-# inline selftest INHERITS SIMPLE_CI_RECEIPT_MANIFEST_REL: its fixtures only
-# carry config/check/must_check_gates.sdn, so with the override set it fails
-# ("tree ... has no config/check/pr_fast_gates.sdn") and the tool refuses to
-# run. Measured 2026-09-24 on the signer: 33/33 selftest cases pass without
-# the override, S1-S5 fail with it. The tools are owned by another lane, so
-# instead of editing them this runs their selftest FIRST, fatally, with the
-# override unset, and then the real operation with the override and the
-# tools' own "already self-tested" marker.
+# inline selftest INHERITS SIMPLE_CI_RECEIPT_MANIFEST_REL. Historically
+# (before 2026-09-24) RECEIPT_MANIFEST_REL pointed at the standalone
+# config/check/pr_fast_gates.sdn while the tools' own selftest fixtures only
+# carried config/check/must_check_gates.sdn, so setting the override before
+# the inline selftest failed it outright ("tree ... has no
+# config/check/pr_fast_gates.sdn": 33/33 selftest cases pass without the
+# override, S1-S5 fail with it). Since the pr row folded into
+# must_check_gates.sdn (WP3), RECEIPT_MANIFEST_REL now equals the tools' own
+# default, so the override is no longer hostile to their inline selftest --
+# the unset/re-set below is kept anyway (harmless no-op) rather than removed,
+# since the tools are owned by another lane and this stays minimally
+# different from their expectations regardless of what RECEIPT_MANIFEST_REL
+# is set to.
 receipt_tool() {
     _tool=$1; shift
     # Git Bash's default `ln -s` makes a COPY, which fails the verifier's own
@@ -745,7 +764,8 @@ verify_receipt() {
     # ENFORCEMENT, not just disclosure (review follow-up finding #1): until
     # now this only recorded the budget; a receipt claiming --budget 999999
     # (or a fake --simple-bin) still verified. The manifest's own description
-    # (config/check/pr_fast_gates.sdn) advertises "inside a 60s budget", so a
+    # (config/check/must_check_gates.sdn, row pr-fast-changed) advertises
+    # "inside a 60s budget", so a
     # receipt binding a larger one is not the check it claims to be. Reject
     # any budget over MAX_ACCEPTED_BUDGET here, in the field this script
     # itself controls.
