@@ -6,10 +6,14 @@
 # and each freshly built, unsigned simple.exe is scanned again on every run.
 # That scanning is a large, repeatable slowdown on Windows.
 #
-# Scope is deliberately NARROW: only this repository's generated build OUTPUT
-# directories, plus the deployed simple*.exe processes. The source tree is
-# NOT excluded, and this must never be widened to a drive root, a user
-# profile, or a download directory.
+# Scope is deliberately NARROW: only generated build OUTPUT — this checkout's
+# build/, src/compiler_rust/target/, bin/release/, the worktree storage root
+# (.simple/storage: bootstrap stage compilers, native caches, tmp, test,
+# evidence), and the compiler cache subtree of the user storage root
+# (<user storage>/cache/compiler) — plus the bootstrap stage compilers and
+# deployed simple*.exe as PROCESSES. The source tree is NOT excluded, and this
+# must never be widened to a drive root, a whole user profile, or a download
+# directory; the one user-level entry is a single named cache subdirectory.
 #
 # Security trade-off, stated rather than hidden: a file under an excluded
 # path is not scanned, so anything dropped there is not scanned either. That
@@ -71,26 +75,64 @@ ps_quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
 
-# Exclusion set: generated build output only. Paths are included even when
-# absent, so a fresh clone's first bootstrap is already fast.
+# Resolve the storage roots the build ACTUALLY writes to, rather than guessing
+# directories. Bootstrap stages 1-3 put their compilers, native caches, homes
+# and temp dirs under the worktree storage root (build/, tmp/, test/, evidence/
+# per scripts/bootstrap/lib/centralized-storage.shs); the compiler bootstrap and
+# native-build caches live under the user storage root.
+STORAGE_ROOTS_REPO_ROOT=$repo_root
+. "$repo_root/scripts/lib/storage-roots.shs" ||
+    fail_error "cannot load scripts/lib/storage-roots.shs"
+storage_roots_init >/dev/null 2>&1 ||
+    fail_error "storage roots unavailable; cannot tell where the build writes"
+bootstrap_root="$SIMPLE_WORKTREE_STORAGE_ROOT/build/bootstrap"
+platform="$(uname -m 2>/dev/null || echo x86_64)-pc-windows-msvc"
+
+# Exclusion set: generated output only. Paths are included even when absent,
+# so a fresh clone's first bootstrap is already fast.
 ps_paths=""
 path_count=0
-for rel in build .simple/storage/build src/compiler_rust/target bin/release; do
-    win_path=$(cygpath -w "$repo_root/$rel")
+for abs in \
+    "$repo_root/build" \
+    "$SIMPLE_WORKTREE_STORAGE_ROOT" \
+    "$SIMPLE_USER_STORAGE_ROOT/cache/compiler" \
+    "$repo_root/src/compiler_rust/target" \
+    "$repo_root/bin/release"; do
+    win_path=$(cygpath -w "$abs")
     ps_paths="${ps_paths:+$ps_paths,}$(ps_quote "$win_path")"
     path_count=$((path_count + 1))
     [ "$action" = list ] && echo "path     $win_path"
 done
 
+# Process exclusions cover the files a compiler OPENS (sources it reads), which
+# path exclusions do not. Stage 2/3 compilers and the stage-2 seed are listed
+# at their expected paths even before they exist, because they are created
+# mid-bootstrap; deployed simple*.exe binaries are listed when present.
+# One bounded `find`, ~1 s; not on any build or push path.
+proc_list=$(
+    {
+        printf '%s\n' \
+            "$bootstrap_root/stage2/$platform/simple.exe" \
+            "$bootstrap_root/stage3/$platform/simple.exe" \
+            "$bootstrap_root/stage3/$platform/stage2-runtime-authority/simple.exe"
+        for exe in "$repo_root"/bin/release/*/simple*.exe; do
+            [ -f "$exe" ] && printf '%s\n' "$exe"
+        done
+        [ -d "$bootstrap_root" ] &&
+            find "$bootstrap_root" -maxdepth 5 -name 'simple*.exe' 2>/dev/null
+    } | sort -u
+)
 ps_procs=""
 proc_count=0
-for exe in "$repo_root"/bin/release/*/simple*.exe; do
-    [ -f "$exe" ] || continue
+while IFS= read -r exe; do
+    [ -n "$exe" ] || continue
     win_exe=$(cygpath -w "$exe")
     ps_procs="${ps_procs:+$ps_procs,}$(ps_quote "$win_exe")"
     proc_count=$((proc_count + 1))
     [ "$action" = list ] && echo "process  $win_exe"
-done
+done <<EOF
+$proc_list
+EOF
 
 if [ "$action" = list ]; then
     echo "PASS — $((path_count + proc_count)) exclusion(s) planned, nothing changed"
