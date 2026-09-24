@@ -797,6 +797,20 @@ bootstrap_stage3_host_platform() {
                 *) return 1 ;;
             esac
             ;;
+        arm64:MINGW*|arm64:MSYS*|arm64:CYGWIN*|arm64:Windows*|aarch64:MINGW*|aarch64:MSYS*|aarch64:CYGWIN*|aarch64:Windows*)
+            # msvc is the single Windows ABI default (matches port-L's
+            # scripts/setup/platform-detect.shs: PLATFORM_ABI defaults to
+            # msvc, not to gnu keyed off MSYSTEM/Git Bash). Only an explicit
+            # SIMPLE_WINDOWS_ABI=gnu opts into the gnu ABI.
+            case "${SIMPLE_WINDOWS_ABI:-msvc}" in
+                gnu) echo aarch64-pc-windows-gnu ;;
+                msvc) echo aarch64-pc-windows-msvc ;;
+                *) return 1 ;;
+            esac
+            ;;
+        x86_64:SimpleOS) echo x86_64-unknown-simpleos ;;
+        aarch64:SimpleOS) echo aarch64-unknown-simpleos ;;
+        riscv64:SimpleOS) echo riscv64-unknown-simpleos ;;
         *) return 1 ;;
     esac
 }
@@ -986,23 +1000,49 @@ bootstrap_stage3_target_c_compiler() {
         *-unknown-freebsd)
             # FreeBSD's QEMU/CI lane admits an explicit LLVM provider. Keep
             # that provider bound to the native target instead of silently
-            # replacing it with the ambient /usr/bin/cc wrapper.
+            # replacing it with the ambient /usr/bin/cc wrapper. Clang-only
+            # policy (2026-09-24): GCC is forbidden here exactly as on macOS.
+            case "${CC:-}" in
+                *gcc*|*g++*) return 1 ;;
+            esac
             if [ -n "${CC:-}" ]; then
                 case "$CC" in
-                    */*) [ -x "$CC" ] || return 1; printf '%s\n' "$CC" ;;
-                    *) command -v "$CC" 2>/dev/null ;;
+                    */*) [ -x "$CC" ] || return 1; bootstrap_stage3_freebsd_cc=$CC ;;
+                    *) bootstrap_stage3_freebsd_cc=$(command -v "$CC" 2>/dev/null) || return 1 ;;
                 esac
             else
-                command -v cc 2>/dev/null
+                bootstrap_stage3_freebsd_cc=$(command -v "${CC:-clang}" 2>/dev/null) || return 1
             fi
+            case "$bootstrap_stage3_freebsd_cc" in
+                */gcc|*/gcc-*|*/g++|*/g++-*) return 1 ;;
+            esac
+            "$bootstrap_stage3_freebsd_cc" --version 2>/dev/null |
+                grep -qi 'clang version' || {
+                    echo 'bootstrap: FreeBSD C compiler must be Clang' >&2
+                    return 1
+                }
+            printf '%s\n' "$bootstrap_stage3_freebsd_cc"
             ;;
         *)
-            bootstrap_stage3_target_cc=${CC:-cc}
+            # Default arm (Linux and any other non-Windows/Darwin/FreeBSD
+            # host). Clang-only policy (2026-09-24): never fall back to a
+            # bare `cc`/`gcc` default.
+            case "${CC:-}" in
+                *gcc*|*g++*) return 1 ;;
+            esac
+            bootstrap_stage3_target_cc=${CC:-clang}
             bootstrap_stage3_target_cc_path=$(command -v \
                 "$bootstrap_stage3_target_cc" 2>/dev/null) || return 1
             [ -f "$bootstrap_stage3_target_cc_path" ] || return 1
             [ -x "$bootstrap_stage3_target_cc_path" ] || return 1
-            "$bootstrap_stage3_target_cc_path" --version >/dev/null 2>&1 || return 1
+            case "$bootstrap_stage3_target_cc_path" in
+                */gcc|*/gcc-*|*/g++|*/g++-*) return 1 ;;
+            esac
+            "$bootstrap_stage3_target_cc_path" --version 2>/dev/null |
+                grep -qi 'clang version' || {
+                    echo 'bootstrap: C compiler must be Clang' >&2
+                    return 1
+                }
             printf '%s\n' "$bootstrap_stage3_target_cc_path"
             ;;
     esac
@@ -1941,7 +1981,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 return 0
             done
         done
-        bootstrap_stage3_llvm_system_cc=$(command -v cc) || return 1
+        bootstrap_stage3_llvm_system_cc=$(command -v "${CC:-clang}") || return 1
         for bootstrap_stage3_llvm_system_suffix in so dylib a; do
             bootstrap_stage3_llvm_system_candidate=$(
                 env -i PATH="$PATH" LC_ALL=C LANG=C \
@@ -2133,7 +2173,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                     # what actually linked -- the same guarantee as the
                     # MSVC/LIB branch, for hosts without an MSVC SDK.
                     bootstrap_stage3_llvm_gnu_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
-                    bootstrap_stage3_llvm_gnu_resolved=$(gcc -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
+                    bootstrap_stage3_llvm_gnu_resolved=$("${CC_x86_64_pc_windows_gnu:-clang}" --target=x86_64-w64-windows-gnu -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
                     case "$bootstrap_stage3_llvm_gnu_resolved" in
                         /*|[A-Za-z]:[\\/]*)
                             # gcc answers with a native Windows path, which
@@ -2257,22 +2297,19 @@ bootstrap_stage3_tool_authority_snapshot() (
     ) || return 1
     [ -n "$bootstrap_stage3_real_rustc" ] &&
         [ -n "$bootstrap_stage3_real_cargo" ] || return 1
-    bootstrap_stage3_tool_c_name=cc
-    # Unix hosts bind their cc command. Both Windows ABIs must use the same
-    # target C-driver owner as the Rust build. The requested-path helper
-    # consumes this exact selected identity.
-    bootstrap_stage3_tool_c_path=$(command -v cc 2>/dev/null || printf '')
-    case "$(bootstrap_stage3_host_platform)" in
-        *-pc-windows-msvc|*-pc-windows-gnu|*-apple-darwin)
-            bootstrap_stage3_tool_c_path=$(
-                bootstrap_stage3_target_c_compiler \
-                    "$(bootstrap_stage3_host_platform)"
-            ) || return 1
-            bootstrap_stage3_tool_c_name=$(basename \
-                "$bootstrap_stage3_tool_c_path")
-            bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
-            ;;
-    esac
+    # Clang-only policy (2026-09-24): every host, not only Windows/macOS,
+    # resolves its C driver through bootstrap_stage3_target_c_compiler so
+    # the same clang-vs-gcc admission applies uniformly. (bootstrap_stage3_
+    # tool_c_name is set below from the resolved path's basename; the
+    # earlier unconditional `=clang` pre-assignment here was dead code,
+    # always overwritten by that basename assignment.)
+    bootstrap_stage3_tool_c_path=$(
+        bootstrap_stage3_target_c_compiler \
+            "$(bootstrap_stage3_host_platform)"
+    ) || return 1
+    bootstrap_stage3_tool_c_name=$(basename \
+        "$bootstrap_stage3_tool_c_path")
+    bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
     bootstrap_stage3_hash_tool=""
     for bootstrap_stage3_hash_candidate in \
         sha256sum shasum sha256 openssl; do
@@ -2282,8 +2319,13 @@ bootstrap_stage3_tool_authority_snapshot() (
         fi
     done
     [ -n "$bootstrap_stage3_hash_tool" ] || return 1
+    # Clang-only policy (2026-09-24): bootstrap_stage3_tool_c_name now always
+    # resolves to the admitted Clang driver's own basename (clang, clang-cl,
+    # clang.exe, ...), so a separate literal "clang" entry here would request
+    # the same path twice -- and the receipt writer below rejects a
+    # duplicate path (receipt.duplicate-path). Dropped as redundant.
     for bootstrap_stage3_tool_name in \
-        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file cmp \
+        cargo rustc "$bootstrap_stage3_tool_c_name" ld ar ranlib sh env perl sed file cmp \
         "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \

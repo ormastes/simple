@@ -802,6 +802,24 @@ bootstrap_stage3_verify_manifest_impl() {
         "$bootstrap_stage3_root" || { bootstrap_stage3_provenance_fail "manifest-stage-tool-snapshot"; return 1; }
     cmp -s "$bootstrap_stage3_tool_authority_path" \
         "$bootstrap_stage3_tool_verify" || {
+        # Clang-only policy (2026-09-24): bootstrap_stage3_tool_authority_snapshot
+        # now names the C driver "clang" (previously "cc") and no longer lists a
+        # separate "clang" tool entry. An admitted generation recorded BEFORE
+        # this change will legitimately fail this byte-for-byte cmp even though
+        # nothing on disk was tampered with -- the recorded snapshot still says
+        # "tool=cc|...". Recognize that specific, expected transition and say so
+        # plainly instead of leaving it as an unexplained mismatch: the fix is to
+        # reseal (regenerate) the admitted authority under the new naming, not to
+        # investigate for tampering.
+        if grep -q '^tool=cc|' "$bootstrap_stage3_tool_authority_path" 2>/dev/null &&
+            ! grep -q '^tool=cc|' "$bootstrap_stage3_tool_verify" 2>/dev/null; then
+            echo "bootstrap Stage 3 provenance: NOTE — recorded tool authority" \
+                "predates the 2026-09-24 clang-only policy (tool named 'cc'," \
+                "not 'clang'); this is an expected invalidation, not tampering." \
+                "Reseal by re-running Stage 3 admission for this generation so a" \
+                "fresh tool_authority snapshot is recorded under the current" \
+                "naming." >&2
+        fi
         rm -f "$bootstrap_stage3_tool_verify"
         bootstrap_stage3_provenance_fail "manifest-stage-tool-snapshot-mismatch"
         return 1
