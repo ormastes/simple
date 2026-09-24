@@ -52,6 +52,22 @@ if [ -n "$_missing" ]; then
     err "missing tool(s):$_missing; this guard needs ELF tooling (clang, readelf, nm) not present on this host"
 fi
 
+# A tool-presence check alone is not enough: on Windows, MSYS2 ships a
+# `clang` (an MSVC-target build, e.g. clang+llvm-*-windows-msvc) alongside
+# MinGW `readelf`/`nm`, so all three commands can resolve on PATH while the
+# artifacts `clang` produces are PE, not ELF — `readelf -d` on a PE binary
+# silently prints nothing, fixture 1's NEEDED check passes VACUOUSLY, and the
+# guard proceeds to a misleading `FAIL` (missing libgcc_s/_Unwind_ versioning
+# that a PE binary was never going to have) instead of the intended
+# "wrong kind of host" ERROR. Detect the MSYS-family uname up front and name
+# the host explicitly, rather than let a vacuous PASS on fixture 1 launder
+# into a nonsensical FAIL later.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+        err "non-ELF host ($(uname -s 2>/dev/null)); this guard reads ELF NEEDED/undefined-symbol tables via readelf/nm, which do not apply to the PE binaries this host's toolchain produces"
+        ;;
+esac
+
 # ---------------------------------------------------------------- selftest ---
 # Fatal, runs before every scan. Fixture 2 replicates the exact pre-fix shape:
 # a binary linked with `-lunwind` against a host that has libunwind.so.8.
@@ -63,6 +79,7 @@ selftest() {
 
     # -- fixture 1: a plain binary must be CLEAN (no libunwind in NEEDED).
     if ! clang "$tmp/m.c" -o "$tmp/clean" 2>/dev/null; then
+        echo "selftest: fixture 1 (clean binary) failed to compile" >&2
         rm -rf "$tmp"; return 1
     fi
     if readelf -d "$tmp/clean" 2>/dev/null | grep -q 'libunwind'; then
