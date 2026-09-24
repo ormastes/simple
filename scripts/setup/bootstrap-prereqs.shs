@@ -326,27 +326,43 @@ vulkaninfo_bin() {
     command -v vulkaninfo 2>/dev/null || true
 }
 
-# Perf (review 2026-09-25): timeout_wrap is now called for EVERY checked
-# tool's --version (fix #11: "run each --version with </dev/null and a
-# short timeout"), not just vulkaninfo — so its own detection probe (2
-# subprocesses: `timeout --version` + `grep`) must run ONCE per script
-# invocation, not once per tool, or it would cost more than the `head`/`cut`
-# calls it replaced. Cached in TIMEOUT_MODE.
+# Perf (review 2026-09-25 #3, corrected): timeout_wrap is called for EVERY
+# checked tool's --version, not just vulkaninfo. The FIRST version of this
+# cache was USELESS: `row="$(check_one "$name" "$fam")"` runs check_one
+# inside a `$(...)` COMMAND SUBSTITUTION, which forks a subshell. A subshell
+# gets its own COPY of every variable; anything timeout_wrap assigns to
+# TIMEOUT_MODE inside that subshell (lazily, on first use) vanishes the
+# instant the subshell exits, so every single tool re-ran the 2-subprocess
+# probe (`command -v timeout` + `timeout --version | grep`) — ~34 extra
+# spawns for a 17-tool check, MORE than the `head`/`cut` calls this was
+# supposed to replace. Real fix: detect_timeout_mode() is called ONCE, in
+# the PARENT shell, before the per-tool loop starts (run_check/run_install)
+# — `$(...)` subshells fork from the parent's CURRENT variable table, so
+# every check_one invocation after that point inherits the already-computed
+# value and skips the probe entirely. timeout_wrap() still lazily detects
+# as a fallback for any caller that invokes it without going through
+# run_check/run_install first (e.g. --selftest calling check_vulkan
+# directly), but that no longer matters for the hot path.
 TIMEOUT_MODE=""
+
+detect_timeout_mode() {
+    if [ -n "$TIMEOUT_MODE" ]; then
+        return
+    fi
+    if command -v timeout >/dev/null 2>&1 && timeout --version 2>&1 | grep -qi 'coreutils'; then
+        TIMEOUT_MODE="gnu"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_MODE="gtimeout"
+    else
+        TIMEOUT_MODE="none"
+    fi
+}
 
 timeout_wrap() {
     # Wrap a command with a real GNU-coreutils timeout(1)/gtimeout(1) if one
     # is on PATH; otherwise run unwrapped (Windows' own timeout.exe has
     # different semantics from GNU timeout and is not used here).
-    if [ -z "$TIMEOUT_MODE" ]; then
-        if command -v timeout >/dev/null 2>&1 && timeout --version 2>&1 | grep -qi 'coreutils'; then
-            TIMEOUT_MODE="gnu"
-        elif command -v gtimeout >/dev/null 2>&1; then
-            TIMEOUT_MODE="gtimeout"
-        else
-            TIMEOUT_MODE="none"
-        fi
-    fi
+    detect_timeout_mode
     case "$TIMEOUT_MODE" in
         gnu) timeout 5 "$@" ;;
         gtimeout) gtimeout 5 "$@" ;;
@@ -521,6 +537,8 @@ run_check() {
         return 2
     fi
     apply_llvm23_path "$fam"
+    apply_local_bin_path
+    detect_timeout_mode
 
     names="$(platform_tools "$platform")"
     if [ -z "$names" ]; then
@@ -639,10 +657,77 @@ have_doas() {
     command -v doas >/dev/null 2>&1
 }
 
+require_sudo_linux() {
+    # MUST-FIX #1 (review 2026-09-26): "an upfront sudo check on Linux (like
+    # FreeBSD's) that fails fast with the exact command" — the FreeBSD
+    # installers already check have_sudo/have_doas before attempting a
+    # pkg install; the Linux ones (apt-get) assumed sudo exists and would
+    # instead fail deep inside a multi-step sequence (e.g. after the
+    # signing key was already fetched and verified) with a bare
+    # "sudo: command not found". Called once at the top of each Linux
+    # installer's real (non-dry-run) path.
+    if have_sudo; then
+        return 0
+    fi
+    echo "error: sudo is required to $1 on Linux but is not installed or not on PATH. Install it first (as root): apt-get install -y sudo — then re-run this script." >&2
+    return 1
+}
+
+export_clang_cargo_env() {
+    # MUST-FIX #6 (review 2026-09-26): clang-only policy applies to what
+    # `cargo install`/rustup builds actually invoke as a C compiler and
+    # linker driver, not just to this script's own choices. Without this,
+    # `cargo install jj-cli` (do_install_jj) and any build step here would
+    # fall through to cc-rs's/rustc's own default C-compiler probing, which
+    # is `cc` on Linux — typically a gcc symlink. Exported (not just set),
+    # so it also reaches do_install_jj even when this function ran in an
+    # earlier, separate do_install_rust call this same process.
+    fam="$1"
+    CC="${CC:-clang}"
+    CXX="${CXX:-clang++}"
+    export CC CXX
+    case "$fam" in
+        linux)
+            arch="$(detect_arch)"
+            case "$arch" in
+                x86_64)
+                    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-clang}"
+                    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+                    ;;
+                aarch64)
+                    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-clang}"
+                    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+                    ;;
+                *)
+                    echo "note: unrecognized architecture '$arch' — could not set a CARGO_TARGET_*_LINKER override; cargo may still fall back to cc/gcc as the link driver for this arch" >&2
+                    ;;
+            esac
+            ;;
+    esac
+}
+
 windows_is_elevated() {
     # `net session` succeeds only from an elevated shell — the standard
     # no-dependency way to detect admin rights on Windows.
     net session >/dev/null 2>&1
+}
+
+apply_local_bin_path() {
+    # SHOULD-FIX #7 (review 2026-09-26): the mold prebuilt-release fallback
+    # (do_install_mold) installs into ~/.local/bin/mold, and the rustup/
+    # cargo installers put rustc/cargo/jj under ~/.cargo/bin — but a FRESH
+    # invocation of `check` (a new shell, no prior PATH mutation carried
+    # over) would not see either unless the user's own shell profile
+    # already includes them, making `check` report mold/jj MISSING again
+    # right after `install` reported them installed. Prepend both,
+    # idempotently, exactly like apply_llvm23_path does for LLVM.
+    for d in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+        [ -d "$d" ] || continue
+        case ":$PATH:" in
+            *":$d:"*) : ;;
+            *) PATH="$d:$PATH"; export PATH ;;
+        esac
+    done
 }
 
 apply_llvm23_path() {
@@ -732,6 +817,7 @@ do_install_llvm23() {
                 echo "would run: add https://apt.llvm.org/$codename/ llvm-toolchain-$codename-23 to /etc/apt/sources.list.d/llvm23.list (signed-by that keyring)"
                 echo "would run: apt-get update && apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools"
             else
+                require_sudo_linux "install LLVM 23.1 via apt" || return 1
                 # MUST-FIX #4 (review 2026-09-25): mktemp instead of a
                 # predictable /tmp path; verify the key's fingerprint against
                 # a value pinned in this script BEFORE trusting it with
@@ -750,22 +836,69 @@ do_install_llvm23() {
                     rm -f "$key_file"
                     return 1
                 fi
-                got_fpr="$(gpg --show-keys --with-fingerprint --with-colons "$key_file" 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')"
+                # MUST-FIX #6 (review 2026-09-26): report a MISSING gpg
+                # distinctly from a fingerprint mismatch — otherwise a host
+                # with no gpg at all gets a misleading "mismatch (got none)"
+                # instead of the true "gpg not installed" cause.
+                if ! command -v gpg >/dev/null 2>&1; then
+                    echo "error: gpg is not installed — cannot verify the apt.llvm.org signing key. Install gpg (apt-get install -y gnupg) and re-run. Aborting LLVM install, nothing added to apt sources." >&2
+                    rm -f "$key_file"
+                    return 1
+                fi
+                # MUST-FIX #2 (review 2026-09-26): the fingerprint check only
+                # ever inspected the FIRST `pub:` record's fingerprint, but
+                # `sudo gpg --dearmor` below imports the WHOLE file — a
+                # tampered or malformed key file that appends a second key
+                # after a legitimate first one would pass this check and
+                # still get trusted wholesale. Require the file to contain
+                # EXACTLY one `pub:` record before trusting any fingerprint
+                # extracted from it.
+                colons="$(gpg --show-keys --with-fingerprint --with-colons "$key_file" 2>/dev/null)"
+                pub_count="$(printf '%s\n' "$colons" | grep -c '^pub:' || true)"
+                if [ "${pub_count:-0}" -ne 1 ]; then
+                    echo "error: apt.llvm.org signing key file contains $pub_count public key record(s), expected exactly 1. Refusing to trust a file that isn't a single known key; aborting LLVM install, nothing added to apt sources." >&2
+                    rm -f "$key_file"
+                    return 1
+                fi
+                got_fpr="$(printf '%s\n' "$colons" | awk -F: '/^fpr:/ {print $10; exit}')"
                 if [ "$got_fpr" != "$LLVM_APT_KEY_FINGERPRINT" ]; then
                     echo "error: apt.llvm.org signing key fingerprint mismatch — got '${got_fpr:-none}', expected '$LLVM_APT_KEY_FINGERPRINT'. Refusing to trust it; aborting LLVM install, nothing added to apt sources." >&2
                     rm -f "$key_file"
                     return 1
                 fi
-                echo "signing key fingerprint verified: $got_fpr"
+                echo "signing key fingerprint verified: $got_fpr (exactly 1 pub record)"
+                # MUST-FIX #1 (review 2026-09-26): every step below MUST
+                # explicitly gate the next one. `do_install_llvm23` is always
+                # invoked from run_install's dispatch loop as
+                # `do_install_llvm23 ... || true` — and a command's failure
+                # inside a function called as part of an `||` list does NOT
+                # trigger `set -e` for anything inside that function call
+                # (this is standard POSIX/bash behavior, not a bug in THIS
+                # script alone: `set -e` is suspended for the whole
+                # invocation, not just the top-level call). A bare
+                # `run_or_plan ...` with no explicit `|| return 1` here would
+                # therefore silently continue past a failed step no matter
+                # how it looks on the page — proven live: a failed
+                # `gpg --dearmor` used to still let the apt source get
+                # added and `apt-get install` attempted (a half-install).
+                # `--batch --yes` makes dearmor non-interactive so it cannot
+                # hang waiting for a confirmation prompt under `install`.
                 run_or_plan "$dry_run" "dearmor the verified key into a dedicated keyring" \
-                    sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg "$key_file"
+                    sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg "$key_file" || { rm -f "$key_file"; return 1; }
                 rm -f "$key_file"
                 echo "running: add /etc/apt/sources.list.d/llvm23.list for llvm-toolchain-$codename-23 (https)"
+                set +e
                 printf 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/%s/ llvm-toolchain-%s-23 main\n' "$codename" "$codename" \
                     | sudo tee /etc/apt/sources.list.d/llvm23.list >/dev/null
-                run_or_plan "$dry_run" "apt-get update" sudo apt-get update
+                tee_rc=$?
+                set -e
+                if [ "$tee_rc" -ne 0 ]; then
+                    echo "error: could not write /etc/apt/sources.list.d/llvm23.list (exit $tee_rc) — aborting LLVM install" >&2
+                    return 1
+                fi
+                run_or_plan "$dry_run" "apt-get update" sudo apt-get update || return 1
                 run_or_plan "$dry_run" "apt-get install clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools" \
-                    sudo apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools
+                    sudo apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools || return 1
             fi
             apply_llvm23_path "$fam"
             if [ "$dry_run" != "1" ]; then
@@ -783,12 +916,12 @@ do_install_llvm23() {
             echo "installing LLVM 23.1 via the repo's own source-build provider (build-llvm-23-1-provider.shs), the same path scripts/check/check-freebsd-llvm-23-1-provider-contract.shs verifies ..."
             build_script="$(repo_root_dir)/scripts/setup/build-llvm-23-1-provider.shs"
             run_or_plan "$dry_run" "sh $build_script --clone (source build — slow, UNTESTED by this agent, no FreeBSD host available)" \
-                sh "$build_script" --clone || true
+                sh "$build_script" --clone || return 1
             ;;
         macos)
             echo "installing LLVM via Homebrew ..."
             echo "note: Homebrew's 'llvm' formula tracks the latest LLVM release; at authoring time (2026-09-24) that is expected to track 23.x, but there is no guaranteed separately-versioned 'llvm@23' formula — verify with 'brew info llvm' before assuming an exact 23.1.x match. UNTESTED by this agent, no macOS host available."
-            run_or_plan "$dry_run" "brew install llvm" brew install llvm || true
+            run_or_plan "$dry_run" "brew install llvm" brew install llvm || return 1
             ;;
         windows)
             existing="$(ls -d /c/dev/tool/clang+llvm-23.1*-x86_64-pc-windows-msvc 2>/dev/null | head -n1 || true)"
@@ -798,8 +931,16 @@ do_install_llvm23() {
             else
                 echo "no existing C:/dev/tool/clang+llvm-23.1*-x86_64-pc-windows-msvc found."
                 echo "installing LLVM 23.1.1 via choco, matching .github/workflows/windows-build.yml's pin ..."
+                # SHOULD-FIX #6 (review 2026-09-26): choco needs an elevated
+                # shell just like the LunarG Vulkan SDK installer does — fail
+                # fast with the exact command instead of choco half-failing.
+                if [ "$dry_run" != "1" ] && ! windows_is_elevated; then
+                    echo "error: installing LLVM via choco needs an ELEVATED shell. Re-run from an Administrator prompt:" >&2
+                    echo "  sh scripts/setup/bootstrap-prereqs.shs install" >&2
+                    return 1
+                fi
                 run_or_plan "$dry_run" "choco install llvm --version=23.1.1 -y (needs an ELEVATED shell)" \
-                    choco install llvm --version=23.1.1 -y || true
+                    choco install llvm --version=23.1.1 -y || return 1
             fi
             ;;
     esac
@@ -821,20 +962,29 @@ do_install_rust() {
     echo "=== Rust ($toolchain, via rustup, user-local ~/.cargo, no root) ==="
     case "$fam" in
         windows)
+            # SHOULD-FIX #7 (review 2026-09-26): mktemp instead of a
+            # predictable /tmp/rustup-init.exe (same class of issue as the
+            # LLVM signing key file).
+            rustup_init="$(mktemp "${TMPDIR:-/tmp}/rustup-init.XXXXXX.exe")"
             run_or_plan "$dry_run" "download rustup-init.exe and install $toolchain" \
-                sh -c "curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.exe https://win.rustup.rs/x86_64 && /tmp/rustup-init.exe -y --default-toolchain '$toolchain' --profile default" || true
+                sh -c "curl --proto '=https' --tlsv1.2 -sSf -o '$rustup_init' https://win.rustup.rs/x86_64 && '$rustup_init' -y --default-toolchain '$toolchain' --profile default" || { rm -f "$rustup_init"; return 1; }
+            rm -f "$rustup_init"
             ;;
         *)
             run_or_plan "$dry_run" "curl https://sh.rustup.rs | sh -s -- -y --default-toolchain $toolchain --profile default" \
-                sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain '$toolchain' --profile default" || true
+                sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain '$toolchain' --profile default" || return 1
             ;;
     esac
     if [ "$dry_run" != "1" ]; then
         # shellcheck disable=SC1091
-        [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env" 2>/dev/null || true
+        [ -f "$HOME/.cargo/env" ] && { . "$HOME/.cargo/env" 2>/dev/null || true; }
         PATH="$HOME/.cargo/bin:$PATH"; export PATH
+        # `rustup component add` failing does not invalidate the rustc/cargo
+        # install itself (rustfmt/clippy are extras check_one never gates
+        # on) — kept as best-effort, unlike the steps above it.
         run_or_plan "$dry_run" "rustup component add rustfmt clippy" rustup component add rustfmt clippy || true
-        echo "installed: $(rustc --version 2>&1 | head -n1 || true)"
+        export_clang_cargo_env "$fam"
+        echo "installed: $(first_n_lines "$(rustc --version 2>&1)" 1)"
     fi
 }
 
@@ -850,6 +1000,7 @@ do_install_mold() {
                 echo "would run (fallback, if needed): download mold v$LLVM_MOLD_PIN_VERSION for $arch, verify its pinned SHA-256, extract only on match, install to ~/.local/bin/mold"
                 return 0
             fi
+            require_sudo_linux "install mold via apt" || return 1
             apt_ok=0
             set +e
             sudo apt-get install -y mold
@@ -924,12 +1075,13 @@ do_install_mold() {
             # SHOULD-FIX #11: stock FreeBSD may have only `doas`, not sudo.
             if have_sudo; then
                 run_or_plan "$dry_run" "sudo pkg install -y mold (untested — no FreeBSD host available)" \
-                    sudo pkg install -y mold || true
+                    sudo pkg install -y mold || return 1
             elif have_doas; then
                 run_or_plan "$dry_run" "doas pkg install -y mold (untested — no FreeBSD host available)" \
-                    doas pkg install -y mold || true
+                    doas pkg install -y mold || return 1
             else
                 echo "warning: neither sudo nor doas found — cannot escalate to install mold. Run as root manually: pkg install -y mold" >&2
+                return 1
             fi
             ;;
         macos)
@@ -944,11 +1096,19 @@ do_install_mold() {
 do_install_jj() {
     dry_run="$1"; fam="$2"
     echo "=== jj (upgrade via cargo now that a modern rustc is available) ==="
-    run_or_plan "$dry_run" "cargo install --locked jj-cli --force" \
-        sh -c 'PATH="$HOME/.cargo/bin:$PATH"; export PATH; cargo install --locked jj-cli --force' || true
     if [ "$dry_run" != "1" ]; then
+        # MUST-FIX #6: export CC/CXX (and the Linux cargo target linker
+        # override) BEFORE the cargo build, not after — jj-cli's build
+        # graph compiles C dependencies (e.g. libgit2/zstd-sys) whose
+        # cc-rs probing and rustc's own final-link step would otherwise
+        # default to `cc` (gcc on most Linux distros).
+        export_clang_cargo_env "$fam"
         PATH="$HOME/.cargo/bin:$PATH"; export PATH
-        echo "installed: $(jj --version 2>&1 | head -n1 || true)"
+    fi
+    run_or_plan "$dry_run" "cargo install --locked jj-cli --force" \
+        sh -c 'PATH="$HOME/.cargo/bin:$PATH"; export PATH; cargo install --locked jj-cli --force' || return 1
+    if [ "$dry_run" != "1" ]; then
+        echo "installed: $(first_n_lines "$(jj --version 2>&1)" 1)"
     fi
 }
 
@@ -959,7 +1119,7 @@ do_install_coreutils_macos() {
     # to use once it exists.
     dry_run="$1"
     echo "=== coreutils (provides gtimeout on macOS) ==="
-    run_or_plan "$dry_run" "brew install coreutils" brew install coreutils || true
+    run_or_plan "$dry_run" "brew install coreutils" brew install coreutils || return 1
 }
 
 do_install_vulkan() {
@@ -968,25 +1128,29 @@ do_install_vulkan() {
     case "$fam" in
         linux)
             echo "installing Ubuntu's own libvulkan-dev/vulkan-tools/glslang-tools/mesa-vulkan-drivers (jammy's loader is ~1.3.204). LunarG does not publish a jammy apt repo entry as of this writing — only the SDK tarball, which this bootstrap does not need for loader+tools+drivers."
+            if [ "$dry_run" != "1" ]; then
+                require_sudo_linux "install Vulkan via apt" || return 1
+            fi
             run_or_plan "$dry_run" "apt-get install libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers" \
-                sudo apt-get install -y libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers || true
+                sudo apt-get install -y libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers || return 1
             echo "note: under WSL2 the enumerated device will be Mesa's Dozen (Vulkan over D3D12) or lavapipe (CPU) — correct for functional testing, not representative of native GPU performance."
             ;;
         freebsd)
             if have_sudo; then
                 run_or_plan "$dry_run" "sudo pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs (untested — no FreeBSD host available)" \
-                    sudo pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || true
+                    sudo pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || return 1
             elif have_doas; then
                 run_or_plan "$dry_run" "doas pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs (untested — no FreeBSD host available)" \
-                    doas pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || true
+                    doas pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || return 1
             else
                 echo "warning: neither sudo nor doas found — cannot escalate to install Vulkan. Run as root manually: pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs" >&2
+                return 1
             fi
             ;;
         macos)
             echo "installing MoltenVK via Homebrew, plus the Vulkan loader/headers/tools/glslang (MoltenVK is a translation layer onto Metal — VK_KHR_portability_subset applies; apps must enable portability enumeration). UNTESTED by this agent, no macOS host available."
             run_or_plan "$dry_run" "brew install molten-vk vulkan-loader vulkan-headers vulkan-tools glslang" \
-                brew install molten-vk vulkan-loader vulkan-headers vulkan-tools glslang || true
+                brew install molten-vk vulkan-loader vulkan-headers vulkan-tools glslang || return 1
             echo "note: brew's molten-vk formula installs its ICD JSON into the standard Vulkan icd.d directory, where the loader auto-discovers it. If vulkaninfo still finds no device afterward, set VK_ICD_FILENAMES (or VK_DRIVER_FILES) to point at MoltenVK's *_icd.json explicitly."
             ;;
         windows)
@@ -1023,25 +1187,42 @@ do_install_vulkan() {
                         rm -rf "$tmp_dir"
                         return 1
                     fi
+                    # MUST-FIX #4 (review 2026-09-26): the previous version
+                    # read curl's output straight through `| tr -d ...` in a
+                    # command substitution — `sha_rc=$?` after that captured
+                    # `tr`'s exit status, not curl's (the same pipe-status
+                    # class of bug already fixed in check_one/check_renderdoc
+                    # for `| head -n1`). A failed/incomplete download of the
+                    # sha file could pass silently as long as `tr` itself
+                    # didn't error. Download to a file, read curl's own rc
+                    # directly from a non-piped command, then trim/lowercase
+                    # via parameter expansion (POSIX `tr`-free) and lowercase
+                    # the locally-computed digest too before comparing —
+                    # LunarG's published hex case is not guaranteed to match
+                    # sha256sum/shasum's lowercase output.
                     sha_url="https://sdk.lunarg.com/sdk/sha/${LUNARG_VULKAN_SDK_PIN_VERSION}/windows/VulkanSDK-${LUNARG_VULKAN_SDK_PIN_VERSION}-Installer.exe.txt"
+                    sha_file="$tmp_dir/expected.sha256"
                     set +e
-                    expected_sha256="$(curl --proto '=https' --tlsv1.2 -sSfL "$sha_url" | tr -d ' \t\r\n')"
+                    curl --proto '=https' --tlsv1.2 -sSfL -o "$sha_file" "$sha_url"
                     sha_rc=$?
                     set -e
+                    expected_sha256="$(tr -d ' \t\r\n' < "$sha_file" 2>/dev/null || true)"
                     if [ "$sha_rc" -ne 0 ] || [ -z "$expected_sha256" ]; then
-                        echo "error: could not fetch the expected SHA-256 from LunarG's verification endpoint ($sha_url) — refusing to run an unverified installer" >&2
+                        echo "error: could not fetch the expected SHA-256 from LunarG's verification endpoint ($sha_url, exit $sha_rc) — refusing to run an unverified installer" >&2
                         rm -rf "$tmp_dir"
                         return 1
                     fi
                     actual_sha256="$(sha256_of "$installer")"
-                    if [ "$actual_sha256" != "$expected_sha256" ]; then
+                    expected_sha256_lc="$(printf '%s' "$expected_sha256" | tr 'A-F' 'a-f')"
+                    actual_sha256_lc="$(printf '%s' "$actual_sha256" | tr 'A-F' 'a-f')"
+                    if [ "$actual_sha256_lc" != "$expected_sha256_lc" ]; then
                         echo "error: Vulkan SDK installer checksum mismatch — got $actual_sha256, expected $expected_sha256. REFUSING to run it." >&2
                         rm -rf "$tmp_dir"
                         return 1
                     fi
                     echo "checksum verified for Vulkan SDK $LUNARG_VULKAN_SDK_PIN_VERSION installer"
                     run_or_plan "$dry_run" "run the (checksum-verified) LunarG Vulkan SDK installer silently" \
-                        "$installer" --accept-licenses --default-answer --confirm-command install
+                        "$installer" --accept-licenses --default-answer --confirm-command install || { rm -rf "$tmp_dir"; return 1; }
                     rm -rf "$tmp_dir"
                 fi
             fi
@@ -1092,8 +1273,16 @@ do_install_renderdoc() {
                 echo "found existing RenderDoc at $existing — reusing it."
             else
                 echo "installing RenderDoc via choco ..."
+                # SHOULD-FIX #6 (review 2026-09-26): same elevation check as
+                # the LunarG Vulkan SDK and LLVM choco installs — fail fast
+                # with the exact command instead of choco half-failing.
+                if [ "$dry_run" != "1" ] && ! windows_is_elevated; then
+                    echo "error: installing RenderDoc via choco needs an ELEVATED shell. Re-run from an Administrator prompt:" >&2
+                    echo "  sh scripts/setup/bootstrap-prereqs.shs install" >&2
+                    return 1
+                fi
                 run_or_plan "$dry_run" "choco install renderdoc -y (needs an ELEVATED shell)" \
-                    choco install renderdoc -y || true
+                    choco install renderdoc -y || return 1
             fi
             ;;
     esac
@@ -1113,6 +1302,8 @@ run_install() {
         return 2
     fi
     apply_llvm23_path "$fam"
+    apply_local_bin_path
+    detect_timeout_mode
 
     names="$(platform_tools "$platform")"
     n=0
@@ -1309,7 +1500,7 @@ EOF
     # Fixture 5: Vulkan present/missing/no-device via a fake vulkaninfo on PATH
     bindir="$tmp/bin"
     mkdir -p "$bindir"
-    for coreutil in grep head cut cat sh awk tr sed find mktemp tar wc; do
+    for coreutil in grep head cut cat sh awk tr sed find mktemp tar wc dirname; do
         real="$(command -v "$coreutil" 2>/dev/null || true)"
         if [ -n "$real" ] && [ ! -e "$bindir/$coreutil" ]; then
             # Neither a symlink NOR a byte copy placed in a different
@@ -1361,14 +1552,24 @@ EOF
     # as a "command not found" leaking into the output, which the dry-run
     # path must never produce (it never calls `"$@"` at all).
     script="$0"
-    for os in Linux Darwin FreeBSD; do
+    # SHOULD-FIX #5 (review 2026-09-26): "don't skip Windows in the dry-run
+    # fixture if avoidable" — it wasn't. Uses a loose fam_expect ("LLVM",
+    # present in the "=== LLVM/clang 23.1 ..." banner regardless of which
+    # windows sub-branch fires) because do_install_llvm23's windows branch
+    # checks a HARDCODED absolute path (/c/dev/tool/clang+llvm-23.1*-...)
+    # rather than anything the fixture's PATH="$bindir" isolation can
+    # override — on a host that genuinely has that LLVM install (this one
+    # does), the dry-run takes the "reusing it" branch instead of the choco
+    # one, and both are valid, plan-only outcomes.
+    for os in Linux Darwin FreeBSD Windows; do
         case "$os" in
-            Linux) fam_expect="LLVM 23.1" ;;
-            Darwin) fam_expect="Homebrew" ;;
-            FreeBSD) fam_expect="build-llvm-23-1-provider" ;;
+            Linux) fam_expect="LLVM 23.1"; uname_fixture="Linux" ;;
+            Darwin) fam_expect="Homebrew"; uname_fixture="Darwin" ;;
+            FreeBSD) fam_expect="build-llvm-23-1-provider"; uname_fixture="FreeBSD" ;;
+            Windows) fam_expect="LLVM"; uname_fixture="MINGW64_NT-10.0" ;;
         esac
         set +e
-        out="$(PATH="$bindir" BOOTSTRAP_PREREQS_UNAME_S="$os" BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native" sh "$script" install --dry-run 2>&1)"
+        out="$(PATH="$bindir" BOOTSTRAP_PREREQS_UNAME_S="$uname_fixture" BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native" sh "$script" install --dry-run 2>&1)"
         rc=$?
         set -e
         printf '%s\n' "$out" | grep -qi "would run\|DRY RUN\|$fam_expect" || selftest_fail "dry-run for $os must print a plan mentioning '$fam_expect', got: $out"
@@ -1497,7 +1698,217 @@ EOF
     row="$(PATH="$bindir" check_one xxd linux)"
     printf '%s\n' "$row" | grep -q '^xxd|PRESENT|' || selftest_fail "check_one on a versionless-banner tool with no min version must still complete as PRESENT (and, critically, must not silently kill the calling shell), got: $row"
 
-    echo "SELFTEST OK — 11 fixture group(s) passed"
+    # ------------------------------------------------------------------
+    # Fixtures 12-14 (review 2026-09-26): fake wget/gpg/sudo/sha256sum on
+    # PATH, exercising the real do_install_* functions directly rather than
+    # re-deriving their logic in the test. A fresh bindir per fixture avoids
+    # cross-contamination with fixtures 1-11's accumulated fixture files,
+    # and HOME is overridden to a sandbox dir so do_install_mold's
+    # `$HOME/.local/bin` writes never touch the real home directory.
+    # ------------------------------------------------------------------
+
+    # Fixture 12 (review 2026-09-26 #5a): mold checksum mismatch must
+    # refuse to extract and return non-zero — proving MUST-FIX #2 actually
+    # gates on the verified checksum, not just prints a message about it.
+    bindir12="$tmp/bin12"
+    mkdir -p "$bindir12"
+    for coreutil in grep head cut cat sh awk tr sed find mktemp tar wc dirname cp chmod mkdir rm; do
+        real="$(command -v "$coreutil" 2>/dev/null || true)"
+        if [ -n "$real" ] && [ ! -e "$bindir12/$coreutil" ]; then
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$bindir12/$coreutil"
+            chmod +x "$bindir12/$coreutil"
+        fi
+    done
+    cat > "$bindir12/sudo" <<'EOF'
+#!/bin/sh
+# apt never has mold in this fixture -> forces the prebuilt-release fallback.
+case "$*" in
+    *"apt-get install -y mold"*) exit 1 ;;
+    *) exit 0 ;;
+esac
+EOF
+    cat > "$bindir12/wget" <<'EOF'
+#!/bin/sh
+# Emulate `wget -qO <file> <url>`: write dummy (WRONG-checksum) bytes.
+out=""
+case "$1" in
+    -qO) out="$2" ;;
+esac
+[ -n "$out" ] && echo "not-the-real-mold-archive" > "$out"
+exit 0
+EOF
+    cat > "$bindir12/sha256sum" <<'EOF'
+#!/bin/sh
+# Always returns a fixed, deliberately-wrong digest.
+echo "0000000000000000000000000000000000000000000000000000000000000000  $1"
+EOF
+    chmod +x "$bindir12/sudo" "$bindir12/wget" "$bindir12/sha256sum"
+    fakehome12="$tmp/home12"
+    mkdir -p "$fakehome12"
+    set +e
+    out="$(PATH="$bindir12" HOME="$fakehome12" BOOTSTRAP_PREREQS_UNAME_M=x86_64 do_install_mold 0 linux 2>&1)"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || selftest_fail "do_install_mold with a checksum mismatch must return non-zero, got rc=0: $out"
+    printf '%s\n' "$out" | grep -qi "checksum mismatch" || selftest_fail "do_install_mold checksum mismatch must say so, got: $out"
+    [ ! -e "$fakehome12/.local/bin/mold" ] || selftest_fail "do_install_mold must NOT install a mold binary after a checksum mismatch (extraction must never run)"
+
+    # Fixture 13 (review 2026-09-26 #5b): fingerprint mismatch, and
+    # separately a well-formed-looking file with TWO `pub:` records (one of
+    # which even matches the real expected fingerprint) — both must be
+    # refused before anything reaches `sudo gpg --dearmor` or apt.
+    bindir13="$tmp/bin13"
+    mkdir -p "$bindir13"
+    for coreutil in grep head cut cat sh awk tr sed find mktemp tar wc dirname cp chmod mkdir rm; do
+        real="$(command -v "$coreutil" 2>/dev/null || true)"
+        if [ -n "$real" ] && [ ! -e "$bindir13/$coreutil" ]; then
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$bindir13/$coreutil"
+            chmod +x "$bindir13/$coreutil"
+        fi
+    done
+    cat > "$bindir13/wget" <<'EOF'
+#!/bin/sh
+out=""
+case "$1" in
+    -qO) out="$2" ;;
+esac
+[ -n "$out" ] && echo "fixture-key-bytes" > "$out"
+exit 0
+EOF
+    cat > "$bindir13/sudo" <<'EOF'
+#!/bin/sh
+# Must never be reached by either fixture below (both refuse earlier).
+echo "FIXTURE BUG: sudo was invoked, verification did not stop the chain" >&2
+exit 1
+EOF
+    chmod +x "$bindir13/wget" "$bindir13/sudo"
+
+    # 13a: single key, wrong fingerprint.
+    cat > "$bindir13/gpg" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *--show-keys*)
+        printf 'pub:::::::::\nfpr:::::::::DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF:\nuid:::::::::\n'
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$bindir13/gpg"
+    set +e
+    out="$(PATH="$bindir13" BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" do_install_llvm23 0 linux 2>&1)"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || selftest_fail "do_install_llvm23 with a mismatched fingerprint must return non-zero, got rc=0: $out"
+    printf '%s\n' "$out" | grep -qi "fingerprint mismatch" || selftest_fail "do_install_llvm23 fingerprint mismatch must say so, got: $out"
+
+    # 13b: two `pub:` records — one has the CORRECT fingerprint, but the
+    # file as a whole must still be refused (MUST-FIX #2).
+    cat > "$bindir13/gpg" <<EOF
+#!/bin/sh
+case "\$*" in
+    *--show-keys*)
+        printf 'pub:::::::::\nfpr:::::::::${LLVM_APT_KEY_FINGERPRINT}:\nuid:::::::::\npub:::::::::\nfpr:::::::::1111111111111111111111111111111111111111:\nuid:::::::::\n'
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$bindir13/gpg"
+    set +e
+    out="$(PATH="$bindir13" BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" do_install_llvm23 0 linux 2>&1)"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || selftest_fail "do_install_llvm23 with a two-pub-record key file must return non-zero even though one record matches, got rc=0: $out"
+    printf '%s\n' "$out" | grep -qi "2 public key record" || selftest_fail "do_install_llvm23 must name the record count for a multi-key file, got: $out"
+
+    # Fixture 14 (review 2026-09-26 #5c): one failing installer must not
+    # abort run_install's loop — a second, independent tool's installer
+    # still runs, and the final verdict still prints and is FAIL (since the
+    # first tool is still missing). Exercises run_install() end-to-end, not
+    # a single do_install_* in isolation, because the bug this guards against
+    # (MUST-FIX #1: set -e is suspended for the whole duration of a function
+    # invoked as `fn || true`) is specifically about the DISPATCH LOOP.
+    bindir14="$tmp/bin14"
+    mkdir -p "$bindir14"
+    for coreutil in grep head cut cat sh awk tr sed find mktemp tar wc dirname cp chmod mkdir rm; do
+        real="$(command -v "$coreutil" 2>/dev/null || true)"
+        if [ -n "$real" ] && [ ! -e "$bindir14/$coreutil" ]; then
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$bindir14/$coreutil"
+            chmod +x "$bindir14/$coreutil"
+        fi
+    done
+    # git/cmake/ninja/timeout/perl/sha256sum/xxd/vulkan/renderdoc all
+    # PRESENT so only clang (LLVM) and jj are missing/dispatched.
+    cat > "$bindir14/git" <<'EOF'
+#!/bin/sh
+echo "git version 2.40.0"
+EOF
+    for t in ninja timeout perl sha256sum xxd; do
+        printf '#!/bin/sh\necho "1.0.0"\n' > "$bindir14/$t"
+        chmod +x "$bindir14/$t"
+    done
+    # cmake has a real minimum (3.13.0) — "1.0.0" would make it WRONG_VERSION
+    # and add unrelated noise to this fixture's missing-tool set.
+    printf '#!/bin/sh\necho "cmake version 3.31.2"\n' > "$bindir14/cmake"
+    chmod +x "$bindir14/cmake"
+    # require_sudo_linux only checks sudo EXISTS (command -v); this fake is
+    # never actually invoked because wget below fails first, before either
+    # do_install_llvm23 or do_install_mold reaches a `sudo ...` call.
+    printf '#!/bin/sh\nexit 0\n' > "$bindir14/sudo"
+    chmod +x "$bindir14/sudo"
+    cat > "$bindir14/vulkaninfo" <<'EOF'
+#!/bin/sh
+echo "GPU0:"
+echo "	deviceName         = Fixture GPU"
+EOF
+    cat > "$bindir14/renderdoccmd" <<'EOF'
+#!/bin/sh
+echo "renderdoccmd v1.44"
+EOF
+    chmod +x "$bindir14/git" "$bindir14/vulkaninfo" "$bindir14/renderdoccmd"
+    # LLVM's wget fails outright (simulating no network) -> do_install_llvm23
+    # must return 1 quickly without ever reaching gpg/sudo.
+    cat > "$bindir14/wget" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "$bindir14/wget"
+    # A jj "install" that succeeds trivially: `cargo install ...` succeeds,
+    # and a real `jj` becomes resolvable afterward reporting a modern
+    # version, so check_one(jj) flips from MISSING to PRESENT.
+    cat > "$bindir14/cargo" <<'EOF'
+#!/bin/sh
+echo "cargo 1.90.0"
+exit 0
+EOF
+    cat > "$bindir14/jj" <<'EOF'
+#!/bin/sh
+echo "jj 0.30.0"
+EOF
+    cat > "$bindir14/rustc" <<'EOF'
+#!/bin/sh
+echo "rustc 1.90.0"
+EOF
+    chmod +x "$bindir14/cargo" "$bindir14/jj" "$bindir14/rustc"
+    fakehome14="$tmp/home14"
+    mkdir -p "$fakehome14"
+    set +e
+    out="$(PATH="$bindir14" HOME="$fakehome14" BOOTSTRAP_PREREQS_UNAME_S=Linux BOOTSTRAP_PREREQS_UNAME_M=x86_64 BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native" run_install 0 2>&1)"; rc=$?
+    set -e
+    # NOTE: this host's apply_llvm23_path legitimately finds a REAL LLVM
+    # 23.1.1 install via an absolute path check that ignores the simulated
+    # platform (by design — that IS MUST-FIX #9's whole point), so clang
+    # never lands in missing_names here and do_install_llvm23 is not the
+    # one that fails in this fixture. mold is: its wget is faked to fail
+    # (network-independent architecture is forced via
+    # BOOTSTRAP_PREREQS_UNAME_M so the failure is deterministic, not an
+    # accidental "uname not found on this fixture PATH" artifact), so mold
+    # is the failing installer, and jj (an independently dispatched
+    # installer running in the SAME loop) is the one proving the loop
+    # was not aborted.
+    [ "$rc" -ne 0 ] || selftest_fail "run_install with one failing installer (mold, no network) must still end FAIL (mold stays missing), got rc=0: $out"
+    printf '%s\n' "$out" | grep -qi "could not download.*mold stays absent" || selftest_fail "the mold install failure must be visible in run_install's output, got: $out"
+    printf '%s\n' "$out" | grep -q '^FAIL' || selftest_fail "run_install must still print the final FAIL verdict after one installer fails, got: $out"
+    printf '%s\n' "$out" | grep -q 'mold(MISSING)' || selftest_fail "the final verdict must still name mold as an offender, got: $out"
+    printf '%s\n' "$out" | grep -q '^jj *PRESENT' || selftest_fail "run_install's final re-check must show jj PRESENT — proving the jj installer still ran despite the earlier mold installer failing (the loop was not aborted), got: $out"
+
+    echo "SELFTEST OK — 14 fixture group(s) passed"
 }
 
 # ---------------------------------------------------------------------------
