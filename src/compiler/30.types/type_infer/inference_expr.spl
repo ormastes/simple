@@ -16,6 +16,7 @@
 #   inference_expr_ops.spl — infer_binary_op, infer_unary_op, narrowing helpers
 
 use compiler.hir.hir.*
+use compiler.hir.hir_definitions.{HirExpr, HirParam}
 use compiler.frontend.core.lexer.*
 use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
@@ -68,8 +69,20 @@ impl HmInferContext:
 
         # Special case: Lambda with expected function type
         # Propagate parameter types from expected into lambda
+        #
+        # `HirExprKind` has no `Closure` variant (only `Lambda(params: [HirParam],
+        # body: HirExpr, captures: [SymbolId])` -- see hir_definitions.spl); this
+        # arm never matched a real value. A payload-carrying unknown-variant arm
+        # like the old `case Closure(params, body, captures):` is NOT treated as
+        # a capture-all binding by the seed (confirmed by probe: it simply never
+        # matches at runtime and control correctly falls through to later arms,
+        # unlike a BARE unknown-variant arm such as `case KwMod:`, which the seed
+        # does reject as an irrefutable capture-all). It was dead code whose
+        # captured bindings (`params`/`body`/`captures`, and `param.span` below)
+        # were left untyped -- that untyped-ness, not swallowed control flow, is
+        # what produced the field-inference failure. Use the real variant name.
         match expr.kind:
-            case Closure(params, body, captures):
+            case Lambda(params, body, captures):
                 val resolved_expected = self.resolve(expected)
                 match resolved_expected.kind:
                     case Function(param_types, return_type, effects):
@@ -87,13 +100,26 @@ impl HmInferContext:
                         # Bind parameters with expected types
                         var i = 0
                         while i < params.len():
-                            val param = params[i]
+                            val param: HirParam = params[i]
                             val expected_param_ty = param_types[i]
 
                             # Use expected type, or fresh var if expected is Infer
                             val param_ty = match expected_param_ty.kind:
                                 case Infer(_, _): self.fresh_var(param.span)
                                 case _: expected_param_ty
+
+                            # Honor the lambda parameter's own declared type
+                            # annotation, if any (`\x: text: ...` against an
+                            # expected `fn(i64)->...`) -- unify it with the
+                            # expected type instead of silently overriding it,
+                            # matching what the synthesize-mode arm below does
+                            # when there is no expected type to check against.
+                            if param.type_.kind != HirTypeKind.Infer(0, 0):
+                                match self.unify(param.type_, param_ty):
+                                    case Err(e):
+                                        self.exit_level()
+                                        return Err(e)
+                                    case _: pass
 
                             self.bind_mono(param.name, param_ty)
                             i = i + 1
