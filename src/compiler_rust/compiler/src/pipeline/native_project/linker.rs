@@ -14,7 +14,8 @@ use super::tools::{
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
-    find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
+    external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command,
+    strip_llvm_constructors,
     target_c_compiler, target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
 };
 
@@ -504,7 +505,7 @@ impl NativeProjectBuilder {
         let output = nm_command()
             .arg("-g")
             .arg("-p")
-            .arg(obj)
+            .arg(external_tool_path(obj))
             .output()
             .map_err(|e| format!("nm: {e}"))?;
         if !output.status.success() {
@@ -705,11 +706,18 @@ impl NativeProjectBuilder {
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
         let output = nm_command()
             .arg("-g")
-            .arg(obj)
+            .arg(external_tool_path(obj))
             .output()
             .map_err(|e| format!("nm: {e}"))?;
         if !output.status.success() {
-            return Ok(Vec::new());
+            // Fail closed: an unreadable object used to yield "no symbols",
+            // which silently dropped every `__module_init_*` from the init
+            // caller and shipped a binary whose module globals were null.
+            return Err(format!(
+                "nm failed on {}: {}",
+                obj.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
         // The leading-underscore prefix is a Mach-O convention. Only strip it
         // when the *output* objects are Mach-O — for cross-compiled ELF objects
@@ -743,7 +751,7 @@ impl NativeProjectBuilder {
         let output = nm_command()
             .arg("-g")
             .arg("-p")
-            .arg(obj)
+            .arg(external_tool_path(obj))
             .output()
             .map_err(|e| format!("nm undefined: {e}"))?;
         if !output.status.success() {
