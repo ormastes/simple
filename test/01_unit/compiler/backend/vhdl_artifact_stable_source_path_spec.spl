@@ -1,0 +1,87 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# VHDL artifact provenance: stable source path normalization.
+#
+# `vhdl_artifact_stable_source_path` (src/plugins/backend_vhdl/driver/
+# driver_vhdl_artifact_build.spl:17) is the seam that turns a HOST-native
+# source path — which on Windows is spelled with backslashes and a drive
+# letter (`C:\Users\dev\simple\src\lib\foo.spl`) — into the REPO-RELATIVE,
+# forward-slash form baked into the VHDL provenance artifact
+# (`VhdlArtifactSource.path`, consumed by `vhdl_artifact_source_aggregate_hash`
+# and the `.gen.json` sidecar). That artifact is a content-hashed,
+# cross-platform-reproducible manifest: if it captured the raw host path, the
+# SAME source compiled on Windows vs. Linux would hash differently for no
+# reason connected to the actual generated hardware, breaking provenance
+# reproducibility. This spec pins the normalization contract directly,
+# without needing a full VhdlDesignCatalog fixture.
+
+use std.spec
+use plugins.backend_vhdl.driver.driver_vhdl_artifact_build.{vhdl_artifact_stable_source_path}
+
+describe "vhdl_artifact_stable_source_path - Windows-native path normalization":
+
+    it "strips everything before /src/ and converts backslashes to slashes":
+        step("strips everything before /src/ and converts backslashes to slashes")
+        val windows_path = "C:\\Users\\dev\\simple\\src\\lib\\hardware\\rv32i_rtl\\entry.spl"
+        expect(vhdl_artifact_stable_source_path(windows_path)).to_equal(
+            "src/lib/hardware/rv32i_rtl/entry.spl")
+
+    it "strips everything before /examples/ and converts backslashes to slashes":
+        step("strips everything before /examples/ and converts backslashes to slashes")
+        val windows_path = "D:\\wk\\simple-worktree\\examples\\hardware\\demo.spl"
+        expect(vhdl_artifact_stable_source_path(windows_path)).to_equal(
+            "examples/hardware/demo.spl")
+
+    it "prefers the first matching anchor when both /src/ and /examples/ could match":
+        step("prefers the first matching anchor when both /src/ and /examples/ could match")
+        # /src/ occurs earlier in the string, so it wins even though the path
+        # also contains a later, unrelated `/examples/` component.
+        val windows_path = "C:\\ci\\src\\lib\\examples\\fixture.spl"
+        expect(vhdl_artifact_stable_source_path(windows_path)).to_equal(
+            "src/lib/examples/fixture.spl")
+
+    it "strips a leading ./ once slashes are normalized, on a Windows-spelled relative path":
+        step("strips a leading ./ once slashes are normalized, on a Windows-spelled relative path")
+        val windows_relative = ".\\lib\\foo.spl"
+        expect(vhdl_artifact_stable_source_path(windows_relative)).to_equal(
+            "lib/foo.spl")
+
+    it "normalizes mixed forward and backward slashes identically to an all-backslash path":
+        step("normalizes mixed forward and backward slashes identically to an all-backslash path")
+        val mixed = "C:\\Users\\dev/simple\\src\\lib/foo.spl"
+        val all_back = "C:\\Users\\dev\\simple\\src\\lib\\foo.spl"
+        expect(vhdl_artifact_stable_source_path(mixed)).to_equal(
+            vhdl_artifact_stable_source_path(all_back))
+        expect(vhdl_artifact_stable_source_path(mixed)).to_equal("src/lib/foo.spl")
+
+    it "is a pure identity-preserving slash conversion when no known anchor or ./ prefix applies":
+        step("is a pure identity-preserving slash conversion when no known anchor or ./ prefix applies")
+        # A path entirely outside the repo (e.g. a build scratch dir) has
+        # nothing to strip -- the contract is "backslash -> slash", not
+        # "guess a repo root".
+        val outside_repo = "C:\\Users\\dev\\scratch\\build\\out.spl"
+        expect(vhdl_artifact_stable_source_path(outside_repo)).to_equal(
+            "C:/Users/dev/scratch/build/out.spl")
+
+    it "already-POSIX paths pass through unchanged (Linux/macOS parity)":
+        step("already-POSIX paths pass through unchanged (Linux/macOS parity)")
+        expect(vhdl_artifact_stable_source_path(
+            "/home/dev/simple/src/lib/foo.spl")).to_equal("src/lib/foo.spl")
+        expect(vhdl_artifact_stable_source_path("./lib/foo.spl")).to_equal("lib/foo.spl")
+
+    it "same logical file, three host spellings, produces one identical provenance path":
+        step("same logical file, three host spellings, produces one identical provenance path")
+        # This is the actual cross-platform-reproducibility property the
+        # function exists for: Windows, POSIX-absolute, and repo-relative
+        # spellings of the SAME file must collapse to the same provenance
+        # string, or the content hash over VhdlArtifactSource would silently
+        # diverge by host OS alone.
+        val windows_spelling = "C:\\dev\\simple\\src\\lib\\hardware\\core.spl"
+        val posix_spelling = "/home/dev/simple/src/lib/hardware/core.spl"
+        val relative_spelling = "./src/lib/hardware/core.spl"
+        val expected = "src/lib/hardware/core.spl"
+        expect(vhdl_artifact_stable_source_path(windows_spelling)).to_equal(expected)
+        expect(vhdl_artifact_stable_source_path(posix_spelling)).to_equal(expected)
+        expect(vhdl_artifact_stable_source_path(relative_spelling)).to_equal(expected)
