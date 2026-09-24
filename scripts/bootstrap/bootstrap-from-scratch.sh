@@ -2294,10 +2294,12 @@ fi
 
 if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
-  rust_authority_target=$(bootstrap_authority_rust_cargo_target \
-    "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
-    "${rust_authority_root}") || exit 1
-  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
+  # rust_authority_target/profile_dir are computed further below, once the
+  # Rust toolchain and LLVM authorities are resolved: the shared
+  # CARGO_TARGET_DIR is keyed by build CONFIGURATION (rustc/cargo identity,
+  # target, backend/features, LLVM version, C toolchain), not by
+  # seed_inputs_fingerprint (which also hashes source content) -- see
+  # bootstrap_authority_rust_build_config_key in bootstrap-authority-wiring.shs.
   rust_authority_home="${rust_authority_root}/home"
   rust_authority_cargo_home="${rust_authority_root}/cargo-home"
   rust_authority_tmp="${rust_authority_root}/tmp"
@@ -2459,6 +2461,62 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     fi
     rust_llvm_path="${rust_llvm_prefix}/bin:${PATH}"
   fi
+
+  # Compute the shared CARGO_TARGET_DIR now that every build-configuration
+  # input (toolchain identity, target, backend/features, LLVM version, C
+  # toolchain) has settled -- see bootstrap_authority_rust_build_config_key
+  # in bootstrap-authority-wiring.shs for exactly what is folded in and why.
+  # --verbose (not bare --version) is required: it is what actually carries
+  # the commit hash, host tuple and rustc's embedded LLVM version.
+  rust_authority_rustc_version=$("${rustc_abs}" --version --verbose) || {
+    echo "error: could not query Rust seed toolchain identity" >&2
+    exit 1
+  }
+  rust_authority_cargo_version=$("${cargo_abs}" --version) || {
+    echo "error: could not query Cargo seed toolchain identity" >&2
+    exit 1
+  }
+  rust_authority_cargo_config_sha256=$(
+    bootstrap_stage3_hash_file \
+      "${repo_root}/src/compiler_rust/.cargo/config.toml"
+  ) || {
+    echo "error: could not hash src/compiler_rust/.cargo/config.toml" >&2
+    exit 1
+  }
+  # toolchain_extra: THE definitive list of every OTHER input folded into the
+  # shared-target-dir config key, kept next to this assembly so the two
+  # cannot drift (bootstrap_authority_rust_build_config_key's header comment
+  # points back here rather than duplicating this list). Each of these can
+  # change a Cargo build's output bytes for fixed-name artifacts:
+  #   - simple_abi_cflags: forwarded as CFLAGS (SIMPLE_ABI_VERSION defines).
+  #   - mingw_linker/cc/ar/cflags/rustflags: the resolved Windows-GNU C
+  #     toolchain and its per-target RUSTFLAGS.
+  #   - CXX/AR/LD/LLVM_CONFIG: forwarded verbatim into the Cargo environment
+  #     by run_rust_authority_env whenever ambiently set.
+  #   - rust_llvm_prefix (LLVM_SYS_231_PREFIX) and rust_llvm_link_kind
+  #     (static vs dynamic-c-api): which LLVM install/link mode Cargo builds
+  #     LLVM-dependent crates against.
+  #   - RUSTFLAGS, the macOS CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS
+  #     passthrough, and CARGO_ENCODED_RUSTFLAGS: ambient rustflags that can
+  #     reach Cargo (directly, or via run_rust_authority_env's macOS branch).
+  #   - SDKROOT/INCLUDE/LIB: header/library search paths a build script's
+  #     compiled objects depend on.
+  #   - a sha256 of src/compiler_rust/.cargo/config.toml's contents (registry
+  #     replacement, vendor directory, any [build] settings it carries).
+  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${CXX:-};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
+  rust_authority_config_key=$(
+    bootstrap_authority_rust_build_config_key \
+      "${rust_authority_rustc_version}" "${rust_authority_cargo_version}" \
+      "${PLATFORM}" "${backend}" "${llvm_features}" "${rust_llvm_version:-}" \
+      "${rust_authority_toolchain_extra}"
+  ) || {
+    echo "error: could not compute Rust build configuration key" >&2
+    exit 1
+  }
+  rust_authority_target=$(bootstrap_authority_rust_cargo_target \
+    "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
+    "${rust_authority_root}" "${rust_authority_config_key}") || exit 1
+  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
 fi
 
 rust_authority_workspace_prepared=0
