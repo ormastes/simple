@@ -29,7 +29,16 @@ simple_msvc_sdk_bin="/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
 simple_msvc_msys_bin="/c/dev/tool/msys2/mingw64/bin"
 # LLVM 23.1.1 is the Windows C authority. The MSVC directory below supplies
 # Windows headers/libraries/link.exe; it is not permission to compile with cl.
-simple_msvc_llvm_bin="/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin"
+# The prefix MUST precede the MinGW bin dir: llvm-sys 231's build script runs the
+# first llvm-config on PATH and feeds its --cflags to the native C driver.  With
+# MinGW first that is -IC:/dev/tool/msys2/mingw64/include, which fails compiling
+# MinGW's stdlib.h (error C2085/C2143 on _exit, _Exit, ecvt, ...).
+# SIMPLE_LLVM_WIN_ROOT_23 is the knob llvm-toolchain-env.shs reads; seed it from
+# a caller-supplied LLVM_SYS_231_PREFIX so this file's PATH entry and the prefix
+# that script prepends can never name two different LLVM installations.
+simple_msvc_llvm_prefix="${LLVM_SYS_231_PREFIX:-${SIMPLE_LLVM_WIN_ROOT_23:-/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc}}"
+simple_msvc_llvm_bin="$simple_msvc_llvm_prefix/bin"
+SIMPLE_LLVM_WIN_ROOT_23="$simple_msvc_llvm_prefix"
 
 for simple_msvc_d in \
   "$simple_msvc_vc_bin" "$simple_msvc_sdk_bin" "$simple_msvc_msys_bin" \
@@ -148,9 +157,19 @@ unset simple_msvc_vc_bin simple_msvc_sdk_bin simple_msvc_msys_bin \
 unset LLVM_SYS_180_PREFIX
 LLVM_VERSIONS=23
 export LLVM_VERSIONS
+export SIMPLE_LLVM_WIN_ROOT_23
 simple_msvc_repo_root="${SIMPLE_PROJECT_ROOT:-$(pwd -P)}"
 if ! . "$simple_msvc_repo_root/scripts/setup/llvm-toolchain-env.shs"; then
   echo "windows-msvc-bootstrap-env: LLVM 23.1 C authority could not be established" >&2
   return 1 2>/dev/null || exit 1
 fi
-unset simple_msvc_repo_root simple_msvc_llvm_bin
+# Fallback only: llvm-toolchain-env.shs derives LLVM_SYS_231_PREFIX from
+# `llvm-config --prefix` and that value wins.  This covers a distribution whose
+# llvm-config.exe is absent, where the platform detector and the Rust binding
+# still need the exact LLVM 23.1 prefix.
+if [ -z "${LLVM_SYS_231_PREFIX:-}" ] &&
+   [ -f "$simple_msvc_llvm_prefix/lib/LLVM-C.lib" ]; then
+  LLVM_SYS_231_PREFIX="$simple_msvc_llvm_prefix"
+  export LLVM_SYS_231_PREFIX
+fi
+unset simple_msvc_repo_root simple_msvc_llvm_prefix simple_msvc_llvm_bin

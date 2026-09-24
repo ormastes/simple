@@ -1,7 +1,8 @@
+use inkwell::AddressSpace;
 use inkwell::context::Context;
+use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::types::BasicType;
 use inkwell::values::AnyValue;
-use inkwell::AddressSpace;
 
 #[test]
 fn test_struct_type() {
@@ -141,9 +142,33 @@ fn test_function_type() {
     assert_eq!(fn_type.get_context(), context);
 }
 
+/// Check that `FunctionType::get_param_types()` can handle metadata arguments.
+/// Regression test for inkwell#546
+#[test]
+fn test_function_type_metadata_params() {
+    let llvm_ir = b"declare void @my_fn(i32, metadata)\0";
+
+    let context = Context::create();
+    let i32_type = context.i32_type();
+    let md_type = context.metadata_type();
+
+    let memory_buffer = MemoryBuffer::create_from_memory_range_copy(llvm_ir, "my_mod");
+    let module = context.create_module_from_ir(memory_buffer).unwrap();
+
+    let fn_type = module.get_function("my_fn").unwrap().get_type();
+    let param_types = fn_type.get_param_types();
+
+    assert_eq!(param_types.len(), 2);
+    assert_eq!(param_types[0].into_int_type(), i32_type);
+    assert_eq!(param_types[1].into_metadata_type(), md_type);
+}
+
 #[test]
 fn test_sized_types() {
-    unsafe { Context::get_global(sized_types) }
+    #[allow(deprecated)]
+    unsafe {
+        Context::get_global(sized_types)
+    }
 }
 
 fn sized_types(global_ctx: &Context) {
@@ -155,17 +180,27 @@ fn sized_types(global_ctx: &Context) {
     let i64_type = global_ctx.i64_type();
     let i128_type = global_ctx.i128_type();
     let f16_type = global_ctx.f16_type();
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    let bf16_type = global_ctx.bf16_type();
     let f32_type = global_ctx.f32_type();
     let f64_type = global_ctx.f64_type();
     let f80_type = global_ctx.x86_f80_type();
     let f128_type = global_ctx.f128_type();
     let ppc_f128_type = global_ctx.ppc_f128_type();
-    #[cfg(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    ))]
+    #[cfg(not(feature = "typed-pointers"))]
     let ptr_type = global_ctx.ptr_type(AddressSpace::default());
     let struct_type = global_ctx.struct_type(&[i8_type.into(), f128_type.into()], false);
     let struct_type2 = global_ctx.struct_type(&[], false);
@@ -186,17 +221,27 @@ fn sized_types(global_ctx: &Context) {
     assert!(i64_type.is_sized());
     assert!(i128_type.is_sized());
     assert!(f16_type.is_sized());
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    assert!(bf16_type.is_sized());
     assert!(f32_type.is_sized());
     assert!(f64_type.is_sized());
     assert!(f80_type.is_sized());
     assert!(f128_type.is_sized());
     assert!(ppc_f128_type.is_sized());
-    #[cfg(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    ))]
+    #[cfg(not(feature = "typed-pointers"))]
     assert!(ptr_type.is_sized());
     assert!(struct_type.is_sized());
     assert!(struct_type2.is_sized());
@@ -207,12 +252,7 @@ fn sized_types(global_ctx: &Context) {
     assert!(!fn_type3.is_sized());
     assert!(!fn_type4.is_sized());
 
-    #[cfg(not(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    )))]
+    #[cfg(feature = "typed-pointers")]
     {
         assert!(bool_type.ptr_type(AddressSpace::default()).is_sized());
         assert!(i8_type.ptr_type(AddressSpace::default()).is_sized());
@@ -221,6 +261,21 @@ fn sized_types(global_ctx: &Context) {
         assert!(i64_type.ptr_type(AddressSpace::default()).is_sized());
         assert!(i128_type.ptr_type(AddressSpace::default()).is_sized());
         assert!(f16_type.ptr_type(AddressSpace::default()).is_sized());
+        #[cfg(any(
+            feature = "llvm11-0",
+            feature = "llvm12-0",
+            feature = "llvm13-0",
+            feature = "llvm14-0",
+            feature = "llvm15-0",
+            feature = "llvm16-0",
+            feature = "llvm17-0",
+            feature = "llvm18-1",
+            feature = "llvm19-1",
+            feature = "llvm20-1",
+            feature = "llvm21-1",
+            feature = "llvm22-1",
+        ))]
+        assert!(bf16_type.ptr_type(AddressSpace::default()).is_sized());
         assert!(f32_type.ptr_type(AddressSpace::default()).is_sized());
         assert!(f64_type.ptr_type(AddressSpace::default()).is_sized());
         assert!(f80_type.ptr_type(AddressSpace::default()).is_sized());
@@ -239,17 +294,27 @@ fn sized_types(global_ctx: &Context) {
     assert!(i64_type.array_type(42).is_sized());
     assert!(i128_type.array_type(42).is_sized());
     assert!(f16_type.array_type(42).is_sized());
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    assert!(bf16_type.array_type(42).is_sized());
     assert!(f32_type.array_type(42).is_sized());
     assert!(f64_type.array_type(42).is_sized());
     assert!(f80_type.array_type(42).is_sized());
     assert!(f128_type.array_type(42).is_sized());
     assert!(ppc_f128_type.array_type(42).is_sized());
-    #[cfg(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    ))]
+    #[cfg(not(feature = "typed-pointers"))]
     assert!(ptr_type.array_type(42).is_sized());
     assert!(struct_type.array_type(0).is_sized());
     assert!(struct_type2.array_type(0).is_sized());
@@ -263,30 +328,80 @@ fn sized_types(global_ctx: &Context) {
     assert!(i64_type.vec_type(42).is_sized());
     assert!(i128_type.vec_type(42).is_sized());
     assert!(f16_type.vec_type(42).is_sized());
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    assert!(bf16_type.vec_type(42).is_sized());
     assert!(f32_type.vec_type(42).is_sized());
     assert!(f64_type.vec_type(42).is_sized());
     assert!(f80_type.vec_type(42).is_sized());
     assert!(f128_type.vec_type(42).is_sized());
     assert!(ppc_f128_type.vec_type(42).is_sized());
+    #[cfg(not(feature = "typed-pointers"))]
+    assert!(ptr_type.vec_type(42).is_sized());
+
     #[cfg(any(
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
         feature = "llvm15-0",
         feature = "llvm16-0",
         feature = "llvm17-0",
-        feature = "llvm18-0"
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1"
     ))]
-    assert!(ptr_type.vec_type(42).is_sized());
+    {
+        assert!(bool_type.scalable_vec_type(42).is_sized());
+        assert!(i8_type.scalable_vec_type(42).is_sized());
+        assert!(i16_type.scalable_vec_type(42).is_sized());
+        assert!(i32_type.scalable_vec_type(42).is_sized());
+        assert!(i64_type.scalable_vec_type(42).is_sized());
+        assert!(i128_type.scalable_vec_type(42).is_sized());
+        assert!(f16_type.scalable_vec_type(42).is_sized());
+        #[cfg(any(
+            feature = "llvm11-0",
+            feature = "llvm12-0",
+            feature = "llvm13-0",
+            feature = "llvm14-0",
+            feature = "llvm15-0",
+            feature = "llvm16-0",
+            feature = "llvm17-0",
+            feature = "llvm18-1",
+            feature = "llvm19-1",
+            feature = "llvm20-1",
+            feature = "llvm21-1",
+            feature = "llvm22-1",
+        ))]
+        assert!(bf16_type.scalable_vec_type(42).is_sized());
+        assert!(f32_type.scalable_vec_type(42).is_sized());
+        assert!(f64_type.scalable_vec_type(42).is_sized());
+        assert!(f80_type.scalable_vec_type(42).is_sized());
+        assert!(f128_type.scalable_vec_type(42).is_sized());
+        assert!(ppc_f128_type.scalable_vec_type(42).is_sized());
+        #[cfg(not(feature = "typed-pointers"))]
+        assert!(ptr_type.scalable_vec_type(42).is_sized());
+    }
 
     let opaque_struct_type = global_ctx.opaque_struct_type("opaque");
 
     assert!(!opaque_struct_type.is_sized());
     assert!(!opaque_struct_type.array_type(0).is_sized());
 
-    #[cfg(not(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    )))]
+    #[cfg(feature = "typed-pointers")]
     {
         let opaque_struct_ptr_type = opaque_struct_type.ptr_type(AddressSpace::default());
         assert!(opaque_struct_ptr_type.is_sized());
@@ -303,27 +418,46 @@ fn test_const_zero() {
     let i64_type = context.i64_type();
     let i128_type = context.i128_type();
     let f16_type = context.f16_type();
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    let bf16_type = context.bf16_type();
     let f32_type = context.f32_type();
     let f64_type = context.f64_type();
     let f80_type = context.x86_f80_type();
     let f128_type = context.f128_type();
     let ppc_f128_type = context.ppc_f128_type();
     let struct_type = context.struct_type(&[i8_type.into(), f128_type.into()], false);
-    #[cfg(not(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    )))]
+    #[cfg(feature = "typed-pointers")]
     let ptr_type = f64_type.ptr_type(AddressSpace::default());
-    #[cfg(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    ))]
+    #[cfg(not(feature = "typed-pointers"))]
     let ptr_type = context.ptr_type(AddressSpace::default());
     let vec_type = f64_type.vec_type(42);
+    #[cfg(any(
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1"
+    ))]
+    let scalable_vec_type = f64_type.scalable_vec_type(42);
     let array_type = f64_type.array_type(42);
 
     bool_type.size_of();
@@ -331,6 +465,20 @@ fn test_const_zero() {
     struct_type.size_of();
     ptr_type.size_of();
     vec_type.size_of();
+    #[cfg(any(
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1"
+    ))]
+    scalable_vec_type.size_of();
     array_type.size_of();
 
     bool_type.get_alignment();
@@ -338,6 +486,20 @@ fn test_const_zero() {
     struct_type.get_alignment();
     ptr_type.get_alignment();
     vec_type.get_alignment();
+    #[cfg(any(
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1"
+    ))]
+    scalable_vec_type.get_alignment();
     array_type.get_alignment();
 
     let bool_zero = bool_type.const_zero();
@@ -347,6 +509,21 @@ fn test_const_zero() {
     let i64_zero = i64_type.const_zero();
     let i128_zero = i128_type.const_zero();
     let f16_zero = f16_type.const_zero();
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    let bf16_zero = bf16_type.const_zero();
     let f32_zero = f32_type.const_zero();
     let f64_zero = f64_type.const_zero();
     let f80_zero = f80_type.const_zero();
@@ -355,6 +532,20 @@ fn test_const_zero() {
     let struct_zero = struct_type.const_zero();
     let ptr_zero = ptr_type.const_zero();
     let vec_zero = vec_type.const_zero();
+    #[cfg(any(
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1"
+    ))]
+    let scalable_vec_zero = scalable_vec_type.const_zero();
     let array_zero = array_type.const_zero();
 
     assert!(bool_zero.is_null());
@@ -364,6 +555,21 @@ fn test_const_zero() {
     assert!(i64_zero.is_null());
     assert!(i128_zero.is_null());
     assert!(f16_zero.is_null());
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    assert!(bf16_zero.is_null());
     assert!(f32_zero.is_null());
     assert!(f64_zero.is_null());
     assert!(f80_zero.is_null());
@@ -372,6 +578,20 @@ fn test_const_zero() {
     assert!(struct_zero.is_null());
     assert!(ptr_zero.is_null());
     assert!(vec_zero.is_null());
+    #[cfg(any(
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1"
+    ))]
+    assert!(scalable_vec_zero.is_null());
     assert!(array_zero.is_null());
 
     assert_eq!(bool_zero.print_to_string().to_str(), Ok("i1 false"));
@@ -381,6 +601,21 @@ fn test_const_zero() {
     assert_eq!(i64_zero.print_to_string().to_str(), Ok("i64 0"));
     assert_eq!(i128_zero.print_to_string().to_str(), Ok("i128 0"));
     assert_eq!(f16_zero.print_to_string().to_str(), Ok("half 0xH0000"));
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    assert_eq!(bf16_zero.print_to_string().to_str(), Ok("bfloat 0xR0000"));
     assert_eq!(f32_zero.print_to_string().to_str(), Ok("float 0.000000e+00"));
     assert_eq!(f64_zero.print_to_string().to_str(), Ok("double 0.000000e+00"));
     assert_eq!(
@@ -401,12 +636,7 @@ fn test_const_zero() {
     );
 
     // handle opaque pointers
-    let ptr_type = if cfg!(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    )) {
+    let ptr_type = if cfg!(not(feature = "typed-pointers")) {
         "ptr null"
     } else {
         "double* null"
@@ -415,6 +645,23 @@ fn test_const_zero() {
     assert_eq!(ptr_zero.print_to_string().to_str(), Ok(ptr_type));
 
     assert_eq!(vec_zero.print_to_string().to_str(), Ok("<42 x double> zeroinitializer"));
+    #[cfg(any(
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1"
+    ))]
+    assert_eq!(
+        scalable_vec_zero.print_to_string().to_str(),
+        Ok("<vscale x 42 x double> zeroinitializer")
+    );
     assert_eq!(
         array_zero.print_to_string().to_str(),
         Ok("[42 x double] zeroinitializer")
@@ -422,10 +669,69 @@ fn test_const_zero() {
 }
 
 #[test]
+fn test_float_type() {
+    let context = Context::create();
+
+    let f16_type = context.f16_type();
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    let bf16_type = context.bf16_type();
+    let f32_type = context.f32_type();
+    let f64_type = context.f64_type();
+    let f128_type = context.f128_type();
+    let x86_f80_type = context.x86_f80_type();
+    let ppc_f128_type = context.ppc_f128_type();
+
+    assert_eq!(f16_type.get_bit_width(), 16);
+    #[cfg(any(
+        feature = "llvm11-0",
+        feature = "llvm12-0",
+        feature = "llvm13-0",
+        feature = "llvm14-0",
+        feature = "llvm15-0",
+        feature = "llvm16-0",
+        feature = "llvm17-0",
+        feature = "llvm18-1",
+        feature = "llvm19-1",
+        feature = "llvm20-1",
+        feature = "llvm21-1",
+        feature = "llvm22-1",
+    ))]
+    assert_eq!(bf16_type.get_bit_width(), 16);
+    assert_eq!(f32_type.get_bit_width(), 32);
+    assert_eq!(f64_type.get_bit_width(), 64);
+    assert_eq!(f128_type.get_bit_width(), 128);
+    assert_eq!(x86_f80_type.get_bit_width(), 80);
+    assert_eq!(ppc_f128_type.get_bit_width(), 128);
+}
+
+#[test]
 fn test_vec_type() {
     let context = Context::create();
     let int = context.i8_type();
     let vec_type = int.vec_type(42);
+
+    assert_eq!(vec_type.get_size(), 42);
+}
+
+#[llvm_versions(12..)]
+#[test]
+fn test_scalable_vec_type() {
+    let context = Context::create();
+    let int = context.i8_type();
+    let vec_type = int.scalable_vec_type(42);
 
     assert_eq!(vec_type.get_size(), 42);
 }
@@ -442,36 +748,14 @@ fn test_type_copies() {
 #[test]
 fn test_ptr_type() {
     let context = Context::create();
-    #[cfg(not(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    )))]
+    #[cfg(feature = "typed-pointers")]
     let ptr_type = context.i8_type().ptr_type(AddressSpace::default());
-    #[cfg(any(
-        feature = "llvm15-0",
-        feature = "llvm16-0",
-        feature = "llvm17-0",
-        feature = "llvm18-0"
-    ))]
+    #[cfg(not(feature = "typed-pointers"))]
     let ptr_type = context.ptr_type(AddressSpace::default());
 
     assert_eq!(ptr_type.get_address_space(), AddressSpace::default());
 
-    #[cfg(any(
-        feature = "llvm4-0",
-        feature = "llvm5-0",
-        feature = "llvm6-0",
-        feature = "llvm7-0",
-        feature = "llvm8-0",
-        feature = "llvm9-0",
-        feature = "llvm10-0",
-        feature = "llvm11-0",
-        feature = "llvm12-0",
-        feature = "llvm13-0",
-        feature = "llvm14-0"
-    ))]
+    #[cfg(feature = "typed-pointers")]
     assert_eq!(ptr_type.get_element_type().into_int_type(), context.i8_type());
 
     // Fn ptr:
@@ -480,19 +764,7 @@ fn test_ptr_type() {
     #[allow(deprecated)]
     let fn_ptr_type = fn_type.ptr_type(AddressSpace::default());
 
-    #[cfg(any(
-        feature = "llvm4-0",
-        feature = "llvm5-0",
-        feature = "llvm6-0",
-        feature = "llvm7-0",
-        feature = "llvm8-0",
-        feature = "llvm9-0",
-        feature = "llvm10-0",
-        feature = "llvm11-0",
-        feature = "llvm12-0",
-        feature = "llvm13-0",
-        feature = "llvm14-0"
-    ))]
+    #[cfg(feature = "typed-pointers")]
     assert_eq!(fn_ptr_type.get_element_type().into_function_type(), fn_type);
 
     assert_eq!(fn_ptr_type.get_context(), context);
@@ -511,36 +783,39 @@ fn test_basic_type_enum() {
         &context.f64_type(),
         // derived types
         &int.array_type(0),
-        #[cfg(not(any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
-            feature = "llvm17-0",
-            feature = "llvm18-0"
-        )))]
+        #[cfg(feature = "typed-pointers")]
         &int.ptr_type(addr),
-        #[cfg(any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
-            feature = "llvm17-0",
-            feature = "llvm18-0"
-        ))]
+        #[cfg(not(feature = "typed-pointers"))]
         &context.ptr_type(addr),
         &context.struct_type(&[int.as_basic_type_enum()], false),
         &int.vec_type(1),
-    ];
-    for basic_type in types {
-        #[cfg(not(any(
+        #[cfg(any(
+            feature = "llvm12-0",
+            feature = "llvm13-0",
+            feature = "llvm14-0",
             feature = "llvm15-0",
             feature = "llvm16-0",
             feature = "llvm17-0",
-            feature = "llvm18-0"
-        )))]
+            feature = "llvm18-1",
+            feature = "llvm19-1",
+            feature = "llvm20-1",
+            feature = "llvm21-1",
+            feature = "llvm22-1"
+        ))]
+        &int.scalable_vec_type(1),
+    ];
+    for basic_type in types {
+        #[cfg(feature = "typed-pointers")]
         assert_eq!(
             basic_type.as_basic_type_enum().ptr_type(addr),
             basic_type.ptr_type(addr)
         );
         assert_eq!(basic_type.as_basic_type_enum().array_type(0), basic_type.array_type(0));
         assert_eq!(basic_type.as_basic_type_enum().size_of(), basic_type.size_of());
+        assert_eq!(
+            basic_type.as_basic_type_enum().get_alignment(),
+            basic_type.get_alignment()
+        );
     }
 }
 
@@ -552,6 +827,15 @@ fn test_no_vector_zero() {
     int.vec_type(0);
 }
 
+#[llvm_versions(12..)]
+#[test]
+#[should_panic]
+fn test_no_scalable_vector_zero() {
+    let context = Context::create();
+    let int = context.i32_type();
+    int.scalable_vec_type(0);
+}
+
 #[test]
 fn test_ptr_address_space() {
     let context = Context::create();
@@ -561,19 +845,9 @@ fn test_ptr_address_space() {
     for index in spaces {
         let address_space = AddressSpace::try_from(index).unwrap();
 
-        #[cfg(not(any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
-            feature = "llvm17-0",
-            feature = "llvm18-0"
-        )))]
+        #[cfg(feature = "typed-pointers")]
         let ptr = context.i32_type().ptr_type(address_space);
-        #[cfg(any(
-            feature = "llvm15-0",
-            feature = "llvm16-0",
-            feature = "llvm17-0",
-            feature = "llvm18-0"
-        ))]
+        #[cfg(not(feature = "typed-pointers"))]
         let ptr = context.ptr_type(address_space);
         assert_eq!(ptr.get_address_space(), address_space);
     }
@@ -588,8 +862,11 @@ fn test_ptr_is_opaque() {
     let context = Context::create();
 
     let i32_ptr_type = context.i32_type().ptr_type(AddressSpace::default());
-    assert!(i32_ptr_type.is_opaque());
+    assert_eq!(!i32_ptr_type.is_opaque(), cfg!(feature = "typed-pointers"));
 
-    let ptr_type = context.ptr_type(AddressSpace::default());
-    assert!(ptr_type.is_opaque());
+    #[cfg(not(feature = "typed-pointers"))]
+    {
+        let ptr_type = context.ptr_type(AddressSpace::default());
+        assert!(ptr_type.is_opaque());
+    }
 }

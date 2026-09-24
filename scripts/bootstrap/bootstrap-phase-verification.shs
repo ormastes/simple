@@ -262,6 +262,8 @@ fi
 
 rss_time=""
 rss_time_style=none
+rss_sample_interval_ms=not-applicable
+rss_sampling_overhead_scope=unavailable
 rss_probe="$tmp/phase-verification-rss-probe"
 if [ -x /usr/bin/time ] &&
    /usr/bin/time -f '%M' -o "$rss_probe" true >/dev/null 2>&1 &&
@@ -293,7 +295,16 @@ case "$rss_time_style" in
     esac
     ;;
 esac
+case "$rss_measurement" in
+  gnu-time-rusage-kib|darwin-time-rusage-bytes-normalized-kib|bsd-time-rusage-kib)
+    rss_sampling_overhead_scope=kernel-rusage ;;
+  proc-group-rss-kib)
+    rss_sample_interval_ms=50
+    rss_sampling_overhead_scope=external-ps-awk-excluded-from-rss-included-in-wall-time ;;
+esac
 echo "max_rss_measurement=$rss_measurement" >>"$summary"
+echo "max_rss_sample_interval_ms=$rss_sample_interval_ms" >>"$summary"
+echo "max_rss_sampling_overhead_scope=$rss_sampling_overhead_scope" >>"$summary"
 
 proc_tree_rss_kib() {
   ps -l | awk -v root="$1" -v proc_root="${2:-/proc}" \
@@ -1467,6 +1478,20 @@ else
       test/01_unit/compiler/bootstrap --mode=compile --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    # Keep the interpreter subsystem as an explicit inventory in both modes.
+    # The full compiler walk below remains independently terminalized per file.
+    run_matrix_task interpreter_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/interpreter --mode=interpreter --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
+    run_matrix_task interpreter_compile_tests --verification-command-owner-receipt="$command_owner_receipt" \
+      --verification-require-test-json \
+      env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
+      test/01_unit/compiler/interpreter --mode=compile --unstable \
+      --assert-ran --no-cache --no-db --no-session-daemon \
+      "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
     # The full compiler inventory below covers loader sources in interpreter
     # mode. Keep one explicit loader behavior oracle in both execution modes so
     # a phase cannot claim compiler/loader coverage from the bootstrap subset
@@ -1510,6 +1535,8 @@ else
     fi
     record_unsupported_task compiler_bootstrap_tests "$test_owner_reason"
     record_unsupported_task compiler_bootstrap_compile_tests "$test_owner_reason"
+    record_unsupported_task interpreter_interpreter_tests "$test_owner_reason"
+    record_unsupported_task interpreter_compile_tests "$test_owner_reason"
     record_unsupported_task loader_interpreter_tests "$test_owner_reason"
     record_unsupported_task loader_compile_tests "$test_owner_reason"
     if [ "$strategy" = full ]; then
