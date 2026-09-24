@@ -13,7 +13,7 @@ Delegate GUI/TUI design to Gemini API. Gemini generates designs; Stitch MCP rend
 | What | Check | Setup |
 |------|-------|-------|
 | Gemini API key | `echo $GEMINI_API_KEY` | `export GEMINI_API_KEY=<key>` |
-| Stitch MCP | `.mcp.json` has `stitch` entry | `sh config/mcp/install.shs` |
+| Stitch MCP | `stitch` in user MCP config (removed from project `.mcp.json` 2026-09-24) | Add `stitch` to your user-level MCP config manually |
 | Stitch API key | `~/.security/env.sh` has `STITCH_API_KEY` | Create file with `export STITCH_API_KEY=<key>` |
 
 ## Workflow
