@@ -211,5 +211,4 @@ FILE.md files) are allowed.
 | `bin/t32_lsp_mcp_server.cmd` | T32 LSP MCP |
 | `bin/t32_mcp_server.cmd` | T32 MCP |
 | `bin/codex_chrome_devtools_mcp.cmd` | Codex Chrome DevTools MCP |
-| `bin/codex_stitch_mcp.cmd` | Codex Stitch MCP |
 | `bin/FILE.md` | Bin manifest |

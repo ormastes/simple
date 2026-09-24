@@ -30,5 +30,4 @@ Executables, wrappers, and MCP server launchers.
 | `t32_lsp_mcp_server.cmd` | T32 LSP MCP wrapper |
 | `t32_mcp_server.cmd` | T32 MCP wrapper |
 | `codex_chrome_devtools_mcp.cmd` | Codex Chrome DevTools MCP |
-| `codex_stitch_mcp.cmd` | Codex Stitch MCP |
 | `FILE.md` | This manifest |
