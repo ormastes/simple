@@ -635,6 +635,28 @@ bootstrap_stage3_canonical_native_command() {
     bootstrap_stage3_native_command=$1
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MSYS*|MINGW*|CYGWIN*)
+            # A native drive-letter spelling (`C:/dev/tool/.../llvm-config.exe`)
+            # is what the Windows bootstrap environment exports for CC/LD/
+            # LLVM_CONFIG, because Cargo and lld-link consume those natively.
+            # `command -v` returns such an absolute argument verbatim, and
+            # bootstrap_stage3_canonical_path only accepts POSIX `/...` input,
+            # so it rejected every native spelling without a message. Normalize
+            # here (one cygpath per command, not per file) instead of forcing
+            # the exported variables into a form the native tools cannot use.
+            case "$bootstrap_stage3_native_command" in
+                [A-Za-z]:[\\/]*)
+                    command -v cygpath >/dev/null 2>&1 || {
+                        echo "bootstrap stage3: cygpath is required to normalize the native command path '$bootstrap_stage3_native_command'; install the MSYS2 'cygpath' utility (msys2-runtime package) or pass a POSIX path" >&2
+                        return 1
+                    }
+                    bootstrap_stage3_native_command=$(
+                        cygpath -u "$bootstrap_stage3_native_command"
+                    ) || {
+                        echo "bootstrap stage3: cygpath -u failed for native command path '$1'" >&2
+                        return 1
+                    }
+                    ;;
+            esac
             case "$bootstrap_stage3_native_command" in
                 *.exe) ;;
                 *)
@@ -1690,7 +1712,10 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     bootstrap_stage3_llvm_config_canonical=$(
         bootstrap_stage3_canonical_native_command \
             "$bootstrap_stage3_llvm_config"
-    ) || return 1
+    ) || {
+        echo "llvm authority: cannot canonicalize llvm-config '$bootstrap_stage3_llvm_config'" >&2
+        return 1
+    }
     bootstrap_stage3_llvm_config_sha256=$(
         bootstrap_stage3_hash_file \
             "$bootstrap_stage3_llvm_config_canonical"
@@ -5334,7 +5359,10 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             bootstrap_stage3_seed_llvm_config_canonical=$(
                 bootstrap_stage3_canonical_native_command \
                     "$bootstrap_stage3_seed_llvm_config"
-            ) || exit 1
+            ) || {
+                echo "seed fingerprint: cannot canonicalize llvm-config '$bootstrap_stage3_seed_llvm_config'" >&2
+                exit 1
+            }
             bootstrap_stage3_seed_trace native-llvm-canonicalized
             if [ "$bootstrap_stage3_seed_llvm_status" = enabled ]; then
                 bootstrap_stage3_seed_llvm_authority_config=$(printf '%s\n' \
