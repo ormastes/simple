@@ -68,6 +68,16 @@ typedef SSIZE_T ssize_t;
 #include <windows.h>
 #endif
 
+#if defined(SIMPLE_RUNTIME_FREESTANDING_V2)
+/* Hosted host-file exports are intentionally absent in freestanding subsets. */
+#elif defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+#define SIMPLE_RUNTIME_HOST_FILE_EXPORTS_OWNER_V2 1
+#include "runtime_host_file_exports.c"
+#undef SIMPLE_RUNTIME_HOST_FILE_EXPORTS_OWNER_V2
+#else
+#error "runtime_native.c has no proven hosted/freestanding host-file profile"
+#endif
+
 #if defined(_MSC_VER)
 /* POSIX entry points this file calls that MSVC does not provide. MinGW HAS all
  * of them, so every shim is gated on _MSC_VER, never _WIN32 -- widening would
@@ -13684,118 +13694,3 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
 
 /* collections.rs:1708 -- remove by key/index from array or dict. */
 SPL_RT_TRAP2(rt_collection_remove)
-
-/* Wave17: one-owner, exact-byte artifact bundle publication.  Handles are
- * random registry tokens, never descriptors.  The Linux implementation keeps
- * every lookup beneath an already-open destination root and publishes the
- * containing directory with one RENAME_NOREPLACE operation. */
-#if defined(__linux__)
-typedef struct RtArtifactBundleTxn {
-    uint64_t token;
-    int root_fd, source_fd, temp_fd, payload_fd, scr1_fd;
-    char temp_leaf[40], bundle_leaf[256], payload_leaf[256], scr1_leaf[256];
-    struct stat source_identity;
-    uint64_t max_bytes, bytes_read;
-    int eof_seen, scr1_staged;
-    struct RtArtifactBundleTxn* next;
-} RtArtifactBundleTxn;
-
-static RtArtifactBundleTxn* rt_artifact_bundle_txns;
-static pthread_mutex_t rt_artifact_bundle_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static int rt_ab_leaf(const uint8_t* p, uint64_t n, char out[256]) {
-    if (!p || n == 0 || n >= 256 || (n == 1 && p[0] == '.') ||
-        (n == 2 && p[0] == '.' && p[1] == '.')) return 0;
-    for (uint64_t i = 0; i < n; ++i) if (p[i] == '/' || p[i] == '\0') return 0;
-    memcpy(out, p, (size_t)n); out[n] = 0; return 1;
-}
-
-static char* rt_ab_path(const uint8_t* p, uint64_t n) {
-    if (!p || n == 0 || n > (uint64_t)PATH_MAX) return NULL;
-    for (uint64_t i = 0; i < n; ++i) if (p[i] == '\0') return NULL;
-    char* s = (char*)malloc((size_t)n + 1); if (!s) return NULL;
-    memcpy(s, p, (size_t)n); s[n] = 0; return s;
-}
-
-static int rt_ab_close(int fd) { int r; if (fd < 0) return 0; do r = close(fd); while (r < 0 && errno == EINTR); return r; }
-static int rt_ab_fsync(int fd) { int r, tries = 0; do r = fsync(fd); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
-static ssize_t rt_ab_read(int fd, void* p, size_t n) { ssize_t r; int tries = 0; do r = read(fd, p, n); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
-static int rt_ab_write_all(int fd, const uint8_t* p, size_t n) {
-    size_t off = 0; int tries = 0;
-    while (off < n) { ssize_t w = write(fd, p + off, n - off); if (w > 0) { off += (size_t)w; tries = 0; continue; } if (w < 0 && errno == EINTR && ++tries < 8) continue; return 0; }
-    return 1;
-}
-static int rt_ab_same_stat(const struct stat* a, const struct stat* b) {
-    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode &&
-           a->st_size == b->st_size && a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
-}
-static void rt_ab_destroy(RtArtifactBundleTxn* t, int remove_temp) {
-    rt_ab_close(t->payload_fd); rt_ab_close(t->scr1_fd); rt_ab_close(t->source_fd);
-    if (remove_temp && t->temp_fd >= 0) { unlinkat(t->temp_fd, t->payload_leaf, 0); unlinkat(t->temp_fd, t->scr1_leaf, 0); }
-    rt_ab_close(t->temp_fd);
-    if (remove_temp && t->root_fd >= 0) unlinkat(t->root_fd, t->temp_leaf, AT_REMOVEDIR);
-    rt_ab_close(t->root_fd); free(t);
-}
-static RtArtifactBundleTxn* rt_ab_take(uint64_t token) {
-    RtArtifactBundleTxn** p = &rt_artifact_bundle_txns;
-    while (*p && (*p)->token != token) p = &(*p)->next;
-    if (!*p) return NULL; RtArtifactBundleTxn* t = *p; *p = t->next; t->next = NULL; return t;
-}
-
-int64_t rt_hosted_safe_artifact_bundle_begin_v1(const uint8_t* root, uint64_t root_len,
-    const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len,
-    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len, int64_t max_bytes) {
-    if (max_bytes < 0) return 0;
-    RtArtifactBundleTxn* t = (RtArtifactBundleTxn*)calloc(1, sizeof(*t)); if (!t) return 0;
-    t->root_fd=t->source_fd=t->temp_fd=t->payload_fd=t->scr1_fd=-1; t->max_bytes=(uint64_t)max_bytes;
-    char* root_path = rt_ab_path(root, root_len); char* source_path = rt_ab_path(source, source_len);
-    if (!root_path || !source_path || !rt_ab_leaf(bundle,bundle_len,t->bundle_leaf) || !rt_ab_leaf(payload,payload_len,t->payload_leaf) || !rt_ab_leaf(scr1,scr1_len,t->scr1_leaf) || !strcmp(t->payload_leaf,t->scr1_leaf)) goto fail;
-    t->root_fd=open(root_path,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW); if(t->root_fd<0) goto fail;
-    if (faccessat(t->root_fd,t->bundle_leaf,F_OK,AT_SYMLINK_NOFOLLOW)==0 || errno!=ENOENT) goto fail;
-    struct open_how how={.flags=O_RDONLY|O_CLOEXEC|O_NOFOLLOW,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};
-    t->source_fd=(int)syscall(SYS_openat2,t->root_fd,source_path,&how,sizeof(how)); if(t->source_fd<0 || fstat(t->source_fd,&t->source_identity)<0 || !S_ISREG(t->source_identity.st_mode) || (uint64_t)t->source_identity.st_size>t->max_bytes) goto fail;
-    for (int tries=0;tries<16;t->token=0,++tries) { if(getrandom(&t->token,sizeof(t->token),0)!=(ssize_t)sizeof(t->token) || !t->token) continue; snprintf(t->temp_leaf,sizeof(t->temp_leaf),".simple-bundle-%016llx",(unsigned long long)t->token); if(mkdirat(t->root_fd,t->temp_leaf,0700)==0) break; }
-    if (!t->token || !t->temp_leaf[0]) goto fail;
-    t->temp_fd=openat(t->root_fd,t->temp_leaf,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW); if(t->temp_fd<0) goto fail;
-    t->payload_fd=openat(t->temp_fd,t->payload_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600); if(t->payload_fd<0) goto fail;
-    pthread_mutex_lock(&rt_artifact_bundle_lock); for(RtArtifactBundleTxn* q=rt_artifact_bundle_txns;q;q=q->next) if(q->token==t->token){pthread_mutex_unlock(&rt_artifact_bundle_lock);goto fail;} t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t; pthread_mutex_unlock(&rt_artifact_bundle_lock);
-    free(root_path); free(source_path); return (int64_t)t->token;
-fail: free(root_path); free(source_path); rt_ab_destroy(t,1); return 0;
-}
-
-int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token, int64_t bound) {
-    if (bound <= 0 || bound > 16*1024*1024) return 0;
-    pthread_mutex_lock(&rt_artifact_bundle_lock); RtArtifactBundleTxn* t=rt_ab_take((uint64_t)token); pthread_mutex_unlock(&rt_artifact_bundle_lock); if(!t)return 0;
-    if(t->eof_seen){rt_ab_destroy(t,1);return 0;}
-    size_t want=(size_t)bound; if((uint64_t)want>t->max_bytes-t->bytes_read)want=(size_t)(t->max_bytes-t->bytes_read);
-    SplArray* a=rt_byte_array_new_len(want); RtCoreArray* ar=rt_core_array_ptr(a); ssize_t n=ar?rt_ab_read(t->source_fd,ar->data,want):-1;
-    if(n<0 || (n>0 && !rt_ab_write_all(t->payload_fd,ar->data,(size_t)n))){if(a)rt_array_free(a);rt_ab_destroy(t,1);return 0;}
-    ar->len=n; t->bytes_read+=(uint64_t)n; if(n==0)t->eof_seen=1;
-    pthread_mutex_lock(&rt_artifact_bundle_lock);t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t;pthread_mutex_unlock(&rt_artifact_bundle_lock); return (int64_t)(uintptr_t)a;
-}
-
-int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t token, int64_t field) {
-    pthread_mutex_lock(&rt_artifact_bundle_lock); RtArtifactBundleTxn* t=rt_artifact_bundle_txns;while(t&&t->token!=(uint64_t)token)t=t->next;
-    int64_t v=t?(field==0?(int64_t)t->source_identity.st_dev:field==1?(int64_t)t->source_identity.st_ino:field==2?(int64_t)t->source_identity.st_size:field==3?(int64_t)t->source_identity.st_mtim.tv_sec:field==4?(int64_t)t->source_identity.st_mtim.tv_nsec:field==5?(int64_t)t->bytes_read:-1):-1; pthread_mutex_unlock(&rt_artifact_bundle_lock);return v;
-}
-
-int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t token,const uint8_t* bytes,uint64_t len,int64_t max_bytes){
-    if(max_bytes<0||len>(uint64_t)max_bytes)return 0; pthread_mutex_lock(&rt_artifact_bundle_lock);RtArtifactBundleTxn*t=rt_ab_take((uint64_t)token);pthread_mutex_unlock(&rt_artifact_bundle_lock);if(!t)return 0;
-    if(!t->eof_seen||t->scr1_staged){rt_ab_destroy(t,1);return 0;} t->scr1_fd=openat(t->temp_fd,t->scr1_leaf,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
-    if(t->scr1_fd<0||!rt_ab_write_all(t->scr1_fd,bytes,(size_t)len)){rt_ab_destroy(t,1);return 0;}t->scr1_staged=1;pthread_mutex_lock(&rt_artifact_bundle_lock);t->next=rt_artifact_bundle_txns;rt_artifact_bundle_txns=t;pthread_mutex_unlock(&rt_artifact_bundle_lock);return 1;
-}
-
-int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t token,int64_t commit){
-    pthread_mutex_lock(&rt_artifact_bundle_lock);RtArtifactBundleTxn*t=rt_ab_take((uint64_t)token);pthread_mutex_unlock(&rt_artifact_bundle_lock);if(!t)return 0;
-    if(!commit){rt_ab_destroy(t,1);return 1;} struct stat now; if(!t->eof_seen||!t->scr1_staged||fstat(t->source_fd,&now)<0||!rt_ab_same_stat(&t->source_identity,&now)||rt_ab_fsync(t->payload_fd)<0||rt_ab_fsync(t->scr1_fd)<0||rt_ab_fsync(t->temp_fd)<0){rt_ab_destroy(t,1);return 0;}
-    rt_ab_close(t->payload_fd);t->payload_fd=-1;rt_ab_close(t->scr1_fd);t->scr1_fd=-1;
-    int renamed, tries=0; do renamed=(int)syscall(SYS_renameat2,t->root_fd,t->temp_leaf,t->root_fd,t->bundle_leaf,RENAME_NOREPLACE);while(renamed<0&&errno==EINTR&&++tries<8);
-    if(renamed<0){rt_ab_destroy(t,1);return 0;} int durable=rt_ab_fsync(t->root_fd)==0;rt_ab_destroy(t,0);return durable?1:-2;
-}
-#else
-int64_t rt_hosted_safe_artifact_bundle_begin_v1(const uint8_t*a,uint64_t b,const uint8_t*c,uint64_t d,const uint8_t*e,uint64_t f,const uint8_t*g,uint64_t h,const uint8_t*i,uint64_t j,int64_t k){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;return 0;}
-int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
-int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t a,int64_t b){(void)a;(void)b;return -1;}
-int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t a,const uint8_t*b,uint64_t c,int64_t d){(void)a;(void)b;(void)c;(void)d;return 0;}
-int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
-#endif
