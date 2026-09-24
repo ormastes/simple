@@ -3969,7 +3969,13 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # probe chain bootstrap-jobs.shs itself uses, so Windows Git Bash where
     # `nproc` is absent still resolves via NUMBER_OF_PROCESSORS).
     case "${jobs:-}" in
-      ''|*[!0-9]*)
+      ''|*[!0-9]*|0)
+        # `0` is included here (not just empty/non-numeric): a literal
+        # --jobs=0 is not a valid worker count either, and letting it
+        # through would divide-derive a 0 build-thread count that
+        # bootstrap-phase-verification.shs's own `case "$build_threads" in
+        # ''|*[!0-9]*|0) die ...` (:164) rejects outright, killing the
+        # verifier instead of just re-detecting a sane count here.
         stage2_tests_cpu_basis=$(bootstrap_detect_host_cpus 2>/dev/null || :)
         case "${stage2_tests_cpu_basis}" in
           ''|*[!0-9]*|0) stage2_tests_cpu_basis=1 ;;
@@ -4020,8 +4026,28 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         fi
         ;;
       Darwin)
-        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null)
-        stage2_tests_free_pages=$(vm_stat 2>/dev/null | awk '/^Pages free:/ { gsub(/\./, "", $3); print $3 }')
+        # `|| :` on every `$(sysctl ...)`/`$(vm_stat ...)` substitution below:
+        # under `set -eu` (line 114), a failing command substitution on its
+        # own line exits the WHOLE SCRIPT immediately (verified:
+        # `sh -c 'set -eu; x=$(false); echo survived'` -> exit 1, no output)
+        # rather than merely leaving the variable empty for the numeric
+        # guard below to catch -- so a missing/failing sysctl or vm_stat
+        # must never be allowed to propagate a nonzero status here.
+        # "Pages free" alone undercounts real headroom: macOS also reports
+        # inactive/purgeable/speculative pages as reclaimable without
+        # swapping, so sum all four the way `vm_stat`'s own summary line
+        # implies (matches the intent of MemAvailable on Linux, not just
+        # MemFree).
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+        stage2_tests_vm_stat_out=$(vm_stat 2>/dev/null || :)
+        stage2_tests_free_pages=$(printf '%s\n' "${stage2_tests_vm_stat_out}" |
+          awk '
+            /^Pages free:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages inactive:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages purgeable:/ { gsub(/\./, "", $3); sum += $3 }
+            /^Pages speculative:/ { gsub(/\./, "", $3); sum += $3 }
+            END { print sum + 0 }
+          ')
         case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
         case "${stage2_tests_free_pages}" in ''|*[!0-9]*) stage2_tests_free_pages="" ;; esac
         if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_pages}" ]; then
@@ -4029,22 +4055,46 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         fi
         ;;
       FreeBSD)
-        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null)
-        stage2_tests_free_pages=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null)
+        # Same `|| :` reasoning as the Darwin branch above. Also add
+        # v_inactive_count: FreeBSD's v_free_count alone is the same
+        # undercount as macOS's "Pages free" -- inactive pages are
+        # reclaimable without swapping.
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null || :)
+        stage2_tests_free_count=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || :)
+        stage2_tests_inactive_count=$(sysctl -n vm.stats.vm.v_inactive_count 2>/dev/null || :)
         case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
-        case "${stage2_tests_free_pages}" in ''|*[!0-9]*) stage2_tests_free_pages="" ;; esac
-        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_pages}" ]; then
+        case "${stage2_tests_free_count}" in ''|*[!0-9]*) stage2_tests_free_count="" ;; esac
+        case "${stage2_tests_inactive_count}" in ''|*[!0-9]*) stage2_tests_inactive_count="" ;; esac
+        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_count}" ]; then
+          stage2_tests_free_pages=$(( stage2_tests_free_count + ${stage2_tests_inactive_count:-0} ))
           stage2_tests_free_kib=$(( stage2_tests_page_size * stage2_tests_free_pages / 1024 ))
         fi
         ;;
       MINGW*|MSYS*|CYGWIN*)
         if command -v powershell.exe >/dev/null 2>&1; then
-          stage2_tests_free_kib=$(powershell.exe -NoProfile -Command \
-            "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" 2>/dev/null | tr -d '\r\n ')
+          # WMI can stall; bound it with `timeout` when available (this repo
+          # already requires POSIX sh + clang-only tooling, not extra
+          # dependencies, and `timeout` is coreutils, already assumed
+          # elsewhere in this script). -NonInteractive plus redirecting
+          # stdin from /dev/null stops a stalled/broken WMI provider from
+          # ever presenting a prompt this non-interactive step cannot answer.
+          if command -v timeout >/dev/null 2>&1; then
+            stage2_tests_free_kib=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
+              "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" </dev/null 2>/dev/null |
+              tr -d '\r\n ') || :
+          else
+            stage2_tests_free_kib=$(powershell.exe -NoProfile -NonInteractive -Command \
+              "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" </dev/null 2>/dev/null |
+              tr -d '\r\n ') || :
+          fi
         fi
         ;;
     esac
     case "${stage2_tests_free_kib}" in ''|*[!0-9]*) stage2_tests_free_kib="" ;; esac
+    # An explicit BOOTSTRAP_VERIFY_BUILD_THREADS is a deliberate override: it
+    # is honored as-is and deliberately bypasses the free-memory derivation
+    # and the 8-thread hard ceiling below -- the caller who sets this env var
+    # is asserting they already know the safe count for their host.
     stage2_tests_build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-}
     if [ -z "${stage2_tests_build_threads}" ]; then
       if [ -n "${stage2_tests_free_kib}" ]; then
