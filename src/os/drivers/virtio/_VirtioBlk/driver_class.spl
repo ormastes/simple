@@ -118,6 +118,7 @@ pub fn virtio_blk_set_last_read_bytes(bytes: [u8]):
 extern fn rt_memcpy(dest: i64, src: i64, len: i64)
 extern fn unsafe_addr_of(ref: any) -> u64
 extern fn rt_memory_barrier()
+extern fn serial_println(msg: text)
 extern fn rt_virtq_desc_write(base: u64, index: u64, addr_lo: u64, addr_hi: u64, len: u64, flags: u64, next: u64) -> u64
 use std.io.dma.{dma_raw_bytes_to_array}
 extern fn rt_arm_virtio_blk_mmio_read_u32(off: u64) -> u32
@@ -343,6 +344,12 @@ pub fn virtio_blk_flush_transition(completed_write_epoch: u64, durable_write_epo
     Ok(target_write_epoch)
 
 fn _virtq_push_avail(desc_idx: u32):
+    # Snapshot the used-ring cursor before publishing. The ARM raw reader
+    # (C owner) advances the same shared ring without updating this module's
+    # cursor; a stale cursor makes _virtq_wait_completion validate the slot
+    # the raw path already consumed and every trait-path read times out.
+    _virtio_blk_sync_for_cpu(g_virtio_blk_used_addr, 4)
+    g_virtio_blk_last_used_idx = mmio_read16(g_virtio_blk_used_addr + 2).to_u32()
     # Descriptor rows are driver-owned until this publication boundary.
     _virtio_blk_sync_for_device(g_virtio_blk_desc_addr, 2048)
     val avail_idx = mmio_read16(g_virtio_blk_avail_addr + 2)
