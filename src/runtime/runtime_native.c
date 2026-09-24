@@ -8028,12 +8028,31 @@ int64_t rt_tls13_sha256(int64_t data_value) {
     return (int64_t)(uintptr_t)digest;
 }
 
+/* `[u8]` -> text, bytes copied verbatim (the interpreter's
+ * Value::text_from_bytes; also the native lowering of `text.from_bytes`).
+ * A `[u8]` arrives in one of two layouts: byte-packed
+ * (RT_CORE_ARRAY_FLAG_BYTES, one byte per element) or generic i64 slots
+ * holding tagged ints (e.g. a `[u8]` literal the backend built slot by slot).
+ * Copying `array->data` verbatim is only right for the first: for slots it
+ * produced 8 tagged bytes per element. Slots are narrowed through
+ * rt_array_bytes_copy_checked, which rejects non-int or out-of-range
+ * elements; a rejected array yields "" like a non-array did before. */
 int64_t rt_bytes_to_text(int64_t bytes_value) {
     RtCoreArray* array = rt_core_as_array(bytes_value);
     if (!array || !array->data || array->len <= 0) {
         return rt_string_new(NULL, 0);
     }
-    return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    }
+    int64_t length = rt_array_bytes_validate(bytes_value);
+    if (length <= 0) return rt_string_new(NULL, 0);
+    uint8_t* narrowed = (uint8_t*)malloc((size_t)length);
+    if (!narrowed) return rt_string_new(NULL, 0);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
+    int64_t result = rt_string_new(narrowed, copied > 0 ? (uint64_t)copied : 0);
+    free(narrowed);
+    return result;
 }
 
 int64_t rt_array_len(SplArray* a) {
