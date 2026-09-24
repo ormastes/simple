@@ -2197,6 +2197,20 @@ int main(int argc, char** argv) {
             if let Some(builtins) = find_msvc_compiler_rt_builtins(&cc, cross_target.arch.name()) {
                 cmd.arg(&builtins);
             }
+            // On Windows the seed's inkwell is `llvm23-1-force-dynamic`
+            // (compiler/Cargo.toml), so `simple_native_all.lib` -- a Rust
+            // staticlib -- carries unresolved LLVM* references and no LLVM
+            // objects. Name the import library from the same prefix llvm-sys
+            // built against; without it the Stage 2 link fails with undefined
+            // LLVMBuildLoad2/LLVMAddGlobal/....
+            if has_native_all {
+                if let Some(prefix) = std::env::var_os("LLVM_SYS_231_PREFIX") {
+                    let llvm_c = PathBuf::from(prefix).join("lib").join("LLVM-C.lib");
+                    if llvm_c.is_file() {
+                        cmd.arg(&llvm_c);
+                    }
+                }
+            }
         }
         #[cfg(target_os = "macos")]
         if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
