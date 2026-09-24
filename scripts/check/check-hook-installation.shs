@@ -24,14 +24,20 @@
 # the guards actually run? Run it before any plumbing landing, and the pre-push
 # hook runs it first so a half-installed hook fails loudly instead of open.
 #
-# Cheap by construction (no git object walks, no selftest corpus) so there is no
-# incentive to skip it.
-#
 # Verdict convention matches the other guards — last line of stdout:
 #   PASS  — <n> check(s) performed, hook wiring intact       exit 0
 #   FAIL  — ...                                              exit 1
 #   ERROR — nothing was checked                              exit 2
 # A run that performs 0 checks is an ERROR, never a pass.
+#
+# `--selftest` (added 2026-09-24): a POSIX-portable, filesystem-free fixture
+# for the absolute-path test below (`is_absolute_path`), plus its own
+# selftest of `--selftest` itself. It does not create real git repos —
+# unlike the sibling guards' selftests, the defect here is pure string
+# logic (does a `case` pattern recognize a Windows drive-letter path as
+# absolute?), which does not need a live filesystem to prove, and a
+# literal different-drive-letter fixture would not be portable to CI hosts
+# that have no D: drive at all.
 
 set -u
 
@@ -44,6 +50,112 @@ fail() {
     printf '%s: DEFECT — %s\n' "$name" "$1"
     [ -n "${2:-}" ] && printf '    fix: %s\n' "$2"
 }
+
+# A path is absolute if it starts with `/` (POSIX / Git-Bash-mounted), or
+# with a Windows drive letter spelled either forward-slash style
+# (`C:/Users/...`, what `git rev-parse --path-format=absolute
+# --git-common-dir` actually emits under Git for Windows) or backslash
+# style (`C:\Users\...`). Only the forward-slash form was recognized before
+# 2026-09-24 (see origin b8075e146c0); the backslash form fell through to
+# the `*)` branch and was joined onto `$repo_root`, producing a broken
+# concatenation like `D:/some-worktree/C:\Users\...\.git` whenever a
+# worktree's root lives under a different path/drive than the git-common-dir
+# — the exact shape that made `no pre-push hook at
+# D:/wk-.../C:/Users/.../hooks/pre-push` report a path that can never exist,
+# independent of whether the hook was actually installed. Mirrors the same
+# fix in scripts/check/check-no-document-symlinks-push.shs (WP5).
+is_absolute_path() {
+    case "$1" in
+        /*) return 0 ;;
+        [A-Za-z]:/*) return 0 ;;
+        [A-Za-z]:\\*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+selftest() {
+    _rc=0
+
+    if is_absolute_path "C:/Users/ormas/dev/simple/.git"; then
+        echo "selftest 1 (forward-slash drive-letter path recognized as absolute): ok"
+    else
+        echo "selftest 1 FAILED: C:/Users/ormas/dev/simple/.git was not recognized as absolute"
+        _rc=1
+    fi
+
+    if is_absolute_path 'C:\Users\ormas\dev\simple\.git'; then
+        echo 'selftest 2 (backslash-style drive-letter path recognized as absolute): ok'
+    else
+        echo 'selftest 2 FAILED: C:\Users\ormas\dev\simple\.git was not recognized as absolute (this was the residual gap before this fix)'
+        _rc=1
+    fi
+
+    if is_absolute_path "/home/ormas/dev/simple/.git"; then
+        echo "selftest 3 (plain POSIX absolute path recognized as absolute): ok"
+    else
+        echo "selftest 3 FAILED: /home/ormas/dev/simple/.git was not recognized as absolute"
+        _rc=1
+    fi
+
+    if is_absolute_path "relative/.git"; then
+        echo "selftest 4 FAILED: relative/.git was incorrectly treated as absolute"
+        _rc=1
+    else
+        echo "selftest 4 (relative path correctly NOT treated as absolute): ok"
+    fi
+
+    # End-to-end fixture for the reported shape: a worktree ROOT under one
+    # path/drive (e.g. a `D:/wk-*` worktree) and a git-common-dir under a
+    # DIFFERENT one (the shared main clone's `C:/Users/.../.git`) — the exact
+    # cross-drive-worktree scenario from the real incident. Exercises the
+    # identical join logic used at the real call site (`git_dir=...; case
+    # "$git_dir" in ...) ;; *) git_dir="$repo_root/$git_dir" ;; esac`), so a
+    # drift between this fixture and that call site is impossible: both call
+    # the same `is_absolute_path`.
+    _repo_root="D:/wk-selftest-worktree-fixture-not-a-real-checkout"
+    _git_dir="C:/Users/selftest/dev/simple/.git"
+    if is_absolute_path "$_git_dir"; then
+        _resolved="$_git_dir"
+    else
+        _resolved="$_repo_root/$_git_dir"
+    fi
+    if [ "$_resolved" = "$_git_dir" ]; then
+        echo "selftest 5 (cross-drive worktree root + drive-letter git-common-dir resolves without concatenation): ok"
+    else
+        echo "selftest 5 FAILED: got '$_resolved', expected the unmodified '$_git_dir' -- this is exactly the reported defect's shape (worktree root wrongly prepended onto an already-absolute git-common-dir)"
+        _rc=1
+    fi
+
+    # Same fixture, backslash-style git-common-dir -- this is the case that
+    # was still broken by the 2026-09-24-b8075e146c0 fix (single-backslash
+    # `[A-Za-z]:\*` pattern, which matches a literal trailing `*` character,
+    # not "backslash followed by anything").
+    _git_dir_bs='C:\Users\selftest\dev\simple\.git'
+    if is_absolute_path "$_git_dir_bs"; then
+        _resolved_bs="$_git_dir_bs"
+    else
+        _resolved_bs="$_repo_root/$_git_dir_bs"
+    fi
+    if [ "$_resolved_bs" = "$_git_dir_bs" ]; then
+        echo "selftest 6 (cross-drive worktree root + BACKSLASH-style drive-letter git-common-dir resolves without concatenation): ok"
+    else
+        echo "selftest 6 FAILED: got '$_resolved_bs', expected the unmodified '$_git_dir_bs'"
+        _rc=1
+    fi
+
+    return $_rc
+}
+
+case "${1:-}" in
+    --selftest)
+        if selftest; then
+            echo "selftest: 6 fixture(s) passed"
+            exit 0
+        fi
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+        ;;
+esac
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
     printf '%s: not inside a git repository\n' "$name"
@@ -66,10 +178,9 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
 git_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
     git_dir=$(git rev-parse --git-common-dir 2>/dev/null) ||
     git_dir="$repo_root/.git"
-case "$git_dir" in
-    /*|[A-Za-z]:/*|[A-Za-z]:\*) ;;
-    *) git_dir="$(CDPATH= cd -- "$git_dir" 2>/dev/null && pwd)" || git_dir="$repo_root/.git" ;;
-esac
+if ! is_absolute_path "$git_dir"; then
+    git_dir="$(CDPATH= cd -- "$git_dir" 2>/dev/null && pwd)" || git_dir="$repo_root/.git"
+fi
 
 expected_guard="$repo_root/scripts/check/pre-push-conflict-tree-guard.shs"
 expected_dispatcher="$repo_root/scripts/hooks/pre-push"
