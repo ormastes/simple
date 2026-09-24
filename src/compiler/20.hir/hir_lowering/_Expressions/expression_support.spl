@@ -247,6 +247,32 @@ impl HirLowering:
                     return self.field_type_for_owner_raw(self.current_method_self_symbol_id, field_name)
         _hir_missing_field_type()
 
+    me owner_type_id_for_base_raw(raw_base_symbol_id: i64) -> i64:
+        """Resolve the owning struct/class TYPE symbol id for a receiver base
+        symbol, mirroring the three lookup strategies `field_type_for_base_raw`
+        already uses (local declared-struct name, the symbol table's own
+        named-type link, and a bare `self`/`me` receiver) -- but returning the
+        owner id itself instead of a specific field's type. Used to check
+        whether the receiver's type declares an instance METHOD with a given
+        name before treating that name as a function-typed FIELD, so a
+        same-named method always wins (see the P2 field-call precedence fix's
+        call site in expression_core.spl)."""
+        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+            val struct_name = self.local_struct_types[raw_base_symbol_id]
+            val struct_symbol = self.symbols.lookup_or_invalid(struct_name)
+            if struct_symbol.is_valid():
+                return struct_symbol.id
+
+        val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
+        if raw_owner_symbol_id >= 0:
+            return raw_owner_symbol_id
+
+        if self.current_method_self_symbol_id >= 0:
+            if val base_definition = self.symbols.get_symbol_raw(raw_base_symbol_id):
+                if base_definition.name == "self" or base_definition.name == "me":
+                    return self.current_method_self_symbol_id
+        -1
+
     me combine_pattern_conditions(conditions: [HirExpr], count: i64, op: HirBinOp, span: Span) -> HirExpr:
         if count == 1:
             return conditions[0]
