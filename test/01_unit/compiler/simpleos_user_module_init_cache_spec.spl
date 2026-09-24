@@ -1,0 +1,80 @@
+# Live tests require an admitted self-hosted runtime and installed Clang.
+use testing.{describe, it, expect}
+use compiler.backend.backend.simpleos_native_linkers.{simpleos_x86_64_user_module_init_cache_key, simpleos_x86_64_cached_user_module_init}
+use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_c_flags}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all, file_write, file_read, file_delete, file_hash_sha256_or_empty}
+use std.concurrent.thread.{thread_spawn}
+
+fn initializer_test_scope() -> text:
+    expect(dir_create_all("build/os")).to_equal(true)
+    match secure_temp_dir("build/os", "initializer-cache-test"):
+        case Ok(path): path
+        case Err(e):
+            expect(e).to_equal("")
+            ""
+
+describe "SimpleOS userspace initializer immutable cache":
+    it "invalidates executable bytes and exact shared compile flags":
+        val scope = initializer_test_scope()
+        val executable = "{scope}/clang-fixture"
+        expect(file_write(executable, "compiler A")).to_equal(true)
+        val digest = file_hash_sha256_or_empty(executable)
+        expect(digest.len()).to_equal(64)
+        val flags = simpleos_x86_64_c_flags(0)
+        val original = simpleos_x86_64_user_module_init_cache_key("void init(void) {}", executable, digest, flags)
+        expect(simpleos_x86_64_user_module_init_cache_key("void init(void) {}", executable, digest, flags)).to_equal(original)
+        expect(file_write(executable, "compiler B")).to_equal(true)
+        expect(simpleos_x86_64_user_module_init_cache_key("void init(void) {}", executable, file_hash_sha256_or_empty(executable), flags) == original).to_equal(false)
+        expect(simpleos_x86_64_user_module_init_cache_key("void init(void) {}", executable, digest, simpleos_x86_64_c_flags(2)) == original).to_equal(false)
+        expect(simpleos_x86_64_user_module_init_cache_key("void changed(void) {}", executable, digest, flags) == original).to_equal(false)
+        expect(dir_remove_all(scope)).to_equal(true)
+
+    it "isolates overlapping same-process staging without replacing the winner":
+        val owner = initializer_test_scope()
+        val first = initializer_test_scope()
+        val second = initializer_test_scope()
+        expect(first == second).to_equal(false)
+        val destination = "{owner}/published.o"
+        expect(file_write("{first}/module_init.o", "complete winner")).to_equal(true)
+        expect(file_write("{second}/module_init.o", "incomplete")).to_equal(true)
+        match file_publish_noreplace("{first}/module_init.o", destination):
+            case Ok(won): expect(won).to_equal(true)
+            case Err(e): expect(e).to_equal("")
+        expect(file_write("{second}/module_init.o", "completed loser")).to_equal(true)
+        match file_publish_noreplace("{second}/module_init.o", destination):
+            case Ok(won): expect(won).to_equal(false)
+            case Err(e): expect(e).to_equal("")
+        expect(file_read(destination)).to_equal("complete winner")
+        expect(dir_remove_all(first)).to_equal(true)
+        expect(dir_remove_all(second)).to_equal(true)
+        expect(dir_remove_all(owner)).to_equal(true)
+
+    it "cold-compiles concurrently in one PID and reuses the durable warm object":
+        val scope = initializer_test_scope()
+        val source = "/* {scope} */ void initializer_cache_regression(void) {}"
+        val first = thread_spawn(\:
+            match simpleos_x86_64_cached_user_module_init(source, 0):
+                case Ok(_): 1
+                case Err(_): 0
+        )
+        val second = thread_spawn(\:
+            match simpleos_x86_64_cached_user_module_init(source, 0):
+                case Ok(_): 1
+                case Err(_): 0
+        )
+        expect(first.join()).to_equal(1)
+        expect(second.join()).to_equal(1)
+        val object = match simpleos_x86_64_cached_user_module_init(source, 0):
+            case Ok(path): path
+            case Err(e):
+                expect(e).to_equal("")
+                ""
+        val digest = file_hash_sha256_or_empty(object)
+        expect(digest.len()).to_equal(64)
+        match simpleos_x86_64_cached_user_module_init(source, 0):
+            case Ok(path): expect(path).to_equal(object)
+            case Err(e): expect(e).to_equal("")
+        expect(file_hash_sha256_or_empty(object)).to_equal(digest)
+        expect(file_delete(object)).to_equal(true)
+        expect(dir_remove_all(scope)).to_equal(true)
