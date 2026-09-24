@@ -19,6 +19,7 @@ variants additionally honor `SIMPLE_GUI=1` per entry source.
 | `rendering_2d_extended.spl` | 2d / extended | Images, compositing, draggable overlapping panels, hit-tested click button | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_2d_extended.spl` |
 | `rendering_web_core.spl` | web / core | Browser-engine page: multi-line text, `<img>` fixture, scrollbar region | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_web_core.spl` |
 | `rendering_web_extended.spl` | web / extended | Tabs: forms-media, animation, aqua/glass/ios theme gallery | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_web_extended.spl` |
+| `rendering_webserver.spl` | webserver / full | Web-server GUI: item list served by the pure-Simple HTTP server (REQ-001); bounded serve, self-exits after one GET | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_webserver.spl` |
 
 ## Shared item list — web-server GUI (REQ-001)
 
@@ -47,7 +48,8 @@ SIMPLE_RENDERING_UI=web SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/u
 - `tui` runs the parser-backed TUI sdn loader in-process.
 - `gui` spawns `bin/simple ui gui <items>` (auto-detected GUI backend);
   honest-fails if no display/runtime is available.
-- `web` spawns `bin/simple ui web <items> --port 8080`, probes the port,
+- `web` spawns `rendering_webserver.spl` — the pure-Simple HTTP server
+  (REQ-001, no dependency on the `ui web` CLI) — sends a real GET probe,
   prints http://localhost:8080, and honest-fails on bind/spawn failure.
 
 ## Environment knobs

@@ -9,11 +9,15 @@
 #   tui -> TUI sdn loader: app.ui.tui.app.run_tui (parser-backed char-grid TUI)
 #   gui -> GUI sdn loader: spawns `bin/simple ui gui <items>` (the `gui` mode of
 #          src/app/ui/main.spl auto-detects tauri/electron/browser/web/tui)
-#   web -> spawns `bin/simple ui web <items> --port 8080`, prints the URL
+#   web -> spawns examples/06_io/ui/rendering/rendering_webserver.spl — the
+#          pure-Simple HTTP server (std.nogc_sync_mut.http_server, REQ-001),
+#          prints the URL; the entry self-exits after serving (bounded serve).
+#          POSIX only (spawns via `env` to pass SIMPLE_SHOWCASE_PORT).
 #
 # Honest-fail lines: `showcase status=blocked <reason>` / `showcase status=pass <path>`.
 
 use std.io_runtime.{env_get, file_exists}
+use std.common.string_core.{text_to_bytes}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use app.io.process_ops.{process_spawn_async, process_wait, process_is_running}
@@ -22,6 +26,7 @@ use app.ui.tui.app.{run_tui}
 
 val ITEMS_SDN: text = "examples/06_io/ui/rendering/rendering_items.ui.sdn"
 val WEB_PORT: i64 = 8080
+val WEBSERVER_ENTRY: text = "examples/06_io/ui/rendering/rendering_webserver.spl"
 
 fn main() -> i64:
     val mode = (env_get("SIMPLE_RENDERING_UI") ?? "tui").trim().lower()
@@ -75,21 +80,31 @@ fn run_web_branch(items_path: text) -> i64:
     if bin == "":
         print "showcase status=blocked web reason=no-simple-binary"
         return 2
-    val pid = process_spawn_async(bin, ["ui", "web", items_path, "--port", "{WEB_PORT}"])
+    val entry = path_join(resolve_repo_root(), WEBSERVER_ENTRY)
+    if not file_exists(entry):
+        print "showcase status=blocked web reason=missing-webserver-entry path={entry}"
+        return 2
+    val pid = process_spawn_async("env", ["SIMPLE_SHOWCASE_PORT={WEB_PORT}", bin, "run", entry])
     if pid <= 0:
         print "showcase status=blocked web reason=spawn-failed bin={bin}"
         return 2
     val addr = "127.0.0.1:{WEB_PORT}"
     var attempts = 0
-    while attempts < 40:
+    # The child needs minutes to compile the http stack under the seed before
+    # it binds; probe for up to 5 minutes. The orphaned child self-exits on
+    # its own serve cap if we give up first.
+    while attempts < 1200:
         if not process_is_running(pid):
             print "showcase status=blocked web reason=server-exited-early (bind failure on port {WEB_PORT}?)"
             return 2
         val probe = TcpStream.connect(addr)
         match probe:
             case Ok(stream):
+                stream.write(text_to_bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"))
+                val status_line = stream.read_line_or_empty()
                 stream.close()
-                print "Rendering items served at http://localhost:{WEB_PORT}"
+                print "Rendering items served at http://localhost:{WEB_PORT} ({status_line.trim()})"
+                process_wait(pid, 15000)
                 print "showcase status=pass http://localhost:{WEB_PORT} pid={pid}"
                 return 0
             case _:

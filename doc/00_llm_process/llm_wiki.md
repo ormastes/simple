@@ -48,8 +48,13 @@ names a repository capability whose implementation owner is ambiguous.
   `showcase status=blocked`, never a silent fallback. On gui/wm the knob is
   advisory: headless captures rasterize on CPU / compositor pixel buffer by
   design.
-- **Web-server GUI:** `bin/simple ui web examples/06_io/ui/rendering/rendering_items.ui.sdn --port 8080`
-  — currently BLOCKED by `doc/08_tracking/bug/ui_web_seed_exits_before_bind_2026-09-24.md`.
+- **Web-server GUI:** `rendering_webserver.spl` serves the item list via the
+  pure-Simple server (`std.nogc_sync_mut.http_server`, bounded serve,
+  self-exits after one GET) — the working REQ-001 path (verified over a real
+  socket). `bin/simple ui web <sdn> --port 8080` remains the CLI form but is
+  BLOCKED by `doc/08_tracking/bug/ui_web_seed_exits_before_bind_2026-09-24.md`;
+  `rendering_switch.spl` `web` branch spawns the entry directly (POSIX `env`
+  spawn) with a real GET probe.
 - **Verification:** spec `test/03_system/ui_showcase/rendering_showcases_spec.spl`
   (structural, 8 steps); runtime gates `scripts/check/check-rendering-showcase-closure.shs`
   (NFR-001) and `check-rendering-showcase-captures.shs` (NFR-002). Honest-fail
