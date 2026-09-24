@@ -43,6 +43,22 @@ if not "%SIMPLE_MCP_NATIVE%"=="" (
 )
 set "SIMPLE_RUNTIME=%REL%\simple.exe"
 if not "%SIMPLE_BINARY%"=="" set "SIMPLE_RUNTIME=%SIMPLE_BINARY%"
+rem A Windows host may run the GNU lane rather than MSVC (see
+rem config/host/<hostname>.sdn rustup_host_triple), and bin\release\<triple> may
+rem hold no deployed runtime at all -- both are true on a GNU-lane host, where
+rem the hardcoded MSVC path above resolves to nothing and this wrapper exited
+rem 127 with "no admitted simple_mcp_server.exe and no runtime at ...".  The
+rem sibling wrappers (simple_lsp_mcp_server.cmd, t32_mcp_server.cmd) do not hit
+rem this because they delegate to bin\simple.cmd, which probes further.  Probe
+rem the same places here.  An explicit SIMPLE_BINARY still wins over all of them.
+if not "%SIMPLE_BINARY%"=="" goto :runtime_resolved
+if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
+if exist "%~dp0release\x86_64-pc-windows-gnu\simple.exe" set "SIMPLE_RUNTIME=%~dp0release\x86_64-pc-windows-gnu\simple.exe"
+if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
+if exist "%~dp0..\src\compiler_rust\target\bootstrap\simple.exe" set "SIMPLE_RUNTIME=%~dp0..\src\compiler_rust\target\bootstrap\simple.exe"
+if exist "%SIMPLE_RUNTIME%" goto :runtime_resolved
+if exist "%~dp0simple.exe" set "SIMPLE_RUNTIME=%~dp0simple.exe"
+:runtime_resolved
 if not exist "%SIMPLE_RUNTIME%" (
     echo error: no admitted simple_mcp_server.exe and no runtime at %SIMPLE_RUNTIME% 1>&2
     exit /b 127

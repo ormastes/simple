@@ -58,10 +58,17 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
     printf '%s: ERROR — nothing was checked (exit 2)\n' "$name"
     exit 2
 }
-git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || git_dir="$repo_root/.git"
+# --git-common-dir alone is relative to the CWD, not to the repo root, so
+# joining it onto $repo_root from any subdirectory yields <repo>/../.git and
+# this check reports the guards unwired when they are wired. Ask git for the
+# absolute form; keep the relative join only as a fallback for git < 2.31,
+# resolving it against the CWD it was actually reported against.
+git_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+    git_dir=$(git rev-parse --git-common-dir 2>/dev/null) ||
+    git_dir="$repo_root/.git"
 case "$git_dir" in
-    /*) ;;
-    *) git_dir="$repo_root/$git_dir" ;;
+    /*|[A-Za-z]:/*|[A-Za-z]:\*) ;;
+    *) git_dir="$(CDPATH= cd -- "$git_dir" 2>/dev/null && pwd)" || git_dir="$repo_root/.git" ;;
 esac
 
 expected_guard="$repo_root/scripts/check/pre-push-conflict-tree-guard.shs"
