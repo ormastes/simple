@@ -30,14 +30,18 @@
 #   ERROR — nothing was checked                              exit 2
 # A run that performs 0 checks is an ERROR, never a pass.
 #
-# `--selftest` (added 2026-09-24): a POSIX-portable, filesystem-free fixture
-# for the absolute-path test below (`is_absolute_path`), plus its own
-# selftest of `--selftest` itself. It does not create real git repos —
-# unlike the sibling guards' selftests, the defect here is pure string
-# logic (does a `case` pattern recognize a Windows drive-letter path as
-# absolute?), which does not need a live filesystem to prove, and a
-# literal different-drive-letter fixture would not be portable to CI hosts
-# that have no D: drive at all.
+# `--selftest` (added 2026-09-24): started as a POSIX-portable,
+# filesystem-free fixture for the absolute-path test below
+# (`is_absolute_path`) -- the defect there is pure string logic (does a
+# `case` pattern recognize a Windows drive-letter path as absolute?), which
+# does not need a live filesystem to prove, and a literal
+# different-drive-letter fixture would not be portable to CI hosts that have
+# no D: drive at all. Extended 2026-09-25 (Opus review, SHOULD finding #2)
+# with ONE real-git-repo fixture for the PASS-only cache added that day: the
+# cache key hashed $expected_guard's CONTENT but not its exec bit, while
+# check 5 blocks on exec bit alone, so a cached PASS survived a bare
+# `chmod -x` with zero bytes touched. That defect needs a real filesystem to
+# reproduce, so this one fixture is not string-only like the other six.
 
 set -u
 
@@ -146,10 +150,113 @@ selftest() {
     return $_rc
 }
 
+# selftest_cache_exec_bit (Opus review 2026-09-25, SHOULD finding #2): a real
+# throwaway git repo wired so every one of the 12 checks below passes, run
+# through THIS SAME SCRIPT (via SELF_SCRIPT_PATH, resolved before this
+# function is ever called). First run must PASS and write the cache; a bare
+# `chmod -x` on $expected_guard afterward (no byte of any file touched) must
+# invalidate that cached PASS and produce a real FAIL, not a stale short-circuit
+# -- exactly the gap the guardExec fingerprint field above was added to close.
+#
+# PLATFORM PROBE FIRST: on an NTFS `noacl` Git-for-Windows/MSYS mount
+# (confirmed present on this host, 2026-09-25), the exec bit `[ -x ]` reports
+# is derived from file CONTENT (a `#!` shebang), not a real independent
+# permission bit -- `chmod +x`/`chmod -x` are accepted but do not change what
+# `[ -x ]` reports, on either a brand-new file or an existing tracked one.
+# That is a genuine host limitation, not a defect in the fix: on a real POSIX
+# filesystem (Linux, macOS, WSL, and this repo's own CI runners) `chmod -x`
+# unconditionally clears the bit `[ -x ]` reports, independent of content,
+# which is exactly the gap the review flagged. Running the byte-for-byte
+# fixture on a host where it cannot possibly reproduce would either hang on
+# an unreachable code path or silently pass for the wrong reason; probing
+# first and reporting which path ran keeps this honest instead of either.
+_cache_exec_bit_probe_supported() {
+    _pb_dir=$(mktemp -d 2>/dev/null) || return 1
+    printf 'plain, no shebang\n' > "$_pb_dir/plain"
+    printf '#!/bin/sh\nexit 0\n' > "$_pb_dir/shebanged"
+    chmod +x "$_pb_dir/plain"
+    chmod -x "$_pb_dir/shebanged"
+    _pb_ok=1
+    [ -x "$_pb_dir/plain" ] || _pb_ok=0
+    [ ! -x "$_pb_dir/shebanged" ] || _pb_ok=0
+    rm -rf "$_pb_dir"
+    [ "$_pb_ok" -eq 1 ]
+}
+selftest_cache_exec_bit() {
+    if ! _cache_exec_bit_probe_supported; then
+        echo "selftest-cache-exec-bit SKIPPED (reason recorded, not silent): this host's filesystem derives"
+        echo "  [ -x ] from file content (a shebang line), not an independent permission bit -- chmod"
+        echo "  cannot toggle it here, so the live PASS/chmod-x/FAIL round trip cannot reproduce."
+        echo "  Falling back to a static check that the fix is actually present in the source:"
+        if grep -Eq '^[[:space:]]*_guard_exec_bit=' "$SELF_SCRIPT_PATH" 2>/dev/null &&
+           grep -q "printf 'guardExec=%s" "$SELF_SCRIPT_PATH" 2>/dev/null; then
+            echo "  ok: the running script computes \$_guard_exec_bit and folds a guardExec= field into the cache fingerprint."
+            return 0
+        fi
+        echo "  FAILED: the running script no longer computes/folds a guardExec= fingerprint field."
+        return 1
+    fi
+    _cx_tmp=$(mktemp -d 2>/dev/null) || { echo "selftest-cache-exec-bit FAILED: mktemp -d failed"; return 1; }
+    _cx_repo="$_cx_tmp/repo"
+    mkdir -p "$_cx_repo/scripts/hooks" "$_cx_repo/scripts/check" "$_cx_repo/.git/hooks"
+    (
+        cd "$_cx_repo" || exit 1
+        git init -q
+        git config user.email t@example.com
+        git config user.name t
+        printf 'launcher\n' > scripts/hooks/pre-push-worktree-launcher
+        printf 'dispatcher\n' > scripts/hooks/pre-push
+        printf '#!/bin/sh\nexit 0\n' > scripts/check/pre-push-conflict-tree-guard.shs
+        chmod +x scripts/check/pre-push-conflict-tree-guard.shs
+        : > scripts/check/check-tree-size-push.shs
+        : > scripts/check/check-no-conflict-tree-push.shs
+        : > scripts/check/check-no-conflict-markers-push.shs
+        : > scripts/check/check-no-revert-push.shs
+        : > scripts/check/check-core-bare-sanity.shs
+        cp "$SELF_SCRIPT_PATH" scripts/check/check-hook-installation.shs 2>/dev/null || : > scripts/check/check-hook-installation.shs
+        # The actual git hook: byte-identical to the launcher, so check 4's
+        # `cmp -s "$hook" "$expected_launcher"` fallback is satisfied without
+        # needing a real symlink (not reliably creatable on every host).
+        cp scripts/hooks/pre-push-worktree-launcher .git/hooks/pre-push
+        chmod +x .git/hooks/pre-push
+        git add -A
+        git commit -q -m fixture
+    ) >/dev/null 2>&1
+
+    _cx_out1=$(cd "$_cx_repo" && sh "$SELF_SCRIPT_PATH" 2>&1)
+    _cx_rc1=$?
+    if [ "$_cx_rc1" -ne 0 ]; then
+        echo "selftest-cache-exec-bit FAILED: fixture's first (should-PASS) run did not pass: rc=$_cx_rc1 out=$_cx_out1"
+        rm -rf "$_cx_tmp"
+        return 1
+    fi
+    if [ ! -f "$_cx_repo/.git/simple-hook-install-check.cache" ]; then
+        echo "selftest-cache-exec-bit FAILED: no cache file was written after a PASS"
+        rm -rf "$_cx_tmp"
+        return 1
+    fi
+
+    chmod -x "$_cx_repo/scripts/check/pre-push-conflict-tree-guard.shs"
+    _cx_out2=$(cd "$_cx_repo" && sh "$SELF_SCRIPT_PATH" 2>&1)
+    _cx_rc2=$?
+    rm -rf "$_cx_tmp"
+    if [ "$_cx_rc2" -eq 0 ]; then
+        echo "selftest-cache-exec-bit FAILED: a bare chmod -x on the guard driver was served a STALE CACHED PASS (rc=0) instead of re-running and failing: $_cx_out2"
+        return 1
+    fi
+    echo "selftest-cache-exec-bit (chmod -x on the guard driver after a cached PASS invalidates the cache and re-fails) -> ok"
+    return 0
+}
+
+SELF_SCRIPT_PATH=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P)/$(basename -- "$0")
+
 case "${1:-}" in
     --selftest)
-        if selftest; then
-            echo "selftest: 6 fixture(s) passed"
+        _st_ok=1
+        selftest || _st_ok=0
+        selftest_cache_exec_bit || _st_ok=0
+        if [ "$_st_ok" -eq 1 ]; then
+            echo "selftest: 7 fixture(s) passed"
             exit 0
         fi
         echo "ERROR — nothing was checked (selftest failed)"
@@ -185,6 +292,106 @@ fi
 expected_guard="$repo_root/scripts/check/pre-push-conflict-tree-guard.shs"
 expected_dispatcher="$repo_root/scripts/hooks/pre-push"
 expected_launcher="$repo_root/scripts/hooks/pre-push-worktree-launcher"
+
+# --- PASS-only cache (2026-09-25, push_hook_plan.md item2, goal "hook adds
+# <=10s"). This script alone measured ~1.5s of the ~5s of fixed overhead in
+# every push (several git-rev-parse/readlink/cmp subshells plus a nested
+# check-core-bare-sanity.shs invocation), on top of the fast content guards it
+# gates. Its own verdict is a pure function of a small, enumerable set of
+# inputs (hook wiring files + two git-config booleans + this script's own
+# content), so an unchanged fingerprint can only ever recompute the SAME
+# verdict. Only a PASS is ever cached: an uncertain or broken wiring state
+# must always be re-examined, never short-circuited, so a FAIL/ERROR path
+# below never writes this cache and a stale cache is never trusted to mean
+# "still fine" -- only "still exactly this". Any hashing failure (a missing
+# file, an unwritable cache dir) degrades to running the full check, never to
+# skipping it.
+_cache_dir_raw=$(git rev-parse --git-dir 2>/dev/null) || _cache_dir_raw=""
+if [ -n "$_cache_dir_raw" ]; then
+    if is_absolute_path "$_cache_dir_raw"; then
+        _cache_dir=$_cache_dir_raw
+    else
+        _cache_dir="$repo_root/$_cache_dir_raw"
+    fi
+else
+    _cache_dir=""
+fi
+_cache_file=""
+_cache_key=""
+if [ -n "$_cache_dir" ] && [ -d "$_cache_dir" ]; then
+    _cache_file="$_cache_dir/simple-hook-install-check.cache"
+    _hooks_path_now=$(git config --get core.hooksPath 2>/dev/null || true)
+    _resolved_hooks_dir=""
+    if [ -n "$_hooks_path_now" ]; then
+        case "$_hooks_path_now" in
+            /*) _resolved_hooks_dir=$_hooks_path_now ;;
+            *) _resolved_hooks_dir="$repo_root/$_hooks_path_now" ;;
+        esac
+    fi
+    _hook_now="$git_dir/hooks/pre-push"
+    if [ -n "$_hooks_path_now" ] && [ -d "$_resolved_hooks_dir" ] && [ -e "$_resolved_hooks_dir/pre-push" ]; then
+        _hook_now="$_resolved_hooks_dir/pre-push"
+    fi
+    _hook_exec_bit="noexec"
+    [ -e "$_hook_now" ] && [ -x "$_hook_now" ] && _hook_exec_bit="exec"
+    _hook_target_now=$(readlink -f "$_hook_now" 2>/dev/null || echo "$_hook_now")
+    _ppl_now="$(dirname "$_hook_now")/pre-push.local"
+    # One batched `sha256sum` over every file this script's checks inspect,
+    # instead of one process per file (measured ~20-30ms per spawn on this
+    # host, so N separate hashes was a meaningful slice of this cache-key
+    # computation's own cost). A file that does not exist is recorded as
+    # "absent:<path>" instead of being fed to sha256sum, so an appear/
+    # disappear transition still changes the fingerprint.
+    #
+    # EXEC BIT (review finding #2, 2026-09-25): content alone is not enough
+    # for $expected_guard -- check 5 below (`[ ! -x "$expected_guard" ]`)
+    # blocks the push when the guard driver is not executable, but a content
+    # hash cannot see a permission-bit-only change (`chmod -x` with no byte
+    # touched). The exec bit of every file whose checks below actually test
+    # executability ($expected_guard as check 5's direct subject, plus the
+    # hook/dispatcher/launcher family already tracked via `_hook_exec_bit`)
+    # is folded into the fingerprint text explicitly, so a bare permission
+    # flip invalidates a cached PASS exactly like a content edit would.
+    set --
+    _missing_note=""
+    _guard_exec_bit="noexec"
+    [ -x "$expected_guard" ] && _guard_exec_bit="exec"
+    for _f in "$_hook_now" "$expected_guard" "$expected_dispatcher" "$expected_launcher" \
+              "$repo_root/scripts/check/check-core-bare-sanity.shs" "$_ppl_now" \
+              "$repo_root/scripts/check/check-tree-size-push.shs" \
+              "$repo_root/scripts/check/check-no-conflict-tree-push.shs" \
+              "$repo_root/scripts/check/check-no-conflict-markers-push.shs" \
+              "$repo_root/scripts/check/check-no-revert-push.shs" \
+              "$repo_root/scripts/check/check-hook-installation.shs"; do
+        if [ -e "$_f" ]; then
+            set -- "$@" "$_f"
+        else
+            _missing_note="$_missing_note
+absent:$_f"
+        fi
+    done
+    _hash_out=""
+    if [ "$#" -gt 0 ]; then
+        _hash_out=$(sha256sum -- "$@" 2>/dev/null)
+    fi
+    _fp=$(
+        printf 'hooksPath=%s\n' "$_hooks_path_now"
+        printf 'hookPath=%s exec=%s target=%s\n' "$_hook_now" "$_hook_exec_bit" "$_hook_target_now"
+        printf 'guardExec=%s\n' "$_guard_exec_bit"
+        printf '%s\n' "$_hash_out"
+        printf '%s\n' "$_missing_note"
+        printf 'core.verify=%s\n' "$(git config --get --type=bool core.verify 2>/dev/null || true)"
+        printf 'core.bare=%s\n' "$(git config --get --type=bool core.bare 2>/dev/null || true)"
+    ) 2>/dev/null
+    _cache_key=$(printf '%s' "$_fp" | sha256sum 2>/dev/null | awk '{print $1}')
+    if [ -n "$_cache_key" ] && [ -f "$_cache_file" ]; then
+        _stored_key=$(sed -n '1p' "$_cache_file" 2>/dev/null)
+        if [ "$_stored_key" = "$_cache_key" ]; then
+            tail -n +2 "$_cache_file" 2>/dev/null
+            exit 0
+        fi
+    fi
+fi
 
 # --- check 1: core.hooksPath must be unset, or point at a real directory that
 # actually contains a pre-push hook. This is the exact defect that let the
@@ -325,5 +532,13 @@ if [ "$fails" -gt 0 ]; then
     exit 1
 fi
 
-printf '%s: PASS — %d check(s) performed, hook wiring intact\n' "$name" "$checks"
+_pass_line=$(printf '%s: PASS — %d check(s) performed, hook wiring intact\n' "$name" "$checks")
+printf '%s' "$_pass_line"
+if [ -n "$_cache_key" ] && [ -n "$_cache_file" ]; then
+    {
+        printf '%s\n' "$_cache_key"
+        printf '%s' "$_pass_line"
+    } > "$_cache_file.tmp$$" 2>/dev/null && mv -f "$_cache_file.tmp$$" "$_cache_file" 2>/dev/null
+    rm -f "$_cache_file.tmp$$" 2>/dev/null
+fi
 exit 0

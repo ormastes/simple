@@ -107,6 +107,81 @@ die() {
 
 [ -n "$TMPD" ] || die 2 "cannot create a temporary directory (mktemp -d failed)"
 
+# --selftest (added 2026-09-25, push_hook_plan.md item2#3): a fail-closed
+# fixture for the "commits but 0 changed paths" branch below. Proves (1) a
+# message-only `git commit --amend` (real commits, tree byte-identical to
+# base -- exactly what a reworded-and-force-pushed commit produces) is now a
+# PASS naming the tree-identical reason, and (2) a range with a genuine
+# content change still scans normally rather than being accidentally routed
+# through the new short-circuit.
+if [ "${1:-}" = --selftest ]; then
+    st_fail=0
+    st_tmp=$(mktemp -d 2>/dev/null) || { echo "$SELF: ERROR — nothing was checked (mktemp -d failed)"; exit 2; }
+    trap 'rm -rf "$TMPD" "$st_tmp" 2>/dev/null' EXIT HUP INT TERM
+    st_self=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P)/$(basename -- "$0")
+
+    st_repo1="$st_tmp/amend-repo"
+    mkdir -p "$st_repo1/scripts/check"
+    cp "$st_self" "$st_repo1/scripts/check/check-no-conflict-markers-push.shs"
+    (
+        cd "$st_repo1" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'hello\n' > f.txt
+        git add f.txt
+        git commit -q -m "initial"
+        st_base=$(git rev-parse HEAD)
+        git commit -q --amend -m "initial (reworded)"
+        st_tip=$(git rev-parse HEAD)
+        sh scripts/check/check-no-conflict-markers-push.shs "$st_base..$st_tip" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc1=$(cat "$st_repo1/rc.txt" 2>/dev/null)
+    st_out1=$(cat "$st_repo1/out.txt" 2>/dev/null)
+    if [ "$st_rc1" = "0" ] && printf '%s' "$st_out1" | "$GREP" -q "PASS — 0 paths changed (tree identical to base"; then
+        echo "$SELF: selftest fixture 1 (message-only amend, tree identical) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 1 FAILED (message-only amend should PASS as tree-identical): rc=$st_rc1 out=$st_out1" >&2
+        st_fail=1
+    fi
+
+    st_repo2="$st_tmp/normal-repo"
+    mkdir -p "$st_repo2/scripts/check"
+    cp "$st_self" "$st_repo2/scripts/check/check-no-conflict-markers-push.shs"
+    (
+        cd "$st_repo2" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'hello\n' > f.txt
+        git add f.txt
+        git commit -q -m "initial"
+        st_base=$(git rev-parse HEAD)
+        printf 'hello\nworld\n' > f.txt
+        git add f.txt
+        git commit -q -m "second"
+        st_tip=$(git rev-parse HEAD)
+        sh scripts/check/check-no-conflict-markers-push.shs "$st_base..$st_tip" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc2=$(cat "$st_repo2/rc.txt" 2>/dev/null)
+    st_out2=$(cat "$st_repo2/out.txt" 2>/dev/null)
+    if [ "$st_rc2" = "0" ] && ! printf '%s' "$st_out2" | "$GREP" -q "tree identical"; then
+        echo "$SELF: selftest fixture 2 (real content change scans normally, no short-circuit) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 2 FAILED (a real content change must not take the tree-identical branch): rc=$st_rc2 out=$st_out2" >&2
+        st_fail=1
+    fi
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "$SELF: ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "$SELF: selftest: 2 fixture(s) passed"
+    exit 0
+fi
+
 # Paths to skip entirely even if they somehow contain a matching pair (e.g. a
 # deliberate test fixture). One path per line — NOT space-separated, because
 # tracked paths may contain spaces. Empty by default; add a path only with a
@@ -306,6 +381,24 @@ done
 exec 3<&-
 
 if [ "$nlines" -eq 0 ]; then
+    # A range with commits but 0 changed paths is USUALLY the caller-error
+    # shape this guard exists to refuse (see the die below) -- but it is also
+    # exactly what a message-only `git commit --amend` followed by a
+    # force-push produces: real commits, a tip whose TREE is byte-identical
+    # to the base's tree, and therefore nothing whatsoever for this guard to
+    # scan. Refusing that case blocked a legitimate push with no marker risk
+    # at all. Distinguish the two mechanically, never by trusting the empty
+    # diff alone: only when the LEFT and TIP commits' trees are PROVEN
+    # identical (a real `git rev-parse ...^{tree}` equality, not an assumed
+    # one) is this a pass; every other 0-path shape (unreadable endpoint,
+    # tree lookup failure, or a genuine caller error) still falls through to
+    # the ERROR below, unchanged.
+    left_tree=$(git rev-parse --verify --quiet "$left^{tree}" 2>/dev/null) || left_tree=""
+    tip_tree=$(git rev-parse --verify --quiet "$tip^{tree}" 2>/dev/null) || tip_tree=""
+    if [ -n "$left_tree" ] && [ -n "$tip_tree" ] && [ "$left_tree" = "$tip_tree" ]; then
+        echo "$SELF: PASS — 0 paths changed (tree identical to base; $ncommits commit(s), $range)"
+        exit 0
+    fi
     die 2 "range '$range' contains $ncommits commit(s) but 0 changed paths.
   Nothing could be scanned, so this guard cannot vouch for the push. If the
   commits really are empty, they should not be pushed either."

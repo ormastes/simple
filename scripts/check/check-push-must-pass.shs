@@ -349,6 +349,84 @@ run_push_gate() {
     return 0
 }
 
+
+# run_three_push_gates_parallel: PARALLEL fast path for the three blocking
+# gates that actually run through run_manifest_push_gates's loop (push-tree-size,
+# push-conflict-markers, push-runtime-api-regression -- push-conflict-tree is
+# the manifest's fourth blocking row but it is already run, unconditionally
+# sequentially, by run_conflict_tree_union BEFORE this function is ever
+# called, gated by MUST_CHECK_CONFLICT_UNION_DONE). Sequential on this host
+# measured push-tree-size alone at ~3.5s of a ~5s blocking-gate total; running
+# the three concurrently instead of one after another is the O1-approved fix
+# (push_hook_plan.md item2/O1). Never called directly by the manifest loop --
+# it is only entered from a fail-closed signature check at the top of
+# run_manifest_push_gates below, so any manifest/dispatcher drift away from
+# the exact three known rows falls straight back to the ordinary sequential
+# case-statement loop, unchanged.
+run_three_push_gates_parallel() {
+    _p_range=$1
+    _left=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
+    if [ "$_left" -le 0 ]; then
+        MUST_CHECK_BUDGET_OVERRUN=push-tree-size
+        echo "push-must-check: ERROR — blocking gate push-tree-size not run: the ${MUST_CHECK_BUDGET_MS}ms blocking budget is exhausted (${MUST_CHECK_BUDGET_SPENT_MS}ms spent)" >&2
+        return 1
+    fi
+    _left_s="$(( _left / 1000 )).$(printf '%03d' $(( _left % 1000 )))"
+    _pw=$(mktemp -d) || return 1
+    _t0=$(push_now_ms)
+
+    "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_p_range" \
+        >"$_pw/tree-size.out" 2>&1 &
+    _pid_ts=$!
+    "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_p_range" \
+        >"$_pw/markers.out" 2>&1 &
+    _pid_cm=$!
+    if [ -n "$RUNTIME_API_EXPECT_REMOVALS" ]; then
+        "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only --expect-removals "$RUNTIME_API_EXPECT_REMOVALS" "$_p_range" \
+            >"$_pw/rtapi.out" 2>&1 &
+    else
+        "$TIMEOUT_BIN" -k 2 "$_left_s" sh "$ROOT/scripts/check/check-runtime-api-regression-push.shs" --scan-only "$_p_range" \
+            >"$_pw/rtapi.out" 2>&1 &
+    fi
+    _pid_rt=$!
+
+    wait "$_pid_ts"; _rc_ts=$?
+    _ms_ts=$(( $(push_now_ms) - _t0 ))
+    wait "$_pid_cm"; _rc_cm=$?
+    _ms_cm=$(( $(push_now_ms) - _t0 ))
+    wait "$_pid_rt"; _rc_rt=$?
+    _ms_rt=$(( $(push_now_ms) - _t0 ))
+
+    _batch_ms=$(( $(push_now_ms) - _t0 ))
+    MUST_CHECK_BUDGET_SPENT_MS=$(( MUST_CHECK_BUDGET_SPENT_MS + _batch_ms ))
+    MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 3 ))
+
+    cat "$_pw/tree-size.out" 2>/dev/null
+    echo "push-must-check: gate push-tree-size exit=$_rc_ts ${_ms_ts}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
+    cat "$_pw/markers.out" 2>/dev/null
+    echo "push-must-check: gate push-conflict-markers exit=$_rc_cm ${_ms_cm}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
+    cat "$_pw/rtapi.out" 2>/dev/null
+    echo "push-must-check: gate push-runtime-api-regression exit=$_rc_rt ${_ms_rt}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms, parallel batch)" >&2
+    rm -rf "$_pw"
+
+    _fail=0
+    for _pair in "push-tree-size:$_rc_ts" "push-conflict-markers:$_rc_cm" "push-runtime-api-regression:$_rc_rt"; do
+        _gid=${_pair%%:*}; _grc=${_pair#*:}
+        case "$_grc" in
+            0) : ;;
+            124|137)
+                MUST_CHECK_BUDGET_OVERRUN=$_gid
+                echo "push-must-check: ERROR — blocking gate $_gid killed at the push budget (${MUST_CHECK_BUDGET_SPENT_MS}ms of ${MUST_CHECK_BUDGET_MS}ms); its verdict is UNKNOWN, not a pass. Split the push, or run the slow tier: sign-local-ci-receipt.shs --run --tier local" >&2
+                _fail=1 ;;
+            *)
+                echo "push-must-check: BLOCKING gate $_gid failed (exit $_grc)" >&2
+                _fail=1 ;;
+        esac
+    done
+    [ "$_fail" -eq 0 ] && return 0
+    return 1
+}
+
 run_manifest_push_gates() {
     _manifest=$1
     _range=$2
@@ -417,6 +495,52 @@ run_manifest_push_gates() {
     rm -f "$_push_dispatch" "$_push_dispatch.count"
     mv -f "$_push_run" "$_push_rows" || { rm -f "$_push_run" "$_push_rows"; return 2; }
     _tab=$(printf '\t')
+
+    # PARALLEL FAST PATH (2026-09-25, push_hook_plan.md item2/O1): only taken
+    # when the surviving push rows are EXACTLY the four known blocking rows,
+    # in their known manifest order, with their exact known commands, AND the
+    # conflict-tree union has already run (so the first row is a guaranteed
+    # no-op here). Any manifest edit, reorder, added row, or dispatcher drift
+    # away from this exact signature falls straight through to the unmodified
+    # sequential case-statement loop below -- fail-closed to the slower but
+    # certainly-correct path, never to skipping a gate. SIMPLE_PUSH_SEQUENTIAL_GATES=1
+    # forces the sequential path unconditionally, for A/B timing verification.
+    #
+    # `command -v run_three_push_gates_parallel` is a second, independent
+    # fail-closed belt: load_committed_dispatcher (above in this file) loads
+    # the helper from the committed copy alongside a committed
+    # run_manifest_push_gates, but this signature check itself can also be
+    # reached from an OLDER run_manifest_push_gates that a NEWER committed
+    # copy overwrote only partially in some future refactor, or from a caller
+    # that invokes this function directly (as the --self-test fixture below
+    # does) without going through load_committed_dispatcher at all. Taking
+    # the fast path when the helper function does not actually exist would
+    # resolve the call at line ~537 to a shell "command not found" (rc 127),
+    # which reads as a BLOCKING gate failure on an otherwise-clean push.
+    if [ "${SIMPLE_PUSH_SEQUENTIAL_GATES:-0}" != 1 ] && [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] && \
+       command -v run_three_push_gates_parallel >/dev/null 2>&1; then
+        _rows_n=$(wc -l < "$_push_rows" | tr -d ' ')
+        if [ "$_rows_n" -eq 4 ]; then
+            _fp_r1=$(sed -n '1p' "$_push_rows")
+            _fp_r2=$(sed -n '2p' "$_push_rows")
+            _fp_r3=$(sed -n '3p' "$_push_rows")
+            _fp_r4=$(sed -n '4p' "$_push_rows")
+            _fp_want1=$(printf 'push-conflict-tree\ttrue\trange\tsh scripts/check/check-no-conflict-tree-push.shs {range}')
+            _fp_want2=$(printf 'push-tree-size\ttrue\trange\tsh scripts/check/check-tree-size-push.shs --push-tip {range}')
+            _fp_want3=$(printf 'push-conflict-markers\ttrue\trange\tsh scripts/check/check-no-conflict-markers-push.shs {range}')
+            _fp_want4=$(printf 'push-runtime-api-regression\ttrue\trange\tsh scripts/check/check-runtime-api-regression-push.shs --scan-only {range}')
+            if [ "$_fp_r1" = "$_fp_want1" ] && [ "$_fp_r2" = "$_fp_want2" ] && \
+               [ "$_fp_r3" = "$_fp_want3" ] && [ "$_fp_r4" = "$_fp_want4" ]; then
+                run_three_push_gates_parallel "$_range"
+                _fastpath_rc=$?
+                rm -f "$_push_rows"
+                [ "$_advisory_skipped" -eq 0 ] ||
+                    echo "push-must-check: $_advisory_skipped advisory gate(s) skipped on this push (MUST_CHECK_ADVISORY=1 runs them; they never block)" >&2
+                return "$_fastpath_rc"
+            fi
+        fi
+    fi
+
     while IFS="$_tab" read -r _id _blocking _mode _command; do
         case "$_id:$_mode:$_command" in
             'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs {range}')
@@ -817,6 +941,20 @@ run_manifest_push_gates() {
 # copy carries one; an older commit without it keeps the running definition.
 load_committed_dispatcher() {
     _committed_self=$(git -C "$ROOT" show "$1:$SELF_REL" 2>/dev/null) || return 0
+    # Load the PARALLEL-BATCH HELPER first, and from the same committed text,
+    # if the committed copy carries one. Review finding (2026-09-25, WP3
+    # follow-up): a committed run_manifest_push_gates newer than the running
+    # script can call run_three_push_gates_parallel, a function the OLDER
+    # running script never defined -- eval'ing only the newer
+    # run_manifest_push_gates left that call resolving to nothing, i.e. a
+    # shell "command not found" (rc 127), which run_manifest_push_gates's own
+    # `|| { rm -f "$_push_rows"; return 1; }` tail turns into a FALSE BLOCK of
+    # an otherwise-clean push. Loading the helper's own committed definition
+    # alongside the function that calls it closes that gap; an older commit
+    # with neither block present leaves the running script's own definitions
+    # (if any) in place, unchanged.
+    _committed_helper=$(printf '%s\n' "$_committed_self" | sed -n '/^run_three_push_gates_parallel() {$/,/^}$/p')
+    [ -z "$_committed_helper" ] || eval "$_committed_helper"
     _committed_fn=$(printf '%s\n' "$_committed_self" | sed -n '/^run_manifest_push_gates() {$/,/^}$/p')
     [ -n "$_committed_fn" ] || return 0
     eval "$_committed_fn"
@@ -988,7 +1126,64 @@ if [ "${1:-}" = --self-test ]; then
     _rc=$?
     [ "$_rc" -eq 2 ] || die "unmatched dispatch-arm row did not return 2 (got $_rc)"
 
-    echo "push-must-check: PASS — 23 ledger/budget/dispatcher fixtures checked"
+    # Committed-dispatcher-newer-than-running-script fixture (Opus review
+    # 2026-09-25, MUST finding #1): replays the exact incident shape --
+    # load_committed_dispatcher redefines run_manifest_push_gates from the
+    # PUSHED commit's copy of this file, and if that copy's
+    # run_manifest_push_gates calls run_three_push_gates_parallel while the
+    # RUNNING script (an older checkout mid-rollout) never defined that
+    # helper, the call used to resolve to a shell "command not found" (rc
+    # 127) -- read by every existing caller as a blocking gate FAILURE on an
+    # otherwise-clean push. load_committed_dispatcher now also loads the
+    # helper's own definition out of the same committed text, so this must
+    # PASS even when the in-memory (pre-fix-simulated) helper is absent.
+    # Placed LAST because it deliberately clobbers the in-memory
+    # run_manifest_push_gates/run_three_push_gates_parallel definitions this
+    # process started with; nothing after this point may depend on them.
+    _ncd_tmp=$(mktemp -d) || die "cannot create newer-committed-dispatcher fixture dir"
+    _ncd_repo="$_ncd_tmp/repo"
+    mkdir -p "$_ncd_repo/scripts/check"
+    _ncd_marker="$_ncd_tmp/marker"
+    (
+        cd "$_ncd_repo" || exit 1
+        git init -q
+        git config user.email t@example.com
+        git config user.name t
+        {
+            printf 'run_three_push_gates_parallel() {\n'
+            printf '    printf "%%s" "ncd-helper-ran" > "%s"\n' "$_ncd_marker"
+            printf '    return 0\n'
+            printf '}\n'
+            printf 'run_manifest_push_gates() {\n'
+            printf '    run_three_push_gates_parallel "$1"\n'
+            printf '}\n'
+        } > scripts/check/check-push-must-pass.shs
+        git add scripts/check/check-push-must-pass.shs
+        git commit -q -m fixture
+    ) >/dev/null 2>&1
+    _ncd_rev=$(git -C "$_ncd_repo" rev-parse HEAD 2>/dev/null)
+    [ -n "$_ncd_rev" ] || die "newer-committed-dispatcher fixture: could not create fixture commit"
+
+    # Simulate the OLDER running script: no run_three_push_gates_parallel at
+    # all, and a stale run_manifest_push_gates that must NOT be what runs.
+    unset -f run_three_push_gates_parallel 2>/dev/null
+    eval 'run_manifest_push_gates() { echo "push-must-check: FIXTURE BUG -- stale in-memory function ran instead of the committed copy" >&2; return 9; }'
+
+    _ncd_saved_root=$ROOT
+    ROOT=$_ncd_repo
+    load_committed_dispatcher "$_ncd_rev"
+    run_manifest_push_gates "irrelevant-range"
+    _ncd_rc=$?
+    ROOT=$_ncd_saved_root
+
+    if [ "$_ncd_rc" -ne 0 ]; then
+        die "committed-dispatcher-newer-than-running-script: run_manifest_push_gates returned $_ncd_rc (expected 0 -- rc 127 means the helper was never loaded)"
+    fi
+    [ -f "$_ncd_marker" ] && [ "$(cat "$_ncd_marker" 2>/dev/null)" = "ncd-helper-ran" ] ||
+        die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
+    rm -rf "$_ncd_tmp"
+
+    echo "push-must-check: PASS — 24 ledger/budget/dispatcher fixtures checked"
     exit 0
 fi
 
