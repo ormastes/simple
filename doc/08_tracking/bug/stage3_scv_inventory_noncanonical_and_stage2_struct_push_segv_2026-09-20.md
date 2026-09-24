@@ -81,3 +81,34 @@ field out of the array yields text, not an address.
 - Fix bug 2 with this fixture as the red test, then check whether the same array-of-struct store/alias defect explains bug 1.
 - Re-run the FreeBSD Stage 3 resume: `sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=… --bootstrap-receipt=…` with the checker's env plus `SIMPLE_SCV_INVENTORY_COLD_INIT=1`.
 - Size `QEMU_MEM` from the post-fix Stage 3 peak. The current default of 8 GB cannot hold the 28.4 GB measured here.
+
+## Update 2026-09-22 — admitted Stage 2 still reproduces the SCV failure
+
+The FreeBSD 14.4 QEMU guest resumed Stage 3 from its admitted Stage 2 receipt
+with `SIMPLE_SCV_INVENTORY_COLD_INIT=1` and eight native-build threads. The
+compiler ran for about 2 h 50 min, reached about 26.3 GiB RSS, and failed with
+`SCV-E-ADMISSION: git-event-apply:inventory-noncanonical`. The Stage 3 status
+receipt says `status=fail`, `shell_exit_status=1`; no Stage 3 compiler was
+admitted. Guest memory was 32 GiB, with a temporary 4 GiB disk-backed swap
+device added when free memory became low. That swap device was removed after
+the failed build.
+
+The immutable failed inventory is
+`build/scv/source-inventory/generations/7c34dc92d3ae782490417c29f901089048534dfbb73bb0a13078c1b3238597bb.inventory`.
+Its SHA-256 matches its filename. It has 16,802 distinct seven-field rows,
+generation 16,802, and **1,886 adjacent bytewise lexical inversions**. The
+header count, row widths, numeric byte counts, and absence of NUL/CR bytes
+were checked separately. This confirms the same bug on the newer admitted
+compiler (`c2c88d0af3f495d0902b3c21550c3a0b5edbc2438cf44d03991346902f252cf6`),
+without attributing it to the text comparator or array mutation yet.
+
+An isolated two-file MIR type-fallback patch was reviewed and discarded:
+declared struct-text fields already have MIR and HIR type propagation in the
+normal field paths, so adding another comparison fallback was not proved to
+change this sort. A small native reproducer built through LLVM object code,
+but its first link lacked `SIMPLE_PROJECT_ROOT`; a later link timed out while
+compiling the hosted runtime. The guest has LLVM 18 `llc` and no default
+`llc` or LLVM 23 `llc`, so the diagnostic explicitly selected LLVM 18.
+No native comparison result was obtained. The next fix must first reproduce
+the array-of-struct field read and sort in one native executable, then inspect
+the emitted comparison path before changing MIR or SCV publication.
