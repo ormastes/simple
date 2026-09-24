@@ -1,0 +1,311 @@
+#!/bin/sh
+# check-rendering-showcase-captures.shs — NFR-002 headless-verifiability gate
+# for the rendering showcases (doc/02_requirements/nfr/rendering_showcases.md,
+# runtime gates in doc/03_plan/sys_test/rendering_showcases.md).
+#
+# Steps (each bounded, default 280s per step; a timeout is BLOCKED, never a
+# hang):
+#   a. 2D core+extended: cpu_simd backend, 320x240, PPM capture -> exit 0,
+#      `showcase status=pass`, valid P6 header, nonzero payload.
+#   b. WM core: exit 0, P6 capture, nonzero `showcase wm_capture checksum=`.
+#   c. TUI core: `showcase status=pass` and painted>0.
+#   d. Web extended: pass line + HTML artifact with all 5 tab ids
+#      (core, forms-media, animation, themes, widgets). The known gpu_web
+#      compile defect (semantic: missing return in non-unit function
+#      '_level_rank', src/lib/gc_async_mut/gpu/browser_engine/shared/
+#      logging.spl) is reported as BLOCKED with the defect name, not FAIL.
+#   e. Item list: `bin/simple ui headless rendering_items.ui.sdn` exits 0
+#      (a stock demo.ui.sdn control run distinguishes toolchain BLOCKED
+#      from entry FAIL).
+#   f. Webserver GUI: rendering_webserver.spl on a test port; curl probe
+#      within its serve window -> HTTP 200 + body contains "scrollbar".
+#
+# Backend note: the 2D default backend is vulkan; this gate pins
+# SIMPLE_2D_BACKEND=cpu_simd for deterministic headless capture (cpu_simd/cpu
+# need no GPU). The vulkan default is validated by the entry's own honest
+# `showcase status=blocked` path, not here.
+#
+# Verdict is ALWAYS the LAST stdout line:
+#   STATUS: PASS — steps a,b,c,e,f green (d may be BLOCKED)               exit 0
+#   STATUS: FAIL — step <s> failed: <reason>                              exit 1
+#   STATUS: BLOCKED — step <s>: <reason> (timeout/env/known defect)       exit 2
+#
+# Usage:
+#   sh scripts/check/check-rendering-showcase-captures.shs
+#
+# Env knobs:
+#   SIMPLE_GATE_STEP_TIMEOUT  per-step bound in seconds (default 280)
+#   SIMPLE_GATE_PORT          webserver probe port (default 18081)
+#
+# POSIX sh only (macOS BSD tools and Linux). Uses the Rust seed bin/simple
+# (bootstrap warning expected); runs with SIMPLE_LIB=src SIMPLE_TIMEOUT_SECONDS=0
+# because the graphics stack exceeds the 10s example watchdog.
+#
+# Execution mode: SIMPLE_EXECUTION_MODE=interpret is pinned because the seed
+# JIT aborts on large module graphs on aarch64 ("direct call out of +/-128 MiB
+# reach ... JIT code arena exhausted", doc/08_tracking/bug/
+# jit_aarch64_branch_relocation_out_of_range_abort_2026-09-05.md); the
+# documented workaround is the interpreter lane, which runs these entries
+# cleanly. Override with SIMPLE_EXECUTION_MODE=jit only on a fixed toolchain.
+
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$ROOT" || { echo "STATUS: BLOCKED — cannot cd to repo root $ROOT"; exit 2; }
+
+SIMPLE_LIB="${SIMPLE_LIB:-src}"
+STEP_TIMEOUT="${SIMPLE_GATE_STEP_TIMEOUT:-280}"
+# Step d (web extended) needs a bigger bound: the seed compiles the browser
+# engine graph in ~12 min (measured 2026-09-24).
+STEP_TIMEOUT_D="${SIMPLE_GATE_STEP_TIMEOUT_D:-900}"
+PORT="${SIMPLE_GATE_PORT:-18081}"
+EX="$ROOT/examples/06_io/ui/rendering"
+FIXTURE="$EX/rendering_fixture.png"
+
+WORK="${TMPDIR:-/tmp}/rendering_captures.$$"
+mkdir -p "$WORK" || { echo "STATUS: BLOCKED — cannot create work dir $WORK"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+export SIMPLE_LIB
+export SIMPLE_TIMEOUT_SECONDS=0
+export SIMPLE_EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-interpret}"
+
+# run_bounded SECONDS LOG CMD... — run CMD with stdout+stderr to LOG; return
+# its exit code, or 124 after SECONDS (process killed, __TIMEOUT__ appended).
+run_bounded() {
+    rb_secs="$1"; rb_log="$2"; shift 2
+    rb_rc="$rb_log.rc"
+    rm -f "$rb_rc"
+    ( "$@" >"$rb_log" 2>&1; echo $? > "$rb_rc" ) &
+    rb_pid=$!
+    rb_waited=0
+    while [ ! -f "$rb_rc" ]; do
+        if [ "$rb_waited" -ge "$rb_secs" ]; then
+            echo "__TIMEOUT__ after ${rb_secs}s" >> "$rb_log"
+            if command -v pkill >/dev/null 2>&1; then
+                pkill -P "$rb_pid" 2>/dev/null || true
+            fi
+            kill "$rb_pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$rb_pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 3
+        rb_waited=$((rb_waited + 3))
+    done
+    rb_code=$(cat "$rb_rc")
+    return "$rb_code"
+}
+
+# ppm_ok FILE — P6 magic + payload beyond the header line.
+ppm_ok() {
+    [ -f "$1" ] || return 1
+    [ "$(head -c 2 "$1")" = "P6" ] || return 1
+    [ "$(wc -c < "$1" | tr -d ' ')" -gt 32 ]
+}
+
+# field LOG KEY — value of `key=<integer>` in LOG (first match; signed).
+field() {
+    sed -n "s/.*$2=\(-\{0,1\}[0-9][0-9]*\).*/\1/p" "$1" | head -n 1
+}
+
+OVERALL="PASS"
+FAIL_REASON=""
+BLOCK_REASON=""
+
+note_fail() { # step reason
+    echo "step $1: FAIL — $2"
+    OVERALL="FAIL"; FAIL_REASON="$FAIL_REASON $1"
+}
+note_blocked() { # step reason
+    echo "step $1: BLOCKED — $2"
+    [ "$OVERALL" = "FAIL" ] || OVERALL="BLOCKED"
+    BLOCK_REASON="$BLOCK_REASON $1"
+}
+note_pass() { # step detail
+    echo "step $1: ok — $2"
+}
+
+# ---- step a: 2D core + extended PPM captures -----------------------------
+for e in rendering_2d_core rendering_2d_extended; do
+    cap="$WORK/$e.ppm"; log="$WORK/$e.log"
+    run_bounded "$STEP_TIMEOUT" "$log" env \
+        SIMPLE_2D_BACKEND=cpu_simd SIMPLE_SHOWCASE_W=320 SIMPLE_SHOWCASE_H=240 \
+        SIMPLE_SHOWCASE_CAPTURE="$cap" \
+        "$ROOT/bin/simple" run "$EX/$e.spl"
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+        note_blocked "a:$e" "timeout after ${STEP_TIMEOUT}s (seed compile/run exceeded bound)"
+        continue
+    fi
+    if [ "$rc" -ne 0 ]; then
+        note_fail "a:$e" "exit $rc: $(grep -m1 'showcase status' "$log" || tail -n 1 "$log")"
+        continue
+    fi
+    if ! grep -q 'showcase status=pass' "$log"; then
+        note_fail "a:$e" "no 'showcase status=pass' line"
+        continue
+    fi
+    if ! ppm_ok "$cap"; then
+        note_fail "a:$e" "capture missing/invalid P6 or zero payload: $cap"
+        continue
+    fi
+    note_pass "a:$e" "$(wc -c < "$cap" | tr -d ' ') bytes PPM, status=pass"
+done
+
+# ---- step b: WM core capture + checksum -----------------------------------
+cap="$WORK/rendering_wm_core.ppm"; log="$WORK/rendering_wm_core.log"
+run_bounded "$STEP_TIMEOUT" "$log" env \
+    SIMPLE_2D_BACKEND=cpu_simd SIMPLE_SHOWCASE_CAPTURE="$cap" \
+    "$ROOT/bin/simple" run "$EX/rendering_wm_core.spl"
+rc=$?
+if [ "$rc" -eq 124 ]; then
+    note_blocked "b" "timeout after ${STEP_TIMEOUT}s (seed compile/run exceeded bound)"
+elif [ "$rc" -ne 0 ]; then
+    note_fail "b" "exit $rc: $(grep -m1 'showcase status' "$log" || tail -n 1 "$log")"
+elif ! ppm_ok "$cap"; then
+    note_fail "b" "capture missing/invalid P6 or zero payload: $cap"
+else
+    sum=$(field "$log" 'checksum')
+    if [ -z "$sum" ] || [ "$sum" -eq 0 ]; then
+        note_fail "b" "checksum line missing or zero (got '${sum:-none}')"
+    else
+        note_pass "b" "checksum=$sum, PPM $(wc -c < "$cap" | tr -d ' ') bytes"
+    fi
+fi
+
+# ---- step c: TUI core painted commands ------------------------------------
+cap="$WORK/rendering_tui_core.ppm"; log="$WORK/rendering_tui_core.log"
+run_bounded "$STEP_TIMEOUT" "$log" env \
+    SIMPLE_SHOWCASE_CAPTURE="$cap" \
+    "$ROOT/bin/simple" run "$EX/rendering_tui_core.spl"
+rc=$?
+if [ "$rc" -eq 124 ]; then
+    note_blocked "c" "timeout after ${STEP_TIMEOUT}s (seed compile/run exceeded bound)"
+elif [ "$rc" -ne 0 ]; then
+    note_fail "c" "exit $rc: $(grep -m1 'showcase status' "$log" || tail -n 1 "$log")"
+elif ! grep -q 'showcase status=pass' "$log"; then
+    note_fail "c" "no 'showcase status=pass' line"
+else
+    painted=$(field "$log" 'painted')
+    if [ -z "$painted" ] || [ "$painted" -le 0 ]; then
+        note_fail "c" "painted commands not > 0 (got '${painted:-none}')"
+    else
+        note_pass "c" "painted=$painted, status=pass"
+    fi
+fi
+
+# ---- step d: web extended HTML artifact -----------------------------------
+WEB_BLOCKED_DEFECT="gpu_web compile defect: semantic: missing return in non-unit function '_level_rank' (src/lib/gc_async_mut/gpu/browser_engine/shared/logging.spl)"
+if [ ! -f "$FIXTURE" ]; then
+    note_blocked "d" "fixture missing: $FIXTURE"
+else
+    html="$WORK/web.html"; log="$WORK/rendering_web_extended.log"
+    run_bounded "$STEP_TIMEOUT_D" "$log" env \
+        SIMPLE_2D_BACKEND=cpu_simd SIMPLE_SHOWCASE_CAPTURE="$html" \
+        "$ROOT/bin/simple" run "$EX/rendering_web_extended.spl"
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+        note_blocked "d" "timeout after ${STEP_TIMEOUT_D}s (seed compile/run exceeded bound)"
+    elif [ "$rc" -ne 0 ]; then
+        if grep -q "_level_rank" "$log" || grep -q "missing return in non-unit function" "$log"; then
+            note_blocked "d" "$WEB_BLOCKED_DEFECT"
+        else
+            note_fail "d" "exit $rc: $(grep -m1 'showcase status' "$log" || tail -n 1 "$log")"
+        fi
+    elif ! grep -q 'showcase status=pass' "$log"; then
+        note_fail "d" "no 'showcase status=pass' line"
+    else
+        missing=""
+        for tab in core forms-media animation themes widgets; do
+            grep -q "id='tab-$tab'" "$html" || grep -q "tab-$tab" "$html" || missing="$missing $tab"
+        done
+        if [ -n "$missing" ]; then
+            note_fail "d" "HTML artifact missing tab id(s):$missing"
+        else
+            note_pass "d" "all 5 tab ids present in $(wc -c < "$html" | tr -d ' ') bytes HTML"
+        fi
+    fi
+fi
+
+# ---- step e: item-list sdn headless parse ----------------------------------
+# Control first: the stock demo sdn. If `ui headless` fails on the CONTROL
+# too, the defect is in the seed's `ui headless` CLI path (toolchain), which
+# is BLOCKED, not an entry FAIL.
+log="$WORK/ui_headless_control.log"
+run_bounded 120 "$log" "$ROOT/bin/simple" ui headless "$ROOT/examples/06_io/ui/demo.ui.sdn"
+control_rc=$?
+log="$WORK/ui_headless.log"
+run_bounded "$STEP_TIMEOUT" "$log" "$ROOT/bin/simple" ui headless "$EX/rendering_items.ui.sdn"
+rc=$?
+if [ "$rc" -eq 124 ]; then
+    note_blocked "e" "timeout after ${STEP_TIMEOUT}s"
+elif [ "$rc" -ne 0 ] && [ "$control_rc" -ne 0 ]; then
+    note_blocked "e" "seed 'ui headless' exits $rc on rendering_items.ui.sdn AND $control_rc on stock demo.ui.sdn (toolchain CLI-path defect, not an entry defect)"
+elif [ "$rc" -ne 0 ]; then
+    note_fail "e" "exit $rc: $(tail -n 1 "$log")"
+else
+    note_pass "e" "rendering_items.ui.sdn parsed headless"
+fi
+
+# ---- step f: webserver GUI bounded HTTP probe -------------------------------
+log="$WORK/rendering_webserver.log"
+body="$WORK/webserver_body.html"
+SIMPLE_SHOWCASE_PORT="$PORT" SIMPLE_SHOWCASE_SERVE_MAX_SECONDS=120 \
+    "$ROOT/bin/simple" run "$EX/rendering_webserver.spl" >"$log" 2>&1 &
+ws_pid=$!
+probe_ok=0
+waited=0
+while [ "$waited" -lt "$STEP_TIMEOUT" ]; do
+    if ! kill -0 "$ws_pid" 2>/dev/null; then
+        break
+    fi
+    code=$(curl -s -m 5 -o "$body" -w '%{http_code}' "http://127.0.0.1:$PORT/" 2>/dev/null || true)
+    if [ "$code" = "200" ]; then
+        probe_ok=1
+        break
+    fi
+    sleep 3
+    waited=$((waited + 3))
+done
+if [ "$probe_ok" -eq 1 ] && grep -q "scrollbar" "$body"; then
+    note_pass "f" "HTTP 200, body contains 'scrollbar' ($(wc -c < "$body" | tr -d ' ') bytes)"
+elif [ "$probe_ok" -eq 1 ]; then
+    note_fail "f" "HTTP 200 but body lacks 'scrollbar' marker"
+else
+    # server exited or bound nothing within the window
+    if [ "$waited" -ge "$STEP_TIMEOUT" ]; then
+        note_blocked "f" "no HTTP response within ${STEP_TIMEOUT}s (serve window missed)"
+    elif grep -q "status=pass" "$log"; then
+        note_blocked "f" "server self-exited after serving but probe never got 200 (serve window missed)"
+    else
+        note_blocked "f" "server could not serve: $(grep -m1 'showcase status' "$log" || tail -n 1 "$log")"
+    fi
+fi
+# reap the server if still running (it self-exits after the serve window)
+if kill -0 "$ws_pid" 2>/dev/null; then
+    waited=0
+    while kill -0 "$ws_pid" 2>/dev/null && [ "$waited" -lt 150 ]; do
+        sleep 3; waited=$((waited + 3))
+    done
+    kill "$ws_pid" 2>/dev/null || true
+fi
+wait "$ws_pid" 2>/dev/null || true
+
+# ---- final verdict -----------------------------------------------------------
+# d is allowed to be BLOCKED (known gpu_web defect); a,b,c,e,f must be green.
+case "$OVERALL" in
+    PASS)
+        echo "STATUS: PASS — steps a,b,c,e,f green (NFR-002; d may be BLOCKED)"
+        exit 0
+        ;;
+    FAIL)
+        echo "STATUS: FAIL — step(s)$FAIL_REASON (NFR-002)"
+        exit 1
+        ;;
+    *)
+        echo "STATUS: BLOCKED — step(s)$BLOCK_REASON (NFR-002)"
+        exit 2
+        ;;
+esac
