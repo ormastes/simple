@@ -26,7 +26,27 @@ manifest_key_count() {
 }
 
 hash_file() {
-  sha256sum "$1" | awk '{print $1}'
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 -q "$1"
+  else
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  fi
+}
+
+hash_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 -q
+  else
+    openssl dgst -sha256 | awk '{print $NF}'
+  fi
 }
 
 validate_hosted_runtime_authority() {
@@ -1460,7 +1480,7 @@ else
 
   if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
     command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
-      sha256sum | awk '{print $1}')
+      hash_stream)
     command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
     write_command_owner_receipt "$command_owner_receipt" "$compiler_cli" "$compiler_cli_sha" \
       "$test_runner" "$test_runner_sha" "$mcp_server" "$mcp_server_sha" || die "cannot freeze command-owner receipt"
@@ -1485,7 +1505,7 @@ else
       # rebuilt MCP/LSP/runtime lineage onto an incompatible existing receipt.
       stage4_tooling_lineage_sha=$(printf '%s\n' "$snapshot_sha" "$command_owner_receipt_sha" \
         "$runtime_path" "$hosted_runtime_sha" "$stage4_mcp_sha" "$stage4_lsp_sha" |
-        sha256sum | awk '{print $1}')
+        hash_stream)
       stage4_tooling_receipt="$server_outputs/stage4-tooling-owners.$stage4_tooling_lineage_sha.env"
       write_stage4_tooling_receipt "$stage4_tooling_receipt" \
         "$server_outputs/simple_mcp_server" "$stage4_mcp_sha" \
