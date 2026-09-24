@@ -3334,7 +3334,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # A pre-execution transcript refusal produces no build log. Remove the prior
   # attempt before entering the runner so failure diagnostics cannot attribute
   # stale compiler output to this invocation.
-  rm -f "${stage2_native_log}"
+  # The pre-exec refusal reason is written to its own file (not the build log,
+  # whose absence is itself the "nothing executed" signal) and handed to
+  # check-stage-log-diagnosable.shs, which scans secondary logs when the build
+  # log was never created.
+  stage2_refusal_log="${stage2_native_log}.refusal"
+  rm -f "${stage2_native_log}" "${stage2_refusal_log}"
   bootstrap_run_stage2_native() {
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
@@ -3377,30 +3382,43 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # but uselessly reported "UNDIAGNOSABLE: no reason was recorded for the
     # refusal" across 8 empty logs. Fail closed exactly as before, but say what
     # differed -- a fail-closed check that cannot be diagnosed is a dead end.
+    # Printing to stderr alone was still not enough: stderr reaches only the
+    # terminal, so the stage diagnosis (which reads files) kept reporting
+    # UNDIAGNOSABLE while the reason sat in scrollback. Each refusal now writes
+    # its reason to ${stage2_refusal_log} first, then echoes that file.
     stage2_env_names=$(bootstrap_stage3_env_assignment_names "$@") || {
-      echo "error: stage2 env assignment names could not be derived" >&2
+      echo "error: stage2 pre-exec refusal: env assignment names could not be derived" \
+        > "${stage2_refusal_log}"
+      cat "${stage2_refusal_log}" >&2
       return 1
     }
     stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}") || {
-      echo "error: no canonical stage2 env name list for ${PLATFORM}" >&2
+      echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
+        > "${stage2_refusal_log}"
+      cat "${stage2_refusal_log}" >&2
       return 1
     }
     [ "${stage2_env_names}" = "${stage2_expected_env_names}" ] || {
-      echo "error: stage2 env assignment names do not match the canonical list for ${PLATFORM}" >&2
-      printf '  actual:   %s\n' "${stage2_env_names}" >&2
-      printf '  expected: %s\n' "${stage2_expected_env_names}" >&2
-      for stage2_env_name in ${stage2_expected_env_names}; do
-        case " ${stage2_env_names} " in
-          *" ${stage2_env_name} "*) ;;
-          *) printf '  missing:  %s\n' "${stage2_env_name}" >&2 ;;
-        esac
-      done
-      for stage2_env_name in ${stage2_env_names}; do
-        case " ${stage2_expected_env_names} " in
-          *" ${stage2_env_name} "*) ;;
-          *) printf '  unexpected: %s\n' "${stage2_env_name}" >&2 ;;
-        esac
-      done
+      {
+        echo "error: stage2 pre-exec refusal: env assignment names do not match the canonical list for ${PLATFORM}"
+        echo "  (builder: bootstrap_run_stage2_native in scripts/bootstrap/bootstrap-from-scratch.sh;"
+        echo "   canonical list: bootstrap_stage3_stage2_canonical_env_names in scripts/check/lib/bootstrap-stage3/authority.shs)"
+        printf '  actual:   %s\n' "${stage2_env_names}"
+        printf '  expected: %s\n' "${stage2_expected_env_names}"
+        for stage2_env_name in ${stage2_expected_env_names}; do
+          case " ${stage2_env_names} " in
+            *" ${stage2_env_name} "*) ;;
+            *) printf '  missing:  %s\n' "${stage2_env_name}" ;;
+          esac
+        done
+        for stage2_env_name in ${stage2_env_names}; do
+          case " ${stage2_expected_env_names} " in
+            *" ${stage2_env_name} "*) ;;
+            *) printf '  unexpected: %s\n' "${stage2_env_name}" ;;
+          esac
+        done
+      } > "${stage2_refusal_log}"
+      cat "${stage2_refusal_log}" >&2
       return 1
     }
     bootstrap_stage3_run_transcribed \
@@ -3714,6 +3732,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       --stage stage2 \
       --status "${stage2_status}" \
       --log "${log_dir}/stage2-native-build.log" \
+      --log "${log_dir}/stage2-native-build.log.refusal" \
       --log "${stage2_sanity_evidence}.frontend-failure.log" \
       --log "${stage2_sanity_evidence}.frontend-driver.log" \
       --log "${stage2_sanity_evidence}.frontend-bootstrap-0.log.hello-world-positional" \
