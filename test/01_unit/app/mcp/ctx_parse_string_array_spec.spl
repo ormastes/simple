@@ -63,6 +63,34 @@ describe "ctx_parse_string_array":
         assert_equal(e[0], "a\"b\"c")
         assert_equal(e[1], "tail")
 
+    it "parses an element with many escaped quotes correctly and fast":
+        # Regression for a quadratic parse: the old scanner recomputed
+        # backslash parity by re-slicing `t.substring(open + 1, cand)` for
+        # EVERY candidate closing quote and stripping "\\" pairs off it,
+        # which re-copies and re-scans the whole prefix each time — O(n^2)
+        # in the number of escaped quotes inside one element. Build one
+        # element with many `\"` escapes and confirm it still parses to the
+        # exact unescaped text (correctness) well within a generous bound
+        # (a quadratic scanner would blow well past this on a few hundred
+        # escapes).
+        val n = 400
+        var parts: [text] = []
+        var expected: [text] = []
+        var i = 0
+        while i < n:
+            parts.push("\\\"q" + str(i) + "\\\"")
+            expected.push("\"q" + str(i) + "\"")
+            i = i + 1
+        val element = parts.join("")
+        val expected_text = expected.join("")
+        val body = "[\"" + element + "\"]"
+        val started = time_now_unix_micros()
+        val r = ctx_parse_string_array(body)
+        val elapsed_ms = (time_now_unix_micros() - started) / 1000
+        assert_equal(r.len(), 1)
+        assert_equal(r[0], expected_text)
+        assert_true(elapsed_ms < 2000)
+
     it "scans a request body carrying non-UTF-8 bytes without a StrBytes crash":
         _fresh_store()
         # \377\376 is never valid UTF-8: the raw body text is a StrBytes

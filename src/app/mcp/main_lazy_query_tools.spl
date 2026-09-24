@@ -357,6 +357,12 @@ fn handle_simple_context(id: text, body: text) -> text:
         out_parts.push(ctx_output)
     else:
         out_parts.push("(context pack unavailable: exit " + str(ctx_exit) + ")\n")
+        # Surface the specific failing binary + failure detail from
+        # `_mcp_run_context_cli` rather than discarding it — see its
+        # no-seed-fallback contract above.
+        if ctx_output != "":
+            out_parts.push(ctx_output)
+            out_parts.push("\n")
     out_parts.push("\n")
 
     # 4. Diagnostics
@@ -495,23 +501,24 @@ fn _simple_pipe_workspace_symbols(query: text, kind: text, requester: text) -> t
     result = result + " --\n"
     result + out
 
-# Run the `simple context` CLI, retrying with the Rust seed bootstrap binary
-# when the preferred pure-Simple release binary cannot host the context child
-# at all: its core-C rt_cli_run_file stub prints
-# "simple: --fork requires hosted interpreter support" (runtime_native.c:720)
-# and exits 1. The seed binary hosts it fine. The retry is gated on that exact
-# marker so genuine context failures are not masked. Same spawn limitation as
-# the LSP side, see
+# Run the `simple context` CLI on the preferred pure-Simple release binary
+# only. Per CLAUDE.md "Critical Rules" (default tooling must be the
+# self-hosted binary; the Rust seed is bootstrap-only, never a runtime
+# fallback), this NEVER retries with `bin/simple`/the seed binary when the
+# preferred binary fails — e.g. its core-C rt_cli_run_file stub printing
+# "simple: --fork requires hosted interpreter support" (runtime_native.c:720).
+# On failure it reports the exact binary path and the failure detail instead
+# of silently swapping binaries. Same spawn limitation as the LSP side, see
 # doc/08_tracking/bug/lsp_mcp_native_arg_extract_and_source_diagnostics_deadlock_2026-06-18.md
 fn _mcp_run_context_cli(ctx_args: [text], timeout_ms: i64, max_bytes: i64) -> (text, i64):
     val primary = _mcp_find_simple_binary()
     val (out, code) = mcp_run_argv(primary, ctx_args, timeout_ms, max_bytes)
-    if (code == 0 and out != "") or not out.contains("--fork requires hosted interpreter support"):
+    if code == 0:
         return (out, code)
-    val seed = "bin/simple"
-    if seed == primary or not file_exists(seed):
-        return (out, code)
-    mcp_run_argv(seed, ctx_args, timeout_ms, max_bytes)
+    var detail = out
+    if detail.len() > 500:
+        detail = detail.slice(0, 500)
+    return ("(context cli failed: binary=" + primary + " exit=" + str(code) + "; " + detail + ")", code)
 
 fn _simple_pipe_context_sql_query(query: text, db_path: text, source_filter: text, format: text) -> text:
     var args = ["context", "--sql", "--query=" + query]
@@ -585,6 +592,27 @@ fn handle_simple_pipe_codebase(id: text, body: text) -> text:
     make_tool_result(id, out_parts.join(""))
 
 # simple_search — Language-aware code search
+# Escapes ERE metacharacters in a literal fragment so it can be embedded
+# inside a mechanically-constructed `grep -E` pattern (the `^kind ` anchors
+# and `|` alternation around it) without the fragment's own characters being
+# read as regex control syntax. Used only for kind-filtered `simple_search`
+# queries, which name an exact symbol — a plain (kind-less) query is left
+# alone and stays a user-authored BRE pattern, per the comment below.
+fn _mcp_escape_ere_literal(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_code_at(i)
+        # ERE metacharacters: . ^ $ * + ? ( ) [ ] { } | plus backslash itself.
+        if ch == 46 or ch == 94 or ch == 36 or ch == 42 or ch == 43 or ch == 63 or
+           ch == 40 or ch == 41 or ch == 91 or ch == 93 or ch == 123 or ch == 125 or
+           ch == 124 or ch == 92:
+            out = out + "\\" + char_from_code(ch)
+        else:
+            out = out + char_from_code(ch)
+        i = i + 1
+    out
+
 fn handle_simple_search(id: text, body: text) -> text:
     val query = extract_field(body, "query")
     val kind = extract_field(body, "kind")
@@ -614,18 +642,25 @@ fn handle_simple_search(id: text, body: text) -> text:
     if kind != "":
         grep_flag = " -E"
     var pattern = query
+    # Kind-filtered patterns embed the query as a LITERAL symbol name inside
+    # our own `^kind `/`|` scaffolding under `-E` — the query text itself
+    # must not be re-interpreted as ERE metacharacters (e.g. `+ ? ( {` in a
+    # query like "foo(bar)?" must match those characters literally, not act
+    # as regex quantifiers/groups). The plain (kind-less) query stays
+    # unescaped and is a user-authored BRE pattern, per the comment above.
+    val eq = _mcp_escape_ere_literal(query)
     if kind == "fn" or kind == "function":
-        pattern = "^fn " + query + "|^ *fn " + query
+        pattern = "^fn " + eq + "|^ *fn " + eq
     elif kind == "class":
-        pattern = "^class " + query + "|^ *class " + query
+        pattern = "^class " + eq + "|^ *class " + eq
     elif kind == "struct":
-        pattern = "^struct " + query + "|^ *struct " + query
+        pattern = "^struct " + eq + "|^ *struct " + eq
     elif kind == "enum":
-        pattern = "^enum " + query + "|^ *enum " + query
+        pattern = "^enum " + eq + "|^ *enum " + eq
     elif kind == "import" or kind == "use":
-        pattern = "use.*" + query + "|import.*" + query
+        pattern = "use.*" + eq + "|import.*" + eq
     elif kind == "type":
-        pattern = "^type " + query + "|^alias " + query + "|^class " + query + "|^struct " + query + "|^enum " + query
+        pattern = "^type " + eq + "|^alias " + eq + "|^class " + eq + "|^struct " + eq + "|^enum " + eq
 
     var args = ["-c", "grep" + grep_flag + " -r -n --include='*.spl' -- \"$1\" \"$2\" | head -n 50", "simple_search", pattern, search_dir]
     if file != "":
