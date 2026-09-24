@@ -159,6 +159,30 @@ fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
             # Do NOT advance i — the slot now holds a different (swapped) entry
     0
 
+fn vmm_munmap_result(space: ProcessVmSpace, vaddr: u64, len: u64) -> VmmMunmapResult:
+    """Unmap [vaddr, vaddr+len) from `space`, returning both the errno-style
+    code and the (possibly updated) address space (see `VmmMunmapResult`).
+    Same VMA-removal + page-unmap logic as `vmm_munmap`, but also surfaces the
+    updated `space` for callers (e.g. `vmm_teardown_user_space`) that must
+    propagate value-type space changes rather than relying on in-place
+    mutation of `space.areas`."""
+    if len == 0:
+        return VmmMunmapResult(code: -22, space: space)  # -EINVAL
+
+    val aligned_start = _align_down(vaddr, PAGE_SIZE)
+    val aligned_len   = _align_up(len, PAGE_SIZE)
+    val aligned_end   = aligned_start + aligned_len
+
+    val code = vma_remove(space, aligned_start, aligned_len)
+
+    var pg = aligned_start
+    while pg < aligned_end:
+        val virt = VirtAddr(addr: pg)
+        vmm_unmap_page(virt)
+        pg = pg + PAGE_SIZE
+
+    VmmMunmapResult(code: code, space: space)
+
 fn vmm_teardown_user_space(space: ProcessVmSpace) -> ProcessVmSpace:
     """Tear down all user-space VMAs in the given address space.
 
@@ -172,7 +196,7 @@ fn vmm_teardown_user_space(space: ProcessVmSpace) -> ProcessVmSpace:
     while (i as u64) < space.vma_count:
         val area = space.areas[i]
         if area.start < VMM_KERNEL_SPACE_START:
-            val unmapped = vmm_munmap_result(current, area.start, area.len)
+            val unmapped: VmmMunmapResult = vmm_munmap_result(current, area.start, area.len)
             if unmapped.code != 0:
                 return current
             current = unmapped.space
@@ -304,25 +328,15 @@ fn vmm_mmap(
     chosen as i64
 
 fn vmm_munmap(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
-    """Unmap [vaddr, vaddr+len) from `space`."""
-    if len == 0:
-        return -22  # -EINVAL
+    """Unmap [vaddr, vaddr+len) from `space`.
 
-    val aligned_start = _align_down(vaddr, PAGE_SIZE)
-    val aligned_len   = _align_up(len, PAGE_SIZE)
-    val aligned_end   = aligned_start + aligned_len
-
-    # Remove VMAs first
-    vma_remove(space, aligned_start, aligned_len)
-
-    # Unmap any present page-table entries in the range
-    var pg = aligned_start
-    while pg < aligned_end:
-        val virt = VirtAddr(addr: pg)
-        vmm_unmap_page(virt)
-        pg = pg + PAGE_SIZE
-
-    0
+    Thin wrapper over `vmm_munmap_result`, which owns the actual VMA-removal
+    + page-unmap logic (kept in one place). `space.areas`/`space.vma_count`
+    mutate in place (array reference semantics), so `space` here already
+    reflects the removal after the call returns; only the errno-style code is
+    needed by this API's existing callers, unlike `vmm_munmap_result`'s
+    `.space`-propagating callers (e.g. `vmm_teardown_user_space`)."""
+    vmm_munmap_result(space, vaddr, len).code
 
 # ============================================================================
 # Copy-on-Write: fork clone
