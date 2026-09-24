@@ -148,36 +148,71 @@ case "${_simple_llvm_uname}" in
   *)       _simple_llvm_os=other ;;
 esac
 
+# Confirm a linker candidate actually RUNS before committing to it. `command
+# -v` only proves the file exists and is executable -- not that it works: a
+# wrong-arch binary, a broken shared-library dependency, or an incomplete
+# install all pass `command -v` and then fail at real invocation time.
+# `--version` is the cheapest probe universally supported by
+# mold/ld.lld/ld64.lld and is what check-arm64-target-runtime-symbols.shs's
+# own `$LD -r ...` usage implicitly assumes works before it runs.
+_simple_llvm_probe_linker() {
+  "$1" --version >/dev/null 2>&1
+}
+
 # Pick a linker (LD/SIMPLE_LLD) and archiver (AR) for suffix $1 (e.g. "-23",
 # "23", or "" for an unsuffixed layout), per the clang-only linker policy:
-# mold on Linux where present, else ld.lld; ld64.lld on macOS; ld.lld on
-# FreeBSD (mold has no Mach-O or PE/COFF backend). Tries the suffixed name
-# first, then the bare name, so a version-suffixed clang paired with an
-# unsuffixed lld/mold (common outside Debian-style packaging) still resolves.
+# mold on Linux where present AND WORKING, else ld.lld; ld64.lld on macOS;
+# ld.lld on FreeBSD (mold has no Mach-O or PE/COFF backend). Tries the
+# suffixed name first, then the bare name, so a version-suffixed clang
+# paired with an unsuffixed lld/mold (common outside Debian-style
+# packaging) still resolves. "mold on Linux where present" is a PREFERENCE
+# ORDER, not a silent alternative: a present-but-broken mold (it does not
+# support every invocation ld.lld does, e.g. relocatable `-r` links) is
+# reported and this falls back to ld.lld rather than handing the caller a
+# linker that will fail the first time it actually runs.
 _simple_llvm_select_linker() {
   _sfx="$1"
+  if [ -n "${LD:-}" ]; then
+    # Respect an explicit LD from the caller's environment: never silently
+    # override an operator's already-made choice with auto-detection. Still
+    # report (not fail) if it does not even respond to --version, so a
+    # stale/wrong preset is visible rather than discovered later as a link
+    # failure with no context.
+    SIMPLE_LLD="${LD}"
+    export SIMPLE_LLD
+    if ! _simple_llvm_probe_linker "${LD}"; then
+      echo "llvm-toolchain-env: warning: preset \$LD='${LD}' did not respond to --version; leaving it unchanged since it was explicitly set" >&2
+    fi
+    unset _sfx
+    return 0
+  fi
   LD=""
   case "${_simple_llvm_os}" in
     linux)
       if command -v mold >/dev/null 2>&1; then
-        LD="mold"
-      elif command -v "ld.lld${_sfx}" >/dev/null 2>&1; then
+        if _simple_llvm_probe_linker mold; then
+          LD="mold"
+        else
+          echo "llvm-toolchain-env: warning: mold is on PATH but failed its --version probe; falling back to ld.lld" >&2
+        fi
+      fi
+      if [ -z "${LD}" ] && command -v "ld.lld${_sfx}" >/dev/null 2>&1 && _simple_llvm_probe_linker "ld.lld${_sfx}"; then
         LD="ld.lld${_sfx}"
-      elif command -v ld.lld >/dev/null 2>&1; then
+      elif [ -z "${LD}" ] && command -v ld.lld >/dev/null 2>&1 && _simple_llvm_probe_linker ld.lld; then
         LD="ld.lld"
       fi
       ;;
     macos)
-      if command -v "ld64.lld${_sfx}" >/dev/null 2>&1; then
+      if command -v "ld64.lld${_sfx}" >/dev/null 2>&1 && _simple_llvm_probe_linker "ld64.lld${_sfx}"; then
         LD="ld64.lld${_sfx}"
-      elif command -v ld64.lld >/dev/null 2>&1; then
+      elif command -v ld64.lld >/dev/null 2>&1 && _simple_llvm_probe_linker ld64.lld; then
         LD="ld64.lld"
       fi
       ;;
     *)
-      if command -v "ld.lld${_sfx}" >/dev/null 2>&1; then
+      if command -v "ld.lld${_sfx}" >/dev/null 2>&1 && _simple_llvm_probe_linker "ld.lld${_sfx}"; then
         LD="ld.lld${_sfx}"
-      elif command -v ld.lld >/dev/null 2>&1; then
+      elif command -v ld.lld >/dev/null 2>&1 && _simple_llvm_probe_linker ld.lld; then
         LD="ld.lld"
       fi
       ;;
