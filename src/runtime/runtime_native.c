@@ -603,24 +603,9 @@ bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t h
     return false;
 }
 
-/* WebGPU backfill (hosted wgpu backend lives in the Rust runtime only).
- *
- * The teardown half was missing: std.gpu.engine2d.webgpu_sffi declares six
- * rt_webgpu_* externs, this file backfilled only is_available/init/
- * create_surface, and a core-C Stage-4 link of any closure reaching that
- * module therefore failed with "requested symbols have no archive owner:
- * rt_webgpu_destroy_surface, rt_webgpu_shutdown" (macOS, 2026-09-06).
- * Same fail-closed contract as the three above: this lane has no wgpu
- * provider, so acquisition already returns unavailable and teardown has
- * nothing to release. */
-bool rt_webgpu_is_available(void) { return false; }
-bool rt_webgpu_init(void) { return false; }
-int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
-    (void)width; (void)height;
-    return 0;
-}
-bool rt_webgpu_shutdown(void) { return false; }
-bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
+/* WebGPU backfill: moved to runtime_webgpu_backfill.c (its own archive
+ * member) so it no longer collides with the hosted Rust runtime's real
+ * rt_webgpu_* definitions whenever runtime_native.obj is pulled. */
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
 int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {

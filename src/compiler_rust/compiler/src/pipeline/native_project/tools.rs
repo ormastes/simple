@@ -499,6 +499,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // hands a raw base pointer to Simple code. Kept a separate TU so it
         // stays auditable in isolation.
         "runtime_packed_span.c",
+        // Fail-closed rt_webgpu_* backfill for core-C lanes, a separate archive
+        // member so a hosted runtime's real definitions win without a
+        // duplicate (see the file header).
+        "runtime_webgpu_backfill.c",
         // Terminal probes (rt_terminal_is_tty / rt_terminal_stdout_is_tty / raw
         // mode / size / rt_stdin_read_byte) backing the std.tui.terminal externs.
         // Was never an archive member, so a core-C native link of anything
