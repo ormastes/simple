@@ -950,12 +950,44 @@ pub(super) fn nm_command() -> std::process::Command {
 fn which_on_path(tool: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(tool);
-        if candidate.is_file() {
-            return Some(candidate);
+        for name in executable_file_names(tool) {
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None
+}
+
+/// File names an executable `tool` can have on disk. On Windows a bare
+/// `llvm-nm` never exists -- the file is `llvm-nm.exe` -- so probing only the
+/// bare name made `nm_command` silently fall back to plain `nm`, which on the
+/// bootstrap PATH is MSYS2's GNU nm. GNU nm cannot open paths longer than
+/// MAX_PATH ("No such file"), which failed the stage-2 full-CLI link on the
+/// deep native-incremental cache; llvm-nm widens long paths itself.
+fn executable_file_names(tool: &str) -> Vec<String> {
+    if cfg!(windows) && !tool.to_ascii_lowercase().ends_with(".exe") {
+        vec![format!("{tool}.exe"), tool.to_string()]
+    } else {
+        vec![tool.to_string()]
+    }
+}
+
+#[cfg(test)]
+mod executable_file_name_tests {
+    use super::executable_file_names;
+
+    #[test]
+    fn windows_probes_the_exe_name_first() {
+        let names = executable_file_names("llvm-nm");
+        if cfg!(windows) {
+            assert_eq!(names, vec!["llvm-nm.exe".to_string(), "llvm-nm".to_string()]);
+        } else {
+            assert_eq!(names, vec!["llvm-nm".to_string()]);
+        }
+        assert_eq!(executable_file_names("llvm-nm.exe"), vec!["llvm-nm.exe".to_string()]);
+    }
 }
 
 fn homebrew_llvm_nm_candidates() -> Vec<PathBuf> {

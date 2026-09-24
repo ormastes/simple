@@ -60,17 +60,33 @@ use crate::stdlib_variant::active_simd_tier_name;
 /// form `\\?\C:\...`, which also disables `.`/`..` and short-name
 /// normalization — safe here because every path built under a cache
 /// directory is already absolute and made only of literal hash/name
-/// segments. Idempotent, and a no-op for a relative path (which still needs
-/// normal resolution against the current directory) and on non-Windows
-/// targets, where the limit does not exist.
+/// segments. Idempotent; a relative path is first resolved against the
+/// current directory; a no-op on non-Windows targets, where the limit does
+/// not exist.
 ///
 /// See `doc/08_tracking/bug/windows_native_incremental_cache_persist_path_too_long_2026-09-24.md`.
 #[cfg(windows)]
 pub(crate) fn win_long_path(path: &Path) -> PathBuf {
-    let raw = path.as_os_str().to_string_lossy();
-    if raw.starts_with(r"\\?\") {
+    if path.as_os_str().to_string_lossy().starts_with(r"\\?\") {
         return path.to_path_buf();
     }
+    // A verbatim prefix is only valid on a fully qualified path; `\\?\` in
+    // front of a relative (`.simple\...`) or drive-relative (`\x`) path names
+    // nothing. Resolve such input against the current directory first
+    // (GetFullPathNameW) and leave it untouched if that fails.
+    let absolute;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        match std::path::absolute(path) {
+            Ok(resolved) => {
+                absolute = resolved;
+                absolute.as_path()
+            }
+            Err(_) => return path.to_path_buf(),
+        }
+    };
+    let raw = path.as_os_str().to_string_lossy();
     // The verbatim form is NOT normalized by Win32 the way an ordinary path
     // is: a forward slash inside it is a literal (invalid) filename
     // character, not a separator, and the API rejects the whole path
@@ -88,10 +104,7 @@ pub(crate) fn win_long_path(path: &Path) -> PathBuf {
         // UNC path: `\\server\share\...` -> `\\?\UNC\server\share\...`.
         return PathBuf::from(format!(r"\\?\UNC\{rest}"));
     }
-    if path.is_absolute() {
-        return PathBuf::from(format!(r"\\?\{raw}"));
-    }
-    path.to_path_buf()
+    PathBuf::from(format!(r"\\?\{raw}"))
 }
 
 #[cfg(not(windows))]
@@ -127,9 +140,13 @@ mod win_long_path_tests {
 
     #[cfg(windows)]
     #[test]
-    fn leaves_a_relative_path_untouched() {
-        let relative = PathBuf::from("objects/abc.o");
-        assert_eq!(win_long_path(&relative), relative);
+    fn absolutizes_a_relative_path_before_prefixing() {
+        // Never `\\?\` + a relative path: that names nothing to any Win32 API.
+        let relative = PathBuf::from(".simple/storage/objects/abc.o");
+        let expected = std::env::current_dir().unwrap().join(r".simple\storage\objects\abc.o");
+        let out = win_long_path(&relative);
+        assert_eq!(out, PathBuf::from(format!(r"\\?\{}", expected.display())));
+        assert!(!out.to_string_lossy().starts_with(r"\\?\."));
     }
 
     #[cfg(windows)]
