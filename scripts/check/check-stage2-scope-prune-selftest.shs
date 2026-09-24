@@ -1,0 +1,104 @@
+#!/bin/sh
+# Fixture-based selftest for bootstrap_prune_stale_seed_scope_dirs
+# (scripts/bootstrap/bootstrap-cache-policy.shs). Proves the three safety
+# properties added after review of the first landing of the stage-2 seed
+# scope-cache prune (see bootstrap-from-scratch.sh's call site, near the
+# stage2-native-build log echo):
+#
+#   1. An ambiguous/malformed log (e.g. only an unrelated `in_scope=.`
+#      field, no `[native-build] compiled=` line at all) must SKIP the
+#      prune -- nothing under the cache dir is removed.
+#   2. A valid single-scope log must remove ONLY the sibling `scope-*` dirs
+#      that (a) match the exact `scope-<16 lowercase hex>` shape and
+#      (b) are not the current scope; the current scope dir and any
+#      non-matching entry are left untouched.
+#   3. An `rm -rf` failure (simulated here with a read-only directory,
+#      real on Windows via AV/locked .o files) must print a warning and
+#      let the script continue -- never abort the caller.
+#
+# Verdict convention matches the repo's other check-*.shs guards:
+#   PASS — <n> fixture(s) checked, all as expected
+#   FAIL — <first failing fixture>: <what was expected vs seen>
+#   ERROR — nothing was checked
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+# shellcheck disable=SC1091
+. "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage2-scope-prune-selftest.XXXXXX")
+trap 'rm -rf "${scratch}"' EXIT HUP INT TERM
+
+checked=0
+fail_msg=""
+
+fail_fixture() {
+  fail_msg="$1"
+}
+
+# --- Fixture 1: ambiguous log -> skip, nothing removed ----------------------
+f1_cache="${scratch}/f1/cache"
+mkdir -p "${f1_cache}/scope-0000000000000001" "${f1_cache}/scope-0000000000000002"
+f1_log="${scratch}/f1/stage2-native-build.log"
+printf 'some unrelated line\nin_scope=.\nno receipt here\n' >"${f1_log}"
+bootstrap_prune_stale_seed_scope_dirs 0 "${f1_log}" "${f1_cache}" >"${scratch}/f1.out" 2>&1
+f1_remaining=$(find "${f1_cache}" -maxdepth 1 -type d -name 'scope-*' | wc -l)
+checked=$((checked + 1))
+if [ "${f1_remaining}" -ne 2 ]; then
+  fail_fixture "fixture1 (ambiguous log): expected 2 scope dirs to remain, found ${f1_remaining}"
+fi
+
+# --- Fixture 2: valid single-scope log -> only non-matching siblings removed
+f2_cache="${scratch}/f2/cache"
+mkdir -p "${f2_cache}/scope-1111111111111111" \
+  "${f2_cache}/scope-2222222222222222" \
+  "${f2_cache}/not-a-scope-dir"
+f2_log="${scratch}/f2/stage2-native-build.log"
+printf '[native-build] compiled=1 reused=858 failed=0 scope=scope-1111111111111111\n' >"${f2_log}"
+if [ -z "${fail_msg}" ]; then
+  bootstrap_prune_stale_seed_scope_dirs 0 "${f2_log}" "${f2_cache}" >"${scratch}/f2.out" 2>&1
+  checked=$((checked + 1))
+  [ -d "${f2_cache}/scope-1111111111111111" ] || fail_fixture "fixture2: current scope dir was removed"
+  [ ! -d "${f2_cache}/scope-2222222222222222" ] || fail_fixture "fixture2: stale matching scope dir was NOT removed"
+  [ -d "${f2_cache}/not-a-scope-dir" ] || fail_fixture "fixture2: non-scope-shaped entry was wrongly removed"
+fi
+
+# --- Fixture 3: rm -rf failure -> warning, continues, dir left in place ----
+# A chmod-based "locked directory" is not a reliable way to make `rm -rf`
+# fail across platforms (notably Git Bash on Windows, where POSIX
+# permission bits on directories do not block deletion the way they do on
+# Linux/macOS). Simulate the real-world failure mode this guards against
+# (AV scan / locked .o file on Windows) portably instead: shadow `rm` on
+# PATH with a stub that always fails, scoped to this one invocation only.
+if [ -z "${fail_msg}" ]; then
+  f3_cache="${scratch}/f3/cache"
+  mkdir -p "${f3_cache}/scope-3333333333333333" "${f3_cache}/scope-4444444444444444/objects"
+  : >"${f3_cache}/scope-4444444444444444/objects/x.o"
+  f3_log="${scratch}/f3/stage2-native-build.log"
+  printf '[native-build] compiled=0 reused=1 failed=0 scope=scope-3333333333333333\n' >"${f3_log}"
+  f3_bin="${scratch}/f3/bin"
+  mkdir -p "${f3_bin}"
+  printf '#!/bin/sh\nexit 1\n' >"${f3_bin}/rm"
+  chmod +x "${f3_bin}/rm"
+  f3_exit=0
+  ( PATH="${f3_bin}:${PATH}" bootstrap_prune_stale_seed_scope_dirs \
+      0 "${f3_log}" "${f3_cache}" >"${scratch}/f3.out" 2>&1 ) || f3_exit=$?
+  checked=$((checked + 1))
+  if [ "${f3_exit}" -ne 0 ]; then
+    fail_fixture "fixture3: caller received a non-zero exit (${f3_exit}); a prune failure must never fail the caller"
+  elif [ ! -d "${f3_cache}/scope-4444444444444444" ]; then
+    fail_fixture "fixture3: the dir whose rm failed should still be on disk"
+  elif ! grep -q 'warning: could not prune' "${scratch}/f3.out"; then
+    fail_fixture "fixture3: expected a 'warning: could not prune' message, got: $(cat "${scratch}/f3.out")"
+  fi
+fi
+
+if [ -n "${fail_msg}" ]; then
+  echo "FAIL — ${checked} fixture(s) checked, ${fail_msg}"
+  exit 1
+fi
+if [ "${checked}" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+echo "PASS — ${checked} fixture(s) checked, bootstrap_prune_stale_seed_scope_dirs behaves as expected"
