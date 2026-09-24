@@ -40,12 +40,64 @@ static RtHsaBundleV1* rt_hsa_bundle(int64_t token) {
     return NULL;
 }
 
-static int rt_hsa_bundle_leaf(const uint8_t* bytes, uint64_t length, char out[256]) {
-    char path[RT_HSA_PATH_BYTES];
-    if (length > 255 || !rt_hsa_path(bytes, length, 0, path) ||
-        strchr(path, '/') || strchr(path, '\\')) return 0;
-    memcpy(out, path, (size_t)length + 1);
+/* Historical fd-ABI transaction name: the physical transaction state is the
+ * static RtHsaBundleV1 table entry below, not a heap allocation. */
+typedef RtHsaBundleV1 RtArtifactBundleTxn;
+
+static int rt_ab_leaf(const uint8_t* p, uint64_t n, char out[256]) {
+    if (!p || n == 0 || n >= 256 || (n == 1 && p[0] == '.') ||
+        (n == 2 && p[0] == '.' && p[1] == '.')) return 0;
+    for (uint64_t i = 0; i < n; ++i) if (p[i] == '/' || p[i] == '\0') return 0;
+    memcpy(out, p, (size_t)n); out[n] = 0; return 1;
+}
+
+static char* rt_ab_path(const uint8_t* p, uint64_t n) {
+    if (!p || n == 0 || n > (uint64_t)PATH_MAX) return NULL;
+    for (uint64_t i = 0; i < n; ++i) if (p[i] == '\0') return NULL;
+    char* s = (char*)malloc((size_t)n + 1); if (!s) return NULL;
+    memcpy(s, p, (size_t)n); s[n] = 0; return s;
+}
+
+static int rt_ab_close(int fd) { int r; if (fd < 0) return 0; do r = close(fd); while (r < 0 && errno == EINTR); return r; }
+static int rt_ab_fsync(int fd) { int r, tries = 0; do r = rt_hsa_fault("fsync", fd) ? -1 : fsync(fd); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
+static ssize_t rt_ab_read(int fd, void* p, size_t n) { ssize_t r; int tries = 0; do r = rt_hsa_fault("bundle-read", fd) ? -1 : read(fd, p, n); while (r < 0 && errno == EINTR && ++tries < 8); return r; }
+static int rt_ab_write_all(int fd, const uint8_t* p, size_t n) {
+    size_t off = 0; int tries = 0;
+    while (off < n) { ssize_t w = rt_hsa_fault("bundle-write", fd) ? -1 : write(fd, p + off, n - off); if (w > 0) { off += (size_t)w; tries = 0; continue; } if (w < 0 && errno == EINTR && ++tries < 8) continue; return 0; }
     return 1;
+}
+static int rt_ab_same_stat(const struct stat* a, const struct stat* b) {
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_mode == b->st_mode &&
+           a->st_size == b->st_size && a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
+static void rt_ab_destroy(RtArtifactBundleTxn* t, int remove_temp) {
+    if (!t) return;
+    rt_ab_close(t->payload); rt_ab_close(t->receipt); rt_ab_close(t->source);
+    if (remove_temp && t->temp >= 0) { unlinkat(t->temp, t->payload_leaf, 0); unlinkat(t->temp, t->receipt_leaf, 0); }
+    rt_ab_close(t->temp);
+    if (remove_temp && t->parent >= 0) unlinkat(t->parent, t->temp_leaf, AT_REMOVEDIR);
+    rt_ab_close(t->parent);
+    /* Entries live in the static table: detach from lookup and release the
+     * retained-root bundle refcount instead of freeing heap memory. */
+    for (int i = 0; i < RT_HSA_ROOT_SLOTS; ++i)
+        if (rt_hsa_roots[i].token == t->root_token && rt_hsa_roots[i].bundles)
+            --rt_hsa_roots[i].bundles;
+    memset(t, 0, sizeof(*t));
+    t->parent = t->temp = t->source = t->payload = t->receipt = -1;
+}
+static RtArtifactBundleTxn* rt_ab_take(uint64_t token) {
+    if (token == 0) return NULL;
+    for (int i = 0; i < RT_HSA_BUNDLE_SLOTS; ++i)
+        if ((uint64_t)rt_hsa_bundles[i].token == token) {
+            rt_hsa_bundles[i].token = 0; /* Detach from lookup; slot stays in the static table. */
+            return &rt_hsa_bundles[i];
+        }
+    return NULL;
+}
+
+static int rt_hsa_bundle_leaf(const uint8_t* bytes, uint64_t length, char out[256]) {
+    /* The bundle lane additionally rejects backslash leaves. */
+    return rt_ab_leaf(bytes, length, out) && !strchr(out, '\\');
 }
 
 static int rt_hsa_bundle_close(int* fd) {
@@ -76,7 +128,7 @@ static int rt_hsa_bundle_cleanup(RtHsaBundleV1* t, int published) {
     if (!published && t->temp >= 0) {
         ok = rt_hsa_bundle_unlink(t->temp, t->payload_leaf, 0) && ok;
         ok = rt_hsa_bundle_unlink(t->temp, t->receipt_leaf, 0) && ok;
-        ok = (rt_hsa_sync(t->temp, 0) == 0) && ok;
+        ok = (rt_ab_fsync(t->temp) == 0) && ok;
     }
     if (!published && t->created) {
         /* An actor replacing the staging pathname must not redirect cleanup
@@ -84,49 +136,41 @@ static int rt_hsa_bundle_cleanup(RtHsaBundleV1* t, int published) {
         if (rt_hsa_bundle_name_matches(t))
             ok = rt_hsa_bundle_unlink(t->parent, t->temp_leaf, AT_REMOVEDIR) && ok;
         else ok = 0;
-        ok = (rt_hsa_sync(t->parent, 0) == 0) && ok;
+        ok = (rt_ab_fsync(t->parent) == 0) && ok;
     }
     ok = rt_hsa_bundle_close(&t->temp) && ok;
     ok = rt_hsa_bundle_close(&t->parent) && ok;
-    for (int i = 0; i < RT_HSA_ROOT_SLOTS; ++i)
-        if (rt_hsa_roots[i].token == t->root_token && rt_hsa_roots[i].bundles)
-            --rt_hsa_roots[i].bundles;
-    memset(t, 0, sizeof(*t));
+    /* rt_ab_destroy clears the static-table slot (lookup token, descriptors,
+     * retained-root bundle refcount); its by-value closes no-op on the -1
+     * descriptors closed above. */
+    rt_ab_destroy(t, 0);
     return ok;
-}
-
-static int rt_hsa_bundle_write(int fd, const uint8_t* bytes, size_t length) {
-    size_t used = 0;
-    unsigned int attempts = 0;
-    while (used < length) {
-        ssize_t count = rt_hsa_fault("bundle-write", fd) ? -1 :
-            write(fd, bytes + used, length - used);
-        if (count > 0) { used += (size_t)count; attempts = 0; continue; }
-        if (count < 0 && errno == EINTR && ++attempts < 32) continue;
-        return 0;
-    }
-    return 1;
 }
 
 static int rt_hsa_bundle_same_source(RtHsaBundleV1* t) {
     struct stat current;
     return rt_hsa_stat(t->source, &current) == 0 &&
-        rt_hsa_same_stat(&t->source_identity, &current);
+        rt_ab_same_stat(&t->source_identity, &current);
 }
 
 int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root_token,
     const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len,
     const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len,
     int64_t max_bytes) {
-    char source_path[RT_HSA_PATH_BYTES], bundle_path[RT_HSA_PATH_BYTES];
     char payload_leaf[256], receipt_leaf[256];
+    char source_check[RT_HSA_PATH_BYTES], bundle_check[RT_HSA_PATH_BYTES];
     if (max_bytes <= 0 || max_bytes > RT_HSA_BUNDLE_MAX_BYTES ||
-        !rt_hsa_path(source, source_len, 0, source_path) ||
-        !rt_hsa_path(bundle, bundle_len, 0, bundle_path) ||
+        !rt_hsa_path(source, source_len, 0, source_check) ||
+        !rt_hsa_path(bundle, bundle_len, 0, bundle_check) ||
         !rt_hsa_bundle_leaf(payload, payload_len, payload_leaf) ||
         !rt_hsa_bundle_leaf(scr1, scr1_len, receipt_leaf) ||
         strcmp(payload_leaf, receipt_leaf) == 0) return -1;
-    if (pthread_mutex_lock(&rt_hsa_mutex) != 0) return -1;
+    /* rt_hsa_path validated the raw bytes above; rt_ab_path owns the
+     * NUL-terminated copies used below (the bundle copy is split in place). */
+    char* source_path = rt_ab_path(source, source_len);
+    char* bundle_path = rt_ab_path(bundle, bundle_len);
+    if (!source_path || !bundle_path) { free(source_path); free(bundle_path); return -1; }
+    if (pthread_mutex_lock(&rt_hsa_mutex) != 0) { free(source_path); free(bundle_path); return -1; }
     RtHsaRootV1* root = rt_hsa_root(root_token);
     RtHsaBundleV1* t = NULL;
     int64_t result = -1;
@@ -188,6 +232,7 @@ fail:
     if (!rt_hsa_bundle_cleanup(t, 0)) result = -3;
 done:
     (void)pthread_mutex_unlock(&rt_hsa_mutex);
+    free(source_path); free(bundle_path);
     return result;
 }
 
@@ -209,8 +254,7 @@ int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token, int64_t max_
     size_t used = 0;
     unsigned int attempts = 0;
     do {
-        ssize_t count = rt_hsa_fault("bundle-read", t->source) ? -1 :
-            read(t->source, bytes + used, wanted ? wanted - used : 1);
+        ssize_t count = rt_ab_read(t->source, bytes + used, wanted ? wanted - used : 1);
         if (count > 0) {
             if (!wanted) goto fail;
             used += (size_t)count;
@@ -222,7 +266,7 @@ int64_t rt_hosted_safe_artifact_bundle_read_stage_v1(int64_t token, int64_t max_
     if (!rt_hsa_bundle_same_source(t)) goto fail;
     array = rt_hsa_fault("bundle-array-allocation", -1) ? NULL : rt_byte_array_new_len(wanted);
     if (!array || rt_array_bytes_store_checked((int64_t)(uintptr_t)array, bytes, (int64_t)wanted) != (int64_t)wanted ||
-        !rt_hsa_bundle_write(t->payload, bytes, wanted)) goto fail;
+        !rt_ab_write_all(t->payload, bytes, wanted)) goto fail;
     t->bytes_read += (int64_t)wanted;
     t->eof_seen = wanted == 0;
     result = (int64_t)(uintptr_t)array;
@@ -269,7 +313,7 @@ int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t token, int64_t payl
     if (!bytes || rt_array_bytes_copy_checked(payload, bytes, length) != length) goto fail;
     t->receipt = rt_hsa_openat(t->temp, t->receipt_leaf,
         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (t->receipt < 0 || !rt_hsa_bundle_write(t->receipt, bytes, (size_t)length)) goto fail;
+    if (t->receipt < 0 || !rt_ab_write_all(t->receipt, bytes, (size_t)length)) goto fail;
     t->receipt_staged = 1;
     result = 1;
     goto done;
@@ -283,14 +327,14 @@ done:
 
 int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t token, bool commit) {
     if (pthread_mutex_lock(&rt_hsa_mutex) != 0) return 0;
-    RtHsaBundleV1* t = rt_hsa_bundle(token);
+    RtHsaBundleV1* t = rt_ab_take((uint64_t)token);
     int64_t result = 0;
     if (!t) goto done;
     if (!commit) { result = rt_hsa_bundle_cleanup(t, 0) ? 1 : -3; goto done; }
     if (t->failed || !t->eof_seen || !t->receipt_staged ||
         t->bytes_read != t->source_identity.st_size || !rt_hsa_root(t->root_token) ||
-        !rt_hsa_bundle_same_source(t) || rt_hsa_sync(t->payload, 0) != 0 ||
-        rt_hsa_sync(t->receipt, 0) != 0 || rt_hsa_sync(t->temp, 0) != 0) goto reject;
+        !rt_hsa_bundle_same_source(t) || rt_ab_fsync(t->payload) != 0 ||
+        rt_ab_fsync(t->receipt) != 0 || rt_ab_fsync(t->temp) != 0) goto reject;
     /* Pre-publication file close errors prevent publication. The retained
      * staging directory remains available for cleanup. */
     if (!rt_hsa_bundle_close(&t->source) || !rt_hsa_bundle_close(&t->payload) ||
@@ -299,7 +343,7 @@ int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t token, bool commit) {
     if (rt_hsa_fault("bundle-rename", t->parent) ||
         syscall(SYS_renameat2, t->parent, t->temp_leaf,
             t->parent, t->bundle_leaf, RENAME_NOREPLACE) != 0) goto reject;
-    result = rt_hsa_sync(t->parent, 0) == 0 ? 1 : -2;
+    result = rt_ab_fsync(t->parent) == 0 ? 1 : -2;
     if (!rt_hsa_bundle_cleanup(t, 1)) result = -2;
     goto done;
 #endif
@@ -310,9 +354,7 @@ done:
     return result;
 }
 #else
-int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root,
-    const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len,
-    const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len, int64_t max_bytes) {
+int64_t rt_hosted_safe_artifact_bundle_begin_v1(int64_t root, const uint8_t* source, uint64_t source_len, const uint8_t* bundle, uint64_t bundle_len, const uint8_t* payload, uint64_t payload_len, const uint8_t* scr1, uint64_t scr1_len, int64_t max_bytes) {
     (void)root; (void)source; (void)source_len; (void)bundle; (void)bundle_len;
     (void)payload; (void)payload_len; (void)scr1; (void)scr1_len; (void)max_bytes;
     return RT_HSA_BUNDLE_UNSUPPORTED_V1;
