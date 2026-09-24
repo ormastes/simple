@@ -2820,7 +2820,7 @@ impl LlvmBackend {
                         .build_call(func, &[recv.into()], "scalar_float_method")
                         .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
                     if let Some(d) = dest {
-                        if let Some(value) = call.try_as_basic_value().left() {
+                        if let Some(value) = call.try_as_basic_value().basic() {
                             vreg_map.insert(*d, value);
                         }
                     }
@@ -2860,7 +2860,7 @@ impl LlvmBackend {
                     let result = builder.build_call(code_at, &[recv.into(), i64_type.const_zero().into()], "ord")
                         .map_err(|e| crate::error::factory::llvm_build_failed("ord call", &e))?;
                     if let Some(d) = dest {
-                        if let Some(value) = result.try_as_basic_value().left() {
+                        if let Some(value) = result.try_as_basic_value().basic() {
                             vreg_map.insert(*d, value);
                         }
                     }
@@ -2887,7 +2887,7 @@ impl LlvmBackend {
                     let call = builder.build_call(intrinsic, &[recv.into()], "float_method")
                         .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
                     if let Some(d) = dest {
-                        if let Some(value) = call.try_as_basic_value().left() {
+                        if let Some(value) = call.try_as_basic_value().basic() {
                             vreg_map.insert(*d, value);
                         }
                     }
