@@ -100,11 +100,43 @@ jobs:
       # recorded: the skip AUTHORITY — which gates a receipt may excuse — can
       # no longer be produced or widened by head content.
       #
-      # COST. The importer polls every 5 s, for at most RECEIPT_WAIT_S
-      # seconds, and stops early once every decision run for this head sha
-      # has completed without an acceptable artifact, or when none has
-      # started after RECEIPT_NO_RUN_S seconds. The base job does no checkout,
-      # so it normally finishes while this job is still checking out.
+      # COST (rewritten 2026-09-24 — CI API-budget risk flagged in PR #1467's
+      # retroactive perf audit).
+      # The GITHUB_TOKEN budget (1,000 req/hour) is SHARED by every workflow in
+      # this repo, so a poller that burns 100-250 calls per stalled PR event
+      # (the pre-fix numbers, measured against a queued base run) can exhaust
+      # it after only 6-8 concurrently stalled events and starve unrelated
+      # workflows (e.g. the review-admission dispatch loop). Cheap-first,
+      # remember-rejections, backoff:
+      #   1. Each poll calls `decision_runs` FIRST (1 call: how many decision
+      #      runs exist for this head sha, how many are still pending). Artifacts
+      #      are listed/downloaded via `try_accept` only when that count says at
+      #      least one run has COMPLETED — a queued/in-progress base run costs
+      #      exactly 1 call per poll, never an artifacts list.
+      #   2. `try_accept` remembers every run id it has PROVEN invalid (wrong
+      #      event/path/status/conclusion, a successful download with no
+      #      decision.txt, or failed validation — never a transient download
+      #      failure, see below) in `$dec/rejected`, so a candidate already
+      #      rejected is never re-fetched (`runs/{id}` + download) on a later
+      #      poll — only the cheap artifacts-list call repeats.
+      #   3. Sleep starts at 10 s and grows by 10 s per poll up to a 30 s cap
+      #      (10, 20, 30, 30, ...), instead of a fixed 5 s — about 11-14 polls
+      #      in RECEIPT_WAIT_S=300s instead of ~60.
+      # Early exits are unchanged: stop once every decision run for this head
+      # sha has completed (one last try_accept first, in case the artifact
+      # became visible between polls), or once none has started after
+      # RECEIPT_NO_RUN_S seconds, or once RECEIPT_WAIT_S is exhausted. The base
+      # job does no checkout, so it normally finishes while this job is still
+      # checking out.
+      # Worst case (base run sits queued the whole window, measured against a
+      # stub gh): 12 `decision_runs` calls, 0 artifact calls, 12 total, vs.
+      # ~122 before. Worst case with one stale rejected candidate plus another
+      # run pending the whole window (measured): that candidate's `runs/{id}`
+      # happens ONCE (never downloaded — its conclusion already disqualifies
+      # it), then only the cheap artifacts-list call repeats each poll: 12
+      # `decision_runs` + 12 `artifacts_list` + 1 `run_detail` = 25 total, vs.
+      # ~183 before. Typical (base job finishes
+      # quickly): 1-3 calls, same order as before.
       # ---------------------------------------------------------------------
       - name: Change classification (import base decision)
         id: classify
@@ -152,8 +184,28 @@ jobs:
                   }' "$1"
           }
 
+          rejected="$dec/rejected"
+          : > "$rejected"
+
           # try_accept: one pass over candidate artifacts, newest run first.
-          # Returns 0 when a decision was accepted into $dec/accepted.
+          # Returns 0 when a decision was accepted into $dec/accepted. A run id
+          # already recorded in $rejected is skipped WITHOUT a `runs/{id}` or
+          # download call — only the artifacts list itself (needed to notice a
+          # brand-new candidate) is re-fetched each time this is called.
+          #
+          # ONLY a run PROVEN invalid is cached in $rejected — never one whose
+          # invalidity could be a transient API hiccup, per the rule that
+          # caching must never cause a genuine decision to be skipped:
+          #   - the run API confirms event/path/status=completed but the
+          #     conclusion/path/event mismatches (a deterministic fact about
+          #     that run, which cannot change) -> cached;
+          #   - `gh run download` ITSELF fails (network blip, transient 403/5xx
+          #     rate limit) -> NOT cached: this is exactly the failure mode a
+          #     retry exists for, so the next poll tries this run again;
+          #   - the download succeeded but produced no `decision.txt`, or
+          #     `validate` rejects the file it did produce -> cached: a
+          #     successfully-downloaded artifact's content cannot change on a
+          #     later poll, so re-fetching it again would learn nothing new.
           try_accept() {
               gh api "repos/$REPO/actions/artifacts?name=receipt-decision-$HEAD_SHA&per_page=30" \
                   --jq '.artifacts[] | select(.expired == false) | [.workflow_run.id, .id] | @tsv' \
@@ -162,15 +214,40 @@ jobs:
               sort -t "$tab" -k1,1nr "$dec/cands" > "$dec/cands.sorted"
               while IFS="$tab" read -r run art; do
                   case "$run" in ''|*[!0-9]*) continue ;; esac
+                  grep -qx "$run" "$rejected" 2>/dev/null && continue
                   gh api "repos/$REPO/actions/runs/$run" \
                       --jq '[.event, .path, .status, .conclusion] | @tsv' > "$dec/run" 2>>"$dec/api.err"
                   [ "$?" -eq 0 ] || continue
-                  [ "$(cat "$dec/run")" = "pull_request_target${tab}$DECISION_WORKFLOW${tab}completed${tab}success" ] || continue
+                  run_line=$(cat "$dec/run")
+                  run_status=$(printf '%s' "$run_line" | awk -F"$tab" '{print $3}')
+                  if [ "$run_line" != "pull_request_target${tab}$DECISION_WORKFLOW${tab}completed${tab}success" ]; then
+                      # Only a run the API reports as COMPLETED can be ruled
+                      # out for good; a still-queued/in-progress run may yet
+                      # become an acceptable candidate on a later poll.
+                      [ "$run_status" = completed ] && echo "$run" >> "$rejected"
+                      continue
+                  fi
                   rm -rf "$dec/dl"
                   gh run download "$run" --repo "$REPO" -n "receipt-decision-$HEAD_SHA" -D "$dec/dl" >/dev/null 2>>"$dec/api.err"
-                  [ "$?" -eq 0 ] && [ -f "$dec/dl/decision.txt" ] || continue
+                  dl_rc=$?
+                  if [ "$dl_rc" -ne 0 ]; then
+                      # The download call itself failed: could be a transient
+                      # rate limit or network error, not a fact about this run.
+                      # Do NOT cache — retry it on the next poll.
+                      continue
+                  fi
+                  if [ ! -f "$dec/dl/decision.txt" ]; then
+                      # Download succeeded but the artifact carries no
+                      # decision.txt: that is a fixed property of this run's
+                      # artifact and will not change on a later poll.
+                      echo "$run" >> "$rejected"
+                      continue
+                  fi
                   validate "$dec/dl/decision.txt" > "$dec/accepted.tmp"
-                  [ "$?" -eq 0 ] || continue
+                  if [ "$?" -ne 0 ]; then
+                      echo "$run" >> "$rejected"
+                      continue
+                  fi
                   mv "$dec/accepted.tmp" "$dec/accepted"
                   accepted_run=$run
                   return 0
@@ -180,6 +257,11 @@ jobs:
 
           # decision_runs_pending: prints how many decision runs for this head
           # exist and how many are not yet completed, as "<total> <pending>".
+          # This is the CHEAP call (1 request) polled on every iteration; only
+          # when it reports at least one COMPLETED run does the loop below call
+          # try_accept (which lists, and may download, artifacts) — a
+          # still-queued/in-progress base run therefore costs exactly this one
+          # call per poll, never an artifacts list.
           decision_runs() {
               gh api "repos/$REPO/actions/workflows/$(basename "$DECISION_WORKFLOW")/runs?event=pull_request_target&head_sha=$HEAD_SHA&per_page=30" \
                   --jq '"\(.total_count) \([.workflow_runs[] | select(.status != "completed")] | length)"' 2>>"$dec/api.err"
@@ -195,18 +277,30 @@ jobs:
               reason="base ref \"$BASE_REF\" is not main: the base decision workflow only decides PRs into main"
           else
               t0=$(date +%s)
+              sleep_s=10
               while :; do
-                  if try_accept; then
-                      reason="accepted base decision from run $accepted_run"
-                      break
-                  fi
-                  waited=$(( $(date +%s) - t0 ))
                   runs=$(decision_runs)
                   total=${runs% *}; pending=${runs#* }
                   case "$total$pending" in *[!0-9]*|'') total=0; pending=1 ;; esac
+                  completed=$(( total - pending ))
+                  [ "$completed" -ge 0 ] || completed=0
+
+                  if [ "$completed" -gt 0 ] && try_accept; then
+                      reason="accepted base decision from run $accepted_run"
+                      break
+                  fi
+
+                  waited=$(( $(date +%s) - t0 ))
                   if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
-                      # All decision runs finished; one last look in case the
-                      # artifact became visible between the two queries.
+                      # All decision runs report completed. The try_accept
+                      # above already looked (completed>0 whenever pending==0
+                      # and total>0) but a transient failure in THAT call
+                      # (e.g. a `gh run download` hiccup, deliberately never
+                      # cached as rejected — see try_accept) deserves one more
+                      # attempt before giving up for good, exactly like the
+                      # pre-fix "one last look". This is the only place this
+                      # loop calls try_accept twice in the same iteration, and
+                      # only on this terminal path.
                       try_accept && { reason="accepted base decision from run $accepted_run"; break; }
                       reason="every decision run for $HEAD_SHA completed without an acceptable decision"
                       break
@@ -219,7 +313,9 @@ jobs:
                       reason="no acceptable base decision within ${RECEIPT_WAIT_S}s"
                       break
                   fi
-                  sleep 5
+                  sleep "$sleep_s"
+                  sleep_s=$(( sleep_s + 10 ))
+                  [ "$sleep_s" -le 30 ] || sleep_s=30
               done
               echo "decision import waited $(( $(date +%s) - t0 ))s"
           fi
