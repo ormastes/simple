@@ -1,0 +1,60 @@
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.backend.backend.llvm_cross_target.{toolchain_for_target, toolchain_for_host}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use std.platform.{get_host_os, host_arch}
+
+describe "LLVM host toolchain architecture":
+    it "selects Apple Silicon linker flags for both ARM64 names":
+        step("Resolve each Apple Silicon host architecture alias")
+        for arch in ["aarch64", "arm64"]:
+            val tc = toolchain_for_host("macos", arch)
+            expect(tc.target).to_equal(CodegenTarget.AArch64)
+            expect(tc.triple).to_equal("aarch64-apple-darwin")
+            expect(tc.linker_flavor).to_equal("macho")
+            expect(tc.default_flags).to_equal(["-arch", "arm64", "-lSystem"])
+            expect(tc.requires_external).to_be(false)
+
+    it "preserves Intel macOS linker flags":
+        step("Resolve each Intel macOS host architecture alias")
+        for arch in ["x86_64", "amd64", "x64"]:
+            val tc = toolchain_for_host("macos", arch)
+            expect(tc.triple).to_equal("x86_64-apple-darwin")
+            expect(tc.default_flags).to_equal(["-arch", "x86_64", "-lSystem"])
+
+    it "selects native Linux descriptors for 32 bit x86 and RISC V":
+        step("Resolve native Linux x86 and RISC V descriptors")
+        for arch in ["i386", "i486", "i586", "i686", "x86"]:
+            val tc = toolchain_for_host("linux", arch)
+            expect(tc.target).to_equal(CodegenTarget.X86)
+            expect(tc.triple).to_equal("i686-unknown-linux-gnu")
+        for arch in ["riscv64", "rv64"]:
+            val tc = toolchain_for_host("linux", arch)
+            expect(tc.target).to_equal(CodegenTarget.Riscv64)
+            expect(tc.requires_external).to_be(false)
+
+    it "retains unsupported host ABI diagnostics":
+        step("Check unsupported host ABI descriptors fail closed")
+        for arch in ["arm", "armv7", "armv7l", "riscv32", "rv32"]:
+            val tc = toolchain_for_host("linux", arch)
+            expect(tc.linker).to_equal("")
+            expect(tc.requires_external).to_be(true)
+        val windows = toolchain_for_host("windows", "aarch64")
+        expect(windows.linker).to_equal("")
+        expect(windows.install_hint).to_contain("unsupported")
+
+    it "rejects unknown hosts instead of producing an x86 binary":
+        step("Reject an unrecognized host architecture")
+        val tc = toolchain_for_host("macos", "unknown-cpu")
+        expect(tc.linker).to_equal("")
+        expect(tc.linker_flavor).to_equal("unsupported")
+        expect(tc.install_hint).to_contain("unknown-cpu")
+
+    it "routes both implicit target aliases through host detection":
+        step("Resolve Host and Native through the detected host architecture")
+        val expected = toolchain_for_host(get_host_os(), host_arch())
+        for target in [CodegenTarget.Host, CodegenTarget.Native]:
+            val actual = toolchain_for_target(target)
+            expect(actual.target).to_equal(expected.target)
+            expect(actual.triple).to_equal(expected.triple)
+            expect(actual.default_flags).to_equal(expected.default_flags)

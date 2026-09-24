@@ -1,0 +1,63 @@
+# Bootstrap regression imports the real inventory and its flat AST owners.
+use compiler.core.ast.*
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_coverage_inventory.*
+use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset as reset_alias}
+use compiler.core.types.{flat_span_new}
+
+fn main() -> i64:
+    ast_reset()
+    val span_id = flat_span_new(10, 20, 2, 3)
+    val guard = expr_bool_lit(1, span_id)
+    val pattern = expr_int_lit(1, span_id)
+    val arm = arm_new(pattern, guard, [])
+    val match_stmt = stmt_match_stmt(pattern, [arm], span_id)
+    module_add_decl(decl_fn("covered", [], [], -1, [match_stmt], 0, [], span_id))
+
+    # A false value written after initialization must remain false on read.
+    compiler_coverage_inventory_reset(false)
+    compiler_coverage_inventory_record_module("src/app/disabled.spl")
+    if compiler_coverage_inventory_sdn().contains("disabled.spl"): return 11
+    if compiler_mcdc_obligation_manifest_sdn().contains("condition|"): return 12
+
+    # Imported omitted defaults and explicit defaults have identical meaning.
+    compiler_coverage_inventory_reset(true)
+    compiler_coverage_inventory_record_module("src/app/coverage_fixture.spl")
+    val default_rows = compiler_coverage_inventory_sdn()
+    val default_obligations = compiler_mcdc_obligation_manifest_sdn()
+    if not default_rows.contains("11, 11, src/app/coverage_fixture.spl, 2, 3, 0, 0"): return 21
+    if not default_obligations.contains("condition|"): return 22
+    if not compiler_coverage_inventory_valid(): return 23
+    compiler_coverage_inventory_reset(true, "", "")
+    compiler_coverage_inventory_record_module("src/app/coverage_fixture.spl")
+    if compiler_coverage_inventory_sdn() != default_rows: return 24
+    if compiler_mcdc_obligation_manifest_sdn() != default_obligations: return 25
+
+    # Aliases retain the declaration's defaults too.
+    reset_alias(true)
+    compiler_coverage_inventory_record_module("src/app/coverage_fixture.spl")
+    if compiler_mcdc_obligation_manifest_sdn() != default_obligations: return 31
+
+    # Explicit filters must not be overwritten by default insertion.
+    compiler_coverage_inventory_reset(true, "", "src/app/coverage_fixture.spl")
+    compiler_coverage_inventory_record_module("src/app/coverage_fixture.spl")
+    if not compiler_coverage_inventory_sdn().contains("coverage_fixture.spl"): return 41
+    if compiler_mcdc_obligation_manifest_sdn().contains("condition|"): return 42
+
+    # Compiler source remains excluded; duplicates remain bounded/idempotent.
+    compiler_coverage_inventory_reset(true)
+    compiler_coverage_inventory_record_module("src/compiler/core.spl")
+    val once = compiler_coverage_inventory_sdn()
+    if not once.contains("11, 11, src/compiler/core.spl, 2, 3, 0, 0"): return 51
+    for index in 0..1000:
+        compiler_coverage_inventory_record_module("src/compiler/core.spl")
+    if compiler_coverage_inventory_sdn() != once: return 52
+    if compiler_mcdc_obligation_manifest_sdn().contains("condition|"): return 53
+    if not compiler_coverage_inventory_valid(): return 54
+
+    compiler_coverage_inventory_reset(false, "", "")
+    compiler_coverage_inventory_record_module("src/app/disabled_again.spl")
+    if compiler_coverage_inventory_sdn().contains("disabled_again.spl"): return 61
+    print "coverage-global-defaults: PASS cases=6 repeats=1000"
+    0

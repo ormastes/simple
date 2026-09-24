@@ -105,9 +105,14 @@ pub struct Lowerer {
     pub(super) method_return_types: HashMap<String, TypeId>,
     /// M12 3b: free-function parameter default-value expressions, keyed by
     /// function name (one Option per declared parameter; None = no default).
+    /// Keyed by the emitted owner-specific symbol for flattened definitions.
     /// Captured from the AST during module lowering so omitted trailing
     /// arguments can be filled at call sites (`lower_call`).
     pub(super) fn_param_defaults: HashMap<String, Vec<Option<Expr>>>,
+    /// Importing module identity -> visible name -> parameter defaults.
+    /// Separate from local declarations so cached facades and aliases retain
+    /// the selected import's contract without a process-wide bare-name lookup.
+    pub(super) imported_fn_param_defaults: HashMap<PathBuf, HashMap<String, Vec<Option<Expr>>>>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -262,6 +267,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             qualified_import_functions: None,
             lenient_types: false,
@@ -322,6 +328,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             qualified_import_functions: None,
             lenient_types: false,
@@ -405,6 +412,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             qualified_import_functions: None,
             lenient_types: false,

@@ -261,9 +261,17 @@ impl Lowerer {
         // caller-scope locals or sibling parameters); anything else is left
         // unfilled, preserving prior behavior. Method/Path-callee defaults are a
         // separate follow-up.
-        if let Expr::Identifier(name) = callee {
+        if let (Expr::Identifier(name), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
             if args.iter().all(|a| a.name.is_none()) {
-                let to_fill: Vec<Expr> = match self.fn_param_defaults.get(name) {
+                let params = self.fn_param_defaults.get(symbol).or_else(|| {
+                    if self.own_declared_function_names.contains(name) { return None; }
+                    self.current_file.as_ref().and_then(|path| {
+                        self.imported_fn_param_defaults
+                            .get(&crate::interpreter::normalize_path_key(path))
+                            .and_then(|contracts| contracts.get(name))
+                    })
+                });
+                let to_fill: Vec<Expr> = match params {
                     Some(params) if params.len() > args_hir.len() => {
                         let mut pending = Vec::new();
                         for slot in &params[args_hir.len()..] {
@@ -313,6 +321,9 @@ impl Lowerer {
             | Expr::Nil
             | Expr::Symbol(_)
             | Expr::Atom(_) => true,
+            // Ordinary quoted strings use FString syntax too. Only literal
+            // parts are safe here; interpolation must not capture caller scope.
+            Expr::FString { parts, .. } => parts.iter().all(|part| matches!(part, ast::FStringPart::Literal(_))),
             Expr::Unary { operand, .. } => Self::is_constant_default(operand),
             Expr::Binary { left, right, .. } => Self::is_constant_default(left) && Self::is_constant_default(right),
             _ => false,

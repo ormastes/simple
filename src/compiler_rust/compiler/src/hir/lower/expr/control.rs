@@ -55,7 +55,8 @@ impl Lowerer {
 
     /// Lower an if expression to HIR
     ///
-    /// Result type is taken from the then branch.
+    /// Result type follows the then branch, except an empty array literal
+    /// acquires its element type from the sibling array branch.
     /// Else branch is optional.
     pub(super) fn lower_if(
         &mut self,
@@ -83,14 +84,36 @@ impl Lowerer {
             return self.lower_if_let_expr(pattern, condition, then_branch, else_branch, ctx);
         }
         let cond_hir = Box::new(self.lower_condition(condition, ctx)?);
-        let then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
-        let else_hir = if let Some(eb) = else_branch {
+        let mut then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
+        let mut else_hir = if let Some(eb) = else_branch {
             Some(Box::new(self.lower_expr(eb, ctx)?))
         } else {
             None
         };
 
-        let ty = then_hir.ty;
+        let mut ty = then_hir.ty;
+        if let Some(other) = else_hir.as_mut() {
+            // An empty literal's configured default (normally i32) is not
+            // evidence about the sibling's elements. Keeping it here narrows
+            // struct keys to i32 when a conditional array is later iterated.
+            // Restrict contextualization to actual empty literals: a populated
+            // or explicitly typed array must never be silently reinterpreted.
+            let then_empty = matches!(then_branch, Expr::Array(items) if items.is_empty());
+            let else_empty = matches!(else_branch, Some(Expr::Array(items)) if items.is_empty());
+            if then_empty != else_empty {
+                let sibling_ty = if then_empty { other.ty } else { then_hir.ty };
+                if let Some(HirType::Array { element, .. }) = self.module.types.get(sibling_ty) {
+                    let element = *element;
+                    let empty_ty = self.module.types.register(HirType::Array { element, size: Some(0) });
+                    if then_empty {
+                        then_hir.ty = empty_ty;
+                    } else {
+                        other.ty = empty_ty;
+                    }
+                    ty = self.module.types.register(HirType::Array { element, size: None });
+                }
+            }
+        }
 
         Ok(HirExpr {
             kind: HirExprKind::If {
