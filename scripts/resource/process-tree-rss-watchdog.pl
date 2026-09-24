@@ -63,7 +63,18 @@ my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
 my ($observer_read, $observer_write, $observer_pid);
 my $observer_buffer = '';
 my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
-my $observer_backend = $^O eq 'darwin' ? 'darwin-sysctl-libproc' : 'ps';
+# Windows (MSYS/Cygwin perl): MSYS PIDs are not Windows PIDs and POSIX
+# sessions/process groups do not exist for native processes, so `ps` sampling
+# and getsid() isolation cannot work. The compiled helper instead owns a named
+# Job Object (--supervise): membership is kernel-enforced (no breakaway), RSS is
+# the summed working set of the job's members, and kill-on-limit terminates the
+# whole job. Native MSWin32 perl has no MSYS path/fork layer and fails closed.
+my $windows = $^O =~ /\A(?:msys|cygwin|MSWin32)\z/ ? 1 : 0;
+my $observer_backend = $windows ? 'win32-job-object' :
+    $^O eq 'darwin' ? 'darwin-sysctl-libproc' : 'ps';
+my $containment_scope = $windows ? 'win32-job-object-no-breakaway' :
+    'observed-descendants-and-process-groups';
+my $extra_receipt = '';
 
 sub verify_observer {
     my @path = lstat($observer_path);
@@ -271,13 +282,14 @@ sub install_session_helper {
         tempdir('simple-rss-session-XXXXXXXX', DIR => dirname($opt{receipt}), CLEANUP => 0) :
         tempdir('simple-rss-session-XXXXXXXX', TMPDIR => 1, CLEANUP => 0);
     $directory = abs_path($directory);
-    $session_helper = "$directory/bootstrap-session-exec";
-    my $compiler = $ENV{CC} || 'cc';
+    $session_helper = "$directory/bootstrap-session-exec" . ($windows ? '.exe' : '');
+    my @compile = windows_compile_command($source, $directory);
+    @compile = ($ENV{CC} || 'cc', '-O2', $source, '-o', $session_helper) unless $windows;
     my $builder = fork();
     defined($builder) or die "cannot fork helper compiler";
     if (!$builder) {
         setpgid(0, 0) == 0 or POSIX::_exit(89);
-        exec {$compiler} $compiler, '-O2', $source, '-o', $session_helper or POSIX::_exit(127);
+        exec {$compile[0]} @compile or POSIX::_exit(127);
     }
     my $deadline = time + 30;
     while (1) {
@@ -298,6 +310,9 @@ sub install_session_helper {
     sysopen($helper_fd, $session_helper, O_RDONLY | O_NOFOLLOW) or die "cannot pin session helper";
     -f $helper_fd or die "session helper is not a regular file";
     $helper_sha = hash_handle($helper_fd);
+    # Windows session identity is job membership, verified natively by the
+    # helper (--supervise --inherit re-checks the parent job before nesting).
+    if ($windows) { $helper_installed = 1; return; }
     # Cold Darwin executable admission can exceed two seconds under host load.
     # No workload exists yet: allow one bounded warmup, while snapshot() keeps
     # a separate bounded observation deadline after workload creation.
@@ -339,6 +354,108 @@ sub install_session_helper {
         $session_id = $own_sid;
     }
     $helper_installed = 1;
+}
+
+sub win_path {
+    my ($path) = @_;
+    my $converted = defined(&Cygwin::posix_to_win_path) ? Cygwin::posix_to_win_path($path) : undef;
+    defined($converted) && $converted =~ /\A[A-Za-z]:[\\\/]/ or die "cannot convert $path to a Windows path";
+    return $converted;
+}
+
+# Toolchain policy: clang-cl (or the clang driver) with LLD only; never cl,
+# link.exe or gcc. The object file is placed beside the helper, not in cwd.
+sub windows_compile_command {
+    my ($source, $directory) = @_;
+    return () unless $windows;
+    $^O ne 'MSWin32' or die "native MSWin32 perl is unsupported; run the guard under MSYS/Git-for-Windows perl";
+    my $compiler = $ENV{CC} || 'clang-cl';
+    my ($name) = $compiler =~ m{([^/\\]+)\z};
+    -f '/usr/bin/sh.exe' or die "MSYS shell /usr/bin/sh.exe is missing";
+    (my $shell = win_path('/usr/bin/sh.exe')) =~ tr{\\}{/};
+    $shell !~ /["\\]/ or die "unsupported MSYS shell path $shell";
+    my @defines = ('-D_CRT_SECURE_NO_WARNINGS', "-DSIMPLE_BOOTSTRAP_SESSION_SHELL=L\"$shell\"");
+    if (($name // '') =~ /\Aclang-cl(?:\.exe)?\z/i) {
+        return ($compiler, '-nologo', '-O2', '-fuse-ld=lld', @defines, win_path($source),
+                '-Fo' . win_path($directory) . '\\bootstrap-session-exec.obj',
+                '-o', win_path($directory) . '\\bootstrap-session-exec.exe');
+    }
+    if (($name // '') =~ /\Aclang(?:-[0-9]+)?(?:\.exe)?\z/i) {
+        return ($compiler, '-O2', '-fuse-ld=lld', @defines, win_path($source),
+                '-o', win_path($directory) . '\\bootstrap-session-exec.exe');
+    }
+    die "Windows session helper requires clang-cl or clang (CC=$compiler; cl/gcc are not permitted)";
+}
+
+sub windows_job_workload {
+    my $directory = dirname($session_helper);
+    my ($spec, $stats) = ("$directory/workload.spec", "$directory/workload.stats");
+    open(my $fh, '>:raw', $spec) or die "cannot write workload spec";
+    print {$fh} join("\0", $session_helper, @ARGV), "\0" or die "cannot write workload spec";
+    close($fh) or die "cannot write workload spec";
+    open(my $winpid_fh, '<', "/proc/$$/winpid") or die "cannot read supervisor Windows PID";
+    my $winpid = <$winpid_fh> // '';
+    close($winpid_fh);
+    chomp $winpid;
+    $winpid =~ /\A[1-9][0-9]*\z/ or die "invalid supervisor Windows PID";
+    my @command = ($session_helper, '--supervise', '--spec', win_path($spec),
+        '--stats', win_path($stats),
+        '--rss-cap-mode', $opt{'rss-cap-mode'}, '--max-rss-kib', $opt{'max-rss-kib'},
+        '--interval-ms', $opt{'interval-ms'}, '--observation-budget-ms', $observation_budget_ms,
+        '--timeout-seconds', $opt{'timeout-seconds'}, '--parent-winpid', $winpid,
+        ($opt{'session-mode'} eq 'inherit' ? ('--inherit') : ()));
+    verify_session_helper();
+    local $SIG{TERM} = sub { $interrupted = 143 };
+    local $SIG{INT} = sub { $interrupted = 130 };
+    local $SIG{HUP} = sub { $interrupted = 129 };
+    my $supervisor = fork();
+    defined($supervisor) or die "cannot fork job supervisor";
+    if (!$supervisor) {
+        $SIG{PIPE} = $workload_sigpipe;
+        exec {$command[0]} @command or POSIX::_exit(127);
+    }
+    my ($stop_at, $forced) = (0, 0);
+    while (waitpid($supervisor, WNOHANG) != $supervisor) {
+        if ($interrupted && !$stop_at) {
+            # The helper polls this each sample and terminates the whole job.
+            if (open(my $stop, '>', "$stats.stop")) { close($stop) }
+            $stop_at = time;
+        }
+        if ($stop_at && time - $stop_at > 5) {
+            kill 'KILL', $supervisor; waitpid($supervisor, 0); $forced = 1; last;
+        }
+        sleep 0.05;
+    }
+    my $helper_exit = $? >> 8;
+    verify_session_helper();
+    my %result;
+    if (!$forced && open(my $in, '<', $stats)) {
+        while (my $line = <$in>) {
+            $line =~ /\A([a-z_]+)=([^\n]*)\n\z/ or die "malformed job supervisor stats";
+            $result{$1} = $2;
+        }
+        close($in);
+    }
+    if (!%result) {
+        warn "rss-guard: job supervisor produced no stats (exit $helper_exit)\n";
+        return ($forced ? 'rss-containment-unverified' : 'session-helper-install-failed', 89, 0);
+    }
+    for my $key (qw(exit_status root_pid session_id peak_rss_kib samples sample_gap_max_ms
+                    sample_duration_max_ms sample_duration_max_us sample_duration_total_us
+                    sample_overruns peak_job_commit_kib quiescent)) {
+        ($result{$key} // '') =~ /\A-?[0-9]+\z/ or die "job supervisor stats missing $key";
+    }
+    ($result{status} // '') =~ /\A[a-z-]+\z/ or die "job supervisor stats missing status";
+    ($leader, $session_id, $peak, $samples) = @result{qw(root_pid session_id peak_rss_kib samples)};
+    ($sample_gap_max_ms, $sample_duration_max_ms, $sample_overruns) =
+        @result{qw(sample_gap_max_ms sample_duration_max_ms sample_overruns)};
+    $session_checks = $samples;
+    $extra_receipt = "peak_job_commit_kib=$result{peak_job_commit_kib}\n" .
+        "sample_duration_max_us=$result{sample_duration_max_us}\n" .
+        "sample_duration_total_us=$result{sample_duration_total_us}\n" .
+        "timeout_signal=job-terminate\n";
+    my $code = $result{status} eq 'interrupted' && $interrupted ? $interrupted : $result{exit_status};
+    return ($result{status}, $code, $result{quiescent});
 }
 
 sub publish_session_admission {
@@ -513,7 +630,7 @@ sub receipt {
         "observer_starts=$observer_starts\nobserver_errors=$observer_errors\n" .
         "observer_restarts=" . ($observer_starts ? $observer_starts - 1 : 0) . "\n" .
         "observer_last_pid=$observer_last_pid\n" .
-        "containment_scope=observed-descendants-and-process-groups\n" .
+        "containment_scope=$containment_scope\n" .
         "hard_memory_limit=0\nquiescent=$quiet\n" .
         "rss_cap_mode=$opt{'rss-cap-mode'}\nrss_cap_enforced=" .
         ($opt{'rss-cap-mode'} eq 'enforce' ? 1 : 0) . "\n" .
@@ -526,7 +643,7 @@ sub receipt {
         "session_helper_sha256=" . ($helper_sha // '') . "\n" .
         "session_helper_source_sha256=" . ($helper_source_sha // '') . "\n" .
         "session_helper_integrity=" . ($helper_failed ? 'failed' : $helper_installed ? 'verified' : 'unverified') . "\n" .
-        "unexpected_session_pids=" . join(',', sort {$a <=> $b} keys %unexpected_sid) . "\n";
+        "unexpected_session_pids=" . join(',', sort {$a <=> $b} keys %unexpected_sid) . "\n" . $extra_receipt;
     print STDERR $body if $code == 88 || $code == 89 || $code == 90;
     if (defined $opt{receipt}) {
         my $tmp = "$opt{receipt}.tmp.$$";
@@ -543,6 +660,16 @@ if (!eval { install_session_helper(); install_observer(); 1 }) {
     warn "rss-guard: session installation failed: $@\n";
     receipt('session-helper-install-failed', 89, 1);
     exit 89;
+}
+if ($windows) {
+    my @outcome = eval { windows_job_workload() };
+    if (!@outcome) {
+        warn "rss-guard: job supervision failed: $@\n";
+        @outcome = ($helper_failed ? 'session-helper-invalid' : 'rss-measurement-failed', 89, 0);
+    }
+    my ($status, $code, $quiet) = @outcome;
+    receipt($status, $code, $quiet);
+    exit $code;
 }
 $started = time;
 pipe(my $gate_read, my $gate_write) or die "rss-guard: pipe failed\n";
