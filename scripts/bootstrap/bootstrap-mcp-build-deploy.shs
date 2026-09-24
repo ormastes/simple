@@ -1,0 +1,673 @@
+#!/bin/sh
+# bootstrap-mcp-build-deploy.shs
+#
+# Extends the sanctioned bootstrap so that once a self-hosted compiler exists
+# (a working full-CLI or Stage 5 candidate binary), the three MCP-family
+# servers get built, tested, and — only when it is safe — auto-deployed:
+#
+#   1. simple-mcp        (src/app/mcp/main.spl              -> simple_mcp_server)
+#   2. simple-lsp-mcp    (src/app/simple_lsp_mcp/main.spl    -> simple_lsp_mcp_server)
+#   3. spipe-mcp         (src/app/spipe_mcp/main.spl         -> spipe_mcp, native leg
+#                          of bin/spipe_mcp_server's interpreter-fallback wrapper)
+#
+# This helper does NOT duplicate Stage 5's native-build rows
+# (bootstrap-from-scratch.sh ~:3961-4022) or bootstrap-phase-verification.shs's
+# mcp_build/lsp_build matrix rows. When a caller already built a candidate
+# (Stage 5), it passes the path via --mcp-candidate=/--lsp-candidate= and this
+# script skips rebuilding it. Building here is only the fallback for callers
+# (or --selftest / manual invocation) that have not built one yet.
+#
+# Steps performed (unless narrowed by flags):
+#   BUILD  - native-build any candidate not already supplied
+#   TEST   - run the modern SSpec system tests under test/03_system/**mcp**
+#            (and the spipe system spec, when present) with the test runner,
+#            plus the real-launcher initialize/tools/list handshake via
+#            check-mcp-config-launchable.shs against the CANDIDATE binaries
+#            (never the currently-deployed ones — a stale deployed server
+#            must never mask a broken candidate)
+#   DEPLOY - for each server, decide once from (deployed health, build_ok,
+#            test_ok):
+#              missing    -> deploy-missing
+#              broken     -> deploy-broken
+#              healthy    -> skip-healthy   (never clobber a working server)
+#              build/test failed -> skip-unverified (never deploy unverified bits)
+#            Install is copy-to-`<path>.new` + `mv -f` over EVERY directory
+#            entry that names the artifact (including a same-inode hardlink
+#            twin such as bin/release/linux-x86_64/), then the `.sha256`
+#            sidecar is refreshed — this is the exact recipe
+#            .claude/rules/code-style.md documents for simple_mcp_server.
+#            On Windows, a locked (running) exe is handled by renaming the
+#            old file aside first, since a running .exe cannot be overwritten
+#            in place.
+#
+# Flags:
+#   --no-deploy-mcp        Disable the DEPLOY step entirely (BUILD/TEST still
+#                          run unless also narrowed). Off by default in CI:
+#                          auto-detected via $CI / $GITHUB_ACTIONS unless
+#                          --force-deploy-mcp is also given.
+#   --force-deploy-mcp     Overrides the CI/receipt-gated auto-off.
+#   --receipt-gated        Caller asserts this run is receipt-gated; treated
+#                          the same as CI for the deploy-default decision.
+#   --skip-build           Do not build; every candidate must be supplied via
+#                          --mcp-candidate=/--lsp-candidate=/--spipe-candidate=
+#   --skip-tests           Do not run system tests; test_ok is then whatever
+#                          --assume-tests-ok says (default: 0, i.e. unverified).
+#   --assume-tests-ok      Only meaningful with --skip-tests: treat tests as
+#                          already verified by the caller (e.g. Stage 5 smoke).
+#   --dry-run              Print the decision + the exact install commands that
+#                          WOULD run, for every server; performs no writes.
+#   --compiler=PATH        Compiler CLI used for native-build/test invocations.
+#   --test-runner=PATH     Test runner binary for the system-test step.
+#   --runtime-path=PATH    --runtime-path forwarded to native-build.
+#   --backend=NAME         --backend forwarded to native-build.
+#   --cache-dir=DIR        --cache-dir forwarded to native-build (reused across
+#                          calls so unchanged inputs produce no rebuild work).
+#   --output-dir=DIR       Where freshly-built candidates land (default: a
+#                          bootstrap-mcp-build subdir under --cache-dir).
+#   --deploy-root=DIR      bin/release/<platform> directory (default:
+#                          <repo_root>/bin/release/<platform from --platform>).
+#   --mirror-root=DIR      A second directory receiving the same hardlink twin
+#                          (e.g. bin/release/linux-x86_64 next to
+#                          bin/release/x86_64-unknown-linux-gnu). Optional.
+#   --spipe-output=PATH    Deploy target for the spipe leg (default:
+#                          <repo_root>/build/bootstrap/mcp-package/spipe_mcp).
+#   --platform=TRIPLE      Target triple, used only to name --deploy-root when
+#                          --deploy-root is not given explicitly.
+#   --exe-suffix=SUF       ".exe" on Windows, "" elsewhere (default: auto).
+#   --jobs=N               --threads forwarded to native-build (default 1).
+#   --mcp-candidate=PATH   Pre-built simple_mcp_server binary (skips its build).
+#   --lsp-candidate=PATH   Pre-built simple_lsp_mcp_server binary.
+#   --spipe-candidate=PATH Pre-built spipe_mcp binary.
+#   --selftest             Run the fixture harness for the deploy-decision and
+#                          install mechanics (no compiler needed) and exit.
+#
+# Verdict (last line of stdout), matching this repo's other check scripts:
+#   PASS  — <n> server(s) processed, <k> deployed, 0 unverified/broken-install
+#   FAIL  — ...
+#   ERROR — nothing was checked (<reason>)
+#
+# Exit status is always read directly by callers into a variable on the line
+# after invocation — never through a pipe.
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+mcp_bd_log() {
+  printf '%s\n' "$*" >&2
+}
+
+mcp_bd_hash_file() {
+  file=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${file}" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${file}" | awk '{print $1}'
+  else
+    mcp_bd_log "error: no sha256sum/shasum available"
+    return 1
+  fi
+}
+
+# Decide the deploy action for one server from its inputs. Pure function: no
+# filesystem access, fully unit-testable.
+#   $1 health: missing|broken|healthy
+#   $2 build_ok: 0|1
+#   $3 test_ok: 0|1
+# Prints one of: deploy-missing deploy-broken skip-healthy skip-unverified
+mcp_bd_decide() {
+  health=$1
+  build_ok=$2
+  test_ok=$3
+  if [ "${build_ok}" -ne 1 ] || [ "${test_ok}" -ne 1 ]; then
+    echo skip-unverified
+    return 0
+  fi
+  case "${health}" in
+    missing) echo deploy-missing ;;
+    broken) echo deploy-broken ;;
+    healthy) echo skip-healthy ;;
+    *)
+      mcp_bd_log "error: mcp_bd_decide: unknown health state '${health}'"
+      return 1
+      ;;
+  esac
+}
+
+# Probe the health of a currently-deployed server.
+#   $1 deployed_path
+#   $2 sidecar_path (deployed_path.sha256, conventionally)
+# Prints one of: missing broken healthy
+# Handshake probing is delegated to $MCP_BD_HEALTH_PROBE_CMD when set (used by
+# --selftest and by callers that already have a cheaper liveness signal); the
+# default probe is check-mcp-config-launchable.shs against a synthesized
+# one-entry config naming the deployed path.
+mcp_bd_health() {
+  deployed_path=$1
+  sidecar_path=$2
+  if [ ! -e "${deployed_path}" ]; then
+    echo missing
+    return 0
+  fi
+  if [ ! -s "${sidecar_path}" ]; then
+    echo broken
+    return 0
+  fi
+  recorded=$(cat "${sidecar_path}" 2>/dev/null | awk '{print $1}') || recorded=""
+  actual=$(mcp_bd_hash_file "${deployed_path}") || actual=""
+  if [ -z "${recorded}" ] || [ "${recorded}" != "${actual}" ]; then
+    echo broken
+    return 0
+  fi
+  if [ -n "${MCP_BD_HEALTH_PROBE_CMD:-}" ]; then
+    if eval "${MCP_BD_HEALTH_PROBE_CMD}" "'${deployed_path}'" >/dev/null 2>&1; then
+      echo healthy
+    else
+      echo broken
+    fi
+    return 0
+  fi
+  cfg_tmp=$(mktemp "${TMPDIR:-/tmp}/mcp-bd-health.XXXXXX") || return 1
+  printf '{"mcpServers":{"probe":{"command":"%s","args":[]}}}\n' "${deployed_path}" >"${cfg_tmp}"
+  probe_status=0
+  sh "${repo_root}/scripts/check/check-mcp-config-launchable.shs" "${cfg_tmp}" >/dev/null 2>&1 || probe_status=$?
+  rm -f "${cfg_tmp}"
+  if [ "${probe_status}" -eq 0 ]; then
+    echo healthy
+  else
+    echo broken
+  fi
+}
+
+# Install a built candidate over a (possibly absent) deployed path, following
+# the .new + mv -f recipe, with a Windows locked-exe rename-aside fallback.
+#   $1 candidate_path (must exist)
+#   $2 dest_path
+# Returns 0 on success, 1 on failure (never partially deploys: a failure here
+# must leave the previous dest_path in place or absent, never a corrupt file).
+mcp_bd_install_one() {
+  candidate_path=$1
+  dest_path=$2
+  [ -s "${candidate_path}" ] || { mcp_bd_log "error: install source missing/empty: ${candidate_path}"; return 1; }
+  dest_dir=$(dirname -- "${dest_path}")
+  mkdir -p "${dest_dir}"
+  new_path="${dest_path}.new"
+  rm -f "${new_path}"
+  cp "${candidate_path}" "${new_path}"
+  chmod +x "${new_path}" 2>/dev/null || true
+
+  mv_status=0
+  if [ "${MCP_BD_FORCE_MV_FAIL_ONCE:-0}" = "1" ]; then
+    MCP_BD_FORCE_MV_FAIL_ONCE=0
+    mv_status=1
+  else
+    mv -f "${new_path}" "${dest_path}" 2>/dev/null || mv_status=$?
+  fi
+
+  if [ "${mv_status}" -ne 0 ]; then
+    # Locked-running-exe case (observed on Windows: a running .exe cannot be
+    # overwritten in place). Rename the old file aside first, then retry.
+    if [ -e "${dest_path}" ]; then
+      aged_path="${dest_path}.old.$$"
+      if ! mv -f "${dest_path}" "${aged_path}" 2>/dev/null; then
+        mcp_bd_log "error: install refused - '${dest_path}' is locked and cannot be renamed aside"
+        rm -f "${new_path}"
+        return 1
+      fi
+      if mv -f "${new_path}" "${dest_path}" 2>/dev/null; then
+        rm -f "${aged_path}"
+      else
+        # Restore the previous binary rather than leaving nothing deployed.
+        mv -f "${aged_path}" "${dest_path}" 2>/dev/null || true
+        rm -f "${new_path}"
+        mcp_bd_log "error: install refused - '${dest_path}' still locked after rename-aside"
+        return 1
+      fi
+    else
+      mcp_bd_log "error: install failed and no previous '${dest_path}' to fall back to"
+      rm -f "${new_path}"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Install a candidate to a primary dest plus an optional hardlinked mirror,
+# and refresh the .sha256 sidecar(s).
+#   $1 candidate_path
+#   $2 primary_dest
+#   $3 mirror_dest (optional, "" to skip)
+mcp_bd_install() {
+  candidate_path=$1
+  primary_dest=$2
+  mirror_dest=${3:-}
+  mcp_bd_install_one "${candidate_path}" "${primary_dest}" || return 1
+  digest=$(mcp_bd_hash_file "${primary_dest}") || return 1
+  printf '%s\n' "${digest}" >"${primary_dest}.sha256"
+  if [ -n "${mirror_dest}" ]; then
+    mirror_dir=$(dirname -- "${mirror_dest}")
+    mkdir -p "${mirror_dir}"
+    rm -f "${mirror_dest}"
+    if ! ln "${primary_dest}" "${mirror_dest}" 2>/dev/null; then
+      cp "${primary_dest}" "${mirror_dest}"
+      chmod +x "${mirror_dest}" 2>/dev/null || true
+    fi
+    printf '%s\n' "${digest}" >"${mirror_dest}.sha256"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Self-test (no compiler required)
+# ---------------------------------------------------------------------------
+
+mcp_bd_selftest_assert_eq() {
+  desc=$1
+  expected=$2
+  actual=$3
+  if [ "${expected}" != "${actual}" ]; then
+    echo "FAIL selftest: ${desc} - expected '${expected}' got '${actual}'" >&2
+    mcp_bd_selftest_failed=1
+  fi
+}
+
+mcp_bd_selftest() {
+  mcp_bd_selftest_failed=0
+
+  # --- decision matrix ---
+  got=$(mcp_bd_decide missing 1 1)
+  mcp_bd_selftest_assert_eq "missing+build_ok+test_ok" deploy-missing "${got}"
+  got=$(mcp_bd_decide broken 1 1)
+  mcp_bd_selftest_assert_eq "broken+build_ok+test_ok" deploy-broken "${got}"
+  got=$(mcp_bd_decide healthy 1 1)
+  mcp_bd_selftest_assert_eq "healthy+build_ok+test_ok" skip-healthy "${got}"
+  got=$(mcp_bd_decide missing 0 1)
+  mcp_bd_selftest_assert_eq "missing+build_fail" skip-unverified "${got}"
+  got=$(mcp_bd_decide broken 1 0)
+  mcp_bd_selftest_assert_eq "broken+test_fail" skip-unverified "${got}"
+  got=$(mcp_bd_decide healthy 0 0)
+  mcp_bd_selftest_assert_eq "healthy+both_fail_still_unverified" skip-unverified "${got}"
+
+  # --- health probe ---
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/mcp-bd-selftest.XXXXXX")
+  trap 'rm -rf "${tmp}"' EXIT
+
+  # missing
+  got=$(mcp_bd_health "${tmp}/nope" "${tmp}/nope.sha256")
+  mcp_bd_selftest_assert_eq "health: no deployed file" missing "${got}"
+
+  # broken: file present, no sidecar
+  printf 'binary-bytes' >"${tmp}/broken_nosidecar"
+  got=$(mcp_bd_health "${tmp}/broken_nosidecar" "${tmp}/broken_nosidecar.sha256")
+  mcp_bd_selftest_assert_eq "health: no sidecar" broken "${got}"
+
+  # broken: sidecar mismatch
+  printf 'binary-bytes' >"${tmp}/broken_mismatch"
+  echo "deadbeef" >"${tmp}/broken_mismatch.sha256"
+  got=$(mcp_bd_health "${tmp}/broken_mismatch" "${tmp}/broken_mismatch.sha256")
+  mcp_bd_selftest_assert_eq "health: sidecar mismatch" broken "${got}"
+
+  # healthy: sidecar matches, probe forced to succeed
+  printf 'binary-bytes' >"${tmp}/healthy_bin"
+  mcp_bd_hash_file "${tmp}/healthy_bin" >"${tmp}/healthy_bin.sha256"
+  MCP_BD_HEALTH_PROBE_CMD="true" got=$(MCP_BD_HEALTH_PROBE_CMD="true" mcp_bd_health "${tmp}/healthy_bin" "${tmp}/healthy_bin.sha256")
+  mcp_bd_selftest_assert_eq "health: matching sidecar + probe ok" healthy "${got}"
+
+  # broken: sidecar matches but probe (handshake) fails - a corrupt-but-intact
+  # binary must still be treated as broken, not healthy.
+  got=$(MCP_BD_HEALTH_PROBE_CMD="false" mcp_bd_health "${tmp}/healthy_bin" "${tmp}/healthy_bin.sha256")
+  mcp_bd_selftest_assert_eq "health: matching sidecar but probe fails" broken "${got}"
+
+  # --- install mechanics ---
+  mkdir -p "${tmp}/deploy" "${tmp}/mirror"
+  printf 'candidate-v1' >"${tmp}/candidate_v1"
+  printf 'candidate-v2' >"${tmp}/candidate_v2"
+
+  # missing -> deploy
+  mcp_bd_install "${tmp}/candidate_v1" "${tmp}/deploy/server" "${tmp}/mirror/server" \
+    || { echo "FAIL selftest: install (missing) returned nonzero" >&2; mcp_bd_selftest_failed=1; }
+  [ "$(cat "${tmp}/deploy/server")" = "candidate-v1" ] \
+    || { echo "FAIL selftest: install (missing) wrong content" >&2; mcp_bd_selftest_failed=1; }
+  [ -f "${tmp}/deploy/server.sha256" ] \
+    || { echo "FAIL selftest: install did not write primary sidecar" >&2; mcp_bd_selftest_failed=1; }
+  [ "$(cat "${tmp}/mirror/server")" = "candidate-v1" ] \
+    || { echo "FAIL selftest: mirror not populated" >&2; mcp_bd_selftest_failed=1; }
+  [ -f "${tmp}/mirror/server.sha256" ] \
+    || { echo "FAIL selftest: install did not write mirror sidecar" >&2; mcp_bd_selftest_failed=1; }
+
+  # re-deploy over an existing (broken) file -> updates content
+  mcp_bd_install "${tmp}/candidate_v2" "${tmp}/deploy/server" "${tmp}/mirror/server" \
+    || { echo "FAIL selftest: install (broken) returned nonzero" >&2; mcp_bd_selftest_failed=1; }
+  [ "$(cat "${tmp}/deploy/server")" = "candidate-v2" ] \
+    || { echo "FAIL selftest: re-install did not update content" >&2; mcp_bd_selftest_failed=1; }
+
+  # locked-exe (Windows) simulation: forced mv failure once, must rename aside
+  # and still land the new content without losing the old file irrecoverably.
+  MCP_BD_FORCE_MV_FAIL_ONCE=1 mcp_bd_install "${tmp}/candidate_v1" "${tmp}/deploy/server" "" \
+    || { echo "FAIL selftest: install (locked-exe path) returned nonzero" >&2; mcp_bd_selftest_failed=1; }
+  [ "$(cat "${tmp}/deploy/server")" = "candidate-v1" ] \
+    || { echo "FAIL selftest: locked-exe install did not land new content" >&2; mcp_bd_selftest_failed=1; }
+  for stray in "${tmp}"/deploy/server.old.*; do
+    [ -e "${stray}" ] || continue
+    echo "FAIL selftest: stray .old rename-aside file left behind: ${stray}" >&2
+    mcp_bd_selftest_failed=1
+  done
+
+  # install failure leaves nothing when there is no destination to fall back to
+  rm -f "${tmp}/deploy/never_deployed"
+  if MCP_BD_FORCE_MV_FAIL_ONCE=1 mcp_bd_install "${tmp}/candidate_v1" "${tmp}/deploy/never_deployed" "" 2>/dev/null; then
+    echo "FAIL selftest: install should have failed with no prior file to fall back to" >&2
+    mcp_bd_selftest_failed=1
+  fi
+  [ ! -e "${tmp}/deploy/never_deployed" ] \
+    || { echo "FAIL selftest: failed install left a stray file" >&2; mcp_bd_selftest_failed=1; }
+
+  rm -rf "${tmp}"
+  trap - EXIT
+
+  if [ "${mcp_bd_selftest_failed}" -eq 1 ]; then
+    echo "FAIL — bootstrap-mcp-build-deploy.shs selftest: one or more fixtures failed"
+    return 1
+  fi
+  echo "PASS — bootstrap-mcp-build-deploy.shs selftest: 12 fixture(s) checked, 0 failed"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Native build of one server entry, reusing the caller's native-build cache.
+# ---------------------------------------------------------------------------
+
+mcp_bd_build_one() {
+  name=$1
+  entry=$2
+  output=$3
+  rm -f "${output}"
+  set +e
+  env SIMPLE_NO_STUB_FALLBACK=1 \
+    "${MCP_BD_COMPILER}" native-build \
+    ${MCP_BD_BACKEND:+--backend "${MCP_BD_BACKEND}"} \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry "${entry}" --threads "${MCP_BD_JOBS:-1}" \
+    --cache-dir "${MCP_BD_CACHE_DIR}" \
+    ${MCP_BD_RUNTIME_PATH:+--runtime-path "${MCP_BD_RUNTIME_PATH}"} \
+    --output "${output}" >"${MCP_BD_OUTPUT_DIR}/${name}.build.log" 2>&1
+  status=$?
+  set -e
+  if [ "${status}" -ne 0 ] || [ ! -s "${output}" ]; then
+    mcp_bd_log "warning: ${name} build failed (exit ${status}); see ${MCP_BD_OUTPUT_DIR}/${name}.build.log"
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# System tests: modern SSpec under test/03_system/**mcp** (+ spipe leg) plus
+# the real-launcher handshake against the CANDIDATE binaries.
+# ---------------------------------------------------------------------------
+
+mcp_bd_run_system_tests() {
+  test_ok=1
+  if [ -n "${MCP_BD_TEST_RUNNER:-}" ] && [ -x "${MCP_BD_TEST_RUNNER}" ]; then
+    for spec in \
+      test/02_integration/app/mcp_stdio_integration_spec.spl \
+      test/03_system/app/mcp/mcp_stdio_contract_spec.spl \
+      test/03_system/check/mcp_config_declared_command_launchable_spec.spl \
+      test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl; do
+      [ -f "${repo_root}/${spec}" ] || continue
+      set +e
+      env SIMPLE_LIB=src "${MCP_BD_TEST_RUNNER}" "${spec}" --mode=interpreter --unstable \
+        >"${MCP_BD_OUTPUT_DIR}/$(basename "${spec}").log" 2>&1
+      spec_status=$?
+      set -e
+      if [ "${spec_status}" -ne 0 ]; then
+        mcp_bd_log "warning: system test failed: ${spec} (exit ${spec_status})"
+        test_ok=0
+      fi
+    done
+  else
+    mcp_bd_log "warning: no test runner supplied/executable; system tests UNSUPPORTED"
+    test_ok=0
+  fi
+
+  # Real-launcher handshake against the freshly built candidates, never the
+  # currently-deployed servers.
+  cfg_tmp=$(mktemp "${TMPDIR:-/tmp}/mcp-bd-handshake.XXXXXX")
+  {
+    printf '{"mcpServers":{'
+    first=1
+    for pair in \
+      "simple-mcp:${MCP_BD_MCP_CANDIDATE:-}" \
+      "simple-lsp-mcp:${MCP_BD_LSP_CANDIDATE:-}"; do
+      cmd=${pair#*:}
+      [ -n "${cmd}" ] && [ -x "${cmd}" ] || continue
+      [ "${first}" -eq 1 ] || printf ','
+      first=0
+      printf '"%s":{"command":"%s","args":[]}' "${pair%%:*}" "${cmd}"
+    done
+    printf '}}\n'
+  } >"${cfg_tmp}"
+  if [ "${first:-1}" -eq 0 ]; then
+    if ! sh "${repo_root}/scripts/check/check-mcp-config-launchable.shs" "${cfg_tmp}" \
+      >"${MCP_BD_OUTPUT_DIR}/handshake.log" 2>&1; then
+      mcp_bd_log "warning: candidate handshake failed; see ${MCP_BD_OUTPUT_DIR}/handshake.log"
+      test_ok=0
+    fi
+  else
+    mcp_bd_log "warning: no launchable candidates to handshake; treating as unverified"
+    test_ok=0
+  fi
+  rm -f "${cfg_tmp}"
+  echo "${test_ok}"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+mcp_bd_main() {
+  no_deploy=0
+  force_deploy=0
+  receipt_gated=0
+  skip_build=0
+  skip_tests=0
+  assume_tests_ok=0
+  dry_run=0
+  compiler=""
+  test_runner=""
+  runtime_path=""
+  backend=""
+  cache_dir=""
+  output_dir=""
+  deploy_root=""
+  mirror_root=""
+  spipe_output=""
+  platform=""
+  exe_suffix=""
+  jobs=1
+  mcp_candidate=""
+  lsp_candidate=""
+  spipe_candidate=""
+
+  for arg in "$@"; do
+    case "${arg}" in
+      --selftest) mcp_bd_selftest; return $? ;;
+      --no-deploy-mcp) no_deploy=1 ;;
+      --force-deploy-mcp) force_deploy=1 ;;
+      --receipt-gated) receipt_gated=1 ;;
+      --skip-build) skip_build=1 ;;
+      --skip-tests) skip_tests=1 ;;
+      --assume-tests-ok) assume_tests_ok=1 ;;
+      --dry-run) dry_run=1 ;;
+      --compiler=*) compiler=${arg#*=} ;;
+      --test-runner=*) test_runner=${arg#*=} ;;
+      --runtime-path=*) runtime_path=${arg#*=} ;;
+      --backend=*) backend=${arg#*=} ;;
+      --cache-dir=*) cache_dir=${arg#*=} ;;
+      --output-dir=*) output_dir=${arg#*=} ;;
+      --deploy-root=*) deploy_root=${arg#*=} ;;
+      --mirror-root=*) mirror_root=${arg#*=} ;;
+      --spipe-output=*) spipe_output=${arg#*=} ;;
+      --platform=*) platform=${arg#*=} ;;
+      --exe-suffix=*) exe_suffix=${arg#*=} ;;
+      --jobs=*) jobs=${arg#*=} ;;
+      --mcp-candidate=*) mcp_candidate=${arg#*=} ;;
+      --lsp-candidate=*) lsp_candidate=${arg#*=} ;;
+      --spipe-candidate=*) spipe_candidate=${arg#*=} ;;
+      -h|--help)
+        sed -n '2,90p' "$0"
+        return 0
+        ;;
+      *)
+        mcp_bd_log "error: unknown argument: ${arg}"
+        return 2
+        ;;
+    esac
+  done
+
+  if [ "${no_deploy}" -eq 0 ] && [ "${force_deploy}" -eq 0 ]; then
+    if [ "${receipt_gated}" -eq 1 ] || [ "${CI:-}" = "1" ] || [ "${CI:-}" = "true" ] || \
+       [ -n "${GITHUB_ACTIONS:-}" ]; then
+      mcp_bd_log "note: CI/receipt-gated run detected - auto-deploy defaults OFF (pass --force-deploy-mcp to override)"
+      no_deploy=1
+    fi
+  fi
+
+  [ -n "${output_dir}" ] || output_dir="${cache_dir:-${repo_root}/.simple/storage/build}/bootstrap-mcp-build"
+  mkdir -p "${output_dir}"
+  [ -n "${cache_dir}" ] || cache_dir="${output_dir}/native_cache"
+  mkdir -p "${cache_dir}"
+
+  if [ -z "${exe_suffix}" ]; then
+    case "${platform}" in
+      *windows*|*msvc*) exe_suffix=".exe" ;;
+      *) exe_suffix="" ;;
+    esac
+  fi
+  [ -n "${deploy_root}" ] || deploy_root="${repo_root}/bin/release/${platform}"
+  [ -n "${spipe_output}" ] || spipe_output="${repo_root}/build/bootstrap/mcp-package/spipe_mcp${exe_suffix}"
+
+  MCP_BD_COMPILER=${compiler}
+  MCP_BD_BACKEND=${backend}
+  MCP_BD_CACHE_DIR=${cache_dir}
+  MCP_BD_RUNTIME_PATH=${runtime_path}
+  MCP_BD_JOBS=${jobs}
+  MCP_BD_OUTPUT_DIR=${output_dir}
+  MCP_BD_TEST_RUNNER=${test_runner}
+  export MCP_BD_COMPILER MCP_BD_BACKEND MCP_BD_CACHE_DIR MCP_BD_RUNTIME_PATH MCP_BD_JOBS MCP_BD_OUTPUT_DIR
+
+  build_ok_mcp=1
+  build_ok_lsp=1
+  build_ok_spipe=1
+
+  if [ "${skip_build}" -eq 1 ]; then
+    [ -n "${mcp_candidate}" ] && [ -x "${mcp_candidate}" ] || build_ok_mcp=0
+    [ -n "${lsp_candidate}" ] && [ -x "${lsp_candidate}" ] || build_ok_lsp=0
+    [ -n "${spipe_candidate}" ] && [ -x "${spipe_candidate}" ] || build_ok_spipe=0
+  else
+    if [ -z "${compiler}" ] || [ ! -x "${compiler}" ]; then
+      mcp_bd_log "error: --compiler is required to build (or pass --skip-build with pre-built candidates)"
+      return 2
+    fi
+    if [ -z "${mcp_candidate}" ]; then
+      mcp_candidate="${output_dir}/simple_mcp_server${exe_suffix}"
+      mcp_bd_build_one simple_mcp_server src/app/mcp/main.spl "${mcp_candidate}" || build_ok_mcp=0
+    fi
+    if [ -z "${lsp_candidate}" ]; then
+      lsp_candidate="${output_dir}/simple_lsp_mcp_server${exe_suffix}"
+      mcp_bd_build_one simple_lsp_mcp_server src/app/simple_lsp_mcp/main.spl "${lsp_candidate}" || build_ok_lsp=0
+    fi
+    if [ -z "${spipe_candidate}" ]; then
+      if [ -f "${repo_root}/src/app/spipe_mcp/main.spl" ]; then
+        spipe_candidate="${output_dir}/spipe_mcp${exe_suffix}"
+        mcp_bd_build_one spipe_mcp src/app/spipe_mcp/main.spl "${spipe_candidate}" || build_ok_spipe=0
+      else
+        mcp_bd_log "UNSUPPORTED spipe_mcp_build entry-not-present: src/app/spipe_mcp/main.spl missing in this checkout"
+        build_ok_spipe=0
+        spipe_candidate=""
+      fi
+    fi
+  fi
+
+  test_ok=1
+  if [ "${skip_tests}" -eq 1 ]; then
+    test_ok=${assume_tests_ok}
+  else
+    MCP_BD_MCP_CANDIDATE=${mcp_candidate}
+    MCP_BD_LSP_CANDIDATE=${lsp_candidate}
+    export MCP_BD_MCP_CANDIDATE MCP_BD_LSP_CANDIDATE
+    test_ok=$(mcp_bd_run_system_tests)
+  fi
+
+  processed=0
+  deployed=0
+  offenders=0
+
+  mcp_exe_name="simple_mcp_server${exe_suffix}"
+  lsp_exe_name="simple_lsp_mcp_server${exe_suffix}"
+
+  for row in \
+    "simple-mcp:${mcp_candidate}:${deploy_root}/${mcp_exe_name}:${build_ok_mcp}:${mirror_root:+${mirror_root}/${mcp_exe_name}}" \
+    "simple-lsp-mcp:${lsp_candidate}:${deploy_root}/${lsp_exe_name}:${build_ok_lsp}:${mirror_root:+${mirror_root}/${lsp_exe_name}}" \
+    "spipe-mcp:${spipe_candidate}:${spipe_output}:${build_ok_spipe}:"; do
+    label=$(echo "${row}" | cut -d: -f1)
+    cand=$(echo "${row}" | cut -d: -f2)
+    dest=$(echo "${row}" | cut -d: -f3)
+    b_ok=$(echo "${row}" | cut -d: -f4)
+    mirror=$(echo "${row}" | cut -d: -f5)
+    processed=$((processed + 1))
+
+    health=$(mcp_bd_health "${dest}" "${dest}.sha256")
+    decision=$(mcp_bd_decide "${health}" "${b_ok}" "${test_ok}")
+    mcp_bd_log "mcp-deploy: ${label} health=${health} build_ok=${b_ok} test_ok=${test_ok} decision=${decision}"
+
+    case "${decision}" in
+      deploy-missing|deploy-broken)
+        if [ "${no_deploy}" -eq 1 ]; then
+          mcp_bd_log "mcp-deploy: ${label} would ${decision} but --no-deploy-mcp is set - skipping"
+          continue
+        fi
+        if [ -z "${cand}" ] || [ ! -x "${cand}" ]; then
+          mcp_bd_log "error: ${label} decided ${decision} but has no usable candidate"
+          offenders=$((offenders + 1))
+          continue
+        fi
+        if [ "${dry_run}" -eq 1 ]; then
+          echo "DRY-RUN: would install ${cand} -> ${dest}${mirror:+ (mirror: ${mirror})}"
+          deployed=$((deployed + 1))
+          continue
+        fi
+        if mcp_bd_install "${cand}" "${dest}" "${mirror}"; then
+          echo "deployed: ${label} -> ${dest}"
+          deployed=$((deployed + 1))
+        else
+          offenders=$((offenders + 1))
+        fi
+        ;;
+      skip-healthy)
+        mcp_bd_log "mcp-deploy: ${label} already healthy - not deploying"
+        ;;
+      skip-unverified)
+        mcp_bd_log "mcp-deploy: ${label} build/test unverified - not deploying"
+        [ "${b_ok}" -eq 1 ] || offenders=$((offenders + 1))
+        ;;
+    esac
+  done
+
+  if [ "${processed}" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no servers processed)"
+    return 2
+  fi
+  if [ "${offenders}" -gt 0 ]; then
+    echo "FAIL — ${processed} server(s) processed, ${deployed} deployed, ${offenders} unverified/broken-install"
+    return 1
+  fi
+  echo "PASS — ${processed} server(s) processed, ${deployed} deployed, 0 unverified/broken-install"
+  return 0
+}
+
+mcp_bd_main "$@"

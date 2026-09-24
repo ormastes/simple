@@ -286,6 +286,11 @@ Options:
   --jobs=<n|full|half|min|auto>
                      Native build workers (default: all detected available CPUs)
   --no-mcp           Skip MCP server builds (Stage 5)
+  --no-deploy-mcp    Build/test the MCP-family servers (simple-mcp, simple-lsp-mcp,
+                     spipe-mcp) but never auto-deploy them locally; see
+                     scripts/bootstrap/bootstrap-mcp-build-deploy.shs. Auto-deploy
+                     already defaults OFF under CI/GITHUB_ACTIONS.
+  --force-deploy-mcp Override the CI/receipt-gated auto-deploy-off default.
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
   --progress[=<path>]
@@ -303,6 +308,8 @@ backend=""
 output_dir="${SIMPLE_BOOTSTRAP_BUILD_ROOT}"
 deploy=0
 build_mcp=1
+no_deploy_mcp=0
+force_deploy_mcp=0
 target=""
 verbose=0
 jobs=""
@@ -444,6 +451,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-mcp)
       build_mcp=0
+      ;;
+    --no-deploy-mcp)
+      no_deploy_mcp=1
+      ;;
+    --force-deploy-mcp)
+      force_deploy_mcp=1
       ;;
     --keep-artifacts|--no-verify)
       ;;
@@ -5042,6 +5055,26 @@ if [ "${build_mcp}" -eq 1 ]; then
     echo "error: fresh Stage 5 MCP server smoke failed" >&2
     exit 1
   fi
+
+  # Stage 5b: extend coverage to the spipe-mcp leg and, once the self-hosted
+  # compiler above has proven itself (build + smoke passed), auto-deploy any
+  # server that is missing or broken locally. Never deploys an unverified or
+  # already-healthy server; see scripts/bootstrap/bootstrap-mcp-build-deploy.shs
+  # for the decision matrix and --selftest.
+  mcp_bd_args="--compiler=$(absolute_path "${full_bin}") --test-runner=$(absolute_path "${full_dir}/simple_test_runner${exe_suffix}")"
+  mcp_bd_args="${mcp_bd_args} --skip-build --mcp-candidate=$(absolute_path "${full_dir}/simple_mcp_server${exe_suffix}")"
+  mcp_bd_args="${mcp_bd_args} --lsp-candidate=$(absolute_path "${full_dir}/simple_lsp_mcp_server${exe_suffix}")"
+  mcp_bd_args="${mcp_bd_args} --assume-tests-ok --backend=${backend} --platform=${PLATFORM}"
+  mcp_bd_args="${mcp_bd_args} --cache-dir=$(absolute_path "${native_cache_dir}")"
+  [ "${no_deploy_mcp}" -eq 0 ] || mcp_bd_args="${mcp_bd_args} --no-deploy-mcp"
+  [ "${force_deploy_mcp}" -eq 0 ] || mcp_bd_args="${mcp_bd_args} --force-deploy-mcp"
+  # shellcheck disable=SC2086
+  sh "${repo_root}/scripts/bootstrap/bootstrap-mcp-build-deploy.shs" ${mcp_bd_args} \
+    >"${log_dir}/stage5b-mcp-build-deploy.log" 2>&1
+  mcp_bd_status=$?
+  echo "  Stage 5b MCP build/deploy: $(tail -n1 "${log_dir}/stage5b-mcp-build-deploy.log")"
+  [ "${mcp_bd_status}" -eq 0 ] || \
+    echo "  WARNING: Stage 5b MCP build/deploy reported failures - see ${log_dir}/stage5b-mcp-build-deploy.log" >&2
 else
   echo "Skipping MCP server builds (--no-mcp)"
 fi
