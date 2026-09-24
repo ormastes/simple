@@ -33,10 +33,18 @@ LLVM+Cranelift, ABI v1 now, `simple.sdn`, atomic APK-only coverage, and
 baseline-relative RSS limits. For each architecture, maximum steady RSS is
 `<=110%` of its admitted baseline and maximum growth across 20 requests is
 `<=10%` of baseline RSS; a missing baseline fails closed. Structural
-implementation is broad. At audited HEAD `1eb24a67d1c3`, compiler closure
-passes with 1,979 classified files and zero forbidden edges, KPF performance
-normal/mutation gates pass, and the native ABI matrix proves major rejection
-and older-minor acceptance. This checkout still admits no runtime for the
+implementation is broad. **Correction (2026-09-24, WP-05, kernel/plugin audit
+plan §G2.2):** the `1eb24a67d1c3` "compiler closure passes with 1,979
+classified files and zero forbidden edges" claim below reflected a checker
+that scanned only `src/compiler` for `use compiler.*` — it never saw
+`export use`, nor imports into `plugins.*`/`app.*`/`os.*`, and it silently
+accepted any unresolvable `compiler.*` import instead of failing on it.
+`check-kernel-closure.shs` was widened to see all of those; the real,
+current verdict on this tree is `FAIL — 1945 classified, 0 unclassified, 9
+K0->P, 19 K1->P, 90 kernel->app/os, 6 unresolved` (exact counts drift as the
+tree changes; re-run the script for the live number). The zero-edges claim
+below is retained for history but is no longer the state of the checker.
+This checkout still admits no runtime for the
 focused SPipe command, the latest Stage3 attempt failed without a candidate,
 and no cross-host bootstrap evidence exists.
 Structural/checker results below are therefore kept distinct from runtime and

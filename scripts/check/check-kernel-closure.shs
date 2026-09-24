@@ -1,11 +1,24 @@
 #!/bin/sh
-# Fail-closed compiler kernel partition verifier (Phase 0).
+# Fail-closed compiler kernel partition verifier (Phase 0, widened WP-05).
+#
+# WP-05 widening (2026-09-24): the previous version scanned only
+# src/compiler/**/*.spl and only `use compiler.*` (never `export use`, never
+# `plugins.*`/`app.*`/`os.*`/`weaving.*` roots, and it silently accepted a
+# dangling import via longest-prefix resolution). It therefore missed every
+# K0/K1 -> PLUGIN, K0/K1 -> APP, K0/K1 -> OS edge, and any `export use`
+# re-export. This version scans the same file set but for ALL those roots,
+# classifies plugins/app/os targets by namespace root (shared with the
+# core-lib closure checker via scripts/lib/kernel-closure-classify.awk),
+# and reports+fails on a dangling `compiler.*` import instead of silently
+# resolving it. See doc/04_architecture/compiler/plugin_arch/
+# kernel_pluggable_partition.md and the kernel/plugin audit plan (WP-05).
 set -eu
 
 usage() { echo "usage: $0 [--root DIR] [--manifest FILE] [--selftest]" >&2; exit 2; }
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 root=$repo_root
 manifest=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+classify_lib="$repo_root/scripts/lib/kernel-closure-classify.awk"
 selftest=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -15,6 +28,7 @@ while [ "$#" -gt 0 ]; do
         *) usage ;;
     esac
 done
+[ -f "$classify_lib" ] || { echo "ERROR — missing shared classifier: $classify_lib"; exit 2; }
 
 manifest_rows() { sed -E -n 's/^[[:space:]]*-[[:space:]]*(K0|K1|P_STATIC|P_DYN)\|/\1|/p' "$1"; }
 
@@ -26,35 +40,14 @@ run_check() {
     temp_dir=$(mktemp -d); trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
     rows=$temp_dir/rows; files=$temp_dir/files; index=$temp_dir/index
     imports=$temp_dir/imports; violations_file=$temp_dir/violations
+    unresolved_file=$temp_dir/unresolved
     manifest_rows "$check_manifest" > "$rows"
     [ -s "$rows" ] || { echo "ERROR — no classification rows"; return 2; }
     (cd "$check_root" && find src/compiler -type f -name '*.spl' -print | LC_ALL=C sort) > "$files"
     [ -s "$files" ] || { echo "ERROR — nothing was checked"; return 2; }
     classification_errors=$temp_dir/classification-errors
-    if ! awk -F '|' -v errors="$classification_errors" '
-        function pattern_regex(pattern, r) {
-            r = pattern
-            gsub(/[.]/, "[.]", r)
-            gsub(/[*][*]/, "\034", r)
-            gsub(/[*]/, "[^/]*", r)
-            gsub(/\034/, ".*", r)
-            return "^" r "$"
-        }
-        function module_for(path, p, n, a, first, prefix, rest) {
-            p = path; sub(/^src\/compiler\//, "", p)
-            n = split(p, a, "/"); first = a[1]
-            if (n == 1) { prefix = "compiler"; rest = first }
-            else {
-                prefix = first
-                sub(/^[0-9][0-9][.]/, "", prefix)
-                prefix = "compiler." prefix
-                rest = p; sub(/^[^\/]*\//, "", rest)
-            }
-            sub(/[.]spl$/, "", rest); gsub(/\//, ".", rest)
-            sub(/[.]__init__$/, "", rest)
-            if (rest == "__init__") return prefix
-            return prefix "." rest
-        }
+    classify_main=$temp_dir/classify_main.awk
+    cat > "$classify_main" <<'AWKEOF'
         NR == FNR { classes[++rules] = $1; regex[rules] = pattern_regex($2); next }
         {
             class = ""
@@ -67,67 +60,209 @@ run_check() {
             }
         }
         END { if (missing > 0) exit 1 }
-    ' "$rows" "$files" > "$index"; then
+AWKEOF
+    if ! awk -f "$classify_lib" -f "$classify_main" -F '|' -v errors="$classification_errors" \
+        "$rows" "$files" > "$index"; then
         cat "$classification_errors"
         count=$(wc -l < "$index" | tr -d ' ')
         unclassified=$(wc -l < "$classification_errors" | tr -d ' ')
-        echo "FAIL — $count file(s) classified, $unclassified unclassified"
+        echo "FAIL — $count classified, $unclassified unclassified"
         return 1
     fi
     count=$(wc -l < "$index" | tr -d ' ')
-    # `pub use` is a re-export AND an import: the re-exporting file links the
-    # imported module in exactly as a plain `use` does, so it must be scanned
-    # too. Until 2026-09-07 only bare `use` matched, which under-reported —
-    # e.g. src/compiler/80.driver/driver.spl:22 `pub use compiler.driver.
-    # driver_riscv_gen2_product` was invisible. Widening is a strengthening:
-    # it can only add edges, never remove one.
-    (cd "$check_root" && xargs grep -H -E '^[[:space:]]*(pub[[:space:]]+)?use[[:space:]]+compiler\.' < "$files" 2>/dev/null || true) |
-        sed -E -n 's/^([^:]*):[[:space:]]*(pub[[:space:]]+)?use[[:space:]]+(compiler\.[A-Za-z0-9_.]*).*/\1|\3/p' > "$imports"
-    awk -F '|' -v index_file="$index" '
+    # `pub use` / `export use` are re-exports AND imports: the re-exporting
+    # file links the imported module in exactly as a plain `use` does, so
+    # both must be scanned too. Widened 2026-09-24 (WP-05) to also match the
+    # `plugins.` / `app.` / `os.` / `weaving.` roots — the previous version
+    # matched only `compiler.` and was blind to every edge into those roots.
+    (cd "$check_root" && xargs grep -H -E '^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+(compiler|plugins|app|os|weaving)\.' < "$files" 2>/dev/null || true) |
+        sed -E -n 's/^([^:]*):[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+((compiler|plugins|app|os|weaving)\.[A-Za-z0-9_.]*).*/\1|\3/p' > "$imports"
+    violation_main=$temp_dir/violation_main.awk
+    cat > "$violation_main" <<'AWKEOF'
         BEGIN {
             while ((getline < index_file) > 0) {
                 class_by_module[$1] = $2
                 class_by_path[$3] = $2
+                # Basename fallback index: the directory-derived module_for()
+                # name does not always match the module system's real package
+                # name for a nested file (e.g. src/compiler/70.backend/linker/
+                # obj_taker.spl is imported as `compiler.linker.obj_taker`, NOT
+                # `compiler.backend.linker.obj_taker` — package names are not
+                # always the full physical directory chain). A shell classifier
+                # cannot re-implement the real module resolver, so as a fallback
+                # for that gap it also indexes by basename (final dotted
+                # component); a basename reached by files of more than one
+                # class is ambiguous and is NOT used to resolve (falls through
+                # to unresolved instead of silently picking a class).
+                n3 = split($3, pparts, "/")
+                base = pparts[n3]
+                sub(/[.]spl$/, "", base)
+                if (base in basename_class) {
+                    if (basename_class[base] != $2) basename_ambiguous[base] = 1
+                } else {
+                    basename_class[base] = $2
+                }
+                # Second fallback key: <immediate-parent-dir>.<basename>, e.g.
+                # "linker.obj_taker" or "core.types" — some subdirectories
+                # (linker, core, ...) are apparently registered as their own
+                # top-level compiler subpackage regardless of which numbered
+                # layer physically contains them, which module_for()'s
+                # layer-derived prefix cannot see. Same ambiguity guard.
+                if (n3 >= 2) {
+                    parent2 = pparts[n3 - 1] "." base
+                    if (parent2 in parent_class) {
+                        if (parent_class[parent2] != $2) parent_ambiguous[parent2] = 1
+                    } else {
+                        parent_class[parent2] = $2
+                    }
+                }
             }
             close(index_file)
         }
         {
             path = $1; imported = $2; probe = imported
             sub(/[.]$/, "", probe)
-            target = ""
-            while (probe ~ /^compiler[.]/) {
-                if (probe in class_by_module) { target = class_by_module[probe]; break }
-                sub(/[.][^.]*$/, "", probe)
+            source = class_by_path[path]
+            if (source == "") next  # every scanned file is classified; defensive only
+
+            root_class = import_root_class(imported)
+            if (root_class == "PLUGIN" || root_class == "APP" || root_class == "OS") {
+                target = root_class
+            } else if (root_class == "K0" || root_class == "LIB") {
+                next  # weaver / stdlib edges are never a boundary violation
+            } else if (root_class == "") {
+                # compiler.* target: resolve by longest-prefix match against
+                # the classified module index first (handles the common case,
+                # including doubled segments like compiler.backend.backend.*).
+                target = ""
+                while (probe ~ /^compiler[.]/) {
+                    if (probe in class_by_module) { target = class_by_module[probe]; break }
+                    sub(/[.][^.]*$/, "", probe)
+                }
+                if (target == "") {
+                    # Fall back to the parent-dir.basename index, then the
+                    # plain basename index, before declaring dangling.
+                    leaf = imported
+                    sub(/[.]$/, "", leaf)
+                    n = split(leaf, lparts, /[.]/)
+                    if (n >= 2) {
+                        two = lparts[n - 1] "." lparts[n]
+                        if ((two in parent_class) && !(two in parent_ambiguous)) target = parent_class[two]
+                    }
+                }
+                if (target == "") {
+                    leaf = imported
+                    sub(/[.]$/, "", leaf)
+                    sub(/^.*[.]/, "", leaf)
+                    if ((leaf in basename_class) && !(leaf in basename_ambiguous)) {
+                        target = basename_class[leaf]
+                    }
+                }
+                if (target == "") {
+                    print "FAIL KERNEL-CLOSURE-004 unresolved: " path " -> " imported >> unresolved_out
+                    next
+                }
+            } else {
+                next  # UNKNOWN root: not one of the recognised namespaces
             }
-            if (class_by_path[path] == "K0" && (target == "P_STATIC" || target == "P_DYN"))
-                print "FAIL KERNEL-CLOSURE-003 K0 imports " target ": " path " -> " imported
+
+            if (target == "P_STATIC" || target == "P_DYN" || target == "PLUGIN") {
+                if (source == "K0") {
+                    print "FAIL KERNEL-CLOSURE-003 K0 imports " target ": " path " -> " imported
+                    k0_to_p++
+                } else if (source == "K1") {
+                    print "FAIL KERNEL-CLOSURE-006 K1 imports " target ": " path " -> " imported
+                    k1_to_p++
+                }
+            } else if (target == "APP" || target == "OS") {
+                print "FAIL KERNEL-CLOSURE-005 " source " imports " target ": " path " -> " imported
+                kernel_to_appos++
+            }
         }
-    ' "$imports" > "$violations_file"
-    violations=$(wc -l < "$violations_file" | tr -d ' ')
+AWKEOF
+    awk -f "$classify_lib" -f "$violation_main" -F '|' -v index_file="$index" -v unresolved_out="$unresolved_file" \
+        "$imports" > "$violations_file"
     cat "$violations_file"
-    [ "$violations" -eq 0 ] || { echo "FAIL — $count file(s) classified, 0 unclassified, $violations K0->P imports"; return 1; }
-    echo "PASS — $count file(s) classified, 0 unclassified, 0 K0->P imports"
+    [ -f "$unresolved_file" ] || : > "$unresolved_file"
+    cat "$unresolved_file"
+    k0_to_p=$(grep -c 'KERNEL-CLOSURE-003' "$violations_file" || true)
+    k1_to_p=$(grep -c 'KERNEL-CLOSURE-006' "$violations_file" || true)
+    kernel_to_appos=$(grep -c 'KERNEL-CLOSURE-005' "$violations_file" || true)
+    unresolved=$(wc -l < "$unresolved_file" | tr -d ' ')
+    total_violations=$((k0_to_p + k1_to_p + kernel_to_appos + unresolved))
+    if [ "$total_violations" -eq 0 ]; then
+        echo "PASS — $count classified, 0 unclassified, 0 K0->P, 0 K1->P, 0 kernel->app/os, 0 unresolved"
+    else
+        echo "FAIL — $count classified, 0 unclassified, $k0_to_p K0->P, $k1_to_p K1->P, $kernel_to_appos kernel->app/os, $unresolved unresolved"
+        return 1
+    fi
 }
 
 run_selftest() {
     fixture=$(mktemp -d); trap 'rm -rf "$fixture"' EXIT HUP INT TERM
     mkdir -p "$fixture/src/compiler/10.frontend" "$fixture/src/compiler/90.tools"
-    printf '%s\n' 'schema: simple/compiler/kernel-closure/v1' 'entries:' '  - K0|src/compiler/10.frontend/**' '  - P_STATIC|src/compiler/90.tools/**' > "$fixture/closure.sdn"
-    printf 'fn clean() -> i64:\n    1\n' > "$fixture/src/compiler/10.frontend/clean.spl"
-    printf 'fn plugin() -> i64:\n    2\n' > "$fixture/src/compiler/90.tools/plugin.spl"
+    printf '%s\n' 'schema: simple/compiler/kernel-closure/v1' 'entries:' '  - K0|src/compiler/10.frontend/**' '  - K1|src/compiler/90.tools/**' > "$fixture/closure.sdn"
+
+    # --- baseline clean fixture: no cross-boundary imports ---
+    reset_fixture() {
+        printf 'fn clean() -> i64:\n    1\n' > "$fixture/src/compiler/10.frontend/clean.spl"
+        printf 'fn k1thing() -> i64:\n    2\n' > "$fixture/src/compiler/90.tools/k1thing.spl"
+    }
+    reset_fixture
     run_check "$fixture" "$fixture/closure.sdn" >/dev/null || { echo "self-test clean fixture failed"; return 1; }
-    printf 'use compiler.tools.plugin.{plugin}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
-    if run_check "$fixture" "$fixture/closure.sdn" >/dev/null 2>&1; then echo "self-test dirty fixture unexpectedly passed"; return 1; fi
-    # A K0 file that RE-EXPORTS a P module (`pub use`) must fail exactly like a
-    # plain `use` — it links the plugin in just the same.
-    printf 'fn clean() -> i64:\n    1\n' > "$fixture/src/compiler/10.frontend/clean.spl"
-    printf 'fn plugin() -> i64:\n    2\n' > "$fixture/src/compiler/90.tools/plugin.spl"
-    run_check "$fixture" "$fixture/closure.sdn" >/dev/null || { echo "self-test clean fixture (pub use round) failed"; return 1; }
-    printf 'pub use compiler.tools.plugin.{plugin}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
-    if run_check "$fixture" "$fixture/closure.sdn" >/dev/null 2>&1; then echo "self-test 'pub use' K0->P went undetected"; return 1; fi
-    rm -f "$fixture/src/compiler/10.frontend/clean.spl" "$fixture/src/compiler/90.tools/plugin.spl"
+
+    # --- plain `use compiler.*` K0->K1 (via manifest as P_STATIC row) ---
+    printf '%s\n' 'schema: simple/compiler/kernel-closure/v1' 'entries:' '  - K0|src/compiler/10.frontend/**' '  - P_STATIC|src/compiler/90.tools/**' > "$fixture/closure.sdn"
+    reset_fixture
+    printf 'use compiler.tools.k1thing.{k1thing}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    if run_check "$fixture" "$fixture/closure.sdn" >/dev/null 2>&1; then echo "self-test dirty (use compiler.*) fixture unexpectedly passed"; return 1; fi
+
+    # --- `pub use` K0->P must fail exactly like plain `use` ---
+    reset_fixture
+    printf 'pub use compiler.tools.k1thing.{k1thing}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test 'pub use' K0->P went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-003' || { echo "self-test 'pub use' K0->P did not report KERNEL-CLOSURE-003"; return 1; }
+
+    # --- `export use` K0->P must fail (previously invisible — WP-05) ---
+    reset_fixture
+    printf 'export use compiler.tools.k1thing.{k1thing}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test 'export use' K0->P went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-003' || { echo "self-test 'export use' K0->P did not report KERNEL-CLOSURE-003"; return 1; }
+
+    # --- K0 -> plugins.* (previously invisible — WP-05) ---
+    reset_fixture
+    printf 'use plugins.backend_vhdl.driver.{emit}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test K0->plugins went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-003 K0 imports PLUGIN' || { echo "self-test K0->plugins did not classify PLUGIN"; return 1; }
+
+    # --- K1 -> app.* (previously invisible — WP-05) ---
+    reset_fixture
+    printf 'use app.io.sysinfo_ops.{whoami}\n' >> "$fixture/src/compiler/90.tools/k1thing.spl"
+    out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test K1->app went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-005 P_STATIC imports APP' || { echo "self-test K1->app did not report kernel->app/os"; return 1; }
+
+    # --- K0 -> os.* (previously invisible — WP-05) ---
+    reset_fixture
+    printf 'use os.smf.smf_generation.{write}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test K0->os went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-005 K0 imports OS' || { echo "self-test K0->os did not report kernel->app/os"; return 1; }
+
+    # --- K0 -> weaving.* must NOT fail (embedded weaver, K0-internal) ---
+    reset_fixture
+    printf 'use weaving.aop_advice_registry.{register}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    run_check "$fixture" "$fixture/closure.sdn" >/dev/null || { echo "self-test K0->weaving.* was wrongly flagged"; return 1; }
+
+    # --- dangling `compiler.*` import must FAIL as unresolved (previously silently accepted) ---
+    reset_fixture
+    printf 'use compiler.nonexistent_package.ghost_module.{ghost}\n' >> "$fixture/src/compiler/10.frontend/clean.spl"
+    out=$(run_check "$fixture" "$fixture/closure.sdn" 2>&1) && { echo "self-test dangling import went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CLOSURE-004 unresolved' || { echo "self-test dangling import did not report KERNEL-CLOSURE-004"; return 1; }
+
+    # --- empty fixture must not vacuously pass ---
+    rm -f "$fixture/src/compiler/10.frontend/clean.spl" "$fixture/src/compiler/90.tools/k1thing.spl"
     if run_check "$fixture" "$fixture/closure.sdn" >/dev/null 2>&1; then echo "self-test empty fixture unexpectedly passed"; return 1; fi
-    echo "kernel closure self-test OK"
+
+    echo "kernel closure self-test OK (10 fixtures)"
 }
 
 if [ "$selftest" -eq 1 ]; then run_selftest; else run_check "$root" "$manifest"; fi
