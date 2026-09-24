@@ -10,7 +10,7 @@ variants additionally honor `SIMPLE_GUI=1` per entry source.
 | Entry | Lane / Tier | Description | Headless run command |
 |---|---|---|---|
 | `rendering_tui_core.spl` | tui / core | Core widget set (panel, text, button, list, menubar, statusbar, divider, progress) on the char-grid ScreenHost | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_tui_core.spl` |
-| `rendering_tui_full.spl` | tui / full | All 25 TUI renderers + `(no tui)` markers for the unrendered WidgetKinds | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_tui_full.spl` |
+| `rendering_tui_full.spl` | tui / full | All 30 TUI-rendered kinds + 13 `(no tui)` markers for the unrendered WidgetKinds | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_tui_full.spl` |
 | `rendering_gui_core.spl` | gui / core | Core widget set on the GUI ScreenHost (PPM capture default) | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_gui_core.spl` |
 | `rendering_gui_full.spl` | gui / full | Full widget set + REQ-011 internal-window desktop (titled + borderless) | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_gui_full.spl` |
 | `rendering_wm_core.spl` | wm / core | WM chrome/taskbar + internal windows, compositor-owned, headless PPM | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_wm_core.spl` |
@@ -19,6 +19,7 @@ variants additionally honor `SIMPLE_GUI=1` per entry source.
 | `rendering_2d_extended.spl` | 2d / extended | Images, compositing, draggable overlapping panels, hit-tested click button | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_2d_extended.spl` |
 | `rendering_web_core.spl` | web / core | Browser-engine page: multi-line text, `<img>` fixture, scrollbar region | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_web_core.spl` |
 | `rendering_web_extended.spl` | web / extended | Tabs: forms-media, animation, aqua/glass/ios theme gallery | `SIMPLE_TIMEOUT_SECONDS=0 bin/simple run examples/06_io/ui/rendering/rendering_web_extended.spl` |
+
 
 ## Shared item list — web-server GUI (REQ-001)
 
