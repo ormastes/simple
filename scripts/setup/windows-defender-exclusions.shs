@@ -1,0 +1,176 @@
+#!/bin/sh
+# Microsoft Defender exclusions for Simple's own build and deploy outputs.
+#
+# Why: Defender real-time protection scans every file a compiler writes and
+# every binary it launches. A bootstrap writes tens of thousands of objects,
+# and each freshly built, unsigned simple.exe is scanned again on every run.
+# That scanning is a large, repeatable slowdown on Windows.
+#
+# Scope is deliberately NARROW: only this repository's generated build OUTPUT
+# directories, plus the deployed simple*.exe processes. The source tree is
+# NOT excluded, and this must never be widened to a drive root, a user
+# profile, or a download directory.
+#
+# Security trade-off, stated rather than hidden: a file under an excluded
+# path is not scanned, so anything dropped there is not scanned either. That
+# is why the list is limited to output the build recreates from source.
+#
+# Distribution note: this is for a DEVELOPER machine that builds Simple. An
+# end-user installer should not silently add antivirus exclusions — that is
+# a behaviour malware uses, and Defender may flag the installer for it. For
+# end users the fix is Authenticode-signing simple.exe. If an installer does
+# call this, it must ask the user first and offer `remove`.
+#
+# Needs Administrator. When not elevated, the Defender step is relaunched ONCE
+# through UAC (Start-Process -Verb RunAs); nothing changes without consent.
+#
+# Usage:
+#   sh scripts/setup/windows-defender-exclusions.shs list     # show the plan, change nothing
+#   sh scripts/setup/windows-defender-exclusions.shs add      # add, then verify
+#   sh scripts/setup/windows-defender-exclusions.shs remove   # remove exactly these, then verify
+#
+# Verdict (last stdout line): PASS — <n> exclusion(s) verified / FAIL — ... (exit 1)
+# / ERROR — nothing was checked (exit 2).
+#
+# Cost: 2-3 powershell.exe starts (~0.5 s each), one-time setup, not on any
+# build or push path.
+
+set -eu
+
+usage() {
+    echo "usage: sh $0 {list|add|remove}" >&2
+    exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+action=$1
+case "$action" in
+    list|add|remove) ;;
+    *) usage ;;
+esac
+
+fail_error() {
+    echo "windows-defender-exclusions: $1" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) fail_error "not a Windows host; Defender exclusions only apply on Windows" ;;
+esac
+command -v powershell.exe >/dev/null 2>&1 ||
+    fail_error "powershell.exe not found; it ships with Windows — check that System32\\WindowsPowerShell\\v1.0 is on PATH"
+command -v cygpath >/dev/null 2>&1 ||
+    fail_error "cygpath not found; run this from Git Bash or MSYS2"
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+
+# Single-quote a value for PowerShell (a literal ' is doubled).
+ps_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+# Exclusion set: generated build output only. Paths are included even when
+# absent, so a fresh clone's first bootstrap is already fast.
+ps_paths=""
+path_count=0
+for rel in build .simple/storage/build src/compiler_rust/target bin/release; do
+    win_path=$(cygpath -w "$repo_root/$rel")
+    ps_paths="${ps_paths:+$ps_paths,}$(ps_quote "$win_path")"
+    path_count=$((path_count + 1))
+    [ "$action" = list ] && echo "path     $win_path"
+done
+
+ps_procs=""
+proc_count=0
+for exe in "$repo_root"/bin/release/*/simple*.exe; do
+    [ -f "$exe" ] || continue
+    win_exe=$(cygpath -w "$exe")
+    ps_procs="${ps_procs:+$ps_procs,}$(ps_quote "$win_exe")"
+    proc_count=$((proc_count + 1))
+    [ "$action" = list ] && echo "process  $win_exe"
+done
+
+if [ "$action" = list ]; then
+    echo "PASS — $((path_count + proc_count)) exclusion(s) planned, nothing changed"
+    exit 0
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+ps1="$tmp/defender.ps1"
+result="$tmp/result.txt"
+ps1_w=$(cygpath -w "$ps1")
+result_w=$(cygpath -w "$result")
+
+if [ "$action" = add ]; then
+    ps_verb=Add-MpPreference
+    ps_want=present
+else
+    ps_verb=Remove-MpPreference
+    ps_want=absent
+fi
+
+# The elevated child cannot hand stdout back through UAC, so it writes its
+# verification to a result file that this script reads afterwards.
+{
+    echo "\$ErrorActionPreference = 'Stop'"
+    echo "\$paths = @($ps_paths)"
+    echo "\$procs = @($ps_procs)"
+    echo "\$out = @()"
+    echo "try {"
+    echo "    $ps_verb -ExclusionPath \$paths"
+    echo "    if (\$procs.Count -gt 0) { $ps_verb -ExclusionProcess \$procs }"
+    echo "    \$pref = Get-MpPreference"
+    echo "    foreach (\$x in \$paths) { \$state = if (\$pref.ExclusionPath -contains \$x) { 'present' } else { 'absent' }; \$out += \"path \$state \$x\" }"
+    echo "    foreach (\$x in \$procs) { \$state = if (\$pref.ExclusionProcess -contains \$x) { 'present' } else { 'absent' }; \$out += \"process \$state \$x\" }"
+    echo "} catch {"
+    echo "    \$out += \"error \$(\$_.Exception.Message)\""
+    echo "}"
+    echo "\$out | Set-Content -Encoding ascii -Path $(ps_quote "$result_w")"
+} >"$ps1"
+
+elevated=$(powershell.exe -NoProfile -Command \
+    "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)" \
+    2>/dev/null | tr -d '\r')
+
+rc=0
+if [ "$elevated" = True ]; then
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ps1_w" || rc=$?
+else
+    echo "windows-defender-exclusions: not elevated; requesting Administrator via UAC (one prompt)..." >&2
+    powershell.exe -NoProfile -Command \
+        "try { \$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$(ps_quote "$ps1_w"); exit \$p.ExitCode } catch { Write-Output ('UAC: ' + \$_.Exception.Message); exit 3 }" \
+        || rc=$?
+fi
+
+if [ ! -s "$result" ]; then
+    if [ "$rc" -eq 3 ]; then
+        echo "windows-defender-exclusions: UAC elevation was declined or failed; nothing was changed" >&2
+    else
+        echo "windows-defender-exclusions: the Defender step produced no result (exit $rc)" >&2
+    fi
+    echo "FAIL — $action not applied"
+    exit 1
+fi
+
+bad=0
+checked=0
+while IFS= read -r line; do
+    line=$(printf '%s' "$line" | tr -d '\r')
+    [ -n "$line" ] || continue
+    echo "$line"
+    case "$line" in
+        error\ *) bad=$((bad + 1)) ;;
+        *" $ps_want "*) checked=$((checked + 1)) ;;
+        *) bad=$((bad + 1)) ;;
+    esac
+done <"$result"
+
+if [ "$bad" -eq 0 ] && [ "$checked" -gt 0 ]; then
+    echo "PASS — $checked exclusion(s) verified $ps_want"
+    exit 0
+fi
+echo "FAIL — $bad of $((checked + bad)) exclusion(s) not $ps_want"
+exit 1
