@@ -215,10 +215,24 @@ impl SimpleParser:
                     nil:
                         pass
 
+        # GNU getopt_long convention: a value option never consumes a following
+        # option as its value, `--` ends option parsing, and an undeclared
+        # `--help` / `-h` sets the `help` flag instead of failing.
         var i = 0
         var positional_idx = 0
+        var options_ended = false
         while i < input_args.len():
             val arg = input_args[i]
+
+            if options_ended:
+                positionals.push(arg)
+                positional_idx = positional_idx + 1
+                i = i + 1
+                continue
+            if arg == "--":
+                options_ended = true
+                i = i + 1
+                continue
 
             # Check for subcommand
             if not arg.starts_with("-") and subcommand == nil and self.subcommands.len() > 0:
@@ -247,6 +261,8 @@ impl SimpleParser:
                         Some(option_def):
                             options[option_def.name] = value
                         nil:
+                            if self.find_flag_by_long(name) != nil:
+                                return Err("Option --{name} does not take a value")
                             return Err("Unknown option: --{name}")
                 else:
                     val flag_def = self.find_flag_by_long(rest)
@@ -257,13 +273,16 @@ impl SimpleParser:
                             val opt_def = self.find_option_by_long(rest)
                             match opt_def:
                                 Some(option_def):
-                                    if i + 1 < input_args.len():
+                                    if i + 1 < input_args.len() and not parser_token_is_option(input_args[i + 1]):
                                         i = i + 1
                                         options[option_def.name] = input_args[i]
                                     else:
                                         return Err("Option --{rest} requires a value")
                                 nil:
-                                    return Err("Unknown argument: --{rest}")
+                                    if rest == "help":
+                                        flags["help"] = true
+                                    else:
+                                        return Err("Unknown argument: --{rest}")
             elif arg.starts_with("-") and arg.len() > 1:
                 # Short option/flag (possibly combined)
                 val chars = arg[1:]
@@ -283,14 +302,17 @@ impl SimpleParser:
                                     val remaining = chars[ci + 1:]
                                     if remaining.len() > 0:
                                         options[option_def.name] = remaining
-                                    elif i + 1 < input_args.len():
+                                    elif i + 1 < input_args.len() and not parser_token_is_option(input_args[i + 1]):
                                         i = i + 1
                                         options[option_def.name] = input_args[i]
                                     else:
                                         return Err("Option -{ch} requires a value")
                                     break
                                 nil:
-                                    return Err("Unknown flag: -{ch}")
+                                    if arg == "-h":
+                                        flags["help"] = true
+                                    else:
+                                        return Err("Unknown flag: -{ch}")
                             break
             else:
                 # Positional argument
@@ -362,6 +384,13 @@ impl SimpleParser:
 # =============================================================================
 # Constructor
 # =============================================================================
+
+fn parser_token_is_option(token: text) -> bool:
+    # `-` (stdin) and negative numbers such as `-5` are values; any other
+    # token starting with `-` is an option and is never consumed as a value.
+    if token.len() < 2 or not token.starts_with("-"):
+        return false
+    not "0123456789".contains(token[1:2])
 
 fn simple_parser(name: text, description: text) -> SimpleParser:
     SimpleParser(
