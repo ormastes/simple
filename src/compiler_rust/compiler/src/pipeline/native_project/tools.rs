@@ -578,60 +578,83 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();
 
-    for source in runtime_inputs.iter().copied().filter(|input| input.ends_with(".c")) {
-        let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
-        let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-        // cl.exe understands none of the GNU codegen flags -- it reports each as
-        // `warning D9002: ignoring unknown option` -- and, decisively, reads
-        // `-o` as its long-deprecated `/o` (`warning D9035`) rather than as
-        // "write the object here". Every translation unit then compiles
-        // successfully while no .obj appears at the requested path, and the
-        // failure surfaces much later and far from its cause, at the archive
-        // step: `llvm-ar: runtime_native.obj: no such file or directory`.
-        let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
-        let mut command = std::process::Command::new(&cc);
-        if msvc {
-            command
-                .arg("-c")
-                .arg("-O1")   // -Os: optimise for size
-                .arg("-Gy")   // -ffunction-sections
-                .arg("-Gw")   // -fdata-sections
-                .arg("-GS-"); // -fno-stack-protector
-            // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
-            // code is position-independent by construction and SEH unwind data
-            // is not optional there.
-        } else {
-            command
-                .arg("-c")
-                .arg("-Os")
-                .arg("-ffunction-sections")
-                .arg("-fdata-sections")
-                .arg("-fno-unwind-tables")
-                .arg("-fno-asynchronous-unwind-tables")
-                .arg("-fno-stack-protector")
-                .arg("-fPIC")
-                .arg("-std=gnu11");
-        }
-        let status = command
-            .args(msvc_c11_atomics_flags(&cc))
-            .arg("-DSIMPLE_CORE_C_STANDALONE=1")
-            // Selects runtime_memory.c as THE memory provider and compiles out
-            // runtime_native.c's mutually-exclusive fallback copies of the same
-            // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
-            .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
-            .args(core_c_target_flags(target, source, riscv_vector))
-            .arg(format!("-I{}", runtime_root.display()))
-            .arg(format!("-I{}", runtime_root.join("platform").display()))
-            .arg(runtime_root.join(source))
-            .args(if msvc {
-                vec![format!("-Fo{}", object.display())]
-            } else {
-                vec!["-o".to_string(), object.display().to_string()]
+    let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
+    // cl.exe understands none of the GNU codegen flags -- it reports each as
+    // `warning D9002: ignoring unknown option` -- and, decisively, reads
+    // `-o` as its long-deprecated `/o` (`warning D9035`) rather than as
+    // "write the object here". Every translation unit then compiles
+    // successfully while no .obj appears at the requested path, and the
+    // failure surfaces much later and far from its cause, at the archive
+    // step: `llvm-ar: runtime_native.obj: no such file or directory`.
+    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    // Host C translation units compile independently; run them across the
+    // rayon pool (sized by --threads, default = host parallelism) instead of
+    // one cc at a time. The serial loop cost OS lanes tens of minutes
+    // (hundreds of .c files at seconds each).
+    let c_results: Vec<(&str, PathBuf, bool)> = {
+        use rayon::prelude::*;
+        runtime_inputs
+            .iter()
+            .copied()
+            .filter(|input| input.ends_with(".c"))
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|source| {
+                let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
+                let mut command = std::process::Command::new(&cc);
+                if msvc {
+                    command
+                        .arg("-c")
+                        .arg("-O1")   // -Os: optimise for size
+                        .arg("-Gy")   // -ffunction-sections
+                        .arg("-Gw")   // -fdata-sections
+                        .arg("-GS-"); // -fno-stack-protector
+                    // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
+                    // code is position-independent by construction and SEH unwind data
+                    // is not optional there.
+                } else {
+                    command
+                        .arg("-c")
+                        .arg("-Os")
+                        .arg("-ffunction-sections")
+                        .arg("-fdata-sections")
+                        .arg("-fno-unwind-tables")
+                        .arg("-fno-asynchronous-unwind-tables")
+                        .arg("-fno-stack-protector")
+                        .arg("-fPIC")
+                        .arg("-std=gnu11");
+                }
+                let ok = command
+                    .args(msvc_c11_atomics_flags(&cc))
+                    .arg("-DSIMPLE_CORE_C_STANDALONE=1")
+                    // Selects runtime_memory.c as THE memory provider and compiles out
+                    // runtime_native.c's mutually-exclusive fallback copies of the same
+                    // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
+                    .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
+                    .args(core_c_target_flags(target, source, riscv_vector))
+                    .arg(format!("-I{}", runtime_root.display()))
+                    .arg(format!("-I{}", runtime_root.join("platform").display()))
+                    .arg(runtime_root.join(source))
+                    .args(if msvc {
+                        vec![format!("-Fo{}", object.display())]
+                    } else {
+                        vec!["-o".to_string(), object.display().to_string()]
+                    })
+                    .status()
+                    .ok()
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                (source, object, ok)
             })
-            .status()
-            .ok()?;
-        if !status.success() {
-            if native_project_rust_trace_enabled() {
+            .collect()
+    };
+    let compiled_count = c_results.iter().filter(|(_, _, ok)| *ok).count();
+    for (source, object, ok) in &c_results {
+        if *ok {
+            objects.push(object.clone());
+            continue;
+        }
+        if native_project_rust_trace_enabled() {
                 #[cfg(unix)]
                 let ino_now: u64 = {
                     use std::os::unix::fs::MetadataExt;
@@ -667,12 +690,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
                             .collect::<Vec<_>>())
                         .unwrap_or_else(|e| vec![format!("<read_dir failed: {e}>")]),
                     staging_entries,
-                    objects.len(),
+                    compiled_count,
                 );
             }
             return None;
-        }
-        objects.push(object);
     }
 
     let status = archive_create_command(&ar, &archive, &objects, false, false)
