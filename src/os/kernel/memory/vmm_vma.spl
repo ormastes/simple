@@ -19,6 +19,7 @@ use os.kernel.memory.vmm.{
 }
 use os.kernel.memory.vmm_address_space.{vmm_map_page_in, vmm_cow_clone_pages, _cow_ref_leaf_pages}
 use os.kernel.memory.pmm.{pmm_alloc_page_raw, pmm_free_page_raw, pmm_unref_page}
+use os.kernel.memory.vmm_shared.{vmm_shared_unmap}
 
 extern fn pmm_alloc_page_raw() -> u64
 extern fn pmm_free_page_raw(pa: u64)
@@ -323,6 +324,33 @@ fn vmm_munmap(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
         pg = pg + PAGE_SIZE
 
     0
+
+fn vmm_munmap_result(space: ProcessVmSpace, vaddr: u64, len: u64) -> VmmMunmapResult:
+    """Unmap [vaddr, vaddr+len) from `space`, returning the updated space.
+
+    Mirrors vmm_munmap above; the Result form exists because
+    `vmm_teardown_user_space` must thread the VMA metadata (value-type
+    propagation — see vma_remove) back to its caller. Shared-file references
+    are dropped before the PTE walk, matching vmm_mmap's rollback path.
+    """
+    if len == 0:
+        return VmmMunmapResult(code: -22, space: space)  # -EINVAL
+
+    val aligned_start = _align_down(vaddr, PAGE_SIZE)
+    val aligned_len   = _align_up(len, PAGE_SIZE)
+    val aligned_end   = aligned_start + aligned_len
+
+    # Drop any live shared-page references before releasing PTEs.
+    _ = vmm_shared_unmap(space.id, aligned_start, aligned_len)
+
+    var pg = aligned_start
+    while pg < aligned_end:
+        val virt = VirtAddr(addr: pg)
+        vmm_unmap_page(virt)
+        pg = pg + PAGE_SIZE
+
+    # Metadata changes are committed only after all PTE work.
+    VmmMunmapResult(code: 0, space: vma_remove(space, aligned_start, aligned_len))
 
 # ============================================================================
 # Copy-on-Write: fork clone
