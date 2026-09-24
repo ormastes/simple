@@ -11,16 +11,23 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 fp_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fp_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 legacy="$root/build/p1-combined-verify/rust-authority-$fp_a"
+# The CARGO_TARGET_DIR is deliberately SHARED across seed-input fingerprints
+# (fixed "target"/"rust-cargo-target" name, not fingerprint-keyed) so a
+# test-only/comment-only Rust change reuses cargo's own per-crate incremental
+# cache instead of forcing a cold rebuild. Only the caller's authority root
+# (home/cargo-home/tmp/receipts, passed in as bootstrap_cargo_legacy_root)
+# stays fingerprint-keyed -- see bootstrap-authority-wiring.shs for the full
+# rationale, including why this cannot admit a stale seed.
 target=$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")
-[ "$target" = "$root/build/c/$fp_a" ] || fail 'cache left repo/build or lost full fingerprint'
+[ "$target" = "$root/build/c/target" ] || fail 'cache left repo/build or gained a fingerprint-keyed path'
 [ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")" ] || fail 'retry changes cache'
 [ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$root/build/other-log-root/rust-authority-$fp_a")" ] || fail 'log-root change discards cache'
-[ "$target" != "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_b" "$root/build/other/rust-authority-$fp_b")" ] || fail 'changed inputs share cache'
-[ "$(bootstrap_authority_rust_cargo_target "$root" linux "$fp_a" "$legacy")" = "$legacy/target" ] || fail 'non-Windows cache moved'
+[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_b" "$root/build/other/rust-authority-$fp_b")" ] || fail 'changed inputs no longer share the Cargo build cache'
+[ "$(bootstrap_authority_rust_cargo_target "$root" linux "$fp_a" "$legacy")" = "$(dirname -- "$legacy")/rust-cargo-target" ] || fail 'non-Windows cache is not shared across fingerprints'
 [ "$target" = "$(CARGO_TARGET_DIR=C:/ambient-untrusted-cache bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")" ] || fail 'ambient Cargo target overrides authority'
 space_repo='C:/work/checkout with spaces'
 space_target=$(bootstrap_authority_rust_cargo_target "$space_repo" windows "$fp_a" "$legacy")
-[ "$space_target" = "$space_repo/build/c/$fp_a" ] || fail 'space-containing checkout split'
+[ "$space_target" = "$space_repo/build/c/target" ] || fail 'space-containing checkout split'
 if bootstrap_authority_rust_cargo_target "$root" windows ../escape "$legacy" >/dev/null 2>&1; then
   fail 'unsafe fingerprint admitted'
 fi
@@ -45,8 +52,10 @@ native_target=$(cygpath -am "$fixture_target")
 
 # Exercise exact prefix boundary and one byte over; long checkout roots fail
 # before launching Cargo instead of repeating the cryptic MSVC C1083 failure.
+# Boundary length accounts for the fixed "/build/c/target" suffix (15 bytes),
+# not a 64-byte fingerprint -- the shared, non-fingerprint-keyed cache name.
 boundary_repo=C:/
-while [ "${#boundary_repo}" -lt 47 ]; do boundary_repo="${boundary_repo}x"; done
+while [ "${#boundary_repo}" -lt 105 ]; do boundary_repo="${boundary_repo}x"; done
 boundary_target=$(bootstrap_authority_rust_cargo_target "$boundary_repo" windows "$fp_a" "$legacy")
 [ "${#boundary_target}" -eq 120 ] || fail '120-byte boundary changed'
 if bootstrap_authority_rust_cargo_target "${boundary_repo}x" windows "$fp_a" "$legacy" >/dev/null 2>&1; then

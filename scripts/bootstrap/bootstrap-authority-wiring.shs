@@ -5,21 +5,59 @@
 # MSVC reports C1083 with an empty generated-file name when cc-rs /Fo paths
 # exceed MAX_PATH. Keep Windows Cargo outputs outside the long receipt/HOME
 # tree, while retaining the complete input fingerprint and the repo-wide Rust
-# authority lock. Retries (including different log roots) reuse this same cache;
-# changed inputs get a different cache. This selector never moves/removes data.
+# authority lock. Retries (including different log roots) reuse this same cache.
+#
+# The CARGO_TARGET_DIR this returns is deliberately SHARED across different
+# seed-input fingerprints (fixed name, not fingerprint-keyed) -- only the
+# caller's per-fingerprint authority root (home/cargo-home/tmp/receipts) stays
+# fingerprint-keyed. Before this, EVERY changed fingerprint (including a
+# test-only #[test] fn with zero effect on the built binary) got a brand-new,
+# empty target dir, so cargo had to recompile the ENTIRE workspace dependency
+# graph from scratch -- 10+ minutes -- even though only one crate's source
+# actually changed. This is pure caching, not a trust weakening: cargo tracks
+# per-crate freshness itself (mtime + content fingerprint under
+# target/<profile>/.fingerprint/), so a shared target dir only lets cargo skip
+# recompiling crates it independently proves are byte-for-byte unchanged --
+# every crate whose source did NOT change (most of the workspace: parser,
+# common, type, runtime, unrelated compiler modules, vendored deps) is reused
+# as-is, while the crate that actually changed and everything that depends on
+# it (its reverse-dependency cone, up through the final relink) still pays its
+# full, non-incremental cost -- the bootstrap profile does not set
+# `incremental = true`, so this is a "rebuild only what changed" win at
+# workspace-crate granularity, not free recompilation of the touched crate.
+# Two authority builds pointed at this SAME shared target dir at once are
+# additionally serialized by this repo's own Rust authority lock
+# (bootstrap_acquire_rust_authority / the output lock on non-Windows) before
+# either invokes cargo -- cargo's own per-target-dir lock file is defense in
+# depth on top of that, not the primary guard. The admitted seed hash is
+# ALWAYS recomputed from the actual produced binary (bootstrap_stage3_hash_file
+# / bootstrap_stage3_verify_seed_stamp), never inferred from cache reuse, so a
+# stale artifact still cannot be admitted. Selecting the right artifact back
+# out of a target dir that can now hold more than one crate build's leftovers
+# is not new: bootstrap_stage3_copy_seed_tuple already treats deps/ as
+# possibly holding multiple hash-suffixed candidates (e.g. from this
+# bootstrap's own two same-profile, different-LTO cargo invocations) and picks
+# the newest by mtime -- see its comments in authority.shs. This selector
+# never moves/removes data.
 bootstrap_authority_rust_cargo_target() (
   [ "$#" -eq 4 ] || return 64
   bootstrap_cargo_repo=$1
   bootstrap_cargo_host=$2
   bootstrap_cargo_fingerprint=$3
   bootstrap_cargo_legacy_root=$4
-  if [ "${bootstrap_cargo_host}" != windows ]; then
-    printf '%s/target\n' "${bootstrap_cargo_legacy_root}"
-    return 0
-  fi
+  # bootstrap_cargo_fingerprint is still validated (defense against a caller
+  # bug passing an unsanitized value through, e.g. a path-traversal string)
+  # but is intentionally NOT used to build the target path -- see the
+  # shared-cache rationale above.
   printf '%s\n' "${bootstrap_cargo_fingerprint}" |
     LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 64
-  bootstrap_cargo_target="${bootstrap_cargo_repo}/build/c/${bootstrap_cargo_fingerprint}"
+  bootstrap_cargo_target_base=$(dirname -- "${bootstrap_cargo_legacy_root}") ||
+    return 1
+  if [ "${bootstrap_cargo_host}" != windows ]; then
+    printf '%s/rust-cargo-target\n' "${bootstrap_cargo_target_base}"
+    return 0
+  fi
+  bootstrap_cargo_target="${bootstrap_cargo_repo}/build/c/target"
   bootstrap_cargo_native=$(cygpath -am "${bootstrap_cargo_target}") || return 1
   case "${bootstrap_cargo_native}" in
     [A-Za-z]:/*) ;;
