@@ -59,6 +59,41 @@ names a repository capability whose implementation owner is ambiguous.
   above, not the legacy flat demos (`widget_showcase*_gui.spl` era); tier
   split is file-based (extended imports core), never a `SHOWCASE_TIER` env.
 
+## SPipe surfaces (which "spipe" do you mean?)
+
+- **SPipe project MCP** (release/spec-evidence workflow): the submodule
+  `.spipe/spipe` @ ceb214d is the REAL tree (stage-1 Simple migration:
+  `src/spipe_cli/main.spl`, `src/spipe_mcp/main.spl`). The `.mcp.json`
+  "spipe" entry serves the **stale vendored copy**
+  `examples/05_stdlib/spipe/mcp/server.js` (node, zero-dep; 15 tools:
+  info/experts/read_doc/fine-tune guides/release plans/folder-reverse-references).
+  Fix bugs in the SUBMODULE (pushed to the Spipe repo), never in the vendored
+  copy. `spipe doctor .` expects 7 host links under `.spipe/` (spipe_project,
+  doc, domain_expert, template, spipe_docs, project_expert/spipe,
+  tool_expert/spipe_submodule); `doc/00_llm_process/{spipe,tool_expert,...}`
+  are symlinks into the submodule.
+- **Host `spipe_mcp` parser MCP** (different thing!): `src/app/spipe_mcp`,
+  wrapper `bin/spipe_mcp_server`, API `std.nogc_sync_mut.spipe.tree_context`
+  — tree-context parsing/storage of CLI output. Guide:
+  `doc/07_guide/infra/spipe_mcp.md`. Not the release workflow.
+- **SPipe knowledge compiler:** see the next section.
+- **CLI:** node-based (`node examples/05_stdlib/spipe/cli/spipe.js`, ~40
+  commands). There is NO `bin/simple spipe` subcommand.
+- **Token/context reduction:** does NOT exist in SPipe (verified 2026-09-24;
+  every "token" hit is auth/parser/pagination). The owner is
+  `plugins/llm_caret_messaging` (`chat_get_context`, `context_bundle_id`).
+  Closest SPipe mechanisms: bounded `spipe_read_doc`, pre-digested
+  `spipe_experts`, FTS search index, 6000-token manifest cap.
+- **Known issues (2026-09-24):** tool errors return `id: null` (clients see
+  hangs; fix in flight); `folder_reverse_references` leaks raw ENOENT;
+  setup-links script must run from `.spipe/spipe/scripts/` — running the
+  vendored copy links `doc/llm_process/*` instead of the config-declared
+  `doc/00_llm_process`.
+- **Agent lookup rule:** "spipe mcp" bug/fix → submodule `.spipe/spipe`;
+  "spipe parser/tree context" → host `src/app/spipe_mcp`; "spipe release
+  gates" → the release validators below; "context/token bundle" →
+  llm_caret_messaging.
+
 ## SPipe Knowledge Compiler
 
 - **Admitted narrow kernels:** commit `6b7fc8b83f6` provides pure-library

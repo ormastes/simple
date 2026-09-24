@@ -1,5 +1,13 @@
 # SPipe MCP Parser API
 
+> **Disambiguation (2026-09-24):** this page documents the HOST parser MCP
+> (`src/app/spipe_mcp`, `bin/spipe_mcp_server`,
+> `std.nogc_sync_mut.spipe.tree_context`). The SPipe *project* MCP
+> (release/spec-evidence workflow: spipe_info/experts/read_doc/release
+> plans) is a different server — see `doc/00_llm_process/llm_wiki.md`
+> "SPipe surfaces" for tree and entry-point truth. Do not fix one in the
+> other's tree.
+
 `std.nogc_sync_mut.spipe.tree_context` is the common language-neutral parser
 surface for SPipe MCP, context-mode style storage, and CLI-tool output parsing.
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,7 +19,9 @@ const WORKTREE_ONE = "W-000000000000000000000000000000B1";
 const WORKTREE_TWO = "W-000000000000000000000000000000B2";
 
 function tempRoot() {
-  return mkdtempSync(join(tmpdir(), "spipe-workspace-storage-"));
+  // macOS tmpdir() is a /var -> /private/var symlink; canonicalize so paths
+  // that round-trip through filesystem resolution compare equal.
+  return realpathSync(mkdtempSync(join(tmpdir(), "spipe-workspace-storage-")));
 }
 
 function snapshotInput(overrides = {}) {
