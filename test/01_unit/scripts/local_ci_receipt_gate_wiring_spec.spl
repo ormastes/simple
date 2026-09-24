@@ -9,7 +9,8 @@ use std.spec.{describe, it, expect}
 use app.sj.gate_manifest.{parse_gate_manifest}
 
 val MANIFEST_PATH = "config/check/must_check_gates.sdn"
-val WORKFLOW_PATH = ".github/workflows/repo-hygiene.yml"
+val WORKFLOW_PATH = ".github/workflows/code-idiom-gates.yml"
+val DECISION_PATH = ".github/workflows/code-idiom-receipt.yml"
 val PUSH_GATE_PATH = "scripts/check/check-push-must-pass.shs"
 val CI_JOB = "code-idiom-gates"
 
@@ -122,7 +123,7 @@ describe "Local CI receipt gate wiring":
     it "starts the admission decision at full and never skips undecided":
         # @req REQ-SSPEC-UNIT
         step("starts the admission decision at full and never skips undecided")
-        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        val workflow = (rt_file_read_text(WORKFLOW_PATH) ?? "") + (rt_file_read_text(DECISION_PATH) ?? "")
         expect(workflow).to_contain("mode=full")
         expect(workflow).to_contain("LOCAL-CI-RECEIPT MODE:")
         # The three conflict-class guards run in every mode: a receipt attests
@@ -140,7 +141,7 @@ describe "Local CI receipt gate wiring":
     it "delivers the receipt out of tree as a git note":
         # @req REQ-SSPEC-UNIT
         step("delivers the receipt out of tree as a git note")
-        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        val workflow = (rt_file_read_text(WORKFLOW_PATH) ?? "") + (rt_file_read_text(DECISION_PATH) ?? "")
         # A tracked receipt file cannot work: the receipt binds the tree, so
         # committing it changes the tree it binds.
         expect(workflow).to_contain("refs/notes/ci-receipts:refs/notes/ci-receipts")
@@ -150,20 +151,20 @@ describe "Local CI receipt gate wiring":
     it "falls to full for any path it cannot classify as documentation":
         # @req REQ-SSPEC-UNIT
         step("falls to full for any path it cannot classify as documentation")
-        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        val workflow = (rt_file_read_text(WORKFLOW_PATH) ?? "") + (rt_file_read_text(DECISION_PATH) ?? "")
         # Mode precedence and the doc-only predicate live in one place.
-        expect(workflow).to_contain("MODE PRECEDENCE: full -> docs -> sanity -> escalate")
+        expect(workflow).to_contain("MODE PRECEDENCE: full -> docs -> sanity")
         # .github/** is excluded before the .md rule is consulted, because a
         # comment-only workflow edit can change the gate that is deciding.
         expect(workflow).to_contain("/^\\.github\\// { print; exit }")
         # The catch-all: anything matching no allow rule disqualifies docs mode.
-        expect(workflow).to_contain("{ print; exit }' \"$tmp/ci-all-changed\"")
+        expect(workflow).to_contain("{ print; exit }' \"$tmp/ci-changed\"")
         expect(workflow).to_contain("mode=docs")
 
     it "keeps conflict guards when the independent docs fast path skips receipt lookup":
         # @req REQ-SSPEC-UNIT
         step("keeps conflict guards when the independent docs fast path skips receipt lookup")
-        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        val workflow = (rt_file_read_text(WORKFLOW_PATH) ?? "") + (rt_file_read_text(DECISION_PATH) ?? "")
         expect(workflow).to_contain(r"DOCS_ONLY: ${{ steps.classify.outputs.docs_only }}")
         expect(workflow).to_contain("if [ \"$DOCS_ONLY\" = true ]; then")
         expect(workflow).to_contain("range=\"$BASE_SHA..$HEAD_SHA\"")
@@ -205,3 +206,54 @@ describe "Local CI receipt gate wiring":
             "push-local-ci-receipt-selftest, push, false, tree, \"sh scripts/check/verify-local-ci-receipt.shs --selftest\"")
         expect(push_gate).to_contain(
             "'push-local-ci-receipt-selftest:tree:sh scripts/check/verify-local-ci-receipt.shs --selftest')")
+
+
+    it "decides skips in BASE code that never runs head content":
+        # @req REQ-SSPEC-UNIT
+        step("decides skips in BASE code that never runs head content")
+        val decision = rt_file_read_text(DECISION_PATH) ?? ""
+        # ADDENDUM_2026-09-06 A: the decision runs from BASE's YAML.
+        expect(decision).to_contain("  pull_request_target:\n    types: [opened, synchronize, reopened]\n    branches: [main]\n")
+        expect(decision).to_contain("[ \"$EVENT_NAME\" = pull_request_target ]")
+        # ...and executes nothing of the head: no checkout at all, head read
+        # only as blobless git objects in a private repo under RUNNER_TEMP.
+        expect(decision.contains("uses: actions/checkout")).to_be(false)
+        expect(decision).to_contain("--filter=blob:none")
+        expect(decision).to_contain("sh \"$verifier\" --root \"$repo\"")
+        # Least privilege, no secrets.
+        expect(decision).to_contain("permissions:\n  contents: read\n  pull-requests: read\n")
+        expect(decision.contains(": write")).to_be(false)
+        expect(decision.contains("secrets.")).to_be(false)
+        # Policy refusal: renames cannot hide a refused source path, and the
+        # helper trees the gates source are refused too.
+        expect(decision).to_contain("git diff --no-renames --name-only \"$BASE_SHA\" \"$HEAD_SHA\"")
+        expect(decision).to_contain("^scripts\\/(check|hooks|lib|setup)\\/")
+        # Decision channel: an artifact of THIS run, keyed by the head sha.
+        expect(decision).to_contain(r"name: receipt-decision-${{ github.event.pull_request.head.sha }}")
+        # D8 kill switch.
+        expect(decision).to_contain(r"SKIP_KILL_SWITCH: ${{ vars.SIMPLE_CI_RECEIPT_DISABLED }}")
+
+    it "runs head gates only on pull_request and imports the decision fail-closed":
+        # @req REQ-SSPEC-UNIT
+        step("runs head gates only on pull_request and imports the decision fail-closed")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        val hygiene = rt_file_read_text(".github/workflows/repo-hygiene.yml") ?? ""
+        # Head scripts never run under pull_request_target (main's cache scope).
+        expect(workflow.contains("pull_request_target:")).to_be(false)
+        expect(workflow).to_contain("\n  pull_request:\n")
+        # The importer authenticates the producing run through the API.
+        expect(workflow).to_contain("DECISION_WORKFLOW: .github/workflows/code-idiom-receipt.yml")
+        expect(workflow).to_contain("\"pull_request_target${{tab}}$DECISION_WORKFLOW${{tab}}completed${{tab}}success\"")
+        expect(workflow).to_contain("val[\"pr\"] == pr && val[\"head_sha\"] == head")
+        expect(workflow).to_contain("[ \"$tested_tree\" = \"$a_tree\" ]")
+        expect(workflow).to_contain(r"ref: ${{ github.event.pull_request.head.sha }}")
+        expect(workflow).to_contain("persist-credentials: false")
+        expect(workflow).to_contain("permissions:\n  contents: read\n  actions: read\n")
+        expect(workflow.contains(": write")).to_be(false)
+        expect(workflow.contains("secrets.")).to_be(false)
+        expect(workflow).to_contain(r"group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}")
+        # The job left repo-hygiene.yml, whose `on:` still carries the REQUIRED
+        # fast-gates context on pull_request only.
+        expect(hygiene.contains("\n  code-idiom-gates:")).to_be(false)
+        expect(hygiene.contains("\n  pull_request_target:")).to_be(false)
+        expect(hygiene).to_contain("name: Code Idiom & Structural Ratchet Gates\n")
