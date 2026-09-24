@@ -13828,9 +13828,29 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
         return rt_string_new(NULL, 0);
     }
 
+#if defined(_WIN32)
+    /* Binary: text mode translated CRLF and stopped at ^Z, so the same file
+     * hashed differently than on POSIX (and than the Rust twin). */
+    int fd = open(path, O_RDONLY | _O_BINARY);
+#else
     int fd = open(path, O_RDONLY);
+#endif
     free(path);
     if (fd < 0) return 0;
+
+    /* `size` is a caller CAP, not the expected length: the SCV inventory reads
+     * every source with a 1 GiB cap, and allocating the cap per file cost
+     * ~350 ms/file on Windows (cold init ran >10 min at ~1 GB RSS for ~43k
+     * sources, 2026-09-25). Allocate only what the file can still supply. */
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG) {
+        int64_t remaining = (int64_t)st.st_size > offset ? (int64_t)st.st_size - offset : 0;
+        if (remaining < size) size = remaining;
+    }
+    if (size == 0) {
+        close(fd);
+        return rt_string_new(NULL, 0);
+    }
 
     uint8_t* buffer = (uint8_t*)malloc((size_t)size);
     if (!buffer) {
