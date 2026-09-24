@@ -55,6 +55,7 @@ use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plu
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
 use std.database.core.{parse_sdn_table}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_execution_resource_scope}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
 use std.nogc_sync_mut.io.http_get_core.{http_get_raw}
 use std.nogc_sync_mut.security.sanitize.{strip_html_tags}
 use std.common.math.special.{ln_f64}
@@ -747,10 +748,25 @@ fn ctx_execute_code(language: text, code: text, file_path: text, timeout_ms: i64
     val lang = language.lower().trim()
     val cap = ctx_capture_max_bytes()
     if lang == "shell" or lang == "sh" or lang == "bash" or lang == "":
-        var argv: [text] = ["-c", "FILE=\"$1\"; export FILE; " + code, "sh"]
+        # `/bin/sh` does not exist as a literal path on Windows (this repo's
+        # native Windows binary is not MSYS-path-translated), which made
+        # every simple_ctx_execute(shell) spawn fail: process_run_observed_bounded
+        # returns exit -1 / stderr "(empty)" when the executable itself is
+        # missing. Resolve the shell the same way std.io.process_ops.shell()
+        # does — SIMPLE_POSIX_SHELL override, then a PATH/install-location
+        # scan for a real POSIX sh.exe (Git for Windows/MSYS/Cygwin) — and
+        # only fail closed when none is found, rather than silently handing
+        # POSIX-syntax code to cmd.exe.
+        val cmd_text = "FILE=\"$1\"; export FILE; " + code
+        val (sh_path, sh_prefix) = resolve_shell_argv(cmd_text)
+        if not is_posix_shell_argv(sh_path):
+            return (nil, "no POSIX sh found for simple_ctx_execute(language: shell) on this host; " +
+                "install Git for Windows (provides usr/bin/sh.exe) or set SIMPLE_POSIX_SHELL to a POSIX sh.exe path")
+        var argv: [text] = sh_prefix
+        argv.push("sh")
         if file_path != "":
             argv.push(file_path)
-        return (Some(ctx_run_bounded("/bin/sh", argv, timeout_ms, cap)), "")
+        return (Some(ctx_run_bounded(sh_path, argv, timeout_ms, cap)), "")
     if lang == "javascript" or lang == "js" or lang == "node":
         if val missing = require_external_tool("simple_ctx_execute", "node", "Node.js"):
             return (nil, missing)
@@ -920,7 +936,13 @@ fn handle_simple_ctx_batch_execute(id: text, body: text) -> text:
     var idx = 0
     var total_bytes: i64 = 0
     for cmd in commands:
-        val r = ctx_run_bounded("/bin/sh", ["-c", cmd], timeout_ms, capture_max)
+        val (sh_path, sh_args) = resolve_shell_argv(cmd)
+        if not is_posix_shell_argv(sh_path):
+            lines.push("[" + str(idx) + "] ERROR: no POSIX sh found for simple_ctx_batch_execute on this host; " +
+                "install Git for Windows or set SIMPLE_POSIX_SHELL")
+            idx = idx + 1
+            continue
+        val r = ctx_run_bounded(sh_path, sh_args, timeout_ms, capture_max)
         val label = source + "#" + str(idx)
         val text_out = "$ " + cmd + "\n" + r.stdout + "\n" + r.stderr_summary
         val n = ctx_index_text(text_out, label)
