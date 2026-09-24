@@ -1,27 +1,36 @@
 # Local CI receipt — operator guide
 
-**Audience:** a developer who wants their PR's required
-`Code Idiom & Structural Ratchet Gates` context to take a fast path instead of
-re-running 27 gate scripts on a saturated runner queue.
+**Audience:** a developer who wants the `code-idiom-gates` extended job (and,
+via a separate `local`-tier receipt, the push hook) to skip re-running gate
+scripts it has already seen pass locally.
 
-**Status, PR #416 branch `ci-receipt-signed-sanity-2026-09-06`:** the signer, the
-verifier, the allowed-signers trust root and the mode decision in
-`repo-hygiene.yml` have all landed, and the path works end to end **locally**.
-Verified on `c70a818a0`, a commit with **no** change-id header: sign exit 0
-binding `patch a251811056b6100759aab75b4863154ba3d3ad3f`, verify exit 0, tamper
-exit 1. Current local selftests (2026-09-23): verifier 25/25, signer 33/33,
-including note attach, push, exact-byte round trip, and rejected-push handling.
+**Status, updated 2026-09-24.** **`code-idiom-gates` is no longer the required
+status context.** Since 2026-09-23 the ruleset's required check is `fast-gates`
+(context `Code Idiom & Structural Ratchet Gates`) in `repo-hygiene.yml`, which
+a `ci`-tier receipt never skips. `code-idiom-gates.yml` (the extended,
+non-required job this receipt targets) was split out of `repo-hygiene.yml` the
+next day into two workflows — see §1a. Today, signing a `ci`-tier receipt
+reduces work on that non-required extended job and, transitively, shortens the
+window in which it can queue-starve; it does not itself satisfy the ruleset.
+Verified end to end locally on `c70a818a0`, a commit with **no** change-id
+header: sign exit 0 binding `patch a251811056b6100759aab75b4863154ba3d3ad3f`,
+verify exit 0, tamper exit 1. Current local selftests (2026-09-23): verifier
+25/25, signer 33/33, including note attach, push, exact-byte round trip, and
+rejected-push handling.
 
 Three things you must know before relying on it:
 
 1. **Delivery is explicit but automated.** The signer supports `--note` and
    `--push-note`; publishing a note is opt-in and occurs only after a successful
    local verdict. See §7.
-2. **`config/check/ci_receipt_allowed_signers` ships with ZERO keys**, so
-   nothing is admitted until a key is deliberately added — §5.
-3. **A local PASS is not a GitHub required-check PASS.** The CI job must fetch
-   and verify the note against the base branch's signer trust root, then report
-   its own success on the current PR head. Do not merge on local output alone.
+2. **`config/check/ci_receipt_allowed_signers` carries exactly one enrolled
+   key today** (`ormastes@simple-ci-receipt`), and shipped with zero as its
+   fail-closed default before that. Nothing is admitted for an identity not
+   listed there — §5.
+3. **A local PASS is not a GitHub required-check PASS**, and (since the
+   2026-09-23 ruleset change) `code-idiom-gates` is not even the required
+   check. The gate job must import and re-validate the base decision against
+   the PR head it actually checked out; do not merge on local output alone.
 
 Specification: `doc/05_design/infra/local_ci_receipt/design.md`.
 Order of work and acceptance bars: `doc/03_plan/infra/local_ci_receipt/plan.md`.
@@ -65,9 +74,91 @@ Raising `cancel-in-progress: false` would only pile stale runs onto a saturated
 queue. The only thing that closes the loop is a required-context run short enough
 to finish between two rebases — the ~60 s `sanity` path.
 
-("Unreachable" above describes **the required check as it runs today, without a
-receipt.** It is not a statement about the receipt fast path, which works
-locally; see the Status block.)
+("Unreachable" above describes **`code-idiom-gates` as it ran under
+`repo-hygiene.yml` before 2026-09-23, when it was still the required check
+without a receipt.** It is not a statement about the receipt fast path, which
+works locally; see the Status block.)
+
+### 1a. 2026-09-23/24: the required check moved, and the job split in two
+
+`repo-hygiene.yml` now carries a separate `fast-gates` job (context
+`Code Idiom & Structural Ratchet Gates`) that is the ruleset's actual required
+check; it is a fixed, short set of gates and is **not** what this receipt
+skips. The former `code-idiom-gates` job — the one this whole document is
+about — moved to its own file, `.github/workflows/code-idiom-gates.yml`, kept
+its job id (so the manifest's `ci_job=code-idiom-gates` rows still key on it)
+but is no longer required, and is now split into two workflows:
+
+- `.github/workflows/code-idiom-receipt.yml` — `pull_request_target` (types
+  `opened`/`synchronize`/`reopened`, PRs into `main` only), **no checkout, no
+  head script**. It fetches the head only as blobless git objects into a
+  private repo under `RUNNER_TEMP`, reads the verifier, the allowed-signers
+  file and the manifest with `git show <BASE_SHA>:<path>` (no working-tree
+  checkout of the base either), decides `mode`/`skip_ids`/`tree`/`docs_only`,
+  and uploads that decision as artifact `receipt-decision-<head sha>`.
+- `.github/workflows/code-idiom-gates.yml` — `pull_request`, runs the actual
+  gate scripts against the PR head with only the PR's own Actions cache scope,
+  and **imports** the base decision (never decides it) — it accepts an
+  artifact only from a run the API reports as
+  `event=pull_request_target`, `path=.github/workflows/code-idiom-receipt.yml`,
+  `completed`/`success`, whose pr/head/base fields match its own payload and
+  whose `tree` equals what it actually checked out. Anything else is `full`.
+
+This closes the design gap recorded in Addendum A below (landed in PR #1467).
+The reason for two workflows rather than one `pull_request_target` job running
+the gates directly: a `pull_request_target` job runs in `main`'s Actions cache
+scope, so head code executing there could poison caches that `release.yml` /
+`cache-main-writer.yml` restore ("Cacheract"). Splitting the decision (no head
+execution) from the gates (head execution, but only in the PR's own cache
+scope) removes that path. Honest limit, unchanged by the split:
+`code-idiom-gates.yml` is still a `pull_request` workflow, so its own YAML is
+still the PR head's — a PR editing that file can still drop its own gates.
+What the split fixes is narrower: the skip *authority* can no longer be
+produced or widened by head content.
+
+PR #1473 (same day) reworked the gates job's decision-import polling from a
+fixed ~5 s loop to a cheap-first backoff (10→20→30 s, capped) that checks a
+1-call "how many decision runs exist / how many are pending" probe before ever
+listing or downloading artifacts, and remembers runs it has proven invalid so
+they are not re-fetched — see §1b for why this mattered in practice on
+2026-09-24.
+
+---
+
+### 1b. 2026-09-24: signing needs an enrolled key on the signing host, and it does not buy queue time
+
+Two facts measured the same day, both worth internalizing before relying on
+this feature:
+
+1. **Signing needs the enrolled private key present on the host that signs.**
+   A Windows development host used on 2026-09-24 had no SSH keys at all and
+   could not sign anything; the enrolled key (`ormastes@simple-ci-receipt`)
+   lives on a different machine. There is no way around this: `ssh-keygen -Y
+   sign` needs the private key file, full stop. To give a new host a signing
+   identity: generate a **distinct** ed25519 key for that host (never reuse a
+   key already enrolled elsewhere or used for anything else —
+   `ssh-keygen -t ed25519 -C ci-receipt-<host> -f ~/.ssh/simple_ci_receipt`,
+   e.g. principal `ormastes-win@simple-ci-receipt` for a Windows host), then
+   land its public half in `config/check/ci_receipt_allowed_signers` through
+   its own reviewed PR (§5). A distinct identity per host means a compromised
+   or retired host's key can be revoked on its own line, without touching any
+   other host's trust. **Adding a signer is a trust decision** — the reviewer
+   is deciding to let that host's local runs stand in for CI's, exactly the
+   trust class in §2.
+2. **A receipt does not buy queue time.** On 2026-09-24, GitHub Actions for
+   this repository was itself saturated: 25 of the last 40 runs sat queued,
+   and `code-idiom-receipt.yml` decision runs were observed queued for **~50
+   minutes** without starting. The decision run is itself an ordinary CI job —
+   when the Actions queue is full, it does not start, `code-idiom-gates.yml`'s
+   importer waits out its full `RECEIPT_WAIT_S=300` (5 min) window (see §1a's
+   PR #1473 backoff — this is exactly the situation it was tuned for) and then
+   falls back to `full`. A receipt reduces the **work** the gates job does
+   once a runner is actually available; it does nothing about how long the
+   job waits for a runner. If the wait itself is the operational problem
+   (rather than the gate work), the tool for that is the kill switch: setting
+   the repo variable `SIMPLE_CI_RECEIPT_DISABLED` to anything other than
+   `false` forces every decision to `full` immediately, which does not shorten
+   queue time either but at least stops the 5-minute import wait on every PR.
 
 ---
 
@@ -96,28 +187,39 @@ What CI still recomputes on the real head **before any row is skipped**:
   `full` by construction, where the gates themselves are the enforcement.
   Measured on a CI-shaped range: conflict-tree 1 s, conflict-markers 5 s,
   tree-size 2 s — 8 s, affordable inside the 60 s `sanity` budget. They matter
-  because a receipt attests the tree
-  the developer ran gates on while CI tests the **merge** of that head against a
-  base that moves every few minutes. `main` was wiped to four files twice in 24 h
-  with every other check green.
+  because a receipt attests the tree the developer signed hours or days
+  earlier, and `main` moves every few minutes; `code-idiom-gates.yml` checks
+  out and tests the PR **head sha** directly (not a merge tip — the former
+  `escalate` mode compared the attested head against a merge tree and was
+  removed on 2026-09-24 once the strict up-to-date ruleset made head and merge
+  tree equal at land time), but the range between the receipt's base and that
+  head is still exactly what the conflict-class guards re-check. `main` was
+  wiped to four files twice in 24 h with every other check green.
 
 ---
 
 ## 3. The modes
 
 There is no binary skip. The decision is made by the `Local CI receipt
-admission` step of `code-idiom-gates`, and it only ever *widens* trust — every
-failure path returns with the mode still `full`.
+admission` step of `code-idiom-receipt.yml` (base-only; §1a) and *imported*,
+never re-decided, by `code-idiom-gates.yml`'s own `Local CI receipt admission
+(import base decision)` step. It only ever *widens* trust — every failure path
+leaves the mode `full`.
 
-The workflow's own header comment says "THREE MODES, and only three". **That
-comment is stale: the landed code emits four**, having added `docs`. Read the
-table, not the comment.
+**Updated 2026-09-24: there are three modes, and only three** — `full`,
+`docs`, `sanity`. The former `escalate` mode (which compared the attested head
+tree against the merge tree the gate job tested) was removed the same day: the
+gate job now checks out and tests the PR head sha directly, and the strict
+up-to-date ruleset makes head and merge-tip equal at land time, so `escalate`'s
+branch could never fire. If you find an older note (including earlier drafts
+of this guide) saying "four modes, the header comment is stale," that was true
+before 2026-09-24 and is no longer true — the code and the header now agree on
+three.
 
 | mode | condition | what runs | budget |
 |---|---|---|---|
 | `docs` | receipt verifies **and** every changed path is documentation | the conflict-class floor only | ≤ 60 s |
-| `sanity` | receipt verifies **and** the attested tree is the tree under test | receipt verify + conflict-tree + conflict-markers + tree-size | ≤ 60 s |
-| `escalate` | receipt verifies for the PR head, but the merge CI is testing has a different tree | the sanity set, plus every gate whose declared `inputs` intersect the paths the merge changed. A gate whose `inputs` are `*` (unbounded) **always** runs | bounded by the diff |
+| `sanity` | receipt verifies **and** the attested `tree` equals `HEAD^{tree}` of the tree this job actually checked out | receipt verify + conflict-tree + conflict-markers + tree-size | ≤ 60 s |
 | `full` | everything else, and every undecidable, missing, malformed, unsigned, mismatched or unreadable input | every gate, exactly as before | unchanged |
 
 The fail-closed hinge is the **inverted** `if:` on each gate step:
@@ -138,12 +240,14 @@ alone costs more than the whole 60 s budget. That step's condition is
 
 ## 4. Generating a signing key
 
-Use a key that signs **nothing else**. Reusing an existing SSH key means a
-signature you made for some other purpose is one namespace check away from being
-replayed as a CI receipt.
+Use a key that signs **nothing else**, and a **distinct key per host** — see
+§1b. Reusing an existing SSH key means a signature you made for some other
+purpose is one namespace check away from being replayed as a CI receipt;
+reusing one key across hosts means a compromised or retired host cannot be
+revoked without also revoking every other host's trust.
 
 ```bash
-ssh-keygen -t ed25519 -C ci-receipt-<who> -f ~/.ssh/simple_ci_receipt
+ssh-keygen -t ed25519 -C ci-receipt-<who>-<host> -f ~/.ssh/simple_ci_receipt
 ```
 
 Requires OpenSSH ≥ 8.0 for `ssh-keygen -Y` (sshsig). Both scripts assert this
@@ -157,11 +261,16 @@ ssh -V        # OpenSSH_10.3p1 measured locally; runners are well past 8.0
 
 ## 5. Getting your key into `config/check/ci_receipt_allowed_signers`
 
-**The file currently has ZERO keys.** That is the intended fail-closed default: an
-allowlist with no key admits nobody, every verification returns non-zero, and CI
-therefore runs the full gate set. The verifier selftest's `c2` case ensures an
-untrusted fixture signer is not admitted by the shipped file; a reviewed signer
-may be enrolled in a separate PR without weakening that invariant.
+**The file shipped with ZERO keys, by design, and as of 2026-09-24 carries
+exactly one enrolled signer:** `ormastes@simple-ci-receipt` (also the identity
+used by the separate `pr`-tier PR fast check, §6). A key not listed here is
+not admitted, full stop — the empty-by-default posture is the intended
+fail-closed baseline: an allowlist with no key admits nobody, every
+verification returns non-zero, and CI therefore runs the full gate set. The
+verifier selftest's `c2` case ensures an untrusted fixture signer is not
+admitted by the shipped file; a reviewed signer may be enrolled in a separate
+PR without weakening that invariant. Adding a signer is a trust decision (§1b)
+— give each host its own identity rather than sharing one across hosts.
 
 Append exactly one line, key material taken verbatim from the `.pub` file:
 
@@ -181,11 +290,14 @@ printf '%s namespaces="simple-ci-receipt" %s\n' \
 **Land that line through review on the BASE branch, in its own PR.** Two reasons,
 both hard:
 
-1. The allowed-signers file, the verifier script and the skip logic are read from
-   `.ci-base` — a checkout of the PR's **base** sha — never from the PR head.
-   Otherwise a PR could add its own key and sign its own receipt.
+1. The allowed-signers file, the verifier script and the manifest are read
+   with `git show <BASE_SHA>:<path>` into a private repo under `RUNNER_TEMP` —
+   **not a checkout** of any kind, base or head (§1a: `code-idiom-receipt.yml`
+   has no `actions/checkout` step at all). Otherwise a PR could add its own key
+   and sign its own receipt.
 2. `decide()` refuses admission outright for any PR that touches
-   `.github/workflows/`, `scripts/check/`, `scripts/hooks/` or `config/check/`:
+   `.github/workflows/`, `scripts/check/`, `scripts/hooks/`, `scripts/lib/`,
+   `scripts/setup/` or `config/check/`:
 
    > `the PR edits check policy (<path>); a receipt may never admit its own rules`
 
@@ -197,17 +309,35 @@ both hard:
 
 ## 6. Running the local gates and minting a receipt
 
-The receipt covers the **`ci` tier** of `config/check/must_check_gates.sdn` —
-27 rows as of 2026-09-06, all with `ci_job` = `code-idiom-gates`. The manifest's
-columns are:
+**There are three separate receipt lanes. Do not conflate them — a receipt
+signed for one tier is not accepted for another, and the verifier's own
+`field tier: receipt covers tier "<a>" but tier "<b>" was requested` FAILs on
+a mismatch.**
+
+| tier | manifest | what it covers | who consumes it |
+|---|---|---|---|
+| `ci` | `config/check/must_check_gates.sdn`, 27 rows, `ci_job=code-idiom-gates` (still 27 as of 2026-09-24) | the extended, non-required `code-idiom-gates` job's gate steps | `code-idiom-gates.yml`'s importer, via a note on `refs/notes/ci-receipts` |
+| `local` | same file, 6 rows (`local-sdn-crc32-sealed`, `local-rust-duplicate-reexport`, `local-no-stale-snapshot-rewind`, `local-range-shs-hygiene`, `local-rt-dual-implementation`, `local-linux-phase2-test-runner-contract`), all `ci_job=-` | the gates the 10 s push hook demoted on 2026-09-24 for being too slow for that budget (22-53 s each on Windows) | **nobody, server-side.** `sign-local-ci-receipt.shs --tier local --run` is a way to run and record them locally before pushing; no workflow imports a `local`-tier receipt today, and `code-idiom-gates.yml` re-runs the equivalent checks itself as its own "Push-tier core gates" step regardless. **Do not `--note`/`--push-note` a `local`-tier receipt expecting it to skip anything in CI** — the CI verifier call is always `--tier ci`, and a `local`-tier note would simply FAIL the tier check |
+| `pr` | a **separate** manifest, `config/check/pr_fast_gates.sdn`, 1 row (`pr-fast-changed`) | the non-required `<1 min PR fast check` (changed-file compile + unit/feature specs) | `pr-fast-check.yml`, via a note on `refs/notes/pr-fast-receipts`; §12 |
+
+This section covers the `ci` lane. The manifest columns are:
 
 ```
 must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|
 ```
 
-`ci_job` maps a row to the CI job that may skip it. `inputs` carries the path set
-that `escalate` intersects against the rebase diff; `*` means unbounded, and an
-unbounded gate always re-runs.
+`ci_job` maps a row to the CI job that may skip it. `inputs` is retained by the
+schema for a future bounded-diff mode; today no mode reads it (the `escalate`
+mode that once intersected it against the rebase diff was removed 2026-09-24,
+§3), so `inputs` is inert for every currently emitted mode.
+
+**Cost, so you know what you are signing up for before running `--tier ci
+--run`:** several rows are slow even outside CI — the manifest's own
+`orphaned-docstring-tail` row measures ~65 s over the tree, several rows need a
+deployed full-CLI `bin/simple` (6b covers the workaround), and `--tier local`
+is no lighter (22-53 s per row on Windows, per the `local` row descriptions
+above). Signing either tier for real is a multi-minute local operation, not a
+quick pre-push step.
 
 ### 6a. Let the signer run the gates for you
 
@@ -449,7 +579,7 @@ suppress. Read the `reason` in the `LOCAL-CI-RECEIPT MODE:` line and match it:
 | `the ci-receipt note on <sha> carries no payload` / `carries no sshsig block` | the note body is not `payload \|\| signature` | rebuild it with `cat receipt sig > /tmp/note` (§7) |
 | `receipt not admitted (verifier exit <n>): <verdict>` | the verifier decided — its verdict is quoted inline | look the verdict up in §10 |
 | `the BASE manifest declares no ci row for job code-idiom-gates` | manifest has no `ci` rows for this job at your base | rebase |
-| `receipt verified but the merge diff could not be computed` / `could not assemble the changed-path set` | `escalate` could not bound itself, so it fell back | re-run the job |
+| `base decision attests tree <a> but this job tests <b>` | rebased or amended after signing — same reason as the `identities match but tree differs` verifier verdict below | re-sign and re-attach the note after the rebase (§10) |
 
 Meanwhile: **push once.** Every force-push cancels the in-flight run and re-queues
 you behind everything else (§1). Get the message and the rebase right before the
@@ -505,7 +635,7 @@ PASS line is the parallel `PASS — <n> row(s) signed, receipt binds tree <sha>
 | `field identities: receipt declares <n> identity(ies) but carries <m>` | corrupt payload; re-mint |
 | `identity KIND mismatch: value(s) <vals> are attested under a different identity kind than the commit(s) under test resolve to; a patch identity never satisfies a change identity` | you signed under one kind and CI resolved the other. Re-sign against the actual PR range. §8 |
 | `identity set differs from the receipt (attested <n>, tested <m>); this is different work, not a rebase` | you signed a different commit set. Re-sign with the `--changes` range that matches the PR |
-| `identities match but tree differs (attested <a>, tested <b>); rebased since signing` | **the rebase case** — same work, new bytes. This is what `escalate` exists for; re-sign and re-attach the note after the rebase to get back to `sanity` |
+| `identities match but tree differs (attested <a>, tested <b>); rebased since signing` | **the rebase case** — same work, new bytes. There is no partial-credit mode for this any more (`escalate` was removed 2026-09-24); re-sign and re-attach the note after the rebase to get back to `sanity` |
 | `field manifest_sha: receipt binds <a> but config/check/must_check_gates.sdn at tree <t> is blob <b>` | the manifest moved under you; rebase and re-sign |
 | `field tier: receipt covers tier "<a>" but tier "<b>" was requested` | you signed with the default `--tier push`. Re-sign with `--tier ci` |
 | `manifest row id "<id>" is declared twice` | manifest defect; fix the manifest |
@@ -521,28 +651,71 @@ decide is a FAILURE, never a pass. Absence of evidence is never evidence.**
 
 ## 11. Known limits and future work
 
+- **`code-idiom-gates` is not the required check** (§1a, since 2026-09-23).
+  This whole receipt lane reduces work on a non-required job; it does not by
+  itself satisfy the branch-protection ruleset (`fast-gates` does, and this
+  receipt does not touch it).
 - **Publication is opt-in** (§7): `--note` attaches locally, while
   `--push-note` publishes to the shared notes ref. The operator must still
   select a trusted key and run all claimed gates before publishing.
-- **Never exercised on a CI runner.** Every result in this guide is local. The
-  runner-side path — notes fetch, base-policy materialization, the mode
-  decision — has no observed green run yet.
-- **`escalate` degrades to `full`** when the attested tree cannot be materialized
-  on the runner. An optional non-identity `attested_commit` fetch hint would fix
-  it; it is not built.
+- **Exercised on a CI runner as of the 2026-09-24 split (PR #1467), but not
+  load-tested.** The decision/import mechanism has run for real PRs since the
+  split; what remains unverified is its behavior under the queue saturation
+  described in §1b beyond "it correctly falls back to `full`."
+- **`code-idiom-gates.yml`'s own YAML is still the PR head's** (§1a): a PR that
+  edits that file can drop its own gates, with or without a receipt. The split
+  narrows what a receipt can forge; it does not make the gates job itself
+  immune to a head edit, which is inherent to every `pull_request` workflow in
+  this repo.
+- **The `pr`-tier PR fast check's `session_id` field carries binary identity**
+  (the simple binary's size + sha256) as a documented v1 shape (§12) — this is
+  a deliberate, not accidental, coupling between a receipt and the exact binary
+  that produced its verdicts.
 - **Coverage honesty.** The idiom job runs 27 guard scripts and they do not share
   a verdict grammar (`check-cpu-hotloop-idiom.shs` prints
   `cpu_lane_hotloop_ok=true`, not a `PASS —` line), so receipt rows key on **exit
   status**, not on parsed output.
 - **The conflict-class guards are blocking in every mode**, including `full`.
-  They have not yet run in a CI context, so if one turns out to be wrong about
-  CI-shaped ranges it will redden PRs; that risk was accepted deliberately over
-  an advisory tier, because in `sanity` and `docs` they are the only enforcement
-  left.
+  In `sanity` and `docs` they are the only enforcement left, which was accepted
+  deliberately over an advisory tier.
 - **A pure-Simple twin verifier** over `src/lib/common/crypto/ed25519.spl` is the
   recorded upgrade path, so the check stops depending on OpenSSH being on the
   runner. It is blocked on a full-CLI pure-Simple binary being deployed to CI —
   CI runners have no `bin/simple` today. Do not build it before then.
+
+---
+
+## 12. The `pr` tier — the PR fast check
+
+A second, independent receipt lane exists alongside the `ci`/`local` tiers
+above: `.github/workflows/pr-fast-check.yml` runs
+`scripts/check/check-pr-fast.shs`, which compiles changed `.spl` files
+(syntax-only by default) and runs their mapped unit and feature specs inside a
+60 s budget. It reads its own one-row manifest,
+`config/check/pr_fast_gates.sdn` (tier `pr`, row `pr-fast-changed`, kept
+separate from `must_check_gates.sdn` because that file is owned by another
+lane), not the `ci`/`local` manifest above.
+
+```bash
+sh scripts/check/check-pr-fast.shs \
+    --sign-key ~/.ssh/simple_ci_receipt --sign-identity <principal> \
+    --publish origin
+```
+
+This signs a `pr`-tier receipt over the exact head tree and change set and
+publishes it on `refs/notes/pr-fast-receipts` (a **different** notes ref from
+the `ci` tier's `refs/notes/ci-receipts`). `pr-fast-check.yml` runs the same
+script in `--verify-receipt` mode, follows the same base-only trust model as
+`code-idiom-receipt.yml` (`pull_request_target`, the script/verifier/allowed-
+signers file read from BASE via `git show`, no head execution), and is
+**not** a required check today — not because of signer enrollment (the same
+`ormastes@simple-ci-receipt` key already verifies here) but because the
+underlying check itself has rough edges: a PR touching no `.spl` file ERRORs,
+a changed file with no mapped spec FAILs outright rather than as a ratchet,
+and the 60 s budget does not scale with change-set size. The signed
+`session_id` field additionally binds the exact simple binary that produced
+the verdicts (its size and sha256) — a documented v1 design choice, not an
+oversight, so a receipt can be tied to the toolchain that generated it.
 
 ---
 

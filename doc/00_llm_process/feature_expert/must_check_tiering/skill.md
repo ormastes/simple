@@ -107,16 +107,72 @@ Selftests verifier 25/25, signer 18/18.
 
 Delivery is a git note on `refs/notes/ci-receipts` keyed by the PR HEAD SHA (not
 the tree, as design D2 first proposed) — it cannot be a tracked file, because
-committing the receipt changes the tree it binds. **The signer has no
-note-emission flag** (`git notes` and `--note` occur zero times in it), so the
-producer runs `cat <receipt> <receipt>.sig > /tmp/note`,
-`git notes --ref=ci-receipts add -f -F /tmp/note <head-sha>`,
-`git push origin refs/notes/ci-receipts` by hand. That is the top usability gap.
-The whole fast path is LOCAL-ONLY so far — it has never been exercised on a CI
-runner; do not describe it as runner-proven. Also note the workflow emits FOUR
-modes (`docs` was added alongside `sanity`/`escalate`/`full`) while its own
-header comment still says three. Operator guide, with the full verdict-string
-troubleshooting table: `doc/07_guide/infra/local_ci_receipt/operator_guide.md`.
+committing the receipt changes the tree it binds. The signer supports `--note`
+(attach locally) and `--push-note` (additionally push the shared ref) directly
+— this corrects an earlier note here that claimed no such flag existed; verify
+against the script's own `Usage:` block before repeating either claim.
+Operator guide, with the full verdict-string troubleshooting table:
+`doc/07_guide/infra/local_ci_receipt/operator_guide.md`.
+
+## 2026-09-24 — required check moved, workflow split, mode count corrected, three receipt lanes
+
+Several 2026-09-06-era claims above and in the operator guide were stale; this
+section is the current state, checked against `origin/main` on 2026-09-24.
+
+- **`code-idiom-gates` is no longer the required status context.** Since
+  2026-09-23 the ruleset requires `fast-gates` in `repo-hygiene.yml` instead.
+  `code-idiom-gates` (the job this whole receipt feature targets) is now
+  non-required, so signing a `ci`-tier receipt reduces work on a non-required
+  job — it does not by itself satisfy the branch-protection ruleset.
+- **The job split into two workflows the next day (PR #1467)**, delivering
+  what the 2026-09-06 addendum (§A) had recorded as undelivered:
+  `.github/workflows/code-idiom-receipt.yml` (`pull_request_target`, PRs into
+  `main` only, **no checkout, no head script** — the head is fetched blobless
+  as git objects into a private repo under `RUNNER_TEMP`, and the verifier /
+  allowed-signers file / manifest are read with `git show <BASE_SHA>:<path>`,
+  not any checkout) decides `mode`/`skip_ids`/`tree`/`docs_only` and uploads it
+  as artifact `receipt-decision-<head sha>`; `.github/workflows/
+  code-idiom-gates.yml` (`pull_request`) runs the actual gates against the PR
+  head and only *imports* that decision, accepting it solely from a run the
+  API reports as `event=pull_request_target`,
+  `path=.github/workflows/code-idiom-receipt.yml`, `completed`/`success`, with
+  matching pr/head/base fields and a `tree` equal to what it checked out.
+  PR #1473 (same day) reworked the importer's polling to a cheap-first
+  10→20→30 s backoff after a saturated Actions queue was observed burning the
+  shared `GITHUB_TOKEN` budget across many stalled decision runs.
+- **`escalate` mode is removed, not merely mis-documented.** There are three
+  modes — `full`, `docs`, `sanity` — and the workflow's header comment now
+  matches the code. (The 2026-09-06 note above, and the operator guide before
+  this pass, said "code emits four, header is stale"; that was true before
+  2026-09-24 and is not true now.) `escalate` compared the attested head tree
+  against the merge tree the gate job tested; the gate job now checks out and
+  tests the PR **head sha** directly, and the strict up-to-date ruleset makes
+  head and merge-tip equal at land time, so that branch could never fire.
+- **`ci_receipt_allowed_signers` is no longer literally empty.** It carries one
+  enrolled signer, `ormastes@simple-ci-receipt` (added for the separate `pr`
+  tier below, and valid for `ci` too). The fail-closed-by-default design intent
+  stands; only the "currently zero keys" factual claim was outdated.
+- **Three separate receipt lanes exist, keyed by manifest tier — do not treat
+  them as one feature with three names:**
+  - `ci` — 27 rows, `config/check/must_check_gates.sdn`, `ci_job=code-idiom-gates`,
+    delivered on `refs/notes/ci-receipts`, consumed by `code-idiom-gates.yml`.
+  - `local` — 6 rows in the same manifest (`ci_job=-`), the gates the push hook
+    demoted from its 10 s budget on 2026-09-24 for being too slow (22-53 s each
+    on Windows: crc32-sealed, duplicate-reexport, stale-snapshot-rewind,
+    range-shs-hygiene, rt-dual-implementation, linux-phase2-test-runner-contract).
+    **Nothing server-side consumes a `local`-tier receipt** — it is a local
+    bookkeeping convenience only; `code-idiom-gates.yml` re-runs the equivalent
+    checks itself as its own "Push-tier core gates" step regardless, and a
+    `local`-tier note would FAIL CI's `--tier ci` verifier call outright on a
+    tier mismatch.
+  - `pr` — a **separate** one-row manifest, `config/check/pr_fast_gates.sdn`
+    (row `pr-fast-changed`), delivered on `refs/notes/pr-fast-receipts` (a
+    different ref from `ci-receipts`), consumed by `pr-fast-check.yml` /
+    `check-pr-fast.shs`. Not required, for reasons unrelated to signer
+    enrollment (practicality gaps in the underlying 60 s check, not trust).
+    Its signed `session_id` binds the exact simple binary (size + sha256) that
+    produced the verdicts — documented v1 behavior, not an oversight.
+
 ## 2026-09-06 push dispatcher and guard-wiring landmines
 
 - **The push consumer must take its dispatcher from the pushed ref, not the

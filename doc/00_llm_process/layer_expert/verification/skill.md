@@ -62,20 +62,27 @@ working tree, because "as of that tree" is the binding and a working-tree read i
 fail-open under a dirty checkout; `ssh-keygen -Y verify` exits **255** on tamper,
 not 1, and a fixture pins that.
 
-CI consumer: the `code-idiom-gates` job of `.github/workflows/repo-hygiene.yml`.
-FOUR modes — `docs`, `sanity`, `escalate`, `full` (the workflow's own header
-comment still says "THREE MODES, and only three"; it is stale, read the code) —
-and the fail-closed hinge is
-the INVERTED per-step `if:` (`!contains(steps.receipt.outputs.skip_ids,
-'|<row id>|')`). An empty, missing or unset `skip_ids` makes `contains` false, so
-the gate RUNS; a decision step that dies or emits nothing runs everything. Never
-replace that with a positive condition or a `needs:`/`if:` job gate — the
-obvious positive form is fail-OPEN, and a skipped job reports as passing.
+CI consumer, **updated 2026-09-24**: `code-idiom-gates` moved out of
+`repo-hygiene.yml` into its own `.github/workflows/code-idiom-gates.yml`, and
+is **no longer the required status check** — `fast-gates` in
+`repo-hygiene.yml` is, since 2026-09-23, and this receipt does not skip it. The
+mode decision itself split into a second, base-only, no-checkout workflow,
+`.github/workflows/code-idiom-receipt.yml`, which `code-idiom-gates.yml` only
+imports (see `doc/00_llm_process/feature_expert/must_check_tiering/skill.md`'s
+2026-09-24 section for the full mechanism). **THREE modes** — `docs`,
+`sanity`, `full` — the former `escalate` mode was removed the same day once
+the gate job started testing the PR head sha directly instead of a merge tip
+(the earlier "code emits four, header is stale" note here is no longer
+accurate). The fail-closed hinge is unchanged: the INVERTED per-step `if:`
+(`!contains(steps.receipt.outputs.skip_ids, '|<row id>|')`). An empty, missing
+or unset `skip_ids` makes `contains` false, so the gate RUNS; a decision step
+that dies or emits nothing runs everything. Never replace that with a positive
+condition or a `needs:`/`if:` job gate — the obvious positive form is
+fail-OPEN, and a skipped job reports as passing.
 The conflict-class guards (conflict-tree, conflict-markers, tree-size) are
 BLOCKING in every mode, gated only on `range != ''`; in `sanity` and `docs` they
 are the only enforcement left. Measured 8 s total on a CI-shaped range, so they
-fit the 60 s budget. They have not yet run on a CI runner — neither has any
-other part of this path.
+fit the 60 s budget. They have run on real PRs since the 2026-09-24 split.
 
 Reading order for a task in this area:
 `doc/07_guide/infra/local_ci_receipt/operator_guide.md` (task-oriented, with the
