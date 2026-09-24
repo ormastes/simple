@@ -3880,8 +3880,20 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 2 compiler tests have no admission receipt at ${stage2_admission_receipt}" >&2
       exit 1
     }
-    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}") || {
-      echo "error: cannot hash the admitted Stage 2 compiler for verification" >&2
+    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}")
+    stage2_tests_hash_status=$?
+    # bootstrap_stage3_hash_file's own body is a pipeline (`sha256sum "$1" |
+    # awk '{print $1}'`, or the shasum/sha256/openssl equivalents): if the
+    # hashing command fails but awk still runs (on no input, awk exits 0 and
+    # prints nothing), the FUNCTION's exit status is awk's, so `|| { ... }`
+    # on the call above would never fire even though the hash is empty.
+    # Check the captured status directly (never through a further pipe) AND
+    # require non-empty output before trusting this value for anything --
+    # especially before the prune below, which would otherwise delete the
+    # CURRENT hash's own cache/output dirs (never anything outside this
+    # tree, but it silently discards a warm cache on every such failure).
+    [ "${stage2_tests_hash_status}" -eq 0 ] && [ -n "${stage2_tests_sha}" ] || {
+      echo "error: cannot hash the admitted Stage 2 compiler for verification (status=${stage2_tests_hash_status}, sha='${stage2_tests_sha}')" >&2
       exit 1
     }
     # Prune stale per-hash cache/output dirs from earlier bootstraps before
@@ -3918,11 +3930,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # a cold full-CLI/test-runner native-build, and documented full-CLI builds
     # of this same closure took 18-40+ minutes elsewhere -- 1800s is not
     # realistic on a cold cache, especially on Windows (slower spawns,
-    # Defender, cold cache). Raise it until real Windows numbers exist. Also
-    # default the test-runner's own internal worker count above the verifier's
-    # built-in default of 1 (fully sequential), derived from this bootstrap's
-    # own --jobs selection, capped to the verifier's accepted range of 1-12;
-    # nothing in this codebase's `--parallel --max-workers=N` test-runner path
+    # Defender, cold cache, and native-build's own worker default is already
+    # sized in hours for exactly this reason). Raise it, and raise it further
+    # still on Windows (MSYS/MINGW/CYGWIN via `uname -s`) until real Windows
+    # numbers exist. Also default the test-runner's own internal worker count
+    # above the verifier's built-in default of 1 (fully sequential); nothing
+    # in this codebase's `--parallel --max-workers=N` test-runner path
     # (already used elsewhere in bootstrap-phase-verification.shs) documents
     # it as unsafe for this suite. Capped at 4, matching the audit's own
     # min(nproc/2, 4) recommendation rather than the verifier's wider
@@ -3933,19 +3946,55 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # step only via the subshell below -- other bootstrap-phase-verification
     # .shs callers (stage1/stage3/stage4, run-*-phase2-tests.shs) keep their
     # own defaults.
-    stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-3600}
+    case "$(uname -s 2>/dev/null || :)" in
+      MINGW*|MSYS*|CYGWIN*) stage2_tests_timeout_default=7200 ;;
+      *) stage2_tests_timeout_default=3600 ;;
+    esac
+    stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-${stage2_tests_timeout_default}}
+    # `jobs` (this bootstrap's own --jobs selection) is expected to already be
+    # a resolved integer by the time this step runs (bootstrap_select_jobs,
+    # sourced from bootstrap-jobs.shs above, replaces a symbolic
+    # full/half/min/auto with a real host CPU count). Do not trust that
+    # blindly: a symbolic or empty value here would otherwise silently
+    # collapse to 1 test worker / 1 build thread even on a wide host
+    # (observed: `--jobs=full --stop-after-stage2` on a 24-thread host).
+    # Re-resolve a real host CPU count whenever `jobs` is not a plain
+    # positive integer, reusing bootstrap_detect_host_cpus (same
+    # nproc -> getconf _NPROCESSORS_ONLN -> sysctl -> NUMBER_OF_PROCESSORS
+    # probe chain bootstrap-jobs.shs itself uses, so Windows Git Bash where
+    # `nproc` is absent still resolves via NUMBER_OF_PROCESSORS).
+    case "${jobs:-}" in
+      ''|*[!0-9]*)
+        stage2_tests_cpu_basis=$(bootstrap_detect_host_cpus 2>/dev/null || :)
+        case "${stage2_tests_cpu_basis}" in
+          ''|*[!0-9]*|0) stage2_tests_cpu_basis=1 ;;
+        esac
+        ;;
+      *) stage2_tests_cpu_basis=${jobs} ;;
+    esac
     stage2_tests_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-}
     if [ -z "${stage2_tests_workers}" ]; then
-      case "${jobs:-1}" in
-        ''|*[!0-9]*) stage2_tests_workers=1 ;;
-        *)
-          stage2_tests_workers=$((jobs / 2))
-          [ "${stage2_tests_workers}" -ge 1 ] || stage2_tests_workers=1
-          [ "${stage2_tests_workers}" -le 4 ] || stage2_tests_workers=4
-          ;;
-      esac
+      # Capped at 4, matching the audit's own min(nproc/2, 4) recommendation
+      # rather than the verifier's wider accepted range (1-12): per-worker
+      # RSS in interpreter mode is unmeasured here and this repo has
+      # SIGKILL-for-memory history on large parses
+      # (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md), so
+      # this stays conservative pending a real measurement.
+      stage2_tests_workers=$((stage2_tests_cpu_basis / 2))
+      [ "${stage2_tests_workers}" -ge 1 ] || stage2_tests_workers=1
+      [ "${stage2_tests_workers}" -le 4 ] || stage2_tests_workers=4
     fi
-    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s, test-workers=${stage2_tests_workers})"
+    stage2_tests_build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-}
+    if [ -z "${stage2_tests_build_threads}" ]; then
+      # Native-build threads are not bounded by the same per-worker-RSS
+      # concern as the interpreter test workers above (one native-build
+      # process is already the unit of the whole entry-closure build, not
+      # N parallel interpreter processes each loading the compiler graph),
+      # so use the full detected/selected job count rather than the
+      # workers' 4-way cap. Was a fixed 4 regardless of host size.
+      stage2_tests_build_threads=${stage2_tests_cpu_basis}
+    fi
+    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s, build-threads=${stage2_tests_build_threads}, test-workers=${stage2_tests_workers})"
     # Without a milestone the progress watcher reads this multi-minute step as a
     # hang between Stage 2 and Stage 3.
     bootstrap_progress_mark stage2-compiler-tests \
@@ -3957,7 +4006,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     (
       cd "${repo_root}" || exit 125
       BOOTSTRAP_VERIFY_TEST_WORKERS="${stage2_tests_workers}"
-      export BOOTSTRAP_VERIFY_TEST_WORKERS
+      BOOTSTRAP_VERIFY_BUILD_THREADS="${stage2_tests_build_threads}"
+      export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --compiler="${stage2_admitted_absolute}" \

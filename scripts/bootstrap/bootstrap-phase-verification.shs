@@ -132,10 +132,14 @@ for arg in "$@"; do
     --compiler-sha256=*) expected_sha=${arg#*=} ;;
     --strategy=*) strategy=${arg#*=} ;;
     # --profile=slim is an explicit opt-in, phase=stage2 only (see
-    # stage2_slim_profile below). Default is "full": every existing caller
-    # (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
-    # run-macos-phase23-evidence.shs, and this script's own stage1/stage3/
-    # stage4 paths) is byte-identical in behavior unless it opts in.
+    # stage2_slim_profile below). EVERY behavioral effect of slim mode --
+    # skipped MCP/LSP builds and checks, skipped compile-mode test
+    # duplicates, and the shared CLI/test-runner build cache -- is gated on
+    # stage2_slim_profile, so default "full" is genuinely byte-identical:
+    # every existing caller (run-linux-phase2-tests.shs,
+    # run-freebsd-phase2-tests.shs, run-macos-phase23-evidence.shs, and this
+    # script's own stage1/stage3/stage4 paths) is unaffected unless it opts
+    # in. Any new stage2_slim_profile-conditioned code must keep this true.
     --profile=*) profile=${arg#*=} ;;
     --hash-policy=*) hash_policy=${arg#*=} ;;
     --work-root=*) work_root=${arg#*=} ;;
@@ -1366,11 +1370,23 @@ else
     tool_outputs="$outputs/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
     compiler_cli="$tool_outputs/simple_cli"
     test_runner="$tool_outputs/simple_test_runner"
-    # One shared object cache for both builds: same compiler, same --source
-    # closure (src/compiler + src/app + src/lib), so the CLI and test-runner
-    # entry points can reuse each other's compiled objects instead of each
-    # paying for the whole closure independently (perf audit of PR #1458).
-    mkdir -p "$tool_cache/shared"
+    # Slim profile only: one shared object cache for both builds (same
+    # compiler, same --source closure of src/compiler + src/app + src/lib),
+    # so the CLI and test-runner entry points reuse each other's compiled
+    # objects instead of each paying for the whole closure independently
+    # (perf audit of PR #1458). Gated on stage2_slim_profile so every other
+    # caller (run-linux-phase2-tests.shs, run-freebsd-phase2-tests.shs,
+    # run-macos-phase23-evidence.shs, stage1/stage3/stage4) keeps its
+    # original two-separate-caches behaviour byte-identically under
+    # --profile=full (the default).
+    if [ "$stage2_slim_profile" -eq 1 ]; then
+      tool_cache_cli="$tool_cache/shared"
+      tool_cache_runner="$tool_cache/shared"
+    else
+      tool_cache_cli="$tool_cache/full-cli"
+      tool_cache_runner="$tool_cache/test-runner"
+    fi
+    mkdir -p "$tool_cache_cli" "$tool_cache_runner"
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
     run_matrix_task compiler_cli_build --verification-expect-executable="$compiler_cli" \
@@ -1378,14 +1394,14 @@ else
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/cli/_CliMain/main_and_help.spl --threads "$build_threads" \
-      --cache-dir "$tool_cache/shared" --output "$compiler_cli"
+      --cache-dir "$tool_cache_cli" --output "$compiler_cli"
     compiler_cli_ready=$matrix_task_passed
     run_matrix_task test_runner_build --verification-expect-executable="$test_runner" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
-      --cache-dir "$tool_cache/shared" --output "$test_runner"
+      --cache-dir "$tool_cache_runner" --output "$test_runner"
     test_runner_ready=$matrix_task_passed
   fi
 
@@ -1703,6 +1719,26 @@ if [ "$stage2_slim_profile" -ne 1 ]; then
     else
       printf 'task=%s_help|result=BLOCKED|status=not-built|elapsed_seconds=0|log=-\n' \
         "$tool" >>"$summary" || die "cannot append verification summary"
+    fi
+  done
+fi
+
+# Self-check the slim stage-2 profile's own guarantee instead of resting it
+# solely on a caller's awk gate (bootstrap-from-scratch.sh's stage2-tests
+# summary validator makes the same check today, but a verifier that can only
+# be trusted correctly by ONE caller is not actually trustworthy). These are
+# the five rows the slim profile exists to produce: proof that a compiler
+# test binary was built (compiler_cli_build, test_runner_build) AND used
+# (compiler_bootstrap_tests, interpreter_interpreter_tests,
+# loader_interpreter_tests). A summary missing any of them, or carrying one
+# that is not exactly PASS, checked nothing and must not report PASS.
+if [ "$stage2_slim_profile" -eq 1 ]; then
+  for stage2_slim_required_task in compiler_cli_build test_runner_build \
+      compiler_bootstrap_tests interpreter_interpreter_tests loader_interpreter_tests; do
+    if ! grep -q "^task=${stage2_slim_required_task}|result=PASS|" "$summary"; then
+      printf 'bootstrap-phase-verification: slim stage-2 profile is missing a required PASS row for %s\n' \
+        "$stage2_slim_required_task" >&2
+      matrix_failed=1
     fi
   done
 fi
