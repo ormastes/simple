@@ -96,17 +96,33 @@ jobs:
           # WP3): this used to be 9 hardcoded `run_gate` lines that had
           # drifted from the pre-push `local` tier (rust-dup --rev vs --range,
           # no linux-phase2). It now reads config/check/must_check_gates.sdn
-          # AT THE PR'S OWN HEAD via --manifest-rev, so a PR cannot edit the
-          # gate that admits IT (the receipt-skip decision stays in
-          # pull_request_target from BASE, unaffected by this step) while
-          # still running the PR's own row set/placeholders. --tier local
-          # selects the 6 local rows plus the push tier's 4 blocking rows —
-          # exactly the "local tier == required remote check" rule (see the
-          # runner's header and config/check/must_check_gates.sdn's `local`
-          # tier comment).
+          # from BASE_SHA (--manifest-rev), NOT from the PR's own head: a PR
+          # cannot edit the gate that admits it. This is the same trust root
+          # check-pr-fast.shs already uses for its own manifest row (a
+          # blob-id comparison between BASE and HEAD FAILs closed on ANY
+          # change to must_check_gates.sdn — see that script's V5 selftest
+          # fixture) and the same shape as code-idiom-receipt.yml's
+          # pull_request_target-from-BASE receipt-skip decision. Reading from
+          # HEAD_SHA instead would let a PR rewrite the very rows that audit
+          # it, which is exactly the property a required check must not have.
+          # Consequence, stated rather than hidden: a PR that itself edits
+          # must_check_gates.sdn (such as the WP3 landing PR that introduced
+          # this step) is checked against the PRE-CHANGE manifest at its own
+          # base and may still show the base's failure mode; that PR lands
+          # like any other required-check exception (documented admin-bypass
+          # merge path, .claude/rules/vcs.md), not by weakening this trust
+          # root. Every ORDINARY PR after that lands sees the fixed manifest
+          # already in place at its base and is unaffected.
+          # --tier local selects the 6 local rows plus the push tier's 4
+          # blocking rows — exactly the "local tier == required remote check"
+          # rule (see the runner's header and must_check_gates.sdn's `local`
+          # tier comment). --range/--ref/--base are always the live PR
+          # endpoints from THIS event, never from the manifest file, so a row
+          # runs against the real PR content even though its COMMAND TEXT
+          # came from BASE.
           sh scripts/check/run-gate-tier.shs --tier local \
               --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
-              --manifest-rev "$HEAD_SHA" --jobs 16 --budget 240
+              --manifest-rev "$BASE_SHA" --jobs 16 --budget 240
           rc=$?
           [ "$rc" -eq 0 ] || { echo "fast-gates: one or more fast gates failed or errored (exit $rc)"; exit 1; }
 

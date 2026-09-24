@@ -10,7 +10,7 @@
 # e.g. "fail" or "error", is treated by the signer as not-pass).
 #
 # Usage:
-#   sh run-gate-tier.shs --tier <t> (--range B..H | --ref H) [--base B]
+#   sh run-gate-tier.shs --tier <t> (--range B..H | --ref H | --rev H) [--base B]
 #                         [--jobs N] [--budget S] [--results FILE]
 #                         [--manifest-rev REV] [--manifest-file PATH]
 #   sh run-gate-tier.shs --selftest
@@ -22,8 +22,19 @@
 #                      check" (plan section A.5): the 6 local rows plus the 4
 #                      push-blocking rows. Rows are deduplicated by id.
 #   --range B..H       value substituted for a `{range}` placeholder.
-#   --ref H            value substituted for a `{rev}` placeholder.
-#   --base B           value substituted for a `{base}` placeholder.
+#   --ref H            value substituted for a `{rev}` placeholder (--rev is
+#                       an accepted alias — land.shs calls exactly `--tier
+#                       local --rev "$TIP"`). When
+#                       --range is omitted but --ref is given, the range is
+#                       DERIVED as `${base}..${ref}`, where --base defaults to
+#                       `origin/main` (land.shs's own invocation is exactly
+#                       `--tier local --rev "$TIP"`, no --range/--base). If
+#                       origin/main does not resolve locally (a shallow clone
+#                       that never fetched it, or a fresh worktree that never
+#                       fetched origin) this is a fail-closed ERROR naming the
+#                       missing ref, never a silent range guess.
+#   --base B           value substituted for a `{base}` placeholder, and the
+#                       base of a range derived from --ref per above.
 #   --jobs N           max concurrent rows (default 16, comfortably above the
 #                       local tier's own row count so nothing queues).
 #   --budget S         wall-clock budget in seconds for the whole tier
@@ -50,6 +61,15 @@
 # checked (<reason>)` exit 2. A budget kill or a 0-row selection is always
 # ERROR, never a pass.
 set -u
+# Job control ON: every `&` background job below gets its OWN process group
+# (pgid == its own pid), so a budget kill can signal `-$pid` (the group, i.e.
+# the row's sh -c AND every child it forked -- git, awk, grep, ...) rather
+# than only the wrapper subshell, which would otherwise leave the real work
+# running past the budget. `set -m` is a no-op, not an error, on a shell that
+# ignores it (harmless if this ever runs under a non-interactive dash build
+# that lacks monitor mode); the -TERM/-KILL calls below are best-effort either
+# way (`2>/dev/null`).
+set -m 2>/dev/null || true
 
 ROOT=${RUN_GATE_TIER_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
 [ -n "$ROOT" ] || { echo "run-gate-tier: ERROR — nothing was checked (cannot locate repository root)" >&2; exit 2; }
@@ -74,7 +94,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --tier) TIER=$2; shift 2 ;;
         --range) RANGE=$2; shift 2 ;;
-        --ref) REF=$2; shift 2 ;;
+        --ref|--rev) REF=$2; shift 2 ;;
         --base) BASE=$2; shift 2 ;;
         --jobs) JOBS=$2; shift 2 ;;
         --budget) BUDGET_S=$2; shift 2 ;;
@@ -180,6 +200,10 @@ run_tier() {
     fi
 
     _work=$(mktemp -d) || { rm -f "$_rows"; echo "run-gate-tier: ERROR — nothing was checked (mktemp -d failed)" >&2; return 2; }
+    # Every row's command is a bare `sh scripts/check/...` relative to the
+    # repo root; cd there once so a caller running from an arbitrary cwd (or
+    # none of the rows themselves re-deriving root) still resolves correctly.
+    cd "$ROOT" || { rm -rf "$_work" "$_rows"; echo "run-gate-tier: ERROR — nothing was checked (cannot cd to repo root $ROOT)" >&2; return 2; }
     _active="$_work/active"; : > "$_active"
     _lines=$(wc -l < "$_rows" | tr -d ' ')
     _t0=$(now_ms)
@@ -230,7 +254,11 @@ run_tier() {
             _killed=1
             continue
         fi
-        ( sh -c "$_expanded" >"$_work/$_id.log" 2>&1; echo $? > "$_work/$_id.rc" ) &
+        # </dev/null: a row must never block on or steal stdin from the
+        # runner (or, worse, from whatever launched the runner -- a pre-push
+        # hook's stdin is the pushed ref rows, and an inherited-stdin row can
+        # silently swallow lines job N+1 needed to read).
+        ( sh -c "$_expanded" </dev/null >"$_work/$_id.log" 2>&1; echo $? > "$_work/$_id.rc" ) &
         echo "$! $_id" >> "$_active"
     done < "$_rows"
 
@@ -239,13 +267,22 @@ run_tier() {
     while [ -s "$_active" ]; do
         _elapsed=$(( $(now_ms) - _t0 ))
         if [ "$_elapsed" -ge "$_budget_ms" ]; then
+            # Signal the whole GROUP (`-$pid`, negative pid under `set -m`
+            # above), not just the wrapper subshell: the wrapper's own exit
+            # does not touch children it forked (git, awk, grep, a nested
+            # sh -c), which would otherwise keep running past the budget and
+            # keep burning the host's CPU/IO for a verdict nobody reads.
+            # Fall back to the bare pid too, in case job control did not
+            # actually grant this job its own process group on this shell.
             while IFS=" " read -r _pid _rid; do
                 [ -n "$_pid" ] || continue
+                kill -TERM -- "-$_pid" 2>/dev/null
                 kill -TERM "$_pid" 2>/dev/null
             done < "$_active"
             sleep 1
             while IFS=" " read -r _pid _rid; do
                 [ -n "$_pid" ] || continue
+                kill -KILL -- "-$_pid" 2>/dev/null
                 kill -KILL "$_pid" 2>/dev/null
                 wait "$_pid" 2>/dev/null
                 printf '%s error\n' "$_rid" >> "$_work/verdicts"
@@ -414,8 +451,58 @@ EOF
         st_report bad "(S7) missing placeholder value is a fail-closed per-row error" "rc=$rc out=$(cat "$ST_T/r7.out" 2>/dev/null)"
     fi
 
+    # (8) `--rev H` with no --range/--base derives `origin/main..H` (this is
+    # land.shs's exact invocation: `run-gate-tier.shs --tier local --rev
+    # "$TIP"`). Built in a scratch repo via RUN_GATE_TIER_ROOT so this does
+    # not touch the real repo's origin/main.
+    R8="$ST_T/repo8"
+    mkdir -p "$R8"
+    git -C "$R8" init -q
+    git -C "$R8" config user.email t@t.example
+    git -C "$R8" config user.name t
+    printf 'a\n' > "$R8/a.txt"; git -C "$R8" add a.txt; git -C "$R8" commit -q -m c0
+    C0=$(git -C "$R8" rev-parse HEAD)
+    git -C "$R8" update-ref refs/remotes/origin/main "$C0"
+    printf 'b\n' > "$R8/b.txt"; git -C "$R8" add b.txt; git -C "$R8" commit -q -m c1
+    C1=$(git -C "$R8" rev-parse HEAD)
+    cat > "$ST_T/m8.sdn" <<EOF
+$HDR
+    g-derive, local, false, range, "sh -c 'echo {range} > $ST_T/derive.out'", -, -, "derived range"
+EOF
+    RUN_GATE_TIER_ROOT="$R8" sh "$0" --tier local --rev "$C1" --manifest-file "$ST_T/m8.sdn" \
+        --budget 20 --jobs 2 --results "$ST_T/r8.out" >/dev/null 2>"$ST_T/r8.err"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(cat "$ST_T/derive.out" 2>/dev/null)" = "origin/main..$C1" ]; then
+        st_report ok "(S8) --rev with no --range/--base derives origin/main..\$rev"
+    else
+        st_report bad "(S8) --rev with no --range/--base derives origin/main..\$rev" "rc=$rc got=$(cat "$ST_T/derive.out" 2>/dev/null) err=$(cat "$ST_T/r8.err" 2>/dev/null)"
+    fi
+
+    # (9) same, but origin/main does not resolve locally: fail closed (ERROR,
+    # never a silent guess), and — crucially — no row ever runs.
+    R9="$ST_T/repo9"
+    mkdir -p "$R9"
+    git -C "$R9" init -q
+    git -C "$R9" config user.email t@t.example
+    git -C "$R9" config user.name t
+    printf 'a\n' > "$R9/a.txt"; git -C "$R9" add a.txt; git -C "$R9" commit -q -m c0
+    C9=$(git -C "$R9" rev-parse HEAD)
+    rm -f "$ST_T/derive9.out"
+    cat > "$ST_T/m9.sdn" <<EOF
+$HDR
+    g-derive9, local, false, range, "sh -c 'echo {range} > $ST_T/derive9.out'", -, -, "derived range, should never run"
+EOF
+    RUN_GATE_TIER_ROOT="$R9" sh "$0" --tier local --rev "$C9" --manifest-file "$ST_T/m9.sdn" \
+        --budget 20 --jobs 2 --results "$ST_T/r9.out" >/dev/null 2>"$ST_T/r9.err"
+    rc=$?
+    if [ "$rc" -eq 2 ] && [ ! -f "$ST_T/derive9.out" ] && grep -q 'origin/main does not resolve' "$ST_T/r9.err"; then
+        st_report ok "(S9) missing origin/main fails closed, never guesses a range, never runs a row"
+    else
+        st_report bad "(S9) missing origin/main fails closed, never guesses a range, never runs a row" "rc=$rc ran=$([ -f "$ST_T/derive9.out" ] && echo yes || echo no) err=$(cat "$ST_T/r9.err" 2>/dev/null)"
+    fi
+
     if [ "$ST_FAILURES" -eq 0 ]; then
-        echo "run-gate-tier: selftest PASS — 7 fixture(s), 0 failed"
+        echo "run-gate-tier: selftest PASS — 9 fixture(s), 0 failed"
         exit 0
     fi
     echo "run-gate-tier: selftest FAIL — $ST_FAILURES fixture(s) failed"
@@ -423,6 +510,21 @@ EOF
 fi
 
 [ -n "$TIER" ] || { echo "run-gate-tier: ERROR — nothing was checked (--tier is required)" >&2; exit 2; }
+
+# land.shs's own invocation is exactly `--tier local --rev "$TIP"`, no
+# --range and no --base: derive one rather than leaving every {range}
+# placeholder unsatisfiable. --base defaults to origin/main; fail closed
+# (ERROR, never a silent guess) if it does not resolve in THIS checkout.
+if [ -z "$RANGE" ] && [ -n "$REF" ]; then
+    if [ -z "$BASE" ]; then
+        if ! git -C "$ROOT" rev-parse -q --verify origin/main >/dev/null 2>&1; then
+            echo "run-gate-tier: ERROR — nothing was checked (--rev given with no --range/--base, and origin/main does not resolve locally in $ROOT; fetch it — git fetch origin main -- or pass --range/--base explicitly)" >&2
+            exit 2
+        fi
+        BASE=origin/main
+    fi
+    RANGE="$BASE..$REF"
+fi
 
 MTEXT=$(read_manifest_text) || { echo "run-gate-tier: ERROR — nothing was checked (cannot read manifest)" >&2; exit 2; }
 [ -n "$MTEXT" ] || { echo "run-gate-tier: ERROR — nothing was checked (empty manifest)" >&2; exit 2; }
