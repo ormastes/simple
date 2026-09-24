@@ -1161,6 +1161,30 @@ case "$(uname -s)" in
       SIMPLE_WINDOWS_ABI=msvc
       export SIMPLE_WINDOWS_ABI
     fi
+    # A fresh Windows checkout without Developer Mode / SeCreateSymbolicLinkPrivilege
+    # gets `core.symlinks=false`, so every tracked mode-120000 path (directory
+    # aliases under src/compiler/, single-file re-export shims like src/std,
+    # src/app/t32_cli) lands as a plain regular file whose content is just the
+    # target path string. Any stage that reads the tree as Simple source then
+    # dies with a parse error on that placeholder, or a broken module-resolution
+    # alias -- measured: a fresh worktree's Stage 2 failed exactly this way on
+    # src/app/t32_cli. setup.shs already materializes these (real symlinks were
+    # never runnable there either), but a bootstrap invoked directly, without
+    # first running setup.shs in that same worktree, never reached that fix.
+    # Run it here too, unconditionally and idempotently, before anything reads
+    # the tree. `|| rc=$?` captures the status directly from the command itself
+    # (never through a pipe) under `set -e`-safe semantics; `--strict-missing`
+    # is deliberately NOT passed, since unbuilt bin/release/** targets are a
+    # legitimate, benign skip this early in a bootstrap.
+    if [ -f "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" ]; then
+      materialize_symlinks_rc=0
+      bash "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" "${repo_root}" || materialize_symlinks_rc=$?
+      if [ "${materialize_symlinks_rc}" -ne 0 ]; then
+        echo "bootstrap-from-scratch: FAILED to materialize git symlinks (rc=${materialize_symlinks_rc}); the checkout will not compile" >&2
+        exit "${materialize_symlinks_rc}"
+      fi
+      unset materialize_symlinks_rc
+    fi
     ;;
 esac
 

@@ -12,8 +12,7 @@
 #   it omitted `/usr/bin/core_perl`, where MSYS2 keeps `shasum`, so
 #   `bootstrap_stage3_tool_requested_path shasum` could not resolve and the
 #   function returned 1 -> "error: could not bind bootstrap tool authority".
-#   The same PATH also lacked every MSVC tool directory (no `cl.exe`,
-#   `link.exe`, `lib.exe`).
+#   The same PATH also lacked every MSVC tool directory (headers/libs).
 #
 #   Second failure mode, also measured: the snapshot fails closed on ANY PATH
 #   component that is not an existing, already-canonical directory
@@ -23,12 +22,113 @@
 #
 # Cross-platform impact: NONE.  This file is new, Windows-only, and is sourced
 # by nothing on Unix.  No existing script was modified.
+#
+# --------------------------------------------------------------------------
+# Portability (2026-09-24): this file used to hardcode ONE machine's VS
+# version (2022 Community, MSVC 14.44.35207), SDK version (10.0.26100.0) and
+# a `/c/dev/tool/...` MSYS2 layout, and failed closed with "missing PATH
+# component" on any other Windows box. It now DISCOVERS the VS/SDK
+# installation via `vswhere.exe` (Microsoft's own fixed, always-installed
+# locator: any Visual Studio 2017+ installer places it at
+# `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe`) or the
+# newest matching directory on disk, honoring pre-set `VCToolsInstallDir` /
+# `WindowsSdkDir` + `WindowsSDKVersion` (e.g. from a prior `vcvars64.bat`) so
+# a caller that already resolved these is never overridden. `/c/dev/tool`
+# MSYS2 and `/usr/bin/core_perl` are now optional (a warning, not a fatal
+# missing-PATH-component error) — see below.
+# --------------------------------------------------------------------------
 
-simple_msvc_vc_bin="/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64"
-simple_msvc_sdk_bin="/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
-simple_msvc_msys_bin="/c/dev/tool/msys2/mingw64/bin"
-# LLVM 23.1.1 is the Windows C authority. The MSVC directory below supplies
-# Windows headers/libraries/link.exe; it is not permission to compile with cl.
+# ---- Visual Studio: VC tools bin/include/lib -----------------------------
+if [ -n "${VCToolsInstallDir:-}" ]; then
+  simple_msvc_vc_root=$(cygpath -u "${VCToolsInstallDir%\\}" 2>/dev/null) || \
+    simple_msvc_vc_root=$(printf '%s' "${VCToolsInstallDir%\\}" | sed -e 's#\\#/#g' -e 's#^\([A-Za-z]\):#/\1#')
+  [ -d "$simple_msvc_vc_root" ] || {
+    echo "windows-msvc-bootstrap-env: VCToolsInstallDir is set but not a directory: ${VCToolsInstallDir}" >&2
+    return 1 2>/dev/null || exit 1
+  }
+else
+  simple_msvc_vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+  [ -x "$simple_msvc_vswhere" ] || \
+    simple_msvc_vswhere="$(command -v vswhere.exe 2>/dev/null || command -v vswhere 2>/dev/null || true)"
+  if [ -z "$simple_msvc_vswhere" ] || [ ! -x "$simple_msvc_vswhere" ]; then
+    echo "windows-msvc-bootstrap-env: vswhere.exe not found (expected at" >&2
+    echo "  '%ProgramFiles(x86)%/Microsoft Visual Studio/Installer/vswhere.exe' or on PATH)" >&2
+    echo "  and VCToolsInstallDir is not set. Install Visual Studio 2022 with the" >&2
+    echo "  'Desktop development with C++' workload, or export VCToolsInstallDir" >&2
+    echo "  yourself (e.g. from a vcvars64.bat call) before sourcing this file." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  simple_msvc_vs_install=$("$simple_msvc_vswhere" -latest -products '*' \
+    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+    -property installationPath 2>/dev/null | tr -d '\r')
+  if [ -z "$simple_msvc_vs_install" ]; then
+    echo "windows-msvc-bootstrap-env: vswhere.exe found no Visual Studio install with" >&2
+    echo "  the 'Desktop development with C++' (VC.Tools.x86.x64) workload. Install it" >&2
+    echo "  via the Visual Studio Installer, or export VCToolsInstallDir yourself." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  simple_msvc_vs_install_posix=$(cygpath -u "$simple_msvc_vs_install" 2>/dev/null) || \
+    simple_msvc_vs_install_posix=$(printf '%s' "$simple_msvc_vs_install" | sed -e 's#\\#/#g' -e 's#^\([A-Za-z]\):#/\1#')
+  simple_msvc_msvc_versions_dir="$simple_msvc_vs_install_posix/VC/Tools/MSVC"
+  if [ ! -d "$simple_msvc_msvc_versions_dir" ]; then
+    echo "windows-msvc-bootstrap-env: $simple_msvc_msvc_versions_dir not found under the" >&2
+    echo "  vswhere-reported install ($simple_msvc_vs_install). The VC.Tools.x86.x64" >&2
+    echo "  workload may be only partially installed." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  # Newest MSVC toolset version wins (dotted-decimal, same field width, so a
+  # plain version sort is correct — e.g. 14.44.35207 > 14.39.33519).
+  simple_msvc_vc_root=$(
+    for simple_msvc_v_dir in "$simple_msvc_msvc_versions_dir"/*/; do
+      [ -d "$simple_msvc_v_dir" ] && printf '%s\n' "${simple_msvc_v_dir%/}"
+    done | sort -t/ -k1,1 -V | tail -n1
+  )
+  if [ -z "$simple_msvc_vc_root" ]; then
+    echo "windows-msvc-bootstrap-env: no MSVC toolset version directory found under" >&2
+    echo "  $simple_msvc_msvc_versions_dir" >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  unset simple_msvc_vswhere simple_msvc_vs_install simple_msvc_vs_install_posix \
+    simple_msvc_msvc_versions_dir simple_msvc_v_dir
+fi
+simple_msvc_vc_bin="$simple_msvc_vc_root/bin/Hostx64/x64"
+simple_msvc_vc_include="$simple_msvc_vc_root/include"
+simple_msvc_vc_lib="$simple_msvc_vc_root/lib/x64"
+
+# ---- Windows SDK: include/lib ---------------------------------------------
+if [ -n "${WindowsSdkDir:-}" ] && [ -n "${WindowsSDKVersion:-}" ]; then
+  simple_msvc_sdk_root=$(cygpath -u "${WindowsSdkDir%\\}" 2>/dev/null) || \
+    simple_msvc_sdk_root=$(printf '%s' "${WindowsSdkDir%\\}" | sed -e 's#\\#/#g' -e 's#^\([A-Za-z]\):#/\1#')
+  simple_msvc_sdk_ver="${WindowsSDKVersion%\\}"
+else
+  simple_msvc_sdk_root="/c/Program Files (x86)/Windows Kits/10"
+  if [ ! -d "$simple_msvc_sdk_root/Include" ]; then
+    echo "windows-msvc-bootstrap-env: Windows 10/11 SDK not found at" >&2
+    echo "  '$simple_msvc_sdk_root' and WindowsSdkDir/WindowsSDKVersion are not set." >&2
+    echo "  Install the Windows SDK (via the VS Installer), or export both" >&2
+    echo "  WindowsSdkDir and WindowsSDKVersion yourself." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  # Newest SDK version whose Include dir actually has the ucrt headers wins.
+  simple_msvc_sdk_ver=$(
+    for simple_msvc_s_dir in "$simple_msvc_sdk_root/Include"/*/; do
+      simple_msvc_s_dir="${simple_msvc_s_dir%/}"
+      [ -d "$simple_msvc_s_dir/ucrt" ] && printf '%s\n' "$(basename "$simple_msvc_s_dir")"
+    done | sort -V | tail -n1
+  )
+  if [ -z "$simple_msvc_sdk_ver" ]; then
+    echo "windows-msvc-bootstrap-env: no versioned Windows SDK (with a ucrt include" >&2
+    echo "  dir) found under $simple_msvc_sdk_root/Include" >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  unset simple_msvc_s_dir
+fi
+simple_msvc_sdk_bin="$simple_msvc_sdk_root/bin/$simple_msvc_sdk_ver/x64"
+
+# LLVM 23.1.1 is the Windows C authority. The MSVC/SDK directories above
+# supply Windows headers/libraries only; they are not permission to compile
+# with cl.exe or link with link.exe (clang-only policy, 2026-09-24 — never
+# `cl`, never MSVC `link.exe`; Windows uses clang-cl + lld-link).
 # The prefix MUST precede the MinGW bin dir: llvm-sys 231's build script runs the
 # first llvm-config on PATH and feeds its --cflags to the native C driver.  With
 # MinGW first that is -IC:/dev/tool/msys2/mingw64/include, which fails compiling
@@ -40,16 +140,43 @@ simple_msvc_llvm_prefix="${LLVM_SYS_231_PREFIX:-${SIMPLE_LLVM_WIN_ROOT_23:-/c/de
 simple_msvc_llvm_bin="$simple_msvc_llvm_prefix/bin"
 SIMPLE_LLVM_WIN_ROOT_23="$simple_msvc_llvm_prefix"
 
-for simple_msvc_d in \
-  "$simple_msvc_vc_bin" "$simple_msvc_sdk_bin" "$simple_msvc_msys_bin" \
-  /usr/bin /usr/bin/core_perl /bin; do
+# ---- Optional components: MSYS2 mingw64 bin, perl's core_perl ------------
+# These used to be hard PATH-membership requirements (fatal "missing PATH
+# component" on any host laid out differently). Neither is load-bearing for
+# the Windows MSVC lane itself: MSYS2's mingw64/bin supplies GNU userland
+# tool variants this lane does not require (the C authority is LLVM/clang-cl,
+# never MinGW-GCC), and core_perl is one of several places `perl` can live
+# under Git for Windows (rank 2 of the portability audit tracks removing the
+# perl dependency itself). Downgraded to a warning: the lane keeps running
+# without them, and anything that genuinely needs a tool from one of these
+# dirs fails with its own clear diagnostic at the point of use instead of
+# here, unconditionally, on every host that happens to lay MSYS2 out
+# differently (or not install it at all).
+simple_msvc_msys_bin="${SIMPLE_MSYS2_MINGW64_BIN:-/c/dev/tool/msys2/mingw64/bin}"
+[ -d "$simple_msvc_msys_bin" ] || {
+  echo "windows-msvc-bootstrap-env: note: MSYS2 mingw64 bin not found at '$simple_msvc_msys_bin' (optional; set SIMPLE_MSYS2_MINGW64_BIN to override)" >&2
+  simple_msvc_msys_bin=""
+}
+simple_msvc_core_perl="/usr/bin/core_perl"
+[ -d "$simple_msvc_core_perl" ] || {
+  echo "windows-msvc-bootstrap-env: note: $simple_msvc_core_perl not found (optional; only needed if perl/shasum live there on this Git-for-Windows install)" >&2
+  simple_msvc_core_perl=""
+}
+
+for simple_msvc_d in "$simple_msvc_vc_bin" "$simple_msvc_sdk_bin" /usr/bin /bin; do
   [ -d "$simple_msvc_d" ] || {
     echo "windows-msvc-bootstrap-env: missing PATH component: $simple_msvc_d" >&2
     return 1 2>/dev/null || exit 1
   }
 done
 
-PATH="$simple_msvc_llvm_bin:$simple_msvc_vc_bin:$simple_msvc_msys_bin:$simple_msvc_sdk_bin:/mingw64/bin:/usr/local/bin:/usr/bin:/bin:/usr/bin/vendor_perl:/usr/bin/core_perl:$PATH"
+# clang-only policy (2026-09-24): the MSVC VC tools bin dir
+# (bin/Hostx64/x64) is DELIBERATELY NOT added to PATH — it is exactly where
+# cl.exe and link.exe live, and putting it on PATH is how they used to shadow
+# clang-cl/lld-link. INCLUDE/LIB below still point at the VC/SDK headers and
+# import libraries, which clang-cl needs regardless of who resolves it on
+# PATH; only the toolchain BINARY directory is withheld.
+PATH="$simple_msvc_llvm_bin${simple_msvc_msys_bin:+:$simple_msvc_msys_bin}:$simple_msvc_sdk_bin:/mingw64/bin:/usr/local/bin:/usr/bin:/bin:/usr/bin/vendor_perl${simple_msvc_core_perl:+:$simple_msvc_core_perl}:$PATH"
 
 # Drop non-absolute, missing, non-canonical and duplicate components so the
 # Stage 3 tool-authority snapshot's fail-closed path check can succeed.
@@ -72,17 +199,32 @@ IFS=$simple_msvc_oifs
 PATH=$simple_msvc_filtered
 export PATH
 
-INCLUDE="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\winrt"
-LIB="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\lib\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64"
+INCLUDE="$(cygpath -w "$simple_msvc_vc_include" 2>/dev/null || printf '%s' "$simple_msvc_vc_include");$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/ucrt" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/shared" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/um" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Include/$simple_msvc_sdk_ver/winrt" 2>/dev/null)"
+LIB="$(cygpath -w "$simple_msvc_vc_lib" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Lib/$simple_msvc_sdk_ver/ucrt/x64" 2>/dev/null);$(cygpath -w "$simple_msvc_sdk_root/Lib/$simple_msvc_sdk_ver/um/x64" 2>/dev/null)"
 export INCLUDE LIB
-# vcvars64 exports VCToolsInstallDir, and scripts/check/check-bootstrap-preflight.shs
-# resolves the Rust MSVC-target linker from it (VCToolsInstallDir/bin/Hostx64/x64/link.exe).
-# Without it the authoritative preflight fails before any pure-Simple stage starts:
-#   check cargo: x64 MSVC preflight requires vcvars64 VCToolsInstallDir/bin/Hostx64/x64/link.exe
-# link.exe here is the sanctioned Rust MSVC-target LINKER exception, not a C compiler.
-VCToolsInstallDir="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207"
+
+# VCToolsInstallDir is exported for anything downstream that still reads it
+# (e.g. as a discovery hint), but it is NO LONGER used to resolve a linker:
+# scripts/check/check-bootstrap-preflight.shs now requires lld-link, not
+# VCToolsInstallDir/bin/Hostx64/x64/link.exe (clang-only policy). Value is
+# Windows-style to match what a real vcvars64.bat / MSBuild would export.
+VCToolsInstallDir="$(cygpath -w "$simple_msvc_vc_root" 2>/dev/null || printf '%s' "$simple_msvc_vc_root")\\"
 export VCToolsInstallDir
 export SIMPLE_WINDOWS_ABI=msvc
+
+# Cargo's MSVC-target linker: lld-link, resolved to an absolute path so Cargo
+# never depends on PATH ordering to avoid MSVC link.exe (which is not even on
+# PATH here, see above, but this is belt-and-suspenders and lets a caller
+# still override CC/PATH without silently losing the pinned linker).
+simple_msvc_lld_link="$simple_msvc_llvm_bin/lld-link.exe"
+if [ -x "$simple_msvc_lld_link" ]; then
+  export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="$simple_msvc_lld_link"
+else
+  echo "windows-msvc-bootstrap-env: note: lld-link.exe not found at '$simple_msvc_lld_link';" >&2
+  echo "  leaving CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER unset, so Cargo falls back to" >&2
+  echo "  resolving 'lld-link' on PATH (src/compiler_rust/.cargo/config.toml)." >&2
+fi
+
 # SIMPLE_LINKER_FLAVOR is the repo-wide ABI selector; SIMPLE_WINDOWS_ABI is only
 # read by src/compiler/70.backend/backend/runtime_compiler.spl (C-compiler
 # choice).  The LINKER path (70.backend/linker/_LinkerWrapper/native_linking.spl:800,
@@ -145,17 +287,25 @@ export MSYS2_ENV_CONV_EXCL
 # consumers and an established meaning.
 export SIMPLE_NO_STUB_FALLBACK=1
 
-# C: is at 100% (23G free of 2.3T); D: has ~797G.  Keep scratch off C:.
-if [ -d /d ]; then
-  mkdir -p /d/simple-tmp 2>/dev/null || true
-  TMPDIR=/d/simple-tmp
-  TMP='D:\simple-tmp'
-  TEMP='D:\simple-tmp'
+# Scratch dir off C:. Previously unconditional whenever /d existed, which
+# silently redirected TMPDIR on any host that happens to have a D: drive for
+# an unrelated reason. Opt-in via SIMPLE_WINDOWS_SCRATCH_DRIVE (POSIX-style
+# path, e.g. "/d") so a host is never surprised into writing bootstrap scratch
+# to a drive nobody asked it to use.
+if [ -n "${SIMPLE_WINDOWS_SCRATCH_DRIVE:-}" ] && [ -d "${SIMPLE_WINDOWS_SCRATCH_DRIVE}" ]; then
+  simple_msvc_scratch_posix="${SIMPLE_WINDOWS_SCRATCH_DRIVE%/}/simple-tmp"
+  mkdir -p "$simple_msvc_scratch_posix" 2>/dev/null || true
+  TMPDIR="$simple_msvc_scratch_posix"
+  TMP="$(cygpath -w "$simple_msvc_scratch_posix" 2>/dev/null || printf '%s' "$simple_msvc_scratch_posix")"
+  TEMP="$TMP"
   export TMPDIR TMP TEMP
+  unset simple_msvc_scratch_posix
 fi
 
-unset simple_msvc_vc_bin simple_msvc_sdk_bin simple_msvc_msys_bin \
-  simple_msvc_d simple_msvc_c simple_msvc_filtered simple_msvc_oifs
+unset simple_msvc_vc_bin simple_msvc_sdk_bin simple_msvc_msys_bin simple_msvc_core_perl \
+  simple_msvc_d simple_msvc_c simple_msvc_filtered simple_msvc_oifs \
+  simple_msvc_vc_root simple_msvc_vc_include simple_msvc_vc_lib \
+  simple_msvc_sdk_root simple_msvc_sdk_ver simple_msvc_lld_link
 
 # Reuse the canonical executable/version validation and target CC binding.
 # Source this bootstrap environment from the repo root, or provide
