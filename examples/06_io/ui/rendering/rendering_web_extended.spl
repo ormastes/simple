@@ -1,0 +1,131 @@
+# Rendering showcase entry — web lane, extended tier.
+# lane: web
+# tier: extended
+# core: examples.ui.rendering_web_core
+#
+# Renders the extended multi-tab document: the core page embedded in the first
+# tab plus forms-media, animation, the aqua-family theme gallery (CSS custom
+# properties), and the full-widget examples — through the browser-engine
+# pipeline and out to an HTML artifact (or a PPM frame for a .ppm capture).
+#
+# Env: same contract as rendering_web_core.spl
+# (SIMPLE_RENDERING_WEB_FIXTURE, SIMPLE_SHOWCASE_W/H, SIMPLE_2D_BACKEND,
+# SIMPLE_SHOWCASE_CAPTURE).
+#
+# KNOWN BLOCKER (another lane owns the fix): the browser_engine gpu_web chain
+# currently fails to compile with
+#   semantic: missing return in non-unit function '_level_rank'
+# (src/lib/gc_async_mut/gpu/browser_engine/shared/logging.spl). This entry is
+# structurally complete and renders as soon as that defect is fixed.
+
+use examples.ui.rendering_web_core.{
+    rendering_web_fixture_pixels,
+    RENDERING_WEB_FIXTURE_URI, RENDERING_WEB_FIXTURE_W, RENDERING_WEB_FIXTURE_H}
+use examples.ui.rendering_web_extended.{
+    rendering_web_extended_page, rendering_web_tabs, rendering_web_theme_names}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_with_images}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{simpleos_host_gpu_image_resource}
+use std.common.image.png_encode.{encode_argb_to_png}
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.io_runtime.{env_get, file_exists, file_write, mkdir_p}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+
+# Contract gate (REQ-006): the extended entry must carry the aqua-family theme
+# gallery. Fail closed if the module theme list loses a required theme.
+fn _required_themes_present() -> bool:
+    val names = rendering_web_theme_names()
+    val required: [text] = ["aqua_light", "aqua_dark", "glass_dark", "ios_light"]
+    for req in required:
+        var found = false
+        for name in names:
+            if name == req:
+                found = true
+        if not found:
+            return false
+    true
+
+fn _env_i32(key: text, fallback: i32) -> i32:
+    val raw = env_get(key).trim()
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn _fixture_path() -> text:
+    "examples/06_io/ui/rendering/" + RENDERING_WEB_FIXTURE_URI
+
+fn _write_fixture() -> bool:
+    val png = encode_argb_to_png(
+        rendering_web_fixture_pixels(), RENDERING_WEB_FIXTURE_W, RENDERING_WEB_FIXTURE_H)
+    if png.len() == 0:
+        return false
+    file_write_bytes(_fixture_path(), png)
+
+fn _checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    for px in pixels:
+        sum = (sum + px.to_i64()) % 1000000007
+    sum
+
+fn _parent_dir(path: text) -> text:
+    val idx = path.last_index_of("/")
+    if idx <= 0:
+        return ""
+    path.substring(0, idx)
+
+fn main() -> i64:
+    if not _required_themes_present():
+        print "showcase status=blocked theme-gallery-missing required=aqua_light aqua_dark glass_dark ios_light"
+        return 1
+    val fixture_path = _fixture_path()
+    if (env_get("SIMPLE_RENDERING_WEB_FIXTURE") ?? "") == "1":
+        if not _write_fixture():
+            print "showcase status=blocked fixture-write-failed path={fixture_path}"
+            return 1
+        print "rendering_web_extended fixture path={fixture_path} w={RENDERING_WEB_FIXTURE_W} h={RENDERING_WEB_FIXTURE_H}"
+    if not file_exists(fixture_path):
+        print "showcase status=blocked missing-fixture path={fixture_path} hint=run with SIMPLE_RENDERING_WEB_FIXTURE=1"
+        return 1
+
+    val w = _env_i32("SIMPLE_SHOWCASE_W", 1280)
+    val h = _env_i32("SIMPLE_SHOWCASE_H", 720)
+    val backend_raw = (env_get("SIMPLE_2D_BACKEND") ?? "").trim().lower()
+    # Empty means unset (or an env_get variant that cannot see it): fall back
+    # to the vulkan default rather than passing "" downstream.
+    val backend = if backend_raw == "": "vulkan" else: backend_raw
+    val html = rendering_web_extended_page()
+    var tabs: [text] = []
+    for tab in rendering_web_tabs():
+        tabs.push(tab.id)
+    var images = [simpleos_host_gpu_image_resource(
+        RENDERING_WEB_FIXTURE_URI, RENDERING_WEB_FIXTURE_W,
+        RENDERING_WEB_FIXTURE_H, rendering_web_fixture_pixels())]
+    val pixels = simple_web_layout_render_html_pixels_engine2d_with_images(
+        html, w, h, backend, images)
+    if pixels.len() != w.to_i64() * h.to_i64():
+        print "showcase status=blocked render-failed backend={backend} pixels={pixels.len()} expected={w * h}"
+        return 1
+    val checksum = _checksum(pixels)
+    if checksum == 0:
+        print "showcase status=blocked blank-frame backend={backend}"
+        return 1
+
+    val tabs_csv = tabs.join(",")
+    val capture = (env_get("SIMPLE_SHOWCASE_CAPTURE") ?? "").trim()
+    if capture == "":
+        print "showcase status=pass rendered (no SIMPLE_SHOWCASE_CAPTURE set) tabs={tabs_csv} checksum={checksum} backend={backend} w={w} h={h}"
+        return 0
+    val dir = _parent_dir(capture)
+    if dir != "":
+        mkdir_p(dir)
+    var written = false
+    if capture.ends_with(".ppm"):
+        written = file_write_bytes(capture, encode_ppm_p6(w.to_u32(), h.to_u32(), pixels))
+    else:
+        # Web capture gate reads the HTML artifact: it must contain the tab ids.
+        written = file_write(capture, html)
+    if not written:
+        print "showcase status=blocked capture-write-failed path={capture}"
+        return 1
+    print "showcase status=pass {capture} tabs={tabs_csv} checksum={checksum} backend={backend} w={w} h={h}"
+    0

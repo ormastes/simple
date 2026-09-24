@@ -1,0 +1,394 @@
+# rendering_2d_extended.spl — Engine2D extended scene (lane 2d, tier extended).
+#
+# Imports the tier core (examples.ui.rendering_2d_core) and adds the extended
+# groups on the same grid:
+#   - masks / clips / blend modes (set_clip/clear_clip, set_mask/clear_mask,
+#     draw_rect_blend / draw_rect_blend_mode)
+#   - images: draw_image / draw_image_blend / draw_image_scaled from a real
+#     fixture PPM when one is available (SIMPLE_SHOWCASE_IMAGE, else a small
+#     built-in probe list), otherwise the recorded 4x4 checker image path with
+#     an honest printed note
+#   - nested compositing via draw_engine / draw_engine_opacity over an
+#     offscreen child engine, plus an offscreen read_pixels receipt
+#   - DRAGGABLE OVERLAPPING PANELS: two translucent panels with a real
+#     z-overlap; presses are resolved by compositor_pick_topmost over a
+#     scratch Compositor of the two panel layers (no engine drag API exists —
+#     app-level pointer state like the existing showcase slider), moves apply
+#     a stored drag_offset, releases drop the panel
+#   - CLICK-EVENT BUTTON: a button rect whose hit_rect is a real DrawIrRect
+#     (common.ui.draw_ir); press arms, release inside hit_rect counts a click,
+#     the counter is rendered on screen
+#
+# The canonical demo pointer script (rendering_2d_extended_script_events) is
+# applied by the entry frame by frame, so a headless capture shows the drag
+# result and the click count without needing a display.
+
+use std.io_runtime.{env_get, file_read_bytes}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.compositor.{Compositor, Layer, compositor_pick_topmost}
+use common.ui.host_input_event.{
+    HostInputEvent, HOST_BTN_LEFT,
+    host_pointer_down, host_pointer_move, host_pointer_up
+}
+use common.ui.draw_ir.{DrawIrRect, draw_ir_rect_bounds}
+use examples.ui.rendering_2d_core.{
+    rendering_2d_core_scene, RENDERING_2D_DESIGN_W, RENDERING_2D_DESIGN_H
+}
+
+val BG_PANEL: u32 = 0xFF1B2435u32
+val WHITE: u32 = 0xFFF3F6FCu32
+val MUTE: u32 = 0xFF9AA7BDu32
+val BLUE: u32 = 0xFF3B82F6u32
+val CYAN: u32 = 0xFF22D3EEu32
+val GREEN: u32 = 0xFF22C55Eu32
+val AMBER: u32 = 0xFFF59E0Bu32
+val RED: u32 = 0xFFEF4444u32
+val PURPLE: u32 = 0xFFA855F7u32
+
+# Panel/button geometry, in design coordinates (RENDERING_2D_DESIGN_W x H).
+val PANEL_W: i32 = 186
+val PANEL_H: i32 = 76
+val PANEL_A_X: i32 = 648
+val PANEL_A_Y: i32 = 498
+val PANEL_B_X: i32 = 742
+val PANEL_B_Y: i32 = 536
+val PANEL_A_Z: i32 = 1
+val PANEL_B_Z: i32 = 2
+val BUTTON_X: i32 = 648
+val BUTTON_Y: i32 = 448
+val BUTTON_W: i32 = 120
+val BUTTON_H: i32 = 24
+
+fn _sx(v: i32, rw: i32) -> i32:
+    v * rw / RENDERING_2D_DESIGN_W
+
+fn _sy(v: i32, rh: i32) -> i32:
+    v * rh / RENDERING_2D_DESIGN_H
+
+fn _sd(v: i32, rw: i32, dpi: i32) -> i32:
+    val r = v * rw / RENDERING_2D_DESIGN_W * dpi / 96
+    if r < 1:
+        return 1
+    r
+
+fn _env_dpi() -> i32:
+    val raw = (env_get("SHOWCASE_DPI") ?? "").trim()
+    if raw == "":
+        return 96
+    val d = raw.to_int() ?? 96
+    if d < 1:
+        return 96
+    d
+
+fn _label(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, x: i32, y: i32, value: text) -> Engine2D:
+    e.draw_text_bg(_sx(x, rw), _sy(y, rh), value, WHITE, 0xCC101522u32, _sd(11, rw, dpi))
+    e
+
+fn _point_in_rect(px: i32, py: i32, rect: DrawIrRect) -> bool:
+    rect.present and px >= rect.x and px < rect.x + rect.width and
+        py >= rect.y and py < rect.y + rect.height
+
+fn _button_hit_rect() -> DrawIrRect:
+    draw_ir_rect_bounds(BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H)
+
+# ---------------------------------------------------------------------------
+# Interaction state.
+# ---------------------------------------------------------------------------
+
+class Rendering2dExtendedState:
+    var panel_a_x: i32
+    var panel_a_y: i32
+    var panel_b_x: i32
+    var panel_b_y: i32
+    var dragging: i32      # 0 = none, 1 = panel A, 2 = panel B
+    var drag_offset_x: i32
+    var drag_offset_y: i32
+    var button_armed: bool
+    var clicks: i64
+    var events_applied: i64
+    var last_event: text
+
+    static fn new() -> Rendering2dExtendedState:
+        Rendering2dExtendedState(
+            panel_a_x: PANEL_A_X, panel_a_y: PANEL_A_Y,
+            panel_b_x: PANEL_B_X, panel_b_y: PANEL_B_Y,
+            dragging: 0, drag_offset_x: 0, drag_offset_y: 0,
+            button_armed: false, clicks: 0, events_applied: 0, last_event: "-"
+        )
+
+# Topmost-panel hit test over a scratch z-sorted Compositor holding exactly
+# the two panel layers — the same pick the visible paint order implies.
+fn _panel_pick(state: Rendering2dExtendedState, px: i32, py: i32) -> i32:
+    var comp = Compositor.create()
+    var la = Layer.create(state.panel_a_x, state.panel_a_y, PANEL_W, PANEL_H)
+    la.z_order = PANEL_A_Z
+    var lb = Layer.create(state.panel_b_x, state.panel_b_y, PANEL_W, PANEL_H)
+    lb.z_order = PANEL_B_Z
+    comp.add_layer(la)
+    comp.add_layer(lb)
+    val top = compositor_pick_topmost(comp, px, py)
+    if top < 0:
+        return 0
+    if comp.layers[top].z_order == PANEL_B_Z:
+        return 2
+    1
+
+pub fn rendering_2d_extended_apply(mut state: Rendering2dExtendedState, ev: HostInputEvent) -> Rendering2dExtendedState:
+    """App-level pointer reducer: press grabs the topmost overlapping panel (or
+    arms the button), moves drag the grabbed panel by the stored drag_offset,
+    release drops the panel or counts a button click when still inside the
+    button hit_rect. No engine drag API exists (gap recorded in the design);
+    this mirrors the existing showcase slider's anchor pattern."""
+    match ev:
+        HostInputEvent.Pointer(px, py, button, pressed, wheel):
+            state.events_applied = state.events_applied + 1
+            if button == HOST_BTN_LEFT and pressed:
+                val picked = _panel_pick(state, px, py)
+                if picked == 2:
+                    state.dragging = 2
+                    state.drag_offset_x = px - state.panel_b_x
+                    state.drag_offset_y = py - state.panel_b_y
+                    state.last_event = "down->panelB(topmost)"
+                elif picked == 1:
+                    state.dragging = 1
+                    state.drag_offset_x = px - state.panel_a_x
+                    state.drag_offset_y = py - state.panel_a_y
+                    state.last_event = "down->panelA"
+                elif _point_in_rect(px, py, _button_hit_rect()):
+                    state.button_armed = true
+                    state.last_event = "down->button"
+                else:
+                    state.last_event = "down->miss"
+            elif button == HOST_BTN_LEFT and not pressed:
+                if state.dragging != 0:
+                    state.dragging = 0
+                    state.last_event = "up->drop"
+                elif state.button_armed:
+                    if _point_in_rect(px, py, _button_hit_rect()):
+                        state.clicks = state.clicks + 1
+                        state.last_event = "up->click"
+                    else:
+                        state.last_event = "up->button-miss"
+                    state.button_armed = false
+            elif button == HOST_BTN_NONE:
+                if state.dragging == 2:
+                    state.panel_b_x = px - state.drag_offset_x
+                    state.panel_b_y = py - state.drag_offset_y
+                    state.last_event = "drag panelB"
+                elif state.dragging == 1:
+                    state.panel_a_x = px - state.drag_offset_x
+                    state.panel_a_y = py - state.drag_offset_y
+                    state.last_event = "drag panelA"
+        _:
+            state.last_event = "non-pointer"
+    state
+
+pub fn rendering_2d_extended_script_events(frame: i64) -> [HostInputEvent]:
+    """Canonical headless demo script (design coordinates).
+
+    Frame 0 presses inside the A/B overlap (panel B is topmost by z-order) and
+    drags B left/up. Frame 1 releases, then presses and releases inside the
+    button hit_rect — one click. Later frames are quiet."""
+    if frame == 0:
+        return [host_pointer_down(790, 550, HOST_BTN_LEFT), host_pointer_move(700, 520)]
+    if frame == 1:
+        return [host_pointer_up(700, 520, HOST_BTN_LEFT),
+                host_pointer_down(700, 458, HOST_BTN_LEFT),
+                host_pointer_up(700, 458, HOST_BTN_LEFT)]
+    []
+
+pub fn rendering_2d_extended_state_new() -> Rendering2dExtendedState:
+    Rendering2dExtendedState.new()
+
+# ---------------------------------------------------------------------------
+# Extended cells.
+# ---------------------------------------------------------------------------
+
+fn _clip_mask_blend_cell(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+    e.draw_rect_filled(_sx(16, rw), _sy(440, rh), _sx(296, rw), _sy(176, rh), BG_PANEL)
+    e = _label(e, rw, rh, dpi, 24, 446, "CLIP / MASK / BLEND")
+    # Clip: a circle and a rect confined to the cyan frame.
+    e.draw_rect(_sx(28, rw), _sy(470, rh), _sx(120, rw), _sy(70, rh), CYAN)
+    e.set_clip(_sx(31, rw), _sy(473, rh), _sx(114, rw), _sy(64, rh))
+    e.draw_circle_filled(_sx(40, rw), _sy(510, rh), _sx(36, rw), RED)
+    e.draw_rect_filled(_sx(80, rw), _sy(462, rh), _sx(90, rw), _sy(96, rh), PURPLE)
+    e.clear_clip()
+    # Mask: full-frame alpha mask confines the gradient to the marked region.
+    var mask: [u8] = [0u8; rw * rh]
+    val mx0 = _sx(168, rw)
+    val mx1 = _sx(296, rw)
+    val my0 = _sy(470, rh)
+    val my1 = _sy(540, rh)
+    var my = my0
+    while my < my1:
+        var mx = mx0
+        while mx < mx1:
+            mask[my * rw + mx] = 255u8
+            mx = mx + 1
+        my = my + 1
+    e.set_mask(mask, rw, rh)
+    e.draw_gradient_rect_h(_sx(150, rw), _sy(460, rh), _sx(150, rw), _sy(90, rh), AMBER, RED)
+    e.clear_mask()
+    # Blend modes.
+    e.draw_rect_blend(_sx(28, rw), _sy(556, rh), _sx(60, rw), _sy(30, rh), 0x887C3AEDu32)
+    e.draw_rect_blend_mode(_sx(100, rw), _sy(556, rh), _sx(60, rw), _sy(30, rh), 0xAA22C55Eu32, 1)
+    e.draw_rect_blend(_sx(172, rw), _sy(556, rh), _sx(60, rw), _sy(30, rh), 0x66F59E0Bu32)
+    e.draw_text(_sx(244, rw), _sy(560, rh), "blend", MUTE, _sd(10, rw, dpi))
+    e
+
+var _image_note_printed: bool = false
+
+fn _recorded_checker() -> ([u32], i32, i32):
+    ([RED, AMBER, GREEN, CYAN, CYAN, BLUE, PURPLE, RED, AMBER, GREEN, PURPLE, WHITE, GREEN, CYAN, BLUE, PURPLE], 4, 4)
+
+fn _ppm_skip_ws_comments(bytes: [u8], pos: i64) -> i64:
+    var p = pos
+    val n = bytes.len()
+    while p < n:
+        val b = bytes[p]
+        if b == 35u8:
+            while p < n and bytes[p] != 10u8:
+                p = p + 1
+            if p < n:
+                p = p + 1
+        elif b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8:
+            p = p + 1
+        else:
+            return p
+    p
+
+fn _ppm_read_int(bytes: [u8], pos: i64) -> (i64, i64):
+    var p = _ppm_skip_ws_comments(bytes, pos)
+    var n = bytes.len()
+    var value: i64 = 0
+    var digits = false
+    while p < n:
+        val b = bytes[p]
+        if b < 48u8 or b > 57u8:
+            break
+        value = value * 10 + (b.to_i64() - 48)
+        digits = true
+        p = p + 1
+    if not digits:
+        return (-1, pos)
+    (value, p)
+
+# Minimal binary P6 PPM reader (RGB triplets -> ARGB u32). Returns ([],0,0)
+# for anything unrecognized — callers fall back to the recorded image.
+fn _try_load_ppm_pixels(path: text) -> ([u32], i32, i32):
+    if path == "":
+        return ([], 0, 0)
+    val bytes = file_read_bytes(path)
+    if bytes.len() < 16:
+        return ([], 0, 0)
+    if bytes[0] != 80u8 or bytes[1] != 54u8:
+        return ([], 0, 0)
+    var pos: i64 = 2
+    val w = _ppm_read_int(bytes, pos)
+    if w.0 <= 0 or w.0 > 16384:
+        return ([], 0, 0)
+    val h = _ppm_read_int(bytes, w.1)
+    if h.0 <= 0 or h.0 > 16384:
+        return ([], 0, 0)
+    val maxval = _ppm_read_int(bytes, h.1)
+    if maxval.0 != 255:
+        return ([], 0, 0)
+    val count = w.0 * h.0
+    if bytes.len() < maxval.1 + count * 3:
+        return ([], 0, 0)
+    var px: [u32] = []
+    var i: i64 = 0
+    val base = maxval.1 + 1
+    while i < count:
+        val r = bytes[base + i * 3].to_i64()
+        val g = bytes[base + i * 3 + 1].to_i64()
+        val b = bytes[base + i * 3 + 2].to_i64()
+        px.push((4278190080 + r * 65536 + g * 256 + b).to_u32())
+        i = i + 1
+    (px, w.0.to_i32(), h.0.to_i32())
+
+fn _image_composite_cell(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+    e.draw_rect_filled(_sx(328, rw), _sy(440, rh), _sx(296, rw), _sy(176, rh), BG_PANEL)
+    e = _label(e, rw, rh, dpi, 336, 446, "IMAGE / OFFSCREEN / NESTED COMPOSITE")
+
+    # Images: fixture PPM when one is available, else the recorded checker.
+    var img = _try_load_ppm_pixels((env_get("SIMPLE_SHOWCASE_IMAGE") ?? "").trim())
+    if img.1 <= 0:
+        img = _try_load_ppm_pixels("examples/06_io/ui/rendering_fixture.ppm")
+    if img.1 <= 0:
+        img = _recorded_checker()
+        if not _image_note_printed:
+            _image_note_printed = true
+            print "rendering_2d_extended note=image-fixture-unavailable using=recorded-4x4-checker (set SIMPLE_SHOWCASE_IMAGE=<ppm>)"
+    else:
+        val fw = img.1
+        val fh = img.2
+        e.draw_text(_sx(340, rw), _sy(468, rh), "fixture {fw}x{fh}", MUTE, _sd(10, rw, dpi))
+    e.draw_image_scaled(_sx(340, rw), _sy(480, rh), _sx(56, rw), _sy(56, rh), img.1, img.2, img.0)
+    e.draw_image(_sx(340, rw), _sy(548, rh), img.1, img.2, img.0)
+    e.draw_image_blend(_sx(360, rw), _sy(548, rh), img.1, img.2, img.0)
+    e.draw_image_scaled(_sx(380, rw), _sy(544, rh), _sx(28, rw), _sy(28, rh), img.1, img.2, img.0)
+
+    # Offscreen child engine: nested compositing + read_pixels receipt.
+    var child = Engine2D.create_offscreen(100, 64)
+    child.clear(0x00000000u32)
+    child.draw_rounded_rect(4, 4, 92, 56, 10, BLUE)
+    child.draw_circle_filled(50, 32, 18, AMBER)
+    child.draw_text(16, 26, "child", WHITE, 12)
+    child.present()
+    val child_pixels = child.read_pixels()
+    var child_nonzero: i64 = 0
+    for p in child_pixels:
+        if p != 0u32:
+            child_nonzero = child_nonzero + 1
+    e.draw_engine(_sx(430, rw), _sy(478, rh), child)
+    e.draw_engine_opacity(_sx(520, rw), _sy(478, rh), child, 500)
+    child.shutdown()
+    e.draw_text(_sx(430, rw), _sy(560, rh), "draw_engine / draw_engine_opacity", MUTE, _sd(10, rw, dpi))
+    e.draw_text(_sx(430, rw), _sy(576, rh), "offscreen read_pixels={child_pixels.len()} nonzero={child_nonzero}", MUTE, _sd(10, rw, dpi))
+    e
+
+fn _interaction_cell(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, state: Rendering2dExtendedState) -> Engine2D:
+    e.draw_rect_filled(_sx(640, rw), _sy(440, rh), _sx(304, rw), _sy(176, rh), BG_PANEL)
+    e = _label(e, rw, rh, dpi, 648, 446, "INTERACTION: DRAG PANELS / CLICK BUTTON")
+
+    # Button (drawn under the panels; the hit_rect is the authority).
+    val button_hit_rect = _button_hit_rect()
+    val btn_fill = if state.button_armed: 0xFF166534u32 else: 0xFF1D4ED8u32
+    e.draw_rect_filled(_sx(button_hit_rect.x, rw), _sy(button_hit_rect.y, rh),
+        _sx(button_hit_rect.width, rw), _sy(button_hit_rect.height, rh), btn_fill)
+    e.draw_rect_thick(_sx(button_hit_rect.x, rw), _sy(button_hit_rect.y, rh),
+        _sx(button_hit_rect.width, rw), _sy(button_hit_rect.height, rh), WHITE, _sd(2, rw, dpi))
+    e.draw_text(_sx(button_hit_rect.x + 8, rw), _sy(button_hit_rect.y + 6, rh),
+        "CLICK ME x{state.clicks}", WHITE, _sd(11, rw, dpi))
+
+    # Translucent overlapping panels, paint order = z-order (A then B).
+    e.draw_rect_filled(_sx(state.panel_a_x, rw), _sy(state.panel_a_y, rh),
+        _sx(PANEL_W, rw), _sy(PANEL_H, rh), 0x8E3B82F6u32)
+    e.draw_rect_thick(_sx(state.panel_a_x, rw), _sy(state.panel_a_y, rh),
+        _sx(PANEL_W, rw), _sy(PANEL_H, rh), BLUE, _sd(2, rw, dpi))
+    e.draw_text(_sx(state.panel_a_x + 8, rw), _sy(state.panel_a_y + 6, rh),
+        "PANEL A (z1) drag me", WHITE, _sd(10, rw, dpi))
+
+    e.draw_rect_filled(_sx(state.panel_b_x, rw), _sy(state.panel_b_y, rh),
+        _sx(PANEL_W, rw), _sy(PANEL_H, rh), 0x8EEF4444u32)
+    e.draw_rect_thick(_sx(state.panel_b_x, rw), _sy(state.panel_b_y, rh),
+        _sx(PANEL_W, rw), _sy(PANEL_H, rh), RED, _sd(2, rw, dpi))
+    e.draw_text(_sx(state.panel_b_x + 8, rw), _sy(state.panel_b_y + 6, rh),
+        "PANEL B (z2) overlaps A", WHITE, _sd(10, rw, dpi))
+
+    e.draw_text(_sx(648, rw), _sy(596, rh),
+        "last={state.last_event} offset=({state.drag_offset_x},{state.drag_offset_y}) clicks={state.clicks} events={state.events_applied}",
+        MUTE, _sd(10, rw, dpi))
+    e
+
+pub fn rendering_2d_extended_scene(mut engine: Engine2D, state: Rendering2dExtendedState, w: i64, h: i64) -> Engine2D:
+    """Core grid plus the extended groups, drawn from the interaction state."""
+    val rw = w.to_i32()
+    val rh = h.to_i32()
+    val dpi = _env_dpi()
+    engine = rendering_2d_core_scene(engine, w, h)
+    engine = _clip_mask_blend_cell(engine, rw, rh, dpi)
+    engine = _image_composite_cell(engine, rw, rh, dpi)
+    engine = _interaction_cell(engine, rw, rh, dpi, state)
+    engine
