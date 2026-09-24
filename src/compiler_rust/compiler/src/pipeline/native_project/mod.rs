@@ -134,6 +134,18 @@ mod win_long_path_tests {
 
     #[cfg(windows)]
     #[test]
+    fn external_tool_path_undoes_the_verbatim_prefix() {
+        // llvm-nm rejects `\\?\` paths; tools must get the plain spelling.
+        use super::tools::external_tool_path;
+        let plain = PathBuf::from(r"D:\wk\cache\objects\abc.o");
+        assert_eq!(external_tool_path(win_long_path(&plain)), plain);
+        let unc = PathBuf::from(r"\\build-server\share\objects\abc.o");
+        assert_eq!(external_tool_path(win_long_path(&unc)), unc);
+        assert_eq!(external_tool_path(&plain), plain);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn normalizes_embedded_forward_slashes_before_prefixing() {
         // Reproduces this crate's own default cache base: `project_root.join(
         // ".simple/native_cache")` leaves the literal `/` inside the joined

@@ -7,7 +7,7 @@ use simple_common::target::TargetOS;
 use super::{effective_target, ModuleImports};
 use super::tools::{
     archive_create_command, find_archive_tool, find_c_compiler, find_runtime_library,
-    is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
+    external_tool_path, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
 };
 
 pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
@@ -531,7 +531,7 @@ pub(crate) fn generate_stub_object_freestanding(
     use std::collections::{BTreeSet, HashSet};
 
     fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
-        let output = nm_command().arg("-g").arg("-p").arg(path).output().ok()?;
+        let output = nm_command().arg("-g").arg("-p").arg(external_tool_path(path)).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -933,7 +933,7 @@ pub(crate) fn generate_stub_object(
         let output = nm_command()
             .arg("-g")
             .arg("-p")
-            .arg(path)
+            .arg(external_tool_path(path))
             .output()
             .map_err(|e| format!("nm: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -965,7 +965,7 @@ pub(crate) fn generate_stub_object(
         let output = nm_command()
             .arg("-g")
             .arg("-p")
-            .arg(rt_path)
+            .arg(external_tool_path(rt_path))
             .output()
             .map_err(|e| format!("nm runtime: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -990,7 +990,7 @@ pub(crate) fn generate_stub_object(
             for flag in &plat_config.nm_flags {
                 nm_cmd.arg(flag);
             }
-            nm_cmd.arg(lib_path);
+            nm_cmd.arg(external_tool_path(lib_path));
             if let Ok(output) = nm_cmd.output() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {

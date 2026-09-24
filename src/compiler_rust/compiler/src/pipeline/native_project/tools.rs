@@ -879,6 +879,28 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
     None
 }
 
+/// Spell a path for an external tool's argv. The native-build cache root is
+/// Windows verbatim (`\\?\C:\...`, see `win_long_path`), so every path under it
+/// inherits that form, but `llvm-nm` rejects it ("invalid argument"). That nm
+/// failure made `read_global_symbols` return no symbols, `generate_init_caller`
+/// found no `__module_init_*`, and the stage-2 binary ran with every module
+/// global null (SEGV in the first registry read). LLVM tools lift MAX_PATH
+/// themselves, so the plain absolute form is safe to pass.
+pub(crate) fn external_tool_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+    #[cfg(windows)]
+    {
+        let raw = path.as_os_str().to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Resolve the `nm`-style symbol-table reader to use for scanning archives and
 /// object files.
 ///
@@ -973,7 +995,7 @@ fn llvm_nm_major_version(path: &Path) -> Option<u32> {
 }
 
 pub(super) fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
-    let output = nm_command().arg("-g").arg("--defined-only").arg(path).output();
+    let output = nm_command().arg("-g").arg("--defined-only").arg(external_tool_path(path)).output();
     let Ok(output) = output else {
         return None;
     };
@@ -1182,7 +1204,7 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
         if cfg!(target_os = "macos") {
             cmd.arg("-m");
         }
-        cmd.arg(path).output()
+        cmd.arg(external_tool_path(path)).output()
     }
     .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
@@ -1223,7 +1245,7 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
         let detailed = nm_command()
             .arg("-g")
             .arg("-m")
-            .arg(path)
+            .arg(external_tool_path(path))
             .output()
             .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
         if detailed.status.success() {
@@ -1246,7 +1268,7 @@ pub(super) fn archive_global_symbols(path: &Path) -> Result<(BTreeMap<String, us
     let output = nm_command()
         .arg("-g")
         .arg("-p")
-        .arg(path)
+        .arg(external_tool_path(path))
         .output()
         .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
@@ -1632,7 +1654,7 @@ fn stage4_shared_library_definitions(path: &Path) -> Result<BTreeSet<String>, St
         .arg("-D")
         .arg("-g")
         .arg("--defined-only")
-        .arg(path)
+        .arg(external_tool_path(path))
         .output()
         .map_err(|err| format!("failed to inspect system library {}: {err}", path.display()))?;
     if !output.status.success() {
