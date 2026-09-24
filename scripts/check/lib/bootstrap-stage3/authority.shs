@@ -798,9 +798,13 @@ bootstrap_stage3_host_platform() {
             esac
             ;;
         arm64:MINGW*|arm64:MSYS*|arm64:CYGWIN*|arm64:Windows*|aarch64:MINGW*|aarch64:MSYS*|aarch64:CYGWIN*|aarch64:Windows*)
-            case "${SIMPLE_WINDOWS_ABI:-${MSYSTEM:+gnu}}" in
+            # msvc is the single Windows ABI default (matches port-L's
+            # scripts/setup/platform-detect.shs: PLATFORM_ABI defaults to
+            # msvc, not to gnu keyed off MSYSTEM/Git Bash). Only an explicit
+            # SIMPLE_WINDOWS_ABI=gnu opts into the gnu ABI.
+            case "${SIMPLE_WINDOWS_ABI:-msvc}" in
                 gnu) echo aarch64-pc-windows-gnu ;;
-                ""|msvc) echo aarch64-pc-windows-msvc ;;
+                msvc) echo aarch64-pc-windows-msvc ;;
                 *) return 1 ;;
             esac
             ;;
@@ -2293,10 +2297,12 @@ bootstrap_stage3_tool_authority_snapshot() (
     ) || return 1
     [ -n "$bootstrap_stage3_real_rustc" ] &&
         [ -n "$bootstrap_stage3_real_cargo" ] || return 1
-    bootstrap_stage3_tool_c_name=clang
     # Clang-only policy (2026-09-24): every host, not only Windows/macOS,
     # resolves its C driver through bootstrap_stage3_target_c_compiler so
-    # the same clang-vs-gcc admission applies uniformly.
+    # the same clang-vs-gcc admission applies uniformly. (bootstrap_stage3_
+    # tool_c_name is set below from the resolved path's basename; the
+    # earlier unconditional `=clang` pre-assignment here was dead code,
+    # always overwritten by that basename assignment.)
     bootstrap_stage3_tool_c_path=$(
         bootstrap_stage3_target_c_compiler \
             "$(bootstrap_stage3_host_platform)"
@@ -2313,8 +2319,13 @@ bootstrap_stage3_tool_authority_snapshot() (
         fi
     done
     [ -n "$bootstrap_stage3_hash_tool" ] || return 1
+    # Clang-only policy (2026-09-24): bootstrap_stage3_tool_c_name now always
+    # resolves to the admitted Clang driver's own basename (clang, clang-cl,
+    # clang.exe, ...), so a separate literal "clang" entry here would request
+    # the same path twice -- and the receipt writer below rejects a
+    # duplicate path (receipt.duplicate-path). Dropped as redundant.
     for bootstrap_stage3_tool_name in \
-        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file cmp \
+        cargo rustc "$bootstrap_stage3_tool_c_name" ld ar ranlib sh env perl sed file cmp \
         "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
