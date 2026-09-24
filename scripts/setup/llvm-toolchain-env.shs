@@ -106,9 +106,17 @@ fi
 unset _simple_windows_host
 # ---------------------------------------------------------------------------
 
-# Local (non-root) LLVM 23 prefix, if it was deployed that way.
-: "${SIMPLE_LLVM_ROOT:=/mnt/data/toolchains/llvm-23-root}"
-if [ -x "${SIMPLE_LLVM_ROOT}/usr/bin/clang-23" ]; then
+# Local (non-root) LLVM 23 prefix, if it was deployed that way. The
+# /mnt/data default is a host-specific path (this dev box's no-root LLVM-23
+# extraction); guard it with -d so an unrelated host does not export a
+# nonexistent default (the -x check below already no-ops there, but this
+# keeps SIMPLE_LLVM_ROOT itself from being set to a path that cannot exist,
+# e.g. on macOS/FreeBSD where /mnt/data is not a convention at all).
+if [ -z "${SIMPLE_LLVM_ROOT:-}" ] && [ -d /mnt/data/toolchains/llvm-23-root ]; then
+  SIMPLE_LLVM_ROOT=/mnt/data/toolchains/llvm-23-root
+fi
+: "${SIMPLE_LLVM_ROOT:=}"
+if [ -n "${SIMPLE_LLVM_ROOT}" ] && [ -x "${SIMPLE_LLVM_ROOT}/usr/bin/clang-23" ]; then
   # Two directories, both needed:
   #   usr/bin              -- version-suffixed names (clang-23, ld.lld-23, ...)
   #   usr/lib/llvm-23/bin  -- UNSUFFIXED names (clang, ld.lld, llvm-config)
@@ -130,27 +138,89 @@ if [ -x "${SIMPLE_LLVM_ROOT}/usr/bin/clang-23" ]; then
   unset _d
 fi
 
+# OS classification used only to pick a linker/archiver below (independent of
+# the Windows short-circuit above, which already returned by this point).
+_simple_llvm_uname="$(uname -s 2>/dev/null || :)"
+case "${_simple_llvm_uname}" in
+  Darwin)  _simple_llvm_os=macos ;;
+  FreeBSD) _simple_llvm_os=freebsd ;;
+  Linux)   _simple_llvm_os=linux ;;
+  *)       _simple_llvm_os=other ;;
+esac
+
+# Pick a linker (LD/SIMPLE_LLD) and archiver (AR) for suffix $1 (e.g. "-23",
+# "23", or "" for an unsuffixed layout), per the clang-only linker policy:
+# mold on Linux where present, else ld.lld; ld64.lld on macOS; ld.lld on
+# FreeBSD (mold has no Mach-O or PE/COFF backend). Tries the suffixed name
+# first, then the bare name, so a version-suffixed clang paired with an
+# unsuffixed lld/mold (common outside Debian-style packaging) still resolves.
+_simple_llvm_select_linker() {
+  _sfx="$1"
+  LD=""
+  case "${_simple_llvm_os}" in
+    linux)
+      if command -v mold >/dev/null 2>&1; then
+        LD="mold"
+      elif command -v "ld.lld${_sfx}" >/dev/null 2>&1; then
+        LD="ld.lld${_sfx}"
+      elif command -v ld.lld >/dev/null 2>&1; then
+        LD="ld.lld"
+      fi
+      ;;
+    macos)
+      if command -v "ld64.lld${_sfx}" >/dev/null 2>&1; then
+        LD="ld64.lld${_sfx}"
+      elif command -v ld64.lld >/dev/null 2>&1; then
+        LD="ld64.lld"
+      fi
+      ;;
+    *)
+      if command -v "ld.lld${_sfx}" >/dev/null 2>&1; then
+        LD="ld.lld${_sfx}"
+      elif command -v ld.lld >/dev/null 2>&1; then
+        LD="ld.lld"
+      fi
+      ;;
+  esac
+  if [ -n "${LD}" ]; then
+    SIMPLE_LLD="${LD}"
+    export LD SIMPLE_LLD
+  else
+    unset LD
+  fi
+  if command -v "llvm-ar${_sfx}" >/dev/null 2>&1; then
+    AR="llvm-ar${_sfx}"
+  elif command -v llvm-ar >/dev/null 2>&1; then
+    AR="llvm-ar"
+  fi
+  [ -z "${AR:-}" ] || export AR
+  unset _sfx
+}
+
 # Preference order: explicit request, then 23, then the old 20 pin, then bare.
+# Tries both the Debian-style "clang-NN" name and the separator-less "clangNN"
+# name FreeBSD's pkg/ports clang uses (e.g. clang23), which the dash-only probe
+# missed entirely.
 _simple_llvm_pick=""
+_simple_llvm_sep="-"
 for _v in ${SIMPLE_LLVM_VERSION:-} 23 20; do
   [ -n "${_v}" ] || continue
   if command -v "clang-${_v}" >/dev/null 2>&1; then
-    _simple_llvm_pick="${_v}"
+    _simple_llvm_pick="${_v}"; _simple_llvm_sep="-"
+    break
+  elif command -v "clang${_v}" >/dev/null 2>&1; then
+    _simple_llvm_pick="${_v}"; _simple_llvm_sep=""
     break
   fi
 done
 
 if [ -n "${_simple_llvm_pick}" ]; then
-  CC="clang-${_simple_llvm_pick}"
-  CXX="clang++-${_simple_llvm_pick}"
+  CC="clang${_simple_llvm_sep}${_simple_llvm_pick}"
+  CXX="clang++${_simple_llvm_sep}${_simple_llvm_pick}"
   export CC CXX
-  if command -v "ld.lld-${_simple_llvm_pick}" >/dev/null 2>&1; then
-    LD="ld.lld-${_simple_llvm_pick}"
-    SIMPLE_LLD="ld.lld-${_simple_llvm_pick}"
-    export LD SIMPLE_LLD
-  fi
-  if command -v "llvm-config-${_simple_llvm_pick}" >/dev/null 2>&1; then
-    LLVM_CONFIG="llvm-config-${_simple_llvm_pick}"
+  _simple_llvm_select_linker "${_simple_llvm_sep}${_simple_llvm_pick}"
+  if command -v "llvm-config${_simple_llvm_sep}${_simple_llvm_pick}" >/dev/null 2>&1; then
+    LLVM_CONFIG="llvm-config${_simple_llvm_sep}${_simple_llvm_pick}"
     export LLVM_CONFIG
     # llvm-sys reads LLVM_SYS_<major><minor>_PREFIX. Export the one matching the
     # picked major so an llvm-sys bump does not also need an env change.
@@ -168,6 +238,70 @@ if [ -n "${_simple_llvm_pick}" ]; then
   SIMPLE_LLVM_MAJOR="${_simple_llvm_pick}"
   export SIMPLE_LLVM_MAJOR
 else
-  echo "llvm-toolchain-env: no versioned clang found; leaving CC/CXX unset" >&2
+  # No clang-NN / clangNN found on PATH. Fall back to well-known unsuffixed
+  # install layouts that version-suffixed naming misses entirely: Homebrew on
+  # macOS (bin/clang, no version in the name) and the FreeBSD llvmNN port's
+  # own prefix (/usr/local/llvmNN/bin/clang, also unsuffixed inside that
+  # prefix). These mirror the prefix candidates
+  # scripts/setup/platform-detect.shs already searches (_llvm_prefixes),
+  # without editing that file, which a different package owns.
+  _simple_llvm_fallback_bin=""
+  case "${_simple_llvm_os}" in
+    macos)
+      _simple_brew_prefix=""
+      if command -v brew >/dev/null 2>&1; then
+        _simple_brew_prefix="$(brew --prefix llvm 2>/dev/null || :)"
+      fi
+      for _p in "${_simple_brew_prefix}" /opt/homebrew/opt/llvm /usr/local/opt/llvm; do
+        [ -n "${_p}" ] && [ -x "${_p}/bin/clang" ] || continue
+        _simple_llvm_fallback_bin="${_p}/bin"
+        break
+      done
+      unset _simple_brew_prefix
+      ;;
+    freebsd)
+      for _v in ${SIMPLE_LLVM_VERSION:-} 23 20 18; do
+        [ -n "${_v}" ] || continue
+        for _p in "/usr/local/llvm${_v}" "/usr/local/llvm-${_v}"; do
+          [ -x "${_p}/bin/clang" ] || continue
+          _simple_llvm_fallback_bin="${_p}/bin"
+          break
+        done
+        [ -z "${_simple_llvm_fallback_bin}" ] || break
+      done
+      ;;
+  esac
+  if [ -n "${_simple_llvm_fallback_bin}" ]; then
+    case ":${PATH}:" in
+      *":${_simple_llvm_fallback_bin}:"*) : ;;
+      *) PATH="${_simple_llvm_fallback_bin}:${PATH}"; export PATH ;;
+    esac
+    CC="${_simple_llvm_fallback_bin}/clang"
+    CXX="${_simple_llvm_fallback_bin}/clang++"
+    export CC CXX
+    _simple_llvm_select_linker ""
+    if [ -x "${_simple_llvm_fallback_bin}/llvm-config" ]; then
+      LLVM_CONFIG="${_simple_llvm_fallback_bin}/llvm-config"
+      export LLVM_CONFIG
+      _simple_llvm_prefix="$("${LLVM_CONFIG}" --prefix 2>/dev/null || :)"
+      _simple_llvm_ver="$("${LLVM_CONFIG}" --version 2>/dev/null | cut -d. -f1)"
+      if [ -n "${_simple_llvm_prefix}" ] && [ -n "${_simple_llvm_ver}" ]; then
+        case "${_simple_llvm_ver}" in
+          23) LLVM_SYS_231_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_231_PREFIX ;;
+          22) LLVM_SYS_221_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_221_PREFIX ;;
+          20) LLVM_SYS_201_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_201_PREFIX ;;
+          18) LLVM_SYS_180_PREFIX="${_simple_llvm_prefix}"; export LLVM_SYS_180_PREFIX ;;
+        esac
+        SIMPLE_LLVM_MAJOR="${_simple_llvm_ver}"
+        export SIMPLE_LLVM_MAJOR
+      fi
+      unset _simple_llvm_prefix _simple_llvm_ver
+    fi
+    echo "llvm-toolchain-env: using unsuffixed clang at ${_simple_llvm_fallback_bin}/clang" >&2
+  else
+    echo "llvm-toolchain-env: no versioned clang found; leaving CC/CXX unset" >&2
+  fi
+  unset _simple_llvm_fallback_bin
 fi
+unset _simple_llvm_os _simple_llvm_uname _simple_llvm_sep
 unset _simple_llvm_pick _v
