@@ -1,7 +1,7 @@
 # rendering_gui_full.spl — GUI (ScreenGuiHost) rendering showcase, full tier.
 # lane: gui
 # tier: full
-# core: examples.ui.rendering_widgets_full (shared core lane pending)
+# core: examples.ui.rendering_widgets_full
 #
 # Full tier = the complete shared showcase tree (toolbar + linked scroll
 # panels + dialogs + event probe + statusbar, via
@@ -9,7 +9,10 @@
 # demo: one `titled` and one `borderless` internal window built with
 # simple_gui_internal_window / simple_gui_internal_window_scene and rendered
 # through shared_wm_scene_render_to_backend with wm_chrome_theme() into an
-# in-memory CompositorBackend, captured as a second PPM.
+# in-memory CompositorBackend, captured as a second PPM. The shared tab list
+# and WidgetKind coverage tables come from
+# examples/ui/rendering_widgets_full (imported below) — the same tab data the
+# TUI full tier renders.
 #
 # Headless by default (offscreen raster of every frame); SIMPLE_GUI=1 presents
 # the widget scenes through a real window instead. SIMPLE_2D_BACKEND
@@ -19,11 +22,6 @@
 # contract): SIMPLE_SHOWCASE_W/H (default 320x240), SIMPLE_SHOWCASE_FRAMES
 # (default 3), SIMPLE_SHOWCASE_CAPTURE (PPM output path; the desktop render is
 # written beside it as <base>.desktop.ppm), SIMPLE_GUI=1.
-#
-# The shared full core module (examples.ui.rendering_widgets_full, which will
-# own rendering_tabs()) is being built by the shared lane; until it lands this
-# entry renders the full tree through showcase_core directly and imports
-# nothing that does not exist yet.
 
 use std.io_runtime.{env_get, exit, file_write_bytes, mkdir_p}
 use common.ui.wm_app_process_contract.{widget_showcase_window_title}
@@ -35,6 +33,9 @@ use common.ui.window_scene.{
 use common.ui.window_scene_draw_ir.{shared_wm_scene_render_to_backend}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use examples.ui.rendering_widgets_full.{
+    rendering_tabs, rendering_all_kinds, rendering_tui_rendered_kinds
+}
 use app.ui_showcase.showcase_core.{showcase_build, showcase_scene}
 use app.ui_showcase.hosts.scene_raster.{
     raster_scene_argb, raster_to_ppm_bytes, raster_distinct_pixel_count
@@ -171,10 +172,13 @@ fn _parent_dir(path: text) -> text:
     path.substring(0, idx)
 
 fn _write_ppm(path: text, px: [u32], w: i32, h: i32) -> i64:
+    """Write one PPM frame; returns the distinct-pixel count, or -1 when the
+    write itself failed."""
     val dir = _parent_dir(path)
     if dir != "":
         mkdir_p(dir)
-    file_write_bytes(path, raster_to_ppm_bytes(px, w, h))
+    if not file_write_bytes(path, raster_to_ppm_bytes(px, w, h)):
+        return -1
     raster_distinct_pixel_count(px, 4)
 
 fn _desktop_capture_path(capture: text) -> text:
@@ -214,11 +218,22 @@ fn main():
             last_scene = showcase_scene(st, w, h)
             frames_rendered = frames_rendered + 1
 
+    # Shared tab/coverage receipt: the rendering_widgets_full tab data the
+    # TUI full tier renders, consumed here so the gui lane provably shares
+    # the same tab list instead of restating it.
+    var tab_ids = ""
+    for t in rendering_tabs():
+        tab_ids = if tab_ids == "": t.id else: tab_ids + "|" + t.id
+    print "showcase shared_tabs ids={tab_ids} kinds={rendering_all_kinds().len()} tui_rendered={rendering_tui_rendered_kinds().len()}"
+
     print "showcase host=gui tier=full frames={frames_rendered} widgets=full-tree desktop=titled+borderless"
 
     if capture != "":
         val px = raster_scene_argb(last_scene, w, h)
         val distinct = _write_ppm(capture, px, w, h)
+        if distinct < 0:
+            print "showcase status=blocked capture-write-failed path={capture}"
+            exit(1)
         print "capture path={capture} distinct_pixels={distinct}"
         if distinct < 2:
             print "showcase status=blocked capture-blank path={capture}"
@@ -228,6 +243,9 @@ fn main():
         val desktop = render_desktop(w, h)
         val desktop_path = _desktop_capture_path(capture)
         val desktop_distinct = _write_ppm(desktop_path, desktop.pixels, w, h)
+        if desktop_distinct < 0:
+            print "showcase status=blocked capture-write-failed path={desktop_path}"
+            exit(1)
         print "capture path={desktop_path} distinct_pixels={desktop_distinct} source=shared_wm_scene_render_to_backend"
         if desktop_distinct < 2:
             print "showcase status=blocked desktop-capture-blank path={desktop_path}"

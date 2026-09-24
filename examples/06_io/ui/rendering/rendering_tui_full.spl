@@ -1,17 +1,16 @@
 # Rendering showcases — TUI full tier.
 # lane: tui
 # tier: full
-# core: examples.ui.rendering_widgets_full (pending L6/shared-core lane)
+# core: examples.ui.rendering_widgets_full
 #
 # Renders the buildable subset of the TUI renderer set through the char-grid
 # ScreenHost (app.ui_showcase.hosts.host_tui.ScreenTuiHost) and then prints a
 # coverage section over all 43 WidgetKind variants: kinds with a TUI renderer
 # are marked `rendered`, the kinds WITHOUT one carry an explicit `(no tui)`
-# marker -- labeled, not dropped. The shared tab data lives in
-# examples/ui/rendering_widgets_full (L6/shared-core lane, in flight); until
-# it lands, this entry is self-contained and does NOT import it (the spec only
-# requires the literal module reference in this header, satisfied by the
-# `# core:` line above).
+# marker -- labeled, not dropped. The widget tree, the coverage tables, and
+# the shared tab list all live in examples/ui/rendering_widgets_full and are
+# imported below; this entry keeps only env parse, host construct, run, and
+# the coverage print.
 #
 # COVERAGE FIGURE NOTE (for the L7 final review): the plan/design says "44
 # WidgetKinds, 25 with TUI renderers, 19 without", but the actual sources say
@@ -19,9 +18,10 @@
 # and the render_tui dispatch (app/ui.render/_TuiWidgets/core_widgets.spl +
 # extended_widgets.spl) covers 30 of them -- 22 core (incl. label via the
 # text renderer and tree + treenode) + 8 extended -- leaving 13 kinds with no
-# TUI renderer. The lists below are derived from those sources, not from the
-# plan's figures, so the `(no tui)` markers stay honest; the shared item list
-# (rendering_items.ui.sdn, L6) should be reconciled with THESE 13 names.
+# TUI renderer. The lists in the shared module are derived from those
+# sources, not from the plan's figures, so the `(no tui)` markers stay
+# honest; the shared item list (rendering_items.ui.sdn, L6) should be
+# reconciled with THESE 13 names.
 #
 # Honest-fail contract: exits non-zero with
 #   showcase status=blocked <reason>
@@ -29,18 +29,14 @@
 #   showcase status=pass examples/06_io/ui/rendering/rendering_tui_full.spl
 
 use std.io_runtime.{env_get, file_write, mkdir_p, exit}
-use common.ui.builder.{
-    column, row, panel, label, text_widget, button, checkbox, dropdown,
-    text_field, image, tooltip, progress, menubar, statusbar, divider,
-    tabs, list_widget, table_widget, segmented_control, tree_widget,
-    tree_node, tree_leaf, scroll, textarea, dialog,
-    build_tree_with_title, with_height
-}
+use common.ui.builder.{build_tree_with_title}
 use common.ui.widget.{UIState}
-use common.ui.widget_store_ops.{set_internal_prop}
 use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
 use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
 use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use examples.ui.rendering_widgets_full.{
+    rendering_widgets_full_tree, rendering_all_kinds, rendering_kind_has_tui
+}
 use app.ui_showcase.showcase_core.{
     showcase_apply, showcase_click_count, showcase_typed_text
 }
@@ -58,93 +54,6 @@ fn _parent_dir(path: text) -> text:
         return ""
     path.substring(0, idx)
 
-# --- coverage tables --------------------------------------------------------
-#
-# ALL 43 WidgetKind wire names (common/ui/widget_kind.spl) and the 30 that
-# have a TUI renderer in the render_tui dispatch. Everything in ALL_KINDS but
-# not in TUI_RENDERED is printed with a `(no tui)` marker in the coverage
-# section.
-
-val ALL_KINDS: [text] = [
-    "panel", "text", "list", "table", "progress", "menubar", "statusbar",
-    "input", "tabs", "button", "checkbox", "radio", "dropdown",
-    "textfield", "image", "divider", "dialog", "tooltip", "tree",
-    "treenode", "scroll", "textarea", "heading", "label",
-    "navigation_bar", "tab_bar", "card", "switch", "segmented_control",
-    "search_bar", "glass_title_bar", "sidebar", "command_bar",
-    "workspace_tabs", "command_palette", "toast", "sheet_modal",
-    "context_menu", "inspector", "utility_rail", "status_chip",
-    "selection_pill", "empty_state"
-]
-
-val TUI_RENDERED: [text] = [
-    "panel", "text", "list", "table", "progress", "menubar", "statusbar",
-    "input", "tabs", "button", "checkbox", "radio", "dropdown",
-    "textfield", "image", "divider", "dialog", "tooltip", "tree",
-    "treenode", "scroll", "textarea", "heading", "label",
-    "navigation_bar", "tab_bar", "card", "switch", "segmented_control",
-    "search_bar"
-]
-
-fn _tui_rendered(kind: text) -> bool:
-    for k in TUI_RENDERED:
-        if k == kind:
-            return true
-    false
-
-# --- inline full widget tree ------------------------------------------------
-#
-# Stands in for the rendering_widgets_full tab content until the shared-core
-# lane lands it. Rows are CELL-sized for the 80x24-style char grid (default
-# 80x40 here so every widget below keeps a real row; SIMPLE_SHOWCASE_H can
-# shrink it, clipped content is the scroll viewport's job). builder-supported
-# kinds only: radio/heading/navigation_bar/tab_bar/card/switch/search_bar
-# have TUI renderers but no builder convenience fn, so they appear in the
-# coverage table (renderer exists) without a tree instance here.
-
-fn build_full_tree(prefix: text) -> UIState:
-    val bar = with_height(menubar("{prefix}_menu", ["Overview", "Fonts", "Shapes", "Scroll", "Blend"]), 1)
-    val tab_row = with_height(tabs("{prefix}_tabs", ["Widgets", "Coverage", "About"]), 1)
-    val main = panel("{prefix}_main", "TUI Full: renderer set", [
-        label("{prefix}_title", "Rendering showcase - TUI full (all TUI renderers)"),
-        with_height(row("{prefix}_controls", [
-            button("{prefix}_ok", "OK", "ok"),
-            checkbox("{prefix}_chk", "enabled", true),
-            progress("{prefix}_prog", 65),
-        ]), 1),
-        with_height(tooltip("{prefix}_tip", "a tooltip", "{prefix}_ok"), 1),
-        divider("{prefix}_div"),
-        with_height(dropdown("{prefix}_drop", ["alpha", "beta", "gamma"]), 1),
-        with_height(text_field("{prefix}_field", "", "type here"), 1),
-        with_height(segmented_control("{prefix}_seg", ["one", "two", "three"], 1, "seg"), 1),
-        with_height(list_widget("{prefix}_list", ["list row 0", "list row 1", "list row 2", "list row 3"]), 3),
-        with_height(table_widget("{prefix}_table", ["id", "name"], [["1", "alpha"], ["2", "beta"], ["3", "gamma"]]), 4),
-        with_height(tree_widget("{prefix}_tree", [
-            tree_node("{prefix}_tree_a", "alpha", [
-                tree_leaf("{prefix}_tree_a1", "a1"),
-                tree_leaf("{prefix}_tree_a2", "a2"),
-            ]),
-            tree_leaf("{prefix}_tree_b", "beta"),
-        ]), 4),
-        with_height(textarea("{prefix}_area", "", "multi-line", 3), 3),
-        with_height(image("{prefix}_img", "asset.png", "[image]"), 3),
-        with_height(scroll("{prefix}_scroll", 4, [
-            label("{prefix}_sl0", "scroll row 0"),
-            label("{prefix}_sl1", "scroll row 1"),
-            label("{prefix}_sl2", "scroll row 2"),
-            label("{prefix}_sl3", "scroll row 3"),
-            label("{prefix}_sl4", "scroll row 4"),
-            label("{prefix}_sl5", "scroll row 5"),
-        ]), 4),
-        with_height(dialog("{prefix}_dlg", "Dialog", [
-            label("{prefix}_dlg_body", "dialog body"),
-        ]), 3),
-    ])
-    val status = with_height(statusbar("{prefix}_status", "ready", "tui full"), 1)
-    val root = column("{prefix}_root", [bar, tab_row, main, status])
-    set_internal_prop(root.id, "sc_prefix", prefix)
-    UIState.new(build_tree_with_title(root, "rendering_tui_full", "dark"))
-
 fn _scene(st: UIState, w: i32, h: i32) -> DrawIrV3Scene:
     draw_ir_v2_to_v3(widget_tree_to_draw_ir_cpu(st.tree.root_node(), w, h))
 
@@ -157,7 +66,9 @@ fn main():
     val max_frames = _env_i32("SIMPLE_SHOWCASE_FRAMES", 3).to_i64()
     val script = env_get("SIMPLE_SHOWCASE_SCRIPT")
 
-    var st = build_full_tree("tui_full")
+    val prefix = "tui_full"
+    var st = UIState.new(build_tree_with_title(
+        rendering_widgets_full_tree(prefix), "rendering_tui_full", "dark"))
     val host = ScreenTuiHost.open(w, h, script)
     var frames: i64 = 0
     while frames < max_frames:
@@ -178,8 +89,8 @@ fn main():
     var coverage = ""
     var rendered_count = 0
     var no_tui_count = 0
-    for kind in ALL_KINDS:
-        if _tui_rendered(kind):
+    for kind in rendering_all_kinds():
+        if rendering_kind_has_tui(kind):
             rendered_count = rendered_count + 1
             val line = "tui-coverage kind={kind} tui=rendered"
             print line
@@ -189,11 +100,11 @@ fn main():
             val line = "tui-coverage kind={kind} tui=(no tui)"
             print line
             coverage = "{coverage}{line}\n"
-    val total_kinds = ALL_KINDS.len()
+    val total_kinds = rendering_all_kinds().len()
     print "tui-coverage rendered={rendered_count} no_tui={no_tui_count} total={total_kinds}"
 
-    val clicks = showcase_click_count("tui_full")
-    val typed = showcase_typed_text("tui_full")
+    val clicks = showcase_click_count(prefix)
+    val typed = showcase_typed_text(prefix)
     val painted = host.last_painted_commands()
     val fills = host.last_fill_commands()
     val unsupported = host.last_unsupported_commands()
