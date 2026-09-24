@@ -134,5 +134,49 @@ else
     echo "ok   gitlink-only range verdict is PASS"
 fi
 
+# --- fixture 4: gitlink + an allowlist-exempted path must NOT take the free
+# gitlink-only PASS unless the allowlist accounting is EXACTLY justified.
+# Review finding (coordinator batch review, 2026-09-24): the first cut of the
+# gitlink-only-PASS branch computed `nlines == skipped_gitlink + exempted`,
+# so a mix of a gitlink and an allowlist-exempted path would freely PASS
+# through the NEW branch even when the CLI's own `--allow` accounting did not
+# fully justify the exemption (e.g. an extra, unmatched --allow path) --
+# bypassing the stricter pre-existing requirement that every --allow'd path
+# actually accounts for something. Fixed by requiring exempted==0 for the
+# free gitlink pass, so a mixed range always falls through to the old,
+# stricter --allow-count-matching logic below.
+env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
+fakesha3=$(printf 'z' | env -u GIT_DIR git -C "$repo" hash-object --stdin -w)
+env -u GIT_DIR git -C "$repo" update-index --add --cacheinfo 160000,"$fakesha3",vendor/mixed_gitlink
+echo "allow me" > "$repo/allowed.txt"
+env -u GIT_DIR git -C "$repo" add allowed.txt
+env -u GIT_DIR git -C "$repo" commit -qm "gitlink + allowlisted file"
+mtip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+
+# 4a: an EXTRA, unmatched --allow (declares 2 paths, only 1 actually changed
+# and allowlisted) must still ERROR -- the mismatch check must still fire
+# even though a gitlink is also present in the range.
+mout_bad="$TMPD/mout_bad"
+mrc_bad=0
+( cd "$repo" && "$GUARD" --allow allowed.txt --allow nonexistent.txt "$BASE..$mtip" ) \
+    >"$mout_bad" 2>&1 || mrc_bad=$?
+check "gitlink + mismatched --allow count still ERRORs" "$mrc_bad" 2
+if grep -q '^check-no-conflict-markers-push: PASS' "$mout_bad"; then
+    echo "FAIL: mismatched --allow count silently PASSed with a gitlink present"
+    cat "$mout_bad"
+    fails=$((fails + 1))
+else
+    echo "ok   mismatched --allow count did not silently pass"
+fi
+
+# 4b: the SAME range with a correctly matched single --allow must still PASS
+# (via the pre-existing --allow-count-matching branch, not the free gitlink
+# pass) -- the fix must not break the legitimate combined case.
+mout_ok="$TMPD/mout_ok"
+mrc_ok=0
+( cd "$repo" && "$GUARD" --allow allowed.txt "$BASE..$mtip" ) \
+    >"$mout_ok" 2>&1 || mrc_ok=$?
+check "gitlink + exactly matched --allow still PASSes" "$mrc_ok" 0
+
 [ "$fails" -eq 0 ] || exit 1
 echo "PASS - conflict_marker_guard_raw_diff_test (all fixtures)"
