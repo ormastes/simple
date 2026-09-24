@@ -1,3 +1,10 @@
+## [1.0.0-rc.1] - 2026-09-25
+First release candidate of the **1.0.0 line**.
+
+### Release
+- Product version is `1.0.0-rc.1`, projected into all 19 declared version
+  surfaces; authority `release/version.sdn` moves to channel `rc`.
+
 ## [1.0.0-beta.14] - 2026-09-19
 Seventh corrected beta of the **1.0.0 line**.
 
