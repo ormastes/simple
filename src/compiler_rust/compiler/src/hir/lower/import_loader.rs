@@ -32,6 +32,26 @@ pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync
 }
 
 impl Lowerer {
+    fn bind_imported_defaults(&mut self, source: &Path, caller: &Path, target: &ImportTarget) {
+        fn selected_names(target: &ImportTarget, contracts: &std::collections::HashMap<String, Vec<Option<Expr>>>, output: &mut Vec<(String, String)>) {
+            match target {
+                ImportTarget::Glob => output.extend(contracts.keys().map(|n| (n.clone(), n.clone()))),
+                ImportTarget::Single(name) => output.push((name.clone(), name.clone())),
+                ImportTarget::Aliased { name, alias } => output.push((name.clone(), alias.clone())),
+                ImportTarget::Group(items) => {
+                    for item in items { selected_names(item, contracts, output); }
+                }
+            }
+        }
+        let Some(contracts) = self.imported_fn_param_defaults.get(source) else { return; };
+        let mut names = Vec::new();
+        selected_names(target, contracts, &mut names);
+        let selected: Vec<_> = names.into_iter().filter_map(|(name, alias)| {
+            contracts.get(&name).cloned().map(|defaults| (alias, defaults))
+        }).collect();
+        self.imported_fn_param_defaults.entry(caller.to_path_buf()).or_default().extend(selected);
+    }
+
     fn import_target_cache_key(target: &ImportTarget) -> String {
         format!("{:?}", target)
     }
@@ -433,6 +453,12 @@ impl Lowerer {
                 }
                 Node::Function(func_def) => {
                     if self.should_import_symbol(&func_def.name, target) {
+                        let defaults: Vec<_> = func_def.params.iter().map(|p| p.default.clone()).collect();
+                        if let Some(path) = &self.current_file {
+                            self.imported_fn_param_defaults
+                                .entry(crate::interpreter::normalize_path_key(path)).or_default()
+                                .insert(func_def.name.clone(), defaults);
+                        }
                         let ret_ty = self.resolve_type_opt(&func_def.return_type)?;
                         self.globals.insert(func_def.name.clone(), ret_ty);
                         self.method_return_types.insert(func_def.name.clone(), ret_ty);
@@ -866,8 +892,10 @@ impl Lowerer {
         // forms of either. `import_stack` and `current_file` deliberately keep the
         // raw path -- they feed cycle reports and `base_dir` resolution.
         let unit_key = crate::interpreter::normalize_path_key(&resolved.path);
+        let caller_key = crate::interpreter::normalize_path_key(current_file);
         let import_key = (unit_key.clone(), Self::import_target_cache_key(target));
         if self.loaded_import_targets.contains(&import_key) {
+            self.bind_imported_defaults(&unit_key, &caller_key, target);
             return Ok(());
         }
 
@@ -954,6 +982,7 @@ impl Lowerer {
         self.import_stack.pop();
         self.loaded_modules.remove(&unit_key);
         if result.is_ok() {
+            self.bind_imported_defaults(&unit_key, &caller_key, target);
             self.loaded_import_targets.insert(import_key);
         }
         result
