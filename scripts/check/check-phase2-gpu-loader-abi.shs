@@ -1,0 +1,54 @@
+#!/bin/sh
+# Focused native link and dynamic ABI evidence; no GPU hardware is used.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?usage: check-phase2-gpu-loader-abi.shs NEW_EVIDENCE_DIR}
+[ ! -e "$out" ] || { echo 'evidence directory already exists' >&2; exit 2; }
+mkdir -p "$out"
+out=$(CDPATH= cd -- "$out" && pwd)
+cc=${CC:-cc}
+case $(uname -s) in
+  Darwin) strip_flag=-Wl,-dead_strip; dl_flag= ;;
+  *) strip_flag=-Wl,--gc-sections; dl_flag=-ldl ;;
+esac
+fixture="$root/test/02_integration/runtime/phase2_gpu_loader_abi.c"
+"$cc" -std=gnu11 -fPIC -shared -DTEST_CUDA_PROVIDER "$fixture" -o "$out/cuda.so"
+"$cc" -std=gnu11 -fPIC -shared -DTEST_VULKAN_PROVIDER "$fixture" -o "$out/vulkan.so"
+"$cc" -std=gnu11 -fPIC -shared -DTEST_CUDA_PROVIDER -DTEST_OMIT_REQUIRED "$fixture" -o "$out/cuda-incomplete.so"
+"$cc" -std=gnu11 -fPIC -shared -DTEST_VULKAN_PROVIDER -DTEST_PROVIDER_ABI=99 "$fixture" -o "$out/vulkan-wrong.so"
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+  -c "$root/src/runtime/runtime_native.c" -o "$out/native.o"
+"$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+  -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+  -c "$root/src/runtime/runtime_dynload.c" -o "$out/dynload.o"
+set --
+if [ -n "${GPU_LOADER_NATIVE_ARCHIVE:-}" ]; then
+  "$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    -c "$root/src/runtime/runtime_legacy_core.c" -o "$out/legacy.o"
+  set -- -DTEST_NATIVE_BOUNDARY "$GPU_LOADER_NATIVE_ARCHIVE" "$out/legacy.o"
+fi
+"$cc" -std=gnu11 -I"$root/src/runtime" "$strip_flag" "$fixture" \
+  "$out/native.o" "$out/dynload.o" "$@" -lm -lpthread $dl_flag -o "$out/loader-check"
+"$out/loader-check" "$out/cuda.so" "$out/vulkan.so" good
+"$out/loader-check" "$out/missing-cuda.so" "$out/missing-vulkan.so" absent
+"$out/loader-check" "$out/cuda-incomplete.so" "$out/vulkan-wrong.so" rejected
+if [ -n "${GPU_LOADER_BASELINE_ROOT:-}" ]; then
+  "$cc" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -I"$GPU_LOADER_BASELINE_ROOT/src/runtime" -I"$GPU_LOADER_BASELINE_ROOT/src/runtime/platform" \
+    -c "$GPU_LOADER_BASELINE_ROOT/src/runtime/runtime_dynload.c" -o "$out/baseline-dynload.o"
+  if "$cc" -std=gnu11 -I"$root/src/runtime" "$strip_flag" "$fixture" \
+      "$out/native.o" "$out/baseline-dynload.o" -lm -lpthread $dl_flag -o "$out/baseline-check" \
+      >"$out/baseline-link.log" 2>&1; then
+    echo 'baseline unexpectedly linked' >&2; exit 1
+  fi
+  grep -q 'rt_cuda_module_load_data_array' "$out/baseline-link.log"
+  grep -q 'rt_vulkan_compile_spirv_array' "$out/baseline-link.log"
+  echo 'phase2-gpu-loader: baseline link correctly rejected'
+fi
+if [ "$(uname -s)" = Darwin ]; then
+  otool -L "$out/loader-check" >"$out/dependencies.txt"
+  if grep -E 'cuda\.so|vulkan\.so|libcuda|libvulkan' "$out/dependencies.txt"; then exit 1; fi
+fi
+echo 'phase2-gpu-loader: PASS'
