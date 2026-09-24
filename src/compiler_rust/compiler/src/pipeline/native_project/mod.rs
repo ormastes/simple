@@ -49,6 +49,117 @@ use crate::optimizations::NativeOptimizationLevel;
 use crate::security::build_security_inventory;
 use crate::stdlib_variant::active_simd_tier_name;
 
+/// Lift the Windows 260-character `MAX_PATH` limit for a filesystem path.
+///
+/// The native-incremental object cache nests several content-hash segments
+/// (`compiler-tools/<phase>/<64-hex snapshot>/<64-hex runtime-identity>/
+/// full-cli/objects/<16-hex>.o`), and a caller-supplied `--cache-dir` under a
+/// long checkout root routinely pushes the final object path past 260
+/// characters. Every ordinary Win32 file API (and `std::fs` on top of it)
+/// enforces that limit unless the path uses the "verbatim" / extended-length
+/// form `\\?\C:\...`, which also disables `.`/`..` and short-name
+/// normalization — safe here because every path built under a cache
+/// directory is already absolute and made only of literal hash/name
+/// segments. Idempotent, and a no-op for a relative path (which still needs
+/// normal resolution against the current directory) and on non-Windows
+/// targets, where the limit does not exist.
+///
+/// See `doc/08_tracking/bug/windows_native_incremental_cache_persist_path_too_long_2026-09-24.md`.
+#[cfg(windows)]
+pub(crate) fn win_long_path(path: &Path) -> PathBuf {
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.starts_with(r"\\?\") {
+        return path.to_path_buf();
+    }
+    // The verbatim form is NOT normalized by Win32 the way an ordinary path
+    // is: a forward slash inside it is a literal (invalid) filename
+    // character, not a separator, and the API rejects the whole path
+    // (ERROR_INVALID_NAME) instead of coping. Mixed separators are common
+    // here even though every segment we join is backslash-joined, because
+    // the base can arrive with forward slashes already baked in as literal
+    // bytes of one component — a `--cache-dir` argument built by a shell
+    // script (`D:/wk.../cache`), or this crate's own default
+    // `project_root.join(".simple/native_cache")`, whose `.join` call adds
+    // one real separator but does not rewrite the `/` already inside the
+    // literal `".simple/native_cache"` argument. Normalize before deciding
+    // whether the path is absolute or UNC, and before prefixing it.
+    let raw = raw.replace('/', r"\");
+    if let Some(rest) = raw.strip_prefix(r"\\") {
+        // UNC path: `\\server\share\...` -> `\\?\UNC\server\share\...`.
+        return PathBuf::from(format!(r"\\?\UNC\{rest}"));
+    }
+    if path.is_absolute() {
+        return PathBuf::from(format!(r"\\?\{raw}"));
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn win_long_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(test)]
+mod win_long_path_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn prefixes_a_long_absolute_drive_path() {
+        let long = PathBuf::from(r"D:\wk\.simple\storage\build\bootstrap\compiler-tools\objects\deadbeefcafef00d.o");
+        let out = win_long_path(&long);
+        assert_eq!(out, PathBuf::from(format!(r"\\?\{}", long.display())));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_idempotent_on_an_already_verbatim_path() {
+        let verbatim = PathBuf::from(r"\\?\D:\wk\objects\abc.o");
+        assert_eq!(win_long_path(&verbatim), verbatim);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prefixes_unc_paths_with_the_verbatim_unc_form() {
+        let unc = PathBuf::from(r"\\build-server\share\objects\abc.o");
+        assert_eq!(win_long_path(&unc), PathBuf::from(r"\\?\UNC\build-server\share\objects\abc.o"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn leaves_a_relative_path_untouched() {
+        let relative = PathBuf::from("objects/abc.o");
+        assert_eq!(win_long_path(&relative), relative);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalizes_embedded_forward_slashes_before_prefixing() {
+        // Reproduces this crate's own default cache base: `project_root.join(
+        // ".simple/native_cache")` leaves the literal `/` inside the joined
+        // component untouched, so the resulting path mixes separators
+        // (`C:\repo\.simple/native_cache`). A verbatim path containing `/` is
+        // rejected outright by Win32 (ERROR_INVALID_NAME) instead of being
+        // normalized, so this must come out all-backslash.
+        let mixed = PathBuf::from("C:/repo").join(".simple/native_cache");
+        assert_eq!(mixed.display().to_string(), r"C:/repo\.simple/native_cache");
+        let out = win_long_path(&mixed);
+        assert_eq!(out, PathBuf::from(r"\\?\C:\repo\.simple\native_cache"));
+        assert!(
+            !out.to_string_lossy().contains('/'),
+            "verbatim path must not contain a forward slash: {}",
+            out.display()
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn is_a_no_op_off_windows() {
+        let any = PathBuf::from("/tmp/wk/.simple/storage/build/bootstrap/compiler-tools/objects/deadbeefcafef00d.o");
+        assert_eq!(win_long_path(&any), any);
+    }
+}
+
 pub(crate) fn native_project_rust_trace_enabled() -> bool {
     matches!(
         std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").as_deref(),
@@ -645,10 +756,16 @@ impl NativeProjectBuilder {
 
     /// Resolve the configured cache root before target isolation.
     pub(crate) fn cache_base_dir(&self) -> PathBuf {
-        self.config
+        let base = self
+            .config
             .cache_dir
             .clone()
-            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"))
+            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"));
+        // Applied at the root of the cache path, not at each join site, so
+        // every path built from it (objects dir, per-module cache files, the
+        // incremental manifest, the staging tempdir) inherits the
+        // extended-length form automatically.
+        win_long_path(&base)
     }
 
     /// Resolve the effective cache directory, including a cross-target triple.
