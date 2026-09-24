@@ -1,18 +1,15 @@
 # Rendering showcases — TUI brief tier.
 # lane: tui
 # tier: brief
-# core: examples.ui.rendering_widgets_core (pending L6/shared-core lane)
+# core: examples.ui.rendering_widgets_core
 #
-# Renders the core widget set (panel, text, button, list, menubar, statusbar,
-# divider, progress) through the char-grid ScreenHost
-# (app.ui_showcase.hosts.host_tui.ScreenTuiHost):
+# Renders the shared brief-tier core widget set (panel, text, button, list,
+# menubar, statusbar, divider, progress — owned by
+# examples/ui/rendering_widgets_core, imported below) through the char-grid
+# ScreenHost (app.ui_showcase.hosts.host_tui.ScreenTuiHost):
 #   widget tree -> DrawIR v2 -> DrawIrV3Scene -> 80x24 char grid
-# (grid size via SIMPLE_SHOWCASE_W/H). The shared core module
-# examples/ui/rendering_widgets_core is being written by the L6/shared-core
-# lane in parallel; until it lands, this entry builds the core subset inline
-# with the same common.ui.builder widgets the shared core will expose, so the
-# entry compiles and runs standalone. Once the shared core exists, the inline
-# tree should be replaced by rendering_widgets_core's tab content.
+# (grid size via SIMPLE_SHOWCASE_W/H). This entry keeps only env parse, host
+# construct, and run — the widget tree lives in the shared core module.
 #
 # Honest-fail contract: exits non-zero with
 #   showcase status=blocked <reason>
@@ -20,16 +17,12 @@
 #   showcase status=pass examples/06_io/ui/rendering/rendering_tui_core.spl
 
 use std.io_runtime.{env_get, file_write, mkdir_p, exit}
-use common.ui.builder.{
-    column, panel, label, text_widget, button, checkbox, list_widget,
-    menubar, statusbar, divider, progress,
-    build_tree_with_title, with_height
-}
+use common.ui.builder.{build_tree_with_title}
 use common.ui.widget.{UIState}
-use common.ui.widget_store_ops.{set_internal_prop}
 use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
 use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
 use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use examples.ui.rendering_widgets_core.{rendering_widgets_core_tui_tree}
 use app.ui_showcase.showcase_core.{
     showcase_apply, showcase_click_count, showcase_typed_text
 }
@@ -47,30 +40,6 @@ fn _parent_dir(path: text) -> text:
         return ""
     path.substring(0, idx)
 
-# --- inline core widget tree (stands in for examples/ui/rendering_widgets_core)
-#
-# Rows are CELL-sized: the TUI host presents the scene on an WxH char grid, so
-# heights are 1-4 cells, not pixels. This is the same tree the shared core
-# will own once the L6 lane lands it.
-
-fn build_core_tree(prefix: text) -> UIState:
-    val bar = with_height(menubar("{prefix}_menu", ["Overview", "Fonts", "Shapes", "Scroll", "Blend"]), 1)
-    val content = panel("{prefix}_main", "Core Widgets", [
-        label("{prefix}_title", "Rendering showcase - TUI brief (core set)"),
-        text_widget("{prefix}_body", "panel text button list menubar statusbar divider progress"),
-        with_height(button("{prefix}_ok", "OK", "ok"), 1),
-        checkbox("{prefix}_chk", "enabled", true),
-        divider("{prefix}_div"),
-        with_height(list_widget("{prefix}_list", ["panel", "text", "button", "list", "menubar", "statusbar", "divider", "progress"]), 4),
-        with_height(progress("{prefix}_prog", 65), 1),
-    ])
-    val status = with_height(statusbar("{prefix}_status", "ready", "tui brief"), 1)
-    val root = column("{prefix}_root", [bar, content, status])
-    # showcase_apply recovers the prefix from this prop (same convention as
-    # showcase_core.showcase_build), so scripted input reaches the reducer.
-    set_internal_prop(root.id, "sc_prefix", prefix)
-    UIState.new(build_tree_with_title(root, "rendering_tui_core", "dark"))
-
 fn _scene(st: UIState, w: i32, h: i32) -> DrawIrV3Scene:
     """Widget tree -> DrawIR v2 composition -> DrawIrV3 scene VALUE: the same
     production path showcase_core.showcase_scene uses (composition extras are
@@ -83,7 +52,9 @@ fn main():
     val max_frames = _env_i32("SIMPLE_SHOWCASE_FRAMES", 3).to_i64()
     val script = env_get("SIMPLE_SHOWCASE_SCRIPT")
 
-    var st = build_core_tree("tui_core")
+    val prefix = "tui_core"
+    var st = UIState.new(build_tree_with_title(
+        rendering_widgets_core_tui_tree(prefix), "rendering_tui_core", "dark"))
     val host = ScreenTuiHost.open(w, h, script)
     var frames: i64 = 0
     while frames < max_frames:
@@ -101,8 +72,8 @@ fn main():
     # painted/fills/unsupported are the honest-fail accounting: fills are
     # background rects the char grid elides, unsupported are scene command
     # kinds with no char mapping. Neither is ever silently dropped.
-    val clicks = showcase_click_count("tui_core")
-    val typed = showcase_typed_text("tui_core")
+    val clicks = showcase_click_count(prefix)
+    val typed = showcase_typed_text(prefix)
     val painted = host.last_painted_commands()
     val fills = host.last_fill_commands()
     val unsupported = host.last_unsupported_commands()

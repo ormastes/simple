@@ -1,10 +1,11 @@
 # rendering_gui_core.spl — GUI (ScreenGuiHost) rendering showcase, brief tier.
 # lane: gui
 # tier: brief
-# core: examples.ui.rendering_widgets_core (shared core lane pending)
+# core: examples.ui.rendering_widgets_core
 #
 # Renders the brief-tier core widget set — panel, text, button, list, menubar,
-# statusbar, divider, progress — through the shared widget tree -> DrawIR v2 ->
+# statusbar, divider, progress, owned by examples/ui/rendering_widgets_core
+# and imported below — through the shared widget tree -> DrawIR v2 ->
 # DrawIrV3 pipeline. Headless by default: frames are rasterized offscreen with
 # the shared scene raster helpers, and when SIMPLE_SHOWCASE_CAPTURE names a PPM
 # path the last frame is written there. With SIMPLE_GUI=1 the same scenes are
@@ -18,29 +19,24 @@
 # this lane: the headless capture rasterizes on CPU by design; the configured
 # backend applies wherever an Engine2D backend is constructed (windowed path).
 #
-# The shared core module (examples.ui.rendering_widgets_core) is being built by
-# the shared lane; until it lands this entry builds the brief tree directly
-# from common.ui.builder — the same widgets, one deterministic column,
-# glass_dark theme — and imports nothing that does not exist yet.
+# This entry keeps only env parse, host construct, and run — the widget tree
+# lives in the shared core module.
 
 use std.io_runtime.{env_get, exit, file_write_bytes, mkdir_p}
-use common.ui.builder.{
-    column, panel, text_widget, button, list_widget, menubar, divider,
-    progress, statusbar, build_tree_with_title, with_height
-}
+use common.ui.builder.{build_tree_with_title}
 use common.ui.widget_store_ops.{WidgetNode}
 use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
 use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
 use common.ui.draw_ir_v3.{DrawIrV3Scene}
 use common.ui.wm_app_process_contract.{widget_showcase_window_title}
+use examples.ui.rendering_widgets_core.{rendering_widgets_core_tree}
 use app.ui_showcase.hosts.scene_raster.{
     raster_scene_argb, raster_to_ppm_bytes, raster_distinct_pixel_count
 }
 use app.ui_showcase.hosts.host_gui.{ScreenGuiHost}
 
 val BRIEF_PREFIX: text = "rgui_brief"
-val BRIEF_BAR_H: i32 = 22
 
 fn _env_i32(key: text, fallback: i32) -> i32:
     val raw = env_get(key).trim()
@@ -49,19 +45,10 @@ fn _env_i32(key: text, fallback: i32) -> i32:
     raw.to_int() ?? fallback
 
 fn brief_tree() -> text:
-    """Build the brief-tier core widget tree in the global widget store and
-    return the root id. One column, deterministic layout, glass_dark theme."""
-    val p = BRIEF_PREFIX
-    val toolbar = with_height(menubar("{p}_menubar", ["File", "View", "Help"]), BRIEF_BAR_H)
-    val body = panel("{p}_panel", "Core Widgets", [
-        text_widget("{p}_text", "text: the quick brown fox 0123456789"),
-        button("{p}_button", "button: Apply", "apply"),
-        list_widget("{p}_list", ["list: alpha", "list: beta", "list: gamma"]),
-        divider("{p}_divider"),
-        progress("{p}_progress", 65)
-    ])
-    val status = with_height(statusbar("{p}_status", "ready", "brief tier"), BRIEF_BAR_H)
-    val root = column("{p}_root", [toolbar, body, status])
+    """Build the shared brief-tier core widget tree (rendering_widgets_core)
+    in the global widget store and return the root id. One column,
+    deterministic layout, glass_dark theme."""
+    val root = rendering_widgets_core_tree(BRIEF_PREFIX)
     build_tree_with_title(root, "Rendering GUI (brief)", "glass_dark")
     root.id
 
@@ -76,12 +63,14 @@ fn _parent_dir(path: text) -> text:
     path.substring(0, idx)
 
 fn _write_capture(path: text, px: [u32], w: i32, h: i32) -> i64:
-    """Write one PPM frame; returns the distinct-pixel count (a blank capture
-    reports 0/1 here instead of being silently tolerated upstream)."""
+    """Write one PPM frame; returns the distinct-pixel count, or -1 when the
+    write itself failed (a blank capture reports 0/1 here instead of being
+    silently tolerated upstream)."""
     val dir = _parent_dir(path)
     if dir != "":
         mkdir_p(dir)
-    file_write_bytes(path, raster_to_ppm_bytes(px, w, h))
+    if not file_write_bytes(path, raster_to_ppm_bytes(px, w, h)):
+        return -1
     raster_distinct_pixel_count(px, 4)
 
 fn main():
@@ -120,6 +109,9 @@ fn main():
     if capture != "":
         val px = raster_scene_argb(last_scene, w, h)
         val distinct = _write_capture(capture, px, w, h)
+        if distinct < 0:
+            print "showcase status=blocked capture-write-failed path={capture}"
+            exit(1)
         print "capture path={capture} distinct_pixels={distinct}"
         if distinct < 2:
             print "showcase status=blocked capture-blank path={capture}"

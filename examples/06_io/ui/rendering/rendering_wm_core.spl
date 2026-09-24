@@ -3,18 +3,21 @@
 # owned, headless PPM default.
 # lane: wm
 # tier: brief
-# core: src.app.wm_showcase session pattern
+# core: examples.ui.rendering_wm_common
 #
 # Runs the real WM session (os.compositor HostCompositor, headless native
 # pixel lane) and admits two internal windows through the production bridge —
 # apply_bridge_request(..., COMP_CREATE_WINDOW, ..., title, x, y, w, h, ...) —
 # exactly like examples/06_io/ui/wm_multiapp_taskbar_gui.spl admits apps.
-# Each window's content is a small built-in pixel producer (rect art; the
-# cross-lane scene cores land separately), handed to the compositor through
-# the external content-frame boundary (require_external_web_frame +
-# set_external_web_frame), the same admission wm_showcase/session.spl uses.
-# The taskbar is NOT built here: HostCompositor.taskbar_model() projects it
-# from the live window list.
+# Each window's content is a small built-in pixel producer (rect art), handed
+# to the compositor through the external content-frame boundary
+# (require_external_web_frame + set_external_web_frame), the same admission
+# wm_showcase/session.spl uses. The taskbar is NOT built here:
+# HostCompositor.taskbar_model() projects it from the live window list.
+#
+# The shared admission/capture/artifact helpers live in
+# examples/ui/rendering_wm_common (imported below); this entry keeps its own
+# window specs, pixel producers, gates, and run sequence.
 #
 # Gates (all receipts from the SAME run):
 #   * windows declared/open/accepted/rendered counts — "rendered" means the
@@ -35,81 +38,30 @@
 # backend-independent; the configured backend applies wherever an Engine2D
 # backend is constructed (windowed/client content paths).
 
-use std.io_runtime.{env_get, file_write_bytes, mkdir_p, write_file}
-use std.io.window_winit.{
-    winit_loop_new, winit_loop_free, winit_window_new, winit_window_free,
-    winit_present_rgba, winit_poll_input,
-}
 use os.compositor.host_compositor_entry.{HostCompositor}
-use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
 use common.window_protocol.geometry.{Size}
-use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
-use common.ui.window_scene_draw_ir.{shared_wm_browser_content_extra_height}
-use common.ui.wm_chrome_theme.{active_wm_theme_id}
-use nogc_sync_mut.ui.theme_package.{default_theme_id}
-use common.image.ppm_decode.{encode_ppm_p6}
+use examples.ui.rendering_wm_common.{
+    WM_DEFAULT_W, WM_DEFAULT_H, WM_MIN_W, WM_MIN_H,
+    WmWindowSpec, WmAdmitted, WmCapture,
+    wm_env_text, wm_env_i32,
+    wm_blit_rect,
+    wm_content_dims, wm_admit_window, wm_capture_desktop,
+    wm_capture_path, wm_provenance_path, wm_write_ppm, wm_write_provenance,
+    wm_gui_present
+}
 
-extern fn rt_time_now_unix_micros() -> i64
-
-val WM_CORE_DEFAULT_W: i32 = 640
-val WM_CORE_DEFAULT_H: i32 = 480
-val WM_CORE_MIN_W: i32 = 640
-val WM_CORE_MIN_H: i32 = 480
-val WM_CORE_ARTIFACT_DIR: text = "build/tmp/rendering_wm"
 val WM_CORE_ARTIFACT: text = "wm_core"
 
-# Chrome geometry of a HostCompositor window, measured against the running
-# compositor (same insets src/app/wm_showcase/session.spl proves by
-# byte-identical readback): content rect is (x + 4, y + 32, w - 8, h - 36).
-val WM_CORE_CONTENT_INSET_X: i32 = 4
-val WM_CORE_CONTENT_INSET_Y: i32 = 32
-
-struct WmCoreWindowSpec:
-    """One declared showcase window admitted through the WM bridge."""
-    key: text
-    title: text
-    app_id: text
-    x: i32
-    y: i32
-    w: i32
-    h: i32
-
-struct WmCoreAdmitted:
-    """A window the run actually admitted, plus the exact content pixels it
-    handed the compositor (kept so the capture can prove they landed)."""
-    key: text
-    window_id: i64
-    title: text
-    content_x: i32
-    content_y: i32
-    content_w: i32
-    content_h: i32
-    pixels: [u32]
-    frame_accepted: bool
-    reject_reason: text
-
-struct WmCoreCapture:
-    """One composited desktop frame plus the receipts that make it checkable."""
-    width: i32
-    height: i32
-    pixels: [u32]
-    checksum: i64
-    distinct_colors: i32
-    open_windows: i32
-    rendered_windows: i32
-    taskbar_entries: i32
-    taskbar_titles: text
-
-fn wm_core_specs() -> [WmCoreWindowSpec]:
+fn wm_core_specs() -> [WmWindowSpec]:
     """The two brief-tier windows. Laid out without overlap, every bottom
     edge above the taskbar band (bottom 56 rows), so each content rect can be
     read back unoccluded from the composite."""
     [
-        WmCoreWindowSpec(
+        WmWindowSpec(
             key: "wm", title: "Rendering WM", app_id: "/sys/apps/rendering-wm",
             x: 24, y: 80, w: 300, h: 190
         ),
-        WmCoreWindowSpec(
+        WmWindowSpec(
             key: "status", title: "Compositor Status",
             app_id: "/sys/apps/wm-status",
             x: 348, y: 80, w: 268, h: 190
@@ -117,76 +69,31 @@ fn wm_core_specs() -> [WmCoreWindowSpec]:
     ]
 
 # ---------------------------------------------------------------------------
-# Env helpers
-# ---------------------------------------------------------------------------
-
-fn _env_text(key: text) -> text:
-    env_get(key).trim()
-
-fn _env_i32(key: text, fallback: i32) -> i32:
-    val raw = _env_text(key)
-    if raw == "":
-        return fallback
-    var i = 0
-    while i < raw.len():
-        # `as i64` on a single-character text yields its code point; accept
-        # ASCII digits only so garbage falls back instead of parsing as 0.
-        val cp = raw.substring(i, i + 1) as i64
-        if cp < 48 or cp > 57:
-            return fallback
-        i = i + 1
-    raw.to_int() ?? fallback
-
-fn _parent_dir(path: text) -> text:
-    val idx = path.last_index_of("/")
-    if idx <= 0:
-        return ""
-    path.substring(0, idx)
-
-# ---------------------------------------------------------------------------
-# Built-in content producers — placeholder frames until the cross-lane scene
-# cores (widgets/2d/web) land; each window kind gets a distinct rect-art
+# Built-in content producers — each window kind gets a distinct rect-art
 # producer so the desktop checksum is sensitive to every window.
 # ---------------------------------------------------------------------------
-
-fn blit_rect(
-    pixels: [u32], fw: i32, fh: i32, x: i32, y: i32, rw: i32, rh: i32,
-    color: u32
-):
-    """Clipped solid rect into a pixel buffer (arrays pass by reference)."""
-    if rw <= 0 or rh <= 0:
-        return
-    var yy = y
-    while yy < y + rh:
-        if yy >= 0 and yy < fh:
-            var xx = x
-            while xx < x + rw:
-                if xx >= 0 and xx < fw:
-                    pixels[yy * fw + xx] = color
-                xx = xx + 1
-        yy = yy + 1
 
 fn paint_wm_panel(w: i32, h: i32) -> [u32]:
     """The 'Rendering WM' window: a miniature desktop — title strip, two mini
     windows, a taskbar band with two colored entries."""
     var px: [u32] = [0xFF16233Au32; w * h]
-    blit_rect(px, w, h, 0, 0, w, 16, 0xFF24466Eu32)
-    blit_rect(px, w, h, 4, 22, w / 2 - 8, h / 2 - 30, 0xFF2E5E8Au32)
-    blit_rect(px, w, h, w / 2 + 4, 30, w / 2 - 8, h / 2 - 38, 0xFF3A7EA6u32)
-    blit_rect(px, w, h, 8, h / 2 + 2, w - 16, 12, 0xFF10161Fu32)
-    blit_rect(px, w, h, 12, h / 2 + 4, 24, 8, 0xFF33B26Bu32)
-    blit_rect(px, w, h, 42, h / 2 + 4, 24, 8, 0xFFE5C33Du32)
+    wm_blit_rect(px, w, h, 0, 0, w, 16, 0xFF24466Eu32)
+    wm_blit_rect(px, w, h, 4, 22, w / 2 - 8, h / 2 - 30, 0xFF2E5E8Au32)
+    wm_blit_rect(px, w, h, w / 2 + 4, 30, w / 2 - 8, h / 2 - 38, 0xFF3A7EA6u32)
+    wm_blit_rect(px, w, h, 8, h / 2 + 2, w - 16, 12, 0xFF10161Fu32)
+    wm_blit_rect(px, w, h, 12, h / 2 + 4, 24, 8, 0xFF33B26Bu32)
+    wm_blit_rect(px, w, h, 42, h / 2 + 4, 24, 8, 0xFFE5C33Du32)
     px
 
 fn paint_status(w: i32, h: i32) -> [u32]:
     """The 'Compositor Status' window: ok badge, metric rows, meter."""
     var px: [u32] = [0xFF141C28u32; w * h]
-    blit_rect(px, w, h, 10, 10, 22, 22, 0xFF33B26Bu32)
-    blit_rect(px, w, h, 42, 12, w - 52, 6, 0xFF3A4A66u32)
-    blit_rect(px, w, h, 42, 26, w - 72, 6, 0xFF3A4A66u32)
-    blit_rect(px, w, h, 42, 40, w - 92, 6, 0xFF3A4A66u32)
-    blit_rect(px, w, h, 10, h - 20, w - 20, 8, 0xFF223A55u32)
-    blit_rect(px, w, h, 10, h - 20, (w - 20) * 3 / 4, 8, 0xFF5CC0E0u32)
+    wm_blit_rect(px, w, h, 10, 10, 22, 22, 0xFF33B26Bu32)
+    wm_blit_rect(px, w, h, 42, 12, w - 52, 6, 0xFF3A4A66u32)
+    wm_blit_rect(px, w, h, 42, 26, w - 72, 6, 0xFF3A4A66u32)
+    wm_blit_rect(px, w, h, 42, 40, w - 92, 6, 0xFF3A4A66u32)
+    wm_blit_rect(px, w, h, 10, h - 20, w - 20, 8, 0xFF223A55u32)
+    wm_blit_rect(px, w, h, 10, h - 20, (w - 20) * 3 / 4, 8, 0xFF5CC0E0u32)
     px
 
 fn paint_for(key: text, cw: i32, ch: i32) -> [u32]:
@@ -194,242 +101,19 @@ fn paint_for(key: text, cw: i32, ch: i32) -> [u32]:
         return paint_status(cw, ch)
     paint_wm_panel(cw, ch)
 
-# ---------------------------------------------------------------------------
-# Pure pixel helpers
-# ---------------------------------------------------------------------------
-
-fn desktop_checksum(pixels: [u32]) -> i64:
-    var sum: i64 = 0
-    var i = 0
-    val n = pixels.len()
-    while i < n:
-        sum = sum + (pixels[i] as i64) * ((i + 1) as i64)
-        i = i + 1
-    sum
-
-fn desktop_distinct_colors(pixels: [u32]) -> i32:
-    var seen: Dict<text, bool> = {}
-    var count = 0
-    var i = 0
-    val n = pixels.len()
-    while i < n:
-        val key = pixels[i].to_string()
-        if not seen.contains_key(key):
-            seen[key] = true
-            count = count + 1
-        i = i + 1
-    count
-
-fn rect_matches(
-    frame: [u32], frame_w: i32, rect_x: i32, rect_y: i32,
-    rect_w: i32, rect_h: i32, expected: [u32]
-) -> bool:
-    """True when `expected` appears byte-identical at (rect_x, rect_y) in the
-    composited desktop — the proof that a window RENDERED: nothing about it
-    can be fabricated by a producer that never ran."""
-    if rect_w <= 0 or rect_h <= 0:
-        return false
-    if expected.len() != rect_w * rect_h:
-        return false
-    var y = 0
-    while y < rect_h:
-        var x = 0
-        while x < rect_w:
-            val at = (rect_y + y) * frame_w + rect_x + x
-            if at < 0 or at >= frame.len():
-                return false
-            if frame[at] != expected[y * rect_w + x]:
-                return false
-            x = x + 1
-        y = y + 1
-    true
-
-# ---------------------------------------------------------------------------
-# WM bridge admission — in-process, same production path as
-# wm_multiapp_taskbar_gui.spl: apply_bridge_request(COMP_CREATE_WINDOW).
-# ---------------------------------------------------------------------------
-
-fn content_theme_id() -> text:
-    """Mirror the compositor's authoritative content-theme resolution so the
-    external-frame acceptance gate admits our frames (unstamped frames are
-    rejected wholesale)."""
-    val active = active_wm_theme_id()
-    if active != "":
-        return active
-    default_theme_id()
-
-fn admit_window(
-    comp: HostCompositor, seq: i64, owner_port: i64, spec: WmCoreWindowSpec,
-    pixels: [u32], revision: i64
-) -> WmCoreAdmitted:
-    """Admit one window through the WM bridge and hand the compositor its
-    content frame through the external content-frame boundary."""
-    comp.apply_bridge_request(
-        seq, owner_port, COMP_CREATE_WINDOW.to_i64(), 0,
-        spec.title, spec.x, spec.y, spec.w, spec.h,
-        "", 900 + owner_port, spec.app_id
-    )
-    val idx = comp.windows.len() - 1
-    if idx < 0:
-        return WmCoreAdmitted(
-            key: spec.key, window_id: 0, title: spec.title,
-            content_x: 0, content_y: 0, content_w: 0, content_h: 0,
-            pixels: [], frame_accepted: false, reject_reason: "create-refused"
-        )
-    val wid = comp.windows[idx].id
-    val cw = spec.w - 8
-    val ch = spec.h - 36 - shared_wm_browser_content_extra_height(spec.app_id)
-    if cw <= 0 or ch <= 0 or pixels.len() != cw * ch:
-        return WmCoreAdmitted(
-            key: spec.key, window_id: wid, title: spec.title,
-            content_x: 0, content_y: 0, content_w: cw, content_h: ch,
-            pixels: [], frame_accepted: false,
-            reject_reason: "content-dims-mismatch"
-        )
-    if not comp.require_external_web_frame(wid):
-        return WmCoreAdmitted(
-            key: spec.key, window_id: wid, title: spec.title,
-            content_x: 0, content_y: 0, content_w: cw, content_h: ch,
-            pixels: [], frame_accepted: false,
-            reject_reason: "external-frame-slot-refused"
-        )
-    var frame = pixel_surface_content_frame(
-        "{wid}", "", 0, 0, cw, ch, pixels, revision, revision
-    )
-    frame.theme_id = content_theme_id()
-    val accepted = comp.set_external_web_frame(wid, frame)
-    WmCoreAdmitted(
-        key: spec.key, window_id: wid, title: spec.title,
-        content_x: spec.x + WM_CORE_CONTENT_INSET_X,
-        content_y: spec.y + WM_CORE_CONTENT_INSET_Y,
-        content_w: cw, content_h: ch,
-        pixels: pixels, frame_accepted: accepted,
-        reject_reason: if accepted: "" else: "external-frame-rejected"
-    )
-
-fn capture_desktop(comp: HostCompositor, opened: [WmCoreAdmitted]) -> WmCoreCapture:
-    """Render one frame on the compositor's headless pixel lane and collect
-    the receipts. The taskbar is read from comp.taskbar_model() — projected
-    from the compositor's live window list, never built here."""
-    comp.render_frame()
-    val pixels = comp.pure_simple_pixel_buffer()
-    val width = comp.width
-    var rendered = 0
-    for e in opened:
-        if e.frame_accepted and rect_matches(
-            pixels, width, e.content_x, e.content_y,
-            e.content_w, e.content_h, e.pixels
-        ):
-            rendered = rendered + 1
-    var titles = ""
-    for entry in comp.taskbar_model().running:
-        titles = if titles == "": entry.title else: titles + "|" + entry.title
-    WmCoreCapture(
-        width: width,
-        height: comp.height,
-        pixels: pixels,
-        checksum: desktop_checksum(pixels),
-        distinct_colors: desktop_distinct_colors(pixels),
-        open_windows: comp.windows.len(),
-        rendered_windows: rendered,
-        taskbar_entries: comp.taskbar_model().running.len(),
-        taskbar_titles: titles
-    )
-
-# ---------------------------------------------------------------------------
-# Artifact — PPM + provenance sidecar (wm_showcase convention)
-# ---------------------------------------------------------------------------
-
-fn capture_path() -> text:
-    val override_path = _env_text("SIMPLE_SHOWCASE_CAPTURE")
-    if override_path != "":
-        return override_path
-    WM_CORE_ARTIFACT_DIR + "/" + WM_CORE_ARTIFACT + ".ppm"
-
-fn provenance_path(ppm: text) -> text:
-    if ppm.len() > 4 and ppm.substring(ppm.len() - 4, ppm.len()) == ".ppm":
-        return ppm.substring(0, ppm.len() - 4) + ".provenance.sdn"
-    ppm + ".provenance.sdn"
-
-fn write_ppm(path: text, cap: WmCoreCapture) -> bool:
-    """Write the frame as P6 PPM. False when the frame is not a full buffer —
-    a short buffer is never padded into a plausible-looking image."""
-    if cap.width <= 0 or cap.height <= 0:
-        return false
-    if cap.pixels.len() != cap.width * cap.height:
-        return false
-    val dir = _parent_dir(path)
-    if dir != "":
-        mkdir_p(dir)
-    val bytes = encode_ppm_p6(cap.width as u32, cap.height as u32, cap.pixels)
-    if bytes.len() == 0:
-        return false
-    file_write_bytes(path, bytes)
-
-fn write_provenance(path: text, cap: WmCoreCapture, gui_presented: bool) -> bool:
-    val dir = _parent_dir(path)
-    if dir != "":
-        mkdir_p(dir)
-    write_file(
-        path,
-        "lane: \"cpu-headless\"\n" +
-            "readback_source: \"host_pixel_buffer\"\n" +
-            "gui_presented: {gui_presented}\n" +
-            "frame_width: {cap.width}\n" +
-            "frame_height: {cap.height}\n" +
-            "frame_checksum: {cap.checksum}\n" +
-            "distinct_colors: {cap.distinct_colors}\n" +
-            "declared_windows: {wm_core_specs().len()}\n" +
-            "open_windows: {cap.open_windows}\n" +
-            "rendered_windows: {cap.rendered_windows}\n" +
-            "taskbar_entries: {cap.taskbar_entries}\n" +
-            "taskbar_titles: \"{cap.taskbar_titles}\"\n"
-    )
-
-# ---------------------------------------------------------------------------
-# Optional physical-window present (SIMPLE_GUI=1). Presents the compositor's
-# own composed desktop 1:1 through the winit present call, pumping the loop
-# so the window stays live. Headless PPM remains the default and the
-# capture-gate path.
-# ---------------------------------------------------------------------------
-
-fn gui_present(w: i32, h: i32, title: text, pixels: [u32], frames: i32) -> bool:
-    val lp = winit_loop_new()
-    if not lp.is_valid:
-        return false
-    val win = winit_window_new(lp, w.to_i64(), h.to_i64(), title)
-    if not win.is_valid:
-        winit_loop_free(lp)
-        return false
-    var packed: [i64] = [0; pixels.len()]
-    var i = 0
-    while i < pixels.len():
-        packed[i] = pixels[i].to_i64() & 0xFFFFFF
-        i = i + 1
-    var f = 0
-    while f < frames:
-        winit_present_rgba(win, w.to_i64(), h.to_i64(), packed)
-        val until = rt_time_now_unix_micros() + 1000000
-        while rt_time_now_unix_micros() < until:
-            winit_poll_input(lp)
-        f = f + 1
-    winit_window_free(win)
-    winit_loop_free(lp)
-    true
-
 fn main() -> i64:
-    val w = _env_i32("SIMPLE_SHOWCASE_W", WM_CORE_DEFAULT_W)
-    val h = _env_i32("SIMPLE_SHOWCASE_H", WM_CORE_DEFAULT_H)
-    var frames = _env_i32("SIMPLE_SHOWCASE_FRAMES", 3)
+    val w = wm_env_i32("SIMPLE_SHOWCASE_W", WM_DEFAULT_W)
+    val h = wm_env_i32("SIMPLE_SHOWCASE_H", WM_DEFAULT_H)
+    var frames = wm_env_i32("SIMPLE_SHOWCASE_FRAMES", 3)
     if frames < 1:
         frames = 1
-    val want_gui = _env_text("SIMPLE_GUI") == "1"
-    if w < WM_CORE_MIN_W or h < WM_CORE_MIN_H:
-        print "showcase status=blocked desktop-too-small need={WM_CORE_MIN_W}x{WM_CORE_MIN_H} got={w}x{h}"
+    val want_gui = wm_env_text("SIMPLE_GUI") == "1"
+    if w < WM_MIN_W or h < WM_MIN_H:
+        print "showcase status=blocked desktop-too-small need={WM_MIN_W}x{WM_MIN_H} got={w}x{h}"
         return 1
 
     var comp = HostCompositor.new_headless(Size(width: w, height: h))
-    var opened: [WmCoreAdmitted] = []
+    var opened: [WmAdmitted] = []
     var seq: i64 = 0
     var revision: i64 = 0
     var owner_port: i64 = 100
@@ -440,9 +124,8 @@ fn main() -> i64:
         # Per-window stage marker: interpreted compositor startup is slow, so
         # without this a slow admit is indistinguishable from a hang.
         print "showcase stage=admit key={spec.key} title={spec.title}"
-        val cw = spec.w - 8
-        val ch = spec.h - 36 - shared_wm_browser_content_extra_height(spec.app_id)
-        opened.push(admit_window(
+        val (cw, ch) = wm_content_dims(spec)
+        opened.push(wm_admit_window(
             comp, seq, owner_port, spec, paint_for(spec.key, cw, ch), revision
         ))
 
@@ -455,7 +138,7 @@ fn main() -> i64:
             val item = "{e.key}={e.reject_reason}"
             rejects = if rejects == "": item else: rejects + "|" + item
 
-    val base = capture_desktop(comp, opened)
+    val base = wm_capture_desktop(comp, opened)
     print "showcase wm_windows declared={wm_core_specs().len()} open={base.open_windows} accepted={accepted} rendered={base.rendered_windows} rejects={rejects}"
     print "showcase wm_taskbar entries={base.taskbar_entries} titles={base.taskbar_titles}"
     print "showcase wm_capture checksum={base.checksum} distinct_colors={base.distinct_colors}"
@@ -473,10 +156,12 @@ fn main() -> i64:
         print "showcase status=blocked capture-blank checksum={base.checksum} distinct_colors={base.distinct_colors}"
         return 1
 
-    val ppm = capture_path()
-    val ppm_written = write_ppm(ppm, base)
-    val prov = provenance_path(ppm)
-    val provenance_written = write_provenance(prov, base, want_gui)
+    val ppm = wm_capture_path(WM_CORE_ARTIFACT)
+    val ppm_written = wm_write_ppm(ppm, base)
+    val prov = wm_provenance_path(ppm)
+    val provenance_written = wm_write_provenance(
+        prov, base, wm_core_specs().len(), "", want_gui
+    )
     if not ppm_written:
         print "showcase status=blocked ppm-write-failed path={ppm}"
         return 1
@@ -486,7 +171,7 @@ fn main() -> i64:
 
     if want_gui:
         print "showcase stage=gui-present frames={frames}"
-        if not gui_present(w, h, "Simple WM — Rendering WM (brief)", base.pixels, frames):
+        if not wm_gui_present(w, h, "Simple WM — Rendering WM (brief)", base.pixels, frames):
             print "showcase status=blocked gui-runtime-unavailable (no display or window backend)"
             return 1
         print "showcase gui_presented=true"
