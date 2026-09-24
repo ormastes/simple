@@ -1,0 +1,926 @@
+#!/bin/sh
+# PR fast check (goal item 4): for one range BASE..HEAD, inside ONE total time
+# budget (default 60s):
+#   1. compile the changed .spl files          (`simple check`, ONE invocation)
+#   2. run the unit specs of the changed files  (`simple run <spec>`)
+#   3. run the feature sspec (test/03_system)   (`simple run <spec>`)
+#
+# Goal item 5: this script IS the whole check, and it runs identically locally
+# and for CI. CI cannot run it directly (the GitHub runner has no bin/simple —
+# the `publish` job fails on every PR for exactly that reason), so the remote
+# side verifies a SIGNED receipt that this script produced over the exact head
+# tree: `--sign-key/--sign-identity` feeds scripts/check/sign-local-ci-receipt.shs
+# with the manifest config/check/pr_fast_gates.sdn (tier `pr`), and
+# .github/workflows/pr-fast-check.yml verifies it with
+# scripts/check/verify-local-ci-receipt.shs. No check logic lives in YAML.
+#
+# CHANGED-FILE -> TEST MAPPING (neither .claude/rules/testing.md nor
+# structure.md states a rule; this is the measured convention, 2026-09-24,
+# over 16,837 tracked src .spl):
+#   module name  src/lib/<p>.spl        -> std.<p> and lib.<p>
+#                src/<p>.spl            -> <p>, and <p> with every numbered
+#                                          layer prefix stripped
+#                                          (src/compiler/10.frontend/x ->
+#                                          compiler.10.frontend.x and
+#                                          compiler.frontend.x — both spellings
+#                                          are used by real specs)
+#                <dir>/__init__.spl     -> the directory's module
+#   unit spec    the MIRROR test/01_unit/<p>_spec.spl when it exists
+#                (1,301 files have one); otherwise every test/01_unit spec that
+#                `use`s the module — `use M`, `use M.{..}` or `use M.item`
+#                (5,458 files have at least one importer).
+#   feature spec the mirror test/03_system/<p>_spec.spl, otherwise every
+#                test/03_system spec that `use`s the module (2,126 files).
+#   A changed *_spec.spl is its own test. Canonical trees only: the legacy
+#   mirrors test/unit and test/integration are never used for mapping.
+#   A changed src/**/*.spl with no unit spec OR no feature spec is a FAIL
+#   naming the file — never a silent pass. Other changed .spl (test helpers,
+#   examples) are compiled but need no test. Non-.spl files are out of scope
+#   and listed.
+#
+# COMPILE MODE: `--syntax-only` by default. Measured 2026-09-24 with the Rust
+# seed as the check worker: semantic `simple check` reports HIR "unresolved
+# name" errors on UNCHANGED origin/main files (src/lib/common/base_encoding.spl,
+# src/app/check/targets.spl, src/app/cli/check_options.spl), so it cannot gate
+# a PR without failing clean code. `--semantic` opts in; the verdict line
+# always names the mode, so a syntax-only pass never claims semantic coverage.
+#
+# BUDGET: one deadline for the whole run (mapping + compile + every spec).
+# Compile and specs run concurrently (`--jobs`, default min(nproc,4)); each
+# child gets `timeout <seconds left>`. A spec that did not start or did not
+# finish before the deadline makes the run FAIL ("budget exceeded"). There is
+# no spec cap and no truncation: a change to a hot module with hundreds of
+# importers simply overruns and FAILs.
+#
+# Verdict line is ALWAYS the last line of stdout:
+#   PASS  — <n> changed file(s) checked, ...                          exit 0
+#   FAIL  — <reason>                                                  exit 1
+#   ERROR — nothing was checked (<reason>)                            exit 2
+# A range with changed files but zero examples executed is ERROR, never PASS.
+#
+# Usage:
+#   sh scripts/check/check-pr-fast.shs [--range BASE..HEAD] [options]
+#   sh scripts/check/check-pr-fast.shs --selftest
+#
+#   --range BASE..HEAD   default: $(git merge-base origin/main HEAD)..HEAD.
+#                        HEAD of the range must be the checked-out HEAD: the
+#                        compiler and specs run on the working tree.
+#   --simple-bin PATH    Simple binary (default $SIMPLE_BIN, else bin/simple)
+#   --budget SECONDS     total wall budget (default 60)
+#   --jobs N             concurrent spec runners (default min(nproc,4))
+#   --semantic           semantic `check` instead of --syntax-only
+#   --root DIR           repository root (default: git toplevel)
+#   --sign-key FILE      on PASS, sign a `pr`-tier receipt with this ssh key
+#   --sign-identity ID   signer principal (required with --sign-key)
+#   --publish REMOTE     after signing, push refs/notes/pr-fast-receipts
+#   --selftest           run the fixture selftest and exit
+#
+# Remote half (what .github/workflows/pr-fast-check.yml runs, from a copy of
+# THIS script materialized out of the PR BASE, never the head):
+#   sh check-pr-fast.shs --verify-receipt --base SHA --head SHA [--root DIR]
+#                        [--notes-remote NAME]
+#   Fetches refs/notes/pr-fast-receipts, reads the note on HEAD, and runs the
+#   BASE copy of scripts/check/verify-local-ci-receipt.shs against the BASE
+#   copy of config/check/ci_receipt_allowed_signers, with
+#   SIMPLE_CI_RECEIPT_MANIFEST_REL=config/check/pr_fast_gates.sdn, --tier pr,
+#   --rev HEAD, --changes BASE..HEAD. A PR that edits pr_fast_gates.sdn cannot
+#   admit itself. No note, no valid signature, a different tree or change set:
+#   FAIL. Fail-closed; there is no skip path.
+set -u
+export LC_ALL=C
+
+NOTE_REF=pr-fast-receipts
+RECEIPT_MANIFEST_REL=config/check/pr_fast_gates.sdn
+RECEIPT_TIER=pr
+RECEIPT_ROW=pr-fast-changed
+
+error_verdict() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+fail_verdict()  { printf 'FAIL — %s\n' "$1"; exit 1; }
+
+mktempdir() { mktemp -d 2>/dev/null || mktemp -d -t pr-fast; }
+
+now_s() { date +%s; }
+
+# Resolves a GNU-coreutils `timeout` that honours `-k` (kill after grace),
+# same rule as the push hook: prefer `gtimeout` (Homebrew name on macOS/BSD),
+# else a `timeout` whose `--version` reports GNU coreutils, never
+# C:\Windows\System32\timeout.exe (no -t/-k, exit 1 on the flags this script
+# needs, and would otherwise silently satisfy `command -v timeout` first on a
+# Windows PATH). Prints the resolved path on success; returns 1 naming nothing
+# on failure so the caller can fail fast and name the requirement itself.
+resolve_gnu_timeout() {
+    if command -v gtimeout >/dev/null 2>&1; then
+        command -v gtimeout
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        _tp=$(command -v timeout)
+        _tv=$("$_tp" --version 2>/dev/null | head -n 1)
+        case "$_tv" in
+            *"GNU coreutils"*) printf '%s\n' "$_tp"; return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# Portable sha256 of a file's content: sha256sum (GNU/most Linux), else
+# shasum -a 256 (macOS/BSD), else openssl dgst -sha256 (near-universal
+# fallback). Prints 64 lowercase hex chars on success; prints nothing and
+# returns 1 if no tool is available, so a caller can name the requirement
+# rather than sign a receipt with a silently-blank identity.
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | awk '{print $1}'
+        return 0
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+        return 0
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}'
+        return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------- mapping --
+# Writes, under $W:
+#   compile      .spl files to compile (one per line)
+#   specs        "<kind>\t<spec>" unique rows, kind in {unit, feature, self}
+#   unmapped     "<file>\t<missing kind>"
+#   mapreport    human-readable per-file mapping
+#   outofscope   changed non-.spl paths
+map_changes() {
+    awk -F'\t' -v W="$W" '
+        function modvariants(rel,   n, parts, i, a, b, c, stripped) {
+            # rel: src-relative path without .spl and without /__init__
+            nv = 0
+            n = split(rel, parts, "/")
+            a = ""; b = ""
+            for (i = 1; i <= n; i++) {
+                c = parts[i]
+                stripped = c
+                sub(/^[0-9]+\./, "", stripped)
+                a = (i == 1) ? c : a "." c
+                b = (i == 1) ? stripped : b "." stripped
+            }
+            if (rel ~ /^lib\//) {
+                sub(/^lib\./, "", a); sub(/^lib\./, "", b)
+                mv[++nv] = "std." a; mv[++nv] = "lib." a
+                if (b != a) { mv[++nv] = "std." b; mv[++nv] = "lib." b }
+            } else {
+                mv[++nv] = a
+                if (b != a) mv[++nv] = b
+            }
+        }
+        function addspec(kind, s) {
+            if (!((kind SUBSEP s) in seenspec)) {
+                seenspec[kind SUBSEP s] = 1
+                printf("%s\t%s\n", kind, s) > (W "/specs")
+            }
+        }
+        FILENAME == W "/tree" { intree[$1] = 1; next }
+        FILENAME == W "/uses" {
+            # $1 spec path, $2 use path. `use P` imports module P; `use P.item`
+            # imports module parent(P). Both are recorded.
+            spec = $1; p = $2
+            tier = (spec ~ /^test\/01_unit\//) ? "unit" : "feature"
+            key = tier SUBSEP p
+            if (!((key SUBSEP spec) in dup)) { dup[key SUBSEP spec] = 1; imp[key] = imp[key] " " spec }
+            if (index(p, ".") > 0) {
+                q = p; sub(/\.[^.]*$/, "", q)
+                key = tier SUBSEP q
+                if (!((key SUBSEP spec) in dup)) { dup[key SUBSEP spec] = 1; imp[key] = imp[key] " " spec }
+            }
+            next
+        }
+        {
+            f = $1
+            if (f !~ /\.spl$/) { print f > (W "/outofscope"); next }
+            print f > (W "/spl")
+            if (f ~ /_spec\.spl$/) {
+                # `simple check` refuses spec files (error E-SSPEC-CHECK:
+                # "SSpec command-block files must use bin/simple test"), and
+                # `simple run <spec>` compiles the spec before running it, so a
+                # changed spec is compiled by being run.
+                addspec("self", f)
+                printf("%s -> itself (compiled by running it)\n", f) > (W "/mapreport")
+                next
+            }
+            print f > (W "/compile")
+            if (f !~ /^src\//) {
+                printf("%s -> compile only (not under src/)\n", f) > (W "/mapreport")
+                next
+            }
+            rel = f; sub(/^src\//, "", rel); sub(/\.spl$/, "", rel); sub(/\/__init__$/, "", rel)
+            modvariants(rel)
+            for (t = 1; t <= 2; t++) {
+                tier = (t == 1) ? "unit" : "feature"
+                root = (t == 1) ? "test/01_unit/" : "test/03_system/"
+                how = ""; found = ""
+                mirror = root rel "_spec.spl"
+                if (mirror in intree) { found = " " mirror; how = "mirror" }
+                else {
+                    delete got
+                    for (i = 1; i <= nv; i++) {
+                        k = tier SUBSEP mv[i]
+                        if (k in imp) {
+                            m = split(imp[k], lst, " ")
+                            for (j = 1; j <= m; j++) if (lst[j] != "" && !(lst[j] in got)) { got[lst[j]] = 1; found = found " " lst[j] }
+                        }
+                    }
+                    how = "importers"
+                }
+                if (found == "") {
+                    printf("%s\t%s\n", f, tier) > (W "/unmapped")
+                    printf("%s -> %s: NONE (no %s, no spec in %s uses %s)\n", f, tier, mirror, root, mv[1]) > (W "/mapreport")
+                } else {
+                    m = split(found, lst, " "); cnt = 0
+                    for (j = 1; j <= m; j++) if (lst[j] != "") { addspec(tier, lst[j]); cnt++ }
+                    printf("%s -> %s: %d spec(s) via %s\n", f, tier, cnt, how) > (W "/mapreport")
+                }
+            }
+        }
+    ' "$W/tree" "$W/uses" "$W/changed"
+}
+
+# ------------------------------------------------------------ run helpers --
+# Spec worker: runs every spec in its bucket until the deadline. One result
+# row per spec: "<status>\t<executed>\t<failed>\t<rc>\t<spec>\t<log>".
+run_bucket() {
+    _bucket=$1; _res=$2; _n=0
+    while IFS= read -r _spec; do
+        [ -n "$_spec" ] || continue
+        _n=$((_n + 1))
+        _left=$((DEADLINE - $(now_s)))
+        if [ "$_left" -le 0 ]; then
+            printf 'budget\t0\t0\t-\t%s\n' "$_spec" >> "$_res"
+            continue
+        fi
+        _log="$W/logs/$(basename "$_res").$_n.log"
+        ( cd "$ROOT" && "$TIMEOUT_BIN" -k "$TIMEOUT_GRACE" "$_left" "$BIN" run "$_spec" ) > "$_log" 2>&1
+        _rc=$?
+        _line=$(grep 'SPEC FILE VERDICT:' "$_log" | tail -n 1)
+        _exec=$(printf '%s\n' "$_line" | sed -n 's/.* executed=\([0-9][0-9]*\).*/\1/p')
+        _fail=$(printf '%s\n' "$_line" | sed -n 's/.* failed=\([0-9][0-9]*\).*/\1/p')
+        _outc=$(printf '%s\n' "$_line" | sed -n 's/.* outcome=\([A-Za-z_]*\).*/\1/p')
+        [ -n "$_exec" ] || _exec=0
+        [ -n "$_fail" ] || _fail=0
+        if [ "$_rc" -eq 124 ]; then _st=budget
+        elif [ -z "$_line" ]; then _st=noverdict
+        elif [ "$_rc" -ne 0 ] || [ "$_fail" -ne 0 ] || [ "$_outc" != OK ]; then _st=fail
+        elif [ "$_exec" -eq 0 ]; then _st=vacuous
+        else _st=pass
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_st" "$_exec" "$_fail" "$_rc" "$_spec" "$_log" >> "$_res"
+    done < "$_bucket"
+}
+
+run_compile() {
+    _out=$1
+    _left=$((DEADLINE - $(now_s)))
+    if [ "$_left" -le 0 ]; then printf 'budget\n' > "$_out.status"; return; fi
+    if [ "$SEMANTIC" = 1 ]; then _flag=""; else _flag="--syntax-only"; fi
+    # shellcheck disable=SC2086
+    ( cd "$ROOT" && "$TIMEOUT_BIN" -k "$TIMEOUT_GRACE" "$_left" "$BIN" check $_flag $(cat "$W/compile") ) > "$_out" 2>&1
+    _rc=$?
+    printf '%s\n' "$(( $(now_s) - START ))" > "$_out.elapsed"
+    if [ "$_rc" -eq 124 ]; then printf 'budget\n' > "$_out.status"
+    elif [ "$_rc" -eq 0 ] && grep -q 'check passed (' "$_out"; then printf 'pass\n' > "$_out.status"
+    else printf 'fail %s\n' "$_rc" > "$_out.status"
+    fi
+}
+
+# ------------------------------------------------------------------ main --
+main() {
+    START=$(now_s)
+    # Children are killed 2s before the budget so reaping, result parsing and
+    # the verdict still land inside it (measured: a run whose children used the
+    # full budget finished 3s late).
+    _margin=2; [ "$BUDGET" -gt 4 ] || _margin=0
+    DEADLINE=$((START + BUDGET - _margin))
+
+    [ -n "$ROOT" ] || ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    [ -n "$ROOT" ] && [ -d "$ROOT" ] || error_verdict "not inside a git repository"
+
+    if [ -z "$RANGE" ]; then
+        _mb=$(git -C "$ROOT" merge-base origin/main HEAD 2>/dev/null)
+        _mb_rc=$?
+        [ "$_mb_rc" -eq 0 ] && [ -n "$_mb" ] || error_verdict "no --range and no merge-base with origin/main (fetch first)"
+        RANGE="$_mb..HEAD"
+    fi
+    case "$RANGE" in
+        *...*) error_verdict "three-dot range \"$RANGE\" is not accepted; pass BASE..HEAD" ;;
+        ?*..?*) ;;
+        *) error_verdict "range \"$RANGE\" is not of the form BASE..HEAD" ;;
+    esac
+    BASE_REV=${RANGE%%..*}; HEAD_REV=${RANGE#*..}
+    BASE_SHA=$(git -C "$ROOT" rev-parse --verify --quiet "$BASE_REV^{commit}")
+    [ -n "$BASE_SHA" ] || error_verdict "cannot resolve range base \"$BASE_REV\""
+    HEAD_SHA=$(git -C "$ROOT" rev-parse --verify --quiet "$HEAD_REV^{commit}")
+    [ -n "$HEAD_SHA" ] || error_verdict "cannot resolve range head \"$HEAD_REV\""
+    CUR_SHA=$(git -C "$ROOT" rev-parse --verify --quiet "HEAD^{commit}")
+    [ "$CUR_SHA" = "$HEAD_SHA" ] ||
+        error_verdict "range head $HEAD_SHA is not the checked-out HEAD $CUR_SHA; the check runs the working tree, so check out the head first"
+
+    if [ -n "$SIGN_KEY" ]; then
+        [ -n "$SIGN_ID" ] || error_verdict "--sign-key needs --sign-identity"
+        # `git diff --quiet HEAD --` alone only sees TRACKED changes, so an
+        # uncommitted new .spl a changed file imports could make a local run
+        # PASS while the receipt binds a HEAD tree that lacks it entirely.
+        # `git status --porcelain --untracked-files=all` reports both tracked
+        # modifications and untracked files in one pass (any output at all
+        # refuses to sign) and is cheap: measured 2026-09-24, ~1.5s on this
+        # ~109k-file tree, vs. a `git worktree add --detach HEAD` materialize
+        # of the same tree measured at 86s (plus 26s to remove) — well over
+        # the 60s budget, so a detached-worktree check was rejected on cost.
+        # Residual, stated rather than papered over: this still cannot see a
+        # gitignored path (e.g. under build/); `--ignored` would report the
+        # repo's normal ignored tree here and always refuse, so it is not
+        # used. A change that depends on a gitignored file is out of scope for
+        # this guard, same as it always was.
+        _untracked=$(git -C "$ROOT" status --porcelain --untracked-files=all -- 2>/dev/null)
+        _status_rc=$?
+        [ "$_status_rc" -eq 0 ] ||
+            error_verdict "git status --porcelain --untracked-files=all failed (exit $_status_rc)"
+        [ -z "$_untracked" ] ||
+            error_verdict "working tree has tracked or untracked changes; a receipt binds HEAD's tree, so the checked content must be exactly HEAD ($(printf '%s\n' "$_untracked" | wc -l | tr -d ' ') path(s), e.g. $(printf '%s\n' "$_untracked" | head -n 1))"
+    fi
+
+    W=$(mktempdir) || error_verdict "cannot create a temp directory"
+    trap 'rm -rf "$W"' EXIT
+    mkdir -p "$W/logs" || error_verdict "cannot create a log directory"
+    : > "$W/spl"; : > "$W/compile"; : > "$W/specs"; : > "$W/unmapped"; : > "$W/mapreport"; : > "$W/outofscope"
+
+    git -C "$ROOT" diff --no-renames --name-only --diff-filter=ACM "$BASE_SHA" "$HEAD_SHA" > "$W/changed_all"
+    _diff_rc=$?
+    [ "$_diff_rc" -eq 0 ] || error_verdict "git diff $BASE_SHA $HEAD_SHA failed (exit $_diff_rc)"
+    git -C "$ROOT" diff --no-renames --name-only --diff-filter=D "$BASE_SHA" "$HEAD_SHA" > "$W/deleted"
+    grep -v -e '^src/compiler_rust/vendor/' -e '^src/runtime/vendor/' "$W/changed_all" > "$W/changed"
+    NCHANGED=$(awk 'END {print NR+0}' "$W/changed")
+    NDELETED=$(awk 'END {print NR+0}' "$W/deleted")
+    [ "$NCHANGED" -gt 0 ] || error_verdict "range $RANGE changes no file (deleted: $NDELETED)"
+
+    git -C "$ROOT" ls-tree -r --name-only "$HEAD_SHA" -- test/01_unit test/03_system > "$W/tree_all"
+    _lt_rc=$?
+    [ "$_lt_rc" -eq 0 ] || error_verdict "git ls-tree failed (exit $_lt_rc)"
+    grep '_spec\.spl$' "$W/tree_all" > "$W/tree"
+    git -C "$ROOT" grep -I -E -o '^[[:space:]]*((pub|export) )?use [A-Za-z0-9_.]+' "$HEAD_SHA" \
+        -- 'test/01_unit/*_spec.spl' 'test/03_system/*_spec.spl' > "$W/uses_raw"
+    _gg_rc=$?
+    # git grep: 0 = matches, 1 = no match (legal in a tiny repo), >1 = error.
+    [ "$_gg_rc" -le 1 ] || error_verdict "git grep for spec imports failed (exit $_gg_rc)"
+    awk -v pfx="$HEAD_SHA:" '{
+        l = $0
+        if (index(l, pfx) == 1) l = substr(l, length(pfx) + 1)
+        c = index(l, ":"); path = substr(l, 1, c - 1); rest = substr(l, c + 1)
+        sub(/^.*use /, "", rest)
+        printf("%s\t%s\n", path, rest)
+    }' "$W/uses_raw" > "$W/uses"
+
+    map_changes
+    NSPL=$(awk 'END {print NR+0}' "$W/spl")
+    NCOMPILE=$(awk 'END {print NR+0}' "$W/compile")
+    NOOS=$(awk 'END {print NR+0}' "$W/outofscope")
+    NUNMAPPED=$(awk 'END {print NR+0}' "$W/unmapped")
+
+    printf 'pr-fast: range %s (%s..%s), %s changed, %s .spl (%s non-spec to compile), %s out of scope, %s deleted\n' \
+        "$RANGE" "$BASE_SHA" "$HEAD_SHA" "$NCHANGED" "$NSPL" "$NCOMPILE" "$NOOS" "$NDELETED"
+    printf 'pr-fast: binary %s\n' "$BIN"
+    sed 's/^/pr-fast: map  /' "$W/mapreport"
+    [ "$NOOS" -eq 0 ] || sed 's/^/pr-fast: out-of-scope  /' "$W/outofscope"
+    [ "$NDELETED" -eq 0 ] || sed 's/^/pr-fast: deleted (not checked)  /' "$W/deleted"
+
+    [ "$NSPL" -gt 0 ] || error_verdict "range $RANGE changes no .spl file ($NOOS out-of-scope path(s))"
+
+    # Unique spec paths (one spec can be both a unit and a feature spec of
+    # different files; it is run once).
+    awk -F'\t' '{print $2}' "$W/specs" | sort -u > "$W/speclist"
+    NUNIQUE=$(awk 'END {print NR+0}' "$W/speclist")
+
+    export SIMPLE_BIN="$BIN"
+    if [ "$NCOMPILE" -gt 0 ]; then
+        run_compile "$W/compile.out" &
+    else
+        printf 'pass\n' > "$W/compile.out.status"; printf '0\n' > "$W/compile.out.elapsed"
+    fi
+    _i=0
+    while [ "$_i" -lt "$JOBS" ]; do
+        awk -v j="$JOBS" -v k="$_i" '(NR - 1) % j == k' "$W/speclist" > "$W/bucket.$_i"
+        : > "$W/res.$_i"
+        if [ -s "$W/bucket.$_i" ]; then run_bucket "$W/bucket.$_i" "$W/res.$_i" & fi
+        _i=$((_i + 1))
+    done
+    wait
+    ELAPSED=$(( $(now_s) - START ))
+
+    CSTATUS=$(cat "$W/compile.out.status" 2>/dev/null)
+    cat "$W"/res.* > "$W/results" 2>/dev/null
+
+    reasons=""
+    add_reason() { if [ -z "$reasons" ]; then reasons=$1; else reasons="$reasons; $1"; fi; }
+
+    case "$CSTATUS" in
+        pass) printf 'pr-fast: compile %s file(s): pass (done at %ss)\n' "$NCOMPILE" "$(cat "$W/compile.out.elapsed" 2>/dev/null)" ;;
+        budget) add_reason "compile did not finish inside the ${BUDGET}s budget" ;;
+        *)  printf 'pr-fast: compile output (tail):\n'
+            grep -v -e 'gc-warning' -e '^warning: public function' "$W/compile.out" | tail -n 20 | sed 's/^/pr-fast:   /'
+            add_reason "compile failed ($CSTATUS): $(grep -E 'error\(s\) found|ERROR' "$W/compile.out" | tail -n 1)" ;;
+    esac
+
+    NEXEC=$(awk -F'\t' '{s += $2} END {print s+0}' "$W/results")
+    NRAN=$(awk -F'\t' '$1 != "budget" {n++} END {print n+0}' "$W/results")
+    for _st in fail noverdict vacuous budget; do
+        _names=$(awk -F'\t' -v s="$_st" '$1 == s {printf("%s%s", sep, $5); sep=" "}' "$W/results")
+        _cnt=$(awk -F'\t' -v s="$_st" '$1 == s {n++} END {print n+0}' "$W/results")
+        [ "$_cnt" -eq 0 ] && continue
+        case "$_st" in
+            fail) add_reason "$_cnt spec(s) failed: $_names" ;;
+            noverdict) add_reason "$_cnt spec(s) printed no SPEC FILE VERDICT line: $_names" ;;
+            vacuous) add_reason "$_cnt spec(s) executed 0 examples: $_names" ;;
+            budget) add_reason "budget exceeded: $_cnt of $NUNIQUE spec(s) not finished inside ${BUDGET}s" ;;
+        esac
+    done
+    for _f in fail noverdict; do
+        awk -F'\t' -v s="$_f" '$1 == s {print $4 "\t" $5 "\t" $6}' "$W/results" > "$W/show.$_f"
+        while IFS="$(printf '\t')" read -r _rc _sp _lg; do
+            printf 'pr-fast: spec %s (exit %s) output tail:\n' "$_sp" "$_rc"
+            grep -v -e 'gc-warning' -e '^warning: public function' "$_lg" | tail -n 8 | sed 's/^/pr-fast:   /'
+        done < "$W/show.$_f"
+    done
+    if [ "$NUNMAPPED" -gt 0 ]; then
+        _um=$(awk -F'\t' '{printf("%s%s(no %s spec)", sep, $1, $2); sep=" "}' "$W/unmapped")
+        add_reason "$NUNMAPPED missing test mapping(s): $_um"
+    fi
+    [ "$ELAPSED" -le "$BUDGET" ] || add_reason "wall time ${ELAPSED}s exceeds the ${BUDGET}s budget"
+
+    _mode=syntax-only; [ "$SEMANTIC" = 1 ] && _mode=semantic
+    printf 'pr-fast: %s spec(s) run, %s example(s) executed, compile=%s, %ss of %ss\n' \
+        "$NRAN" "$NEXEC" "$_mode" "$ELAPSED" "$BUDGET"
+
+    [ -z "$reasons" ] || fail_verdict "$reasons"
+    [ "$NEXEC" -gt 0 ] || error_verdict "$NSPL changed .spl file(s) but 0 examples executed"
+
+    SUFFIX=""
+    [ -z "$SIGN_KEY" ] || sign_receipt
+
+    NUNIT=$(awk -F'\t' '$1 == "unit"' "$W/specs" | awk 'END {print NR+0}')
+    NFEAT=$(awk -F'\t' '$1 == "feature"' "$W/specs" | awk 'END {print NR+0}')
+    NSELF=$(awk -F'\t' '$1 == "self"' "$W/specs" | awk 'END {print NR+0}')
+    printf 'PASS — %s changed file(s) checked: compile=%s %s file(s), %s unit + %s feature + %s changed spec(s) (%s unique) ran %s example(s) in %ss of %ss%s (callers in unchanged files and deleted files are NOT compiled)\n' \
+        "$NCHANGED" "$_mode" "$NCOMPILE" "$NUNIT" "$NFEAT" "$NSELF" "$NUNIQUE" "$NEXEC" "$ELAPSED" "$BUDGET" "$SUFFIX"
+    exit 0
+}
+
+# Runs one of the shared receipt tools against the pr-fast manifest.
+#
+# Both tools run a mandatory --selftest before every real operation, and that
+# inline selftest INHERITS SIMPLE_CI_RECEIPT_MANIFEST_REL: its fixtures only
+# carry config/check/must_check_gates.sdn, so with the override set it fails
+# ("tree ... has no config/check/pr_fast_gates.sdn") and the tool refuses to
+# run. Measured 2026-09-24 on the signer: 33/33 selftest cases pass without
+# the override, S1-S5 fail with it. The tools are owned by another lane, so
+# instead of editing them this runs their selftest FIRST, fatally, with the
+# override unset, and then the real operation with the override and the
+# tools' own "already self-tested" marker.
+receipt_tool() {
+    _tool=$1; shift
+    # Git Bash's default `ln -s` makes a COPY, which fails the verifier's own
+    # "(l) symlinked receipt ERRORs" case on Windows (measured: 24/25 without,
+    # 25/25 with native symlinks). Linux/macOS ignore MSYS.
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*) MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict"; export MSYS ;;
+    esac
+    ( unset SIMPLE_CI_RECEIPT_MANIFEST_REL SIMPLE_CI_RECEIPT_IN_SELFTEST; sh "$_tool" --selftest ) > "$W/tool_selftest.out" 2>&1
+    _ts_rc=$?
+    if [ "$_ts_rc" -ne 0 ]; then
+        printf 'mandatory selftest of %s failed (exit %s): %s\n' "$_tool" "$_ts_rc" "$(tail -n 1 "$W/tool_selftest.out")"
+        return 90
+    fi
+    SIMPLE_CI_RECEIPT_IN_SELFTEST=1 SIMPLE_CI_RECEIPT_MANIFEST_REL=$RECEIPT_MANIFEST_REL sh "$_tool" "$@"
+}
+
+# Signs a `pr`-tier receipt through the shared signer and attaches it as a
+# note on refs/notes/$NOTE_REF (NOT refs/notes/ci-receipts: that ref holds the
+# push-tier receipt keyed by the same head sha, and the signer's --note uses
+# `-f`, so sharing it would clobber one receipt with the other).
+sign_receipt() {
+    _signer="$ROOT/scripts/check/sign-local-ci-receipt.shs"
+    [ -f "$_signer" ] || fail_verdict "checks passed but $_signer is missing; no receipt signed"
+    printf '%s pass\n' "$RECEIPT_ROW" > "$W/receipt_results"
+    _outdir="$ROOT/build/pr-fast"
+    mkdir -p "$_outdir" || fail_verdict "checks passed but cannot create $_outdir"
+    _receipt="$_outdir/pr_fast_receipt.v1.txt"
+
+    # BINDING (review item2/item4 finding #2): the receipt's `rows:` schema
+    # (owned by scripts/check/{sign,verify}-local-ci-receipt.shs, a separate
+    # lane — see receipt_tool() above for why this script does not edit them)
+    # binds only "<row-id> pass|fail"; it has no field for the compile mode,
+    # the budget, or which `simple` binary ran, so a receipt that recorded
+    # only "pr-fast-changed pass" could not distinguish a real run from one
+    # made by a fake binary under a slack budget. The only signed field this
+    # script controls without touching that shared schema is `session_id`
+    # (charset [A-Za-z0-9._@+-]+, opaque to the shared tools): it is repurposed
+    # here, instead of --signed-at-style bookkeeping, to carry a fixed-grammar
+    # positional token binding mode, budget, binary size and binary content
+    # hash. This is a v1 workaround, not a schema change — a real v2 field
+    # belongs to that shared lane's owner.
+    _mode=syntax-only; [ "$SEMANTIC" = 1 ] && _mode=semantic
+    _binsize=$(wc -c < "$BIN" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$_binsize" ] && [ "$_binsize" -gt 0 ] 2>/dev/null ||
+        fail_verdict "checks passed but cannot stat simple binary \"$BIN\" for the receipt's binary-identity field"
+    _binsha=$(sha256_file "$BIN")
+    _binsha_rc=$?
+    if [ "$_binsha_rc" -eq 0 ] && [ -n "$_binsha" ]; then
+        printf '%s' "$_binsha" | grep -qE '^[0-9a-f]{64}$' || _binsha_rc=1
+    else
+        _binsha_rc=1
+    fi
+    [ "$_binsha_rc" -eq 0 ] ||
+        fail_verdict "checks passed but no sha256 tool (sha256sum, shasum -a 256 or openssl) produced a valid 64-hex digest of the simple binary for the receipt"
+    _session_id="prfast.v1.$_mode.$BUDGET.$_binsize.$_binsha"
+    printf 'pr-fast: binary identity for the receipt: path=%s size=%s sha256=%s\n' "$BIN" "$_binsize" "$_binsha"
+
+    receipt_tool "$_signer" --root "$ROOT" --key "$SIGN_KEY" --identity "$SIGN_ID" \
+        --results "$W/receipt_results" --rev "$HEAD_SHA" --changes "$BASE_SHA..$HEAD_SHA" \
+        --tier "$RECEIPT_TIER" --session-id "$_session_id" --out "$_receipt" > "$W/sign.out" 2>&1
+    _sign_rc=$?
+    [ "$_sign_rc" -eq 0 ] || fail_verdict "checks passed but signing failed (exit $_sign_rc): $(tail -n 1 "$W/sign.out")"
+    cat "$_receipt" "$_receipt.sig" > "$W/note_payload"
+    _cat_rc=$?
+    [ "$_cat_rc" -eq 0 ] || fail_verdict "checks passed but cannot assemble the receipt note"
+    _blob=$(git -C "$ROOT" hash-object -w "$W/note_payload")
+    _ho_rc=$?
+    [ "$_ho_rc" -eq 0 ] && [ -n "$_blob" ] || fail_verdict "checks passed but git hash-object failed"
+    git -C "$ROOT" notes --ref="$NOTE_REF" add -f -C "$_blob" "$HEAD_SHA" > /dev/null 2>&1
+    _note_rc=$?
+    [ "$_note_rc" -eq 0 ] || fail_verdict "checks passed, receipt signed at $_receipt, but attaching refs/notes/$NOTE_REF failed"
+    SUFFIX="; receipt signed and attached to refs/notes/$NOTE_REF for $HEAD_SHA"
+    if [ -n "$PUBLISH" ]; then
+        git -C "$ROOT" push "$PUBLISH" "refs/notes/$NOTE_REF" > "$W/push.out" 2>&1
+        _push_rc=$?
+        [ "$_push_rc" -eq 0 ] ||
+            fail_verdict "checks passed, receipt attached locally, but pushing refs/notes/$NOTE_REF to $PUBLISH failed (fetch it and 'git notes --ref=$NOTE_REF merge', then retry): $(tail -n 1 "$W/push.out")"
+        SUFFIX="$SUFFIX, pushed to $PUBLISH"
+    fi
+}
+
+# --------------------------------------------------------- remote verify --
+verify_receipt() {
+    [ -n "$V_BASE" ] && [ -n "$V_HEAD" ] || error_verdict "--verify-receipt needs --base SHA and --head SHA"
+    [ -n "$ROOT" ] || ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    [ -n "$ROOT" ] && [ -d "$ROOT" ] || error_verdict "not inside a git repository"
+    command -v ssh-keygen >/dev/null 2>&1 || error_verdict "ssh-keygen (OpenSSH >= 8) is required and not installed"
+    W=$(mktempdir) || error_verdict "cannot create a temp directory"
+    trap 'rm -rf "$W"' EXIT
+
+    git -C "$ROOT" fetch --no-tags --quiet "$NOTES_REMOTE" "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF" > "$W/fetch.out" 2>&1
+    _f_rc=$?
+    [ "$_f_rc" -eq 0 ] || fail_verdict "no refs/notes/$NOTE_REF on $NOTES_REMOTE (git fetch exit $_f_rc): nobody published a pr-fast receipt; run check-pr-fast.shs --sign-key ... --publish $NOTES_REMOTE locally"
+    for _rev in "$V_BASE" "$V_HEAD"; do
+        git -C "$ROOT" cat-file -e "$_rev^{commit}" 2>/dev/null
+        _ce_rc=$?
+        [ "$_ce_rc" -eq 0 ] || error_verdict "commit $_rev is not present locally (fetch the PR endpoints first)"
+    done
+
+    # Base-only policy (a PR must never supply its own trust root or rules).
+    # Same layout as the repo so the verifier's own selftest finds its
+    # sibling allowlist (its case c2 reads <root>/config/check/...).
+    mkdir -p "$W/base/scripts/check" "$W/base/config/check" || error_verdict "cannot create the base policy directory"
+    git -C "$ROOT" show "$V_BASE:scripts/check/verify-local-ci-receipt.shs" > "$W/base/scripts/check/verify-local-ci-receipt.shs" 2>/dev/null
+    _s1=$?
+    [ "$_s1" -eq 0 ] || fail_verdict "base $V_BASE carries no scripts/check/verify-local-ci-receipt.shs"
+    git -C "$ROOT" show "$V_BASE:config/check/ci_receipt_allowed_signers" > "$W/base/config/check/ci_receipt_allowed_signers" 2>/dev/null
+    _s2=$?
+    [ "$_s2" -eq 0 ] || fail_verdict "base $V_BASE carries no config/check/ci_receipt_allowed_signers"
+    _mb=$(git -C "$ROOT" rev-parse --verify --quiet "$V_BASE:$RECEIPT_MANIFEST_REL")
+    _mh=$(git -C "$ROOT" rev-parse --verify --quiet "$V_HEAD:$RECEIPT_MANIFEST_REL")
+    [ -n "$_mb" ] || fail_verdict "base $V_BASE carries no $RECEIPT_MANIFEST_REL"
+    [ "$_mb" = "$_mh" ] || fail_verdict "the PR edits $RECEIPT_MANIFEST_REL; a receipt may never admit its own rules"
+
+    git -C "$ROOT" notes --ref="$NOTE_REF" show "$V_HEAD" > "$W/payload" 2>/dev/null
+    _n_rc=$?
+    [ "$_n_rc" -eq 0 ] && [ -s "$W/payload" ] ||
+        fail_verdict "no pr-fast receipt note for head $V_HEAD on refs/notes/$NOTE_REF"
+    awk -v r="$W/receipt" -v s="$W/receipt.sig" '
+        /^-----BEGIN SSH SIGNATURE-----$/ { sig = 1 }
+        { if (sig) print > s; else print > r }
+    ' "$W/payload"
+    [ -s "$W/receipt" ] && [ -s "$W/receipt.sig" ] ||
+        fail_verdict "the note on $V_HEAD is not a receipt followed by an SSH signature"
+
+    receipt_tool "$W/base/scripts/check/verify-local-ci-receipt.shs" --root "$ROOT" \
+        --receipt "$W/receipt" --signature "$W/receipt.sig" \
+        --allowed-signers "$W/base/config/check/ci_receipt_allowed_signers" --rev "$V_HEAD" --changes "$V_BASE..$V_HEAD" \
+        --tier "$RECEIPT_TIER" > "$W/verify.out" 2>&1
+    _v_rc=$?
+    _v_last=$(tail -n 1 "$W/verify.out")
+    sed 's/^/pr-fast-verify: /' "$W/verify.out"
+    [ "$_v_rc" -eq 0 ] || fail_verdict "receipt for $V_HEAD did not verify (verifier exit $_v_rc): $_v_last"
+
+    # The shared verifier only proves the receipt's SIGNATURE and its ROW set
+    # (pr-fast-changed pass) against the manifest; it knows nothing about this
+    # script's session_id-encoded binding (see sign_receipt() above) of
+    # compile mode, budget and simple-binary identity. Check that binding
+    # here, in the remote half this script itself is, and fail closed if it
+    # is absent or malformed — a receipt that only proved "pr-fast-changed
+    # pass" could have come from any compile mode, any budget, or a fake
+    # binary, which is exactly the overclaim this exists to close.
+    _v_session_raw=$(awk -F': ' '$1 == "session_id" {print $2; exit}' "$W/receipt")
+    _v_session=""
+    printf '%s' "$_v_session_raw" | grep -qE '^prfast\.v1\.(syntax-only|semantic)\.[0-9]+\.[0-9]+\.[0-9a-f]{64}$' &&
+        _v_session="$_v_session_raw"
+    [ -n "$_v_session" ] ||
+        fail_verdict "receipt for $V_HEAD carries no valid session_id binary-identity binding (expected prfast.v1.<syntax-only|semantic>.<budget>.<binsize>.<sha256>; got \"$_v_session_raw\")"
+    printf 'pr-fast-verify: binding %s\n' "$_v_session"
+
+    printf 'PASS — 1 pr-fast receipt checked for %s..%s: %s (binding %s)\n' "$V_BASE" "$V_HEAD" "$_v_last" "$_v_session"
+    exit 0
+}
+
+# --------------------------------------------------------------- selftest --
+selftest() {
+    SELF=$1
+    T=$(mktempdir) || { printf 'FAIL — selftest cannot create a temp dir\n'; exit 1; }
+    trap 'rm -rf "$T"' EXIT
+    FAKE="$T/fake-simple"
+    cat > "$FAKE" <<'EOF'
+#!/bin/sh
+cmd=$1; shift
+case "$cmd" in
+check)
+    [ "${1:-}" = --syntax-only ] && shift
+    n=0; bad=0
+    for f in "$@"; do
+        # Mirrors the real `simple check`, which rejects spec files outright.
+        case "$f" in *_spec.spl) echo "error[E-SSPEC-CHECK]: $f"; echo "1 error(s) found in 1 of 1 file(s)"; exit 1 ;; esac
+        n=$((n + 1)); grep -q SYNTAX_ERROR "$f" && bad=$((bad + 1))
+    done
+    if [ "$bad" -gt 0 ]; then echo "$bad error(s) found in $bad of $n file(s)"; exit 1; fi
+    echo "Syntax-only check passed ($n file(s)); semantic coverage was not requested"
+    exit 0 ;;
+run)
+    f=$1
+    grep -q SLEEPME "$f" && sleep 6
+    if grep -q IGNORETERM "$f"; then trap '' TERM; sleep 30; fi
+    if grep -q NOVERDICT "$f"; then echo "ran"; exit 0; fi
+    if grep -q FAILME "$f"; then
+        echo "SPEC FILE VERDICT: $f outcome=ERROR declared>=2 executed=2 passed=1 failed=1 skipped=0 dropped=0"; exit 1
+    fi
+    echo "SPEC FILE VERDICT: $f outcome=OK declared>=2 executed=2 passed=2 failed=0 skipped=0 dropped=0"
+    exit 0 ;;
+esac
+exit 3
+EOF
+    chmod +x "$FAKE"
+    R="$T/repo"
+    mkdir -p "$R/src/lib/common" "$R/src/compiler/10.frontend" "$R/test/01_unit/lib/common" \
+             "$R/test/01_unit/compiler" "$R/test/03_system/feature" || exit 1
+    printf 'fn foo() -> i64:\n    1\n' > "$R/src/lib/common/foo.spl"
+    printf 'fn bar() -> i64:\n    2\n' > "$R/src/lib/common/bar.spl"
+    printf 'fn qux() -> i64:\n    3\n' > "$R/src/lib/common/qux.spl"
+    printf 'fn baz() -> i64:\n    4\n' > "$R/src/compiler/10.frontend/baz.spl"
+    printf 'use std.spec\nuse std.common.foo.{foo}\n' > "$R/test/01_unit/lib/common/foo_spec.spl"
+    printf 'use std.spec\n' > "$R/test/01_unit/lib/common/qux_spec.spl"
+    printf 'use compiler.frontend.baz.{baz}\n' > "$R/test/01_unit/compiler/baz_user_spec.spl"
+    printf 'use std.common.foo\n' > "$R/test/03_system/feature/foo_feature_spec.spl"
+    printf '    use compiler.10.frontend.baz\n' > "$R/test/03_system/feature/baz_feature_spec.spl"
+    printf 'readme\n' > "$R/README.md"
+    (
+        cd "$R" && git init -q && git config core.autocrlf false && git config user.email st@invalid && git config user.name st &&
+        git add -A && git commit -q -m base
+    ) || { printf 'FAIL — selftest cannot build the fixture repo\n'; exit 1; }
+    BASE=$(git -C "$R" rev-parse HEAD)
+
+    st_ok=0; st_bad=0
+    # scenario <name> <expected rc> <expected verdict prefix> <must-contain> <budget> <edit cmd>
+    scenario() {
+        _name=$1; _want_rc=$2; _want_pfx=$3; _want_sub=$4; _bud=$5; _edit=$6; _bin=${7:-$FAKE}
+        git -C "$R" checkout -q --detach "$BASE" && git -C "$R" reset -q --hard "$BASE"
+        if [ -n "$_edit" ]; then
+            ( cd "$R" && sh -c "$_edit" && git add -A && git commit -q -m "$_name" ) || { st_bad=$((st_bad + 1)); printf 'selftest: BAD %s (fixture edit failed)\n' "$_name"; return; }
+        fi
+        _out=$(sh "$SELF" --root "$R" --range "$BASE..HEAD" --simple-bin "$_bin" --budget "$_bud" --jobs 2 2>&1)
+        _rc=$?
+        _last=$(printf '%s\n' "$_out" | tail -n 1)
+        case "$_last" in "$_want_pfx"*) _pfx_ok=1 ;; *) _pfx_ok=0 ;; esac
+        case "$_last" in *"$_want_sub"*) _sub_ok=1 ;; *) _sub_ok=0 ;; esac
+        if [ "$_rc" -eq "$_want_rc" ] && [ "$_pfx_ok" = 1 ] && [ "$_sub_ok" = 1 ]; then
+            st_ok=$((st_ok + 1)); printf 'selftest: ok  %s -> %s\n' "$_name" "$_last"
+        else
+            st_bad=$((st_bad + 1)); printf 'selftest: BAD %s (rc %s, want %s) -> %s\n' "$_name" "$_rc" "$_want_rc" "$_last"
+        fi
+    }
+    scenario "S1 clean change PASSes"            0 "PASS" "1 unit + 1 feature" 60 "printf '# edit\n' >> src/lib/common/foo.spl"
+    scenario "S2 failing unit spec FAILs"         1 "FAIL" "spec(s) failed: test/01_unit/lib/common/foo_spec.spl" 60 "printf '# edit\n' >> src/lib/common/foo.spl && printf '# FAILME\n' >> test/01_unit/lib/common/foo_spec.spl"
+    scenario "S3 no resolvable test FAILs"        1 "FAIL" "src/lib/common/bar.spl(no unit spec)" 60 "printf '# edit\n' >> src/lib/common/bar.spl"
+    scenario "S4 empty range ERRORs"              2 "ERROR — nothing was checked" "changes no file" 60 ""
+    scenario "S5 docs-only range ERRORs"          2 "ERROR — nothing was checked" "no .spl" 60 "printf 'more\n' >> README.md"
+    scenario "S6 compile error FAILs"             1 "FAIL" "compile failed" 60 "printf 'SYNTAX_ERROR\n' >> src/lib/common/foo.spl"
+    scenario "S7 budget overrun FAILs"            1 "FAIL" "budget exceeded" 3 "printf '# edit\n' >> src/lib/common/foo.spl && printf '# SLEEPME\n' >> test/01_unit/lib/common/foo_spec.spl"
+    scenario "S8 missing binary ERRORs"           2 "ERROR — nothing was checked" "simple binary" 60 "printf '# edit\n' >> src/lib/common/foo.spl" "$T/no-such-simple"
+    scenario "S9 numbered-layer module maps"      0 "PASS" "1 unit + 1 feature" 60 "printf '# edit\n' >> src/compiler/10.frontend/baz.spl"
+    scenario "S10 missing feature spec FAILs"     1 "FAIL" "qux.spl(no feature spec)" 60 "printf '# edit\n' >> src/lib/common/qux.spl"
+    scenario "S11 spec without verdict FAILs"     1 "FAIL" "no SPEC FILE VERDICT" 60 "printf '# NOVERDICT\n' >> test/01_unit/lib/common/foo_spec.spl"
+    scenario "S12 changed spec runs itself"       0 "PASS" "1 changed spec" 60 "printf '# edit\n' >> test/01_unit/lib/common/foo_spec.spl"
+
+    # st_verdict <name> <want rc> <want prefix> <want substring> <cmd...>
+    # (defined here so S14 below can use it; redefined identically further
+    # down for the receipt round trip so that section stays self-contained.)
+    st_verdict() {
+        _name=$1; _want_rc=$2; _want_pfx=$3; _want_sub=$4; shift 4
+        _out=$("$@" 2>&1)
+        _rc=$?
+        _last=$(printf '%s\n' "$_out" | tail -n 1)
+        case "$_last" in "$_want_pfx"*) _pfx_ok=1 ;; *) _pfx_ok=0 ;; esac
+        case "$_last" in *"$_want_sub"*) _sub_ok=1 ;; *) _sub_ok=0 ;; esac
+        if [ "$_rc" -eq "$_want_rc" ] && [ "$_pfx_ok" = 1 ] && [ "$_sub_ok" = 1 ]; then
+            st_ok=$((st_ok + 1)); printf 'selftest: ok  %s -> %s\n' "$_name" "$_last"
+        else
+            st_bad=$((st_bad + 1)); printf 'selftest: BAD %s (rc %s, want %s) -> %s\n' "$_name" "$_rc" "$_want_rc" "$_last"
+        fi
+    }
+
+    # S13: a spec that ignores TERM must still be bounded — `timeout -k` sends
+    # KILL after the grace period, so the whole run must finish within
+    # budget + TIMEOUT_GRACE + slack, never hang past it.
+    git -C "$R" checkout -q --detach "$BASE" && git -C "$R" reset -q --hard "$BASE"
+    ( cd "$R" && printf '# edit\n' >> src/lib/common/foo.spl && printf '# IGNORETERM\n' >> test/01_unit/lib/common/foo_spec.spl && git add -A && git commit -q -m S13 )
+    _s13_bud=3
+    _s13_start=$(now_s)
+    _s13_out=$(sh "$SELF" --root "$R" --range "$BASE..HEAD" --simple-bin "$FAKE" --budget "$_s13_bud" --jobs 2 2>&1)
+    _s13_rc=$?
+    _s13_elapsed=$(($(now_s) - _s13_start))
+    _s13_last=$(printf '%s\n' "$_s13_out" | tail -n 1)
+    # Grace is fixed at 5s in this script (TIMEOUT_GRACE); allow generous slack
+    # for process teardown/reaping on a loaded host.
+    _s13_bound=$((_s13_bud + 5 + 20))
+    case "$_s13_last" in
+        FAIL*budget*) _s13_verdict_ok=1 ;;
+        *) _s13_verdict_ok=0 ;;
+    esac
+    if [ "$_s13_rc" -eq 1 ] && [ "$_s13_verdict_ok" = 1 ] && [ "$_s13_elapsed" -le "$_s13_bound" ]; then
+        st_ok=$((st_ok + 1)); printf 'selftest: ok  S13 TERM-ignoring spec is killed within budget+grace -> %s (%ss <= %ss)\n' "$_s13_last" "$_s13_elapsed" "$_s13_bound"
+    else
+        st_bad=$((st_bad + 1)); printf 'selftest: BAD S13 TERM-ignoring spec (rc %s, elapsed %ss, bound %ss) -> %s\n' "$_s13_rc" "$_s13_elapsed" "$_s13_bound" "$_s13_last"
+    fi
+
+    # S14: an untracked .spl file must not yield a signable PASS — the sign
+    # gate must refuse before ever reaching the compile/spec run.
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        git -C "$R" checkout -q --detach "$BASE" && git -C "$R" reset -q --hard "$BASE"
+        ( cd "$R" && printf '# edit\n' >> src/lib/common/foo.spl && git add -A && git commit -q -m S14 )
+        printf 'fn untracked() -> i64:\n    5\n' > "$R/src/lib/common/untracked_helper.spl"
+        ssh-keygen -q -t ed25519 -N '' -C s14 -f "$T/s14key" > /dev/null 2>&1
+        st_verdict "S14 untracked .spl blocks --sign-key" 2 "ERROR — nothing was checked" "tracked or untracked changes" \
+            sh "$SELF" --root "$R" --range "$BASE..HEAD" --simple-bin "$FAKE" --jobs 2 \
+            --sign-key "$T/s14key" --sign-identity s14@fixture
+        rm -f "$R/src/lib/common/untracked_helper.spl"
+    else
+        st_bad=$((st_bad + 1)); printf 'selftest: BAD S14 untracked-file guard not exercised (ssh-keygen missing)\n'
+    fi
+
+    # --- receipt round trip: local sign+publish, remote verify -------------
+    # Uses the REAL shared signer/verifier (copied from this checkout) and a
+    # bare repository standing in for origin.
+    st_verdict() {  # <name> <want rc> <want prefix> <want substring> <cmd...>
+        _name=$1; _want_rc=$2; _want_pfx=$3; _want_sub=$4; shift 4
+        _out=$("$@" 2>&1)
+        _rc=$?
+        _last=$(printf '%s\n' "$_out" | tail -n 1)
+        case "$_last" in "$_want_pfx"*) _pfx_ok=1 ;; *) _pfx_ok=0 ;; esac
+        case "$_last" in *"$_want_sub"*) _sub_ok=1 ;; *) _sub_ok=0 ;; esac
+        if [ "$_rc" -eq "$_want_rc" ] && [ "$_pfx_ok" = 1 ] && [ "$_sub_ok" = 1 ]; then
+            st_ok=$((st_ok + 1)); printf 'selftest: ok  %s -> %s\n' "$_name" "$_last"
+        else
+            st_bad=$((st_bad + 1)); printf 'selftest: BAD %s (rc %s, want %s) -> %s\n' "$_name" "$_rc" "$_want_rc" "$_last"
+        fi
+    }
+    SELF_ROOT=$(cd "$(dirname "$SELF")/../.." && pwd)
+    if command -v ssh-keygen >/dev/null 2>&1 &&
+       [ -f "$SELF_ROOT/scripts/check/sign-local-ci-receipt.shs" ] &&
+       [ -f "$SELF_ROOT/scripts/check/verify-local-ci-receipt.shs" ]; then
+        ssh-keygen -q -t ed25519 -N '' -C st -f "$T/key" > /dev/null 2>&1 || { printf 'FAIL — selftest cannot generate an ssh key\n'; exit 1; }
+        mkdir -p "$R/scripts/check" "$R/config/check"
+        cp "$SELF_ROOT/scripts/check/sign-local-ci-receipt.shs" "$SELF_ROOT/scripts/check/verify-local-ci-receipt.shs" "$R/scripts/check/"
+        cp "$SELF_ROOT/$RECEIPT_MANIFEST_REL" "$R/$RECEIPT_MANIFEST_REL"
+        printf 'st@fixture namespaces="simple-ci-receipt" %s\n' "$(cat "$T/key.pub")" > "$R/config/check/ci_receipt_allowed_signers"
+        git init -q --bare "$T/remote.git"
+        git -C "$R" checkout -q --detach "$BASE" && git -C "$R" reset -q --hard "$BASE"
+        ( cd "$R" && git add -A && git commit -q -m policy && git remote add origin "$T/remote.git" ) ||
+            { printf 'FAIL — selftest cannot add receipt policy to the fixture\n'; exit 1; }
+        PBASE=$(git -C "$R" rev-parse HEAD)
+        ( cd "$R" && printf '# edit\n' >> src/lib/common/foo.spl && git add -A && git commit -q -m signed )
+        H1=$(git -C "$R" rev-parse HEAD)
+        st_verdict "V1 PASS signs + publishes a receipt" 0 "PASS" "pushed to origin" \
+            sh "$SELF" --root "$R" --range "$PBASE..HEAD" --simple-bin "$FAKE" --jobs 2 \
+            --sign-key "$T/key" --sign-identity st@fixture --publish origin
+        git -C "$R" update-ref -d "refs/notes/$NOTE_REF"
+        st_verdict "V2 remote verify of the signed head PASSes" 0 "PASS" "1 pr-fast receipt checked" \
+            sh "$SELF" --verify-receipt --root "$R" --base "$PBASE" --head "$H1" --notes-remote origin
+        ( cd "$R" && printf '# more\n' >> src/lib/common/foo.spl && git add -A && git commit -q -m unsigned )
+        H2=$(git -C "$R" rev-parse HEAD)
+        st_verdict "V3 head without a receipt FAILs" 1 "FAIL" "no pr-fast receipt note" \
+            sh "$SELF" --verify-receipt --root "$R" --base "$PBASE" --head "$H2" --notes-remote origin
+        # Tamper with the published receipt's bound tree; the signature must no
+        # longer verify.
+        git -C "$R" fetch -q origin "+refs/notes/$NOTE_REF:refs/notes/$NOTE_REF"
+        git -C "$R" notes --ref="$NOTE_REF" show "$H1" > "$T/note"
+        sed 's/^tree: ./tree: 0/' "$T/note" > "$T/note.bad"
+        _nb=$(git -C "$R" hash-object -w "$T/note.bad")
+        git -C "$R" notes --ref="$NOTE_REF" add -f -C "$_nb" "$H1" > /dev/null 2>&1
+        git -C "$R" push -q -f origin "refs/notes/$NOTE_REF" > /dev/null 2>&1
+        st_verdict "V4 tampered receipt FAILs" 1 "FAIL" "did not verify" \
+            sh "$SELF" --verify-receipt --root "$R" --base "$PBASE" --head "$H1" --notes-remote origin
+        ( cd "$R" && printf '# tamper\n' >> "$RECEIPT_MANIFEST_REL" && git add -A && git commit -q -m tamper )
+        H3=$(git -C "$R" rev-parse HEAD)
+        st_verdict "V5 PR editing the receipt manifest FAILs" 1 "FAIL" "never admit its own rules" \
+            sh "$SELF" --verify-receipt --root "$R" --base "$PBASE" --head "$H3" --notes-remote origin
+
+        # V6: a receipt signed WITHOUT this script's session_id binary-identity
+        # binding (i.e. straight through the shared signer, the way another
+        # caller of that generic tool might) must fail THIS script's remote
+        # verify, even though it verifies fine against the shared verifier
+        # alone — that gap is exactly finding #2 (a PASS receipt overclaims).
+        git -C "$R" checkout -q --detach "$PBASE" && git -C "$R" reset -q --hard "$PBASE"
+        ( cd "$R" && printf '# v6\n' >> src/lib/common/foo.spl && git add -A && git commit -q -m v6 )
+        H4=$(git -C "$R" rev-parse HEAD)
+        ( cd "$R" &&
+          printf '%s pass\n' "$RECEIPT_ROW" > "$T/v6_results" &&
+          SIMPLE_CI_RECEIPT_MANIFEST_REL="$RECEIPT_MANIFEST_REL" SIMPLE_CI_RECEIPT_IN_SELFTEST=1 \
+          sh scripts/check/sign-local-ci-receipt.shs --root "$R" --key "$T/key" --identity st@fixture \
+              --results "$T/v6_results" --rev "$H4" --changes "$PBASE..$H4" --tier "$RECEIPT_TIER" \
+              --out "$T/v6_receipt.txt" > "$T/v6_sign.out" 2>&1
+        )
+        _v6_sign_rc=$?
+        if [ "$_v6_sign_rc" -eq 0 ]; then
+            cat "$T/v6_receipt.txt" "$T/v6_receipt.txt.sig" > "$T/v6_payload"
+            _v6_blob=$(git -C "$R" hash-object -w "$T/v6_payload")
+            git -C "$R" notes --ref="$NOTE_REF" add -f -C "$_v6_blob" "$H4" > /dev/null 2>&1
+            git -C "$R" push -q -f origin "refs/notes/$NOTE_REF" > /dev/null 2>&1
+            st_verdict "V6 receipt with no binary-identity binding FAILs" 1 "FAIL" "binary-identity binding" \
+                sh "$SELF" --verify-receipt --root "$R" --base "$PBASE" --head "$H4" --notes-remote origin
+        else
+            st_bad=$((st_bad + 1)); printf 'selftest: BAD V6 fixture (direct signer call failed, exit %s): %s\n' "$_v6_sign_rc" "$(tail -n 1 "$T/v6_sign.out")"
+        fi
+    else
+        st_bad=$((st_bad + 1)); printf 'selftest: BAD receipt round trip not exercised (ssh-keygen or the shared signer/verifier missing)\n'
+    fi
+    if [ "$st_bad" -eq 0 ] && [ "$st_ok" -gt 0 ]; then
+        printf 'PASS — %s selftest fixture(s) checked, 0 wrong\n' "$st_ok"; exit 0
+    fi
+    printf 'FAIL — %s of %s selftest fixture(s) wrong\n' "$st_bad" "$((st_ok + st_bad))"; exit 1
+}
+
+# ------------------------------------------------------------------- args --
+RANGE=""; BIN_ARG=""; BUDGET=60; JOBS=""; SEMANTIC=0; ROOT=""
+SIGN_KEY=""; SIGN_ID=""; PUBLISH=""
+VERIFY=0; V_BASE=""; V_HEAD=""; NOTES_REMOTE=origin
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest "$0" ;;
+        --verify-receipt) VERIFY=1 ;;
+        --base) shift; [ $# -gt 0 ] || error_verdict "--base needs a value"; V_BASE=$1 ;;
+        --head) shift; [ $# -gt 0 ] || error_verdict "--head needs a value"; V_HEAD=$1 ;;
+        --notes-remote) shift; [ $# -gt 0 ] || error_verdict "--notes-remote needs a value"; NOTES_REMOTE=$1 ;;
+        --range) shift; [ $# -gt 0 ] || error_verdict "--range needs a value"; RANGE=$1 ;;
+        --simple-bin) shift; [ $# -gt 0 ] || error_verdict "--simple-bin needs a value"; BIN_ARG=$1 ;;
+        --budget) shift; [ $# -gt 0 ] || error_verdict "--budget needs a value"; BUDGET=$1 ;;
+        --jobs) shift; [ $# -gt 0 ] || error_verdict "--jobs needs a value"; JOBS=$1 ;;
+        --semantic) SEMANTIC=1 ;;
+        --root) shift; [ $# -gt 0 ] || error_verdict "--root needs a value"; ROOT=$1 ;;
+        --sign-key) shift; [ $# -gt 0 ] || error_verdict "--sign-key needs a value"; SIGN_KEY=$1 ;;
+        --sign-identity) shift; [ $# -gt 0 ] || error_verdict "--sign-identity needs a value"; SIGN_ID=$1 ;;
+        --publish) shift; [ $# -gt 0 ] || error_verdict "--publish needs a value"; PUBLISH=$1 ;;
+        -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 0 ;;
+        *) error_verdict "unknown argument \"$1\"" ;;
+    esac
+    shift
+done
+command -v git >/dev/null 2>&1 || error_verdict "git is required and not installed"
+[ "$VERIFY" = 0 ] || verify_receipt
+case "$BUDGET" in ''|*[!0-9]*|0) error_verdict "--budget must be a positive integer" ;; esac
+TIMEOUT_BIN=$(resolve_gnu_timeout)
+_resolve_rc=$?
+[ "$_resolve_rc" -eq 0 ] && [ -n "$TIMEOUT_BIN" ] ||
+    error_verdict "a GNU coreutils timeout is required: neither gtimeout nor a timeout reporting \"GNU coreutils\" in --version was found on PATH (on Windows, C:\\Windows\\System32\\timeout.exe does not qualify and must not shadow a real one)"
+TIMEOUT_GRACE=5
+if [ -z "$JOBS" ]; then
+    JOBS=$(nproc 2>/dev/null) || JOBS=1
+    case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
+    [ "$JOBS" -le 4 ] || JOBS=4
+fi
+case "$JOBS" in ''|*[!0-9]*|0) error_verdict "--jobs must be a positive integer" ;; esac
+
+if [ -n "$BIN_ARG" ]; then BIN=$BIN_ARG
+elif [ -n "${SIMPLE_BIN:-}" ]; then BIN=$SIMPLE_BIN
+else
+    _r=$ROOT; [ -n "$_r" ] || _r=$(git rev-parse --show-toplevel 2>/dev/null)
+    BIN="$_r/bin/simple"
+fi
+[ -f "$BIN" ] && [ -x "$BIN" ] ||
+    error_verdict "simple binary \"$BIN\" is not an executable file (pass --simple-bin or SIMPLE_BIN; bin/simple is created by scripts/setup/setup.shs)"
+case "$BIN" in /*|[A-Za-z]:*) ;; *) BIN="$(pwd)/$BIN" ;; esac
+
+main
