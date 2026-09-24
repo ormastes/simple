@@ -7,8 +7,19 @@
 #
 #   1. simple-mcp        (src/app/mcp/main.spl              -> simple_mcp_server)
 #   2. simple-lsp-mcp    (src/app/simple_lsp_mcp/main.spl    -> simple_lsp_mcp_server)
-#   3. spipe-mcp         (src/app/spipe_mcp/main.spl         -> spipe_mcp, native leg
-#                          of bin/spipe_mcp_server's interpreter-fallback wrapper)
+#   3. spipe-mcp         (.spipe/spipe/src/spipe_mcp/main.spl -> the native leg
+#                          admitted by the submodule's own wrapper,
+#                          .spipe/spipe/bin/spipe-mcp[.cmd], at
+#                          .spipe/spipe/build/simple-bin/spipe-mcp[.exe])
+#
+# NOTE (2026-09-24 correction): an OLDER (2026-08-27) in-tree copy exists at
+# src/app/spipe_mcp/main.spl with its own wrapper bin/spipe_mcp_server, but
+# .mcp.json's "spipe" entry now launches the SUBMODULE copy
+# (.spipe/spipe/bin/spipe-mcp) — see Spipe PR #16/#18, bumped into
+# .spipe/spipe 2026-09-24. This script therefore builds/deploys/probes the
+# SUBMODULE copy. The in-tree copy is left untouched (not deleted); its
+# remaining callers, if any, are named in the commit that made this
+# correction rather than duplicated here.
 #
 # This helper does NOT duplicate Stage 5's native-build rows
 # (bootstrap-from-scratch.sh ~:3961-4022) or bootstrap-phase-verification.shs's
@@ -70,7 +81,10 @@
 #                          (e.g. bin/release/linux-x86_64 next to
 #                          bin/release/x86_64-unknown-linux-gnu). Optional.
 #   --spipe-output=PATH    Deploy target for the spipe leg (default:
-#                          <repo_root>/build/bootstrap/mcp-package/spipe_mcp).
+#                          <repo_root>/.spipe/spipe/build/simple-bin/spipe-mcp
+#                          - exactly where .spipe/spipe/bin/spipe-mcp[.cmd]
+#                          admits a native binary from, via its own
+#                          <exe>.sha256 sidecar check).
 #   --platform=TRIPLE      Target triple, used only to name --deploy-root when
 #                          --deploy-root is not given explicitly.
 #   --exe-suffix=SUF       ".exe" on Windows, "" elsewhere (default: auto).
@@ -140,16 +154,24 @@ mcp_bd_decide() {
 }
 
 # Probe the health of a currently-deployed server.
-#   $1 deployed_path
-#   $2 sidecar_path (deployed_path.sha256, conventionally)
+#   $1 deployed_path   - the artifact whose presence/hash gates missing/broken
+#   $2 sidecar_path    - deployed_path.sha256, conventionally
+#   $3 launch_cmd      - optional; the command the HANDSHAKE probe actually
+#                        launches, when it differs from deployed_path (e.g.
+#                        spipe-mcp's real launcher is the wrapper script
+#                        .spipe/spipe/bin/spipe-mcp, which itself resolves and
+#                        sha256-admits deployed_path internally - probing the
+#                        wrapper exercises the exact path a real MCP client
+#                        takes). Defaults to deployed_path.
 # Prints one of: missing broken healthy
 # Handshake probing is delegated to $MCP_BD_HEALTH_PROBE_CMD when set (used by
 # --selftest and by callers that already have a cheaper liveness signal); the
 # default probe is check-mcp-config-launchable.shs against a synthesized
-# one-entry config naming the deployed path.
+# one-entry config naming launch_cmd.
 mcp_bd_health() {
   deployed_path=$1
   sidecar_path=$2
+  launch_cmd=${3:-${deployed_path}}
   if [ ! -e "${deployed_path}" ]; then
     echo missing
     return 0
@@ -165,15 +187,21 @@ mcp_bd_health() {
     return 0
   fi
   if [ -n "${MCP_BD_HEALTH_PROBE_CMD:-}" ]; then
-    if eval "${MCP_BD_HEALTH_PROBE_CMD}" "'${deployed_path}'" >/dev/null 2>&1; then
+    if eval "${MCP_BD_HEALTH_PROBE_CMD}" "'${launch_cmd}'" >/dev/null 2>&1; then
       echo healthy
     else
       echo broken
     fi
     return 0
   fi
+  if [ ! -x "${launch_cmd}" ] && [ ! -f "${launch_cmd}" ]; then
+    # No real launcher to probe through (e.g. a .cmd wrapper missing on a
+    # POSIX host) - fall back to the deployed artifact itself rather than
+    # silently reporting healthy on hash alone.
+    launch_cmd=${deployed_path}
+  fi
   cfg_tmp=$(mktemp "${TMPDIR:-/tmp}/mcp-bd-health.XXXXXX") || return 1
-  printf '{"mcpServers":{"probe":{"command":"%s","args":[]}}}\n' "${deployed_path}" >"${cfg_tmp}"
+  printf '{"mcpServers":{"probe":{"command":"%s","args":[]}}}\n' "${launch_cmd}" >"${cfg_tmp}"
   probe_status=0
   sh "${repo_root}/scripts/check/check-mcp-config-launchable.shs" "${cfg_tmp}" >/dev/null 2>&1 || probe_status=$?
   rm -f "${cfg_tmp}"
@@ -382,16 +410,24 @@ mcp_bd_selftest() {
 # Native build of one server entry, reusing the caller's native-build cache.
 # ---------------------------------------------------------------------------
 
+#   $1 name    - log/label
+#   $2 entry   - entry .spl, repo-root-relative
+#   $3 output  - candidate output path
+#   $4 extra_source - optional additional --source root (repo-root-relative),
+#                     e.g. .spipe/spipe/src for a submodule-hosted entry whose
+#                     module tree lives outside src/compiler|src/app|src/lib.
 mcp_bd_build_one() {
   name=$1
   entry=$2
   output=$3
+  extra_source=${4:-}
   rm -f "${output}"
   set +e
   env SIMPLE_NO_STUB_FALLBACK=1 \
     "${MCP_BD_COMPILER}" native-build \
     ${MCP_BD_BACKEND:+--backend "${MCP_BD_BACKEND}"} \
-    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --source src/compiler --source src/app --source src/lib \
+    ${extra_source:+--source "${extra_source}"} --entry-closure \
     --entry "${entry}" --threads "${MCP_BD_JOBS:-1}" \
     --cache-dir "${MCP_BD_CACHE_DIR}" \
     ${MCP_BD_RUNTIME_PATH:+--runtime-path "${MCP_BD_RUNTIME_PATH}"} \
@@ -417,7 +453,8 @@ mcp_bd_run_system_tests() {
       test/02_integration/app/mcp_stdio_integration_spec.spl \
       test/03_system/app/mcp/mcp_stdio_contract_spec.spl \
       test/03_system/check/mcp_config_declared_command_launchable_spec.spl \
-      test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl; do
+      test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl \
+      test/03_system/app/spipe/feature/spipe_knowledge_compiler_mcp_spec.spl; do
       [ -f "${repo_root}/${spec}" ] || continue
       set +e
       env SIMPLE_LIB=src "${MCP_BD_TEST_RUNNER}" "${spec}" --mode=interpreter --unstable \
@@ -442,7 +479,8 @@ mcp_bd_run_system_tests() {
     first=1
     for pair in \
       "simple-mcp:${MCP_BD_MCP_CANDIDATE:-}" \
-      "simple-lsp-mcp:${MCP_BD_LSP_CANDIDATE:-}"; do
+      "simple-lsp-mcp:${MCP_BD_LSP_CANDIDATE:-}" \
+      "spipe-mcp:${MCP_BD_SPIPE_CANDIDATE:-}"; do
       cmd=${pair#*:}
       [ -n "${cmd}" ] && [ -x "${cmd}" ] || continue
       [ "${first}" -eq 1 ] || printf ','
@@ -549,7 +587,12 @@ mcp_bd_main() {
     esac
   fi
   [ -n "${deploy_root}" ] || deploy_root="${repo_root}/bin/release/${platform}"
-  [ -n "${spipe_output}" ] || spipe_output="${repo_root}/build/bootstrap/mcp-package/spipe_mcp${exe_suffix}"
+  spipe_module_root="${repo_root}/.spipe/spipe"
+  [ -n "${spipe_output}" ] || spipe_output="${spipe_module_root}/build/simple-bin/spipe-mcp${exe_suffix}"
+  spipe_wrapper="${spipe_module_root}/bin/spipe-mcp"
+  case "${exe_suffix}" in
+    .exe) [ -f "${spipe_wrapper}.cmd" ] && spipe_wrapper="${spipe_wrapper}.cmd" ;;
+  esac
 
   MCP_BD_COMPILER=${compiler}
   MCP_BD_BACKEND=${backend}
@@ -582,11 +625,13 @@ mcp_bd_main() {
       mcp_bd_build_one simple_lsp_mcp_server src/app/simple_lsp_mcp/main.spl "${lsp_candidate}" || build_ok_lsp=0
     fi
     if [ -z "${spipe_candidate}" ]; then
-      if [ -f "${repo_root}/src/app/spipe_mcp/main.spl" ]; then
-        spipe_candidate="${output_dir}/spipe_mcp${exe_suffix}"
-        mcp_bd_build_one spipe_mcp src/app/spipe_mcp/main.spl "${spipe_candidate}" || build_ok_spipe=0
+      spipe_entry="${spipe_module_root}/src/spipe_mcp/main.spl"
+      if [ -f "${spipe_entry}" ]; then
+        spipe_candidate="${output_dir}/spipe-mcp${exe_suffix}"
+        mcp_bd_build_one spipe-mcp "${spipe_entry}" "${spipe_candidate}" "${spipe_module_root}/src" \
+          || build_ok_spipe=0
       else
-        mcp_bd_log "UNSUPPORTED spipe_mcp_build entry-not-present: src/app/spipe_mcp/main.spl missing in this checkout"
+        mcp_bd_log "UNSUPPORTED spipe_mcp_build entry-not-present: ${spipe_entry} missing (submodule not initialized? run: git submodule update --init .spipe/spipe)"
         build_ok_spipe=0
         spipe_candidate=""
       fi
@@ -599,7 +644,8 @@ mcp_bd_main() {
   else
     MCP_BD_MCP_CANDIDATE=${mcp_candidate}
     MCP_BD_LSP_CANDIDATE=${lsp_candidate}
-    export MCP_BD_MCP_CANDIDATE MCP_BD_LSP_CANDIDATE
+    MCP_BD_SPIPE_CANDIDATE=${spipe_candidate}
+    export MCP_BD_MCP_CANDIDATE MCP_BD_LSP_CANDIDATE MCP_BD_SPIPE_CANDIDATE
     test_ok=$(mcp_bd_run_system_tests)
   fi
 
@@ -611,17 +657,22 @@ mcp_bd_main() {
   lsp_exe_name="simple_lsp_mcp_server${exe_suffix}"
 
   for row in \
-    "simple-mcp:${mcp_candidate}:${deploy_root}/${mcp_exe_name}:${build_ok_mcp}:${mirror_root:+${mirror_root}/${mcp_exe_name}}" \
-    "simple-lsp-mcp:${lsp_candidate}:${deploy_root}/${lsp_exe_name}:${build_ok_lsp}:${mirror_root:+${mirror_root}/${lsp_exe_name}}" \
-    "spipe-mcp:${spipe_candidate}:${spipe_output}:${build_ok_spipe}:"; do
+    "simple-mcp:${mcp_candidate}:${deploy_root}/${mcp_exe_name}:${build_ok_mcp}:${mirror_root:+${mirror_root}/${mcp_exe_name}}:" \
+    "simple-lsp-mcp:${lsp_candidate}:${deploy_root}/${lsp_exe_name}:${build_ok_lsp}:${mirror_root:+${mirror_root}/${lsp_exe_name}}:" \
+    "spipe-mcp:${spipe_candidate}:${spipe_output}:${build_ok_spipe}::${spipe_wrapper}"; do
     label=$(echo "${row}" | cut -d: -f1)
     cand=$(echo "${row}" | cut -d: -f2)
     dest=$(echo "${row}" | cut -d: -f3)
     b_ok=$(echo "${row}" | cut -d: -f4)
     mirror=$(echo "${row}" | cut -d: -f5)
+    # launch_cmd: the command a real client actually invokes when it differs
+    # from dest (spipe-mcp's real launcher is its wrapper script, which
+    # internally resolves/admits dest - see mcp_bd_health's doc comment).
+    launch_cmd=$(echo "${row}" | cut -d: -f6)
+    [ -n "${launch_cmd}" ] || launch_cmd=${dest}
     processed=$((processed + 1))
 
-    health=$(mcp_bd_health "${dest}" "${dest}.sha256")
+    health=$(mcp_bd_health "${dest}" "${dest}.sha256" "${launch_cmd}")
     decision=$(mcp_bd_decide "${health}" "${b_ok}" "${test_ok}")
     mcp_bd_log "mcp-deploy: ${label} health=${health} build_ok=${b_ok} test_ok=${test_ok} decision=${decision}"
 
