@@ -8,12 +8,34 @@ die() {
   exit 2
 }
 
+# Clang-only policy (2026-09-24): four-way hash fallback, mirroring
+# scripts/check/lib/bootstrap-stage3/authority.shs.
 hash_file() {
-  sha256sum "$1" | awk '{print $1}'
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 -q "$1"
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r "$1" | awk '{print $1}'
+  else
+    die "no sha256 tool available (need sha256sum, shasum, sha256, or openssl)"
+  fi
 }
 
 hash_text() {
-  sha256sum | awk '{print $1}'
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 -q
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r | awk '{print $1}'
+  else
+    die "no sha256 tool available (need sha256sum, shasum, sha256, or openssl)"
+  fi
 }
 
 absolute_file() {
@@ -51,7 +73,13 @@ compiler_manifest=
 cli_journal=
 mcp_journal=
 lsp_journal=
-linker=cc
+# Clang-only policy (2026-09-24): never default to a bare `cc` (which can
+# resolve to gcc). `clang.exe` covers MINGW; other hosts resolve plain
+# `clang`.
+case "${OS:-}${MSYSTEM:-}" in
+  *MINGW*|*MSYS*|Windows_NT) linker=clang.exe ;;
+  *) linker=clang ;;
+esac
 scope=full
 resume=0
 worker_task=
@@ -103,8 +131,16 @@ compiler_manifest=$(absolute_file "$compiler_manifest") || die "cannot resolve c
 runner="$source_root/scripts/bootstrap/stage4-tooling-matrix.shs"
 link_wrapper="$source_root/scripts/bootstrap/stage4-tools-only.sh"
 [ -x "$link_wrapper" ] || die "tools-only linker is not executable"
+case "$linker" in
+  *gcc*|*g++*) die "clang-only policy: linker must be clang, not $linker" ;;
+esac
 linker_path=$(command -v "$linker" 2>/dev/null) || die "linker is unavailable: $linker"
 linker_path=$(absolute_file "$linker_path") || die "cannot resolve linker"
+case "$linker_path" in
+  */gcc|*/gcc-*|*/g++|*/g++-*) die "clang-only policy: linker resolved to a GCC binary: $linker_path" ;;
+esac
+"$linker_path" --version 2>/dev/null | grep -qi 'clang version' \
+  || die "clang-only policy: linker is not Clang: $linker_path"
 
 work_rel="build/mini_builds/stage4_tooling_$matrix_id"
 work_root="$source_root/$work_rel"
