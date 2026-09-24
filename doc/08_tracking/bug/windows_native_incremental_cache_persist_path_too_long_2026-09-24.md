@@ -39,17 +39,57 @@ digests (`$snapshot_sha`, `$runtime_cache_identity`):
 
 Concatenated with `objects/<16-hex>.o`, the final object path under
 `D:\wk-bootstrap-20260924\...` measured well over 300 characters — past the
-Windows 260-character `MAX_PATH` limit. `tempfile::NamedTempFile::persist`
-(used by `persist_compiled_object`) calls the plain (non-verbatim) Win32
-rename/create APIs, which reject any path over that limit with
-`ERROR_PATH_NOT_FOUND` (os error 3) rather than a length-specific error,
-which is what "cannot find the path specified" against an existing directory
-actually meant here.
+Windows 260-character `MAX_PATH` limit.
 
-(Whether a given Windows host also enforces this depends on the
-`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled` policy;
-disabled hosts hit the limit unconditionally on ordinary paths, which is the
-environment this bug report came from.)
+**Which call actually hits the limit, precisely.** Rust's `std::fs` on
+Windows does *not* generally suffer from `MAX_PATH`: every `std::fs` entry
+point routes through `sys::path::windows::maybe_verbatim` /
+`get_long_path` (`library/std/src/sys/path/windows.rs`), which calls
+`GetFullPathNameW` and transparently prepends the `\\?\` verbatim prefix
+whenever the absolute path is long enough. That is why the two `std::fs`
+calls surrounding this bug — `create_dir_all(&objects_dir)`
+(`native_project/mod.rs`) and `NamedTempFile::new_in(parent)` /
+`OpenOptions::open` (used internally by `tempfile::create`) — both succeed
+even on a long path, so the object cache directory and the temp file inside
+it are created fine; only the final rename step fails.
+
+The failing call is `NamedTempFile::persist(cache_path)`
+(`compiler.rs:188`). The `tempfile` crate's **Windows** implementation of
+`persist` (`tempfile-3.24.0/src/file/imp/windows.rs:92-119`) does not go
+through `std::fs` at all: it UTF-16-encodes both paths itself
+(`s.as_os_str().encode_wide()`) and calls the raw Win32 APIs
+`SetFileAttributesW` / `MoveFileExW` directly via `windows_sys` — bypassing
+`maybe_verbatim` entirely. Those raw calls enforce the legacy `MAX_PATH`
+limit on whatever path they are handed, which is exactly what silently
+truncated "the directory exists, the temp file was created and written, but
+the final rename fails" into a plain `ERROR_PATH_NOT_FOUND` (os error 3).
+
+Confirmed by direct reproduction (`persist_compiled_object` copied verbatim
+into a throwaway `tempfile = "3.24.0"` crate, given the same
+`compiler-tools/<phase>/<64-hex>/<64-hex>/full-cli/objects/<16-hex>.o` shape
+at 308 characters under this session's own scratch directory — never under
+the live bootstrap worktree):
+
+```
+persist_compiled_object(&cache_path, b"..."):
+  FAILED: persist cache object: The system cannot find the path specified. (os error 3)
+```
+
+— byte-identical to the real log line. Both parent directories existed
+(`create_dir_all` had already run and the temp file itself was created and
+written successfully; only `.persist()` failed), ruling out a missing-parent-
+directory cause. Applying `win_long_path()` to the same `cache_path` before
+calling the identical `persist_compiled_object` made it succeed, with a
+correct cache-hit re-read afterward.
+
+(This reproduces on **any** Windows host, including ones with
+`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled=1` set —
+this dev host has that key set to `1`, and the failure still reproduces
+exactly, because `tempfile`'s Windows `persist()` bypasses the mechanism
+that registry key relies on (`std::fs`'s own `maybe_verbatim`) entirely. An
+earlier version of this note assumed `LongPathsEnabled` would mask the bug
+on this host and that the "before" case could not be reproduced live here;
+that assumption was wrong — see Verification below.)
 
 ## Fix
 
@@ -94,16 +134,51 @@ tests, `cargo test --release -p simple-compiler --lib win_long_path`):
 All 5 Windows-gated tests pass on `x86_64-pc-windows-msvc`
 (`cargo test --release -p simple-compiler --lib win_long_path_tests`, 2026-09-24).
 
-## Verification note
+## Verification
 
-This dev host has `LongPathsEnabled=1`, under which even the *unpatched*
-raw path already round-trips (confirmed empirically), so the literal
-"before" failure could not be reproduced live on this machine. The fix was
-instead verified by: (1) unit tests asserting `win_long_path` produces a
-well-formed, all-backslash verbatim path for both the reported `--cache-dir`
-shape and this crate's own default (mixed-separator) shape; (2) a standalone
-Rust program exercising the exact real path-construction shape
-(`compiler-tools/<phase>/<64-hex>/<64-hex>/full-cli/.../objects/<16-hex>.o`)
-and confirming write + read round-trip through the fixed form; (3)
-`cargo check --release --bin simple` and `cargo build --release --bin simple`
-both pass cleanly with the change.
+1. **Which binary emits the message.** `grep -rn "cache write skipped\|persist
+   cache object"` across `src/compiler_rust`, every `src/**/*.spl`, and
+   `src/runtime` finds the format strings in exactly one place:
+   `compiler/src/pipeline/native_project/compiler.rs:192,202`. No `.spl` file
+   and no C runtime file contains this text, so whatever binary
+   `bootstrap-phase-verification.shs` calls `compiler.snapshot` must be built
+   from this Rust crate — the pure-Simple stage-2 compiler (which would call
+   `rt_*` C runtime externs, not this code) is not a candidate; that theory is
+   ruled out by the grep, not by assumption.
+2. **Exact failing operation, exact failing path shape, parent-dir existence.**
+   Reproduced directly (see Root cause above) by calling the real
+   `persist_compiled_object` function (copied verbatim, not reimplemented)
+   against a path built to the exact same shape and length (308 chars) as the
+   real failure, confirming: the parent directory exists and the temp file is
+   created and written successfully; only the final `tempfile::persist()`
+   rename fails, with byte-identical error text to the log
+   (`persist cache object: The system cannot find the path specified. (os
+   error 3)`).
+3. **Fix verified to close it.** The same reproduction, with `win_long_path()`
+   applied to the path before calling `persist_compiled_object`, succeeds and
+   the object is correctly re-readable afterward (cache-hit simulation).
+4. **Unit tests** (`win_long_path_tests` in `mod.rs`, `cargo test --release -p
+   simple-compiler --lib win_long_path`): `prefixes_a_long_absolute_drive_path`,
+   `is_idempotent_on_an_already_verbatim_path`,
+   `prefixes_unc_paths_with_the_verbatim_unc_form`,
+   `leaves_a_relative_path_untouched`,
+   `normalizes_embedded_forward_slashes_before_prefixing` (generalization spec:
+   reproduces this crate's own default cache-base join, not just the reported
+   `--cache-dir` shape), `is_a_no_op_off_windows` (non-Windows target). All 5
+   Windows-gated tests pass.
+5. `cargo check --release --bin simple` and `cargo build --release --bin
+   simple` both pass cleanly with the change.
+
+**A real end-to-end `native-build` of a multi-file user fixture through this
+seed's CLI was attempted but not completed**, for a reason unrelated to this
+fix: `native-build`'s own admission path
+(`src/app/cli/native_build_main.spl` -> `compiler_inventory_refresh_v1` ->
+interpreted `.spl`) requires either a pre-admitted SCV source inventory or a
+working `rt_fs_read_text` interpreter extern that this particular seed build
+does not have backed (a separate, already-tracked interpreter-extern-registry
+gap — see `.claude/rules/vcs.md` § "interpreter-extern registry gap
+ratchet"), and forcing it further (`SIMPLE_SCV_FREEZE_FALLBACK=1`) reached an
+unrelated worker crash (`semantic: variable 'BorrowChecker' not found`) deep
+in unrelated bootstrap-worker plumbing. Item 2/3 above (the exact function,
+exact path shape, exact error text, before/after) is the direct proof for
+this specific defect and does not depend on that unrelated admission gate.
