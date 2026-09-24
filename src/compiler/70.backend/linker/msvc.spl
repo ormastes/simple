@@ -311,6 +311,16 @@ fn is_msvc_linker_candidate(path: text) -> bool:
         not normalized.contains("/mingw64/bin/link.exe")
 
 fn find_link_exe() -> text?:
+    # Toolchain policy (2026-09-24): clang/LLD only, so lld-link is tried
+    # FIRST. It implements the MSVC command line and COFF ABI this wrapper
+    # emits. MSVC link.exe below is only a fallback for a host without LLVM.
+    val lld_result = msvc_shell("where lld-link.exe 2>nul")
+    if lld_result.exit_code == 0:
+        for lld_line in lld_result.stdout.split("\n"):
+            val candidate = lld_line.trim()
+            if candidate.ends_with("lld-link.exe") and file_exists(candidate):
+                return Some(candidate)
+
     # Try to find Visual Studio
     val vs_path_opt = find_visual_studio()
     match vs_path_opt:
@@ -346,16 +356,6 @@ fn find_link_exe() -> text?:
         for path_line in path_result.stdout.split("\n"):
             val candidate = path_line.trim()
             if is_msvc_linker_candidate(candidate) and file_exists(candidate):
-                return Some(candidate)
-
-    # lld-link implements the MSVC command-line and COFF ABI accepted by this
-    # linker wrapper.  Prefer it to accidentally accepting a Unix `link.exe`
-    # when Visual Studio discovery is unavailable in a bootstrap environment.
-    val lld_result = msvc_shell("where lld-link.exe 2>nul")
-    if lld_result.exit_code == 0:
-        for lld_line in lld_result.stdout.split("\n"):
-            val candidate = lld_line.trim()
-            if candidate.ends_with("lld-link.exe") and file_exists(candidate):
                 return Some(candidate)
 
     nil
