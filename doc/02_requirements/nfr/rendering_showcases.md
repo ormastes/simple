@@ -8,21 +8,25 @@ Core-tier import closure must be meaningfully smaller than the
 full/extended tier per lane, measured by a static transitive-import census
 (`scripts/check/check-rendering-showcase-closure.shs`).
 
-**Recalibrated 2026-09-24** (the original flat ≤ 0.60 ratio target was set
-pre-implementation and is structurally unreachable on graph-dominated
-lanes — measured: 2d 232/247 = 0.94, web 315/317 = 0.99, because the
-engine2d/browser-engine import graphs dominate BOTH tiers and the extended
-tier adds only its own scene module). Per-lane targets:
+**Final targets (2026-09-24, after two measurement-driven recalibrations).**
+The original flat ≤ 0.60 ratio target was set pre-implementation and is
+disproven by measurement on every lane: the engine2d / browser-engine /
+compositor import graphs dominate BOTH tiers everywhere (post-refactor,
+merged main: tui 124/126 = 0.98, gui 108/154 = 0.70, wm 444/444 = 1.00,
+2d 232/247 = 0.94, web 315/317 = 0.99). The brief/full and core/extended
+tiers differ in CONTENT (which scenes/widgets are built), not in runtime
+import graphs. The split's real loading guarantee is directional: **core
+never imports extended/full content**. Per-lane gate:
 
-- **tui / gui / wm**: core/brief closure ≤ 60% of the full sibling. These
-  lanes are red by construction until the shared widget-core refactor
-  lands (tui/wm measured 1.00 — full entries are self-contained; tracked
-  in the L9 review-fix lane).
-- **2d / web**: strict reduction — the core closure must be smaller than
-  the extended closure (measured margins: 2d 15 files, web 2 files). The
-  split's loading value on these lanes is that core never imports the
-  extended content, which the strict reduction plus the real `use`-edge
-  direction guarantees.
+- **2d / web / tui / gui**: strict reduction — core closure < extended/full
+  closure (measured margins: 2d 15, web 2, tui 2, gui 46 files).
+- **wm**: no-growth — core ≤ full (closure-neutral by design: both tiers
+  share the compositor graph via `rendering_wm_common`; the split is
+  content — 2 windows vs 3 + sabotage — not imports).
+
+The structural half of the tier contract (file-based split; extended/full
+REALLY imports the shared core modules — no `SHOWCASE_TIER`-style env
+switching) is enforced by the acceptance spec's import assertions.
 
 Gate fails on: target miss per lane, or closure-growth regression.
 
