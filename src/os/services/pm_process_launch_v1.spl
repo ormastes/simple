@@ -1,0 +1,143 @@
+"""ProcessLaunchSpecV1 translation at the SimpleOS process-manager boundary.
+
+The shared SOSIX contract owns shape validation. PmService owns service
+liveness and launch authority, resolves every requested capability/grant, and
+only then hands a typed request to its injected execution mechanism. This
+module never calls the private kernel ABI.
+"""
+
+use std.common.contracts.execution.process_launch_spec_v1.{
+    ProcessLaunchSpecV1,
+    ProcessLaunchResourcesV1
+}
+use os.sosix.core.capability_ref.SosixCapabilityRef
+use os.sosix.process_launch_provider_v1.{
+    sosix_process_launch_plan_v1
+}
+use os.services.pm_service.PmService
+
+pub enum PmStdioBindingKindV1:
+    Inherit
+    Null
+    Capability
+
+pub struct PmStdioBindingV1:
+    kind: PmStdioBindingKindV1
+    capability_name: text
+
+pub struct PmProcessLaunchRequestV1:
+    executable: text
+    argv: [text]
+    environment: [text]
+    cwd: text
+    stdin: PmStdioBindingV1
+    stdout: PmStdioBindingV1
+    stderr: PmStdioBindingV1
+    namespace_name: text
+    resources: ProcessLaunchResourcesV1
+    cpu_affinity: [i64]
+    runtime_profile: text
+    capabilities: [text]
+    service_grants: [text]
+
+pub struct PmProcessLaunchResultV1:
+    accepted: bool
+    reason: text
+    process_id: i64
+
+fn _pm_launch_result_v1(
+    accepted: bool, reason: text, process_id: i64
+) -> PmProcessLaunchResultV1:
+    PmProcessLaunchResultV1(
+        accepted: accepted, reason: reason, process_id: process_id)
+
+fn _pm_stdio_binding_v1(mode: text, capability_name: text) -> PmStdioBindingV1:
+    if mode == "inherit":
+        return PmStdioBindingV1(
+            kind: PmStdioBindingKindV1.Inherit, capability_name: "")
+    if mode == "null":
+        return PmStdioBindingV1(
+            kind: PmStdioBindingKindV1.Null, capability_name: "")
+    PmStdioBindingV1(
+        kind: PmStdioBindingKindV1.Capability,
+        capability_name: capability_name)
+
+fn _pm_process_launch_request_v1(
+    launch: ProcessLaunchSpecV1
+) -> PmProcessLaunchRequestV1:
+    # `launch` is the owned, already-validated provider projection. Reuse its
+    # bounded vectors; do not independently reinterpret or revalidate shape.
+    PmProcessLaunchRequestV1(
+        executable: launch.executable,
+        argv: launch.argv,
+        environment: launch.environment,
+        cwd: launch.cwd,
+        stdin: _pm_stdio_binding_v1(
+            launch.stdin.mode, launch.stdin.capability_name),
+        stdout: _pm_stdio_binding_v1(
+            launch.stdout.mode, launch.stdout.capability_name),
+        stderr: _pm_stdio_binding_v1(
+            launch.stderr.mode, launch.stderr.capability_name),
+        namespace_name: launch.namespace_name,
+        resources: launch.resources,
+        cpu_affinity: launch.cpu_affinity,
+        runtime_profile: launch.runtime_profile,
+        capabilities: launch.capabilities,
+        service_grants: launch.service_grants)
+
+impl PmService:
+    pub me pm_process_launch_v1(
+        service: SosixCapabilityRef,
+        launch: ProcessLaunchSpecV1,
+        service_is_live: fn(SosixCapabilityRef) -> bool,
+        service_can_launch: fn(SosixCapabilityRef) -> bool,
+        capability_is_live: fn(SosixCapabilityRef, text) -> bool,
+        service_grant_is_live: fn(SosixCapabilityRef, text) -> bool,
+        execute: fn(PmProcessLaunchRequestV1) -> i64
+    ) -> PmProcessLaunchResultV1:
+        """Authorize, translate, and submit one launch through PM ownership."""
+        val plan = sosix_process_launch_plan_v1(service, launch)
+        if not plan.accepted:
+            return _pm_launch_result_v1(false, plan.reason, -1)
+        if not self.initialized:
+            return _pm_launch_result_v1(false, "process-service-not-ready", -1)
+        if not service_is_live(plan.service):
+            return _pm_launch_result_v1(false, "stale-process-service-capability", -1)
+        if not service_can_launch(plan.service):
+            return _pm_launch_result_v1(false, "process-launch-authority-denied", -1)
+        if (plan.launch.stdin.mode == "capability" and
+            not capability_is_live(
+                plan.service, plan.launch.stdin.capability_name)):
+            return _pm_launch_result_v1(
+                false,
+                "stdio-capability-not-live:{plan.launch.stdin.capability_name}",
+                -1)
+        if (plan.launch.stdout.mode == "capability" and
+            not capability_is_live(
+                plan.service, plan.launch.stdout.capability_name)):
+            return _pm_launch_result_v1(
+                false,
+                "stdio-capability-not-live:{plan.launch.stdout.capability_name}",
+                -1)
+        if (plan.launch.stderr.mode == "capability" and
+            not capability_is_live(
+                plan.service, plan.launch.stderr.capability_name)):
+            return _pm_launch_result_v1(
+                false,
+                "stdio-capability-not-live:{plan.launch.stderr.capability_name}",
+                -1)
+        for capability_name in plan.launch.capabilities:
+            if not capability_is_live(plan.service, capability_name):
+                return _pm_launch_result_v1(
+                    false, "requested-capability-not-live:{capability_name}", -1)
+        for grant_name in plan.launch.service_grants:
+            if not service_grant_is_live(plan.service, grant_name):
+                return _pm_launch_result_v1(
+                    false, "requested-service-grant-not-live:{grant_name}", -1)
+        val process_id = execute(_pm_process_launch_request_v1(plan.launch))
+        if process_id <= 0:
+            return _pm_launch_result_v1(false, "process-execution-failed", process_id)
+        _pm_launch_result_v1(true, "launched", process_id)
+
+export PmStdioBindingKindV1, PmStdioBindingV1
+export PmProcessLaunchRequestV1, PmProcessLaunchResultV1

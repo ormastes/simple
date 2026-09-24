@@ -1,0 +1,250 @@
+# @tag: startup, launch-metadata, retained-smf
+# Deterministic retained-SMF behavior matrix for the section-index repair.
+
+use std.spec.{describe, it, expect}
+use app.startup.launch_metadata.{
+    LaunchMetadata,
+    launch_metadata_default,
+    retained_smf_launch_metadata_v1,
+    render_launch_metadata_sidecar
+}
+
+struct SectionRow:
+    section_type: i64
+    offset: i64
+    size: i64
+    alignment: i64
+
+fn put_u32(mut bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var out = bytes.concat([])
+    out[offset] = (value & 255).to_u8()
+    out[offset + 1] = ((value >> 8) & 255).to_u8()
+    out[offset + 2] = ((value >> 16) & 255).to_u8()
+    out[offset + 3] = ((value >> 24) & 255).to_u8()
+    out
+
+fn put_u64(mut bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var out = bytes.concat([])
+    var i: i64 = 0
+    while i < 8:
+        out[offset + i] = ((value >> (i * 8)) & 255).to_u8()
+        i = i + 1
+    out
+
+fn zeros(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn section_entry(row: SectionRow) -> [u8]:
+    var entry = zeros(64)
+    entry[0] = row.section_type.to_u8()
+    entry = put_u32(entry, 4, 1)
+    entry = put_u64(entry, 8, row.offset)
+    entry = put_u64(entry, 16, row.size)
+    entry = put_u64(entry, 24, row.size)
+    entry = put_u64(entry, 32, row.alignment)
+    entry
+
+fn max_end(rows: [SectionRow], payload_len: i64) -> i64:
+    var result = payload_len
+    for row in rows:
+        val end = row.offset + row.size
+        if end > result:
+            result = end
+    result
+
+fn smf_fixture(rows: [SectionRow], payload: [u8], symbol_overlap: bool = false,
+        data_len_override: i64 = -1) -> [u8]:
+    val natural_data_len = max_end(rows, payload.len())
+    val data_len = if data_len_override >= 0:
+        data_len_override
+    else:
+        natural_data_len
+    var out = zeros(data_len)
+    var payload_index: i64 = 0
+    while payload_index < payload.len():
+        out[payload_index] = payload[payload_index]
+        payload_index = payload_index + 1
+
+    val section_table = data_len
+    for row in rows:
+        out = out.concat(section_entry(row))
+    val table_end = section_table + rows.len() * 64
+    val symbol_table = if symbol_overlap and rows.len() > 0:
+        table_end - 64
+    else:
+        table_end
+
+    var header = zeros(128)
+    header[0] = 83
+    header[1] = 77
+    header[2] = 70
+    header[3] = 0
+    header[4] = 1
+    header[5] = 1
+    header = put_u32(header, 16, rows.len())
+    header = put_u64(header, 20, section_table)
+    header = put_u64(header, 28, symbol_table)
+    header = put_u32(header, 36, 0)
+    header = put_u32(header, 52, 0)
+    header = put_u32(header, 56, 0)
+    out.concat(header)
+
+fn canonical_payload() -> [u8]:
+    val metadata = launch_metadata_default("smf")
+    render_launch_metadata_sidecar(metadata).bytes()
+
+fn valid_metadata_rows() -> [SectionRow]:
+    val payload_len = canonical_payload().len()
+    [
+        SectionRow(section_type: 1, offset: payload_len + 8, size: 8, alignment: 16),
+        SectionRow(section_type: 15, offset: 0, size: payload_len, alignment: 16),
+        SectionRow(section_type: 1, offset: payload_len, size: 8, alignment: 16)
+    ]
+
+fn expect_retained(bytes: [u8], present: bool, ok: bool, kind: text, reason: text):
+    val result = retained_smf_launch_metadata_v1(bytes, "smf")
+    expect(result.present).to_equal(present)
+    expect(result.ok).to_equal(ok)
+    expect(result.metadata.entry_kind).to_equal(kind)
+    expect(result.reason).to_equal(reason)
+
+fn wide_valid_fixture(section_count: i64) -> [u8]:
+    var rows: [SectionRow] = []
+    var i: i64 = 0
+    while i < section_count:
+        rows.push(SectionRow(
+            section_type: 1,
+            offset: i,
+            size: 1,
+            alignment: 16))
+        i = i + 1
+    smf_fixture(rows, [], false)
+
+describe "Launch metadata section validation [importance=critical; importance_weight=3]":
+    describe "LM-A01: exact fail-fast precedence [importance=critical; importance_weight=3]":
+        it "should accept out-of-order non-overlapping spans and half-open adjacency [importance=critical; importance_weight=3]":
+            step("Build a retained SMF with ordered section rows")
+            val payload = canonical_payload()
+            val rows = valid_metadata_rows()
+            step("Validate retained metadata through the public entry point")
+            val bytes = smf_fixture(rows, payload)
+            step("Compare the complete retained result with the compatibility oracle")
+            expect_retained(bytes, true, true, "smf", "launch_metadata_retained")
+
+        it "should reject an overlap before a later invalid alignment [importance=critical; importance_weight=3]":
+            val rows = [
+                SectionRow(section_type: 1, offset: 0, size: 8, alignment: 16),
+                SectionRow(section_type: 1, offset: 4, size: 8, alignment: 16),
+                SectionRow(section_type: 1, offset: 5, size: 1, alignment: 3)
+            ]
+            expect_retained(smf_fixture(rows, [], false, 16), true, false, "smf",
+                "launch_metadata_section_overlap")
+
+        it "should report alignment before a same-row overlap when no prior overlap exists [importance=critical; importance_weight=3]":
+            val rows = [
+                SectionRow(section_type: 1, offset: 0, size: 8, alignment: 16),
+                SectionRow(section_type: 1, offset: 4, size: 8, alignment: 3)
+            ]
+            expect_retained(smf_fixture(rows, []), true, false, "smf",
+                "launch_metadata_section_alignment_invalid")
+
+        it "should report overlap before a later invalid payload range [importance=critical; importance_weight=3]":
+            val rows = [
+                SectionRow(section_type: 1, offset: 0, size: 8, alignment: 16),
+                SectionRow(section_type: 1, offset: 4, size: 8, alignment: 16),
+                SectionRow(section_type: 1, offset: 100000, size: 1, alignment: 16)
+            ]
+            expect_retained(smf_fixture(rows, [], false, 16), true, false, "smf",
+                "launch_metadata_section_overlap")
+
+        it "should report symbol-table overlap before decoding any section row [importance=critical; importance_weight=3]":
+            val rows = [SectionRow(section_type: 15, offset: 0,
+                size: canonical_payload().len(), alignment: 16)]
+            expect_retained(smf_fixture(rows, canonical_payload(), true), false, false,
+                "smf", "launch_metadata_symbol_table_overlap")
+
+    describe "LM-A02: duplicate, zero-size, and overlap matrix [importance=critical; importance_weight=3]":
+        it "should allow adjacent spans but reject equal-start and nested spans [importance=critical; importance_weight=3]":
+            val adjacent = [
+                SectionRow(section_type: 1, offset: 0, size: 4, alignment: 16),
+                SectionRow(section_type: 1, offset: 4, size: 4, alignment: 16)
+            ]
+            expect_retained(smf_fixture(adjacent, []), false, true, "smf",
+                "launch_metadata_absent")
+            val equal_start = [
+                SectionRow(section_type: 1, offset: 0, size: 8, alignment: 16),
+                SectionRow(section_type: 1, offset: 0, size: 1, alignment: 16)
+            ]
+            expect_retained(smf_fixture(equal_start, []), true, false, "smf",
+                "launch_metadata_section_overlap")
+            val nested = [
+                SectionRow(section_type: 1, offset: 0, size: 16, alignment: 16),
+                SectionRow(section_type: 1, offset: 4, size: 2, alignment: 16)
+            ]
+            expect_retained(smf_fixture(nested, []), true, false, "smf",
+                "launch_metadata_section_overlap")
+
+        it "should let same-row overlap win over duplicate metadata [importance=critical; importance_weight=3]":
+            val rows = [
+                SectionRow(section_type: 15, offset: 0, size: 8, alignment: 16),
+                SectionRow(section_type: 15, offset: 4, size: 8, alignment: 16)
+            ]
+            expect_retained(smf_fixture(rows, canonical_payload()), true, false, "smf",
+                "launch_metadata_section_overlap")
+
+        it "should report a non-overlapping duplicate metadata row [importance=critical; importance_weight=3]":
+            val rows = [
+                SectionRow(section_type: 15, offset: 0, size: 8, alignment: 16),
+                SectionRow(section_type: 15, offset: 8, size: 8, alignment: 16)
+            ]
+            expect_retained(smf_fixture(rows, canonical_payload()), true, false, "smf",
+                "launch_metadata_section_duplicate")
+
+        it "should report zero-size metadata as payload-invalid without overlap [importance=critical; importance_weight=3]":
+            val rows = [SectionRow(section_type: 15, offset: 0, size: 0, alignment: 16)]
+            expect_retained(smf_fixture(rows, []), true, false, "smf",
+                "launch_metadata_payload_invalid")
+
+        it "should report an earlier overlap before a later zero-size metadata row [importance=critical; importance_weight=3]":
+            val rows = [
+                SectionRow(section_type: 1, offset: 0, size: 8, alignment: 16),
+                SectionRow(section_type: 1, offset: 4, size: 8, alignment: 16),
+                SectionRow(section_type: 15, offset: 12, size: 0, alignment: 16)
+            ]
+            expect_retained(smf_fixture(rows, [], false, 16), true, false, "smf",
+                "launch_metadata_section_overlap")
+
+    describe "LM-A03: wide valid tables and exact byte oracle [importance=high; importance_weight=2]":
+        it "should validate 64 and 256 non-overlapping section rows [importance=high; importance_weight=2]":
+            expect_retained(wide_valid_fixture(64), false, true, "smf",
+                "launch_metadata_absent")
+            expect_retained(wide_valid_fixture(256), false, true, "smf",
+                "launch_metadata_absent")
+
+        it "should validate 1024 and 4096 non-overlapping section rows [importance=high; importance_weight=2]":
+            expect_retained(wide_valid_fixture(1024), false, true, "smf",
+                "launch_metadata_absent")
+            expect_retained(wide_valid_fixture(4096), false, true, "smf",
+                "launch_metadata_absent")
+
+        it "should preserve a byte-exact retained payload result [importance=high; importance_weight=2]":
+            val payload = canonical_payload()
+            val rows = valid_metadata_rows()
+            val result = retained_smf_launch_metadata_v1(smf_fixture(rows, payload), "smf")
+            expect(result.present).to_equal(true)
+            expect(result.ok).to_equal(true)
+            expect(result.reason).to_equal("launch_metadata_retained")
+            expect(render_launch_metadata_sidecar(result.metadata)).to_equal(
+                "simple_launch_metadata:\n" +
+                "  entry_kind: \"smf\"\n" +
+                "  target_os: \"\"\n" +
+                "  target_arch: \"\"\n" +
+                "  target_abi: \"\"\n" +
+                "  uses_arg_parser: true\n" +
+                "  mmap_hint: true\n" +
+                "  load_policy: \"map_selected_segments\"\n")

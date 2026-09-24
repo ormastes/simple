@@ -1,0 +1,179 @@
+# codex-system-test
+# @tag:system
+# @evidence-display: links
+# @req REQ-007 REQ-010 REQ-012 REQ-013 REQ-016 REQ-017 REQ-018 REQ-019
+# Plan: doc/03_plan/sys_test/simple_platform_unification.md
+# This supporting gate does not close the desktop/toolchain umbrella spec.
+# Native execution with an admitted pure-Simple runner is required. Loading
+# this file, a Rust seed run, or a generated manual is not acceptance evidence.
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{cwd, getpid, file_exists, file_read_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_image_manifest_v1.{
+    SimpleOsImageManifestV1, simpleos_image_manifest_digest_v1
+}
+use os.image_cli_v1.{
+    simpleos_image_cli_plan_v1, simpleos_image_cli_plan_lines_v1,
+    handle_os_image_v1
+}
+use os.installer.verified_image_composition_owner_v1.{
+    simpleos_verified_image_compose_v1
+}
+use os.fs_wrapper_artifact.{
+    fs_wrapper_symbol_admission, inspect_fs_wrapper_artifact
+}
+
+# @inline
+fn prepare_image_args_v1(root: text, output: text) -> [text]:
+    [
+        "--target=x86_64-unknown-simpleos", "--root=" + root,
+        "--output=" + output, "--sectors=32768", "--profile=dev",
+        "--build-id=unification-system-v1", "--source-id=unification-system-v1",
+        "--sosix-version=sosix-v1", "--kernel=kernel.elf", "--init=init.smf",
+        "--loader=loader.smf", "--selector=selector.smf", "--compiler=simple.smf"
+    ]
+
+# @inline
+fn require_composed_image_v1():
+    # Inputs are actual compiled products staged by the build owner. This
+    # test never creates marker ELF/SMF payloads or edits the staged inputs.
+    val root = cwd() + "/build/simpleos/unification-system-inputs"
+    for name in ["kernel.elf", "init.smf", "loader.smf", "selector.smf", "simple.smf"]:
+        if not file_exists(root + "/" + name):
+            fail("MissingEvidence: image-admission requires built artifact " + root + "/" + name)
+            return
+    val output = "system-" + getpid().to_text() + ".img"
+    val plan = simpleos_image_cli_plan_v1(prepare_image_args_v1(root, output)).unwrap()
+    var manifests: [SimpleOsImageManifestV1] = []
+    val result = simpleos_verified_image_compose_v1(plan.request, manifests)
+    if result.is_err():
+        fail("MissingEvidence: native image composition owner: " + result.unwrap_err())
+        return
+    if manifests.len() != 1:
+        fail("MissingEvidence: image composition owner did not return exactly one manifest")
+        return
+    val receipt = result.unwrap()
+    val bytes = file_read_bytes(root + "/" + output)
+    expect(bytes.len()).to_be_greater_than(0)
+    expect(receipt.carrier_byte_length).to_equal(bytes.len() as u64)
+    expect(receipt.carrier_digest).to_equal(sha256_u8_hex(bytes))
+    expect(receipt.artifact_count).to_equal(5)
+    expect(receipt.manifest_digest).to_equal(
+        simpleos_image_manifest_digest_v1(manifests[0]).unwrap())
+    expect(manifests[0].compiler.len()).to_equal(1)
+    expect(manifests[0].carrier.digest).to_equal(receipt.carrier_digest)
+    # Exclusive publication must retain the previously inspected bytes.
+    var second_manifests: [SimpleOsImageManifestV1] = []
+    expect(simpleos_verified_image_compose_v1(
+        plan.request, second_manifests).is_err()).to_equal(true)
+    expect(second_manifests.len()).to_equal(0)
+    expect(sha256_u8_hex(file_read_bytes(root + "/" + output))).to_equal(receipt.carrier_digest)
+
+# @inline
+fn require_unified_release_verifier_v1(stage: text):
+    # Explicit fail-fast placeholder, not a test-only verifier. Replace this
+    # only with the production cold-boot evidence producer/consumer API after
+    # that owner exists. The ledger contract alone cannot attest a guest run.
+    fail("MissingEvidence: " + stage + "; production immutable-candidate cold-boot compiler/reboot verifier is not wired; filesystem smoke and desktop marker receipts cannot satisfy REQ-018")
+
+describe "UP-AC-005 REQ-012 REQ-013 REQ-016: image planning [source-contract]":
+    it "should inspect a dev image request without claiming artifact admission":
+        step("Inspect the explicit dev image plan")
+        var args = prepare_image_args_v1("/absent/unification-inputs", "system.img")
+        args.push("--show-plan")
+        val plan = simpleos_image_cli_plan_v1(args).unwrap()
+        expect(plan.inspect_only).to_equal(true)
+        expect(plan.request.compiler_relative_path).to_equal("simple.smf")
+        val lines = simpleos_image_cli_plan_lines_v1(plan).join("\n")
+        expect(lines).to_contain("Qualified: false")
+        expect(lines).to_contain("Artifact admission: not attempted")
+        expect(handle_os_image_v1(args)).to_equal(0)
+
+    it "should reject artifact output aliasing before host I/O":
+        step("Request an output that aliases the kernel")
+        val result = simpleos_image_cli_plan_v1(
+            prepare_image_args_v1("/absent/unification-inputs", "kernel.elf"))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("verified image paths must be distinct safe relative paths")
+
+    it "should reject a compiler payload in the runtime profile":
+        step("Keep compiler placement bound to the selected profile")
+        var args = prepare_image_args_v1("/absent/unification-inputs", "system.img")
+        args[4] = "--profile=runtime"
+        val result = simpleos_image_cli_plan_v1(args)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("verified image compiler payload is permitted only in dev profile")
+
+describe "UP-AC-005 REQ-012 REQ-013 REQ-016: native image composition [image-admission]":
+    it "should publish actual staged artifacts through the production image owner":
+        step("Require built kernel, services, loader, selector, and compiler products")
+        step("Compose NVFS and bind its receipt to the bytes reread from disk")
+        require_composed_image_v1()
+
+describe "UP-AC-006 REQ-007 REQ-019: weak-provider rejection [source-contract]":
+    it "should reject a weak serial implementation before QEMU":
+        step("Submit an artifact symbol table containing weak serial output")
+        val result = fs_wrapper_symbol_admission(
+            "examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl",
+            "1: 00001000 12 FUNC WEAK DEFAULT 1 serial_println")
+        expect(result.admitted).to_equal(false)
+        expect(result.reason).to_equal("required-symbol-not-strong")
+        expect(result.symbol).to_equal("serial_println")
+
+    it "should reject generated freestanding fallback implementations":
+        step("Submit an artifact carrying the generated fallback object")
+        val result = fs_wrapper_symbol_admission(
+            "examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl",
+            "1: 00000000 0 FILE LOCAL DEFAULT ABS _stubs_freestanding.c")
+        expect(result.admitted).to_equal(false)
+        expect(result.reason).to_equal("generated-freestanding-stubs")
+
+    it "should reject a stripped symbol table with missing required providers":
+        step("Require linked provider evidence even when symbol inspection succeeds")
+        val result = fs_wrapper_symbol_admission(
+            "examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl", "")
+        expect(result.admitted).to_equal(false)
+        expect(result.reason).to_equal("required-symbol-missing")
+        expect(result.symbol).to_equal("__simple_entry_start")
+
+describe "UP-AC-006 REQ-007 REQ-019: linked filesystem providers [image-admission]":
+    it "should admit the real filesystem artifact before requesting a guest boot":
+        step("Inspect linked implementations in the actual filesystem probe ELF")
+        val artifact = cwd() + "/build/simpleos/unification-system-inputs/fs-probe.elf"
+        if not file_exists(artifact):
+            fail("MissingEvidence: built filesystem probe artifact " + artifact)
+            return
+        val result = inspect_fs_wrapper_artifact(
+            "examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl", artifact)
+        expect(result.reason).to_equal("ready")
+        expect(result.admitted).to_equal(true)
+
+describe "UP-AC-006 REQ-010 REQ-017 REQ-018 REQ-019: compiler and persistence [live-guest]":
+    it "should bind guest compiler version to the immutable candidate and cold boot":
+        step("Boot the qualified release firmware path and run guest simple --version")
+        require_unified_release_verifier_v1("guest-version")
+
+    it "should interpret the source inside the same qualified guest":
+        step("Run simple run hello.spl and retain guest output and status")
+        require_unified_release_verifier_v1("guest-run")
+
+    it "should build an artifact using the ordinary compiler inside SimpleOS":
+        step("Build hello.spl in the guest and bind source, compiler, and output digests")
+        require_unified_release_verifier_v1("guest-build")
+
+    it "should execute the artifact produced by the guest compiler":
+        step("Execute the guest-produced artifact and retain output, status, and identity")
+        require_unified_release_verifier_v1("guest-execute")
+
+    it "should persist a marker in an isolated writable derivative of the candidate":
+        step("Write and sync a fresh marker through the guest NVFS provider")
+        require_unified_release_verifier_v1("persistence-write")
+
+    it "should reboot the same derived state and read the previously written marker":
+        step("Cold reboot the derived state and verify marker identity across boot sessions")
+        require_unified_release_verifier_v1("reboot-read")
+
+fn main():
+    return ()

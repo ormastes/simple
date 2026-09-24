@@ -1,0 +1,267 @@
+# Deterministic x86_64 SimpleOS image-manifest composition admission.
+#
+# The caller owns and populates the large manifest value.  This module checks
+# that it is the exact projection of verified artifact inputs and one completed
+# NVFS materialization, then returns only a small receipt.  It never invents an
+# identity and grants no release or publication admission.
+
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_X86_64_FIRMWARE
+}
+use std.common.contracts.execution.simpleos_image_manifest_v1.*
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use os.port.nvfs_image.{
+    NvfsImageMaterializationReceiptV1,
+    NVFS_IMAGE_CARRIER_FORMAT_V1, NVFS_IMAGE_PROVIDER
+}
+
+pub const SIMPLEOS_IMAGE_COMPOSER_V1_X86_64_KERNEL_TARGET: text =
+    "x86_64-unknown-none"
+
+pub enum SimpleOsImageCompositionErrorV1:
+    None
+    InvalidIdentity
+    InvalidArtifactEvidence
+    InvalidKernelTarget
+    InvalidProfileContents
+    InvalidMaterialization
+    CandidateMismatch
+    ManifestInvalid
+
+pub struct SimpleOsVerifiedArtifactInputV1:
+    """Artifact identity plus builder-verified inclusion in one root image.
+
+    The producer of this value is a trust boundary: it must inspect the exact
+    materialized root and bind image_path, digest, and byte length to that root.
+    This composer validates the binding but does not inspect image bytes.
+    """
+    artifact: SimpleOsImageArtifactV1
+    source_path: text
+    source_digest: text
+    source_byte_length: u64
+    identity_verified: bool
+    included_in_materialized_root: bool
+    materialized_root_digest: text
+
+pub struct SimpleOsVerifiedProviderInputV1:
+    provider: SimpleOsImageProviderV1
+    source_path: text
+    source_digest: text
+    source_byte_length: u64
+    identity_verified: bool
+    included_in_materialized_root: bool
+    materialized_root_digest: text
+
+pub struct SimpleOsX8664ImageCompositionV1:
+    """Caller-owned candidate and every fact from which it is projected."""
+    candidate: SimpleOsImageManifestV1
+    profile_id: text
+    build_id: text
+    source_id: text
+    sosix_version: text
+    kernel_target_triple: text
+    kernel: SimpleOsVerifiedArtifactInputV1
+    init: SimpleOsVerifiedArtifactInputV1
+    loader: SimpleOsVerifiedArtifactInputV1
+    selector: SimpleOsVerifiedArtifactInputV1
+    compiler: [SimpleOsVerifiedArtifactInputV1]
+    providers: [SimpleOsVerifiedProviderInputV1]
+    materialization: NvfsImageMaterializationReceiptV1
+    root_volume_id: text
+
+pub struct SimpleOsImageCompositionReceiptV1:
+    accepted: bool
+    error: SimpleOsImageCompositionErrorV1
+
+fn _composition_reject_v1(
+    error: SimpleOsImageCompositionErrorV1
+) -> SimpleOsImageCompositionReceiptV1:
+    SimpleOsImageCompositionReceiptV1(accepted: false, error: error)
+
+fn _verified_artifact_v1(
+    input: SimpleOsVerifiedArtifactInputV1, root_digest: text
+) -> bool:
+    input.identity_verified and input.source_path.len() > 0 and
+        input.source_path.len() <= 4096 and
+        hash256_hex_valid(input.source_digest) and
+        input.source_byte_length > 0u64 and
+        input.artifact.digest == input.source_digest and
+        input.included_in_materialized_root and
+        input.materialized_root_digest == root_digest
+
+fn _verified_provider_v1(
+    input: SimpleOsVerifiedProviderInputV1, root_digest: text
+) -> bool:
+    input.identity_verified and input.source_path.len() > 0 and
+        input.source_path.len() <= 4096 and
+        hash256_hex_valid(input.source_digest) and
+        input.source_byte_length > 0u64 and
+        input.provider.artifact.digest == input.source_digest and
+        input.included_in_materialized_root and
+        input.materialized_root_digest == root_digest
+
+fn _artifact_equal_v1(
+    left: SimpleOsImageArtifactV1, right: SimpleOsImageArtifactV1
+) -> bool:
+    left.artifact_id == right.artifact_id and left.role == right.role and
+        left.image_path == right.image_path and left.digest == right.digest and
+        left.required == right.required and left.baseline == right.baseline
+
+fn _provider_equal_v1(
+    left: SimpleOsImageProviderV1, right: SimpleOsImageProviderV1
+) -> bool:
+    _artifact_equal_v1(left.artifact, right.artifact) and
+        left.interface_id == right.interface_id and left.tier == right.tier
+
+fn _artifact_inputs_match_v1(
+    candidate: [SimpleOsImageArtifactV1], inputs: [SimpleOsVerifiedArtifactInputV1]
+) -> bool:
+    if candidate.len() != inputs.len(): return false
+    var i = 0
+    while i < candidate.len():
+        if not _artifact_equal_v1(candidate[i], inputs[i].artifact): return false
+        i = i + 1
+    true
+
+fn _provider_inputs_match_v1(
+    candidate: [SimpleOsImageProviderV1], inputs: [SimpleOsVerifiedProviderInputV1]
+) -> bool:
+    if candidate.len() != inputs.len(): return false
+    var i = 0
+    while i < candidate.len():
+        if not _provider_equal_v1(candidate[i], inputs[i].provider): return false
+        i = i + 1
+    true
+
+fn _core_roles_valid_v1(input: SimpleOsX8664ImageCompositionV1) -> bool:
+    val kernel = input.kernel.artifact
+    val init = input.init.artifact
+    val loader = input.loader.artifact
+    val selector = input.selector.artifact
+    kernel.role == SimpleOsImageArtifactRoleV1.Kernel and
+        kernel.required and kernel.baseline and
+        init.role == SimpleOsImageArtifactRoleV1.Service and
+        init.required and init.baseline and
+        loader.role == SimpleOsImageArtifactRoleV1.Runtime and
+        loader.required and loader.baseline and
+        selector.role == SimpleOsImageArtifactRoleV1.Runtime and
+        selector.required and selector.baseline
+
+fn _profile_contents_valid_v1(input: SimpleOsX8664ImageCompositionV1) -> bool:
+    if not simpleos_image_profile_id_valid_v1(input.profile_id): return false
+    if input.profile_id != "dev" and input.compiler.len() != 0: return false
+    for compiler in input.compiler:
+        if compiler.artifact.role != SimpleOsImageArtifactRoleV1.Compiler:
+            return false
+    for provider in input.providers:
+        if provider.provider.artifact.role != SimpleOsImageArtifactRoleV1.Provider:
+            return false
+    true
+
+fn _materialization_valid_v1(input: SimpleOsX8664ImageCompositionV1) -> bool:
+    val receipt = input.materialization
+    receipt.bytes_verified_before_write and receipt.write_completed and
+        receipt.output_path.len() > 0 and
+        receipt.provider_id == NVFS_IMAGE_PROVIDER and
+        receipt.carrier_format_id == NVFS_IMAGE_CARRIER_FORMAT_V1 and
+        hash256_hex_valid(receipt.carrier_digest) and
+        receipt.carrier_byte_length > 0u64 and
+        receipt.carrier_digest == receipt.root_digest and
+        receipt.carrier_byte_length == receipt.root_byte_length
+
+fn _candidate_storage_matches_v1(input: SimpleOsX8664ImageCompositionV1) -> bool:
+    val candidate = input.candidate
+    val receipt = input.materialization
+    if candidate.carrier.kind != SimpleOsImageCarrierKindV1.RawDiskImage or
+        candidate.carrier.format_id != receipt.carrier_format_id or
+        candidate.carrier.digest != receipt.carrier_digest or
+        candidate.carrier.byte_length != receipt.carrier_byte_length:
+        return false
+    if candidate.volumes.len() != 1: return false
+    val volume = candidate.volumes[0]
+    if volume.volume_id != input.root_volume_id or
+        volume.role != SimpleOsImageVolumeRoleV1.System or
+        volume.filesystem != SimpleOsImageFilesystemV1.Nvfs or
+        volume.digest != receipt.root_digest or
+        volume.byte_length != receipt.root_byte_length or volume.writable:
+        return false
+    candidate.root.volume_id == input.root_volume_id and
+        candidate.root.filesystem == SimpleOsImageFilesystemV1.Nvfs and
+        candidate.root.mount_point == "/" and
+        candidate.root.snapshot_id == "" and candidate.root.overlay_id == "" and
+        not candidate.snapshot.present and candidate.snapshot.snapshot_id == "" and
+        candidate.snapshot.volume_id == "" and candidate.snapshot.digest == "" and
+        not candidate.overlay.present and candidate.overlay.overlay_id == "" and
+        candidate.overlay.base_snapshot_id == "" and
+        candidate.overlay.upper_volume_id == "" and candidate.overlay.digest == ""
+
+fn _candidate_projection_matches_v1(input: SimpleOsX8664ImageCompositionV1) -> bool:
+    val candidate = input.candidate
+    candidate.schema_version == SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA and
+        candidate.target_id == SIMPLEOS_TARGET_V1_X86_64_TRIPLE and
+        candidate.profile_id == input.profile_id and
+        candidate.build_id == input.build_id and candidate.source_id == input.source_id and
+        candidate.firmware_profile == SIMPLEOS_TARGET_V1_X86_64_FIRMWARE and
+        candidate.sosix_version == input.sosix_version and
+        _artifact_equal_v1(candidate.kernel, input.kernel.artifact) and
+        candidate.services.len() == 1 and
+        _artifact_equal_v1(candidate.services[0], input.init.artifact) and
+        candidate.runtime.len() == 2 and
+        _artifact_equal_v1(candidate.runtime[0], input.loader.artifact) and
+        _artifact_equal_v1(candidate.runtime[1], input.selector.artifact) and
+        _artifact_inputs_match_v1(candidate.compiler, input.compiler) and
+        _provider_inputs_match_v1(candidate.providers, input.providers) and
+        candidate.symbols.len() == 0 and
+        candidate.entry.artifact_id == input.init.artifact.artifact_id and
+        candidate.entry.symbol == "simpleos-init" and
+        candidate.baseline.kernel_artifact_id == input.kernel.artifact.artifact_id and
+        candidate.baseline.init_artifact_id == input.init.artifact.artifact_id and
+        candidate.baseline.loader_artifact_id == input.loader.artifact.artifact_id and
+        candidate.baseline.selector_artifact_id == input.selector.artifact.artifact_id and
+        _candidate_storage_matches_v1(input)
+
+pub fn simpleos_x86_64_image_manifest_compose_v1(
+    input: SimpleOsX8664ImageCompositionV1
+) -> SimpleOsImageCompositionReceiptV1:
+    """Validate the exact deterministic projection into a caller-owned value."""
+    if input.kernel_target_triple != SIMPLEOS_IMAGE_COMPOSER_V1_X86_64_KERNEL_TARGET:
+        return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidKernelTarget)
+    if not simpleos_image_identity_valid_v1(input.build_id) or
+        not simpleos_image_identity_valid_v1(input.source_id) or
+        not simpleos_image_identity_valid_v1(input.sosix_version) or
+        not simpleos_image_identity_valid_v1(input.root_volume_id):
+        return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidIdentity)
+    if input.compiler.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS or
+        input.providers.len() > SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS:
+        return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidProfileContents)
+    if not _core_roles_valid_v1(input) or
+        not _verified_artifact_v1(input.kernel, input.materialization.root_digest) or
+        not _verified_artifact_v1(input.init, input.materialization.root_digest) or
+        not _verified_artifact_v1(input.loader, input.materialization.root_digest) or
+        not _verified_artifact_v1(input.selector, input.materialization.root_digest):
+        return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidArtifactEvidence)
+    for compiler in input.compiler:
+        if not _verified_artifact_v1(compiler, input.materialization.root_digest):
+            return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidArtifactEvidence)
+    for provider in input.providers:
+        if not _verified_provider_v1(provider, input.materialization.root_digest):
+            return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidArtifactEvidence)
+    if not _profile_contents_valid_v1(input):
+        return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidProfileContents)
+    if not _materialization_valid_v1(input):
+        return _composition_reject_v1(SimpleOsImageCompositionErrorV1.InvalidMaterialization)
+    if not _candidate_projection_matches_v1(input):
+        return _composition_reject_v1(SimpleOsImageCompositionErrorV1.CandidateMismatch)
+    match simpleos_image_manifest_validate_v1(input.candidate):
+        case Err(_):
+            return _composition_reject_v1(SimpleOsImageCompositionErrorV1.ManifestInvalid)
+        case Ok(_): ()
+    SimpleOsImageCompositionReceiptV1(
+        accepted: true, error: SimpleOsImageCompositionErrorV1.None)
+
+export SimpleOsImageCompositionErrorV1
+export SimpleOsVerifiedArtifactInputV1, SimpleOsVerifiedProviderInputV1
+export SimpleOsX8664ImageCompositionV1, SimpleOsImageCompositionReceiptV1
+export simpleos_x86_64_image_manifest_compose_v1
+export SIMPLEOS_IMAGE_COMPOSER_V1_X86_64_KERNEL_TARGET

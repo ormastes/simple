@@ -1,0 +1,548 @@
+# SimpleOS release evidence manifest v1.
+#
+# This bounded value contract binds evidence produced by existing image,
+# launch, SOSIX, and guest-toolchain owners.  It does not execute, sign,
+# publish, promote, or mutate a release candidate.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+
+pub const SIMPLEOS_RELEASE_EVIDENCE_MANIFEST_V1_SCHEMA: u16 = 1u16
+pub const SIMPLEOS_RELEASE_EVIDENCE_V1_MAX_IDENTITY_BYTES: i64 = 256
+pub const SIMPLEOS_RELEASE_EVIDENCE_V1_MAX_CANONICAL_BYTES: i64 = 32768
+
+pub enum SimpleOsReleaseMachineBackendV1:
+    Qemu
+    Hardware
+
+pub enum SimpleOsReleaseWorkflowKindV1:
+    Version
+    Run
+    Build
+    NativeExecute
+
+pub enum SimpleOsReleaseEvidenceErrorV1:
+    None
+    InvalidSchema
+    InvalidIdentity
+    InvalidDigest
+    InvalidCandidate
+    InvalidDerivedState
+    InvalidFirmware
+    InvalidLaunchPlan
+    InvalidBootSession
+    InvalidSosixFilesystemEvidence
+    InvalidGuestWorkflow
+    WorkflowKindMismatch
+    WorkflowChainMismatch
+    InvalidPersistenceEvidence
+    PersistenceStateMismatch
+    InvalidTimeRange
+    InvalidToolchain
+    DiagnosticOnlyEvidence
+    ReplayDetected
+    ConsumeContextMismatch
+    CanonicalTooLarge
+
+pub struct SimpleOsReleaseTimedReceiptV1:
+    receipt_id: text
+    receipt_digest: text
+    # Digest of candidate/image/state/firmware/sealed-plan execution identity.
+    # The producing owner validates its receipt before contributing this bind.
+    execution_binding_digest: text
+    observed_at_unix_ms: u64
+    duration_ms: u64
+    succeeded: bool
+    diagnostic_only: bool
+
+pub struct SimpleOsReleaseCandidateEvidenceV1:
+    image_manifest_digest: text
+    candidate_bytes_digest: text
+    candidate_byte_length: u64
+    immutable_candidate: bool
+
+pub struct SimpleOsReleaseDerivedStateEvidenceV1:
+    state_id: text
+    base_candidate_bytes_digest: text
+    initial_state_digest: text
+    final_state_digest: text
+    writable_overlay_digest: text
+    derived_only: bool
+
+pub struct SimpleOsReleaseFirmwareEvidenceV1:
+    firmware_id: text
+    firmware_digest: text
+
+pub struct SimpleOsReleaseLaunchEvidenceV1:
+    backend: SimpleOsReleaseMachineBackendV1
+    sealed_plan_digest: text
+    source_spec_digest: text
+    admitted: bool
+
+pub struct SimpleOsReleaseSosixFilesystemEvidenceV1:
+    timed: SimpleOsReleaseTimedReceiptV1
+    contract_version: text
+    result_digest: text
+
+pub struct SimpleOsReleaseGuestWorkflowEvidenceV1:
+    kind: SimpleOsReleaseWorkflowKindV1
+    timed: SimpleOsReleaseTimedReceiptV1
+    # References a receipt already validated by the guest-toolchain owner;
+    # digest shape and booleans here do not establish its provenance.
+    guest_toolchain_receipt_digest: text
+    compiler_digest: text
+    input_source_digest: text
+    produced_artifact_digest: text
+    stdout_digest: text
+    exit_code: i64
+    executed_in_guest: bool
+
+pub struct SimpleOsReleasePersistenceEvidenceV1:
+    marker_id: text
+    marker_value_digest: text
+    write_receipt: SimpleOsReleaseTimedReceiptV1
+    reboot_receipt: SimpleOsReleaseTimedReceiptV1
+    read_receipt: SimpleOsReleaseTimedReceiptV1
+    write_state_id: text
+    write_state_digest: text
+    reboot_state_id: text
+    reboot_state_digest: text
+    read_state_id: text
+    read_state_digest: text
+    observed_marker_digest: text
+    same_derived_state: bool
+
+pub struct SimpleOsReleaseToolchainEvidenceV1:
+    toolchain_id: text
+    toolchain_manifest_digest: text
+    compiler_id: text
+    compiler_digest: text
+    compiler_provenance_digest: text
+    self_hosted_simple: bool
+    rust_seed: bool
+
+pub struct SimpleOsReleaseConsumptionV1:
+    evidence_id: text
+    nonce: text
+    sequence: u64
+    previous_evidence_digest: text
+    issued_at_unix_ms: u64
+    expires_at_unix_ms: u64
+    consumed_at_unix_ms: u64
+    consumed_once: bool
+
+pub struct SimpleOsReleaseEvidenceManifestV1:
+    schema_version: u16
+    target_id: text
+    profile_id: text
+    candidate: SimpleOsReleaseCandidateEvidenceV1
+    derived_state: SimpleOsReleaseDerivedStateEvidenceV1
+    firmware: SimpleOsReleaseFirmwareEvidenceV1
+    launch: SimpleOsReleaseLaunchEvidenceV1
+    boot: SimpleOsReleaseTimedReceiptV1
+    sosix_filesystem: SimpleOsReleaseSosixFilesystemEvidenceV1
+    version: SimpleOsReleaseGuestWorkflowEvidenceV1
+    run: SimpleOsReleaseGuestWorkflowEvidenceV1
+    build: SimpleOsReleaseGuestWorkflowEvidenceV1
+    native_execute: SimpleOsReleaseGuestWorkflowEvidenceV1
+    persistence: SimpleOsReleasePersistenceEvidenceV1
+    toolchain: SimpleOsReleaseToolchainEvidenceV1
+    started_at_unix_ms: u64
+    finished_at_unix_ms: u64
+    total_duration_ms: u64
+    diagnostic_only: bool
+    consumption: SimpleOsReleaseConsumptionV1
+
+# The caller supplies ledger-owned expectations.  This keeps replay state out
+# of the value contract and makes a stale or already-consumed nonce fail closed.
+pub struct SimpleOsReleaseEvidenceAdmissionContextV1:
+    expected_target_id: text
+    expected_candidate_bytes_digest: text
+    expected_evidence_id: text
+    expected_nonce: text
+    expected_sequence: u64
+    expected_previous_evidence_digest: text
+    expected_execution_binding_digest: text
+    now_unix_ms: u64
+    nonce_already_consumed: bool
+
+fn _release_identity_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > SIMPLEOS_RELEASE_EVIDENCE_V1_MAX_IDENTITY_BYTES:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 33 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _release_digest_valid_v1(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+fn _release_timed_valid_v1(value: SimpleOsReleaseTimedReceiptV1) -> bool:
+    _release_identity_valid_v1(value.receipt_id) and
+        _release_digest_valid_v1(value.receipt_digest) and
+        _release_digest_valid_v1(value.execution_binding_digest) and
+        value.observed_at_unix_ms > 0u64 and value.duration_ms > 0u64 and
+        value.succeeded and not value.diagnostic_only
+
+fn _release_timed_in_window_v1(
+    value: SimpleOsReleaseTimedReceiptV1,
+    started_at: u64,
+    finished_at: u64
+) -> bool:
+    _release_timed_valid_v1(value) and
+        value.observed_at_unix_ms >= started_at and
+        value.observed_at_unix_ms <= finished_at and
+        value.duration_ms <= finished_at - value.observed_at_unix_ms
+
+fn _release_timed_ends_before_v1(
+    first: SimpleOsReleaseTimedReceiptV1,
+    second: SimpleOsReleaseTimedReceiptV1
+) -> bool:
+    first.duration_ms <= second.observed_at_unix_ms and
+        first.observed_at_unix_ms <= second.observed_at_unix_ms - first.duration_ms
+
+fn _release_workflow_valid_v1(
+    value: SimpleOsReleaseGuestWorkflowEvidenceV1,
+    expected_kind: SimpleOsReleaseWorkflowKindV1,
+    toolchain: SimpleOsReleaseToolchainEvidenceV1,
+    started_at: u64,
+    finished_at: u64
+) -> SimpleOsReleaseEvidenceErrorV1:
+    if value.kind != expected_kind:
+        return SimpleOsReleaseEvidenceErrorV1.WorkflowKindMismatch
+    if not _release_timed_in_window_v1(value.timed, started_at, finished_at) or
+       not value.executed_in_guest or
+       value.exit_code != 0:
+        return SimpleOsReleaseEvidenceErrorV1.InvalidGuestWorkflow
+    if not _release_digest_valid_v1(value.guest_toolchain_receipt_digest) or
+       not _release_digest_valid_v1(value.compiler_digest) or
+       not _release_digest_valid_v1(value.input_source_digest) or
+       not _release_digest_valid_v1(value.produced_artifact_digest) or
+       not _release_digest_valid_v1(value.stdout_digest):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidDigest
+    if value.compiler_digest != toolchain.compiler_digest:
+        return SimpleOsReleaseEvidenceErrorV1.WorkflowChainMismatch
+    SimpleOsReleaseEvidenceErrorV1.None
+
+class _SimpleOsReleaseCanonicalWriterV1:
+    pieces: [text]
+
+impl _SimpleOsReleaseCanonicalWriterV1:
+    me append(value: text):
+        self.pieces.push("{value.len()}:{value}")
+
+    fn finish() -> text:
+        self.pieces.join("")
+
+pub fn simpleos_release_execution_binding_digest_v1(
+    target_id: text,
+    profile_id: text,
+    candidate: SimpleOsReleaseCandidateEvidenceV1,
+    derived_state: SimpleOsReleaseDerivedStateEvidenceV1,
+    firmware: SimpleOsReleaseFirmwareEvidenceV1,
+    launch: SimpleOsReleaseLaunchEvidenceV1
+) -> text:
+    var writer = _SimpleOsReleaseCanonicalWriterV1(pieces: [])
+    writer.append("simpleos-release-execution-binding-v1")
+    writer.append(target_id)
+    writer.append(profile_id)
+    writer.append(candidate.image_manifest_digest)
+    writer.append(candidate.candidate_bytes_digest)
+    writer.append(candidate.candidate_byte_length.to_text())
+    writer.append(derived_state.state_id)
+    writer.append(derived_state.base_candidate_bytes_digest)
+    writer.append(derived_state.initial_state_digest)
+    writer.append(derived_state.final_state_digest)
+    writer.append(derived_state.writable_overlay_digest)
+    writer.append(firmware.firmware_id)
+    writer.append(firmware.firmware_digest)
+    writer.append(if launch.backend == SimpleOsReleaseMachineBackendV1.Qemu: "qemu" else: "hardware")
+    writer.append(launch.sealed_plan_digest)
+    writer.append(launch.source_spec_digest)
+    sha256_u8_hex(writer.finish().bytes())
+
+fn _release_timed_append_v1(writer: _SimpleOsReleaseCanonicalWriterV1, value: SimpleOsReleaseTimedReceiptV1):
+    writer.append(value.receipt_id)
+    writer.append(value.receipt_digest)
+    writer.append(value.execution_binding_digest)
+    writer.append(value.observed_at_unix_ms.to_text())
+    writer.append(value.duration_ms.to_text())
+    writer.append(if value.succeeded: "1" else: "0")
+    writer.append(if value.diagnostic_only: "1" else: "0")
+
+fn _release_workflow_append_v1(writer: _SimpleOsReleaseCanonicalWriterV1, value: SimpleOsReleaseGuestWorkflowEvidenceV1):
+    writer.append(match value.kind:
+        case SimpleOsReleaseWorkflowKindV1.Version: "version"
+        case SimpleOsReleaseWorkflowKindV1.Run: "run"
+        case SimpleOsReleaseWorkflowKindV1.Build: "build"
+        case SimpleOsReleaseWorkflowKindV1.NativeExecute: "native-execute")
+    _release_timed_append_v1(writer, value.timed)
+    writer.append(value.guest_toolchain_receipt_digest)
+    writer.append(value.compiler_digest)
+    writer.append(value.input_source_digest)
+    writer.append(value.produced_artifact_digest)
+    writer.append(value.stdout_digest)
+    writer.append(value.exit_code.to_text())
+    writer.append(if value.executed_in_guest: "1" else: "0")
+
+pub fn simpleos_release_evidence_validate_v1(
+    manifest: SimpleOsReleaseEvidenceManifestV1,
+    context: SimpleOsReleaseEvidenceAdmissionContextV1
+) -> SimpleOsReleaseEvidenceErrorV1:
+    if manifest.schema_version != SIMPLEOS_RELEASE_EVIDENCE_MANIFEST_V1_SCHEMA:
+        return SimpleOsReleaseEvidenceErrorV1.InvalidSchema
+    if not _release_identity_valid_v1(manifest.target_id) or
+       not _release_identity_valid_v1(manifest.profile_id):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidIdentity
+    if manifest.target_id != context.expected_target_id:
+        return SimpleOsReleaseEvidenceErrorV1.ConsumeContextMismatch
+    if manifest.started_at_unix_ms == 0u64 or
+       manifest.finished_at_unix_ms <= manifest.started_at_unix_ms or
+       manifest.total_duration_ms == 0u64 or
+       manifest.total_duration_ms != manifest.finished_at_unix_ms - manifest.started_at_unix_ms:
+        return SimpleOsReleaseEvidenceErrorV1.InvalidTimeRange
+    if not _release_digest_valid_v1(manifest.candidate.image_manifest_digest) or
+       not _release_digest_valid_v1(manifest.candidate.candidate_bytes_digest) or
+       manifest.candidate.candidate_byte_length == 0u64 or
+       not manifest.candidate.immutable_candidate:
+        return SimpleOsReleaseEvidenceErrorV1.InvalidCandidate
+    if manifest.candidate.candidate_bytes_digest != context.expected_candidate_bytes_digest:
+        return SimpleOsReleaseEvidenceErrorV1.InvalidCandidate
+    if not _release_identity_valid_v1(manifest.derived_state.state_id) or
+       manifest.derived_state.base_candidate_bytes_digest != manifest.candidate.candidate_bytes_digest or
+       not _release_digest_valid_v1(manifest.derived_state.initial_state_digest) or
+       not _release_digest_valid_v1(manifest.derived_state.final_state_digest) or
+       not _release_digest_valid_v1(manifest.derived_state.writable_overlay_digest) or
+       not manifest.derived_state.derived_only:
+        return SimpleOsReleaseEvidenceErrorV1.InvalidDerivedState
+    if not _release_identity_valid_v1(manifest.firmware.firmware_id) or
+       not _release_digest_valid_v1(manifest.firmware.firmware_digest):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidFirmware
+    if not manifest.launch.admitted or
+       not _release_digest_valid_v1(manifest.launch.sealed_plan_digest) or
+       not _release_digest_valid_v1(manifest.launch.source_spec_digest):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidLaunchPlan
+    val execution_binding = simpleos_release_execution_binding_digest_v1(
+        manifest.target_id, manifest.profile_id, manifest.candidate,
+        manifest.derived_state, manifest.firmware, manifest.launch)
+    if not _release_digest_valid_v1(context.expected_execution_binding_digest) or
+       execution_binding != context.expected_execution_binding_digest:
+        return SimpleOsReleaseEvidenceErrorV1.ConsumeContextMismatch
+    if manifest.boot.execution_binding_digest != execution_binding or
+       manifest.sosix_filesystem.timed.execution_binding_digest != execution_binding or
+       manifest.version.timed.execution_binding_digest != execution_binding or
+       manifest.run.timed.execution_binding_digest != execution_binding or
+       manifest.build.timed.execution_binding_digest != execution_binding or
+       manifest.native_execute.timed.execution_binding_digest != execution_binding or
+       manifest.persistence.write_receipt.execution_binding_digest != execution_binding or
+       manifest.persistence.reboot_receipt.execution_binding_digest != execution_binding or
+       manifest.persistence.read_receipt.execution_binding_digest != execution_binding:
+        return SimpleOsReleaseEvidenceErrorV1.WorkflowChainMismatch
+    if not _release_timed_in_window_v1(
+        manifest.boot, manifest.started_at_unix_ms, manifest.finished_at_unix_ms):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidBootSession
+    if not _release_timed_in_window_v1(
+           manifest.sosix_filesystem.timed,
+           manifest.started_at_unix_ms, manifest.finished_at_unix_ms) or
+       not _release_identity_valid_v1(manifest.sosix_filesystem.contract_version) or
+       not _release_digest_valid_v1(manifest.sosix_filesystem.result_digest):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidSosixFilesystemEvidence
+    val version_error = _release_workflow_valid_v1(
+        manifest.version, SimpleOsReleaseWorkflowKindV1.Version, manifest.toolchain,
+        manifest.started_at_unix_ms, manifest.finished_at_unix_ms)
+    if version_error != SimpleOsReleaseEvidenceErrorV1.None: return version_error
+    val run_error = _release_workflow_valid_v1(
+        manifest.run, SimpleOsReleaseWorkflowKindV1.Run, manifest.toolchain,
+        manifest.started_at_unix_ms, manifest.finished_at_unix_ms)
+    if run_error != SimpleOsReleaseEvidenceErrorV1.None: return run_error
+    val build_error = _release_workflow_valid_v1(
+        manifest.build, SimpleOsReleaseWorkflowKindV1.Build, manifest.toolchain,
+        manifest.started_at_unix_ms, manifest.finished_at_unix_ms)
+    if build_error != SimpleOsReleaseEvidenceErrorV1.None: return build_error
+    val execute_error = _release_workflow_valid_v1(
+        manifest.native_execute, SimpleOsReleaseWorkflowKindV1.NativeExecute,
+        manifest.toolchain, manifest.started_at_unix_ms, manifest.finished_at_unix_ms)
+    if execute_error != SimpleOsReleaseEvidenceErrorV1.None: return execute_error
+    if manifest.version.guest_toolchain_receipt_digest !=
+           manifest.run.guest_toolchain_receipt_digest or
+       manifest.run.guest_toolchain_receipt_digest !=
+           manifest.build.guest_toolchain_receipt_digest or
+       manifest.build.guest_toolchain_receipt_digest !=
+           manifest.native_execute.guest_toolchain_receipt_digest or
+       manifest.run.input_source_digest != manifest.build.input_source_digest or
+       manifest.native_execute.input_source_digest !=
+           manifest.build.produced_artifact_digest or
+       manifest.native_execute.produced_artifact_digest !=
+           manifest.build.produced_artifact_digest:
+        return SimpleOsReleaseEvidenceErrorV1.WorkflowChainMismatch
+    val persistence = manifest.persistence
+    if not _release_identity_valid_v1(persistence.marker_id) or
+       not _release_digest_valid_v1(persistence.marker_value_digest) or
+       not _release_digest_valid_v1(persistence.observed_marker_digest) or
+       not _release_timed_in_window_v1(
+           persistence.write_receipt,
+           manifest.started_at_unix_ms, manifest.finished_at_unix_ms) or
+       not _release_timed_in_window_v1(
+           persistence.reboot_receipt,
+           manifest.started_at_unix_ms, manifest.finished_at_unix_ms) or
+       not _release_timed_in_window_v1(
+           persistence.read_receipt,
+           manifest.started_at_unix_ms, manifest.finished_at_unix_ms):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidPersistenceEvidence
+    if persistence.marker_value_digest != persistence.observed_marker_digest or
+       persistence.write_state_id != manifest.derived_state.state_id or
+       persistence.write_state_digest != manifest.derived_state.final_state_digest or
+       persistence.reboot_state_id != manifest.derived_state.state_id or
+       persistence.reboot_state_digest != manifest.derived_state.final_state_digest or
+       persistence.read_state_id != manifest.derived_state.state_id or
+       persistence.read_state_digest != manifest.derived_state.final_state_digest or
+       not persistence.same_derived_state:
+        return SimpleOsReleaseEvidenceErrorV1.PersistenceStateMismatch
+    if not _release_timed_ends_before_v1(
+           manifest.boot, manifest.sosix_filesystem.timed) or
+       not _release_timed_ends_before_v1(
+           manifest.sosix_filesystem.timed, manifest.version.timed) or
+       not _release_timed_ends_before_v1(manifest.version.timed, manifest.run.timed) or
+       not _release_timed_ends_before_v1(manifest.run.timed, manifest.build.timed) or
+       not _release_timed_ends_before_v1(
+           manifest.build.timed, manifest.native_execute.timed) or
+       not _release_timed_ends_before_v1(
+           manifest.native_execute.timed, persistence.write_receipt) or
+       not _release_timed_ends_before_v1(
+           persistence.write_receipt, persistence.reboot_receipt) or
+       not _release_timed_ends_before_v1(
+           persistence.reboot_receipt, persistence.read_receipt):
+        return SimpleOsReleaseEvidenceErrorV1.InvalidTimeRange
+    if not _release_identity_valid_v1(manifest.toolchain.toolchain_id) or
+       not _release_identity_valid_v1(manifest.toolchain.compiler_id) or
+       not _release_digest_valid_v1(manifest.toolchain.toolchain_manifest_digest) or
+       not _release_digest_valid_v1(manifest.toolchain.compiler_digest) or
+       not _release_digest_valid_v1(manifest.toolchain.compiler_provenance_digest) or
+       not manifest.toolchain.self_hosted_simple or manifest.toolchain.rust_seed:
+        return SimpleOsReleaseEvidenceErrorV1.InvalidToolchain
+    if manifest.diagnostic_only:
+        return SimpleOsReleaseEvidenceErrorV1.DiagnosticOnlyEvidence
+    val consume = manifest.consumption
+    if not _release_identity_valid_v1(consume.evidence_id) or
+       not _release_identity_valid_v1(consume.nonce) or consume.sequence == 0u64 or
+       not _release_digest_valid_v1(consume.previous_evidence_digest) or
+       consume.issued_at_unix_ms < manifest.finished_at_unix_ms or
+       consume.expires_at_unix_ms <= consume.issued_at_unix_ms or
+       consume.consumed_at_unix_ms < consume.issued_at_unix_ms or
+       consume.consumed_at_unix_ms > consume.expires_at_unix_ms or
+       not consume.consumed_once:
+        return SimpleOsReleaseEvidenceErrorV1.ReplayDetected
+    if context.nonce_already_consumed:
+        return SimpleOsReleaseEvidenceErrorV1.ReplayDetected
+    if consume.evidence_id != context.expected_evidence_id or
+       consume.nonce != context.expected_nonce or
+       consume.sequence != context.expected_sequence or
+       consume.previous_evidence_digest != context.expected_previous_evidence_digest or
+       context.now_unix_ms < consume.issued_at_unix_ms or
+       context.now_unix_ms > consume.expires_at_unix_ms or
+       consume.consumed_at_unix_ms > context.now_unix_ms:
+        return SimpleOsReleaseEvidenceErrorV1.ConsumeContextMismatch
+    SimpleOsReleaseEvidenceErrorV1.None
+
+fn _simpleos_release_evidence_canonical_build_v1(manifest: SimpleOsReleaseEvidenceManifestV1) -> text:
+    var writer = _SimpleOsReleaseCanonicalWriterV1(pieces: [])
+    writer.append("simpleos-release-evidence-manifest-v1")
+    writer.append(manifest.schema_version.to_text())
+    writer.append(manifest.target_id)
+    writer.append(manifest.profile_id)
+    writer.append(manifest.candidate.image_manifest_digest)
+    writer.append(manifest.candidate.candidate_bytes_digest)
+    writer.append(manifest.candidate.candidate_byte_length.to_text())
+    writer.append(if manifest.candidate.immutable_candidate: "1" else: "0")
+    writer.append(manifest.derived_state.state_id)
+    writer.append(manifest.derived_state.base_candidate_bytes_digest)
+    writer.append(manifest.derived_state.initial_state_digest)
+    writer.append(manifest.derived_state.final_state_digest)
+    writer.append(manifest.derived_state.writable_overlay_digest)
+    writer.append(if manifest.derived_state.derived_only: "1" else: "0")
+    writer.append(manifest.firmware.firmware_id)
+    writer.append(manifest.firmware.firmware_digest)
+    writer.append(if manifest.launch.backend == SimpleOsReleaseMachineBackendV1.Qemu: "qemu" else: "hardware")
+    writer.append(manifest.launch.sealed_plan_digest)
+    writer.append(manifest.launch.source_spec_digest)
+    writer.append(if manifest.launch.admitted: "1" else: "0")
+    _release_timed_append_v1(writer, manifest.boot)
+    _release_timed_append_v1(writer, manifest.sosix_filesystem.timed)
+    writer.append(manifest.sosix_filesystem.contract_version)
+    writer.append(manifest.sosix_filesystem.result_digest)
+    _release_workflow_append_v1(writer, manifest.version)
+    _release_workflow_append_v1(writer, manifest.run)
+    _release_workflow_append_v1(writer, manifest.build)
+    _release_workflow_append_v1(writer, manifest.native_execute)
+    writer.append(manifest.persistence.marker_id)
+    writer.append(manifest.persistence.marker_value_digest)
+    _release_timed_append_v1(writer, manifest.persistence.write_receipt)
+    _release_timed_append_v1(writer, manifest.persistence.reboot_receipt)
+    _release_timed_append_v1(writer, manifest.persistence.read_receipt)
+    writer.append(manifest.persistence.write_state_id)
+    writer.append(manifest.persistence.write_state_digest)
+    writer.append(manifest.persistence.reboot_state_id)
+    writer.append(manifest.persistence.reboot_state_digest)
+    writer.append(manifest.persistence.read_state_id)
+    writer.append(manifest.persistence.read_state_digest)
+    writer.append(manifest.persistence.observed_marker_digest)
+    writer.append(if manifest.persistence.same_derived_state: "1" else: "0")
+    writer.append(manifest.toolchain.toolchain_id)
+    writer.append(manifest.toolchain.toolchain_manifest_digest)
+    writer.append(manifest.toolchain.compiler_id)
+    writer.append(manifest.toolchain.compiler_digest)
+    writer.append(manifest.toolchain.compiler_provenance_digest)
+    writer.append(if manifest.toolchain.self_hosted_simple: "1" else: "0")
+    writer.append(if manifest.toolchain.rust_seed: "1" else: "0")
+    writer.append(manifest.started_at_unix_ms.to_text())
+    writer.append(manifest.finished_at_unix_ms.to_text())
+    writer.append(manifest.total_duration_ms.to_text())
+    writer.append(if manifest.diagnostic_only: "1" else: "0")
+    writer.append(manifest.consumption.evidence_id)
+    writer.append(manifest.consumption.nonce)
+    writer.append(manifest.consumption.sequence.to_text())
+    writer.append(manifest.consumption.previous_evidence_digest)
+    writer.append(manifest.consumption.issued_at_unix_ms.to_text())
+    writer.append(manifest.consumption.expires_at_unix_ms.to_text())
+    writer.append(manifest.consumption.consumed_at_unix_ms.to_text())
+    writer.append(if manifest.consumption.consumed_once: "1" else: "0")
+    writer.finish()
+
+pub fn simpleos_release_evidence_canonical_v1(
+    manifest: SimpleOsReleaseEvidenceManifestV1,
+    context: SimpleOsReleaseEvidenceAdmissionContextV1
+) -> Result<text, SimpleOsReleaseEvidenceErrorV1>:
+    val error = simpleos_release_evidence_validate_v1(manifest, context)
+    if error != SimpleOsReleaseEvidenceErrorV1.None:
+        return Err(error)
+    val canonical = _simpleos_release_evidence_canonical_build_v1(manifest)
+    if canonical.len() > SIMPLEOS_RELEASE_EVIDENCE_V1_MAX_CANONICAL_BYTES:
+        return Err(SimpleOsReleaseEvidenceErrorV1.CanonicalTooLarge)
+    Ok(canonical)
+
+pub fn simpleos_release_evidence_digest_v1(
+    manifest: SimpleOsReleaseEvidenceManifestV1,
+    context: SimpleOsReleaseEvidenceAdmissionContextV1
+) -> Result<text, SimpleOsReleaseEvidenceErrorV1>:
+    match simpleos_release_evidence_canonical_v1(manifest, context):
+        case Ok(canonical): Ok(sha256_u8_hex(canonical.bytes()))
+        case Err(error): Err(error)
+
+export SimpleOsReleaseMachineBackendV1, SimpleOsReleaseWorkflowKindV1
+export SimpleOsReleaseEvidenceErrorV1, SimpleOsReleaseTimedReceiptV1
+export SimpleOsReleaseCandidateEvidenceV1, SimpleOsReleaseDerivedStateEvidenceV1
+export SimpleOsReleaseFirmwareEvidenceV1, SimpleOsReleaseLaunchEvidenceV1
+export SimpleOsReleaseSosixFilesystemEvidenceV1
+export SimpleOsReleaseGuestWorkflowEvidenceV1
+export SimpleOsReleasePersistenceEvidenceV1, SimpleOsReleaseToolchainEvidenceV1
+export SimpleOsReleaseConsumptionV1, SimpleOsReleaseEvidenceManifestV1
+export SimpleOsReleaseEvidenceAdmissionContextV1
+export SIMPLEOS_RELEASE_EVIDENCE_MANIFEST_V1_SCHEMA
+export SIMPLEOS_RELEASE_EVIDENCE_V1_MAX_IDENTITY_BYTES
+export SIMPLEOS_RELEASE_EVIDENCE_V1_MAX_CANONICAL_BYTES
+export simpleos_release_evidence_validate_v1
+export simpleos_release_execution_binding_digest_v1
+export simpleos_release_evidence_canonical_v1, simpleos_release_evidence_digest_v1
