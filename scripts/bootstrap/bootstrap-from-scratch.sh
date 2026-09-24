@@ -194,6 +194,13 @@ Options:
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
+                     Stage 2 additionally EXERCISES the admitted Stage 2
+                     compiler with the phase verification matrix: it builds a
+                     phase-bound full CLI and standalone test runner from that
+                     compiler and runs the compiler-bootstrap, interpreter and
+                     loader suites through them. A failing suite, an incomplete
+                     verification summary, or a missing admitted artifact stops
+                     the bootstrap.
   --strategy=<name>  Bootstrap scheduling strategy: adhoc, normal, or full
                      (default: normal; env: SIMPLE_BOOTSTRAP_STRATEGY).
                      normal reuses incremental caches and schedules isolated
@@ -201,8 +208,9 @@ Options:
                      and test to a terminal summary even after task crashes.
   --stop-after-stage2
                      With --full-bootstrap, build and admit the measured
-                     Stage-2 trust root, then stop before Stage 3. This is the
-                     sole receipt-free bootstrap lane.
+                     Stage-2 trust root, run the Stage 2 compiler tests
+                     described under --full-bootstrap, then stop before
+                     Stage 3. This is the sole receipt-free bootstrap lane.
   --resume-stage3-from-admitted=<output>
                      Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
                      using a new one-thread recovery transcript/evidence lane.
@@ -3774,6 +3782,166 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
       chmod 400 "${stage2_compatibility_manifest_absolute}"
     fi
+  fi
+
+  # Stage 2 compiler tests (--full-bootstrap).
+  #
+  # Until this step, Stage 2 ended at admission: it built the compiler, probed
+  # it on a hello world (sanity), probed one struct-receiver/runtime capability,
+  # admitted it, published the parent receipts and the frozen runtime capsule,
+  # and sealed the native cache. Nothing ever RAN a compiler test with it. A
+  # Stage 2 that compiles three lines but cannot build its own test runner, or
+  # whose test runner fails the compiler suites, stayed invisible until Stage 3
+  # or later — which is the whole point of having a Phase 2 at all.
+  #
+  # This does not invent a mechanism. `bootstrap-phase-verification.shs
+  # --phase=stage2` is the repo's existing executable Phase 2 gate (the same one
+  # run-linux-phase2-tests.shs and run-freebsd-phase2-tests.shs drive after the
+  # fact, and the one named as authoritative in
+  # doc/09_report/phase2_binary_verification_blocked_2026-09-21.md). It resolves
+  # the bound runtime capsule itself via phase2-runtime-binding.shs resolve — so
+  # no --runtime-path is passed and no path-equality assumption is made — then
+  # builds a phase-bound full CLI and `simple_test_runner` FROM this Stage 2
+  # compiler (compiler_cli_build / test_runner_build) and runs
+  # compiler_bootstrap_tests, interpreter_* and loader_* through them under
+  # --verification-require-test-json and a frozen command-owner receipt.
+  #
+  # The "compiler test binary" therefore does not pre-exist: Stage 2 produces
+  # it. Absence of it is a FAILED test_runner_build, which the summary check
+  # below treats as an error, never as a skip.
+  #
+  # It necessarily runs AFTER admission, because the verifier reads
+  # admission.env and the capsule published immediately above. Ordering note in
+  # the report below: on failure the admitted binary, its receipts and the
+  # capsule are already on disk, so this step writes rejection evidence and
+  # refuses the run rather than retracting them — there is no post-admission
+  # retraction idiom in this script (stage2-rejected/ is pre-admission only).
+  # No existing gate, receipt or admission step is relaxed to make room here.
+  if [ "${full_bootstrap}" -eq 1 ] && [ "${stage2_status}" -eq 0 ]; then
+    stage2_tests_root="${output_dir}/stage2-compiler-tests/${PLATFORM}"
+    stage2_tests_work="${stage2_tests_root}/verification"
+    stage2_tests_summary="${stage2_tests_work}/summary.env"
+    stage2_tests_evidence="${stage2_tests_root}/stage2-compiler-tests.env"
+    stage2_tests_rejection="${stage2_tests_root}/rejection.env"
+    stage2_tests_log="${log_dir}/stage2-compiler-tests.log"
+    mkdir -p "${stage2_tests_root}" || {
+      echo "error: cannot create the Stage 2 compiler-test evidence root" >&2
+      exit 1
+    }
+    # A previous run may have left these 400; clear them so this run records
+    # truthfully instead of inheriting a stale verdict (same failure mode the
+    # stage2-rejected receipts already guard against above).
+    rm -f "${stage2_tests_evidence}" "${stage2_tests_rejection}"
+    # Absence of the artifact under test is an ERROR, never a silent pass.
+    [ -f "${stage2_admitted_bin}" ] && [ -x "${stage2_admitted_bin}" ] || {
+      echo "error: Stage 2 compiler tests have nothing to run: no executable admitted compiler at ${stage2_admitted_bin}" >&2
+      exit 1
+    }
+    [ -f "${stage2_admission_receipt}" ] || {
+      echo "error: Stage 2 compiler tests have no admission receipt at ${stage2_admission_receipt}" >&2
+      exit 1
+    }
+    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}") || {
+      echo "error: cannot hash the admitted Stage 2 compiler for verification" >&2
+      exit 1
+    }
+    # The verifier accepts normal or full only; every other bootstrap strategy
+    # (adhoc, unset) maps onto its normal matrix, which already includes the
+    # compiler-bootstrap, interpreter and loader suites at Stage 2.
+    case "${SIMPLE_BOOTSTRAP_STRATEGY:-normal}" in
+      full) stage2_tests_strategy=full ;;
+      *) stage2_tests_strategy=normal ;;
+    esac
+    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy})"
+    # Without a milestone the progress watcher reads this multi-minute step as a
+    # hang between Stage 2 and Stage 3.
+    bootstrap_progress_mark stage2-compiler-tests \
+      "$(absolute_path "${stage2_tests_log}")"
+    stage2_tests_status=0
+    # Status is captured directly from the subshell, never through a pipe: a
+    # pipeline's $? is the last stage's status and has produced false greens in
+    # this repo before.
+    (
+      cd "${repo_root}" || exit 125
+      sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
+        --phase=stage2 \
+        --compiler="${stage2_admitted_absolute}" \
+        --compiler-sha256="${stage2_tests_sha}" \
+        --strategy="${stage2_tests_strategy}" \
+        --hash-policy=canonical \
+        --work-root="${stage2_tests_work}" \
+        --cache-root="${stage2_tests_root}/cache" \
+        --source-root="${repo_root}"
+    ) >"${stage2_tests_log}" 2>&1 || stage2_tests_status=$?
+    if [ "${stage2_tests_status}" -eq 0 ] && [ ! -f "${stage2_tests_summary}" ]; then
+      echo "error: Stage 2 compiler tests exited 0 but wrote no verification summary" >&2
+      stage2_tests_status=95
+    fi
+    # Exit 0 alone is not evidence. The verifier records UNSUPPORTED tasks
+    # rather than failing them outright, so require the rows that prove a
+    # compiler test binary was BUILT and USED, each exactly once and PASS.
+    # A summary that names none of them checked nothing and is an ERROR.
+    if [ "${stage2_tests_status}" -eq 0 ] &&
+      ! awk -F'[=|]' -v sha="${stage2_tests_sha}" '
+        $1 == "phase" { phases++; if ($2 != "stage2") bad = 1 }
+        $1 == "hash_policy" { policies++; if ($2 != "canonical") bad = 1 }
+        $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad = 1 }
+        $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
+        $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
+        $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
+        $1 == "task" {
+          if ($3 != "result" || $4 != "PASS") bad = 1
+          if ($2 == "compiler_cli_build") cli++
+          if ($2 == "test_runner_build") runner++
+          if ($2 == "compiler_bootstrap_tests") bootstrap_tests++
+          if ($2 == "interpreter_interpreter_tests") interpreter_tests++
+          if ($2 == "loader_interpreter_tests") loader_tests++
+        }
+        END {
+          exit (bad || phases != 1 || policies != 1 || expected != 1 ||
+            actual != 1 || failures != 1 || outcomes != 1 ||
+            cli != 1 || runner != 1 || bootstrap_tests != 1 ||
+            interpreter_tests != 1 || loader_tests != 1)
+        }
+      ' "${stage2_tests_summary}"; then
+      echo "error: Stage 2 compiler-test summary is incomplete, not PASS, or names no executed compiler test suite" >&2
+      stage2_tests_status=95
+    fi
+    if [ "${stage2_tests_status}" -ne 0 ]; then
+      {
+        echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
+        echo "status=rejected"
+        echo "reason=stage2-compiler-tests-failed"
+        echo "candidate=${stage2_admitted_absolute}"
+        echo "candidate_sha256=${stage2_tests_sha}"
+        echo "strategy=${stage2_tests_strategy}"
+        echo "verification_status=${stage2_tests_status}"
+        echo "verification_summary=${stage2_tests_summary}"
+        echo "verification_log=${stage2_tests_log}"
+      } >"${stage2_tests_rejection}"
+      chmod 400 "${stage2_tests_rejection}"
+      echo "error: Stage 2 compiler tests failed (status=${stage2_tests_status})" >&2
+      echo "       summary:   ${stage2_tests_summary}" >&2
+      echo "       log:       ${stage2_tests_log}" >&2
+      echo "       rejection: ${stage2_tests_rejection}" >&2
+      echo "       The Stage 2 admission receipt, parent receipts and runtime" >&2
+      echo "       capsule were published before these tests ran and remain on" >&2
+      echo "       disk; do NOT resume Stage 3 from this output until the" >&2
+      echo "       failure above is understood." >&2
+      exit 1
+    fi
+    {
+      echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
+      echo "status=pass"
+      echo "candidate=${stage2_admitted_absolute}"
+      echo "candidate_sha256=${stage2_tests_sha}"
+      echo "strategy=${stage2_tests_strategy}"
+      echo "verification_summary=${stage2_tests_summary}"
+      echo "verification_summary_sha256=$(bootstrap_stage3_hash_file "${stage2_tests_summary}")"
+      echo "verification_log=${stage2_tests_log}"
+    } >"${stage2_tests_evidence}"
+    chmod 400 "${stage2_tests_evidence}"
+    echo "bootstrap-policy: stage2-compiler-tests=${stage2_tests_evidence}"
   fi
 
   if [ "${stop_after_stage2}" -eq 1 ]; then
