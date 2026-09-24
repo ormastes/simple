@@ -3884,14 +3884,68 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: cannot hash the admitted Stage 2 compiler for verification" >&2
       exit 1
     }
+    # Prune stale per-hash cache/output dirs from earlier bootstraps before
+    # running. The verifier keys its object cache and built-tool output dirs
+    # by this Stage 2 compiler's own hash (perf/mem audit of PR #1458,
+    # 2026-09-24), which changes on essentially every bootstrap, so nothing
+    # ever deleted the PREVIOUS hash's cache/output dir; left alone, disk use
+    # under stage2-compiler-tests/<PLATFORM>/ grows without bound across
+    # repeated bootstraps. Keep only the directory matching the CURRENT
+    # admitted-compiler hash; everything else here is dead weight from a
+    # compiler that is no longer the admitted Stage 2 binary.
+    for stage2_tests_stale_root in \
+      "${stage2_tests_root}/cache/compiler-tools/stage2" \
+      "${stage2_tests_root}/cache/tool_builds/stage2" \
+      "${stage2_tests_work}/outputs/compiler-tools/stage2" \
+      "${stage2_tests_work}/outputs/tool-builds/stage2"; do
+      [ -d "${stage2_tests_stale_root}" ] || continue
+      for stage2_tests_stale_dir in "${stage2_tests_stale_root}"/*; do
+        [ -d "${stage2_tests_stale_dir}" ] || continue
+        [ "$(basename "${stage2_tests_stale_dir}")" = "${stage2_tests_sha}" ] && continue
+        rm -rf "${stage2_tests_stale_dir}" ||
+          echo "warning: could not prune stale Stage 2 compiler-test dir: ${stage2_tests_stale_dir}" >&2
+      done
+    done
     # The verifier accepts normal or full only; every other bootstrap strategy
     # (adhoc, unset) maps onto its normal matrix, which already includes the
     # compiler-bootstrap, interpreter and loader suites at Stage 2.
     case "${SIMPLE_BOOTSTRAP_STRATEGY:-normal}" in
-      full) stage2_tests_strategy=full ;;
-      *) stage2_tests_strategy=normal ;;
+      full) stage2_tests_strategy=full; stage2_tests_profile=full ;;
+      *) stage2_tests_strategy=normal; stage2_tests_profile=slim ;;
     esac
-    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy})"
+    # Timeout/worker realism (perf/mem audit of PR #1458): the outer per-task
+    # timeout (BOOTSTRAP_VERIFY_TIMEOUT_SECONDS, verifier default 1800s) binds
+    # a cold full-CLI/test-runner native-build, and documented full-CLI builds
+    # of this same closure took 18-40+ minutes elsewhere -- 1800s is not
+    # realistic on a cold cache, especially on Windows (slower spawns,
+    # Defender, cold cache). Raise it until real Windows numbers exist. Also
+    # default the test-runner's own internal worker count above the verifier's
+    # built-in default of 1 (fully sequential), derived from this bootstrap's
+    # own --jobs selection, capped to the verifier's accepted range of 1-12;
+    # nothing in this codebase's `--parallel --max-workers=N` test-runner path
+    # (already used elsewhere in bootstrap-phase-verification.shs) documents
+    # it as unsafe for this suite. Capped at 4, matching the audit's own
+    # min(nproc/2, 4) recommendation rather than the verifier's wider
+    # accepted range (1-12): per-worker RSS in interpreter mode is unmeasured
+    # here and this repo has SIGKILL-for-memory history on large parses
+    # (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md), so this
+    # stays conservative pending a real measurement. Scoped to this stage-2
+    # step only via the subshell below -- other bootstrap-phase-verification
+    # .shs callers (stage1/stage3/stage4, run-*-phase2-tests.shs) keep their
+    # own defaults.
+    stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-3600}
+    stage2_tests_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-}
+    if [ -z "${stage2_tests_workers}" ]; then
+      case "${jobs:-1}" in
+        ''|*[!0-9]*) stage2_tests_workers=1 ;;
+        *)
+          stage2_tests_workers=$((jobs / 2))
+          [ "${stage2_tests_workers}" -ge 1 ] || stage2_tests_workers=1
+          [ "${stage2_tests_workers}" -le 4 ] || stage2_tests_workers=4
+          ;;
+      esac
+    fi
+    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s, test-workers=${stage2_tests_workers})"
     # Without a milestone the progress watcher reads this multi-minute step as a
     # hang between Stage 2 and Stage 3.
     bootstrap_progress_mark stage2-compiler-tests \
@@ -3902,15 +3956,19 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # this repo before.
     (
       cd "${repo_root}" || exit 125
+      BOOTSTRAP_VERIFY_TEST_WORKERS="${stage2_tests_workers}"
+      export BOOTSTRAP_VERIFY_TEST_WORKERS
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --compiler="${stage2_admitted_absolute}" \
         --compiler-sha256="${stage2_tests_sha}" \
         --strategy="${stage2_tests_strategy}" \
+        --profile="${stage2_tests_profile}" \
         --hash-policy=canonical \
         --work-root="${stage2_tests_work}" \
         --cache-root="${stage2_tests_root}/cache" \
-        --source-root="${repo_root}"
+        --source-root="${repo_root}" \
+        --timeout-seconds="${stage2_tests_timeout_seconds}"
     ) >"${stage2_tests_log}" 2>&1 || stage2_tests_status=$?
     if [ "${stage2_tests_status}" -eq 0 ] && [ ! -f "${stage2_tests_summary}" ]; then
       echo "error: Stage 2 compiler tests exited 0 but wrote no verification summary" >&2
