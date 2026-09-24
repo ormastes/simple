@@ -776,8 +776,9 @@ impl MirLowering:
         # pre-declared, later-assigned `val`s.
         match stmt:
             case _:
-                val span: Span = stmt.span
-                val stmt_kind_value: HirStmtKind = stmt.kind
+                val cur_stmt: HirStmt = stmt
+                val span: Span = cur_stmt.span
+                val stmt_kind_value: HirStmtKind = cur_stmt.kind
                 val fallback_type = HirType(kind: HirTypeKind.Unit, span: Span.empty())
                 val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
                 val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
@@ -803,7 +804,7 @@ impl MirLowering:
                         Some(let_symbol_value)
                     else:
                         nil
-                    val let_init = mir_hir_let_init(stmt_kind_value, fallback_expr)
+                    val let_init: HirExpr = mir_hir_let_init(stmt_kind_value, fallback_expr)
 
                     if let_symbol.?:
                         val symbol_value = let_symbol ?? SymbolId(id: -1)
@@ -821,7 +822,7 @@ impl MirLowering:
                         # self-hosted lane (disc=-1 before any unwrap, measured).
                         val let_type_present = mir_hir_let_type_present(stmt_kind_value)
                         val let_type_value: HirType = mir_hir_let_type(stmt_kind_value, fallback_type)
-                        val let_type = if let_type_present: let_type_value else: nil
+                        val let_type: HirType? = if let_type_present: let_type_value else: nil
                         # [mir-let-symtype-probe] -- DIAGNOSTIC, default OFF.
                         # THE LIVE PATH. The earlier arm=A/arm=B slot probe measured payload
                         # slot 1, which this handler deliberately never reads (see the comment
@@ -844,7 +845,8 @@ impl MirLowering:
                             else:
                                 mir_let_slot_probe_state = 0
                         if mir_let_slot_probe_state == 1:
-                            eprint("[mir-let-symtype-probe] letnil={let_type == nil} letzero={let_type == 0} letkindzero={let_type.kind == 0}\n")
+                            val probe_let_type: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+                            eprint("[mir-let-symtype-probe] letnil={let_type == nil} letzero={let_type == 0} letkindzero={probe_let_type.kind == 0}\n")
                         # `val f = \x: ...` -- keep the existing bind-time
                         # capture snapshot, and materialize non-capturing lambdas
                         # through the same lifted FuncPtr used for lambda args.
@@ -863,7 +865,7 @@ impl MirLowering:
                             # this pipeline's MIR mutates in place, not via SSA
                             # renaming) does not leak into calls of this lambda.
                             self.lambda_capture_snapshot[symbol_value_id] = self.snapshot_lambda_capture(let_init)
-                            val lambda_operand = self.lower_lambda_value(let_init)
+                            val lambda_operand: MirOperand? = self.lower_lambda_value(let_init)
                             if val lifted_lambda = lambda_operand:
                                 match lifted_lambda.kind:
                                     case Const(_, lambda_type):
@@ -895,7 +897,7 @@ impl MirLowering:
                         # `??` is immune to that binding; `.?` is too, so the
                         # presence test is unchanged. Only the bare method call
                         # was affected.
-                        val mir_type = if let_type.?:
+                        val mir_type: MirType = if let_type.?:
                             val type_value: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                             match type_value.kind:
                                 case HirTypeKind.Infer(_, _): MirType.i64()
@@ -903,7 +905,7 @@ impl MirLowering:
                         else:
                             MirType.i64()
 
-                        var init_local = self.lower_expr(let_init)
+                        var init_local: LocalId = self.lower_expr(let_init)
                         # [mir-let-instcount-probe] DIAGNOSTIC, default OFF (SIMPLE_MIRB_TRACE=1).
                         # The Aggregate for an array literal is emitted by lower_expr above yet is
                         # ABSENT from the emitted module, while the same literal used directly as a
@@ -1597,7 +1599,7 @@ impl MirLowering:
                                     self.builder = b2
 
                     case Assign(target, op, value):
-                        val value_local = self.lower_expr(value)
+                        val value_local: LocalId = self.lower_expr(value)
                         self.lower_assign(target, op, value_local, value.kind)
 
                     case Block(block):
@@ -1669,7 +1671,7 @@ impl MirLowering:
             # class of issue) -- `global_static.symbol` on that nil then
             # crashed. The explicit `.has(...)`/`.? ` + `.unwrap()` sequence
             # below never touches that unsafe pattern.
-            val global_static = self.find_global_static(symbol_id).unwrap()
+            val global_static: MirStatic = self.find_global_static(symbol_id).unwrap()
             if not global_static.is_mutable:
                 self.error_fatal("cannot assign to immutable module global", Some(span))
                 return
@@ -1902,7 +1904,7 @@ impl MirLowering:
                 # lowered `receiver` and the SAME `field_index` the store uses:
                 # the place is resolved exactly once, so a receiver expression
                 # with side effects still runs exactly once.
-                val receiver = self.lower_expr(base)
+                val receiver: LocalId = self.lower_expr(base)
                 var rhs_value = value_local
                 # Bitfield-ness is probed with the pure predicate pair (no MIR
                 # emitted) so the compound read can be routed to the packed
@@ -1971,7 +1973,7 @@ impl MirLowering:
             case Index(base, index):
                 # Index assignment: arr[i] = value
                 # Lower to runtime call: rt_array_set(arr, index, value)
-                val receiver = self.lower_expr(base)
+                val receiver: LocalId = self.lower_expr(base)
                 # Dict handles insert via rt_dict_set with a tagged key, NOT the
                 # raw rt_array_set/GEP path below (which treats the string key as
                 # an element offset). Mirrors the dict getter in expr_dispatch.
@@ -2028,7 +2030,7 @@ impl MirLowering:
                     b_dset.emit_call(dict_set_op, [mir_operand_copy(receiver), mir_operand_copy(dict_key), mir_operand_copy(boxed_value)], MirType.i64())
                     self.builder = b_dset
                     return
-                var index_local = self.lower_expr(index)
+                var index_local: LocalId = self.lower_expr(index)
                 if self.current_gpu_kernel_target == "vulkan" or self.current_gpu_kernel_target == "cuda":
                     if val receiver_type = self.local_mir_type_of(receiver):
                         match receiver_type.kind:
@@ -2121,7 +2123,7 @@ impl MirLowering:
 
     me lower_receiver_and_args(receiver: HirExpr, args: [HirCallArg]) -> [MirOperand]:
         """Lower receiver and arguments for method calls."""
-        val receiver_local = self.lower_expr(receiver)
+        val receiver_local: LocalId = self.lower_expr(receiver)
         # Keep the implicit receiver insertion as an explicit push. The
         # self-hosted Stage 3 compiler has miscompiled the one-element generic
         # array literal above for zero-explicit-argument calls, leaving an
@@ -2130,7 +2132,7 @@ impl MirLowering:
         var arg_operands: [MirOperand] = []
         arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
         for arg in args:
-            val arg_local = self.lower_expr(arg.value)
+            val arg_local: LocalId = self.lower_expr(arg.value)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
         arg_operands
 
@@ -2630,9 +2632,9 @@ impl MirLowering:
         exactly right, and `lower_cond_operand` rather than `lower_cond_expr`
         so no extra MC/DC probe is emitted for a non-decision node.
         """
-        val result = match cond.kind:
+        val result: LocalId = match cond.kind:
             case HirExprKind.ExistsCheck(exists_base):
-                val exists_local = self.lower_expr(exists_base)
+                val exists_local: LocalId = self.lower_expr(exists_base)
                 var b_cond = self.builder
                 val is_some_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_is_some"),
@@ -2657,7 +2659,7 @@ impl MirLowering:
                 # the required spelling for VALUE position; this only affects
                 # CONDITION position, matching the split this function's
                 # docstring already establishes for the `.?` case.
-                val cond_local = self.lower_expr(cond)
+                val cond_local: LocalId = self.lower_expr(cond)
                 var cond_is_optional = false
                 if val cond_hir_type = self.find_local_hir_type(cond_local.id):
                     match cond_hir_type.kind:
@@ -3363,7 +3365,7 @@ impl MirLowering:
         rather than crashing on a null call.
         """
         # Step 1: Lower the iterable expression
-        val collection_local = self.lower_expr(iter)
+        val collection_local: LocalId = self.lower_expr(iter)
         var element_type = MirType.i64()
         # HirSymbol.type_ is `HirType?` (hir_types.spl:106) and is a MIXED
         # population -- only 13 of 56 `symbols.define(` sites box it -- so the
