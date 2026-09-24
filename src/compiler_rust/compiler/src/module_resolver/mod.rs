@@ -45,6 +45,24 @@ mod tests {
     }
 
     #[test]
+    fn inventory_scratch_import_resolves_from_app_context() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let source_root = root.join("src");
+        let importer = source_root.join("app/compiler_entrypoint/inventory_scratch.spl");
+        let source = fs::read_to_string(&importer).expect("inventory scratch source");
+        let module_name = "compiler.mir._MirLowering.transient_owner_sffi";
+        assert!(source.contains(&format!("use {module_name}.{{")));
+
+        let path = ModulePath::new(module_name.split('.').map(str::to_string).collect());
+        let resolver = ModuleResolver::new(root, source_root.clone());
+        let resolved = resolver.resolve(&path, &importer).expect("SFFI owner import");
+        assert_eq!(
+            resolved.path,
+            source_root.join("compiler/50.mir/_MirLowering/transient_owner_sffi.spl")
+        );
+    }
+
+    #[test]
     fn test_single_file_mode() {
         let resolver = ModuleResolver::single_file(Path::new("/tmp/test.spl"));
         assert_eq!(resolver.project_root(), Path::new("/tmp"));
