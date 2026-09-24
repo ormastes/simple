@@ -9,6 +9,7 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_acquire, proc_slot_release}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.io_runtime.{getpid}
 use std.convert.{try_parse_int}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, TerminationEvidence, ResourceBudget, BudgetDecision, evaluate_resource_budget, classify_termination}
@@ -528,6 +529,18 @@ fn _legacy_process_fallback(cmd: text, args: [text], timeout_ms: i64, max_output
         runtime_error: if legacy_exit == -1 and not legacy_timed_out: reported_error else: 0)
 
 fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ObservedProcessResult:
+    # ponytail: Windows takes the established bounded facade
+    # (rt_process_run_bounded, runtime_process.c: CreateProcess + job object +
+    # pipes) instead of the owned observed capsule. Measured 2026-09-25: the
+    # seed-built stage-2 tools pass the capsule's `cmd` as one word (C owner
+    # takes ptr+len) and read its raw 3-word tuple result as a runtime array,
+    # so every spawn came back exit -1 ("child produced no exit status").
+    # Ceiling: resource evidence is Unavailable on Windows (the test RSS cap
+    # is still enforced by the runner's Job-Object guard). Upgrade path: an
+    # array-returning owned-process wrapper with Rust twins, tracked in
+    # doc/08_tracking/todo/windows_owned_process_capsule_seed_abi_2026-09-25.md.
+    if host_is_windows_host():
+        return _legacy_process_fallback(cmd, args, timeout_ms, max_output_bytes, -1)
     val started = time_now_unix_micros()
     proc_slot_acquire()
     val (stdout, stderr, fields) = _process_run_observed_raw(cmd, args, timeout_ms, max_output_bytes)

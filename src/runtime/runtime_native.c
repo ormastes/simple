@@ -778,6 +778,74 @@ int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
     return (int64_t)(uintptr_t)result;
 #endif
 }
+
+/* The rest of the SMF loader's descriptor pair (smf_mmap_native.spl opens,
+   maps, closes). Same runtime.c-only situation as rt_mmap_raw: the only C
+   definitions live in platform/{unix_common,platform_win}.h. Measured
+   2026-09-25: both were stubbed in the Windows stage-2 simple_cli link.
+   `path` arrives as a native text value or a raw C string, hence
+   rt_interp_cstr. Flags use the Linux numbering the loader and the Rust
+   interpreter twin (interpreter_extern/file_io.rs rt_open_fd) share: access
+   in bits 0-1, O_CREAT 0x40, O_TRUNC 0x200, O_APPEND 0x400. POSIX passes them
+   to open(2) unchanged; Windows translates them onto _wopen and returns a CRT
+   descriptor, which is what spl_windows_mmap_raw maps. Failure is -1 with
+   errno set by the CRT. */
+int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    const char* p = rt_interp_cstr((int64_t)(uintptr_t)path);
+    if (!p) return -1;
+#if defined(_WIN32)
+    (void)mode; /* Rust's OpenOptions ignores the POSIX mode on Windows too. */
+    int access = (int)(flags & 0x3);
+    int oflag = _O_BINARY | _O_NOINHERIT |
+                (access == 0 ? _O_RDONLY : access == 1 ? _O_WRONLY : _O_RDWR);
+    if (flags & 0x40) oflag |= _O_CREAT;
+    if (flags & 0x200) oflag |= _O_TRUNC;
+    if (flags & 0x400) oflag |= _O_APPEND;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, NULL, 0);
+    if (wide_len <= 0) { errno = EINVAL; return -1; }
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) { errno = ENOMEM; return -1; }
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, wide, wide_len);
+    int fd = _wopen(wide, oflag, _S_IREAD | _S_IWRITE);
+    free(wide);
+    return (int64_t)fd;
+#else
+    return (int64_t)open(p, (int)flags, (unsigned int)mode);
+#endif
+}
+
+int64_t rt_close_fd(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+#if defined(_WIN32)
+    return (int64_t)_close((int)fd);
+#else
+    return (int64_t)close((int)fd);
+#endif
+}
+
+/* Host target code, same table as the Rust runtime
+   (value/sffi/env_process.rs rt_get_host_target_code): x86_64 0, aarch64 1,
+   riscv64 2, anything else -1. Read by backend_selector.spl target_code(). */
+int64_t rt_get_host_target_code(void) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+    return 0;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return 1;
+#elif defined(__riscv) && __riscv_xlen == 64
+    return 2;
+#else
+    return -1;
+#endif
+}
+
+/* Current async task id. The Rust runtime (lib.rs rt_current_task_id)
+   answers the executor, fiber, then async-runtime task, and 0 when none is
+   active. The core-C lane has no executor, fibers or async runtime, so no
+   task is ever active: 0, and callers (mcdc probe_registry.spl) fall back to
+   the thread id exactly as they do under Rust outside a task. */
+int64_t rt_current_task_id(void) {
+    return 0;
+}
 #endif
 
 #undef SPL_HOSTED_UNAVAILABLE_WEAK
@@ -8028,12 +8096,31 @@ int64_t rt_tls13_sha256(int64_t data_value) {
     return (int64_t)(uintptr_t)digest;
 }
 
+/* `[u8]` -> text, bytes copied verbatim (the interpreter's
+ * Value::text_from_bytes; also the native lowering of `text.from_bytes`).
+ * A `[u8]` arrives in one of two layouts: byte-packed
+ * (RT_CORE_ARRAY_FLAG_BYTES, one byte per element) or generic i64 slots
+ * holding tagged ints (e.g. a `[u8]` literal the backend built slot by slot).
+ * Copying `array->data` verbatim is only right for the first: for slots it
+ * produced 8 tagged bytes per element. Slots are narrowed through
+ * rt_array_bytes_copy_checked, which rejects non-int or out-of-range
+ * elements; a rejected array yields "" like a non-array did before. */
 int64_t rt_bytes_to_text(int64_t bytes_value) {
     RtCoreArray* array = rt_core_as_array(bytes_value);
     if (!array || !array->data || array->len <= 0) {
         return rt_string_new(NULL, 0);
     }
-    return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    }
+    int64_t length = rt_array_bytes_validate(bytes_value);
+    if (length <= 0) return rt_string_new(NULL, 0);
+    uint8_t* narrowed = (uint8_t*)malloc((size_t)length);
+    if (!narrowed) return rt_string_new(NULL, 0);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
+    int64_t result = rt_string_new(narrowed, copied > 0 ? (uint64_t)copied : 0);
+    free(narrowed);
+    return result;
 }
 
 int64_t rt_array_len(SplArray* a) {
@@ -14137,6 +14224,24 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
     // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
         (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+}
+
+/* Same (ptr, len) vs single-text-value ABI split as the facades above, for
+ * the owned observed capsule. resource_scope.spl declares
+ * `rt_process_run_owned_observed_bounded_value(cmd: text, args, timeout_ms,
+ * max_output_bytes)`; generated native code passes 4 words, the C owner takes
+ * 5 (cmd_data, cmd_len, ...). Without this facade every argument after cmd
+ * shifted: cmd_len received the args array pointer and the call failed before
+ * CreateProcess, so on Windows (no /bin/sh, no cgroup -> this path) every
+ * `simple test` child came back exit -1 with empty output ("child produced no
+ * exit status"). The owner already returns the native 3-word tuple, so only
+ * the cmd parameter is adapted. */
+int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
+                                                    int64_t max_output_bytes) {
+    const char* cmd_c = rt_interp_cstr(cmd);
+    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    return rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+                                                       timeout_ms, max_output_bytes);
 }
 
 int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,

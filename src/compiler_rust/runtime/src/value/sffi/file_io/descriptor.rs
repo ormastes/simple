@@ -288,3 +288,149 @@ pub unsafe extern "C" fn rt_fd_pwrite(fd: i32, buffer: *const u8, len: i64, offs
         -38
     }
 }
+
+/// Linux `open(2)` flag bits shared by the SMF loader
+/// (`src/compiler/99.loader/smf_mmap_native.spl`), the interpreter twin
+/// (`interpreter_extern/file_io.rs`) and the core-C twin (`runtime_native.c`).
+/// POSIX hosts pass them to `open(2)` unchanged; only Windows translates.
+#[cfg(windows)]
+const OPEN_FD_ACCESS_MASK: i64 = 0x3;
+#[cfg(windows)]
+const OPEN_FD_CREAT: i64 = 0x40;
+#[cfg(windows)]
+const OPEN_FD_TRUNC: i64 = 0x200;
+#[cfg(windows)]
+const OPEN_FD_APPEND: i64 = 0x400;
+
+/// Path bytes of a boxed runtime string, or of an already-raw NUL-terminated
+/// C string (same acceptance as `rt_interp_cstr`).
+fn open_fd_path_bytes(path: crate::value::RuntimeValue) -> Option<Vec<u8>> {
+    use crate::value::collections::{rt_string_data, rt_string_len};
+    let data = rt_string_data(path);
+    if !data.is_null() {
+        let len = rt_string_len(path);
+        if len < 0 {
+            return None;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+        return Some(bytes.to_vec());
+    }
+    let raw = path.to_raw();
+    if raw < 0x10000 {
+        return None;
+    }
+    let cstr = unsafe { std::ffi::CStr::from_ptr(raw as usize as *const std::ffi::c_char) };
+    Some(cstr.to_bytes().to_vec())
+}
+
+#[cfg(windows)]
+extern "C" {
+    fn _wopen(path: *const u16, oflag: i32, ...) -> i32;
+    fn _close(fd: i32) -> i32;
+}
+
+/// Open a CRT/POSIX file descriptor for the SMF loader's mmap path.
+/// Rust twin of `rt_open_fd` in `runtime_native.c`: Linux flag numbering;
+/// POSIX passes the flags to `open(2)`, Windows translates them onto `_wopen`
+/// (UTF-8 path -> UTF-16, `_O_BINARY | _O_NOINHERIT`) and returns the CRT
+/// descriptor `rt_mmap_raw` maps. Returns -1 with `errno` set on failure.
+#[no_mangle]
+pub extern "C" fn rt_open_fd(path: crate::value::RuntimeValue, flags: i64, mode: i64) -> i64 {
+    let Some(bytes) = open_fd_path_bytes(path) else {
+        return -1;
+    };
+    #[cfg(unix)]
+    {
+        let Ok(c_path) = std::ffi::CString::new(bytes) else {
+            return -1;
+        };
+        let fd = unsafe { libc::open(c_path.as_ptr(), flags as libc::c_int, mode as libc::c_uint) };
+        i64::from(fd)
+    }
+    #[cfg(windows)]
+    {
+        let _ = mode; // OpenOptions and the C twin ignore the POSIX mode on Windows.
+        const O_RDONLY: i32 = 0x0000;
+        const O_WRONLY: i32 = 0x0001;
+        const O_RDWR: i32 = 0x0002;
+        const O_APPEND: i32 = 0x0008;
+        const O_CREAT: i32 = 0x0100;
+        const O_TRUNC: i32 = 0x0200;
+        const O_NOINHERIT: i32 = 0x0080;
+        const O_BINARY: i32 = 0x8000;
+        const S_IREAD: i32 = 0x0100;
+        const S_IWRITE: i32 = 0x0080;
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return -1;
+        };
+        if text.contains('\0') {
+            return -1;
+        }
+        let mut oflag = O_BINARY
+            | O_NOINHERIT
+            | match flags & OPEN_FD_ACCESS_MASK {
+                0 => O_RDONLY,
+                1 => O_WRONLY,
+                _ => O_RDWR,
+            };
+        if flags & OPEN_FD_CREAT != 0 {
+            oflag |= O_CREAT;
+        }
+        if flags & OPEN_FD_TRUNC != 0 {
+            oflag |= O_TRUNC;
+        }
+        if flags & OPEN_FD_APPEND != 0 {
+            oflag |= O_APPEND;
+        }
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        i64::from(unsafe { _wopen(wide.as_ptr(), oflag, S_IREAD | S_IWRITE) })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (bytes, flags, mode);
+        -1
+    }
+}
+
+/// Close a descriptor returned by `rt_open_fd`. Invalid descriptors fail
+/// closed with -1 (Rust twin of `rt_close_fd` in `runtime_native.c`).
+#[no_mangle]
+pub extern "C" fn rt_close_fd(fd: i64) -> i64 {
+    if fd < 0 || fd > i64::from(i32::MAX) {
+        return -1;
+    }
+    #[cfg(unix)]
+    {
+        i64::from(unsafe { libc::close(fd as libc::c_int) })
+    }
+    #[cfg(windows)]
+    {
+        i64::from(unsafe { _close(fd as i32) })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        -1
+    }
+}
+
+#[cfg(test)]
+mod open_fd_tests {
+    use super::{rt_close_fd, rt_open_fd};
+    use crate::value::collections::rt_string_new;
+
+    #[test]
+    fn open_write_read_close_with_linux_flags() {
+        let path = std::env::temp_dir().join(format!("rt_open_fd_twin_{}.tmp", std::process::id()));
+        let text = path.to_str().expect("utf8 temp path");
+        let boxed = rt_string_new(text.as_ptr(), text.len() as u64);
+        let wfd = rt_open_fd(boxed, 0x1 | 0x40 | 0x200, 0o644);
+        assert!(wfd >= 0, "create+truncate");
+        assert_eq!(rt_close_fd(wfd), 0);
+        let rfd = rt_open_fd(boxed, 0x0, 0);
+        assert!(rfd >= 0, "read-only reopen");
+        assert_eq!(rt_close_fd(rfd), 0);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(rt_open_fd(boxed, 0x0, 0), -1, "missing file");
+        assert_eq!(rt_close_fd(-1), -1);
+    }
+}
