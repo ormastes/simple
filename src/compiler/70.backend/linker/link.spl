@@ -278,10 +278,18 @@ impl Linker:
             val reader = reader_result.unwrap()
             self.readers = self.readers.push(reader)
 
-            # Load note.sdn metadata for lazy instantiation
-            val metadata_result = reader.read_note_sdn()
-            if metadata_result.is_ok():
-                self.lazy_inst.load_metadata(path, metadata_result.unwrap())
+            # Load note.sdn metadata for lazy instantiation.
+            # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly
+            # (smf_reader.spl:294), not a Result -- same bug class as
+            # collect_deferred_hints below (the previous `.is_ok()`/
+            # `.unwrap()` here left the value receiver-typed ANY). There is
+            # no failure case to gate on: an absent note.sdn section yields
+            # `NoteSdnMetadata.new()` (all-empty), and `load_metadata` is a
+            # no-op-safe merge over empty arrays plus an idempotent map
+            # write, so calling it unconditionally is the correct restored
+            # semantics, not a behavior change.
+            val metadata: NoteSdnMetadata = reader.read_note_sdn()
+            self.lazy_inst.load_metadata(path, metadata)
 
         Ok(())
 
@@ -320,25 +328,29 @@ impl Linker:
         var all_hints: [DeferredHints] = []
 
         for reader in self.readers:
-            val metadata_result = reader.read_note_sdn()
-            if metadata_result.is_ok():
-                val metadata = metadata_result.unwrap()
-                # Convert type_inferences to DeferredHints
-                var ti_idx = 0
-                while ti_idx < metadata.type_inferences.len():
-                    val ti: TypeInferenceEntry = metadata.type_inferences[ti_idx]
-                    val hint = DeferredHints(
-                        symbol: ti.expr,
-                        type_vars: [],
-                        constraints: [],
-                        usage_sites: [UsageSite(
-                            file: ti.from_file,
-                            loc: ti.from_loc,
-                            context_type: nil
-                        )]
-                    )
-                    all_hints = all_hints.push(hint)
-                    ti_idx = ti_idx + 1
+            # `SmfReaderImpl.read_note_sdn` returns `NoteSdnMetadata` directly,
+            # NOT a Result (smf_reader.spl:294) -- there is no error case to
+            # check. Treating it as one (the previous `.is_ok()`/`.unwrap()`
+            # here) left `metadata_result`/`metadata` receiver-typed ANY,
+            # the same class of bug documented at lazy_instantiator.spl's
+            # `load_template` comment (GenericTemplate? mistaken for Result).
+            val metadata: NoteSdnMetadata = reader.read_note_sdn()
+            # Convert type_inferences to DeferredHints
+            var ti_idx = 0
+            while ti_idx < metadata.type_inferences.len():
+                val ti: TypeInferenceEntry = metadata.type_inferences[ti_idx]
+                val hint = DeferredHints(
+                    symbol: ti.expr,
+                    type_vars: [],
+                    constraints: [],
+                    usage_sites: [UsageSite(
+                        file: ti.from_file,
+                        loc: ti.from_loc,
+                        context_type: nil
+                    )]
+                )
+                all_hints = all_hints.push(hint)
+                ti_idx = ti_idx + 1
 
         all_hints
 
@@ -368,7 +380,19 @@ impl Linker:
                         location: nil
                     ))
 
-        if self.errors.any(_.kind == LinkErrorKind.TypeMismatch):
+        # `self.errors.any(_.kind == ...)` desugars to a placeholder lambda
+        # (10.frontend/desugar/placeholder_lambda.spl) whose parameter type
+        # the seed did not infer from `[LinkError]` here, leaving `_`
+        # receiver-typed as a bare `i64` and `.kind` unresolvable. A plain
+        # loop with an explicitly typed rebind is the idiom proven elsewhere
+        # in this stage-2 pass.
+        var has_type_mismatch = false
+        for e in self.errors:
+            val err: LinkError = e
+            if err.kind == LinkErrorKind.TypeMismatch:
+                has_type_mismatch = true
+                break
+        if has_type_mismatch:
             Err("Type unification failed")
         else:
             Ok(())
@@ -430,7 +454,14 @@ impl Linker:
                 case _:
                     pass
 
-        if self.errors.any(_.kind == LinkErrorKind.InstantiationFailed):
+        # Same placeholder-lambda inference gap as resolve_cross_module above.
+        var has_instantiation_failure = false
+        for e in self.errors:
+            val err: LinkError = e
+            if err.kind == LinkErrorKind.InstantiationFailed:
+                has_instantiation_failure = true
+                break
+        if has_instantiation_failure:
             Err("Instantiation failed")
         else:
             Ok(())
