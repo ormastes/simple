@@ -29,26 +29,40 @@
 # Every input recorded here is one that changes the FEATURE SET, TOOLCHAIN, OR
 # TARGET Cargo builds under -- i.e. can change which code path a fixed-name
 # artifact actually contains, as opposed to only changing source bytes cargo
-# already fingerprints for itself:
-#   - rustc identity (`rustc --version --verbose`: version, commit hash, embedded
-#     LLVM, host tuple) -- a different rustc can emit different code / accept
-#     different flags for the same source and features.
-#   - cargo identity (`cargo --version`) -- resolver/fingerprint/build-plan
+# already fingerprints for itself. This function takes 6 explicit positional
+# inputs plus one opaque, caller-assembled "toolchain_extra" string ($7):
+#   - $1 rustc identity: MUST be `rustc --version --verbose` (not bare
+#     --version) -- verbose adds the commit hash, host tuple and rustc's
+#     embedded LLVM version, any of which can change emitted code for the
+#     same source/features/target.
+#   - $2 cargo identity (`cargo --version`) -- resolver/fingerprint/build-plan
 #     behavior can change between cargo versions.
-#   - target platform (`--target <triple>`) -- selects an entirely different
-#     Cargo <target-triple>/<profile>/ subtree; included for defense in depth
-#     even though different triples already segregate naturally under one
-#     CARGO_TARGET_DIR.
-#   - backend selector + the exact `--features ...` string it produces (the
-#     concrete case above: this is what changes which crates/feature-gated
-#     code paths get compiled into deps/native-all/the seed binary).
-#   - LLVM identity (major.minor.patch from llvm-config, when the llvm feature
-#     is enabled) -- swapping the LLVM install changes what LLVM-dependent
-#     crates link against and can change emitted code.
-#   - CFLAGS forwarded to cargo (SIMPLE_ABI_VERSION defines etc.) -- changes
-#     the bytes of every build-script-compiled C object cargo produces.
-#   - the resolved C toolchain identity (CC / linker / archiver paths) for the
-#     target -- changes what a build script's cc-rs invocation actually runs.
+#   - $3 target platform (`--target <triple>`) -- selects an entirely
+#     different Cargo <target-triple>/<profile>/ subtree; included for
+#     defense in depth even though different triples already segregate
+#     naturally under one CARGO_TARGET_DIR.
+#   - $4 backend selector, $5 the exact `--features ...` string it produces
+#     (the concrete incident this exists for: this is what changes which
+#     crates/feature-gated code paths get compiled into deps/native-all/the
+#     seed binary).
+#   - $6 LLVM identity (major.minor.patch from llvm-config, when the llvm
+#     feature is enabled) -- swapping the LLVM install changes what
+#     LLVM-dependent crates link against and can change emitted code.
+#   - $7 toolchain_extra: an OPAQUE string the caller assembles from every
+#     OTHER input that can change a Cargo build's output bytes. This
+#     function does not interpret it, so the call site is the single source
+#     of truth for its exact contents -- see the `rust_authority_toolchain_extra=`
+#     assembly immediately above the call in bootstrap-from-scratch.sh, which
+#     is kept next to this list specifically so the two cannot drift. As of
+#     this writing that assembly folds in: CFLAGS (SIMPLE_ABI_VERSION
+#     defines), the Windows-GNU mingw linker/cc/ar/cflags/rustflags
+#     selection, CXX/AR/LD/LLVM_CONFIG (forwarded verbatim into the Cargo
+#     environment when ambiently set), LLVM_SYS_231_PREFIX, the resolved
+#     LLVM link kind (static vs dynamic-c-api), RUSTFLAGS and the macOS
+#     per-target CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS/general
+#     CARGO_ENCODED_RUSTFLAGS passthrough, SDKROOT/INCLUDE/LIB, and a sha256
+#     of `src/compiler_rust/.cargo/config.toml`'s contents (registry
+#     replacement / vendor directory / any [build] settings it carries).
 # Deliberately NOT included: source file content (that is the seed content
 # fingerprint's job, and is what this key must stay independent of so a
 # source-only/test-only edit keeps reusing the warm cache), and environment
@@ -63,14 +77,37 @@ bootstrap_authority_rust_build_config_key() {
   bootstrap_cargo_cfg_llvm_features=$5
   bootstrap_cargo_cfg_llvm_version=$6
   bootstrap_cargo_cfg_toolchain_extra=$7
-  bootstrap_cargo_cfg_digest=$(
-    printf 'profile=bootstrap\nrustc=%s\ncargo=%s\nplatform=%s\nbackend=%s\nllvm-features=%s\nllvm-version=%s\ntoolchain-extra=%s\n' \
-      "${bootstrap_cargo_cfg_rustc}" "${bootstrap_cargo_cfg_cargo}" \
-      "${bootstrap_cargo_cfg_platform}" "${bootstrap_cargo_cfg_backend}" \
-      "${bootstrap_cargo_cfg_llvm_features}" "${bootstrap_cargo_cfg_llvm_version}" \
-      "${bootstrap_cargo_cfg_toolchain_extra}" | sha256sum
-  ) || return 1
-  bootstrap_cargo_cfg_digest=${bootstrap_cargo_cfg_digest%% *}
+  # Same sha256-with-fallback chain as bootstrap_stage3_hash_stdin
+  # (scripts/check/lib/bootstrap-stage3/authority.shs) -- duplicated rather
+  # than sourced because this file is a standalone module with no dependency
+  # on authority.shs (focused tests source it alone).
+  if command -v sha256sum >/dev/null 2>&1; then
+    bootstrap_cargo_cfg_digest=$(
+      printf 'profile=bootstrap\nrustc=%s\ncargo=%s\nplatform=%s\nbackend=%s\nllvm-features=%s\nllvm-version=%s\ntoolchain-extra=%s\n' \
+        "${bootstrap_cargo_cfg_rustc}" "${bootstrap_cargo_cfg_cargo}" \
+        "${bootstrap_cargo_cfg_platform}" "${bootstrap_cargo_cfg_backend}" \
+        "${bootstrap_cargo_cfg_llvm_features}" "${bootstrap_cargo_cfg_llvm_version}" \
+        "${bootstrap_cargo_cfg_toolchain_extra}" | sha256sum | awk '{print $1}'
+    ) || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    bootstrap_cargo_cfg_digest=$(
+      printf 'profile=bootstrap\nrustc=%s\ncargo=%s\nplatform=%s\nbackend=%s\nllvm-features=%s\nllvm-version=%s\ntoolchain-extra=%s\n' \
+        "${bootstrap_cargo_cfg_rustc}" "${bootstrap_cargo_cfg_cargo}" \
+        "${bootstrap_cargo_cfg_platform}" "${bootstrap_cargo_cfg_backend}" \
+        "${bootstrap_cargo_cfg_llvm_features}" "${bootstrap_cargo_cfg_llvm_version}" \
+        "${bootstrap_cargo_cfg_toolchain_extra}" | shasum -a 256 | awk '{print $1}'
+    ) || return 1
+  elif command -v sha256 >/dev/null 2>&1; then
+    bootstrap_cargo_cfg_digest=$(
+      printf 'profile=bootstrap\nrustc=%s\ncargo=%s\nplatform=%s\nbackend=%s\nllvm-features=%s\nllvm-version=%s\ntoolchain-extra=%s\n' \
+        "${bootstrap_cargo_cfg_rustc}" "${bootstrap_cargo_cfg_cargo}" \
+        "${bootstrap_cargo_cfg_platform}" "${bootstrap_cargo_cfg_backend}" \
+        "${bootstrap_cargo_cfg_llvm_features}" "${bootstrap_cargo_cfg_llvm_version}" \
+        "${bootstrap_cargo_cfg_toolchain_extra}" | sha256 -q
+    ) || return 1
+  else
+    return 1
+  fi
   printf '%s\n' "${bootstrap_cargo_cfg_digest}" |
     LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 1
   printf '%s\n' "${bootstrap_cargo_cfg_digest}" | cut -c1-12

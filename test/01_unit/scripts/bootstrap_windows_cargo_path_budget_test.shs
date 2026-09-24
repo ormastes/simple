@@ -73,11 +73,58 @@ key_diff_llvm_version=$(bootstrap_authority_rust_build_config_key \
 key_diff_toolchain_extra=$(bootstrap_authority_rust_build_config_key \
   'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
   llvm '--features llvm' 23.1.1 'cc=clang;mingw_linker=;mingw_cc=;mingw_ar=')
-for candidate_name in rustc cargo platform backend llvm_version toolchain_extra; do
+# Features string varied independently of backend (same backend literal,
+# different exact --features spelling -- e.g. a driver-hooks toggle that
+# does not change the backend name).
+key_diff_features_only=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm,driver-hooks' 23.1.1 'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=')
+# CFLAGS varied within toolchain_extra, isolated from the "cc=" tool-path
+# field exercised by key_diff_toolchain_extra above.
+key_diff_cflags=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 23.1.1 \
+  'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=;abi_cflags=-DSIMPLE_ABI_VERSION=2')
+# RUSTFLAGS varied within toolchain_extra.
+key_diff_rustflags=$(bootstrap_authority_rust_build_config_key \
+  'rustc 1.98.0-nightly' 'cargo 1.98.0-nightly' x86_64-pc-windows-msvc \
+  llvm '--features llvm' 23.1.1 \
+  'cc=clang-cl;mingw_linker=;mingw_cc=;mingw_ar=;rustflags=-C target-cpu=native')
+for candidate_name in rustc cargo platform backend llvm_version toolchain_extra \
+  features_only cflags rustflags; do
   eval "candidate=\$key_diff_$candidate_name"
   [ "$candidate" != "$key_reference" ] ||
     fail "config key ignores a changed $candidate_name input"
 done
+
+# The real call site must actually pass --verbose and assemble every
+# documented toolchain_extra field -- a unit test of the standalone function
+# proves nothing if bootstrap-from-scratch.sh stops forwarding an input.
+# Read the checked-out script and grep for the exact assembly, so this fails
+# the moment that assembly line is edited without updating this list.
+call_site="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+grep -Fq '"${rustc_abs}" --version --verbose' "$call_site" ||
+  fail 'call site no longer requests rustc --version --verbose'
+grep -Fq 'bootstrap_authority_rust_build_config_key' "$call_site" ||
+  fail 'call site no longer calls bootstrap_authority_rust_build_config_key'
+toolchain_extra_line=$(grep '^  rust_authority_toolchain_extra=' "$call_site") ||
+  fail 'call site no longer assembles rust_authority_toolchain_extra'
+for required_field in \
+  'mingw_cflags=' 'mingw_rustflags=' 'abi_cflags=' 'cxx=${CXX' \
+  'ar_env=${AR' 'ld_env=${LD' 'llvm_config_env=${LLVM_CONFIG' \
+  'llvm_sys_231_prefix=' 'llvm_link_kind=' 'rustflags=${RUSTFLAGS' \
+  'darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS' \
+  'encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS' 'sdkroot=${SDKROOT' \
+  'include=${windows_include' 'lib=${windows_lib' 'cargo_config_sha256='; do
+  case "$toolchain_extra_line" in
+    *"$required_field"*) ;;
+    *) fail "call site's toolchain_extra assembly is missing $required_field" ;;
+  esac
+done
+grep -Fq 'rust_authority_cargo_config_sha256=$(' "$call_site" ||
+  fail 'call site no longer hashes src/compiler_rust/.cargo/config.toml'
+grep -Fq 'src/compiler_rust/.cargo/config.toml' "$call_site" ||
+  fail 'call site no longer names the Cargo config.toml being hashed'
 
 # Actual failing checkout spelling and cc-rs libmimalloc-sys nesting, including
 # the target triple, Cargo crate hash and object-source hash. No paths created.
