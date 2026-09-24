@@ -1,80 +1,63 @@
 # Word Document Rendering
 #
 # Render document blocks as UI widgets for display.
+#
+# Built against the real `attributed_text` model (DocBlock { kind, spans }
+# with the BlockKind enum) — see `word/html_render.spl`, which renders the
+# same model to HTML and documents this as the canonical shape.
 
 use common.ui.widget.{WidgetNode}
 use common.ui.builder.{text_widget}
-use common.rich_text.attributed_text.{DocBlock, TextSpan, spans_to_plain_text, block_to_plain_text}
+use common.rich_text.attributed_text.{DocBlock, BlockKind, spans_to_plain_text}
 
 # =========================================================================
 # Block Rendering
 # =========================================================================
 
+fn _block_prefix(kind: BlockKind, content: text) -> text:
+    """Return the display text for a block, with a markdown-style prefix
+    matching the block's kind (heading level, bullet/ordered marker, quote)."""
+    match kind:
+        case Paragraph: content
+        case Heading1: "# {content}"
+        case Heading2: "## {content}"
+        case Heading3: "### {content}"
+        case BulletItem: "- {content}"
+        case OrderedItem: "1. {content}"
+        case CodeBlock: content
+        case Quote: "> {content}"
+        case FootnoteDef: content
+
+fn _block_style_tag(kind: BlockKind) -> text:
+    """Map a block kind to a style/type tag for the widget's `block_type` prop."""
+    match kind:
+        case Paragraph: "paragraph"
+        case Heading1: "heading_1"
+        case Heading2: "heading_2"
+        case Heading3: "heading_3"
+        case BulletItem: "bullet_list"
+        case OrderedItem: "numbered_list"
+        case CodeBlock: "code_block"
+        case Quote: "quote"
+        case FootnoteDef: "footnote"
+
 fn render_block(block: DocBlock, index: i32) -> WidgetNode:
     """Convert a DocBlock into a WidgetNode for display.
 
-    Each block type gets an appropriate text representation:
-      Paragraph     -> plain text
-      Heading       -> "# title" / "## title" / "### title"
-      BulletList    -> "- item" per line
-      NumberedList  -> "1. item" per line
-      CodeBlock     -> language prefix + code
-      Quote         -> "> " prefix per line
-      HorizontalRule-> "---"
-      Image         -> "[Image: alt]"
+    Each block kind gets an appropriate text representation:
+      Paragraph            -> plain text
+      Heading1/2/3         -> "# title" / "## title" / "### title"
+      BulletItem           -> "- item"
+      OrderedItem          -> "1. item"
+      CodeBlock            -> code text verbatim
+      Quote                -> "> " prefix
+      FootnoteDef          -> plain text
     """
     val widget_id = "block_{index}"
-
-    match block:
-        case DocBlock.Paragraph(spans):
-            val content = spans_to_plain_text(spans)
-            return _styled_text(widget_id, content, "paragraph")
-
-        case DocBlock.Heading(level, spans):
-            val heading_text = spans_to_plain_text(spans)
-            val prefix = _heading_prefix(level)
-            val content = "{prefix} {heading_text}"
-            return _styled_text(widget_id, content, "heading_{level}")
-
-        case DocBlock.BulletList(items):
-            var lines: [text] = []
-            for item in items:
-                val item_text = spans_to_plain_text(item)
-                lines = lines.push("- {item_text}")
-            val content = lines.join("\n")
-            return _styled_text(widget_id, content, "bullet_list")
-
-        case DocBlock.NumberedList(items, start):
-            var lines: [text] = []
-            var num = start
-            for item in items:
-                val item_text = spans_to_plain_text(item)
-                lines = lines.push("{num}. {item_text}")
-                num = num + 1
-            val content = lines.join("\n")
-            return _styled_text(widget_id, content, "numbered_list")
-
-        case DocBlock.CodeBlock(language, code):
-            val lang_label = if language != "": "[{language}] " else: ""
-            val content = "{lang_label}{code}"
-            return _styled_text(widget_id, content, "code_block")
-
-        case DocBlock.Quote(blocks):
-            var lines: [text] = []
-            for inner_block in blocks:
-                val inner_text = block_to_plain_text(inner_block)
-                lines = lines.push("> {inner_text}")
-            val content = lines.join("\n")
-            return _styled_text(widget_id, content, "quote")
-
-        case DocBlock.HorizontalRule:
-            return _styled_text(widget_id, "---", "horizontal_rule")
-
-        case DocBlock.Image(src, alt):
-            val content = "[Image: {alt}]"
-            return _styled_text(widget_id, content, "image")
-
-    return text_widget(widget_id, "")
+    val content = spans_to_plain_text(block.spans)
+    val display_text = _block_prefix(block.kind, content)
+    val block_type = _block_style_tag(block.kind)
+    return _styled_text(widget_id, display_text, block_type)
 
 # =========================================================================
 # Document Rendering
@@ -93,18 +76,6 @@ fn render_document(blocks: [DocBlock]) -> [WidgetNode]:
 # =========================================================================
 # Internal Helpers
 # =========================================================================
-
-fn _heading_prefix(level: i32) -> text:
-    """Return the markdown-style heading prefix for a given level."""
-    if level == 1:
-        return "#"
-    if level == 2:
-        return "##"
-    if level == 3:
-        return "###"
-    if level == 4:
-        return "####"
-    return "#"
 
 fn _styled_text(id: text, content: text, block_type: text) -> WidgetNode:
     """Create a text widget annotated with its block type for styling."""
