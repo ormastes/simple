@@ -1,7 +1,17 @@
 /* Native mechanism for os.installer.hosted_safe_artifact_io_v1. The Simple
  * owner retains policy, grant redemption, and publication receipts. */
 #if !defined(SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1)
-#error "instantiate hosted-safe-artifact only from runtime_native.c"
+/* Standalone syntax gate: the push gate feeds every src/runtime .c to
+ * $CC -fsyntax-only individually. Self-instantiate exactly what
+ * runtime_native.c supplies before including this file; the #ifndef keeps
+ * the real owner path untouched. */
+#define SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1 1
+#define RT_HSA_STANDALONE_SYNTAX_SELF_INSTANTIATE 1
+#endif
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+/* O_TMPFILE/AT_EMPTY_PATH/RENAME_NOREPLACE need the GNU profile; this
+ * mirrors runtime_native.c and is a no-op when that owner went first. */
+#define _GNU_SOURCE
 #endif
 
 #include "runtime.h"
@@ -30,6 +40,7 @@ typedef struct RtHsaRootV1 {
     int fd;
     dev_t device;
     ino_t inode;
+    unsigned int bundles;
 } RtHsaRootV1;
 
 static RtHsaRootV1 rt_hsa_roots[RT_HSA_ROOT_SLOTS];
@@ -161,7 +172,7 @@ int64_t rt_hosted_safe_artifact_root_open_v1(const uint8_t* bytes, uint64_t leng
         }
         token = rt_hsa_next_token;
         rt_hsa_next_token = token == INT64_MAX ? 0 : token + 1;
-        rt_hsa_roots[i] = (RtHsaRootV1){token, fd, identity.st_dev, identity.st_ino};
+        rt_hsa_roots[i] = (RtHsaRootV1){token, fd, identity.st_dev, identity.st_ino, 0};
         break;
     }
     (void)pthread_mutex_unlock(&rt_hsa_mutex);
@@ -173,6 +184,7 @@ bool rt_hosted_safe_artifact_root_close_v1(int64_t token) {
     int closed = 0;
     for (int i = 0; i < RT_HSA_ROOT_SLOTS; ++i) {
         if (rt_hsa_roots[i].token != token) continue;
+        if (rt_hsa_roots[i].bundles != 0) break;
         int fd = rt_hsa_roots[i].fd;
         memset(&rt_hsa_roots[i], 0, sizeof(rt_hsa_roots[i]));
         closed = rt_hsa_close(fd) == 0;
@@ -328,3 +340,5 @@ int64_t rt_hosted_safe_artifact_publish_v1(int64_t handle, const uint8_t* path,
     return -3;
 }
 #endif
+
+#include "runtime_hosted_safe_artifact_bundle_v1.c"
