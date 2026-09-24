@@ -1,0 +1,57 @@
+# Scoped userspace owner of the kernel execve char** representation.
+# No caller or request slot retains an address into this allocation.
+
+use os.userlib.execve_plan_v1.{execve_plan_v1}
+use os.userlib.syscall_raw.{syscall}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_write_i64}
+
+pub fn user_execve(path: text, argv: [text], envp: [text]) -> i64:
+    """Deliver owned argv/envp copies to syscall 59; release on every return.
+
+    The caller retains its texts. This function owns one raw allocation until
+    the synchronous syscall returns. The kernel copies char** into kernel-owned
+    texts before committing an image. A successful nonreturning exec reclaims
+    the old userspace allocation with the old address space.
+    """
+    val prepared = execve_plan_v1(path, argv, envp)
+    if prepared.is_err():
+        return prepared.unwrap_err()
+    val plan = prepared.unwrap()
+    val size = plan.bytes.len() as i64
+    val allocation = unsafe(capabilities: [ffi, raw_ptr]): raw_alloc(size)
+    if allocation <= 0:
+        return -12
+    if allocation > 0x7FFFFFFFFFFFFFFF - size:
+        unsafe(capabilities: [ffi, raw_ptr]): raw_free(allocation, size)
+        return -14
+
+    # A Simple [u8]/[u64] can contain tagged runtime values; .ptr() is not a
+    # C byte buffer or char**. Write aligned machine words into our own block.
+    # All current SimpleOS char** targets consume little-endian u64 slots.
+    var offset: i64 = 0
+    while offset < size:
+        var word: u64 = 0
+        var lane: i64 = 0
+        while lane < 8:
+            word = word | ((plan.bytes[offset + lane] as u64) << (lane * 8))
+            lane = lane + 1
+        unsafe(capabilities: [ffi, raw_ptr]): raw_write_i64(allocation, offset, word as i64)
+        offset = offset + 8
+    var index: i64 = 0
+    while index < plan.argv_offsets.len() as i64:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            raw_write_i64(allocation, index * 8, allocation + plan.argv_offsets[index])
+        index = index + 1
+    index = 0
+    while index < plan.envp_offsets.len() as i64:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            raw_write_i64(allocation, plan.env_table_offset + index * 8, allocation + plan.envp_offsets[index])
+        index = index + 1
+
+    val result = syscall(59, (allocation + plan.path_offset) as u64,
+        plan.path_length as u64, allocation as u64,
+        (allocation + plan.env_table_offset) as u64, 0)
+    unsafe(capabilities: [ffi, raw_ptr]): raw_free(allocation, size)
+    result
+
+export user_execve

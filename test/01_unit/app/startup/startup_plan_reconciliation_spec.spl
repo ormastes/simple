@@ -1,0 +1,112 @@
+# @cover src/app/startup/startup_plan_reconciliation.spl 80%
+use std.spec.{describe, it, expect, step, fail}
+use app.startup.contract.startup_plan_v1.{
+    startup_entry_kind_artifact,
+    startup_plan_hash,
+    startup_plan_from_request,
+    startup_request_v1
+}
+use app.startup.startup_planner.{planner_request_default, plan_startup}
+use app.startup.startup_plan_reconciliation.{
+    startup_launch_plan_from_load_plan,
+    startup_launch_plan_from_v1
+}
+use std.common.structural.component.descriptor.{
+    ComponentDescriptorV1,
+    component_descriptor_default,
+    component_descriptor_v1
+}
+
+fn step_freeze_platform_authorities():
+    step("freeze platform authorities")
+
+fn ordered_dynamic_components() -> [ComponentDescriptorV1]:
+    var optimized = component_descriptor_default("parser.simd", "1")
+    optimized.presence = "on"
+    optimized.placement = "dynamic"
+    optimized.activation = "startup"
+    optimized.dependencies = ["parser.scalar"]
+    var baseline = component_descriptor_default("parser.scalar", "1")
+    baseline.presence = "on"
+    baseline.placement = "dynamic"
+    baseline.activation = "command"
+    # Catalog the dependent first; the plan must still emit its dependency
+    # first.
+    [component_descriptor_v1(optimized), component_descriptor_v1(baseline)]
+
+describe "startup plan reconciliation":
+    it "projects a sealed V1 receipt without inventing platform capability":
+        step_freeze_platform_authorities()
+        val request = startup_request_v1(
+            "simple", "app.smf", 0, 0, startup_entry_kind_artifact(), 0, 0, 1)
+        val frozen = startup_plan_from_request(request)
+        val launch = startup_launch_plan_from_v1(frozen, ["--safe"])
+        expect(launch.supported).to_equal(true)
+        expect(launch.entry_kind).to_equal("smf")
+        expect(launch.entry_path).to_equal("app.smf")
+        expect(launch.program_args).to_equal(["app.smf", "--safe"])
+        expect(launch.source_plan_digest).to_equal(frozen.plan_digest)
+        expect(launch.include_mmap_cache).to_equal(false)
+        expect(launch.cache_strategy).to_equal("normal_read")
+
+        val normalized = startup_launch_plan_from_v1(
+            frozen, ["app.smf", "--safe"])
+        expect(normalized.program_args).to_equal(["app.smf", "--safe"])
+
+    it "fails closed when the frozen receipt is mutated after sealing":
+        step_freeze_platform_authorities()
+        val request = startup_request_v1(
+            "simple", "app.smf", 0, 0, startup_entry_kind_artifact(), 0, 0, 1)
+        var frozen = startup_plan_from_request(request)
+        frozen.entry_path = "other.smf"
+        val launch = startup_launch_plan_from_v1(frozen, [])
+        expect(launch.supported).to_equal(false)
+        expect(launch.error).to_equal("invalid_startup_plan_v1")
+
+    it "rejects malformed V1 structure even when its producer sealed it":
+        step_freeze_platform_authorities()
+        # The frozen producer can hash an invalid negative routing boundary;
+        # its decoder owns the structural rejection and the adapter reuses it.
+        val request = startup_request_v1(
+            "simple", "app.smf", 0, 0, startup_entry_kind_artifact(), 0, 0, -1)
+        val launch = startup_launch_plan_from_v1(
+            startup_plan_from_request(request), [])
+        expect(launch.supported).to_equal(false)
+        expect(launch.error).to_equal("invalid_startup_plan_v1")
+
+    it "rejects a lossy capsule set even with recomputed matching hashes":
+        step_freeze_platform_authorities()
+        val request = startup_request_v1(
+            "simple", "app.smf", 0, 0, startup_entry_kind_artifact(), 0, 0, 1)
+        var frozen = startup_plan_from_request(request)
+        frozen.required_capsules = ["bad,capsule"]
+        val forged_digest = startup_plan_hash(frozen)
+        frozen.plan_digest = forged_digest
+        frozen.plan_hash = forged_digest
+        val launch = startup_launch_plan_from_v1(frozen, [])
+        expect(launch.supported).to_equal(false)
+        expect(launch.error).to_equal("invalid_startup_plan_v1")
+
+    it "preserves deterministic component order in the canonical plan":
+        step_freeze_platform_authorities()
+        val request = planner_request_default("compile")
+        val legacy = plan_startup(request, ordered_dynamic_components())
+        val launch = startup_launch_plan_from_load_plan(legacy)
+        if not launch.supported:
+            fail("component startup projection unexpectedly rejected: " + launch.error)
+        expect(launch.command_id).to_equal("compile")
+        expect(launch.component_steps.len()).to_equal(2)
+        expect(launch.component_steps[0].id).to_equal("parser.scalar")
+        expect(launch.component_steps[1].id).to_equal("parser.simd")
+        expect(launch.component_steps[1].mode).to_equal("dynamic")
+        expect(launch.include_dynlib_loader).to_equal(true)
+
+    it "propagates legacy component-plan rejection without partial steps":
+        step_freeze_platform_authorities()
+        var request = planner_request_default("compile")
+        request.requested = ["missing.component"]
+        val launch = startup_launch_plan_from_load_plan(
+            plan_startup(request, ordered_dynamic_components()))
+        expect(launch.supported).to_equal(false)
+        expect(launch.error).to_equal("unknown_component:missing.component")
+        expect(launch.component_steps.len()).to_equal(0)

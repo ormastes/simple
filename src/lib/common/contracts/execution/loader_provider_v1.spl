@@ -1,0 +1,437 @@
+# Provider-neutral loader operation boundary.
+#
+# The shared loader core owns artifact parsing, dependency/symbol resolution,
+# relocation, and lifecycle policy. This module describes only bounded values
+# and injected provider operations. It imports no compiler or platform API.
+
+pub const LOADER_PROVIDER_SCHEMA_V1: u16 = 1u16
+pub const LOADER_RIGHT_READ_V1: u64 = 1u64
+pub const LOADER_RIGHT_MAP_V1: u64 = 2u64
+pub const LOADER_RIGHT_PROTECT_V1: u64 = 4u64
+pub const LOADER_RIGHT_EXECUTE_V1: u64 = 8u64
+pub const LOADER_RIGHT_LIBRARY_LOOKUP_V1: u64 = 16u64
+pub const LOADER_RIGHT_CACHE_READ_V1: u64 = 32u64
+pub const LOADER_RIGHT_CACHE_WRITE_V1: u64 = 64u64
+pub const LOADER_RIGHT_ALL_V1: u64 = 127u64
+pub const LOADER_MAX_READ_BYTES_V1: u64 = 67108864u64
+pub const LOADER_MAX_MAP_BYTES_V1: u64 = 1099511627776u64
+pub const LOADER_MAX_TEXT_CHARS_V1: i64 = 256
+
+pub enum LoaderProviderLifecycleV1:
+    Inactive
+    Active
+    Draining
+    Retired
+
+pub enum LoaderMemoryAccessV1:
+    ReadOnly
+    ReadWrite
+    ReadExecute
+
+pub enum LoaderCacheActionV1:
+    Lookup
+    Publish
+    Evict
+
+pub enum LoaderOperationV1:
+    Read
+    Map
+    Protect
+    LibraryLookup
+    Cache
+
+pub enum LoaderProviderErrorV1:
+    None
+    UnsupportedSchema
+    InvalidProvider
+    ProviderNotActive
+    StaleGeneration
+    MissingRight
+    InvalidRange
+    InvalidAlignment
+    ExecutableMemoryDenied
+    WritableExecutableDenied
+    InvalidIdentity
+    InvalidCacheAction
+    ProviderRejected
+    InvalidReceipt
+
+pub struct LoaderProviderCheckV1:
+    ok: bool
+    error: LoaderProviderErrorV1
+
+pub struct LoaderOperationReceiptV1:
+    ok: bool
+    operation: LoaderOperationV1
+    provider_identity: u64
+    provider_generation: u64
+    result_handle: u64
+    result_value: u64
+    bytes_processed: u64
+    error: LoaderProviderErrorV1
+
+pub struct LoaderReadRequestV1:
+    schema_version: u16
+    provider_identity: u64
+    provider_generation: u64
+    capability_handle: u64
+    rights: u64
+    artifact_handle: u64
+    file_offset: u64
+    byte_count: u64
+    destination_handle: u64
+
+pub struct LoaderMapRequestV1:
+    schema_version: u16
+    provider_identity: u64
+    provider_generation: u64
+    capability_handle: u64
+    rights: u64
+    artifact_handle: u64
+    file_offset: u64
+    file_bytes: u64
+    memory_bytes: u64
+    alignment: u64
+    access: LoaderMemoryAccessV1
+
+pub struct LoaderProtectRequestV1:
+    schema_version: u16
+    provider_identity: u64
+    provider_generation: u64
+    capability_handle: u64
+    rights: u64
+    mapping_handle: u64
+    mapping_size: u64
+    mapping_offset: u64
+    byte_count: u64
+    access: LoaderMemoryAccessV1
+
+pub struct LoaderLibraryLookupRequestV1:
+    schema_version: u16
+    provider_identity: u64
+    provider_generation: u64
+    capability_handle: u64
+    rights: u64
+    library_handle: u64
+    symbol_name: text
+
+pub struct LoaderCacheRequestV1:
+    schema_version: u16
+    provider_identity: u64
+    provider_generation: u64
+    capability_handle: u64
+    rights: u64
+    action: LoaderCacheActionV1
+    cache_key: text
+    artifact_handle: u64
+
+pub class LoaderProviderV1:
+    # Handles and requested rights are opaque assertions at this portable seam.
+    # Each injected operation remains responsible for resolving them against
+    # provider-owned identity/generation/rights/extent state atomically before
+    # performing a side effect. The dispatch helpers suppress operation calls
+    # when a portable structural or policy check fails.
+    schema_version: u16
+    provider_identity: u64
+    generation: u64
+    lifecycle: LoaderProviderLifecycleV1
+    rights: u64
+    executable_memory_allowed: bool
+    max_read_bytes: u64
+    max_map_bytes: u64
+    read_operation: fn(LoaderReadRequestV1) -> LoaderOperationReceiptV1
+    map_operation: fn(LoaderMapRequestV1) -> LoaderOperationReceiptV1
+    protect_operation: fn(LoaderProtectRequestV1) -> LoaderOperationReceiptV1
+    library_lookup_operation: fn(LoaderLibraryLookupRequestV1) -> LoaderOperationReceiptV1
+    cache_operation: fn(LoaderCacheRequestV1) -> LoaderOperationReceiptV1
+
+fn _loader_check_v1(ok: bool, error: LoaderProviderErrorV1) -> LoaderProviderCheckV1:
+    LoaderProviderCheckV1(ok: ok, error: error)
+
+fn _loader_reject_receipt_v1(
+    operation: LoaderOperationV1,
+    generation: u64,
+    error: LoaderProviderErrorV1,
+    provider_identity: u64 = 0u64
+) -> LoaderOperationReceiptV1:
+    LoaderOperationReceiptV1(
+        ok: false,
+        operation: operation,
+        provider_identity: provider_identity,
+        provider_generation: generation,
+        result_handle: 0u64,
+        result_value: 0u64,
+        bytes_processed: 0u64,
+        error: error)
+
+fn _loader_provider_validate_v1(provider: LoaderProviderV1) -> LoaderProviderCheckV1:
+    if provider.schema_version != LOADER_PROVIDER_SCHEMA_V1:
+        return _loader_check_v1(false, LoaderProviderErrorV1.UnsupportedSchema)
+    if provider.provider_identity == 0u64 or provider.generation == 0u64:
+        return _loader_check_v1(false, LoaderProviderErrorV1.InvalidProvider)
+    if provider.lifecycle != LoaderProviderLifecycleV1.Active:
+        return _loader_check_v1(false, LoaderProviderErrorV1.ProviderNotActive)
+    if provider.rights == 0u64 or (provider.rights | LOADER_RIGHT_ALL_V1) != LOADER_RIGHT_ALL_V1:
+        return _loader_check_v1(false, LoaderProviderErrorV1.InvalidProvider)
+    if (provider.max_read_bytes == 0u64 or
+        provider.max_read_bytes > LOADER_MAX_READ_BYTES_V1 or
+        provider.max_map_bytes == 0u64 or
+        provider.max_map_bytes > LOADER_MAX_MAP_BYTES_V1):
+        return _loader_check_v1(false, LoaderProviderErrorV1.InvalidProvider)
+    _loader_check_v1(true, LoaderProviderErrorV1.None)
+
+fn _loader_preflight_v1(
+    provider: LoaderProviderV1,
+    schema_version: u16,
+    provider_identity: u64,
+    generation: u64,
+    capability_handle: u64,
+    rights: u64,
+    required_rights: u64
+) -> LoaderProviderCheckV1:
+    val provider_check = _loader_provider_validate_v1(provider)
+    if not provider_check.ok:
+        return provider_check
+    if schema_version != LOADER_PROVIDER_SCHEMA_V1:
+        return _loader_check_v1(false, LoaderProviderErrorV1.UnsupportedSchema)
+    if provider_identity == 0u64 or provider_identity != provider.provider_identity:
+        return _loader_check_v1(false, LoaderProviderErrorV1.InvalidProvider)
+    if generation == 0u64 or generation != provider.generation:
+        return _loader_check_v1(false, LoaderProviderErrorV1.StaleGeneration)
+    if capability_handle == 0u64:
+        return _loader_check_v1(false, LoaderProviderErrorV1.MissingRight)
+    if (rights == 0u64 or (rights | provider.rights) != provider.rights or
+        (rights & required_rights) != required_rights):
+        return _loader_check_v1(false, LoaderProviderErrorV1.MissingRight)
+    _loader_check_v1(true, LoaderProviderErrorV1.None)
+
+fn _loader_access_executable_v1(access: LoaderMemoryAccessV1) -> bool:
+    access == LoaderMemoryAccessV1.ReadExecute
+
+fn _loader_alignment_valid_v1(alignment: u64) -> bool:
+    alignment > 0u64 and (alignment & (alignment - 1u64)) == 0u64
+
+fn _loader_text_valid_v1(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "" or value.len() > LOADER_MAX_TEXT_CHARS_V1:
+        return false
+    not value.contains("\0") and not value.contains("\n") and not value.contains("\r")
+
+fn _loader_receipt_validate_v1(
+    receipt: LoaderOperationReceiptV1,
+    operation: LoaderOperationV1,
+    provider_identity: u64,
+    generation: u64,
+    maximum_bytes: u64
+) -> LoaderOperationReceiptV1:
+    if (receipt.operation != operation or
+        receipt.provider_identity != provider_identity or
+        receipt.provider_generation != generation or
+        receipt.bytes_processed > maximum_bytes):
+        return _loader_reject_receipt_v1(
+            operation, generation, LoaderProviderErrorV1.InvalidReceipt,
+            provider_identity)
+    if receipt.ok:
+        if receipt.error != LoaderProviderErrorV1.None:
+            return _loader_reject_receipt_v1(
+                operation, generation, LoaderProviderErrorV1.InvalidReceipt,
+                provider_identity)
+    else:
+        if receipt.error == LoaderProviderErrorV1.None:
+            return _loader_reject_receipt_v1(
+                operation, generation, LoaderProviderErrorV1.InvalidReceipt,
+                provider_identity)
+        return _loader_reject_receipt_v1(
+            operation, generation, receipt.error, provider_identity)
+    receipt
+
+pub fn loader_provider_read_v1(
+    provider: LoaderProviderV1,
+    request: LoaderReadRequestV1
+) -> LoaderOperationReceiptV1:
+    val check = _loader_preflight_v1(
+        provider, request.schema_version, request.provider_identity,
+        request.provider_generation,
+        request.capability_handle, request.rights, LOADER_RIGHT_READ_V1)
+    if not check.ok:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Read, provider.generation, check.error,
+            provider.provider_identity)
+    if (request.artifact_handle == 0u64 or request.destination_handle == 0u64 or
+        request.byte_count == 0u64 or request.byte_count > provider.max_read_bytes or
+        request.file_offset > 18446744073709551615u64 - request.byte_count):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Read, provider.generation,
+            LoaderProviderErrorV1.InvalidRange, provider.provider_identity)
+    val receipt = provider.read_operation(request)
+    val validated = _loader_receipt_validate_v1(
+        receipt, LoaderOperationV1.Read, provider.provider_identity,
+        provider.generation, request.byte_count)
+    if validated.ok and validated.bytes_processed != request.byte_count:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Read, provider.generation,
+            LoaderProviderErrorV1.InvalidReceipt, provider.provider_identity)
+    validated
+
+pub fn loader_provider_map_v1(
+    provider: LoaderProviderV1,
+    request: LoaderMapRequestV1
+) -> LoaderOperationReceiptV1:
+    var required = LOADER_RIGHT_MAP_V1
+    if _loader_access_executable_v1(request.access):
+        required = required | LOADER_RIGHT_EXECUTE_V1
+    val check = _loader_preflight_v1(
+        provider, request.schema_version, request.provider_identity,
+        request.provider_generation,
+        request.capability_handle, request.rights, required)
+    if not check.ok:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Map, provider.generation, check.error,
+            provider.provider_identity)
+    if (request.artifact_handle == 0u64 or request.file_bytes == 0u64 or
+        request.memory_bytes < request.file_bytes or
+        request.memory_bytes > provider.max_map_bytes or
+        request.file_offset > 18446744073709551615u64 - request.file_bytes):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Map, provider.generation,
+            LoaderProviderErrorV1.InvalidRange, provider.provider_identity)
+    if not _loader_alignment_valid_v1(request.alignment):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Map, provider.generation,
+            LoaderProviderErrorV1.InvalidAlignment, provider.provider_identity)
+    if (_loader_access_executable_v1(request.access) and
+        not provider.executable_memory_allowed):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Map, provider.generation,
+            LoaderProviderErrorV1.ExecutableMemoryDenied,
+            provider.provider_identity)
+    val receipt = provider.map_operation(request)
+    val validated = _loader_receipt_validate_v1(
+        receipt, LoaderOperationV1.Map, provider.provider_identity,
+        provider.generation, request.memory_bytes)
+    if validated.ok and (validated.result_handle == 0u64 or
+        validated.bytes_processed != request.memory_bytes):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Map, provider.generation,
+            LoaderProviderErrorV1.InvalidReceipt, provider.provider_identity)
+    validated
+
+pub fn loader_provider_protect_v1(
+    provider: LoaderProviderV1,
+    request: LoaderProtectRequestV1
+) -> LoaderOperationReceiptV1:
+    var required = LOADER_RIGHT_PROTECT_V1
+    if _loader_access_executable_v1(request.access):
+        required = required | LOADER_RIGHT_EXECUTE_V1
+    val check = _loader_preflight_v1(
+        provider, request.schema_version, request.provider_identity,
+        request.provider_generation,
+        request.capability_handle, request.rights, required)
+    if not check.ok:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Protect, provider.generation, check.error,
+            provider.provider_identity)
+    if (request.mapping_handle == 0u64 or request.mapping_size == 0u64 or
+        request.mapping_size > provider.max_map_bytes or
+        request.byte_count == 0u64 or
+        request.byte_count > provider.max_map_bytes or
+        request.mapping_offset > request.mapping_size or
+        request.byte_count > request.mapping_size - request.mapping_offset):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Protect, provider.generation,
+            LoaderProviderErrorV1.InvalidRange, provider.provider_identity)
+    if (_loader_access_executable_v1(request.access) and
+        not provider.executable_memory_allowed):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Protect, provider.generation,
+            LoaderProviderErrorV1.ExecutableMemoryDenied,
+            provider.provider_identity)
+    val receipt = provider.protect_operation(request)
+    val validated = _loader_receipt_validate_v1(
+        receipt, LoaderOperationV1.Protect, provider.provider_identity,
+        provider.generation, request.byte_count)
+    if validated.ok and (validated.result_handle != request.mapping_handle or
+        validated.bytes_processed != request.byte_count):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Protect, provider.generation,
+            LoaderProviderErrorV1.InvalidReceipt, provider.provider_identity)
+    validated
+
+pub fn loader_provider_library_lookup_v1(
+    provider: LoaderProviderV1,
+    request: LoaderLibraryLookupRequestV1
+) -> LoaderOperationReceiptV1:
+    val check = _loader_preflight_v1(
+        provider, request.schema_version, request.provider_identity,
+        request.provider_generation,
+        request.capability_handle, request.rights,
+        LOADER_RIGHT_LIBRARY_LOOKUP_V1)
+    if not check.ok:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.LibraryLookup, provider.generation, check.error,
+            provider.provider_identity)
+    if request.library_handle == 0u64 or not _loader_text_valid_v1(request.symbol_name):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.LibraryLookup, provider.generation,
+            LoaderProviderErrorV1.InvalidIdentity, provider.provider_identity)
+    val receipt = provider.library_lookup_operation(request)
+    val validated = _loader_receipt_validate_v1(
+        receipt, LoaderOperationV1.LibraryLookup, provider.provider_identity,
+        provider.generation, 0u64)
+    if validated.ok and validated.result_handle == 0u64:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.LibraryLookup, provider.generation,
+            LoaderProviderErrorV1.InvalidReceipt, provider.provider_identity)
+    validated
+
+pub fn loader_provider_cache_v1(
+    provider: LoaderProviderV1,
+    request: LoaderCacheRequestV1
+) -> LoaderOperationReceiptV1:
+    var required = LOADER_RIGHT_CACHE_READ_V1
+    match request.action:
+        case LoaderCacheActionV1.Lookup:
+            required = LOADER_RIGHT_CACHE_READ_V1
+        case LoaderCacheActionV1.Publish:
+            required = LOADER_RIGHT_CACHE_WRITE_V1
+        case LoaderCacheActionV1.Evict:
+            required = LOADER_RIGHT_CACHE_WRITE_V1
+    val check = _loader_preflight_v1(
+        provider, request.schema_version, request.provider_identity,
+        request.provider_generation,
+        request.capability_handle, request.rights, required)
+    if not check.ok:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Cache, provider.generation, check.error,
+            provider.provider_identity)
+    if not _loader_text_valid_v1(request.cache_key):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Cache, provider.generation,
+            LoaderProviderErrorV1.InvalidIdentity, provider.provider_identity)
+    if request.action == LoaderCacheActionV1.Publish and request.artifact_handle == 0u64:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Cache, provider.generation,
+            LoaderProviderErrorV1.InvalidCacheAction, provider.provider_identity)
+    if request.action != LoaderCacheActionV1.Publish and request.artifact_handle != 0u64:
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Cache, provider.generation,
+            LoaderProviderErrorV1.InvalidCacheAction, provider.provider_identity)
+    val receipt = provider.cache_operation(request)
+    val validated = _loader_receipt_validate_v1(
+        receipt, LoaderOperationV1.Cache, provider.provider_identity,
+        provider.generation, 0u64)
+    if (validated.ok and request.action == LoaderCacheActionV1.Lookup and
+        validated.result_handle == 0u64):
+        return _loader_reject_receipt_v1(
+            LoaderOperationV1.Cache, provider.generation,
+            LoaderProviderErrorV1.InvalidReceipt, provider.provider_identity)
+    validated
+
+export LoaderProviderLifecycleV1, LoaderMemoryAccessV1, LoaderCacheActionV1
+export LoaderOperationV1, LoaderProviderErrorV1, LoaderProviderCheckV1
+export LoaderOperationReceiptV1, LoaderReadRequestV1, LoaderMapRequestV1
+export LoaderProtectRequestV1, LoaderLibraryLookupRequestV1, LoaderCacheRequestV1
+export LoaderProviderV1
+export loader_provider_read_v1, loader_provider_map_v1
+export loader_provider_protect_v1, loader_provider_library_lookup_v1
+export loader_provider_cache_v1

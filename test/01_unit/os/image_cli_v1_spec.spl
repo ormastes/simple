@@ -1,0 +1,113 @@
+# REQ-016: explicit image CLI inputs and read-only planning.
+use std.spec.{describe, it, expect, step}
+use os.image_cli_v1.*
+use os.installer.verified_image_composition_owner_v1.{
+    simpleos_verified_image_request_validate_v1
+}
+
+fn image_args_v1() -> [text]:
+    [
+        "--target=x86_64-unknown-simpleos", "--root=/absent/image-cli-fixture",
+        "--output=system.img", "--sectors=256", "--profile=runtime",
+        "--build-id=build-v1", "--source-id=source-v1", "--sosix-version=sosix-v1",
+        "--kernel=kernel.elf", "--init=init.smf", "--loader=loader.smf",
+        "--selector=selector.smf"
+    ]
+
+fn changed_args_v1(slot: i64, value: text) -> [text]:
+    var args = image_args_v1()
+    args[slot] = value
+    args
+
+describe "SimpleOS image CLI V1":
+    it "projects all caller-selected identities and artifacts without opening paths":
+        step("Parse a complete request beneath an intentionally absent root")
+        val result = simpleos_image_cli_plan_v1(image_args_v1())
+        expect(result.is_ok()).to_equal(true)
+        val plan = result.unwrap()
+        expect(plan.inspect_only).to_equal(false)
+        expect(plan.request.trusted_absolute_root).to_equal("/absent/image-cli-fixture")
+        expect(plan.request.output_relative_path).to_equal("system.img")
+        expect(plan.request.size_sectors).to_equal(256u64)
+        expect(plan.request.profile_id).to_equal("runtime")
+        expect(plan.request.build_id).to_equal("build-v1")
+        expect(plan.request.source_id).to_equal("source-v1")
+        expect(plan.request.sosix_version).to_equal("sosix-v1")
+        expect(plan.request.kernel_relative_path).to_equal("kernel.elf")
+        expect(plan.request.init_relative_path).to_equal("init.smf")
+        expect(plan.request.loader_relative_path).to_equal("loader.smf")
+        expect(plan.request.selector_relative_path).to_equal("selector.smf")
+        expect(plan.request.compiler_relative_path).to_equal("")
+        expect(simpleos_verified_image_request_validate_v1(plan.request).is_ok()).to_equal(true)
+
+    it "prints an unqualified inspection plan without requiring a live host provider":
+        var args = image_args_v1()
+        args.push("--show-plan")
+        val plan = simpleos_image_cli_plan_v1(args).unwrap()
+        expect(plan.inspect_only).to_equal(true)
+        step("Require planning to distinguish input shape from execution evidence")
+        val lines = simpleos_image_cli_plan_lines_v1(plan).join("\n")
+        expect(lines).to_contain("no artifacts read and no output written")
+        expect(lines).to_contain("Provider admission: not attempted")
+        expect(lines).to_contain("Artifact admission: not attempted")
+        expect(lines).to_contain("Qualified: false")
+        expect(handle_os_image_v1(args)).to_equal(0)
+
+    it "accepts split options and keeps the optional compiler restricted to dev":
+        var args: [text] = []
+        for argument in image_args_v1():
+            val equals = argument.find("=")
+            args.push(argument[:equals])
+            args.push(argument[equals + 1:])
+        args[9] = "dev"
+        args.push("--compiler")
+        args.push("simple.smf")
+        args.push("--show-plan")
+        val result = simpleos_image_cli_plan_v1(args)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().request.compiler_relative_path).to_equal("simple.smf")
+        args[9] = "runtime"
+        expect(simpleos_image_cli_plan_v1(args).is_err()).to_equal(true)
+
+    it "rejects missing unknown repeated and oversized input instead of guessing":
+        expect(simpleos_image_cli_plan_v1([]).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(11, "--selector")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(10, "--loader")).is_err()).to_equal(true)
+        for argument in ["--profile=dev", "--unknown=x", "system.img", "--root", "--compiler="]:
+            var args = image_args_v1()
+            args.push(argument)
+            expect(simpleos_image_cli_plan_v1(args).is_err()).to_equal(true)
+        var duplicate_plan = image_args_v1()
+        duplicate_plan.push("--show-plan")
+        duplicate_plan.push("--show-plan")
+        expect(simpleos_image_cli_plan_v1(duplicate_plan).is_err()).to_equal(true)
+        var too_many: [text] = []
+        while too_many.len() < 28: too_many.push("--show-plan")
+        expect(simpleos_image_cli_plan_v1(too_many).is_err()).to_equal(true)
+        var oversized = "--root=/"
+        while oversized.len() < 4200: oversized = oversized + "x"
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(1, oversized)).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(1, "--root=/a\nb")).is_err()).to_equal(true)
+
+    it "shares preflight path identity profile and sector rejection with the owner":
+        step("Reject traversal, source aliasing, unsupported target, and invalid metadata")
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(0, "--target=aarch64-unknown-simpleos")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(1, "--root=relative")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(2, "--output=../escape.img")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(2, "--output=kernel.elf")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(4, "--profile=unknown")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(5, "--build-id=BAD")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(6, "--source-id=bad..id")).is_err()).to_equal(true)
+        expect(simpleos_image_cli_plan_v1(changed_args_v1(7, "--sosix-version=v 1")).is_err()).to_equal(true)
+        for value in ["0", "7", "32769", "999999999999999999", "-8", "+8", "8x", "8.0"]:
+            expect(simpleos_image_cli_plan_v1(changed_args_v1(3, "--sectors=" + value)).is_err()).to_equal(true)
+        for value in ["8", "32768"]:
+            expect(simpleos_image_cli_plan_v1(changed_args_v1(3, "--sectors=" + value)).is_ok()).to_equal(true)
+
+    it "provides help without synthesizing a request or launching composition":
+        expect(handle_os_image_v1(["--help"])).to_equal(0)
+        expect(handle_os_image_v1(["-h"])).to_equal(0)
+        expect(handle_os_image_v1([])).to_equal(1)
+        val usage = simpleos_image_cli_usage_lines_v1().join("\n")
+        expect(usage).to_contain("unsupported hosts fail closed")
+        expect(usage).to_contain("composition does not qualify firmware boot or release")

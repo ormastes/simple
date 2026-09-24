@@ -1,0 +1,61 @@
+"""Descriptor-authoritative file identity and extent values.
+
+Providers construct this value from metadata queries on one already-open,
+call-stable descriptor.  It deliberately carries no pathname: callers cannot
+accidentally re-authorize a replacement directory entry after open.  This is
+not a write lease or a guarantee against truncation after the observation.
+"""
+
+pub const DESCRIPTOR_STAT_WORDS_V1: i64 = 10
+pub const DESCRIPTOR_STAT_BYTES_V1: i64 = 80
+
+pub enum DescriptorNodeKindV1:
+    Regular
+    Directory
+    Other
+
+pub struct DescriptorFileIdentityV1:
+    filesystem_id: u64
+    object_id_low: u64
+    object_id_high: u64
+
+pub struct DescriptorFileStatV1:
+    identity: DescriptorFileIdentityV1
+    size: u64
+    # Zero means unavailable on a provider that cannot report allocation.
+    allocated_bytes: u64
+    mode: u64
+    link_count: u64
+    modified_time_ns: u64
+    # Zero means unavailable.  Non-zero timestamps use Unix epoch nanoseconds.
+    change_time_ns: u64
+    kind: DescriptorNodeKindV1
+
+pub struct DescriptorFileStatCheckV1:
+    accepted: bool
+    reason: text
+
+pub fn descriptor_file_identity_valid_v1(value: DescriptorFileIdentityV1) -> bool:
+    (value.object_id_low != 0u64 or value.object_id_high != 0u64)
+
+pub fn descriptor_file_identity_equal_v1(
+    left: DescriptorFileIdentityV1, right: DescriptorFileIdentityV1
+) -> bool:
+    (left.filesystem_id == right.filesystem_id and
+        left.object_id_low == right.object_id_low and
+        left.object_id_high == right.object_id_high)
+
+pub fn descriptor_file_stat_validate_v1(
+    value: DescriptorFileStatV1, require_regular: bool, maximum_size: u64
+) -> DescriptorFileStatCheckV1:
+    if not descriptor_file_identity_valid_v1(value.identity):
+        return DescriptorFileStatCheckV1(false, "identity-unavailable")
+    if require_regular and value.kind != DescriptorNodeKindV1.Regular:
+        return DescriptorFileStatCheckV1(false, "not-regular-file")
+    if value.size > maximum_size:
+        return DescriptorFileStatCheckV1(false, "extent-exceeds-limit")
+    DescriptorFileStatCheckV1(true, "accepted")
+
+export DescriptorNodeKindV1, DescriptorFileIdentityV1, DescriptorFileStatV1
+export DescriptorFileStatCheckV1, descriptor_file_identity_valid_v1
+export descriptor_file_identity_equal_v1, descriptor_file_stat_validate_v1

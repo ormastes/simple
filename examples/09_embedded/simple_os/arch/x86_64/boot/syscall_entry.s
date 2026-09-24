@@ -58,6 +58,16 @@
     .type kernel_syscall_entry_asm, @function
     .align 16
 kernel_syscall_entry_asm:
+    /* L7 diagnostic (2026-09-24): 'S' = trampoline entered (so LSTAR/SCE are
+     * live); 's' = reached the dispatcher call. If the payload's exit syscall
+     * #UDs instead, NEITHER prints and the defect is in the MSR install. */
+    pushq   %rax
+    pushq   %rdx
+    movw    $0x3f8, %dx
+    movb    $'S', %al
+    outb    %al, %dx
+    popq    %rdx
+    popq    %rax
     /* Save caller rsp and switch to the global kernel syscall stack.
      * Using a global stack is safe on single-CPU SimpleOS. When SMP
      * lands, replace with per-CPU GS-base scratch (see comment at top). */
@@ -81,6 +91,14 @@ kernel_syscall_entry_asm:
     movq    %rsi, %rdx      /* C arg2: a1 */
     movq    %rdi, %rsi      /* C arg1: a0 */
     movq    %rax, %rdi      /* C arg0: syscall number */
+    /* L7 diagnostic: 's' = about to call the C dispatcher. */
+    pushq   %rax
+    pushq   %rdx
+    movw    $0x3f8, %dx
+    movb    $'s', %al
+    outb    %al, %dx
+    popq    %rdx
+    popq    %rax
     call    rt_syscall_dispatch
     /* rax now holds the int64_t return value from the dispatcher. */
 

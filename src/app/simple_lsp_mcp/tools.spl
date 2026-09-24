@@ -2,17 +2,14 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
-use app.io.minimal_runtime_ops.{process_run, process_run_timeout, process_run_bounded}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _is_ws, _find_json_value_start}
+use app.io.minimal_runtime_ops.{cwd, process_run_timeout, process_run_bounded}
 # Import process_run_timeout from the light std module, NOT app.io.mod — the
 # latter is a CLI/compiler re-export hub whose graph makes `bin/simple run` skip
 # main() (LSP MCP server never starts). See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use .session_state.{lsp_record_location, lsp_resolve_requester}
-use .lsp_command_metrics.{lsp_note_command_start}
-use .lsp_query_inproc.{lsp_query_inproc_dispatch_v1, lsp_query_inproc_command_text_v1}
-use .lsp_visibility_inproc.{lsp_visibility_hover_inproc_v1, lsp_visibility_completions_inproc_v1, lsp_visibility_symbols_inproc_v1}
-use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
+use compiler.common.cache_contract.virtual_source_read_registry_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
@@ -38,7 +35,6 @@ fn command_failure(code: i64, stderr: text, stdout: text) -> text:
     prefix + ": " + detail
 
 fn run_command_text(binary: text, args: [text]) -> text:
-    lsp_note_command_start()
     val (stdout, stderr, code) = process_run_bounded(
         binary, args, LSP_COMMAND_TIMEOUT_MS, LSP_COMMAND_OUTPUT_CAPTURE_BYTES)
     val clean = clean_command_output(stdout)
@@ -46,31 +42,14 @@ fn run_command_text(binary: text, args: [text]) -> text:
         return clean
     command_failure(code, stderr, clean)
 
-# NOTE for lsp_command_bounded_spec: this function no longer starts a command
-# unconditionally. A query the server can answer from a workspace file it can
-# already read is answered IN PROCESS (zero child starts); everything else still
-# goes through the single bounded command owner below.
 fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
-    val inproc = lsp_query_inproc_dispatch_v1(subcmd, file, line0 + 1, char0 + 1)
-    if inproc.handled:
-        return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 fn run_visibility_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
-    if subcmd == "completions":
-        val inproc = lsp_visibility_completions_inproc_v1(file, line0 + 1, char0 + 1)
-        if inproc.handled:
-            return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [query_visibility_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 # hover with an explicit requester location (`path[:line]`); "" = no requester.
-# Answered in-process when possible: the pure-Simple release binary cannot host
-# the query_visibility.spl child at all (its core-C rt_cli_run_file stub prints
-# "simple: --fork requires hosted interpreter support", runtime_native.c:720).
 fn run_visibility_hover(file: text, line0: i64, char0: i64, requester: text) -> text:
-    val inproc = lsp_visibility_hover_inproc_v1(file, line0 + 1, char0 + 1, requester)
-    if inproc.handled:
-        return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [query_visibility_path(), "hover", file, str(line0 + 1), str(char0 + 1), "--requester", requester])
 
 fn run_lsp_symbols(file: text) -> text:
@@ -79,9 +58,6 @@ fn run_lsp_symbols(file: text) -> text:
 # `requester` is always passed through — "" means "no requester" (only
 # boundary-crossing symbols reachable), never the file itself.
 fn run_visibility_symbols(file: text, requester: text) -> text:
-    val inproc = lsp_visibility_symbols_inproc_v1(file, requester)
-    if inproc.handled:
-        return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [query_visibility_path(), "symbols", file, "--requester", requester])
 
 # Two-set view (layerPublic / featurePublic) for a requester location.
@@ -209,7 +185,7 @@ fn handle_resources_list(id: text) -> text:
 
 fn handle_resource_templates_list(id: text) -> text:
     val descriptor = jo2(
-        jp("uriTemplate", js('simple-summary://{snapshot}/{logical_path}/_tldr.spl')),
+        jp("uriTemplate", js("simple-summary://" + LB() + "snapshot" + RB() + "/" + LB() + "logical_path" + RB() + "/_tldr.spl")),
         jp("name", js("Frozen Public Summary")))
     jsonrpc_result(id, jo1(jp("resourceTemplates", "[" + descriptor + "]")))
 
@@ -502,9 +478,9 @@ fn handle_tool_call(id: text, body: text) -> text:
     jsonrpc_error(id, -32602, "Unknown tool: " + tool_name)
 
 fn lsp_get_cwd() -> text:
-    val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", "pwd"])
-    if code == 0 and stdout.trim() != "":
-        return stdout.trim()
+    val current = cwd().trim()
+    if current != "":
+        return current
     "."
 
 export arg_field

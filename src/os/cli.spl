@@ -1,4 +1,9 @@
 use app.io.env_ops.{env_get, env_set}
+use os.image_cli_v1.{handle_os_image_v1}
+use os.qemu_cli_plan_v1.{
+    qemu_cli_inspect_plan_v1, qemu_cli_inspect_named_lane_v1,
+    qemu_cli_named_lane_supported_v1
+}
 use os.qemu_runner.{
     OsTarget,
     arch_display_name,
@@ -10,6 +15,9 @@ use os.qemu_runner.{
     get_scenario,
     scenario_exists,
     scenario_by_name_direct,
+    _catalog_platform_name_for_scenario,
+    _catalog_has_lane_for_scenario,
+    scenario_target,
     run_os,
     run_os_debug_gui,
     run_scenario,
@@ -17,6 +25,10 @@ use os.qemu_runner.{
     test_all_architectures,
     test_os,
     test_scenario
+}
+use std.common.contracts.execution.process_launch_spec_v1.{
+    ProcessLaunchIoV1, ProcessLaunchResourcesV1, ProcessLaunchSpecV1,
+    process_launch_spec_validate_v1
 }
 
 fn os_parse_arch_arg(args: [text]) -> text:
@@ -37,6 +49,11 @@ fn os_parse_arch_arg(args: [text]) -> text:
                 return "__missing_arch__"
             return value
         i = i + 1
+    # Default: host arch (aarch64 hosts default to arm64 guests; see
+    # qemu_default_arch in os._QemuRunner.runner_targets). --arch/--target
+    # always overrides.
+    if qemu_default_arch() == "arm64":
+        return "arm64"
     "x86_64"
 
 fn os_has_flag(args: [text], flag: text) -> bool:
@@ -96,7 +113,10 @@ fn print_os_help():
     print ""
     print "Commands:"
     print "  build              Build the OS kernel"
+    print "  image              Compose a verified NVFS carrier (see image --help)"
     print "  run                Build and run in QEMU"
+    print "  shell              Inspect interactive QEMU launch (launch unavailable)"
+    print "  bootstrap          Inspect target-native compiler qualification (execution unavailable)"
     print "  test               Build and run boot smoke test"
     print "  targets            List supported architectures"
     print ""
@@ -106,10 +126,75 @@ fn print_os_help():
     print "  --all              Test all architectures (with 'test' command)"
     print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
     print "  --debug-gui        Keep GUI targets windowed while exposing serial logs"
+    print "  --show-plan        Validate the typed default-lane QEMU launch plan"
+    print "  --print-command    Print sealed POSIX command or Windows argv display"
     print "  --log=<on|off>     Compile normal OS logging in or out (default: on)"
-    print ""
     print "Architectures:"
     print "  x86_64   x86_32   riscv64   riscv32   arm64   arm32"
+
+pub fn simpleos_shell_cli_unavailable_reason_v1() -> text:
+    "interactive SimpleOS shell launch is not wired to a stdin-attached " +
+        "process provider; use --show-plan or --print-command to inspect it"
+
+pub fn simpleos_shell_cli_inspection_requested_v1(args: [text]) -> bool:
+    os_has_flag(args, "--show-plan") or os_has_flag(args, "--print-command")
+
+pub fn simpleos_bootstrap_cli_unavailable_reason_v1() -> text:
+    "SimpleOS bootstrap execution is not wired: the production owner must " +
+        "bind EnvironmentSnapshotV1, SimpleOsImageManifestV1, QemuLaunchPlanV1, " +
+        "ProcessLaunchSpecV1, and release-evidence ledger receipts"
+
+fn _bootstrap_stdio_v1() -> ProcessLaunchIoV1:
+    ProcessLaunchIoV1(mode: "inherit", capability_name: "")
+
+fn _bootstrap_resources_v1() -> ProcessLaunchResourcesV1:
+    ProcessLaunchResourcesV1(
+        memory_bytes: 536870912, cpu_time_us: 120000000,
+        open_handles: 128)
+
+fn _bootstrap_launch_v1(executable: text, argv: [text]) -> ProcessLaunchSpecV1:
+    ProcessLaunchSpecV1(
+        executable: executable, argv: argv, environment: [], cwd: "/user/bootstrap",
+        stdin: _bootstrap_stdio_v1(), stdout: _bootstrap_stdio_v1(),
+        stderr: _bootstrap_stdio_v1(), namespace_name: "bootstrap-qualification",
+        resources: _bootstrap_resources_v1(), cpu_affinity: [],
+        runtime_profile: "simpleos-dev", capabilities: ["fs.read", "fs.write"],
+        service_grants: ["sosix.fs", "sosix.process", "sosix.time"])
+
+pub fn simpleos_bootstrap_guest_launch_specs_v1() -> [ProcessLaunchSpecV1]:
+    """Return bounded guest work; constructing this value launches nothing."""
+    [
+        _bootstrap_launch_v1("/system/bin/simple", ["simple", "--version"]),
+        _bootstrap_launch_v1(
+            "/system/bin/simple", ["simple", "build", "hello.spl", "-o", "hello"]),
+        _bootstrap_launch_v1("/user/bootstrap/hello", ["hello"])
+    ]
+
+pub fn simpleos_bootstrap_guest_specs_valid_v1() -> bool:
+    val specs = simpleos_bootstrap_guest_launch_specs_v1()
+    if specs.len() != 3:
+        return false
+    for spec in specs:
+        if not process_launch_spec_validate_v1(spec).accepted:
+            return false
+    true
+
+pub fn simpleos_bootstrap_plan_lines_v1() -> [text]:
+    [
+        "Bootstrap mode: inspection only; no guest was booted",
+        "1. Admit host execution through EnvironmentSnapshotV1",
+        "2. Require a dev SimpleOsImageManifestV1 containing the target-native compiler",
+        "3. Inspect the current sealed QemuLaunchPlanV1 run lane",
+        "4. Require a distinct cold-boot release-firmware receipt before execution",
+        "5. Dispatch ProcessLaunchSpecV1: simple --version",
+        "6. Dispatch ProcessLaunchSpecV1: simple build hello.spl -o hello",
+        "7. Dispatch ProcessLaunchSpecV1: ./hello",
+        "8. Persist receipts atomically in the release-evidence ledger",
+        "Qualified: false"
+    ]
+
+fn handle_os_image(args: [text]) -> i64:
+    handle_os_image_v1(args)
 
 fn print_os_targets():
     print "Supported SimpleOS architectures:"
@@ -199,7 +284,67 @@ fn handle_os_build(args: [text]) -> i64:
         print "Run 'simple os targets' for supported architectures."
         1
 
+fn _handle_os_inspection_v1(args: [text], print_command: bool) -> i64:
+    """Inspect a sealed QEMU plan without mutating process environment state."""
+    val log_mode = os_parse_log_arg(args)
+    val log_error = os_log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val scenario_name = os_parse_scenario_arg(args)
+    val scenario_error = _os_scenario_arg_error(scenario_name)
+    if scenario_error != "":
+        print scenario_error
+        return 1
+    if scenario_name != "":
+        if not scenario_exists(scenario_name):
+            print "Error: unknown scenario '{scenario_name}'"
+            return 1
+        val scenario = scenario_by_name_direct(scenario_name)
+        if not _catalog_has_lane_for_scenario(scenario):
+            print "Error: named scenario '{scenario_name}' is not a catalog-owned QEMU lane"
+            return 1
+        val platform_name = _catalog_platform_name_for_scenario(scenario)
+        if not qemu_cli_named_lane_supported_v1(platform_name, scenario.name):
+            print "Error: named scenario '{scenario_name}' uses a QEMU boot shape not represented by the sealed plan"
+            return 1
+        val target = scenario_target(scenario)
+        val outcome = qemu_cli_inspect_named_lane_v1(
+            platform_name, scenario.name, target.output, target.qemu_memory,
+            target.qemu_bios, target.qemu_extra, print_command)
+        if not outcome.ok():
+            print "Error: {outcome.error()}"
+            return 1
+        for line in outcome.lines_copy(): print line
+        return 0
+    val arch_name = os_parse_arch_arg(args)
+    val arch_error = _os_arch_arg_error(arch_name)
+    if arch_error != "":
+        print arch_error
+        return 1
+    val arch = arch_from_name(arch_name)
+    if not arch.?:
+        print "Error: unknown architecture '{arch_name}'"
+        print "Run 'simple os targets' for supported architectures."
+        return 1
+    val target = get_qemu_target(arch.unwrap())
+    val outcome = qemu_cli_inspect_plan_v1(
+        arch_name, target.output, target.qemu_memory, target.qemu_bios,
+        target.qemu_extra, print_command)
+    if not outcome.ok():
+        print "Error: {outcome.error()}"
+        return 1
+    for line in outcome.lines_copy(): print line
+    0
+
 fn handle_os_run(args: [text]) -> i64:
+    val show_plan = os_has_flag(args, "--show-plan")
+    val print_command = os_has_flag(args, "--print-command")
+    if show_plan and print_command:
+        print "Error: --show-plan and --print-command are mutually exclusive"
+        return 1
+    if show_plan or print_command:
+        return _handle_os_inspection_v1(args, print_command)
     val log_mode = os_parse_log_arg(args)
     val log_error = os_log_arg_error(log_mode)
     if log_error != "":
@@ -309,6 +454,33 @@ fn handle_os_test(args: [text]) -> i64:
             print "Run 'simple os targets' for supported architectures."
             1
 
+fn handle_os_shell(args: [text]) -> i64:
+    # Reuse the sealed QEMU inspection owner, but do not call its normal runner:
+    # that path captures process output and cannot attach host stdin. A real
+    # shell command requires a ProcessLaunchSpecV1-capable interactive provider.
+    if simpleos_shell_cli_inspection_requested_v1(args):
+        return handle_os_run(args)
+    print "Error: " + simpleos_shell_cli_unavailable_reason_v1()
+    1
+
+fn handle_os_bootstrap(args: [text]) -> i64:
+    if not os_has_flag(args, "--show-plan"):
+        print "Error: " + simpleos_bootstrap_cli_unavailable_reason_v1()
+        print "Use --show-plan for read-only inspection."
+        return 1
+    if os_has_flag(args, "--print-command"):
+        print "Error: bootstrap is a receipt-bound sequence, not one shell command"
+        return 1
+    if not simpleos_bootstrap_guest_specs_valid_v1():
+        print "Error: invalid SimpleOS bootstrap ProcessLaunchSpecV1 sequence"
+        return 1
+    val qemu_status = _handle_os_inspection_v1(args, false)
+    if qemu_status != 0:
+        return qemu_status
+    for line in simpleos_bootstrap_plan_lines_v1():
+        print line
+    0
+
 fn handle_os(args: [text]) -> i64:
     if args.len() == 0:
         print_os_help()
@@ -319,8 +491,14 @@ fn handle_os(args: [text]) -> i64:
     match subcmd:
         "build":
             handle_os_build(rest)
+        "image":
+            handle_os_image(rest)
         "run":
             handle_os_run(rest)
+        "shell":
+            handle_os_shell(rest)
+        "bootstrap":
+            handle_os_bootstrap(rest)
         "test":
             handle_os_test(rest)
         "targets":

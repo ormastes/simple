@@ -13,6 +13,7 @@ use os.kernel.memory.vmm.{
     vmm_translate, vmm_read_pte
 }
 use os.kernel.memory.vmm_vma.{vma_find}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
 # ============================================================================
 # User Pointer Verification (copy_to_user guard)
@@ -288,11 +289,13 @@ fn vmm_copyin_bytes_from_space(space: ProcessVmSpace, ptr: u64, len: u64) -> Vmm
 
     VmmCopyBytesResult(status: _vmm_copy_ok(len), bytes: bytes)
 
-fn _vmm_bytes_to_text(bytes: [u8]) -> text:
-    var chars: [text] = []
-    for b in bytes:
-        chars.push((b.to_i64()).to_char())
-    chars.join("")
+fn _vmm_copy_cstr_utf8(bytes: [u8]) -> VmmCopyCstrResult:
+    """Lift the already copied pre-NUL bytes without byte-to-codepoint expansion."""
+    val bytes_read = bytes.len() as u64 + 1
+    val decoded = validated_utf8_bytes_to_text_linear(bytes)
+    if decoded.is_err():
+        return _vmm_copy_cstr_err(22, bytes_read)
+    VmmCopyCstrResult(status: _vmm_copy_ok(bytes_read), value: decoded.unwrap())
 
 fn _vmm_copyin_current_byte(ptr: u64) -> u8?:
     """Read one byte from the current userspace mapping through page tables."""
@@ -363,10 +366,7 @@ fn vmm_copyin_cstr(ptr: u64, max_len: u64) -> VmmCopyCstrResult:
         val read = _vmm_copyin_current_byte(current)
         if val Some(b) = read:
             if b == 0u8:
-                return VmmCopyCstrResult(
-                    status: _vmm_copy_ok(i + 1),
-                    value: _vmm_bytes_to_text(bytes)
-                )
+                return _vmm_copy_cstr_utf8(bytes)
             bytes.push(b)
         else:
             return _vmm_copy_cstr_err(14, i)

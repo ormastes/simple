@@ -1,0 +1,115 @@
+# Sole runtime owner for the SimpleOS release-evidence ledger.
+#
+# Copyable contract values never carry authority.  This module keeps the one
+# canonical ledger behind a private raw mutex, samples the live wall clock
+# inside that critical section, finalizes consumption, validates, and publishes
+# with one assignment.  Persistence of successful snapshots is the embedding
+# service's responsibility; no signing or publishing happens here.
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_try_lock, mutex_raw_unlock}
+use std.nogc_async_mut.sffi.system.{time_now_unix_micros}
+use std.common.contracts.execution.simpleos_release_evidence_manifest_v1.{
+    SimpleOsReleaseEvidenceManifestV1, SimpleOsReleaseEvidenceErrorV1
+}
+use std.common.contracts.execution.simpleos_release_evidence_ledger_v1.{
+    SimpleOsReleaseEvidenceClaimV1,
+    SimpleOsReleaseEvidenceLedgerV1,
+    SimpleOsReleaseEvidenceLedgerCommitV1,
+    SimpleOsReleaseEvidenceLedgerErrorV1,
+    simpleos_release_evidence_ledger_genesis_v1,
+    simpleos_release_evidence_ledger_copy_v1,
+    simpleos_release_evidence_ledger_valid_v1,
+    simpleos_release_evidence_ledger_transition_v1
+}
+
+var _release_evidence_ledger_v1 = simpleos_release_evidence_ledger_genesis_v1()
+var _release_evidence_ledger_mutex_v1 = mutex_raw_create()
+var _release_evidence_ledger_quarantined_v1 = false
+var _release_evidence_ledger_initialized_v1 = false
+
+fn _release_evidence_owner_unlock_v1() -> bool:
+    if mutex_raw_unlock(_release_evidence_ledger_mutex_v1):
+        return true
+    _release_evidence_ledger_quarantined_v1 = true
+    false
+
+fn _release_evidence_owner_failure_v1(
+    error: SimpleOsReleaseEvidenceLedgerErrorV1
+) -> SimpleOsReleaseEvidenceLedgerCommitV1:
+    SimpleOsReleaseEvidenceLedgerCommitV1(
+        ok: false,
+        error: error,
+        manifest_error: SimpleOsReleaseEvidenceErrorV1.None,
+        ledger: simpleos_release_evidence_ledger_genesis_v1(),
+        claim_identity_digest: "",
+        transition_digest: "",
+        finalized_manifest: nil)
+
+pub fn simpleos_release_evidence_owner_snapshot_v1()
+        -> SimpleOsReleaseEvidenceLedgerV1?:
+    if not mutex_raw_try_lock(_release_evidence_ledger_mutex_v1):
+        return nil
+    if _release_evidence_ledger_quarantined_v1 or
+       not _release_evidence_ledger_initialized_v1:
+        _release_evidence_owner_unlock_v1()
+        return nil
+    val snapshot = simpleos_release_evidence_ledger_copy_v1(
+        _release_evidence_ledger_v1)
+    if not _release_evidence_owner_unlock_v1():
+        return nil
+    Some(snapshot)
+
+# Boot/recovery must call this exactly once with either the durable ledger or
+# explicit genesis. A process restart cannot silently discard replay history.
+pub fn simpleos_release_evidence_owner_start_v1(
+    recovered_ledger: SimpleOsReleaseEvidenceLedgerV1
+) -> bool:
+    if not mutex_raw_try_lock(_release_evidence_ledger_mutex_v1):
+        return false
+    if _release_evidence_ledger_quarantined_v1 or
+       _release_evidence_ledger_initialized_v1 or
+       not simpleos_release_evidence_ledger_valid_v1(recovered_ledger):
+        _release_evidence_owner_unlock_v1()
+        return false
+    _release_evidence_ledger_v1 = simpleos_release_evidence_ledger_copy_v1(
+        recovered_ledger)
+    _release_evidence_ledger_initialized_v1 = true
+    if not _release_evidence_owner_unlock_v1():
+        return false
+    true
+
+pub fn simpleos_release_evidence_owner_commit_v1(
+    claim: SimpleOsReleaseEvidenceClaimV1,
+    pending_manifest: SimpleOsReleaseEvidenceManifestV1
+) -> SimpleOsReleaseEvidenceLedgerCommitV1:
+    if not mutex_raw_try_lock(_release_evidence_ledger_mutex_v1):
+        return _release_evidence_owner_failure_v1(
+            SimpleOsReleaseEvidenceLedgerErrorV1.OwnerBusy)
+    if _release_evidence_ledger_quarantined_v1:
+        _release_evidence_owner_unlock_v1()
+        return _release_evidence_owner_failure_v1(
+            SimpleOsReleaseEvidenceLedgerErrorV1.SerializationIndeterminate)
+    if not _release_evidence_ledger_initialized_v1:
+        _release_evidence_owner_unlock_v1()
+        return _release_evidence_owner_failure_v1(
+            SimpleOsReleaseEvidenceLedgerErrorV1.OwnerNotInitialized)
+
+    val clock_micros = time_now_unix_micros()
+    val authoritative_now = if clock_micros > 0:
+        (clock_micros / 1000).to_u64()
+    else:
+        0u64
+    val result = simpleos_release_evidence_ledger_transition_v1(
+        _release_evidence_ledger_v1, claim, pending_manifest,
+        authoritative_now)
+    if result.ok:
+        _release_evidence_ledger_v1 = simpleos_release_evidence_ledger_copy_v1(
+            result.ledger)
+    if not _release_evidence_owner_unlock_v1():
+        return _release_evidence_owner_failure_v1(
+            SimpleOsReleaseEvidenceLedgerErrorV1.SerializationIndeterminate)
+    result
+
+export simpleos_release_evidence_owner_snapshot_v1
+export simpleos_release_evidence_owner_start_v1
+export simpleos_release_evidence_owner_commit_v1

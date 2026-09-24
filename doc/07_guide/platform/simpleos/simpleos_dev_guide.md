@@ -427,7 +427,28 @@ bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=x86_32
 bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=i686
 ```
 
-The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/09_embedded/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
+The x86_32 catalog retains the `qemu-system-i386` guest identity, ELF32 linker
+mode, and freestanding C/ASM boot support under
+`examples/09_embedded/simple_os/arch/x86_32/boot/`. The host adapter launches
+that `pc`/`qemu32` machine through the compatible `qemu-system-x86_64`
+frontend because the i386 frontend rejects this Multiboot-style kernel's PVH
+shape. The executable alias is host policy and does not change target identity.
+
+Inspect the sealed launch policy without starting QEMU:
+
+```bash
+simple os run --arch=x86_32 --show-plan
+simple os run --arch=x86_32 --print-command
+simple os run --scenario=x86_64-q35-pure-nvme-perf --show-plan
+```
+
+POSIX hosts receive single-quoted inert command text. Windows receives a
+labelled `Windows argv (display only)` vector, not POSIX or PowerShell
+syntax. Named inspection admits only catalog scenarios whose established boot
+shape is represented exactly. ARM loader-device scenarios and the forwarded-
+network RV64 hosted scenario fail closed until their typed vocabulary exists.
+Normal launch remains on the established runner until complete parity is
+qualified.
 
 ### 4.8 Native Build Config
 
@@ -561,6 +582,35 @@ If you need a working proof lane today, use:
 - `bin/simple os test --scenario=x64-desktop-test` for the lighter desktop lane
 
 ---
+
+### Unified image and shell commands
+
+`simple os shell --show-plan` and `simple os shell --print-command` reuse the
+sealed QEMU inspection owner. Interactive launch currently fails closed: the
+established runner captures stdout/stderr and does not attach host stdin. The
+command remains unavailable until a `ProcessLaunchSpecV1`-capable interactive
+provider owns the session; it does not introduce another machine policy.
+
+`simple os image` is recognized but currently fails closed. The legacy
+installer builder can emit descriptor fallbacks and placeholder payloads; the
+command will remain unavailable until a production owner binds materialized
+NVFS artifact evidence to `SimpleOsImageManifestV1`. It never creates a
+placeholder image, signs, publishes, or writes physical media.
+
+`simple os bootstrap --show-plan` is the non-mutating bootstrap inspection
+surface. It validates the same sealed QEMU run-plan preview used by
+`simple os run`, then
+prints the target-native compiler qualification sequence as three bounded
+`ProcessLaunchSpecV1` requests. The sequence requires an admitted
+`EnvironmentSnapshotV1`, a dev `SimpleOsImageManifestV1`, and atomic
+release-evidence receipts. It explicitly reports `Qualified: false` and does
+not build, boot, download, sign, publish, or claim guest success.
+
+`simple os bootstrap` without `--show-plan` fails closed until a production
+owner can bind those authorities and commit the complete cold-boot evidence
+chain. The preview does not prove a release-firmware boot; that remains a
+separate required receipt. `--print-command` is rejected because bootstrap is a receipt-bound
+sequence, not a single shell command.
 
 ## 5. Simple Compiler Bootstrap
 
