@@ -218,6 +218,23 @@ if [ -f "$BUILDLOG" ]; then
     if [ -n "${LANE_STUBS:-}" ]; then
         fail "kernel built, but functions on THIS lane's call path were stub-fallbacked (would silently misbehave): $LANE_STUBS (see $BUILDLOG)"
     fi
+    # C-bridge compile failures are silently non-fatal to native-build: the
+    # kernel links against the 16-byte weak stubs instead of the strong C
+    # definitions, and every serial_println/nvme/fat32 call becomes int3-backed
+    # dead code — the guest then halts after '[BOOT64] call _start' with no
+    # fault frame and no diagnostic (2026-09-24: committed WIP broke
+    # baremetal_stubs.c exactly this way; L2-L7 all MISS, root cause invisible
+    # without reading the build log). Fail closed here. The three files below
+    # are documented OFF this lane's call path (see the bug record's
+    # 'Still-open C defects'): tls13_aes256_gcm_helper and
+    # runtime_service_owners are unreferenced by this entry; up2_dci needs the
+    # external gnu-efi SDK which is a legitimate SKIP on hosts without it.
+    C_FAILURES=$(grep 'ERROR: failed to compile' "$BUILDLOG" 2>/dev/null \
+        | grep -vE 'tls13_aes256_gcm_helper\.c|runtime_service_owners\.c|up2_dci_uefi_loader\.c' \
+        | sed -n 's/.*failed to compile \([^ ]*\).*/\1/p' | sort -u | tr '\n' ' ') || true
+    if [ -n "${C_FAILURES:-}" ]; then
+        fail "kernel built, but lane C bridge file(s) failed to compile (kernel links weak stubs instead: $C_FAILURES (see $BUILDLOG)"
+    fi
 fi
 echo "[hello] kernel=$KERNEL ($(stat -c%s "$KERNEL") bytes)"
 

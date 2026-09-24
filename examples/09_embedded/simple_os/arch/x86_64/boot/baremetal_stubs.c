@@ -68,6 +68,61 @@ static inline void io_wait(void)
      uint32_t hi = (uint32_t)(value >> 32);
      __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
  }
+
+/* Restored 2026-09-24 (B17): this function was dropped from the main tree by
+ * a WIP merge — it survived only in .claude/worktrees copies. Without it the
+ * extern in os.kernel.arch.x86_64.cpu.install_syscall_entry resolved to a
+ * weak stub, NO syscall MSR was ever programmed, and the ring-3 payload's
+ * first `syscall` (its exit) #UD'd into the recoverable-fault march. Programs
+ * EFER.SCE, STAR (per the 5+1-entry GDT in crt0.s: kernel CS 0x08, user
+ * 32-bit CS 0x18 | RPL3 = 0x1B), LSTAR = kernel_syscall_entry_asm, and
+ * SFMASK = 0x200 (clear IF on entry). Returns the LSTAR target. */
+uint64_t get_kernel_syscall_entry_addr(void);
+
+uint64_t rt_x86_install_syscall_entry_raw(void)
+{
+    uint64_t efer = rt_read_msr(0xC0000080u);
+    rt_write_msr(0xC0000080u, efer | 1u);
+    rt_write_msr(0xC0000081u, ((uint64_t)0x1B << 48) | ((uint64_t)0x08 << 32));
+    rt_write_msr(0xC0000082u, get_kernel_syscall_entry_addr());
+    rt_write_msr(0xC0000084u, 0x200u);
+    return get_kernel_syscall_entry_addr();
+}
+
+/* Ground-truth MSR dump for the L7 investigation (2026-09-24): reads the
+ * syscall MSRs from plain C and prints them, so a nil/garbage read cannot be
+ * blamed on a Simple-side extern. Called by the hello entry right before the
+ * ring-3 handoff. */
+void serial_puts(const char *s);
+static void _serial_puts_impl(const char *s);
+static void serial_put_hex(uint64_t v);
+static void serial_put_dec(int64_t v);
+void rt_x86_dump_syscall_msrs(void)
+{
+    _serial_puts_impl("[msr] efer=0x");
+    serial_put_hex(rt_read_msr(0xC0000080u));
+    _serial_puts_impl(" star=0x");
+    serial_put_hex(rt_read_msr(0xC0000081u));
+    _serial_puts_impl(" lstar=0x");
+    serial_put_hex(rt_read_msr(0xC0000082u));
+    _serial_puts_impl(" sfmask=0x");
+    serial_put_hex(rt_read_msr(0xC0000084u));
+    _serial_puts_impl("\r\n");
+}
+
+/* L7 line printer: the seed's i64 text interpolation renders EMPTY (the
+ * "[hello] native program exited rc=" line printed with no digits), so the
+ * gate's literal `rc=0` never matched even though the exit status IS 0.
+ * serial_put_dec(int64_t) formats correctly — print the rung line here.
+ * NOTE: _serial_puts_impl, not serial_puts — the #define at line ~211 does
+ * not reach this early in the file, and the bare serial_puts symbol binds
+ * to the Simple tagged-text implementation which cannot print a char*. */
+void rt_x86_print_exit_rc_line(int64_t rc)
+{
+    _serial_puts_impl("[hello] native program exited rc=");
+    serial_put_dec(rc);
+    _serial_puts_impl("\r\n");
+}
  
  /* rt_x86_syscall — C-ABI wrapper that actually emits the `syscall`
   * instruction. The Simple-side asm-volatile block in
@@ -261,8 +316,21 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define TRUE_VALUE     ENCODE_INT(1)
 #define FALSE_VALUE    ENCODE_INT(0)
 
+/* HeapHeader — 8 bytes, matches src/runtime/runtime_value.h and the Rust
+ * runtime's repr(C) heap header (value/heap.rs): object_type u8, gc_flags u8,
+ * reserved u16, size u32. The anonymous union keeps the legacy whole-word
+ * `hdr.type` writes (109 sites) working: writing the u32 word implicitly
+ * clears gc_flags/reserved, which preserves the non-packed default for
+ * freshly constructed objects. Newer code addresses gc_flags directly. */
 typedef struct {
-    uint32_t type;
+    union {
+        uint32_t type;
+        struct {
+            uint8_t  object_type;
+            uint8_t  gc_flags;
+            uint16_t reserved;
+        };
+    };
     uint32_t size;
 } HeapHeader;
 
@@ -286,6 +354,23 @@ typedef struct {
 #define HEAP_CLOSURE 5
 #define HEAP_MODULE  6
 #define HEAP_ENUM    7
+
+/* gc_flags bits — matches gc_flags::BYTE_PACKED in the Rust runtime
+ * (value/heap.rs). A BYTE_PACKED HEAP_ARRAY stores len raw bytes at items
+ * instead of len tagged RuntimeValue slots. */
+#define BYTE_PACKED  0x08
+
+/* Decode an ABI RuntimeValue to a RuntimeArray*, or NULL when the value is
+ * not a heap array. Never dereferences the payload for non-heap words: NIL
+ * (TAG_SPECIAL, the raw address 3) fails IS_HEAP and returns NULL here, so
+ * callers that screen IS_HEAP first are belt-and-braces, not load-bearing. */
+static inline RuntimeArray *runtime_array_from_abi(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return NULL;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(v);
+    if (!a || a->hdr.object_type != HEAP_ARRAY) return NULL;
+    return a;
+}
 
 static inline RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
 {
@@ -2401,6 +2486,123 @@ static int _fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
             return -1;
     }
     return 0;
+}
+
+/* Cluster-cursor stream reader over the boot FAT32 volume (ported from the
+ * hello-in-guest lane, 91b6b9f28dd: the WIP merge clobber dropped these while
+ * the .spl entries still extern them — every call silently landed in a 16-byte
+ * int3 weak stub and the guest died at '[hello] FAIL fat32 open' with an empty
+ * rc). `simpleos_fat32_stream_open` resolves a path once; successive
+ * `simpleos_fat32_stream_read_at` calls copy file ranges into caller-owned
+ * destinations. */
+static struct {
+    int active;
+    uint32_t start_cluster;
+    uint32_t cur_cluster;      /* cluster whose data currently covers `pos` base */
+    uint32_t cluster_bytes;
+    uint64_t file_size;
+    uint64_t pos;              /* absolute byte offset of cur_cluster's first byte */
+    uint8_t *cbuf;             /* one-cluster scratch (nvme-aligned) */
+    uint32_t cbuf_cluster;     /* cluster currently loaded in cbuf, 0 = none */
+} _fat_stream;
+
+int64_t simpleos_fat32_stream_open(const char *path, int64_t path_len)
+{
+    char path_buf[128];
+    uint32_t cluster = 0;
+    uint32_t file_size = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return -1;
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
+        return -1;
+
+    _fat_stream.cluster_bytes = _fat32.sectors_per_cluster * 512;
+    if (!_fat_stream.cbuf) {
+        _fat_stream.cbuf = (uint8_t *)nvme_alloc_aligned(_fat_stream.cluster_bytes, 512);
+        if (!_fat_stream.cbuf)
+            return -1;
+    }
+    _fat_stream.active        = 1;
+    _fat_stream.start_cluster = cluster;
+    _fat_stream.cur_cluster   = cluster;
+    _fat_stream.file_size     = file_size;
+    _fat_stream.pos           = 0;
+    _fat_stream.cbuf_cluster  = 0;
+    return (int64_t)file_size;
+}
+
+/* Advance/reset the cursor so cur_cluster is the cluster containing byte
+ * target_off and pos == that cluster's file base. Returns 0 on success. */
+static int _fat_stream_seek(uint64_t target_off)
+{
+    uint32_t cb = _fat_stream.cluster_bytes;
+    if (cb == 0) return -1;
+    if (target_off < _fat_stream.pos) {
+        _fat_stream.cur_cluster = _fat_stream.start_cluster;
+        _fat_stream.pos = 0;
+    }
+    uint64_t target_base = (target_off / cb) * cb;
+    while (_fat_stream.pos < target_base) {
+        uint32_t next = _fat32_next_cluster(_fat_stream.cur_cluster);
+        if (next < 2 || next >= 0x0FFFFFF8) return -1;
+        _fat_stream.cur_cluster = next;
+        _fat_stream.pos += cb;
+    }
+    return 0;
+}
+
+/* Copy `len` bytes starting at file offset `file_off` into physical/identity
+ * address `dst`. Returns bytes copied, or -1 on error. */
+int64_t simpleos_fat32_stream_read_at(uint64_t file_off, uint64_t dst, uint64_t len)
+{
+    if (!_fat_stream.active || !_fat_stream.cbuf) return -1;
+    uint32_t cb = _fat_stream.cluster_bytes;
+    uint8_t *out = (uint8_t *)(uintptr_t)dst;
+    uint64_t done = 0;
+
+    if (file_off >= _fat_stream.file_size) return 0;
+    if (file_off + len > _fat_stream.file_size)
+        len = _fat_stream.file_size - file_off;
+
+    while (done < len) {
+        uint64_t cur = file_off + done;
+        if (_fat_stream_seek(cur) != 0) return -1;
+        if (_fat_stream.cbuf_cluster != _fat_stream.cur_cluster) {
+            if (_fat32_read_cluster(_fat_stream.cur_cluster, _fat_stream.cbuf) != 0)
+                return -1;
+            _fat_stream.cbuf_cluster = _fat_stream.cur_cluster;
+        }
+        uint64_t in_off = cur - _fat_stream.pos;   /* pos is cluster base */
+        uint64_t avail  = cb - in_off;
+        uint64_t chunk  = (len - done < avail) ? (len - done) : avail;
+        __builtin_memcpy(out + done, _fat_stream.cbuf + in_off, chunk);
+        done += chunk;
+    }
+    return (int64_t)done;
+}
+
+/* Copy a text's bytes + NUL to a physical/identity-mapped address; returns
+ * the RAW i64 byte length. Uses THIS file's RuntimeString layout (same decode
+ * as rt_print_str, which prints loader-passed text correctly). Lane extern:
+ * hello_world_ovmf_entry.spl::_write_text_z builds argv/envp strings in the
+ * ring-3 stack frame through this. */
+int64_t rt_text_copy_to_phys(RuntimeValue str, uint64_t phys)
+{
+    RuntimeString *s = 0;
+    if (IS_HEAP(str)) {
+        RuntimeString *c = (RuntimeString *)DECODE_PTR(str);
+        if (c && c->hdr.type == HEAP_STRING && c->len < 0x100000) s = c;
+    }
+    if (!s && str != 0) {
+        RuntimeString *c = (RuntimeString *)(uintptr_t)str;
+        if (c->hdr.type == HEAP_STRING && c->len < 0x100000) s = c;
+    }
+    if (!s) return -1;
+    uint8_t *dst = (uint8_t *)(uintptr_t)phys;
+    for (uint32_t i = 0; i < s->len; i++) dst[i] = (uint8_t)s->data[i];
+    dst[s->len] = 0;
+    return (int64_t)s->len;
 }
 
 static uint32_t _fat32_find_free_cluster(void) {
@@ -13699,7 +13901,10 @@ TRAP_STUB_RET(rt_thread_join, 1)
 /* Safe no-ops on single-threaded bare metal */
 RuntimeValue rt_thread_yield(void)          { return NIL_VALUE; }  /* yield: no-op */
 RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread ID 0 */
-RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }  /* sleep: return immediately */
+/* rt_thread_sleep intentionally has NO RuntimeValue stub here: the real
+ * freestanding-native body `void rt_thread_sleep(int64_t millis)` lives below
+ * (~line 17420, single i64 param per RuntimeFuncSpec). A RuntimeValue-typed
+ * stub of the same name collides with it at C link/compile time. */
 TRAP_STUB_RET(rt_mutex_new, 0)
 TRAP_STUB_RET(rt_mutex_lock, 1)
 TRAP_STUB_RET(rt_mutex_unlock, 1)
@@ -15184,6 +15389,10 @@ void rt_bare_spawn_leave(void) {
 
 int64_t rt_bare_spawn_depth(void) { return _bare_spawn_depth; }
 
+/* Defined below (after simpleos_bare_exec_reset); declared here because
+ * rt_user_heap_init calls it before that point. */
+static void _bare_exec_reset_files(void);
+
 void rt_user_heap_init(uint64_t base, uint64_t size) {
     _user_heap_base = base;
     _user_heap_cur  = base;
@@ -15844,6 +16053,31 @@ int64_t rt_x86_tss_init(void) {
  * -------------------------------------------------------------------------- */
 int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
+    /* Exit-path diagnostic (2026-09-24): unconditional first-8 trace proving
+     * whether a ring-3 syscall reaches this dispatcher and in what mode. */
+    {
+        static int _disp_trace = 0;
+        if (_disp_trace < 8) {
+            _disp_trace++;
+            serial_puts("[disp] n=");
+            serial_put_dec((int64_t)num);
+            serial_puts(" mode=");
+            serial_put_dec((int64_t)_bare_exec_mode);
+            serial_puts("\r\n");
+        }
+    }
+    /* Bare-exec mode (installed by rt_x86_exec_token_install before a ring-3
+     * handoff): route through the boot-layer handler FIRST. This is what
+     * wires the exit(2)-resumes-the-kernel path on x86_64 — without it the
+     * dispatch went straight to the scheduler shims, which know nothing
+     * about the enter_user_first savepoint, and the ring-3 program fell off
+     * its stack after exit (2026-09-24 hello-lane L7). Numbers the boot
+     * handler does not claim fall through to the shims below. */
+    if (_bare_exec_mode) {
+        int64_t bare_out = 0;
+        if (_bare_exec_handle(num, a0, a1, a2, a3, a4, a5, &bare_out))
+            return bare_out;
+    }
     switch (num) {
         case 0:  return spl_handle_exit(a0, a1, a2, a3, a4, a5);
         case 1:  return spl_handle_yield(a0, a1, a2, a3, a4, a5);

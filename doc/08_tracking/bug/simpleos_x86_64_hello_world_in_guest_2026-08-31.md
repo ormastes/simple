@@ -636,3 +636,252 @@ its `_start` sets up its own `.bss` stack inside a mapped RW page.
 Gate verdict, honestly RED — the lane is landed RED, not weakened to green:
 `FAIL — 1 program(s) staged, 7 rung(s) checked, missing: L6 L7;`
 `interpreter row ADVISORY/RED: no in-guest Simple interpreter exists in this tree`
+
+
+---
+
+## 2026-09-24: B12 RESOLVED — five merge-clobber regressions fixed, L1..L7 path
+
+Base: `codex/spipe-local-knowledge-setup` @ `1d1013e59bd` (aarch64 Linux host,
+20 cores). Seed: `src/compiler_rust/target/release/simple` (2026-09-20 build).
+The lane branch `91b6b9f28dd` was found to be ALREADY merged into HEAD via
+PR #165 (`c64808b567b`) — no merge/cherry-pick was needed; all lane files were
+present at HEAD. What followed was a chain of FIVE committed regressions that
+the WIP commit `ca716186466` ("pr235 extraction") and friends had introduced
+on top of the lane, each masked by the previous one. Every one is a
+"silent degradation" failure: the build "succeeds" and the defect only shows
+as wrong runtime behavior.
+
+### Host environment notes (this aarch64 box)
+- No OVMF installed: fetched `ovmf` 2024.02 via `apt download` + `dpkg -x` to
+  `/tmp/ovmf-fetch/root/usr/share/OVMF/`, passed via `OVMF_CODE` /
+  `OVMF_VARS_SRC` env overrides (the gate supports them).
+- No x86_64 GRUB modules (arm64 host): fetched
+  `grub-efi-amd64-bin_2.12-1ubuntu7.3_amd64.deb` from
+  `archive.ubuntu.com/ubuntu/pool/main/g/grub2-unsigned/` (noble ports has no
+  amd64 index) and wrapped `grub-mkstandalone` via
+  `/tmp/shim-bin/grub-mkstandalone` adding
+  `--directory=/tmp/grub-amd64/root/usr/lib/grub/x86_64-efi` on PATH.
+  Version matched the host grub-common 2.12-1ubuntu7.3 exactly.
+
+### B13 — RESOLVED: `baremetal_stubs.c` failed to compile; the whole C bridge silently became 16-byte weak stubs
+Kernel built "successfully" (native-build treats C failures as non-fatal:
+"511 compiled, 0 cached, 0 failed") but every strong C definition
+(`serial_println`, `rt_x86_tss_init`, NVMe, FAT32, mmio, `rt_string_*`)
+resolved to the seed's synthesized 16-byte int3 weak stubs. Guest halted
+right after `[BOOT64] call _start` — L2 MISS, no fault frame, no diagnostic.
+Four committed sub-defects (all in `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`):
+1. `HeapHeader` was the stale 2-field `{u32 type; u32 size}` while newer
+   byte-packed helper code and `rt_push`/`rt_pop`/`rt_clear`/`rt_sort` used
+   the canonical 4-field layout (`object_type u8, gc_flags u8, reserved u16,
+   size u32` — matches `src/runtime/runtime_value.h` and the Rust runtime's
+   `heap.rs`). Fixed with an anonymous union so legacy whole-word `hdr.type`
+   writes still zero the sub-fields (109 call sites untouched) and
+   `hdr.gc_flags`/`hdr.reserved` address the real fields. Same 8-byte size.
+2. `BYTE_PACKED` and `runtime_array_from_abi` were used but defined nowhere.
+   Added `#define BYTE_PACKED 0x08` (matches `gc_flags::BYTE_PACKED`) and a
+   static inline `runtime_array_from_abi` (IS_HEAP screen first — NIL/address-3
+   never dereferenced).
+3. `_bare_exec_reset_files` called (line ~15229) before its static definition
+   (~15315). Added a forward declaration.
+4. Duplicate `rt_thread_sleep`: a legacy `RuntimeValue rt_thread_sleep(RuntimeValue)`
+   stub (line ~13732) collided with the real `void rt_thread_sleep(int64_t)`
+   (line ~17409, the RuntimeFuncSpec single-i64 contract). Removed the stub.
+
+The gate now FAILS CLOSED on this class: any `ERROR: failed to compile` for a
+lane C file (other than the documented off-lane trio `tls13_aes256_gcm_helper.c`,
+`runtime_service_owners.c`, `up2_dci_uefi_loader.c`) fails the gate.
+
+Effect: kernel 480,848 -> 2,075,552 bytes; **L2 green**.
+
+### B14 — RESOLVED: `ltr $0x30` #GP'd — no TSS slot in the GDT
+Serial: `[tss] rsp0 installed sel=0x30` never printed; first exception frame
+was `rip=0x800b0fc ltrw %ax, errcode=0x30`. Root cause: `gdt64_tss_desc` was
+declared `extern` in the C bridge but defined NOWHERE — it resolved to a weak
+stub in throwaway memory, and crt0's GDT (6 entries, limit 47) didn't even
+cover selector 0x30. Fix in `examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s`
+(mirrors `origin/agent/dom-retention-per-plan`): GDT moved `.rodata` -> `.data`
+(CR0.WP makes .rodata unwritable — descriptor patching would #PF), added the
+16-byte TSS descriptor slots at 0x30/0x38 inside gdt64 (so the GDTR limit
+covers them), exported `gdt64_tss_desc`.
+
+Effect: `[tss] rsp0 installed sel=0x30`; NVMe + FAT32 BPB parse; **L3 green**.
+
+### B15 — RESOLVED: fat32 stream functions + `rt_text_copy_to_phys` clobbered
+`[hello] FAIL fat32 open /FSEXEC.ELF rc=` with an EMPTY rc — the externs
+`simpleos_fat32_stream_open`, `simpleos_fat32_stream_read_at`, and
+`rt_text_copy_to_phys` (all used by this entry) were dropped from
+baremetal_stubs.c by the WIP merge; calls landed in weak stubs. (i64 text
+interpolation also prints empty — `{fsize}` on a positive i64 yields nothing
+while u64 interpolations print — a separate seed quirk visible all over this
+lane's log; noted, not lane-blocking.) Ported the proven implementations back
+from `91b6b9f28dd` (`_fat_stream` cursor struct, open/seek/read_at,
+rt_text_copy_to_phys), adapted to HEAD's identical local helpers.
+
+Effect: `[hello] /FSEXEC.ELF read size=...`; **L4 green**.
+
+### B16 — RESOLVED: PMM given a stale hardcoded `kernel_end` — pool aliased 346 MiB of kernel .bss/.heap/.stack
+`[spawn] FAIL stack alloc p=0` (run 4) after the image mapped fine: the entry
+called `pmm_init_identity_range(0x80000000, 0x100000, 0x1400000)` — kernel
+end hardcoded at 20 MiB, but the real `_kernel_end` is **0x15DDF000 (~366
+MiB)** (`_heap` malloc reservation alone is 192 MiB, plus the 32 MiB
+`simpleos_fat32_path_read_buf`, 16 MiB `.heap`, 8 MiB `.stack`). The PMM
+handed out frames that alias live kernel memory; zeroing an aliased frame
+wiped `g_pmm` bookkeeping (`free_pages` -> 0) and later the user page tables
+themselves. Fix: crt0.s now exports real `_get_kernel_start`/`_get_kernel_end`
+getter functions (`lea _kernel_start/end(%rip), %rax; ret` — the `extern fn
+_get_kernel_end()` pattern used by fs_exec_entry/filesystem_servers_entry has
+NO implementation anywhere in this tree; it would resolve to a weak stub), and
+the entry passes them to `pmm_init_identity_range`. A 4-allocation PMM probe in
+the entry confirmed the allocator itself is healthy (consecutive aligned
+frames, correct `last_alloc_index`).
+
+Effect: 2048 stack pages map; `[hello] entering ring 3`; **L5 green**.
+
+### B12 — RESOLVED: `VmFlags` loses its low two bits when passed across a module boundary
+The `iretq` itself was innocent — the CPL3 transition SUCCEEDED (fault frames
+show `cs=0x2b`). The first instruction fetch at 0x400000 immediately #PF'd
+with errcode 0x14 (not-present, user, instruction-fetch). Lane diagnostics
+(`_dump_pt_chain` + `_dump_table_nonzero` in the entry, printing under the
+user CR3 right before the handoff) showed: every INTERMEDIATE entry exact
+(flags 0x7, consecutive frames), both LEAF PTEs with PTE_PRESENT stripped —
+user_rx (P|U = 0x05) written as 0x04, user_rw (P|W|U|NX = 0x27) written as
+0x24. That is exactly the low 2 bits masked off (a nil-tag `& ~3` on the
+boxed word) while the struct travels entry -> os.kernel.memory.vmm_address_space
+-> os.kernel.memory.vmm._flags_to_pte_bits. The VmFlags declaration itself
+warns "uses u32 to avoid cross-module bool struct codegen bug" — the
+avoidance fails on this seed: the bug is in the by-value struct crossing,
+not the field width.
+
+Fix (no compiler-lane surgery, lane-local and API-additive): `vmm_address_space.spl`
+gains `vmm_map_user_page_rx` / `vmm_map_user_page_rw` wrappers plus a local
+`_user_leaf_pte_bits(writable)` derived from PTE_* constants in the same
+module; no VmFlags value crosses any boundary. The entry (and its heap/stack
+mappers) calls the wrappers. `vmm_map_user_low_page` remains for other lanes
+(same latent defect — the ssh/fs_exec lanes that still call it will hit this).
+
+Effect: leaf PTEs land with P|U (RX) and P|W|U|NX (RW); the payload's CPL3
+fetch, stack access, and COM1 output all work.
+
+### Rung status (real OVMF pflash; never `-kernel`, never isa-debug-exit)
+| rung | | status |
+|---|---|---|
+| L1 | `[grub-uefi] multiboot loading` | **OK** |
+| L2 | `SimpleOS x86_64 hello-world in-guest` | **OK** |
+| L3 | `[hello] nvme online` | **OK** |
+| L4 | `[hello] /FSEXEC.ELF read size=` | **OK** |
+| L5 | `[hello] entering ring 3` | **OK** |
+| L6 | `HELLO_NATIVE_SIMPLEOS_X86_64_OK` | **OK** |
+| L7 | `[hello] native program exited rc=0` | **OK** |
+
+**GATE VERDICT: `PASS — 1 program(s) checked, 7 rung(s) green, hello world
+printed its own output in-guest under OVMF`** (2026-09-24, seed
+2026-09-20). Serial evidence of the full ring-3 lifecycle:
+
+```
+[msr] efer=0xd01 star=0x1b000800000000 lstar=0x8000630 sfmask=0x200
+[spawn] token armed
+[spawn] entering user cs=0x2b iopl=3 rip=0x4194304 rsp=0x549757910912
+ABCHELLO_NATIVE_SIMPLEOS_X86_64_OK hello world from Simple
+[disp] n=0 mode=1                       <- payload syscall 0 in bare-exec mode
+[sc] n=0 a0=0x0 a1=0x37 a2=0x3f8
+[syscall] exit status=0
+[spawn] ring3 program exited rc= (kernel resumed)   <- longjmp resume worked
+[hello] native program exited rc=0                  <- L7, printed from C
+HELLO_IN_GUEST_NATIVE_LANE_OK
+```
+
+### Also noted this session (not fixed, off-lane)
+- i64 text interpolation prints EMPTY (`{fsize}` with fsize=13896 prints
+  nothing; u64 interpolations print fine). Cosmetic here but will bite any
+  Simple program formatting i64s under this seed. It also cost L7 one extra
+  cycle: the resume worked and the `rc=` line PRINTED, but with no digits,
+  so the gate's literal `rc=0` did not match until the line was printed from
+  C (`rt_x86_print_exit_rc_line`, serial_put_dec). Root-cause the seed's
+  i64→text path separately.
+- `syscall_entry.s` ring-3/ring-0 return classification compares the caller
+  RIP against `[0x100000, _kernel_end)`; a user image linked at 0x400000 is
+  INSIDE that window, so payload syscalls take the ring-0 return path (jmp
+  back to CPL0 user code). Functionally survivable for this payload (its exit
+  path longjmps), but it is a privilege-escalation-shaped bug for real
+  programs. Worth its own bug record.
+- `vmm_map_page_in` (vmm_address_space.spl) constructs
+  `VmFlags(present:..., writable:..., ...)` with named fields the struct
+  doesn't declare — suspicious on the same cross-module struct path; not on
+  this lane's call path.
+- `destroy_user_address_space` (`_free_user_half_subtree`) frees every
+  PD/PT under PML4[0..255], including the SHARED kernel identity PDs that
+  cloned PDPT entries [1..3] still reference (only PDPT[0] is privatized by
+  the map path). Survived here only because nothing reallocates before the
+  lane ends. The exec-again path (multi-command) WILL corrupt the kernel's
+  page tables. Needs a shared-structural-entry refcount or clone-on-destroy.
+- Diagnostics still in the tree (remove before calling the lane clean):
+  `[disp]` first-8 trace at the top of `rt_syscall_dispatch`, `Ss` outb
+  markers in `syscall_entry.s`, `[msr]` dump + `pmm-probe`/`ptdump`/`tbdump`
+  in the hello entry. All are inert on the success path but noisy.
+- `rt_extras.c` still contains ~1,238 other strong NOP stubs; any future C
+  definition of one of those names will hit the same B18 shadowing until the
+  `-z muldefs` first-definition-wins behavior is fixed (link object order or
+  drop muldefs for the freestanding link).
+
+---
+
+## 2026-09-24 (later session): L7 green — B17/B18, the exit-resume chain
+
+Base: `codex/spipe-local-knowledge-setup` @ `1d1013e59bd`. Gate verdict:
+**PASS, L1..L7 all green** (evidence above). Three more committed defects
+sat between L6 and L7:
+
+### B17 — RESOLVED: the ring-3 exit-resume chain was never wired up on x86_64
+With B12 fixed, the payload ran and printed, then the log ended in a
+recoverable-fault march. The exit path had THREE missing pieces, none of
+which existed anywhere in the tree (the lane's old worktree had them; the
+commits never did):
+1. **No savepoint producer.** `enter_user_first.s` had the CONSUMER
+   (`rt_x86_ring3_resume` restoring `_ring3_resume_buf`/`_ring3_resume_valid`)
+   but nothing ever FILLED those slots — git history confirms no revision of
+   the file establishes them. Added: save rbx/rbp/r12-r15/rsp/current-cr3 at
+   function entry (before any push, so [rsp] is the return address) and set
+   `_ring3_resume_valid=1`.
+2. **No exec token.** `_bare_exec_handle` case 0 (the exit-with-resume path)
+   requires `_x86_exec_token_current_valid()`; the installer
+   `rt_x86_exec_token_install` was only called from the scheduler-owned
+   spawn path (`user_entry.spl`), never from this entry. The hello entry now
+   calls `rt_x86_exec_token_install(1, 1, space.phys_root)` before the
+   handoff (task/generation need only be nonzero on this single-process lane).
+3. **Dispatch never routed to the boot layer.** `rt_syscall_dispatch` went
+   straight to the scheduler shims; `_bare_exec_handle` (with the
+   `rt_x86_ring3_resume` longjmp) was dead code, and `_bare_exec_mode` was
+   written but never read. Added the `if (_bare_exec_mode)` hook at the top
+   of `rt_syscall_dispatch` (unhandled numbers fall through to the shims).
+
+### B18 — RESOLVED: `-z muldefs` + strong NOP stubs shadowed the MSR helpers (root cause of "syscall #UD")
+Even with B17 wired, the payload's `syscall` #UD'd (mis-parsed fault frame
+showed real rip=0x400453, real cs=0x2b, cr2=0; trampoline `outb` markers
+'S'/'s' never fired). Chain:
+- The freestanding link passes **`-z muldefs`** (`linker.rs:2871`), so with
+  duplicate symbol definitions lld keeps the FIRST object seen — and
+  `rt_extras.o` (1,242 STRONG `NOP2(name)` no-op stubs, no `weak`
+  attribute) and `auto_stubs.o` (weak 8-arg NIL stubs) link BEFORE
+  `baremetal_stubs.o`.
+- `rt_read_msr`/`rt_write_msr` therefore resolved to no-op NIL stubs. The
+  restored syscall-MSR installer read EFER=nil(3) and its "writes" went
+  nowhere real; EFER.SCE stayed 0, LSTAR stayed 0.
+- Fix: removed the 4 colliding stub lines (`rt_load_barrier`,
+  `rt_store_barrier`, `rt_read_msr`, `rt_write_msr`) from `rt_extras.c` and
+  the same 3 from `auto_stubs.c`; the strong C definitions (real
+  rdmsr/wrmsr, lfence/sfence) now link. Verified in the kernel: second
+  `rdmsr` site appears, and the C ground-truth dump prints
+  `efer=0xd01 star=0x1b000800000000 lstar=0x8000630 sfmask=0x200`.
+- Related binding trap (cost one cycle): C helpers placed BEFORE the
+  `#define serial_puts _serial_puts_impl` line (linker.rs order) that calls
+  bare `serial_puts` bind to the SIMPLE tagged-text `serial_puts`
+  (`src__os__kernel__interrupts__idt___serial_puts`), which cannot print a
+  `char *` — labels printed empty while `serial_put_hex`/`serial_put_dec`
+  worked. Call `_serial_puts_impl` directly from that region of the file.
+
+### B19 — worked around: i64 interpolation renders empty (the L7 literal)
+The resume worked and `[hello] native program exited rc=` PRINTED — but the
+i64 digits were empty (B12-note quirk), so the gate's literal `rc=0` did not
+match. Worked around with `rt_x86_print_exit_rc_line(int64_t)` (C,
+`serial_put_dec`). The seed's i64→text path needs its own bug record.

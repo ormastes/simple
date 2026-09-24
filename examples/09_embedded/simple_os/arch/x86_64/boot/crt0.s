@@ -589,8 +589,35 @@ rt_harden_text_write_trap_probe:
     popq %rbp
     ret
 
+/* --------------------------------------------------------------------------
+ * _get_kernel_start / _get_kernel_end — Simple-visible getters returning the
+ * linker's _kernel_start/_kernel_end addresses as u64. Freestanding .spl
+ * entries declare `extern fn _get_kernel_end() -> u64` and call it; without
+ * a real definition the reference resolves to a synthesized 16-byte weak stub
+ * and returns garbage, and a garbage kernel_end handed to the PMM makes it
+ * hand out frames that alias kernel .bss/.heap/.stack (2026-09-24 hello-lane
+ * incident: hardcoded 0x1400000 vs actual _kernel_end 0x15DDF000). A plain lea
+ * of the linker symbol is the whole implementation.
+ * -------------------------------------------------------------------------- */
+    .section .text
+    .globl _get_kernel_start
+    .type _get_kernel_start, @function
+    .align 16
+_get_kernel_start:
+    leaq    _kernel_start(%rip), %rax
+    ret
+    .size _get_kernel_start, . - _get_kernel_start
+
+    .globl _get_kernel_end
+    .type _get_kernel_end, @function
+    .align 16
+_get_kernel_end:
+    leaq    _kernel_end(%rip), %rax
+    ret
+    .size _get_kernel_end, . - _get_kernel_end
+
 /* ==================================================================
- * 64-bit GDT (5 entries for SYSCALL/SYSRET support)
+ * 64-bit GDT (6 segment entries + a 16-byte TSS descriptor)
  *
  * Selector layout required by MSR_STAR (Intel SDM Vol 3A §5.8.8):
  *   0x00: null
@@ -599,11 +626,17 @@ rt_harden_text_write_trap_probe:
  *   0x18: user CS 32-bit compat — SYSRET compat loads CS=0x1B (0x18|3)
  *   0x20: user SS/DS            — SYSRET loads SS=0x23 (0x20|3)
  *   0x28: user CS 64-bit        — SYSRET 64-bit loads CS=0x2B (0x28|3)
+ *   0x30: TSS (16-byte system descriptor) — filled + ltr'd by rt_x86_tss_init
  *
  * MSR_STAR value: (USER_CS_32 | 3) << 48 | KERNEL_CS << 32
  *              = 0x001B_0008_0000_0000
+ *
+ * The table lives in .data (writable): rt_x86_tss_init patches the TSS base
+ * and limit into gdt64_tss_desc at runtime, which would #PF on a .rodata page
+ * (CR0.WP is set above), and ltr $0x30 would #GP(0x30) if slot 0x30 sat
+ * outside the GDTR limit.
  * ================================================================== */
-.section .rodata
+.section .data
 .align 16
 gdt64:
     .quad 0                    /* 0x00: null descriptor */
@@ -647,6 +680,18 @@ gdt64:
     .byte 0xFA                 /* access: present, DPL=3, code, exec/read */
     .byte 0xAF                 /* flags: G=1, L=1, D=0 (64-bit) */
     .byte 0x00                 /* base high */
+
+    /* 0x30: 64-bit TSS descriptor — 16 bytes (2 slots). Reserved here (zero,
+     * so present=0) and filled at runtime by rt_x86_tss_init (baremetal_stubs.c),
+     * which writes base/limit/type=0x89 (present, available 64-bit TSS) then
+     * `ltr $0x30`. Kept INSIDE gdt64 and within the GDTR limit so the selector
+     * actually resolves — a free-floating .bss descriptor is never seen by ltr
+     * (that was the B13-era #GP(0x30): gdt64_tss_desc resolved to a weak stub
+     * and slot 0x30 was beyond the limit). */
+    .global gdt64_tss_desc
+gdt64_tss_desc:
+    .quad 0                    /* 0x30: TSS descriptor low  8 bytes */
+    .quad 0                    /* 0x38: TSS descriptor high 8 bytes (base 63:32) */
 
 gdt64_end:
 

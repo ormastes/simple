@@ -2983,7 +2983,10 @@ __attribute__((weak)) RuntimeValue rt_is_contract_violation(RuntimeValue a, Runt
 __attribute__((weak)) RuntimeValue rt_is_debug_mode_enabled(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_is_macro_trace_enabled(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_list_dir_recursive(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
-__attribute__((weak)) RuntimeValue rt_load_barrier(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
+/* rt_load_barrier: weak stub REMOVED 2026-09-24 (B18) — the freestanding link uses -z
+ * muldefs, so the FIRST definition wins and this stub shadowed the real
+ * strong definition in baremetal_stubs.c (returned NIL, no rdmsr/wrmsr,
+ * syscall MSRs never programmed). Strong def now links unopposed. */
 __attribute__((weak)) RuntimeValue rt_lyon_fill_tessellate(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_lyon_fill_tessellate_with_rule(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_lyon_fill_tessellation_free(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
@@ -3221,7 +3224,10 @@ __attribute__((weak)) RuntimeValue rt_rapier2d_world_set_gravity(RuntimeValue a,
 __attribute__((weak)) RuntimeValue rt_rapier2d_world_step(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_rdrand(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_read_cr0(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
-__attribute__((weak)) RuntimeValue rt_read_msr(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
+/* rt_read_msr: weak stub REMOVED 2026-09-24 (B18) — the freestanding link uses -z
+ * muldefs, so the FIRST definition wins and this stub shadowed the real
+ * strong definition in baremetal_stubs.c (returned NIL, no rdmsr/wrmsr,
+ * syscall MSRs never programmed). Strong def now links unopposed. */
 __attribute__((weak)) RuntimeValue rt_read_stdin_line(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_regex_captures(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_regex_captures_len(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
@@ -3796,7 +3802,10 @@ __attribute__((weak)) RuntimeValue rt_weak_is_valid(RuntimeValue a, RuntimeValue
 __attribute__((weak)) RuntimeValue rt_weak_new(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_weak_upgrade(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_write_cr0(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
-__attribute__((weak)) RuntimeValue rt_write_msr(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
+/* rt_write_msr: weak stub REMOVED 2026-09-24 (B18) — the freestanding link uses -z
+ * muldefs, so the FIRST definition wins and this stub shadowed the real
+ * strong definition in baremetal_stubs.c (returned NIL, no rdmsr/wrmsr,
+ * syscall MSRs never programmed). Strong def now links unopposed. */
 __attribute__((weak)) RuntimeValue rt_ws_close(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_ws_connect(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }
 __attribute__((weak)) RuntimeValue rt_ws_receive(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f, RuntimeValue g, RuntimeValue h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return NIL_VALUE; }

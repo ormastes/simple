@@ -3576,7 +3576,10 @@ NOP2(rt_io_tcp_write_text)
 NOP2(rt_io_udp_connect)
 NOP2(rt_io_udp_local_addr)
 NOP2(rt_io_udp_set_read_timeout)
-NOP2(rt_load_barrier)
+/* rt_load_barrier: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_lyon_fill_tessellate)
 NOP2(rt_lyon_fill_tessellate_with_rule)
 NOP2(rt_lyon_fill_tessellation_free)
@@ -3723,7 +3726,10 @@ NOP2(rt_rapier2d_world_cast_ray)
 NOP2(rt_rapier2d_world_get_contacts)
 NOP2(rt_rapier2d_world_intersection_test)
 NOP2(rt_read_cr0)
-NOP2(rt_read_msr)
+/* rt_read_msr: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_read_stdin_line)
 NOP2(rt_regex_captures_len)
 NOP2(rt_regex_destroy)
@@ -3841,7 +3847,10 @@ NOP2(rt_ssh_get_methods)
 NOP2(rt_ssh_is_authenticated)
 NOP2(rt_ssh_set_timeout)
 NOP2(rt_stdin_read_all)
-NOP2(rt_store_barrier)
+/* rt_store_barrier: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_tar_extract_file)
 NOP2(rt_tcp_connect_timeout)
 NOP2(rt_term_enable_ansi)
@@ -4013,7 +4022,10 @@ NOP2(rt_vulkan_submit_and_wait)
 NOP2(rt_vulkan_wait_fence)
 NOP2(rt_vulkan_wait_idle)
 NOP2(rt_write_cr0)
-NOP2(rt_write_msr)
+/* rt_write_msr: strong NOP-stub REMOVED 2026-09-24 (B18) — the freestanding
+ * link uses -z muldefs (first definition wins) and this object links before
+ * baremetal_stubs.c, so the no-op shadowed the real strong definition (the
+ * syscall MSR installer therefore read NIL and never programmed LSTAR). */
 NOP2(rt_ws_receive)
 NOP2(rt_zip_extract_file)
 

@@ -23,11 +23,11 @@
 
 use os.kernel.memory.vmm_address_space.{
     create_user_address_space, destroy_user_address_space,
-    vmm_map_user_low_page,
+    vmm_map_user_page_rx, vmm_map_user_page_rw,
     vmm_clone_kernel_low_private, vmm_zero_phys_range
 }
 use os.kernel.memory.pmm.{pmm_free_page_raw}
-use os.kernel.types.memory_types.{VmFlags, VirtAddr, PhysAddr}
+use os.kernel.types.memory_types.{VirtAddr, PhysAddr}
 use os.kernel.types.task_types.{TaskContext, AddressSpace}
 use os.kernel.arch_adapt.x86_64_user_entry.{x86_64_enter_user_task}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_read64, mmio_write8}
@@ -65,6 +65,30 @@ extern fn rt_user_heap_init_returning(base: u64, size: u64)
 # rax is clobbered by the intervening serial_println calls, so read it explicitly.
 @unsafe(reason: "reads process-global ring-3 handoff state", capabilities: [ffi, raw_ptr])
 extern fn rt_x86_ring3_exit_rc() -> i64
+# Bare-exec token: arms the syscall-0 exit path to longjmp back through the
+# enter_user_first savepoint (rt_x86_ring3_resume) instead of
+# outb(0xF4)/cli;hlt. task/generation only need to be nonzero on this
+# single-process lane; expected_cr3 is the user PML4 (matched against cr3
+# at exit time).
+@unsafe(reason: "arms the ring-3 exit resume path", capabilities: [ffi, raw_ptr])
+extern fn rt_x86_exec_token_install(task_id: u64, generation: u64, expected_cr3: u64) -> i64
+# Runtime MSR dump (baremetal_stubs.c) — pure-C ground truth of the syscall
+# MSR state immediately before the ring-3 handoff (the Simple-side
+# rt_read_msr readback returned nil — see B12/L7 record).
+@unsafe(reason: "reads model-specific registers for diagnosis", capabilities: [ffi])
+extern fn rt_x86_dump_syscall_msrs()
+# L7 rung-line printer (C): i64 interpolation is empty on this seed, so the
+# "rc=0" line the gate greps for is emitted from C (serial_put_dec).
+@unsafe(reason: "prints the exit-status rung line from C", capabilities: [ffi])
+extern fn rt_x86_print_exit_rc_line(rc: i64)
+# Linker-symbol getters implemented in boot/crt0.s (lea _kernel_start/end).
+# Hardcoding the kernel end here is NOT safe: this kernel's .bss+.heap+.stack
+# span ~366 MiB (192 MiB malloc heap, 32 MiB FAT path buffer, 16 MiB .heap,
+# 8 MiB .stack) and grows with the C bridge; a stale constant makes the PMM
+# hand out frames that alias live kernel memory (2026-09-24: pool died at the
+# first stack page because zeroing an aliased frame wiped g_pmm bookkeeping).
+extern fn _get_kernel_start() -> u64
+extern fn _get_kernel_end() -> u64
 
 # Little-endian scalar reads straight off the identity-mapped RAW file buffer.
 # The [u8] channel (byte_utils/read_*_le over image.file_bytes) reads boxed
@@ -86,6 +110,47 @@ fn _wr64(addr: u64, value: u64):
     while i < 8:
         mmio_write8(addr + i, ((value >> (i * 8)) & 0xFF) as u8)
         i = i + 1
+
+# B12 diagnostic: walk the user page-table chain for `va` under `root_phys`
+# and print every entry (PTE_ADDR_MASK = 0x000FFFFFFFFFF000; P=1, US=4,
+# PS=0x80). Page-table pages are low physical addresses, identity-mapped in
+# the kernel, so plain mmio reads reach them. Right before the iretq this
+# shows exactly what the CPL3 fetch and the first stack accesses will see.
+@unsafe(reason: "diagnostic walk over raw physical page tables", capabilities: [ffi, raw_ptr])
+fn _dump_pt_chain(root_phys: u64, va: u64, label: text):
+    val ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+    val pml4e = _rd64(root_phys, ((va >> 39) & 0x1FF) * 8)
+    serial_println("[ptdump] {label} va=0x{va} pml4e=0x{pml4e}")
+    if (pml4e & 1) == 0:
+        return
+    val pdpte = _rd64(pml4e & ADDR_MASK, ((va >> 30) & 0x1FF) * 8)
+    serial_println("[ptdump] {label} pdpte=0x{pdpte}")
+    if (pdpte & 1) == 0:
+        return
+    if (pdpte & 0x80) != 0:
+        return
+    val pde = _rd64(pdpte & ADDR_MASK, ((va >> 21) & 0x1FF) * 8)
+    serial_println("[ptdump] {label} pde=0x{pde}")
+    if (pde & 1) == 0:
+        return
+    if (pde & 0x80) != 0:
+        return
+    val pte = _rd64(pde & ADDR_MASK, ((va >> 12) & 0x1FF) * 8)
+    serial_println("[ptdump] {label} pte=0x{pte}")
+
+# B12 diagnostic: dump every NON-ZERO entry of a 512-entry table. A table that
+# carries entries no mapper wrote means frames are aliased/duplicated or stale
+# (the 2026-09-24 suspicion: pmm double-allocation). A clean table with a bad
+# leaf means the flags computation is at fault instead.
+@unsafe(reason: "diagnostic walk over raw physical page tables", capabilities: [ffi, raw_ptr])
+fn _dump_table_nonzero(table_phys: u64, label: text):
+    var i: u64 = 0
+    while i < 512:
+        val e = _rd64(table_phys, i * 8)
+        if (e & 1) != 0:
+            serial_println("[tbdump] {label}[{i}]=0x{e}")
+        i = i + 1
+    serial_println("[tbdump] {label} done")
 
 fn _text_z_size(value: text) -> u64:
     # NOTE: the src/os original writes this as
@@ -410,8 +475,13 @@ fn _map_pt_loads(space: AddressSpace, blob: u64, hdr_len: u64, file_len: u64, us
                     writable = true
             j = j + 1
 
-        val flags = if writable: VmFlags.user_rw() else: VmFlags.user_rx()
-        if not vmm_map_user_low_page(space, VirtAddr(addr: va), PhysAddr(addr: phys), flags):
+        # B12 fix: use the rx/rw wrappers — no VmFlags crosses the module
+        # boundary, so the leaf keeps PTE_PRESENT (see vmm_address_space.spl).
+        val mapped = if writable:
+            vmm_map_user_page_rw(space, VirtAddr(addr: va), PhysAddr(addr: phys))
+        else:
+            vmm_map_user_page_rx(space, VirtAddr(addr: va), PhysAddr(addr: phys))
+        if not mapped:
             serial_println("[spawn] FAIL map page va=0x{va}")
             # The VMM destructor can only discover successfully installed
             # leaves. This frame is still solely owned by the local mapper.
@@ -517,7 +587,7 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
             destroy_user_address_space(space)
             return -3
         vmm_zero_phys_range(sph, PAGE.to_u64())
-        if not vmm_map_user_low_page(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph), VmFlags.user_rw()):
+        if not vmm_map_user_page_rw(space, VirtAddr(addr: sva.to_u64()), PhysAddr(addr: sph)):
             serial_println("[spawn] FAIL stack map p={p}")
             # The failed leaf never entered the page-table tree, so return it
             # directly before recursively releasing the successfully mapped
@@ -588,7 +658,7 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
                 destroy_user_address_space(space)
                 return -5
             vmm_zero_phys_range(hph, HEAP_PAGE_SZ)
-            if not vmm_map_user_low_page(space, VirtAddr(addr: HEAP_VA + (hp * HEAP_PAGE_SZ)), PhysAddr(addr: hph), VmFlags.user_rw()):
+            if not vmm_map_user_page_rw(space, VirtAddr(addr: HEAP_VA + (hp * HEAP_PAGE_SZ)), PhysAddr(addr: hph)):
                 serial_println("[spawn] FAIL heap map page={hp}")
                 pmm_free_page_raw(hph)
                 destroy_user_address_space(space)
@@ -596,6 +666,27 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
             hp = hp + 1
         rt_user_heap_init_returning(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)
         serial_println("[spawn] user heap mapped base=0x{HEAP_VA} pages={HEAP_PAGES}")
+
+    # B12 diagnostics: dump the exact entries the CPL3 instruction fetch
+    # (image VA) and the first stack reads (user rsp) will translate through,
+    # under the user CR3 that rt_x86_enter_user_first is about to install.
+    _dump_pt_chain(space.phys_root, entry, "img")
+    _dump_pt_chain(space.phys_root, user_rsp_u, "stk")
+    # Full-table dumps: if these contain entries no mapper wrote, pmm frames
+    # are aliased or the tables are stale.
+    _dump_table_nonzero(space.phys_root, "pml4")
+    val img_pdpt_guess = _rd64(space.phys_root, ((entry >> 39) & 0x1FF) * 8) & 0x000FFFFFFFFFF000
+    _dump_table_nonzero(img_pdpt_guess, "imgpdpt")
+
+    # Arm the exit-resume path: with the token installed and the enter_user
+    # savepoint live, the payload's exit(2) syscall longjmps back to this
+    # frame instead of wedging on isa-debug-exit (absent under OVMF).
+    rt_x86_dump_syscall_msrs()
+    if rt_x86_exec_token_install(1, 1, space.phys_root) != 1:
+        serial_println("[spawn] FAIL exec token install")
+        destroy_user_address_space(space)
+        return -7
+    serial_println("[spawn] token armed")
 
     val ctx = TaskContext(
         rax: 0, rbx: 0, rcx: 0, rdx: 0,
@@ -664,17 +755,33 @@ fn spl_start():
         return
     serial_println("[hello] /FSEXEC.ELF read size={fsize} buf=0x{buf}")
 
-    if not pmm_init_identity_range(0x80000000, 0x100000, 0x14000000):
+    if not pmm_init_identity_range(0x80000000, _get_kernel_start(), _get_kernel_end()):
         serial_println("[hello] FAIL pmm_init")
         return
     vmm_init(g_pmm, 0)
-    serial_println("[hello] pmm+vmm online")
+    serial_println("[hello] pmm+vmm online total_pages={g_pmm.total_pages} free_pages={g_pmm.free_pages}")
+    # PMM sanity probe: consecutive allocations must return DISTINCT,
+    # monotonically-ordered frames. Repeats or backtracking mean the next-fit
+    # bookkeeping is broken, which aliases page-table frames and corrupts the
+    # user address space (B12 investigation, 2026-09-24).
+    var probe_i: u64 = 0
+    while probe_i < 4:
+        val probe_pa = pmm_alloc_page_raw()
+        serial_println("[pmm-probe] {probe_i} -> 0x{probe_pa}")
+        probe_i = probe_i + 1
+    serial_println("[pmm-probe] last_alloc_index={g_pmm.last_alloc_index} free={g_pmm.free_pages}")
 
     serial_println("[hello] entering ring 3 ...")
     val rc = _x86_64_fs_exec_enter_ring3(
         "/FSEXEC.ELF", buf, fsize.to_u64(), fsize.to_u64(), false, false, [], [])
-    serial_println("[hello] native program exited rc={rc}")
+    # i64 text interpolation renders EMPTY on this seed (the "{rc}" below
+    # prints no digits), so the L7 rung line — which the gate greps
+    # literally as "rc=0" — comes from the C side where serial_put_dec
+    # formats int64_t correctly. The Simple line stays as a comment-bearing
+    # duplicate of the kernel-resume fact.
+    serial_println("[hello] native program exited (resume ok)")
+    rt_x86_print_exit_rc_line(rc)
     if rc == 0:
         serial_println("HELLO_IN_GUEST_NATIVE_LANE_OK")
     else:
-        serial_println("[hello] TEST FAILED rc={rc}")
+        serial_println("[hello] TEST FAILED")
