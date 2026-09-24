@@ -778,6 +778,74 @@ int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
     return (int64_t)(uintptr_t)result;
 #endif
 }
+
+/* The rest of the SMF loader's descriptor pair (smf_mmap_native.spl opens,
+   maps, closes). Same runtime.c-only situation as rt_mmap_raw: the only C
+   definitions live in platform/{unix_common,platform_win}.h. Measured
+   2026-09-25: both were stubbed in the Windows stage-2 simple_cli link.
+   `path` arrives as a native text value or a raw C string, hence
+   rt_interp_cstr. Flags use the Linux numbering the loader and the Rust
+   interpreter twin (interpreter_extern/file_io.rs rt_open_fd) share: access
+   in bits 0-1, O_CREAT 0x40, O_TRUNC 0x200, O_APPEND 0x400. POSIX passes them
+   to open(2) unchanged; Windows translates them onto _wopen and returns a CRT
+   descriptor, which is what spl_windows_mmap_raw maps. Failure is -1 with
+   errno set by the CRT. */
+int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    const char* p = rt_interp_cstr((int64_t)(uintptr_t)path);
+    if (!p) return -1;
+#if defined(_WIN32)
+    (void)mode; /* Rust's OpenOptions ignores the POSIX mode on Windows too. */
+    int access = (int)(flags & 0x3);
+    int oflag = _O_BINARY | _O_NOINHERIT |
+                (access == 0 ? _O_RDONLY : access == 1 ? _O_WRONLY : _O_RDWR);
+    if (flags & 0x40) oflag |= _O_CREAT;
+    if (flags & 0x200) oflag |= _O_TRUNC;
+    if (flags & 0x400) oflag |= _O_APPEND;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, NULL, 0);
+    if (wide_len <= 0) { errno = EINVAL; return -1; }
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) { errno = ENOMEM; return -1; }
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, wide, wide_len);
+    int fd = _wopen(wide, oflag, _S_IREAD | _S_IWRITE);
+    free(wide);
+    return (int64_t)fd;
+#else
+    return (int64_t)open(p, (int)flags, (unsigned int)mode);
+#endif
+}
+
+int64_t rt_close_fd(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+#if defined(_WIN32)
+    return (int64_t)_close((int)fd);
+#else
+    return (int64_t)close((int)fd);
+#endif
+}
+
+/* Host target code, same table as the Rust runtime
+   (value/sffi/env_process.rs rt_get_host_target_code): x86_64 0, aarch64 1,
+   riscv64 2, anything else -1. Read by backend_selector.spl target_code(). */
+int64_t rt_get_host_target_code(void) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+    return 0;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return 1;
+#elif defined(__riscv) && __riscv_xlen == 64
+    return 2;
+#else
+    return -1;
+#endif
+}
+
+/* Current async task id. The Rust runtime (lib.rs rt_current_task_id)
+   answers the executor, fiber, then async-runtime task, and 0 when none is
+   active. The core-C lane has no executor, fibers or async runtime, so no
+   task is ever active: 0, and callers (mcdc probe_registry.spl) fall back to
+   the thread id exactly as they do under Rust outside a task. */
+int64_t rt_current_task_id(void) {
+    return 0;
+}
 #endif
 
 #undef SPL_HOSTED_UNAVAILABLE_WEAK
