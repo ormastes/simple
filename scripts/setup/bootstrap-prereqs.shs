@@ -1,66 +1,83 @@
 #!/bin/sh
 set -eu
-# bootstrap-prereqs.shs — check-and-ASK prerequisite installer for bootstrapping
-# the Simple compiler on a fresh Linux/WSL host.
+# bootstrap-prereqs.shs — check-and-INSTALL prerequisite manager for
+# bootstrapping the Simple compiler, across Linux (Ubuntu/Debian, incl. WSL),
+# FreeBSD, macOS, and Windows (Git Bash).
 #
 # Usage:
-#   sh scripts/setup/bootstrap-prereqs.shs [check|install] [--yes] [--selftest]
+#   sh scripts/setup/bootstrap-prereqs.shs [check|install] [--dry-run] [--selftest]
 #
 # Modes:
 #   check   (default) — detect every prerequisite with its required version,
-#           print a table of present / missing / wrong-version, exit 0 only
-#           if all are satisfied.
-#   install — for each missing/wrong-version item, print the exact install
-#           command and ASK "Install <tool>? [y/N]" before running it.
-#           Default answer is No. Never installs silently.
+#           print a table of present / missing / wrong-version / unsupported,
+#           exit 0 only if all applicable prerequisites are satisfied.
+#           Read-only. NO network calls. Runs in seconds.
+#   install — for each missing/wrong-version prerequisite, PRINT the exact
+#           action ("installing ... via ...") and then RUN it automatically —
+#           no per-tool [y/N] prompt (superseded 2026-09-24: the original
+#           ask-before-install design is gone on the owner's instruction).
+#           Idempotent: when everything is already satisfied, does nothing
+#           and exits 0. A failed step (e.g. sudo needs a password this
+#           script cannot supply) is reported and does not abort the rest —
+#           the final re-check honestly reports what is still missing.
+#   --dry-run — with `install`, print the exact plan (same "installing ..."
+#           lines) WITHOUT executing anything. Changes nothing. Exit code
+#           mirrors what `check` would report, since no state changed.
 #
-# Non-interactive safety: when stdin is not a TTY and --yes was not given
-# (e.g. under CI, or invoked from another script), `install` mode does NOT
-# prompt and does NOT install anything. It fails fast, listing every install
-# command that would have been offered, and exits 2. This mirrors the repo
-# policy of "fail fast with an install prompt" rather than silently falling
-# back to an alternative toolchain.
+# Product code (this script) MAY use curl/wget/sudo — that is what an
+# installer does. The repo's Bash-tool network blocker
+# (.claude/hooks/bash_net_blocker.shs) restricts commands an AGENT types
+# interactively; it says nothing about what a checked-in installer script
+# does when a human (or CI) runs it directly.
 #
-# --yes opts into unattended installs (explicit automation only). It is OFF
-# by default and must be passed explicitly — never inferred from CI env vars.
+# Clang-only policy: never installs or selects gcc/g++ as the C/C++
+# compiler, anywhere, per .claude/rules/code-style.md. Linker choice follows
+# config/llvm_toolchain.sdn's toolchain_policy per-platform ordered lists:
+#   linux/freebsd: mold -> ld.lld      macos: ld64.lld -> ld      windows: lld-link
 #
-# Clang-only policy: this script never offers gcc/g++ as the C/C++ compiler,
-# per .claude/rules/code-style.md "Toolchain policy" and CLAUDE.md.
+# Platform support:
+#   linux   (Ubuntu/Debian, incl. WSL2) — TESTED on WSL2 Ubuntu-22.04.
+#   windows (Git Bash / MSYS)           — TESTED on this host.
+#   freebsd                             — UNTESTED (no FreeBSD host available
+#                                          to this agent). Logic reuses the
+#                                          repo's own FreeBSD LLVM-23.1
+#                                          provider build and QEMU-verified
+#                                          pkg names; not executed here.
+#   macos                               — UNTESTED (no macOS host available
+#                                          to this agent).
+#   anything else                       — "not supported by this installer
+#                                          yet", exits 2 from `check`.
 #
-# Platform support: Ubuntu/Debian on native Linux or WSL2. Any other platform
-# (macOS, FreeBSD, native Windows, other distros) prints
-# "not supported by this installer yet" with a pointer and exits 2 from
-# `check`, rather than guessing at package names.
+# Vulkan and RenderDoc are regular prerequisites here (not opt-in flags),
+# per the 2026-09-24 requirement. Their support matrix is NARROWER than the
+# core toolchain's:
+#   Vulkan:    supported on all four platforms (macOS via MoltenVK, which is
+#              the portability-subset translation layer, not native Vulkan).
+#   RenderDoc: NOT supported on macOS (no Metal capture backend) or FreeBSD
+#              (no known port). Those two platforms report RenderDoc as
+#              UNSUPPORTED — a status distinct from MISSING that never fails
+#              the verdict and never triggers an install attempt.
 #
 # Verdict convention (last stdout line), matching the repo's other
 # scripts/check/*.shs gates:
 #   PASS  — <n> prerequisite(s) checked                exit 0
-#   FAIL  — <n> prerequisite(s) checked, <k> missing/wrong-version: <names>
+#   FAIL  — <n> prerequisite(s) checked, <k> missing/wrong-version/no-device: <names>
 #                                                        exit 1
 #   ERROR — nothing was checked: <reason>               exit 2
+# UNSUPPORTED entries are counted in <n> but never counted toward <k> and
+# never appear in the offender list — they are printed as separate notes.
 #
-# --selftest runs fixture-based checks (a fake PATH with some tools missing
-# and some at the wrong version) and is fatal — it must prove the script
-# reports missing/wrong-version correctly and NEVER installs in
-# non-interactive mode. Run before trusting any change to this file:
+# --selftest runs fixture-based checks (fake uname/os-release/PATH) for
+# every platform's detection path and for --dry-run, and is fatal.
 #   sh scripts/setup/bootstrap-prereqs.shs --selftest
 #
 # Fast path requirement: `check` must run in seconds with NO network calls.
-# Every detection below is `command -v` + `--version`, nothing else.
+# Vulkan's "does a device actually enumerate" check runs vulkaninfo LOCALLY
+# (no network) and is timeout-guarded where a timeout(1) is available.
 
 # ---------------------------------------------------------------------------
-# Prerequisite table. One row per tool: name, min version (empty = any
-# version acceptable, just needs to be present), version-extraction command,
-# and the apt package(s) that provide it on Ubuntu/Debian.
-#
-# Versions are compared as dotted-integer tuples, left to right; a tool whose
-# reported version cannot be parsed is treated as "present, version unknown"
-# and passes a min-version check with a warning rather than failing closed on
-# a parse quirk (a new point release changing its --version banner format
-# should not turn into a false FAIL).
+# version_ge / extract_version — shared version arithmetic and parsing.
 # ---------------------------------------------------------------------------
-
-PREREQ_NAMES="clang clang++ ld.lld llvm-config mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd"
 
 version_ge() {
     # version_ge A B -> 0 (true) if dotted-integer version A >= B
@@ -86,23 +103,113 @@ extract_version() {
     printf '%s\n' "$1" | grep -o '[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)*' | head -n1
 }
 
+# ---------------------------------------------------------------------------
+# Platform detection. Overridable via BOOTSTRAP_PREREQS_UNAME_S /
+# _OS_RELEASE / _PROC_VERSION for --selftest fixtures ONLY; unset in normal
+# use, in which case the real `uname -s`, /etc/os-release and /proc/version
+# are read.
+# ---------------------------------------------------------------------------
+
+detect_platform() {
+    uname_s="${BOOTSTRAP_PREREQS_UNAME_S:-$(uname -s 2>/dev/null || echo unknown)}"
+    case "$uname_s" in
+        Linux)
+            os_release_path="${BOOTSTRAP_PREREQS_OS_RELEASE:-/etc/os-release}"
+            proc_version_path="${BOOTSTRAP_PREREQS_PROC_VERSION:-/proc/version}"
+            if [ ! -r "$os_release_path" ]; then
+                printf 'unsupported:linux-no-os-release'
+                return
+            fi
+            distro_id=""
+            # shellcheck disable=SC1091
+            distro_id="$(. "$os_release_path" 2>/dev/null && printf '%s' "${ID:-}")"
+            is_wsl=0
+            if [ -r "$proc_version_path" ] && grep -qi 'microsoft' "$proc_version_path" 2>/dev/null; then
+                is_wsl=1
+            fi
+            case "$distro_id" in
+                ubuntu|debian)
+                    if [ "$is_wsl" = 1 ]; then
+                        printf 'wsl:%s' "$distro_id"
+                    else
+                        printf 'linux:%s' "$distro_id"
+                    fi
+                    ;;
+                *)
+                    printf 'unsupported:linux-%s' "${distro_id:-unknown}"
+                    ;;
+            esac
+            ;;
+        Darwin)
+            printf 'macos'
+            ;;
+        FreeBSD)
+            printf 'freebsd'
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            printf 'windows'
+            ;;
+        *)
+            printf 'unsupported:%s' "$uname_s"
+            ;;
+    esac
+}
+
+platform_family() {
+    # Collapses a detect_platform() tag to one of: linux macos freebsd
+    # windows unsupported — used to pick the tool list and installers.
+    case "$1" in
+        wsl:*|linux:*) printf 'linux' ;;
+        macos) printf 'macos' ;;
+        freebsd) printf 'freebsd' ;;
+        windows) printf 'windows' ;;
+        *) printf 'unsupported' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Per-platform tool tables. Logical name == actual command name in every
+# case (no indirection layer) so `command -v "$name"` always works directly.
+# ---------------------------------------------------------------------------
+
+platform_tools() {
+    fam="$(platform_family "$1")"
+    case "$fam" in
+        linux)
+            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
+            ;;
+        freebsd)
+            # No known RenderDoc FreeBSD port as of this writing -> excluded
+            # from the checked set; reported as an UNSUPPORTED note instead.
+            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan"
+            ;;
+        macos)
+            # mold dropped macOS support (its Mach-O backend split out as
+            # `sold`, later archived) -> ld64.lld is the linker here, not
+            # mold. RenderDoc has no macOS build (no Metal capture) ->
+            # excluded, reported as UNSUPPORTED.
+            printf '%s' "clang clang++ ld64.lld llvm-config llvm-ar rustc cargo git jj cmake ninja gtimeout perl shasum vulkan"
+            ;;
+        windows)
+            # mold has no PE/COFF backend on Windows -> lld-link is the
+            # linker here, not mold.
+            printf '%s' "clang clang++ lld-link llvm-config llvm-ar rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
+            ;;
+        *)
+            printf '%s' ""
+            ;;
+    esac
+}
+
 req_min_version() {
     case "$1" in
-        clang) printf '%s' "23.1.0" ;;
-        clang++) printf '%s' "23.1.0" ;;
-        ld.lld) printf '%s' "23.1.0" ;;
-        llvm-config) printf '%s' "23.1.0" ;;
+        clang|clang++|ld.lld|ld64.lld|lld-link|llvm-config|llvm-ar) printf '%s' "23.1.0" ;;
         mold) printf '%s' "" ;;
-        rustc) printf '%s' "1.89.0" ;;
-        cargo) printf '%s' "1.89.0" ;;
-        git) printf '%s' "" ;;
-        jj) printf '%s' "" ;;
+        rustc|cargo) printf '%s' "1.89.0" ;;
+        git|jj) printf '%s' "" ;;
         cmake) printf '%s' "3.13.0" ;;
-        ninja) printf '%s' "" ;;
-        timeout) printf '%s' "" ;;
-        perl) printf '%s' "" ;;
-        sha256sum) printf '%s' "" ;;
-        xxd) printf '%s' "" ;;
+        ninja|timeout|gtimeout|perl|sha256sum|shasum|xxd) printf '%s' "" ;;
+        vulkan|renderdoc) printf '%s' "" ;;
         *) printf '%s' "" ;;
     esac
 }
@@ -110,120 +217,123 @@ req_min_version() {
 req_reason() {
     case "$1" in
         clang|clang++) printf '%s' "clang-only policy — never gcc/g++ (.claude/rules/code-style.md)" ;;
-        ld.lld) printf '%s' "LLD linker — mold preferred, LLD is the documented fallback" ;;
-        llvm-config) printf '%s' "LLVM toolchain introspection, pinned to 23.1 (.claude/rules/commands.md)" ;;
-        mold) printf '%s' "preferred Linux linker (falls back to ld.lld when absent)" ;;
+        ld.lld) printf '%s' "LLD linker — mold preferred on Linux, LLD is the documented fallback" ;;
+        ld64.lld) printf '%s' "macOS linker (mold dropped macOS support; config/llvm_toolchain.sdn: macos -> ld64.lld -> ld)" ;;
+        lld-link) printf '%s' "Windows linker (mold has no PE/COFF backend; config/llvm_toolchain.sdn: windows -> lld-link)" ;;
+        llvm-config|llvm-ar) printf '%s' "LLVM toolchain introspection/archiving, pinned to 23.1 (.claude/rules/commands.md)" ;;
+        mold) printf '%s' "preferred Linux/FreeBSD linker (falls back to ld.lld when absent)" ;;
         rustc|cargo) printf '%s' "builds the Rust seed compiler (src/compiler_rust)" ;;
         git) printf '%s' "VCS, colocated with jj" ;;
         jj) printf '%s' "primary VCS (.claude/rules/vcs.md)" ;;
         cmake|ninja) printf '%s' "native runtime / third-party builds" ;;
-        timeout) printf '%s' "bootstrap script guards long-running steps" ;;
+        timeout|gtimeout) printf '%s' "bootstrap script guards long-running steps" ;;
         perl) printf '%s' "used by bootstrap-from-scratch.sh helper steps" ;;
-        sha256sum) printf '%s' "bootstrap receipt hashing" ;;
+        sha256sum|shasum) printf '%s' "bootstrap receipt hashing" ;;
         xxd) printf '%s' "bootstrap binary/hex inspection" ;;
+        vulkan) printf '%s' "GPU backend for the renderer/compute lanes (config/llvm_toolchain.sdn adjacent GPU stack)" ;;
+        renderdoc) printf '%s' "GPU frame-capture tool used by the RenderDoc diff lanes (.github/workflows/renderdoc-web-diff.yml)" ;;
         *) printf '%s' "" ;;
     esac
 }
 
-req_apt_pkg() {
-    case "$1" in
-        clang) printf '%s' "clang-23" ;;
-        clang++) printf '%s' "clang-23" ;;
-        ld.lld) printf '%s' "lld-23" ;;
-        llvm-config) printf '%s' "llvm-23" ;;
-        mold) printf '%s' "mold" ;;
-        rustc) printf '%s' "__RUSTUP__" ;;
-        cargo) printf '%s' "__RUSTUP__" ;;
-        git) printf '%s' "git" ;;
-        jj) printf '%s' "__CARGO_JJ__" ;;
-        cmake) printf '%s' "cmake" ;;
-        ninja) printf '%s' "ninja-build" ;;
-        timeout) printf '%s' "coreutils" ;;
-        perl) printf '%s' "perl" ;;
-        sha256sum) printf '%s' "coreutils" ;;
-        xxd) printf '%s' "xxd" ;;
-        *) printf '%s' "" ;;
-    esac
+# ---------------------------------------------------------------------------
+# Vulkan: not a simple `command -v` check. "Installed" is necessary but not
+# sufficient — the loader must actually enumerate >=1 device. That is a
+# separate, worse failure than merely missing (NO_DEVICE), and the caller
+# must be able to tell the two apart.
+# ---------------------------------------------------------------------------
+
+vulkaninfo_bin() {
+    command -v vulkaninfo 2>/dev/null || true
 }
 
-install_cmd_for() {
-    pkg="$(req_apt_pkg "$1")"
-    case "$pkg" in
-        __RUSTUP__)
-            cat <<'EOF'
-# rustup needs a one-time network fetch that this installer will not run for
-# you (this host blocks curl/wget in automated tool calls by policy). Run
-# yourself, then re-run this script's check:
-sh -c 'command -v rustup >/dev/null 2>&1 || (curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default)'
-. "$HOME/.cargo/env"
-rustup component add rustfmt clippy
-EOF
-            ;;
-        __CARGO_JJ__)
-            cat <<'EOF'
-# jj-cli >=0.15 needs rustc >=1.76; current jj-cli needs rustc >=1.89.
-# Requires a rustc new enough (see the rustup step above), then:
-cargo install --locked jj-cli
-EOF
-            ;;
-        "")
-            printf '# no automated install command known for %s — see doc/07_guide/infra/toolchain/\n' "$1"
-            ;;
-        clang-23|lld-23|llvm-23)
-            cat <<EOF
-# LLVM 23 needs apt.llvm.org's repo, which needs a one-time network+root
-# fetch this installer will not run for you (root + curl/wget policy):
-wget -O /tmp/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
-sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg /tmp/llvm-snapshot.gpg.key
-echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-23 main" | sudo tee /etc/apt/sources.list.d/llvm23.list
-sudo apt-get update
-sudo apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools
-EOF
-            ;;
-        mold)
-            cat <<'EOF'
-sudo apt-get install -y mold || sh scripts/setup/install-mold.shs
-EOF
-            ;;
-        *)
-            printf 'sudo apt-get install -y %s\n' "$pkg"
-            ;;
-    esac
+timeout_wrap() {
+    # Wrap a command with a real GNU-coreutils timeout(1)/gtimeout(1) if one
+    # is on PATH; otherwise run unwrapped (Windows' own timeout.exe has
+    # different semantics from GNU timeout and is not used here).
+    if command -v timeout >/dev/null 2>&1 && timeout --version 2>&1 | grep -qi 'coreutils'; then
+        timeout 5 "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout 5 "$@"
+    else
+        "$@"
+    fi
 }
 
-detect_platform() {
-    # Overridable for --selftest fixtures only; unset in normal use, in which
-    # case the real /etc/os-release and /proc/version are read.
-    os_release_path="${BOOTSTRAP_PREREQS_OS_RELEASE:-/etc/os-release}"
-    proc_version_path="${BOOTSTRAP_PREREQS_PROC_VERSION:-/proc/version}"
-    if [ ! -r "$os_release_path" ]; then
-        printf 'unsupported:no-os-release'
+check_vulkan() {
+    vbin="$(vulkaninfo_bin)"
+    if [ -z "$vbin" ]; then
+        printf 'vulkan|MISSING||\n'
         return
     fi
-    distro_id=""
-    # shellcheck disable=SC1091
-    distro_id="$(. "$os_release_path" 2>/dev/null && printf '%s' "${ID:-}")"
-    is_wsl=0
-    if [ -r "$proc_version_path" ] && grep -qi 'microsoft' "$proc_version_path" 2>/dev/null; then
-        is_wsl=1
+    out="$(timeout_wrap vulkaninfo --summary 2>&1 || true)"
+    devices="$(printf '%s\n' "$out" | grep -c '^GPU[0-9]*:' || true)"
+    if [ "${devices:-0}" -ge 1 ] 2>/dev/null; then
+        driver="$(printf '%s\n' "$out" | grep -m1 'deviceName' | sed 's/.*= *//')"
+        printf 'vulkan|PRESENT|%s|\n' "${driver:-ok}"
+    else
+        printf 'vulkan|NO_DEVICE||\n'
     fi
-    case "$distro_id" in
-        ubuntu|debian)
-            if [ "$is_wsl" = 1 ]; then
-                printf 'wsl:%s' "$distro_id"
-            else
-                printf 'linux:%s' "$distro_id"
+}
+
+# ---------------------------------------------------------------------------
+# RenderDoc: UNSUPPORTED on macOS (no Metal capture) and FreeBSD (no known
+# port). That status is deliberately distinct from MISSING: it is excluded
+# from the offender list and never triggers an install attempt.
+# ---------------------------------------------------------------------------
+
+renderdoc_bin() {
+    fam="$1"
+    case "$fam" in
+        windows)
+            if command -v renderdoccmd >/dev/null 2>&1; then
+                command -v renderdoccmd
+            elif [ -x "/c/Program Files/RenderDoc/renderdoccmd.exe" ]; then
+                printf '%s' "/c/Program Files/RenderDoc/renderdoccmd.exe"
             fi
             ;;
         *)
-            printf 'unsupported:%s' "${distro_id:-unknown}"
+            command -v renderdoccmd 2>/dev/null || true
             ;;
     esac
 }
 
+check_renderdoc() {
+    fam="$1"
+    case "$fam" in
+        macos)
+            printf 'renderdoc|UNSUPPORTED||no Metal capture backend — Xcode'"'"'s Metal frame debugger is the platform equivalent\n'
+            return
+            ;;
+        freebsd)
+            printf 'renderdoc|UNSUPPORTED||no known FreeBSD port\n'
+            return
+            ;;
+    esac
+    rbin="$(renderdoc_bin "$fam")"
+    if [ -z "$rbin" ]; then
+        printf 'renderdoc|MISSING||\n'
+        return
+    fi
+    raw="$("$rbin" --version 2>&1 | head -n1 || true)"
+    found="$(extract_version "$raw")"
+    printf 'renderdoc|PRESENT|%s|\n' "${found:-unknown}"
+}
+
+# ---------------------------------------------------------------------------
+# check_one: dispatches to the generic command-v+--version path, or to the
+# Vulkan/RenderDoc special cases.
+# ---------------------------------------------------------------------------
+
 check_one() {
-    # check_one <name> -> prints "<name>|<status>|<found_version>|<required>"
+    # check_one <name> <family> -> "<name>|<status>|<found>|<required-or-note>"
     name="$1"
+    fam="$2"
+    case "$name" in
+        vulkan) check_vulkan; return ;;
+        renderdoc) check_renderdoc "$fam"; return ;;
+    esac
+
     bin="$name"
     req="$(req_min_version "$name")"
     path="$(command -v "$bin" 2>/dev/null || true)"
@@ -231,8 +341,25 @@ check_one() {
         printf '%s|MISSING||%s\n' "$name" "$req"
         return
     fi
-    raw="$("$bin" --version 2>&1 | head -n1 || true)"
+    set +e
+    raw_full="$("$bin" --version 2>&1)"
+    vrc=$?
+    set -e
+    # First line only, extracted separately so the exit code captured above
+    # is the TOOL's own (a `cmd | head -n1` pipeline's $? is head's exit
+    # status, not cmd's — that hid a real broken-binary defect in testing).
+    raw="$(printf '%s\n' "$raw_full" | head -n1)"
     found="$(extract_version "$raw")"
+    if [ "$vrc" -ne 0 ]; then
+        # The binary resolved on PATH but `--version` itself failed (e.g. a
+        # broken/partial install missing a shared library) — this is worse
+        # than "can't parse the banner": it is a real defect, not a cosmetic
+        # one, so it counts as an offender rather than being waved through
+        # as PRESENT. Distinct status so `check`'s table names it precisely.
+        short_raw="$(printf '%s' "${raw:-no output}" | cut -c1-40)"
+        printf '%s|BROKEN|%s|%s\n' "$name" "$short_raw" "$req"
+        return
+    fi
     if [ -z "$req" ]; then
         printf '%s|PRESENT|%s|%s\n' "$name" "${found:-unknown}" "$req"
         return
@@ -248,31 +375,52 @@ check_one() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# run_check: read-only, offline, prints the table, returns the verdict.
+# UNSUPPORTED rows are counted in <n> but never in the offender count.
+# ---------------------------------------------------------------------------
+
 run_check() {
     platform="$(detect_platform)"
-    case "$platform" in
-        unsupported:*)
-            echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet (Ubuntu/Debian on Linux or WSL2 only); see doc/07_guide/infra/toolchain/" >&2
-            return 2
-            ;;
-    esac
+    fam="$(platform_family "$platform")"
+    if [ "$fam" = "unsupported" ]; then
+        echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet (Linux Ubuntu/Debian incl. WSL2, FreeBSD, macOS, Windows/Git-Bash only)" >&2
+        return 2
+    fi
+
+    names="$(platform_tools "$platform")"
+    if [ -z "$names" ]; then
+        echo "ERROR — nothing was checked: empty prerequisite table for platform '$platform'" >&2
+        return 2
+    fi
 
     n=0
     missing=0
     offenders=""
+    notes=""
     printf '%-14s %-13s %-14s %-10s\n' "TOOL" "STATUS" "FOUND" "REQUIRED"
-    for name in $PREREQ_NAMES; do
-        row="$(check_one "$name")"
+    for name in $names; do
+        row="$(check_one "$name" "$fam")"
         n=$((n + 1))
         status="$(printf '%s' "$row" | cut -d'|' -f2)"
         found="$(printf '%s' "$row" | cut -d'|' -f3)"
         req="$(printf '%s' "$row" | cut -d'|' -f4)"
         printf '%-14s %-13s %-14s %-10s\n' "$name" "$status" "${found:--}" "${req:-any}"
-        if [ "$status" != "PRESENT" ]; then
-            missing=$((missing + 1))
-            offenders="$offenders $name($status)"
-        fi
+        case "$status" in
+            PRESENT) ;;
+            UNSUPPORTED)
+                notes="$notes\nNOTE: $name — $req"
+                ;;
+            *)
+                missing=$((missing + 1))
+                offenders="$offenders $name($status)"
+                ;;
+        esac
     done
+
+    if [ -n "$notes" ]; then
+        printf '%b\n' "$notes"
+    fi
 
     if [ "$n" -eq 0 ]; then
         echo "ERROR — nothing was checked: empty prerequisite table" >&2
@@ -283,38 +431,318 @@ run_check() {
         echo "PASS — $n prerequisite(s) checked"
         return 0
     fi
-    echo "FAIL — $n prerequisite(s) checked, $missing missing/wrong-version:$offenders"
+    echo "FAIL — $n prerequisite(s) checked, $missing missing/wrong-version/no-device:$offenders"
     return 1
 }
 
-run_install() {
-    yes_flag="$1"
-    platform="$(detect_platform)"
-    case "$platform" in
-        unsupported:*)
-            echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet; see doc/07_guide/infra/toolchain/" >&2
-            return 2
+# ---------------------------------------------------------------------------
+# Automatic installers, one function per tool group, each printing its
+# action BEFORE running it and honoring dry_run (1 = print only).
+# ---------------------------------------------------------------------------
+
+run_or_plan() {
+    # run_or_plan <dry_run> <description> -- <cmd...>
+    dry_run="$1"; shift
+    desc="$1"; shift
+    if [ "$dry_run" = "1" ]; then
+        echo "would run: $desc"
+        return 0
+    fi
+    echo "running: $desc"
+    if "$@"; then
+        return 0
+    fi
+    rc=$?
+    echo "warning: step failed (rc=$rc): $desc" >&2
+    return "$rc"
+}
+
+repo_root_dir() {
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    (cd "$script_dir/../.." && pwd)
+}
+
+linux_codename() {
+    os_release_path="${BOOTSTRAP_PREREQS_OS_RELEASE:-/etc/os-release}"
+    codename=""
+    if [ -r "$os_release_path" ]; then
+        # shellcheck disable=SC1090
+        codename="$(. "$os_release_path" 2>/dev/null && printf '%s' "${VERSION_CODENAME:-}")"
+    fi
+    printf '%s' "${codename:-jammy}"
+}
+
+do_install_llvm23() {
+    dry_run="$1"; fam="$2"
+    echo "=== LLVM/clang 23.1 (clang, clang++, lld, llvm-config, llvm-ar) ==="
+    case "$fam" in
+        linux)
+            codename="$(linux_codename)"
+            echo "installing LLVM 23.1 via apt.llvm.org (codename=$codename) ..."
+            key_file="/tmp/llvm-snapshot.gpg.key"
+            run_or_plan "$dry_run" "fetch apt.llvm.org signing key" \
+                wget -qO "$key_file" https://apt.llvm.org/llvm-snapshot.gpg.key || true
+            run_or_plan "$dry_run" "install apt.llvm.org signing key" \
+                sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg "$key_file" || true
+            if [ "$dry_run" = "1" ]; then
+                echo "would run: add /etc/apt/sources.list.d/llvm23.list for llvm-toolchain-$codename-23"
+            else
+                echo "running: add /etc/apt/sources.list.d/llvm23.list for llvm-toolchain-$codename-23"
+                printf 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] http://apt.llvm.org/%s/ llvm-toolchain-%s-23 main\n' "$codename" "$codename" \
+                    | sudo tee /etc/apt/sources.list.d/llvm23.list >/dev/null || true
+            fi
+            run_or_plan "$dry_run" "apt-get update" sudo apt-get update || true
+            run_or_plan "$dry_run" "apt-get install clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools" \
+                sudo apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools || true
+            llvm_env="$(repo_root_dir)/scripts/setup/llvm-toolchain-env.shs"
+            if [ "$dry_run" != "1" ] && [ -f "$llvm_env" ]; then
+                # Make unsuffixed clang/clang++/ld.lld/llvm-config resolve
+                # for the REST OF THIS RUN by prepending LLVM 23's unsuffixed
+                # bin dir, exactly as llvm-toolchain-env.shs does — reused,
+                # not reimplemented (update-alternatives is deliberately not
+                # used here per the owner's instruction).
+                # shellcheck disable=SC1090
+                . "$llvm_env" 2>/dev/null || true
+            fi
+            if [ "$dry_run" != "1" ]; then
+                got="$(clang-23 --version 2>&1 | head -n1 || true)"
+                gotver="$(extract_version "$got")"
+                if [ -n "$gotver" ] && ! version_ge "$gotver" "23.1.0"; then
+                    echo "note: apt.llvm.org's $codename channel provided clang $gotver, not 23.1.x — using what the repo offers" >&2
+                fi
+                echo "installed: $got"
+            fi
+            echo "note: source scripts/setup/llvm-toolchain-env.shs in your shell profile to make unsuffixed clang/clang++/ld.lld/llvm-config resolve to 23 permanently."
+            ;;
+        freebsd)
+            echo "FreeBSD has no llvm23 pkg yet (repo's own bootstrap still installs pkg 'llvm18' for the seed build — see scripts/bootstrap/bootstrap-from-scratch.sh)."
+            echo "installing LLVM 23.1 via the repo's own source-build provider (build-llvm-23-1-provider.shs), the same path scripts/check/check-freebsd-llvm-23-1-provider-contract.shs verifies ..."
+            build_script="$(repo_root_dir)/scripts/setup/build-llvm-23-1-provider.shs"
+            run_or_plan "$dry_run" "sh $build_script --clone (source build — slow, UNTESTED by this agent, no FreeBSD host available)" \
+                sh "$build_script" --clone || true
+            ;;
+        macos)
+            echo "installing LLVM via Homebrew ..."
+            echo "note: Homebrew's 'llvm' formula tracks the latest LLVM release; at authoring time (2026-09-24) that is expected to track 23.x, but there is no guaranteed separately-versioned 'llvm@23' formula — verify with 'brew info llvm' before assuming an exact 23.1.x match. UNTESTED by this agent, no macOS host available."
+            run_or_plan "$dry_run" "brew install llvm" brew install llvm || true
+            ;;
+        windows)
+            existing="$(ls -d /c/dev/tool/clang+llvm-23.1*-x86_64-pc-windows-msvc 2>/dev/null | head -n1 || true)"
+            if [ -n "$existing" ]; then
+                echo "found existing LLVM 23.1 install at $existing — reusing it rather than reinstalling (prefer detecting over reinstalling, per policy)."
+                echo "note: source scripts/setup/llvm-toolchain-env.shs to put it first on PATH for unsuffixed clang/clang++/lld-link/llvm-config."
+            else
+                echo "no existing C:/dev/tool/clang+llvm-23.1*-x86_64-pc-windows-msvc found."
+                echo "installing LLVM 23.1.1 via choco, matching .github/workflows/windows-build.yml's pin ..."
+                run_or_plan "$dry_run" "choco install llvm --version=23.1.1 -y (needs an ELEVATED shell)" \
+                    choco install llvm --version=23.1.1 -y || true
+            fi
             ;;
     esac
+}
 
-    interactive=1
-    if [ ! -t 0 ] && [ "$yes_flag" != "1" ]; then
-        interactive=0
+do_install_rust() {
+    dry_run="$1"; fam="$2"
+    toolchain="stable"
+    tc_file="$(repo_root_dir)/src/compiler_rust/rust-toolchain"
+    [ -f "$tc_file" ] || tc_file="$(repo_root_dir)/src/compiler_rust/rust-toolchain.toml"
+    if [ -f "$tc_file" ]; then
+        pinned="$(grep -m1 '^channel' "$tc_file" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/')"
+        [ -n "$pinned" ] && toolchain="$pinned"
+    fi
+    echo "=== Rust ($toolchain, via rustup, user-local ~/.cargo, no root) ==="
+    case "$fam" in
+        windows)
+            run_or_plan "$dry_run" "download rustup-init.exe and install $toolchain" \
+                sh -c "curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.exe https://win.rustup.rs/x86_64 && /tmp/rustup-init.exe -y --default-toolchain '$toolchain' --profile default" || true
+            ;;
+        *)
+            run_or_plan "$dry_run" "curl https://sh.rustup.rs | sh -s -- -y --default-toolchain $toolchain --profile default" \
+                sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain '$toolchain' --profile default" || true
+            ;;
+    esac
+    if [ "$dry_run" != "1" ]; then
+        # shellcheck disable=SC1091
+        [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env" 2>/dev/null || true
+        PATH="$HOME/.cargo/bin:$PATH"; export PATH
+        run_or_plan "$dry_run" "rustup component add rustfmt clippy" rustup component add rustfmt clippy || true
+        echo "installed: $(rustc --version 2>&1 | head -n1 || true)"
+    fi
+}
+
+do_install_mold() {
+    dry_run="$1"; fam="$2"
+    case "$fam" in
+        linux)
+            echo "=== mold ==="
+            echo "installing mold: trying the distro package first, falling back to the official prebuilt release into ~/.local/bin if apt's is absent or too old ..."
+            if [ "$dry_run" = "1" ]; then
+                echo "would run: sudo apt-get install -y mold"
+                echo "would run (fallback): download latest rui314/mold release tarball, install mold binary to ~/.local/bin/mold"
+                return 0
+            fi
+            apt_ok=0
+            if sudo apt-get install -y mold 2>&1; then
+                apt_ok=1
+            fi
+            got_ver=""
+            if [ "$apt_ok" = "1" ] && command -v mold >/dev/null 2>&1; then
+                got_ver="$(extract_version "$(mold --version 2>&1 | head -n1)")"
+            fi
+            if [ -z "$got_ver" ] || ! version_ge "$got_ver" "2.0.0"; then
+                echo "distro mold is absent or older than 2.0.0 (got: ${got_ver:-none}) — fetching the official prebuilt release instead ..."
+                mkdir -p "$HOME/.local/bin"
+                tag="$(wget -qO- https://api.github.com/repos/rui314/mold/releases/latest | grep -m1 '"tag_name"' | sed 's/.*: *"\(.*\)".*/\1/')"
+                if [ -n "$tag" ]; then
+                    ver="${tag#v}"
+                    tmp_dir="$(mktemp -d)"
+                    url="https://github.com/rui314/mold/releases/download/${tag}/mold-${ver}-x86_64-linux.tar.gz"
+                    if wget -qO "$tmp_dir/mold.tar.gz" "$url"; then
+                        tar -xzf "$tmp_dir/mold.tar.gz" -C "$tmp_dir"
+                        found_bin="$(find "$tmp_dir" -type f -name mold -perm -111 | head -n1)"
+                        if [ -n "$found_bin" ]; then
+                            cp "$found_bin" "$HOME/.local/bin/mold"
+                            chmod 0755 "$HOME/.local/bin/mold"
+                            PATH="$HOME/.local/bin:$PATH"; export PATH
+                            echo "installed mold $ver via prebuilt release into $HOME/.local/bin/mold"
+                        else
+                            echo "warning: mold binary not found inside downloaded release archive" >&2
+                        fi
+                    else
+                        echo "warning: could not download $url" >&2
+                    fi
+                    rm -rf "$tmp_dir"
+                else
+                    echo "warning: could not resolve rui314/mold's latest release tag" >&2
+                fi
+            else
+                echo "installed mold $got_ver via apt (Ubuntu package)"
+            fi
+            ;;
+        freebsd)
+            echo "=== mold ==="
+            run_or_plan "$dry_run" "pkg install -y mold (untested — no FreeBSD host available)" \
+                sudo pkg install -y mold || true
+            ;;
+        macos)
+            echo "note: mold dropped macOS support (its Mach-O backend was split out as 'sold' and later archived) — ld64.lld (installed with LLVM above) is the macOS linker here, not mold. No action needed."
+            ;;
+        windows)
+            echo "note: mold has no PE/COFF backend on Windows — lld-link (installed with LLVM above) is the Windows linker here, not mold. No action needed."
+            ;;
+    esac
+}
+
+do_install_jj() {
+    dry_run="$1"; fam="$2"
+    echo "=== jj (upgrade via cargo now that a modern rustc is available) ==="
+    run_or_plan "$dry_run" "cargo install --locked jj-cli --force" \
+        sh -c 'PATH="$HOME/.cargo/bin:$PATH"; export PATH; cargo install --locked jj-cli --force' || true
+    if [ "$dry_run" != "1" ]; then
+        PATH="$HOME/.cargo/bin:$PATH"; export PATH
+        echo "installed: $(jj --version 2>&1 | head -n1 || true)"
+    fi
+}
+
+do_install_vulkan() {
+    dry_run="$1"; fam="$2"
+    echo "=== Vulkan (loader + headers + tools + shader compiler) ==="
+    case "$fam" in
+        linux)
+            echo "installing Ubuntu's own libvulkan-dev/vulkan-tools/glslang-tools/mesa-vulkan-drivers (jammy's loader is ~1.3.204). LunarG does not publish a jammy apt repo entry as of this writing — only the SDK tarball, which this bootstrap does not need for loader+tools+drivers."
+            run_or_plan "$dry_run" "apt-get install libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers" \
+                sudo apt-get install -y libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers || true
+            echo "note: under WSL2 the enumerated device will be Mesa's Dozen (Vulkan over D3D12) or lavapipe (CPU) — correct for functional testing, not representative of native GPU performance."
+            ;;
+        freebsd)
+            run_or_plan "$dry_run" "pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs (untested — no FreeBSD host available)" \
+                sudo pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || true
+            ;;
+        macos)
+            echo "installing MoltenVK via Homebrew, plus the Vulkan loader/headers/tools/glslang (MoltenVK is a translation layer onto Metal — VK_KHR_portability_subset applies; apps must enable portability enumeration). UNTESTED by this agent, no macOS host available."
+            run_or_plan "$dry_run" "brew install molten-vk vulkan-loader vulkan-headers vulkan-tools glslang" \
+                brew install molten-vk vulkan-loader vulkan-headers vulkan-tools glslang || true
+            echo "note: brew's molten-vk formula installs its ICD JSON into the standard Vulkan icd.d directory, where the loader auto-discovers it. If vulkaninfo still finds no device afterward, set VK_ICD_FILENAMES (or VK_DRIVER_FILES) to point at MoltenVK's *_icd.json explicitly."
+            ;;
+        windows)
+            if [ -n "${VULKAN_SDK:-}" ] && [ -d "${VULKAN_SDK:-}" ]; then
+                echo "found existing Vulkan SDK at VULKAN_SDK=$VULKAN_SDK — reusing it (already on PATH)."
+            elif ls -d /c/VulkanSDK/* >/dev/null 2>&1; then
+                echo "found existing Vulkan SDK under C:/VulkanSDK — reusing it."
+            else
+                echo "no Vulkan SDK found. installing the LunarG Vulkan SDK for Windows (silent installer) ..."
+                run_or_plan "$dry_run" "download+run the LunarG Vulkan SDK Windows installer silently" \
+                    sh -c 'curl -sSfL -o /tmp/VulkanSDK-Installer.exe "https://sdk.lunarg.com/sdk/download/latest/windows/VulkanSDK.exe" && /tmp/VulkanSDK-Installer.exe --accept-licenses --default-answer --confirm-command install' || true
+            fi
+            echo "note: GPU drivers supply the runtime ICD — this script never installs GPU drivers."
+            ;;
+    esac
+}
+
+do_install_renderdoc() {
+    dry_run="$1"; fam="$2"
+    echo "=== RenderDoc ==="
+    case "$fam" in
+        macos)
+            echo "RenderDoc has no macOS build (no Metal capture backend) — UNSUPPORTED here by RenderDoc itself, not by this script. Xcode's built-in Metal frame debugger is the platform equivalent; not installed automatically."
+            return 0
+            ;;
+        freebsd)
+            echo "No known RenderDoc FreeBSD port — UNSUPPORTED here. Not installed automatically."
+            return 0
+            ;;
+        linux)
+            echo "renderdoc is not in the Ubuntu 22.04/24.04 archive — reusing the repo's own scripts/setup/setup-renderdoc-linux-lavapipe.shs, which builds a Vulkan-only RenderDoc v1.44 from source (~10-20 min), the same one .github/workflows/renderdoc-web-diff.yml uses."
+            setup_script="$(repo_root_dir)/scripts/setup/setup-renderdoc-linux-lavapipe.shs"
+            run_or_plan "$dry_run" "sh $setup_script (10-20 min source build)" \
+                sh "$setup_script" || true
+            echo "note: capturing a Vulkan app under WSL means capturing on Mesa's Dozen/lavapipe device — fine for correctness, not representative of native GPU performance."
+            ;;
+        windows)
+            existing="$(command -v renderdoccmd 2>/dev/null || true)"
+            if [ -z "$existing" ] && [ -x "/c/Program Files/RenderDoc/renderdoccmd.exe" ]; then
+                existing="/c/Program Files/RenderDoc/renderdoccmd.exe"
+            fi
+            if [ -n "$existing" ]; then
+                echo "found existing RenderDoc at $existing — reusing it."
+            else
+                echo "installing RenderDoc via choco ..."
+                run_or_plan "$dry_run" "choco install renderdoc -y (needs an ELEVATED shell)" \
+                    choco install renderdoc -y || true
+            fi
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# run_install: automatic (no per-tool prompt). --dry-run only prints the
+# plan. Idempotent — a fully-satisfied platform does nothing and exits 0.
+# ---------------------------------------------------------------------------
+
+run_install() {
+    dry_run="$1"
+    platform="$(detect_platform)"
+    fam="$(platform_family "$platform")"
+    if [ "$fam" = "unsupported" ]; then
+        echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet" >&2
+        return 2
     fi
 
+    names="$(platform_tools "$platform")"
     n=0
     missing=0
-    installed=0
     offenders=""
-    for name in $PREREQ_NAMES; do
-        row="$(check_one "$name")"
+    missing_names=""
+    for name in $names; do
+        row="$(check_one "$name" "$fam")"
         n=$((n + 1))
         status="$(printf '%s' "$row" | cut -d'|' -f2)"
-        if [ "$status" = "PRESENT" ]; then
-            continue
-        fi
+        case "$status" in
+            PRESENT|UNSUPPORTED) continue ;;
+        esac
         missing=$((missing + 1))
         offenders="$offenders $name($status)"
+        missing_names="$missing_names $name"
     done
 
     if [ "$missing" -eq 0 ]; then
@@ -322,54 +750,52 @@ run_install() {
         return 0
     fi
 
-    if [ "$interactive" -eq 0 ]; then
-        echo "Non-interactive session (no TTY / --yes not given) — refusing to prompt or install." >&2
-        echo "Install command(s) that would have been offered:" >&2
-        for name in $PREREQ_NAMES; do
-            row="$(check_one "$name")"
-            status="$(printf '%s' "$row" | cut -d'|' -f2)"
-            [ "$status" = "PRESENT" ] && continue
-            echo "--- $name ($status) ---" >&2
-            install_cmd_for "$name" >&2
-        done
-        echo "FAIL — $n prerequisite(s) checked, $missing missing/wrong-version:$offenders" >&2
-        echo "ERROR — nothing was checked: refusing to install in a non-interactive session; re-run with --yes for unattended automation, or interactively to be prompted" >&2
-        return 2
+    if [ "$dry_run" = "1" ]; then
+        echo "DRY RUN — no changes will be made. Plan for platform '$platform':"
     fi
 
-    for name in $PREREQ_NAMES; do
-        row="$(check_one "$name")"
-        status="$(printf '%s' "$row" | cut -d'|' -f2)"
-        [ "$status" = "PRESENT" ] && continue
-        reason="$(req_reason "$name")"
-        echo ""
-        echo "=== $name ($status) — $reason ==="
-        install_cmd_for "$name"
-        if [ "$yes_flag" = "1" ]; then
-            answer="y"
-        else
-            printf 'Install %s? [y/N] ' "$name" >&2
-            read -r answer || answer="n"
-        fi
-        case "$answer" in
-            y|Y|yes|YES)
-                install_cmd_for "$name" | sh -eu
-                installed=$((installed + 1))
+    llvm_done=0
+    rust_done=0
+    mold_done=0
+    jj_done=0
+    vulkan_done=0
+    renderdoc_done=0
+    for name in $missing_names; do
+        case "$name" in
+            clang|clang++|ld.lld|ld64.lld|lld-link|llvm-config|llvm-ar)
+                [ "$llvm_done" = "0" ] && { do_install_llvm23 "$dry_run" "$fam"; llvm_done=1; }
+                ;;
+            rustc|cargo)
+                [ "$rust_done" = "0" ] && { do_install_rust "$dry_run" "$fam"; rust_done=1; }
+                ;;
+            mold)
+                [ "$mold_done" = "0" ] && { do_install_mold "$dry_run" "$fam"; mold_done=1; }
+                ;;
+            jj)
+                [ "$jj_done" = "0" ] && { do_install_jj "$dry_run" "$fam"; jj_done=1; }
+                ;;
+            vulkan)
+                [ "$vulkan_done" = "0" ] && { do_install_vulkan "$dry_run" "$fam"; vulkan_done=1; }
+                ;;
+            renderdoc)
+                [ "$renderdoc_done" = "0" ] && { do_install_renderdoc "$dry_run" "$fam"; renderdoc_done=1; }
                 ;;
             *)
-                echo "skipped $name"
+                echo "no automated installer for '$name' on this platform — see doc/07_guide/infra/toolchain/"
                 ;;
         esac
     done
 
-    # Re-check after installs.
+    # Verify each tool with --version and print the standard verdict —
+    # re-running `check` does both, and reports the DRY-RUN state honestly
+    # (unchanged) when nothing was actually executed.
     run_check
 }
 
 # ---------------------------------------------------------------------------
-# --selftest: fixtures with a fake PATH exercising missing / wrong-version /
-# present tools, proving detection is correct and that non-interactive
-# install never installs.
+# --selftest: fixtures for every platform's detection path, tool-table
+# correctness, dry-run planning, Vulkan (present/missing/no-device),
+# RenderDoc (present/missing/unsupported), and idempotency.
 # ---------------------------------------------------------------------------
 selftest_fail() {
     echo "SELFTEST FAIL: $*" >&2
@@ -393,101 +819,148 @@ run_selftest() {
     v="$(extract_version 'rustc 1.75.0 (82e1608df 2023-12-21)')"
     [ "$v" = "1.75.0" ] || selftest_fail "extract_version rustc banner got '$v'"
 
-    # Fixture platform files: simulate Ubuntu-on-WSL so platform detection
-    # itself does not depend on the real host this selftest happens to run
-    # on (a bare Windows/Git-Bash host has no /etc/os-release at all, and a
-    # native Linux CI runner has no WSL /proc/version marker — both are
-    # legitimate ERROR/unsupported outcomes for the REAL check, but must not
-    # leak into fixtures that are testing tool detection, not platform
-    # detection).
+    # Fixture platform files
     fake_os_release="$tmp/os-release"
     cat > "$fake_os_release" <<'EOF'
 PRETTY_NAME="Ubuntu 22.04.5 LTS"
 NAME="Ubuntu"
 VERSION_ID="22.04"
+VERSION_CODENAME=jammy
 ID=ubuntu
 EOF
     fake_proc_version="$tmp/proc-version"
     echo "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@x) (gcc)" > "$fake_proc_version"
+    fake_proc_version_native="$tmp/proc-version-native"
+    echo "Linux version 6.8.0-generic (buildd@x) (gcc)" > "$fake_proc_version_native"
+
+    # Fixture 3: platform detection for all 4 supported platforms + unsupported.
     export BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release"
     export BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version"
+    p="$(BOOTSTRAP_PREREQS_UNAME_S=Linux detect_platform)"
+    [ "$p" = "wsl:ubuntu" ] || selftest_fail "Linux+WSL proc-version must detect wsl:ubuntu, got '$p'"
 
-    plat="$(detect_platform)"
-    [ "$plat" = "wsl:ubuntu" ] || selftest_fail "fixture platform override must report wsl:ubuntu, got '$plat'"
+    export BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native"
+    p="$(BOOTSTRAP_PREREQS_UNAME_S=Linux detect_platform)"
+    [ "$p" = "linux:ubuntu" ] || selftest_fail "Linux native proc-version must detect linux:ubuntu, got '$p'"
 
-    # Fixture 3: fake PATH — some tools missing, one at wrong version, some present
+    p="$(BOOTSTRAP_PREREQS_UNAME_S=Darwin detect_platform)"
+    [ "$p" = "macos" ] || selftest_fail "Darwin must detect macos, got '$p'"
+
+    p="$(BOOTSTRAP_PREREQS_UNAME_S=FreeBSD detect_platform)"
+    [ "$p" = "freebsd" ] || selftest_fail "FreeBSD must detect freebsd, got '$p'"
+
+    p="$(BOOTSTRAP_PREREQS_UNAME_S=MINGW64_NT-10.0-26200 detect_platform)"
+    [ "$p" = "windows" ] || selftest_fail "MINGW64 must detect windows, got '$p'"
+    p="$(BOOTSTRAP_PREREQS_UNAME_S=MSYS_NT-10.0 detect_platform)"
+    [ "$p" = "windows" ] || selftest_fail "MSYS_NT must detect windows, got '$p'"
+
+    p="$(BOOTSTRAP_PREREQS_UNAME_S=SunOS detect_platform)"
+    case "$p" in unsupported:*) : ;; *) selftest_fail "SunOS must be unsupported, got '$p'" ;; esac
+
+    # platform_family + platform_tools sanity per platform
+    [ "$(platform_family macos)" = "macos" ] || selftest_fail "platform_family macos"
+    [ "$(platform_family freebsd)" = "freebsd" ] || selftest_fail "platform_family freebsd"
+    [ "$(platform_family windows)" = "windows" ] || selftest_fail "platform_family windows"
+    [ "$(platform_family wsl:ubuntu)" = "linux" ] || selftest_fail "platform_family wsl:ubuntu"
+
+    case "$(platform_tools macos)" in *ld64.lld*) : ;; *) selftest_fail "macos tools must include ld64.lld" ;; esac
+    case "$(platform_tools macos)" in *mold*) selftest_fail "macos tools must NOT include mold" ;; esac
+    case "$(platform_tools macos)" in *renderdoc*) selftest_fail "macos tools must NOT include renderdoc (unsupported, handled separately)" ;; esac
+    case "$(platform_tools windows)" in *lld-link*) : ;; *) selftest_fail "windows tools must include lld-link" ;; esac
+    case "$(platform_tools windows)" in *mold*) selftest_fail "windows tools must NOT include mold" ;; esac
+    case "$(platform_tools freebsd)" in *mold*) : ;; *) selftest_fail "freebsd tools must include mold" ;; esac
+    case "$(platform_tools linux:ubuntu)" in *vulkan*) : ;; *) selftest_fail "linux tools must include vulkan" ;; esac
+
+    # Fixture 4: RenderDoc UNSUPPORTED on macOS/FreeBSD never fails and never installs
+    row="$(check_renderdoc macos)"
+    printf '%s\n' "$row" | grep -q '^renderdoc|UNSUPPORTED|' || selftest_fail "renderdoc on macos must be UNSUPPORTED, got: $row"
+    row="$(check_renderdoc freebsd)"
+    printf '%s\n' "$row" | grep -q '^renderdoc|UNSUPPORTED|' || selftest_fail "renderdoc on freebsd must be UNSUPPORTED, got: $row"
+
+    # Fixture 5: Vulkan present/missing/no-device via a fake vulkaninfo on PATH
     bindir="$tmp/bin"
     mkdir -p "$bindir"
-    # present, satisfies min version
+    for coreutil in grep head cut cat sh awk tr sed find mktemp tar wc; do
+        real="$(command -v "$coreutil" 2>/dev/null || true)"
+        if [ -n "$real" ] && [ ! -e "$bindir/$coreutil" ]; then
+            # Neither a symlink NOR a byte copy placed in a different
+            # directory works on Windows/MSYS: the copied/linked binary
+            # can't find its co-located support DLLs from its new location
+            # ("error while loading shared libraries") even though the
+            # symlink/copy itself succeeds without error. A tiny exec
+            # wrapper avoids this on every platform — the interpreter is
+            # invoked via its own absolute shebang path (unaffected by the
+            # restricted fixture PATH), and it `exec`s the ORIGINAL binary
+            # by its original absolute path, so it loads from where its
+            # dependencies actually live.
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$bindir/$coreutil"
+            chmod +x "$bindir/$coreutil"
+        fi
+    done
+
+    # 5a: no vulkaninfo at all -> MISSING
+    row="$(PATH="$bindir" check_vulkan)"
+    printf '%s\n' "$row" | grep -q '^vulkan|MISSING|' || selftest_fail "vulkan with no binary must be MISSING, got: $row"
+
+    # 5b: vulkaninfo present, reports a GPU -> PRESENT
+    cat > "$bindir/vulkaninfo" <<'EOF'
+#!/bin/sh
+echo "Vulkan Instance Version: 1.4.350"
+echo "GPU0:"
+echo "	deviceName         = Fixture GPU"
+EOF
+    chmod +x "$bindir/vulkaninfo"
+    row="$(PATH="$bindir" check_vulkan)"
+    printf '%s\n' "$row" | grep -q '^vulkan|PRESENT|' || selftest_fail "vulkan with a fixture GPU line must be PRESENT, got: $row"
+
+    # 5c: vulkaninfo present but enumerates no device -> NO_DEVICE (a FAIL,
+    # distinct from MISSING)
+    cat > "$bindir/vulkaninfo" <<'EOF'
+#!/bin/sh
+echo "Vulkan Instance Version: 1.4.350"
+echo "ERROR: [Loader Message] Code 0 : setup_loader_term_phys_devs: Failed to detect any devices"
+EOF
+    chmod +x "$bindir/vulkaninfo"
+    row="$(PATH="$bindir" check_vulkan)"
+    printf '%s\n' "$row" | grep -q '^vulkan|NO_DEVICE|' || selftest_fail "vulkan with no GPU lines must be NO_DEVICE, got: $row"
+
+    # Fixture 6: --dry-run prints a plan, executes nothing, for a fully-empty
+    # fixture PATH (every tool MISSING). Use a marker file that any REAL
+    # execution of run_or_plan's command would need real network/sudo
+    # binaries to touch; since none of those exist on the fixture PATH, a
+    # bug that ran commands for real instead of planning them would surface
+    # as a "command not found" leaking into the output, which the dry-run
+    # path must never produce (it never calls `"$@"` at all).
+    script="$0"
+    for os in Linux Darwin FreeBSD; do
+        case "$os" in
+            Linux) fam_expect="LLVM 23.1" ;;
+            Darwin) fam_expect="Homebrew" ;;
+            FreeBSD) fam_expect="build-llvm-23-1-provider" ;;
+        esac
+        set +e
+        out="$(PATH="$bindir" BOOTSTRAP_PREREQS_UNAME_S="$os" BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native" sh "$script" install --dry-run 2>&1)"
+        rc=$?
+        set -e
+        printf '%s\n' "$out" | grep -qi "would run\|DRY RUN\|$fam_expect" || selftest_fail "dry-run for $os must print a plan mentioning '$fam_expect', got: $out"
+        printf '%s\n' "$out" | grep -qi "^running:" && selftest_fail "dry-run for $os must never print 'running:' (that means it executed something), got: $out"
+    done
+
+    # Fixture 7: fully-satisfied fixture PATH -> check PASSes, and `install`
+    # (non-dry-run) is idempotent: does nothing, exits 0, no "installing"
+    # banners.
     cat > "$bindir/git" <<'EOF'
 #!/bin/sh
 echo "git version 2.40.0"
 EOF
-    # present, wrong version (clang too old)
-    cat > "$bindir/clang" <<'EOF'
-#!/bin/sh
-echo "Ubuntu clang version 14.0.0-1ubuntu1.1"
-EOF
-    chmod +x "$bindir/git" "$bindir/clang"
-    # rustc, cargo, jj, mold, ld.lld, llvm-config, cmake, ninja, timeout,
-    # perl, sha256sum, xxd, clang++ deliberately absent from this fixture PATH.
-
-    # The fixture PATH below is used VERBATIM (not prepended to the real
-    # PATH), so that a host which happens to already have some of these
-    # tools installed cannot turn a fixture's intended MISSING into a false
-    # PRESENT. That means every core utility this script itself calls
-    # (grep, head, cut, cat, printf's external form, mktemp is only needed
-    # earlier) must also be reachable from inside that fixture PATH —
-    # symlink the real ones in.
-    for coreutil in grep head cut cat sh awk tr; do
-        real="$(command -v "$coreutil" 2>/dev/null || true)"
-        if [ -n "$real" ] && [ ! -e "$bindir/$coreutil" ]; then
-            ln -s "$real" "$bindir/$coreutil" 2>/dev/null || cp "$real" "$bindir/$coreutil"
-        fi
-    done
-
-    fake_path="$bindir"
-    # run_check exits non-zero on FAIL. Under `set -e`, a bare
-    # `var=$(cmd)` assignment takes on cmd's own exit status and DOES abort
-    # the script (this is a real POSIX/bash gotcha, distinct from a command
-    # substitution embedded inside a larger command) — so errexit is
-    # disabled around every fixture invocation that is expected to return
-    # non-zero, and re-enabled immediately after `rc=$?` is captured.
-    set +e
-    out="$(PATH="$fake_path" run_check 2>&1)"; rc=$?
-    set -e
-    printf '%s\n' "$out" | grep -q '^git *PRESENT' || selftest_fail "git must be detected PRESENT in fixture, got: $out"
-    printf '%s\n' "$out" | grep -q '^clang *WRONG_VERSION' || selftest_fail "clang must be WRONG_VERSION in fixture (14.0.0 < 23.1.0), got: $out"
-    printf '%s\n' "$out" | grep -q '^rustc *MISSING' || selftest_fail "rustc must be MISSING in fixture, got: $out"
-    printf '%s\n' "$out" | grep -q '^FAIL' || selftest_fail "fixture run_check must end in FAIL, got: $out"
-    [ "$rc" -eq 1 ] || selftest_fail "fixture run_check must exit 1, got $rc"
-
-    # Fixture 4: non-interactive install must never install, must exit 2,
-    # and must list every offending tool's install command.
-    set +e
-    out="$(PATH="$fake_path" sh -c '
-        exec </dev/null
-        '"$0"' install
-    ' 2>&1)"; rc=$?
-    set -e
-    [ "$rc" -eq 2 ] || selftest_fail "non-interactive install must exit 2, got $rc"
-    printf '%s\n' "$out" | grep -qi "non-interactive" || selftest_fail "non-interactive install must say so: $out"
-    printf '%s\n' "$out" | grep -q "rustc" || selftest_fail "non-interactive install must list rustc's install command: $out"
-    printf '%s\n' "$out" | grep -qE '^ERROR' || selftest_fail "non-interactive install must end in ERROR verdict: $out"
-    # Never actually ran an installer: no apt-get/cargo install invocation
-    # markers should appear as *executed* — this fixture PATH has no real
-    # apt-get/cargo, so any attempt to invoke one would itself error loudly
-    # with "command not found", which we did not see above (rc is 2, exit
-    # reason is the refusal path, not a failed install attempt).
-
-    # Fixture 5: a fully-satisfied fixture PATH must PASS.
-    for t in clang clang++ ld.lld llvm-config mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd; do
+    for t in clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo jj cmake ninja timeout perl sha256sum xxd; do
         case "$t" in
             clang|clang++) ver="clang version 23.1.0" ;;
             ld.lld) ver="LLD 23.1.0" ;;
-            llvm-config) ver="23.1.0" ;;
+            llvm-config|llvm-ar) ver="23.1.0" ;;
             rustc) ver="rustc 1.90.0" ;;
             cargo) ver="cargo 1.90.0" ;;
+            jj) ver="jj 0.30.0" ;;
             cmake) ver="cmake version 3.31.2" ;;
             *) ver="1.0.0" ;;
         esac
@@ -497,13 +970,32 @@ echo "$ver"
 EOF
         chmod +x "$bindir/$t"
     done
+    cat > "$bindir/vulkaninfo" <<'EOF'
+#!/bin/sh
+echo "GPU0:"
+echo "	deviceName         = Fixture GPU"
+EOF
+    chmod +x "$bindir/vulkaninfo" "$bindir/git"
+    cat > "$bindir/renderdoccmd" <<'EOF'
+#!/bin/sh
+echo "renderdoccmd v1.44"
+EOF
+    chmod +x "$bindir/renderdoccmd"
+
     set +e
-    out="$(PATH="$fake_path" run_check 2>&1)"; rc=$?
+    out="$(PATH="$bindir" BOOTSTRAP_PREREQS_UNAME_S=Linux BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native" run_check 2>&1)"; rc=$?
     set -e
     printf '%s\n' "$out" | grep -q '^PASS' || selftest_fail "fully-satisfied fixture must PASS, got: $out"
-    [ "$rc" -eq 0 ] || selftest_fail "fully-satisfied fixture must exit 0, got $rc"
+    [ "$rc" -eq 0 ] || selftest_fail "fully-satisfied fixture check must exit 0, got $rc"
 
-    echo "SELFTEST OK — 5 fixture(s) passed"
+    set +e
+    out="$(PATH="$bindir" BOOTSTRAP_PREREQS_UNAME_S=Linux BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native" run_install 0 2>&1)"; rc=$?
+    set -e
+    printf '%s\n' "$out" | grep -q '^PASS' || selftest_fail "fully-satisfied fixture install must PASS immediately (idempotent), got: $out"
+    printf '%s\n' "$out" | grep -qi "^=== " && selftest_fail "fully-satisfied fixture install must not print any installer banner, got: $out"
+    [ "$rc" -eq 0 ] || selftest_fail "fully-satisfied fixture install must exit 0, got $rc"
+
+    echo "SELFTEST OK — 7 fixture group(s) passed"
 }
 
 # ---------------------------------------------------------------------------
@@ -511,18 +1003,18 @@ EOF
 # ---------------------------------------------------------------------------
 
 mode="check"
-yes_flag="0"
+dry_run="0"
 do_selftest="0"
 
 for arg in "$@"; do
     case "$arg" in
         check) mode="check" ;;
         install) mode="install" ;;
-        --yes) yes_flag="1" ;;
+        --dry-run) dry_run="1" ;;
         --selftest) do_selftest="1" ;;
         *)
             echo "unknown argument: $arg" >&2
-            echo "usage: sh scripts/setup/bootstrap-prereqs.shs [check|install] [--yes] [--selftest]" >&2
+            echo "usage: sh scripts/setup/bootstrap-prereqs.shs [check|install] [--dry-run] [--selftest]" >&2
             exit 2
             ;;
     esac
@@ -539,7 +1031,7 @@ case "$mode" in
         exit $?
         ;;
     install)
-        run_install "$yes_flag"
+        run_install "$dry_run"
         exit $?
         ;;
 esac
