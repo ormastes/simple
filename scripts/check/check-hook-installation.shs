@@ -186,6 +186,84 @@ expected_guard="$repo_root/scripts/check/pre-push-conflict-tree-guard.shs"
 expected_dispatcher="$repo_root/scripts/hooks/pre-push"
 expected_launcher="$repo_root/scripts/hooks/pre-push-worktree-launcher"
 
+# --- PASS-only cache (2026-09-25, push_hook_plan.md item2, goal "hook adds
+# <=10s"). This script alone measured ~1.5s of the ~5s of fixed overhead in
+# every push (several git-rev-parse/readlink/cmp subshells plus a nested
+# check-core-bare-sanity.shs invocation), on top of the fast content guards it
+# gates. Its own verdict is a pure function of a small, enumerable set of
+# inputs (hook wiring files + two git-config booleans + this script's own
+# content), so an unchanged fingerprint can only ever recompute the SAME
+# verdict. Only a PASS is ever cached: an uncertain or broken wiring state
+# must always be re-examined, never short-circuited, so a FAIL/ERROR path
+# below never writes this cache and a stale cache is never trusted to mean
+# "still fine" -- only "still exactly this". Any hashing failure (a missing
+# file, an unwritable cache dir) degrades to running the full check, never to
+# skipping it.
+_cache_hash_file() { sha256sum -- "$1" 2>/dev/null | awk '{print $1}'; }
+_cache_or_missing() {
+    if [ -e "$1" ]; then
+        _h=$(_cache_hash_file "$1") && [ -n "$_h" ] && { printf 'file:%s\n' "$_h"; return 0; }
+        printf 'unreadable:%s\n' "$1"
+    else
+        printf 'absent:%s\n' "$1"
+    fi
+}
+_cache_dir_raw=$(git rev-parse --git-dir 2>/dev/null) || _cache_dir_raw=""
+if [ -n "$_cache_dir_raw" ]; then
+    if is_absolute_path "$_cache_dir_raw"; then
+        _cache_dir=$_cache_dir_raw
+    else
+        _cache_dir="$repo_root/$_cache_dir_raw"
+    fi
+else
+    _cache_dir=""
+fi
+_cache_file=""
+_cache_key=""
+if [ -n "$_cache_dir" ] && [ -d "$_cache_dir" ]; then
+    _cache_file="$_cache_dir/simple-hook-install-check.cache"
+    _hooks_path_now=$(git config --get core.hooksPath 2>/dev/null || true)
+    _resolved_hooks_dir=""
+    if [ -n "$_hooks_path_now" ]; then
+        case "$_hooks_path_now" in
+            /*) _resolved_hooks_dir=$_hooks_path_now ;;
+            *) _resolved_hooks_dir="$repo_root/$_hooks_path_now" ;;
+        esac
+    fi
+    _hook_now="$git_dir/hooks/pre-push"
+    if [ -n "$_hooks_path_now" ] && [ -d "$_resolved_hooks_dir" ] && [ -e "$_resolved_hooks_dir/pre-push" ]; then
+        _hook_now="$_resolved_hooks_dir/pre-push"
+    fi
+    _hook_exec_bit="noexec"
+    [ -e "$_hook_now" ] && [ -x "$_hook_now" ] && _hook_exec_bit="exec"
+    _hook_target_now=$(readlink -f "$_hook_now" 2>/dev/null || echo "$_hook_now")
+    _ppl_now="$(dirname "$_hook_now")/pre-push.local"
+    _fp=$(
+        printf 'hooksPath=%s\n' "$_hooks_path_now"
+        printf 'hookPath=%s exec=%s target=%s\n' "$_hook_now" "$_hook_exec_bit" "$_hook_target_now"
+        _cache_or_missing "$_hook_now"
+        _cache_or_missing "$expected_guard"
+        _cache_or_missing "$expected_dispatcher"
+        _cache_or_missing "$expected_launcher"
+        _cache_or_missing "$repo_root/scripts/check/check-core-bare-sanity.shs"
+        _cache_or_missing "$_ppl_now"
+        for _g in check-tree-size-push check-no-conflict-tree-push check-no-conflict-markers-push check-no-revert-push; do
+            _cache_or_missing "$repo_root/scripts/check/$_g.shs"
+        done
+        printf 'core.verify=%s\n' "$(git config --get --type=bool core.verify 2>/dev/null || true)"
+        printf 'core.bare=%s\n' "$(git config --get --type=bool core.bare 2>/dev/null || true)"
+        _cache_or_missing "$repo_root/scripts/check/check-hook-installation.shs"
+    ) 2>/dev/null
+    _cache_key=$(printf '%s' "$_fp" | sha256sum 2>/dev/null | awk '{print $1}')
+    if [ -n "$_cache_key" ] && [ -f "$_cache_file" ]; then
+        _stored_key=$(sed -n '1p' "$_cache_file" 2>/dev/null)
+        if [ "$_stored_key" = "$_cache_key" ]; then
+            tail -n +2 "$_cache_file" 2>/dev/null
+            exit 0
+        fi
+    fi
+fi
+
 # --- check 1: core.hooksPath must be unset, or point at a real directory that
 # actually contains a pre-push hook. This is the exact defect that let the
 # fourth wipe through.
@@ -325,5 +403,13 @@ if [ "$fails" -gt 0 ]; then
     exit 1
 fi
 
-printf '%s: PASS — %d check(s) performed, hook wiring intact\n' "$name" "$checks"
+_pass_line=$(printf '%s: PASS — %d check(s) performed, hook wiring intact\n' "$name" "$checks")
+printf '%s' "$_pass_line"
+if [ -n "$_cache_key" ] && [ -n "$_cache_file" ]; then
+    {
+        printf '%s\n' "$_cache_key"
+        printf '%s' "$_pass_line"
+    } > "$_cache_file.tmp$$" 2>/dev/null && mv -f "$_cache_file.tmp$$" "$_cache_file" 2>/dev/null
+    rm -f "$_cache_file.tmp$$" 2>/dev/null
+fi
 exit 0
