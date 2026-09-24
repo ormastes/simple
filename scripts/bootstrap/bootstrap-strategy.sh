@@ -195,10 +195,66 @@ else
     critical_cpu=1
 fi
 memory_total=${SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB:-}
-if [ -z "$memory_total" ] && [ -r /proc/meminfo ]; then
-    memory_total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
+if [ -z "$memory_total" ]; then
+    # Per-OS total-physical-memory probe. /proc/meminfo alone (the old
+    # behaviour) is Linux- and MSYS-only; a host with neither -- notably
+    # bare FreeBSD, and stock macOS -- fell through to a fabricated 2048 MiB
+    # below with no signal that the number was made up. sysctl covers
+    # FreeBSD/Darwin; PowerShell covers a Windows host where /proc/meminfo
+    # (MSYS's emulation) is unavailable, e.g. a non-MSYS POSIX layer.
+    case "$(uname -s 2>/dev/null || :)" in
+        Darwin)
+            _bs_mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || :)
+            case "$_bs_mem_bytes" in ''|*[!0-9]*) _bs_mem_bytes="" ;; esac
+            [ -z "$_bs_mem_bytes" ] || memory_total=$((_bs_mem_bytes / 1048576))
+            unset _bs_mem_bytes
+            ;;
+        FreeBSD)
+            _bs_mem_bytes=$(sysctl -n hw.physmem 2>/dev/null || :)
+            case "$_bs_mem_bytes" in ''|*[!0-9]*) _bs_mem_bytes="" ;; esac
+            [ -z "$_bs_mem_bytes" ] || memory_total=$((_bs_mem_bytes / 1048576))
+            unset _bs_mem_bytes
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            if [ -r /proc/meminfo ]; then
+                memory_total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
+            fi
+            case "$memory_total" in ''|*[!0-9]*) memory_total="" ;; esac
+            if [ -z "$memory_total" ] && command -v powershell.exe >/dev/null 2>&1; then
+                if command -v timeout >/dev/null 2>&1; then
+                    _bs_mem_kib=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
+                        "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize" \
+                        </dev/null 2>/dev/null | tr -d '\r\n ') || :
+                else
+                    _bs_mem_kib=$(powershell.exe -NoProfile -NonInteractive -Command \
+                        "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize" \
+                        </dev/null 2>/dev/null | tr -d '\r\n ') || :
+                fi
+                case "$_bs_mem_kib" in ''|*[!0-9]*) _bs_mem_kib="" ;; esac
+                [ -z "$_bs_mem_kib" ] || memory_total=$((_bs_mem_kib / 1024))
+                unset _bs_mem_kib
+            fi
+            ;;
+        *)
+            if [ -r /proc/meminfo ]; then
+                memory_total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
+            fi
+            ;;
+    esac
 fi
-case "$memory_total" in ''|*[!0-9]*|0) memory_total=2048 ;; esac
+case "$memory_total" in ''|*[!0-9]*|0) memory_total="" ;; esac
+# memory_total_known gates memory_enforcement below: when the probe found
+# nothing real, the compiler engine must NOT be capped against a fabricated
+# number (a 2048 MiB stand-in below any seed or cargo build broke mold and
+# every other build on hosts without /proc, notably bare FreeBSD). The
+# fabricated value is kept only so the arithmetic below (which every code
+# path still reads) has a positive integer to work with; it never reaches
+# `ulimit -v` because memory_enforcement stays "none" in that case.
+memory_total_known=1
+if [ -z "$memory_total" ]; then
+    memory_total_known=0
+    memory_total=2048
+fi
 # Reservation used only for the engine-side critical_memory accounting
 # below; the qualifier itself intentionally runs WITHOUT a ulimit -v cap
 # (see run_qualifier) because mold's output-buffer reservation fails under
@@ -215,7 +271,7 @@ if [ -z "$critical_memory" ]; then
 fi
 case "$critical_memory" in ''|*[!0-9]*|0) echo 'bootstrap-scheduler-error: invalid compiler memory limit' >&2; exit 2 ;; esac
 memory_enforcement=none
-if (ulimit -v 1048576) 2>/dev/null; then
+if [ "$memory_total_known" -eq 1 ] && (ulimit -v 1048576) 2>/dev/null; then
     memory_enforcement=ulimit-v
 fi
 schedule_mode=speculative
@@ -297,24 +353,34 @@ event task-start stage-engine building
     for engine_arg in "$@"; do
         case "$engine_arg" in --jobs|--jobs=*) forced_jobs= ;; esac
     done
-    SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
-    SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER="$generation_dir/stage2-cleanup.ready" \
-    SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
-    perl -e '
-        use strict; use warnings;
-        my $jobs = shift @ARGV;
-        my $engine = shift @ARGV;
-        my @out;
-        for my $arg (@ARGV) {
-            next if $arg eq "--full-cli" || $arg eq "--deploy" ||
-                $arg eq "--release" || $arg eq "--clean-release";
-            push @out, $arg;
-        }
-        push @out, "--jobs=$jobs" if length $jobs;
-        exec "/bin/sh", $engine, @out;
-        die "exec stage engine failed: $!";
-    ' "$forced_jobs" "$engine" "$@" \
-        >"$generation_dir/stage-engine.log" 2>&1
+    (
+        SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1
+        SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER="$generation_dir/stage2-cleanup.ready"
+        SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu"
+        export SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED \
+            SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS
+        _bs_engine="$engine"
+        _bs_jobs="$forced_jobs"
+        # POSIX argv filter, replacing a perl -e one-liner: drop the four
+        # flags the stage engine must never see directly, then optionally
+        # append --jobs=N. No arrays in POSIX sh, so rebuild the positional
+        # parameters by shifting each original argument off the front and,
+        # unless it is filtered, pushing it back onto the end via
+        # `set -- "$@" "$arg"` -- looping exactly the original argument
+        # count keeps this from re-processing the ones just appended.
+        _bs_remaining=$#
+        while [ "$_bs_remaining" -gt 0 ]; do
+            _bs_arg=$1
+            shift
+            case "$_bs_arg" in
+                --full-cli|--deploy|--release|--clean-release) ;;
+                *) set -- "$@" "$_bs_arg" ;;
+            esac
+            _bs_remaining=$((_bs_remaining - 1))
+        done
+        [ -z "$_bs_jobs" ] || set -- "$@" "--jobs=$_bs_jobs"
+        exec /bin/sh "$_bs_engine" "$@"
+    ) >"$generation_dir/stage-engine.log" 2>&1
     rc=$?
     done_tmp="$engine_done.tmp.$$"
     {
