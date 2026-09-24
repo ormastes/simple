@@ -27,7 +27,7 @@ use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profi
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_rename, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
 use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, compile_simpleos_arm64, simpleos_spl_start_symbol}
 use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
@@ -99,6 +99,46 @@ fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
         return Err("SimpleOS x86_64 asm compile failed for {src}: {err}")
     Ok(obj)
 
+# Version this signature if compile_simpleos_x86_64_c changes its fixed flags.
+# The generated caller is self-contained (no headers or include dependencies).
+fn simpleos_x86_64_user_module_init_cache_key(source: text, cc: text, compiler_version: text, opt_level: i64) -> text:
+    val identity = "simpleos-user-init-v1;x86_64-unknown-none-elf;{opt_level};{cc}\n{compiler_version}\n{source}"
+    sha256_u8_hex(identity.bytes())
+
+fn simpleos_x86_64_cached_user_module_init(source: text, opt_level: i64) -> Result<text, text>:
+    val configured_cc = env_get("SIMPLE_CC") ?? ""
+    val cc = if configured_cc != "": configured_cc else: "clang"
+    val (compiler_version, version_err, version_code) = process_run(cc, ["--version"])
+    if version_code != 0 or compiler_version.trim() == "":
+        return Err("cannot identify initializer compiler {cc}: {version_err}")
+    val key = simpleos_x86_64_user_module_init_cache_key(source, cc, compiler_version, opt_level)
+    val prefix = "build/os/simpleos_x86_64_user_module_init_{key}"
+    val init_c = "{prefix}.c"
+    val init_o = "{prefix}.o"
+    if file_exists(init_o):
+        return Ok(init_o)
+    # PID distinguishes concurrent publishers only; durable paths are keyed by
+    # source/toolchain/flags. Never expose a partially written source or object.
+    val source_tmp = "{prefix}.{getpid()}.tmp.c"
+    val object_tmp = "{prefix}.{getpid()}.tmp.o"
+    if not file_write(source_tmp, source):
+        file_delete(source_tmp)
+        return Err("cannot stage initializer source")
+    if not file_rename(source_tmp, init_c):
+        file_delete(source_tmp)
+        if not file_exists(init_c):
+            return Err("cannot publish initializer source")
+    match compile_simpleos_x86_64_c(init_c, object_tmp, opt_level):
+        case Err(e):
+            file_delete(object_tmp)
+            return Err(e)
+        case Ok(_): pass
+    if not file_rename(object_tmp, init_o):
+        file_delete(object_tmp)
+        if not file_exists(init_o):
+            return Err("cannot publish initializer object")
+    Ok(init_o)
+
 fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf":
@@ -135,21 +175,16 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
             if not dir_create_all("build/os"):
                 file_delete(entry_object)
                 return Err("SimpleOS x86_64 userspace module-init staging directory creation failed")
-            val init_c = "build/os/simpleos_x86_64_user_module_init_{getpid()}.c"
-            init_o = "build/os/simpleos_x86_64_user_module_init_{getpid()}.o"
             # The compatibility runtime archive exports an empty strong
             # __simple_call_module_inits stub. --wrap redirects the CRT's
             # reference to this generated implementation without admitting a
             # second strong definition from the archive.
-            file_write(init_c, simpleos_module_init_caller_source_for_symbol(module_init_names, "__wrap___simple_call_module_inits"))
-            match compile_simpleos_x86_64_c(init_c, init_o, opt_level):
+            val init_source = simpleos_module_init_caller_source_for_symbol(module_init_names, "__wrap___simple_call_module_inits")
+            match simpleos_x86_64_cached_user_module_init(init_source, opt_level):
                 case Err(e):
-                    file_delete(init_c)
-                    file_delete(init_o)
                     file_delete(entry_object)
                     return Err("SimpleOS x86_64 userspace module-init caller compilation failed: {e}")
-                case Ok(_): pass
-            file_delete(init_c)
+                case Ok(path): init_o = path
 
         val support0 = support[0]
         var user_args: [text] = [
@@ -168,7 +203,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
         val (_user_out, user_err, user_code) = process_run(linker, user_args)
         file_delete(entry_object)
-        file_delete(init_o)
+        # The content-keyed initializer object is immutable and survives links.
         if user_code != 0:
             return Err("SimpleOS x86_64 user executable link failed: {user_err}")
         if verbose:
