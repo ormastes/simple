@@ -1,0 +1,77 @@
+# ARM64 in-guest clang compile bring-up entry (lane-C1 aarch64 deliverable).
+#
+# Sequential rungs, each gated by the BLOCKING arm64_fs_exec_spawn_ring3
+# (prepare -> EL0 handoff -> wait_for_collect -> child exit code):
+#   R3: /CLANG.ELF --version            (guest clang prints its version line)
+#   R4a: /CLANG.ELF -cc1 -triple aarch64-unknown-simpleos -emit-obj /HELLO.C -o /HELLO.O
+#   R4b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /HELLO.O /LIBC.A -o /HELLO2.ELF
+#   R5: /HELLO2.ELF                     (prints HELLO_C_FROM_GUEST_ARM64)
+# Final marker: CLANG_IN_GUEST_ARM64_OK
+#
+# Staged by scripts/qemu/check_simpleos_arm64_clang_compile.shs via
+# scripts/os/fsexec_mkimg_clang_arm64.spl (FAT32 root-only, 8.3 names).
+
+extern fn serial_println(msg: text)
+extern fn rt_qemu_exit_success()
+extern fn rt_arm64_harden_canary_value() -> i64
+
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_vfs_boot_init}
+use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_ring3}
+use os.kernel.boot.mmio.{mmio_disable_test_mode}
+use os.kernel.log.klog_api.{log_init_serial, LOG_TRACE}
+
+fn _rung(label: text, path: text, argv: [text]) -> i64:
+    serial_println("[clang-bringup] rung={label} exec={path}")
+    val rc = arm64_fs_exec_spawn_ring3(path, argv, [])
+    serial_println("[clang-bringup] rung={label} rc={rc}")
+    rc
+
+fn spl_start():
+    serial_println("")
+    serial_println("=== SimpleOS ARM64 in-guest clang bring-up ===")
+    serial_println("[harden] canary arch=aarch64 value={rt_arm64_harden_canary_value()}")
+    # Route kernel-log diagnostics (boot-fs-mount, virtio, fat32) to serial:
+    # without this the failure evidence above vfs:fail is silently gated off.
+    log_init_serial(LOG_TRACE)
+
+    if not arm_fs_exec_vfs_boot_init():
+        serial_println("[clang-bringup] vfs:fail")
+        serial_println("CLANG_IN_GUEST_ARM64_VFS_FAIL")
+        rt_qemu_exit_success()
+        return
+
+    # R3: guest clang --version (exit code 0 expected)
+    val rc3 = _rung("R3-clang-version", "/CLANG.ELF", ["/CLANG.ELF", "--version"])
+    if rc3 != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R3_FAIL rc={rc3}")
+        rt_qemu_exit_success()
+        return
+
+    # R4a: in-guest cc1 compile /HELLO.C -> /HELLO.O
+    val rc4a = _rung("R4a-cc1-compile", "/CLANG.ELF",
+        ["/CLANG.ELF", "-cc1", "-triple", "aarch64-unknown-simpleos",
+         "-ffreestanding", "-nostdlibinc", "-O0",
+         "-emit-obj", "-o", "/HELLO.O", "/HELLO.C"])
+    if rc4a != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R4_COMPILE_FAIL rc={rc4a}")
+        rt_qemu_exit_success()
+        return
+
+    # R4b: in-guest lld link -> /HELLO2.ELF
+    val rc4b = _rung("R4b-lld-link", "/LLD.ELF",
+        ["/LLD.ELF", "-flavor", "gnu", "-T", "/SIMPLEOS.LD",
+         "/CRT0.O", "/HELLO.O", "/LIBC.A", "-o", "/HELLO2.ELF"])
+    if rc4b != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R4_LINK_FAIL rc={rc4b}")
+        rt_qemu_exit_success()
+        return
+
+    # R5: run the guest-produced binary (prints HELLO_C_FROM_GUEST_ARM64)
+    val rc5 = _rung("R5-run-hello2", "/HELLO2.ELF", ["/HELLO2.ELF"])
+    if rc5 != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R5_FAIL rc={rc5}")
+        rt_qemu_exit_success()
+        return
+
+    serial_println("CLANG_IN_GUEST_ARM64_OK")
+    rt_qemu_exit_success()

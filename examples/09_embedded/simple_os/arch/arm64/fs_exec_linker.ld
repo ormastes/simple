@@ -36,6 +36,10 @@ SECTIONS {
         *(.data*)
     } > RAM
 
+    /* End of the LOADED image: crt0.S's self-relocation stub moves exactly
+     * [_start, _kernel_load_end). Everything below is NOLOAD. */
+    _kernel_load_end = .;
+
     .bss (NOLOAD) : ALIGN(4K) {
         _sbss = .;
         *(.bss*)
@@ -56,4 +60,8 @@ SECTIONS {
     } > RAM
 
 INCLUDE "examples/09_embedded/simple_os/arch/common/linker_arm_common.ld"
+
+/* Total in-memory footprint (text..heap), declared in the arm64 Linux Image
+ * header in crt0.S so a real bootloader reserves the full span. */
+_image_size = _kernel_end - _start;
 }
