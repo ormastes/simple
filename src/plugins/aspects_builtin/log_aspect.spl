@@ -1,0 +1,52 @@
+# Built-in "log" advice body — moved out of the K0 weaver (WP-11, kernel/plugin
+# split plan Phase 7 first step). The weaver mechanism (AopWeaver.add_before/
+# add_after/add_around) stays in `compiler.tools.aop` (K0); this advice BODY
+# does not, per kernel_pluggable_partition.md §3 ("Advice bodies are P").
+#
+# Moved verbatim from src/compiler/90.tools/aop.spl (class LogAspect,
+# AopWeaver.add_log_aspect). Byte-identical closures/orders (100).
+
+use compiler.tools.aop.{AopWeaver, Pointcut}
+use plugins.aspects_builtin.aspect_helpers.{aop_first_arg}
+
+class LogAspect:
+    level: i64
+
+    fn log_aop(prefix: text, message: text):
+        if self.level > 0:
+            print "[AOP] {prefix} {message}"
+
+    fn before(name: text, args: [Any]):
+        self.log_aop(">>", name)
+
+    fn after(name: text, result: Any):
+        self.log_aop("<<", name)
+
+    fn around(name: text, args: [Any], proceed: fn() -> Any) -> Any:
+        self.before(name, args)
+        val result = proceed()
+        self.after(name, result)
+        result
+
+# Installs `aspect` onto `weaver` for `pointcut`, using the kernel's already-
+# public generic add_before/add_after mechanism. This is the free-function
+# replacement for the former `AopWeaver.add_log_aspect` method — it could not
+# stay a method once LogAspect moved out of the kernel (a K0 class taking a P
+# type as a parameter is the same K0->P edge the partition forbids).
+pub fn install_log_aspect(weaver: AopWeaver, aspect: LogAspect, pointcut: Pointcut):
+    # Normalize args to avoid nil/empty edge cases during bootstrap.
+    val before_handler: fn(text, [Any]) -> Any = \name, args:
+        if args == nil:
+            aspect.before(name, [])
+        else:
+            aspect.before(name, args)
+    weaver.add_before(pointcut, before_handler, 100)
+
+    val after_handler: fn(text, [Any]) -> Any = \name, args:
+        if args == nil:
+            aspect.after(name, nil)
+        else if args.len() > 0:
+            aspect.after(name, aop_first_arg(args))
+        else:
+            aspect.after(name, nil)
+    weaver.add_after(pointcut, after_handler, 100)
