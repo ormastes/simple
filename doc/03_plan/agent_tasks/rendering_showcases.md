@@ -21,9 +21,11 @@ Sidecars must not invent or rename these:
   on unavailable backends; advisory on gui/wm headless captures),
   `SIMPLE_RENDERING_UI` (`tui|gui|web`),
   `SIMPLE_RENDERING_WEB_FIXTURE=1` (generate web fixture).
-- **Entry header format (line 2-3 of every entry):**
-  `# lane: <tui|gui|wm|2d|web>` and `# tier: <brief|full|core|extended>`
-  plus `# core: <module path>` — the census spec asserts these.
+- **Entry header format (lines 2-6 of every entry):**
+  `# lane: <tui|gui|wm|2d|web|webserver|switch>` and `# tier: <brief|full|core|extended>`
+  plus `# core: <module path or data file>` — the census spec asserts these.
+  (2026-09-24 review: `webserver` and `switch` lanes added to the enum; the
+  `switch` entry's `# core:` names its data file `rendering_items.ui.sdn`.)
 - **Honest-fail exit line:** `showcase status=blocked <reason>` /
   `showcase status=pass <path>` (matches existing entries).
 - **Capture artifacts:** PPM + `.provenance.sdn` sidecar (wm_showcase
