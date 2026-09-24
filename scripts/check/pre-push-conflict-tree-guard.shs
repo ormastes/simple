@@ -132,4 +132,84 @@ fi
 # structure plus fresh bootstrap evidence in roughly ten seconds.
 MUST_CHECK_PUSH_REMOTE=${1:-}
 export MUST_CHECK_PUSH_REMOTE
-exec sh "$repo_root/scripts/check/check-push-must-pass.shs" --from-pre-push-hook
+
+# 2026-09-24 (WP2, push_hook_plan.md A.5/D, owner decision O3=a): stdin carries
+# the ref rows git always feeds a pre-push hook, and check-push-must-pass.shs
+# reads them itself — stdin can only be consumed once, so we tee it to a temp
+# file first and feed that file to both the (unmodified) dispatcher and our own
+# post-pass reporting loop below.
+_refs_tmp=$(mktemp 2>/dev/null) || _refs_tmp="${TMPDIR:-/tmp}/simple-pre-push-refs.$$"
+# EXIT-only trap does cleanup unconditionally. INT/TERM get their OWN traps
+# that clean up AND exit non-zero explicitly — a signal delivered mid-hook
+# must never be allowed to fall through to whatever exit status the shell
+# would otherwise have produced (which could be 0).
+trap 'rm -f "$_refs_tmp"' EXIT
+trap 'rm -f "$_refs_tmp"; exit 130' INT
+trap 'rm -f "$_refs_tmp"; exit 143' TERM
+
+if ! cat > "$_refs_tmp"; then
+    echo "pre-push: cannot capture the ref rows git fed this hook on stdin — refusing to push blind" >&2
+    exit 2
+fi
+if [ ! -s "$_refs_tmp" ]; then
+    echo "pre-push: stdin produced an EMPTY ref-rows file — refusing to push blind." >&2
+    echo "  git always feeds a real pre-push invocation at least one ref row; an" >&2
+    echo "  empty capture here means stdin was truncated or redirected away, and" >&2
+    echo "  letting the dispatcher run on 0 rows would silently pass an unchecked push." >&2
+    exit 2
+fi
+
+sh "$repo_root/scripts/check/check-push-must-pass.shs" --from-pre-push-hook < "$_refs_tmp"
+_must_pass_rc=$?
+if [ "$_must_pass_rc" -ne 0 ]; then
+    rm -f "$_refs_tmp"
+    exit "$_must_pass_rc"
+fi
+
+# --- local-ci receipt: REPORT ONLY, never changes the push verdict --------
+# O3=a: the local must-check tier is RUN and SIGNED in scripts/land.shs,
+# before a PR is opened — not here. This hook stays under ~10s by only asking
+# "does a valid-looking receipt already exist for what is about to be
+# pushed?" via a single `git notes show` per ref (well under 0.1s). An
+# unsigned/rush push is not a local failure: the remote fast-gates job simply
+# finds no receipt and runs the full checks, exactly like today.
+_ci_key=${SIMPLE_CI_RECEIPT_KEY:-}
+if [ -z "$_ci_key" ]; then
+    _ci_key=$(git config --get simple.ciReceiptKey 2>/dev/null) || _ci_key=""
+fi
+_ci_identity=${SIMPLE_CI_RECEIPT_IDENTITY:-}
+if [ -z "$_ci_identity" ]; then
+    _ci_identity=$(git config --get simple.ciReceiptIdentity 2>/dev/null) || _ci_identity=""
+fi
+
+_rush=0
+_rush_reason=""
+if [ "${SIMPLE_PUSH_RUSH:-0}" = 1 ]; then
+    _rush=1
+    _rush_reason="SIMPLE_PUSH_RUSH=1"
+elif [ -z "$_ci_key" ] || [ ! -f "$_ci_key" ] || [ -z "$_ci_identity" ]; then
+    _rush=1
+    _rush_reason="no local-ci signing key/identity configured (set SIMPLE_CI_RECEIPT_KEY/SIMPLE_CI_RECEIPT_IDENTITY or git config simple.ciReceiptKey/simple.ciReceiptIdentity)"
+fi
+
+_git_dir=$(git rev-parse --git-dir 2>/dev/null) || _git_dir=".git"
+
+while read -r _local_ref _local_sha _remote_ref _remote_sha; do
+    case "$_local_sha" in
+        ''|0000000000000000000000000000000000000000) continue ;;
+    esac
+    if [ "$_rush" = 1 ]; then
+        _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || _ts="unknown"
+        printf 'push-must-check: RUSH — local tier not run, no receipt for %s (%s); server runs full checks (%s)\n' "$_local_sha" "$_local_ref" "$_rush_reason" >&2
+        printf '%s RUSH ref=%s sha=%s reason=%s\n' "$_ts" "$_local_ref" "$_local_sha" "$_rush_reason" >> "$_git_dir/simple-push-rush.log" 2>/dev/null
+    else
+        if git notes --ref=ci-receipts show "$_local_sha" >/dev/null 2>&1; then
+            printf 'push-must-check: local-ci receipt present for %s (%s)\n' "$_local_sha" "$_local_ref" >&2
+        else
+            printf 'push-must-check: local-ci receipt ABSENT for %s (%s) — server will run full checks; sign one via: sh scripts/check/land.shs --submit\n' "$_local_sha" "$_local_ref" >&2
+        fi
+    fi
+done < "$_refs_tmp"
+
+rm -f "$_refs_tmp"
+exit 0
