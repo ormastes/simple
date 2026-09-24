@@ -75,8 +75,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          # `shell: sh` is `sh -e`; without this the first red gate aborts the
-          # step before `rc=$?` and the per-gate report below never prints.
+          # `shell: sh` is `sh -e`; without this a red runner exit aborts the
+          # step before the exit-code check below runs.
           set +e
           if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
               echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
@@ -92,33 +92,23 @@ jobs:
           # elsewhere. 41 extra commits keeps the window real.
           git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
               { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
-          RANGE="$BASE_SHA..$HEAD_SHA"
-          rc_total=0
-          run_gate() {
-              _gate=$1
-              _t0=$(date +%s)
-              sh "$@"
-              rc=$?
-              echo "fast-gates: $_gate exit=$rc $(( $(date +%s) - _t0 ))s"
-              [ "$rc" -eq 0 ] || rc_total=1
-          }
-          run_gate scripts/check/check-no-conflict-tree-push.shs "$RANGE"
-          run_gate scripts/check/check-no-conflict-markers-push.shs "$RANGE"
-          run_gate scripts/check/check-tree-size-push.shs --push-tip "$RANGE"
-          run_gate scripts/check/check-sdn-crc32-sealed.shs --rev "$HEAD_SHA"
-          run_gate scripts/check/check-rust-duplicate-reexport.shs --rev "$HEAD_SHA"
-          run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$HEAD_SHA" --baseline-rev "$BASE_SHA"
-          run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
-          run_gate scripts/check/check-range-shs-hygiene-push.shs "$RANGE"
-          # Blocking at push (push-no-stale-snapshot-rewind) and therefore
-          # required here too: the push tier is bypassable and the rewind class
-          # (e274cd33719 and two more, 2026-09-06) is precisely what a stale
-          # whole-tree snapshot pushed over someone else's landed work looks
-          # like. It reads committed objects only, so the sparse checkout above
-          # is sufficient; the depth fetched covers every commit in the range
-          # and its parent, which is what the single-parent walk needs.
-          run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
-          [ "$rc_total" -eq 0 ] || { echo "fast-gates: one or more fast gates failed"; exit 1; }
+          # One runner, one manifest, for both local and remote (goal item 5,
+          # WP3): this used to be 9 hardcoded `run_gate` lines that had
+          # drifted from the pre-push `local` tier (rust-dup --rev vs --range,
+          # no linux-phase2). It now reads config/check/must_check_gates.sdn
+          # AT THE PR'S OWN HEAD via --manifest-rev, so a PR cannot edit the
+          # gate that admits IT (the receipt-skip decision stays in
+          # pull_request_target from BASE, unaffected by this step) while
+          # still running the PR's own row set/placeholders. --tier local
+          # selects the 6 local rows plus the push tier's 4 blocking rows —
+          # exactly the "local tier == required remote check" rule (see the
+          # runner's header and config/check/must_check_gates.sdn's `local`
+          # tier comment).
+          sh scripts/check/run-gate-tier.shs --tier local \
+              --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
+              --manifest-rev "$HEAD_SHA" --jobs 16 --budget 240
+          rc=$?
+          [ "$rc" -eq 0 ] || { echo "fast-gates: one or more fast gates failed or errored (exit $rc)"; exit 1; }
 
   # The extended lane (job `code-idiom-gates`, "Code Idiom & Structural Ratchet
   # Gates (extended)") moved to .github/workflows/code-idiom-gates.yml on
