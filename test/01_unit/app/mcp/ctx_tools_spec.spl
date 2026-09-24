@@ -36,7 +36,7 @@ so the repo's own `.simple/ctx/` is never written by a test run.
 
 use std.spec
 use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_exists, file_write, time_now_unix_micros}
-use app.mcp.main_lazy_ctx_tools.{ctx_escape_cell, ctx_unescape_cell, ctx_chunk_text, ctx_tokenize, ctx_parse_string_array, ctx_unescape_json, ctx_index_text, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text, ctx_store_dir}
+use app.mcp.main_lazy_ctx_tools.{ctx_escape_cell, ctx_unescape_cell, ctx_chunk_text, ctx_tokenize, ctx_query_terms, ctx_parse_string_array, ctx_unescape_json, ctx_index_text, ctx_html_to_text, ctx_cap_bytes, ctx_fetch_allowed_url, ctx_stats_text, ctx_store_dir}
 use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute, handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute, handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats, handle_simple_ctx_doctor, handle_simple_ctx_upgrade, ctx_doctor_text, ctx_upgrade_store, ctx_schema_version}
 use app.mcp.main_dispatch.{dispatch_tool}
 
@@ -129,6 +129,25 @@ describe "simple_ctx_batch_execute":
         assert_contains(r, "[1] exit 0")
         assert_contains(r, "## query: gamma (1 hit(s))")
         assert_contains(r, "source=batch:spec#0")
+
+    it "finds a phrase actually present in the just-indexed command output, in the same call":
+        # 2026-09-24 investigation: a real MCP session reported
+        # simple_ctx_batch_execute({"commands":["git log --oneline -3"],
+        # "queries":["Merge pull request"]}) returning "0 hit(s)" right after
+        # indexing that command's output, which looked like a same-call
+        # recall bug. Reading the live chunk store's actual row for that
+        # exact call (chunk 865, source batch:1790238609#0) showed the real
+        # `git log --oneline -3` output at that moment held three non-merge
+        # commits and never contained the literal text "Merge pull request"
+        # at all — the 0-hit answer was correct given the data, not a
+        # search defect. This test pins the behaviour that report assumed
+        # was broken: a phrase genuinely present in the freshly indexed batch
+        # output IS found by a query in the same call.
+        _fresh_store()
+        val body = "{\"commands\":[\"echo deadbeef01 Merge pull request #1486 from foo/bar\"],\"queries\":[\"Merge pull request\"]}"
+        val r = handle_simple_ctx_batch_execute("6b", body)
+        assert_contains(r, "## query: Merge pull request (1 hit(s))")
+        assert_contains(r, "source=batch:")
 
 describe "simple_ctx_execute / simple_ctx_execute_file":
     it "returns stdout only and summarizes stderr to one line":
@@ -291,3 +310,29 @@ describe "search quality (parity: stopwords, code-token fallback)":
         assert_contains(s, "alpha (2 hit(s))")
         assert_contains(s, "match=bm25")
         assert_true(_idx(s, "source=doc:short") < _idx(s, "source=doc:long"))
+
+    it "does not treat 'fix'/'test'/'update'/'deps' as stopwords (2026-09-24 ranking regression)":
+        # Regression: these four used to sit in _CTX_STOPWORDS as "dev-noise"
+        # words, so a query naming them silently lost that term before
+        # scoring. Measured against the live 865-chunk repo store, dropping
+        # "fix" from "LLVM-C link fix" left the query as just "llvm link",
+        # letting an unrelated llvm-config doc page (which repeats "llvm"
+        # many times and never says "fix") outscore the actual matching
+        # chunk (11.928 vs 10.663). ctx_query_terms must keep all four.
+        val terms = ctx_query_terms("LLVM-C link fix test update deps").join("|")
+        assert_contains(terms, "fix")
+        assert_contains(terms, "test")
+        assert_contains(terms, "update")
+        assert_contains(terms, "deps")
+
+    it "ranks the chunk naming the query's most discriminating term first, not a doc that merely repeats a shared term":
+        _fresh_store()
+        assert_equal(ctx_index_text("The quick brown fox bootstrap stage2 LLVM-C link fix landed as PR 1490.", "ctx-selftest"), 1)
+        var padding: [text] = ["llvm-official-llvm-config is a tool used for llvm configuration and llvm builds across llvm projects with llvm mentioned many many times to pad length"]
+        var i = 0
+        while i < 15:
+            padding.push("llvm")
+            i = i + 1
+        assert_equal(ctx_index_text(padding.join(" "), "llvm-official-llvm-config"), 1)
+        val s = handle_simple_ctx_search("38", "{\"queries\":[\"LLVM-C link fix\"]}")
+        assert_true(_idx(s, "source=ctx-selftest") < _idx(s, "source=llvm-official-llvm-config"))
