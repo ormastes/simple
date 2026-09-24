@@ -561,7 +561,8 @@ printf '[3/7] Base image\n'
 
 mkdir -p "$VM_DIR" "$QEMU_RUNTIME_DIR" \
     "$(dirname "$OVERLAY_IMAGE")" "$(dirname "$SERIAL_LOG")" \
-    "$(dirname "$QEMU_START_LOG")" "$(dirname "$PID_FILE")"
+    "$(dirname "$QEMU_START_LOG")" "$(dirname "$PID_FILE")" \
+    "$(dirname "$QEMU_CLOUDINIT_ISO")"
 
 MEDIA_RECEIPT="$(sh "$MEDIA_CHECKER" --check --path "$QEMU_VM_PATH")" || {
     printf '%s\n' "$MEDIA_RECEIPT" >&2
@@ -640,7 +641,9 @@ pass "Overlay created (${QEMU_DISK_GB}G): $OVERLAY_IMAGE"
 
 # Detect KVM
 ACCEL="tcg"
-CPU_MODEL="qemu64"
+# Both bootstrap LLVM backends emit x86-64-v3. qemu64 lacks AVX2 and
+# makes the generated Stage 2 compiler fault before even --version.
+CPU_MODEL="max"
 case "${HOST_ARCH:-$(uname -m 2>/dev/null || true)}" in
     x86_64|amd64)
         if [ -w /dev/kvm ] 2>/dev/null; then
@@ -751,6 +754,21 @@ else
     fail "No root/sudo/doas available (root SSH timed out, no sudo/doas)"
 fi
 
+check_guest_avx2() {
+    # Compile the detector for baseline x86-64 so unsupported guests can
+    # reject cleanly. Clang's builtin also checks OS support for AVX state.
+    if ! $VM_SSH "probe=\$(mktemp /tmp/simple-avx2-probe.XXXXXX) &&
+        trap 'rm -f \"\$probe\"' EXIT HUP INT TERM &&
+        printf '%s\\n' 'int main(void) { __builtin_cpu_init(); return __builtin_cpu_supports(\"avx2\") ? 0 : 1; }' |
+        clang -x c -march=x86-64 -o \"\$probe\" - && \"\$probe\""; then
+        fail "Guest AVX2 execution support is required by bootstrap LLVM (CPU model: $CPU_MODEL)"
+    fi
+    pass "Guest AVX2 execution support verified"
+}
+
+info "Bootstrap resources: ${QEMU_CPUS} vCPUs, ${QEMU_MEM} RAM, ${QEMU_BUILD_JOBS} jobs"
+check_guest_avx2
+
 copy_guest_bootstrap_logs() {
     host_log_dir="${PROVENANCE_DIR}/guest-logs"
     rm -rf "$host_log_dir"
@@ -775,6 +793,7 @@ copy_guest_bootstrap_logs() {
 # ── Smoke / Full ───────────────────────────────────────────────────────
 printf '[7/7] Bootstrap (%s)\n' "$MODE"
 
+
 if [ "$MODE" = "smoke" ]; then
     # Smoke checks the base image compiler only; full runs admit LLVM 23.1.
     CLANG_CHECK=$($VM_SSH "test -x /usr/bin/clang && test -x /usr/bin/clang++ && echo ok || echo missing" 2>/dev/null)
@@ -783,6 +802,7 @@ if [ "$MODE" = "smoke" ]; then
     else
         fail "Base-image clang not available for smoke check"
     fi
+
 
     # Test trivial C compilation
     $VM_SSH "echo 'int main(){return 0;}' > /tmp/test.c && /usr/bin/clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok

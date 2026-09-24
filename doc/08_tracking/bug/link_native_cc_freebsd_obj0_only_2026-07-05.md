@@ -1,6 +1,6 @@
 ---
 id: link_native_cc_freebsd_obj0_only_2026-07-05
-status: OPEN
+status: FIXED IN SOURCE — VERIFICATION PENDING
 severity: medium
 discovered: 2026-07-05
 discovered_by: Code review of src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
@@ -12,26 +12,35 @@ related: src/compiler/70.backend/linker/linking_process.spl
 
 ## Summary
 
-The FreeBSD native linking code path in `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl` (around line 580) builds link arguments from `object_files[0]` only, dropping runtime objects and entry shim objects. The macOS branch (lines 556-573) was recently fixed to include all objects in the link, but the FreeBSD branch remains defective and will produce an undefined `_main` symbol error on FreeBSD native builds.
+The FreeBSD native linking code path previously built link arguments from
+`object_files[0]` only, dropping runtime objects and entry shim objects. The
+source now routes the FreeBSD branch through `cc_fallback_object_args`, which
+retains every object in the link.
 
 ## Evidence
 
-- File: `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl` line 580
-- macOS branch: correctly iterates `for obj in object_files` (lines 556-573)
-- FreeBSD branch: accesses `object_files[0]` directly, ignoring other objects
-- Pattern: Same defect fixed in macOS branch but not backported to FreeBSD
-- Unverified on actual FreeBSD (no host available for testing)
+- File: `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl`
+  (`os_name == "freebsd"` branch)
+- The branch appends every result of `cc_fallback_object_args(object_files)`.
+- `test/01_unit/compiler/linker/native_link_hardening_spec.spl` pins the
+  all-object helper contract.
+- A fresh native FreeBSD `--full` QEMU receipt remains pending; this source
+  correction has not been claimed as live guest evidence.
 
 ## Impact
 
-Native linking on FreeBSD will fail with undefined `_main` symbol or other runtime symbols, preventing successful binary link. The defect is identical to the recently-fixed macOS issue, so a straightforward backport of the macOS loop structure will resolve it.
+The old truncation could produce an undefined `_main` or runtime symbol on a
+FreeBSD native build. The source correction removes that truncation.
 
 ## Scope
 
-The fix is mechanical: replace the FreeBSD branch's `object_files[0]` access with the same `for obj in object_files` loop pattern used in the macOS branch. This ensures runtime objects and entry shim are included in the final link.
+The FreeBSD branch now appends all fallback object arguments, ensuring runtime
+objects and the entry shim are included in the final link.
 
 ## Next Steps
 
-1. Mirror the macOS all-objects loop (lines 556-573) into the FreeBSD branch.
-2. Test the fix on a FreeBSD host or via the automated QEMU bootstrap check (`scripts/check/check-freebsd-bootstrap-qemu.shs --smoke`).
-3. Verify that `_main` and runtime symbols resolve correctly in the linked binary.
+1. Run the focused host-safe linker contract spec.
+2. Complete the separately owned fresh FreeBSD QEMU verification:
+   `sh scripts/check/check-freebsd-bootstrap-qemu.shs --full`.
+3. Record the guest identity and retained Stage 2/3 logs before claiming live
+   FreeBSD link evidence.

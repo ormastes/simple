@@ -110,6 +110,57 @@ fn compile_source_inventory_apply_filesystem_events_v1(
                 operation, identity, content!))
     compile_source_inventory_apply_and_publish_v1(cache_root, translated)
 
+# Cold replay retains one slot per distinct identity rather than constructing
+# successively larger inventories for every event. Reuse the one-event authority
+# on at most ONE row so validation, no-ops, facets and generation stay identical.
+# Deleted slots are reused on recreation; churn cannot retain one row per event.
+fn compile_source_inventory_apply_cold_events_v1(
+    initial_generation: i64, events: [CompileSourceEventV1]
+) -> CompileSourceInventoryChangeV1:
+    if initial_generation < 0:
+        return CompileSourceInventoryChangeV1(false, "event-invalid", nil, false, false)
+    var positions: Dict<text, i64> = {}
+    var retained: [CompileSourceInventoryEntryV1] = []
+    var active: [bool] = []
+    var generation = initial_generation
+    var content_changed = false
+    var semantics_changed = false
+    for event in events:
+        var position = -1
+        var single: [CompileSourceInventoryEntryV1] = []
+        if positions.has(event.source_identity):
+            position = positions[event.source_identity]
+            if active[position]:
+                single = single.push(retained[position])
+        val changed = compile_source_inventory_apply_event_v1(
+            CompileSourceInventoryV1(1, generation, single), event)
+        if not changed.valid:
+            return changed
+        val next = changed.inventory!
+        generation = next.generation
+        content_changed = content_changed or changed.content_changed
+        semantics_changed = semantics_changed or changed.semantics_changed
+        if next.entries.len() == 0:
+            if position >= 0:
+                active[position] = false
+        else:
+            if position >= 0:
+                retained[position] = next.entries[0]
+                active[position] = true
+            else:
+                positions[event.source_identity] = retained.len()
+                retained = retained.push(next.entries[0])
+                active = active.push(true)
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var index = 0
+    while index < retained.len():
+        if active[index]:
+            entries = entries.push(retained[index])
+        index = index + 1
+    val inventory = CompileSourceInventoryV1(1, generation, compile_source_inventory_sort_v1(entries))
+    val reason = if generation == initial_generation: "ok-no-change" else: "ok"
+    CompileSourceInventoryChangeV1(true, reason, Some(inventory), content_changed, semantics_changed)
+
 fn compile_source_inventory_storage_v1(cache_root: text) -> text:
     "{cache_root}/source-inventory"
 

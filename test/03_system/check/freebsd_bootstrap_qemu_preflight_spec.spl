@@ -42,7 +42,7 @@ use std.spec.*
 
 val SCRIPT = "scripts/check/check-freebsd-bootstrap-qemu.shs"
 val PREFLIGHT_ORDER =
-    "mode,port,user,memory,cpus,ssh_timeout,root_ssh_timeout," +
+    "mode,port,user,memory,cpus,build_jobs,disk,ssh_timeout,root_ssh_timeout," +
     "timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool," +
     "admitted_media,ssh_public_key,ssh_private_key,workspace"
 
@@ -95,7 +95,7 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         val (stdout, stderr, code) = step_freebsd_bootstrap_preflight("")
         expect(code).to_equal(0)  # oracle: canonical inputs must pass the bounded preflight with exit 0
         expect(stderr).to_equal("")
-        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("21")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("none")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("pass")
@@ -109,7 +109,7 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "QEMU_PORT=not-a-port")
         expect(code).to_equal(1)  # oracle: a rejected input must exit 1, not fall through to the live check
-        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("21")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("port")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
@@ -123,12 +123,20 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "QEMU_USER=-root")
         expect(code).to_equal(1)  # oracle: an option-injection-shaped user must exit 1
-        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("21")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("user")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
         expect(stdout.contains("Smoke test PASSED")).to_equal(false)
         expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
+
+    it "rejects an overlay smaller than the required guest free space":
+        # @req REQ-FREEBSD-PREFLIGHT-007
+        val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
+            "QEMU_DISK_GB=30 QEMU_GUEST_MIN_FREE_GB=31")
+        expect(code).to_equal(1)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("disk")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
 
     it "refuses a present image without a trusted media digest":
         # @req REQ-FREEBSD-PREFLIGHT-004
@@ -156,7 +164,7 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         # @capture(statistics): the pass/fail receipt markers present in the wrapper source
         step("Read the wrapper source and assert its PASS vocabulary stays preflight-scoped")
         val pass_evidence_contract = file_read(SCRIPT)
-        expect(pass_evidence_contract).to_contain("freebsd_qemu_preflight_status=pass")
-        expect(pass_evidence_contract).to_contain("freebsd_qemu_preflight_status=fail")
+        expect(pass_evidence_contract).to_contain("PREFLIGHT_STATUS=\"pass\"")
+        expect(pass_evidence_contract).to_contain("PREFLIGHT_STATUS=\"fail\"")
         expect(pass_evidence_contract.contains("Smoke test PASSED")).to_equal(false)  # oracle: the preflight receipt must not borrow the smoke pass phrase
         expect(pass_evidence_contract.contains("Full bootstrap PASSED")).to_equal(false)  # oracle: the preflight receipt must not borrow the full-bootstrap pass phrase
