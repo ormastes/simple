@@ -11,6 +11,7 @@ use app.io.minimal_runtime_ops.{process_run, process_run_timeout, process_run_bo
 use .session_state.{lsp_record_location, lsp_resolve_requester}
 use .lsp_command_metrics.{lsp_note_command_start}
 use .lsp_query_inproc.{lsp_query_inproc_dispatch_v1, lsp_query_inproc_command_text_v1}
+use .lsp_visibility_inproc.{lsp_visibility_hover_inproc_v1, lsp_visibility_completions_inproc_v1, lsp_visibility_symbols_inproc_v1}
 use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
@@ -56,10 +57,20 @@ fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
     run_command_text(find_simple_binary(), [lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 fn run_visibility_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
+    if subcmd == "completions":
+        val inproc = lsp_visibility_completions_inproc_v1(file, line0 + 1, char0 + 1)
+        if inproc.handled:
+            return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [query_visibility_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 # hover with an explicit requester location (`path[:line]`); "" = no requester.
+# Answered in-process when possible: the pure-Simple release binary cannot host
+# the query_visibility.spl child at all (its core-C rt_cli_run_file stub prints
+# "simple: --fork requires hosted interpreter support", runtime_native.c:720).
 fn run_visibility_hover(file: text, line0: i64, char0: i64, requester: text) -> text:
+    val inproc = lsp_visibility_hover_inproc_v1(file, line0 + 1, char0 + 1, requester)
+    if inproc.handled:
+        return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [query_visibility_path(), "hover", file, str(line0 + 1), str(char0 + 1), "--requester", requester])
 
 fn run_lsp_symbols(file: text) -> text:
@@ -68,6 +79,9 @@ fn run_lsp_symbols(file: text) -> text:
 # `requester` is always passed through — "" means "no requester" (only
 # boundary-crossing symbols reachable), never the file itself.
 fn run_visibility_symbols(file: text, requester: text) -> text:
+    val inproc = lsp_visibility_symbols_inproc_v1(file, requester)
+    if inproc.handled:
+        return lsp_query_inproc_command_text_v1(inproc)
     run_command_text(find_simple_binary(), [query_visibility_path(), "symbols", file, "--requester", requester])
 
 # Two-set view (layerPublic / featurePublic) for a requester location.

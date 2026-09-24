@@ -350,8 +350,7 @@ fn handle_simple_context(id: text, body: text) -> text:
         ctx_args.push("--db=" + db_path)
     if source_filter != "":
         ctx_args.push("--source-filter=" + source_filter)
-    val (ctx_output, ctx_exit) = mcp_run_argv(
-        _mcp_find_simple_binary(), ctx_args, 15000, 1048576)
+    val (ctx_output, ctx_exit) = _mcp_run_context_cli(ctx_args, 15000, 1048576)
     if ctx_exit == 0 and ctx_output != "":
         out_parts.push(ctx_output)
     else:
@@ -494,6 +493,24 @@ fn _simple_pipe_workspace_symbols(query: text, kind: text, requester: text) -> t
     result = result + " --\n"
     result + out
 
+# Run the `simple context` CLI, retrying with the Rust seed bootstrap binary
+# when the preferred pure-Simple release binary cannot host the context child
+# at all: its core-C rt_cli_run_file stub prints
+# "simple: --fork requires hosted interpreter support" (runtime_native.c:720)
+# and exits 1. The seed binary hosts it fine. The retry is gated on that exact
+# marker so genuine context failures are not masked. Same spawn limitation as
+# the LSP side, see
+# doc/08_tracking/bug/lsp_mcp_native_arg_extract_and_source_diagnostics_deadlock_2026-06-18.md
+fn _mcp_run_context_cli(ctx_args: [text], timeout_ms: i64, max_bytes: i64) -> (text, i64):
+    val primary = _mcp_find_simple_binary()
+    val (out, code) = mcp_run_argv(primary, ctx_args, timeout_ms, max_bytes)
+    if (code == 0 and out != "") or not out.contains("--fork requires hosted interpreter support"):
+        return (out, code)
+    val seed = "bin/simple"
+    if seed == primary or not file_exists(seed):
+        return (out, code)
+    mcp_run_argv(seed, ctx_args, timeout_ms, max_bytes)
+
 fn _simple_pipe_context_sql_query(query: text, db_path: text, source_filter: text, format: text) -> text:
     var args = ["context", "--sql", "--query=" + query]
     if db_path != "":
@@ -504,8 +521,7 @@ fn _simple_pipe_context_sql_query(query: text, db_path: text, source_filter: tex
         args.push("--json")
     else:
         args.push("--text")
-    val (out, exit_code) = mcp_run_argv(
-        _mcp_find_simple_binary(), args, 15000, 1048576)
+    val (out, exit_code) = _mcp_run_context_cli(args, 15000, 1048576)
     "-- simple_pipe codebase db exit=" + str(exit_code) + " --\n" + out
 
 fn handle_simple_pipe_codebase(id: text, body: text) -> text:
@@ -588,23 +604,30 @@ fn handle_simple_search(id: text, body: text) -> text:
     elif scope == "app":
         search_dir = "src/app/"
 
+    # Alternation uses ERE `|` (via grep -E), not GNU BRE `\|`: BSD grep
+    # (macOS) treats `\|` as a literal and silently returns nothing for the
+    # kind-filtered patterns. The plain (kind-less) query stays a BRE pattern
+    # so user-supplied regexes keep their meaning.
+    var grep_flag = ""
+    if kind != "":
+        grep_flag = " -E"
     var pattern = query
     if kind == "fn" or kind == "function":
-        pattern = "^fn " + query + "\\|^ *fn " + query
+        pattern = "^fn " + query + "|^ *fn " + query
     elif kind == "class":
-        pattern = "^class " + query + "\\|^ *class " + query
+        pattern = "^class " + query + "|^ *class " + query
     elif kind == "struct":
-        pattern = "^struct " + query + "\\|^ *struct " + query
+        pattern = "^struct " + query + "|^ *struct " + query
     elif kind == "enum":
-        pattern = "^enum " + query + "\\|^ *enum " + query
+        pattern = "^enum " + query + "|^ *enum " + query
     elif kind == "import" or kind == "use":
-        pattern = "use.*" + query + "\\|import.*" + query
+        pattern = "use.*" + query + "|import.*" + query
     elif kind == "type":
-        pattern = "^type " + query + "\\|^alias " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query
+        pattern = "^type " + query + "|^alias " + query + "|^class " + query + "|^struct " + query + "|^enum " + query
 
-    var args = ["-c", "grep -r -n --include='*.spl' -- \"$1\" \"$2\" | head -n 50", "simple_search", pattern, search_dir]
+    var args = ["-c", "grep" + grep_flag + " -r -n --include='*.spl' -- \"$1\" \"$2\" | head -n 50", "simple_search", pattern, search_dir]
     if file != "":
-        args = ["-c", "grep -n -- \"$1\" \"$2\" | head -n 50", "simple_search", query, file]
+        args = ["-c", "grep" + grep_flag + " -n -- \"$1\" \"$2\" | head -n 50", "simple_search", pattern, file]
 
     var out = ""
     var _u: i64 = 0
