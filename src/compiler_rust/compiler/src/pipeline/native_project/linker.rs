@@ -14,7 +14,8 @@ use super::tools::{
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
-    external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command,
+    external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, missing_llvm_tool_error,
+    nm_command,
     strip_llvm_constructors,
     target_c_compiler, target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
 };
@@ -502,7 +503,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
             .arg(external_tool_path(obj))
@@ -704,7 +705,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg(external_tool_path(obj))
             .output()
@@ -748,7 +749,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
             .arg(external_tool_path(obj))
@@ -1711,7 +1712,7 @@ int main(int argc, char** argv) {
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             {
                 let archive_path = temp_dir.join("libspl_objects.a");
-                let ar_tool = find_archive_tool();
+                let ar_tool = find_archive_tool()?;
 
                 let batches = archive_object_batches(&ar_tool, &archive_path, object_paths)?;
                 let mut ar_ok = true;
@@ -2364,7 +2365,8 @@ int main(int argc, char** argv) {
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if self.config.strip {
-                if let Some(objcopy) = find_objcopy_tool() {
+                {
+                    let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy"))?;
                     let _ = std::process::Command::new(objcopy)
                         .arg("--remove-section=.comment")
                         .arg(&self.output)
@@ -3113,16 +3115,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                 && (triple.contains("x86_64") || triple.contains("i686"))
                 && !boot_objects.is_empty()
             {
-                let objcopy_bin = ["llvm-objcopy", "gobjcopy", "objcopy"]
-                    .iter()
-                    .find(|bin| {
-                        std::process::Command::new(bin)
-                            .arg("--version")
-                            .output()
-                            .is_ok_and(|o| o.status.success())
-                    })
-                    .unwrap_or(&"objcopy");
-                wrap_elf32_multiboot(&self.output, objcopy_bin)?;
+                let objcopy_bin = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy"))?;
+                wrap_elf32_multiboot(&self.output, &objcopy_bin)?;
             }
             if let Ok(meta) = std::fs::metadata(&self.output) {
                 eprintln!(

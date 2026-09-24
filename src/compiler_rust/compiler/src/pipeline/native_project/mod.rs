@@ -1485,7 +1485,7 @@ impl NativeProjectBuilder {
             std::fs::remove_file(&self.output)
                 .map_err(|e| format!("remove existing archive {}: {e}", self.output.display()))?;
         }
-        let ar = find_archive_tool();
+        let ar = find_archive_tool()?;
         let output = archive_create_command(&ar, &self.output, object_paths, false, false)
             .output()
             .map_err(|e| format!("run archive tool {ar}: {e}"))?;
