@@ -14,6 +14,44 @@ case "${1:-}" in
     ;;
 esac
 
+# -- argv-normalize begin
+# Options with a REQUIRED value accept `--opt=value` and `--opt value`
+# (GNU getopt_long convention). Rewrite the space form to the `=` form once,
+# here, so every later scanner -- the strategy pre-scan below,
+# bootstrap-strategy.sh, and the option loop -- sees a single spelling.
+# Options with an OPTIONAL value (--progress[=PATH], --diagnostics[=MODE]) take
+# it only after `=`; the next word is never consumed. A required value that is
+# missing, or that looks like another option, is a hard error.
+bootstrap_argc=$#
+while [ "${bootstrap_argc}" -gt 0 ]; do
+  bootstrap_arg=$1
+  shift
+  bootstrap_argc=$((bootstrap_argc - 1))
+  case "${bootstrap_arg}" in
+    --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
+    --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
+    --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
+    --progress-interval)
+      bootstrap_value_missing=1
+      if [ "${bootstrap_argc}" -gt 0 ]; then
+        case "$1" in -*) ;; *) bootstrap_value_missing=0 ;; esac
+      fi
+      if [ "${bootstrap_value_missing}" -eq 1 ]; then
+        echo "error: ${bootstrap_arg} requires a value: use ${bootstrap_arg}=<value> or ${bootstrap_arg} <value>" >&2
+        echo "Run '$0 --help' for usage." >&2
+        exit 2
+      fi
+      set -- "$@" "${bootstrap_arg}=$1"
+      shift
+      bootstrap_argc=$((bootstrap_argc - 1))
+      ;;
+    *)
+      set -- "$@" "${bootstrap_arg}"
+      ;;
+  esac
+done
+# -- argv-normalize end
+
 # The coordinated strategy supervisor is the default entry for an ordinary
 # multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
 # diagnostic sweeps keep their direct fail-closed paths. The supervisor sets
@@ -23,16 +61,9 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
   bootstrap_strategy_arg=${SIMPLE_BOOTSTRAP_STRATEGY:-normal}
   bootstrap_strategy_output=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
   bootstrap_strategy_bypass=0
-  bootstrap_strategy_expect_value=0
   for bootstrap_strategy_option in "$@"; do
-    if [ "${bootstrap_strategy_expect_value}" -eq 1 ]; then
-      bootstrap_strategy_arg=${bootstrap_strategy_option}
-      bootstrap_strategy_expect_value=0
-      continue
-    fi
     case "${bootstrap_strategy_option}" in
       --strategy=*) bootstrap_strategy_arg=${bootstrap_strategy_option#*=} ;;
-      --strategy) bootstrap_strategy_expect_value=1 ;;
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
       --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
       --produce-stage3-receipt=*|\
@@ -167,6 +198,9 @@ Subcommands:
                      Standalone bootstrap progress/liveness watcher
 
 Options:
+  An option shown as --opt=<value> also accepts --opt <value>. An optional
+  value, shown as --opt[=<value>], must be attached with '='. An unknown or
+  malformed argument is an error (exit 2).
   --backend=<name>   Backend for stage2/stage3/stage4 (selected default: llvm;
                      explicit cranelift remains supported).
   --output=<dir>     Explicit legacy-compatible output override. The default is
@@ -264,6 +298,7 @@ Options:
 EOF
 }
 
+# -- argv-parse begin
 backend=""
 output_dir="${SIMPLE_BOOTSTRAP_BUILD_ROOT}"
 deploy=0
@@ -347,15 +382,6 @@ while [ "$#" -gt 0 ]; do
     --strategy=*)
       bootstrap_strategy=${1#*=}
       ;;
-    --strategy)
-      shift
-      if [ "$#" -eq 0 ]; then
-        echo "error: --strategy requires adhoc, normal, or full" >&2
-        usage >&2
-        exit 1
-      fi
-      bootstrap_strategy=$1
-      ;;
     --resume-stage3-from-admitted=*)
       resume_stage3_output=${1#*=}
       ;;
@@ -413,15 +439,6 @@ while [ "$#" -gt 0 ]; do
         bootstrap_mode=dynload
       fi
       ;;
-    --mode)
-      shift
-      if [ "$#" -eq 0 ]; then
-        echo "error: --mode requires dynload or one-binary" >&2
-        usage >&2
-        exit 1
-      fi
-      bootstrap_mode=$1
-      ;;
     --verbose)
       verbose=1
       ;;
@@ -445,13 +462,16 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
-      echo "error: unknown option '$1'" >&2
-      usage >&2
-      exit 1
+      # Never dump usage here: 100+ lines of help buried the one error line,
+      # so a mistyped launch looked exactly like --help.
+      echo "error: unknown argument: $1" >&2
+      echo "Run '$0 --help' for usage." >&2
+      exit 2
       ;;
   esac
   shift
 done
+# -- argv-parse end
 
 if [ "${stop_after_stage2}" -eq 1 ]; then
   [ "${stop_after_stage3}" -eq 0 ] &&
