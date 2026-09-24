@@ -35,6 +35,10 @@ set -eu
 # config/llvm_toolchain.sdn's toolchain_policy per-platform ordered lists:
 #   linux/freebsd: mold -> ld.lld      macos: ld64.lld -> ld      windows: lld-link
 #
+# "23.1" below is a MINIMUM, not an exact pin — version_ge() accepts 23.1.x,
+# 23.2.x, 24.x, etc. (review 2026-09-25 #8: this used to say "pinned" in one
+# place while the check itself was always a floor; reworded for consistency).
+#
 # Platform support:
 #   linux   (Ubuntu/Debian, incl. WSL2) — TESTED on WSL2 Ubuntu-22.04.
 #   windows (Git Bash / MSYS)           — TESTED on this host.
@@ -74,6 +78,40 @@ set -eu
 # Fast path requirement: `check` must run in seconds with NO network calls.
 # Vulkan's "does a device actually enumerate" check runs vulkaninfo LOCALLY
 # (no network) and is timeout-guarded where a timeout(1) is available.
+# Perf: check_one avoids `head`/`cut` subprocesses on the hot path (see
+# first_n_lines() and run_check()'s IFS-based row split) — measured
+# ~4.5s -> ~1.1s on Windows for a 17-tool check (see commit message).
+#
+# Pinned supply-chain constants (reviewed 2026-09-25 — MUST FIX #2/#3/#4):
+#   - apt.llvm.org signing key fingerprint, cross-checked against two
+#     independent sources (apt's own NO_PUBKEY report and a vendoring PR):
+#     6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+#   - mold prebuilt-release fallback is pinned to a specific version+sha256
+#     per architecture (LLVM_MOLD_PIN_* below), not "latest" — a
+#     version bump here is a deliberate, reviewed edit, not automatic.
+#   - The LunarG Vulkan SDK installer is pinned to a specific version and
+#     its SHA-256 is fetched from LunarG's own documented, versioned
+#     verification endpoint (https://sdk.lunarg.com/sdk/sha/<ver>/...) —
+#     the same trust root as the download itself, over HTTPS — rather than
+#     a hardcoded hash this script's author could not independently
+#     re-verify against a second source at edit time.
+
+# A literal embedded newline, used everywhere below to split text without
+# spawning an external `head`/`awk` process for "first N lines" extraction.
+# NOT `$(printf '\n')` — command substitution strips ALL trailing newlines
+# from its output, so that idiom silently yields an EMPTY string when the
+# entire output is a newline (caught while testing this exact line). This
+# embedded-quote form is the standard portable way to hold one.
+NL='
+'
+
+LLVM_APT_KEY_FINGERPRINT="6084F3CF814B57C1CF12EFD515CF4D18AF4F7421"
+
+LLVM_MOLD_PIN_VERSION="2.42.1"
+LLVM_MOLD_PIN_SHA256_X86_64="6ff270c9bf07d2bec5c98aa324eb7c4daf6a1a4d815c05ff1708049616047855"
+LLVM_MOLD_PIN_SHA256_AARCH64="16b025652d3d7456689e6025a77e1903bb2a15e7630877c26cc133f5df95b9c6"
+
+LUNARG_VULKAN_SDK_PIN_VERSION="1.4.341.1"
 
 # ---------------------------------------------------------------------------
 # version_ge / extract_version — shared version arithmetic and parsing.
@@ -98,9 +136,45 @@ version_ge() {
     return 0
 }
 
+first_n_lines() {
+    # first_n_lines <text> <n> -> first n lines, newline-joined. No `head`
+    # subprocess (perf: this runs once or twice per checked tool). Also
+    # fixes a correctness bug: some tools' first line carries no version at
+    # all (llvm-ar's vanilla banner is "LLVM (http://llvm.org/):" on line 1,
+    # the version is on line 2), so a first-LINE-only read silently passed a
+    # 18.1.8 llvm-ar as matching a 23.1.0 requirement.
+    text="$1"; n="$2"
+    rest="$text"; out=""; i=0
+    while [ "$i" -lt "$n" ] && [ -n "$rest" ]; do
+        line="${rest%%"$NL"*}"
+        if [ -n "$out" ]; then out="$out$NL$line"; else out="$line"; fi
+        case "$rest" in *"$NL"*) rest="${rest#*"$NL"}" ;; *) rest="" ;; esac
+        i=$((i + 1))
+    done
+    printf '%s' "$out"
+}
+
 extract_version() {
-    # extract_version <raw --version output> -> first dotted-number token
-    printf '%s\n' "$1" | grep -o '[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)*' | head -n1
+    # extract_version <raw --version output> -> first dotted-number token.
+    # `grep -o` is the only subprocess here (no separate `head`: the first
+    # match is taken via parameter expansion on the literal $NL).
+    #
+    # `|| true` is LOAD-BEARING, not decorative: found live, the hard way.
+    # `grep -o` with no match exits 1, and `matches="$(cmd)"` is a bare
+    # assignment statement whose own exit status IS the command
+    # substitution's (a real POSIX/set -e gotcha, distinct from a command
+    # substitution embedded inside a larger command — see run_or_plan's
+    # header comment for the sibling gotcha). The OLD implementation piped
+    # through `head -n1` as its last stage, and `head` exits 0 even on empty
+    # input, which accidentally masked this. Removing that `head` for perf
+    # turned "no version-like substring in this banner" (routine — e.g.
+    # xxd's "xxd 2024-09-15 by Juergen Weigert et al." has no dotted
+    # number) into `set -e` silently killing the ENTIRE script mid-`check`,
+    # for every tool checked after the first one with a bare-unparseable
+    # banner. Caught by a real WSL2/Windows run truncating output after
+    # `xxd`, not by any fixture — see the added --selftest fixture.
+    matches="$(printf '%s\n' "$1" | grep -o '[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)*' || true)"
+    printf '%s' "${matches%%"$NL"*}"
 }
 
 # ---------------------------------------------------------------------------
@@ -179,16 +253,21 @@ platform_tools() {
             printf '%s' "clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
             ;;
         freebsd)
-            # No known RenderDoc FreeBSD port as of this writing -> excluded
-            # from the checked set; reported as an UNSUPPORTED note instead.
-            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan"
+            # MUST-FIX #9 (review 2026-09-25): renderdoc MUST be in this list
+            # — check_renderdoc() already returns UNSUPPORTED for freebsd
+            # (no known port), but that status can only ever be produced if
+            # check_one("renderdoc", ...) is actually invoked. Excluding the
+            # name here (the previous approach) made the UNSUPPORTED note
+            # unreachable dead code: the row never appeared at all.
+            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
             ;;
         macos)
             # mold dropped macOS support (its Mach-O backend split out as
             # `sold`, later archived) -> ld64.lld is the linker here, not
-            # mold. RenderDoc has no macOS build (no Metal capture) ->
-            # excluded, reported as UNSUPPORTED.
-            printf '%s' "clang clang++ ld64.lld llvm-config llvm-ar rustc cargo git jj cmake ninja gtimeout perl shasum vulkan"
+            # mold. renderdoc IS listed (see the freebsd comment above for
+            # why) — check_renderdoc() reports it UNSUPPORTED (no Metal
+            # capture backend), never MISSING, and it is never installed.
+            printf '%s' "clang clang++ ld64.lld llvm-config llvm-ar rustc cargo git jj cmake ninja gtimeout perl shasum vulkan renderdoc"
             ;;
         windows)
             # mold has no PE/COFF backend on Windows -> lld-link is the
@@ -220,7 +299,7 @@ req_reason() {
         ld.lld) printf '%s' "LLD linker — mold preferred on Linux, LLD is the documented fallback" ;;
         ld64.lld) printf '%s' "macOS linker (mold dropped macOS support; config/llvm_toolchain.sdn: macos -> ld64.lld -> ld)" ;;
         lld-link) printf '%s' "Windows linker (mold has no PE/COFF backend; config/llvm_toolchain.sdn: windows -> lld-link)" ;;
-        llvm-config|llvm-ar) printf '%s' "LLVM toolchain introspection/archiving, pinned to 23.1 (.claude/rules/commands.md)" ;;
+        llvm-config|llvm-ar) printf '%s' "LLVM toolchain introspection/archiving, minimum 23.1 (a floor, not an exact pin — 23.2.x, 24.x, etc. also satisfy it) (.claude/rules/commands.md)" ;;
         mold) printf '%s' "preferred Linux/FreeBSD linker (falls back to ld.lld when absent)" ;;
         rustc|cargo) printf '%s' "builds the Rust seed compiler (src/compiler_rust)" ;;
         git) printf '%s' "VCS, colocated with jj" ;;
@@ -247,17 +326,32 @@ vulkaninfo_bin() {
     command -v vulkaninfo 2>/dev/null || true
 }
 
+# Perf (review 2026-09-25): timeout_wrap is now called for EVERY checked
+# tool's --version (fix #11: "run each --version with </dev/null and a
+# short timeout"), not just vulkaninfo — so its own detection probe (2
+# subprocesses: `timeout --version` + `grep`) must run ONCE per script
+# invocation, not once per tool, or it would cost more than the `head`/`cut`
+# calls it replaced. Cached in TIMEOUT_MODE.
+TIMEOUT_MODE=""
+
 timeout_wrap() {
     # Wrap a command with a real GNU-coreutils timeout(1)/gtimeout(1) if one
     # is on PATH; otherwise run unwrapped (Windows' own timeout.exe has
     # different semantics from GNU timeout and is not used here).
-    if command -v timeout >/dev/null 2>&1 && timeout --version 2>&1 | grep -qi 'coreutils'; then
-        timeout 5 "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout 5 "$@"
-    else
-        "$@"
+    if [ -z "$TIMEOUT_MODE" ]; then
+        if command -v timeout >/dev/null 2>&1 && timeout --version 2>&1 | grep -qi 'coreutils'; then
+            TIMEOUT_MODE="gnu"
+        elif command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_MODE="gtimeout"
+        else
+            TIMEOUT_MODE="none"
+        fi
     fi
+    case "$TIMEOUT_MODE" in
+        gnu) timeout 5 "$@" ;;
+        gtimeout) gtimeout 5 "$@" ;;
+        *) "$@" ;;
+    esac
 }
 
 check_vulkan() {
@@ -315,9 +409,37 @@ check_renderdoc() {
         printf 'renderdoc|MISSING||\n'
         return
     fi
-    raw="$("$rbin" --version 2>&1 | head -n1 || true)"
+    set +e
+    raw_full="$(timeout_wrap "$rbin" --version </dev/null 2>&1)"
+    vrc=$?
+    set -e
+    if [ "$vrc" -ne 0 ]; then
+        # Same pipe-exit-status bug fixed in check_one: `cmd | head -n1 ||
+        # true` always reports success regardless of cmd's real exit code.
+        # A broken renderdoccmd (exit 127) must not read as PRESENT.
+        short_raw="$(first_n_lines "$raw_full" 1 | cut -c1-40)"
+        printf 'renderdoc|BROKEN|%s|\n' "${short_raw:-no output}"
+        return
+    fi
+    raw="$(first_n_lines "$raw_full" 3)"
     found="$(extract_version "$raw")"
     printf 'renderdoc|PRESENT|%s|\n' "${found:-unknown}"
+}
+
+split_row() {
+    # split_row "<name>|<status>|<found>|<req>" -> sets ROW_NAME, ROW_STATUS,
+    # ROW_FOUND, ROW_REQ. Perf (review 2026-09-25): replaces 3x `cut`
+    # subprocess per row with a builtin IFS word-split — measured
+    # ~4.5s -> ~1.1s on Windows for a 17-tool `check` (see commit message).
+    # `set -f` guards against the split words undergoing pathname expansion.
+    row_in="$1"
+    old_ifs="$IFS"
+    IFS='|'
+    set -f
+    set -- $row_in
+    set +f
+    IFS="$old_ifs"
+    ROW_NAME="${1:-}"; ROW_STATUS="${2:-}"; ROW_FOUND="${3:-}"; ROW_REQ="${4:-}"
 }
 
 # ---------------------------------------------------------------------------
@@ -342,21 +464,25 @@ check_one() {
         return
     fi
     set +e
-    raw_full="$("$bin" --version 2>&1)"
+    raw_full="$(timeout_wrap "$bin" --version </dev/null 2>&1)"
     vrc=$?
     set -e
-    # First line only, extracted separately so the exit code captured above
-    # is the TOOL's own (a `cmd | head -n1` pipeline's $? is head's exit
-    # status, not cmd's — that hid a real broken-binary defect in testing).
-    raw="$(printf '%s\n' "$raw_full" | head -n1)"
-    found="$(extract_version "$raw")"
+    # Exit code captured directly from the tool's own command substitution
+    # above (never through a pipe — a `cmd | head -n1` pipeline's $? is
+    # head's exit status, not cmd's, which hid a real broken-binary defect
+    # in testing: three MSYS clang/lld/llvm-ar binaries with exit 127 were
+    # reported PRESENT). Look at the first 3 lines, not just line 1 — some
+    # tools (llvm-ar's vanilla banner) put the version on line 2, and a
+    # first-line-only read let an 18.1.8 llvm-ar pass a 23.1.0 requirement.
+    raw3="$(first_n_lines "$raw_full" 3)"
+    found="$(extract_version "$raw3")"
     if [ "$vrc" -ne 0 ]; then
         # The binary resolved on PATH but `--version` itself failed (e.g. a
         # broken/partial install missing a shared library) — this is worse
         # than "can't parse the banner": it is a real defect, not a cosmetic
         # one, so it counts as an offender rather than being waved through
         # as PRESENT. Distinct status so `check`'s table names it precisely.
-        short_raw="$(printf '%s' "${raw:-no output}" | cut -c1-40)"
+        short_raw="$(printf '%s' "${raw3:-no output}" | cut -c1-40)"
         printf '%s|BROKEN|%s|%s\n' "$name" "$short_raw" "$req"
         return
     fi
@@ -365,7 +491,12 @@ check_one() {
         return
     fi
     if [ -z "$found" ]; then
-        printf '%s|PRESENT|unknown|%s\n' "$name" "$req"
+        # A minimum version IS required here but none could be parsed from
+        # the first 3 lines of the banner — that used to be waved through as
+        # PRESENT (a genuine wrong-version tool could hide behind an
+        # unparseable banner forever). Fail closed instead: a real defect
+        # or format change is now visible rather than silently trusted.
+        printf '%s|WRONG_VERSION|unknown|%s\n' "$name" "$req"
         return
     fi
     if version_ge "$found" "$req"; then
@@ -384,13 +515,16 @@ run_check() {
     platform="$(detect_platform)"
     fam="$(platform_family "$platform")"
     if [ "$fam" = "unsupported" ]; then
-        echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet (Linux Ubuntu/Debian incl. WSL2, FreeBSD, macOS, Windows/Git-Bash only)" >&2
+        # Verdict convention: the last STDOUT line is authoritative (review
+        # 2026-09-25 #7) — this used to go to stderr only.
+        echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet (Linux Ubuntu/Debian incl. WSL2, FreeBSD, macOS, Windows/Git-Bash only)"
         return 2
     fi
+    apply_llvm23_path "$fam"
 
     names="$(platform_tools "$platform")"
     if [ -z "$names" ]; then
-        echo "ERROR — nothing was checked: empty prerequisite table for platform '$platform'" >&2
+        echo "ERROR — nothing was checked: empty prerequisite table for platform '$platform'"
         return 2
     fi
 
@@ -402,9 +536,8 @@ run_check() {
     for name in $names; do
         row="$(check_one "$name" "$fam")"
         n=$((n + 1))
-        status="$(printf '%s' "$row" | cut -d'|' -f2)"
-        found="$(printf '%s' "$row" | cut -d'|' -f3)"
-        req="$(printf '%s' "$row" | cut -d'|' -f4)"
+        split_row "$row"
+        status="$ROW_STATUS"; found="$ROW_FOUND"; req="$ROW_REQ"
         printf '%-14s %-13s %-14s %-10s\n' "$name" "$status" "${found:--}" "${req:-any}"
         case "$status" in
             PRESENT) ;;
@@ -423,7 +556,7 @@ run_check() {
     fi
 
     if [ "$n" -eq 0 ]; then
-        echo "ERROR — nothing was checked: empty prerequisite table" >&2
+        echo "ERROR — nothing was checked: empty prerequisite table"
         return 2
     fi
 
@@ -442,6 +575,16 @@ run_check() {
 
 run_or_plan() {
     # run_or_plan <dry_run> <description> -- <cmd...>
+    #
+    # MUST-FIX (review 2026-09-25): the previous body was
+    #   `if "$@"; then return 0; fi; rc=$?; ...; return "$rc"`
+    # which NEVER reported failure. POSIX defines a taken-no-branch `if`
+    # statement's own exit status as 0 regardless of the tested command's
+    # status — proven directly: `if false; then :; fi; echo $?` prints 0,
+    # not 1. So `rc=$?` after the `if` always read 0, and every failed step
+    # (a rejected sudo password, a 404 download, anything) silently returned
+    # success. Fixed by capturing the command's exit status directly, never
+    # through an `if`'s implicit status and never through a pipe.
     dry_run="$1"; shift
     desc="$1"; shift
     if [ "$dry_run" = "1" ]; then
@@ -449,17 +592,121 @@ run_or_plan() {
         return 0
     fi
     echo "running: $desc"
-    if "$@"; then
-        return 0
-    fi
+    set +e
+    "$@"
     rc=$?
-    echo "warning: step failed (rc=$rc): $desc" >&2
-    return "$rc"
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        echo "warning: step failed (exit $rc): $desc" >&2
+        return "$rc"
+    fi
+    return 0
 }
 
 repo_root_dir() {
     script_dir="$(cd "$(dirname "$0")" && pwd)"
     (cd "$script_dir/../.." && pwd)
+}
+
+sha256_of() {
+    # sha256_of <file> -> lowercase hex digest, whatever tool is available.
+    f="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$f" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$f" | cut -d' ' -f1
+    else
+        echo "error: no sha256sum/shasum available to verify a download" >&2
+        return 1
+    fi
+}
+
+detect_arch() {
+    # detect_arch -> x86_64 | aarch64 | unsupported:<raw uname -m>
+    m="${BOOTSTRAP_PREREQS_UNAME_M:-$(uname -m 2>/dev/null || echo unknown)}"
+    case "$m" in
+        x86_64|amd64) printf 'x86_64' ;;
+        aarch64|arm64) printf 'aarch64' ;;
+        *) printf 'unsupported:%s' "$m" ;;
+    esac
+}
+
+have_sudo() {
+    command -v sudo >/dev/null 2>&1
+}
+
+have_doas() {
+    command -v doas >/dev/null 2>&1
+}
+
+windows_is_elevated() {
+    # `net session` succeeds only from an elevated shell — the standard
+    # no-dependency way to detect admin rights on Windows.
+    net session >/dev/null 2>&1
+}
+
+apply_llvm23_path() {
+    # MUST-FIX #9 (review 2026-09-25): `check` only ever looked at the bare
+    # PATH, so a host that has a real LLVM 23.1 install under a
+    # version-suffixed or non-standard prefix (apt's clang-23, this
+    # Windows host's C:/dev/tool/clang+llvm-23.1.1-..., a FreeBSD
+    # source-built provider, an un-linked Homebrew keg) reported FAIL
+    # forever and `install` reinstalled on every run. This prepends the
+    # right directory onto PATH for the REST OF THIS PROCESS, mirroring
+    # what scripts/setup/llvm-toolchain-env.shs does for the cases it
+    # covers (sourced separately, below, for its CC/CXX/LLVM_CONFIG
+    # side-effects) plus the apt.llvm.org standard layout that script does
+    # not cover (it only auto-detects a specific rootless extraction path,
+    # not a normal `apt-get install clang-23`, which installs its
+    # UNSUFFIXED real binaries under /usr/lib/llvm-23/bin/).
+    fam="$1"
+    case "$fam" in
+        linux)
+            if [ -x /usr/lib/llvm-23/bin/clang ]; then
+                case ":$PATH:" in
+                    *":/usr/lib/llvm-23/bin:"*) : ;;
+                    *) PATH="/usr/lib/llvm-23/bin:$PATH"; export PATH ;;
+                esac
+            fi
+            ;;
+        windows)
+            win_root="$(ls -d /c/dev/tool/clang+llvm-23.1*-x86_64-pc-windows-msvc 2>/dev/null | head -n1 || true)"
+            if [ -n "$win_root" ] && [ -x "$win_root/bin/clang.exe" ]; then
+                case ":$PATH:" in
+                    *":$win_root/bin:"*) : ;;
+                    *) PATH="$win_root/bin:$PATH"; export PATH ;;
+                esac
+            fi
+            ;;
+        macos)
+            if command -v brew >/dev/null 2>&1; then
+                brew_prefix="$(brew --prefix llvm 2>/dev/null || true)"
+                if [ -n "$brew_prefix" ] && [ -x "$brew_prefix/bin/clang" ]; then
+                    case ":$PATH:" in
+                        *":$brew_prefix/bin:"*) : ;;
+                        *) PATH="$brew_prefix/bin:$PATH"; export PATH ;;
+                    esac
+                fi
+            fi
+            ;;
+        freebsd)
+            provider="$(repo_root_dir)/build/toolchains/llvm-23.1.0-rc2"
+            if [ -x "$provider/bin/clang" ]; then
+                case ":$PATH:" in
+                    *":$provider/bin:"*) : ;;
+                    *) PATH="$provider/bin:$PATH"; export PATH ;;
+                esac
+            fi
+            ;;
+    esac
+    # Best-effort: also source the repo's own env script for its CC/CXX/
+    # LD/LLVM_CONFIG side-effects (Windows path, and the rootless-extraction
+    # Linux case it DOES cover). Network-free, so safe inside `check`.
+    llvm_env="$(repo_root_dir)/scripts/setup/llvm-toolchain-env.shs"
+    if [ -f "$llvm_env" ]; then
+        # shellcheck disable=SC1090
+        . "$llvm_env" 2>/dev/null || true
+    fi
 }
 
 linux_codename() {
@@ -478,41 +725,58 @@ do_install_llvm23() {
     case "$fam" in
         linux)
             codename="$(linux_codename)"
-            echo "installing LLVM 23.1 via apt.llvm.org (codename=$codename) ..."
-            key_file="/tmp/llvm-snapshot.gpg.key"
-            run_or_plan "$dry_run" "fetch apt.llvm.org signing key" \
-                wget -qO "$key_file" https://apt.llvm.org/llvm-snapshot.gpg.key || true
-            run_or_plan "$dry_run" "install apt.llvm.org signing key" \
-                sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg "$key_file" || true
+            echo "installing LLVM 23.1 (minimum) via apt.llvm.org (codename=$codename) ..."
             if [ "$dry_run" = "1" ]; then
-                echo "would run: add /etc/apt/sources.list.d/llvm23.list for llvm-toolchain-$codename-23"
+                echo "would run: fetch apt.llvm.org signing key to a mktemp file, verify its fingerprint == $LLVM_APT_KEY_FINGERPRINT (gpg --show-keys --with-fingerprint) BEFORE trusting it"
+                echo "would run: dearmor the verified key into a dedicated keyring at /usr/share/keyrings/llvm-snapshot.gpg"
+                echo "would run: add https://apt.llvm.org/$codename/ llvm-toolchain-$codename-23 to /etc/apt/sources.list.d/llvm23.list (signed-by that keyring)"
+                echo "would run: apt-get update && apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools"
             else
-                echo "running: add /etc/apt/sources.list.d/llvm23.list for llvm-toolchain-$codename-23"
-                printf 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] http://apt.llvm.org/%s/ llvm-toolchain-%s-23 main\n' "$codename" "$codename" \
-                    | sudo tee /etc/apt/sources.list.d/llvm23.list >/dev/null || true
+                # MUST-FIX #4 (review 2026-09-25): mktemp instead of a
+                # predictable /tmp path; verify the key's fingerprint against
+                # a value pinned in this script BEFORE trusting it with
+                # `gpg --dearmor`; a failed fetch or a fingerprint mismatch
+                # STOPS here (no `|| true`) — nothing gets added to apt
+                # sources on an unverified or absent key. https:// (not
+                # http://) for the repo line itself.
+                key_file="$(mktemp "${TMPDIR:-/tmp}/llvm-snapshot-key.XXXXXX")"
+                echo "running: fetch apt.llvm.org signing key"
+                set +e
+                wget -qO "$key_file" https://apt.llvm.org/llvm-snapshot.gpg.key
+                fetch_rc=$?
+                set -e
+                if [ "$fetch_rc" -ne 0 ]; then
+                    echo "error: could not fetch apt.llvm.org signing key (exit $fetch_rc) — aborting LLVM install, nothing added to apt sources" >&2
+                    rm -f "$key_file"
+                    return 1
+                fi
+                got_fpr="$(gpg --show-keys --with-fingerprint --with-colons "$key_file" 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')"
+                if [ "$got_fpr" != "$LLVM_APT_KEY_FINGERPRINT" ]; then
+                    echo "error: apt.llvm.org signing key fingerprint mismatch — got '${got_fpr:-none}', expected '$LLVM_APT_KEY_FINGERPRINT'. Refusing to trust it; aborting LLVM install, nothing added to apt sources." >&2
+                    rm -f "$key_file"
+                    return 1
+                fi
+                echo "signing key fingerprint verified: $got_fpr"
+                run_or_plan "$dry_run" "dearmor the verified key into a dedicated keyring" \
+                    sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg "$key_file"
+                rm -f "$key_file"
+                echo "running: add /etc/apt/sources.list.d/llvm23.list for llvm-toolchain-$codename-23 (https)"
+                printf 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/%s/ llvm-toolchain-%s-23 main\n' "$codename" "$codename" \
+                    | sudo tee /etc/apt/sources.list.d/llvm23.list >/dev/null
+                run_or_plan "$dry_run" "apt-get update" sudo apt-get update
+                run_or_plan "$dry_run" "apt-get install clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools" \
+                    sudo apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools
             fi
-            run_or_plan "$dry_run" "apt-get update" sudo apt-get update || true
-            run_or_plan "$dry_run" "apt-get install clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools" \
-                sudo apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools || true
-            llvm_env="$(repo_root_dir)/scripts/setup/llvm-toolchain-env.shs"
-            if [ "$dry_run" != "1" ] && [ -f "$llvm_env" ]; then
-                # Make unsuffixed clang/clang++/ld.lld/llvm-config resolve
-                # for the REST OF THIS RUN by prepending LLVM 23's unsuffixed
-                # bin dir, exactly as llvm-toolchain-env.shs does — reused,
-                # not reimplemented (update-alternatives is deliberately not
-                # used here per the owner's instruction).
-                # shellcheck disable=SC1090
-                . "$llvm_env" 2>/dev/null || true
-            fi
+            apply_llvm23_path "$fam"
             if [ "$dry_run" != "1" ]; then
-                got="$(clang-23 --version 2>&1 | head -n1 || true)"
+                got="$(first_n_lines "$(timeout_wrap clang-23 --version </dev/null 2>&1)" 1)"
                 gotver="$(extract_version "$got")"
                 if [ -n "$gotver" ] && ! version_ge "$gotver" "23.1.0"; then
                     echo "note: apt.llvm.org's $codename channel provided clang $gotver, not 23.1.x — using what the repo offers" >&2
                 fi
                 echo "installed: $got"
             fi
-            echo "note: source scripts/setup/llvm-toolchain-env.shs in your shell profile to make unsuffixed clang/clang++/ld.lld/llvm-config resolve to 23 permanently."
+            echo "note: source scripts/setup/llvm-toolchain-env.shs in your shell profile to make unsuffixed clang/clang++/ld.lld/llvm-config resolve to 23 permanently (this run already applied the equivalent PATH prepend for itself)."
             ;;
         freebsd)
             echo "FreeBSD has no llvm23 pkg yet (repo's own bootstrap still installs pkg 'llvm18' for the seed build — see scripts/bootstrap/bootstrap-from-scratch.sh)."
@@ -547,7 +811,11 @@ do_install_rust() {
     tc_file="$(repo_root_dir)/src/compiler_rust/rust-toolchain"
     [ -f "$tc_file" ] || tc_file="$(repo_root_dir)/src/compiler_rust/rust-toolchain.toml"
     if [ -f "$tc_file" ]; then
-        pinned="$(grep -m1 '^channel' "$tc_file" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?.*/\1/')"
+        # POSIX bracket expressions only (review 2026-09-25 #11): `\s` and
+        # `\?` are GNU sed extensions and silently fail to match on macOS/
+        # FreeBSD's BSD sed, which would leave $toolchain at its "stable"
+        # default instead of the repo's actual pin.
+        pinned="$(grep -m1 '^channel' "$tc_file" 2>/dev/null | sed 's/.*=[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}.*/\1/')"
         [ -n "$pinned" ] && toolchain="$pinned"
     fi
     echo "=== Rust ($toolchain, via rustup, user-local ~/.cargo, no root) ==="
@@ -575,54 +843,94 @@ do_install_mold() {
     case "$fam" in
         linux)
             echo "=== mold ==="
-            echo "installing mold: trying the distro package first, falling back to the official prebuilt release into ~/.local/bin if apt's is absent or too old ..."
+            echo "installing mold: trying the distro package first, falling back to the official prebuilt release (pinned v$LLVM_MOLD_PIN_VERSION, SHA-256 checksum-verified BEFORE extraction) into ~/.local/bin if apt's is absent or older than 2.0.0 ..."
+            arch="$(detect_arch)"
             if [ "$dry_run" = "1" ]; then
                 echo "would run: sudo apt-get install -y mold"
-                echo "would run (fallback): download latest rui314/mold release tarball, install mold binary to ~/.local/bin/mold"
+                echo "would run (fallback, if needed): download mold v$LLVM_MOLD_PIN_VERSION for $arch, verify its pinned SHA-256, extract only on match, install to ~/.local/bin/mold"
                 return 0
             fi
             apt_ok=0
-            if sudo apt-get install -y mold 2>&1; then
-                apt_ok=1
-            fi
+            set +e
+            sudo apt-get install -y mold
+            apt_rc=$?
+            set -e
+            [ "$apt_rc" -eq 0 ] && apt_ok=1
             got_ver=""
             if [ "$apt_ok" = "1" ] && command -v mold >/dev/null 2>&1; then
-                got_ver="$(extract_version "$(mold --version 2>&1 | head -n1)")"
+                got_ver="$(extract_version "$(first_n_lines "$(mold --version 2>&1)" 1)")"
             fi
-            if [ -z "$got_ver" ] || ! version_ge "$got_ver" "2.0.0"; then
-                echo "distro mold is absent or older than 2.0.0 (got: ${got_ver:-none}) — fetching the official prebuilt release instead ..."
-                mkdir -p "$HOME/.local/bin"
-                tag="$(wget -qO- https://api.github.com/repos/rui314/mold/releases/latest | grep -m1 '"tag_name"' | sed 's/.*: *"\(.*\)".*/\1/')"
-                if [ -n "$tag" ]; then
-                    ver="${tag#v}"
-                    tmp_dir="$(mktemp -d)"
-                    url="https://github.com/rui314/mold/releases/download/${tag}/mold-${ver}-x86_64-linux.tar.gz"
-                    if wget -qO "$tmp_dir/mold.tar.gz" "$url"; then
-                        tar -xzf "$tmp_dir/mold.tar.gz" -C "$tmp_dir"
-                        found_bin="$(find "$tmp_dir" -type f -name mold -perm -111 | head -n1)"
-                        if [ -n "$found_bin" ]; then
-                            cp "$found_bin" "$HOME/.local/bin/mold"
-                            chmod 0755 "$HOME/.local/bin/mold"
-                            PATH="$HOME/.local/bin:$PATH"; export PATH
-                            echo "installed mold $ver via prebuilt release into $HOME/.local/bin/mold"
-                        else
-                            echo "warning: mold binary not found inside downloaded release archive" >&2
-                        fi
-                    else
-                        echo "warning: could not download $url" >&2
-                    fi
-                    rm -rf "$tmp_dir"
-                else
-                    echo "warning: could not resolve rui314/mold's latest release tag" >&2
-                fi
-            else
+            if [ -n "$got_ver" ] && version_ge "$got_ver" "2.0.0"; then
                 echo "installed mold $got_ver via apt (Ubuntu package)"
+                return 0
             fi
+            echo "distro mold is absent or older than 2.0.0 (got: ${got_ver:-none}) — fetching the pinned official prebuilt release v$LLVM_MOLD_PIN_VERSION instead ..."
+            # MUST-FIX #2 (review 2026-09-25): a pinned version+SHA-256 (not
+            # "latest", which this script's author could not keep verified),
+            # checksum verified BEFORE `tar` ever touches the download, and
+            # the architecture comes from `uname -m` (detect_arch) instead of
+            # a hardcoded x86_64 — an unsupported arch refuses cleanly rather
+            # than silently downloading the wrong binary.
+            case "$arch" in
+                x86_64) expected_sha256="$LLVM_MOLD_PIN_SHA256_X86_64" ;;
+                aarch64) expected_sha256="$LLVM_MOLD_PIN_SHA256_AARCH64" ;;
+                *)
+                    echo "warning: unsupported architecture '$arch' for the pinned mold prebuilt release — no fallback available, mold stays absent (ld.lld remains the fallback linker)" >&2
+                    return 0
+                    ;;
+            esac
+            mkdir -p "$HOME/.local/bin"
+            tmp_dir="$(mktemp -d)"
+            url="https://github.com/rui314/mold/releases/download/v${LLVM_MOLD_PIN_VERSION}/mold-${LLVM_MOLD_PIN_VERSION}-${arch}-linux.tar.gz"
+            set +e
+            wget -qO "$tmp_dir/mold.tar.gz" "$url"
+            dl_rc=$?
+            set -e
+            if [ "$dl_rc" -ne 0 ]; then
+                echo "warning: could not download $url (exit $dl_rc) — mold stays absent" >&2
+                rm -rf "$tmp_dir"
+                return 0
+            fi
+            actual_sha256="$(sha256_of "$tmp_dir/mold.tar.gz")"
+            if [ "$actual_sha256" != "$expected_sha256" ]; then
+                echo "error: mold download checksum mismatch for $url — got $actual_sha256, expected $expected_sha256. REFUSING to extract or run it." >&2
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            echo "checksum verified for mold v$LLVM_MOLD_PIN_VERSION ($arch)"
+            set +e
+            tar -xzf "$tmp_dir/mold.tar.gz" -C "$tmp_dir"
+            tar_rc=$?
+            set -e
+            if [ "$tar_rc" -ne 0 ]; then
+                echo "warning: could not extract the (checksum-verified) mold archive (exit $tar_rc)" >&2
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            found_bin="$(find "$tmp_dir" -type f -name mold -perm -111 | head -n1)"
+            if [ -z "$found_bin" ]; then
+                echo "warning: mold binary not found inside the verified release archive" >&2
+                rm -rf "$tmp_dir"
+                return 1
+            fi
+            cp "$found_bin" "$HOME/.local/bin/mold"
+            chmod 0755 "$HOME/.local/bin/mold"
+            PATH="$HOME/.local/bin:$PATH"; export PATH
+            rm -rf "$tmp_dir"
+            echo "installed mold $LLVM_MOLD_PIN_VERSION via checksum-verified prebuilt release into $HOME/.local/bin/mold"
             ;;
         freebsd)
             echo "=== mold ==="
-            run_or_plan "$dry_run" "pkg install -y mold (untested — no FreeBSD host available)" \
-                sudo pkg install -y mold || true
+            # SHOULD-FIX #11: stock FreeBSD may have only `doas`, not sudo.
+            if have_sudo; then
+                run_or_plan "$dry_run" "sudo pkg install -y mold (untested — no FreeBSD host available)" \
+                    sudo pkg install -y mold || true
+            elif have_doas; then
+                run_or_plan "$dry_run" "doas pkg install -y mold (untested — no FreeBSD host available)" \
+                    doas pkg install -y mold || true
+            else
+                echo "warning: neither sudo nor doas found — cannot escalate to install mold. Run as root manually: pkg install -y mold" >&2
+            fi
             ;;
         macos)
             echo "note: mold dropped macOS support (its Mach-O backend was split out as 'sold' and later archived) — ld64.lld (installed with LLVM above) is the macOS linker here, not mold. No action needed."
@@ -644,6 +952,16 @@ do_install_jj() {
     fi
 }
 
+do_install_coreutils_macos() {
+    # SHOULD-FIX #9 (review 2026-09-25): macOS ships neither `gtimeout` nor
+    # GNU `timeout` by default — Homebrew's `coreutils` formula provides
+    # `gtimeout`, which this script's own timeout_wrap() already knows how
+    # to use once it exists.
+    dry_run="$1"
+    echo "=== coreutils (provides gtimeout on macOS) ==="
+    run_or_plan "$dry_run" "brew install coreutils" brew install coreutils || true
+}
+
 do_install_vulkan() {
     dry_run="$1"; fam="$2"
     echo "=== Vulkan (loader + headers + tools + shader compiler) ==="
@@ -655,8 +973,15 @@ do_install_vulkan() {
             echo "note: under WSL2 the enumerated device will be Mesa's Dozen (Vulkan over D3D12) or lavapipe (CPU) — correct for functional testing, not representative of native GPU performance."
             ;;
         freebsd)
-            run_or_plan "$dry_run" "pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs (untested — no FreeBSD host available)" \
-                sudo pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || true
+            if have_sudo; then
+                run_or_plan "$dry_run" "sudo pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs (untested — no FreeBSD host available)" \
+                    sudo pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || true
+            elif have_doas; then
+                run_or_plan "$dry_run" "doas pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs (untested — no FreeBSD host available)" \
+                    doas pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs || true
+            else
+                echo "warning: neither sudo nor doas found — cannot escalate to install Vulkan. Run as root manually: pkg install -y vulkan-loader vulkan-headers vulkan-tools glslang mesa-libs" >&2
+            fi
             ;;
         macos)
             echo "installing MoltenVK via Homebrew, plus the Vulkan loader/headers/tools/glslang (MoltenVK is a translation layer onto Metal — VK_KHR_portability_subset applies; apps must enable portability enumeration). UNTESTED by this agent, no macOS host available."
@@ -670,9 +995,55 @@ do_install_vulkan() {
             elif ls -d /c/VulkanSDK/* >/dev/null 2>&1; then
                 echo "found existing Vulkan SDK under C:/VulkanSDK — reusing it."
             else
-                echo "no Vulkan SDK found. installing the LunarG Vulkan SDK for Windows (silent installer) ..."
-                run_or_plan "$dry_run" "download+run the LunarG Vulkan SDK Windows installer silently" \
-                    sh -c 'curl -sSfL -o /tmp/VulkanSDK-Installer.exe "https://sdk.lunarg.com/sdk/download/latest/windows/VulkanSDK.exe" && /tmp/VulkanSDK-Installer.exe --accept-licenses --default-answer --confirm-command install' || true
+                echo "no Vulkan SDK found. installing the LunarG Vulkan SDK $LUNARG_VULKAN_SDK_PIN_VERSION for Windows ..."
+                if [ "$dry_run" = "1" ]; then
+                    echo "would run: verify this shell is elevated (net session)"
+                    echo "would run: download the LunarG SDK $LUNARG_VULKAN_SDK_PIN_VERSION installer over https, fetch its expected SHA-256 from LunarG's own versioned verification endpoint (sdk.lunarg.com/sdk/sha/...), verify, then run it silently"
+                else
+                    # MUST-FIX #3 (review 2026-09-25): --proto/--tlsv1.2,
+                    # a pinned SDK version, a checksum fetched from LunarG's
+                    # own documented per-version verification endpoint and
+                    # checked before running the installer, and an explicit
+                    # elevation check that fails with the exact command
+                    # instead of half-installing.
+                    if ! windows_is_elevated; then
+                        echo "error: installing the Vulkan SDK needs an ELEVATED shell. Re-run from an Administrator prompt:" >&2
+                        echo "  sh scripts/setup/bootstrap-prereqs.shs install" >&2
+                        return 1
+                    fi
+                    tmp_dir="$(mktemp -d)"
+                    installer="$tmp_dir/VulkanSDK-Installer.exe"
+                    dl_url="https://sdk.lunarg.com/sdk/download/${LUNARG_VULKAN_SDK_PIN_VERSION}/windows/VulkanSDK-${LUNARG_VULKAN_SDK_PIN_VERSION}-Installer.exe"
+                    set +e
+                    curl --proto '=https' --tlsv1.2 -sSfL -o "$installer" "$dl_url"
+                    dl_rc=$?
+                    set -e
+                    if [ "$dl_rc" -ne 0 ]; then
+                        echo "error: could not download $dl_url (exit $dl_rc) — aborting Vulkan SDK install" >&2
+                        rm -rf "$tmp_dir"
+                        return 1
+                    fi
+                    sha_url="https://sdk.lunarg.com/sdk/sha/${LUNARG_VULKAN_SDK_PIN_VERSION}/windows/VulkanSDK-${LUNARG_VULKAN_SDK_PIN_VERSION}-Installer.exe.txt"
+                    set +e
+                    expected_sha256="$(curl --proto '=https' --tlsv1.2 -sSfL "$sha_url" | tr -d ' \t\r\n')"
+                    sha_rc=$?
+                    set -e
+                    if [ "$sha_rc" -ne 0 ] || [ -z "$expected_sha256" ]; then
+                        echo "error: could not fetch the expected SHA-256 from LunarG's verification endpoint ($sha_url) — refusing to run an unverified installer" >&2
+                        rm -rf "$tmp_dir"
+                        return 1
+                    fi
+                    actual_sha256="$(sha256_of "$installer")"
+                    if [ "$actual_sha256" != "$expected_sha256" ]; then
+                        echo "error: Vulkan SDK installer checksum mismatch — got $actual_sha256, expected $expected_sha256. REFUSING to run it." >&2
+                        rm -rf "$tmp_dir"
+                        return 1
+                    fi
+                    echo "checksum verified for Vulkan SDK $LUNARG_VULKAN_SDK_PIN_VERSION installer"
+                    run_or_plan "$dry_run" "run the (checksum-verified) LunarG Vulkan SDK installer silently" \
+                        "$installer" --accept-licenses --default-answer --confirm-command install
+                    rm -rf "$tmp_dir"
+                fi
             fi
             echo "note: GPU drivers supply the runtime ICD — this script never installs GPU drivers."
             ;;
@@ -692,10 +1063,24 @@ do_install_renderdoc() {
             return 0
             ;;
         linux)
-            echo "renderdoc is not in the Ubuntu 22.04/24.04 archive — reusing the repo's own scripts/setup/setup-renderdoc-linux-lavapipe.shs, which builds a Vulkan-only RenderDoc v1.44 from source (~10-20 min), the same one .github/workflows/renderdoc-web-diff.yml uses."
+            # SHOULD-FIX #10 (review 2026-09-25): this script's own clang-
+            # only policy (CLAUDE.md, .claude/rules/code-style.md) means it
+            # must never install or select gcc/g++ silently. The repo's own
+            # scripts/setup/setup-renderdoc-linux-lavapipe.shs would build a
+            # Vulkan-only RenderDoc v1.44 from source (~10-20 min, the same
+            # one .github/workflows/renderdoc-web-diff.yml uses) — but its
+            # own RENDERDOC_BUILD_PACKAGES includes `build-essential`
+            # (gcc/g++, a hard requirement of RenderDoc's own third-party
+            # build system, not something this script can route around) and
+            # by default it also downloads and installs Google Chrome. Since
+            # neither can be made clang-only, this stays a manual,
+            # explicitly-opted-into step rather than something `install`
+            # does on the owner's behalf.
             setup_script="$(repo_root_dir)/scripts/setup/setup-renderdoc-linux-lavapipe.shs"
-            run_or_plan "$dry_run" "sh $setup_script (10-20 min source build)" \
-                sh "$setup_script" || true
+            echo "SKIPPED — RenderDoc on Linux is not auto-installed. Building it needs the repo's own $setup_script, which installs build-essential (gcc/g++ — a clang-only-policy violation this script will not make silently) and, unless given --no-chrome, downloads and installs Google Chrome."
+            echo "To accept that for this one dev tool, run manually:"
+            echo "  sh $setup_script            # gcc/g++ + Chrome"
+            echo "  sh $setup_script --no-chrome  # gcc/g++, no Chrome"
             echo "note: capturing a Vulkan app under WSL means capturing on Mesa's Dozen/lavapipe device — fine for correctness, not representative of native GPU performance."
             ;;
         windows)
@@ -724,9 +1109,10 @@ run_install() {
     platform="$(detect_platform)"
     fam="$(platform_family "$platform")"
     if [ "$fam" = "unsupported" ]; then
-        echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet" >&2
+        echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet"
         return 2
     fi
+    apply_llvm23_path "$fam"
 
     names="$(platform_tools "$platform")"
     n=0
@@ -736,7 +1122,8 @@ run_install() {
     for name in $names; do
         row="$(check_one "$name" "$fam")"
         n=$((n + 1))
-        status="$(printf '%s' "$row" | cut -d'|' -f2)"
+        split_row "$row"
+        status="$ROW_STATUS"
         case "$status" in
             PRESENT|UNSUPPORTED) continue ;;
         esac
@@ -760,25 +1147,62 @@ run_install() {
     jj_done=0
     vulkan_done=0
     renderdoc_done=0
+    coreutils_done=0
+    # SHOULD-FIX #7 (review 2026-09-25): each `do_install_*` is invoked via
+    # `if ...; then fn || true; fi`, never via `[ cond ] && { fn; }`. Under
+    # `set -e`, a bare `A && B` statement whose overall result is a failure
+    # DOES abort the script — so a controlled `return 1` from e.g. a failed
+    # signing-key verification inside do_install_llvm23 used to be able to
+    # kill the whole `install` run before it ever reached the remaining
+    # tools or printed the final verdict. Inside an `if` condition (and with
+    # the `|| true` belt-and-braces on the call itself), a failing installer
+    # function can never abort the script — the subsequent tools still get
+    # attempted, and the mandatory final `run_check` always runs and always
+    # prints a verdict, which will correctly show FAIL for whatever the
+    # failed step left missing.
     for name in $missing_names; do
         case "$name" in
             clang|clang++|ld.lld|ld64.lld|lld-link|llvm-config|llvm-ar)
-                [ "$llvm_done" = "0" ] && { do_install_llvm23 "$dry_run" "$fam"; llvm_done=1; }
+                if [ "$llvm_done" = "0" ]; then
+                    do_install_llvm23 "$dry_run" "$fam" || true
+                    llvm_done=1
+                fi
                 ;;
             rustc|cargo)
-                [ "$rust_done" = "0" ] && { do_install_rust "$dry_run" "$fam"; rust_done=1; }
+                if [ "$rust_done" = "0" ]; then
+                    do_install_rust "$dry_run" "$fam" || true
+                    rust_done=1
+                fi
                 ;;
             mold)
-                [ "$mold_done" = "0" ] && { do_install_mold "$dry_run" "$fam"; mold_done=1; }
+                if [ "$mold_done" = "0" ]; then
+                    do_install_mold "$dry_run" "$fam" || true
+                    mold_done=1
+                fi
                 ;;
             jj)
-                [ "$jj_done" = "0" ] && { do_install_jj "$dry_run" "$fam"; jj_done=1; }
+                if [ "$jj_done" = "0" ]; then
+                    do_install_jj "$dry_run" "$fam" || true
+                    jj_done=1
+                fi
                 ;;
             vulkan)
-                [ "$vulkan_done" = "0" ] && { do_install_vulkan "$dry_run" "$fam"; vulkan_done=1; }
+                if [ "$vulkan_done" = "0" ]; then
+                    do_install_vulkan "$dry_run" "$fam" || true
+                    vulkan_done=1
+                fi
                 ;;
             renderdoc)
-                [ "$renderdoc_done" = "0" ] && { do_install_renderdoc "$dry_run" "$fam"; renderdoc_done=1; }
+                if [ "$renderdoc_done" = "0" ]; then
+                    do_install_renderdoc "$dry_run" "$fam" || true
+                    renderdoc_done=1
+                fi
+                ;;
+            gtimeout)
+                if [ "$coreutils_done" = "0" ]; then
+                    do_install_coreutils_macos "$dry_run" || true
+                    coreutils_done=1
+                fi
                 ;;
             *)
                 echo "no automated installer for '$name' on this platform — see doc/07_guide/infra/toolchain/"
@@ -865,7 +1289,12 @@ EOF
 
     case "$(platform_tools macos)" in *ld64.lld*) : ;; *) selftest_fail "macos tools must include ld64.lld" ;; esac
     case "$(platform_tools macos)" in *mold*) selftest_fail "macos tools must NOT include mold" ;; esac
-    case "$(platform_tools macos)" in *renderdoc*) selftest_fail "macos tools must NOT include renderdoc (unsupported, handled separately)" ;; esac
+    # MUST-FIX #9 regression guard: renderdoc MUST be reachable in the
+    # per-platform tool table on macOS/FreeBSD (the opposite of the
+    # original, wrong assertion this replaces) — otherwise its UNSUPPORTED
+    # status is dead code that can never print.
+    case "$(platform_tools macos)" in *renderdoc*) : ;; *) selftest_fail "macos tools must include renderdoc (check_renderdoc reports it UNSUPPORTED, not this table)" ;; esac
+    case "$(platform_tools freebsd)" in *renderdoc*) : ;; *) selftest_fail "freebsd tools must include renderdoc (check_renderdoc reports it UNSUPPORTED, not this table)" ;; esac
     case "$(platform_tools windows)" in *lld-link*) : ;; *) selftest_fail "windows tools must include lld-link" ;; esac
     case "$(platform_tools windows)" in *mold*) selftest_fail "windows tools must NOT include mold" ;; esac
     case "$(platform_tools freebsd)" in *mold*) : ;; *) selftest_fail "freebsd tools must include mold" ;; esac
@@ -995,7 +1424,80 @@ EOF
     printf '%s\n' "$out" | grep -qi "^=== " && selftest_fail "fully-satisfied fixture install must not print any installer banner, got: $out"
     [ "$rc" -eq 0 ] || selftest_fail "fully-satisfied fixture install must exit 0, got $rc"
 
-    echo "SELFTEST OK — 7 fixture group(s) passed"
+    # Fixture 8 (review 2026-09-25 #1): run_or_plan must report a failing
+    # step's real exit status. The bug was `if "$@"; then return 0; fi;
+    # rc=$?` always reading 0 — proven directly by POSIX semantics: a
+    # taken-no-branch `if` statement's own exit status is 0 regardless of
+    # the tested command, so `rc=$?` after it never saw the real failure.
+    set +e
+    out="$(run_or_plan 0 "deliberate failure" false 2>&1)"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || selftest_fail "run_or_plan must propagate a failing command's exit status, got rc=0"
+    printf '%s\n' "$out" | grep -qi "warning:.*failed" || selftest_fail "run_or_plan must print a failure warning, got: $out"
+
+    # Fixture 9 (review 2026-09-25 #5): check_renderdoc must not read a
+    # broken renderdoccmd (real exit 127) as PRESENT — same pipe-exit-status
+    # bug already fixed in check_one (`cmd | head -n1 || true` always
+    # reports success regardless of cmd's real exit code).
+    cat > "$bindir/renderdoccmd" <<'EOF'
+#!/bin/sh
+echo "error while loading shared libraries: libfoo.so: cannot open shared object file" >&2
+exit 127
+EOF
+    chmod +x "$bindir/renderdoccmd"
+    row="$(PATH="$bindir" check_renderdoc windows)"
+    printf '%s\n' "$row" | grep -q '^renderdoc|BROKEN|' || selftest_fail "a renderdoccmd that exits 127 must be BROKEN, not PRESENT, got: $row"
+    # restore the working fixture for anything after this point
+    cat > "$bindir/renderdoccmd" <<'EOF'
+#!/bin/sh
+echo "renderdoccmd v1.44"
+EOF
+    chmod +x "$bindir/renderdoccmd"
+
+    # Fixture 10 (review 2026-09-25 #6): a multi-line banner whose version
+    # is on line 2, not line 1 — llvm-ar's real vanilla banner shape ("LLVM
+    # (http://llvm.org/):" / "  LLVM version 23.1.1" / "  Optimized build.").
+    # A first-line-only read let an 18.1.8 llvm-ar pass a 23.1.0 minimum on
+    # this exact host; a first-3-lines read must catch it, and a banner
+    # with NO parseable version at all (min version set) must FAIL, not be
+    # waved through as PRESENT.
+    cat > "$bindir/llvm-ar" <<'EOF'
+#!/bin/sh
+printf 'LLVM (http://llvm.org/):\n  LLVM version 18.1.8\n  Optimized build.\n'
+EOF
+    chmod +x "$bindir/llvm-ar"
+    row="$(PATH="$bindir" check_one llvm-ar linux)"
+    printf '%s\n' "$row" | grep -q '^llvm-ar|WRONG_VERSION|18\.1\.8|' || selftest_fail "multi-line llvm-ar banner (version on line 2) must parse as 18.1.8/WRONG_VERSION, got: $row"
+
+    cat > "$bindir/llvm-ar" <<'EOF'
+#!/bin/sh
+printf 'LLVM (http://llvm.org/):\n  Optimized build.\n  no version line here at all\n'
+EOF
+    chmod +x "$bindir/llvm-ar"
+    row="$(PATH="$bindir" check_one llvm-ar linux)"
+    printf '%s\n' "$row" | grep -q '^llvm-ar|WRONG_VERSION|unknown|' || selftest_fail "an llvm-ar banner with a required minimum but NO parseable version must FAIL closed (WRONG_VERSION), not be waved through as PRESENT, got: $row"
+
+    # Fixture 11: extract_version regression guard. `grep -o` with no match
+    # exits 1; `matches="$(cmd | grep -o ...)"` is a bare assignment whose
+    # own exit status IS the pipeline's under `set -e` (the same class of
+    # bug as run_or_plan's, and the LunarG/mold `|| true` fixes elsewhere in
+    # this file) — this silently killed the ENTIRE script mid-`check` on
+    # this exact host for any tool whose banner has no dotted-version
+    # substring (xxd's real banner: "xxd 2024-09-15 by Juergen Weigert et
+    # al." — a date, not a version). extract_version itself must survive
+    # this without `set -e` aborting the caller, and check_one for such a
+    # tool (no min version) must still complete as PRESENT.
+    v="$(extract_version 'xxd 2024-09-15 by Juergen Weigert et al.')"
+    [ -z "$v" ] || selftest_fail "extract_version on a versionless banner must return empty without aborting, got '$v'"
+    cat > "$bindir/xxd" <<'EOF'
+#!/bin/sh
+echo "xxd 2024-09-15 by Juergen Weigert et al."
+EOF
+    chmod +x "$bindir/xxd"
+    row="$(PATH="$bindir" check_one xxd linux)"
+    printf '%s\n' "$row" | grep -q '^xxd|PRESENT|' || selftest_fail "check_one on a versionless-banner tool with no min version must still complete as PRESENT (and, critically, must not silently kill the calling shell), got: $row"
+
+    echo "SELFTEST OK — 11 fixture group(s) passed"
 }
 
 # ---------------------------------------------------------------------------
