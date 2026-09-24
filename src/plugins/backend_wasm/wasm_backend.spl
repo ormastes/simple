@@ -682,6 +682,9 @@ class WasmBackend:
             compile_time_ms: 0
         ))
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
 struct WasmCompileResult:
     """Result of WASM compilation."""
     module_name: text
@@ -700,18 +703,33 @@ impl WasmCompileResult:
         self.js_glue != nil
 
     fn write_to_files(base_path: text) -> Result<(), text>:
-        """Write compilation outputs to files."""
-        # Would write:
-        # - {base_path}.wat
-        # - {base_path}.wasm
-        # - {base_path}.js (if js_glue present)
+        """Write compilation outputs to files.
+
+        Previously a silent no-op that reported success without writing —
+        the same durability hole `LeanExportResult.write_to_file` (this
+        plugin family's `backend_lean/lean_backend.spl`) documents having
+        been fixed for already. Now actually writes:
+        - {base_path}.wat  (always)
+        - {base_path}.wasm (when native wat2wasm compilation succeeded)
+        - {base_path}.js   (when js_glue is present)
+        """
+        if not rt_file_write_text("{base_path}.wat", self.wat):
+            return Err(
+                "wasm-backend: failed to write WAT module `{self.module_name}` to {base_path}.wat")
+        if self.wasm.?:
+            if not rt_file_write_bytes("{base_path}.wasm", self.wasm.unwrap()):
+                return Err(
+                    "wasm-backend: failed to write WASM binary `{self.module_name}` to {base_path}.wasm")
+        if self.js_glue.?:
+            if not rt_file_write_text("{base_path}.js", self.js_glue.unwrap()):
+                return Err(
+                    "wasm-backend: failed to write JS glue `{self.module_name}` to {base_path}.js")
         Ok(())
 
 # ============================================================================
 # WAT to WASM Binary Compilation
 # ============================================================================
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_process_run(cmd: text) -> i64
 extern fn rt_file_delete(path: text) -> bool
