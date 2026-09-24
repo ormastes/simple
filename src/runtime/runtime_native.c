@@ -14139,6 +14139,24 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
         (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
 }
 
+/* Same (ptr, len) vs single-text-value ABI split as the facades above, for
+ * the owned observed capsule. resource_scope.spl declares
+ * `rt_process_run_owned_observed_bounded_value(cmd: text, args, timeout_ms,
+ * max_output_bytes)`; generated native code passes 4 words, the C owner takes
+ * 5 (cmd_data, cmd_len, ...). Without this facade every argument after cmd
+ * shifted: cmd_len received the args array pointer and the call failed before
+ * CreateProcess, so on Windows (no /bin/sh, no cgroup -> this path) every
+ * `simple test` child came back exit -1 with empty output ("child produced no
+ * exit status"). The owner already returns the native 3-word tuple, so only
+ * the cmd parameter is adapted. */
+int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
+                                                    int64_t max_output_bytes) {
+    const char* cmd_c = rt_interp_cstr(cmd);
+    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    return rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+                                                       timeout_ms, max_output_bytes);
+}
+
 int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
                                       int64_t max_output_bytes) {
     const char* cmd_c = rt_interp_cstr(cmd);
