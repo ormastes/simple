@@ -774,12 +774,16 @@ impl HirLowering:
         errors_ok and messages_ok and recovered_ok
 
     me promote_symbol_table_transient_owners() -> bool:
-        # HirModule.symbols aliases this lowerer's persistent SymbolTable
-        # (reset_module reuses the table and stores fresh containers into it
-        # while the per-file HIR scope is active). The promotion walk from the
-        # HIR root cannot see through that untracked persistent owner, so
-        # without this every HirSymbol/Scope of the module is freed at scope
-        # end and later readers (HIR cache encode, MIR) use freed memory.
+        # begin_module -> reset_module runs BEFORE the per-file HIR scope, so
+        # the table and its containers are persistent; the ENTRIES added
+        # while lowering (HirSymbol, Scope, ScopeId, text keys) are
+        # transient. The walk from the HIR root reaches them through the
+        # module's SymbolTable.module_snapshot(); promoting the containers
+        # here as well keeps the lowerer's own table valid (same containers)
+        # until its next reset_module, and fails closed on its own.
+        # current_scope needs no separate call: it is a field of that
+        # snapshot, so the HIR-root walk promotes it (and a failure there
+        # already fails the HIR promotion).
         val table = self.symbols
         val symbols_ok = rt_transient_heap_promote(table.symbols)
         val scopes_ok = rt_transient_heap_promote(table.scopes)
@@ -792,10 +796,6 @@ impl HirLowering:
         val root_scope_symbols_ok = rt_transient_heap_promote(table.root_scope_symbols)
         val union_symbols_ok = rt_transient_heap_promote(table.structural_union_symbols)
         val union_owners_ok = rt_transient_heap_promote(table.structural_union_owners)
-        # current_scope is a raw struct. Promotion only reports false for a
-        # value that is neither a transient allocation nor a heap object, i.e.
-        # one this scope never frees, so its result does not gate success.
-        val _current_scope_promoted = rt_transient_heap_promote(table.current_scope)
         symbols_ok and scopes_ok and gpu_targets_ok and gpu_orders_ok and
             qualified_functions_ok and qualified_types_ok and exact_symbols_ok and
             module_callables_ok and root_scope_symbols_ok and union_symbols_ok and
