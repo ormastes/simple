@@ -74,9 +74,12 @@ so source changes are visible even when an older native `spipe_mcp` artifact is
 present. Set `SIMPLE_SPIPE_MCP_BINARY=/path/to/spipe_mcp` for an explicit native
 deployment, or `SIMPLE_SPIPE_MCP_PREFER_NATIVE=1` only after the native parser
 and stdio protocol probes pass.
-`simple spipe-mcp ...` is the canonical shortcut; the top-level wrapper hands it
-to `bin/spipe_mcp_server` and keeps every other `simple` command on the stable
-release runtime.
+`bin/simple run src/app/spipe_mcp/main.spl ...` is the canonical invocation;
+there is no `spipe-mcp` CLI shortcut in the current command registry. The
+`bin/spipe_mcp_server` wrapper prefers the source entrypoint via
+`bin/release/simple` (set `SIMPLE_SPIPE_MCP_BINARY=/path/to/spipe_mcp` for an
+explicit native deployment, or `SIMPLE_SPIPE_MCP_PREFER_NATIVE=1` only after
+the native parser and stdio protocol probes pass).
 Parser and capture commands accept `--source-kind=K`, `--sourceKind=K`, or
 `--kind=K`; the default is `command_output`. MCP calls may use `source_kind` or
 `sourceKind`, and raw text may be supplied as `text`, `raw_text`, or `rawText`.
