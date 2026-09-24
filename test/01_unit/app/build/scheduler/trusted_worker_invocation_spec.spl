@@ -1,0 +1,82 @@
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1,
+    plan_build_worker_ssh_v1, validate_build_worker_reply_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_dispatch_v1,
+    encode_build_result_v1}
+use app.io.mod.{dir_create_all, file_atomic_write, file_hash_sha256,
+    time_now_unix_micros, getpid, cwd}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    ActionResultCandidate, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _invocation_action_v1() -> ActionSpec:
+    val snapshot = sha256_text("worker invocation snapshot")
+    ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("source"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"), sha256_text("behavior"),
+            sha256_text("abi"), sha256_text("runtime"),
+            sha256_text("sysroot"), "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/answer.c", sha256_text("answer source"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["cc", "-c", "src/answer.c"], "src", sha256_text("sandbox"),
+        ["answer.o"], sha256_text("resources"))
+
+fn _invocation_node_v1(root: text) -> TrustedSshNodeV1:
+    expect(dir_create_all(root)).to_be(true)
+    val ssh = root + "/ssh"
+    val hosts = root + "/known_hosts"
+    val key = root + "/identity"
+    expect(file_atomic_write(ssh, "test executable\n")).to_be(true)
+    expect(file_atomic_write(hosts,
+        "node-a ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeTestOnly\n"))
+        .to_be(true)
+    expect(file_atomic_write(key, "test key\n")).to_be(true)
+    TrustedSshNodeV1("node-a", "127.0.0.1", "builder", 2222,
+        ssh, file_hash_sha256(ssh), hosts, file_hash_sha256(hosts),
+        key, file_hash_sha256(key))
+
+describe "fixed pinned SSH worker invocation":
+    it "uses only configured executable and dispatch-bound safe tokens":
+        val root = cwd() + "/build/test/worker-invoke-" +
+            getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val node = _invocation_node_v1(root)
+        val action = _invocation_action_v1()
+        val digest = action_spec_digest_v1(action)
+        val attempt = AttemptSpec(1, digest, "try-1", "node-a", 0, 0, 4096)
+        val dispatch = encode_build_dispatch_v1(action, attempt, 7, 1, 8)
+        val request = sha256_text("complete request bytes")
+        val config = TrustedWorkerCommandV1(node,
+            "/usr/local/libexec/simple-build-worker", 30000)
+        val planned = plan_build_worker_ssh_v1(config, dispatch, request)
+        expect(planned.valid).to_be(true)
+        expect(planned.args.contains("/usr/local/libexec/simple-build-worker"))
+            .to_be(true)
+        expect(planned.args.contains("try-1")).to_be(true)
+        expect(planned.args.contains(request)).to_be(true)
+        val unsafe = TrustedWorkerCommandV1(node, "/bin/sh;exit", 30000)
+        expect(plan_build_worker_ssh_v1(unsafe, dispatch, request).reason)
+            .to_equal("worker-command-invalid")
+        expect(plan_build_worker_ssh_v1(config, dispatch, "bad").valid)
+            .to_be(false)
+
+    it "accepts only a result from the dispatched attempt and fence":
+        val action = _invocation_action_v1()
+        val digest = action_spec_digest_v1(action)
+        val attempt = AttemptSpec(1, digest, "try-1", "node-a", 0, 0, 4096)
+        val dispatch = encode_build_dispatch_v1(action, attempt, 7, 1, 8)
+        val candidate = ActionResultCandidate(1, digest, "try-1", "node-a",
+            sha256_text("manifest"), sha256_text("diagnostics"), true)
+        val result = encode_build_result_v1(candidate, 7)
+        expect(validate_build_worker_reply_v1(dispatch, result).received)
+            .to_be(true)
+        expect(validate_build_worker_reply_v1(dispatch,
+            result.replace("fence=7", "fence=8")).reason)
+            .to_equal("worker-result-mismatch")
+        expect(validate_build_worker_reply_v1(dispatch,
+            result.replace("worker=node-a", "worker=node-b")).reason)
+            .to_equal("worker-result-mismatch")
+        expect(validate_build_worker_reply_v1(dispatch, "bad").reason)
+            .to_equal("worker-result-invalid")

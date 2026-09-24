@@ -661,8 +661,21 @@ fn ensure_kill_monitor_running():
     else:
         # Linux / macOS / FreeBSD / MinGW / MSYS2 / Cygwin: use .sh
         if file_exists(sh_path):
-            rt_process_spawn_async("sh", [sh_path])
-            print "[safeguard] Started kill_simple_monitor.shs in background"
+            if is_macos():
+                # The native async-spawn path has crashed in a macOS test
+                # runner child (tracked in the 2026-09-26 monitor bug). Use
+                # the already exercised synchronous shell facade to launch
+                # this one detached safeguard without entering that ABI.
+                val spawned = shell_output_default(
+                    "nohup sh {sh_path} </dev/null >/dev/null 2>&1 & echo $!", "")
+                val pid = spawned.trim().to_i64() ?? -1
+                if pid > 0:
+                    print "[safeguard] Started kill_simple_monitor.shs in background"
+                else:
+                    print "[safeguard] WARNING: monitor launch failed"
+            else:
+                rt_process_spawn_async("sh", [sh_path])
+                print "[safeguard] Started kill_simple_monitor.shs in background"
         else:
             print "[safeguard] WARNING: {sh_path} not found, skipping resource monitor"
 

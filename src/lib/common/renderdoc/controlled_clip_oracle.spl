@@ -1,0 +1,69 @@
+# Independent analytic pixels for the pinned 16x16 clipped rectangle scene.
+# This does not decode the fixture or consume either backend's DrawIR producer.
+
+use std.fs.{read_file}
+use std.io_runtime.{file_exists}
+use std.common.crypto.sha256.{sha256_text, sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use common.renderdoc.final_output_pixels.{FinalOutputCapture,
+    final_output_canonical_rgba}
+
+val _CLIP_ORACLE_FIXTURE_PATH: text =
+    "test/fixtures/simple_2d_skia/controlled_clipped_rect_v2.sdn"
+val _CLIP_ORACLE_FIXTURE_SHA256: text =
+    "b16d53f7785a09559bf209797fcb724906f896b93d23eff512bda69ec44d8f2f"
+val _CLIP_ORACLE_RGBA_SHA256: text =
+    "0664e46ad7f384f9b594b7d1c1e8d0db13a197846a4527db5c152258baf20dc0"
+
+pub fn controlled_clip_expected_rgba() -> Result<[i64], text>:
+    """Build the expected image from independent integer coverage rules."""
+    if not file_exists(_CLIP_ORACLE_FIXTURE_PATH) or
+        sha256_text(read_file(_CLIP_ORACLE_FIXTURE_PATH)) !=
+            _CLIP_ORACLE_FIXTURE_SHA256:
+        return Err("controlled-clip-oracle-source-mismatch")
+    var rgba: [i64] = []
+    var y = 0
+    while y < 16:
+        var x = 0
+        while x < 16:
+            # The empty and disjoint clips contribute no pixels. The final
+            # orange rectangle proves an earlier clip did not leak into it.
+            val orange = x >= 10 and x < 14 and y >= 11 and y < 14
+            val blue = x >= 2 and x < 7 and y >= 3 and y < 9
+            val red = if orange: 170 else if blue: 51 else: 16
+            val green = if orange: 85 else if blue: 102 else: 32
+            val blue_channel = if orange: 0 else if blue: 153 else: 48
+            rgba.push(red)
+            rgba.push(green)
+            rgba.push(blue_channel)
+            rgba.push(255)
+            x = x + 1
+        y = y + 1
+    if rgba.len() != 1024 or
+        bytes_to_hex(sha256_bytes(rgba)) != _CLIP_ORACLE_RGBA_SHA256:
+        return Err("controlled-clip-oracle-image-digest-mismatch")
+    Ok(rgba)
+
+pub fn controlled_clip_capture_matches_oracle(
+    capture: FinalOutputCapture) -> Result<bool, text>:
+    """Compare completed canonical pixels to the independent clip oracle."""
+    if capture.metadata.fixture_id != "controlled-clipped-rect-v2" or
+        capture.metadata.fixture_digest != _CLIP_ORACLE_FIXTURE_SHA256:
+        return Err("controlled-clip-oracle-fixture-mismatch")
+    if capture.metadata.width != 16 or capture.metadata.height != 16 or
+        capture.metadata.crop_x != 0 or capture.metadata.crop_y != 0 or
+        capture.metadata.crop_width != 16 or
+        capture.metadata.crop_height != 16:
+        return Err("controlled-clip-oracle-capture-extent")
+    val expected = controlled_clip_expected_rgba()?
+    val actual = match final_output_canonical_rgba(capture):
+        case Ok(rgba): rgba
+        case Err(err): return Err("controlled-clip-oracle-capture-" + err.code)
+    if actual.len() != 1024 or expected.len() != 1024:
+        return Err("controlled-clip-oracle-capture-length")
+    var index = 0
+    while index < 1024:
+        if actual[index] != expected[index]:
+            return Ok(false)
+        index = index + 1
+    Ok(true)

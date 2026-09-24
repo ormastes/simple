@@ -32,6 +32,8 @@
 #include <sys/stat.h>
 #undef max
 #else
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -88,6 +90,54 @@ int64_t rt_unix_socket_connect(const char* path) {
     }
     memcpy(address.sun_path, path, strlen(path) + 1);
     if (connect(fd, (struct sockaddr*)&address, sizeof(address)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return (int64_t)fd;
+#endif
+}
+
+/* A bounded local-daemon connect for byte-stream owners. The returned socket
+ * is blocking; callers apply their own read/write deadlines. */
+int64_t rt_unix_socket_connect_timeout(const char* path, int64_t timeout_ms) {
+#if defined(_WIN32)
+    (void)path; (void)timeout_ms;
+    return -1;
+#else
+    if (!path || timeout_ms < 1 || timeout_ms > 60000) return -1;
+    struct sockaddr_un address;
+    size_t path_len = strlen(path);
+    if (path_len == 0 || path_len >= sizeof(address.sun_path)) return -1;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, path, path_len + 1);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0 ||
+        fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (connect(fd, (struct sockaddr*)&address, sizeof(address)) != 0) {
+        if (errno != EINPROGRESS) {
+            close(fd);
+            return -1;
+        }
+        struct pollfd wait_fd = {.fd = fd, .events = POLLOUT, .revents = 0};
+        if (poll(&wait_fd, 1, (int)timeout_ms) != 1) {
+            close(fd);
+            return -1;
+        }
+        int error = 0;
+        socklen_t error_len = sizeof(error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_len) != 0 ||
+            error_len != sizeof(error) || error != 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    if (fcntl(fd, F_SETFL, flags) != 0) {
         close(fd);
         return -1;
     }

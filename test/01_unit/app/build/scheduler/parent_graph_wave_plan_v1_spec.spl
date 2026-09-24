@@ -1,0 +1,268 @@
+use std.spec.*
+use app.build.scheduler.parent_graph_wave_plan_v1.{plan_parent_graph_wave_v1}
+use app.build.scheduler.parent_graph_request.{ParentGraphRequestV1,
+    admit_parent_graph_requests_v1}
+use app.build.scheduler.parent_cli.{DistBuildConfigV1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1, SchedulerLedgerV1,
+    SchedulerAttemptV1, SchedulerFenceV1, empty_scheduler_ledger_v1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1}
+use compiler.common.build_contract.{BuildInputRef, BuildDependencyRef,
+    SnapshotManifest, ToolchainManifest, InputManifest, ActionSpec,
+    AttemptSpec, AcceptedResult, NodeCapabilities, action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _wave_request_v1(label: text, dependency: text,
+        worker: text) -> BuildWorkerRequestV1:
+    val snapshot = sha256_text("wave-snapshot")
+    var dependencies: [text] = []
+    var outputs: [BuildDependencyRef] = []
+    if dependency != "":
+        dependencies.push(dependency)
+        outputs.push(BuildDependencyRef(dependency, "lib.o",
+            sha256_text("lib-object")))
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/" + label + ".c", sha256_text(label))],
+            [], dependencies, outputs, [], [], sha256_text("context"),
+            true, false),
+        ["/usr/bin/clang", "-c"], "simple-build/outputs",
+        sha256_text("sandbox"),
+        if dependency == "": ["lib.o"] else: ["final.o"],
+        sha256_text("resources"))
+    BuildWorkerRequestV1(action,
+        AttemptSpec(1, action_spec_digest_v1(action), "template-" + label,
+            worker, 0, 4, 4096), 1, 2, 8)
+
+fn _wave_worker_v1(worker_id: text, cpu: i64) -> DistBuildConfigV1:
+    val node = TrustedSshNodeV1(worker_id, "build.example", "builder", 22,
+        "/usr/bin/ssh", sha256_text("ssh"), "/etc/ssh/known_hosts",
+        sha256_text("known-hosts"), "/home/builder/.ssh/id_ed25519",
+        sha256_text("identity"))
+    DistBuildConfigV1("", "/trusted/graph.manifest", "/trusted/owner",
+        DistributedBuildNodeV1(
+            TrustedWorkerCommandV1(node, "/opt/simple/bin/simple-worker", 60000),
+            TrustedSftpConfigV1(node, "/usr/bin/sftp", sha256_text("sftp"),
+                "/srv/simple/inbox"),
+            "/trusted/source", "/trusted/state", "/trusted/cas"),
+        NodeCapabilities(1, worker_id, ["x86_64-unknown-linux-gnu"],
+            [sha256_text("abi")], "trusted-build", 16384),
+        "trusted-build", SchedulerCapacityV1(cpu, 16384, 0, 32),
+        "", "", "")
+
+fn _wave_graph_v1(requests: [BuildWorkerRequestV1]) -> ParentGraphRequestV1:
+    var wires: [text] = []
+    for request in requests:
+        wires.push(encode_build_worker_request_v1(request))
+    admit_parent_graph_requests_v1(wires, "", "worker-1", 0)
+
+describe "parent graph parallel wave planning":
+    it "proposes two independent slots without changing the caller ledger":
+        val first = _wave_request_v1("first", "", "worker-1")
+        val second = _wave_request_v1("second", "", "worker-2")
+        val graph = _wave_graph_v1([first, second])
+        val workers = [_wave_worker_v1("worker-1", 4),
+            _wave_worker_v1("worker-2", 4)]
+        val ledger = empty_scheduler_ledger_v1()
+        val wave = plan_parent_graph_wave_v1(graph, ledger, workers,
+            ["dist-first", "dist-second"], 0)
+        expect(graph.valid).to_be(true)
+        expect(wave.status).to_equal("DISPATCH")
+        expect(wave.slots.len()).to_equal(2)
+        expect(wave.slots[0].action_digest < wave.slots[1].action_digest).to_be(true)
+        expect(wave.slots[0].worker_index != wave.slots[1].worker_index).to_be(true)
+        expect(ledger.attempts.len()).to_equal(0)
+        expect(ledger.fences.len()).to_equal(0)
+        expect(ledger.accepted.len()).to_equal(0)
+
+    it "holds a consumer until its producer is accepted":
+        val producer = _wave_request_v1("producer", "", "worker-1")
+        val consumer = _wave_request_v1("consumer",
+            producer.attempt.action_digest, "worker-2")
+        val graph = _wave_graph_v1([producer, consumer])
+        val workers = [_wave_worker_v1("worker-1", 4),
+            _wave_worker_v1("worker-2", 4)]
+        val first = plan_parent_graph_wave_v1(graph,
+            empty_scheduler_ledger_v1(), workers,
+            ["dist-producer", "dist-consumer"], 0)
+        expect(first.status).to_equal("DISPATCH")
+        expect(first.slots.len()).to_equal(1)
+        expect(first.slots[0].action_digest).to_equal(
+            producer.attempt.action_digest)
+        val active = SchedulerLedgerV1(
+            [SchedulerAttemptV1(producer.attempt.action_digest,
+                "active-producer", "worker-1", 1, 2, 4096, 8, true)],
+            [SchedulerFenceV1(producer.attempt.action_digest, 1)], [], [])
+        val waiting = plan_parent_graph_wave_v1(graph, active, workers,
+            ["dist-next-one", "dist-next-two"], 0)
+        expect(waiting.status).to_equal("WAIT_ACTIVE")
+        expect(waiting.slots.len()).to_equal(0)
+        val accepted = SchedulerLedgerV1([], [],
+            [AcceptedResult(1, producer.attempt.action_digest,
+                "done-producer", sha256_text("manifest"),
+                sha256_text("receipt"))], [])
+        val next = plan_parent_graph_wave_v1(graph, accepted, workers,
+            ["dist-next-one", "dist-next-two"], 0)
+        expect(next.slots.len()).to_equal(1)
+        expect(next.slots[0].action_digest).to_equal(
+            consumer.attempt.action_digest)
+
+    it "limits a wave by shared capacity and returns a partial wave":
+        val first = _wave_request_v1("first", "", "worker-1")
+        val second = _wave_request_v1("second", "", "worker-2")
+        val graph = _wave_graph_v1([first, second])
+        val workers = [_wave_worker_v1("worker-1", 2),
+            _wave_worker_v1("worker-2", 2)]
+        val wave = plan_parent_graph_wave_v1(graph,
+            empty_scheduler_ledger_v1(), workers,
+            ["dist-first", "dist-second"], 0)
+        expect(wave.status).to_equal("DISPATCH")
+        expect(wave.slots.len()).to_equal(1)
+        val expected = if first.attempt.action_digest <
+            second.attempt.action_digest: first.attempt.action_digest else:
+            second.attempt.action_digest
+        expect(wave.slots[0].action_digest).to_equal(expected)
+
+    it "limits waves by reserved memory and file descriptors":
+        val first = _wave_request_v1("first", "", "worker-1")
+        val second = _wave_request_v1("second", "", "worker-2")
+        val graph = _wave_graph_v1([first, second])
+        var memory_first = _wave_worker_v1("worker-1", 4)
+        var memory_second = _wave_worker_v1("worker-2", 4)
+        memory_first.capacity = SchedulerCapacityV1(4, 8192, 4096, 32)
+        memory_second.capacity = SchedulerCapacityV1(4, 8192, 4096, 32)
+        val memory_wave = plan_parent_graph_wave_v1(graph,
+            empty_scheduler_ledger_v1(), [memory_first, memory_second],
+            ["dist-memory-first", "dist-memory-second"], 0)
+        expect(memory_wave.status).to_equal("DISPATCH")
+        expect(memory_wave.slots.len()).to_equal(1)
+
+        var fd_first = _wave_worker_v1("worker-1", 4)
+        var fd_second = _wave_worker_v1("worker-2", 4)
+        fd_first.capacity = SchedulerCapacityV1(4, 16384, 0, 8)
+        fd_second.capacity = SchedulerCapacityV1(4, 16384, 0, 8)
+        val fd_wave = plan_parent_graph_wave_v1(graph,
+            empty_scheduler_ledger_v1(), [fd_first, fd_second],
+            ["dist-fd-first", "dist-fd-second"], 0)
+        expect(fd_wave.status).to_equal("DISPATCH")
+        expect(fd_wave.slots.len()).to_equal(1)
+
+    it "excludes an active worker while another worker receives a slot":
+        val first = _wave_request_v1("first", "", "worker-1")
+        val second = _wave_request_v1("second", "", "worker-2")
+        val graph = _wave_graph_v1([first, second])
+        val workers = [_wave_worker_v1("worker-1", 4),
+            _wave_worker_v1("worker-2", 4)]
+        val ledger = SchedulerLedgerV1(
+            [SchedulerAttemptV1(first.attempt.action_digest,
+                "active-first", "worker-1", 1, 2, 4096, 8, true)],
+            [SchedulerFenceV1(first.attempt.action_digest, 1)], [], [])
+        val wave = plan_parent_graph_wave_v1(graph, ledger, workers,
+            ["dist-first", "dist-second"], 0)
+        expect(wave.status).to_equal("DISPATCH")
+        expect(wave.slots.len()).to_equal(1)
+        expect(wave.slots[0].worker_index).to_equal(1)
+        expect(wave.slots[0].action_digest).to_equal(second.attempt.action_digest)
+        expect(ledger.attempts.len()).to_equal(1)
+        expect(ledger.attempts[0].active).to_be(true)
+        expect(ledger.fences.len()).to_equal(1)
+        expect(ledger.fences[0].epoch).to_equal(1)
+
+    it "blocks an active graph attempt issued to the wrong worker":
+        val first = _wave_request_v1("first", "", "worker-1")
+        val graph = _wave_graph_v1([first])
+        val ledger = SchedulerLedgerV1(
+            [SchedulerAttemptV1(first.attempt.action_digest,
+                "active-wrong-worker", "unavailable-worker", 1,
+                2, 4096, 8, true)],
+            [SchedulerFenceV1(first.attempt.action_digest, 1)], [], [])
+        val wave = plan_parent_graph_wave_v1(graph, ledger,
+            [_wave_worker_v1("worker-1", 4)], ["dist-next"], 0)
+        expect(wave.status).to_equal("BLOCKED")
+        expect(wave.reason).to_equal("graph-active-worker-mismatch")
+
+    it "charges an unrelated active attempt against shared capacity":
+        val request = _wave_request_v1("fresh", "", "worker-1")
+        val graph = _wave_graph_v1([request])
+        val unrelated = sha256_text("unrelated-active")
+        val ledger = SchedulerLedgerV1(
+            [SchedulerAttemptV1(unrelated, "unrelated-attempt", "worker-2",
+                1, 2, 4096, 8, true)],
+            [SchedulerFenceV1(unrelated, 1)], [], [])
+        val wave = plan_parent_graph_wave_v1(graph, ledger,
+            [_wave_worker_v1("worker-1", 2)], ["dist-fresh"], 0)
+        expect(wave.status).to_equal("BLOCKED")
+        expect(wave.reason).to_equal("graph-capacity-exhausted")
+        expect(wave.slots.len()).to_equal(0)
+
+    it "orders by priority, then action digest, regardless of worker order":
+        val low = _wave_request_v1("low", "", "worker-1")
+        var high = _wave_request_v1("high", "", "worker-2")
+        var high_attempt = high.attempt
+        high_attempt.priority = 10
+        high.attempt = high_attempt
+        val graph = _wave_graph_v1([low, high])
+        val workers = [_wave_worker_v1("worker-1", 4),
+            _wave_worker_v1("worker-2", 4)]
+        val wave = plan_parent_graph_wave_v1(graph,
+            empty_scheduler_ledger_v1(), workers,
+            ["dist-low", "dist-high"], 0)
+        expect(wave.slots.len()).to_equal(2)
+        expect(wave.slots[0].action_digest).to_equal(high.attempt.action_digest)
+        expect(wave.slots[0].worker_index).to_equal(1)
+
+    it "rejects duplicate and historical attempt IDs before selection":
+        val first = _wave_request_v1("first", "", "worker-1")
+        val second = _wave_request_v1("second", "", "worker-2")
+        val graph = _wave_graph_v1([first, second])
+        val workers = [_wave_worker_v1("worker-1", 4),
+            _wave_worker_v1("worker-2", 4)]
+        val duplicate = plan_parent_graph_wave_v1(graph,
+            empty_scheduler_ledger_v1(), workers,
+            ["dist-same", "dist-same"], 0)
+        expect(duplicate.status).to_equal("BLOCKED")
+        expect(duplicate.reason).to_equal("attempt-id-invalid")
+        val historical = SchedulerLedgerV1(
+            [SchedulerAttemptV1(first.attempt.action_digest,
+                "dist-old", "worker-1", 1, 2, 4096, 8, false)],
+            [SchedulerFenceV1(first.attempt.action_digest, 1)], [], [])
+        val reused = plan_parent_graph_wave_v1(graph, historical, workers,
+            ["dist-new", "dist-old"], 0)
+        expect(reused.status).to_equal("BLOCKED")
+        expect(reused.reason).to_equal("attempt-id-reused")
+
+    it "rejects a request and action pair changed after graph admission":
+        val request = _wave_request_v1("first", "", "worker-1")
+        var graph = _wave_graph_v1([request])
+        var actions = graph.actions
+        var changed = actions[0]
+        changed.cpu_tokens = 1
+        actions[0] = changed
+        graph.actions = actions
+        val wave = plan_parent_graph_wave_v1(graph,
+            empty_scheduler_ledger_v1(), [_wave_worker_v1("worker-1", 4)],
+            ["dist-first"], 0)
+        expect(wave.status).to_equal("BLOCKED")
+        expect(wave.reason).to_equal("graph-request-action-mismatch")
+
+    it "reports complete only after every action has an accepted publication":
+        val request = _wave_request_v1("complete", "", "worker-1")
+        val graph = _wave_graph_v1([request])
+        val accepted = SchedulerLedgerV1([], [],
+            [AcceptedResult(1, request.attempt.action_digest,
+                "done-complete", sha256_text("manifest"),
+                sha256_text("receipt"))], [])
+        val wave = plan_parent_graph_wave_v1(graph, accepted,
+            [_wave_worker_v1("worker-1", 4)], ["dist-unused"], 0)
+        expect(wave.status).to_equal("COMPLETE")
+        expect(wave.slots.len()).to_equal(0)

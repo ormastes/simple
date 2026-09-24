@@ -1,0 +1,216 @@
+# Backend-neutral draw commands lowered from the versioned shared Draw IR.
+# A rejected lowering contains no executable commands or batches. Executors
+# must check `accepted` before using this value.
+
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SCHEMA_VERSION,
+    DRAW_IR_SCHEMA_VERSION_V4, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER,
+    DRAW_IR_RASTER_COVERAGE_AA, DrawIrAffine2D,
+    DrawIrBatch, DrawIrCommand, DrawIrComposition, DrawIrEmbeddingConfig,
+    DrawIrGlyphRunPayload, DrawIrRect, DrawIrSourceInfo, DrawIrStyleProp
+}
+use common.numeric_round.{is_inf_f64, is_nan_f64}
+
+pub val UI_IR_SCHEMA_VERSION: text = "simple-ui-ir-v1"
+pub val UI_IR_SCHEMA_VERSION_V2: text = "simple-ui-ir-v2"
+pub val UI_IR_COMMAND_RECT: i32 = 1
+pub val UI_IR_COMMAND_TEXT: i32 = 2
+
+struct UiIrBatch:
+    batch_id: text
+    backend_target: text
+    source: DrawIrSourceInfo
+    embedding: DrawIrEmbeddingConfig
+    command_start: i32
+    command_count: i32
+
+struct UiIrCommand:
+    kind: i32
+    batch_index: i32
+    component_id: text
+    parent_id: text
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+    color: u32
+    text_value: text
+    advance_widths: [i32]
+    border_rect: DrawIrRect
+    content_rect: DrawIrRect
+    hit_rect: DrawIrRect
+    clip_rect: DrawIrRect
+    computed_style: [DrawIrStyleProp]
+    glyph_run: DrawIrGlyphRunPayload
+    affine_transform: DrawIrAffine2D?
+    raster_policy: text
+
+struct UiIr:
+    schema: text
+    composition_id: text
+    scene_key: text
+    backend_target: text
+    generation: i64
+    batches: [UiIrBatch]
+    commands: [UiIrCommand]
+    accepted: bool
+    rejection_reason: text
+    rejected_batch_index: i32
+    rejected_command_index: i32
+
+fn _ui_ir_rejected(composition: DrawIrComposition, reason: text, batch_index: i32, command_index: i32) -> UiIr:
+    UiIr(
+        schema: if composition.schema == DRAW_IR_SCHEMA_VERSION_V4: UI_IR_SCHEMA_VERSION_V2 else: UI_IR_SCHEMA_VERSION,
+        composition_id: composition.composition_id,
+        scene_key: composition.scene_key,
+        backend_target: composition.backend_target,
+        generation: composition.generation,
+        batches: [], commands: [], accepted: false,
+        rejection_reason: reason,
+        rejected_batch_index: batch_index,
+        rejected_command_index: command_index
+    )
+
+fn _ui_ir_finite_coordinate(value: f64) -> bool:
+    not is_nan_f64(value) and not is_inf_f64(value)
+
+fn _ui_ir_valid_command_geometry(command: DrawIrCommand) -> bool:
+    if val geometry = command.fractional_geometry:
+        return (_ui_ir_finite_coordinate(geometry.x) and
+            _ui_ir_finite_coordinate(geometry.y) and
+            _ui_ir_finite_coordinate(geometry.width) and
+            _ui_ir_finite_coordinate(geometry.height) and
+            geometry.width >= 0.0 and geometry.height >= 0.0)
+    command.width >= 0 and command.height >= 0
+
+fn _ui_ir_valid_clip_rect(clip: DrawIrRect) -> bool:
+    if not clip.present:
+        return true
+    if clip.width < 0 or clip.height < 0:
+        return false
+    # Keep edge arithmetic wider than the i32 fields so malformed dimensions
+    # cannot wrap while the command is flattened for a backend.
+    val right = clip.x.to_i64() + clip.width.to_i64()
+    val bottom = clip.y.to_i64() + clip.height.to_i64()
+    right >= clip.x.to_i64() and bottom >= clip.y.to_i64()
+
+fn _ui_ir_finite_transformed_point(matrix: DrawIrAffine2D, x: f64, y: f64) -> bool:
+    (_ui_ir_finite_coordinate(matrix.a * x + matrix.c * y + matrix.tx) and
+        _ui_ir_finite_coordinate(matrix.b * x + matrix.d * y + matrix.ty))
+
+fn _ui_ir_valid_affine(command: DrawIrCommand, matrix: DrawIrAffine2D) -> bool:
+    if not (_ui_ir_finite_coordinate(matrix.a) and _ui_ir_finite_coordinate(matrix.b) and
+        _ui_ir_finite_coordinate(matrix.c) and _ui_ir_finite_coordinate(matrix.d) and
+        _ui_ir_finite_coordinate(matrix.tx) and _ui_ir_finite_coordinate(matrix.ty)):
+        return false
+    val determinant = matrix.a * matrix.d - matrix.b * matrix.c
+    if not _ui_ir_finite_coordinate(determinant) or determinant == 0.0:
+        return false
+    if val geometry = command.fractional_geometry:
+        val right = geometry.x + geometry.width
+        val bottom = geometry.y + geometry.height
+        if not _ui_ir_finite_coordinate(right) or not _ui_ir_finite_coordinate(bottom):
+            return false
+        return (_ui_ir_finite_transformed_point(matrix, geometry.x, geometry.y) and
+            _ui_ir_finite_transformed_point(matrix, right, geometry.y) and
+            _ui_ir_finite_transformed_point(matrix, geometry.x, bottom) and
+            _ui_ir_finite_transformed_point(matrix, right, bottom))
+    false
+
+fn _ui_ir_command(command: DrawIrCommand, batch_index: i32) -> UiIrCommand:
+    var x = command.x.to_f64()
+    var y = command.y.to_f64()
+    var width = command.width.to_f64()
+    var height = command.height.to_f64()
+    if val geometry = command.fractional_geometry:
+        x = geometry.x
+        y = geometry.y
+        width = geometry.width
+        height = geometry.height
+    UiIrCommand(
+        kind: if command.kind == DRAW_IR_COMMAND_RECT: UI_IR_COMMAND_RECT else: UI_IR_COMMAND_TEXT,
+        batch_index: batch_index,
+        component_id: command.component_id,
+        parent_id: command.parent_id,
+        x: x, y: y, width: width, height: height,
+        color: command.color,
+        text_value: command.text_value,
+        advance_widths: command.advance_widths,
+        border_rect: command.border_rect,
+        content_rect: command.content_rect,
+        hit_rect: command.hit_rect,
+        clip_rect: command.clip_rect,
+        computed_style: command.computed_style,
+        glyph_run: command.glyph_run,
+        affine_transform: command.affine_transform,
+        raster_policy: command.raster_policy
+    )
+
+# Lower supported Draw IR rectangle and text commands without rounding. The
+# fractional payload, when present, is authoritative over legacy integer
+# geometry. Any unsupported command rejects the whole composition.
+pub fn draw_ir_to_ui_ir(composition: DrawIrComposition) -> UiIr:
+    val is_v4 = composition.schema == DRAW_IR_SCHEMA_VERSION_V4
+    if composition.schema != DRAW_IR_SCHEMA_VERSION and not is_v4:
+        return _ui_ir_rejected(composition, "unsupported composition schema", -1, -1)
+    var batches: [UiIrBatch] = []
+    var commands: [UiIrCommand] = []
+    var batch_index = 0
+    while batch_index < composition.batches.len():
+        val batch: DrawIrBatch = composition.batches[batch_index]
+        if batch.schema != composition.schema:
+            return _ui_ir_rejected(composition, "unsupported batch schema", batch_index, -1)
+        if (batch.embedding.width < 0 or batch.embedding.height < 0 or
+            batch.embedding.opacity_milli < 0 or batch.embedding.opacity_milli > 1000):
+            return _ui_ir_rejected(composition, "invalid batch embedding", batch_index, -1)
+        val command_start = commands.len()
+        var command_index = 0
+        while command_index < batch.commands.len():
+            val command = batch.commands[command_index]
+            if command.kind != DRAW_IR_COMMAND_RECT and command.kind != DRAW_IR_COMMAND_TEXT:
+                return _ui_ir_rejected(composition, "unsupported command kind: " + command.kind, batch_index, command_index)
+            if command.edge != nil or command.image_uri != "" or command.points.len() > 0:
+                return _ui_ir_rejected(composition, "unsupported command payload", batch_index, command_index)
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.fractional_geometry != nil:
+                return _ui_ir_rejected(composition, "fractional text geometry is unsupported", batch_index, command_index)
+            if (command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER and
+                command.raster_policy != DRAW_IR_RASTER_COVERAGE_AA):
+                return _ui_ir_rejected(composition, "unsupported raster policy", batch_index, command_index)
+            if (not is_v4 and (command.affine_transform != nil or
+                command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER)):
+                return _ui_ir_rejected(composition, "v4 command in v3 batch", batch_index, command_index)
+            if command.raster_policy == DRAW_IR_RASTER_COVERAGE_AA and command.kind != DRAW_IR_COMMAND_RECT:
+                return _ui_ir_rejected(composition, "coverage policy requires rect", batch_index, command_index)
+            if val matrix = command.affine_transform:
+                if (command.kind != DRAW_IR_COMMAND_RECT or command.fractional_geometry == nil or
+                    command.x != 0 or command.y != 0 or command.width != 0 or command.height != 0):
+                    return _ui_ir_rejected(composition, "affine requires fractional local rect", batch_index, command_index)
+                if not _ui_ir_valid_affine(command, matrix):
+                    return _ui_ir_rejected(composition, "invalid affine transform", batch_index, command_index)
+            if not _ui_ir_valid_command_geometry(command):
+                return _ui_ir_rejected(composition, "invalid command geometry", batch_index, command_index)
+            if not _ui_ir_valid_clip_rect(command.clip_rect):
+                return _ui_ir_rejected(composition, "invalid rectangular clip", batch_index, command_index)
+            commands.push(_ui_ir_command(command, batch_index))
+            command_index = command_index + 1
+        batches.push(UiIrBatch(
+            batch_id: batch.batch_id,
+            backend_target: batch.backend_target,
+            source: batch.source,
+            embedding: batch.embedding,
+            command_start: command_start,
+            command_count: batch.commands.len()
+        ))
+        batch_index = batch_index + 1
+    UiIr(
+        schema: if is_v4: UI_IR_SCHEMA_VERSION_V2 else: UI_IR_SCHEMA_VERSION,
+        composition_id: composition.composition_id,
+        scene_key: composition.scene_key,
+        backend_target: composition.backend_target,
+        generation: composition.generation,
+        batches: batches, commands: commands, accepted: true,
+        rejection_reason: "", rejected_batch_index: -1,
+        rejected_command_index: -1
+    )
+
+export UI_IR_COMMAND_RECT, UI_IR_COMMAND_TEXT, UI_IR_SCHEMA_VERSION, UI_IR_SCHEMA_VERSION_V2, UiIr, UiIrBatch, UiIrCommand, draw_ir_to_ui_ir

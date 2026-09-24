@@ -38,6 +38,9 @@ extern fn rt_gpu_provider_wait_raw(backend: i64, session: i64,
 @unsafe(reason: "native GPU bounded readback boundary", capabilities: [ffi])
 extern fn rt_gpu_provider_readback_raw(backend: i64, session: i64,
     resource: i64, bytes: i64) -> i64
+@unsafe(reason: "native GPU session/completion UUID provenance", capabilities: [ffi])
+extern fn rt_gpu_provider_device_identity_raw(backend: i64, session: i64,
+    completion: i64, identity: i64) -> i64
 @unsafe(reason: "native GPU completion retirement", capabilities: [ffi])
 extern fn rt_gpu_provider_completion_release(backend: i64, session: i64,
     completion: i64) -> i64
@@ -56,6 +59,7 @@ val GPU_PROVIDER_STATUS_REJECTED: i64 = -7
 val GPU_PROVIDER_STATUS_UNCERTAIN: i64 = -8
 val GPU_PROVIDER_RECEIPT_BYTES: i64 = 56
 val GPU_PROVIDER_BYTES_BYTES: i64 = 24
+val GPU_PROVIDER_DEVICE_IDENTITY_BYTES: i64 = 64
 
 struct GpuProviderInfo:
     loaded: bool
@@ -134,6 +138,17 @@ struct GpuProviderReadback:
     valid: bool
     status: i64
     length: i64
+
+struct GpuProviderDeviceIdentity:
+    valid: bool
+    status: i64
+    device_uuid: text
+    driver_uuid: text
+    vendor_id: i64
+    device_id: i64
+    device_type: i64
+    api_version: i64
+    driver_version: i64
 
 fn gpu_provider_info(backend: i64) -> GpuProviderInfo:
     if backend != GPU_PROVIDER_BACKEND_CUDA and \
@@ -251,7 +266,7 @@ fn gpu_provider_wait(session: GpuProviderSession,
     val valid = call_status == GPU_PROVIDER_STATUS_OK and \
         receipt_status == GPU_PROVIDER_STATUS_OK and \
         correlation == completion.correlation_id and provider != 0 and \
-        device >= 0 and checksum != 0 and elapsed != 0
+        device >= 0 and elapsed != 0
     GpuProviderReceipt(valid: valid,
         status: if call_status == GPU_PROVIDER_STATUS_OK:
             receipt_status else: call_status,
@@ -285,6 +300,59 @@ fn gpu_provider_readback_raw(session: GpuProviderSession,
         status: status,
         length: if length >= 0 and length <= capacity: length else: 0)
 
+fn _gpu_provider_device_identity_invalid(status: i64) -> GpuProviderDeviceIdentity:
+    GpuProviderDeviceIdentity(valid: false, status: status,
+        device_uuid: "", driver_uuid: "", vendor_id: 0, device_id: 0,
+        device_type: 0, api_version: 0, driver_version: 0)
+
+fn _gpu_provider_hex_byte(value: u32) -> text:
+    val alphabet = "0123456789abcdef"
+    val high = ((value >> 4) & 0x0fu32).to_i64()
+    val low = (value & 0x0fu32).to_i64()
+    alphabet.substring(high, high + 1) + alphabet.substring(low, low + 1)
+
+fn _gpu_provider_uuid_hex(ptr: i64, offset: i64) -> text:
+    var hex = ""
+    var word_index: i64 = 0
+    while word_index < 16:
+        val word = raw_read_i32(ptr, offset + word_index) as u32
+        hex = hex + _gpu_provider_hex_byte(word & 0xffu32)
+        hex = hex + _gpu_provider_hex_byte((word >> 8) & 0xffu32)
+        hex = hex + _gpu_provider_hex_byte((word >> 16) & 0xffu32)
+        hex = hex + _gpu_provider_hex_byte((word >> 24) & 0xffu32)
+        word_index = word_index + 4
+    hex
+
+fn gpu_provider_device_identity(session: GpuProviderSession,
+    completion: GpuProviderCompletion) -> GpuProviderDeviceIdentity:
+    """Query UUIDs from an authenticated owned terminal completion after readback."""
+    if not session.is_open() or not completion.is_live() or
+        session.backend != completion.backend or
+        session.handle != completion.session:
+        return _gpu_provider_device_identity_invalid(GPU_PROVIDER_STATUS_INVALID)
+    val ptr = raw_alloc(GPU_PROVIDER_DEVICE_IDENTITY_BYTES)
+    if ptr == 0:
+        return _gpu_provider_device_identity_invalid(GPU_PROVIDER_STATUS_FAILED)
+    raw_write_i64(ptr, 0, GPU_PROVIDER_DEVICE_IDENTITY_BYTES)
+    val status = unsafe(capabilities: [ffi]):
+        rt_gpu_provider_device_identity_raw(session.backend, session.handle,
+            completion.handle, ptr)
+    if status != GPU_PROVIDER_STATUS_OK:
+        raw_free(ptr, GPU_PROVIDER_DEVICE_IDENTITY_BYTES)
+        return _gpu_provider_device_identity_invalid(status)
+    val device_uuid = _gpu_provider_uuid_hex(ptr, 8)
+    val driver_uuid = _gpu_provider_uuid_hex(ptr, 24)
+    val vendor_id = (raw_read_i32(ptr, 40) as u32).to_i64()
+    val device_id = (raw_read_i32(ptr, 44) as u32).to_i64()
+    val device_type = (raw_read_i32(ptr, 48) as u32).to_i64()
+    val api_version = (raw_read_i32(ptr, 52) as u32).to_i64()
+    val driver_version = (raw_read_i32(ptr, 56) as u32).to_i64()
+    raw_free(ptr, GPU_PROVIDER_DEVICE_IDENTITY_BYTES)
+    GpuProviderDeviceIdentity(valid: true, status: status,
+        device_uuid: device_uuid, driver_uuid: driver_uuid,
+        vendor_id: vendor_id, device_id: device_id, device_type: device_type,
+        api_version: api_version, driver_version: driver_version)
+
 export GPU_PROVIDER_BACKEND_CUDA, GPU_PROVIDER_BACKEND_VULKAN
 export GPU_PROVIDER_BACKEND_METAL, GPU_PROVIDER_STATUS_OK
 export GPU_PROVIDER_STATUS_UNAVAILABLE, GPU_PROVIDER_STATUS_INCOMPATIBLE
@@ -295,4 +363,5 @@ export GpuProviderInfo, GpuProviderSession, GpuProviderResource
 export GpuProviderCompletion, GpuProviderReceipt, GpuProviderReadback
 export gpu_provider_info, gpu_provider_open, gpu_provider_resource_alloc
 export gpu_provider_submit_raw, gpu_provider_wait, gpu_provider_readback_raw
+export gpu_provider_device_identity, GpuProviderDeviceIdentity
 export gpu_provider_unload

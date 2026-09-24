@@ -193,3 +193,46 @@ describe "SoftwareBackend primitive rendering":
                 i = i + 1
             expect(n).to_equal(0)
             b.shutdown()
+
+    it "init_with_initial_color(0x00000000) matches init+clear state byte-for-byte on a non-square surface (F1 regression)":
+        # @req REQ-SSPEC-LIB
+        step("init_with_initial_color transparent matches init+clear state on 13x7")
+        # F1 made create_offscreen route through init_with_initial_color
+        # instead of init() + clear(). This pins that the optimization kept
+        # semantics: identical buffer bytes, identical dirty-tile and clip
+        # metadata, on a surface whose 13-wide row is not tile-aligned.
+        var fast = SoftwareBackend.create()
+        var slow = SoftwareBackend.create()
+        if fast.init_with_initial_color(13, 7, 0x00000000u32) and slow.init(13, 7):
+            slow.clear(0x00000000u32)
+            expect(fast.buf.len()).to_equal(91)
+            expect(slow.buf.len()).to_equal(91)
+            var byte_mismatches = 0
+            var i = 0
+            while i < 91:
+                if fast.buf[i] != slow.buf[i]:
+                    byte_mismatches = byte_mismatches + 1
+                i = i + 1
+            expect(byte_mismatches).to_equal(0)
+            expect(fast.buf[0]).to_equal(0x00000000u32)
+            expect(fast.buf[90]).to_equal(0x00000000u32)
+            expect(fast.w).to_equal(slow.w)
+            expect(fast.h).to_equal(slow.h)
+            expect(fast.tiles_x).to_equal(slow.tiles_x)
+            expect(fast.tiles_y).to_equal(slow.tiles_y)
+            expect(fast.dirty_tiles.len()).to_equal(slow.dirty_tiles.len())
+            var tile_mismatches = 0
+            var t = 0
+            while t < fast.dirty_tiles.len():
+                if fast.dirty_tiles[t] != slow.dirty_tiles[t]:
+                    tile_mismatches = tile_mismatches + 1
+                t = t + 1
+            expect(tile_mismatches).to_equal(0)
+            expect(fast.dirty_tiles[0]).to_equal(true)
+            expect(fast.clip_x).to_equal(slow.clip_x)
+            expect(fast.clip_y).to_equal(slow.clip_y)
+            expect(fast.clip_w).to_equal(13)
+            expect(fast.clip_h).to_equal(7)
+            expect(fast.clip_enabled).to_equal(false)
+            fast.shutdown()
+            slow.shutdown()

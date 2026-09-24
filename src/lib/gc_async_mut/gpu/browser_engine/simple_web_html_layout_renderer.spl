@@ -9,15 +9,24 @@ use std.nogc_sync_mut.text_layout.font_renderer.{
 
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
+    DRAW_IR_RASTER_ALIASED_PIXEL_CENTER,
+    DRAW_IR_RASTER_COVERAGE_AA,
     DrawIrBatch,
     DrawIrCommand,
+    DrawIrStyleProp,
     DrawIrComposition,
     DrawIrEmbeddingConfig,
     DrawIrSourceInfo,
     draw_ir_batch_with_source,
+    draw_ir_batch_with_source_v4,
     draw_ir_composition,
+    draw_ir_composition_v4,
     draw_ir_embed_composition,
     draw_ir_embedding_config,
+    draw_ir_fractional_rect,
+    draw_ir_affine2d,
+    draw_ir_affine_rect,
+    draw_ir_style_prop,
     draw_ir_rect_bounds,
     draw_ir_rect_intersection,
     draw_ir_rect_clipped,
@@ -31,6 +40,12 @@ use common.render_scene.scene.{SceneCommand, scene_fill_rect}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.engine.math2d.{Vec2, Transform2D}
+use std.common.engine.units.{Angle}
+use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
+    web_box_geometry_scene_reason}
+use std.gc_async_mut.gpu.browser_engine.simple_web_fractional_box_resolver.{
+    web_resolve_absolute_px_leaf_boxes}
 use std.common.color.types.{from_rgba}
 use std.common.animation.timing.{
     TimingFunction, evaluate_timing, parse_timing_function
@@ -103,6 +118,50 @@ class SimpleWebLayoutHitIndex:
     height: i32
     input_text_hits: [SimpleWebInputTextHitMap]
 
+pub enum SimpleWebElementScrollReason:
+    None
+    EmptyElementId
+    ElementNotFound
+    ElementNotScrollContainer
+    ElementHasNoLayoutBox
+    FixedDescendantUnsupported
+    NoScrollRange
+    ClampedToScrollRange
+    RenderDegraded
+
+pub fn simple_web_element_scroll_reason_text(
+    reason: SimpleWebElementScrollReason
+) -> text:
+    if reason == SimpleWebElementScrollReason.EmptyElementId:
+        return "empty-element-id"
+    if reason == SimpleWebElementScrollReason.ElementNotFound:
+        return "element-not-found"
+    if reason == SimpleWebElementScrollReason.ElementNotScrollContainer:
+        return "element-not-scroll-container"
+    if reason == SimpleWebElementScrollReason.ElementHasNoLayoutBox:
+        return "element-has-no-layout-box"
+    if reason == SimpleWebElementScrollReason.FixedDescendantUnsupported:
+        return "fixed-descendant-unsupported"
+    if reason == SimpleWebElementScrollReason.NoScrollRange:
+        return "no-scroll-range"
+    if reason == SimpleWebElementScrollReason.ClampedToScrollRange:
+        return "clamped-to-scroll-range"
+    if reason == SimpleWebElementScrollReason.RenderDegraded:
+        return "render-degraded"
+    ""
+
+pub class SimpleWebElementScrollState:
+    requested_id: text
+    resolved_id: text
+    requested_top: i32
+    resolved_top: i32
+    max_top: i32
+    # One of not-requested, applied, unsupported, degraded.
+    status: text
+    reason: SimpleWebElementScrollReason
+    # The WEB_BUDGET_SITE_* value when reason is RenderDegraded.
+    degrade_detail: text
+
 pub fn simple_web_layout_hit_test_index(
     index: SimpleWebLayoutHitIndex, x: i32, y: i32
 ) -> text:
@@ -145,6 +204,7 @@ class SimpleWebLayoutDrawIrResult:
     resolved_input_view_start_byte: i64
     resolved_scroll_y: i32
     max_scroll_y: i32
+    element_scroll: SimpleWebElementScrollState
     document_html: text
     rules: Rules
     base_styles: [Style]
@@ -154,6 +214,10 @@ class SimpleWebLayoutDrawIrResult:
     material_counts: [i64]
     cpu_material_nodes: [i32]
     solid_material_nodes: [i32]
+    # Captured across every computed Style before integer visibility culling.
+    box_geometry_rejection_reason: text = ""
+    # The strict fractional producer emits no commands when this is nonempty.
+    fractional_scene_rejection_reason: text = ""
 
 fn _simple_web_root_sticky_admitted(
     nodes: [HNode], node_index: i32
@@ -170,6 +234,11 @@ class _SimpleWebScrolledLayout:
     boxes: LayoutResult
     resolved_scroll_y: i32
     max_scroll_y: i32
+
+class _SimpleWebElementScrolledLayout:
+    boxes: LayoutResult
+    state: SimpleWebElementScrollState
+    selected_index: i32
 
 fn _simple_web_scrolled_layout(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
@@ -277,6 +346,164 @@ fn _simple_web_scrolled_layout(
         boxes: shifted,
         resolved_scroll_y: resolved.to_i32(),
         max_scroll_y: max_scroll.to_i32()
+    )
+
+fn _simple_web_element_scrolled_layout(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    requested: bool, element_id: text, scroll_top: i32
+) -> _SimpleWebElementScrolledLayout:
+    if not requested:
+        return _SimpleWebElementScrolledLayout(
+            boxes: boxes, selected_index: -1,
+            state: SimpleWebElementScrollState(
+                requested_id: "", resolved_id: "", requested_top: 0,
+                resolved_top: 0, max_top: 0,
+                status: "not-requested",
+                reason: SimpleWebElementScrollReason.None,
+                degrade_detail: ""
+            )
+        )
+    var selected = -1
+    if element_id != "":
+        var find_index = 0
+        while find_index < nodes.len():  # cpu-lane-loop-ok: one id lookup over DOM nodes, bounded by node count
+            if nodes[find_index].id_attr == element_id:
+                selected = find_index
+                break
+            find_index = find_index + 1
+    val unsupported_reason = if element_id == "":
+        SimpleWebElementScrollReason.EmptyElementId
+    elif selected < 0:
+        SimpleWebElementScrollReason.ElementNotFound
+    elif not styles[selected].overflow_auto_y and
+        not styles[selected].overflow_scroll_y:
+        SimpleWebElementScrollReason.ElementNotScrollContainer
+    elif boxes.bw[selected] <= 0 or boxes.bh[selected] <= 0:
+        SimpleWebElementScrollReason.ElementHasNoLayoutBox
+    else:
+        SimpleWebElementScrollReason.None
+    if unsupported_reason != SimpleWebElementScrollReason.None:
+        return _SimpleWebElementScrolledLayout(
+            boxes: boxes, selected_index: -1,
+            state: SimpleWebElementScrollState(
+                requested_id: element_id, resolved_id: "",
+                requested_top: scroll_top, resolved_top: 0, max_top: 0,
+                status: "unsupported", reason: unsupported_reason,
+                degrade_detail: ""
+            )
+        )
+    # A viewport-fixed descendant does not move with an element scrollport.
+    # The current paint path has one translated layout box per descendant,
+    # so reject that tree until fixed containing blocks are represented.
+    var inside: [bool] = [false; nodes.len()]
+    var scan_index = 0
+    while scan_index < nodes.len():  # cpu-lane-loop-ok: one parent-first descendant preflight, bounded by node count
+        val parent = nodes[scan_index].parent as i32
+        if parent >= 0:
+            inside[scan_index] = parent == selected or inside[parent]
+            if inside[scan_index] and styles[scan_index].position_fixed:
+                return _SimpleWebElementScrolledLayout(
+                    boxes: boxes, selected_index: -1,
+                    state: SimpleWebElementScrollState(
+                        requested_id: element_id, resolved_id: element_id,
+                        requested_top: scroll_top, resolved_top: 0, max_top: 0,
+                        status: "unsupported",
+                        reason: SimpleWebElementScrollReason.FixedDescendantUnsupported,
+                        degrade_detail: ""
+                    )
+                )
+        scan_index = scan_index + 1
+    val descendants = _html_draw_ir_descendant_bottom(nodes, styles, boxes)
+    val inner_bottom = (
+        boxes.by[selected].to_i64() + boxes.bh[selected].to_i64() -
+        styles[selected].border_b.to_i64()
+    )
+    var max_top = descendants[selected] - inner_bottom
+    if max_top < 0:
+        max_top = 0
+    if max_top > 2147483647:
+        max_top = 2147483647
+    var resolved = if scroll_top > 0: scroll_top.to_i64() else: 0i64
+    if resolved > max_top:
+        resolved = max_top
+    if scroll_top > 0 and max_top == 0:
+        return _SimpleWebElementScrolledLayout(
+            boxes: boxes, selected_index: selected,
+            state: SimpleWebElementScrollState(
+                requested_id: element_id, resolved_id: element_id,
+                requested_top: scroll_top, resolved_top: 0, max_top: 0,
+                status: "unsupported",
+                reason: SimpleWebElementScrollReason.NoScrollRange,
+                degrade_detail: ""
+            )
+        )
+    # Keep raw layout coordinates intact for extent and source evidence.
+    # Copy explicitly before mutating descendant positions.
+    var shifted_by: [i32] = []
+    for original_y in boxes.by:
+        shifted_by.push(original_y)
+    var inner_scroll_ancestor: [bool] = [false; nodes.len()]
+    var sticky_subtree_delta: [i32] = [0; nodes.len()]
+    var i = 0
+    while i < nodes.len():  # cpu-lane-loop-ok: one top-down descendant translation and sticky pass, bounded by node count
+        val parent = nodes[i].parent as i32
+        if parent >= 0:
+            if inside[i]:
+                val inherited = sticky_subtree_delta[parent]
+                val shifted_y = (
+                    boxes.by[i].to_i64() - resolved + inherited.to_i64()
+                )
+                shifted_by[i] = _html_draw_ir_saturated_i32(shifted_y)
+                inner_scroll_ancestor[i] = if parent == selected:
+                    false
+                else:
+                    inner_scroll_ancestor[parent] or
+                    styles[parent].overflow_auto_y or
+                    styles[parent].overflow_hidden
+                var own_delta = 0
+                if (
+                    styles[i].position_sticky and
+                    styles[i].top_px != SIMPLE_WEB_STICKY_TOP_AUTO and
+                    not inner_scroll_ancestor[i]
+                ):
+                    val sticky_top = (
+                        boxes.by[selected].to_i64() +
+                        styles[selected].border_t.to_i64() +
+                        styles[i].top_px.to_i64()
+                    )
+                    val parent_bottom = (
+                        shifted_by[parent].to_i64() +
+                        boxes.bh[parent].to_i64() -
+                        styles[parent].border_b.to_i64() -
+                        boxes.bh[i].to_i64()
+                    )
+                    var target_y = sticky_top
+                    if target_y > parent_bottom:
+                        target_y = parent_bottom
+                    if target_y > shifted_by[i].to_i64():
+                        val sticky_y = _html_draw_ir_saturated_i32(target_y)
+                        own_delta = sticky_y - shifted_by[i]
+                        shifted_by[i] = sticky_y
+                sticky_subtree_delta[i] = inherited + own_delta
+        i = i + 1
+    val shifted = LayoutResult(
+        bx: boxes.bx, by: shifted_by, bw: boxes.bw, bh: boxes.bh,
+        wrap_starts: boxes.wrap_starts, wrap_ends: boxes.wrap_ends,
+        intrinsic_widths: boxes.intrinsic_widths, height: boxes.height
+    )
+    val applied_reason = if resolved != scroll_top.to_i64():
+        SimpleWebElementScrollReason.ClampedToScrollRange
+    else:
+        SimpleWebElementScrollReason.None
+    _SimpleWebElementScrolledLayout(
+        boxes: shifted, selected_index: selected,
+        state: SimpleWebElementScrollState(
+            requested_id: element_id, resolved_id: element_id,
+            requested_top: scroll_top, resolved_top: resolved.to_i32(),
+            max_top: max_top.to_i32(), status: "applied",
+            reason: applied_reason,
+            degrade_detail: ""
+        )
     )
 
 class SimpleWebLayoutMaterialWitness:
@@ -1258,14 +1485,23 @@ fn _simple_web_layout_compose_retained(
     height: i32,
     vector_fonts: bool,
     scroll_y: i32,
+    element_scroll_requested: bool,
+    element_scroll_id: text,
+    element_scroll_top: i32,
     overlay: BrowserTextInputOverlay,
     images: [SimpleOsHostGpuImageResource],
-    depth: i32
+    depth: i32,
+    fractional_mode: bool = false
 ) -> SimpleWebLayoutDrawIrResult:
     val scrolled = _simple_web_scrolled_layout(
         nodes, styles, raw_boxes, width, height, scroll_y
     )
-    val boxes = scrolled.boxes
+    val element_scrolled = _simple_web_element_scrolled_layout(
+        nodes, styles, scrolled.boxes, element_scroll_requested,
+        element_scroll_id, element_scroll_top
+    )
+    val boxes = element_scrolled.boxes
+    val box_geometry_reason = web_box_geometry_scene_reason(styles)
     val source = draw_ir_source_html_ast(
         "simple_web_html_layout_renderer", "html", "", "", "",
         "layout", "1"
@@ -1276,6 +1512,189 @@ fn _simple_web_layout_compose_retained(
     val input_hit_build = _simple_web_input_text_hit_build(
         nodes, styles, child_index, boxes, width, height, overlay
     )
+    if fractional_mode:
+        val fractional_source = html.lower()
+        val resolved = web_resolve_absolute_px_leaf_boxes(
+            nodes, styles, boxes, width, height
+        )
+        val fractional_reason = if simple_web_layout_last_render_degraded():
+            "web-render-degraded:{simple_web_layout_last_render_degrade_reason()}"
+        elif scrolled.resolved_scroll_y != 0 or element_scroll_requested or
+            element_scrolled.state.resolved_top != 0:
+            "fractional-scroll-unsupported"
+        elif animation_time_ms >= 0 or animation_registry.entries.len() > 0:
+            "fractional-animation-unsupported"
+        elif fractional_source.contains("<link") or
+            fractional_source.contains("@import"):
+            "fractional-external-stylesheet-unsupported"
+        elif fractional_source.contains("::") or
+            fractional_source.contains(":before") or
+            fractional_source.contains(":after") or
+            fractional_source.contains(":first-") or
+            fractional_source.contains(":marker") or
+            fractional_source.contains(":selection") or
+            fractional_source.contains(":placeholder") or
+            fractional_source.contains(":backdrop"):
+            "fractional-generated-content-unsupported"
+        else:
+            resolved.reason
+        var fractional_batches: [DrawIrBatch] = []
+        var fractional_v4_batches: [DrawIrBatch] = []
+        if fractional_reason == "":
+            val canvas_color = _web_canvas_background(
+                nodes, styles, argb(255, 255, 255)
+            )
+            if resolved.painted_scene_index >= 0:
+                val surface_clip = draw_ir_rect_bounds(0, 0, width, height)
+                var canvas = draw_ir_affine_rect(
+                    "html-canvas", width.to_f64(), height.to_f64(),
+                    canvas_color, draw_ir_affine2d(
+                        1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+                    DRAW_IR_RASTER_ALIASED_PIXEL_CENTER)
+                canvas.clip_rect = surface_clip
+                canvas.computed_style = [
+                    draw_ir_style_prop("source-role", "canvas"),
+                    draw_ir_style_prop("source-node-index", "-1"),
+                    draw_ir_style_prop("source-html-sha256", sha256_text(html))]
+                var v4_commands: [DrawIrCommand] = [canvas]
+                for owner in resolved.background_node_indexes:
+                    val parent = nodes[owner].parent as i32
+                    var parent_id = ""
+                    if parent >= 0 and parent < nodes.len():
+                        parent_id = _html_draw_ir_component_id(
+                            nodes[parent], parent)
+                    var background = draw_ir_affine_rect(
+                        _html_draw_ir_component_id(nodes[owner], owner),
+                        boxes.bw[owner].to_f64(),
+                        boxes.bh[owner].to_f64(), styles[owner].bg,
+                        draw_ir_affine2d(1.0, 0.0, 0.0, 1.0,
+                            boxes.bx[owner].to_f64(),
+                            boxes.by[owner].to_f64()),
+                        DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, parent_id)
+                    background.clip_rect = surface_clip
+                    var background_props = _html_draw_ir_style_props(
+                        nodes[owner], styles[owner])
+                    background_props.push(draw_ir_style_prop(
+                        "source-role", "painted-background"))
+                    background_props.push(draw_ir_style_prop(
+                        "source-node-index", "{owner}"))
+                    background.computed_style = background_props
+                    v4_commands.push(background)
+                for leaf in resolved.leaves:
+                    val owner = leaf.node_index
+                    val parent = nodes[owner].parent as i32
+                    var a = 1.0
+                    var b = 0.0
+                    var c = 0.0
+                    var d = 1.0
+                    var tx = leaf.x
+                    var ty = leaf.y
+                    if leaf.rotated:
+                        val rotation = Transform2D(
+                            position: Vec2.zero(),
+                            rotation: Angle.from_degrees(leaf.rotation_deg),
+                            scale: Vec2.one())
+                        val axis = rotation.transform_point(
+                            Vec2(x: 1.0, y: 0.0))
+                        a = axis.x
+                        b = axis.y
+                        c = 0.0 - axis.y
+                        d = axis.x
+                        val center_x = leaf.width / 2.0
+                        val center_y = leaf.height / 2.0
+                        tx = leaf.x + leaf.translate_x + center_x -
+                            a * center_x - c * center_y
+                        ty = leaf.y + leaf.translate_y + center_y -
+                            b * center_x - d * center_y
+                    var command = draw_ir_affine_rect(
+                        _html_draw_ir_component_id(nodes[owner], owner),
+                        leaf.width, leaf.height, styles[owner].bg,
+                        draw_ir_affine2d(a, b, c, d, tx, ty),
+                        DRAW_IR_RASTER_COVERAGE_AA,
+                        _html_draw_ir_component_id(nodes[parent], parent))
+                    command.clip_rect = surface_clip
+                    var leaf_props = _html_draw_ir_style_props(
+                        nodes[owner], styles[owner])
+                    leaf_props.push(draw_ir_style_prop("source-role",
+                        if leaf.rotated: "rotated-leaf" else: "fractional-bar"))
+                    leaf_props.push(draw_ir_style_prop(
+                        "source-node-index", "{owner}"))
+                    leaf_props.push(draw_ir_style_prop("source-transform-raw",
+                        styles[owner].transform_raw))
+                    command.computed_style = leaf_props
+                    v4_commands.push(command)
+                fractional_v4_batches.push(draw_ir_batch_with_source_v4(
+                    "html-layout-fractional-v4", DRAW_IR_BACKEND_CPU,
+                    embedding, v4_commands, source))
+            else:
+                var fractional_commands: [DrawIrCommand] = [
+                    _html_draw_ir_canvas_command(width, height, canvas_color)
+                ]
+                for leaf in resolved.leaves:
+                    val owner = leaf.node_index
+                    val parent = nodes[owner].parent as i32
+                    var command = draw_ir_fractional_rect(
+                        _html_draw_ir_component_id(nodes[owner], owner),
+                        leaf.x, leaf.y, leaf.width, leaf.height,
+                        styles[owner].bg,
+                        _html_draw_ir_component_id(nodes[parent], parent)
+                    )
+                    command.clip_rect = draw_ir_rect_bounds(0, 0, width, height)
+                    var source_props: [DrawIrStyleProp] = []
+                    for prop in _html_draw_ir_style_props(
+                        nodes[owner], styles[owner]):
+                        if prop.key != "left" and prop.key != "top" and
+                            prop.key != "width" and prop.key != "height":
+                            source_props.push(prop)
+                    command.computed_style = source_props
+                    fractional_commands.push(command)
+                fractional_batches.push(draw_ir_batch_with_source(
+                    "html-layout-fractional", DRAW_IR_BACKEND_CPU,
+                    embedding, fractional_commands, source
+                ))
+        val fractional_composition = if fractional_v4_batches.len() > 0:
+            draw_ir_composition_v4(
+                "html-layout-fractional-v4",
+                "simple-web-html-layout-fractional-v4",
+                DRAW_IR_BACKEND_CPU, fractional_v4_batches)
+        else:
+            draw_ir_composition(
+                "html-layout-fractional", "simple-web-html-layout-fractional",
+                DRAW_IR_BACKEND_CPU, fractional_batches)
+        val empty_witness = SimpleWebLayoutMaterialWitness(
+            cpu_composited_count: 0, cpu_composited_sha256: "",
+            solid_material_count: 0, solid_material_sha256: ""
+        )
+        return SimpleWebLayoutDrawIrResult(
+            composition: fractional_composition,
+            render_degraded: simple_web_layout_last_render_degraded(),
+            degrade_reason: simple_web_layout_last_render_degrade_reason(),
+            material_fallback: simple_web_layout_material_provenance_after_execution(
+                empty_witness, 0, 1, 1, 0
+            ),
+            material_witness: empty_witness,
+            animation_end_ms: animation_schedule.animation_end_ms,
+            animation_next_ms: animation_schedule.animation_next_ms,
+            animation_property_work_count: animation_property_work_count,
+            hit_index: SimpleWebLayoutHitIndex(
+                nodes: nodes, styles: styles, child_index: child_index,
+                boxes: boxes, width: width, height: height,
+                input_text_hits: input_hit_build.hits
+            ),
+            resolved_input_view_start_byte:
+                input_hit_build.resolved_view_start_byte,
+            resolved_scroll_y: scrolled.resolved_scroll_y,
+            max_scroll_y: scrolled.max_scroll_y,
+            element_scroll: element_scrolled.state,
+            document_html: html, rules: rules, base_styles: base_styles,
+            raw_boxes: raw_boxes, animation_registry: animation_registry,
+            material_entries: material_entries,
+            material_counts: material_counts,
+            cpu_material_nodes: cpu_material_nodes,
+            solid_material_nodes: solid_material_nodes,
+            box_geometry_rejection_reason: box_geometry_reason,
+            fractional_scene_rejection_reason: fractional_reason
+        )
     # One ancestor clip cache per render, shared by the visibility mask and the
     # compose pass below. Both used to build their own from identical inputs.
     val clip_cache = build_ancestor_clip_cache(
@@ -1285,8 +1704,11 @@ fn _simple_web_layout_compose_retained(
         nodes, styles, boxes, clip_cache
     )
     val (commands, command_owner_nodes) = _html_draw_ir_commands(
-        nodes, styles, boxes, width, height, vector_fonts,
-        input_hit_build.target_keys, overlay, visible_nodes, images, clip_cache
+        nodes, styles, boxes, raw_boxes, width, height, vector_fonts,
+        input_hit_build.target_keys, overlay, visible_nodes, images, clip_cache,
+        element_scrolled.selected_index,
+        element_scrolled.state.resolved_top,
+        element_scrolled.state.max_top
     )
     val canvas_color = _web_canvas_background(
         nodes, styles, argb(255, 255, 255)
@@ -1414,7 +1836,7 @@ fn _simple_web_layout_compose_retained(
                     val child_rules = if attr_value(nodes[owner].attrs_raw, "space").trim().lower() == "shared": rules else: _web_empty_rules()
                     val child = _simple_web_layout_compose_document(
                         child_html, content.width, content.height,
-                        vector_fonts, animation_time_ms, 0,
+                        vector_fonts, animation_time_ms, 0, false, "", 0,
                         browser_text_input_overlay_empty(), [], [], child_rules,
                         depth + 1, child_deadline
                     )
@@ -1460,6 +1882,21 @@ fn _simple_web_layout_compose_retained(
     val material_witness = _simple_web_layout_merge_material_witness(
         [parent_material_witness] + child_witnesses
     )
+    val final_element_scroll = if (
+        element_scroll_requested and simple_web_layout_last_render_degraded()
+    ):
+        SimpleWebElementScrollState(
+            requested_id: element_scroll_id,
+            resolved_id: element_scrolled.state.resolved_id,
+            requested_top: element_scroll_top,
+            resolved_top: element_scrolled.state.resolved_top,
+            max_top: element_scrolled.state.max_top,
+            status: "degraded",
+            reason: SimpleWebElementScrollReason.RenderDegraded,
+            degrade_detail: simple_web_layout_last_render_degrade_reason()
+        )
+    else:
+        element_scrolled.state
     SimpleWebLayoutDrawIrResult(
         composition: composition,
         render_degraded: simple_web_layout_last_render_degraded(),
@@ -1484,6 +1921,7 @@ fn _simple_web_layout_compose_retained(
             input_hit_build.resolved_view_start_byte,
         resolved_scroll_y: scrolled.resolved_scroll_y,
         max_scroll_y: scrolled.max_scroll_y,
+        element_scroll: final_element_scroll,
         document_html: html,
         rules: rules,
         base_styles: base_styles,
@@ -1492,7 +1930,8 @@ fn _simple_web_layout_compose_retained(
         material_entries: material_entries,
         material_counts: material_counts,
         cpu_material_nodes: cpu_material_nodes,
-        solid_material_nodes: solid_material_nodes
+        solid_material_nodes: solid_material_nodes,
+        box_geometry_rejection_reason: box_geometry_reason
     )
 
 # Comparability gate for the Draw IR display list, the exact analogue of
@@ -1505,7 +1944,8 @@ fn _simple_web_layout_compose_retained(
 pub fn simple_web_layout_draw_ir_comparable(
     result: SimpleWebLayoutDrawIrResult
 ) -> bool:
-    not result.render_degraded
+    not result.render_degraded and
+        result.fractional_scene_rejection_reason == ""
 
 # Per-render decision string in the campaign's established shape (compare
 # `simple_web_layout_software_present_decision`): every decline names a concrete
@@ -1516,11 +1956,15 @@ pub fn simple_web_layout_draw_ir_compare_decision(
 ) -> text:
     if result.render_degraded:
         return "draw-ir:declined:compared=none:reason=budget-exhausted:" + result.degrade_reason
+    if result.fractional_scene_rejection_reason != "":
+        return "draw-ir:declined:compared=none:reason=" + result.fractional_scene_rejection_reason
     "draw-ir:comparable:full-display-list:reason=budget-complete"
 
 fn _simple_web_layout_compose_document(
     html: text, width: i32, height: i32, vector_fonts: bool,
     animation_time_ms: i64, scroll_y: i32,
+    element_scroll_requested: bool, element_scroll_id: text,
+    element_scroll_top: i32,
     overlay: BrowserTextInputOverlay,
     animation_instances: [BrowserCssAnimationInstance],
     images: [SimpleOsHostGpuImageResource],
@@ -1701,6 +2145,7 @@ fn _simple_web_layout_compose_document(
         animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, vector_fonts, scroll_y,
+        element_scroll_requested, element_scroll_id, element_scroll_top,
         overlay, images, depth
     )
     if _phase_on:
@@ -1815,7 +2260,8 @@ pub fn simple_web_layout_compose_prepared(
         prepared.material_entries, prepared.material_counts,
         prepared.cpu_material_nodes, prepared.solid_material_nodes,
         prepared.width, prepared.height, prepared.vector_fonts,
-        prepared.scroll_y, prepared.overlay, prepared.images, 0
+        prepared.scroll_y, false, "", 0,
+        prepared.overlay, prepared.images, 0
     )
 
 fn _simple_web_layout_render_html_draw_ir_result_at_time(
@@ -1832,6 +2278,7 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
     _web_budget_begin(resolved_budget_ms)
     _simple_web_layout_compose_document(
         html, width, height, vector_fonts, animation_time_ms, scroll_y,
+        false, "", 0,
         overlay, animation_instances, images, _web_empty_rules(), 0,
         _web_render_deadline_us
     )
@@ -1958,7 +2405,8 @@ pub fn simple_web_layout_rerender_retained(
         animation_time_ms,
         animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
-        solid_material_nodes, width, height, true, scroll_y, overlay, images, 0
+        solid_material_nodes, width, height, true, scroll_y,
+        false, "", 0, overlay, images, 0
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
@@ -1975,6 +2423,35 @@ pub fn simple_web_layout_render_html_draw_ir_with_images(
 pub fn simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result(html, width, height, true)
 
+# A separate strict producer mode. It shares the normal parser, cascade and
+# layout, then resolves f64 absolute leaves before integer visibility culling.
+pub fn simple_web_layout_render_html_draw_ir_fractional_result(
+    html: text, width: i32, height: i32
+) -> SimpleWebLayoutDrawIrResult:
+    val prepared = simple_web_layout_prepare_retained(
+        html, width, height, true, -1, 0,
+        browser_text_input_overlay_empty(), [], []
+    )
+    val node_count = prepared.nodes.len() as i32
+    val raw_boxes = layout(
+        prepared.nodes, prepared.styles, prepared.child_index,
+        0, 0, 0, width, height,
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        empty_i32_lists(node_count), empty_i32_lists(node_count),
+        neg_one_i32_list(node_count)
+    )
+    _simple_web_layout_compose_retained(
+        html, prepared.nodes, prepared.rules, prepared.child_index,
+        prepared.base_styles, prepared.styles, raw_boxes,
+        prepared.animation_registry, prepared.animation_schedule,
+        prepared.animation_time_ms, prepared.animation_property_work_count,
+        prepared.material_entries, prepared.material_counts,
+        prepared.cpu_material_nodes, prepared.solid_material_nodes,
+        width, height, true, 0, false, "", 0,
+        prepared.overlay, prepared.images, 0, true
+    )
+
 pub fn simple_web_layout_render_html_draw_ir_result_with_images(
     html: text, width: i32, height: i32,
     images: [SimpleOsHostGpuImageResource]
@@ -1988,6 +2465,30 @@ pub fn simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i
     _simple_web_layout_render_html_draw_ir_result_at_time(
         html, width, height, true, animation_time_ms, 0,
         browser_text_input_overlay_empty(), [], []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    element_id: text, scroll_top: i32
+) -> SimpleWebLayoutDrawIrResult:
+    """Render with an element's vertical scroll offset, independent of document scroll.
+
+    The returned element_scroll state records the resolved id and clamped
+    offset or a stable unsupported/degraded reason. Descendants, their clips,
+    sticky top boxes, and the selected scrollbar use the resolved offset.
+    """
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS:
+        area_floor_ms
+    else:
+        WEB_RENDER_BUDGET_MS
+    _web_budget_begin(if env_override > 0: env_override else: default_budget_ms)
+    _simple_web_layout_compose_document(
+        html, width, height, true, animation_time_ms, 0,
+        true, element_id, scroll_top,
+        browser_text_input_overlay_empty(), [], [], _web_empty_rules(), 0,
+        _web_render_deadline_us
     )
 
 pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_images(

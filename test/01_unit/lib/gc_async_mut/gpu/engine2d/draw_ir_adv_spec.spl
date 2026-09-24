@@ -42,10 +42,12 @@ use common.ui.draw_ir.{
     draw_ir_batch,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_image_command,
     draw_ir_no_rect,
-    draw_ir_rect
+    draw_ir_rect,
+    draw_ir_rect_bounds
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images, engine2d_draw_ir_coalesce_plain_fills, engine2d_draw_ir_prepare_damage_plan, engine2d_draw_ir_render_damaged, engine2d_draw_ir_render_composition_damaged, engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_draw_ir_render_prepared_damage_plan_with_images, engine2d_draw_ir_render_tiled, engine2d_resolved_draw_ir_image}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, _engine2d_draw_ir_materialize_image_damage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images, engine2d_draw_ir_coalesce_plain_fills, engine2d_draw_ir_prepare_damage_plan, engine2d_draw_ir_render_damaged, engine2d_draw_ir_render_composition_damaged, engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_draw_ir_render_prepared_damage_plan_with_images, engine2d_draw_ir_render_tiled, engine2d_resolved_draw_ir_image}
 use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue}
@@ -2118,3 +2120,45 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.fallback_reason).to_contain("future-path")
         expect(result.pixels[0]).to_equal(RED)
         engine.shutdown()
+
+    it "materializes a bounded large crop with exact source content (F3 regression: preallocated crop buffer)":
+        step("Verify: materializes a bounded large crop with exact source content")
+        # 128x96 source with a unique value per pixel, cropped to 100x80 at
+        # (12,8). Command dims equal the image dims, so the resample inside
+        # _engine2d_draw_ir_materialize_image_damage is an identity map and
+        # every cropped pixel must equal source pixel (8+row, 12+col).
+        # Content assertion for the preallocated-crop-buffer change: the
+        # optimization must not alter a single output pixel.
+        var pixels: [u32] = [0u32; 128 * 96]
+        var i = 0
+        while i < 128 * 96:
+            pixels[i] = 0xff000000u32 + i.to_u32()
+            i += 1
+        val command = draw_ir_image_command(
+            "crop-case", 0, 0, 128, 96, "image://crop-case", [])
+        command.clip_rect = draw_ir_rect_bounds(12, 8, 100, 80)
+        val image = engine2d_resolved_draw_ir_image(
+            "image://crop-case", 128, 96, pixels)
+
+        val clipped = _engine2d_draw_ir_materialize_image_damage(
+            image, 0, 0, command, draw_ir_rect_bounds(0, 0, 128, 96), 0, 0)
+
+        expect(clipped.handled).to_equal(true)
+        expect(clipped.valid).to_equal(true)
+        expect(clipped.x).to_equal(12)
+        expect(clipped.y).to_equal(8)
+        expect(clipped.width).to_equal(100)
+        expect(clipped.height).to_equal(80)
+        expect(clipped.pixels.len()).to_equal(8000)
+        var mismatches = 0
+        var row = 0
+        while row < 80:
+            var col = 0
+            while col < 100:
+                val expected = 0xff000000u32 +
+                    ((8 + row) * 128 + (12 + col)).to_u32()
+                if clipped.pixels[row * 100 + col] != expected:
+                    mismatches = mismatches + 1
+                col += 1
+            row += 1
+        expect(mismatches).to_equal(0)

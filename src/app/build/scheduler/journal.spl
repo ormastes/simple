@@ -1,0 +1,604 @@
+# Parent-owned local scheduler WAL. The caller MUST hold an exclusive lifetime
+# lock for a trusted root across open, commits, and compaction. This module
+# does not acquire that lock; two live parents using one root are unsupported.
+# A successful append means its bytes passed file_fsync before dispatch or
+# reassignment; callers must discard the proposed transition on any error.
+# The directory fsync protects newly created names and snapshot replacement on
+# hosted backends that support it. When creating a root, its parent must already
+# exist; syncing that parent makes the new root entry durable. The facade cannot
+# promise power-loss safety
+# on filesystems or Windows providers that do not honor file/directory fsync;
+# those platforms return an error where the facade reports failure. This WAL
+# is an integrity check, not an authenticated log against a malicious writer.
+use app.build.scheduler.ledger.{SchedulerLedgerV1, SchedulerFenceV1,
+    SchedulerAttemptV1, SchedulerFailedAttemptV1, SchedulerTransitionV1,
+    empty_scheduler_ledger_v1, scheduler_current_fence_v1,
+    scheduler_ledger_valid_v1, fail_attempt_v1}
+use app.build.scheduler.broker.{SchedulerPublishV1}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use compiler.common.build_contract.{AcceptedResult, ActionResultCandidate}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_exists, file_read_regular_no_follow_bounded,
+    file_append, file_atomic_write, file_fsync, directory_fsync, dir_create_all,
+    file_size_raw}
+
+val SCHEDULER_JOURNAL_MAX_BYTES_V1: i64 = 8388608
+val SCHEDULER_SNAPSHOT_MAX_BYTES_V1: i64 = 4194304
+val SCHEDULER_RECORD_MAX_BYTES_V1: i64 = 2048
+val SCHEDULER_JOURNAL_MAX_RECORDS_V1: i64 = 16384
+val _SCHEDULER_GENESIS_V1 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+struct SchedulerJournalStateV1:
+    ledger: SchedulerLedgerV1
+    sequence: i64
+    head_digest: text
+    journal_bytes: i64
+    journal_records: i64
+    error: text
+
+fn _journal_error_v1(reason: text) -> SchedulerJournalStateV1:
+    SchedulerJournalStateV1(empty_scheduler_ledger_v1(), 0, _SCHEDULER_GENESIS_V1, 0, 0,
+        "scheduler-journal-error: " + reason)
+
+fn _journal_genesis_v1() -> SchedulerJournalStateV1:
+    SchedulerJournalStateV1(empty_scheduler_ledger_v1(), 0, _SCHEDULER_GENESIS_V1, 0, 0, "")
+
+fn _journal_field_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 256:
+        return false
+    for c in value.chars():
+        if c < "!" or c > "~" or c == "|" or c == "," or c == ";":
+            return false
+    true
+
+fn _journal_number_v1(value: text, minimum: i64, maximum: i64) -> i64:
+    if value == "" or value.len() > 18:
+        return -1
+    for c in value.chars():
+        if c < "0" or c > "9":
+            return -1
+    val number = value.to_i64() ?? -1
+    if number < minimum or number > maximum or number.to_text() != value:
+        return -1
+    number
+
+fn _journal_digest_v1(value: text) -> bool:
+    scheduler_action_digest_valid_v1(value)
+
+fn _journal_attempt_text_v1(attempt: SchedulerAttemptV1) -> text:
+    attempt.action_digest + "," + attempt.attempt_id + "," + attempt.worker_id +
+        "," + attempt.fence.to_text() + "," + attempt.cpu_tokens.to_text() +
+        "," + attempt.memory_bytes.to_text() + "," + attempt.fd_tokens.to_text()
+
+fn _journal_parse_attempt_v1(value: text) -> SchedulerAttemptV1?:
+    val parts = value.split(",")
+    if parts.len() != 7 or not _journal_digest_v1(parts[0]) or
+       not _journal_field_v1(parts[1]) or not _journal_field_v1(parts[2]):
+        return nil
+    val fence = _journal_number_v1(parts[3], 1, 1000000000)
+    val cpu = _journal_number_v1(parts[4], 1, 1000000000)
+    val memory = _journal_number_v1(parts[5], 1, 1000000000000000)
+    val fds = _journal_number_v1(parts[6], 1, 1000000000)
+    if fence < 0 or cpu < 0 or memory < 0 or fds < 0:
+        return nil
+    SchedulerAttemptV1(parts[0], parts[1], parts[2], fence, cpu, memory, fds, true)
+
+fn _journal_accepted_text_v1(accepted: AcceptedResult) -> text:
+    accepted.action_digest + "," + accepted.accepted_attempt_id + "," +
+        accepted.output_manifest_digest + "," + accepted.broker_receipt_digest
+
+fn _journal_parse_accepted_v1(value: text) -> AcceptedResult?:
+    val parts = value.split(",")
+    if parts.len() != 4 or not _journal_digest_v1(parts[0]) or
+       not _journal_field_v1(parts[1]) or
+       not _journal_digest_v1(parts[2]) or not _journal_digest_v1(parts[3]):
+        return nil
+    AcceptedResult(1, parts[0], parts[1], parts[2], parts[3])
+
+fn _journal_failure_text_v1(failure: SchedulerFailedAttemptV1) -> text:
+    failure.action_digest + "," + failure.attempt_id + "," +
+        failure.worker_id + "," + failure.fence.to_text() + "," +
+        failure.classification + "," +
+        (if failure.output_manifest_digest == "": "-" else: failure.output_manifest_digest) +
+        "," + failure.diagnostic_digest
+
+fn _journal_parse_failure_v1(value: text) -> SchedulerFailedAttemptV1?:
+    val parts = value.split(",")
+    if parts.len() != 7 or not _journal_digest_v1(parts[0]) or
+       not _journal_field_v1(parts[1]) or not _journal_field_v1(parts[2]) or
+       not _journal_field_v1(parts[4]) or
+       not _journal_digest_v1(parts[6]) or
+       (parts[5] != "-" and not _journal_digest_v1(parts[5])):
+        return nil
+    val fence = _journal_number_v1(parts[3], 1, 1000000000)
+    if fence < 0:
+        return nil
+    SchedulerFailedAttemptV1(parts[0], parts[1], parts[2], fence,
+        parts[4], if parts[5] == "-": "" else: parts[5], parts[6])
+
+fn _journal_attempt_equal_v1(left: SchedulerAttemptV1,
+                             right: SchedulerAttemptV1) -> bool:
+    _journal_attempt_text_v1(left) == _journal_attempt_text_v1(right) and
+        left.active == right.active
+
+fn _journal_ledger_equal_v1(left: SchedulerLedgerV1,
+                            right: SchedulerLedgerV1) -> bool:
+    if left.attempts.len() != right.attempts.len() or
+       left.fences.len() != right.fences.len() or
+       left.accepted.len() != right.accepted.len() or
+       left.failures.len() != right.failures.len():
+        return false
+    var i: i64 = 0
+    while i < left.attempts.len():
+        if not _journal_attempt_equal_v1(left.attempts[i], right.attempts[i]):
+            return false
+        i = i + 1
+    i = 0
+    while i < left.fences.len():
+        if left.fences[i].action_digest != right.fences[i].action_digest or
+           left.fences[i].epoch != right.fences[i].epoch:
+            return false
+        i = i + 1
+    i = 0
+    while i < left.accepted.len():
+        if left.accepted[i].version != right.accepted[i].version or
+           _journal_accepted_text_v1(left.accepted[i]) !=
+               _journal_accepted_text_v1(right.accepted[i]):
+            return false
+        i = i + 1
+    i = 0
+    while i < left.failures.len():
+        if _journal_failure_text_v1(left.failures[i]) !=
+           _journal_failure_text_v1(right.failures[i]):
+            return false
+        i = i + 1
+    true
+
+fn _journal_strong_valid_v1(ledger: SchedulerLedgerV1) -> bool:
+    if not scheduler_ledger_valid_v1(ledger):
+        return false
+    for attempt in ledger.attempts:
+        if not _journal_field_v1(attempt.attempt_id) or
+           not _journal_field_v1(attempt.worker_id) or
+           attempt.fence > scheduler_current_fence_v1(ledger, attempt.action_digest):
+            return false
+    for accepted in ledger.accepted:
+        if not _journal_digest_v1(accepted.output_manifest_digest) or
+           not _journal_digest_v1(accepted.broker_receipt_digest) or
+           not _journal_field_v1(accepted.accepted_attempt_id):
+            return false
+        var found = false
+        for attempt in ledger.attempts:
+            if attempt.attempt_id == accepted.accepted_attempt_id and
+               attempt.action_digest == accepted.action_digest and not attempt.active:
+                found = true
+        if not found:
+            return false
+    for failure in ledger.failures:
+        if not _journal_field_v1(failure.attempt_id) or
+           not _journal_field_v1(failure.worker_id) or
+           not _journal_field_v1(failure.classification) or
+           failure.fence >= scheduler_current_fence_v1(ledger,
+               failure.action_digest):
+            return false
+    true
+
+fn _journal_set_fence_v1(ledger: SchedulerLedgerV1, digest: text,
+                         epoch: i64) -> SchedulerLedgerV1:
+    var fences: [SchedulerFenceV1] = []
+    var found = false
+    for fence in ledger.fences:
+        if fence.action_digest == digest:
+            fences.push(SchedulerFenceV1(digest, epoch))
+            found = true
+        else:
+            fences.push(fence)
+    if not found:
+        fences.push(SchedulerFenceV1(digest, epoch))
+    SchedulerLedgerV1(ledger.attempts, fences, ledger.accepted,
+        ledger.failures)
+
+fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
+                     payload: text) -> SchedulerLedgerV1?:
+    if operation == "A":
+        val parsed = _journal_parse_attempt_v1(payload)
+        if parsed == nil:
+            return nil
+        val attempt = parsed.unwrap()
+        if ledger.attempts.len() >= 4096 or
+           attempt.fence != scheduler_current_fence_v1(ledger, attempt.action_digest) + 1:
+            return nil
+        for old in ledger.attempts:
+            if old.attempt_id == attempt.attempt_id or
+               (old.action_digest == attempt.action_digest and old.active):
+                return nil
+        for accepted in ledger.accepted:
+            if accepted.action_digest == attempt.action_digest:
+                return nil
+        var attempts = ledger.attempts
+        attempts.push(attempt)
+        val next = _journal_set_fence_v1(
+            SchedulerLedgerV1(attempts, ledger.fences, ledger.accepted,
+                ledger.failures),
+            attempt.action_digest, attempt.fence)
+        next
+    elif operation == "R":
+        if not _journal_field_v1(payload):
+            return nil
+        var attempts: [SchedulerAttemptV1] = []
+        var digest = ""
+        for old in ledger.attempts:
+            if old.attempt_id == payload and old.active:
+                digest = old.action_digest
+                attempts.push(SchedulerAttemptV1(old.action_digest, old.attempt_id,
+                    old.worker_id, old.fence, old.cpu_tokens, old.memory_bytes,
+                    old.fd_tokens, false))
+            else:
+                attempts.push(old)
+        if digest == "" or scheduler_current_fence_v1(ledger, digest) >= 1000000000:
+            return nil
+        val next = _journal_set_fence_v1(
+            SchedulerLedgerV1(attempts, ledger.fences, ledger.accepted,
+                ledger.failures), digest,
+            scheduler_current_fence_v1(ledger, digest) + 1)
+        next
+    elif operation == "P":
+        val parsed = _journal_parse_accepted_v1(payload)
+        if parsed == nil or ledger.accepted.len() >= 256:
+            return nil
+        val accepted = parsed.unwrap()
+        for old in ledger.accepted:
+            if old.action_digest == accepted.action_digest:
+                return nil
+        var attempts: [SchedulerAttemptV1] = []
+        var found = false
+        for old in ledger.attempts:
+            if old.attempt_id == accepted.accepted_attempt_id and
+               old.action_digest == accepted.action_digest and old.active and
+               old.fence == scheduler_current_fence_v1(ledger, old.action_digest):
+                found = true
+                attempts.push(SchedulerAttemptV1(old.action_digest, old.attempt_id,
+                    old.worker_id, old.fence, old.cpu_tokens, old.memory_bytes,
+                    old.fd_tokens, false))
+            else:
+                attempts.push(old)
+        if not found:
+            return nil
+        var accepted_rows: [AcceptedResult] = []
+        var inserted = false
+        for old in ledger.accepted:
+            if not inserted and accepted.action_digest < old.action_digest:
+                accepted_rows.push(accepted)
+                inserted = true
+            accepted_rows.push(old)
+        if not inserted:
+            accepted_rows.push(accepted)
+        val next = SchedulerLedgerV1(attempts, ledger.fences, accepted_rows,
+            ledger.failures)
+        next
+    elif operation == "X":
+        val parsed = _journal_parse_failure_v1(payload)
+        if parsed == nil:
+            return nil
+        val failure = parsed.unwrap()
+        val candidate = ActionResultCandidate(1, failure.action_digest,
+            failure.attempt_id, failure.worker_id,
+            failure.output_manifest_digest, failure.diagnostic_digest, false)
+        val transition = fail_attempt_v1(ledger, candidate, failure.fence,
+            failure.classification)
+        if not transition.admitted or transition.error != "":
+            return nil
+        transition.ledger
+    else:
+        nil
+
+fn _journal_snapshot_body_v1(ledger: SchedulerLedgerV1) -> text:
+    var rows: [text] = []
+    for fence in ledger.fences:
+        rows.push("F," + fence.action_digest + "," + fence.epoch.to_text())
+    for attempt in ledger.attempts:
+        rows.push("A," + _journal_attempt_text_v1(attempt) +
+            "," + (if attempt.active: "1" else: "0"))
+    for failure in ledger.failures:
+        rows.push("X," + _journal_failure_text_v1(failure))
+    for accepted in ledger.accepted:
+        rows.push("P," + _journal_accepted_text_v1(accepted))
+    if rows.len() == 0: "-" else: rows.join(";")
+
+fn _journal_parse_snapshot_body_v1(body: text) -> SchedulerLedgerV1?:
+    if body == "-":
+        return empty_scheduler_ledger_v1()
+    var fences: [SchedulerFenceV1] = []
+    var attempts: [SchedulerAttemptV1] = []
+    var accepted: [AcceptedResult] = []
+    var failures: [SchedulerFailedAttemptV1] = []
+    val rows = body.split(";")
+    if rows.len() > 8704:
+        return nil
+    var phase = 0
+    for row in rows:
+        val fields = row.split(",")
+        if fields.len() == 3 and fields[0] == "F" and phase == 0:
+            val epoch = _journal_number_v1(fields[2], 1, 1000000000)
+            if not _journal_digest_v1(fields[1]) or epoch < 0:
+                return nil
+            fences.push(SchedulerFenceV1(fields[1], epoch))
+        elif fields.len() == 9 and fields[0] == "A" and phase <= 1:
+            phase = 1
+            val parsed = _journal_parse_attempt_v1(row[2:row.len() - 2])
+            if parsed == nil or (fields[8] != "0" and fields[8] != "1"):
+                return nil
+            val attempt = parsed.unwrap()
+            attempts.push(SchedulerAttemptV1(attempt.action_digest,
+                attempt.attempt_id, attempt.worker_id, attempt.fence,
+                attempt.cpu_tokens, attempt.memory_bytes, attempt.fd_tokens,
+                fields[8] == "1"))
+        elif fields.len() == 8 and fields[0] == "X" and phase <= 2:
+            phase = 2
+            val parsed = _journal_parse_failure_v1(row[2:])
+            if parsed == nil:
+                return nil
+            failures.push(parsed.unwrap())
+        elif fields.len() == 5 and fields[0] == "P":
+            phase = 3
+            val parsed = _journal_parse_accepted_v1(row[2:])
+            if parsed == nil:
+                return nil
+            accepted.push(parsed.unwrap())
+        else:
+            return nil
+    val ledger = SchedulerLedgerV1(attempts, fences, accepted, failures)
+    if _journal_strong_valid_v1(ledger) and
+       _journal_snapshot_body_v1(ledger) == body:
+        ledger
+    else:
+        nil
+
+fn _journal_root_valid_v1(root: text) -> bool:
+    root != "" and not root.contains("\n") and not root.contains("\r") and
+        not root.ends_with("/")
+
+fn _journal_parent_v1(root: text) -> text:
+    var last: i64 = -1
+    var i: i64 = 0
+    while i < root.len():
+        if root[i:i + 1] == "/":
+            last = i
+        i = i + 1
+    if last < 0:
+        return "."
+    if last == 0:
+        return "/"
+    root[0:last]
+
+fn _journal_snapshot_line_v1(state: SchedulerJournalStateV1) -> text:
+    val body = _journal_snapshot_body_v1(state.ledger)
+    "S1|" + state.sequence.to_text() + "|" + state.head_digest + "|" +
+        sha256_text(body) + "|" + body + "\n"
+
+fn scheduler_journal_open_v1(root: text) -> SchedulerJournalStateV1:
+    """Replay a bounded local WAL. Any malformed or torn tail blocks scheduling."""
+    if not _journal_root_valid_v1(root):
+        return _journal_error_v1("root-invalid")
+    var state = _journal_genesis_v1()
+    val snapshot_path = root + "/snapshot.v1"
+    val journal_path = root + "/journal.v1"
+    if file_exists(snapshot_path):
+        val read = file_read_regular_no_follow_bounded(
+            snapshot_path, SCHEDULER_SNAPSHOT_MAX_BYTES_V1)
+        if read.is_err():
+            return _journal_error_v1("snapshot-unreadable")
+        val line = read.unwrap()
+        if not line.ends_with("\n") or line.len() < 70 or
+           line[0:3] != "S1|" or line.contains("\r"):
+            return _journal_error_v1("snapshot-corrupt")
+        val parts = line[0:line.len() - 1].split("|")
+        if parts.len() != 5:
+            return _journal_error_v1("snapshot-corrupt")
+        val seq = _journal_number_v1(parts[1], 0, 1000000000)
+        if seq < 0 or not _journal_digest_v1(parts[2]) or
+           not _journal_digest_v1(parts[3]) or sha256_text(parts[4]) != parts[3]:
+            return _journal_error_v1("snapshot-corrupt")
+        val parsed = _journal_parse_snapshot_body_v1(parts[4])
+        if parsed == nil:
+            return _journal_error_v1("snapshot-corrupt")
+        if (seq == 0 and (parts[2] != _SCHEDULER_GENESIS_V1 or
+            parts[4] != "-")) or
+           (seq > 0 and parts[2] == _SCHEDULER_GENESIS_V1):
+            return _journal_error_v1("snapshot-corrupt")
+        state = SchedulerJournalStateV1(parsed.unwrap(), seq, parts[2], 0, 0, "")
+    if not file_exists(journal_path):
+        return state
+    val read = file_read_regular_no_follow_bounded(
+        journal_path, SCHEDULER_JOURNAL_MAX_BYTES_V1)
+    if read.is_err():
+        return _journal_error_v1("journal-unreadable")
+    val content = read.unwrap()
+    if content == "":
+        return state
+    if not content.ends_with("\n") or content.contains("\r"):
+        return _journal_error_v1("journal-torn")
+    val lines = content[0:content.len() - 1].split("\n")
+    if lines.len() > SCHEDULER_JOURNAL_MAX_RECORDS_V1:
+        return _journal_error_v1("journal-bound")
+    var replay = _journal_genesis_v1()
+    var anchored = state.sequence == 0
+    var retained_prefix = false
+    var prefix_sequence: i64 = 0
+    var prefix_digest = ""
+    if lines.len() > 0:
+        val first = lines[0].split("|")
+        if first.len() != 6:
+            return _journal_error_v1("journal-corrupt")
+        val first_seq = _journal_number_v1(first[1], 1, 1000000000)
+        if first_seq == state.sequence + 1 and first[2] == state.head_digest:
+            replay = state
+            anchored = true
+        elif first_seq > 1 and first_seq <= state.sequence and
+             _journal_digest_v1(first[2]):
+            # A prior compaction cleared an earlier WAL segment. If the next
+            # snapshot rename landed but WAL clearing did not, retain this
+            # segment through the new snapshot hash before applying later rows.
+            retained_prefix = true
+            prefix_sequence = first_seq - 1
+            prefix_digest = first[2]
+        elif first_seq != 1:
+            return _journal_error_v1("journal-gap")
+    for line in lines:
+        if line.len() == 0 or line.len() > SCHEDULER_RECORD_MAX_BYTES_V1:
+            return _journal_error_v1("record-bound")
+        val parts = line.split("|")
+        if parts.len() != 6 or parts[0] != "J1" or
+           not _journal_digest_v1(parts[2]) or not _journal_digest_v1(parts[3]):
+            return _journal_error_v1("record-corrupt")
+        val seq = _journal_number_v1(parts[1], 1, 1000000000)
+        val digest = sha256_text(parts[1] + "|" + parts[2] + "|" +
+            parts[4] + "|" + parts[5])
+        if digest != parts[3]:
+            return _journal_error_v1("record-digest")
+        if retained_prefix and not anchored:
+            if seq != prefix_sequence + 1 or parts[2] != prefix_digest:
+                return _journal_error_v1("record-chain")
+            prefix_sequence = seq
+            prefix_digest = digest
+            if seq == state.sequence:
+                if digest != state.head_digest:
+                    return _journal_error_v1("snapshot-anchor")
+                replay = state
+                anchored = true
+            continue
+        if seq != replay.sequence + 1 or parts[2] != replay.head_digest:
+            return _journal_error_v1("record-chain")
+        val next = _journal_apply_v1(replay.ledger, parts[4], parts[5])
+        if next == nil:
+            return _journal_error_v1("record-transition")
+        replay = SchedulerJournalStateV1(next.unwrap(), seq, digest, 0, 0, "")
+        if seq == state.sequence:
+            if digest != state.head_digest or
+               not _journal_ledger_equal_v1(replay.ledger, state.ledger):
+                return _journal_error_v1("snapshot-anchor")
+            anchored = true
+    if not anchored or replay.sequence < state.sequence:
+        return _journal_error_v1("snapshot-anchor")
+    if not _journal_strong_valid_v1(replay.ledger):
+        return _journal_error_v1("ledger-invalid")
+    SchedulerJournalStateV1(replay.ledger, replay.sequence, replay.head_digest,
+        content.len(), lines.len(), "")
+
+fn _journal_commit_v1(root: text, current: SchedulerJournalStateV1,
+                      next: SchedulerLedgerV1, operation: text,
+                      payload: text) -> SchedulerJournalStateV1:
+    if current.error != "" or not _journal_root_valid_v1(root):
+        return _journal_error_v1("state-invalid")
+    if not _journal_digest_v1(current.head_digest) or
+       current.journal_bytes < 0 or
+       current.journal_bytes > SCHEDULER_JOURNAL_MAX_BYTES_V1 or
+       current.journal_records < 0 or
+       current.journal_records > SCHEDULER_JOURNAL_MAX_RECORDS_V1:
+        return _journal_error_v1("state-invalid")
+    val journal_path = root + "/journal.v1"
+    val on_disk_size = if file_exists(journal_path): file_size_raw(journal_path) else: 0
+    if on_disk_size != current.journal_bytes:
+        return _journal_error_v1("stale-or-corrupt")
+    val applied = _journal_apply_v1(current.ledger, operation, payload)
+    if applied == nil or not _journal_ledger_equal_v1(applied.unwrap(), next):
+        return _journal_error_v1("transition-mismatch")
+    if current.sequence >= 1000000000:
+        return _journal_error_v1("sequence-bound")
+    val seq = current.sequence + 1
+    val digest = sha256_text(seq.to_text() + "|" + current.head_digest +
+        "|" + operation + "|" + payload)
+    val line = "J1|" + seq.to_text() + "|" + current.head_digest + "|" +
+        digest + "|" + operation + "|" + payload + "\n"
+    if line.len() > SCHEDULER_RECORD_MAX_BYTES_V1:
+        return _journal_error_v1("record-bound")
+    val root_created = not file_exists(root)
+    if root_created and not file_exists(_journal_parent_v1(root)):
+        return _journal_error_v1("parent-directory-missing")
+    if not dir_create_all(root) or
+       (root_created and not directory_fsync(_journal_parent_v1(root))):
+        return _journal_error_v1("directory-not-durable")
+    var prior_bytes = current.journal_bytes
+    var prior_records = current.journal_records
+    if prior_bytes + line.len() > SCHEDULER_JOURNAL_MAX_BYTES_V1 or
+       prior_records >= SCHEDULER_JOURNAL_MAX_RECORDS_V1:
+        val compacted = scheduler_journal_compact_v1(root, current)
+        if compacted.error != "":
+            return compacted
+        prior_bytes = 0
+        prior_records = 0
+    val created = not file_exists(journal_path)
+    if not file_append(journal_path, line) or
+       file_size_raw(journal_path) != prior_bytes + line.len() or
+       not file_fsync(journal_path) or
+       (created and not directory_fsync(root)):
+        return _journal_error_v1("append-not-durable")
+    SchedulerJournalStateV1(next, seq, digest, prior_bytes + line.len(),
+        prior_records + 1, "")
+
+fn scheduler_journal_admit_v1(root: text, current: SchedulerJournalStateV1,
+                              transition: SchedulerTransitionV1) -> SchedulerJournalStateV1:
+    if not transition.admitted or transition.error != "" or
+       transition.ledger.attempts.len() != current.ledger.attempts.len() + 1:
+        return _journal_error_v1("admission-invalid")
+    val attempt = transition.ledger.attempts[transition.ledger.attempts.len() - 1]
+    if transition.fence != attempt.fence:
+        return _journal_error_v1("admission-fence")
+    _journal_commit_v1(root, current, transition.ledger, "A",
+        _journal_attempt_text_v1(attempt))
+
+fn scheduler_journal_revoke_v1(root: text, current: SchedulerJournalStateV1,
+                               attempt_id: text,
+                               transition: SchedulerTransitionV1) -> SchedulerJournalStateV1:
+    if not transition.admitted or transition.error != "":
+        return _journal_error_v1("revocation-invalid")
+    _journal_commit_v1(root, current, transition.ledger, "R", attempt_id)
+
+fn scheduler_journal_fail_v1(root: text, current: SchedulerJournalStateV1,
+                             transition: SchedulerTransitionV1) -> SchedulerJournalStateV1:
+    if not transition.admitted or transition.error != "" or
+       transition.ledger.failures.len() != current.ledger.failures.len() + 1:
+        return _journal_error_v1("failure-invalid")
+    val failure = transition.ledger.failures[
+        transition.ledger.failures.len() - 1]
+    if transition.fence != failure.fence + 1:
+        return _journal_error_v1("failure-fence")
+    _journal_commit_v1(root, current, transition.ledger, "X",
+        _journal_failure_text_v1(failure))
+
+fn scheduler_journal_publish_v1(root: text, current: SchedulerJournalStateV1,
+                                publication: SchedulerPublishV1) -> SchedulerJournalStateV1:
+    if not publication.published or publication.error != "":
+        return _journal_error_v1("publication-invalid")
+    _journal_commit_v1(root, current, publication.ledger, "P",
+        _journal_accepted_text_v1(publication.accepted))
+
+fn scheduler_journal_compact_v1(root: text,
+                                current: SchedulerJournalStateV1) -> SchedulerJournalStateV1:
+    """Atomic snapshot, then atomically clear the replayed prefix."""
+    if current.error != "" or not _journal_root_valid_v1(root):
+        return _journal_error_v1("state-invalid")
+    val disk = scheduler_journal_open_v1(root)
+    if disk.error != "" or disk.sequence != current.sequence or
+       disk.head_digest != current.head_digest or
+       disk.journal_bytes != current.journal_bytes or
+       not _journal_ledger_equal_v1(disk.ledger, current.ledger):
+        return _journal_error_v1("stale-or-corrupt")
+    val line = _journal_snapshot_line_v1(current)
+    if line.len() > SCHEDULER_SNAPSHOT_MAX_BYTES_V1:
+        return _journal_error_v1("snapshot-bound")
+    if not dir_create_all(root) or
+       not file_atomic_write(root + "/snapshot.v1", line) or
+       not file_fsync(root + "/snapshot.v1") or not directory_fsync(root):
+        return _journal_error_v1("snapshot-not-durable")
+    if not file_atomic_write(root + "/journal.v1", "") or
+       not file_fsync(root + "/journal.v1") or not directory_fsync(root):
+        return _journal_error_v1("compact-not-durable")
+    SchedulerJournalStateV1(current.ledger, current.sequence,
+        current.head_digest, 0, 0, "")
+
+export SchedulerJournalStateV1, SCHEDULER_JOURNAL_MAX_BYTES_V1
+export scheduler_journal_open_v1, scheduler_journal_admit_v1
+export scheduler_journal_revoke_v1, scheduler_journal_publish_v1
+export scheduler_journal_fail_v1
+export scheduler_journal_compact_v1

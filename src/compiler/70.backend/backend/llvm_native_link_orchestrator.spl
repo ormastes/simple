@@ -549,7 +549,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # not pass them to cleanup_runtime_objects or delete them after linking.
     # They remain caller-owned; dynamic providers stay in the dependency table
     # while static providers contribute only extracted members.
-    val external_providers = match llvm_configured_external_link_objects():
+    val configured_providers = match llvm_configured_external_link_objects():
         case Ok(paths): paths
         case Err(err):
             cleanup_runtime_objects(runtime_objects)
@@ -560,6 +560,19 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             else:
                 file_delete(entry_obj_path)
             return Err(err)
+    var external_providers = configured_providers
+    for provider in options.external_link_inputs:
+        if provider == "" or not file_exists(provider) or file_size_raw(provider) <= 0:
+            cleanup_runtime_objects(runtime_objects)
+            if bootstrap_support_obj != "":
+                file_delete(bootstrap_support_obj)
+            if stage4_requested:
+                remove_file_if_exists(entry_obj_path)
+            else:
+                file_delete(entry_obj_path)
+            return Err("explicit external link provider is missing or empty: " + provider)
+        if not external_providers.contains(provider):
+            external_providers = external_providers.push(provider)
     for provider in external_providers:
         all_objects = all_objects.push(provider)
         runtime_provider_inputs = runtime_provider_inputs.push(provider)

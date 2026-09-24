@@ -1,0 +1,96 @@
+# Pure wire/byte validation only. The caller must authenticate filesystem
+# provenance and worker isolation before treating these bytes as evidence.
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+pub struct DistExecWorkerResultV1:
+    leaf_name: text
+    nonce: text
+    artifact_sha256: text
+    exit_code: i64
+    stdout_bytes: i64
+    stdout_sha256: text
+    stderr_bytes: i64
+    v4_binding: text
+
+fn _dist_exec_result_hex_v1(value: text, width: i64) -> bool:
+    if value.len() != width: return false
+    for ch in value.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+pub fn parse_dist_exec_committed_pointer_v1(wire: text, expected_nonce: text) -> Result<text, text>:
+    """Return only the canonical result leaf, never a caller-supplied path."""
+    if not _dist_exec_result_hex_v1(expected_nonce, 32):
+        return Err("result-nonce-invalid")
+    val root = "/simple-build/outputs/"
+    val prefix = root + "result-" + expected_nonce + "-"
+    if (wire.len() != prefix.len() + 7 or not wire.starts_with(prefix) or
+            not wire.ends_with("\n")):
+        return Err("result-pointer-invalid")
+    val suffix = wire[prefix.len():wire.len() - 1]
+    for ch in suffix.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "z") or
+                (ch >= "A" and ch <= "Z")):
+            return Err("result-pointer-suffix-invalid")
+    Ok(wire[root.len():wire.len() - 1])
+
+pub fn validate_dist_exec_worker_result_v1(result: DistExecWorkerResultV1,
+        stdout: [u8], expected_nonce: text, expected_artifact_digest: text,
+        output_byte_cap: i64) -> Result<bool, text>:
+    """Validate consistency; v4_binding is syntax checked, not authenticated."""
+    if (not _dist_exec_result_hex_v1(expected_nonce, 32) or
+            not _dist_exec_result_hex_v1(expected_artifact_digest, 64) or
+            output_byte_cap <= 0 or output_byte_cap > 16777216):
+        return Err("result-expectation-invalid")
+    val leaf = parse_dist_exec_committed_pointer_v1(
+        "/simple-build/outputs/" + result.leaf_name + "\n", expected_nonce)?
+    if (leaf != result.leaf_name or result.nonce != expected_nonce or
+            result.artifact_sha256 != expected_artifact_digest):
+        return Err("result-identity-mismatch")
+    if result.exit_code != 0 or result.stderr_bytes != 0:
+        return Err("result-process-failed")
+    if (result.stdout_bytes < 0 or result.stdout_bytes > output_byte_cap or
+            stdout.len() > output_byte_cap or result.stdout_bytes != stdout.len()):
+        return Err("result-stdout-count-invalid")
+    if (not _dist_exec_result_hex_v1(result.stdout_sha256, 64) or
+            result.stdout_sha256 != sha256_u8_hex(stdout)):
+        return Err("result-stdout-digest-invalid")
+    if not _dist_exec_result_hex_v1(result.v4_binding, 64):
+        return Err("result-v4-binding-invalid")
+    Ok(true)
+
+pub fn parse_dist_exec_worker_result_v1(pointer_wire: text, receipt_wire: text,
+        stdout: [u8], expected_nonce: text, expected_artifact_digest: text,
+        output_byte_cap: i64) -> Result<DistExecWorkerResultV1, text>:
+    """Parse exactly the worker's ordered V1 schema and validate raw stdout."""
+    val leaf = parse_dist_exec_committed_pointer_v1(pointer_wire, expected_nonce)?
+    if (receipt_wire.len() <= 0 or receipt_wire.len() > 1024 or
+            not receipt_wire.ends_with("\n") or receipt_wire.contains("\r") or
+            receipt_wire.contains("\x00")):
+        return Err("result-receipt-wire-invalid")
+    val rows = receipt_wire[0:receipt_wire.len() - 1].split("\n")
+    val keys = ["nonce=", "artifact-sha256=", "exit-code=", "stdout-bytes=",
+        "stdout-sha256=", "stderr-bytes=", "v4-binding="]
+    if rows.len() != 8 or rows[0] != "simple-dist-exec-worker-result-v1":
+        return Err("result-receipt-schema-invalid")
+    var values: [text] = []
+    var index: i64 = 0
+    while index < keys.len():
+        if not rows[index + 1].starts_with(keys[index]):
+            return Err("result-receipt-key-invalid")
+        values.push(rows[index + 1][keys[index].len():])
+        index = index + 1
+    if values[2] != "0" or values[5] != "0":
+        return Err("result-process-failed")
+    val count = values[3].to_i64() ?? -1
+    if count < 0 or count.to_text() != values[3]:
+        return Err("result-stdout-number-invalid")
+    val result = DistExecWorkerResultV1(leaf, values[0], values[1], 0,
+        count, values[4], 0, values[6])
+    validate_dist_exec_worker_result_v1(result, stdout, expected_nonce,
+        expected_artifact_digest, output_byte_cap)?
+    Ok(result)
+
+export DistExecWorkerResultV1, parse_dist_exec_committed_pointer_v1
+export validate_dist_exec_worker_result_v1, parse_dist_exec_worker_result_v1

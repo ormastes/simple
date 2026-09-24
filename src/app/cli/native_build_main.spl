@@ -14,7 +14,8 @@ use std.io_runtime.{dir_create_all, dir_remove_all}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb}
 use app.cli.native_build_warm_receipt.{
-    NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
+    NATIVE_BUILD_WARM_CANDIDATE_ENV, NativeBuildWarmReceiptState,
+    native_build_warm_receipt_prepare,
     native_build_warm_artifact_restore, native_build_warm_receipt_finish
 }
 use app.cli.environment_variant_policy_handoff_owner_v1.{
@@ -820,8 +821,16 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         env_set("SIMPLE_FRONTEND_CACHE_DIR", frontend_cache_dir)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
-    val warm_receipt = native_build_warm_receipt_prepare(
-        args, simple_bin, policy.handoff.cache_identity)
+    # Warm artifact receipts do not bind --input-manifest or the provider
+    # bytes it declares. Always run the worker for dependency link builds.
+    val warm_receipt = if native_build_manifest_requested(args):
+        NativeBuildWarmReceiptState(
+            eligible: false, hit: false, key: "", receipt_path: "",
+            candidate_path: "", artifact_path: "", artifact_digest: "",
+            output_path: "", args: [], closure_count: 0)
+    else:
+        native_build_warm_receipt_prepare(
+            args, simple_bin, policy.handoff.cache_identity)
     if warm_receipt.hit:
         if native_build_warm_artifact_restore(warm_receipt):
             print "[native-build-warm] exact final artifact restored; worker skipped"
@@ -1003,13 +1012,20 @@ fn native_build_is_value_consuming_flag(arg: text) -> bool:
     arg == "--backend" or arg == "--backend-plugin" or arg == "--runtime-bundle" or arg == "--runtime-path"
         or arg == "--linker-script" or arg == "--entry" or arg == "--source"
         or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode"
-        or arg == "--cache-dir" or arg == "--target" or arg == "--cpu"
+        or arg == "--cache-dir" or arg == "--input-manifest"
+        or arg == "--target" or arg == "--cpu"
         or arg == "--opt-level" or arg == "--timeout" or arg == "--threads"
         or arg == "--jobs" or arg == "-j" or arg == "--log"
         or arg == "--parser-impl" or arg == "--parser-prefer"
         or arg == "--parser-require" or arg == "--host-cpu-max"
         or arg == "--frontend-offload"
         or arg == "--frontend-offload-fallback"
+
+fn native_build_manifest_requested(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--input-manifest" or arg.starts_with("--input-manifest="):
+            return true
+    false
 
 fn native_build_has_entry(args: [text]) -> bool:
     var i = 0

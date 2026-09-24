@@ -72,7 +72,8 @@ fn cstring_returns_registry_has_every_exact_signature() {
         "rt_cuda_device_name", "rt_cuda_get_error_string", "rt_metal_device_name",
         "rt_metal_get_last_error", "rt_vulkan_device_driver_identity",
         "rt_vulkan_device_name", "rt_vulkan_device_type", "rt_vulkan_get_last_error",
-        "rt_vulkan_selected_device_driver_identity", "rt_vulkan_selected_device_name",
+        "rt_vulkan_selected_device_driver_identity", "rt_vulkan_selected_device_identity_v1",
+        "rt_vulkan_selected_device_name",
         "rt_vulkan_selected_device_type",
     ]);
     for &name in C_STRING_RETURNING_RUNTIME_FNS {
@@ -80,9 +81,10 @@ fn cstring_returns_registry_has_every_exact_signature() {
         let arity = match name {
             "rt_cuda_device_name" | "rt_cuda_get_error_string" | "rt_metal_device_name"
             | "rt_vulkan_device_driver_identity" | "rt_vulkan_device_name"
-            | "rt_vulkan_device_type" => 1,
+            | "rt_vulkan_device_type" | "rt_vulkan_selected_device_identity_v1" => 1,
             "rt_metal_get_last_error" | "rt_vulkan_get_last_error"
-            | "rt_vulkan_selected_device_driver_identity" | "rt_vulkan_selected_device_name"
+            | "rt_vulkan_selected_device_driver_identity"
+            | "rt_vulkan_selected_device_name"
             | "rt_vulkan_selected_device_type" => 0,
             _ => panic!("add exact signature expectation for {name}"),
         };
@@ -99,7 +101,7 @@ fn cstring_returns_native_calls_decode_each_gpu_result_exactly_once() {
         let arity = usize::from(matches!(name,
             "rt_cuda_device_name" | "rt_cuda_get_error_string" | "rt_metal_device_name"
             | "rt_vulkan_device_driver_identity" | "rt_vulkan_device_name"
-            | "rt_vulkan_device_type"));
+            | "rt_vulkan_device_type" | "rt_vulkan_selected_device_identity_v1"));
         let object = call_object(name, arity, true);
         assert_eq!(relocation_count(&object, name), 1, "{name}");
         assert_eq!(relocation_count(&object, "rt_cstring_to_text"), 1, "{name}");

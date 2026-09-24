@@ -11,12 +11,22 @@ that a rendering-fix agent can act on.
 `type` (draw/dispatch/copy/clear/present), `pipeline`, vs/ps/cs hashes, `viewport`,
 `scissor`, `targets[]` (id + width + height + format), draw params
 (`vertexCount`/`instanceCount`, or `groupsX/Y/Z`), and `outputSha256` — sha256 of the
-bound colour target saved as 8-bit RGBA PNG right after the event. `--thumbs` adds a
+first bound graphics colour target saved as a PNG after draw/clear events. This is a
+digest of encoded file bytes, not canonical pixels. Missing or failed graphics output
+blocks export; `outputStatus` and `outputError` explain the failure. `--thumbs` adds a
 64×64 **raw RGBA8** downsample as base64 (`thumbFormat: "rgba8-64x64"`), raw rather than
-PNG so the pure-Simple consumer needs no PNG decoder. The diff decodes that base64 and
+PNG so the pure-Simple consumer needs no PNG decoder. Thumbnails are emitted only for
+single-sample RGBA/BGRA 8-bit targets; unsupported formats record `thumbError`.
+Dispatch/copy/present events do not inherit graphics targets. The diff decodes that base64 and
 compares whole 4-byte pixels (`src/app/ui/renderdoc_diff/thumb.spl`); `thumb_mismatch_pct`
 is a real pixel percentage, not a base64-text proxy, and is `-1` when either side has no
 thumbnail. Fixture thumbnails are 2×2 so the expected percentages are hand-checkable.
+The export labels its hash domain `png-file-bytes/v1-not-canonical-pixels` and its
+comparison scope `graphics-event-diagnostics-only`. Event agreement is not whole-frame
+visual equivalence.
+The v1 parser requires a nonempty 64-character hexadecimal `outputSha256` for each
+draw/clear event. It also rejects event files with no graphics output. Fixture digests
+are synthetic values for parser and alignment tests; they are not capture evidence.
 
 Shader "hashes" are the replay API's stage index plus entry-point name, not a content
 digest: equal values do NOT prove equal shader bytes. They are informational only and no
@@ -25,7 +35,7 @@ classification reads them.
 Fail-closed: bad `RDOC` magic → exit 1 (checked FIRST, so it works with no RenderDoc);
 no `renderdoccmd`/`qrenderdoc` → exit 2 with `renderdoc_status=blocked:renderdoccmd-missing`.
 
-The RenderDoc replay API is Python-only, so the **only** Python is the thin exporter
+The RenderDoc replay API is Python-only, so the only production Python is the thin exporter
 `scripts/tool/renderdoc-qrenderdoc-python-smoke.py` — extended in place, not duplicated;
 with `RDOC_EXPORT_RDC` unset it keeps its original smoke behaviour. All logic (alignment,
 classification, verdicts) is pure Simple in `src/app/ui/renderdoc_diff/`.
@@ -72,10 +82,11 @@ sh scripts/check/check-renderdoc-web-diff.shs --thumbs \
 
 ## Honest macOS status
 
-This host has no RenderDoc, so **the replay half of the exporter has never executed**:
-its RenderDoc API calls are written but unverified, and version renames are the likely
-first failure. Everything else is proven here — the magic check, the missing-binary path,
-the schema, and the whole diff — by `--selftest` over hand-written fixtures in
+This host has no RenderDoc, so **native replay remains unverified**. Offline API mocks
+in `test/02_integration/tool/renderdoc_exporter_contract_test.shs` exercise action
+classification, save failure, thumbnail format checks, and stale output removal.
+They are contract tests, not GPU evidence. The wrapper magic check, missing-binary
+path, and separate diff are exercised by `--selftest` over hand-written fixtures in
 `test/fixtures/renderdoc_diff/`, which need no `.rdc`.
 
 A binary that cannot `run` (a bootstrap-only CLI) is detected by a liveness probe and

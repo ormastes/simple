@@ -139,8 +139,13 @@ describe "Bitmap":
         val p0 = sk_path_new()
         val p1 = p0.move_to(2.0, 10.0)
         val p2 = p1.line_to(18.0, 10.0)
-        val color = _red()
-        stroke_path(bm, p2, color, 4.0)
+        # NOTE: the color is passed inline, NOT via `val color = _red()`.
+        # A val-bound SkColor4f crossing the fill_path_aa -> _scan_row ->
+        # set_pixel chain hits a seed test-runner type-erasure defect
+        # ('r' on Dict); inline arguments and `bin/simple run` are
+        # unaffected. See
+        # doc/08_tracking/bug/seed_val_bound_class_type_erasure_spec_context_2026-10-03.md
+        stroke_path(bm, p2, _red(), 4.0)
         # pixel along the stroke: (10,10) idx = (10*20+10)*4 = 840
         val r_byte = bm.pixels[840] as i64
         expect(r_byte).to_be_greater_than(0)
@@ -168,3 +173,24 @@ describe "Bitmap":
         val r2 = bm2.pixels[132] as i64
         expect(r1).to_be_greater_than(200)
         expect(r2).to_be_greater_than(200)
+
+    it "zeros on a non-square bitmap preallocates every byte to zero (W1 regression)":
+        # @req: REQ-LIB-SKIA_RASTER_PRIMS-001
+        step("Verify: zeros on a non-square bitmap preallocates every byte to zero")
+        # W1 changed Bitmap.zeros from a per-element push loop to a one-shot
+        # 4*w*h preallocation. Content must be unchanged: every one of the
+        # 13*7*4 bytes zero, and the non-square row geometry must still
+        # address correctly through set_pixel.
+        val bm = Bitmap.zeros(13, 7)
+        expect(bm.pixels.len()).to_equal(364)  # oracle: 13*7*4
+        var nonzero = 0
+        var i = 0
+        while i < 364:
+            if bm.pixels[i] as i64 != 0:
+                nonzero = nonzero + 1
+            i += 1
+        expect(nonzero).to_equal(0)
+        bm.set_pixel(12, 6, _red())
+        # last pixel (12,6): idx = (6*13+12)*4 = 360
+        expect(bm.pixels[360] as i64).to_be_greater_than(200)
+        expect(bm.pixels[363] as i64).to_equal(255)

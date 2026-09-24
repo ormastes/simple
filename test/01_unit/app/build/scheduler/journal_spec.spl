@@ -1,0 +1,188 @@
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1, admit_attempt_v1,
+    revoke_attempt_v1, fail_attempt_v1}
+use app.build.scheduler.broker.{FencedCandidateV1, accept_result_v1}
+use app.build.scheduler.journal.{scheduler_journal_open_v1,
+    scheduler_journal_admit_v1, scheduler_journal_revoke_v1,
+    scheduler_journal_publish_v1, scheduler_journal_compact_v1,
+    scheduler_journal_fail_v1}
+use compiler.common.build_contract.{ActionResultCandidate, BuildInputRef,
+    SnapshotManifest, ToolchainManifest, InputManifest, ActionSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_append, file_atomic_write, file_read_regular_no_follow_bounded,
+    dir_create_all,
+    time_now_unix_micros, getpid}
+
+fn _journal_action_v1(name: text) -> SchedulerActionV1:
+    val snapshot = sha256_text("journal-snapshot")
+    val spec = ActionSpec(
+        version: 1, kind: "simple-compile",
+        snapshot: SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        toolchain: ToolchainManifest(1, sha256_text("tool"),
+            sha256_text("behavior"), sha256_text("provider"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "aarch64-apple-darwin"),
+        inputs: InputManifest(1, snapshot,
+            [BuildInputRef("src/" + name + ".spl", sha256_text(name))],
+            [], [], [], [], [], sha256_text("resolution"), true, false),
+        argv: ["simple", "build", name], working_directory: "src",
+        sandbox_digest: sha256_text("sandbox"),
+        output_paths: ["build/" + name + ".out"],
+        resource_policy_digest: sha256_text("resource-policy"))
+    SchedulerActionV1(action_spec_digest_v1(spec), spec, [], 0, 0, 1, 20, 1)
+
+fn _journal_test_root_v1(label: text) -> text:
+    "build/test/scheduler-journal-" + label + "-" + getpid().to_text() +
+        "-" + time_now_unix_micros().to_text()
+
+describe "durable parent scheduler journal":
+    it "retains failed attempt diagnostics across replay compaction and retry":
+        val root = _journal_test_root_v1("failed")
+        val action = _journal_action_v1("failed-producer")
+        val capacity = SchedulerCapacityV1(1, 100, 10, 5)
+        val initial = scheduler_journal_open_v1(root)
+        val admitted = admit_attempt_v1(initial.ledger, [action],
+            action.action_digest, "try-1", "node-1", capacity, 0)
+        val started = scheduler_journal_admit_v1(root, initial, admitted)
+        expect(started.error).to_equal("")
+        val candidate = ActionResultCandidate(1, action.action_digest,
+            "try-1", "node-1", "", sha256_text("compiler diagnostics"), false)
+        val invalid = fail_attempt_v1(started.ledger, candidate, 1, "unknown")
+        expect(invalid.error).to_equal("scheduler-error: failure-invalid")
+        val failed = fail_attempt_v1(started.ledger, candidate, 1,
+            "action-failure-unclassified")
+        expect(failed.admitted).to_be(true)
+        val stored = scheduler_journal_fail_v1(root, started, failed)
+        expect(stored.error).to_equal("")
+        val replayed = scheduler_journal_open_v1(root)
+        expect(replayed.error).to_equal("")
+        expect(replayed.ledger.failures.len()).to_equal(1)
+        expect(replayed.ledger.failures[0].classification)
+            .to_equal("action-failure-unclassified")
+        expect(replayed.ledger.failures[0].diagnostic_digest).to_equal(
+            sha256_text("compiler diagnostics"))
+        expect(replayed.ledger.failures[0].output_manifest_digest).to_equal("")
+        expect(replayed.ledger.attempts[0].active).to_be(false)
+        expect(replayed.ledger.fences[0].epoch).to_equal(2)
+        val stale = fail_attempt_v1(replayed.ledger, candidate, 1,
+            "action-failure-unclassified")
+        expect(stale.error).to_equal("scheduler-error: stale-fence")
+        val compacted = scheduler_journal_compact_v1(root, replayed)
+        expect(compacted.error).to_equal("")
+        val recovered = scheduler_journal_open_v1(root)
+        expect(recovered.error).to_equal("")
+        expect(recovered.ledger.failures.len()).to_equal(1)
+        expect(recovered.ledger.failures[0].classification)
+            .to_equal("action-failure-unclassified")
+        expect(recovered.ledger.failures[0].diagnostic_digest).to_equal(
+            sha256_text("compiler diagnostics"))
+        val retry = admit_attempt_v1(recovered.ledger, [action],
+            action.action_digest, "try-2", "node-2", capacity, 0)
+        expect(retry.admitted).to_be(true)
+        expect(retry.fence).to_equal(3)
+        val stored_retry = scheduler_journal_admit_v1(root, recovered, retry)
+        expect(stored_retry.error).to_equal("")
+        val output = sha256_text("verified retry output")
+        val published = accept_result_v1(stored_retry.ledger,
+            FencedCandidateV1(ActionResultCandidate(1, action.action_digest,
+                "try-2", "node-2", output, sha256_text("success diagnostics"),
+                true), 3), output)
+        expect(published.published).to_be(true)
+        val stored_publish = scheduler_journal_publish_v1(root, stored_retry,
+            published)
+        expect(stored_publish.error).to_equal("")
+        val complete = scheduler_journal_open_v1(root)
+        expect(complete.error).to_equal("")
+        expect(complete.ledger.failures.len()).to_equal(1)
+        expect(complete.ledger.accepted[0].accepted_attempt_id).to_equal("try-2")
+
+    it "replays admission revocation and publication with the current fence":
+        val root = _journal_test_root_v1("replay")
+        val action = _journal_action_v1("producer")
+        val capacity = SchedulerCapacityV1(1, 100, 10, 5)
+        val initial = scheduler_journal_open_v1(root)
+        expect(initial.error).to_equal("")
+        val first = admit_attempt_v1(initial.ledger, [action],
+            action.action_digest, "try-1", "local", capacity, 0)
+        val stored_first = scheduler_journal_admit_v1(root, initial, first)
+        expect(stored_first.error).to_equal("")
+        expect(scheduler_journal_open_v1(root).head_digest).to_equal(stored_first.head_digest)
+        val revoked = revoke_attempt_v1(stored_first.ledger, "try-1")
+        val stored_revoked = scheduler_journal_revoke_v1(root, stored_first,
+            "try-1", revoked)
+        expect(stored_revoked.error).to_equal("")
+        val second = admit_attempt_v1(stored_revoked.ledger, [action],
+            action.action_digest, "try-2", "local", capacity, 0)
+        val stored_second = scheduler_journal_admit_v1(root, stored_revoked, second)
+        expect(stored_second.error).to_equal("")
+        expect(stored_second.ledger.fences[0].epoch).to_equal(3)
+        val output = sha256_text("verified output bytes")
+        val stale = accept_result_v1(stored_second.ledger,
+            FencedCandidateV1(ActionResultCandidate(1, action.action_digest,
+                "try-1", "local", output, sha256_text("diag"), true), 1), output)
+        expect(stale.published).to_be(false)
+        val published = accept_result_v1(stored_second.ledger,
+            FencedCandidateV1(ActionResultCandidate(1, action.action_digest,
+                "try-2", "local", output, sha256_text("diag"), true), 3), output)
+        expect(published.published).to_be(true)
+        val stored_published = scheduler_journal_publish_v1(root, stored_second, published)
+        expect(stored_published.error).to_equal("")
+        val replayed = scheduler_journal_open_v1(root)
+        expect(replayed.error).to_equal("")
+        expect(replayed.sequence).to_equal(4)
+        expect(replayed.ledger.fences[0].epoch).to_equal(3)
+        expect(replayed.ledger.accepted[0].accepted_attempt_id).to_equal("try-2")
+        expect(replayed.ledger.attempts[0].active).to_be(false)
+        expect(replayed.ledger.attempts[1].active).to_be(false)
+        val compacted = scheduler_journal_compact_v1(root, replayed)
+        expect(compacted.error).to_equal("")
+        val after_snapshot = scheduler_journal_open_v1(root)
+        expect(after_snapshot.error).to_equal("")
+        expect(after_snapshot.head_digest).to_equal(replayed.head_digest)
+        expect(after_snapshot.ledger.fences[0].epoch).to_equal(3)
+        val follower = _journal_action_v1("follower")
+        val next = admit_attempt_v1(after_snapshot.ledger, [action, follower],
+            follower.action_digest, "follower-1", "local", capacity, 0)
+        val stored_next = scheduler_journal_admit_v1(root, after_snapshot, next)
+        expect(stored_next.error).to_equal("")
+        val replayed_next = scheduler_journal_open_v1(root)
+        expect(replayed_next.error).to_equal("")
+        expect(replayed_next.sequence).to_equal(5)
+        expect(replayed_next.ledger.accepted[0].accepted_attempt_id).to_equal("try-2")
+        val retained = file_read_regular_no_follow_bounded(root + "/journal.v1", 2048)
+        expect(retained.is_err()).to_be(false)
+        val second_compact = scheduler_journal_compact_v1(root, replayed_next)
+        expect(second_compact.error).to_equal("")
+        # Simulate a crash after the new snapshot rename but before WAL clear.
+        expect(file_atomic_write(root + "/journal.v1", retained.unwrap())).to_be(true)
+        val retained_recovery = scheduler_journal_open_v1(root)
+        expect(retained_recovery.error).to_equal("")
+        expect(retained_recovery.sequence).to_equal(5)
+        expect(retained_recovery.ledger.attempts.len()).to_equal(3)
+
+    it "rejects stale writers and a torn journal tail":
+        val root = _journal_test_root_v1("torn")
+        val action = _journal_action_v1("one")
+        val capacity = SchedulerCapacityV1(1, 100, 10, 5)
+        val initial = scheduler_journal_open_v1(root)
+        val first = admit_attempt_v1(initial.ledger, [action],
+            action.action_digest, "try-1", "local", capacity, 0)
+        val stored = scheduler_journal_admit_v1(root, initial, first)
+        expect(stored.error).to_equal("")
+        val stale = scheduler_journal_admit_v1(root, initial, first)
+        expect(stale.error).to_equal("scheduler-journal-error: stale-or-corrupt")
+        expect(file_append(root + "/journal.v1", "J1|2|partial")).to_be(true)
+        val torn = scheduler_journal_open_v1(root)
+        expect(torn.error).to_equal("scheduler-journal-error: journal-torn")
+        val revoked = revoke_attempt_v1(stored.ledger, "try-1")
+        val blocked = scheduler_journal_revoke_v1(root, stored, "try-1", revoked)
+        expect(blocked.error).to_equal("scheduler-journal-error: stale-or-corrupt")
+
+    it "fails closed when snapshot bytes change":
+        val root = _journal_test_root_v1("snapshot")
+        expect(dir_create_all(root)).to_be(true)
+        expect(file_atomic_write(root + "/snapshot.v1", "S1|0|bad\n")).to_be(true)
+        val opened = scheduler_journal_open_v1(root)
+        expect(opened.error).to_equal("scheduler-journal-error: snapshot-corrupt")

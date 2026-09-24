@@ -1,0 +1,38 @@
+# Native macOS App Sandbox/XPC packaging CLI. Both executables are supplied:
+# the host must connect to service_identifier; the service must call xpc_main.
+use app.io.mod.{get_args}
+use app.macos_xpc_bundle.generator.{MacXpcBundleRequest, generate_macos_xpc_bundle}
+
+fn usage():
+    print "Usage: simple-xpc-bundle bundle HOST_EXECUTABLE SERVICE_EXECUTABLE HOST_ID SERVICE_ID SIGNING_IDENTITY"
+    print "Use absolute paths to prebuilt Mach-O entrypoints. SIGNING_IDENTITY is a certificate SHA-1 or '-' for local ad-hoc development."
+    print "Inputs must be self-contained native executables; this command does not bundle external libraries or resources."
+    print "The host must connect to SERVICE_ID; the service must implement xpc_main. Packaging does not prove live sandbox isolation."
+
+fn main() -> i64:
+    val arguments = get_args()
+    var start: i64 = -1
+    for index in 0..arguments.len():
+        if arguments[index] == "--help" or arguments[index] == "-h":
+            usage()
+            return 0
+        if arguments[index] == "bundle" and start < 0:
+            start = index + 1
+    if start < 0 or arguments.len() - start != 5:
+        usage()
+        return 2
+    val request = MacXpcBundleRequest(
+        host_executable: arguments[start], service_executable: arguments[start + 1],
+        host_identifier: arguments[start + 2], service_identifier: arguments[start + 3],
+        signing_identity: arguments[start + 4])
+    match generate_macos_xpc_bundle(request):
+        case Err(message):
+            print "XPC bundle generation failed: {message}"
+            return 1
+        case Ok(artifact):
+            print "Signed app bundle: {artifact.app_path}"
+            print "Embedded XPC service: {artifact.service_path}"
+            if request.signing_identity == "-":
+                print "Ad-hoc development signature only; no distribution identity."
+            print "No app launch or sandbox qualification was performed."
+            return 0

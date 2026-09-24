@@ -1,0 +1,173 @@
+# Exclusive lifetime owner for one trusted scheduler journal root. Keep this
+# object alive across recovery, all transitions, and final close. The root and
+# its parent are trusted local directories; the file-lock facade follows paths.
+use app.io.mod.{file_exists, dir_create_all, directory_fsync, file_lock,
+    file_unlock}
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1, empty_scheduler_ledger_v1}
+use app.build.scheduler.broker.{FencedCandidateV1}
+use app.build.scheduler.journal.{SchedulerJournalStateV1}
+use app.build.scheduler.coordinator.{SchedulerDispatchV1,
+    SchedulerRevocationV1, SchedulerPublicationV1,
+    scheduler_coordinator_open_v1, scheduler_coordinator_admit_from_state_v1,
+    scheduler_coordinator_revoke_from_state_v1,
+    scheduler_coordinator_fail_from_state_v1,
+    scheduler_coordinator_publish_from_state_v1}
+use compiler.common.build_contract.{AcceptedResult, ActionResultCandidate}
+
+fn _owner_error_state_v1(reason: text) -> SchedulerJournalStateV1:
+    SchedulerJournalStateV1(empty_scheduler_ledger_v1(), 0, "", 0, 0,
+        "scheduler-owner-error: " + reason)
+
+fn _owner_parent_v1(root: text) -> text:
+    var last: i64 = -1
+    var i: i64 = 0
+    while i < root.len():
+        if root[i:i + 1] == "/":
+            last = i
+        i = i + 1
+    if last < 0:
+        return "."
+    if last == 0:
+        return "/"
+    root[0:last]
+
+fn _owner_root_valid_v1(root: text) -> bool:
+    root != "" and root != "." and root != ".." and
+        not root.contains("\n") and not root.contains("\r") and
+        not root.ends_with("/")
+
+class SchedulerOwnerV1:
+    root: text
+    lock_handle: i64
+    state: SchedulerJournalStateV1
+    error: text
+    _closed: bool
+    recovery_phase: bool
+
+    me admit(actions: [SchedulerActionV1], action_digest: text,
+        attempt_id: text, worker_id: text, capacity: SchedulerCapacityV1,
+        now_tick: i64) -> SchedulerDispatchV1:
+        if self._closed or self.lock_handle < 0 or self.error != "" or
+           self.state.error != "":
+            val reason = if self.error != "": self.error else: "scheduler-owner-error: inactive"
+            return SchedulerDispatchV1(self.state, false, 0, reason)
+        # A new dispatch can race a missing-spool recovery decision. Once any
+        # new admission is attempted, startup-only recovery is closed.
+        self.recovery_phase = false
+        val result = scheduler_coordinator_admit_from_state_v1(self.root,
+            self.state, actions, action_digest, attempt_id, worker_id,
+            capacity, now_tick)
+        if result.state.error != "":
+            self.error = result.state.error
+            self.state = result.state
+        elif result.dispatch:
+            self.state = result.state
+        result
+
+    me revoke(attempt_id: text) -> SchedulerRevocationV1:
+        if self._closed or self.lock_handle < 0 or self.error != "" or
+           self.state.error != "":
+            val reason = if self.error != "": self.error else: "scheduler-owner-error: inactive"
+            return SchedulerRevocationV1(self.state, false, 0, reason)
+        val result = scheduler_coordinator_revoke_from_state_v1(self.root,
+            self.state, attempt_id)
+        if result.state.error != "":
+            self.error = result.state.error
+            self.state = result.state
+        elif result.acknowledged:
+            self.state = result.state
+        result
+
+    me fail(candidate: ActionResultCandidate, fence: i64,
+        classification: text) -> SchedulerRevocationV1:
+        if self._closed or self.lock_handle < 0 or self.error != "" or
+           self.state.error != "":
+            val reason = if self.error != "": self.error else: "scheduler-owner-error: inactive"
+            return SchedulerRevocationV1(self.state, false, 0, reason)
+        val result = scheduler_coordinator_fail_from_state_v1(self.root,
+            self.state, candidate, fence, classification)
+        if result.state.error != "":
+            self.error = result.state.error
+            self.state = result.state
+        elif result.acknowledged:
+            self.state = result.state
+        result
+
+    me publish(fenced: FencedCandidateV1,
+        verified_output_manifest_digest: text) -> SchedulerPublicationV1:
+        if self._closed or self.lock_handle < 0 or self.error != "" or
+           self.state.error != "":
+            val reason = if self.error != "": self.error else: "scheduler-owner-error: inactive"
+            return SchedulerPublicationV1(self.state, false,
+                AcceptedResult(1, "", "", "", ""), reason)
+        val result = scheduler_coordinator_publish_from_state_v1(self.root,
+            self.state, fenced, verified_output_manifest_digest)
+        if result.state.error != "":
+            self.error = result.state.error
+            self.state = result.state
+        elif result.acknowledged:
+            self.state = result.state
+        result
+
+    me close() -> bool:
+        if self._closed or self.lock_handle < 0:
+            return false
+        val released = file_unlock(self.lock_handle)
+        self.lock_handle = -1
+        self._closed = true
+        if not released:
+            self.error = "scheduler-owner-error: unlock-failed"
+        released
+
+fn scheduler_owner_open_v1(root: text) -> SchedulerOwnerV1:
+    """Acquire the root lock before replay; never admit on an uncertain lease."""
+    if not _owner_root_valid_v1(root):
+        val state = _owner_error_state_v1("root-invalid")
+        return SchedulerOwnerV1(root, -1, state, state.error, true, false)
+    val created = not file_exists(root)
+    if created and not file_exists(_owner_parent_v1(root)):
+        val state = _owner_error_state_v1("parent-directory-missing")
+        return SchedulerOwnerV1(root, -1, state, state.error, true, false)
+    if not dir_create_all(root) or
+       (created and not directory_fsync(_owner_parent_v1(root))):
+        val state = _owner_error_state_v1("directory-not-durable")
+        return SchedulerOwnerV1(root, -1, state, state.error, true, false)
+    # Positive timeout is bounded; zero means wait forever in this facade.
+    val handle = file_lock(root + "/owner.lock", 1)
+    if handle < 0:
+        val state = _owner_error_state_v1("lock-unavailable")
+        return SchedulerOwnerV1(root, -1, state, state.error, true, false)
+    val opened = scheduler_coordinator_open_v1(root)
+    if opened.error != "":
+        file_unlock(handle)
+        return SchedulerOwnerV1(root, -1, opened, opened.error, true, false)
+    SchedulerOwnerV1(root, handle, opened, "", false, true)
+
+fn scheduler_owner_admit_v1(owner: SchedulerOwnerV1,
+    actions: [SchedulerActionV1], action_digest: text, attempt_id: text,
+    worker_id: text, capacity: SchedulerCapacityV1,
+    now_tick: i64) -> SchedulerDispatchV1:
+    owner.admit(actions, action_digest, attempt_id, worker_id, capacity, now_tick)
+
+fn scheduler_owner_revoke_v1(owner: SchedulerOwnerV1,
+    attempt_id: text) -> SchedulerRevocationV1:
+    owner.revoke(attempt_id)
+
+fn scheduler_owner_fail_v1(owner: SchedulerOwnerV1,
+    candidate: ActionResultCandidate, fence: i64,
+    classification: text) -> SchedulerRevocationV1:
+    owner.fail(candidate, fence, classification)
+
+fn scheduler_owner_publish_v1(owner: SchedulerOwnerV1,
+    fenced: FencedCandidateV1,
+    verified_output_manifest_digest: text) -> SchedulerPublicationV1:
+    owner.publish(fenced, verified_output_manifest_digest)
+
+fn scheduler_owner_close_v1(owner: SchedulerOwnerV1) -> bool:
+    owner.close()
+
+export SchedulerOwnerV1, scheduler_owner_open_v1, scheduler_owner_admit_v1
+export scheduler_owner_revoke_v1, scheduler_owner_publish_v1
+export scheduler_owner_fail_v1
+export scheduler_owner_close_v1

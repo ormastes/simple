@@ -7,10 +7,16 @@ use common.ui.draw_ir.{
     DRAW_IR_COMMAND_EDGE,
     DRAW_IR_COMMAND_RECT,
     DRAW_IR_SCHEMA_VERSION,
+    DRAW_IR_SCHEMA_VERSION_V2,
+    DRAW_IR_SCHEMA_VERSION_V4,
+    DRAW_IR_RASTER_ALIASED_PIXEL_CENTER,
+    DRAW_IR_RASTER_COVERAGE_AA,
     DrawEdge,
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
+    DrawIrAffine2D,
+    DrawIrFractionalGeometry,
     DrawIrGlyphRunPayload,
     DrawIrPoint,
     DrawIrRect,
@@ -18,9 +24,13 @@ use common.ui.draw_ir.{
     DrawIrStyleProp,
     draw_edge,
     draw_ir_batch_with_source,
+    draw_ir_batch_with_source_v4,
     draw_ir_composition,
+    draw_ir_composition_v4,
     draw_ir_embedding_config,
     draw_ir_empty_glyph_run_payload,
+    draw_ir_fractional_geometry,
+    draw_ir_affine2d,
     draw_ir_glyph_run_payload,
     draw_ir_point,
     draw_ir_rect,
@@ -78,6 +88,13 @@ fn _draw_ir_sdn_field(line: text, key: text) -> text:
             return _draw_ir_sdn_unescape(_draw_ir_sdn_byte_slice(line_bytes, start + prefix_bytes.len(), end))
         start = end + 1
     ""
+
+fn _draw_ir_sdn_has_field(line: text, key: text) -> bool:
+    val prefix = "{key}="
+    for part in line.split(" "):
+        if part.starts_with(prefix):
+            return true
+    false
 
 fn _draw_ir_sdn_i32(line: text, key: text) -> i32:
     val value = _draw_ir_sdn_field(line, key)
@@ -148,6 +165,191 @@ fn _draw_ir_sdn_u32(line: text, key: text) -> u32:
     val value = _draw_ir_sdn_field(line, key)
     _draw_ir_sdn_parse_u32(value)
 
+# Reject malformed v3 coordinates instead of allowing text.to_f64() to turn
+# garbage into zero. Exponent syntax is accepted for f64.to_string() output.
+fn _draw_ir_sdn_decimal_valid(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var index = 0
+    if value[index] == "-" or value[index] == "+":
+        index = index + 1
+    var digits = 0
+    while index < value.len() and _draw_ir_sdn_digit(value[index]) >= 0:
+        digits = digits + 1
+        index = index + 1
+    if index < value.len() and value[index] == ".":
+        index = index + 1
+        while index < value.len() and _draw_ir_sdn_digit(value[index]) >= 0:
+            digits = digits + 1
+            index = index + 1
+    if digits == 0:
+        return false
+    if index < value.len() and (value[index] == "e" or value[index] == "E"):
+        index = index + 1
+        if index < value.len() and (value[index] == "-" or value[index] == "+"):
+            index = index + 1
+        var exponent_digits = 0
+        while index < value.len() and _draw_ir_sdn_digit(value[index]) >= 0:
+            exponent_digits = exponent_digits + 1
+            index = index + 1
+        if exponent_digits == 0:
+            return false
+    index == value.len()
+
+fn _draw_ir_sdn_decimal_has_nonzero_digit(value: text) -> bool:
+    for digit in value:
+        if digit == "e" or digit == "E":
+            break
+        if digit == "1" or digit == "2" or digit == "3" or digit == "4" or
+                digit == "5" or digit == "6" or digit == "7" or digit == "8" or digit == "9":
+            return true
+    false
+
+fn _draw_ir_sdn_f64(line: text, key: text) -> f64:
+    val raw = _draw_ir_sdn_field(line, key)
+    if not _draw_ir_sdn_decimal_valid(raw):
+        panic("invalid Draw IR fractional coordinate: {key}")
+    val value = raw.to_f64()
+    if value != value or value > 1.0e300 or value < -1.0e300 or
+            (value == 0.0 and _draw_ir_sdn_decimal_has_nonzero_digit(raw)):
+        panic("non-finite Draw IR fractional coordinate: {key}")
+    value
+
+fn _draw_ir_sdn_parse_fractional_geometry(line: text) -> DrawIrFractionalGeometry?:
+    val present = _draw_ir_sdn_field(line, "fractional_present")
+    if present == "" or present == "false":
+        return nil
+    if present != "true":
+        panic("invalid Draw IR fractional presence")
+    draw_ir_fractional_geometry(
+        _draw_ir_sdn_f64(line, "fractional_x"),
+        _draw_ir_sdn_f64(line, "fractional_y"),
+        _draw_ir_sdn_f64(line, "fractional_width"),
+        _draw_ir_sdn_f64(line, "fractional_height")
+    )
+
+fn _draw_ir_sdn_parse_affine(line: text, source_schema: text) -> DrawIrAffine2D?:
+    val present = _draw_ir_sdn_field(line, "affine_present")
+    if source_schema != DRAW_IR_SCHEMA_VERSION_V4:
+        if _draw_ir_sdn_has_field(line, "affine_present") or
+                _draw_ir_sdn_has_field(line, "raster_policy"):
+            panic("affine Draw IR fields require v4 schema")
+        return nil
+    if present == "false":
+        return nil
+    if present != "true":
+        panic("invalid v4 affine presence field")
+    draw_ir_affine2d(
+        _draw_ir_sdn_f64(line, "affine_a"),
+        _draw_ir_sdn_f64(line, "affine_b"),
+        _draw_ir_sdn_f64(line, "affine_c"),
+        _draw_ir_sdn_f64(line, "affine_d"),
+        _draw_ir_sdn_f64(line, "affine_tx"),
+        _draw_ir_sdn_f64(line, "affine_ty")
+    )
+
+fn _draw_ir_sdn_parse_raster_policy(line: text, source_schema: text) -> text:
+    if source_schema != DRAW_IR_SCHEMA_VERSION_V4:
+        return DRAW_IR_RASTER_ALIASED_PIXEL_CENTER
+    val policy = _draw_ir_sdn_field(line, "raster_policy")
+    if policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER and policy != DRAW_IR_RASTER_COVERAGE_AA:
+        panic("invalid v4 raster policy")
+    policy
+
+fn _draw_ir_sdn_valid_f64_field(line: text, key: text) -> bool:
+    val raw = _draw_ir_sdn_field(line, key)
+    if not _draw_ir_sdn_decimal_valid(raw):
+        return false
+    val value = raw.to_f64()
+    value == value and value <= 1.0e300 and value >= -1.0e300 and
+        (value != 0.0 or not _draw_ir_sdn_decimal_has_nonzero_digit(raw))
+
+fn _draw_ir_sdn_v4_command_error(line: text) -> text:
+    val fractional_present = _draw_ir_sdn_field(line, "fractional_present")
+    val affine_present = _draw_ir_sdn_field(line, "affine_present")
+    val policy = _draw_ir_sdn_field(line, "raster_policy")
+    if fractional_present != "true" and fractional_present != "false":
+        return "v4 fractional presence field required"
+    if affine_present != "true" and affine_present != "false":
+        return "v4 affine presence field required"
+    if policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER and policy != DRAW_IR_RASTER_COVERAGE_AA:
+        return "v4 raster policy invalid"
+    if affine_present == "true" and fractional_present != "true":
+        return "v4 affine command requires fractional local geometry"
+    if fractional_present == "true":
+        if not _draw_ir_sdn_valid_f64_field(line, "fractional_x") or
+                not _draw_ir_sdn_valid_f64_field(line, "fractional_y") or
+                not _draw_ir_sdn_valid_f64_field(line, "fractional_width") or
+                not _draw_ir_sdn_valid_f64_field(line, "fractional_height"):
+            return "v4 fractional geometry invalid"
+    elif (_draw_ir_sdn_has_field(line, "fractional_x") or
+            _draw_ir_sdn_has_field(line, "fractional_y") or
+            _draw_ir_sdn_has_field(line, "fractional_width") or
+            _draw_ir_sdn_has_field(line, "fractional_height")):
+        return "v4 fractional fields declared without presence"
+    if affine_present == "true":
+        if not _draw_ir_sdn_valid_f64_field(line, "affine_a") or
+                not _draw_ir_sdn_valid_f64_field(line, "affine_b") or
+                not _draw_ir_sdn_valid_f64_field(line, "affine_c") or
+                not _draw_ir_sdn_valid_f64_field(line, "affine_d") or
+                not _draw_ir_sdn_valid_f64_field(line, "affine_tx") or
+                not _draw_ir_sdn_valid_f64_field(line, "affine_ty"):
+            return "v4 affine matrix invalid"
+        val local_width = _draw_ir_sdn_field(line, "fractional_width").to_f64()
+        val local_height = _draw_ir_sdn_field(line, "fractional_height").to_f64()
+        if local_width <= 0.0 or local_height <= 0.0:
+            return "v4 affine local dimensions must be positive"
+        val a = _draw_ir_sdn_field(line, "affine_a").to_f64()
+        val b = _draw_ir_sdn_field(line, "affine_b").to_f64()
+        val c = _draw_ir_sdn_field(line, "affine_c").to_f64()
+        val d = _draw_ir_sdn_field(line, "affine_d").to_f64()
+        val determinant = a * d - b * c
+        if determinant == 0.0 or determinant != determinant or
+                determinant > 1.0e300 or determinant < -1.0e300:
+            return "v4 affine matrix is singular or non-finite"
+    elif (_draw_ir_sdn_has_field(line, "affine_a") or
+            _draw_ir_sdn_has_field(line, "affine_b") or
+            _draw_ir_sdn_has_field(line, "affine_c") or
+            _draw_ir_sdn_has_field(line, "affine_d") or
+            _draw_ir_sdn_has_field(line, "affine_tx") or
+            _draw_ir_sdn_has_field(line, "affine_ty")):
+        return "v4 affine fields declared without presence"
+    ""
+
+fn _draw_ir_sdn_legacy_command_error(line: text, source_schema: text) -> text:
+    val fractional_present = _draw_ir_sdn_field(line, "fractional_present")
+    if source_schema == DRAW_IR_SCHEMA_VERSION_V2:
+        if _draw_ir_sdn_has_field(line, "fractional_present") or
+                _draw_ir_sdn_has_field(line, "fractional_x") or
+                _draw_ir_sdn_has_field(line, "fractional_y") or
+                _draw_ir_sdn_has_field(line, "fractional_width") or
+                _draw_ir_sdn_has_field(line, "fractional_height"):
+            return "v2 fractional fields forbidden"
+    else:
+        if fractional_present != "true" and fractional_present != "false":
+            return "v3 fractional presence field invalid"
+        if fractional_present == "true":
+            if not _draw_ir_sdn_valid_f64_field(line, "fractional_x") or
+                    not _draw_ir_sdn_valid_f64_field(line, "fractional_y") or
+                    not _draw_ir_sdn_valid_f64_field(line, "fractional_width") or
+                    not _draw_ir_sdn_valid_f64_field(line, "fractional_height"):
+                return "v3 fractional geometry invalid"
+        elif (_draw_ir_sdn_has_field(line, "fractional_x") or
+                _draw_ir_sdn_has_field(line, "fractional_y") or
+                _draw_ir_sdn_has_field(line, "fractional_width") or
+                _draw_ir_sdn_has_field(line, "fractional_height")):
+            return "v3 fractional fields declared without presence"
+    if _draw_ir_sdn_has_field(line, "affine_present") or
+            _draw_ir_sdn_has_field(line, "affine_a") or
+            _draw_ir_sdn_has_field(line, "affine_b") or
+            _draw_ir_sdn_has_field(line, "affine_c") or
+            _draw_ir_sdn_has_field(line, "affine_d") or
+            _draw_ir_sdn_has_field(line, "affine_tx") or
+            _draw_ir_sdn_has_field(line, "affine_ty") or
+            _draw_ir_sdn_has_field(line, "raster_policy"):
+        return "v4 affine/policy fields require v4 schema"
+    ""
+
 fn _draw_ir_sdn_emit_rect(line: text, key: text, rect: DrawIrRect) -> text:
     line + " {key}_present={rect.present} {key}_x={rect.x} {key}_y={rect.y} {key}_width={rect.width} {key}_height={rect.height}"
 
@@ -187,7 +389,7 @@ fn _draw_ir_sdn_emit_advances(line: text, advances: [i32]) -> text:
         index = index + 1
     parts.join("")
 
-fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
+fn _draw_ir_sdn_emit_command(command: DrawIrCommand, schema: text) -> text:
     var parts: [text] = ["\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)} parent_id={_draw_ir_sdn_escape(command.parent_id)} image_uri={_draw_ir_sdn_escape(command.image_uri)}"]
     parts.push(_draw_ir_sdn_emit_rect("", "border", command.border_rect))
     parts.push(_draw_ir_sdn_emit_rect("", "content", command.content_rect))
@@ -197,14 +399,33 @@ fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
     parts.push(_draw_ir_sdn_emit_points("", "point", command.points))
     parts.push(_draw_ir_sdn_emit_advances("", command.advance_widths))
     parts.push(_draw_ir_sdn_emit_glyph_run("", command.glyph_run))
+    parts.push(" fractional_present={command.fractional_geometry != nil}")
+    if val fractional = command.fractional_geometry:
+        parts.push(" fractional_x={fractional.x} fractional_y={fractional.y} fractional_width={fractional.width} fractional_height={fractional.height}")
+    if schema == DRAW_IR_SCHEMA_VERSION_V4:
+        if command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER and command.raster_policy != DRAW_IR_RASTER_COVERAGE_AA:
+            panic("invalid v4 raster policy")
+        if command.affine_transform != nil and command.fractional_geometry == nil:
+            panic("v4 affine command requires fractional local geometry")
+        parts.push(" affine_present={command.affine_transform != nil}")
+        if val affine = command.affine_transform:
+            parts.push(" affine_a={affine.a} affine_b={affine.b} affine_c={affine.c} affine_d={affine.d} affine_tx={affine.tx} affine_ty={affine.ty}")
+        parts.push(" raster_policy={command.raster_policy}")
+    elif command.affine_transform != nil or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER:
+        panic("v4 affine Draw IR command requires v4 composition")
     parts.push(" edge_present={command.edge != nil}")
     if val edge = command.edge:
         parts.push(" edge_id={_draw_ir_sdn_escape(edge.id)} edge_source={_draw_ir_sdn_escape(edge.source)} edge_target={_draw_ir_sdn_escape(edge.target)} edge_routing={_draw_ir_sdn_escape(edge.routing)}")
         parts.push(_draw_ir_sdn_emit_styles("", "edge_style", edge.style))
         parts.push(_draw_ir_sdn_emit_points("", "edge_point", edge.points))
-    parts.join("")
+    val encoded = parts.join("")
+    if schema == DRAW_IR_SCHEMA_VERSION_V4:
+        val error = _draw_ir_sdn_v4_command_error(encoded)
+        if error != "":
+            panic("{error}")
+    encoded
 
-fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch) -> text:
+fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch, schema: text) -> text:
     val command_count = batch.commands.len()
     var lines: [text] = [""; command_count + 1]
     var write_idx = 0
@@ -221,20 +442,37 @@ fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch) -> text:
     lines[write_idx] = header_parts.join("")
     write_idx = write_idx + 1
     for command in batch.commands:
-        lines[write_idx] = _draw_ir_sdn_emit_command(command)
+        lines[write_idx] = _draw_ir_sdn_emit_command(command, schema)
         write_idx = write_idx + 1
     lines.join("\n")
 
 fn draw_ir_to_sdn(composition: DrawIrComposition) -> text:
+    if composition.schema != DRAW_IR_SCHEMA_VERSION_V2 and
+            composition.schema != DRAW_IR_SCHEMA_VERSION and
+            composition.schema != DRAW_IR_SCHEMA_VERSION_V4:
+        panic("unsupported typed Draw IR schema")
+    for batch in composition.batches:
+        if batch.schema != composition.schema:
+            panic("Draw IR composition/batch schema mismatch")
+        if composition.schema == DRAW_IR_SCHEMA_VERSION_V2:
+            for command in batch.commands:
+                if command.fractional_geometry != nil:
+                    panic("v2 Draw IR cannot encode fractional geometry")
     val batch_count = composition.batches.len()
     var lines: [text] = [""; batch_count + 2]
     var write_idx = 0
-    lines[write_idx] = "draw_ir schema={composition.schema}"
+    # V2/V3 typed inputs still use the established v3 bytes. Explicit v4
+    # compositions alone carry affine state and raster policy.
+    val output_schema = if composition.schema == DRAW_IR_SCHEMA_VERSION_V4:
+        DRAW_IR_SCHEMA_VERSION_V4
+    else:
+        DRAW_IR_SCHEMA_VERSION
+    lines[write_idx] = "draw_ir schema={output_schema}"
     write_idx = write_idx + 1
     lines[write_idx] = "\tcomposition id={_draw_ir_sdn_escape(composition.composition_id)} scene_key={_draw_ir_sdn_escape(composition.scene_key)} backend={composition.backend_target}"
     write_idx = write_idx + 1
     for batch in composition.batches:
-        lines[write_idx] = _draw_ir_sdn_emit_batch(batch)
+        lines[write_idx] = _draw_ir_sdn_emit_batch(batch, output_schema)
         write_idx = write_idx + 1
     lines.join("\n")
 
@@ -369,7 +607,10 @@ fn _draw_ir_sdn_parse_edge(line: text) -> DrawEdge?:
         )
     nil
 
-fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
+fn _draw_ir_sdn_parse_command(line: text, source_schema: text) -> DrawIrCommand:
+    val affine = _draw_ir_sdn_parse_affine(line, source_schema)
+    if affine != nil and _draw_ir_sdn_field(line, "fractional_present") != "true":
+        panic("v4 affine command requires fractional local geometry")
     DrawIrCommand(
         kind: _draw_ir_sdn_field(line, "kind"),
         component_id: _draw_ir_sdn_field(line, "id"),
@@ -389,7 +630,10 @@ fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
         parent_id: _draw_ir_sdn_field(line, "parent_id"),
         image_uri: _draw_ir_sdn_field(line, "image_uri"),
         points: _draw_ir_sdn_parse_points(line, "point"),
-        glyph_run: _draw_ir_sdn_parse_glyph_run(line)
+        glyph_run: _draw_ir_sdn_parse_glyph_run(line),
+        fractional_geometry: _draw_ir_sdn_parse_fractional_geometry(line),
+        affine_transform: affine,
+        raster_policy: _draw_ir_sdn_parse_raster_policy(line, source_schema)
     )
 
 fn _draw_ir_sdn_parse_source(line: text) -> DrawIrSourceInfo:
@@ -404,8 +648,8 @@ fn _draw_ir_sdn_parse_source(line: text) -> DrawIrSourceInfo:
         _draw_ir_sdn_field(line, "style_revision")
     )
 
-fn _draw_ir_sdn_batch_from_state(batch_line: text, commands: [DrawIrCommand]) -> DrawIrBatch:
-    draw_ir_batch_with_source(
+fn _draw_ir_sdn_batch_from_state(batch_line: text, commands: [DrawIrCommand], source_schema: text) -> DrawIrBatch:
+    val batch = draw_ir_batch_with_source(
         _draw_ir_sdn_field(batch_line, "id"),
         _draw_ir_sdn_field(batch_line, "backend"),
         draw_ir_embedding_config(
@@ -422,6 +666,11 @@ fn _draw_ir_sdn_batch_from_state(batch_line: text, commands: [DrawIrCommand]) ->
         commands,
         _draw_ir_sdn_parse_source(batch_line)
     )
+    if source_schema == DRAW_IR_SCHEMA_VERSION_V4:
+        return draw_ir_batch_with_source_v4(
+            batch.batch_id, batch.backend_target, batch.embedding,
+            batch.commands, batch.source)
+    batch
 
 fn _draw_ir_sdn_count_batches(lines: [text]) -> i32:
     var count = 0
@@ -444,7 +693,7 @@ fn _draw_ir_sdn_count_commands(lines: [text], start_idx: i32) -> i32:
         idx = idx + 1
     count
 
-fn _draw_ir_sdn_parse_commands(lines: [text], start_idx: i32, command_count: i32) -> [DrawIrCommand]:
+fn _draw_ir_sdn_parse_commands(lines: [text], start_idx: i32, command_count: i32, source_schema: text) -> [DrawIrCommand]:
     if command_count == 0:
         return []
     var commands: [DrawIrCommand] = [draw_ir_rect("", 0, 0, 0, 0, 0u32); command_count]
@@ -456,7 +705,7 @@ fn _draw_ir_sdn_parse_commands(lines: [text], start_idx: i32, command_count: i32
         if line.starts_with("batch "):
             return commands
         if line.starts_with("command "):
-            commands[write_idx] = _draw_ir_sdn_parse_command(line)
+            commands[write_idx] = _draw_ir_sdn_parse_command(line, source_schema)
             write_idx = write_idx + 1
         idx = idx + 1
     commands
@@ -466,6 +715,9 @@ fn sdn_to_draw_ir(source: text) -> DrawIrComposition:
     var scene_key = ""
     var backend_target = ""
     val lines = source.split("\n")
+    val source_schema = _draw_ir_sdn_field(lines[0], "schema")
+    if source_schema != DRAW_IR_SCHEMA_VERSION and source_schema != DRAW_IR_SCHEMA_VERSION_V2 and source_schema != DRAW_IR_SCHEMA_VERSION_V4:
+        panic("unsupported Draw IR SDN schema")
     val batch_count = _draw_ir_sdn_count_batches(lines)
     var batches: [DrawIrBatch] = []
     if batch_count > 0:
@@ -475,14 +727,66 @@ fn sdn_to_draw_ir(source: text) -> DrawIrComposition:
     val line_count = lines.len()
     while idx < line_count:
         val line = lines[idx].trim()
+        if line.starts_with("command "):
+            val fractional_field = _draw_ir_sdn_field(line, "fractional_present")
+            if source_schema != DRAW_IR_SCHEMA_VERSION_V2 and fractional_field == "":
+                panic("missing v3 fractional presence field")
+            if source_schema == DRAW_IR_SCHEMA_VERSION_V2 and fractional_field != "":
+                panic("v2 Draw IR cannot declare fractional geometry")
+            if source_schema == DRAW_IR_SCHEMA_VERSION_V4:
+                val error = _draw_ir_sdn_v4_command_error(line)
+                if error != "":
+                    panic("{error}")
         if line.starts_with("composition "):
             composition_id = _draw_ir_sdn_field(line, "id")
             scene_key = _draw_ir_sdn_field(line, "scene_key")
             backend_target = _draw_ir_sdn_field(line, "backend")
         elif line.starts_with("batch "):
             val command_count = _draw_ir_sdn_count_commands(lines, idx + 1)
-            val commands = _draw_ir_sdn_parse_commands(lines, idx + 1, command_count)
-            batches[batch_idx] = _draw_ir_sdn_batch_from_state(line, commands)
+            val commands = _draw_ir_sdn_parse_commands(lines, idx + 1, command_count, source_schema)
+            batches[batch_idx] = _draw_ir_sdn_batch_from_state(line, commands, source_schema)
             batch_idx = batch_idx + 1
         idx = idx + 1
+    if source_schema == DRAW_IR_SCHEMA_VERSION_V4:
+        return draw_ir_composition_v4(composition_id, scene_key, backend_target, batches)
     draw_ir_composition(composition_id, scene_key, backend_target, batches)
+
+# Validate every accepted schema before constructing a batch so checked callers
+# receive Err rather than an inner decoder panic or a partly defaulted value.
+pub fn sdn_to_draw_ir_checked(source: text) -> Result<DrawIrComposition, text>:
+    if source.trim() == "":
+        return Err("empty Draw IR SDN")
+    val lines = source.split("\n")
+    if lines.len() == 0:
+        return Err("Draw IR SDN header required")
+    if not lines[0].trim().starts_with("draw_ir "):
+        return Err("Draw IR SDN header required")
+    val source_schema = _draw_ir_sdn_field(lines[0], "schema")
+    if source_schema != DRAW_IR_SCHEMA_VERSION and source_schema != DRAW_IR_SCHEMA_VERSION_V2 and source_schema != DRAW_IR_SCHEMA_VERSION_V4:
+        return Err("unsupported Draw IR SDN schema")
+    var composition_count = 0
+    var batch_count = 0
+    var command_index = 0
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line.starts_with("composition "):
+            composition_count = composition_count + 1
+            if composition_count != 1 or batch_count != 0:
+                return Err("Draw IR composition order invalid")
+        elif line.starts_with("batch "):
+            if composition_count != 1:
+                return Err("Draw IR batch requires composition")
+            batch_count = batch_count + 1
+        elif line.starts_with("command "):
+            if batch_count == 0:
+                return Err("Draw IR command requires batch")
+            val error = if source_schema == DRAW_IR_SCHEMA_VERSION_V4:
+                _draw_ir_sdn_v4_command_error(line)
+            else:
+                _draw_ir_sdn_legacy_command_error(line, source_schema)
+            if error != "":
+                return Err("command {command_index}: {error}")
+            command_index = command_index + 1
+    if composition_count != 1:
+        return Err("Draw IR composition required")
+    Ok(sdn_to_draw_ir(source))

@@ -41,9 +41,13 @@ typedef int pid_t;
 #else
 #include <dirent.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#endif
 #endif
 
 int64_t rt_getpid(void) {
@@ -783,7 +787,8 @@ int64_t rt_term_enable_ansi(void) {
 }
 
 int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
-    if (!cmd || !*cmd) return -1;
+    if (!cmd || !*cmd || arg_count < 0 ||
+            (arg_count > 0 && !args)) return -1;
 #if defined(_WIN32)
     char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
     if (!argv) return -1;
@@ -792,6 +797,17 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     intptr_t pid = _spawnvp(_P_NOWAIT, cmd, (const char* const*)argv);
     free(argv);
     return pid < 0 ? -1 : (int64_t)pid;
+#elif defined(__APPLE__)
+    if (arg_count > 32768) return -1;
+    for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
+    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    if (!argv) return -1;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
+    pid_t pid = -1;
+    int error = posix_spawnp(&pid, cmd, NULL, NULL, argv, *_NSGetEnviron());
+    free(argv);
+    return error == 0 ? (int64_t)pid : -1;
 #else
     pid_t pid = fork();
     if (pid < 0) return -1;

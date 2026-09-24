@@ -1,0 +1,128 @@
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1}
+use app.build.scheduler.broker.{FencedCandidateV1}
+use app.build.scheduler.coordinator.{scheduler_coordinator_open_v1,
+    scheduler_coordinator_admit_from_state_v1,
+    scheduler_coordinator_revoke_from_state_v1,
+    scheduler_coordinator_publish_from_state_v1,
+    scheduler_coordinator_admit_v1, scheduler_coordinator_revoke_v1,
+    scheduler_coordinator_publish_v1}
+use app.build.scheduler.journal.{scheduler_journal_open_v1}
+use compiler.common.build_contract.{ActionResultCandidate, BuildInputRef,
+    SnapshotManifest, ToolchainManifest, InputManifest, ActionSpec,
+    action_spec_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_append, time_now_unix_micros, getpid}
+
+fn _coordinator_action_v1(name: text) -> SchedulerActionV1:
+    val snapshot = sha256_text("coordinator-snapshot")
+    val spec = ActionSpec(
+        version: 1, kind: "simple-compile",
+        snapshot: SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        toolchain: ToolchainManifest(1, sha256_text("tool"),
+            sha256_text("behavior"), sha256_text("provider"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "aarch64-apple-darwin"),
+        inputs: InputManifest(1, snapshot,
+            [BuildInputRef("src/" + name + ".spl", sha256_text(name))],
+            [], [], [], [], [], sha256_text("resolution"), true, false),
+        argv: ["simple", "build", name], working_directory: "src",
+        sandbox_digest: sha256_text("sandbox"),
+        output_paths: ["build/" + name + ".out"],
+        resource_policy_digest: sha256_text("resource-policy"))
+    SchedulerActionV1(action_spec_digest_v1(spec), spec, [], 0, 0, 1, 20, 1)
+
+fn _coordinator_root_v1(label: text) -> text:
+    "build/test/scheduler-coordinator-" + label + "-" + getpid().to_text() +
+        "-" + time_now_unix_micros().to_text()
+
+fn _coordinator_candidate_v1(action: text, attempt: text,
+                             output: text) -> FencedCandidateV1:
+    FencedCandidateV1(ActionResultCandidate(1, action, attempt, "local",
+        output, sha256_text("diagnostics"), true), 1)
+
+describe "parent scheduler coordinator":
+    it "journals admission and revocation before allowing dispatch or acknowledgment":
+        val root = _coordinator_root_v1("fence")
+        val action = _coordinator_action_v1("one")
+        val capacity = SchedulerCapacityV1(1, 100, 10, 5)
+        val opened = scheduler_coordinator_open_v1(root)
+        expect(opened.error).to_equal("")
+        val first = scheduler_coordinator_admit_from_state_v1(root, opened, [action],
+            action.action_digest, "try-1", "local", capacity, 0)
+        expect(first.error).to_equal("")
+        expect(first.dispatch).to_be(true)
+        expect(first.fence).to_equal(1)
+        expect(first.state.sequence).to_equal(1)
+        val stale_owner = scheduler_coordinator_admit_from_state_v1(root, opened,
+            [action], action.action_digest, "try-stale", "local", capacity, 0)
+        expect(stale_owner.dispatch).to_be(false)
+        expect(stale_owner.error).to_equal("scheduler-journal-error: stale-or-corrupt")
+        val revoked = scheduler_coordinator_revoke_from_state_v1(root, first.state,
+            "try-1")
+        expect(revoked.error).to_equal("")
+        expect(revoked.acknowledged).to_be(true)
+        expect(revoked.fence).to_equal(2)
+        expect(revoked.state.sequence).to_equal(2)
+        val output = sha256_text("stored output bytes")
+        val late = scheduler_coordinator_publish_from_state_v1(root, revoked.state,
+            _coordinator_candidate_v1(action.action_digest, "try-1", output),
+            output)
+        expect(late.acknowledged).to_be(false)
+        expect(late.error).to_equal("scheduler-error: stale-fence")
+        val retry = scheduler_coordinator_admit_from_state_v1(root, revoked.state,
+            [action],
+            action.action_digest, "try-2", "local", capacity, 0)
+        expect(retry.dispatch).to_be(true)
+        expect(retry.fence).to_equal(3)
+        expect(retry.state.sequence).to_equal(3)
+        expect(scheduler_journal_open_v1(root).sequence).to_equal(3)
+
+    it "requires an independently verified digest and a durable publication":
+        val root = _coordinator_root_v1("publish")
+        val action = _coordinator_action_v1("two")
+        val capacity = SchedulerCapacityV1(1, 100, 10, 5)
+        val opened = scheduler_coordinator_open_v1(root)
+        val admitted = scheduler_coordinator_admit_from_state_v1(root, opened, [action],
+            action.action_digest, "try-1", "local", capacity, 0)
+        expect(admitted.dispatch).to_be(true)
+        val output = sha256_text("stored output bytes")
+        val candidate = _coordinator_candidate_v1(action.action_digest,
+            "try-1", output)
+        val wrong = scheduler_coordinator_publish_from_state_v1(root,
+            admitted.state, candidate,
+            sha256_text("other bytes"))
+        expect(wrong.acknowledged).to_be(false)
+        expect(wrong.error).to_equal("scheduler-error: candidate-invalid")
+        expect(admitted.state.sequence).to_equal(1)
+        val published = scheduler_coordinator_publish_from_state_v1(root,
+            admitted.state, candidate, output)
+        expect(published.error).to_equal("")
+        expect(published.acknowledged).to_be(true)
+        expect(published.accepted.output_manifest_digest).to_equal(output)
+        val replayed = scheduler_journal_open_v1(root)
+        expect(replayed.sequence).to_equal(2)
+        expect(replayed.ledger.accepted[0].accepted_attempt_id).to_equal("try-1")
+
+    it "fails closed when journal replay detects a torn record":
+        val root = _coordinator_root_v1("torn")
+        val action = _coordinator_action_v1("three")
+        val capacity = SchedulerCapacityV1(1, 100, 10, 5)
+        val admitted = scheduler_coordinator_admit_v1(root, [action],
+            action.action_digest, "try-1", "local", capacity, 0)
+        expect(admitted.dispatch).to_be(true)
+        expect(file_append(root + "/journal.v1", "J1|2|partial")).to_be(true)
+        val revoked = scheduler_coordinator_revoke_v1(root, "try-1")
+        expect(revoked.acknowledged).to_be(false)
+        expect(revoked.error).to_equal("scheduler-journal-error: journal-torn")
+        val output = sha256_text("stored output bytes")
+        val published = scheduler_coordinator_publish_v1(root,
+            _coordinator_candidate_v1(action.action_digest, "try-1", output),
+            output)
+        expect(published.acknowledged).to_be(false)
+        expect(published.error).to_equal("scheduler-journal-error: journal-torn")
+        val another = scheduler_coordinator_admit_v1(root, [action],
+            action.action_digest, "try-2", "local", capacity, 0)
+        expect(another.dispatch).to_be(false)
+        expect(another.error).to_equal("scheduler-journal-error: journal-torn")

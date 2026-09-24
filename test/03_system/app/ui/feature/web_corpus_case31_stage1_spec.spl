@@ -1,0 +1,129 @@
+# @req REQ-2D-006
+# @req NFR-2D-003
+# @tag: system, web, text, corpus, fail_closed
+"""Pinned corpus case 31 declares its latin shaping input and independent oracle.
+
+The expected pixels come from the native glyph contract's resolved subset for
+the pinned Noto Sans Mono face — real cmap glyph ids and hmtx advances, never
+5x7 charset indices and never Web DrawIR or backend output. Physical Vulkan
+capture stays blocked until a backend admits the private native text record.
+"""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.font_registry.{
+    simpleos_default_font_asset_candidate, selected_font_asset_candidates}
+use common.renderdoc.native_glyph_contract.{
+    NATIVE_GLYPH_CONTRACT_FORMAT, NATIVE_GLYPH_CONTRACT_FONT_SHA256,
+    NATIVE_GLYPH_CONTRACT_MAX_GLYPHS, native_glyph_contract_resolve,
+    native_glyph_contract_preflight}
+use common.renderdoc.corpus_case31_oracle.{
+    CORPUS_CASE31_SOURCE_SHA256, CORPUS_CASE31_WIDTH, CORPUS_CASE31_HEIGHT,
+    CORPUS_CASE31_SOURCE_TEXT, CORPUS_CASE31_TEXT_SIZE_PX,
+    CORPUS_CASE31_RGBA_SHA256, CORPUS_CASE31_EDGE_PIXELS,
+    CORPUS_CASE31_EDGE_MAX_CHANNEL_DELTA,
+    CORPUS_CASE31_EDGE_MAX_MEAN_CHANNEL_DELTA,
+    corpus_case31_analytic_oracle}
+
+val FIXTURE: text =
+    "test/fixtures/html_css/corpus/cases/31-latin-shaping.html"
+
+describe "pinned Web corpus case 31 Stage-1 native glyph oracle":
+    it "pins the corpus source bytes and the declared font-edge tolerances":
+        step("Reject a source byte change before any oracle construction")
+        val html = read_file(FIXTURE)
+        expect(sha256_text(html)).to_equal(CORPUS_CASE31_SOURCE_SHA256)
+        val changed = html.replace("office affine AVATAR",
+            "office affine AVATAR ")
+        expect(changed == html).to_be(false)
+        # NFR-2D-003: tolerances are declared constants, recorded before any
+        # device capture, and are not derived from observed mismatches.
+        expect(CORPUS_CASE31_EDGE_MAX_CHANNEL_DELTA).to_equal(16i64)
+        expect(CORPUS_CASE31_EDGE_MAX_MEAN_CHANNEL_DELTA).to_equal(4i64)
+        expect(CORPUS_CASE31_WIDTH).to_equal(640)
+        expect(CORPUS_CASE31_HEIGHT).to_equal(480)
+
+    it "rejects font identity mismatch, empty text, control chars and flags":
+        step("Resolve against a non-pinned registry candidate")
+        val other = selected_font_asset_candidates()[0]
+        match native_glyph_contract_resolve(
+                CORPUS_CASE31_SOURCE_TEXT, other,
+                CORPUS_CASE31_TEXT_SIZE_PX, 0):
+            case Err(reason):
+                expect(reason).to_equal(
+                    "native-glyph-contract-font-identity-mismatch")
+            case Ok(_): fail_test("non-pinned font must not resolve")
+        step("Reject empty text, control characters and nonzero flags")
+        val pinned = simpleos_default_font_asset_candidate()
+        match native_glyph_contract_resolve("", pinned,
+                CORPUS_CASE31_TEXT_SIZE_PX, 0):
+            case Err(reason):
+                expect(reason).to_equal("native-glyph-contract-empty-text")
+            case Ok(_): fail_test("empty text must not resolve")
+        match native_glyph_contract_resolve("office affine\tAVATAR", pinned,
+                CORPUS_CASE31_TEXT_SIZE_PX, 0):
+            case Err(reason):
+                expect(reason).to_equal(
+                    "native-glyph-contract-control-character")
+            case Ok(_): fail_test("control characters must not resolve")
+        match native_glyph_contract_resolve(CORPUS_CASE31_SOURCE_TEXT, pinned,
+                CORPUS_CASE31_TEXT_SIZE_PX, 1):
+            case Err(reason):
+                expect(reason).to_equal(
+                    "native-glyph-contract-flags-unsupported")
+            case Ok(_): fail_test("nonzero flags must not resolve")
+        step("Reject a subset above the hard glyph bound")
+        var oversized = ""
+        var index = 0
+        while index <= NATIVE_GLYPH_CONTRACT_MAX_GLYPHS:
+            oversized = oversized + "a"
+            index = index + 1
+        match native_glyph_contract_resolve(oversized, pinned,
+                CORPUS_CASE31_TEXT_SIZE_PX, 0):
+            case Err(reason):
+                expect(reason).to_equal(
+                    "native-glyph-contract-subset-overflow")
+            case Ok(_): fail_test("oversized subset must not resolve")
+
+    it "resolves and prefights the pinned latin shaping subset":
+        step("Resolve the pinned source string through the real cmap layer")
+        val candidate = simpleos_default_font_asset_candidate()
+        match native_glyph_contract_resolve(CORPUS_CASE31_SOURCE_TEXT,
+                candidate, CORPUS_CASE31_TEXT_SIZE_PX, 0):
+            case Err(reason):
+                fail_test("native glyph contract blocked: {reason}")
+            case Ok(subset):
+                expect(subset.format).to_equal(NATIVE_GLYPH_CONTRACT_FORMAT)
+                expect(subset.font_sha256).to_equal(
+                    NATIVE_GLYPH_CONTRACT_FONT_SHA256)
+                expect(subset.glyphs.len()).to_equal(
+                    CORPUS_CASE31_SOURCE_TEXT.len())
+                step("Whole-composition preflight before any device work")
+                match native_glyph_contract_preflight(subset):
+                    case Err(reason):
+                        fail_test(
+                            "native glyph contract preflight blocked: {reason}")
+                    case Ok(checked):
+                        expect(checked.glyphs.len()).to_equal(20)
+                        var glyph_index: i64 = 0
+                        while glyph_index < checked.glyphs.len():
+                            val glyph = checked.glyphs[glyph_index]
+                            expect(glyph.glyph_id == 0u32).to_be(false)
+                            expect(glyph.advance_milli_px).to_be_greater_than(0i64)
+                            expect(glyph.cluster).to_equal(glyph_index)
+                            glyph_index = glyph_index + 1
+                        expect(checked.glyphs[19].pen_milli_px +
+                            checked.glyphs[19].advance_milli_px).to_equal(
+                            408000i64)
+
+    it "self-checks the independent analytic oracle image":
+        step("Build the expected image from literal glyph-ink rectangles")
+        match corpus_case31_analytic_oracle():
+            case Err(reason):
+                fail_test("corpus case 31 analytic oracle blocked: {reason}")
+            case Ok(image):
+                expect(image.rgba.len()).to_equal(640 * 480 * 4)
+                expect(image.edge_pixels).to_equal(CORPUS_CASE31_EDGE_PIXELS)
+                expect(image.edge_pixels).to_equal(13872i64)

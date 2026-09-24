@@ -67,6 +67,27 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
             "docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "/bin/busybox", "echo", "SIMPLEORCH-OK"])
 
+    it "binds build input and output mounts to one attempt with no network":
+        var r = request("create-build")
+        r.network_policy = "none"
+        r.build_input_root = "/var/lib/simpleorch/build-attempts/pod-1-1-abc123/inputs"
+        r.build_output_root = "/var/lib/simpleorch/build-attempts/pod-1-1-abc123/outputs"
+        val built = build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            r, "create-build", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args).to_contain("type=bind,src=" + r.build_input_root +
+            ",dst=/simple-build/inputs,readonly")
+        expect(built.1.args).to_contain("type=bind,src=" + r.build_output_root +
+            ",dst=/simple-build/outputs")
+        expect(built.1.args).to_contain("/simple-build/outputs")
+        r.build_output_root = "/var/lib/simpleorch/build-attempts/pod-2-1-abc123/outputs"
+        expect(build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            r, "create-build", 7, "boot-1").0).to_equal("build-mount-attempt-mismatch")
+        r.build_output_root = "/var/lib/simpleorch/build-attempts/pod-1-1-abc123/outputs"
+        r.network_policy = "bridge"
+        expect(build_create_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch",
+            r, "create-build", 7, "boot-1").0).to_equal("build-mount-policy-invalid")
+
     it "fails closed when any rootless launch prerequisite is absent":
         val good = RootlessCapabilityEvidenceV1(uid: "1000", username: "alice",
             uid_map: "0 1000 1", gid_map: "0 1000 1",
@@ -159,7 +180,7 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val wait_cmd = build_wait_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "ctr-123").1
         val logs_cmd = build_logs_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "ctr-123").1
         val destroy_cmd = build_destroy_command(OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "ctr-123", false).1
-        val inspect_output = "pod-1|1|boot-1|7|create-1|ctr-123|running"
+        val inspect_output = "pod-1|1|boot-1|7|create-1|ctr-123|running|0"
         val provider = LinuxOciRuntimeProviderV1.scripted("linux", OCI_DEFAULT_ENGINE,
             "/var/lib/simpleorch", "boot-1", 7,
             [scripted_result(create_cmd, "ctr-123\n", 0),
@@ -191,7 +212,7 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val good = LinuxOciRuntimeProviderV1.scripted("linux", OCI_DEFAULT_ENGINE,
             "/var/lib/simpleorch", "boot-1", 7,
             [scripted_result(name_cmd,
-                "pod-1|1|boot-1|7|create-1|ctr-123|exited", 0)])
+                "pod-1|1|boot-1|7|create-1|ctr-123|exited|0", 0)])
         val recovered = good.recover(r)
         expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
         expect(recovered.state.phase).to_equal(RUNTIME_PHASE_EXITED)
@@ -201,9 +222,57 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val bad = LinuxOciRuntimeProviderV1.scripted("linux", OCI_DEFAULT_ENGINE,
             "/var/lib/simpleorch", "boot-1", 7,
             [scripted_result(name_cmd,
-                "pod-1|1|boot-other|7|create-1|ctr-123|running", 0)])
+                "pod-1|1|boot-other|7|create-1|ctr-123|running|0", 0)])
         expect(bad.recover(r).status).to_equal(RUNTIME_STATUS_REJECTED)
         expect(bad.state_for(r).phase).to_equal(RUNTIME_PHASE_UNKNOWN)
+
+    it "recovers canonical exit codes only from identity-matched exited state":
+        val r = request("create-1")
+        val prefix = "pod-1|1|boot-1|7|create-1|ctr-123|"
+        for code in ["0", "1", "137"]:
+            val parsed = recover_state_from_inspect(OCI_DEFAULT_ENGINE,
+                prefix + "exited|" + code, r, "create-1", "ctr-123",
+                7, "boot-1")
+            expect(parsed.is_ok()).to_be(true)
+            expect(parsed.unwrap().exit_code).to_equal(code.to_i64())
+        val docker = recover_state_from_inspect(OCI_ENGINE_DOCKER,
+            prefix + "exited|137", r, "create-1", "ctr-123",
+            7, "boot-1")
+        expect(docker.is_ok()).to_be(true)
+        expect(docker.unwrap().exit_code).to_equal(137)
+        for status in ["created", "running", "dead"]:
+            val parsed = recover_state_from_inspect(OCI_DEFAULT_ENGINE,
+                prefix + status + "|0", r, "create-1", "ctr-123",
+                7, "boot-1")
+            expect(parsed.is_ok()).to_be(true)
+            expect(parsed.unwrap().exit_code).to_equal(-1)
+        for bad in ["exited|-1", "exited|256", "exited|abc",
+                    "exited|", "exited|00", "exited", "exited|0|extra"]:
+            expect(recover_state_from_inspect(OCI_DEFAULT_ENGINE,
+                prefix + bad, r, "create-1", "ctr-123", 7,
+                "boot-1").is_err()).to_be(true)
+        expect(recover_state_from_inspect(OCI_DEFAULT_ENGINE,
+            "pod-1|1|wrong-boot|7|create-1|ctr-123|exited|0",
+            r, "create-1", "ctr-123", 7, "boot-1").is_err()).to_be(true)
+
+    it "rejects native wait exit codes outside the container range":
+        val r = request("create-1")
+        val create_cmd = build_create_command(OCI_DEFAULT_ENGINE,
+            "/var/lib/simpleorch", r, "create-1", 7, "boot-1").1
+        val start_cmd = build_start_command(OCI_DEFAULT_ENGINE,
+            "/var/lib/simpleorch", "ctr-123").1
+        val wait_cmd = build_wait_command(OCI_DEFAULT_ENGINE,
+            "/var/lib/simpleorch", "ctr-123").1
+        for code in ["-1\n", "256\n"]:
+            val provider = LinuxOciRuntimeProviderV1.scripted("linux",
+                OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7,
+                [scripted_result(create_cmd, "ctr-123\n", 0),
+                 scripted_result(start_cmd, "ctr-123\n", 0),
+                 scripted_result(wait_cmd, code, 0)])
+            expect(provider.create(r).status).to_equal(RUNTIME_STATUS_OK)
+            expect(provider.start(r).status).to_equal(RUNTIME_STATUS_OK)
+            expect(provider.wait(r).reason)
+                .to_equal("native-wait-returned-invalid-exit-code")
 
     it "reloads the pre-create intent journal before native recovery":
         val r = request()
@@ -222,7 +291,7 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val fresh = LinuxOciRuntimeProviderV1.scripted("linux", OCI_DEFAULT_ENGINE,
             journal_dir, "boot-1", 7,
             [scripted_result(inspect_cmd,
-                "pod-1|1|boot-1|7|create-persisted|ctr-disk|exited", 0)])
+                "pod-1|1|boot-1|7|create-persisted|ctr-disk|exited|0", 0)])
         val recovered = fresh.recover(r)
         expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
         expect(recovered.state.identity.native_id).to_equal("ctr-disk")
@@ -283,7 +352,7 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val provider = LinuxOciRuntimeProviderV1.scripted_with_intents("linux",
             OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7, [intent],
             [scripted_result(inspect_cmd,
-                "pod-1|1|boot-1|7|create-timeout|ctr-recovered|exited", 0)])
+                "pod-1|1|boot-1|7|create-timeout|ctr-recovered|exited|0", 0)])
         val recovered = provider.create(r)
         expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
         expect(recovered.operation).to_equal("recover")
@@ -345,7 +414,7 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
             "/var/lib/simpleorch", "boot-1", 7,
             [scripted_result(create_cmd, "", 124),
              scripted_result(inspect_cmd,
-                 "pod-1|1|boot-1|7|create-timeout|ctr-after-timeout|running", 0)])
+                 "pod-1|1|boot-1|7|create-timeout|ctr-after-timeout|running|0", 0)])
         val prepared = provider.prepare_pod(r)
         expect(prepared.status).to_equal(RUNTIME_STATUS_OK)
         val result = provider.create(r)
@@ -462,7 +531,7 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val provider = LinuxOciRuntimeProviderV1.scripted_with_intents("linux",
             OCI_DEFAULT_ENGINE, journal_dir, "boot-1", 7, full_active_intents(),
             [scripted_result(inspect_cmd,
-                "durable-active|1|boot-1|7|create-active|ctr-active|running", 0)])
+                "durable-active|1|boot-1|7|create-active|ctr-active|running|0", 0)])
         val recovered = provider.recover(target)
         expect(recovered.status).to_equal(RUNTIME_STATUS_OK)
         expect(recovered.state.identity.operation_id).to_equal("create-active")
@@ -561,7 +630,7 @@ describe "Linux OCI LinuxOciRuntimeProviderV1":
         val provider = LinuxOciRuntimeProviderV1.scripted("linux",
             OCI_DEFAULT_ENGINE, "/var/lib/simpleorch", "boot-1", 7,
             [scripted_result(inspect_cmd,
-                "recover-target|1|boot-1|7|recover-capacity|ctr-recover|exited", 0)])
+                "recover-target|1|boot-1|7|recover-capacity|ctr-recover|exited|0", 0)])
         var index = 0
         while index < OCI_MAX_RETAINED_RECORDS:
             expect(provider.prepare_pod(request("", "active-" + index.to_text())).status)

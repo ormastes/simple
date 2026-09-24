@@ -1,0 +1,115 @@
+# Canonical output claims for a stopped build attempt. The worker constructs
+# this from its private output mount; the parent reconstructs it from copied
+# files and diagnostic bytes before considering a candidate for publication.
+# The caller must separately retain verified files in immutable storage.
+use app.io.mod.{file_is_regular_no_follow, file_size_raw, file_hash_sha256}
+use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
+use compiler.common.build_contract.{ActionSpec, AttemptSpec,
+    action_spec_digest_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+val BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1: i64 = 65536
+val BUILD_OUTPUT_MAX_FILES_V1: i64 = 128
+val BUILD_OUTPUT_MAX_TOTAL_BYTES_V1: i64 = 1073741824
+val BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1: i64 = 1048576
+
+struct BuildOutputObservationV1:
+    valid: bool
+    reason: text
+    manifest_wire: text
+    manifest_digest: text
+    diagnostic_digest: text
+    output_bytes: i64
+
+fn _output_reject_v1(reason: text) -> BuildOutputObservationV1:
+    BuildOutputObservationV1(false, reason, "", "", "", 0)
+
+fn _output_root_valid_v1(root: text) -> bool:
+    root.starts_with("/") and root.len() > 1 and root.len() <= 4096 and
+        not root.ends_with("/") and not root.contains("//") and
+        not root.contains("\n") and not root.contains("\r") and
+        not root.split("/").contains(".") and
+        not root.split("/").contains("..")
+
+fn _output_wire_path_v1(path: text) -> bool:
+    path != "" and path.len() <= 1024 and not path.contains("|") and
+        not path.contains("/") and not path.contains("\\") and
+        not path.contains("\n") and not path.contains("\r") and
+        not path.contains("\t") and not path.contains("\x00")
+
+fn _output_identity_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128:
+        return false
+    for c in value.chars():
+        if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+           (c >= "0" and c <= "9") or c == "-" or c == "_" or c == ".":
+            continue
+        return false
+    true
+
+fn observe_build_outputs_v1(action: ActionSpec, attempt: AttemptSpec,
+        fence: i64, output_root: text, diagnostics: text) -> BuildOutputObservationV1:
+    """Hash every declared output after termination, with bounded identities."""
+    val action_digest = action_spec_digest_v1(action)
+    if not scheduler_action_digest_valid_v1(action_digest) or
+       attempt.version != 1 or attempt.action_digest != action_digest or
+       not _output_identity_v1(attempt.attempt_id) or
+       not _output_identity_v1(attempt.worker_id) or
+       fence <= 0 or fence > 1000000000 or
+       not _output_root_valid_v1(output_root):
+        return _output_reject_v1("attempt-or-root-invalid")
+    if diagnostics.len() < 0 or diagnostics.len() > BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1:
+        return _output_reject_v1("diagnostic-bound")
+    if action.output_paths.len() == 0 or
+       action.output_paths.len() > BUILD_OUTPUT_MAX_FILES_V1:
+        return _output_reject_v1("output-count-invalid")
+    val diagnostic_digest = sha256_text(diagnostics)
+    var wire = "simple-build-output-manifest-v1\n" +
+        "action=" + action_digest + "\n" +
+        "attempt=" + attempt.attempt_id + "\n" +
+        "worker=" + attempt.worker_id + "\n" +
+        "fence=" + fence.to_text() + "\n" +
+        "diagnostics=" + diagnostic_digest + "\n" +
+        "count=" + action.output_paths.len().to_text() + "\n"
+    var total: i64 = 0
+    for logical_path in canonical_identity_sort_texts(action.output_paths):
+        if not _output_wire_path_v1(logical_path):
+            return _output_reject_v1("output-path-invalid")
+        val path = output_root + "/" + logical_path
+        if not file_is_regular_no_follow(path):
+            return _output_reject_v1("output-not-regular")
+        val size = file_size_raw(path)
+        if size <= 0 or size > BUILD_OUTPUT_MAX_TOTAL_BYTES_V1 - total:
+            return _output_reject_v1("output-size-invalid")
+        val digest = file_hash_sha256(path)
+        if not scheduler_action_digest_valid_v1(digest):
+            return _output_reject_v1("output-hash-unavailable")
+        wire = wire + logical_path + "|" + size.to_text() + "|" + digest + "\n"
+        if wire.len() > BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1:
+            return _output_reject_v1("manifest-bound")
+        total = total + size
+    BuildOutputObservationV1(true, "", wire, sha256_text(wire),
+        diagnostic_digest, total)
+
+fn verify_build_outputs_v1(action: ActionSpec, attempt: AttemptSpec,
+        fence: i64, output_root: text, diagnostics: text,
+        claimed_wire: text, claimed_digest: text) -> BuildOutputObservationV1:
+    """Reconstruct the worker claim from independently copied parent bytes."""
+    if claimed_wire.len() == 0 or
+       claimed_wire.len() > BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1 or
+       not scheduler_action_digest_valid_v1(claimed_digest):
+        return _output_reject_v1("claim-invalid")
+    val observed = observe_build_outputs_v1(action, attempt, fence,
+        output_root, diagnostics)
+    if not observed.valid:
+        return observed
+    if claimed_wire != observed.manifest_wire or
+       claimed_digest != observed.manifest_digest:
+        return _output_reject_v1("claim-mismatch")
+    observed
+
+export BUILD_OUTPUT_MANIFEST_MAX_BYTES_V1, BUILD_OUTPUT_MAX_FILES_V1
+export BUILD_OUTPUT_MAX_TOTAL_BYTES_V1, BUILD_OUTPUT_MAX_DIAGNOSTIC_BYTES_V1
+export BuildOutputObservationV1, observe_build_outputs_v1
+export verify_build_outputs_v1

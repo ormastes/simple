@@ -12,6 +12,7 @@ use std.common.ui.draw_ir.{
     DRAW_IR_EDGE_STRAIGHT,
     DRAW_IR_COMMAND_RECT,
     DRAW_IR_COMMAND_TEXT,
+    DRAW_IR_RASTER_COVERAGE_AA,
     DrawIrBatch,
     DrawIrCommand,
     DrawIrPoint,
@@ -25,10 +26,13 @@ use std.common.ui.draw_ir.{
     draw_ir_rect_bounds,
     draw_ir_rect_intersection,
     draw_ir_rect_translate,
+    draw_ir_command_has_unsupported_v4_state,
     simple_2d_draw_ir_adv_composition_plan,
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.strict_vulkan_rect_clip.{
+    engine2d_strict_vulkan_rect_clip_coverage}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
 }
@@ -44,6 +48,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     engine2d_draw_ir_glass_material_pixels
 }
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
+use std.common.numeric_round.{ceil_f64, floor_f64}
 use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
     Engine2dDrawIrCornerRadii,
     engine2d_draw_ir_has_inset_shadow,
@@ -140,6 +145,11 @@ struct Engine2dDrawIrAdvResult:
     async_admission_reason: text = ""
     async_packet_checksum: i64 = 0
     async_claim: bool = false
+    # Monotonic completed Vulkan fence generation linked to this readback.
+    # Zero means the strict submission/readback pair was not authenticated.
+    submission_generation: i64 = 0
+    frame_width: i32 = 0
+    frame_height: i32 = 0
 
 # A strict Vulkan submission receipt deliberately carries no framebuffer
 # pixels.  The retained Engine2D and composition let an evidence caller make
@@ -160,6 +170,7 @@ struct Engine2dDrawIrAdvSubmitResult:
     no_readback: bool
     readback_bytes: i64
     font_evidence_valid: bool
+    submission_generation: i64 = 0
 
 # Owner-result boundary for strict DrawIR followed by visible presentation.
 # The returned Engine2D is the sole mutable owner after both operations; callers
@@ -1177,6 +1188,8 @@ fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp])
     true
 
 fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, allow_clipped: bool, allow_translucent_initializer: bool) -> bool:
+    if draw_ir_command_has_unsupported_v4_state(command):
+        return false
     val right = command.x.to_i64() + command.width.to_i64()
     val bottom = command.y.to_i64() + command.height.to_i64()
     if (command.width <= 0 or command.height <= 0 or right <= 0 or bottom <= 0 or
@@ -1300,6 +1313,10 @@ fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images:
             return "fresh-device-opaque-full-target-first-command-required"
         var command_index = 0
         for command in batch.commands:
+            if draw_ir_command_has_unsupported_v4_state(command):
+                return "draw-ir-v4-state-unsupported"
+            if command.fractional_geometry != nil:
+                return "fractional-geometry-unsupported"
             val allow_translucent_initializer = not fills_target and embedding.clip and command_index == 0
             if not _engine2d_draw_ir_fresh_device_command_supported(command, images, embedding.width, embedding.height, not fills_target and embedding.clip, allow_translucent_initializer):
                 return "fresh-device-command-preflight-required"
@@ -1362,6 +1379,95 @@ fn _engine2d_draw_ir_strict_vulkan_box_bounded(command: DrawIrCommand, width: i3
         command.x >= 0 and command.y >= 0 and
         right <= width.to_i64() and bottom <= height.to_i64()
 
+# Rasterize the authoritative f64 rectangle, rather than converting its
+# geometry to integer DrawIR. A non-AA pixel is covered exactly when its
+# center lies in [x, x + width) x [y, y + height). The returned box is only
+# the set of covered pixel indices for Engine2D's integer fill primitive.
+# Reject nonfinite, unbounded, and subpixel-empty rectangles before any GPU
+# work. These checks also bound every f64-to-i32 conversion below.
+fn _engine2d_draw_ir_strict_vulkan_fractional_pixels(command: DrawIrCommand, width: i32, height: i32) -> DrawIrRect:
+    if draw_ir_command_has_unsupported_v4_state(command):
+        return draw_ir_no_rect()
+    if val Some(geometry) = command.fractional_geometry:
+        val right = geometry.x + geometry.width
+        val bottom = geometry.y + geometry.height
+        if not (geometry.x >= 0.0 and geometry.y >= 0.0 and
+            geometry.width > 0.0 and geometry.height > 0.0 and
+            right <= width.to_f64() and bottom <= height.to_f64()):
+            return draw_ir_no_rect()
+        val left_pixel = ceil_f64(geometry.x - 0.5).to_i32()
+        val top_pixel = ceil_f64(geometry.y - 0.5).to_i32()
+        val right_pixel = ceil_f64(right - 0.5).to_i32()
+        val bottom_pixel = ceil_f64(bottom - 0.5).to_i32()
+        if right_pixel <= left_pixel or bottom_pixel <= top_pixel:
+            return draw_ir_no_rect()
+        return draw_ir_rect_bounds(
+            left_pixel, top_pixel,
+            right_pixel - left_pixel, bottom_pixel - top_pixel)
+    draw_ir_no_rect()
+
+# The GPU receives the f32 SkScalar-shaped payload only after f64 validation.
+# Each product and translation is bounded, making the two-pixel bbox expansion
+# conservative for the f32 operations in the pinned shader. Clipping is in
+# surface coordinates, before the local-to-surface affine map is sampled.
+fn _engine2d_draw_ir_strict_vulkan_affine_pixels(command: DrawIrCommand,
+    width: i32, height: i32) -> DrawIrRect:
+    if command.raster_policy != DRAW_IR_RASTER_COVERAGE_AA:
+        return draw_ir_no_rect()
+    if val Some(geometry) = command.fractional_geometry:
+        if val Some(matrix) = command.affine_transform:
+            if (geometry.x != 0.0 or geometry.y != 0.0 or
+                not (geometry.width > 0.0 and geometry.width <= 16384.0 and
+                     geometry.height > 0.0 and geometry.height <= 16384.0) or
+                not (matrix.a >= -4.0 and matrix.a <= 4.0 and
+                     matrix.b >= -4.0 and matrix.b <= 4.0 and
+                     matrix.c >= -4.0 and matrix.c <= 4.0 and
+                     matrix.d >= -4.0 and matrix.d <= 4.0 and
+                     matrix.tx >= -16384.0 and matrix.tx <= 16384.0 and
+                     matrix.ty >= -16384.0 and matrix.ty <= 16384.0)):
+                return draw_ir_no_rect()
+            val aw = matrix.a * geometry.width
+            val bw = matrix.b * geometry.width
+            val ch = matrix.c * geometry.height
+            val dh = matrix.d * geometry.height
+            if (not (aw >= -16384.0 and aw <= 16384.0 and
+                     bw >= -16384.0 and bw <= 16384.0 and
+                     ch >= -16384.0 and ch <= 16384.0 and
+                     dh >= -16384.0 and dh <= 16384.0)):
+                return draw_ir_no_rect()
+            val determinant = matrix.a * matrix.d - matrix.b * matrix.c
+            if not (determinant <= -0.001 or determinant >= 0.001):
+                return draw_ir_no_rect()
+            var min_x = matrix.tx
+            var max_x = matrix.tx
+            var min_y = matrix.ty
+            var max_y = matrix.ty
+            val corners_x = [matrix.tx + aw, matrix.tx + aw + ch,
+                matrix.tx + ch]
+            val corners_y = [matrix.ty + bw, matrix.ty + bw + dh,
+                matrix.ty + dh]
+            var i = 0
+            while i < 3:
+                if corners_x[i] < min_x: min_x = corners_x[i]
+                if corners_x[i] > max_x: max_x = corners_x[i]
+                if corners_y[i] < min_y: min_y = corners_y[i]
+                if corners_y[i] > max_y: max_y = corners_y[i]
+                i += 1
+            val left = floor_f64(min_x).to_i32() - 2
+            val top = floor_f64(min_y).to_i32() - 2
+            val right = ceil_f64(max_x).to_i32() + 2
+            val bottom = ceil_f64(max_y).to_i32() + 2
+            var visible = draw_ir_rect_intersection(
+                draw_ir_rect_bounds(left, top, right - left, bottom - top),
+                draw_ir_rect_bounds(0, 0, width, height))
+            if command.clip_rect.present:
+                val clip = command.clip_rect
+                if clip.width < 0 or clip.height < 0:
+                    return draw_ir_no_rect()
+                visible = draw_ir_rect_intersection(visible, clip)
+            return visible
+    draw_ir_no_rect()
+
 fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> text:
     if engine.selected_backend_name != "vulkan" or engine.vulkan_font_poisoned():
         return "strict-vulkan-engine-required"
@@ -1375,13 +1481,70 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
             embedding.clip):
             return "strict-vulkan-single-surface-required"
         for command in batch.commands:
-            if command.? == false or command.clip_rect.present:
+            if draw_ir_command_has_unsupported_v4_state(command):
+                if (first or command.kind != DRAW_IR_COMMAND_RECT or
+                    command.affine_transform == nil or
+                    command.raster_policy != DRAW_IR_RASTER_COVERAGE_AA):
+                    return "strict-vulkan-affine-coverage-unsupported"
+                # The coverage kernel consumes only local rectangle geometry,
+                # matrix, surface clip, and opaque colour. Reject every other
+                # command payload before checking pipeline availability.
+                if (command.x != 0 or command.y != 0 or
+                    command.width != 0 or command.height != 0 or
+                    command.fractional_geometry == nil or
+                    command.text_value != "" or command.advance_widths.len() != 0 or
+                    command.edge != nil or command.image_uri != "" or
+                    command.points.len() != 0 or command.glyph_run.valid or
+                    command.glyph_run.glyph_ids.len() != 0 or
+                    command.glyph_run.xs.len() != 0 or
+                    command.glyph_run.ys.len() != 0 or
+                    command.glyph_run.clusters.len() != 0 or
+                    command.parent_id != "" or command.border_rect.present or
+                    command.content_rect.present or command.hit_rect.present or
+                    command.computed_style.len() != 0 or
+                    (command.clip_rect.present and
+                     (command.clip_rect.width < 0 or command.clip_rect.height < 0))):
+                    return "strict-vulkan-affine-plain-rect-required"
+                if not engine.vulkan_affine_coverage_ready():
+                    return "strict-vulkan-affine-coverage-pipeline-required"
+                val affine_pixels = _engine2d_draw_ir_strict_vulkan_affine_pixels(
+                    command, engine.width(), engine.height())
+                if (not affine_pixels.present or affine_pixels.width <= 0 or
+                    affine_pixels.height <= 0):
+                    return "strict-vulkan-affine-coverage-required"
+            elif command.fractional_geometry != nil:
+                if first:
+                    return "strict-vulkan-clear-first-required"
+                if command.kind != DRAW_IR_COMMAND_RECT:
+                    return "fractional-geometry-unsupported"
+                if not _engine2d_draw_ir_strict_vulkan_fractional_pixels(
+                    command, engine.width(), engine.height()).present:
+                    return "strict-vulkan-fractional-rect-coverage-required"
+            if command.? == false:
                 return "strict-vulkan-command-preflight-required"
+            if command.clip_rect.present and command.affine_transform == nil:
+                if (first or command.kind != DRAW_IR_COMMAND_RECT or
+                    command.fractional_geometry != nil or
+                    command.clip_rect.width < 0 or command.clip_rect.height < 0 or
+                    command.width <= 0 or command.height <= 0 or
+                    command.text_value != "" or command.advance_widths.len() != 0 or
+                    command.edge != nil or command.image_uri != "" or
+                    command.points.len() != 0 or command.glyph_run.valid or
+                    command.glyph_run.glyph_ids.len() != 0 or
+                    command.glyph_run.xs.len() != 0 or
+                    command.glyph_run.ys.len() != 0 or
+                    command.glyph_run.clusters.len() != 0 or
+                    command.parent_id != "" or command.border_rect.present or
+                    command.content_rect.present or command.hit_rect.present):
+                    return "strict-vulkan-clipped-rect-preflight-required"
             if first and command.kind != DRAW_IR_COMMAND_RECT:
                 return "strict-vulkan-clear-first-required"
             if command.kind == DRAW_IR_COMMAND_RECT:
-                if not _engine2d_draw_ir_strict_vulkan_box_bounded(
-                    command, engine.width(), engine.height()):
+                if (command.fractional_geometry == nil and
+                    command.affine_transform == nil and
+                    not command.clip_rect.present and
+                    not _engine2d_draw_ir_strict_vulkan_box_bounded(
+                        command, engine.width(), engine.height())):
                     return "strict-vulkan-command-bounds-required"
                 if (command.computed_style.len() != 0 or
                     ((command.color >> 24) & 0xFFu32) != 0xFFu32):
@@ -1431,6 +1594,18 @@ fn _engine2d_draw_ir_strict_vulkan_command_count(composition: DrawIrComposition)
             if command.? != false:
                 count = count + 1
     count
+
+fn _engine2d_draw_ir_batch_has_unsupported_v4_state(batch: DrawIrBatch) -> bool:
+    for command in batch.commands:
+        if command.? != false and draw_ir_command_has_unsupported_v4_state(command):
+            return true
+    false
+
+fn _engine2d_draw_ir_composition_has_unsupported_v4_state(composition: DrawIrComposition) -> bool:
+    for batch in composition.batches:
+        if _engine2d_draw_ir_batch_has_unsupported_v4_state(batch):
+            return true
+    false
 
 # Append one diagnostic kind without unbounded duplicate string growth.
 fn _engine2d_draw_ir_note_unsupported_kind(kinds: text, kind: text) -> text:
@@ -1621,8 +1796,17 @@ fn _engine2d_draw_ir_materialize_image_damage(
             width: 0, height: 0, pixels: [])
     val destination_x = clip.x - x
     val destination_y = clip.y - y
+    # Preallocate the exact crop size: the previous per-pixel push() built the
+    # buffer through amortized growth, recopying every boxed element on each
+    # capacity doubling. The i64 area guard keeps the absurd-size case on the
+    # old push path (which would fail the same allocation either way).
+    val crop_area = clip.width.to_i64() * clip.height.to_i64()
     var cropped: [u32] = []
+    val preallocated = crop_area > 0 and crop_area <= 2147483647
+    if preallocated:
+        cropped = [0u32; crop_area.to_i32()]
     var row = 0
+    var write_at = 0
     while row < clip.height:
         var col = 0
         while col < clip.width:
@@ -1632,8 +1816,13 @@ fn _engine2d_draw_ir_materialize_image_damage(
             val source_y = (
                 (destination_y + row).to_i64() * image.height.to_i64() /
                 command.height.to_i64()).to_i32()
-            cropped.push(image.pixels[
-                source_y * image.width + source_x])
+            if preallocated:
+                cropped[write_at] = image.pixels[
+                    source_y * image.width + source_x]
+                write_at += 1
+            else:
+                cropped.push(image.pixels[
+                    source_y * image.width + source_x])
             col += 1
         row += 1
     Engine2dClippedImage(
@@ -1642,6 +1831,8 @@ fn _engine2d_draw_ir_materialize_image_damage(
 
 fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
     if command.? == false:
+        return false
+    if draw_ir_command_has_unsupported_v4_state(command):
         return false
     (command.kind == DRAW_IR_COMMAND_RECT and command.width > 0 and
      command.height > 0 and command.computed_style.len() == 0 and
@@ -2088,6 +2279,16 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
         if command.? == false:
             skipped = skipped + 1
             continue
+        if draw_ir_command_has_unsupported_v4_state(command):
+            skipped = skipped + command_weight
+            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
+                unsupported_kinds, "draw-ir-v4-state-unsupported")
+            continue
+        if command.fractional_geometry != nil:
+            skipped = skipped + command_weight
+            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
+                unsupported_kinds, "fractional-geometry-unsupported")
+            continue
         val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
             command, offset_x, offset_y, active_clip,
             surface_fb_w, surface_fb_h)
@@ -2481,24 +2682,18 @@ fn _engine2d_draw_ir_parent_region_pixels(
         row = row + 1
     region
 
-# D9: region-limited readback seam. No backend below exposes a device-side
-# region read yet (RenderBackend only has whole-framebuffer
-# read_pixels_with_source()), so this is the DEFAULT implementation: read the
-# full frame once, exactly as every call site already did, and crop on the
-# host with _engine2d_draw_ir_parent_region_pixels. Pixel-for-pixel identical
-# to a caller doing eng.read_pixels_with_source() then cropping itself by
-# hand -- see engine2d_read_pixels_region_equivalence_spec.spl -- so this
-# alone removes no work. What it buys: every "I only need this rect" call
-# site now asks a single seam for exactly its rect instead of the whole
-# framebuffer, so a future backend-specific region read (a real device-side
-# crop) can be dropped in behind this one function with no call-site changes.
+# D9: region-limited readback seam. Originally the DEFAULT implementation
+# lived here (read the full frame once, crop on the host) because no backend
+# exposed a device-side region read. The seam now reaches the backend
+# through RenderBackend.read_pixels_region: SoftwareBackend/CpuBackend copy
+# only the requested rows natively, and every other backend inherits the
+# trait default, which is exactly the old behavior this function had (one
+# whole-frame read + host crop with zero-fill-at-edge). Pixels are
+# pixel-for-pixel identical either way -- see
+# engine2d_read_pixels_region_equivalence_spec.spl.
 fn _engine2d_read_pixels_region(engine: Engine2D, x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
     var eng = engine
-    val full = eng.read_pixels_with_source()
-    val cropped = _engine2d_draw_ir_parent_region_pixels(
-        full, eng.width(), eng.height(), x, y, width, height)
-    engine2d_readback_with_identity(
-        cropped, full.source, full.backend_handle, full.device_identity)
+    eng.read_pixels_region(x, y, width, height)
 
 fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
     var padding = 0
@@ -2542,6 +2737,9 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # entry-closure build lowered `batch.commands.len()` as an impl-less trait
     # call and trapped before the first WM frame.
     val commands: [DrawIrCommand] = batch.commands
+    if _engine2d_draw_ir_batch_has_unsupported_v4_state(batch):
+        return _engine2d_draw_ir_render_outcome(
+            eng, 0, commands.len().to_i32(), "draw-ir-v4-state-unsupported", 0)
     if commands.len() == 0:
         return _engine2d_draw_ir_render_outcome(eng, 0, 0, "", 0)
     # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
@@ -2815,6 +3013,11 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
 
 fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    if _engine2d_draw_ir_batch_has_unsupported_v4_state(batch):
+        return _engine2d_draw_ir_result_from_plan_with_unsupported(
+            plan, 0, batch.commands.len().to_i32(),
+            "draw-ir-v4-state-unsupported",
+            engine2d_readback([], "preflight_rejected"))
     val outcome = _engine2d_draw_ir_render_batch_embedded(
         engine, batch, images, 0, false,
         engine.width().to_i64() * engine.height().to_i64())
@@ -2939,10 +3142,43 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                 if first:
                     eng.clear(command.color)
                 else:
-                    eng.draw_rect_filled(
-                        command.x, command.y, command.width, command.height,
-                        command.color)
-                rendered = rendered + 1
+                    var painted = true
+                    if val Some(matrix) = command.affine_transform:
+                        if val Some(geometry) = command.fractional_geometry:
+                            val pixels = _engine2d_draw_ir_strict_vulkan_affine_pixels(
+                                command, eng.width(), eng.height())
+                            if pixels.present and pixels.width > 0 and pixels.height > 0:
+                                painted = eng.draw_affine_rect_coverage_vulkan_only(
+                                    pixels.x, pixels.y, pixels.width, pixels.height,
+                                    geometry.width, geometry.height,
+                                    matrix.a, matrix.b, matrix.c, matrix.d,
+                                    matrix.tx, matrix.ty, command.color)
+                            else:
+                                painted = false
+                        else:
+                            painted = false
+                    elif command.clip_rect.present:
+                        val visible = engine2d_strict_vulkan_rect_clip_coverage(
+                            command, eng.width(), eng.height())
+                        if visible.present:
+                            eng.draw_rect_filled(visible.x, visible.y,
+                                visible.width, visible.height, command.color)
+                    elif command.fractional_geometry != nil:
+                        val pixels = _engine2d_draw_ir_strict_vulkan_fractional_pixels(
+                            command, eng.width(), eng.height())
+                        eng.draw_rect_filled(
+                            pixels.x, pixels.y, pixels.width, pixels.height,
+                            command.color)
+                    else:
+                        eng.draw_rect_filled(
+                            command.x, command.y, command.width, command.height,
+                            command.color)
+                    if painted:
+                        rendered = rendered + 1
+                    else:
+                        skipped = skipped + 1
+                if first:
+                    rendered = rendered + 1
             elif command.kind == DRAW_IR_COMMAND_TEXT:
                 val identity = _engine2d_draw_ir_style_value(
                     command.computed_style, "font-identity")
@@ -3004,9 +3240,11 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                 evidence.device_executed and evidence.promotion_ready and
                 evidence.readback_source == "device_readback"))
     val expected = _engine2d_draw_ir_strict_vulkan_command_count(composition)
+    val submission_generation = eng.vulkan_submission_generation()
     val completed = (submitted and finalized and observed.valid and completion_known and
         no_readback and readback_bytes == 0 and backend_handle > 0 and
-        device_identity > 0 and rendered == expected and skipped == 0 and
+        device_identity > 0 and submission_generation > 0 and
+        rendered == expected and skipped == 0 and
         font_valid)
     Engine2dDrawIrAdvSubmitResult(
         engine: eng,
@@ -3023,7 +3261,8 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
         completion_known: completed,
         no_readback: completed,
         readback_bytes: if completed: 0 else: readback_bytes,
-        font_evidence_valid: font_valid)
+        font_evidence_valid: font_valid,
+        submission_generation: if completed: submission_generation else: 0)
 
 fn _engine2d_draw_ir_strict_vulkan_submit_rejected(engine: Engine2D, composition: DrawIrComposition, reason: text) -> Engine2dDrawIrAdvSubmitResult:
     Engine2dDrawIrAdvSubmitResult(
@@ -3073,6 +3312,7 @@ fn engine2d_draw_ir_adv_strict_vulkan_submit_with_images(engine: Engine2D, compo
     result.completion_known = false
     result.no_readback = false
     result.readback_bytes = 0
+    result.submission_generation = 0
     result
 
 fn engine2d_draw_ir_adv_strict_vulkan_window_present_with_images(
@@ -3133,15 +3373,54 @@ fn engine2d_draw_ir_adv_strict_vulkan_window_present_with_images(
 
 fn engine2d_draw_ir_adv_strict_vulkan_readback(submission: Engine2dDrawIrAdvSubmitResult) -> Engine2dDrawIrAdvResult:
     """Read back one successful strict submission without replaying DrawIR."""
-    if submission.fallback_required or not submission.completion_known:
+    if submission.fallback_required or not submission.completion_known or
+        submission.submission_generation <= 0:
+        val reason = if submission.submission_generation <= 0 and
+            not submission.fallback_required:
+            "strict-vulkan-submission-generation-required"
+        else:
+            submission.fallback_reason
         return _engine2d_draw_ir_strict_vulkan_rejected(
-            submission.composition, submission.fallback_reason)
+            submission.composition, reason)
     var eng = submission.engine
+    val generation_before = eng.vulkan_submission_generation()
     val readback = eng.read_pixels_with_source()
-    _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(
+    val generation_after = eng.vulkan_submission_generation()
+    var linked = (generation_before == submission.submission_generation and
+        generation_after == submission.submission_generation and
+        readback.source == "device_readback" and
+        readback.backend_handle == submission.backend_handle and
+        readback.device_identity == submission.device_identity and
+        readback.pixel_count == eng.width().to_i64() * eng.height().to_i64())
+    if val Some(frame) = eng.latest_vulkan_frame_receipt():
+        linked = linked and frame.completion_known and not frame.cpu_fallback_used and
+            frame.backend_handle == submission.backend_handle and
+            frame.device_identity == submission.device_identity and
+            frame.device_fence_count == submission.submission_generation
+    else:
+        linked = false
+    var result = _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(
         submission.composition, submission.rendered_command_count,
         submission.skipped_command_count, readback, eng,
         submission.device_submit_count, submission.device_fence_count)
+    if not linked:
+        result.fallback_required = true
+        result.fallback_reason = "strict-vulkan-readback-submission-mismatch"
+        result.rendered_command_count = 0
+        result.skipped_command_count = _engine2d_draw_ir_strict_vulkan_command_count(
+            submission.composition)
+        result.pixels = []
+        result.readback_source = "device_evidence_rejected"
+        result.backend_handle = 0
+        result.device_identity = 0
+        result.readback_checksum = 0
+        result.device_submit_count = 0
+        result.device_fence_count = 0
+        return result
+    result.submission_generation = submission.submission_generation
+    result.frame_width = eng.width()
+    result.frame_height = eng.height()
+    result
 
 fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Execute only device-attested Vulkan DrawIR primitives.
@@ -3162,6 +3441,7 @@ fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, c
     val font_required = _engine2d_draw_ir_composition_has_text(composition)
     val readback_valid = (result.readback_source == "device_readback" and
         result.backend_handle > 0 and result.device_identity > 0 and
+        result.submission_generation > 0 and
         result.pixels.len() == engine.width().to_i64() * engine.height().to_i64())
     val commands_valid = (result.rendered_command_count == expected and
         result.skipped_command_count == 0 and not result.fallback_required)
@@ -3184,6 +3464,9 @@ fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, c
     # submit/readback receipt computed before font and command validation.
     result.device_submit_count = 0
     result.device_fence_count = 0
+    result.submission_generation = 0
+    result.frame_width = 0
+    result.frame_height = 0
     result
 
 fn _engine2d_draw_ir_composition_has_text(composition: DrawIrComposition) -> bool:
@@ -3195,6 +3478,11 @@ fn _engine2d_draw_ir_composition_has_text(composition: DrawIrComposition) -> boo
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
+    if _engine2d_draw_ir_composition_has_unsupported_v4_state(composition):
+        return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
+            plan, 0, _engine2d_draw_ir_strict_vulkan_command_count(composition),
+            "draw-ir-v4-state-unsupported",
+            engine2d_readback([], "preflight_rejected"))
     # Preserve the public fallback invariant from the original inputs. The
     # native cross-module aggregate path can lose this bool from `plan`.
     val gpu_fallback_required = (
@@ -3488,6 +3776,15 @@ fn engine2d_draw_ir_prepare_damage_plan(
     var spatial_indexes: [Engine2dDrawIrSpatialIndex] = []
     for batch in composition.batches:
         val embedding = batch.embedding
+        for command in batch.commands:
+            if draw_ir_command_has_unsupported_v4_state(command):
+                return _engine2d_draw_ir_invalid_prepared_damage_plan(
+                    composition, damage_rects, width, height, content_identity,
+                    "draw-ir-v4-state-unsupported")
+            if command.fractional_geometry != nil:
+                return _engine2d_draw_ir_invalid_prepared_damage_plan(
+                    composition, damage_rects, width, height, content_identity,
+                    "fractional-geometry-unsupported")
         if (embedding.width <= 0 or embedding.height <= 0 or
             embedding.opacity_milli != 1000 or
             _engine2d_draw_ir_batch_samples_parent(batch)):
@@ -3549,6 +3846,21 @@ fn engine2d_draw_ir_render_damaged_with_images(
     use the existing conservative full-frame executor.
     """
     var eng = engine
+    for command in commands:
+        if draw_ir_command_has_unsupported_v4_state(command):
+            return Engine2dDrawIrTileOutcome(
+                engine: eng, tiles_total: 0, tiles_rendered: 0,
+                tiles_skipped: 0, ops_rendered: 0,
+                ops_skipped: commands.len().to_i32(),
+                unsupported_kinds: "draw-ir-v4-state-unsupported",
+                readback: engine2d_readback([], "preflight_rejected"))
+        if command.fractional_geometry != nil:
+            return Engine2dDrawIrTileOutcome(
+                engine: eng, tiles_total: 0, tiles_rendered: 0,
+                tiles_skipped: 0, ops_rendered: 0,
+                ops_skipped: commands.len().to_i32(),
+                unsupported_kinds: "fractional-geometry-unsupported",
+                readback: engine2d_readback([], "preflight_rejected"))
     if not _engine2d_draw_ir_damage_rects_valid(
         damage_rects, eng.width(), eng.height()):
         return Engine2dDrawIrTileOutcome(
@@ -3761,6 +4073,9 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
     defer_cpu_present: bool
 ) -> Engine2dDrawIrTileOutcome:
     """Retained damaged replay with the composition's resolved image table."""
+    if _engine2d_draw_ir_composition_has_unsupported_v4_state(composition):
+        return engine2d_draw_ir_retained_rejected(
+            engine, "draw-ir-v4-state-unsupported")
     if (defer_cpu_present and engine.backend_name() != "cpu" and
         engine.backend_name() != "cpu_simd" and
         engine.backend_name() != "software"):
@@ -3935,6 +4250,9 @@ fn engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
     next revision. Any unsupported command, invalid damage, fallback, missing
     device observation, or host readback rejects the whole submission.
     """
+    if _engine2d_draw_ir_composition_has_unsupported_v4_state(composition):
+        return _engine2d_draw_ir_strict_vulkan_submit_rejected(
+            engine, composition, "strict-vulkan-affine-damage-unsupported")
     if engine.backend_name() != "vulkan":
         return _engine2d_draw_ir_strict_vulkan_submit_rejected(
             engine, composition, "strict-vulkan-backend-required")
@@ -3987,11 +4305,13 @@ fn engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
             (eng.font_execution_target() == "vulkan" and
                 evidence.device_executed and evidence.promotion_ready and
                 evidence.readback_source == "device_readback"))
+    val submission_generation = eng.vulkan_submission_generation()
     val completed = (
         outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0 and
         outcome.ops_skipped == outcome.ops_culled_by_damage and
         observed.valid and completion_known and no_readback and
         readback_bytes == 0 and backend_handle > 0 and device_identity > 0 and
+        submission_generation > 0 and
         font_valid)
     Engine2dDrawIrAdvSubmitResult(
         engine: eng, composition: composition,
@@ -4006,7 +4326,8 @@ fn engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
         device_fence_count: if completed: observed.fence_count else: 0,
         completion_known: completed, no_readback: completed,
         readback_bytes: if completed: 0 else: readback_bytes,
-        font_evidence_valid: font_valid)
+        font_evidence_valid: font_valid,
+        submission_generation: if completed: submission_generation else: 0)
 
 fn engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images(
     engine: Engine2D,
@@ -4072,6 +4393,21 @@ fn engine2d_draw_ir_render_tiled(
     tile_items: [i32]
 ) -> Engine2dDrawIrTileOutcome:
     var eng = engine
+    for command in commands:
+        if draw_ir_command_has_unsupported_v4_state(command):
+            return Engine2dDrawIrTileOutcome(
+                engine: eng, tiles_total: 0, tiles_rendered: 0,
+                tiles_skipped: 0, ops_rendered: 0,
+                ops_skipped: commands.len().to_i32(),
+                unsupported_kinds: "draw-ir-v4-state-unsupported",
+                readback: engine2d_readback([], "preflight_rejected"))
+        if command.fractional_geometry != nil:
+            return Engine2dDrawIrTileOutcome(
+                engine: eng, tiles_total: 0, tiles_rendered: 0,
+                tiles_skipped: 0, ops_rendered: 0,
+                ops_skipped: commands.len().to_i32(),
+                unsupported_kinds: "fractional-geometry-unsupported",
+                readback: engine2d_readback([], "preflight_rejected"))
     val tiles = tile_x.len()
     var tiles_rendered = 0
     var tiles_skipped = 0

@@ -1,0 +1,81 @@
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, draw_ir, corpus, clip, fail_closed
+"""Pinned corpus case 06 retains the real Web child geometry and ancestor clip."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.renderdoc.corpus_case06_oracle.{
+    CORPUS_CASE06_SOURCE_SHA256, CORPUS_CASE06_WIDTH,
+    CORPUS_CASE06_HEIGHT}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_corpus_case06_gpu_scene_from_html}
+
+val FIXTURE: text =
+    "test/fixtures/html_css/corpus/cases/06-rectangular-clip.html"
+
+describe "pinned Web corpus case 06 Stage-1 lowering":
+    it "rejects changed source bytes before Web producer admission":
+        step("Change a pinned clip offset and require source rejection")
+        val html = read_file(FIXTURE)
+        expect(sha256_text(html)).to_equal(CORPUS_CASE06_SOURCE_SHA256)
+        val changed = html.replace("left:40px;top:25px", "left:41px;top:25px")
+        expect(changed == html).to_be(false)
+        match web_corpus_case06_gpu_scene_from_html(changed):
+            case Err(reason):
+                expect(reason).to_equal("web-corpus-case06-html-sha256-mismatch")
+            case Ok(_): fail_test("changed corpus clip source must not be admitted")
+
+    it "keeps five visible rectangles linked to six producer commands":
+        step("Lower pinned Web layout with the transparent clip parent omitted")
+        val html = read_file(FIXTURE)
+        match web_corpus_case06_gpu_scene_from_html(html):
+            case Err(reason): fail_test("pinned Web clip admission blocked: {reason}")
+            case Ok(scene):
+                expect(scene.html_sha256).to_equal(CORPUS_CASE06_SOURCE_SHA256)
+                expect(scene.source_draw_ir_sha256).to_equal(
+                    sha256_text(draw_ir_to_sdn(scene.source_draw_ir)))
+                expect(scene.source_command_count).to_equal(6)
+                expect(scene.gpu_command_count).to_equal(5)
+                expect(scene.source_command_indexes).to_equal([0i64, 1, 2, 3, 5])
+                expect(scene.gpu_draw_ir.batches.len()).to_equal(1)
+                val batch = scene.gpu_draw_ir.batches[0]
+                expect(batch.embedding.width).to_equal(CORPUS_CASE06_WIDTH)
+                expect(batch.embedding.height).to_equal(CORPUS_CASE06_HEIGHT)
+                expect(batch.embedding.clip).to_equal(false)
+                val source = scene.source_draw_ir.batches[0].commands
+                expect(source[4].color).to_equal(0u32)
+                expect(source[4].x).to_equal(40)
+                expect(source[4].y).to_equal(40)
+                expect(source[4].width).to_equal(160)
+                expect(source[4].height).to_equal(100)
+                var i = 0
+                while i < batch.commands.len():
+                    val source_index = scene.source_command_indexes[i]
+                    val producer = source[source_index]
+                    val gpu = batch.commands[i]
+                    expect(gpu.component_id).to_equal(producer.component_id)
+                    expect(gpu.x).to_equal(producer.x)
+                    expect(gpu.y).to_equal(producer.y)
+                    expect(gpu.width).to_equal(producer.width)
+                    expect(gpu.height).to_equal(producer.height)
+                    expect(gpu.color).to_equal(producer.color)
+                    expect(gpu.parent_id).to_equal("")
+                    i = i + 1
+                val child = batch.commands[4]
+                expect(child.x).to_equal(80)
+                expect(child.y).to_equal(65)
+                expect(child.width).to_equal(220)
+                expect(child.height).to_equal(170)
+                expect(child.color).to_equal(0xff00aaffu32)
+                expect(child.clip_rect.present).to_equal(true)
+                expect(child.clip_rect.x).to_equal(source[4].x)
+                expect(child.clip_rect.y).to_equal(source[4].y)
+                expect(child.clip_rect.width).to_equal(source[4].width)
+                expect(child.clip_rect.height).to_equal(source[4].height)
+                # The visible child is the intersection: x=80..199, y=65..139.
+                expect(child.clip_rect.x + child.clip_rect.width).to_equal(200)
+                expect(child.clip_rect.y + child.clip_rect.height).to_equal(140)

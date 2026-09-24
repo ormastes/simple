@@ -1,0 +1,143 @@
+# Parent-owned local scheduler boundary. A successful return authorizes the
+# parent to dispatch, acknowledge revocation, or acknowledge publication only
+# after the corresponding journal append has been made durable.
+use app.build.scheduler.planner.{SchedulerActionV1}
+use app.build.scheduler.ledger.{SchedulerCapacityV1, admit_attempt_v1,
+    revoke_attempt_v1, fail_attempt_v1}
+use app.build.scheduler.broker.{FencedCandidateV1, accept_result_v1}
+use app.build.scheduler.journal.{SchedulerJournalStateV1,
+    scheduler_journal_open_v1, scheduler_journal_admit_v1,
+    scheduler_journal_revoke_v1, scheduler_journal_publish_v1,
+    scheduler_journal_fail_v1}
+use compiler.common.build_contract.{AcceptedResult, ActionResultCandidate}
+
+struct SchedulerDispatchV1:
+    state: SchedulerJournalStateV1
+    dispatch: bool
+    fence: i64
+    error: text
+
+struct SchedulerRevocationV1:
+    state: SchedulerJournalStateV1
+    acknowledged: bool
+    fence: i64
+    error: text
+
+struct SchedulerPublicationV1:
+    state: SchedulerJournalStateV1
+    acknowledged: bool
+    accepted: AcceptedResult
+    error: text
+
+fn _coordinator_empty_accepted_v1() -> AcceptedResult:
+    AcceptedResult(1, "", "", "", "")
+
+fn scheduler_coordinator_open_v1(root: text) -> SchedulerJournalStateV1:
+    """Open or recover one journal for an exclusive parent owner."""
+    scheduler_journal_open_v1(root)
+
+fn scheduler_coordinator_admit_from_state_v1(root: text,
+    current: SchedulerJournalStateV1, actions: [SchedulerActionV1],
+    action_digest: text, attempt_id: text, worker_id: text,
+    capacity: SchedulerCapacityV1, now_tick: i64) -> SchedulerDispatchV1:
+    """Dispatch only after a durable append using the owner's current state.
+
+    The caller must exclusively own root, pass the state returned by open or
+    the previous successful coordinator call, and discard it after any journal
+    error. This path does not replay the journal for each transition.
+    """
+    if current.error != "":
+        return SchedulerDispatchV1(current, false, 0, current.error)
+    val transition = admit_attempt_v1(current.ledger, actions, action_digest,
+        attempt_id, worker_id, capacity, now_tick)
+    if not transition.admitted or transition.error != "":
+        return SchedulerDispatchV1(current, false, 0, transition.error)
+    val stored = scheduler_journal_admit_v1(root, current, transition)
+    if stored.error != "":
+        return SchedulerDispatchV1(stored, false, 0, stored.error)
+    SchedulerDispatchV1(stored, true, transition.fence, "")
+
+fn scheduler_coordinator_revoke_from_state_v1(root: text,
+    current: SchedulerJournalStateV1,
+    attempt_id: text) -> SchedulerRevocationV1:
+    """Acknowledge revocation after its fence is durable under one root owner."""
+    if current.error != "":
+        return SchedulerRevocationV1(current, false, 0, current.error)
+    val transition = revoke_attempt_v1(current.ledger, attempt_id)
+    if not transition.admitted or transition.error != "":
+        return SchedulerRevocationV1(current, false, 0, transition.error)
+    val stored = scheduler_journal_revoke_v1(root, current, attempt_id, transition)
+    if stored.error != "":
+        return SchedulerRevocationV1(stored, false, 0, stored.error)
+    SchedulerRevocationV1(stored, true, transition.fence, "")
+
+fn scheduler_coordinator_fail_from_state_v1(root: text,
+    current: SchedulerJournalStateV1, candidate: ActionResultCandidate,
+    fence: i64, classification: text) -> SchedulerRevocationV1:
+    """Journal a failed current attempt and its diagnostics before retry."""
+    if current.error != "":
+        return SchedulerRevocationV1(current, false, 0, current.error)
+    val transition = fail_attempt_v1(current.ledger, candidate, fence,
+        classification)
+    if not transition.admitted or transition.error != "":
+        return SchedulerRevocationV1(current, false, 0, transition.error)
+    val stored = scheduler_journal_fail_v1(root, current, transition)
+    if stored.error != "":
+        return SchedulerRevocationV1(stored, false, 0, stored.error)
+    SchedulerRevocationV1(stored, true, transition.fence, "")
+
+fn scheduler_coordinator_publish_from_state_v1(root: text,
+    current: SchedulerJournalStateV1, fenced: FencedCandidateV1,
+    verified_output_manifest_digest: text) -> SchedulerPublicationV1:
+    """Acknowledge acceptance only after the parent verifies and journals it.
+
+    The parent must first validate output bytes and place them in immutable
+    storage. The digest argument is that independently verified manifest
+    digest, never the candidate's untrusted digest copied by the coordinator.
+    """
+    val empty = _coordinator_empty_accepted_v1()
+    if current.error != "":
+        return SchedulerPublicationV1(current, false, empty, current.error)
+    val publication = accept_result_v1(current.ledger, fenced,
+        verified_output_manifest_digest)
+    if not publication.published or publication.error != "":
+        return SchedulerPublicationV1(current, false, empty, publication.error)
+    val stored = scheduler_journal_publish_v1(root, current, publication)
+    if stored.error != "":
+        return SchedulerPublicationV1(stored, false, empty, stored.error)
+    SchedulerPublicationV1(stored, true, publication.accepted, "")
+
+fn scheduler_coordinator_admit_v1(root: text, actions: [SchedulerActionV1],
+                                  action_digest: text, attempt_id: text,
+                                  worker_id: text, capacity: SchedulerCapacityV1,
+                                  now_tick: i64) -> SchedulerDispatchV1:
+    """Open/recover and admit one attempt when no owner state is retained."""
+    scheduler_coordinator_admit_from_state_v1(root, scheduler_coordinator_open_v1(root),
+        actions, action_digest, attempt_id, worker_id, capacity, now_tick)
+
+fn scheduler_coordinator_revoke_v1(root: text,
+                                   attempt_id: text) -> SchedulerRevocationV1:
+    """Open/recover and revoke one attempt when no owner state is retained."""
+    scheduler_coordinator_revoke_from_state_v1(root, scheduler_coordinator_open_v1(root),
+        attempt_id)
+
+fn scheduler_coordinator_fail_v1(root: text, candidate: ActionResultCandidate,
+    fence: i64, classification: text) -> SchedulerRevocationV1:
+    scheduler_coordinator_fail_from_state_v1(root, scheduler_coordinator_open_v1(root),
+        candidate, fence, classification)
+
+fn scheduler_coordinator_publish_v1(root: text, fenced: FencedCandidateV1,
+    verified_output_manifest_digest: text) -> SchedulerPublicationV1:
+    """Open/recover and publish one result when no owner state is retained."""
+    scheduler_coordinator_publish_from_state_v1(root, scheduler_coordinator_open_v1(root),
+        fenced, verified_output_manifest_digest)
+
+export SchedulerDispatchV1, SchedulerRevocationV1, SchedulerPublicationV1
+export scheduler_coordinator_open_v1
+export scheduler_coordinator_admit_from_state_v1
+export scheduler_coordinator_revoke_from_state_v1
+export scheduler_coordinator_fail_from_state_v1
+export scheduler_coordinator_publish_from_state_v1
+export scheduler_coordinator_admit_v1, scheduler_coordinator_revoke_v1
+export scheduler_coordinator_fail_v1
+export scheduler_coordinator_publish_v1

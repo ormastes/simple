@@ -2,6 +2,9 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_s
 export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_decl_apply.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
+    web_box_geometry_capture_tokens, web_box_geometry_tokens_reason,
+    web_fractional_capture_authored_decls}
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -1160,6 +1163,14 @@ fn _apply_decls_on_writing_mode(
         return st
     # One table owns ordinary values, Grid values, and authored metadata.
     val table = decl_table_build(decls)
+    # Capture winning authored lengths before either integer declaration path
+    # can truncate them. Later declarations replace the same property slot.
+    val geometry_tokens = web_box_geometry_capture_tokens(
+        st.box_geometry_raw_tokens, table)
+    val geometry_unresolved = web_box_geometry_tokens_reason(
+        geometry_tokens) != ""
+    val fractional_decls = web_fractional_capture_authored_decls(
+        st.fractional_authored_decls, table)
     val has_grid_declaration = (
         decl_tbl_last_index(table, "grid-template-columns") >= 0 or
         decl_tbl_last_index(table, "grid-template-rows") >= 0 or
@@ -1173,9 +1184,13 @@ fn _apply_decls_on_writing_mode(
         val ordinary = _apply_decls_without_grid(
             st, decls, table, em_base, logical_writing_mode, apply_display
         )
-        return apply_authored_style_metadata(
+        var result = apply_authored_style_metadata(
             ordinary, st, table, logical_writing_mode
         )
+        result.box_geometry_raw_tokens = geometry_tokens
+        result.box_geometry_unresolved = geometry_unresolved
+        result.fractional_authored_decls = fractional_decls
+        return result
     val columns = st.grid_template_columns
     val rows = st.grid_template_rows
     val column = st.grid_column
@@ -1194,7 +1209,12 @@ fn _apply_decls_on_writing_mode(
     result.grid_area = area
     result.grid_auto_flow_column = auto_flow_column
     apply_grid_decls(result, table)
-    apply_authored_style_metadata(result, st, table, logical_writing_mode)
+    result = apply_authored_style_metadata(
+        result, st, table, logical_writing_mode)
+    result.box_geometry_raw_tokens = geometry_tokens
+    result.box_geometry_unresolved = geometry_unresolved
+    result.fractional_authored_decls = fractional_decls
+    result
 
 fn apply_decls_on_writing_mode(
     st: Style, decls: text, em_base: i32, logical_writing_mode: text

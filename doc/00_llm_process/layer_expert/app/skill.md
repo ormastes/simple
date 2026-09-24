@@ -32,6 +32,17 @@ When project work changes this layer's public contract, source ownership, tests,
 
 Template: [layer_skill.md](../../template/layer_skill.md)
 
+## Distributed build CI handoff (2026-09-26)
+
+`src/app/build/signed_build_ci_observation.spl` compares a caller-supplied
+current PR, GitHub/local integration tree, protected identities, manifest and
+gate digest before delegating to signed artifact verification. It is a pure
+consistency check. The app layer must receive those values from an independent
+base-owned GitHub collector and must keep the required job reporting a result
+even when local signed work is reused. See the
+[distributed build feature wiki](../../feature_expert/dist_build_scheduler/skill.md)
+and the open protected-observation tracking record.
+
 ## Session update 2026-09-06 — the silent-rewind merge class
 
 **A PR built on a stale snapshot can DELETE landed work while merging cleanly.**

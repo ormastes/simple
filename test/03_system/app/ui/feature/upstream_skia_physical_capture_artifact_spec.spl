@@ -1,0 +1,97 @@
+# @req REQ-2D-003 REQ-2D-005 REQ-2D-006
+# @cover src/lib/skia/backend/upstream_ganesh_vulkan/physical_capture_artifact.spl 80%
+# @tag: system, skia, vulkan, physical_device
+"""Negative controls for the controlled Skia capture candidate adapter.
+
+Constructed frames are deliberately incomplete and are never GPU evidence.
+"""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use common.renderdoc.physical_vulkan_2d_qualification.{PreparedRenderScene}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{UpstreamSkiaGaneshFrame}
+use std.skia.backend.upstream_ganesh_vulkan.physical_capture_artifact.{
+    upstream_skia_controlled_rectangle_artifact,
+    upstream_skia_controlled_clip_artifact}
+
+fn controlled_scene() -> PreparedRenderScene:
+    PreparedRenderScene(
+        fixture_id: "controlled-opaque-rect-v1",
+        source_path: "test/fixtures/simple_2d_skia/controlled_opaque_rect_v1.sdn",
+        source_sha256: "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3",
+        scene_scope: "controlled-rectangle-only",
+        render_degraded: false, degrade_reason: "")
+
+fn controlled_clip_scene() -> PreparedRenderScene:
+    PreparedRenderScene(
+        fixture_id: "controlled-clipped-rect-v2",
+        source_path: "test/fixtures/simple_2d_skia/controlled_clipped_rect_v2.sdn",
+        source_sha256: "b16d53f7785a09559bf209797fcb724906f896b93d23eff512bda69ec44d8f2f",
+        scene_scope: "controlled-clipped-rectangle-only",
+        render_degraded: false, degrade_reason: "")
+
+fn constructed_frame() -> UpstreamSkiaGaneshFrame:
+    UpstreamSkiaGaneshFrame(width: 16, height: 16, rgba_bytes: [],
+        provider_identity: 0x534b4941564b0001, device_identity: 0,
+        resource_id: 1, submission_token: 1, completion_token: 1,
+        readback_checksum: 1, backend_handle: 1)
+
+describe "controlled upstream Skia physical capture candidate":
+    it "rejects a clipped-scene frame without completed native readback":
+        # @req REQ-2D-006
+        step("Reject identity before completed readback for the clipped fixture")
+        val result = upstream_skia_controlled_clip_artifact(
+            constructed_frame(), controlled_clip_scene())
+        match result:
+            case Err(reason):
+                expect(reason).to_equal("upstream Skia completed device receipt missing")
+            case Ok(_): fail_test("constructed clipped frame must not become an artifact")
+
+    it "rejects a constructed frame with no observed submit, wait, or readback":
+        step("Reject identity before completed readback")
+        val result = upstream_skia_controlled_rectangle_artifact(
+            constructed_frame(), controlled_scene())
+        match result:
+            case Err(reason):
+                expect(reason).to_equal("upstream Skia completed device receipt missing")
+            case Ok(_): fail_test("constructed frame must not become a capture artifact")
+
+    it "rejects a software Vulkan device even with synthetic counters":
+        step("Require a discrete or integrated selected native device")
+        var frame = constructed_frame()
+        frame.device_submit_count = 1
+        frame.device_wait_count = 1
+        frame.device_readback_count = 1
+        frame.device_type = 4
+        val result = upstream_skia_controlled_rectangle_artifact(
+            frame, controlled_scene())
+        match result:
+            case Err(reason):
+                expect(reason).to_equal("upstream Skia physical Vulkan device required")
+            case Ok(_): fail_test("software Vulkan must not become a physical artifact")
+
+    it "rejects synthetic bytes with an invalid native readback checksum":
+        step("Validate the completed frame bytes before packaging a candidate")
+        var frame = constructed_frame()
+        var pixels: [i64] = []
+        var index = 0
+        while index < 16 * 16 * 4:
+            pixels.push(0)
+            index = index + 1
+        frame.rgba_bytes = pixels
+        frame.device_submit_count = 1
+        frame.device_wait_count = 1
+        frame.device_readback_count = 1
+        frame.device_type = 2
+        frame.physical_device_uuid = "11111111111111111111111111111111"
+        frame.driver_uuid = "22222222222222222222222222222222"
+        frame.vendor_id = 1
+        frame.device_id = 1
+        frame.api_version = 1
+        frame.driver_version = 1
+        val result = upstream_skia_controlled_rectangle_artifact(
+            frame, controlled_scene())
+        match result:
+            case Err(reason):
+                expect(reason).to_equal("upstream Skia readback checksum mismatch")
+            case Ok(_): fail_test("synthetic bytes must not become a capture artifact")

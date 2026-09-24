@@ -6,6 +6,9 @@
 #include "runtime.h"
 #include <errno.h>
 #include <stdio.h>
+#if defined(__APPLE__)
+#include <sys/stdio.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
@@ -280,6 +283,14 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (errno == EEXIST) return 0;
     if (errno != ENOSYS && errno != EINVAL) return -1;
 #endif
+#if defined(__APPLE__)
+    /* Unlike link(2), exclusive rename also publishes directories. */
+    if (renamex_np(staged, destination, RENAME_EXCL) == 0) return 1;
+    if (errno == EEXIST) return 0;
+    if (errno != ENOTSUP && errno != EOPNOTSUPP && errno != EINVAL) return -1;
+#endif
+    struct stat source_stat;
+    if (lstat(staged, &source_stat) != 0 || !S_ISREG(source_stat.st_mode)) return -1;
     if (link(staged, destination) != 0) return errno == EEXIST ? 0 : -1;
     (void)unlink(staged); return 1;
 #endif

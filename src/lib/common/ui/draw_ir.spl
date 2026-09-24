@@ -3,7 +3,11 @@
 # This is a pure Simple boundary. GPU execution is deliberately deferred to
 # backend plugins that consume these batches and report fallback decisions.
 
-pub val DRAW_IR_SCHEMA_VERSION: text = "simple-draw-ir-v2"
+pub val DRAW_IR_SCHEMA_VERSION: text = "simple-draw-ir-v3"
+pub val DRAW_IR_SCHEMA_VERSION_V2: text = "simple-draw-ir-v2"
+pub val DRAW_IR_SCHEMA_VERSION_V4: text = "simple-draw-ir-v4"
+pub val DRAW_IR_RASTER_ALIASED_PIXEL_CENTER: text = "aliased-pixel-center"
+pub val DRAW_IR_RASTER_COVERAGE_AA: text = "coverage-aa"
 pub val DRAW_IR_BACKEND_CPU: text = "cpu"
 pub val DRAW_IR_BACKEND_GPU: text = "gpu"
 pub val DRAW_IR_BACKEND_AUTO: text = "auto"
@@ -32,6 +36,26 @@ struct DrawIrRect:
     y: i32
     width: i32
     height: i32
+
+# V3 command-space geometry. When present this is authoritative; the legacy
+# integer x/y/width/height fields are compatibility storage only and must not
+# be used to render this command. A consumer without fractional support must
+# reject the command before dispatch.
+struct DrawIrFractionalGeometry:
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+
+# V4 local-to-surface affine map. The fractional command geometry remains in
+# local coordinates and is transformed by this matrix at raster time.
+struct DrawIrAffine2D:
+    a: f64
+    b: f64
+    c: f64
+    d: f64
+    tx: f64
+    ty: f64
 
 struct DrawIrStyleProp:
     key: text
@@ -85,6 +109,9 @@ struct DrawIrCommand:
     image_uri: text
     points: [DrawIrPoint]
     glyph_run: DrawIrGlyphRunPayload
+    fractional_geometry: DrawIrFractionalGeometry? = nil
+    affine_transform: DrawIrAffine2D? = nil
+    raster_policy: text = "aliased-pixel-center"
 
 struct DrawIrSourceInfo:
     source_kind: text
@@ -168,6 +195,12 @@ fn draw_ir_point(x: i32, y: i32) -> DrawIrPoint:
 fn draw_ir_rect_bounds(x: i32, y: i32, width: i32, height: i32) -> DrawIrRect:
     DrawIrRect(present: true, x: x, y: y, width: width, height: height)
 
+fn draw_ir_fractional_geometry(x: f64, y: f64, width: f64, height: f64) -> DrawIrFractionalGeometry:
+    DrawIrFractionalGeometry(x: x, y: y, width: width, height: height)
+
+pub fn draw_ir_affine2d(a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64) -> DrawIrAffine2D:
+    DrawIrAffine2D(a: a, b: b, c: c, d: d, tx: tx, ty: ty)
+
 fn draw_ir_no_rect() -> DrawIrRect:
     DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
 
@@ -226,6 +259,28 @@ fn draw_ir_rect(component_id: text, x: i32, y: i32, width: i32, height: i32, col
     draw_ir_rect_clipped(
         component_id, x, y, width, height, color, draw_ir_no_rect(), parent_id
     )
+
+# REQ-2D-002: retain all four coordinates exactly in the versioned payload.
+# Zero legacy fields are deliberately not an approximation of fractional data.
+fn draw_ir_fractional_rect(component_id: text, x: f64, y: f64, width: f64, height: f64, color: u32, parent_id: text = "") -> DrawIrCommand:
+    var command = draw_ir_rect(component_id, 0, 0, 0, 0, color, parent_id)
+    command.fractional_geometry = draw_ir_fractional_geometry(x, y, width, height)
+    command
+
+# V4 draws a local rectangle through an explicit affine map. Legacy integer
+# fields stay zero and cannot be mistaken for a rounded transformed extent.
+pub fn draw_ir_affine_rect(component_id: text, width: f64, height: f64, color: u32, affine_transform: DrawIrAffine2D, raster_policy: text = "aliased-pixel-center", parent_id: text = "") -> DrawIrCommand:
+    if raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER and raster_policy != DRAW_IR_RASTER_COVERAGE_AA:
+        panic("unsupported Draw IR raster policy")
+    var command = draw_ir_fractional_rect(component_id, 0.0, 0.0, width, height, color, parent_id)
+    command.affine_transform = affine_transform
+    command.raster_policy = raster_policy
+    command
+
+# Legacy renderers/lowerers use this preflight before touching integer-only
+# command fields. The default policy alone is compatible with v3 commands.
+pub fn draw_ir_command_has_unsupported_v4_state(command: DrawIrCommand) -> bool:
+    command.affine_transform != nil or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER
 
 fn draw_ir_rect_clipped(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, clip_rect: DrawIrRect, parent_id: text = "") -> DrawIrCommand:
     DrawIrCommand(
@@ -522,6 +577,19 @@ fn draw_ir_batch_with_source(batch_id: text, backend_target: text, embedding: Dr
 fn draw_ir_batch(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand]) -> DrawIrBatch:
     draw_ir_batch_with_source(batch_id, backend_target, embedding, commands, draw_ir_source_manual())
 
+pub fn draw_ir_batch_with_source_v4(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand], source: DrawIrSourceInfo) -> DrawIrBatch:
+    DrawIrBatch(
+        schema: DRAW_IR_SCHEMA_VERSION_V4,
+        batch_id: batch_id,
+        backend_target: backend_target,
+        source: source,
+        embedding: embedding,
+        commands: commands
+    )
+
+pub fn draw_ir_batch_v4(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand]) -> DrawIrBatch:
+    draw_ir_batch_with_source_v4(batch_id, backend_target, embedding, commands, draw_ir_source_manual())
+
 var _draw_ir_composition_generation: i64 = 0
 
 # Hand out the next composition generation in the current serial producer
@@ -538,6 +606,16 @@ pub fn draw_ir_next_composition_generation() -> i64:
 fn draw_ir_composition(composition_id: text, scene_key: text, backend_target: text, batches: [DrawIrBatch]) -> DrawIrComposition:
     DrawIrComposition(
         schema: DRAW_IR_SCHEMA_VERSION,
+        composition_id: composition_id,
+        scene_key: scene_key,
+        backend_target: backend_target,
+        batches: batches,
+        generation: draw_ir_next_composition_generation()
+    )
+
+pub fn draw_ir_composition_v4(composition_id: text, scene_key: text, backend_target: text, batches: [DrawIrBatch]) -> DrawIrComposition:
+    DrawIrComposition(
+        schema: DRAW_IR_SCHEMA_VERSION_V4,
         composition_id: composition_id,
         scene_key: scene_key,
         backend_target: backend_target,
@@ -761,4 +839,4 @@ fn simple_2d_draw_ir_adv_composition_plan(composition: DrawIrComposition, gpu_av
         fallback_reason: _simple_2d_draw_ir_fallback_reason(composition.backend_target, gpu_available)
     )
 
-export DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_EDGE, DRAW_IR_COMMAND_GROUP, DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_PATH, DRAW_IR_COMMAND_PORT, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_EDGE_BEZIER, DRAW_IR_EDGE_ORTHOGONAL, DRAW_IR_EDGE_STRAIGHT, DRAW_IR_SCHEMA_VERSION, DRAW_IR_SOURCE_GUI_AST, DRAW_IR_SOURCE_HTML_AST, DRAW_IR_SOURCE_MANUAL, DRAW_IR_SOURCE_WM_SCENE
+export DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_EDGE, DRAW_IR_COMMAND_GROUP, DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_PATH, DRAW_IR_COMMAND_PORT, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_EDGE_BEZIER, DRAW_IR_EDGE_ORTHOGONAL, DRAW_IR_EDGE_STRAIGHT, DRAW_IR_SCHEMA_VERSION, DRAW_IR_SCHEMA_VERSION_V2, DRAW_IR_SCHEMA_VERSION_V4, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, DRAW_IR_RASTER_COVERAGE_AA, DRAW_IR_SOURCE_GUI_AST, DRAW_IR_SOURCE_HTML_AST, DRAW_IR_SOURCE_MANUAL, DRAW_IR_SOURCE_WM_SCENE, draw_ir_command_has_unsupported_v4_state

@@ -161,18 +161,19 @@ fn _sdn_index_of(s: text, ch: text) -> i64:
     -1
 
 fn _sdn_split_lines(s: text) -> [text]:
+    # Slice-based: emit s[start:i] at each '\n' instead of accumulating
+    # `cur = cur + c` per character, which was O(line_bytes^2) per line
+    # (a 1 MiB single-line document cost ~5e11 byte copies before parse).
     var out: [text] = []
-    var cur = ""
+    var start = 0
     var i = 0
-    while i < s.len():
-        val c = s.substring(i, i + 1)
-        if c == "\n":
-            out.push(cur)
-            cur = ""
-        else:
-            cur = cur + c
+    val n = s.len()
+    while i < n:
+        if s.byte_at(i) == 10:
+            out.push(s.slice(start, i))
+            start = i + 1
         i = i + 1
-    out.push(cur)
+    out.push(s.slice(start, n))
     out
 
 fn _sdn_parse_mapping(source: text) -> Result<SdnValue, text>:
@@ -512,30 +513,32 @@ fn _sdn_parse_inline_dict(s: text) -> SdnValue:
 fn _sdn_unescape(s: text) -> text:
     if not s.contains("\\"):
         return s
-    var out = ""
+    # Accumulate parts and join ONCE; the old `out = out + ch` per character
+    # was O(n^2) on every escaped string (each concat re-copied the prefix).
+    var parts: [text] = []
     var i = 0
     while i < s.len():
         val ch = s.substring(i, i + 1)
         if ch == "\\" and i + 1 < s.len():
             val nx = s.substring(i + 1, i + 2)
             if nx == "n":
-                out = out + "\n"
+                parts.push("\n")
             else:
                 if nx == "t":
-                    out = out + "\t"
+                    parts.push("\t")
                 else:
                     if nx == "r":
-                        out = out + "\r"
+                        parts.push("\r")
                     else:
                         if nx == "\"" or nx == "\\":
-                            out = out + nx
+                            parts.push(nx)
                         else:
-                            out = out + ch + nx
+                            parts.push(ch + nx)
             i = i + 2
         else:
-            out = out + ch
+            parts.push(ch)
             i = i + 1
-    out
+    parts.join("")
 
 # ---- table parsing ----
 

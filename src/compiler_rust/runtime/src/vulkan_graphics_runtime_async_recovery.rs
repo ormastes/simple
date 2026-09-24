@@ -112,7 +112,12 @@ pub extern "C" fn rt_vulkan_async_session_abandon_device(session: i64) -> i64 {
         }
         owner.accepting = false;
         owner.telemetry.quarantined = 1;
+        let next_selected_device_token = state.next_selected_device_token;
         let retained = std::mem::replace(&mut *state, super::vulkan_graphics_runtime_core::VulkanState::new());
+        // Preserve the process-lifetime token allocator even while this
+        // generation is terminally quarantined. A future recovery change must
+        // never reuse the retained device's selection token.
+        state.next_selected_device_token = next_selected_device_token;
         state.device_generation_quarantined = true;
         *quarantine = Some(retained);
         // Keep a terminal scalar snapshot: outstanding owner and byte counts

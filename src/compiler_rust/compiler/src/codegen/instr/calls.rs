@@ -2468,6 +2468,7 @@ pub(in crate::codegen) const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
     "rt_vulkan_device_type",
     "rt_vulkan_get_last_error",
     "rt_vulkan_selected_device_driver_identity",
+    "rt_vulkan_selected_device_identity_v1",
     "rt_vulkan_selected_device_name",
     "rt_vulkan_selected_device_type",
 ];

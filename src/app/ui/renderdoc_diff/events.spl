@@ -51,17 +51,52 @@ fn _i64_of(raw: text) -> i64:
         return 0
     raw.to_i64()
 
+fn _is_sha256(raw: text) -> bool:
+    """A v1 output digest identifies encoded PNG bytes, never absent evidence."""
+    if raw.len() != 64:
+        return false
+    var i = 0
+    while i < raw.len():
+        val c = raw.substring(i, i + 1)
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")):
+            return false
+        i = i + 1
+    true
+
+fn rdoc_events_evidence_error(set: RdocEventSet) -> text:
+    """Validate v1 event evidence, including sets built without the JSON parser."""
+    if set.error != "":
+        return set.error
+    if set.schema != RDOC_EVENTS_SCHEMA:
+        return "unsupported schema " + set.schema
+    var has_graphics_output = false
+    var e = 0
+    while e < set.events.len():
+        val item = set.events[e]
+        if item.event_type == "draw" or item.event_type == "clear":
+            if item.target_count <= 0 or not _is_sha256(item.output_sha256):
+                return "missing or invalid outputSha256 at events[" + e.to_text() + "]"
+            has_graphics_output = true
+        e = e + 1
+    if set.events.len() > 0 and not has_graphics_output:
+        return "no graphics output evidence"
+    ""
+
 fn rdoc_events_parse(src: text) -> RdocEventSet:
     """Parse an events.json document. A schema other than v1 is an error, not events."""
     val pairs = json_flatten(src)
     val schema = json_pair_lookup(pairs, "schema")
     val capture = json_pair_lookup(pairs, "capture")
+    val evidence_status = json_pair_lookup(pairs, "evidenceStatus")
     var empty: [RdocEvent] = []
     if schema == "":
         return RdocEventSet(schema: "", capture: capture, events: empty, error: "missing schema")
     if schema != RDOC_EVENTS_SCHEMA:
         return RdocEventSet(schema: schema, capture: capture, events: empty,
             error: "unsupported schema " + schema)
+    if evidence_status != "" and evidence_status != "ready":
+        return RdocEventSet(schema: schema, capture: capture, events: empty,
+            error: "incomplete exporter evidence " + evidence_status)
     var out: [RdocEvent] = []
     var counts: [text] = []
     var count_vals: [i64] = []
@@ -103,12 +138,16 @@ fn rdoc_events_parse(src: text) -> RdocEventSet:
             groups_x: _i64_of(json_pair_lookup(pairs, base + ".groupsX")),
             groups_y: _i64_of(json_pair_lookup(pairs, base + ".groupsY")),
             groups_z: _i64_of(json_pair_lookup(pairs, base + ".groupsZ")),
-            output_sha256: json_pair_lookup(pairs, base + ".outputSha256"),
+            output_sha256: json_pair_lookup(pairs, base + ".outputSha256").lower(),
             thumb_format: json_pair_lookup(pairs, base + ".thumbFormat"),
             thumb_base64: json_pair_lookup(pairs, base + ".thumbBase64"),
             ordinal: ordinal
         ))
         idx = idx + 1
+    val evidence_error = rdoc_events_evidence_error(
+        RdocEventSet(schema: schema, capture: capture, events: out, error: ""))
+    if evidence_error != "":
+        return RdocEventSet(schema: schema, capture: capture, events: empty, error: evidence_error)
     RdocEventSet(schema: schema, capture: capture, events: out, error: "")
 
 fn _rdoc_target_count(pairs: [JsonPair], base: text) -> i64:

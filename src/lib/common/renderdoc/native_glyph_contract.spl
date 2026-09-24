@@ -1,0 +1,222 @@
+# Versioned PRIVATE native text record for vector-font text submission.
+#
+# This contract exists because source glyph ids in shared DrawIR v3 are 5x7
+# charset indices (widget_draw_ir._charset_glyph_run pushes
+# glyph_index_for_char(ch)), which upstream vector-font consumers must never
+# reinterpret as real glyph ids (the upstream Skia provider therefore rejects
+# every text command today: upstream_ganesh_vulkan/provider.spl rectangle
+# payload rejection). This module is the bounded replacement: a resolved
+# subset of REAL cmap glyph ids for the pinned Noto Sans Mono face.
+#
+# NATIVE_GLYPH_CONTRACT_FORMAT is a private wire format of its own. It is NOT
+# the DrawIR payload v1/v2 rectangle wire, NOT the v3 affine wire, and its
+# glyph ids are NOT 5x7 charset indices. Bumping the format string is the
+# versioning mechanism; consumers must reject unknown formats.
+
+use std.common.encoding.font_registry.{
+    FontAssetCandidate, simpleos_default_font_asset_candidate,
+    selected_font_asset_identity, load_selected_font_file}
+use std.common.encoding.sfnt.{parse_offset_table, OtFont}
+use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
+use std.common.encoding.sfnt_glyf.{sfnt_glyph_advance_into}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px}
+use common.renderdoc.gui_input_scene.{GUI_INPUT_FONT_SHA256}
+
+pub val NATIVE_GLYPH_CONTRACT_FORMAT: text =
+    "simple-native-glyph-contract/v1"
+
+# Pinned face: the SimpleOS default Noto Sans Mono variable font. Same bytes
+# the GUI input scene pins (gui_input_scene.GUI_INPUT_FONT_SHA256).
+pub val NATIVE_GLYPH_CONTRACT_FONT_PATH: text =
+    "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+pub val NATIVE_GLYPH_CONTRACT_FONT_BYTES: i64 = 1708408
+pub val NATIVE_GLYPH_CONTRACT_FONT_SHA256: text = GUI_INPUT_FONT_SHA256
+pub val NATIVE_GLYPH_CONTRACT_FONT_FAMILY: text = "Noto Sans Mono"
+
+# Hard bound on the resolved subset, in the style of
+# gc_async_mut/gpu/engine2d/draw_ir_adv._E2D_DRAW_IR_MAX_TEXT_ITEMS (4096).
+pub val NATIVE_GLYPH_CONTRACT_MAX_GLYPHS: i64 = 4096
+pub val NATIVE_GLYPH_CONTRACT_MAX_SIZE_PX: i64 = 512
+
+# sfnt_glyf.sfnt_glyph_advance_into success cookie (meta[7]).
+val _NATIVE_GLYPH_ADVANCE_COOKIE: i64 = 310031
+val _NATIVE_GLYPH_SELECTOR_INDEX: i64 = 1
+
+pub struct NativeGlyphContractGlyph:
+    # REAL cmap glyph id for the pinned face (sfnt_cmap.sfnt_cmap_glyph_id),
+    # never a 5x7 charset index. 0 means "unmapped" and is always rejected.
+    glyph_id: u32
+    # Source character index (UTF-16-free, per-rune), monotonic nondecreasing.
+    cluster: i64
+    # hmtx advance in MILLI-pixels at size_px (sfnt_glyf meta[18] quantity).
+    advance_milli_px: i64
+    # Pair kern between this glyph and the next, in milli-pixels, from the
+    # face's `kern` table (sfnt_kern). The pinned Noto Sans Mono face ships
+    # GPOS kerning but NO `kern` table, so this lane answers 0 for every pair;
+    # GPOS PairPos shaping is deliberately NOT applied here and any future
+    # GPOS-driven delta must bump NATIVE_GLYPH_CONTRACT_FORMAT.
+    kern_after_milli_px: i64
+    # Exact cumulative pen at this glyph's origin, in milli-pixels:
+    # pen[i+1] = pen[i] + advance[i] + kern_after[i].
+    pen_milli_px: i64
+
+pub struct NativeGlyphContractSubset:
+    format: text
+    font_identity: text
+    font_sha256: text
+    font_bytes: i64
+    size_px: i64
+    text: text
+    glyphs: [NativeGlyphContractGlyph]
+
+fn _native_glyph_font_pinned(candidate: FontAssetCandidate) -> bool:
+    val cand_sha: text = candidate.sha256
+    val cand_bytes: i64 = candidate.byte_len
+    cand_sha == NATIVE_GLYPH_CONTRACT_FONT_SHA256 and
+        cand_bytes == NATIVE_GLYPH_CONTRACT_FONT_BYTES
+
+fn native_glyph_contract_resolve(text: text,
+    candidate: FontAssetCandidate, size_px: i64, flags: i64
+) -> Result<NativeGlyphContractSubset, text>:
+    """Resolve a bounded glyph subset from the pinned font, before device work.
+
+    Rejects, in order: font identity mismatch (sha/bytes/axes), unsupported
+    size, empty text, any nonzero flags (clipping, blend and effects are not
+    part of this contract and must be rejected before any device work), subset
+    overflow, invalid font bytes, control characters, codepoints the cmap
+    layer cannot map, and glyphs whose hmtx advance cannot be read. No device
+    work happens here."""
+    if not _native_glyph_font_pinned(candidate):
+        return Err("native-glyph-contract-font-identity-mismatch")
+    val identity = selected_font_asset_identity(candidate)
+    if not identity.starts_with(
+            "sha256={NATIVE_GLYPH_CONTRACT_FONT_SHA256};"):
+        return Err("native-glyph-contract-font-identity-mismatch")
+    if size_px <= 0 or size_px > NATIVE_GLYPH_CONTRACT_MAX_SIZE_PX:
+        return Err("native-glyph-contract-font-size-unsupported")
+    if text == "":
+        return Err("native-glyph-contract-empty-text")
+    if flags != 0:
+        return Err("native-glyph-contract-flags-unsupported")
+    if text.len() > NATIVE_GLYPH_CONTRACT_MAX_GLYPHS:
+        return Err("native-glyph-contract-subset-overflow")
+    val cand_path: text = candidate.local_path
+    val loaded = load_selected_font_file(cand_path)
+    val blob: [u8] = loaded.0
+    val validation = loaded.1
+    if not validation.valid or blob.len() != NATIVE_GLYPH_CONTRACT_FONT_BYTES:
+        return Err("native-glyph-contract-font-bytes-invalid")
+    val maybe_font = parse_offset_table(blob)
+    val font = match maybe_font:
+        Some(value): value
+        None: return Err("native-glyph-contract-font-bytes-invalid")
+    # Pass 1: cmap ids and hmtx advances for every rune. The pinned font has
+    # no `kern` table, so kern pairs resolve to 0 via sfnt_kern; the call is
+    # kept so a face change that introduces a kern table is consumed
+    # identically here and in the measurement lane.
+    var gids: [i64] = []
+    var advances: [i64] = []
+    var index: i64 = 0
+    for ch in text:
+        val cp = ch.char_code_at(0)
+        if cp < 32 or cp == 127:
+            return Err("native-glyph-contract-control-character")
+        val gid = sfnt_cmap_glyph_id(font, cp as u32)
+        if gid == 0:
+            return Err("native-glyph-contract-unsupported-shaping")
+        var meta: [i64] = [0; 20]
+        sfnt_glyph_advance_into(blob, _NATIVE_GLYPH_SELECTOR_INDEX,
+            gid as i64, size_px, meta)
+        if meta[7] != _NATIVE_GLYPH_ADVANCE_COOKIE:
+            return Err("native-glyph-contract-unsupported-shaping")
+        gids.push(gid as i64)
+        advances.push(meta[18])
+        index = index + 1
+    # Pass 2: pair kerns and the exact milli-pixel cumulative pen.
+    var glyphs: [NativeGlyphContractGlyph] = []
+    var pen: i64 = 0
+    index = 0
+    while index < gids.len():
+        var kern_after: i64 = 0
+        if index + 1 < gids.len():
+            kern_after = sfnt_blob_kern_pair_milli_px(
+                blob, gids[index], gids[index + 1], size_px)
+        glyphs.push(NativeGlyphContractGlyph(
+            glyph_id: gids[index] as u32,
+            cluster: index,
+            advance_milli_px: advances[index],
+            kern_after_milli_px: kern_after,
+            pen_milli_px: pen))
+        pen = pen + advances[index] + kern_after
+        index = index + 1
+    Ok(NativeGlyphContractSubset(
+        format: NATIVE_GLYPH_CONTRACT_FORMAT,
+        font_identity: identity,
+        font_sha256: NATIVE_GLYPH_CONTRACT_FONT_SHA256,
+        font_bytes: NATIVE_GLYPH_CONTRACT_FONT_BYTES,
+        size_px: size_px,
+        text: text,
+        glyphs: glyphs))
+
+fn native_glyph_contract_preflight(
+    subset: NativeGlyphContractSubset
+) -> Result<NativeGlyphContractSubset, text>:
+    """Whole-composition preflight for a resolved subset.
+
+    Runs over the complete subset BEFORE any device submission: format and
+    font identity pins, per-glyph cmap id nonzero, monotonic clusters,
+    positive advances, and an exact milli-pixel pen chain. Any failure is a
+    typed text error, never a boolean and never a device-side fault."""
+    if subset.format != NATIVE_GLYPH_CONTRACT_FORMAT:
+        return Err("native-glyph-contract-preflight-format-mismatch")
+    if subset.font_sha256 != NATIVE_GLYPH_CONTRACT_FONT_SHA256 or
+        subset.font_bytes != NATIVE_GLYPH_CONTRACT_FONT_BYTES or
+        not subset.font_identity.starts_with(
+            "sha256={NATIVE_GLYPH_CONTRACT_FONT_SHA256};"):
+        return Err("native-glyph-contract-preflight-font-identity-mismatch")
+    if subset.size_px <= 0 or subset.size_px > NATIVE_GLYPH_CONTRACT_MAX_SIZE_PX:
+        return Err("native-glyph-contract-preflight-font-size-invalid")
+    if subset.glyphs.len() == 0:
+        return Err("native-glyph-contract-preflight-empty-subset")
+    if subset.glyphs.len() > NATIVE_GLYPH_CONTRACT_MAX_GLYPHS:
+        return Err("native-glyph-contract-preflight-subset-overflow")
+    if subset.glyphs.len() != subset.text.len():
+        return Err("native-glyph-contract-preflight-text-length-mismatch")
+    var index: i64 = 0
+    while index < subset.glyphs.len():
+        val glyph = subset.glyphs[index]
+        val gid: u32 = glyph.glyph_id
+        val advance: i64 = glyph.advance_milli_px
+        val cluster: i64 = glyph.cluster
+        val pen: i64 = glyph.pen_milli_px
+        if gid == 0:
+            return Err("native-glyph-contract-preflight-zero-glyph-id")
+        if advance <= 0:
+            return Err("native-glyph-contract-preflight-nonpositive-advance")
+        if index == 0:
+            if cluster != 0 or pen != 0:
+                return Err("native-glyph-contract-preflight-pen-divergence")
+        else:
+            val prior = subset.glyphs[index - 1]
+            val prior_advance: i64 = prior.advance_milli_px
+            val prior_kern: i64 = prior.kern_after_milli_px
+            val prior_pen: i64 = prior.pen_milli_px
+            if cluster <= prior.cluster:
+                return Err("native-glyph-contract-preflight-cluster-regression")
+            if pen != prior_pen + prior_advance + prior_kern:
+                return Err("native-glyph-contract-preflight-pen-divergence")
+        index = index + 1
+    Ok(subset)
+
+fn native_glyph_contract_resolve_default(text: text, size_px: i64,
+    flags: i64) -> Result<NativeGlyphContractSubset, text>:
+    """Resolve against the pinned SimpleOS default face."""
+    native_glyph_contract_resolve(
+        text, simpleos_default_font_asset_candidate(), size_px, flags)
+
+export NATIVE_GLYPH_CONTRACT_FORMAT, NATIVE_GLYPH_CONTRACT_FONT_PATH,
+    NATIVE_GLYPH_CONTRACT_FONT_BYTES, NATIVE_GLYPH_CONTRACT_FONT_SHA256,
+    NATIVE_GLYPH_CONTRACT_FONT_FAMILY, NATIVE_GLYPH_CONTRACT_MAX_GLYPHS,
+    NATIVE_GLYPH_CONTRACT_MAX_SIZE_PX, NativeGlyphContractGlyph,
+    NativeGlyphContractSubset, native_glyph_contract_resolve,
+    native_glyph_contract_preflight, native_glyph_contract_resolve_default

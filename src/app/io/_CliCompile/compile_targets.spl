@@ -56,9 +56,13 @@ use app.build.targets.action_identity.{
     darwin_link_tool_identity_v1
 }
 use app.build.targets.artifact_receipt.{
-    ImportedClosureInputV1, digest_is_sha256,
+    DependencyArtifactInputV1, ImportedClosureInputV1, digest_is_sha256,
     publish_dependency_manifest_layer_v1, publish_imported_closure_layer_v1,
     target_cache_namespace_v1, target_action_key_v1
+}
+use app.io._CliCompile.native_dependency_inputs.{
+    native_dependency_inputs_empty_v1, native_dependency_inputs_load_v1,
+    native_dependency_inputs_cleanup_v1, native_dependency_inputs_copies_valid_v1
 }
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.cache.darwin_runtime_provider_manifest.{
@@ -121,7 +125,8 @@ fn _native_build_runtime_manifest_identity(cache_dir: text, architecture: text) 
 
 fn _publish_and_admit_darwin_native_action_v1(
     cache_dir: text, output: text, entry_point: text, native_inputs: [text], backend: text,
-    native_target: text, opt_level: i64, release: bool, artifact_kind: text
+    native_target: text, opt_level: i64, release: bool, artifact_kind: text,
+    dependency_inputs: [DependencyArtifactInputV1]
 ) -> text:
     val os_name = host_os()
     var target_triple = native_target
@@ -166,7 +171,7 @@ fn _publish_and_admit_darwin_native_action_v1(
             return "target-identity-error: native-input-not-repo-relative"
         closure_inputs.push(ImportedClosureInputV1(relative, file_hash_sha256(input_path)))
     val dependencies = publish_dependency_manifest_layer_v1(
-        repo_root, cache_dir, entry, []
+        repo_root, cache_dir, entry, dependency_inputs
     )
     if not digest_is_sha256(dependencies): return dependencies
     val tool_path = _native_build_relative_identity_path(repo_root, cli_current_exe_path())
@@ -327,7 +332,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or cli_native_build_policy_value_flag(arg):
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--input-manifest" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -385,6 +390,9 @@ fn cli_native_build_option_error(args: [text]) -> text:
             if error != "": return error
         elif arg.starts_with("--cache-dir="):
             val error = cli_native_build_inline_value_error(arg, "--cache-dir=", "--cache-dir", false)
+            if error != "": return error
+        elif arg.starts_with("--input-manifest="):
+            val error = cli_native_build_inline_value_error(arg, "--input-manifest=", "--input-manifest", false)
             if error != "": return error
         elif arg.starts_with("--target="):
             val error = cli_native_build_inline_value_error(arg, "--target=", "--target", false)
@@ -693,6 +701,7 @@ fn _cli_native_build(
             print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
             print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
             print "  --entry-closure      Compile only modules reachable from --entry"
+            print "  --input-manifest <path> Link verified dependency archives/objects"
             print "  --threads <n>        Native build workers"
             print "  --jobs <n>, -j <n>   Alias for --threads"
             print "  --log <on|off>       Compile normal SimpleOS logging in or out"
@@ -787,6 +796,7 @@ fn _cli_native_build(
         var native_cpu = ""
         var build_mode = "dynload"
         var cache_dir = "build/native_cache"
+        var input_manifest = ""
         var native_threads = 0
         var parse_shard: text = ""
         var hir_shard: text = ""
@@ -917,6 +927,14 @@ fn _cli_native_build(
                 cache_dir = a.substring(12)
                 if cache_dir == "":
                     cache_dir = "build/native_cache"
+            elif a == "--input-manifest":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --input-manifest requires a path")
+                    return 1
+                j = j + 1
+                input_manifest = args[j]
+            elif a.starts_with("--input-manifest="):
+                input_manifest = a.substring(17)
             elif a.starts_with("--target="):
                 native_target = a.substring(9)
             elif a == "--target":
@@ -1054,6 +1072,9 @@ fn _cli_native_build(
             _cli_eprint("Error: No entry point specified for native-build backend")
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
+        if input_manifest != "" and (emit_object or emit_archive or emit_shared):
+            _cli_eprint("Error: --input-manifest currently requires executable output")
+            return 1
 
         # Contained default: no explicit -o/--output means the binary goes to
         # build/native/<entry-stem>, never a bare filename in whatever
@@ -1187,6 +1208,16 @@ fn _cli_native_build(
             return 1
         env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", if keep_intermediates: "1" else: "")
         env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", if print_intermediates: "1" else: "")
+        val dependency_inputs = if input_manifest == "":
+            native_dependency_inputs_empty_v1()
+        else:
+            val repo_root = rt_path_absolute(".")
+            val consumer = _native_build_relative_identity_path(repo_root, entry_point)
+            native_dependency_inputs_load_v1(
+                repo_root, cache_dir, input_manifest, consumer, output)
+        if dependency_inputs.error != "":
+            _cli_eprint("Error: {dependency_inputs.error}")
+            return 1
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types (CompileOptions, CompileMode)
@@ -1203,6 +1234,7 @@ fn _cli_native_build(
                 native_inputs = native_inputs.push(entry_point)
                 options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
+            options.external_link_inputs = dependency_inputs.provider_paths
             if effective_entry_closure:
                 if verbose:
                     _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
@@ -1229,6 +1261,7 @@ fn _cli_native_build(
                 options, collection):
                 case Ok(value): value
                 case Err(reason):
+                    native_dependency_inputs_cleanup_v1(dependency_inputs.provider_paths)
                     _cli_eprint("Error: invalid environment variant policy: {reason}")
                     return 1
             if verbose:
@@ -1251,6 +1284,7 @@ fn _cli_native_build(
                 native_inputs = native_inputs.push(entry_point)
                 options = cli_native_build_add_bootstrap_input(options, entry_point)
             options.input_files = native_inputs
+            options.external_link_inputs = dependency_inputs.provider_paths
             if effective_entry_closure:
                 if verbose:
                     _cli_eprint("[native-build] closure scan cache release reads={driver_entry_scan_cache_read_count()} scans={driver_entry_scan_cache_scan_count()} hits={driver_entry_scan_cache_hit_count()}")
@@ -1276,6 +1310,7 @@ fn _cli_native_build(
                 options, collection):
                 case Ok(value): value
                 case Err(reason):
+                    native_dependency_inputs_cleanup_v1(dependency_inputs.provider_paths)
                     _cli_eprint("Error: invalid environment variant policy: {reason}")
                     return 1
             if verbose:
@@ -1284,10 +1319,17 @@ fn _cli_native_build(
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result
+        val dependency_inputs_stable = native_dependency_inputs_copies_valid_v1(
+            dependency_inputs.inputs, dependency_inputs.provider_paths)
+        native_dependency_inputs_cleanup_v1(dependency_inputs.provider_paths)
         env_set("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", old_native_noop_final_output)
         env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", old_keep_intermediates)
         env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", old_print_intermediates)
-        match result:
+        val admitted_result = if dependency_inputs_stable:
+            result
+        else:
+            CompileResult.CodegenError("dependency linker input changed during native-build")
+        match admitted_result:
             case CompileResult.Success(_):
                 # Root-cause guard for the exit-0-with-no-binary hang
                 # (doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md):
@@ -1380,7 +1422,8 @@ fn _cli_native_build(
                     "binary"
                 val native_identity_error = _publish_and_admit_darwin_native_action_v1(
                     cache_dir, output, entry_point, native_action_inputs, backend,
-                    native_target, opt_level, release, native_action_artifact_kind
+                    native_target, opt_level, release, native_action_artifact_kind,
+                    dependency_inputs.inputs
                 )
                 if native_identity_error != "":
                     _cli_dir_create_impl(cache_dir + "/inputs", true)
@@ -1459,7 +1502,7 @@ fn _cli_native_build(
                     env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                 if verbose:
                     _cli_eprint("[native-build] failed backend={backend} mode={build_mode} cache-dir={cache_dir} threads={native_threads} entry={entry_point} output={output}")
-                val errors = compile_result_errors(result)
+                val errors = compile_result_errors(admitted_result)
                 if errors.len() == 0:
                     _cli_eprint("error: native-build failed without diagnostics")
                 else:

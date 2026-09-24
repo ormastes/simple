@@ -1,3 +1,4 @@
+# @req REQ-2D-004
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use app.ui.renderdoc_diff.events.{rdoc_events_parse}
@@ -21,11 +22,18 @@ fn _first_id(name: text) -> i64:
     val b = rdoc_events_parse(file_read(FIXTURES + name + "_b.events.json"))
     rdoc_diff(a, b).first_divergent
 
+fn _single_draw(digest: text) -> text:
+    "{\"schema\":\"renderdoc-events/v1\",\"capture\":\"synthetic.rdc\",\"events\":[" +
+        "{\"eventId\":1,\"name\":\"draw\",\"type\":\"draw\",\"pipeline\":\"graphics\"," +
+        "\"targets\":[{\"id\":1,\"width\":1,\"height\":1,\"format\":\"R8G8B8A8_UNORM\"}]," +
+        "\"outputSha256\":\"" + digest + "\"}]}"
+
 describe "RenderDoc capture diff":
 
     it "parses the v1 schema and buckets ordinals per event type":
         step("Classify a RenderDoc capture diff")
         # @req REQ-UI-RENDERDOC-DIFF-001
+        # @req REQ-2D-004
         val a = rdoc_events_parse(file_read(FIXTURES + "identical_a.events.json"))
 
         expect(a.error).to_equal("")
@@ -41,9 +49,53 @@ describe "RenderDoc capture diff":
     it "rejects an unknown schema rather than reporting zero events":
         step("Classify a RenderDoc capture diff")
         # @req REQ-UI-RENDERDOC-DIFF-002
+        # @req REQ-2D-004
         val bad = rdoc_events_parse("{\"schema\":\"renderdoc-events/v9\",\"events\":[]}")
 
         expect(bad.error).to_equal("unsupported schema renderdoc-events/v9")
+
+    it "rejects absent or invented output evidence in direct event files":
+        step("Validate captured graphics output evidence")
+        # @req REQ-UI-RENDERDOC-DIFF-014
+        # @req REQ-2D-004
+        val empty = rdoc_events_parse(_single_draw(""))
+        val unavailable = rdoc_events_parse(_single_draw("unavailable:readback"))
+        val fake = rdoc_events_parse(_single_draw("sha_draw"))
+        expect(empty.error).to_equal("missing or invalid outputSha256 at events[0]")
+        expect(unavailable.error).to_equal("missing or invalid outputSha256 at events[0]")
+        expect(fake.error).to_equal("missing or invalid outputSha256 at events[0]")
+        expect(rdoc_diff_verdict(rdoc_diff(empty, empty))).to_start_with("RENDERDOC DIFF: ERROR")
+
+    it "rejects event sets without graphics output evidence":
+        step("Validate captured graphics output evidence")
+        # @req REQ-UI-RENDERDOC-DIFF-015
+        val marker = rdoc_events_parse("{\"schema\":\"renderdoc-events/v1\",\"events\":[" +
+            "{\"eventId\":1,\"name\":\"marker\",\"type\":\"marker\",\"targets\":[]}]}")
+        expect(marker.error).to_equal("no graphics output evidence")
+
+    it "rejects a blocked export or a graphics row without a target":
+        step("Validate every graphics event before alignment")
+        # @req REQ-UI-RENDERDOC-DIFF-016
+        val sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val valid = _single_draw(sha)
+        val blocked = valid.replace("\"capture\":", "\"evidenceStatus\":\"blocked\",\"capture\":")
+        val no_target = valid.replace(
+            "\"targets\":[{\"id\":1,\"width\":1,\"height\":1,\"format\":\"R8G8B8A8_UNORM\"}]",
+            "\"targets\":[]")
+        expect(rdoc_events_parse(blocked).error).to_equal("incomplete exporter evidence blocked")
+        expect(rdoc_events_parse(no_target).error).to_equal("missing or invalid outputSha256 at events[0]")
+
+    it "compares equivalent hexadecimal digest case without a false difference":
+        step("Normalize the diagnostic digest representation")
+        # @req REQ-UI-RENDERDOC-DIFF-017
+        # @req REQ-2D-004
+        val lower = rdoc_events_parse(_single_draw(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        val upper = rdoc_events_parse(_single_draw(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+        expect(lower.error).to_equal("")
+        expect(upper.error).to_equal("")
+        expect(rdoc_diff(lower, upper).divergent).to_equal(0)
 
     it "aligns identical captures with no divergence":
         step("Classify a RenderDoc capture diff")

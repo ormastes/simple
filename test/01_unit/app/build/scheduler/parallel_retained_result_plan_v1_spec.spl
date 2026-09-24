@@ -1,0 +1,163 @@
+use std.spec.*
+use app.build.scheduler.parallel_retained_result_plan_v1.{
+    plan_parallel_retained_result_v1}
+use app.build.scheduler.parallel_transport_wire_v1.{
+    ParallelTransportFileV1, ParallelTransportHandoffV1,
+    ParallelTransportObservationV1,
+    parallel_transport_approved_node_digest_v1,
+    parallel_transport_handoff_digest_v1}
+use app.build.scheduler.distributed_attempt.{DistributedBuildNodeV1}
+use app.build.scheduler.trusted_ssh.{TrustedSshNodeV1}
+use app.build.scheduler.trusted_sftp.{TrustedSftpConfigV1}
+use app.build.scheduler.trusted_worker_invocation.{TrustedWorkerCommandV1}
+use app.build.scheduler.worker_request.{BuildWorkerRequestV1,
+    encode_build_worker_request_v1, parse_build_worker_request_v1}
+use app.build.scheduler.dispatch_wire.{encode_build_result_v1}
+use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
+    ToolchainManifest, InputManifest, ActionSpec, AttemptSpec,
+    ActionResultCandidate, action_spec_digest_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _retained_node_v1() -> DistributedBuildNodeV1:
+    val ssh = TrustedSshNodeV1("worker-1", "build.example", "builder", 22,
+        "/usr/bin/ssh", sha256_text("ssh"), "/etc/ssh/known_hosts",
+        sha256_text("hosts"), "/etc/ssh/key", sha256_text("key"))
+    DistributedBuildNodeV1(
+        TrustedWorkerCommandV1(ssh, "/opt/simple/worker", 30000),
+        TrustedSftpConfigV1(ssh, "/usr/bin/sftp", sha256_text("sftp"),
+            "/srv/inbox"), "/trusted/source", "/trusted/state",
+        "/trusted/cas")
+
+fn _retained_request_wire_v1(outputs: [text]) -> text:
+    val snapshot = sha256_text("retained-snapshot")
+    val action = ActionSpec(1, "compile",
+        SnapshotManifest(1, snapshot, sha256_text("tree"),
+            sha256_text("submodules")),
+        ToolchainManifest(1, sha256_text("compiler"),
+            sha256_text("behavior"), sha256_text("abi"),
+            sha256_text("runtime"), sha256_text("sysroot"),
+            "x86_64-unknown-linux-gnu"),
+        InputManifest(1, snapshot,
+            [BuildInputRef("src/main.c", sha256_text("source"))],
+            [], [], [], [], [], sha256_text("context"), true, false),
+        ["/usr/bin/clang", "-c"], "simple-build/outputs",
+        sha256_text("sandbox"), outputs, sha256_text("resources"))
+    val attempt = AttemptSpec(1, action_spec_digest_v1(action),
+        "dist-try-1", "worker-1", 0, 2, 4096)
+    encode_build_worker_request_v1(BuildWorkerRequestV1(action, attempt,
+        1, 2, 8))
+
+fn _retained_handoff_v1(outputs: [text]) -> ParallelTransportHandoffV1:
+    val request = _retained_request_wire_v1(outputs)
+    val node = _retained_node_v1()
+    ParallelTransportHandoffV1(true, "", sha256_text("nonce"), request,
+        sha256_text(request), node,
+        parallel_transport_approved_node_digest_v1(node),
+        "/trusted/prepared",
+        ParallelTransportFileV1("inputs.batch", 80,
+            sha256_text("inputs-batch")),
+        ParallelTransportFileV1("control.batch", 90,
+            sha256_text("control-batch")),
+        "/trusted/results", 100000, 131, 1000)
+
+fn _retained_observation_v1(handoff: ParallelTransportHandoffV1,
+        success: bool, paths: [text]) -> ParallelTransportObservationV1:
+    val request = parse_build_worker_request_v1(handoff.request_wire).unwrap()
+    val candidate = ActionResultCandidate(1, request.attempt.action_digest,
+        request.attempt.attempt_id, request.attempt.worker_id,
+        if success: sha256_text("manifest") else: "",
+        sha256_text("diagnostics"), success)
+    var files: [ParallelTransportFileV1] = []
+    for path in canonical_identity_sort_texts(paths):
+        files.push(ParallelTransportFileV1(path,
+            if not success and path == "outputs/manifest.wire": 0 else: 10,
+            sha256_text(path)))
+    ParallelTransportObservationV1(true, "",
+        parallel_transport_handoff_digest_v1(handoff), handoff.nonce,
+        handoff.request_digest, "FETCHED",
+        encode_build_result_v1(candidate, request.fence), files)
+
+fn _success_paths_v1() -> [text]:
+    ["outputs/result.wire", "outputs/manifest.wire",
+     "outputs/diagnostics", "outputs/z.o", "outputs/a.o"]
+
+fn _failure_paths_v1() -> [text]:
+    ["outputs/result.wire", "outputs/manifest.wire",
+     "outputs/diagnostics", "outputs/failure-proof.wire"]
+
+describe "parallel retained result inventory V1":
+    it "requires every success output and three metadata files exactly":
+        val handoff = _retained_handoff_v1(["z.o", "a.o"])
+        val observation = _retained_observation_v1(handoff, true,
+            _success_paths_v1())
+        val plan = plan_parallel_retained_result_v1(handoff, observation)
+        expect(plan.valid).to_be(true)
+        expect(plan.success).to_be(true)
+        expect(plan.required_paths).to_equal(
+            canonical_identity_sort_texts(_success_paths_v1()))
+        expect(plan.total_bytes).to_equal(50)
+
+    it "requires the failure proof and forbids success outputs":
+        val handoff = _retained_handoff_v1(["z.o", "a.o"])
+        val observation = _retained_observation_v1(handoff, false,
+            _failure_paths_v1())
+        val plan = plan_parallel_retained_result_v1(handoff, observation)
+        expect(plan.valid).to_be(true)
+        expect(plan.success).to_be(false)
+        expect(plan.required_paths).to_equal(
+            canonical_identity_sort_texts(_failure_paths_v1()))
+
+    it "rejects a missing or extra file in either outcome":
+        val handoff = _retained_handoff_v1(["z.o", "a.o"])
+        val missing = _retained_observation_v1(handoff, true,
+            ["outputs/result.wire", "outputs/manifest.wire",
+             "outputs/diagnostics", "outputs/a.o"])
+        expect(plan_parallel_retained_result_v1(handoff,
+            missing).valid).to_be(false)
+        val extra = _retained_observation_v1(handoff, false,
+            ["outputs/result.wire", "outputs/manifest.wire",
+             "outputs/diagnostics", "outputs/failure-proof.wire",
+             "outputs/a.o"])
+        expect(plan_parallel_retained_result_v1(handoff,
+            extra).valid).to_be(false)
+
+    it "rejects reserved or duplicate declared output names":
+        val reserved = _retained_handoff_v1(["result.wire"])
+        val reserved_observation = _retained_observation_v1(reserved,
+            true, ["outputs/result.wire", "outputs/manifest.wire",
+                "outputs/diagnostics"])
+        expect(plan_parallel_retained_result_v1(reserved,
+            reserved_observation).valid).to_be(false)
+        expect(_retained_request_wire_v1(["same.o", "same.o"]))
+            .to_equal("")
+
+    it "rejects a nonempty failure manifest claim":
+        val handoff = _retained_handoff_v1(["z.o", "a.o"])
+        var claim = _retained_observation_v1(handoff, false,
+            _failure_paths_v1())
+        var i: i64 = 0
+        while i < claim.result_files.len():
+            if claim.result_files[i].relative_path ==
+               "outputs/manifest.wire":
+                var file = claim.result_files[i]
+                file.byte_count = 10
+                claim.result_files[i] = file
+            i = i + 1
+        expect(plan_parallel_retained_result_v1(handoff, claim).valid)
+            .to_be(false)
+
+    it "leaves incomplete or over-budget observations unverified":
+        val handoff = _retained_handoff_v1(["z.o", "a.o"])
+        val incomplete = ParallelTransportObservationV1(true, "deadline",
+            parallel_transport_handoff_digest_v1(handoff), handoff.nonce,
+            handoff.request_digest, "INCOMPLETE", "", [])
+        val stopped = plan_parallel_retained_result_v1(handoff, incomplete)
+        expect(stopped.valid).to_be(false)
+        expect(stopped.reason).to_equal("observation-incomplete")
+        var constrained = handoff
+        constrained.max_output_bytes = 49
+        val oversized = _retained_observation_v1(constrained, true,
+            _success_paths_v1())
+        expect(plan_parallel_retained_result_v1(constrained,
+            oversized).valid).to_be(false)

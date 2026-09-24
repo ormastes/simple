@@ -28,6 +28,7 @@ use std.gpu.engine2d.backend_vulkan_font_spirv.{
     font_atlas_composite_vulkan_spirv_trusted
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_rect_batch_spirv.{spirv_rect_batch}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_affine_coverage_spirv.{spirv_affine_coverage_rect}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_glass_material_spirv.{spirv_glass_material}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_blur_rect_spirv.{spirv_blur_rect}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_shadow_rect_spirv.{spirv_shadow_rect}
@@ -77,7 +78,7 @@ class VulkanSession:
 
     instance: i64         # VkInstance handle (runtime-managed; populated after init)
     physical_device: i64  # VkPhysicalDevice (runtime-managed placeholder)
-    device: i64           # VkDevice logical handle from vulkan_get_device()
+    device: i64           # native selected-device generation token; not a VkDevice pointer
     queue: i64            # VkQueue (runtime-managed placeholder)
     queue_family: i64     # queue family index (runtime-managed placeholder)
     command_pool: i64     # VkCommandPool (runtime-managed placeholder)
@@ -87,6 +88,7 @@ class VulkanSession:
     # Compiled GLSL shader module handles
     shader_clear: i64
     shader_rect_filled: i64
+    shader_affine_coverage_rect: i64
     shader_rect_outline: i64
     shader_circle_filled: i64
     shader_circle_outline: i64
@@ -100,6 +102,7 @@ class VulkanSession:
     # Compute pipeline handles
     pipe_clear: i64
     pipe_rect_filled: i64
+    pipe_affine_coverage_rect: i64
     pipe_rect_outline: i64
     pipe_circle_filled: i64
     pipe_circle_outline: i64
@@ -168,6 +171,7 @@ class VulkanSession:
             allocator: 0,
             shader_clear: 0,
             shader_rect_filled: 0,
+            shader_affine_coverage_rect: 0,
             shader_rect_outline: 0,
             shader_circle_filled: 0,
             shader_circle_outline: 0,
@@ -179,6 +183,7 @@ class VulkanSession:
             shader_font_atlas: 0,
             pipe_clear: 0,
             pipe_rect_filled: 0,
+            pipe_affine_coverage_rect: 0,
             pipe_rect_outline: 0,
             pipe_circle_filled: 0,
             pipe_circle_outline: 0,
@@ -248,7 +253,9 @@ class VulkanSession:
         self.device_type = vulkan_sffi_device_type(0)
         self.driver_identity = vulkan_sffi_device_driver_identity(0)
 
-        # Retrieve the opaque device handle exposed by the runtime
+        # Native runtime returns a monotonically unique selected-device
+        # generation token. Its value is not a physical UUID; the strict
+        # final capture binds it to the selected physical device query.
         self.device = vulkan_get_device()
         if self.device <= 0:
             self.init_error = "device-handle"
@@ -260,6 +267,7 @@ class VulkanSession:
         val noop_spirv = spirv_noop_storage()
         self.shader_clear         = vulkan_sffi_compile_spirv(spirv_clear())
         self.shader_rect_filled   = vulkan_sffi_compile_spirv(spirv_rect_filled())
+        self.shader_affine_coverage_rect = vulkan_sffi_compile_spirv(spirv_affine_coverage_rect())
         self.shader_rect_outline  = vulkan_sffi_compile_spirv(spirv_rect_outline())
         self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())
         self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)
@@ -300,6 +308,9 @@ class VulkanSession:
         # Create compute pipelines (all use push constants)
         self.pipe_clear          = vulkan_sffi_create_compute_pipeline(self.shader_clear,         "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_rect_filled    = vulkan_sffi_create_compute_pipeline(self.shader_rect_filled,   "main", _VS_PUSH_CONSTANT_SIZE)
+        if self.shader_affine_coverage_rect > 0:
+            self.pipe_affine_coverage_rect = vulkan_sffi_create_compute_pipeline(
+                self.shader_affine_coverage_rect, "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_rect_outline   = vulkan_sffi_create_compute_pipeline(self.shader_rect_outline,  "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_circle_filled  = vulkan_sffi_create_compute_pipeline(self.shader_circle_filled, "main", _VS_PUSH_CONSTANT_SIZE)
         self.pipe_circle_outline = vulkan_sffi_create_compute_pipeline(self.shader_circle_outline,"main", _VS_PUSH_CONSTANT_SIZE)
@@ -591,6 +602,7 @@ class VulkanSession:
         self.pipe_font_atlas = 0
         if self.pipe_clear != 0:          vulkan_sffi_destroy_pipeline(self.pipe_clear)
         if self.pipe_rect_filled != 0:    vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_affine_coverage_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_affine_coverage_rect)
         if self.pipe_rect_outline != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
         if self.pipe_circle_filled != 0:  vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
         if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
@@ -609,6 +621,7 @@ class VulkanSession:
         self.pipe_shadow_rect = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
+        self.pipe_affine_coverage_rect = 0
         self.pipe_rect_outline = 0
         self.pipe_circle_filled = 0
         self.pipe_circle_outline = 0
@@ -620,6 +633,7 @@ class VulkanSession:
 
         if self.shader_clear != 0:          vulkan_sffi_destroy_shader(self.shader_clear)
         if self.shader_rect_filled != 0:    vulkan_sffi_destroy_shader(self.shader_rect_filled)
+        if self.shader_affine_coverage_rect != 0: vulkan_sffi_destroy_shader(self.shader_affine_coverage_rect)
         if self.shader_rect_outline != 0:   vulkan_sffi_destroy_shader(self.shader_rect_outline)
         if self.shader_circle_filled != 0:  vulkan_sffi_destroy_shader(self.shader_circle_filled)
         if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
@@ -640,6 +654,7 @@ class VulkanSession:
         self.rect_batch_error = "not-installed"
         self.shader_clear = 0
         self.shader_rect_filled = 0
+        self.shader_affine_coverage_rect = 0
         self.shader_rect_outline = 0
         self.shader_circle_filled = 0
         self.shader_circle_outline = 0

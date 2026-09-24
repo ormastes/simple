@@ -1,0 +1,341 @@
+# Pinned source-scene selection and authenticated Web-to-GPU projection.
+mod app.test.vulkan_2d_qualification.scene_contract
+
+use app.io.mod.{file_is_regular_no_follow, file_hash_sha256,
+    file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use std.fs.{read_file}
+use common.renderdoc.controlled_rect_scene.{
+    simple_2d_controlled_rect_fixture_scene}
+use common.renderdoc.controlled_clip_scene.{
+    simple_2d_controlled_clip_fixture_scene}
+use common.renderdoc.gui_button_scene.{gui_button_scene_input_sha256}
+use common.renderdoc.web_opaque_box_oracle.{
+    WEB_OPAQUE_BOX_FIXTURE_ID, WEB_OPAQUE_BOX_FIXTURE_PATH,
+    WEB_OPAQUE_BOX_FIXTURE_SHA256}
+use common.renderdoc.corpus_case01_oracle.{
+    CORPUS_CASE01_FIXTURE_ID, CORPUS_CASE01_SOURCE_PATH,
+    CORPUS_CASE01_SOURCE_SHA256, CORPUS_CASE01_REFERENCE_PATH,
+    CORPUS_CASE01_REFERENCE_SHA256, CORPUS_CASE01_WIDTH,
+    CORPUS_CASE01_HEIGHT, CORPUS_CASE01_RGBA_SHA256}
+use common.renderdoc.corpus_case06_oracle.{
+    CORPUS_CASE06_FIXTURE_ID, CORPUS_CASE06_SOURCE_PATH,
+    CORPUS_CASE06_SOURCE_SHA256, CORPUS_CASE06_REFERENCE_PATH,
+    CORPUS_CASE06_REFERENCE_SHA256, CORPUS_CASE06_WIDTH,
+    CORPUS_CASE06_HEIGHT, CORPUS_CASE06_RGBA_SHA256}
+use common.renderdoc.corpus_case02_polygon_oracle.{
+    CORPUS_CASE02_FIXTURE_ID, CORPUS_CASE02_SOURCE_PATH,
+    CORPUS_CASE02_SOURCE_SHA256, CORPUS_CASE02_WIDTH,
+    CORPUS_CASE02_HEIGHT, CORPUS_CASE02_RGBA_SHA256}
+use common.renderdoc.corpus_case31_oracle.{
+    CORPUS_CASE31_FIXTURE_ID, CORPUS_CASE31_SOURCE_PATH,
+    CORPUS_CASE31_SOURCE_SHA256, CORPUS_CASE31_WIDTH,
+    CORPUS_CASE31_HEIGHT, CORPUS_CASE31_RGBA_SHA256}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    WebOpaqueBoxGpuScene, web_opaque_box_gpu_scene_from_html,
+    web_corpus_case01_gpu_scene_from_html,
+    web_corpus_case06_gpu_scene_from_html,
+    web_corpus_case02_gpu_scene_from_html}
+use common.renderdoc.gui_button_qualification.{
+    GUI_BUTTON_RESTING_PATH, GUI_BUTTON_RESTING_SHA256,
+    GUI_BUTTON_PRESSED_PATH, GUI_BUTTON_PRESSED_SHA256,
+    gui_button_prepared_scene, gui_button_checked_draw_ir}
+use common.ui.draw_ir.{DrawIrComposition}
+use common.renderdoc.physical_vulkan_2d_qualification.{
+    PreparedRenderScene,
+    CONTROLLED_RECT_FIXTURE_PATH, CONTROLLED_RECT_FIXTURE_SHA256,
+    CONTROLLED_CLIP_FIXTURE_PATH, CONTROLLED_CLIP_FIXTURE_SHA256}
+
+val FIXTURE_ID: text = "controlled-opaque-rect-v1"
+val CLIP_FIXTURE_ID: text = "controlled-clipped-rect-v2"
+val CLIP_SCOPE: text = "controlled-clipped-rectangle-only"
+val RECT_SCOPE: text = "controlled-rectangle-only"
+val SCENE_RECT: i64 = 0
+val SCENE_CLIP: i64 = 1
+val SCENE_GUI_RESTING: i64 = 2
+val SCENE_GUI_PRESSED: i64 = 3
+val SCENE_WEB_BOX: i64 = 4
+val SCENE_CORPUS_CASE01: i64 = 5
+val SCENE_CORPUS_CASE06: i64 = 6
+val SCENE_CORPUS_CASE02: i64 = 7
+val SCENE_CORPUS_CASE31: i64 = 8
+
+struct WebWorkerScene:
+    admitted: WebOpaqueBoxGpuScene
+    gpu_draw_ir_sha256: text
+    source_command_indexes: text
+
+
+fn scene_is_gui(kind: i64) -> bool:
+    kind == SCENE_GUI_RESTING or kind == SCENE_GUI_PRESSED
+
+fn scene_gui_pressed(kind: i64) -> bool:
+    kind == SCENE_GUI_PRESSED
+
+fn scene_is_web(kind: i64) -> bool:
+    kind == SCENE_WEB_BOX or kind == SCENE_CORPUS_CASE01 or
+        kind == SCENE_CORPUS_CASE06 or kind == SCENE_CORPUS_CASE02
+
+fn scene_is_corpus(kind: i64) -> bool:
+    kind == SCENE_CORPUS_CASE01 or kind == SCENE_CORPUS_CASE06 or
+        kind == SCENE_CORPUS_CASE02 or kind == SCENE_CORPUS_CASE31
+
+fn scene_width(kind: i64) -> i32:
+    if kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_WIDTH
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_WIDTH
+    elif kind == SCENE_CORPUS_CASE02: CORPUS_CASE02_WIDTH
+    elif kind == SCENE_CORPUS_CASE31: CORPUS_CASE31_WIDTH
+    else: 16
+
+fn scene_height(kind: i64) -> i32:
+    if kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_HEIGHT
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_HEIGHT
+    elif kind == SCENE_CORPUS_CASE02: CORPUS_CASE02_HEIGHT
+    elif kind == SCENE_CORPUS_CASE31: CORPUS_CASE31_HEIGHT
+    else: 16
+
+fn scene_pixel_length(kind: i64) -> i64:
+    scene_width(kind).to_i64() * scene_height(kind).to_i64() * 4
+
+fn scene_reference_sha(kind: i64) -> text:
+    if kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_REFERENCE_SHA256
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_REFERENCE_SHA256
+    else: "none"
+
+fn scene_oracle_sha(kind: i64) -> text:
+    if kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_RGBA_SHA256
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_RGBA_SHA256
+    elif kind == SCENE_CORPUS_CASE02: CORPUS_CASE02_RGBA_SHA256
+    elif kind == SCENE_CORPUS_CASE31: CORPUS_CASE31_RGBA_SHA256
+    else: "none"
+
+fn scene_reference_path(kind: i64) -> text:
+    if kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_REFERENCE_PATH
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_REFERENCE_PATH
+    else: ""
+
+fn scene_fixture_id(kind: i64) -> text:
+    if kind == SCENE_CLIP: CLIP_FIXTURE_ID
+    elif kind == SCENE_GUI_RESTING: "gui-button-16x16-v1-resting"
+    elif kind == SCENE_GUI_PRESSED: "gui-button-16x16-v1-pressed"
+    elif kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_FIXTURE_ID
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_FIXTURE_ID
+    elif kind == SCENE_CORPUS_CASE02: CORPUS_CASE02_FIXTURE_ID
+    elif kind == SCENE_CORPUS_CASE31: CORPUS_CASE31_FIXTURE_ID
+    elif scene_is_web(kind): WEB_OPAQUE_BOX_FIXTURE_ID
+    else: FIXTURE_ID
+
+fn scene_fixture_path(kind: i64) -> text:
+    if kind == SCENE_CLIP: CONTROLLED_CLIP_FIXTURE_PATH
+    elif kind == SCENE_GUI_RESTING: GUI_BUTTON_RESTING_PATH
+    elif kind == SCENE_GUI_PRESSED: GUI_BUTTON_PRESSED_PATH
+    elif kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_SOURCE_PATH
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_SOURCE_PATH
+    elif kind == SCENE_CORPUS_CASE02: CORPUS_CASE02_SOURCE_PATH
+    elif kind == SCENE_CORPUS_CASE31: CORPUS_CASE31_SOURCE_PATH
+    elif scene_is_web(kind): WEB_OPAQUE_BOX_FIXTURE_PATH
+    else: CONTROLLED_RECT_FIXTURE_PATH
+
+fn scene_fixture_sha(kind: i64) -> text:
+    if kind == SCENE_CLIP: CONTROLLED_CLIP_FIXTURE_SHA256
+    elif kind == SCENE_GUI_RESTING: GUI_BUTTON_RESTING_SHA256
+    elif kind == SCENE_GUI_PRESSED: GUI_BUTTON_PRESSED_SHA256
+    elif kind == SCENE_CORPUS_CASE01: CORPUS_CASE01_SOURCE_SHA256
+    elif kind == SCENE_CORPUS_CASE06: CORPUS_CASE06_SOURCE_SHA256
+    elif kind == SCENE_CORPUS_CASE02: CORPUS_CASE02_SOURCE_SHA256
+    elif kind == SCENE_CORPUS_CASE31: CORPUS_CASE31_SOURCE_SHA256
+    elif scene_is_web(kind): WEB_OPAQUE_BOX_FIXTURE_SHA256
+    else: CONTROLLED_RECT_FIXTURE_SHA256
+
+fn scene_scope(kind: i64) -> text:
+    if kind == SCENE_CLIP: CLIP_SCOPE
+    elif kind == SCENE_GUI_RESTING: "gui-button-resting"
+    elif kind == SCENE_GUI_PRESSED: "gui-button-pressed"
+    elif kind == SCENE_CORPUS_CASE01: "corpus-case01-solid-boxes-only"
+    elif kind == SCENE_CORPUS_CASE06: "corpus-case06-rectangular-clip-only"
+    elif kind == SCENE_CORPUS_CASE02: "corpus-case02-fractional-edges-only"
+    elif kind == SCENE_CORPUS_CASE31: "corpus-case31-latin-shaping-only"
+    elif scene_is_web(kind): "web-opaque-box-only"
+    else: RECT_SCOPE
+
+fn scene_input_state_sha(kind: i64) -> text:
+    if scene_is_gui(kind): gui_button_scene_input_sha256(scene_gui_pressed(kind))
+    elif kind == SCENE_CORPUS_CASE01:
+        sha256_text("web-corpus-case01-input-v1\n" +
+            "html_sha256={CORPUS_CASE01_SOURCE_SHA256}\n" +
+            "reference_sha256={CORPUS_CASE01_REFERENCE_SHA256}\n" +
+            "viewport=640x480\ndpr=1\nstate=none\n")
+    elif kind == SCENE_CORPUS_CASE06:
+        sha256_text("web-corpus-case06-input-v1\n" +
+            "html_sha256={CORPUS_CASE06_SOURCE_SHA256}\n" +
+            "reference_sha256={CORPUS_CASE06_REFERENCE_SHA256}\n" +
+            "viewport=640x480\ndpr=1\nstate=none\n")
+    elif kind == SCENE_CORPUS_CASE02:
+        sha256_text("web-corpus-case02-input-v1\n" +
+            "html_sha256={CORPUS_CASE02_SOURCE_SHA256}\n" +
+            "oracle_rgba_sha256={CORPUS_CASE02_RGBA_SHA256}\n" +
+            "viewport=640x480\ndpr=1\nstate=none\n")
+    elif kind == SCENE_CORPUS_CASE31:
+        # Case 31 is a standalone corpus kind: no Web producer exists yet
+        # (the upstream provider rejects all text), so it is not a
+        # scene_is_web kind. The receipt domain contract in
+        # candidate_receipts.read_candidate only accepts an input-state sha
+        # for gui/web kinds, so this stays "none" until the native text
+        # record producer lands and case 31 joins scene_is_web.
+        "none"
+    elif scene_is_web(kind):
+        sha256_text("web-opaque-box-input-v1\n" +
+            "html_sha256={WEB_OPAQUE_BOX_FIXTURE_SHA256}\n" +
+            "viewport=16x16\ndpr=1\nstate=none\n")
+    else: "none"
+
+fn web_worker_scene(kind: i64) -> Result<WebWorkerScene, text>:
+    if not scene_is_web(kind):
+        return Err("web-scene-kind-required")
+    val source_path = scene_fixture_path(kind)
+    val expected_sha = scene_fixture_sha(kind)
+    if not file_is_regular_no_follow(source_path) or
+        file_hash_sha256(source_path) != expected_sha:
+        return Err("web-fixture-missing-or-digest-mismatch")
+    if scene_reference_path(kind) != "" and
+        (not file_is_regular_no_follow(scene_reference_path(kind)) or
+        file_hash_sha256(scene_reference_path(kind)) !=
+            scene_reference_sha(kind)):
+        return Err("corpus-reference-missing-or-digest-mismatch")
+    val html = match file_read_regular_no_follow_bounded(
+        source_path, 4096):
+        case Ok(value): value
+        case Err(reason): return Err("web-fixture-read:" + reason)
+    if sha256_text(html) != expected_sha:
+        return Err("web-fixture-read-digest-mismatch")
+    val admitted = if kind == SCENE_CORPUS_CASE01:
+        web_corpus_case01_gpu_scene_from_html(html)?
+    elif kind == SCENE_CORPUS_CASE06:
+        web_corpus_case06_gpu_scene_from_html(html)?
+    elif kind == SCENE_CORPUS_CASE02:
+        web_corpus_case02_gpu_scene_from_html(html)?
+    else:
+        web_opaque_box_gpu_scene_from_html(html)?
+    if admitted.html_sha256 != expected_sha or
+        admitted.source_draw_ir_sha256 !=
+            sha256_text(draw_ir_to_sdn(admitted.source_draw_ir)) or
+        admitted.gpu_draw_ir.batches.len() != 1 or
+        admitted.gpu_draw_ir.batches[0].embedding.width != scene_width(kind) or
+        admitted.gpu_draw_ir.batches[0].embedding.height != scene_height(kind) or
+        (kind == SCENE_CORPUS_CASE06 and
+            (admitted.source_command_count != 6 or
+            admitted.gpu_command_count != 5)) or
+        (kind == SCENE_CORPUS_CASE02 and
+            (admitted.source_command_count != 6 or
+            admitted.gpu_command_count != 6)) or
+        (kind != SCENE_CORPUS_CASE06 and
+            admitted.source_command_count != admitted.gpu_command_count) or
+        admitted.gpu_command_count !=
+            admitted.gpu_draw_ir.batches[0].commands.len().to_i64() or
+        admitted.source_command_indexes.len().to_i64() !=
+            admitted.gpu_command_count:
+        return Err("web-layout-projection-evidence-invalid")
+    if kind == SCENE_CORPUS_CASE06 and
+        (admitted.source_command_indexes[0] != 0 or
+        admitted.source_command_indexes[1] != 1 or
+        admitted.source_command_indexes[2] != 2 or
+        admitted.source_command_indexes[3] != 3 or
+        admitted.source_command_indexes[4] != 5):
+        return Err("web-corpus-case06-source-command-map-invalid")
+    if kind == SCENE_CORPUS_CASE02:
+        var mapped = 0
+        while mapped < 6:
+            if admitted.source_command_indexes[mapped] != mapped:
+                return Err("web-corpus-case02-source-command-map-invalid")
+            mapped = mapped + 1
+    var indexes = ""
+    var index = 0
+    while index < admitted.source_command_indexes.len():
+        val source_index = admitted.source_command_indexes[index]
+        if source_index < 0 or
+            source_index >= admitted.source_command_count or
+            admitted.source_draw_ir.batches.len() != 1 or
+            source_index >= admitted.source_draw_ir.batches[0].commands.len():
+            return Err("web-layout-source-command-index-invalid")
+        val source = admitted.source_draw_ir.batches[0].commands[source_index]
+        val gpu = admitted.gpu_draw_ir.batches[0].commands[index]
+        if gpu.component_id != source.component_id or
+            (kind != SCENE_CORPUS_CASE02 and
+                (gpu.x != source.x or gpu.y != source.y or
+                gpu.width != source.width or
+                gpu.height != source.height)) or
+            gpu.color != source.color:
+            return Err("web-layout-source-command-map-invalid")
+        if kind == SCENE_CORPUS_CASE02:
+            if index < 4:
+                if gpu.x != 0 or gpu.y != 0 or gpu.width != 640 or
+                    gpu.height != 480 or gpu.affine_transform != nil or
+                    gpu.fractional_geometry != nil or gpu.clip_rect.present:
+                    return Err("web-corpus-case02-background-projection-invalid")
+            elif gpu.x != source.x or gpu.y != source.y or
+                gpu.width != source.width or gpu.height != source.height or
+                gpu.affine_transform == nil or
+                gpu.fractional_geometry == nil or
+                not gpu.clip_rect.present or
+                gpu.clip_rect.x != 0 or gpu.clip_rect.y != 0 or
+                gpu.clip_rect.width != 640 or gpu.clip_rect.height != 480 or
+                gpu.raster_policy != source.raster_policy:
+                return Err("web-corpus-case02-affine-projection-invalid")
+        if kind == SCENE_CORPUS_CASE06:
+            if index == 4:
+                if not gpu.clip_rect.present or
+                    not source.clip_rect.present or
+                    gpu.clip_rect.x != source.clip_rect.x or
+                    gpu.clip_rect.y != source.clip_rect.y or
+                    gpu.clip_rect.width != source.clip_rect.width or
+                    gpu.clip_rect.height != source.clip_rect.height:
+                    return Err("web-corpus-case06-child-clip-map-invalid")
+            elif gpu.clip_rect.present:
+                return Err("web-corpus-case06-unexpected-gpu-clip")
+        if index > 0:
+            indexes = indexes + ","
+        indexes = indexes + "{source_index}"
+        index = index + 1
+    val gpu_sha = sha256_text(draw_ir_to_sdn(admitted.gpu_draw_ir))
+    Ok(WebWorkerScene(admitted: admitted,
+        gpu_draw_ir_sha256: gpu_sha,
+        source_command_indexes: indexes))
+
+fn scene_draw_ir(kind: i64) -> Result<DrawIrComposition, text>:
+    if kind == SCENE_CLIP:
+        simple_2d_controlled_clip_fixture_scene()
+    elif scene_is_gui(kind):
+        gui_button_checked_draw_ir(scene_gui_pressed(kind))
+    else:
+        simple_2d_controlled_rect_fixture_scene()
+
+fn prepared_scene(kind: i64) -> Result<PreparedRenderScene, text>:
+    val source_path = scene_fixture_path(kind)
+    val expected_sha = scene_fixture_sha(kind)
+    if not file_is_regular_no_follow(source_path):
+        return Err("controlled-fixture-missing-or-symlink")
+    val source_sha = file_hash_sha256(source_path)
+    if source_sha != expected_sha or
+        sha256_text(read_file(source_path)) != source_sha:
+        return Err("controlled-fixture-digest-mismatch")
+    if scene_is_gui(kind):
+        return gui_button_prepared_scene(scene_gui_pressed(kind))
+    Ok(PreparedRenderScene(
+        fixture_id: scene_fixture_id(kind),
+        source_path: source_path,
+        source_sha256: source_sha,
+        scene_scope: scene_scope(kind),
+        render_degraded: false, degrade_reason: ""))
+
+
+export SCENE_RECT, SCENE_CLIP, SCENE_GUI_RESTING,
+    SCENE_GUI_PRESSED, SCENE_WEB_BOX, SCENE_CORPUS_CASE01,
+    SCENE_CORPUS_CASE06, SCENE_CORPUS_CASE02, SCENE_CORPUS_CASE31,
+    WebWorkerScene, scene_is_gui,
+    scene_gui_pressed, scene_is_web, scene_is_corpus,
+    scene_width, scene_height, scene_pixel_length,
+    scene_reference_sha, scene_oracle_sha, scene_fixture_id,
+    scene_fixture_path, scene_fixture_sha, scene_scope,
+    scene_input_state_sha, web_worker_scene, scene_draw_ir,
+    prepared_scene

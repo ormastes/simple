@@ -102,6 +102,36 @@ trait RenderBackend:
         """
         pass_dn
     fn read_pixels_with_source() -> Engine2DReadback
+    # D9 region-read seam. Default: one whole-framebuffer read, then a
+    # host-side crop with out-of-bounds pixels as 0u32 -- pixel-for-pixel
+    # identical to a caller doing read_pixels_with_source() and cropping by
+    # hand (the half-open, zero-fill-at-edge convention
+    # _engine2d_draw_ir_parent_region_pixels implements). Backends with a
+    # native region read (SoftwareBackend) override this and copy only the
+    # requested rows; every other backend inherits the fallback unchanged.
+    me read_pixels_region(x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
+        val full = self.read_pixels_with_source()
+        var cropped: [u32] = []
+        if (self.width() > 0 and self.height() > 0 and width > 0 and height > 0 and
+            full.pixels.len() == self.width().to_i64() * self.height().to_i64()):
+            val total = width.to_i64() * height.to_i64()
+            if total > 0 and total <= 2147483647:
+                cropped = [0u32; total.to_i32()]
+                var row = 0
+                while row < height:
+                    var col = 0
+                    while col < width:
+                        val source_x = x + col
+                        val source_y = y + row
+                        if (source_x >= 0 and source_y >= 0 and
+                            source_x < self.width() and source_y < self.height()):
+                            cropped[row.to_i64() * width.to_i64() + col.to_i64()] =
+                                full.pixels[source_y.to_i64() * self.width().to_i64() +
+                                    source_x.to_i64()]
+                        col = col + 1
+                    row = row + 1
+        engine2d_readback_with_identity(
+            cropped, full.source, full.backend_handle, full.device_identity)
     fn width() -> i32
     fn height() -> i32
 

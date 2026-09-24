@@ -1,0 +1,327 @@
+# Confined artifact paths, worker receipt parsing, and paired pixel verdict.
+mod app.test.vulkan_2d_qualification.candidate_receipts
+
+use app.io.mod.{file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded,
+    file_read_regular_no_follow_bounded_bytes, process_run_bounded}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use common.renderdoc.controlled_rect_oracle.{controlled_rect_expected_rgba}
+use common.renderdoc.controlled_clip_oracle.{controlled_clip_expected_rgba}
+use common.renderdoc.gui_button_qualification.{gui_button_expected_rgba}
+use common.renderdoc.web_opaque_box_oracle.{web_opaque_box_expected_rgba}
+use common.renderdoc.corpus_case01_oracle.{corpus_case01_expected_rgba}
+use common.renderdoc.corpus_case06_oracle.{corpus_case06_expected_rgba}
+use common.renderdoc.corpus_case02_polygon_oracle.{case02_compare_canonical_rgba}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY}
+use app.test.vulkan_2d_qualification.scene_contract.{
+    SCENE_CLIP, SCENE_CORPUS_CASE01, SCENE_CORPUS_CASE06,
+    SCENE_CORPUS_CASE02,
+    scene_is_gui, scene_gui_pressed, scene_is_web, scene_is_corpus,
+    scene_width, scene_height, scene_pixel_length,
+    scene_reference_sha, scene_oracle_sha, scene_fixture_id,
+    scene_fixture_sha, scene_input_state_sha, web_worker_scene,
+    prepared_scene}
+
+val OUTPUT_PREFIX: text = "build/test-artifacts/vulkan_2d/"
+val SKIA_REVISION: text = "35d5edfa0d50984c22ff94f5438c31e0db12c6f8"
+
+
+struct WorkerCandidate:
+    backend_id: text
+    device_type: text
+    device_uuid: text
+    driver_uuid: text
+    nonce: text
+    input_state_sha256: text
+    web_source_draw_ir_sha256: text
+    web_gpu_draw_ir_sha256: text
+    web_source_command_indexes: text
+    pixels: [u8]
+
+
+fn safe_output_dir(value: text) -> bool:
+    if not value.starts_with(OUTPUT_PREFIX):
+        return false
+    val suffix = value[OUTPUT_PREFIX.len():]
+    if suffix.len() == 0 or suffix.len() > 80:
+        return false
+    for character in suffix:
+        val code = character as i32
+        if not ((code >= 48 and code <= 57) or
+            (code >= 65 and code <= 90) or
+            (code >= 97 and code <= 122) or code == 45 or code == 95):
+            return false
+    true
+
+fn path_components_no_symlink(value: text) -> bool:
+    if value == "" or value.contains("\n") or value.contains("\r"):
+        return false
+    var prefix = if value.starts_with("/"): "/" else: ""
+    for segment in value.split("/"):
+        if segment == "" or segment == ".":
+            continue
+        if segment == "..":
+            return false
+        if prefix == "/":
+            prefix = prefix + segment
+        elif prefix == "":
+            prefix = segment
+        else:
+            prefix = prefix + "/" + segment
+        val (_, _, status) = process_run_bounded(
+            "/usr/bin/test", ["-L", prefix], 2000, 128)
+        if status != 1:
+            return false
+    true
+
+
+fn receipt_field(source: text, key: text) -> text:
+    val prefix = key + ": "
+    var found = false
+    var value = ""
+    for line in source.split("\n"):
+        if line.starts_with(prefix):
+            if found:
+                return ""
+            value = line[prefix.len():]
+            found = true
+    if found: value else: ""
+
+fn lowercase_hex(value: text, size: i64) -> bool:
+    if value.len() != size:
+        return false
+    for character in value:
+        val code = character as i32
+        if not ((code >= 48 and code <= 57) or
+            (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn positive_decimal(value: text) -> bool:
+    if value.len() == 0 or value.len() > 19:
+        return false
+    var number: i64 = 0
+    for character in value:
+        val code = character as i32
+        if code < 48 or code > 57:
+            return false
+        val digit = (code - 48).to_i64()
+        if number > (9223372036854775807i64 - digit) / 10:
+            return false
+        number = number * 10 + digit
+    number > 0
+
+fn read_candidate(output_dir: text, backend: text, executable_sha: text,
+    provider_sha: text, kind: i64) -> Result<WorkerCandidate, text>:
+    if not safe_output_dir(output_dir) or
+        not path_components_no_symlink(output_dir):
+        return Err("output-directory-outside-controlled-artifacts")
+    val receipt_path = output_dir + "/" + backend + ".sdn"
+    val pixel_path = output_dir + "/" + backend + ".rgba"
+    if not file_is_regular_no_follow(receipt_path) or
+        not file_is_regular_no_follow(pixel_path):
+        return Err("worker-artifact-absent-or-symlink:" + backend)
+    val source = match file_read_regular_no_follow_bounded(receipt_path, 8192):
+        case Ok(value): value
+        case Err(reason): return Err("receipt-read:" + reason)
+    if receipt_field(source, "schema") != "simple-2d-physical-worker/v1" or
+        receipt_field(source, "status") != "candidate" or
+        receipt_field(source, "backend_id") != backend or
+        receipt_field(source, "fixture_id") != scene_fixture_id(kind) or
+        receipt_field(source, "fixture_sha256") != scene_fixture_sha(kind) or
+        (scene_is_corpus(kind) and
+            (receipt_field(source, "reference_sha256") !=
+                scene_reference_sha(kind) or
+            receipt_field(source, "oracle_rgba_sha256") !=
+                scene_oracle_sha(kind))) or
+        ((scene_is_gui(kind) or scene_is_web(kind)) and receipt_field(source,
+            "input_state_sha256") != scene_input_state_sha(kind)) or
+        (not scene_is_gui(kind) and not scene_is_web(kind) and
+            receipt_field(source, "input_state_sha256") != "" and
+            receipt_field(source, "input_state_sha256") != "none") or
+        receipt_field(source, "executable_sha256") != executable_sha or
+        receipt_field(source, "provider_sha256") != provider_sha:
+        return Err("worker-artifact-domain-mismatch:" + backend)
+    val nonce = receipt_field(source, "run_nonce")
+    val device_uuid = receipt_field(source, "physical_device_uuid")
+    val driver_uuid = receipt_field(source, "driver_uuid")
+    val device_type = receipt_field(source, "device_type")
+    if not lowercase_hex(nonce, 64) or
+        not lowercase_hex(device_uuid, 32) or
+        not lowercase_hex(driver_uuid, 32) or
+        device_uuid == "00000000000000000000000000000000" or
+        driver_uuid == "00000000000000000000000000000000" or
+        (device_type != "discrete" and device_type != "integrated"):
+        return Err("physical-device-provenance-invalid:" + backend)
+    if backend == "upstream-skia-ganesh-vulkan" and
+        receipt_field(source, "provider_identity") !=
+            "{UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY}":
+        return Err("upstream-skia-provider-identity-invalid")
+    if backend == "upstream-skia-ganesh-vulkan" and
+        receipt_field(source, "skia_revision") != SKIA_REVISION:
+        return Err("upstream-skia-revision-invalid")
+    if backend == "upstream-skia-ganesh-vulkan" and
+        (not lowercase_hex(receipt_field(source,
+            "skia_build_receipt_sha256"), 64) or
+        not lowercase_hex(receipt_field(source,
+            "skia_deps_sha256"), 64) or
+        not lowercase_hex(receipt_field(source,
+            "skia_archive_sha256"), 64)):
+        return Err("upstream-skia-build-digests-invalid")
+    if receipt_field(source, "device_name") == "" or
+        receipt_field(source, "driver_identity") == "" or
+        receipt_field(source, "resource_id") == "" or
+        receipt_field(source, "frame_id") == "" or
+        receipt_field(source, "readback_source") != "device_readback" or
+        not (receipt_field(source, "device_identity") == "0" or
+            positive_decimal(receipt_field(source, "device_identity"))) or
+        (backend == "engine2d-vulkan" and
+            receipt_field(source, "device_identity") == "0") or
+        not positive_decimal(receipt_field(source, "backend_handle")) or
+        not positive_decimal(receipt_field(source, "submit_count")) or
+        not positive_decimal(receipt_field(source, "fence_count")):
+        return Err("completed-owner-evidence-invalid:" + backend)
+    var web_source_sha = ""
+    var web_gpu_sha = ""
+    var web_indexes = ""
+    if scene_is_web(kind):
+        val web = web_worker_scene(kind)?
+        web_source_sha = receipt_field(source, "web_source_draw_ir_sha256")
+        web_gpu_sha = receipt_field(source, "web_gpu_draw_ir_sha256")
+        web_indexes = receipt_field(source, "web_source_command_indexes")
+        if web_source_sha != web.admitted.source_draw_ir_sha256 or
+            web_gpu_sha != web.gpu_draw_ir_sha256 or
+            web_indexes != web.source_command_indexes or
+            receipt_field(source, "web_source_command_count") !=
+                "{web.admitted.source_command_count}" or
+            receipt_field(source, "web_gpu_command_count") !=
+                "{web.admitted.gpu_command_count}":
+            return Err("web-layout-projection-receipt-mismatch:" + backend)
+    val token = receipt_field(source, "submission_token")
+    val width = scene_width(kind)
+    val height = scene_height(kind)
+    val stride = width.to_i64() * 4
+    val pixel_length = scene_pixel_length(kind)
+    if token == "" or receipt_field(source, "completion_token") != token or
+        receipt_field(source, "selected_resource_count") != "1" or
+        receipt_field(source, "mip_level") != "0" or
+        receipt_field(source, "array_layer") != "0" or
+        receipt_field(source, "frame_complete") != "true" or
+        receipt_field(source, "readback_complete") != "true" or
+        receipt_field(source, "device_status") != "ready" or
+        receipt_field(source, "width") != "{width}" or
+        receipt_field(source, "height") != "{height}" or
+        receipt_field(source, "stride") != "{stride}" or
+        receipt_field(source, "pixel_format") != "R8G8B8A8_UNORM" or
+        receipt_field(source, "alpha_mode") != "straight" or
+        receipt_field(source, "origin") != "top-left" or
+        receipt_field(source, "crop_x") != "0" or
+        receipt_field(source, "crop_y") != "0" or
+        receipt_field(source, "crop_width") != "{width}" or
+        receipt_field(source, "crop_height") != "{height}" or
+        receipt_field(source, "pixel_length") != "{pixel_length}" or
+        receipt_field(source, "color_space") != "srgb" or
+        receipt_field(source, "color_primaries") != "srgb" or
+        receipt_field(source, "transfer_function") != "srgb" or
+        receipt_field(source, "source_width") != "{width}" or
+        receipt_field(source, "source_height") != "{height}" or
+        not positive_decimal(receipt_field(source, "source_stride")) or
+        receipt_field(source, "source_stride").to_i64() < stride or
+        (receipt_field(source, "source_pixel_format") != "R8G8B8A8_UNORM" and
+            receipt_field(source, "source_pixel_format") != "B8G8R8A8_UNORM") or
+        (receipt_field(source, "source_alpha_mode") != "opaque" and
+            receipt_field(source, "source_alpha_mode") != "straight") or
+        (receipt_field(source, "source_origin") != "top-left" and
+            receipt_field(source, "source_origin") != "bottom-left") or
+        receipt_field(source, "source_crop_x") != "0" or
+        receipt_field(source, "source_crop_y") != "0" or
+        receipt_field(source, "source_crop_width") != "{width}" or
+        receipt_field(source, "source_crop_height") != "{height}":
+        return Err("completed-final-output-invalid:" + backend)
+    val pixel_sha = receipt_field(source, "pixel_sha256")
+    if not lowercase_hex(pixel_sha, 64):
+        return Err("pixel-digest-mismatch:" + backend)
+    val pixels = match file_read_regular_no_follow_bounded_bytes(
+        pixel_path, pixel_length):
+        case Ok(value): value
+        case Err(reason): return Err("pixel-read:" + reason)
+    if pixels.len().to_i64() != pixel_length:
+        return Err("pixel-length-mismatch:" + backend)
+    if sha256_u8_hex(pixels) != pixel_sha:
+        return Err("pixel-digest-mismatch:" + backend)
+    Ok(WorkerCandidate(backend_id: backend, device_type: device_type,
+        device_uuid: device_uuid, driver_uuid: driver_uuid,
+        nonce: nonce,
+        input_state_sha256: receipt_field(source, "input_state_sha256"),
+        web_source_draw_ir_sha256: web_source_sha,
+        web_gpu_draw_ir_sha256: web_gpu_sha,
+        web_source_command_indexes: web_indexes,
+        pixels: pixels))
+
+fn verify_candidates(output_dir: text, executable_sha: text,
+    provider_sha: text, kind: i64) -> Result<WorkerCandidate, text>:
+    val scene = prepared_scene(kind)?
+    val engine = read_candidate(output_dir, "engine2d-vulkan",
+        executable_sha, executable_sha, kind)?
+    val skia = read_candidate(output_dir, "upstream-skia-ganesh-vulkan",
+        executable_sha, provider_sha, kind)?
+    if engine.nonce != skia.nonce or
+        engine.input_state_sha256 != skia.input_state_sha256 or
+        engine.web_source_draw_ir_sha256 != skia.web_source_draw_ir_sha256 or
+        engine.web_gpu_draw_ir_sha256 != skia.web_gpu_draw_ir_sha256 or
+        engine.web_source_command_indexes != skia.web_source_command_indexes or
+        engine.device_type != skia.device_type or
+        engine.device_uuid != skia.device_uuid or
+        engine.driver_uuid != skia.driver_uuid:
+        return Err("physical-device-pair-mismatch")
+    if kind == SCENE_CORPUS_CASE02:
+        val pixel_length = scene_pixel_length(kind)
+        if engine.pixels.len().to_i64() != pixel_length or
+            skia.pixels.len().to_i64() != pixel_length:
+            return Err("case02-pixel-length-mismatch")
+        var engine_rgba: [i64] = []
+        var skia_rgba: [i64] = []
+        for byte in engine.pixels:
+            engine_rgba.push(byte.to_i64())
+        for byte in skia.pixels:
+            skia_rgba.push(byte.to_i64())
+        val engine_oracle = case02_compare_canonical_rgba(engine_rgba)?
+        val skia_oracle = case02_compare_canonical_rgba(skia_rgba)?
+        if not engine_oracle.passed or not skia_oracle.passed:
+            return Err("case02-oracle-mismatch")
+        if scene.source_sha256 != scene_fixture_sha(kind):
+            return Err("fixture-source-changed")
+        return Ok(engine)
+    val oracle_result = if kind == SCENE_CLIP:
+        controlled_clip_expected_rgba()
+    elif scene_is_gui(kind):
+        gui_button_expected_rgba(scene_gui_pressed(kind))
+    elif kind == SCENE_CORPUS_CASE01:
+        corpus_case01_expected_rgba()
+    elif kind == SCENE_CORPUS_CASE06:
+        corpus_case06_expected_rgba()
+    elif scene_is_web(kind):
+        web_opaque_box_expected_rgba()
+    else:
+        controlled_rect_expected_rgba()
+    val expected = oracle_result?
+    val pixel_length = scene_pixel_length(kind)
+    if expected.len().to_i64() != pixel_length or
+        engine.pixels.len().to_i64() != pixel_length or
+        skia.pixels.len().to_i64() != pixel_length:
+        return Err("controlled-oracle-length-mismatch")
+    var index = 0
+    while index < pixel_length:
+        if engine.pixels[index] != skia.pixels[index] or
+            engine.pixels[index].to_i64() != expected[index]:
+            return Err("controlled-rectangle-pixel-mismatch")
+        index = index + 1
+    if scene.source_sha256 != scene_fixture_sha(kind):
+        return Err("fixture-source-changed")
+    Ok(engine)
+
+
+export SKIA_REVISION, WorkerCandidate, safe_output_dir,
+    path_components_no_symlink, lowercase_hex, read_candidate,
+    verify_candidates

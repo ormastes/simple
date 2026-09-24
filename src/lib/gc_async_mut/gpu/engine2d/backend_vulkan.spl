@@ -31,7 +31,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     engine2d_glass_corner_radius
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
-    _pack_clear_pc, _pack_rect_pc, _pack_circle_pc,
+    _pack_clear_pc, _pack_rect_pc, _pack_affine_coverage_pc, _pack_circle_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
     _pack_glass_material_pc, _pack_blur_rect_pc, _pack_shadow_rect_pc,
     vulkan_dispatch_region_kernel_checked,
@@ -243,6 +243,7 @@ class VulkanBackend:
     # Shader module handles
     shader_clear: i64
     shader_rect_filled: i64
+    shader_affine_coverage_rect: i64
     shader_rect_outline: i64
     shader_circle_filled: i64
     shader_circle_outline: i64
@@ -254,6 +255,7 @@ class VulkanBackend:
     # Pipeline handles
     pipe_clear: i64
     pipe_rect_filled: i64
+    pipe_affine_coverage_rect: i64
     pipe_rect_outline: i64
     pipe_circle_filled: i64
     pipe_circle_outline: i64
@@ -558,6 +560,7 @@ class VulkanBackend:
             d_framebuffer: 0,
             shader_clear: 0,
             shader_rect_filled: 0,
+            shader_affine_coverage_rect: 0,
             shader_rect_outline: 0,
             shader_circle_filled: 0,
             shader_circle_outline: 0,
@@ -568,6 +571,7 @@ class VulkanBackend:
             shader_blit: 0,
             pipe_clear: 0,
             pipe_rect_filled: 0,
+            pipe_affine_coverage_rect: 0,
             pipe_rect_outline: 0,
             pipe_circle_filled: 0,
             pipe_circle_outline: 0,
@@ -964,6 +968,7 @@ impl RenderBackend for VulkanBackend:
         # Borrow shared pipeline handles from the session
         self.shader_clear         = session.shader_clear
         self.shader_rect_filled   = session.shader_rect_filled
+        self.shader_affine_coverage_rect = session.shader_affine_coverage_rect
         self.shader_rect_outline  = session.shader_rect_outline
         self.shader_circle_filled = session.shader_circle_filled
         self.shader_circle_outline = session.shader_circle_outline
@@ -975,6 +980,7 @@ impl RenderBackend for VulkanBackend:
 
         self.pipe_clear          = session.pipe_clear
         self.pipe_rect_filled    = session.pipe_rect_filled
+        self.pipe_affine_coverage_rect = session.pipe_affine_coverage_rect
         self.pipe_rect_outline   = session.pipe_rect_outline
         self.pipe_circle_filled  = session.pipe_circle_filled
         self.pipe_circle_outline = session.pipe_circle_outline
@@ -1188,6 +1194,7 @@ impl RenderBackend for VulkanBackend:
         # Destroy pipelines
         if self.pipe_clear != 0: vulkan_sffi_destroy_pipeline(self.pipe_clear)
         if self.pipe_rect_filled != 0: vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_affine_coverage_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_affine_coverage_rect)
         if self.pipe_rect_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
         if self.pipe_circle_filled != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
         if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
@@ -1199,6 +1206,7 @@ impl RenderBackend for VulkanBackend:
         # Destroy shader modules
         if self.shader_clear != 0: vulkan_sffi_destroy_shader(self.shader_clear)
         if self.shader_rect_filled != 0: vulkan_sffi_destroy_shader(self.shader_rect_filled)
+        if self.shader_affine_coverage_rect != 0: vulkan_sffi_destroy_shader(self.shader_affine_coverage_rect)
         if self.shader_rect_outline != 0: vulkan_sffi_destroy_shader(self.shader_rect_outline)
         if self.shader_circle_filled != 0: vulkan_sffi_destroy_shader(self.shader_circle_filled)
         if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
@@ -1250,6 +1258,31 @@ impl RenderBackend for VulkanBackend:
         val gy = (_i64(h) + 15) / 16
         self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
         self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1, "rect-outline-dispatch-failed")
+
+    fn affine_coverage_ready() -> bool:
+        (self.initialized and not self.completion_unknown and
+            self.d_framebuffer > 0 and self.pipe_affine_coverage_rect > 0 and
+            self.mask_buf.len() == 0)
+
+    me draw_affine_rect_coverage(rx: i32, ry: i32, rw: i32, rh: i32,
+        local_w: f64, local_h: f64, a: f64, b: f64, c: f64, d: f64,
+        tx: f64, ty: f64, color: u32) -> bool:
+        """Paint one opaque affine polygon by device pixel-square coverage."""
+        if (not self.affine_coverage_ready() or rw <= 0 or rh <= 0 or
+            color_a(color) != 255 or self.mask_buf.len() != 0):
+            return false
+        val pc = _pack_affine_coverage_pc(rx, ry, rw, rh, self.w, self.h,
+            color, local_w, local_h, a, b, c, d, tx, ty)
+        self.hint_damage(_i64(rx), _i64(ry), _i64(rw), _i64(rh))
+        val dispatched = self._dispatch_framebuffer_checked(
+            self.pipe_affine_coverage_rect, pc, (_i64(rw) + 15) / 16,
+            (_i64(rh) + 15) / 16, 1, "affine-coverage-dispatch-failed")
+        if dispatched <= 0:
+            if dispatched < 0: self.completion_unknown = true
+            return false
+        self.dirty = true
+        self.host_mirror_frame_fresh = false
+        true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         # Timed shim: the body is unchanged in `_draw_rect_filled_impl`. Split
@@ -3081,6 +3114,7 @@ impl Engine2DExtended for VulkanBackend:
     me _clear_borrowed_pipeline_handles():
         self.shader_clear = 0
         self.shader_rect_filled = 0
+        self.shader_affine_coverage_rect = 0
         self.shader_rect_outline = 0
         self.shader_circle_filled = 0
         self.shader_circle_outline = 0
@@ -3091,6 +3125,7 @@ impl Engine2DExtended for VulkanBackend:
         self.shader_blit = 0
         self.pipe_clear = 0
         self.pipe_rect_filled = 0
+        self.pipe_affine_coverage_rect = 0
         self.pipe_rect_outline = 0
         self.pipe_circle_filled = 0
         self.pipe_circle_outline = 0

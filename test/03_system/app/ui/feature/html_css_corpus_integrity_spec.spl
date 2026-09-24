@@ -1,0 +1,77 @@
+# @req REQ-HTML-CSS-CORPUS-001
+# @req REQ-2D-006
+# The JSON manifest is the authoritative input inventory for this imported corpus.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.fs.{read_file}
+use std.io_runtime.{file_exists}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.json.types.{json_to_string, json_to_number}
+use std.common.crypto.sha256.{sha256_text}
+
+val CORPUS: text = "test/fixtures/html_css/corpus/"
+
+fn field(value: any, name: text) -> text:
+    json_to_string(json_object_get(value, name)) ?? ""
+
+describe "imported HTML/CSS rendering corpus integrity":
+    it "loads 48 pinned source cases and their independent references":
+        step("load the repo-native JSON manifest and check every source digest")
+        val parsed = json_parse_with_error(read_file(CORPUS + "manifest.json"))
+        expect(parsed.1).to_equal("")
+        val manifest = parsed.0
+        expect(field(manifest, "schema")).to_equal("simple-render-corpus/v1")
+        val cases = json_object_get(manifest, "cases")
+        expect(json_array_length(cases)).to_equal(48)
+
+        var references = 0
+        var i = 0
+        while i < 48:
+            val entry = json_array_get(cases, i)
+            val id = field(entry, "id")
+            val path = field(entry, "file")
+            expect(id.len()).to_be_greater_than(2)
+            expect(path).to_equal("cases/" + id + ".html")
+            expect(file_exists(CORPUS + path)).to_equal(true)
+            expect(sha256_text(read_file(CORPUS + path))).to_equal(field(entry, "source_sha256"))
+            expect(field(entry, "vulkan_parity_status")).to_equal("not-run")
+            expect(field(entry, "simple_render_status")).to_equal("not-run")
+
+            val viewport = json_object_get(entry, "viewport")
+            expect(json_array_length(viewport)).to_equal(2)
+            expect(json_to_number(json_array_get(viewport, 0))).to_equal(640.0)
+            expect(json_to_number(json_array_get(viewport, 1))).to_equal(480.0)
+            expect(json_to_number(json_object_get(entry, "dpr"))).to_equal(1.0)
+
+            val reference = field(entry, "reference")
+            if reference != "":
+                expect(reference).to_equal("references/" + id + ".html")
+                expect(file_exists(CORPUS + reference)).to_equal(true)
+                expect(sha256_text(read_file(CORPUS + reference))).to_equal(field(entry, "reference_sha256"))
+                expect(field(entry, "oracle")).to_equal("independent-reftest")
+                references = references + 1
+            else:
+                expect(field(entry, "reference_sha256")).to_equal("")
+            i = i + 1
+        expect(references).to_equal(8)
+
+    it "retains the local SVG and deterministic special states":
+        step("check local image input and scroll/animation state metadata")
+        val parsed = json_parse_with_error(read_file(CORPUS + "manifest.json"))
+        expect(parsed.1).to_equal("")
+        val manifest = parsed.0
+        val assets = json_object_get(manifest, "assets")
+        expect(json_array_length(assets)).to_equal(1)
+        val checker = json_array_get(assets, 0)
+        val checker_path = field(checker, "file")
+        expect(checker_path).to_equal("assets/checker.svg")
+        expect(file_exists(CORPUS + checker_path)).to_equal(true)
+        expect(sha256_text(read_file(CORPUS + checker_path))).to_equal(field(checker, "sha256"))
+        val cases = json_object_get(manifest, "cases")
+        val scroll = json_object_get(json_array_get(cases, 40), "state")
+        expect(field(scroll, "scroll_selector")).to_equal("#scroller")
+        expect(json_to_number(json_object_get(scroll, "scroll_top"))).to_equal(125.0)
+        val animation = json_object_get(json_array_get(cases, 42), "state")
+        expect(json_to_number(json_object_get(animation, "animation_time_ms"))).to_equal(500.0)

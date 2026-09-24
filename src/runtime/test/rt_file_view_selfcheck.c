@@ -59,9 +59,15 @@ int main(void) {
     char root[] = "/tmp/simple-file-view-XXXXXX";
     assert(mkdtemp(root));
     char nested[256], file[512], link_path[512];
+#if !defined(_WIN32)
+    char fifo_path[512];
+#endif
     snprintf(nested, sizeof(nested), "%s/nested", root);
     snprintf(file, sizeof(file), "%s/data.bin", nested);
     snprintf(link_path, sizeof(link_path), "%s/link.bin", nested);
+#if !defined(_WIN32)
+    snprintf(fifo_path, sizeof(fifo_path), "%s/pipe.bin", nested);
+#endif
     assert(make_dir(nested) == 0);
     int fd = open(file, O_CREAT | O_EXCL | O_WRONLY, 0600);
     assert(fd >= 0);
@@ -99,6 +105,15 @@ int main(void) {
         assert(rt_file_view_open_beneath_no_follow_v1(
             (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&link_text) == -3);
     }
+#if !defined(_WIN32)
+    assert(mkfifo(fifo_path, 0600) == 0);
+    TestText fifo_text = text("nested/pipe.bin");
+    alarm(5);
+    assert(rt_file_view_open_beneath_no_follow_v1(
+        (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&fifo_text) == -3);
+    alarm(0);
+    assert(unlink(fifo_path) == 0);
+#endif
     TestText escape_text = text("../data.bin");
     assert(rt_file_view_open_beneath_no_follow_v1(
         (int64_t)(uintptr_t)&root_text, (int64_t)(uintptr_t)&escape_text) == -2);

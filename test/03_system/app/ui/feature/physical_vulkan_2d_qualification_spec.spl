@@ -1,0 +1,293 @@
+# @req REQ-2D-003 REQ-2D-005 REQ-2D-006
+# @cover src/lib/common/renderdoc/physical_vulkan_2d_qualification.spl 80%
+# @tag: system, engine2d, skia, vulkan, physical_device
+"""Controlled rectangle qualification gate.
+
+The gate independently hashes one pinned source file. It admits a visual
+comparison only after both backend adapters provide authenticated, physical
+Vulkan device captures with complete final-output metadata. These scenarios
+exercise blocked outcomes; they do not claim a GPU was available.
+"""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use common.renderdoc.controlled_clip_oracle.{controlled_clip_expected_rgba}
+use common.renderdoc.physical_vulkan_2d_qualification.{
+    PreparedRenderScene, VulkanBackendCaptureArtifact,
+    qualify_physical_vulkan_2d_pair}
+use common.renderdoc.final_output_pixels.{FinalOutputMetadata, FinalOutputCapture}
+
+fn controlled_scene() -> PreparedRenderScene:
+    PreparedRenderScene(
+        fixture_id: "controlled-opaque-rect-v1",
+        source_path: "test/fixtures/simple_2d_skia/controlled_opaque_rect_v1.sdn",
+        source_sha256: "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3",
+        scene_scope: "controlled-rectangle-only",
+        render_degraded: false, degrade_reason: "")
+
+fn controlled_clip_scene() -> PreparedRenderScene:
+    PreparedRenderScene(
+        fixture_id: "controlled-clipped-rect-v2",
+        source_path: "test/fixtures/simple_2d_skia/controlled_clipped_rect_v2.sdn",
+        source_sha256: "b16d53f7785a09559bf209797fcb724906f896b93d23eff512bda69ec44d8f2f",
+        scene_scope: "controlled-clipped-rectangle-only",
+        render_degraded: false, degrade_reason: "")
+
+fn missing_capture(backend: text, device_type: text) -> VulkanBackendCaptureArtifact:
+    VulkanBackendCaptureArtifact(
+        backend_id: backend, fixture_id: "controlled-opaque-rect-v1",
+        fixture_sha256: "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3",
+        producer_authenticated: true, provider_identity: 0x534b4941564b0001,
+        device_name: "reported device", device_type: device_type,
+        driver_identity: "reported driver",
+        physical_device_uuid: "11111111111111111111111111111111",
+        driver_uuid: "22222222222222222222222222222222",
+        device_identity: 1,
+        backend_handle: 1, submit_count: 1, fence_count: 1,
+        readback_source: "device_readback", fallback_required: false,
+        capture: nil)
+
+fn synthetic_capture_extent(
+    backend: text, width: i32, height: i32, wrong_color: bool
+) -> VulkanBackendCaptureArtifact:
+    var reported = missing_capture(backend, "discrete")
+    var bytes: [i64] = []
+    var y = 0
+    while y < height:
+        var x = 0
+        while x < width:
+            val inside = x >= 4 and x < 12 and y >= 4 and y < 12
+            val red = if inside: 51 elif wrong_color: 17 else: 16
+            bytes.push(red)
+            bytes.push(if inside: 102 else: 32)
+            bytes.push(if inside: 153 else: 48)
+            bytes.push(255)
+            x = x + 1
+        y = y + 1
+    reported.capture = Some(FinalOutputCapture(
+        metadata: FinalOutputMetadata(
+            fixture_id: "controlled-opaque-rect-v1",
+            fixture_digest: "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3",
+            frame_id: "reported-frame", resource_id: backend + "-reported-resource",
+            selected_resource_count: 1, mip_level: 0, array_layer: 0,
+            submission_token: "reported-submission",
+            completion_token: "reported-submission",
+            frame_complete: true, readback_complete: true,
+            device_status: "ready", width: width.to_i64(),
+            height: height.to_i64(), stride: width.to_i64() * 4,
+            pixel_format: "R8G8B8A8_UNORM", alpha_mode: "straight",
+            color_space: "srgb", color_primaries: "srgb",
+            transfer_function: "srgb", origin: "top-left",
+            crop_x: 0, crop_y: 0, crop_width: width.to_i64(),
+            crop_height: height.to_i64()),
+        pixel_bytes: bytes))
+    reported
+
+fn synthetic_capture(backend: text) -> VulkanBackendCaptureArtifact:
+    synthetic_capture_extent(backend, 16, 16, false)
+
+fn synthetic_clip_capture(backend: text) -> VulkanBackendCaptureArtifact:
+    var artifact = synthetic_capture(backend)
+    artifact.fixture_id = "controlled-clipped-rect-v2"
+    artifact.fixture_sha256 =
+        "b16d53f7785a09559bf209797fcb724906f896b93d23eff512bda69ec44d8f2f"
+    if val Some(existing) = artifact.capture:
+        var metadata = existing.metadata
+        metadata.fixture_id = artifact.fixture_id
+        metadata.fixture_digest = artifact.fixture_sha256
+        artifact.capture = Some(FinalOutputCapture(
+            metadata: metadata, pixel_bytes: existing.pixel_bytes))
+    artifact
+
+fn synthetic_clip_capture_with_bytes(backend: text,
+    rgba: [i64]) -> VulkanBackendCaptureArtifact:
+    var artifact = synthetic_clip_capture(backend)
+    if val Some(existing) = artifact.capture:
+        artifact.capture = Some(FinalOutputCapture(
+            metadata: existing.metadata, pixel_bytes: rgba))
+    artifact
+
+describe "physical Vulkan 2D qualification contract":
+    it "recognizes the pinned clipped scene and blocks absent GPU captures":
+        # @req REQ-2D-006
+        step("Hash the pinned clipped rectangle source independently")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_clip_scene(), nil, nil)
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal("engine2d-vulkan-capture-missing")
+        expect(receipt.source_sha256).to_equal(
+            "b16d53f7785a09559bf209797fcb724906f896b93d23eff512bda69ec44d8f2f")
+
+    it "fails identical wrong clipped pixels against the independent oracle":
+        # @req REQ-2D-006 NFR-2D-003
+        step("Check clipped pixels after a matching pairwise byte comparison")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_clip_scene(),
+            Some(synthetic_clip_capture("engine2d-vulkan")),
+            Some(synthetic_clip_capture("upstream-skia-ganesh-vulkan")))
+        expect(receipt.status).to_equal("fail")
+        expect(receipt.reason).to_equal(
+            "controlled-clip-oracle-mismatch:engine2d-vulkan")
+
+    it "keeps a matching clipped scene at candidate status":
+        # @req REQ-2D-006 NFR-2D-002
+        step("Compare structural clipped pixels without claiming physical proof")
+        match controlled_clip_expected_rgba():
+            case Err(reason):
+                fail_test("controlled clip oracle unavailable: {reason}")
+            case Ok(rgba):
+                val receipt = qualify_physical_vulkan_2d_pair(
+                    controlled_clip_scene(),
+                    Some(synthetic_clip_capture_with_bytes("engine2d-vulkan", rgba)),
+                    Some(synthetic_clip_capture_with_bytes(
+                        "upstream-skia-ganesh-vulkan", rgba)))
+                expect(receipt.status).to_equal("candidate")
+                expect(receipt.reason).to_equal("pixel-match-provenance-unverified")
+
+    it "blocks when no completed Engine2D capture exists":
+        step("Hash the pinned controlled rectangle source independently")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(), nil, nil)
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal("engine2d-vulkan-capture-missing")
+        expect(receipt.source_sha256).to_equal(
+            "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3")
+        expect(receipt.comparison == nil).to_equal(true)
+
+    it "blocks software Vulkan before final-pixel comparison":
+        step("Reject a CPU Vulkan device even when a caller presents receipt numbers")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(),
+            Some(missing_capture("engine2d-vulkan", "cpu")),
+            Some(missing_capture("upstream-skia-ganesh-vulkan", "discrete")))
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal(
+            "physical-device-provenance-missing:engine2d-vulkan")
+        expect(receipt.comparison == nil).to_equal(true)
+
+    it "blocks an incomplete final-output capture":
+        step("Require the actual selected resource and completed readback")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(),
+            Some(missing_capture("engine2d-vulkan", "discrete")),
+            Some(missing_capture("upstream-skia-ganesh-vulkan", "discrete")))
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal(
+            "final-output-capture-missing:engine2d-vulkan")
+        expect(receipt.comparison == nil).to_equal(true)
+
+    it "blocks matching small images for the pinned 16 by 16 scene":
+        # @req NFR-2D-004 REQ-2D-006
+        step("Check source extent before comparing otherwise matching pixels")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(),
+            Some(synthetic_capture_extent("engine2d-vulkan", 2, 1, false)),
+            Some(synthetic_capture_extent("upstream-skia-ganesh-vulkan", 2, 1, false)))
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal(
+            "capture-controlled-extent-mismatch:engine2d-vulkan")
+
+    it "blocks captures with different Vulkan driver UUIDs":
+        # @req NFR-2D-002 REQ-2D-006
+        step("Require both backend runs to identify the same driver UUID")
+        var other = synthetic_capture("upstream-skia-ganesh-vulkan")
+        other.driver_uuid = "44444444444444444444444444444444"
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(),
+            Some(synthetic_capture("engine2d-vulkan")), Some(other))
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal("physical-device-pair-mismatch")
+        expect(receipt.comparison == nil).to_equal(true)
+
+    it "treats backend-formatted names as diagnostics when UUIDs agree":
+        # @req NFR-2D-002 REQ-2D-006
+        step("Keep differently formatted Vulkan labels out of pair admission")
+        var engine = synthetic_capture("engine2d-vulkan")
+        var skia = synthetic_capture("upstream-skia-ganesh-vulkan")
+        engine.device_name = "GPU Model (Engine2D)"
+        engine.driver_identity = "driver=abcd api=1.1"
+        skia.device_name = "vendor:device"
+        skia.driver_identity = "driver 0xabcd, Vulkan 1.1"
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(), Some(engine), Some(skia))
+        expect(receipt.status).to_equal("candidate")
+        expect(receipt.reason).to_equal("pixel-match-provenance-unverified")
+
+    it "blocks matching model names with different Vulkan device UUIDs":
+        # @req NFR-2D-002 REQ-2D-006
+        step("Distinguish two identical GPU models across backend processes")
+        var other = synthetic_capture("upstream-skia-ganesh-vulkan")
+        other.physical_device_uuid = "33333333333333333333333333333333"
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(),
+            Some(synthetic_capture("engine2d-vulkan")), Some(other))
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal("physical-device-pair-mismatch")
+        expect(receipt.comparison == nil).to_equal(true)
+
+    it "blocks absent physical-device UUID evidence":
+        # @req NFR-2D-002
+        step("Require canonical nonzero Vulkan UUIDs before comparison")
+        var engine = synthetic_capture("engine2d-vulkan")
+        engine.physical_device_uuid = "00000000000000000000000000000000"
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(), Some(engine),
+            Some(synthetic_capture("upstream-skia-ganesh-vulkan")))
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal(
+            "physical-device-uuid-missing:engine2d-vulkan")
+        expect(receipt.comparison == nil).to_equal(true)
+
+    it "blocks degraded source rendering":
+        step("Preserve Web and GUI producer degradation as a typed block")
+        var scene = controlled_scene()
+        scene.render_degraded = true
+        scene.degrade_reason = "unsupported-css"
+        val receipt = qualify_physical_vulkan_2d_pair(scene, nil, nil)
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal("source-render-degraded")
+        expect(receipt.comparison == nil).to_equal(true)
+
+    it "does not qualify caller-reported matching pixels as physical proof":
+        # @req NFR-2D-002
+        step("Present two synthetic matching pixel buffers with claimed GPU receipts")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(),
+            Some(synthetic_capture("engine2d-vulkan")),
+            Some(synthetic_capture("upstream-skia-ganesh-vulkan")))
+        expect(receipt.status).to_equal("candidate")
+        expect(receipt.reason).to_equal("pixel-match-provenance-unverified")
+
+    it "fails matching wrong pixels against the controlled rectangle oracle":
+        # @req NFR-2D-003 REQ-2D-006
+        step("Reject common-mode pixel errors after the pairwise byte match")
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(),
+            Some(synthetic_capture_extent("engine2d-vulkan", 16, 16, true)),
+            Some(synthetic_capture_extent("upstream-skia-ganesh-vulkan", 16, 16, true)))
+        expect(receipt.status).to_equal("fail")
+        expect(receipt.reason).to_equal(
+            "controlled-rectangle-oracle-mismatch:engine2d-vulkan")
+
+    it "accepts Vulkan device index zero as a structural candidate":
+        # @req NFR-2D-002
+        step("Keep the first enumerated device eligible for authenticated review")
+        var engine = synthetic_capture("engine2d-vulkan")
+        var skia = synthetic_capture("upstream-skia-ganesh-vulkan")
+        skia.device_identity = 0
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(), Some(engine), Some(skia))
+        expect(receipt.status).to_equal("candidate")
+        expect(receipt.reason).to_equal("pixel-match-provenance-unverified")
+
+    it "rejects a missing Engine2D selected-device generation token":
+        # @req NFR-2D-002
+        step("Require a positive Engine2D generation while allowing Skia index zero")
+        var engine = synthetic_capture("engine2d-vulkan")
+        engine.device_identity = 0
+        val receipt = qualify_physical_vulkan_2d_pair(
+            controlled_scene(), Some(engine),
+            Some(synthetic_capture("upstream-skia-ganesh-vulkan")))
+        expect(receipt.status).to_equal("blocked")
+        expect(receipt.reason).to_equal(
+            "physical-device-provenance-missing:engine2d-vulkan")

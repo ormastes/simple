@@ -1,0 +1,72 @@
+# @req REQ-2D-003
+# @req NFR-2D-003
+# @tag: unit, renderdoc, web, corpus
+"""Independent case 06 pixels; this test does not qualify a GPU capture."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use common.renderdoc.corpus_case06_oracle.{
+    CORPUS_CASE06_WIDTH, CORPUS_CASE06_HEIGHT,
+    CORPUS_CASE06_FIXTURE_ID, CORPUS_CASE06_SOURCE_SHA256,
+    corpus_case06_expected_rgba, corpus_case06_capture_matches_oracle}
+use common.renderdoc.final_output_pixels.{FinalOutputMetadata, FinalOutputCapture}
+
+fn _offset(x: i32, y: i32) -> i64:
+    (y * CORPUS_CASE06_WIDTH + x).to_i64() * 4
+
+fn _capture(rgba: [i64]) -> FinalOutputCapture:
+    FinalOutputCapture(
+        metadata: FinalOutputMetadata(
+            fixture_id: CORPUS_CASE06_FIXTURE_ID,
+            fixture_digest: CORPUS_CASE06_SOURCE_SHA256,
+            frame_id: "case06-unit-frame", resource_id: "case06-final-color",
+            selected_resource_count: 1, mip_level: 0, array_layer: 0,
+            submission_token: "complete-1", completion_token: "complete-1",
+            frame_complete: true, readback_complete: true, device_status: "ready",
+            width: 640, height: 480, stride: 2560,
+            pixel_format: "R8G8B8A8_UNORM", alpha_mode: "opaque",
+            color_space: "srgb", color_primaries: "srgb", transfer_function: "srgb",
+            origin: "top-left", crop_x: 0, crop_y: 0,
+            crop_width: 640, crop_height: 480),
+        pixel_bytes: rgba)
+
+describe "pinned corpus case 06 independent oracle":
+    it "keeps the white canvas and clipped cyan rectangle at exact boundaries":
+        step("Hash the authored HTML and reference before constructing pixels")
+        val rgba = match corpus_case06_expected_rgba():
+            case Ok(value): value
+            case Err(reason): fail_test("case 06 oracle unavailable: {reason}")
+        expect(rgba.len()).to_equal(
+            CORPUS_CASE06_WIDTH.to_i64() * CORPUS_CASE06_HEIGHT.to_i64() * 4)
+        val before_x = _offset(79, 65)
+        val before_y = _offset(80, 64)
+        val cyan_start = _offset(80, 65)
+        val cyan_end = _offset(199, 139)
+        val after_x = _offset(200, 139)
+        val after_y = _offset(199, 140)
+        expect(rgba[_offset(0, 0):_offset(0, 0) + 4]).to_equal([255, 255, 255, 255])
+        expect(rgba[before_x:before_x + 4]).to_equal([255, 255, 255, 255])
+        expect(rgba[before_y:before_y + 4]).to_equal([255, 255, 255, 255])
+        expect(rgba[cyan_start:cyan_start + 4]).to_equal([0, 170, 255, 255])
+        expect(rgba[cyan_end:cyan_end + 4]).to_equal([0, 170, 255, 255])
+        expect(rgba[after_x:after_x + 4]).to_equal([255, 255, 255, 255])
+        expect(rgba[after_y:after_y + 4]).to_equal([255, 255, 255, 255])
+        expect(rgba[_offset(639, 479):_offset(639, 479) + 4]).to_equal([255, 255, 255, 255])
+
+    it "compares canonical final pixels and rejects one changed pixel":
+        step("Compare a completed capture with the independent case 06 oracle")
+        val rgba = match corpus_case06_expected_rgba():
+            case Ok(value): value
+            case Err(reason): fail_test("case 06 oracle unavailable: {reason}")
+        val correct = match corpus_case06_capture_matches_oracle(_capture(rgba)):
+            case Ok(value): value
+            case Err(reason): fail_test("case 06 capture invalid: {reason}")
+        expect(correct).to_equal(true)
+        var wrong: [i64] = []
+        for byte in rgba:
+            wrong.push(byte)
+        wrong[_offset(80, 65)] = 1
+        val changed = match corpus_case06_capture_matches_oracle(_capture(wrong)):
+            case Ok(value): value
+            case Err(reason): fail_test("case 06 changed capture invalid: {reason}")
+        expect(changed).to_equal(false)

@@ -1,0 +1,84 @@
+# @cover src/lib/nogc_sync_mut/mimalloc.spl
+# @cover src/lib/nogc_sync_mut/mimalloc_page.spl
+# # nogc_sync_mut mimalloc local_free reuse specification
+#
+# **Feature IDs:** #alloc-003
+# **Category:** Infrastructure | Stdlib
+# **Difficulty:** 3/5
+# **Status:** Draft
+# **Requirements:** N/A
+#
+# ## Overview
+#
+# Regression evidence for the nogc_sync_mut mimalloc local_free reuse fix
+# (sibling of the gc_async_mut fix; see
+# doc/08_tracking/bug/lib_perfmem_allocator_freelist_reuse_2026-10-03.md).
+# mi_free pushes freed blocks onto a page's local_free list; allocation must
+# reclaim from local_free once the fresh free list is empty. Before the fix,
+# local_free was write-only: every alloc/free cycle in a steady-state churn
+# appended a new page to pages_by_class, growing the page list (and the
+# per-alloc scan cost) without bound.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.mimalloc.{
+    mi_malloc,
+    mi_free,
+    mimalloc_init,
+    mi_heap_new,
+    mi_stats_current,
+}
+use std.nogc_sync_mut.mimalloc_types.{_g_heap, _size_class_slot}
+
+describe "nogc_sync_mut mimalloc local_free reuse":
+    it "steady-state alloc/free churn keeps the page list bounded":
+        step("Initialize a fresh global heap")
+        mimalloc_init(mi_heap_new())
+
+        step("Run 200 alloc/free cycles of one size class")
+        var i = 0
+        while i < 200:
+            val p = mi_malloc(64)
+            expect(p.?).to_equal(true)
+            mi_free(p.unwrap(), 64)
+            i = i + 1
+
+        step("The size class must still be served by a single page")
+        val class_idx = _size_class_slot(64)
+        expect(_g_heap.pages_by_class[class_idx].len()).to_equal(1)
+
+    it "allocation and free statistics stay balanced under churn":
+        step("Initialize a fresh global heap")
+        mimalloc_init(mi_heap_new())
+
+        step("Run 100 alloc/free cycles")
+        var i = 0
+        while i < 100:
+            val p = mi_malloc(32)
+            expect(p.?).to_equal(true)
+            mi_free(p.unwrap(), 32)
+            i = i + 1
+
+        step("No bytes remain allocated and every alloc has a matching free")
+        val st = mi_stats_current()
+        expect(st.allocated).to_equal(0)
+        expect(st.allocation_count).to_equal(st.free_count)
+
+    it "interleaved allocations of two sizes keep separate bounded page lists":
+        step("Initialize a fresh global heap")
+        mimalloc_init(mi_heap_new())
+
+        step("Churn two size classes interleaved")
+        var i = 0
+        while i < 120:
+            val a = mi_malloc(16)
+            val b = mi_malloc(128)
+            expect(a.?).to_equal(true)
+            expect(b.?).to_equal(true)
+            mi_free(a.unwrap(), 16)
+            mi_free(b.unwrap(), 128)
+            i = i + 1
+
+        step("Each class page list stays at one page")
+        expect(_g_heap.pages_by_class[_size_class_slot(16)].len()).to_equal(1)
+        expect(_g_heap.pages_by_class[_size_class_slot(128)].len()).to_equal(1)

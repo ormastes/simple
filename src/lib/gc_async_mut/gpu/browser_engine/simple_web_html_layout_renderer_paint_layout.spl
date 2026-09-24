@@ -323,6 +323,14 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("transform-origin", st.transform_origin),
         draw_ir_style_prop("transform-box", st.transform_box),
         draw_ir_style_prop("transform-style", st.transform_style),
+        draw_ir_style_prop("transform", st.transform_raw),
+        draw_ir_style_prop("translate", st.translate_raw),
+        draw_ir_style_prop("scale", st.scale_raw),
+        draw_ir_style_prop("rotate", st.rotate_raw),
+        draw_ir_style_prop("box-geometry-raw-tokens",
+            st.box_geometry_raw_tokens.join("|")),
+        draw_ir_style_prop("box-geometry-unresolved",
+            if st.box_geometry_unresolved: "true" else: "false"),
         draw_ir_style_prop("image-rendering", st.image_rendering),
         draw_ir_style_prop("object-fit", st.object_fit),
         draw_ir_style_prop("object-position", st.object_position),
@@ -1326,12 +1334,50 @@ fn _html_draw_ir_node_paint_order(
         styles, members, child_contexts, 0, []
     )
 
+fn _html_draw_ir_descendant_bottom(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult
+) -> [i64]:
+    var descendant_bottom: [i64] = [0i64; nodes.len()]
+    var i = 0
+    while i < nodes.len():  # cpu-lane-loop-ok: one raw-layout bottom per node, bounded by node count
+        val outer_bottom = boxes.by[i].to_i64() + boxes.bh[i].to_i64()
+        # A scrollport's own border is not scrollable content. Begin at its
+        # inner bottom; descendants may extend that range below the viewport.
+        descendant_bottom[i] = if styles[i].overflow_auto_y or
+            styles[i].overflow_scroll_y:
+            outer_bottom - styles[i].border_b.to_i64()
+        else:
+            outer_bottom
+        i = i + 1
+    i = nodes.len() - 1
+    while i >= 0:  # cpu-lane-loop-ok: one reverse subtree-extent pass, bounded by node count
+        val parent = nodes[i].parent
+        if parent >= 0:
+            val own_bottom = boxes.by[i].to_i64() + boxes.bh[i].to_i64()
+            val propagated = if styles[i].overflow_hidden or
+                styles[i].overflow_auto_y or styles[i].overflow_scroll_y:
+                own_bottom
+            else:
+                descendant_bottom[i]
+            val content_bottom = if styles[parent].overflow_auto_y or
+                styles[parent].overflow_scroll_y:
+                propagated + styles[parent].pad_b.to_i64()
+            else:
+                propagated
+            if content_bottom > descendant_bottom[parent]:
+                descendant_bottom[parent] = content_bottom
+        i = i - 1
+    descendant_bottom
+
 fn _html_draw_ir_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    raw_boxes: LayoutResult,
     width: i32, height: i32, vector_fonts: bool,
     target_keys: [text], overlay: BrowserTextInputOverlay,
     visible_nodes: [bool], images: [SimpleOsHostGpuImageResource],
-    clip_cache: PaintClipCache
+    clip_cache: PaintClipCache,
+    element_scroll_index: i32, element_scroll_top: i32,
+    element_scroll_max: i32
 ) -> ([DrawIrCommand], [i32]):
     # One uri -> index map per render. The per-node loop below used to rescan
     # the whole image list for every img, video and background layer.
@@ -1351,34 +1397,9 @@ fn _html_draw_ir_commands(
     var scrollbar_commands_at: [[DrawIrCommand]] = []
     var scrollbar_owners_at: [[i32]] = []
     if scrollbar_lowering:
-        descendant_bottom = [0i64; nodes.len()]
-        var extent_init = 0
-        # cpu-lane-loop-ok: initialises descendant_bottom to each node's own bottom edge; single O(node_count) init of the scroll-extent accumulator
-        while extent_init < nodes.len():
-            descendant_bottom[extent_init] = (
-                boxes.by[extent_init].to_i64() +
-                boxes.bh[extent_init].to_i64()
-            )
-            extent_init = extent_init + 1
-        var extent_index = nodes.len() - 1
-        # cpu-lane-loop-ok: reverse sweep propagating each node's scroll extent into its parent; this IS the bulk idiom - it replaces a per-node subtree walk with one O(node_count) backward pass
-        while extent_index >= 0:
-            val own_bottom = (
-                boxes.by[extent_index].to_i64() +
-                boxes.bh[extent_index].to_i64()
-            )
-            val extent_parent = nodes[extent_index].parent
-            if extent_parent >= 0:
-                val propagated_bottom = if (
-                    styles[extent_index].overflow_hidden or
-                    styles[extent_index].overflow_auto_y
-                ):
-                    own_bottom
-                else:
-                    descendant_bottom[extent_index]
-                if propagated_bottom > descendant_bottom[extent_parent]:
-                    descendant_bottom[extent_parent] = propagated_bottom
-            extent_index = extent_index - 1
+        descendant_bottom = _html_draw_ir_descendant_bottom(
+            nodes, styles, raw_boxes
+        )
         # Schedule chrome immediately after the owner's last painted
         # descendant. This keeps it above owned content, below later stacking
         # contexts/glass, and contiguous with its opacity subtree.
@@ -1433,8 +1454,12 @@ fn _html_draw_ir_commands(
                     boxes.by[scrollbar_index].to_i64() +
                     st.border_t.to_i64()
                 )
+                val raw_track_y64 = (
+                    raw_boxes.by[scrollbar_index].to_i64() +
+                    st.border_t.to_i64()
+                )
                 val content_extent = (
-                    descendant_bottom[scrollbar_index] - track_y64
+                    descendant_bottom[scrollbar_index] - raw_track_y64
                 )
                 if (
                     inner_width64 >= 15 and track_h64 >= 8 and
@@ -1519,15 +1544,27 @@ fn _html_draw_ir_commands(
                             thumb_h64 = 16
                         if thumb_h64 > track_h64:
                             thumb_h64 = track_h64
+                        val thumb_offset = if (
+                            scrollbar_index == element_scroll_index and
+                            element_scroll_max > 0
+                        ):
+                            (track_h64 - thumb_h64) *
+                            element_scroll_top.to_i64() /
+                            element_scroll_max.to_i64()
+                        else:
+                            0i64
                         var thumb = _html_draw_ir_overlay_rect(
                             component_id + "_scrollbar_thumb",
                             ClipRect(
-                                x0: track_x, y0: track_y,
+                                x0: track_x,
+                                y0: _html_draw_ir_saturated_i32(
+                                    track_y64 + thumb_offset
+                                ),
                                 x1: _html_draw_ir_saturated_i32(
                                     track_x64 + 15
                                 ),
                                 y1: _html_draw_ir_saturated_i32(
-                                    track_y64 + thumb_h64
+                                    track_y64 + thumb_offset + thumb_h64
                                 )
                             ),
                             thumb_color, scrollport_clip

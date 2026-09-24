@@ -60,6 +60,10 @@ pub struct LinuxOciRequestV1:
     pid_limit: i64
     network_policy: text
     filesystem_policy: text
+    # Build-only mounts. Both must be set together under this attempt's
+    # trusted state directory. Existing orchestration requests leave them empty.
+    build_input_root: text = ""
+    build_output_root: text = ""
 
 pub struct RootlessCapabilityEvidenceV1:
     uid: text
@@ -263,6 +267,9 @@ impl LinuxOciRuntimeProviderV1:
             return RuntimeValidationV1(accepted: false, reason: "network-policy-unsupported")
         if request.filesystem_policy != "read-only":
             return RuntimeValidationV1(accepted: false, reason: "filesystem-policy-unsupported")
+        val mount_error = _build_mount_error(self.state_dir, request)
+        if mount_error != "":
+            return RuntimeValidationV1(accepted: false, reason: mount_error)
         RuntimeValidationV1(accepted: true, reason: "")
 
     # Reserve the logical attempt before any native side effect.  This is the
@@ -477,6 +484,9 @@ impl LinuxOciRuntimeProviderV1:
                 "native-wait-failed", run.stdout, run.stderr, run.exit_code)
         val raw_code = run.stdout.trim()
         if raw_code == "" or raw_code.to_i64().to_text() != raw_code:
+            return self._rejected_with_output("wait", current, command.1,
+                "native-wait-returned-invalid-exit-code", run.stdout, run.stderr, run.exit_code)
+        if raw_code.to_i64() < 0 or raw_code.to_i64() > 255:
             return self._rejected_with_output("wait", current, command.1,
                 "native-wait-returned-invalid-exit-code", run.stdout, run.stderr, run.exit_code)
         val exited = RuntimeStateV1(phase: RUNTIME_PHASE_EXITED,
@@ -1042,6 +1052,34 @@ fn _safe_token(value: text) -> bool:
         index = index + 1
     true
 
+fn _build_mount_error(state_dir: text, request: LinuxOciRequestV1) -> text:
+    if request.build_input_root == "" and request.build_output_root == "":
+        return ""
+    if request.build_input_root == "" or request.build_output_root == "":
+        return "build-mount-pair-incomplete"
+    if request.command.len() == 0 or request.command[0] == "":
+        return "build-command-empty"
+    if not state_dir.starts_with("/") or state_dir.ends_with("/") or
+       state_dir.contains(",") or state_dir.contains("=") or
+       state_dir.contains("\n") or state_dir.contains("\r") or
+       state_dir.contains("//") or state_dir.split("/").contains(".") or
+       state_dir.split("/").contains("..") or
+       not _safe_token(request.pod_uid) or request.attempt <= 0:
+        return "build-mount-state-root-invalid"
+    if request.network_policy != "none" or request.filesystem_policy != "read-only":
+        return "build-mount-policy-invalid"
+    val prefix = state_dir + "/build-attempts/" + request.pod_uid +
+        "-" + request.attempt.to_text() + "-"
+    if not request.build_input_root.ends_with("/inputs"):
+        return "build-mount-attempt-mismatch"
+    val stage_root = request.build_input_root[0:request.build_input_root.len() - 7]
+    if not stage_root.starts_with(prefix) or
+       stage_root.len() <= prefix.len() or stage_root.len() > prefix.len() + 64 or
+       not _safe_token(stage_root[prefix.len():]) or
+       request.build_output_root != stage_root + "/outputs":
+        return "build-mount-attempt-mismatch"
+    ""
+
 fn _locked_image(value: text) -> bool:
     val marker = "@sha256:"
     val at = value.index_of(marker)
@@ -1183,6 +1221,9 @@ fn _base_command(engine: text, operation: text, state_dir: text,
 pub fn build_create_command(engine: text, state_dir: text,
         request: LinuxOciRequestV1, operation_id: text,
         provider_generation: i64, node_boot_id: text) -> (text, RuntimeCommandV1):
+    val mount_error = _build_mount_error(state_dir, request)
+    if mount_error != "":
+        return (mount_error, runtime_command_empty())
     match linux_oci_container_name(request.pod_uid, request.attempt):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(name):
@@ -1221,10 +1262,30 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--pids-limit", request.pid_limit.to_text(),
                 "--network", request.network_policy,
                 "--read-only", "--security-opt", "no-new-privileges",
-                "--cap-drop", "ALL",
-                request.image]
-            for value in request.command:
-                args.push(value)
+                "--cap-drop", "ALL"]
+            if request.build_input_root != "":
+                # A build action names its exact executable. Override the
+                # image's ENTRYPOINT so image metadata cannot prefix or
+                # reinterpret the approved compiler argv.
+                args.push("--entrypoint")
+                args.push(request.command[0])
+                args.push("--mount")
+                args.push("type=bind,src=" + request.build_input_root +
+                    ",dst=/simple-build/inputs,readonly")
+                args.push("--mount")
+                args.push("type=bind,src=" + request.build_output_root +
+                    ",dst=/simple-build/outputs")
+                args.push("--workdir")
+                args.push("/simple-build/outputs")
+            args.push(request.image)
+            if request.build_input_root != "":
+                var command_index: i64 = 1
+                while command_index < request.command.len():
+                    args.push(request.command[command_index])
+                    command_index = command_index + 1
+            else:
+                for value in request.command:
+                    args.push(value)
             for value in request.args:
                 args.push(value)
             ("", RuntimeCommandV1(operation: "create", program: engine, args: args))
@@ -1288,13 +1349,13 @@ pub fn build_inspect_command(engine: text, state_dir: text,
         return ("runc-inspect-does-not-prove-provider-identity", runtime_command_empty())
     if native_id == "" or not _native_id_valid(native_id):
         return ("native-id-invalid", runtime_command_empty())
-    # Four labels plus the native id and status are returned in a stable order.
+    # Four labels plus native id, status and exit code are returned in order.
     val format = "{{{{ index .Config.Labels \"io.simpleorch.pod_uid\" }}}}|" +
         "{{{{ index .Config.Labels \"io.simpleorch.attempt\" }}}}|" +
         "{{{{ index .Config.Labels \"io.simpleorch.node_boot_id\" }}}}|" +
         "{{{{ index .Config.Labels \"io.simpleorch.provider_generation\" }}}}|" +
         "{{{{ index .Config.Labels \"io.simpleorch.operation_id\" }}}}|" +
-        "{{{{.Id}}}}|{{{{.State.Status}}}}"
+        "{{{{.Id}}}}|{{{{.State.Status}}}}|{{{{.State.ExitCode}}}}"
     ("", RuntimeCommandV1(operation: "inspect", program: engine,
         args: ["inspect", "--format", format, native_id]))
 
@@ -1305,7 +1366,7 @@ pub fn recover_state_from_inspect(engine: text, output: text,
     if engine == OCI_ENGINE_RUNC:
         return Err("runc-recovery-requires-identity-labels")
     val fields = output.trim().split("|")
-    if fields.len() != 7:
+    if fields.len() != 8:
         return Err("inspect-identity-shape-invalid")
     if fields[0] != request.pod_uid:
         return Err("inspect-pod-uid-mismatch")
@@ -1328,9 +1389,15 @@ pub fn recover_state_from_inspect(engine: text, output: text,
     elif fields[6] == "stopped": phase = RUNTIME_PHASE_STOPPED
     elif fields[6] == "dead": phase = RUNTIME_PHASE_STOPPED
     else: return Err("inspect-state-unsupported: " + fields[6])
+    val raw_code = fields[7]
+    val parsed_code = raw_code.to_i64() ?? -1
+    if parsed_code < 0 or parsed_code > 255 or
+       parsed_code.to_text() != raw_code:
+        return Err("inspect-exit-code-invalid")
+    val exit_code = if fields[6] == "exited": parsed_code else: -1
     Ok(RuntimeStateV1(phase: phase,
         identity: RuntimeIdentityV1(pod_uid: request.pod_uid,
             attempt: request.attempt, provider_generation: provider_generation,
             operation_id: fields[4], engine: engine,
             native_id: fields[5], node_boot_id: node_boot_id),
-        exit_code: -1, reason: "recovered"))
+        exit_code: exit_code, reason: "recovered"))

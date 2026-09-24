@@ -49,6 +49,36 @@ impl SkCpuSurface:
 
     fn read_pixels(dst_rect: SkIRect) -> [i64]:
         val w = self.info.width
+        # Preallocate 4*w*h in one shot when the whole rect is inside the
+        # buffer (i64-guarded product, same style as the raster Bitmap.zeros
+        # fix). The push loop below is kept verbatim as the degenerate-path
+        # fallback so an out-of-bounds rect still yields the same shortened,
+        # cursor-ordered result it always did.
+        if dst_rect.right > dst_rect.left and dst_rect.bottom > dst_rect.top:
+            val rw = dst_rect.right.to_i64() - dst_rect.left.to_i64()
+            val rh = dst_rect.bottom.to_i64() - dst_rect.top.to_i64()
+            val total = rw * rh * 4
+            if (total > 0 and total <= 2147483647 and
+                dst_rect.left >= 0 and dst_rect.top >= 0 and
+                dst_rect.right <= w and dst_rect.bottom <= self.info.height):
+                val last = ((dst_rect.bottom.to_i64() - 1) * w +
+                    (dst_rect.right.to_i64() - 1)) * 4
+                if last + 3 < self.pixels.len():
+                    var result: [i64] = [0i64; total]
+                    var write_at = 0
+                    var y = dst_rect.top
+                    while y < dst_rect.bottom:
+                        var x = dst_rect.left
+                        while x < dst_rect.right:
+                            val base = (y * w + x) * 4
+                            result[write_at] = self.pixels[base]
+                            result[write_at + 1] = self.pixels[base + 1]
+                            result[write_at + 2] = self.pixels[base + 2]
+                            result[write_at + 3] = self.pixels[base + 3]
+                            write_at += 4
+                            x = x + 1
+                        y = y + 1
+                    return result
         var result: [i64] = []
         var y = dst_rect.top
         while y < dst_rect.bottom:

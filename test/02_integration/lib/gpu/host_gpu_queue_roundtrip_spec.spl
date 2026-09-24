@@ -91,6 +91,7 @@ use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{engine2d_draw_ir_runt
 
 val GREEN: u32 = 0xff00ff00u32
 val _DRAW_IR_PAYLOAD: text = "schema=simple-draw-ir-v2\ncomposition id=evt scene=frame backend=gpu\nbatch id=evt backend=gpu commands=1"
+val _DRAW_IR_PAYLOAD_V3: text = "draw_ir schema=simple-draw-ir-v3\ncomposition id=evt scene=frame backend=gpu\nbatch id=evt backend=gpu commands=1"
 val _NON_DRAW_IR_PAYLOAD: text = "schema=legacy-blob-v0\nbatch id=evt backend=gpu commands=1"
 
 # A decision that is accepted AND queue_required (the only path that enqueues).
@@ -313,6 +314,23 @@ describe "host GPU runtime queue — CPU<->GPU round-trip":
         expect(dispatched.backend_handle).to_equal(7)
         expect(dispatched.payload_hash).to_equal(424242)
 
+    it "dispatches a versioned Draw IR v3 runtime packet":
+        # @req REQ-2D-002
+        step("Submit and drain the current shared Draw IR schema")
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val lane = matching_lane(128, 4096)
+        val event = engine2d_host_gpu_event("evt-rt-v3", ENGINE2D_HOST_GPU_LANE_GPU, "draw_ir_delta", 128, 4096, false, false, false, true)
+        val decision = engine2d_host_gpu_event_handler_decision(event, lane)
+        val submitted = engine2d_host_gpu_event_submit_to_runtime_payload_text(queue, decision, lane, 424243, _DRAW_IR_PAYLOAD_V3)
+        assert_true(submitted.submitted)
+        val drained = engine2d_host_gpu_runtime_drain(queue, 1)
+        expect(drained.status).to_equal("completed")
+        expect(drained.last_payload_text).to_contain("schema=simple-draw-ir-v3")
+        val dispatched = engine2d_host_gpu_runtime_dispatch_draw_ir(queue, drained, 424243)
+        expect(dispatched.dispatched).to_equal(true)
+        expect(dispatched.backend_handle).to_equal(7)
+
 
 # ============================================================================
 # @manual_section: Negative / corrupt branches — fail closed
@@ -338,9 +356,9 @@ describe "host GPU runtime dispatch — fail-closed on corruption":
         assert_false(dispatched.dispatched)
         expect(dispatched.status).to_equal("payload_hash_mismatch")
 
-    it "rejects a payload that is not Draw IR v2 (wrong schema)":
+    it "rejects a payload that is not admitted Draw IR (wrong schema)":
         # @req REQ-SSPEC-INTEGRATION
-        step("rejects a payload that is not Draw IR v2 (wrong schema)")
+        step("rejects a payload that is not admitted Draw IR (wrong schema)")
         step("Submit a non-Draw-IR payload, then attempt dispatch")
         engine2d_host_gpu_runtime_reset()
         val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)

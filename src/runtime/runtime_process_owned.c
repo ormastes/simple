@@ -2410,7 +2410,9 @@ enum {
     POV4_CAP_PTRACE_EXEC = 1 << 2, POV4_CAP_EXACT_ENV = 1 << 3,
     POV4_CAP_ABSOLUTE_DEADLINE = 1 << 4, POV4_CAP_WAIT4 = 1 << 5,
     POV4_CAP_RLIMIT_AS = 1 << 6, POV4_CAP_TWO_PHASE_COLLECT = 1 << 7,
-    POV4_CAP_LEADER_ONLY = 1 << 8
+    POV4_CAP_LEADER_ONLY = 1 << 8,
+    /* Reserved: advertise only after exact descendant containment is owned. */
+    POV4_CAP_EXACT_TREE = 1 << 9
 };
 #define POV4_CAPABILITIES (POV4_CAP_PINNED_EXEC | POV4_CAP_PINNED_CWD | \
     POV4_CAP_PTRACE_EXEC | POV4_CAP_EXACT_ENV | POV4_CAP_ABSOLUTE_DEADLINE | \

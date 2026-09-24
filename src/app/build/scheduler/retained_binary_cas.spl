@@ -1,0 +1,115 @@
+# Parent-retained binary CAS adapter. Normal object/executable bytes use the
+# compiler's binary CAS; regular ar archives share its digest namespace and
+# publication protocol. Thin archives are never self-contained CAS objects.
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
+    file_read_regular_no_follow_bounded_bytes, file_publish_noreplace_raw,
+    secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use compiler.driver.cache.binary_object_cas.{
+    binary_object_cas_blob_path, binary_object_cas_put,
+    binary_object_cas_read}
+
+val RETAINED_ARCHIVE_MAX_BYTES_V1: i64 = 268435456
+
+fn retained_binary_archive_name_v1(name: text) -> bool:
+    name.ends_with(".a") or name.ends_with(".lib")
+
+fn retained_regular_archive_valid_v1(bytes: [u8]) -> bool:
+    """Check complete regular ar members; thin references are not retained."""
+    if bytes.len() < 8 or bytes.len() > RETAINED_ARCHIVE_MAX_BYTES_V1:
+        return false
+    val magic = "!<arch>\n".bytes()
+    var i: i64 = 0
+    while i < 8:
+        if bytes[i] != magic[i]: return false
+        i = i + 1
+    var offset: i64 = 8
+    while offset < bytes.len():
+        if bytes.len() - offset < 60 or
+           bytes[offset + 58].to_i64() != 0x60 or
+           bytes[offset + 59].to_i64() != 0x0A:
+            return false
+        var size: i64 = 0
+        var digit_seen = false
+        var padding_seen = false
+        var j: i64 = 48
+        while j < 58:
+            val ch = bytes[offset + j].to_i64()
+            if ch == 0x20:
+                padding_seen = true
+            elif ch >= 0x30 and ch <= 0x39 and not padding_seen:
+                digit_seen = true
+                size = size * 10 + ch - 0x30
+                if size > RETAINED_ARCHIVE_MAX_BYTES_V1: return false
+            else:
+                return false
+            j = j + 1
+        if not digit_seen or size > bytes.len() - offset - 60:
+            return false
+        offset = offset + 60 + size
+        if size % 2 != 0:
+            if offset >= bytes.len() or bytes[offset].to_i64() != 0x0A:
+                return false
+            offset = offset + 1
+    offset == bytes.len()
+
+fn retained_binary_cas_read_v1(root: text, name: text,
+        digest: text, max_bytes: i64) -> [u8]?:
+    if not retained_binary_archive_name_v1(name):
+        return binary_object_cas_read(root, digest, max_bytes)
+    if max_bytes < 8 or max_bytes > RETAINED_ARCHIVE_MAX_BYTES_V1:
+        return nil
+    val path = binary_object_cas_blob_path(root, digest)
+    if path == "": return nil
+    match file_read_regular_no_follow_bounded_bytes(path, max_bytes):
+        case Err(_): nil
+        case Ok(bytes):
+            if not retained_regular_archive_valid_v1(bytes) or
+               sha256_u8_hex(bytes) != digest:
+                return nil
+            bytes
+
+fn retained_binary_cas_verify_v1(root: text, name: text,
+        digest: text) -> bool:
+    retained_binary_cas_read_v1(root, name, digest,
+        RETAINED_ARCHIVE_MAX_BYTES_V1).?
+
+fn retained_binary_cas_put_v1(root: text, name: text,
+        bytes: [u8]) -> text:
+    if not retained_binary_archive_name_v1(name):
+        return binary_object_cas_put(root, bytes)
+    if not retained_regular_archive_valid_v1(bytes): return ""
+    val digest = sha256_u8_hex(bytes)
+    val destination = binary_object_cas_blob_path(root, digest)
+    if destination == "": return ""
+    val parent = root + "/objects/sha256/" + digest[0:2]
+    if not dir_create_all(parent): return ""
+    if retained_binary_cas_verify_v1(root, name, digest): return digest
+    val stage = secure_temp_dir_raw(parent, "simple-archive-cas")
+    if stage == "": return ""
+    val staged = stage + "/archive"
+    if not file_write_bytes(staged, bytes):
+        dir_remove(stage, true)
+        return ""
+    match file_read_regular_no_follow_bounded_bytes(staged,
+            RETAINED_ARCHIVE_MAX_BYTES_V1):
+        case Err(_):
+            dir_remove(stage, true)
+            return ""
+        case Ok(saved):
+            if not retained_regular_archive_valid_v1(saved) or
+               sha256_u8_hex(saved) != digest:
+                dir_remove(stage, true)
+                return ""
+    val status = file_publish_noreplace_raw(staged, destination)
+    dir_remove(stage, true)
+    if (status == 0 or status == 1) and
+       retained_binary_cas_verify_v1(root, name, digest):
+        return digest
+    ""
+
+export RETAINED_ARCHIVE_MAX_BYTES_V1
+export retained_binary_archive_name_v1, retained_regular_archive_valid_v1
+export retained_binary_cas_read_v1, retained_binary_cas_verify_v1
+export retained_binary_cas_put_v1

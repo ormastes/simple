@@ -1,0 +1,139 @@
+# Candidate adapter for a completed native Ganesh corpus case 06 frame.
+
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    WebOpaqueBoxGpuScene}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
+    file_hash_sha256}
+use common.renderdoc.corpus_case06_oracle.{
+    CORPUS_CASE06_FIXTURE_ID, CORPUS_CASE06_SOURCE_PATH,
+    CORPUS_CASE06_SOURCE_SHA256, CORPUS_CASE06_REFERENCE_PATH,
+    CORPUS_CASE06_REFERENCE_SHA256, CORPUS_CASE06_WIDTH,
+    CORPUS_CASE06_HEIGHT}
+use common.renderdoc.physical_vulkan_2d_qualification.{
+    PreparedRenderScene, VulkanBackendCaptureArtifact}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UpstreamSkiaGaneshFrame, upstream_skia_ganesh_vulkan_final_capture,
+    UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY}
+
+fn _case06_native_uuid_valid(value: text) -> bool:
+    if value.len() != 32 or value == "00000000000000000000000000000000":
+        return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or
+            (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _case06_physical_device_type(value: i64) -> text:
+    if value == 1: "integrated"
+    elif value == 2: "discrete"
+    else: ""
+
+fn _upstream_skia_case06_web_projection_valid(
+    web: WebOpaqueBoxGpuScene
+) -> bool:
+    if web.source_command_count != 6 or web.gpu_command_count != 5 or
+        web.source_command_indexes.len() != 5 or
+        web.source_draw_ir.batches.len() != 1 or
+        web.gpu_draw_ir.batches.len() != 1:
+        return false
+    if web.source_command_indexes[0] != 0 or
+        web.source_command_indexes[1] != 1 or
+        web.source_command_indexes[2] != 2 or
+        web.source_command_indexes[3] != 3 or
+        web.source_command_indexes[4] != 5:
+        return false
+    val source = web.source_draw_ir.batches[0].commands
+    val gpu = web.gpu_draw_ir.batches[0].commands
+    if source.len() != 6 or gpu.len() != 5:
+        return false
+    var i = 0
+    while i < 5:  # cpu-lane-loop-ok: fixed five-command case 06 source-to-GPU mapping check
+        val producer = source[web.source_command_indexes[i]]
+        val lowered = gpu[i]
+        if lowered.component_id != producer.component_id or
+            lowered.kind != producer.kind or lowered.x != producer.x or
+            lowered.y != producer.y or lowered.width != producer.width or
+            lowered.height != producer.height or lowered.color != producer.color:
+            return false
+        i = i + 1
+    val parent = source[4]
+    val child_source = source[5]
+    val child_gpu = gpu[4]
+    if parent.color != 0u32 or parent.width <= 0 or parent.height <= 0 or
+        not child_source.clip_rect.present or
+        not child_gpu.clip_rect.present:
+        return false
+    child_source.clip_rect.x == parent.x and
+    child_source.clip_rect.y == parent.y and
+    child_source.clip_rect.width == parent.width and
+    child_source.clip_rect.height == parent.height and
+    child_gpu.clip_rect.x == child_source.clip_rect.x and
+    child_gpu.clip_rect.y == child_source.clip_rect.y and
+    child_gpu.clip_rect.width == child_source.clip_rect.width and
+    child_gpu.clip_rect.height == child_source.clip_rect.height
+
+pub fn upstream_skia_corpus_case06_artifact(
+    frame: UpstreamSkiaGaneshFrame,
+    scene: PreparedRenderScene,
+    web: WebOpaqueBoxGpuScene
+) -> Result<VulkanBackendCaptureArtifact, text>:
+    if scene.fixture_id != CORPUS_CASE06_FIXTURE_ID or
+        scene.source_path != CORPUS_CASE06_SOURCE_PATH or
+        scene.source_sha256 != CORPUS_CASE06_SOURCE_SHA256 or
+        scene.scene_scope != "corpus-case06-rectangular-clip-only" or
+        scene.render_degraded or scene.degrade_reason != "" or
+        web.html_sha256 != scene.source_sha256 or
+        web.source_draw_ir_sha256.len() != 64 or
+        not _upstream_skia_case06_web_projection_valid(web) or
+        not file_is_regular_no_follow(CORPUS_CASE06_SOURCE_PATH) or
+        file_hash_sha256(CORPUS_CASE06_SOURCE_PATH) !=
+            CORPUS_CASE06_SOURCE_SHA256 or
+        not file_is_regular_no_follow(CORPUS_CASE06_REFERENCE_PATH) or
+        file_hash_sha256(CORPUS_CASE06_REFERENCE_PATH) !=
+            CORPUS_CASE06_REFERENCE_SHA256:
+        return Err("upstream Skia corpus case 06 source admission invalid")
+    if frame.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY or
+        frame.backend_handle <= 0 or frame.device_identity < 0 or
+        frame.device_submit_count != 1 or frame.device_wait_count != 1 or
+        frame.device_readback_count != 1 or frame.resource_id <= 0 or
+        frame.submission_token <= 0 or
+        frame.completion_token != frame.submission_token:
+        return Err("upstream Skia corpus case 06 completion missing")
+    if frame.width != CORPUS_CASE06_WIDTH or
+        frame.height != CORPUS_CASE06_HEIGHT:
+        return Err("upstream Skia corpus case 06 extent invalid")
+    val device_type = _case06_physical_device_type(frame.device_type)
+    if device_type == "":
+        return Err("upstream Skia physical Vulkan device required")
+    if not _case06_native_uuid_valid(frame.physical_device_uuid) or
+        not _case06_native_uuid_valid(frame.driver_uuid) or
+        frame.vendor_id < 0 or frame.device_id < 0 or
+        frame.api_version <= 0 or frame.driver_version < 0:
+        return Err("upstream Skia native device provenance missing")
+    val frame_id = "{scene.fixture_id}-{frame.submission_token}"
+    match upstream_skia_ganesh_vulkan_final_capture(
+        frame, scene.fixture_id, scene.source_sha256, frame_id):
+        case Err(reason): Err(reason)
+        case Ok(capture):
+            Ok(VulkanBackendCaptureArtifact(
+                backend_id: "upstream-skia-ganesh-vulkan",
+                fixture_id: scene.fixture_id,
+                fixture_sha256: scene.source_sha256,
+                producer_authenticated: true,
+                provider_identity: frame.provider_identity,
+                device_name: "vulkan-vendor-{frame.vendor_id}-device-{frame.device_id}",
+                device_type: device_type,
+                driver_identity: "vulkan-api-{frame.api_version}-driver-{frame.driver_version}",
+                physical_device_uuid: frame.physical_device_uuid,
+                driver_uuid: frame.driver_uuid,
+                device_identity: frame.device_identity,
+                backend_handle: frame.backend_handle,
+                submit_count: frame.device_submit_count,
+                fence_count: frame.device_wait_count,
+                readback_source: "device_readback",
+                fallback_required: false,
+                capture: Some(capture)))

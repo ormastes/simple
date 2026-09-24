@@ -22,6 +22,7 @@
 
 #include "runtime.h"
 #include "simple_gpu_provider_abi_v1.h"
+#include "simple_gpu_provider_identity_v1.h"
 
 #include <stdatomic.h>
 #include <limits.h>
@@ -1197,7 +1198,6 @@ int64_t rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session_token,
                 receipt.provider_identity != identity ||
                 receipt.device_identity != device || receipt.resource == 0 ||
                 receipt.resource != provider_resource ||
-                receipt.checksum == 0 ||
                 receipt.device_elapsed_ns == 0)
             status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
         else {
@@ -1307,6 +1307,81 @@ int64_t rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session_token,
     }
     simple_gpu_unlock();
     free(staging);
+    simple_gpu_call_release_v1(&pin);
+    return status;
+}
+
+int64_t rt_gpu_provider_device_identity_raw(int64_t backend_bit,
+        int64_t session_token, int64_t completion_token, int64_t identity_ptr) {
+    SimpleGpuCallPinV1 pin;
+    const SimpleGpuProviderAbiV1 *api;
+    SimpleGpuProviderDeviceIdentityFnV1 query;
+    SimpleGpuOwnedSessionV1 *session;
+    SimpleGpuOwnedCompletionV1 *completion;
+    SimpleGpuProviderDeviceIdentityV1 identity;
+    uint64_t provider_session, provider_completion;
+    SimpleGpuStatusV1 status;
+    size_t i;
+    int device_nonzero = 0, driver_nonzero = 0;
+    if (session_token <= 0 || completion_token <= 0 || identity_ptr == 0)
+        return SIMPLE_GPU_STATUS_INVALID;
+    if (((SimpleGpuProviderDeviceIdentityV1 *)(uintptr_t)identity_ptr)->struct_size <
+            sizeof(SimpleGpuProviderDeviceIdentityV1))
+        return SIMPLE_GPU_STATUS_INVALID;
+    if (!simple_gpu_api_acquire_v1(backend_bit, &pin, &api))
+        return SIMPLE_GPU_STATUS_UNAVAILABLE;
+    (void)api;
+    simple_gpu_lock();
+    query = (SimpleGpuProviderDeviceIdentityFnV1)simple_gpu_symbol(
+        pin.state->handle, "simple_gpu_provider_device_identity_v1");
+    if (!query) {
+        simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
+        return SIMPLE_GPU_STATUS_UNAVAILABLE;
+    }
+    session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
+    completion = session ? simple_gpu_completion_locked_v1(
+        session, (uint64_t)completion_token) : NULL;
+    if (!session || !completion || session->state != pin.state ||
+            session->generation != pin.generation || session->quarantined ||
+            session->busy || completion->quarantined || completion->busy ||
+            !completion->terminal || !completion->readback_observed ||
+            completion->readback_length == 0) {
+        simple_gpu_unlock(); simple_gpu_call_release_v1(&pin);
+        return SIMPLE_GPU_STATUS_INVALID;
+    }
+    session->busy = 1;
+    completion->busy = 1;
+    provider_session = session->provider_handle;
+    provider_completion = completion->provider_handle;
+    simple_gpu_unlock();
+    memset(&identity, 0, sizeof(identity));
+    identity.struct_size = sizeof(identity);
+    status = query(provider_session, provider_completion, &identity);
+    if (status == SIMPLE_GPU_STATUS_OK) {
+        for (i = 0; i < 16; i++) {
+            device_nonzero |= identity.device_uuid[i] != 0;
+            driver_nonzero |= identity.driver_uuid[i] != 0;
+        }
+        if (identity.struct_size != sizeof(identity) ||
+                identity.version != SIMPLE_GPU_PROVIDER_DEVICE_IDENTITY_VERSION_V1 ||
+                identity.reserved != 0 || !device_nonzero || !driver_nonzero ||
+                identity.api_version == 0 || identity.device_type == 0)
+            status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
+    }
+    simple_gpu_lock();
+    session = simple_gpu_session_locked_v1(backend_bit, (uint64_t)session_token);
+    completion = session ? simple_gpu_completion_locked_v1(
+        session, (uint64_t)completion_token) : NULL;
+    if (!session || !completion || session->state != pin.state ||
+            session->generation != pin.generation ||
+            !completion->terminal || !completion->readback_observed) {
+        status = SIMPLE_GPU_STATUS_INCOMPATIBLE;
+    }
+    if (completion) completion->busy = 0;
+    if (session) session->busy = 0;
+    simple_gpu_unlock();
+    if (status == SIMPLE_GPU_STATUS_OK)
+        memcpy((void *)(uintptr_t)identity_ptr, &identity, sizeof(identity));
     simple_gpu_call_release_v1(&pin);
     return status;
 }

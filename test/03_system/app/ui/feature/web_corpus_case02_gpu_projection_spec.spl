@@ -1,0 +1,141 @@
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, draw_ir, affine, gpu_candidate
+"""Pinned Web case02 CPU-source to GPU DrawIR v4 projection."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU,
+    DRAW_IR_RASTER_COVERAGE_AA, DRAW_IR_SCHEMA_VERSION_V4,
+    DrawIrStyleProp}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_corpus_case02_gpu_scene_from_html}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_fractional_result}
+use std.gc_async_mut.gpu.browser_engine.web_corpus_case02_projection.{
+    web_case02_project_v4}
+
+val CASE02_PATH: text =
+    "test/fixtures/html_css/corpus/cases/02-fractional-edges.html"
+val CASE02_SHA256: text =
+    "5ad0ddd4a7848160e220c116c7c7f21872a7f184d3444a2d97990e88da10bfe1"
+
+describe "pinned Web case02 GPU DrawIR v4 candidate":
+    it "retains six source indexes and projects a strict single surface":
+        step("Authenticate the exact HTML fixture and run the real Web producer")
+        val html = read_file(CASE02_PATH)
+        expect(sha256_text(html)).to_equal(CASE02_SHA256)
+        match web_corpus_case02_gpu_scene_from_html(html):
+            case Err(reason):
+                fail_test("case02 projection rejected: {reason}")
+            case Ok(scene):
+                step("Check source and GPU receipts, topology, and index mapping")
+                expect(scene.html_sha256).to_equal(CASE02_SHA256)
+                expect(scene.source_draw_ir_sha256).to_equal(
+                    sha256_text(draw_ir_to_sdn(scene.source_draw_ir)))
+                expect(scene.gpu_draw_ir_sha256).to_equal(
+                    sha256_text(draw_ir_to_sdn(scene.gpu_draw_ir)))
+                expect(scene.source_draw_ir.schema).to_equal(
+                    DRAW_IR_SCHEMA_VERSION_V4)
+                expect(scene.source_draw_ir.backend_target).to_equal(
+                    DRAW_IR_BACKEND_CPU)
+                expect(scene.gpu_draw_ir.schema).to_equal(
+                    DRAW_IR_SCHEMA_VERSION_V4)
+                expect(scene.gpu_draw_ir.backend_target).to_equal(
+                    DRAW_IR_BACKEND_GPU)
+                expect(scene.source_command_count).to_equal(6)
+                expect(scene.gpu_command_count).to_equal(6)
+                expect(scene.source_command_indexes.len()).to_equal(6)
+                var index = 0
+                while index < 6:
+                    expect(scene.source_command_indexes[index]).to_equal(
+                        index.to_i64())
+                    index = index + 1
+                expect(scene.gpu_draw_ir.batches.len()).to_equal(1)
+                val batch = scene.gpu_draw_ir.batches[0]
+                expect(batch.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
+                expect(batch.embedding.x).to_equal(0)
+                expect(batch.embedding.y).to_equal(0)
+                expect(batch.embedding.width).to_equal(640)
+                expect(batch.embedding.height).to_equal(480)
+                expect(batch.embedding.opacity_milli).to_equal(1000)
+                expect(batch.embedding.clip).to_equal(false)
+                step("Prove redundant white backgrounds became plain integer clears")
+                index = 0
+                while index < 4:
+                    val command = batch.commands[index]
+                    expect(command.color).to_equal(0xFFFFFFFFu32)
+                    expect(command.x).to_equal(0)
+                    expect(command.y).to_equal(0)
+                    expect(command.width).to_equal(640)
+                    expect(command.height).to_equal(480)
+                    expect(command.affine_transform).to_be_nil()
+                    expect(command.fractional_geometry).to_be_nil()
+                    expect(command.clip_rect.present).to_equal(false)
+                    expect(command.parent_id).to_equal("")
+                    expect(command.computed_style.len()).to_equal(0)
+                    index = index + 1
+                step("Prove tile and bar preserve affine coverage and surface clip")
+                expect(batch.commands[4].color).to_equal(0xFF247BDEu32)
+                expect(batch.commands[5].color).to_equal(0xFF111111u32)
+                index = 4
+                while index < 6:
+                    val command = batch.commands[index]
+                    expect(command.raster_policy).to_equal(
+                        DRAW_IR_RASTER_COVERAGE_AA)
+                    expect(command.affine_transform != nil).to_equal(true)
+                    expect(command.fractional_geometry != nil).to_equal(true)
+                    expect(command.clip_rect.present).to_equal(true)
+                    expect(command.clip_rect.width).to_equal(640)
+                    expect(command.clip_rect.height).to_equal(480)
+                    expect(command.parent_id).to_equal("")
+                    expect(command.computed_style.len()).to_equal(0)
+                    index = index + 1
+
+    it "rejects changed source before GPU projection":
+        step("Change one pinned paint byte and require source hash rejection")
+        val html = read_file(CASE02_PATH)
+        val changed = html.replace("background:#111;", "background:#222;")
+        expect(changed == html).to_equal(false)
+        match web_corpus_case02_gpu_scene_from_html(changed):
+            case Ok(_): fail_test("changed case02 source was projected")
+            case Err(reason):
+                expect(reason).to_equal(
+                    "web-corpus-case02-html-sha256-mismatch")
+
+    it "rejects a real source command missing required paint metadata":
+        step("Remove border-left-width from the producer's rotated tile")
+        val html = read_file(CASE02_PATH)
+        val rendered = simple_web_layout_render_html_draw_ir_fractional_result(
+            html, 640, 480)
+        expect(rendered.fractional_scene_rejection_reason).to_equal("")
+        var command = rendered.composition.batches[0].commands[4]
+        var kept: [DrawIrStyleProp] = []
+        var removed = 0
+        for prop in command.computed_style:
+            if prop.key == "border-left-width":
+                removed = removed + 1
+            else:
+                kept.push(prop)
+        expect(removed).to_equal(1)
+        command.computed_style = kept
+        var commands = rendered.composition.batches[0].commands
+        commands[4] = command
+        var batch = rendered.composition.batches[0]
+        batch.commands = commands
+        var batches = rendered.composition.batches
+        batches[0] = batch
+        var damaged = rendered.composition
+        damaged.batches = batches
+        val projection = web_case02_project_v4(
+            damaged, rendered.hit_index.nodes, rendered.hit_index.styles,
+            sha256_text(html))
+        match projection:
+            case Ok(_): fail_test("missing required paint metadata was projected")
+            case Err(reason):
+                expect(reason).to_equal(
+                    "missing-source-paint-style:4:border-left-width")

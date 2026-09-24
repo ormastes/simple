@@ -610,6 +610,16 @@ pub extern "C" fn rt_io_tcp_write(handle: i64, data: crate::value::RuntimeValue)
     if err == NetError::Success as i64 { written } else { -err }
 }
 
+// The pure-Simple hosted runtime supplies a signal-safe Unix socket send.
+// The Rust seed does not provide this Docker attach transport capability.
+#[no_mangle]
+pub extern "C" fn rt_io_socket_send_nosigpipe(
+    _handle: i64,
+    _data: crate::value::RuntimeValue,
+) -> i64 {
+    -1
+}
+
 #[no_mangle]
 pub extern "C" fn rt_io_tcp_write_text(handle: i64, data: crate::value::RuntimeValue) -> i64 {
     let Some((ptr, len)) = runtime_text_ptr_len(data) else {

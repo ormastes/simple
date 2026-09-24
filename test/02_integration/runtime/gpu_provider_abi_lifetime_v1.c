@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "simple_gpu_provider_abi_v1.h"
+#include "simple_gpu_provider_identity_v1.h"
 
 static uint64_t checksum_v1(const uint8_t *bytes, uint64_t length) {
     uint64_t value = UINT64_C(14695981039346656037), i;
@@ -16,6 +17,7 @@ static SimpleGpuOperationV1 operations[SIMPLE_GPU_OP_COUNT];
 static SimpleGpuProviderAbiV1 table;
 static uint8_t resource_bytes[64];
 static uint64_t resource_size;
+static int provider_waited, provider_readback;
 static int64_t operation_stub(void) { return 1; }
 static SimpleGpuStatusV1 shutdown_v1(void) { return SIMPLE_GPU_STATUS_OK; }
 static SimpleGpuStatusV1 session_open_v1(uint64_t backend, uint64_t device,
@@ -48,6 +50,8 @@ static SimpleGpuStatusV1 submit_v1(SimpleGpuHandleV1 session,
             !request->data || request->length != 4 || request->correlation_id != 909)
         return SIMPLE_GPU_STATUS_INVALID;
     if (request->output_resource != 202) return SIMPLE_GPU_STATUS_INVALID;
+    provider_waited = 0;
+    provider_readback = 0;
     *out = 303; return SIMPLE_GPU_STATUS_OK;
 }
 static SimpleGpuStatusV1 wait_v1(SimpleGpuHandleV1 session,
@@ -56,6 +60,7 @@ static SimpleGpuStatusV1 wait_v1(SimpleGpuHandleV1 session,
         return SIMPLE_GPU_STATUS_INVALID;
     *receipt = (SimpleGpuReceiptV1){sizeof(*receipt), SIMPLE_GPU_STATUS_OK,
         909, 7001, 3, 202, checksum_v1(resource_bytes, resource_size), 77};
+    provider_waited = 1;
     return SIMPLE_GPU_STATUS_OK;
 }
 static SimpleGpuStatusV1 readback_v1(SimpleGpuHandleV1 session,
@@ -64,8 +69,31 @@ static SimpleGpuStatusV1 readback_v1(SimpleGpuHandleV1 session,
             bytes->length < resource_size) return SIMPLE_GPU_STATUS_INVALID;
     memcpy(bytes->data, resource_bytes, resource_size);
     bytes->length = resource_size;
+    provider_readback = 1;
     return SIMPLE_GPU_STATUS_OK;
 }
+#ifdef SIMPLE_GPU_ABI_IDENTITY_PROVIDER
+/* Synthetic UUID bytes exercise the host gate only; they are not GPU evidence. */
+__attribute__((visibility("default")))
+SimpleGpuStatusV1 simple_gpu_provider_device_identity_v1(
+        SimpleGpuHandleV1 session, SimpleGpuHandleV1 completion,
+        SimpleGpuProviderDeviceIdentityV1 *out) {
+    if (session != 101 || completion != 303 || !out ||
+            out->struct_size < sizeof(*out) || !provider_waited ||
+            !provider_readback) return SIMPLE_GPU_STATUS_INVALID;
+    memset(out, 0, sizeof(*out));
+    out->struct_size = sizeof(*out);
+    out->version = SIMPLE_GPU_PROVIDER_DEVICE_IDENTITY_VERSION_V1;
+    out->device_uuid[0] = 0x12;
+    out->driver_uuid[0] = 0x34;
+    out->vendor_id = 0x10de;
+    out->device_id = 0x1234;
+    out->device_type = 2;
+    out->api_version = 1;
+    out->driver_version = 2;
+    return SIMPLE_GPU_STATUS_OK;
+}
+#endif
 static SimpleGpuStatusV1 completion_release_v1(SimpleGpuHandleV1 session,
         SimpleGpuHandleV1 completion) {
     return session == 101 && completion == 303 ?
@@ -100,6 +128,7 @@ int64_t rt_gpu_provider_submit_raw(int64_t, int64_t, int64_t, int64_t, int64_t,
         int64_t, int64_t);
 int64_t rt_gpu_provider_wait_raw(int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_readback_raw(int64_t, int64_t, int64_t, int64_t);
+int64_t rt_gpu_provider_device_identity_raw(int64_t, int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_completion_release(int64_t, int64_t, int64_t);
 int64_t rt_gpu_provider_device_image_authority_word(
         int64_t, int64_t, int64_t, int64_t);
@@ -112,6 +141,7 @@ int main(int argc, char **argv) {
     SimpleGpuReceiptV1 receipt = {.struct_size = sizeof(receipt)};
     SimpleGpuBytesV1 bytes = {.struct_size = sizeof(bytes), .data = output,
         .length = sizeof(output)};
+    SimpleGpuProviderDeviceIdentityV1 identity = {.struct_size = sizeof(identity)};
     if (argc != 3 || setenv("SIMPLE_VULKAN_PROVIDER_PATH", argv[1], 1) ||
             setenv("SIMPLE_VULKAN_PROVIDER_SHA256", argv[2], 1)) return 2;
     if (!rt_gpu_provider_loaded(SIMPLE_GPU_BACKEND_VULKAN) ||
@@ -132,15 +162,40 @@ int main(int argc, char **argv) {
             rt_gpu_provider_resource_release(SIMPLE_GPU_BACKEND_VULKAN,
                 session, resource) != SIMPLE_GPU_STATUS_BUSY ||
             rt_gpu_provider_unload(SIMPLE_GPU_BACKEND_VULKAN) != 0) return 4;
+#ifdef SIMPLE_GPU_ABI_IDENTITY_TEST
+    if (rt_gpu_provider_device_identity_raw(SIMPLE_GPU_BACKEND_VULKAN,
+            session, completion, (int64_t)(uintptr_t)&identity) !=
+            SIMPLE_GPU_STATUS_INVALID) return 10;
+#else
+    if (rt_gpu_provider_device_identity_raw(SIMPLE_GPU_BACKEND_VULKAN,
+            session, completion, (int64_t)(uintptr_t)&identity) !=
+            SIMPLE_GPU_STATUS_UNAVAILABLE) return 10;
+#endif
     if (rt_gpu_provider_wait_raw(SIMPLE_GPU_BACKEND_VULKAN, session, completion,
             1000000, (int64_t)(uintptr_t)&receipt) != SIMPLE_GPU_STATUS_OK ||
             receipt.checksum != checksum_v1(expected, sizeof(expected)) ||
             receipt.device_elapsed_ns != 77 ||
             rt_gpu_provider_wait_raw(SIMPLE_GPU_BACKEND_VULKAN, session, completion,
                 1000000, (int64_t)(uintptr_t)&receipt) != SIMPLE_GPU_STATUS_INVALID) return 5;
+#ifdef SIMPLE_GPU_ABI_IDENTITY_TEST
+    if (rt_gpu_provider_device_identity_raw(SIMPLE_GPU_BACKEND_VULKAN,
+            session, completion, (int64_t)(uintptr_t)&identity) !=
+            SIMPLE_GPU_STATUS_INVALID) return 11;
+#endif
     if (rt_gpu_provider_readback_raw(SIMPLE_GPU_BACKEND_VULKAN, session, resource,
             (int64_t)(uintptr_t)&bytes) != SIMPLE_GPU_STATUS_OK ||
             bytes.length != sizeof(output) || output[0] != 1 || output[15] != 16) return 6;
+#ifdef SIMPLE_GPU_ABI_IDENTITY_TEST
+    if (rt_gpu_provider_device_identity_raw(SIMPLE_GPU_BACKEND_VULKAN,
+            session, completion, (int64_t)(uintptr_t)&identity) !=
+            SIMPLE_GPU_STATUS_OK || identity.device_uuid[0] != 0x12 ||
+            identity.driver_uuid[0] != 0x34 || identity.vendor_id != 0x10de)
+        return 12;
+#else
+    if (rt_gpu_provider_device_identity_raw(SIMPLE_GPU_BACKEND_VULKAN,
+            session, completion, (int64_t)(uintptr_t)&identity) !=
+            SIMPLE_GPU_STATUS_UNAVAILABLE) return 12;
+#endif
     if (rt_gpu_provider_completion_release(SIMPLE_GPU_BACKEND_VULKAN, session, completion) ||
             rt_gpu_provider_completion_release(SIMPLE_GPU_BACKEND_VULKAN, session, completion)
                 != SIMPLE_GPU_STATUS_INVALID ||

@@ -1,0 +1,202 @@
+# codex-impl
+# Completed final-output capture and canonical RGBA comparison. RenderDoc event
+# alignment is diagnostic and is deliberately absent from this visual verdict.
+
+val FINAL_OUTPUT_MAX_BYTES: i64 = 268435456
+
+struct FinalOutputMetadata:
+    fixture_id: text
+    fixture_digest: text
+    frame_id: text
+    resource_id: text
+    selected_resource_count: i64
+    mip_level: i64
+    array_layer: i64
+    submission_token: text
+    completion_token: text
+    frame_complete: bool
+    readback_complete: bool
+    device_status: text
+    width: i64
+    height: i64
+    stride: i64
+    pixel_format: text
+    alpha_mode: text
+    color_space: text
+    color_primaries: text
+    transfer_function: text
+    origin: text
+    crop_x: i64
+    crop_y: i64
+    crop_width: i64
+    crop_height: i64
+
+struct FinalOutputCapture:
+    metadata: FinalOutputMetadata
+    pixel_bytes: [i64]
+
+struct FinalOutputError:
+    code: text
+    field: text
+    message: text
+
+struct FinalOutputTolerance:
+    fixture_id: text
+    verified_source_digest: text
+    max_channel_delta: i64
+    max_excess_pixels: i64
+
+struct FinalOutputComparison:
+    passed: bool
+    status: text
+    field: text
+    canonical_byte_length: i64
+    differing_pixels: i64
+    excess_pixels: i64
+
+fn _error(code: text, field: text, message: text) -> FinalOutputError:
+    FinalOutputError(code: code, field: field, message: message)
+
+fn _lower_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val digits = "0123456789abcdef"
+    for character in value:
+        if not digits.contains(character.to_text()):
+            return false
+    true
+
+fn final_output_validate(capture: FinalOutputCapture) -> Result<FinalOutputCapture, FinalOutputError>:
+    """Validate target identity, completion, domain and exact raw byte length."""
+    val m = capture.metadata
+    if m.device_status == "absent":
+        return Err(_error("blocked-environment", "device_status", "GPU device is absent"))
+    if m.device_status != "ready":
+        return Err(_error("capture-error", "device_status", "GPU device is not ready"))
+    if m.fixture_id == "" or not _lower_sha256(m.fixture_digest):
+        return Err(_error("capture-error", "fixture_digest", "pinned fixture identity and digest are required"))
+    if m.selected_resource_count != 1:
+        return Err(_error("ambiguous-target", "selected_resource_count", "exactly one final resource must be selected"))
+    if m.frame_id == "" or m.resource_id == "" or m.mip_level < 0 or m.array_layer < 0:
+        return Err(_error("capture-error", "resource_id", "frame and subresource identity are required"))
+    if not m.frame_complete or not m.readback_complete or m.submission_token == "" or m.completion_token == "" or m.submission_token != m.completion_token:
+        return Err(_error("incomplete-frame", "completion_token", "readback must complete the selected submission"))
+    if m.width <= 0 or m.height <= 0 or m.stride <= 0 or m.width > FINAL_OUTPUT_MAX_BYTES / 4:
+        return Err(_error("capture-error", "width", "dimensions or stride are invalid"))
+    if m.stride < m.width * 4 or m.stride > FINAL_OUTPUT_MAX_BYTES or m.height > FINAL_OUTPUT_MAX_BYTES / m.stride:
+        return Err(_error("capture-error", "stride", "stride or raw image size is invalid"))
+    if capture.pixel_bytes.len() != m.stride * m.height:
+        return Err(_error("capture-error", "pixel_bytes", "raw byte length must equal stride times height"))
+    if m.crop_x < 0 or m.crop_y < 0 or m.crop_width <= 0 or m.crop_height <= 0 or m.crop_x > m.width or m.crop_y > m.height:
+        return Err(_error("capture-error", "crop", "crop is outside the image"))
+    if m.crop_width > m.width - m.crop_x or m.crop_height > m.height - m.crop_y:
+        return Err(_error("capture-error", "crop", "crop is outside the image"))
+    if m.pixel_format != "R8G8B8A8_UNORM" and m.pixel_format != "B8G8R8A8_UNORM":
+        return Err(_error("unsupported-conversion", "pixel_format", "pixel format cannot be decoded to RGBA8"))
+    if m.alpha_mode != "straight" and m.alpha_mode != "opaque":
+        return Err(_error("unsupported-conversion", "alpha_mode", "alpha conversion is unsupported"))
+    if m.color_space != "srgb" or m.color_primaries != "srgb" or m.transfer_function != "srgb":
+        return Err(_error("unsupported-conversion", "color_space", "color primaries or transfer conversion is unsupported"))
+    if m.origin != "top-left" and m.origin != "bottom-left":
+        return Err(_error("unsupported-conversion", "origin", "image origin is unsupported"))
+    var i = 0
+    while i < capture.pixel_bytes.len():
+        if capture.pixel_bytes[i] < 0 or capture.pixel_bytes[i] > 255:
+            return Err(_error("capture-error", "pixel_bytes", "raw pixel values must be bytes"))
+        i = i + 1
+    if m.alpha_mode == "opaque":
+        var row = 0
+        while row < m.height:
+            var column = 0
+            while column < m.width:
+                val alpha_offset = row * m.stride + column * 4 + 3
+                if capture.pixel_bytes[alpha_offset] != 255:
+                    return Err(_error("capture-error", "pixel_bytes",
+                        "opaque RGBA capture contains non-opaque alpha"))
+                column = column + 1
+            row = row + 1
+    Ok(capture)
+
+fn final_output_canonical_rgba(capture: FinalOutputCapture) -> Result<[i64], FinalOutputError>:
+    """Return tightly packed, top-left-origin, straight-alpha sRGB RGBA bytes."""
+    val valid = final_output_validate(capture)?
+    val m = valid.metadata
+    var out: [i64] = []
+    var y = 0
+    while y < m.crop_height:
+        val source_y = if m.origin == "top-left": m.crop_y + y else: m.height - 1 - (m.crop_y + y)
+        var x = 0
+        while x < m.crop_width:
+            val offset = source_y * m.stride + (m.crop_x + x) * 4
+            val first = valid.pixel_bytes[offset]
+            val second = valid.pixel_bytes[offset + 1]
+            val third = valid.pixel_bytes[offset + 2]
+            if m.pixel_format == "B8G8R8A8_UNORM":
+                out.push(third)
+                out.push(second)
+                out.push(first)
+            else:
+                out.push(first)
+                out.push(second)
+                out.push(third)
+            out.push(if m.alpha_mode == "opaque": 255 else: valid.pixel_bytes[offset + 3])
+            x = x + 1
+        y = y + 1
+    if out.len() != m.crop_width * m.crop_height * 4:
+        return Err(_error("capture-error", "pixel_bytes", "canonical RGBA byte length is invalid"))
+    Ok(out)
+
+fn _comparison(passed: bool, status: text, field: text, length: i64, differing: i64, excess: i64) -> FinalOutputComparison:
+    FinalOutputComparison(passed: passed, status: status, field: field,
+        canonical_byte_length: length, differing_pixels: differing, excess_pixels: excess)
+
+fn compare_final_output_pixels(left: FinalOutputCapture, right: FinalOutputCapture, tolerance: FinalOutputTolerance) -> FinalOutputComparison:
+    """Compare canonical final pixels; any tolerance must be declared for a fixture."""
+    match final_output_validate(left):
+        case Err(err): return _comparison(false, "left-" + err.code, err.field, 0, 0, 0)
+        case Ok(_): ()
+    match final_output_validate(right):
+        case Err(err): return _comparison(false, "right-" + err.code, err.field, 0, 0, 0)
+        case Ok(_): ()
+    if tolerance.max_channel_delta < 0 or tolerance.max_channel_delta > 255 or tolerance.max_excess_pixels < 0:
+        return _comparison(false, "invalid-tolerance", "tolerance", 0, 0, 0)
+    if not _lower_sha256(tolerance.verified_source_digest):
+        return _comparison(false, "unverified-fixture", "verified_source_digest", 0, 0, 0)
+    if (tolerance.max_channel_delta > 0 or tolerance.max_excess_pixels > 0) and tolerance.fixture_id == "":
+        return _comparison(false, "invalid-tolerance", "fixture_id", 0, 0, 0)
+    if left.metadata.fixture_id != right.metadata.fixture_id or left.metadata.fixture_digest != right.metadata.fixture_digest:
+        return _comparison(false, "domain-mismatch", "fixture_digest", 0, 0, 0)
+    if tolerance.verified_source_digest != left.metadata.fixture_digest:
+        return _comparison(false, "unverified-fixture", "fixture_digest", 0, 0, 0)
+    if tolerance.fixture_id != "" and tolerance.fixture_id != left.metadata.fixture_id:
+        return _comparison(false, "invalid-tolerance", "fixture_id", 0, 0, 0)
+    if left.metadata.crop_width != right.metadata.crop_width or left.metadata.crop_height != right.metadata.crop_height:
+        return _comparison(false, "domain-mismatch", "crop", 0, 0, 0)
+    match final_output_canonical_rgba(left):
+        case Err(err): return _comparison(false, "left-" + err.code, err.field, 0, 0, 0)
+        case Ok(left_rgba):
+            match final_output_canonical_rgba(right):
+                case Err(err): return _comparison(false, "right-" + err.code, err.field, 0, 0, 0)
+                case Ok(right_rgba):
+                    if left_rgba.len() != right_rgba.len() or left_rgba.len() != left.metadata.crop_width * left.metadata.crop_height * 4:
+                        return _comparison(false, "capture-error", "pixel_bytes", 0, 0, 0)
+                    var differing = 0
+                    var excess = 0
+                    var p = 0
+                    while p < left_rgba.len():
+                        var any_difference = false
+                        var over_delta = false
+                        var channel = 0
+                        while channel < 4:
+                            val a = left_rgba[p + channel]
+                            val b = right_rgba[p + channel]
+                            val delta = if a >= b: a - b else: b - a
+                            if delta > 0: any_difference = true
+                            if delta > tolerance.max_channel_delta: over_delta = true
+                            channel = channel + 1
+                        if any_difference: differing = differing + 1
+                        if over_delta: excess = excess + 1
+                        p = p + 4
+                    val passed = excess <= tolerance.max_excess_pixels
+                    _comparison(passed, if passed: "pass" else: "pixel-mismatch", "pixel_bytes",
+                        left_rgba.len(), differing, excess)

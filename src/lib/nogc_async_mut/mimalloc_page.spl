@@ -11,9 +11,32 @@ use std.nogc_async_mut.mimalloc_types.{MiBlock, MiPage}
 # ============================================================================
 
 fn _page_alloc_from_free(page: MiPage) -> (MiPage, [u8]?):
-    """Pop the newest free block. Returns updated page + mock ptr."""
+    """Pop the newest free block. Returns updated page + mock ptr.
+
+    When the fresh `free` list is empty, reclaim one block from `local_free`
+    (blocks returned by mi_free). Without this reuse, steady-state alloc/free
+    churn would append a new page on every cycle and grow the page list
+    without bound.
+    """
     if page.free.len() == 0:
-        (page, nil)
+        if page.local_free.len() == 0:
+            (page, nil)
+        else:
+            # Tail-pop keeps reuse LIFO without copying the remaining list.
+            var new_local = page.local_free
+            val _block = new_local.pop()
+            val new_page = MiPage(
+                base: page.base,
+                block_size: page.block_size,
+                capacity: page.capacity,
+                used: page.used + 1,
+                free: page.free,
+                local_free: new_local,
+                xthread_free: page.xthread_free,
+            )
+            # In interpreter mode, return a mock allocation of block_size bytes
+            val mock_ptr: [u8] = [0u8; page.block_size]
+            (new_page, Some(mock_ptr))
     else:
         # _page_free_to_local and raw free append blocks. Tail-pop keeps
         # reuse LIFO without copying the remaining free list.

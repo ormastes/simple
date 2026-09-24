@@ -50,7 +50,8 @@ use common.ui.draw_ir.{
     draw_ir_next_composition_generation,
     draw_ir_no_rect,
     draw_ir_rect,
-    draw_ir_rect_bounds
+    draw_ir_rect_bounds,
+    draw_ir_command_has_unsupported_v4_state
 }
 use common.ui.draw_ir_diff.{
     DrawIrCommandIndex,
@@ -113,6 +114,10 @@ fn _draw_ir_patch_points_bounds(points: [DrawIrPoint]) -> DrawIrRect:
         (right - left + 1).to_i32(), (bottom - top + 1).to_i32())
 
 fn _draw_ir_patch_bounds(command: DrawIrCommand) -> DrawIrRect:
+    if draw_ir_command_has_unsupported_v4_state(command):
+        panic("transformed Draw IR damage bounds require a v4-capable patcher")
+    if command.fractional_geometry != nil:
+        panic("fractional Draw IR damage bounds require a fractional-capable patcher")
     # Linear strokes ignore command geometry: PATH reads command.points and
     # EDGE reads edge.points. Check those authoritative payloads first, since
     # decoded commands can carry stale nonzero geometry alongside fresh points.
@@ -128,7 +133,21 @@ fn _draw_ir_patch_bounds(command: DrawIrCommand) -> DrawIrRect:
     _draw_ir_patch_points_bounds(command.points)
 
 fn _draw_ir_patch_geometry_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
-    a.x != b.x or a.y != b.y or a.width != b.width or a.height != b.height
+    if a.x != b.x or a.y != b.y or a.width != b.width or a.height != b.height:
+        return true
+    if val at = a.affine_transform:
+        if val bt = b.affine_transform:
+            if at.a != bt.a or at.b != bt.b or at.c != bt.c or at.d != bt.d or at.tx != bt.tx or at.ty != bt.ty:
+                return true
+        else:
+            return true
+    elif b.affine_transform != nil:
+        return true
+    if val ag = a.fractional_geometry:
+        if val bg = b.fractional_geometry:
+            return ag.x != bg.x or ag.y != bg.y or ag.width != bg.width or ag.height != bg.height
+        return true
+    b.fractional_geometry != nil
 
 # NOTE: deliberately avoids returning text? (nilable) from a per-property
 # lookup and comparing via `== nil` / `!=` -- that optional-return pattern
@@ -141,6 +160,8 @@ fn _draw_ir_patch_geometry_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
 # ordered key/value sequence. Set comparison would accept duplicate-key
 # reorderings that visibly change a stroke/fill property.
 fn _draw_ir_patch_style_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    if a.raster_policy != b.raster_policy:
+        return true
     if a.computed_style.len() != b.computed_style.len():
         return true
     var i = 0
@@ -456,7 +477,7 @@ fn draw_ir_patch_commands_equal(a: DrawIrComposition, b: DrawIrComposition) -> b
             return false
         if ca.parent_id != cb.parent_id:
             return false
-        if ca.x != cb.x or ca.y != cb.y or ca.width != cb.width or ca.height != cb.height:
+        if _draw_ir_patch_geometry_changed(ca, cb):
             return false
         if ca.color != cb.color:
             return false
