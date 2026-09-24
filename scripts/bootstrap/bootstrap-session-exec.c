@@ -128,6 +128,37 @@ static void inheritable_stdio(STARTUPINFOW *si) {
     si->hStdInput = std[0]; si->hStdOutput = std[1]; si->hStdError = std[2];
 }
 
+/* Crash classification parity with POSIX 128+signal. A native process that
+ * dies from an exception exits with its NTSTATUS; mapping it keeps e.g. an
+ * access violation at 139 instead of its truncated low byte (0x05 -> "exit 5"). */
+static int ntstatus_to_posix(DWORD status) {
+    switch (status) {
+    case 0xC0000005: case 0xC0000006: case 0xC00000FD: return 128 + 11; /* SIGSEGV */
+    case 0xC000001D: case 0xC0000096: return 128 + 4;                   /* SIGILL */
+    case 0xC000008C: case 0xC000008D: case 0xC000008E: case 0xC000008F:
+    case 0xC0000090: case 0xC0000091: case 0xC0000092: case 0xC0000093:
+    case 0xC0000094: case 0xC0000095: return 128 + 8;                   /* SIGFPE */
+    case 0x80000002: return 128 + 7;                                    /* SIGBUS */
+    case 0x80000003: case 0x80000004: return 128 + 5;                   /* SIGTRAP */
+    case 0xC000013A: return 128 + 2;                                    /* SIGINT */
+    default: return 128 + 6; /* SIGABRT: fastfail 0xC0000409 and any other fatal status */
+    }
+}
+
+/* Map a root exit code to a POSIX-style status. `abnormal` is the NTSTATUS of
+ * the last job member that died from an exception (0 if none). The root is an
+ * MSYS shell stub: it reports a signal death as sig<<8 (0xB00 for an access
+ * violation) and collapses exceptions it does not know to 0x7f. */
+static int posix_exit_status(DWORD raw, DWORD abnormal) {
+    if (raw >= 0x80000000) return ntstatus_to_posix(raw);
+    if (raw == 0x7f && abnormal) return ntstatus_to_posix(abnormal);
+    /* MSYS also truncates some statuses to their low byte (0x80000003 -> 3). */
+    if (abnormal && raw && raw == (abnormal & 0xff)) return ntstatus_to_posix(abnormal);
+    if (raw <= 0xff) return (int)raw;
+    DWORD sig = (raw >> 8) & 0x7f;
+    return (raw & 0xff) == 0 && sig >= 1 && sig < 64 ? 128 + (int)sig : 128 + 6;
+}
+
 /* `-- COMMAND`: the child inherits job membership; the job forbids breakaway. */
 static int run_in_session(int argc, wchar_t **argv) {
     const wchar_t *shell = session_shell;
@@ -150,7 +181,7 @@ static int run_in_session(int argc, wchar_t **argv) {
     if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0 ||
         !GetExitCodeProcess(pi.hProcess, &code)) code = 127;
     CloseHandle(pi.hProcess);
-    return (int)code;
+    return posix_exit_status(code, 0);
 }
 
 /* ---- --supervise: job owner, RSS sampler and enforcer ------------------ */
@@ -231,6 +262,32 @@ static int sample_job(HANDLE job, unsigned long long *kib, unsigned long *member
     return 1;
 }
 
+/* NTSTATUS of the last job member that died from an exception. The kernel
+ * posts JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS; the exit code is read at once,
+ * while the member's MSYS parent still holds its process handle. */
+static volatile LONG abnormal_status;
+
+static DWORD WINAPI abnormal_exit_watch(LPVOID port) {
+    DWORD message;
+    ULONG_PTR key;
+    LPOVERLAPPED data;
+    while (GetQueuedCompletionStatus((HANDLE)port, &message, &key, &data, INFINITE)) {
+        /* Not every fatal status is on the kernel's "abnormal" list (e.g. the
+         * fastfail 0xC0000409 arrives as a plain exit), so inspect both. */
+        int abnormal = message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS;
+        if (!abnormal && message != JOB_OBJECT_MSG_EXIT_PROCESS) continue;
+        DWORD code = 0;
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)(ULONG_PTR)data);
+        if (h) {
+            if (!GetExitCodeProcess(h, &code)) code = 0;
+            CloseHandle(h);
+        }
+        if (code >= 0x80000000) InterlockedExchange(&abnormal_status, (LONG)code);
+        else if (abnormal) InterlockedExchange(&abnormal_status, (LONG)0xC0000000); /* unreadable */
+    }
+    return 0;
+}
+
 static unsigned long long now_us(void) {
     static LARGE_INTEGER frequency;
     LARGE_INTEGER counter;
@@ -273,6 +330,13 @@ static int supervise(const options *o) {
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
     if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits))
         return reject("cannot configure session job");
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT association;
+    association.CompletionKey = job;
+    association.CompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+    if (!association.CompletionPort ||
+        !SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &association, sizeof association) ||
+        !CreateThread(NULL, 0, abnormal_exit_watch, association.CompletionPort, 0, NULL))
+        return reject("cannot watch session job exits");
     HANDLE parent = NULL;
     if (o->parent_pid) {
         parent = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)o->parent_pid);
@@ -308,6 +372,7 @@ static int supervise(const options *o) {
     swprintf(stop, MAX_PATH + 8, L"%ls.stop", o->stats);
     const char *status = "complete";
     int code = 0;
+    DWORD root_raw = 0;
     /* Timing in microseconds (QPC); GetTickCount64 has ~15 ms granularity,
      * too coarse to report sampling overhead against a 100 ms cadence. */
     unsigned long long peak = 0, samples = 0, gap_max = 0, dur_max = 0, dur_total = 0, overruns = 0;
@@ -339,9 +404,12 @@ static int supervise(const options *o) {
         unsigned long long spent_ms = (now_us() - at) / 1000;
         DWORD wait = spent_ms >= o->interval_ms ? 0 : (DWORD)(o->interval_ms - spent_ms);
         if (WaitForSingleObject(pi.hProcess, wait) == WAIT_OBJECT_0) {
-            DWORD exit_code = 0;
-            if (!GetExitCodeProcess(pi.hProcess, &exit_code)) { status = "rss-measurement-failed"; code = 89; }
-            else code = (int)exit_code;
+            if (!GetExitCodeProcess(pi.hProcess, &root_raw)) { status = "rss-measurement-failed"; code = 89; }
+            else {
+                /* 0x7f may be a collapsed exception: let the exit watcher land. */
+                for (int i = 0; root_raw == 0x7f && !abnormal_status && i < 20; ++i) Sleep(10);
+                code = posix_exit_status(root_raw, (DWORD)abnormal_status);
+            }
             break;
         }
     }
@@ -367,9 +435,11 @@ static int supervise(const options *o) {
     fprintf(f, "status=%s\nexit_status=%d\nroot_pid=%lu\nsession_id=%llu\npeak_rss_kib=%llu\n"
                "samples=%llu\nsample_gap_max_ms=%llu\nsample_duration_max_ms=%llu\n"
                "sample_duration_max_us=%llu\nsample_duration_total_us=%llu\n"
-               "sample_overruns=%llu\npeak_job_commit_kib=%llu\njob_members_peak=%lu\nquiescent=%d\n",
+               "sample_overruns=%llu\npeak_job_commit_kib=%llu\njob_members_peak=%lu\nquiescent=%d\n"
+               "root_exit_raw=0x%lx\nabnormal_exit_ntstatus=0x%lx\n",
             status, code, pi.dwProcessId, id, peak, samples, gap_max / 1000, dur_max / 1000,
-            dur_max, dur_total, overruns, commit_kib, members_peak, quiescent);
+            dur_max, dur_total, overruns, commit_kib, members_peak, quiescent,
+            root_raw, (unsigned long)abnormal_status);
     if (fclose(f) || !MoveFileExW(tmp, o->stats, MOVEFILE_REPLACE_EXISTING))
         return reject("cannot publish supervisor stats");
     CloseHandle(pi.hProcess);

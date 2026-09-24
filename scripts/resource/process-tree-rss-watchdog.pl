@@ -9,6 +9,8 @@ use Time::HiRes qw(time sleep alarm);
 use Cwd qw(abs_path);
 use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
+use File::Path qw(make_path remove_tree);
+use Config;
 use Fcntl qw(O_RDONLY O_NOFOLLOW);
 use Digest::SHA;
 use IPC::Open2 qw(open2);
@@ -75,6 +77,7 @@ my $observer_backend = $windows ? 'win32-job-object' :
 my $containment_scope = $windows ? 'win32-job-object-no-breakaway' :
     'observed-descendants-and-process-groups';
 my $extra_receipt = '';
+my $session_dir;
 
 sub verify_observer {
     my @path = lstat($observer_path);
@@ -282,9 +285,28 @@ sub install_session_helper {
         tempdir('simple-rss-session-XXXXXXXX', DIR => dirname($opt{receipt}), CLEANUP => 0) :
         tempdir('simple-rss-session-XXXXXXXX', TMPDIR => 1, CLEANUP => 0);
     $directory = abs_path($directory);
-    $session_helper = "$directory/bootstrap-session-exec" . ($windows ? '.exe' : '');
-    my @compile = windows_compile_command($source, $directory);
-    @compile = ($ENV{CC} || 'cc', '-O2', $source, '-o', $session_helper) unless $windows;
+    $session_dir = $directory;
+    if ($windows) {
+        install_cached_windows_helper($source, $source_fh);
+        $helper_installed = 1;
+        return;
+    }
+    $session_helper = "$directory/bootstrap-session-exec";
+    run_compiler($ENV{CC} || 'cc', '-O2', $source, '-o', $session_helper);
+    hash_handle($source_fh) eq $helper_source_sha or die "session helper source changed during compilation";
+    close($source_fh);
+    chmod(0500, $session_helper) == 1 or die "cannot protect session helper";
+    sysopen($helper_fd, $session_helper, O_RDONLY | O_NOFOLLOW) or die "cannot pin session helper";
+    -f $helper_fd or die "session helper is not a regular file";
+    $helper_sha = hash_handle($helper_fd);
+    # Cold Darwin executable admission can exceed two seconds under host load.
+    # No workload exists yet: allow one bounded warmup, while snapshot() keeps
+    # a separate bounded observation deadline after workload creation.
+    posix_session_admission();
+}
+
+sub run_compiler {
+    my @compile = @_;
     my $builder = fork();
     defined($builder) or die "cannot fork helper compiler";
     if (!$builder) {
@@ -304,18 +326,9 @@ sub install_session_helper {
         }
         sleep 0.02;
     }
-    hash_handle($source_fh) eq $helper_source_sha or die "session helper source changed during compilation";
-    close($source_fh);
-    chmod(0500, $session_helper) == 1 or die "cannot protect session helper";
-    sysopen($helper_fd, $session_helper, O_RDONLY | O_NOFOLLOW) or die "cannot pin session helper";
-    -f $helper_fd or die "session helper is not a regular file";
-    $helper_sha = hash_handle($helper_fd);
-    # Windows session identity is job membership, verified natively by the
-    # helper (--supervise --inherit re-checks the parent job before nesting).
-    if ($windows) { $helper_installed = 1; return; }
-    # Cold Darwin executable admission can exceed two seconds under host load.
-    # No workload exists yet: allow one bounded warmup, while snapshot() keeps
-    # a separate bounded observation deadline after workload creation.
+}
+
+sub posix_session_admission {
     my $own_sid = observe_sessions(5, $$)->{$$};
     $own_sid > 0 or die "cannot determine supervisor session";
     if ($opt{'session-mode'} eq 'inherit') {
@@ -364,10 +377,8 @@ sub win_path {
 }
 
 # Toolchain policy: clang-cl (or the clang driver) with LLD only; never cl,
-# link.exe or gcc. The object file is placed beside the helper, not in cwd.
-sub windows_compile_command {
-    my ($source, $directory) = @_;
-    return () unless $windows;
+# link.exe or gcc. The object file is placed in the build directory, not cwd.
+sub windows_compile_flags {
     $^O ne 'MSWin32' or die "native MSWin32 perl is unsupported; run the guard under MSYS/Git-for-Windows perl";
     my $compiler = $ENV{CC} || 'clang-cl';
     my ($name) = $compiler =~ m{([^/\\]+)\z};
@@ -375,20 +386,83 @@ sub windows_compile_command {
     (my $shell = win_path('/usr/bin/sh.exe')) =~ tr{\\}{/};
     $shell !~ /["\\]/ or die "unsupported MSYS shell path $shell";
     my @defines = ('-D_CRT_SECURE_NO_WARNINGS', "-DSIMPLE_BOOTSTRAP_SESSION_SHELL=L\"$shell\"");
-    if (($name // '') =~ /\Aclang-cl(?:\.exe)?\z/i) {
-        return ($compiler, '-nologo', '-O2', '-fuse-ld=lld', @defines, win_path($source),
-                '-Fo' . win_path($directory) . '\\bootstrap-session-exec.obj',
-                '-o', win_path($directory) . '\\bootstrap-session-exec.exe');
-    }
-    if (($name // '') =~ /\Aclang(?:-[0-9]+)?(?:\.exe)?\z/i) {
-        return ($compiler, '-O2', '-fuse-ld=lld', @defines, win_path($source),
-                '-o', win_path($directory) . '\\bootstrap-session-exec.exe');
-    }
+    return ($compiler, 'cl', '-nologo', '-O2', '-fuse-ld=lld', @defines)
+        if ($name // '') =~ /\Aclang-cl(?:\.exe)?\z/i;
+    return ($compiler, 'gnu', '-O2', '-fuse-ld=lld', @defines)
+        if ($name // '') =~ /\Aclang(?:-[0-9]+)?(?:\.exe)?\z/i;
     die "Windows session helper requires clang-cl or clang (CC=$compiler; cl/gcc are not permitted)";
 }
 
+# Build once, reuse on every guard start. The cache key covers everything that
+# determines the binary: source sha, compiler identity (--version, which also
+# names the target), compiler path, flags (including the baked-in shell path)
+# and the host. An entry is published by an atomic directory rename, and a
+# cached binary whose hash differs from its sidecar fails closed.
+sub install_cached_windows_helper {
+    my ($source, $source_fh) = @_;
+    my ($compiler, $style, @flags) = windows_compile_flags();
+    my $cache = $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE} ||
+        abs_path(dirname(__FILE__) . '/../..') . '/.simple/storage/cache/bootstrap-session-helper';
+    make_path($cache);
+    -d $cache or die "cannot create session helper cache $cache";
+    # `clang-cl --version` costs ~180 ms, most of a warm guard start. Memoize
+    # it per compiler executable (resolved path, size, mtime, inode).
+    my $resolved = $compiler =~ m{[/\\]} ? $compiler :
+        (grep { -f $_ } map { ("$_/$compiler", "$_/$compiler.exe") } split(/:/, $ENV{PATH} // ''))[0];
+    defined($resolved) && (my @compiler_stat = stat($resolved)) or die "cannot resolve compiler $compiler";
+    my $identity_file = "$cache/identity-" . Digest::SHA::sha256_hex(join("\0", $resolved,
+        @compiler_stat[0, 1, 7, 9])) . '.txt';
+    my $identity;
+    if (open(my $memo, '<', $identity_file)) { local $/; $identity = <$memo>; close($memo) }
+    if (!defined($identity) || $identity !~ /clang/i) {
+        local $/;
+        open(my $version, '-|', $compiler, '--version') or die "cannot query compiler identity";
+        $identity = <$version> // '';
+        close($version) or die "compiler identity query failed";
+        $identity =~ /clang/i or die "compiler identity is not clang: $identity";
+        open(my $memo, '>', "$identity_file.new.$$") or die "cannot record compiler identity";
+        print {$memo} $identity;
+        close($memo) && rename("$identity_file.new.$$", $identity_file) or die "cannot record compiler identity";
+    }
+    my $key = Digest::SHA::sha256_hex(join("\0", 'simple-session-helper-cache-v1', $helper_source_sha,
+        $identity, $compiler, $style, @flags, $^O, $Config{archname}));
+    my $entry = "$cache/$key";
+    my $binary = "$entry/bootstrap-session-exec.exe";
+    if (!-d $entry) {
+        my $build = abs_path(tempdir(".build-XXXXXXXX", DIR => $cache, CLEANUP => 0));
+        my $output = win_path($build) . '\\bootstrap-session-exec.exe';
+        run_compiler($compiler, @flags, win_path($source),
+            ($style eq 'cl' ? ('-Fo' . win_path($build) . '\\bootstrap-session-exec.obj') : ()),
+            '-o', $output);
+        hash_handle($source_fh) eq $helper_source_sha or die "session helper source changed during compilation";
+        unlink("$build/bootstrap-session-exec.obj");
+        open(my $built, '<:raw', "$build/bootstrap-session-exec.exe") or die "compiled session helper is missing";
+        my $sha = hash_handle($built);
+        close($built);
+        open(my $sidecar, '>', "$build/bootstrap-session-exec.exe.sha256") or die "cannot write helper sidecar";
+        print {$sidecar} "$sha\n";
+        close($sidecar) or die "cannot write helper sidecar";
+        chmod(0500, "$build/bootstrap-session-exec.exe") == 1 or die "cannot protect session helper";
+        if (!rename($build, $entry)) {
+            -d $entry or die "cannot publish session helper cache entry";
+            remove_tree($build); # a concurrent guard published the same key first
+        }
+    }
+    close($source_fh);
+    sysopen($helper_fd, $binary, O_RDONLY | O_NOFOLLOW) or die "cannot pin cached session helper";
+    -f $helper_fd or die "cached session helper is not a regular file";
+    $helper_sha = hash_handle($helper_fd);
+    open(my $sidecar, '<', "$binary.sha256") or die "cached session helper has no sidecar";
+    my $expected = <$sidecar> // '';
+    close($sidecar);
+    chomp $expected;
+    $expected =~ /\A[0-9a-f]{64}\z/ && $expected eq $helper_sha
+        or die "cached session helper hash does not match its sidecar ($binary)";
+    $session_helper = $binary;
+}
+
 sub windows_job_workload {
-    my $directory = dirname($session_helper);
+    my $directory = $session_dir;
     my ($spec, $stats) = ("$directory/workload.spec", "$directory/workload.stats");
     open(my $fh, '>:raw', $spec) or die "cannot write workload spec";
     print {$fh} join("\0", $session_helper, @ARGV), "\0" or die "cannot write workload spec";
@@ -453,6 +527,8 @@ sub windows_job_workload {
     $extra_receipt = "peak_job_commit_kib=$result{peak_job_commit_kib}\n" .
         "sample_duration_max_us=$result{sample_duration_max_us}\n" .
         "sample_duration_total_us=$result{sample_duration_total_us}\n" .
+        "root_exit_raw=" . ($result{root_exit_raw} // '') . "\n" .
+        "abnormal_exit_ntstatus=" . ($result{abnormal_exit_ntstatus} // '') . "\n" .
         "timeout_signal=job-terminate\n";
     my $code = $result{status} eq 'interrupted' && $interrupted ? $interrupted : $result{exit_status};
     return ($result{status}, $code, $result{quiescent});
