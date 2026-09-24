@@ -6,7 +6,16 @@ windows_host=0
 case $(uname -s) in MINGW*|MSYS*|CYGWIN*) windows_host=1 ;; esac
 
 die() { echo "phase2-runtime-capsule: $*" >&2; exit 2; }
-hash_file() { sha256sum "$1" | awk '{print $1}'; }
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+hash_lines() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+  else shasum -a 256 | awk '{print $1}'
+  fi
+}
 value() { sed -n "s/^$1=//p" "$2" | head -n 1; }
 require_unique_keys() {
   file=$1; shift
@@ -36,7 +45,26 @@ capsule_identity() {
   {
     [ "$capsule_schema" = simple-phase2-runtime-capsule-v1 ] || printf '%s\n' "$layout"
     printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$stamp_sha" "$backfill_sha"
-  } | sha256sum | awk '{print $1}'
+    [ -z "${dynamic_sha:-}" ] || printf '%s\n' "$dynamic_sha"
+    [ -z "${cocoa_sha:-}" ] || printf '%s\n' "$cocoa_sha" "$cocoa_receipt_sha" unavailable not-established
+  } | hash_lines
+}
+
+# A diagnostic producer is an inert candidate, never Darwin load authority.
+# Keep both bytes and provenance together until an exact mapped-byte and
+# dependency admission mechanism exists. No pathname from this receipt is used.
+verify_cocoa_candidate() {
+  cocoa_root=$1
+  cocoa_receipt="$cocoa_root/libspl_cocoa.producer.txt"
+  [ -f "$cocoa_root/libspl_cocoa.dylib" ] && [ ! -L "$cocoa_root/libspl_cocoa.dylib" ] || return 1
+  [ -f "$cocoa_receipt" ] && [ ! -L "$cocoa_receipt" ] || return 1
+  require_unique_keys "$cocoa_receipt" kind admission artifact abi artifact_sha256 dependency_admission || return 1
+  [ "$(value kind "$cocoa_receipt")" = diagnostic-producer-receipt ] || return 1
+  [ "$(value admission "$cocoa_receipt")" = not-established ] || return 1
+  [ "$(value artifact "$cocoa_receipt")" = libspl_cocoa.dylib ] || return 1
+  [ "$(value abi "$cocoa_receipt")" = legacy-cocoa-raw-title-v1 ] || return 1
+  [ "$(value artifact_sha256 "$cocoa_receipt")" = "$(hash_file "$cocoa_root/libspl_cocoa.dylib")" ] || return 1
+  [ "$(value dependency_admission "$cocoa_receipt")" = not-established ] || return 1
 }
 
 verify_capsule() {
@@ -51,6 +79,9 @@ verify_capsule() {
   capsule_schema=$(value schema "$receipt")
   case "$capsule_schema" in
     simple-phase2-runtime-capsule-v1)
+      # V1 predates the layout discriminator and is POSIX only.  Reject an
+      # injected layout instead of letting different consumers select
+      # different artifact names from the same receipt.
       [ "$(awk -F= '$1 == "artifact_layout" { count++ } END { print count + 0 }' "$receipt")" = 0 ] || return 1
       layout_files posix ;;
     simple-phase2-runtime-capsule-v2)
@@ -93,12 +124,49 @@ verify_capsule() {
   require_unique_keys "$capsule/hosted-runtime.env" schema status relative_path sha256 || return 1
   [ "$(value schema "$capsule/hosted-runtime.env")" = simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
   [ "$(value status "$capsule/hosted-runtime.env")" = frozen ] || return 1
-  case "$hosted_relative" in deps/libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+  # cargo >= 1.100 drops the metadata-hash suffix from the rlib filename
+  # (libspl_hosted_runtime.rlib instead of libspl_hosted_runtime-<hash>.rlib);
+  # accept both spellings, as done for the capsule in 08d6fb9599e.
+  case "$hosted_relative" in deps/libspl_hosted_runtime*.rlib) ;; *) return 1 ;; esac
   case "${hosted_relative#deps/}" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
   [ -d "$capsule/deps" ] && [ ! -L "$capsule/deps" ] || return 1
   [ -f "$capsule/$hosted_relative" ] && [ ! -L "$capsule/$hosted_relative" ] || return 1
   [ "$(hash_file "$capsule/$hosted_relative")" = "$hosted_sha" ] || return 1
-  [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  dynamic_sha=$(value dynamic_runtime_sha256 "$receipt")
+  if grep -q '^dynamic_runtime_sha256=' "$receipt"; then
+    require_unique_keys "$receipt" dynamic_runtime_sha256 || return 1
+    [ -n "$dynamic_sha" ] || return 1
+  fi
+  case "$dynamic_sha" in
+    ''|absent) [ ! -e "$capsule/libsimple_runtime.dylib" ] && [ ! -L "$capsule/libsimple_runtime.dylib" ] || return 1 ;;
+    *)
+      case "$dynamic_sha" in *[!0-9a-f]*) return 1 ;; esac
+      [ "${#dynamic_sha}" = 64 ] || return 1
+      [ -f "$capsule/libsimple_runtime.dylib" ] && [ ! -L "$capsule/libsimple_runtime.dylib" ] || return 1
+      [ "$(hash_file "$capsule/libsimple_runtime.dylib")" = "$dynamic_sha" ] || return 1 ;;
+  esac
+  cocoa_sha=$(value cocoa_candidate_sha256 "$receipt")
+  cocoa_receipt_sha=$(value cocoa_producer_receipt_sha256 "$receipt")
+  if grep -q '^cocoa_' "$receipt"; then
+    require_unique_keys "$receipt" cocoa_candidate_sha256 cocoa_producer_receipt_sha256 \
+      cocoa_admission cocoa_dependency_admission || return 1
+    [ "$(value cocoa_admission "$receipt")" = unavailable ] || return 1
+    [ "$(value cocoa_dependency_admission "$receipt")" = not-established ] || return 1
+    [ -n "$cocoa_sha" ] && [ -n "$cocoa_receipt_sha" ] || return 1
+  fi
+  case "$cocoa_sha" in
+    ''|absent)
+      [ "$cocoa_receipt_sha" = "$cocoa_sha" ] || return 1
+      [ ! -e "$capsule/libspl_cocoa.dylib" ] && [ ! -L "$capsule/libspl_cocoa.dylib" ] || return 1
+      [ ! -e "$capsule/libspl_cocoa.producer.txt" ] && [ ! -L "$capsule/libspl_cocoa.producer.txt" ] || return 1 ;;
+    *)
+      case "$cocoa_sha$cocoa_receipt_sha" in *[!0-9a-f]*) return 1 ;; esac
+      [ "${#cocoa_sha}" = 64 ] && [ "${#cocoa_receipt_sha}" = 64 ] || return 1
+      verify_cocoa_candidate "$capsule" || return 1
+      [ "$(hash_file "$capsule/libspl_cocoa.dylib")" = "$cocoa_sha" ] || return 1
+      [ "$(hash_file "$capsule/libspl_cocoa.producer.txt")" = "$cocoa_receipt_sha" ] || return 1 ;;
+  esac
   stamp_sha=$(hash_file "$stamp")
   aggregate=$(capsule_identity)
   [ "$(value capsule_identity_sha256 "$receipt")" = "$aggregate" ] || return 1
@@ -112,8 +180,8 @@ verify_capsule() {
   if [ "$windows_host" = 1 ]; then
     windows_permissions verify "$capsule" || return 1
   else
-    writable=$(find "$capsule" \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit) || return 1
-    [ -z "$writable" ] || return 1
+    writable_entries=$(find "$capsule" \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit) || return 1
+    [ -z "$writable_entries" ] || return 1
   fi
 }
 
@@ -153,10 +221,31 @@ case ${1:-} in
     [ ! -L "$authority/$backfill_file" ] || die 'symlink backfill authority'
     [ ! -f "$authority/$backfill_file" ] || cp "$authority/$backfill_file" "$staging/"
     hosted_relative=$(value relative_path "$authority/hosted-runtime.env")
-    case "$hosted_relative" in deps/libspl_hosted_runtime-*.rlib) ;; *) die 'invalid hosted authority path' ;; esac
+    case "$hosted_relative" in deps/libspl_hosted_runtime*.rlib) ;; *) die 'invalid hosted authority path' ;; esac
     case "${hosted_relative#deps/}" in *[!A-Za-z0-9_.-]*) die 'invalid hosted authority leaf' ;; esac
     [ ! -L "$authority/deps" ] && [ ! -L "$authority/$hosted_relative" ] || die 'symlink hosted authority'
     cp "$authority/$hosted_relative" "$staging/$hosted_relative"
+    dynamic_sha=absent
+    if [ -e "$authority/libsimple_runtime.dylib" ] || [ -L "$authority/libsimple_runtime.dylib" ]; then
+      [ -f "$authority/libsimple_runtime.dylib" ] && [ ! -L "$authority/libsimple_runtime.dylib" ] || die 'unsafe dynamic runtime'
+      dynamic_sha=$(hash_file "$authority/libsimple_runtime.dylib")
+      cp "$authority/libsimple_runtime.dylib" "$staging/libsimple_runtime.dylib"
+      [ "$(hash_file "$authority/libsimple_runtime.dylib")" = "$dynamic_sha" ] || die 'dynamic runtime changed during publication'
+      [ "$(hash_file "$staging/libsimple_runtime.dylib")" = "$dynamic_sha" ] || die 'dynamic runtime copy hash mismatch'
+    fi
+    cocoa_sha=absent
+    cocoa_receipt_sha=absent
+    if [ -e "$authority/libspl_cocoa.dylib" ] || [ -L "$authority/libspl_cocoa.dylib" ] || \
+       [ -e "$authority/libspl_cocoa.producer.txt" ] || [ -L "$authority/libspl_cocoa.producer.txt" ]; then
+      verify_cocoa_candidate "$authority" || die 'invalid diagnostic Cocoa candidate'
+      cocoa_sha=$(hash_file "$authority/libspl_cocoa.dylib")
+      cocoa_receipt_sha=$(hash_file "$authority/libspl_cocoa.producer.txt")
+      cp "$authority/libspl_cocoa.dylib" "$authority/libspl_cocoa.producer.txt" "$staging/"
+      [ "$(hash_file "$authority/libspl_cocoa.dylib")" = "$cocoa_sha" ] && \
+        [ "$(hash_file "$authority/libspl_cocoa.producer.txt")" = "$cocoa_receipt_sha" ] || die 'Cocoa candidate changed during publication'
+      [ "$(hash_file "$staging/libspl_cocoa.dylib")" = "$cocoa_sha" ] && \
+        [ "$(hash_file "$staging/libspl_cocoa.producer.txt")" = "$cocoa_receipt_sha" ] || die 'Cocoa candidate copy mismatch'
+    fi
     hosted_receipt_sha=$(hash_file "$authority/hosted-runtime.env")
     stamp_sha=$(hash_file "$authority/$stamp_file")
     backfill_sha=$(value backfill_sha256 "$authority/$stamp_file")
@@ -170,6 +259,11 @@ case ${1:-} in
       echo native_all_sha256="$native_sha"
       echo hosted_authority_receipt_sha256="$hosted_receipt_sha"
       echo seed_authority_stamp_sha256="$stamp_sha"
+      echo dynamic_runtime_sha256="$dynamic_sha"
+      echo cocoa_candidate_sha256="$cocoa_sha"
+      echo cocoa_producer_receipt_sha256="$cocoa_receipt_sha"
+      echo cocoa_admission=unavailable
+      echo cocoa_dependency_admission=not-established
       echo capsule_identity_sha256="$aggregate"
       echo source_authority_path="$(CDPATH= cd -- "$authority" && pwd -P)"
     } >"$staging/phase2-runtime-capsule.env"

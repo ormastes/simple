@@ -185,6 +185,28 @@ That banner is the artifact's honest self-identification. A binary that answers
 `doc/08_tracking/bug/stage3_vacuous_binary_is_enum_discriminant_garbage_not_a_link_failure_2026-08-08.md`,
 never accept exit code alone as proof.
 
+### Read the Phase 1 verification result
+
+`bootstrap-phase-verification.shs --phase=stage1` records source checks and
+source tests as `UNSUPPORTED`: the admitted Rust seed is a bootstrap producer,
+not the normal source-test runtime. Successful server builds and help probes do
+not qualify those missing checks, and the overall Phase 1 matrix must fail.
+Interpreter/compile discovery, test JSON, executed-test counts, and skip counts
+belong to the later admitted CLI/test-runner phases; Phase 1 does not execute
+those paths or claim their coverage.
+
+The verifier checks summary initialization and terminal-row writes and retains
+failed/unsupported task state in memory. A stale `overall=PASS`, a read-only
+summary, or removed failure rows must not turn the current process into a
+successful verification. Consume the current process exit status and its
+current authority/summary evidence together; an old summary alone is invalid.
+
+The executable controller regression is
+`test/01_unit/scripts/bootstrap_phase_stage1_native_build_authority_test.shs`.
+Its fake seed/tools verify authority routing and failure handling; they are not
+live bootstrap admission evidence. Read-only-file cases explicitly report when
+the filesystem or caller privilege prevents enforcing that fault.
+
 ## 2. Deploy phase 1 + both MCP servers into a temp root
 
 ```sh

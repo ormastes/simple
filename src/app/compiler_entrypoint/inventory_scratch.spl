@@ -1,0 +1,24 @@
+# One file's canonicalization and hashing scratch belongs to that file. Keep
+# only its event alive; promoting the accumulated event array each time would
+# walk every earlier event again and turn cold admission quadratic.
+use std.nogc_sync_mut.sffi.fs.{fs_read_text}
+use std.scv.compile_source_inventory_core.{CompileSourceEventV1, compile_source_inventory_git_event_v1}
+use compiler.hir.hir_lowering.transient_ownership.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn compiler_inventory_file_event_v1(
+    operation: text, identity: text, absolute: text
+) -> CompileSourceEventV1?:
+    if not transient_scope_begin():
+        return nil
+    val event = compile_source_inventory_git_event_v1(
+        operation, identity, fs_read_text(absolute) ?? "")
+    if not transient_scope_pause():
+        transient_scope_end()
+        return nil
+    val retained = transient_promote(event)
+    val ended = transient_scope_end()
+    if not retained or not ended:
+        return nil
+    Some(event)
+
+export compiler_inventory_file_event_v1

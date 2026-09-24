@@ -177,7 +177,9 @@ fn is_msvc_archive_tool(tool: &str) -> bool {
     Path::new(tool)
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("lib"))
+        .is_some_and(|stem| {
+            stem.eq_ignore_ascii_case("lib") || stem.eq_ignore_ascii_case("llvm-lib")
+        })
 }
 
 pub(super) fn archive_create_command(
@@ -461,6 +463,9 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // (stage3_native_build_and_compile_segv_on_hello_world_2026-08-18).
         // Compiles with zero symbol collisions against the existing members.
         "runtime_simd_case.c",
+        // Core-C provider for rt_simd_str_search, used by the full CLI's
+        // string-search closure. It must be an archive member under host-gpu.
+        "runtime_simd_search.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
         "runtime_simd_dispatch.c",

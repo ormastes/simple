@@ -264,6 +264,26 @@ fn sanitized_enum_constructor_call_lowers_to_enum_with() {
         MirInst::EnumWith { enum_name, variant_name, .. }
             if enum_name == "Type" && variant_name == "Int"
     )));
+    let has_payload_capacity = mir.functions.iter().any(|function| {
+        function.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                let MirInst::Call { dest: Some(array_reg), target, args } = inst else {
+                    return false;
+                };
+                target == &CallTarget::from_name("rt_array_new")
+                    && args.len() == 1
+                    && block.instructions.iter().any(|candidate| {
+                        matches!(candidate, MirInst::ConstInt { dest, value }
+                            if *dest == args[0] && *value == 2)
+                    })
+                    && block.instructions.iter().any(|candidate| {
+                        matches!(candidate, MirInst::EnumWith { enum_name, variant_name, payload, .. }
+                            if enum_name == "Type" && variant_name == "Int" && payload == array_reg)
+                    })
+            })
+        })
+    });
+    assert!(has_payload_capacity, "two-field enum payload must pass capacity 2 to rt_array_new");
     assert!(!has_inst(&mir, |i| matches!(
         i,
         MirInst::Call { target, .. } if target.name() == "Type_dot_Int"

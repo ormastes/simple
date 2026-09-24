@@ -154,6 +154,155 @@ static void free_handle(int64_t handle) {
     HANDLE_WRUNLOCK();
 }
 
+/* Scalar TLS has a raw i64 ABI, distinct from the tagged RuntimeValue TLS.
+ * Each live handle owns one OS TLS key. Values are kept in the key itself,
+ * without a heap allocation on the get/set path. Public handles combine a
+ * monotonically increasing serial with a reusable table slot: stale handles
+ * never address a recycled OS key, and table memory tracks peak live slots.
+ * The table lock stays held across OS key access, so free cannot race it. */
+#define SCALAR_TLS_SLOT_BITS 20
+#define SCALAR_TLS_SLOT_COUNT (UINT64_C(1) << SCALAR_TLS_SLOT_BITS)
+#define SCALAR_TLS_SLOT_MASK (SCALAR_TLS_SLOT_COUNT - 1)
+typedef struct {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_key_t key;
+#else
+    DWORD key;
+#endif
+    int64_t handle;
+    size_t next_free;
+    bool active;
+} ScalarTlsEntry;
+
+static ScalarTlsEntry* g_scalar_tls_entries = NULL;
+static size_t g_scalar_tls_capacity = 0;
+static size_t g_scalar_tls_used = 0;
+static size_t g_scalar_tls_free_head = SIZE_MAX;
+static uint64_t g_scalar_tls_serial = 0;
+#ifdef SPL_THREAD_PTHREAD
+static pthread_rwlock_t g_scalar_tls_lock = PTHREAD_RWLOCK_INITIALIZER;
+#define SCALAR_TLS_RDLOCK() pthread_rwlock_rdlock(&g_scalar_tls_lock)
+#define SCALAR_TLS_RDUNLOCK() pthread_rwlock_unlock(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRLOCK() pthread_rwlock_wrlock(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRUNLOCK() pthread_rwlock_unlock(&g_scalar_tls_lock)
+#else
+static SRWLOCK g_scalar_tls_lock = SRWLOCK_INIT;
+#define SCALAR_TLS_RDLOCK() AcquireSRWLockShared(&g_scalar_tls_lock)
+#define SCALAR_TLS_RDUNLOCK() ReleaseSRWLockShared(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRLOCK() AcquireSRWLockExclusive(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRUNLOCK() ReleaseSRWLockExclusive(&g_scalar_tls_lock)
+#endif
+
+/* The hosted runtime represents i64 scalar values as pointer-sized TLS bits. */
+_Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "scalar TLS requires 64-bit pointers");
+
+int64_t rt_thread_local_new(void) {
+    SCALAR_TLS_WRLOCK();
+    size_t index = g_scalar_tls_free_head != SIZE_MAX
+        ? g_scalar_tls_free_head : g_scalar_tls_used;
+    if (index >= SCALAR_TLS_SLOT_COUNT ||
+        g_scalar_tls_serial > ((uint64_t)INT64_MAX - index - 1) / SCALAR_TLS_SLOT_COUNT) {
+        SCALAR_TLS_WRUNLOCK();
+        return 0;
+    }
+    if (index >= g_scalar_tls_capacity) {
+        size_t capacity = g_scalar_tls_capacity ? g_scalar_tls_capacity * 2 : 16;
+        if (capacity <= index || capacity > SCALAR_TLS_SLOT_COUNT ||
+            capacity > SIZE_MAX / sizeof(ScalarTlsEntry)) {
+            SCALAR_TLS_WRUNLOCK();
+            return 0;
+        }
+        ScalarTlsEntry* entries = (ScalarTlsEntry*)SPL_REALLOC(
+            g_scalar_tls_entries, capacity * sizeof(ScalarTlsEntry), "scalar_tls_keys");
+        if (!entries) {
+            SCALAR_TLS_WRUNLOCK();
+            return 0;
+        }
+        memset(entries + g_scalar_tls_capacity, 0,
+               (capacity - g_scalar_tls_capacity) * sizeof(ScalarTlsEntry));
+        g_scalar_tls_entries = entries;
+        g_scalar_tls_capacity = capacity;
+    }
+
+#ifdef SPL_THREAD_PTHREAD
+    if (pthread_key_create(&g_scalar_tls_entries[index].key, NULL) != 0) {
+        SCALAR_TLS_WRUNLOCK();
+        return 0;
+    }
+#else
+    DWORD key = TlsAlloc();
+    if (key == TLS_OUT_OF_INDEXES) {
+        SCALAR_TLS_WRUNLOCK();
+        return 0;
+    }
+    g_scalar_tls_entries[index].key = key;
+#endif
+    if (g_scalar_tls_free_head != SIZE_MAX) {
+        g_scalar_tls_free_head = g_scalar_tls_entries[index].next_free;
+    } else {
+        g_scalar_tls_used++;
+    }
+    int64_t handle = (int64_t)(g_scalar_tls_serial * SCALAR_TLS_SLOT_COUNT + index + 1);
+    g_scalar_tls_entries[index].handle = handle;
+    g_scalar_tls_entries[index].active = true;
+    g_scalar_tls_serial++;
+    SCALAR_TLS_WRUNLOCK();
+    return handle;
+}
+
+int64_t rt_thread_local_get_i64(int64_t handle) {
+    if (handle <= 0) return 0;
+    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    SCALAR_TLS_RDLOCK();
+    int64_t value = 0;
+    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
+        g_scalar_tls_entries[index].handle == handle) {
+#ifdef SPL_THREAD_PTHREAD
+        uintptr_t bits = (uintptr_t)pthread_getspecific(g_scalar_tls_entries[index].key);
+#else
+        uintptr_t bits = (uintptr_t)TlsGetValue(g_scalar_tls_entries[index].key);
+#endif
+        memcpy(&value, &bits, sizeof(value));
+    }
+    SCALAR_TLS_RDUNLOCK();
+    return value;
+}
+
+void rt_thread_local_set_i64(int64_t handle, int64_t value) {
+    if (handle <= 0) return;
+    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    SCALAR_TLS_RDLOCK();
+    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
+        g_scalar_tls_entries[index].handle == handle) {
+        uintptr_t bits;
+        memcpy(&bits, &value, sizeof(bits));
+#ifdef SPL_THREAD_PTHREAD
+        (void)pthread_setspecific(g_scalar_tls_entries[index].key, (void*)bits);
+#else
+        (void)TlsSetValue(g_scalar_tls_entries[index].key, (void*)bits);
+#endif
+    }
+    SCALAR_TLS_RDUNLOCK();
+}
+
+void rt_thread_local_free(int64_t handle) {
+    if (handle <= 0) return;
+    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    SCALAR_TLS_WRLOCK();
+    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
+        g_scalar_tls_entries[index].handle == handle) {
+#ifdef SPL_THREAD_PTHREAD
+        (void)pthread_key_delete(g_scalar_tls_entries[index].key);
+#else
+        (void)TlsFree(g_scalar_tls_entries[index].key);
+#endif
+        g_scalar_tls_entries[index].active = false;
+        g_scalar_tls_entries[index].next_free = g_scalar_tls_free_head;
+        g_scalar_tls_free_head = index;
+    }
+    SCALAR_TLS_WRUNLOCK();
+}
+
 /* ================================================================
  * Thread Management
  * ================================================================ */

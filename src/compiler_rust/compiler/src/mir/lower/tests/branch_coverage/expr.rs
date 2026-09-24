@@ -288,17 +288,42 @@ fn parse_program() -> BrowserResult<i64>:
 }
 
 #[test]
-fn direct_result_unwrap_lowers_to_enum_payload_not_method_dispatch() {
+fn direct_result_unwrap_lowers_to_checked_runtime_not_method_dispatch() {
     let mir = compile_to_mir(
         "fn mk() -> Result<i64, text>:\n    return Ok(7)\n\nfn test() -> i64:\n    return mk().unwrap()\n",
     )
     .unwrap();
     assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload"))
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_unwrap_or_trap"))
     }));
     assert!(!has_inst(&mir, |i| {
         matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap" || func_name.ends_with(".unwrap"))
     }));
+}
+
+#[test]
+fn result_ok_err_method_projection_builds_options_and_checks_outer_variant() {
+    let mir = compile_to_mir(
+        "fn make(flag: bool) -> Result<i64, text>:\n    if flag:\n        return Ok(7)\n    Err(\"bad\")\n\nfn probe(flag: bool) -> bool:\n    val a = make(flag).ok()\n    val b = make(flag).err()\n    a.is_some() or b.is_some()\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_check_variant"))));
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::OptionSome { .. })));
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::OptionNone { .. })));
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload"))));
+}
+
+#[test]
+fn result_ok_unwrap_has_one_payload_read_and_wrong_variant_trap() {
+    let mir = compile_to_mir(
+        "fn make(flag: bool) -> Result<i64, text>:\n    if flag:\n        return Ok(7)\n    Err(\"bad\")\n\nfn probe(flag: bool) -> i64:\n    make(flag).ok().unwrap()\n",
+    )
+    .unwrap();
+    let debug = format!("{mir:#?}");
+    assert_eq!(debug.matches("rt_enum_payload").count(), 1, "{debug}");
+    assert!(debug.contains("rt_enum_check_variant"), "{debug}");
+    assert!(debug.contains("rt_unwrap_or_trap"), "{debug}");
+    assert!(!debug.contains("MethodCallStatic"), "{debug}");
 }
 
 #[test]
@@ -314,9 +339,9 @@ fn optional_field_unwrap_lowers_to_enum_payload_not_named_method() {
     // payload segfaulted on subsequent field access -- so the contract
     // inverted for this case: the flat-nullable unwrap must stay on the
     // erased, runtime tag-dispatching path (a BARE `unwrap`, which codegen
-    // maps to `rt_unwrap_or_trap`). `rt_enum_payload` remains correct for a
-    // genuine boxed enum receiver and is still pinned by
-    // `direct_result_unwrap_lowers_to_enum_payload_not_method_dispatch` above.
+    // maps to `rt_unwrap_or_trap`). Genuine boxed Result/Option unwrap also
+    // uses that checked helper; `rt_enum_payload` remains the guarded `?`
+    // or match projection primitive.
     assert!(
         !has_inst(&mir, |i| matches!(
             i,

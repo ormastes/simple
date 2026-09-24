@@ -5,10 +5,11 @@
 # are confined to the caller-provided SCV cache root.
 
 use std.common.crypto.sha256.{sha256_text}
-use std.common.text_advanced.{split_whitespace}
+@allow(star_import) # reason: public compatibility facade over the pure inventory core
+export use std.scv.compile_source_inventory_core.*
 use std.nogc_sync_mut.io_runtime.{dir_list}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
-use std.io.{file_lock, file_unlock}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.io_runtime.{process_is_running}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 
@@ -23,134 +24,6 @@ extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 
-val COMPILE_SOURCE_INVENTORY_SCHEMA_V1: i64 = 1
-val COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
-
-struct CompileSourceInventoryEntryV1:
-    source_identity: text
-    content_digest: text
-    semantic_digest: text
-    export_digest: text
-    initializer_digest: text
-    provider_digest: text
-    byte_count: i64
-
-struct CompileSourceEventV1:
-    source: text
-    operation: text
-    source_identity: text
-    content_digest: text
-    semantic_digest: text
-    export_digest: text
-    initializer_digest: text
-    provider_digest: text
-    byte_count: i64
-
-struct CompileSourceGitChangeV1:
-    operation: text
-    source_identity: text
-    content: text
-
-struct CompileSourceInventoryV1:
-    schema_version: i64
-    generation: i64
-    entries: [CompileSourceInventoryEntryV1]
-
-struct CompileSourceInventoryReadV1:
-    valid: bool
-    reason: text
-    digest: text
-    inventory: CompileSourceInventoryV1?
-
-struct CompileSourceInventoryChangeV1:
-    valid: bool
-    reason: text
-    inventory: CompileSourceInventoryV1?
-    content_changed: bool
-    semantics_changed: bool
-
-fn compile_source_inventory_strip_comments_v1(content: text) -> text:
-    var rows: [text] = []
-    for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
-            continue
-        # split_whitespace is a free function, not a text method: the method
-        # form resolved to `str.split_whitespace`, which exists nowhere, and
-        # aborted every inventory refresh (rc=70) under the seed.
-        rows = rows.push(split_whitespace(trimmed).join(" "))
-    rows.join("\n")
-
-# Facet text keyed off an ALREADY-canonicalized (comment/blank stripped) text.
-# `compile_source_inventory_facet_text_v1` below stripped comments itself on
-# every call, so one file paid for `strip_comments` 4 times (semantic, export,
-# initializer, provider) even though all four facets share the same canonical
-# text. This is the same canonicalization, just computed once and reused.
-fn compile_source_inventory_facet_rows_from_canonical_v1(
-    canonical: text, facet: text
-) -> text:
-    if facet == "semantic":
-        return canonical
-    var rows: [text] = []
-    for line in canonical.split("\n"):
-        if (facet == "export" and (line.starts_with("export ") or
-                line.starts_with("pub "))) or
-                (facet == "initializer" and (line.starts_with("val ") or
-                    line.starts_with("var ") or line.starts_with("init "))) or
-                (facet == "provider" and (line.starts_with("use ") or
-                    line.starts_with("impl ") or line.starts_with("provider "))):
-            rows = rows.push(line)
-    rows.join("\n")
-
-fn compile_source_inventory_facet_text_v1(content: text, facet: text) -> text:
-    compile_source_inventory_facet_rows_from_canonical_v1(
-        compile_source_inventory_strip_comments_v1(content), facet)
-
-# NOTE on hashing cost: `sha256_text` (used below, 4x per file) is already
-# runtime-native — src/lib/common/crypto/sha256.spl:211 calls the extern
-# `rt_tls13_sha256` and only falls back to an interpreted compression loop on
-# an invalid-length result. So a per-file "pass a natively-hashed digest in"
-# path would not skip interpreted hashing; it would just add a second,
-# redundant file read (fs::read via rt_file_hash_sha256, on top of the
-# content this function already has in hand) for no compute benefit. That
-# path was tried and removed here — see
-# doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md
-# for what IS still interpreted-only in this file (the comment/whitespace
-# canonicalization below) and the measurement this note is based on.
-fn compile_source_inventory_event_from_content_v1(
-    source: text, operation: text, source_identity: text, content: text
-) -> CompileSourceEventV1:
-    if operation == "delete":
-        return CompileSourceEventV1(
-            source, operation, source_identity, "", "", "", "", "", 0)
-    val canonical = compile_source_inventory_strip_comments_v1(content)
-    CompileSourceEventV1(
-        source, operation, source_identity, sha256_text(content),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "semantic")),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "export")),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "initializer")),
-        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "provider")),
-        content.len())
-
-fn compile_source_inventory_git_event_v1(
-    operation: text, source_identity: text, content: text
-) -> CompileSourceEventV1:
-    compile_source_inventory_event_from_content_v1(
-        "git", operation, source_identity, content)
-
-fn compile_source_inventory_filesystem_event_v1(
-    operation: text, source_identity: text, content: text
-) -> CompileSourceEventV1:
-    compile_source_inventory_event_from_content_v1(
-        "filesystem", operation, source_identity, content)
-
-fn compile_source_inventory_event_path_v1(root: text, path: text) -> text:
-    val normalized_root = root.replace("\\", "/")
-    val normalized_path = path.replace("\\", "/")
-    if normalized_path.starts_with(normalized_root + "/"):
-        return normalized_path.substring(normalized_root.len() + 1)
-    normalized_path
-
 fn compile_source_inventory_apply_and_publish_v1(
     cache_root: text, events: [CompileSourceEventV1]
 ) -> CompileSourceInventoryReadV1:
@@ -159,11 +32,18 @@ fn compile_source_inventory_apply_and_publish_v1(
         current.inventory!
     else:
         CompileSourceInventoryV1(COMPILE_SOURCE_INVENTORY_SCHEMA_V1, 0, [])
-    for event in events:
-        val changed = compile_source_inventory_apply_event_v1(inventory, event)
-        if not changed.valid:
-            return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
-        inventory = changed.inventory!
+    val initial = if inventory.generation == 0 and inventory.entries.len() == 0:
+        compile_source_inventory_initial_events_v1(events)
+    else:
+        nil
+    if initial != nil:
+        inventory = initial!
+    else:
+        for event in events:
+            val changed = compile_source_inventory_apply_event_v1(inventory, event)
+            if not changed.valid:
+                return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
+            inventory = changed.inventory!
     val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
         cache_root, inventory)
     if digest == "":
@@ -229,139 +109,6 @@ fn compile_source_inventory_apply_filesystem_events_v1(
             compile_source_inventory_filesystem_event_v1(
                 operation, identity, content!))
     compile_source_inventory_apply_and_publish_v1(cache_root, translated)
-
-fn compile_source_inventory_text_valid_v1(value: text) -> bool:
-    value != "" and not value.contains("\n") and not value.contains("\r") and
-        not value.contains("|")
-
-fn compile_source_inventory_digest_valid_v1(value: text) -> bool:
-    if value.len() != 64:
-        return false
-    for ch in value:
-        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
-            return false
-    true
-
-fn compile_source_inventory_path_valid_v1(value: text) -> bool:
-    compile_source_inventory_text_valid_v1(value) and
-        not value.starts_with("/") and not value.contains("\\") and
-        not value.contains("//") and not value.split("/").contains("..") and
-        (value.ends_with(".spl") or value == "simple.sdn" or
-            value.ends_with("/simple.sdn"))
-
-fn compile_source_inventory_cache_root_valid_v1(cache_root: text) -> bool:
-    cache_root == "build/scv" or cache_root == ".simple/scv" or
-        cache_root.ends_with("/build/scv") or
-        cache_root.ends_with("/.simple/scv")
-
-fn compile_source_inventory_sort_v1(
-    values: [CompileSourceInventoryEntryV1]
-) -> [CompileSourceInventoryEntryV1]:
-    var sorted = values
-    var index = 1
-    while index < sorted.len():
-        val item = sorted[index]
-        var cursor = index
-        while cursor > 0 and item.source_identity < sorted[cursor - 1].source_identity:
-            sorted[cursor] = sorted[cursor - 1]
-            cursor = cursor - 1
-        sorted[cursor] = item
-        index = index + 1
-    sorted
-
-fn compile_source_inventory_entry_valid_v1(
-    entry: CompileSourceInventoryEntryV1
-) -> bool:
-    compile_source_inventory_path_valid_v1(entry.source_identity) and
-        compile_source_inventory_digest_valid_v1(entry.content_digest) and
-        compile_source_inventory_digest_valid_v1(entry.semantic_digest) and
-        compile_source_inventory_digest_valid_v1(entry.export_digest) and
-        compile_source_inventory_digest_valid_v1(entry.initializer_digest) and
-        compile_source_inventory_digest_valid_v1(entry.provider_digest) and
-        entry.byte_count >= 0
-
-fn compile_source_inventory_encode_v1(inventory: CompileSourceInventoryV1) -> text:
-    if inventory.schema_version != COMPILE_SOURCE_INVENTORY_SCHEMA_V1 or
-            inventory.generation < 0:
-        return ""
-    val entries = compile_source_inventory_sort_v1(inventory.entries)
-    var rows = [
-        "simple-compile-source-inventory-v1",
-        "generation={inventory.generation}",
-        "count={entries.len()}"
-    ]
-    var previous = ""
-    for entry in entries:
-        if (not compile_source_inventory_entry_valid_v1(entry) or
-                entry.source_identity == previous):
-            return ""
-        previous = entry.source_identity
-        rows = rows.push([
-            entry.source_identity, entry.content_digest, entry.semantic_digest,
-            entry.export_digest, entry.initializer_digest,
-            entry.provider_digest, entry.byte_count.to_text()
-        ].join("|"))
-    rows.join("\n")
-
-fn compile_source_inventory_digest_v1(inventory: CompileSourceInventoryV1) -> text:
-    val encoded = compile_source_inventory_encode_v1(inventory)
-    if encoded == "": "" else: sha256_text(encoded)
-
-fn compile_source_inventory_find_v1(
-    entries: [CompileSourceInventoryEntryV1], source_identity: text
-) -> i64:
-    var index = 0
-    while index < entries.len():
-        if entries[index].source_identity == source_identity:
-            return index
-        index = index + 1
-    -1
-
-fn compile_source_inventory_apply_event_v1(
-    inventory: CompileSourceInventoryV1, event: CompileSourceEventV1
-) -> CompileSourceInventoryChangeV1:
-    if (inventory.schema_version != COMPILE_SOURCE_INVENTORY_SCHEMA_V1 or
-            inventory.generation < 0 or
-            not (event.source == "git" or event.source == "filesystem") or
-            not compile_source_inventory_path_valid_v1(event.source_identity)):
-        return CompileSourceInventoryChangeV1(false, "event-invalid", nil, false, false)
-    var entries = compile_source_inventory_sort_v1(inventory.entries)
-    val found = compile_source_inventory_find_v1(entries, event.source_identity)
-    if event.operation == "delete":
-        if found < 0:
-            return CompileSourceInventoryChangeV1(true, "ok-no-change", Some(inventory), false, false)
-        val old = entries[found]
-        entries.remove(found)
-        val next = CompileSourceInventoryV1(1, inventory.generation + 1, entries)
-        return CompileSourceInventoryChangeV1(true, "ok", Some(next), true,
-            old.semantic_digest != "" or old.export_digest != "" or
-            old.initializer_digest != "" or old.provider_digest != "")
-    if not (event.operation == "create" or event.operation == "modify"):
-        return CompileSourceInventoryChangeV1(false, "event-operation-invalid", nil, false, false)
-    val next_entry = CompileSourceInventoryEntryV1(
-        event.source_identity, event.content_digest, event.semantic_digest,
-        event.export_digest, event.initializer_digest, event.provider_digest,
-        event.byte_count)
-    if not compile_source_inventory_entry_valid_v1(next_entry):
-        return CompileSourceInventoryChangeV1(false, "event-entry-invalid", nil, false, false)
-    var content_changed = true
-    var semantics_changed = true
-    if found >= 0:
-        val old = entries[found]
-        content_changed = old.content_digest != next_entry.content_digest or
-            old.byte_count != next_entry.byte_count
-        semantics_changed = old.semantic_digest != next_entry.semantic_digest or
-            old.export_digest != next_entry.export_digest or
-            old.initializer_digest != next_entry.initializer_digest or
-            old.provider_digest != next_entry.provider_digest
-        if not content_changed and not semantics_changed:
-            return CompileSourceInventoryChangeV1(true, "ok-no-change", Some(inventory), false, false)
-        entries[found] = next_entry
-    else:
-        entries = entries.push(next_entry)
-    val next = CompileSourceInventoryV1(
-        1, inventory.generation + 1, compile_source_inventory_sort_v1(entries))
-    CompileSourceInventoryChangeV1(true, "ok", Some(next), content_changed, semantics_changed)
 
 fn compile_source_inventory_storage_v1(cache_root: text) -> text:
     "{cache_root}/source-inventory"
@@ -527,6 +274,7 @@ export CompileSourceGitChangeV1
 export CompileSourceInventoryV1, CompileSourceInventoryReadV1
 export CompileSourceInventoryChangeV1
 export compile_source_inventory_apply_event_v1
+export compile_source_inventory_initial_events_v1
 export compile_source_inventory_path_valid_v1
 export compile_source_inventory_git_event_v1
 export compile_source_inventory_filesystem_event_v1
@@ -538,4 +286,3 @@ export compile_source_inventory_digest_v1
 export compile_source_inventory_publish_v1, compile_source_inventory_publish_reasoned_v1, compile_source_inventory_read_current_v1
 export compile_source_inventory_recover_v1
 export compile_source_inventory_snapshot_rows_v1
-use std.common.text_advanced.{split_whitespace}

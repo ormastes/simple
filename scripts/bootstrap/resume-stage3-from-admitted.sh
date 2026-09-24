@@ -246,6 +246,9 @@ bootstrap_stage3_resume_write_status_receipt() {
     echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
     echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
     echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo preflight_receipt_path="${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:?authoritative preflight receipt is required}"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file \
+      "${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT}")"
     echo log_sha256="$(bootstrap_stage3_hash_file \
       "$bootstrap_stage3_resume_receipt_log")"
     echo transcript_sha256="$(bootstrap_stage3_hash_file \
@@ -351,6 +354,9 @@ bootstrap_stage3_resume_write_status_receipt() {
     echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
     echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
     echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo preflight_receipt_path="${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:?authoritative preflight receipt is required}"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file \
+      "${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT}")"
     echo log_sha256="$(bootstrap_stage3_hash_file \
       "$bootstrap_stage3_resume_receipt_log")"
     echo transcript_sha256="$(bootstrap_stage3_hash_file \
@@ -414,6 +420,16 @@ stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
+bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+bootstrap_preflight_expected_config="platform=${platform};backend=${stage2_backend};mode=dynload;lane=full-bootstrap"
+sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+  --seed="$seed" --expect-config="$bootstrap_preflight_expected_config" \
+  --verify-receipt="$bootstrap_preflight_receipt" || {
+  echo "bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence" >&2
+  exit 64
+}
+SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
+export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
 # The Stage-2 build-args vector is reconstructed from the RECORDED transcript --
 # every env VALUE and the argv verbatim -- not from a hand-written copy of
 # bootstrap-from-scratch.sh:2827. The hand-written copy was stale in both halves
@@ -450,6 +466,8 @@ done <"$stage2_transcript"
 stage2_env_value() {
   bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
 }
+bootstrap_stage2_darwin_env=
+case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 stage2_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=$(stage2_env_value RUST_LOG)" \
   "LIBRARY_PATH=$stage2_library_path" \
@@ -466,6 +484,12 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
   "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
   "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  ${bootstrap_stage2_darwin_env:+"CC=$(stage2_env_value CC)"} \
+  ${bootstrap_stage2_darwin_env:+"CXX=$(stage2_env_value CXX)"} \
+  ${bootstrap_stage2_darwin_env:+"AR=$(stage2_env_value AR)"} \
+  ${bootstrap_stage2_darwin_env:+"LD=$(stage2_env_value LD)"} \
+  ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=$(stage2_env_value LLVM_CONFIG)"} \
+  ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=$(stage2_env_value SIMPLE_LLVM_REQUIRED_VERSION)"} \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
@@ -885,7 +909,23 @@ bootstrap_stage_sanity() (
   version_expect_status=0
   version_expected=$(bootstrap_stage3_canonical_version "$sanity_repo_root") || \
     version_expect_status=1
-  for name in $(env | sed 's/=.*//'); do unset "$name"; done
+  # The outer guard owns these values. Scrubbing them makes the bounded-log
+  # collector create a new session, escaping the still-active outer monitor.
+  # Validate before any candidate execution, and preserve presence (including
+  # malformed/empty contracts) rather than silently falling back to standalone.
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+  fi
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
+  for name in $(env | sed 's/=.*//'); do
+    case "$name" in
+      SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
+      ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+    esac
+    unset "$name"
+  done
   HOME=$sanity_home TMPDIR=$sanity_tmp PATH=$sanity_path LC_ALL=C LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
   evidence_tmp="$evidence.tmp.$$"

@@ -3,7 +3,13 @@
 set -eu
 tool_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 die() { echo "phase2-runtime-binding: $*" >&2; exit 2; }
-hash_file() { sha256sum "$1" | awk '{print $1}'; }
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi | awk '{print $1}'
+}
 value() {
   [ "$(awk -F= -v key="$1" '$1 == key {n++} END {print n+0}' "$2")" = 1 ] || return 1
   sed -n "s/^$1=//p" "$2"
@@ -27,7 +33,9 @@ verify_runtime_leaves() {
     *) return 1 ;;
   esac
   relative=$(value relative_path "$runtime_base/hosted-runtime.env") || return 1
-  case "$relative" in deps/libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+  # Cargo 1.100 can publish either hashed (`-HASH`) or unhashed hosted-runtime
+  # leaves depending on build-dir layout. Admission binds the exact leaf/hash.
+  case "$relative" in deps/libspl_hosted_runtime*.rlib) ;; *) return 1 ;; esac
   case "${relative#deps/}" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
   [ -d "$runtime_base" ] && [ ! -L "$runtime_base" ] && [ ! -L "$runtime_base/deps" ] || return 1
   set -- "$native" "$stamp" hosted-runtime.env "$relative"

@@ -1463,6 +1463,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         file_io::rt_file_read_regular_no_follow_bounded
     );
     insert_simple!(
+        "rt_file_read_regular_no_follow_bounded_bytes",
+        file_io::rt_file_read_regular_no_follow_bounded_bytes
+    );
+    insert_simple!(
         "rt_file_read_regular_no_follow_last_failure",
         file_io::rt_file_read_regular_no_follow_last_failure
     );
@@ -2329,8 +2333,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_thread_join", concurrency::rt_thread_join);
     insert_simple!("rt_thread_local_free", concurrency::rt_thread_local_free);
     insert_simple!("rt_thread_local_get", concurrency::rt_thread_local_get);
+    insert_simple!("rt_thread_local_get_i64", concurrency::rt_thread_local_get_i64);
     insert_simple!("rt_thread_local_new", concurrency::rt_thread_local_new);
     insert_simple!("rt_thread_local_set", concurrency::rt_thread_local_set);
+    insert_simple!("rt_thread_local_set_i64", concurrency::rt_thread_local_set_i64);
     insert_simple!("rt_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("rt_thread_yield", concurrency::rt_thread_yield);
     insert_simple!("rt_time_format", time::rt_time_format);
