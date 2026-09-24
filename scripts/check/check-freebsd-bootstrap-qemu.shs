@@ -18,8 +18,18 @@ set -eu
 #   QEMU_SSH_PRIVATE_KEY  Matching SSH private key (default: public-key path without .pub)
 #   QEMU_PORT            SSH forwarding port (default: 2222)
 #   QEMU_USER            VM user (default: freebsd)
+#   QEMU_ARCH            Guest arch: amd64|arm64 (default: host arch — aarch64
+#                        hosts boot aarch64 guests under KVM; x86 guests only
+#                        when explicitly configured)
+#   QEMU_EFI_FD          aarch64 UEFI firmware path (arm64 only; auto-resolves
+#                        to system qemu-efi-aarch64/AAVMF, else rootless
+#                        'apt download qemu-efi-aarch64' + dpkg -x into
+#                        ~/.simple/qemu/firmware)
 #   QEMU_MEM             RAM (default: 32G)
 #   QEMU_CPUS            CPUs (default: 10)
+#   Per-host config (untracked, gitignored): .simple/qemu-host.conf at the
+#   repo root or ~/.simple/qemu-host.conf is sourced at startup; use
+#   ': "${QEMU_MEM:=16G}"' there so explicit env exports still win.
 #   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 1800; pristine images
 #                        may run freebsd-update before nuageinit/sshd)
 #   QEMU_ROOT_SSH_TIMEOUT Root SSH wait seconds after user SSH (default: 120)
@@ -32,6 +42,27 @@ EXPECTED_BOOTSTRAP_VERSION=$(bootstrap_stage3_canonical_version "$ROOT_DIR") || 
     printf '%s\n' 'FreeBSD bootstrap check: release/version.sdn or its VERSION projection is invalid' >&2
     exit 2
 }
+
+# Per-host, untracked config (gitignored): repo-local wins over ~/.simple.
+# Use ': "${VAR:=value}"' inside the file to keep explicit env exports
+# taking precedence. Knobs: QEMU_ARCH, QEMU_MEM, QEMU_CPUS, QEMU_EFI_FD.
+[ -f "${HOME}/.simple/qemu-host.conf" ] && . "${HOME}/.simple/qemu-host.conf"
+[ -f "${ROOT_DIR}/.simple/qemu-host.conf" ] && . "${ROOT_DIR}/.simple/qemu-host.conf"
+
+# Guest arch defaults to the HOST arch — never emulate x86 on aarch64 hosts
+# unless explicitly configured (QEMU_ARCH=amd64).
+_host_arch="$(uname -m 2>/dev/null || echo unknown)"
+case "$_host_arch" in
+    aarch64|arm64) _host_arch=arm64 ;;
+    x86_64|amd64) _host_arch=amd64 ;;
+    *) _host_arch=amd64 ;;
+esac
+QEMU_ARCH="${QEMU_ARCH:-$_host_arch}"
+case "$QEMU_ARCH" in
+    amd64|x86_64) QEMU_ARCH=amd64 ;;
+    arm64|aarch64) QEMU_ARCH=arm64 ;;
+    *) printf 'Invalid QEMU_ARCH: %s (expected amd64|arm64)\n' "$QEMU_ARCH" >&2; exit 2 ;;
+esac
 
 VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
 QEMU_PORT="${QEMU_PORT:-2222}"
@@ -47,7 +78,16 @@ QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-7200}"
 QEMU_SMOKE_TIMEOUT="${QEMU_SMOKE_TIMEOUT:-600}"
 QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-7200}"
 FREEBSD_VERSION="14.4"
-FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
+case "$QEMU_ARCH" in
+    arm64)
+        FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-ufs.qcow2"
+        FREEBSD_IMAGE_FETCH_URL="https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE/aarch64/Latest/${FREEBSD_IMAGE_NAME}.xz"
+        ;;
+    amd64)
+        FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
+        FREEBSD_IMAGE_FETCH_URL="https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE/amd64/Latest/${FREEBSD_IMAGE_NAME}.xz"
+        ;;
+esac
 MEDIA_CHECKER="${ROOT_DIR}/scripts/qemu/simple-freebsd-media.shs"
 SHARED_MEDIA_ROOT="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/images/freebsd"
 QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${SIMPLE_FREEBSD_MEDIA_PATH:-${SHARED_MEDIA_ROOT}/${FREEBSD_IMAGE_NAME}}}}"
@@ -175,7 +215,12 @@ preflight_architecture() {
     [ "$host_arch" = "x86_64" ] || [ "$host_arch" = "amd64" ]
 }
 
-preflight_qemu_system() { command -v qemu-system-x86_64 >/dev/null 2>&1; }
+preflight_qemu_system() {
+    case "$QEMU_ARCH" in
+        arm64) command -v qemu-system-aarch64 >/dev/null 2>&1 ;;
+        *) command -v qemu-system-x86_64 >/dev/null 2>&1 ;;
+    esac
+}
 preflight_qemu_img() { command -v qemu-img >/dev/null 2>&1; }
 preflight_ssh() { command -v ssh >/dev/null 2>&1; }
 preflight_rsync() { command -v rsync >/dev/null 2>&1; }
@@ -422,8 +467,45 @@ trap cleanup EXIT
 printf 'FreeBSD QEMU Bootstrap Check (%s mode)\n\n' "$MODE"
 printf '[1/7] Prerequisites\n'
 
-command -v qemu-system-x86_64 >/dev/null 2>&1 || fail "qemu-system-x86_64 not found"
-pass "qemu-system-x86_64 found"
+case "$QEMU_ARCH" in
+    arm64) QEMU_SYSTEM="qemu-system-aarch64" ;;
+    *) QEMU_SYSTEM="qemu-system-x86_64" ;;
+esac
+command -v "$QEMU_SYSTEM" >/dev/null 2>&1 || fail "$QEMU_SYSTEM not found"
+pass "$QEMU_SYSTEM found"
+
+# aarch64 cloud images boot via UEFI. Resolve firmware: explicit env, system
+# packages, or a rootless apt download + dpkg -x into ~/.simple/qemu/firmware.
+resolve_efi_fd() {
+    _candidates="${QEMU_EFI_FD:-}
+/usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+/usr/share/AAVMF/AAVMF_CODE.fd
+${HOME}/.simple/qemu/firmware/QEMU_EFI.fd"
+    _old_ifs=$IFS; IFS='
+'
+    for _c in $_candidates; do
+        IFS=$_old_ifs
+        [ -n "$_c" ] && [ -r "$_c" ] && { printf '%s' "$_c"; return 0; }
+    done
+    IFS=$_old_ifs
+    _fwdir="${HOME}/.simple/qemu/firmware"
+    mkdir -p "$_fwdir"
+    if (cd "$_fwdir" && apt download qemu-efi-aarch64 >/dev/null 2>&1 && rm -rf extracted && dpkg -x qemu-efi-aarch64_*.deb extracted >/dev/null 2>&1); then
+        _f=$(find "$_fwdir/extracted" -name 'QEMU_EFI.fd' 2>/dev/null | head -1)
+        if [ -n "$_f" ]; then
+            cp "$_f" "$_fwdir/QEMU_EFI.fd"
+            printf '%s' "$_fwdir/QEMU_EFI.fd"
+            return 0
+        fi
+    fi
+    return 1
+}
+if [ "$QEMU_ARCH" = "arm64" ]; then
+    if ! QEMU_EFI_FD_RESOLVED="$(resolve_efi_fd)"; then
+        fail "no aarch64 EFI firmware found (install qemu-efi-aarch64, set QEMU_EFI_FD, or allow the rootless apt download into ~/.simple/qemu/firmware)"
+    fi
+    pass "aarch64 EFI firmware: $QEMU_EFI_FD_RESOLVED"
+fi
 
 command -v qemu-img >/dev/null 2>&1 || fail "qemu-img not found"
 pass "qemu-img found"
@@ -549,10 +631,19 @@ if [ -w /dev/kvm ] 2>/dev/null; then
     CPU_MODEL="host"
 fi
 
+# Arch-specific machine tuple: aarch64 guests use the virt machine with UEFI.
+case "$QEMU_ARCH" in
+    arm64)
+        MACHINE_ARGS="-machine virt,accel=${ACCEL} -cpu max -bios ${QEMU_EFI_FD_RESOLVED}"
+        ;;
+    *)
+        MACHINE_ARGS="-machine accel=${ACCEL} -cpu ${CPU_MODEL}"
+        ;;
+esac
+
 rm -f "$PID_FILE" "$QEMU_START_LOG"
-if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" qemu-system-x86_64 \
-    -machine "accel=${ACCEL}" \
-    -cpu "$CPU_MODEL" \
+if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" "$QEMU_SYSTEM" \
+    $MACHINE_ARGS \
     -m "$QEMU_MEM" \
     -smp "$QEMU_CPUS" \
     -drive "file=${OVERLAY_IMAGE},format=qcow2,if=virtio" \

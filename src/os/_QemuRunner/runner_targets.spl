@@ -133,6 +133,41 @@ fn _os_build_log_mode() -> text:
     val raw = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
     _normalize_os_log_mode(raw)
 
+fn os_build_jobs() -> text:
+    """Parallel native-build jobs for OS kernel builds. SIMPLE_OS_BUILD_JOBS
+    overrides the default of 10."""
+    val raw = rt_env_get("SIMPLE_OS_BUILD_JOBS") ?? ""
+    if raw != "":
+        return raw
+    "10"
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn qemu_host_arch() -> text:
+    """Host machine arch (uname -m), normalized to amd64|arm64|unknown.
+    Baremetal-safe: never shells out where /bin/sh is absent."""
+    val probe = rt_process_run_timeout("/bin/sh", ["-c", "uname -m 2>/dev/null || echo unknown"], 5000)
+    val (out, _err, code) = probe
+    if code != 0:
+        return "unknown"
+    val m = out.trim()
+    if m == "aarch64" or m == "arm64":
+        return "arm64"
+    if m == "x86_64" or m == "amd64":
+        return "amd64"
+    "unknown"
+
+fn qemu_default_arch() -> text:
+    """Guest-arch default: SIMPLEOS_QEMU_ARCH env override, else the host arch
+    (so aarch64 hosts never emulate x86 unless configured), else amd64."""
+    val raw = rt_env_get("SIMPLEOS_QEMU_ARCH") ?? ""
+    if raw != "":
+        return raw
+    val host = qemu_host_arch()
+    if host == "arm64" or host == "amd64":
+        return host
+    "amd64"
+
 fn qemu_effective_memory(configured: text) -> text:
     """Guest RAM for a QEMU launch. SIMPLEOS_QEMU_MEM overrides the configured
     per-target/scenario memory; the configured value is the default (32G since

@@ -46,6 +46,18 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Per-host, untracked config (gitignored); same knobs as
+# check-freebsd-bootstrap-qemu.shs. Guest arch defaults to the host arch.
+[ -f "${HOME}/.simple/qemu-host.conf" ] && . "${HOME}/.simple/qemu-host.conf"
+[ -f "${ROOT_DIR}/.simple/qemu-host.conf" ] && . "${ROOT_DIR}/.simple/qemu-host.conf"
+_host_arch="$(uname -m 2>/dev/null || echo unknown)"
+case "$_host_arch" in
+    aarch64|arm64) _host_arch=arm64 ;;
+    *) _host_arch=amd64 ;;
+esac
+QEMU_ARCH="${QEMU_ARCH:-$_host_arch}"
+case "$QEMU_ARCH" in amd64|x86_64) QEMU_ARCH=amd64 ;; arm64|aarch64) QEMU_ARCH=arm64 ;; *) printf 'Invalid QEMU_ARCH: %s\n' "$QEMU_ARCH" >&2; exit 2 ;; esac
+
 VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
@@ -55,7 +67,10 @@ QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 BUILD_TIMEOUT_SEC="${BUILD_TIMEOUT_SEC:-2400}"
 FREEBSD_VERSION="14.4"
-FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
+case "$QEMU_ARCH" in
+    arm64) FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-arm64-aarch64-BASIC-CLOUDINIT-ufs.qcow2" ;;
+    *) FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2" ;;
+esac
 MEDIA_CHECKER="${ROOT_DIR}/scripts/qemu/simple-freebsd-media.shs"
 SHARED_MEDIA_ROOT="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/images/freebsd"
 QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${SIMPLE_FREEBSD_MEDIA_PATH:-${SHARED_MEDIA_ROOT}/${FREEBSD_IMAGE_NAME}}}}"
@@ -105,7 +120,8 @@ trap cleanup EXIT
 
 printf 'FreeBSD WM Seam Refusal Check\n\n'
 printf '[1/6] Prerequisites\n'
-command -v qemu-system-x86_64 >/dev/null 2>&1 || fail "qemu-system-x86_64 not found"
+case "$QEMU_ARCH" in arm64) QEMU_SYSTEM="qemu-system-aarch64" ;; *) QEMU_SYSTEM="qemu-system-x86_64" ;; esac
+command -v "$QEMU_SYSTEM" >/dev/null 2>&1 || fail "$QEMU_SYSTEM not found"
 command -v qemu-img >/dev/null 2>&1 || fail "qemu-img not found"
 command -v ssh >/dev/null 2>&1 || fail "ssh not found"
 command -v rsync >/dev/null 2>&1 || fail "rsync not found"
@@ -147,10 +163,20 @@ if [ -w /dev/kvm ] 2>/dev/null; then
     CPU_MODEL="host"
 fi
 
+if [ "$QEMU_ARCH" = "arm64" ]; then
+    QEMU_EFI_FD_RESOLVED="${QEMU_EFI_FD:-}"
+    for _c in /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd "${HOME}/.simple/qemu/firmware/QEMU_EFI.fd"; do
+        [ -z "$QEMU_EFI_FD_RESOLVED" ] && [ -r "$_c" ] && QEMU_EFI_FD_RESOLVED="$_c"
+    done
+    [ -n "$QEMU_EFI_FD_RESOLVED" ] || fail "no aarch64 EFI firmware (install qemu-efi-aarch64 or set QEMU_EFI_FD; the bootstrap check can fetch it rootlessly)"
+    MACHINE_ARGS="-machine virt,accel=${ACCEL} -cpu max -bios ${QEMU_EFI_FD_RESOLVED}"
+else
+    MACHINE_ARGS="-machine accel=${ACCEL} -cpu ${CPU_MODEL}"
+fi
+
 rm -f "$PID_FILE" "$QEMU_START_LOG"
-if ! qemu-system-x86_64 \
-    -machine "accel=${ACCEL}" \
-    -cpu "$CPU_MODEL" \
+if ! "$QEMU_SYSTEM" \
+    $MACHINE_ARGS \
     -m "$QEMU_MEM" \
     -smp "$QEMU_CPUS" \
     -drive "file=${OVERLAY_IMAGE},format=qcow2,if=virtio" \
