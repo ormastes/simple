@@ -3880,8 +3880,13 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 2 compiler tests have no admission receipt at ${stage2_admission_receipt}" >&2
       exit 1
     }
-    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}")
-    stage2_tests_hash_status=$?
+    # Under `set -eu` (line 114), a bare `sha=$(cmd)` with `cmd` failing would
+    # exit the script on that line -- before a later `status=$?` line ever
+    # runs -- so the diagnostic below would never print. Initialize the
+    # status and let `|| stage2_tests_hash_status=$?` capture a nonzero exit
+    # without tripping -e.
+    stage2_tests_hash_status=0
+    stage2_tests_sha=$(bootstrap_stage3_hash_file "${stage2_admitted_bin}") || stage2_tests_hash_status=$?
     # bootstrap_stage3_hash_file's own body is a pipeline (`sha256sum "$1" |
     # awk '{print $1}'`, or the shasum/sha256/openssl equivalents): if the
     # hashing command fails but awk still runs (on no input, awk exits 0 and
@@ -3979,20 +3984,85 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # RSS in interpreter mode is unmeasured here and this repo has
       # SIGKILL-for-memory history on large parses
       # (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md), so
-      # this stays conservative pending a real measurement.
+      # this stays conservative pending a real measurement. Confirmed still
+      # appropriate after the build-thread memory review below: each test
+      # worker here runs `simple_test_runner` against ALREADY-BUILT CLI/
+      # test-runner binaries (spec-by-spec interpreter execution), not a
+      # fresh whole-entry-closure native-build per worker, so it is not the
+      # same 2.4-2.7 GB-per-worker cost native-build threads carry. 4 stays
+      # the cap pending a real per-worker RSS measurement of this path.
       stage2_tests_workers=$((stage2_tests_cpu_basis / 2))
       [ "${stage2_tests_workers}" -ge 1 ] || stage2_tests_workers=1
       [ "${stage2_tests_workers}" -le 4 ] || stage2_tests_workers=4
     fi
+    # Portable free-memory probe (perf/mem re-review, 2026-09-24): deriving
+    # build threads from CPU count alone (the prior version of this step)
+    # is wrong by the repo's own numbers -- shard_mem_clamp.spl and the
+    # 2026-08-18 bug record measure each native-build worker at 2.4-2.7 GB
+    # with nothing shared between workers, and a 16-worker run was already
+    # OOM-killed at ~40 GB. On a 24-thread/64 GB host, 24 threads would ask
+    # for ~58-65 GB against ~36-52 GB free. The existing memory clamp
+    # (bootstrap_build_jobs_memory_clamp, bootstrap-build-jobs-policy.shs)
+    # reads only /proc/meminfo, which does not exist on Windows -- this
+    # step's own primary target -- so it is reimplemented here per-platform:
+    # Linux via /proc/meminfo MemAvailable, macOS via hw.pagesize + vm_stat
+    # "Pages free", FreeBSD via hw.pagesize + vm.stats.vm.v_free_count, and
+    # Windows via `Get-CimInstance Win32_OperatingSystem` (FreePhysicalMemory
+    # is already reported in KiB). Any detection failure leaves
+    # stage2_tests_free_kib empty, which the build-threads block below
+    # treats as "assume the worst" (falls back to the 8-thread hard ceiling
+    # below, never to the full CPU count).
+    stage2_tests_free_kib=""
+    case "$(uname -s 2>/dev/null || :)" in
+      Linux)
+        if [ -r /proc/meminfo ]; then
+          stage2_tests_free_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null)
+        fi
+        ;;
+      Darwin)
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null)
+        stage2_tests_free_pages=$(vm_stat 2>/dev/null | awk '/^Pages free:/ { gsub(/\./, "", $3); print $3 }')
+        case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
+        case "${stage2_tests_free_pages}" in ''|*[!0-9]*) stage2_tests_free_pages="" ;; esac
+        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_pages}" ]; then
+          stage2_tests_free_kib=$(( stage2_tests_page_size * stage2_tests_free_pages / 1024 ))
+        fi
+        ;;
+      FreeBSD)
+        stage2_tests_page_size=$(sysctl -n hw.pagesize 2>/dev/null)
+        stage2_tests_free_pages=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null)
+        case "${stage2_tests_page_size}" in ''|*[!0-9]*) stage2_tests_page_size="" ;; esac
+        case "${stage2_tests_free_pages}" in ''|*[!0-9]*) stage2_tests_free_pages="" ;; esac
+        if [ -n "${stage2_tests_page_size}" ] && [ -n "${stage2_tests_free_pages}" ]; then
+          stage2_tests_free_kib=$(( stage2_tests_page_size * stage2_tests_free_pages / 1024 ))
+        fi
+        ;;
+      MINGW*|MSYS*|CYGWIN*)
+        if command -v powershell.exe >/dev/null 2>&1; then
+          stage2_tests_free_kib=$(powershell.exe -NoProfile -Command \
+            "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" 2>/dev/null | tr -d '\r\n ')
+        fi
+        ;;
+    esac
+    case "${stage2_tests_free_kib}" in ''|*[!0-9]*) stage2_tests_free_kib="" ;; esac
     stage2_tests_build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-}
     if [ -z "${stage2_tests_build_threads}" ]; then
-      # Native-build threads are not bounded by the same per-worker-RSS
-      # concern as the interpreter test workers above (one native-build
-      # process is already the unit of the whole entry-closure build, not
-      # N parallel interpreter processes each loading the compiler graph),
-      # so use the full detected/selected job count rather than the
-      # workers' 4-way cap. Was a fixed 4 regardless of host size.
-      stage2_tests_build_threads=${stage2_tests_cpu_basis}
+      if [ -n "${stage2_tests_free_kib}" ]; then
+        # free_GB / 3, per the measured ~2.4-2.7 GB/worker above (3 GB divisor
+        # leaves headroom rather than assuming the tightest measured figure).
+        stage2_tests_build_threads=$(( stage2_tests_free_kib / 1024 / 1024 / 3 ))
+      else
+        # Detection failed outright: fall back to the conservative 8-thread
+        # ceiling below, never to the (potentially much larger) CPU count.
+        stage2_tests_build_threads=8
+      fi
+      case "${stage2_tests_build_threads}" in ''|*[!0-9]*) stage2_tests_build_threads=8 ;; esac
+      [ "${stage2_tests_build_threads}" -ge 1 ] || stage2_tests_build_threads=1
+      [ "${stage2_tests_build_threads}" -le "${stage2_tests_cpu_basis}" ] ||
+        stage2_tests_build_threads=${stage2_tests_cpu_basis}
+      # Hard ceiling regardless of how much memory is free -- this is a
+      # native-build worker count, not a job-scheduling optimization target.
+      [ "${stage2_tests_build_threads}" -le 8 ] || stage2_tests_build_threads=8
     fi
     echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s, build-threads=${stage2_tests_build_threads}, test-workers=${stage2_tests_workers})"
     # Without a milestone the progress watcher reads this multi-minute step as a
