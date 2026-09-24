@@ -224,41 +224,74 @@ is_allowlisted() {
     printf '%s\n' "$ALLOWLIST" | "$GREP" -qxF -- "$1"
 }
 
-# --- 6. collect changed paths, NUL-safe against spaces in filenames --------
-# --no-renames keeps every record to exactly "<status><TAB><path>", so a path
-# containing spaces survives intact when read as the rest of the line.
-# core.quotePath=false stops git from octal-escaping non-ASCII names.
-git -c core.quotePath=false diff --name-status --no-renames "$range" -- \
-    > "$TMPD/paths" 2>/dev/null
+# --- 6. collect changed paths+modes in O(1) git processes ------------------
+# Rewritten 2026-09-24 (WP1, doc push_hook_plan.md section D). The old version
+# spawned one `git ls-tree -d --format=...` (gitlink check) plus one `git show`
+# plus two plain `grep` per CHANGED FILE -- about 200ms/file on Windows, 13.7s
+# for a 68-file push. It also depended on `git ls-tree --format`, which needs
+# git >= 2.36; on git 2.34 (Ubuntu 22.04) that call fails, the path is treated
+# as a blob, and `git show` then fails "bad object" -- the gate failed CLOSED
+# on every range touching a submodule pointer (e.g. .spipe/spipe).
+#
+# The rewrite uses a constant number of git processes regardless of file
+# count:
+#   1. `git diff --raw -z --no-renames` -- ONE call. Raw mode gives the NEW
+#      FILE MODE directly (`git diff --raw` documents mode 160000 = gitlink),
+#      so the gitlink check needs no extra git call and no git-2.36 feature.
+#   2. `git cat-file --batch-check` -- ONE call, all remaining paths fed over
+#      stdin -- fail-closed unreadable-path detection without a `git show`
+#      per file.
+#   3. `git grep` for the open marker, `git grep` for the close marker -- one
+#      call each (chunked only if the remaining-path list is large enough to
+#      risk the OS argv-length limit; git grep has no --pathspec-from-file,
+#      unlike git diff/log, so batched positional args are the only route).
+#      A file is flagged only when it appears in BOTH result sets.
+#
+# `--raw -z` record format (verified against real git 2.47 and documented
+# since old versions): repeating NUL-terminated pairs
+#   ":<oldmode> <newmode> <oldsha> <newsha> <status>\0<path>\0"
+# Converting every NUL to a newline is safe: git paths can never contain a NUL
+# or a literal newline, so this never fabricates a false line boundary.
+git -c core.quotePath=false diff --raw -z --no-renames "$range" -- \
+    > "$TMPD/rawdiff" 2>"$TMPD/rawdifferr"
 dl=$?
-[ "$dl" -eq 0 ] || die 2 "git diff --name-status '$range' failed with status $dl"
+[ "$dl" -eq 0 ] || die 2 "git diff --raw '$range' failed with status $dl: $(head -1 "$TMPD/rawdifferr" 2>/dev/null)"
+tr '\0' '\n' < "$TMPD/rawdiff" > "$TMPD/pairs"
 
-nlines=$(wc -l < "$TMPD/paths" | tr -d ' ')
-if [ "$nlines" -eq 0 ]; then
-    die 2 "range '$range' contains $ncommits commit(s) but 0 changed paths.
-  Nothing could be scanned, so this guard cannot vouch for the push. If the
-  commits really are empty, they should not be pushed either."
-fi
-
-found=0
+nlines=0
 scanned=0
 exempted=0
 skipped_deleted=0
 skipped_gitlink=0
+: > "$TMPD/remaining"     # one path per line -- safe, paths can't contain LF
+: > "$TMPD/batch_input"   # "<tip>:<path>" per line, for cat-file --batch-check
 
-while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    status=${line%%"$TAB"*}
-    path=${line#*"$TAB"}
+exec 3< "$TMPD/pairs"
+while IFS= read -r metaline <&3; do
+    [ -n "$metaline" ] || continue
+    if ! IFS= read -r path <&3; then
+        exec 3<&-
+        die 2 "malformed 'git diff --raw -z' output: metadata line with no path
+  ('$metaline'). This should be impossible; refusing to guess."
+    fi
+    nlines=$((nlines + 1))
+    meta=${metaline#:}
+    # Fixed-shape metadata ("<oldmode> <newmode> <oldsha> <newsha> <status>")
+    # contains no filenames, so word-splitting it is safe even though the path
+    # on the NEXT line may hold spaces or other odd bytes.
+    set -- $meta
+    newmode=$2
+    status=$5
     case "$status" in
         D*) skipped_deleted=$((skipped_deleted + 1)); continue ;;
     esac
-    # A submodule (gitlink, mode 160000) has no blob content in THIS repo, so
-    # `git show <tip>:<path>` fails with "bad object". That is not unreadable
-    # content: there is nothing here that could carry a conflict marker, and the
+    # A submodule (gitlink, mode 160000) has no blob content in THIS repo --
+    # there is nothing here that could carry a conflict marker, and the
     # submodule's own history is guarded inside its own repository. Skip it
-    # explicitly and COUNT it, so the skip is visible in the verdict.
-    if [ "$(git ls-tree -d --format='%(objectmode)' "$tip" -- "$path" 2>/dev/null)" = "160000" ]; then
+    # explicitly and COUNT it. Unlike the old `git ls-tree --format` probe,
+    # the mode comes for free from the diff record above: no extra call, no
+    # git-2.36 dependency.
+    if [ "$newmode" = "160000" ]; then
         skipped_gitlink=$((skipped_gitlink + 1))
         continue
     fi
@@ -266,45 +299,149 @@ while IFS= read -r line; do
         exempted=$((exempted + 1))
         continue
     fi
-    if ! git show "$tip:$path" > "$TMPD/content" 2>"$TMPD/showerr"; then
-        die 2 "cannot read '$path' at $tip (status was '$status', so it is not a deletion).
-  A path that cannot be read cannot be cleared. Refusing to pass.
-  git said: $(head -1 "$TMPD/showerr" 2>/dev/null)"
-    fi
     scanned=$((scanned + 1))
-    # jj picks a marker LENGTH per file (>=7) so the markers cannot collide with
-    # the content being wrapped -- a materialized conflict is routinely 10 chars
-    # (`<<<<<<<<<< Conflict 1 of 1`). The old fixed-width `^<<<<<<< ` required a
-    # space at column 8 and so silently missed every marker longer than 7. That
-    # is not hypothetical: .spipe/scv-remaining/impl_ws_a.md reached origin with
-    # a 10-char pair while this guard reported clean (found 2026-08-02).
+    printf '%s\n' "$path" >> "$TMPD/remaining"
+    printf '%s:%s\n' "$tip" "$path" >> "$TMPD/batch_input"
+done
+exec 3<&-
+
+if [ "$nlines" -eq 0 ]; then
+    die 2 "range '$range' contains $ncommits commit(s) but 0 changed paths.
+  Nothing could be scanned, so this guard cannot vouch for the push. If the
+  commits really are empty, they should not be pushed either."
+fi
+
+found=0
+
+if [ "$scanned" -gt 0 ]; then
+    # --- 6a. fail-closed unreadable-path check, ONE process for all paths ---
+    git cat-file --batch-check < "$TMPD/batch_input" \
+        > "$TMPD/batchout" 2>"$TMPD/batcherr"
+    bl=$?
+    [ "$bl" -eq 0 ] || die 2 "git cat-file --batch-check failed with status $bl: $(head -1 "$TMPD/batcherr" 2>/dev/null)"
+    if "$GREP" -q ' missing$' "$TMPD/batchout"; then
+        badline=$("$GREP" -m1 ' missing$' "$TMPD/batchout")
+        die 2 "cannot read one or more changed paths at $tip: $badline
+  A path that cannot be read cannot be cleared. Refusing to pass."
+    fi
+
+    # --- 6b. one `git grep` call per marker kind (chunked only if the ------
+    # remaining-path list is large enough to risk the OS argv-length limit).
+    # jj picks a marker LENGTH per file (>=7) so the markers cannot collide
+    # with the content being wrapped -- a materialized conflict is routinely
+    # 10 chars (`<<<<<<<<<< Conflict 1 of 1`). The old fixed-width
+    # `^<<<<<<< ` required a space at column 8 and so silently missed every
+    # marker longer than 7. That is not hypothetical:
+    # .spipe/scv-remaining/impl_ws_a.md reached origin with a 10-char pair
+    # while this guard reported clean (found 2026-08-02).
     #
     # The label is optional too. `git merge-file -L '' -L '' -L ''` emits
     # "<<<<<<< " / ">>>>>>> " -- marker, space, EMPTY label -- and any
-    # trailing-whitespace strip (every formatter, this repo's own fmt/lint, most
-    # editors on save) turns those into a bare "<<<<<<<" / ">>>>>>>". PROVED
-    # 2026-08-02: the pre-strip block matched, the post-strip block did not, so a
-    # real conflict block survived a formatter and became invisible. Requiring a
-    # space at the end of the run was the same fixed-shape mistake as requiring
-    # it at column 8.
+    # trailing-whitespace strip (every formatter, this repo's own fmt/lint,
+    # most editors on save) turns those into a bare "<<<<<<<" / ">>>>>>>".
+    # PROVED 2026-08-02: the pre-strip block matched, the post-strip block did
+    # not, so a real conflict block survived a formatter and became
+    # invisible. Requiring a space at the end of the run was the same
+    # fixed-shape mistake as requiring it at column 8.
     #
-    # `^<{7,}( |$)` accepts >=7 markers followed by a space OR end of line, and
-    # still rejects a shorter run and a run glued to other text ("<<<<<<<x").
-    # Measured across all 109,516 files of the tree at 4834c449124: zero files
-    # gain a matching pair from the relaxation, so it costs no false positive.
-    open_lines=$("$GREP" -nE '^<{7,}( |$)' "$TMPD/content" 2>/dev/null)
-    close_lines=$("$GREP" -nE '^>{7,}( |$)' "$TMPD/content" 2>/dev/null)
-    if [ -n "$open_lines" ] && [ -n "$close_lines" ]; then
-        echo "CONFLICT MARKERS: $path" >&2
-        printf '%s\n' "$open_lines" | while IFS=: read -r ln _; do
-            echo "  open  line $ln" >&2
-        done
-        printf '%s\n' "$close_lines" | while IFS=: read -r ln _; do
-            echo "  close line $ln" >&2
-        done
+    # `^<{7,}( |$)` accepts >=7 markers followed by a space OR end of line,
+    # and still rejects a shorter run and a run glued to other text
+    # ("<<<<<<<x"). Measured across all 109,516 files of the tree at
+    # 4834c449124: zero files gain a matching pair from the relaxation, so it
+    # costs no false positive.
+    #
+    # git grep has no --pathspec-from-file (that flag exists on git diff/log,
+    # not grep), so the only way to scope it to just the changed paths is
+    # positional arguments. CHUNK bounds the argv size instead of letting a
+    # huge range risk the OS command-line limit; at or under CHUNK files this
+    # is exactly ONE git process per marker kind, matching WP1's target.
+    CHUNK=500
+
+    run_grep_chunked() { # <pattern> <outfile> -> sets G_RC (0 ok/no-match, >0 real error)
+        pat=$1
+        outfile=$2
+        : > "$outfile"
+        : > "$TMPD/greperr"
+        G_RC=0
+        n=0
+        set --
+        while IFS= read -r p; do
+            set -- "$@" "$p"
+            n=$((n + 1))
+            if [ "$n" -ge "$CHUNK" ]; then
+                git -c core.quotePath=false --literal-pathspecs grep -anzE "$pat" "$tip" -- "$@" \
+                    >> "$outfile" 2>>"$TMPD/greperr"
+                rc=$?
+                [ "$rc" -gt 1 ] && G_RC=$rc
+                set --
+                n=0
+            fi
+        done < "$TMPD/remaining"
+        if [ "$n" -gt 0 ]; then
+            git -c core.quotePath=false --literal-pathspecs grep -anzE "$pat" "$tip" -- "$@" \
+                >> "$outfile" 2>>"$TMPD/greperr"
+            rc=$?
+            [ "$rc" -gt 1 ] && G_RC=$rc
+        fi
+    }
+
+    run_grep_chunked '^<{7,}( |$)' "$TMPD/openhits"
+    [ "$G_RC" -eq 0 ] || die 2 "git grep (open-marker pattern) failed: $(head -1 "$TMPD/greperr" 2>/dev/null)"
+    run_grep_chunked '^>{7,}( |$)' "$TMPD/closehits"
+    [ "$G_RC" -eq 0 ] || die 2 "git grep (close-marker pattern) failed: $(head -1 "$TMPD/greperr" 2>/dev/null)"
+
+    # Each `git grep -z` match record is "<tree>:<path>\0<lineno>\0<content>\n"
+    # (verified: -z NUL-separates the FIELDS, the trailing content still ends
+    # with a real newline). Converting NUL to TAB turns each match into one
+    # TAB-separated line; stripping the exact "$tip:" prefix (a literal-string
+    # match, not a split on the first colon) recovers the path intact even
+    # when the path itself contains a colon.
+    tr '\0' "$TAB" < "$TMPD/openhits"  > "$TMPD/openhits.tsv"
+    tr '\0' "$TAB" < "$TMPD/closehits" > "$TMPD/closehits.tsv"
+
+    : > "$TMPD/open_pl"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        rest=${line#"$tip":}
+        p=${rest%%"$TAB"*}
+        ln=${rest#*"$TAB"}
+        ln=${ln%%"$TAB"*}
+        printf '%s\t%s\n' "$p" "$ln" >> "$TMPD/open_pl"
+    done < "$TMPD/openhits.tsv"
+
+    : > "$TMPD/close_pl"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        rest=${line#"$tip":}
+        p=${rest%%"$TAB"*}
+        ln=${rest#*"$TAB"}
+        ln=${ln%%"$TAB"*}
+        printf '%s\t%s\n' "$p" "$ln" >> "$TMPD/close_pl"
+    done < "$TMPD/closehits.tsv"
+
+    cut -f1 "$TMPD/open_pl"  | LC_ALL=C sort -u > "$TMPD/open_paths"
+    cut -f1 "$TMPD/close_pl" | LC_ALL=C sort -u > "$TMPD/close_paths"
+    # A file is flagged only when it appears in BOTH result sets.
+    LC_ALL=C comm -12 "$TMPD/open_paths" "$TMPD/close_paths" > "$TMPD/flagged"
+
+    if [ -s "$TMPD/flagged" ]; then
         found=1
+        while IFS= read -r fpath; do
+            [ -n "$fpath" ] || continue
+            echo "CONFLICT MARKERS: $fpath" >&2
+            # Exact-key match on the path FIELD, not a substring search: a
+            # plain `grep -F "$fpath<TAB>"` would also match inside a longer
+            # path that merely ENDS with $fpath (e.g. "a.txt" inside
+            # "ba.txt"), reporting the wrong file's line numbers.
+            awk -F"$TAB" -v k="$fpath" '$1 == k { print $2 }' "$TMPD/open_pl" | while IFS= read -r ln; do
+                echo "  open  line $ln" >&2
+            done
+            awk -F"$TAB" -v k="$fpath" '$1 == k { print $2 }' "$TMPD/close_pl" | while IFS= read -r ln; do
+                echo "  close line $ln" >&2
+            done
+        done < "$TMPD/flagged"
     fi
-done < "$TMPD/paths"
+fi
 
 # Verdict suffix that RECORDS any escape actually used, so a passing run can
 # never hide the fact that a path was exempted.
@@ -314,11 +451,35 @@ if [ -n "$CLI_ALLOW" ]; then
 fi
 
 if [ "$scanned" -eq 0 ]; then
+    # A range whose changed paths are ENTIRELY gitlinks (a submodule pointer
+    # bump, e.g. `.spipe/spipe`) is a legitimate, always-safe 0-scan: a
+    # gitlink categorically has no blob content in this repo to ever carry a
+    # marker, so it needs no explicit --allow to justify skipping it. This is
+    # the fix for A.3: on git 2.34 (git grep -z has no --format dependency
+    # here, but the OLD script's separate `git ls-tree --format` gitlink
+    # probe used to fail on 2.34 and misclassify the path as unreadable
+    # content, ERRORing on every push that touched .spipe/spipe). An
+    # all-DELETION range is deliberately NOT given the same pass: a commit
+    # that only deletes previously-scanned content and adds nothing new to
+    # scan is exactly the shape a bad rebase can produce, so that case still
+    # requires an explicit --allow below, unchanged from before this rewrite.
+    # `exempted` must be exactly 0 here too: if some OTHER path was skipped by
+    # the (implicit or --allow) allowlist, the "entirely explained by
+    # uncontroversial gitlinks" story no longer covers the whole range, and
+    # that mixed case falls through to the stricter existing --allow
+    # requirement below instead of getting a free pass.
+    if [ "$skipped_gitlink" -gt 0 ] && [ "$skipped_deleted" -eq 0 ] && [ "$exempted" -eq 0 ] \
+       && [ "$nlines" -eq "$skipped_gitlink" ]; then
+        echo "$SELF: PASS — 0 file(s) scanned at $tip across $ncommits commit(s) in $range$allow_note ($skipped_gitlink submodule gitlink(s) skipped: no blob content in this repo) (repo $toplevel)"
+        exit 0
+    fi
     # Still fail closed when the zero came from anything OTHER than paths the
     # caller named on the command line for this run.
     if [ "$exempted" -eq 0 ] || [ -z "$CLI_ALLOW" ] || [ "$exempted" -ne "$(printf '%s' "$CLI_ALLOW" | "$GREP" -c .)" ]; then
+        gitlink_die_note=""
+        [ "$skipped_gitlink" -eq 0 ] || gitlink_die_note=", $skipped_gitlink gitlink(s)"
         die 2 "range '$range' changed $nlines path(s) but 0 were scanned
-  ($skipped_deleted deletion(s), the rest allowlisted). Nothing was verified."
+  ($skipped_deleted deletion(s)$gitlink_die_note, the rest allowlisted). Nothing was verified."
     fi
     echo "$SELF: PASS — 0 file(s) scanned at $tip across $ncommits commit(s) in $range$allow_note (repo $toplevel)"
     exit 0
@@ -327,8 +488,8 @@ fi
 if [ "$found" -ne 0 ]; then
     # Working-copy-conflict tripwire (added 2026-08-11, see
     # doc/08_tracking/bug/conflict_markers_reported_at_origin_were_working_copy_only_2026-08-11.md):
-    # every marker match above came from `git show "$tip:$path"` — COMMITTED
-    # content only, never the working tree — so this guard cannot itself
+    # every marker match above came from `git grep ... "$tip" -- ...` —
+    # COMMITTED content only, never the working tree — so this guard cannot itself
     # confuse a stalled local cherry-pick for a poisoned commit. But a human
     # reading this FAIL and about to blame the SHA in $tip needs that ruled
     # out explicitly, because a separate, unrelated stalled cherry-pick in
