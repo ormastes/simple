@@ -54,6 +54,7 @@ use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_st
 # GROUP 6: Self-protection imports
 use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
 use std.test_runner.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.test_runner.shutdown.{shutdown_graceful}
 # GROUP 7: Parallel execution imports
 use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring, get_cpu_count}
@@ -343,6 +344,16 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     # Sequential flag overrides parallel
     if updated_options.sequential:
+        updated_options.parallel = false
+
+    # ponytail: parallel spawn_async_test fails closed on Windows (no native
+    # redirected-argv async spawn; see std.test_runner.test_runner_async), so
+    # every file came back "child produced no exit status" in 0 ms
+    # (bootstrap35 stage-2, 2026-09-25). Run the sequential path, whose
+    # bounded process facade works on Windows. Upgrade path: a native
+    # redirected async spawn in the runtime, then drop this branch.
+    if updated_options.parallel and host_is_windows_host():
+        print "WARNING: --parallel is unavailable on Windows (no redirected async spawn); running sequentially."
         updated_options.parallel = false
 
     # Parallel execution with resource governor
