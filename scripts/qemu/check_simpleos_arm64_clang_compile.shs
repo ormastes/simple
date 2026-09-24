@@ -1,0 +1,172 @@
+#!/bin/sh
+# check_simpleos_arm64_clang_compile.shs
+#
+# aarch64 in-guest clang compile bring-up (lane-C1 aarch64 guest milestone).
+#
+# Rungs (single boot covers R2-R5; the guest entry sequences them):
+#   R1  image staged + host-verified (FAT32 root, 8.3 names)
+#   R2  guest boots to the clang-bringup entry (VFS up)
+#   R3  /CLANG.ELF --version prints in-guest
+#   R4a /CLANG.ELF -cc1 ... /HELLO.C -o /HELLO.O     (in-guest compile)
+#   R4b /LLD.ELF -T /SIMPLEOS.LD ... -o /HELLO2.ELF (in-guest link)
+#   R5  /HELLO2.ELF runs, prints HELLO_C_FROM_GUEST_ARM64
+# Final marker: CLANG_IN_GUEST_ARM64_OK
+#
+# Toolchain inputs come from the lane-C1 aarch64 build
+# (/home/yoon/llvm-project-simpleos/build-os-llvm): guest-runnable static
+# aarch64 ELFs (cross-aarch64-unknown-simpleos) + sysroot-aarch64.
+#
+# Host rules: aarch64 host + KVM only; NO x86 guests anywhere in this lane.
+# Bounded: one kernel build + one boot per invocation (<=3 boot cycles).
+#
+#   sh scripts/qemu/check_simpleos_arm64_clang_compile.shs            # full run
+#   sh scripts/qemu/check_simpleos_arm64_clang_compile.shs --r1-only  # stage+verify image only
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+LLVM_WORK="${LLVM_WORK:-/home/yoon/llvm-project-simpleos/build-os-llvm}"
+GUEST_BIN_DIR="$LLVM_WORK/cross-aarch64-unknown-simpleos/bin"
+SYSROOT_A64="$LLVM_WORK/sysroot-aarch64"
+STAGE_DIR=build/os/elfexec_clang_arm64
+IMAGE="$STAGE_DIR/fat32-clang-arm64.img"
+KERNEL=build/os/simpleos_arm64_clang_bringup.elf
+OUT="$STAGE_DIR/run-$(date +%Y%m%d_%H%M%S)"
+SEED="${SEED:-src/compiler_rust/target/bootstrap/simple}"
+R1_ONLY=0
+[ "${1:-}" = "--r1-only" ] && R1_ONLY=1
+
+note()  { echo "[a64-clang] $*"; }
+fail()  { echo "[a64-clang] FAIL: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- preflight --
+note "preflight: host arch + tools"
+[ "$(uname -m)" = aarch64 ] || fail "aarch64 host required (host rule)"
+[ -e /dev/kvm ] || fail "/dev/kvm missing"
+command -v qemu-system-aarch64 >/dev/null 2>&1 || fail "qemu-system-aarch64 missing"
+[ -x "$SEED" ] || fail "seed compiler missing: $SEED"
+[ -x "$GUEST_BIN_DIR/clang-20" ] || fail "guest clang missing: $GUEST_BIN_DIR/clang-20"
+[ -x "$GUEST_BIN_DIR/lld" ] || fail "guest lld missing: $GUEST_BIN_DIR/lld"
+[ -f "$SYSROOT_A64/lib/crt0.o" ] || fail "sysroot crt0 missing"
+[ -f "$SYSROOT_A64/share/simpleos/simpleos.ld" ] || fail "sysroot linker script missing"
+[ -f "$SYSROOT_A64/lib/libsimpleos_c.a" ] || fail "sysroot libsimpleos_c.a missing"
+CLANG_BYTES=$(wc -c < "$GUEST_BIN_DIR/clang-20" | tr -d ' ')
+LLD_BYTES=$(wc -c < "$GUEST_BIN_DIR/lld" | tr -d ' ')
+note "guest clang=${CLANG_BYTES}B lld=${LLD_BYTES}B"
+
+# ------------------------------------------------------------------- R1: img --
+note "R1: staging FAT32 image"
+mkdir -p "$STAGE_DIR/stage" "$OUT"
+cp "$SYSROOT_A64/lib/crt0.o"                      "$STAGE_DIR/stage/CRT0.O"
+cp "$SYSROOT_A64/share/simpleos/simpleos.ld"      "$STAGE_DIR/stage/SIMPLEOS.LD"
+cp "$SYSROOT_A64/lib/libsimpleos_c.a"             "$STAGE_DIR/stage/LIBC.A"
+cat > "$STAGE_DIR/stage/HELLO.C" <<'EOF'
+extern int printf(const char *fmt, ...);
+int main(void) { printf("HELLO_C_FROM_GUEST_ARM64\n"); return 0; }
+EOF
+printf '%s\n' "$CLANG_BYTES" > "$STAGE_DIR/clang_size.txt"
+printf '%s\n' "$LLD_BYTES"  > "$STAGE_DIR/lld_size.txt"
+
+note "R1: running FAT32 structural-prefix writer (seed interpreter)"
+"$SEED" run scripts/os/fsexec_mkimg_clang_arm64.spl > "$OUT/mkimg.log" 2>&1 \
+    || { cat "$OUT/mkimg.log"; fail "image writer failed"; }
+STATUS=$(grep -o 'fsexec_mkimg_clang_arm64_status=ok.*' "$OUT/mkimg.log" | head -1)
+[ -n "$STATUS" ] || { cat "$OUT/mkimg.log"; fail "writer status line missing"; }
+note "R1: writer $STATUS"
+
+P1_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload1_start=\([0-9]*\).*/\1/p')
+P2_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload2_start=\([0-9]*\).*/\1/p')
+FAT_SECTORS=$(printf '%s\n' "$STATUS" | sed -n 's/.* fat_sectors=\([0-9]*\).*/\1/p')
+TOTAL=$(printf '%s\n' "$STATUS"    | sed -n 's/.* total_bytes=\([0-9]*\).*/\1/p')
+PREFIX="$STAGE_DIR/fat32-clang-arm64-prefix.bin"
+[ -f "$PREFIX" ] || fail "prefix not written"
+note "R1: assembling image (prefix + CLANG.ELF + LLD.ELF, ${TOTAL} bytes)"
+cp "$PREFIX" "$IMAGE"
+# Data area base: (reserved + num_fats*fat_sectors) * 512; cluster N offset:
+DATA_BASE=$(( (32 + FAT_SECTORS) * 512 ))
+P1_OFF=$(( DATA_BASE + (P1_START - 2) * 32768 ))
+P2_OFF=$(( DATA_BASE + (P2_START - 2) * 32768 ))
+[ $(( P1_OFF % 512 )) -eq 0 ] && [ $(( P2_OFF % 512 )) -eq 0 ] || fail "payload offsets not sector-aligned"
+dd if="$GUEST_BIN_DIR/clang-20" of="$IMAGE" bs=512 seek=$(( P1_OFF / 512 )) conv=notrunc 2>/dev/null
+dd if="$GUEST_BIN_DIR/lld"      of="$IMAGE" bs=512 seek=$(( P2_OFF / 512 )) conv=notrunc 2>/dev/null
+truncate -s "$TOTAL" "$IMAGE"
+
+# Host-side path verification: parse the image root directory and check every
+# expected 8.3 entry exists with the right size; spot-check the CLANG.ELF magic.
+note "R1: verifying image root directory (host-side)"
+ROOT_OFF="$DATA_BASE"
+python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" <<'PYEOF' || fail "image root-dir verification failed"
+import sys
+img, root_off, clang_b, lld_b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+data = open(img, 'rb').read()
+want = {b'CRT0.O': None, b'SIMPLEOS.LD': None, b'LIBC.A': None, b'HELLO.C': None,
+        b'CLANG.ELF': clang_b, b'LLD.ELF': lld_b}
+found = {}
+for slot in range(64):
+    e = data[root_off + slot*32 : root_off + slot*32 + 32]
+    if e[0] in (0x00, 0xE5) or e[11] == 0x0F:
+        if e[0] == 0x00: break
+        continue
+    name = e[0:11].rstrip(b' ')
+    size = int.from_bytes(e[28:32], 'little')
+    found[name] = size
+missing = [k for k in want if k not in found]
+badsize = [k for k, sz in want.items() if sz is not None and k in found and found[k] != sz]
+if missing or badsize:
+    print(f"image_verify FAIL missing={missing} badsize={badsize} found={found}")
+    sys.exit(1)
+print(f"image_verify OK entries={sorted(k.decode() for k in found)} "
+      f"CLANG.ELF={found[b'CLANG.ELF']} LLD.ELF={found[b'LLD.ELF']}")
+PYEOF
+note "R1 PASS: image at $IMAGE ($(wc -c < "$IMAGE" | tr -d ' ') bytes)"
+[ "$R1_ONLY" = 1 ] && { note "--r1-only: stopping before kernel build/boot"; exit 0; }
+
+# ------------------------------------------------------------------ kernel --
+if [ ! -s "$KERNEL" ] || [ "${REBUILD_KERNEL:-0}" = 1 ]; then
+    note "building arm64 clang-bringup kernel (seed compiler, cranelift)"
+    env TMPDIR="$STAGE_DIR/tmp" SIMPLE_BINARY="$SEED" SIMPLE_BIN="$SEED" \
+        SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+        "$SEED" native-build \
+        --cache-dir "$STAGE_DIR/native-cache" \
+        --source src/os --source src/lib --source examples/09_embedded/simple_os \
+        --backend cranelift --opt-level=aggressive --log off --timeout 240 \
+        --entry-closure \
+        --entry examples/09_embedded/simple_os/arch/arm64/clang_bringup_entry.spl \
+        --target aarch64-unknown-none \
+        --output "$KERNEL" \
+        --linker-script examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld \
+        > "$OUT/kernel-build.log" 2>&1 || { tail -30 "$OUT/kernel-build.log"; fail "kernel build failed"; }
+fi
+[ -s "$KERNEL" ] || fail "kernel missing: $KERNEL"
+scripts/check/check-simpleos-arm64-fs-exec-elf.shs "$KERNEL" || fail "kernel ELF contract gate failed"
+note "kernel ready: $KERNEL"
+
+# ------------------------------------------------------------- R2-R5: boot --
+note "R2-R5: booting arm64 guest (KVM, 2G, virtio-blk FAT32)"
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-600}"
+timeout "$BOOT_TIMEOUT" qemu-system-aarch64 \
+    -machine virt -accel kvm -cpu host -m 2G -smp 4 \
+    -nographic -monitor none -no-reboot \
+    -global virtio-mmio.force-legacy=false \
+    -drive "file=$IMAGE,if=none,id=armdisk,format=raw" \
+    -device virtio-blk-device,drive=armdisk \
+    -semihosting-config enable=on,target=native \
+    -kernel "$KERNEL" \
+    -serial "file:$OUT/serial.log" \
+    > "$OUT/qemu.log" 2>&1 || true
+
+note "serial evidence (printable, last 60 lines):"
+tr -cd '\11\12\15\40-\176' < "$OUT/serial.log" | tail -60 || true
+
+R1S=PASS
+R2=FAIL; grep -q '=== SimpleOS ARM64 in-guest clang bring-up ===' "$OUT/serial.log" && R2=PASS
+R3=FAIL; grep -q 'rung=R3-clang-version rc=0' "$OUT/serial.log" && R3=PASS
+R4=FAIL; grep -q 'rung=R4b-lld-link rc=0' "$OUT/serial.log" && R4=PASS
+R5=FAIL; grep -q 'rung=R5-run-hello2 rc=0' "$OUT/serial.log" && R5=PASS
+OK=FAIL; grep -q 'CLANG_IN_GUEST_ARM64_OK' "$OUT/serial.log" && OK=PASS
+
+note "rung table: R1=$R1S R2=$R2 R3=$R3 R4=$R4 R5=$R5 FINAL=$OK"
+[ "$OK" = PASS ] && { note "ALL RUNGS PASS"; exit 0; }
+note "rungs missed — see $OUT/serial.log"
+exit 1
