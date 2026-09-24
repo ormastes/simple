@@ -139,8 +139,25 @@ export MUST_CHECK_PUSH_REMOTE
 # file first and feed that file to both the (unmodified) dispatcher and our own
 # post-pass reporting loop below.
 _refs_tmp=$(mktemp 2>/dev/null) || _refs_tmp="${TMPDIR:-/tmp}/simple-pre-push-refs.$$"
-cat > "$_refs_tmp"
-trap 'rm -f "$_refs_tmp"' EXIT INT TERM
+# EXIT-only trap does cleanup unconditionally. INT/TERM get their OWN traps
+# that clean up AND exit non-zero explicitly — a signal delivered mid-hook
+# must never be allowed to fall through to whatever exit status the shell
+# would otherwise have produced (which could be 0).
+trap 'rm -f "$_refs_tmp"' EXIT
+trap 'rm -f "$_refs_tmp"; exit 130' INT
+trap 'rm -f "$_refs_tmp"; exit 143' TERM
+
+if ! cat > "$_refs_tmp"; then
+    echo "pre-push: cannot capture the ref rows git fed this hook on stdin — refusing to push blind" >&2
+    exit 2
+fi
+if [ ! -s "$_refs_tmp" ]; then
+    echo "pre-push: stdin produced an EMPTY ref-rows file — refusing to push blind." >&2
+    echo "  git always feeds a real pre-push invocation at least one ref row; an" >&2
+    echo "  empty capture here means stdin was truncated or redirected away, and" >&2
+    echo "  letting the dispatcher run on 0 rows would silently pass an unchecked push." >&2
+    exit 2
+fi
 
 sh "$repo_root/scripts/check/check-push-must-pass.shs" --from-pre-push-hook < "$_refs_tmp"
 _must_pass_rc=$?

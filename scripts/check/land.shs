@@ -115,21 +115,66 @@ else
         exit 1
     fi
 
-    # HOOK POINT: scripts/check/run-gate-tier.shs (WP3) is the intended tier
-    # runner once it lands on origin/main — it reads the manifest and
-    # substitutes {range}/{rev}/{base} placeholders per row. Until then,
-    # `sign-local-ci-receipt.shs --run` already does the equivalent for a
-    # single host: it reads config/check/must_check_gates.sdn's `local` tier
-    # rows AS OF $TIP and runs each row's own command directly, the same way
-    # check-push-must-pass.shs's dispatch runs the push tier's rows. Swap the
-    # invocation below for a `run-gate-tier.shs --tier local --rev "$TIP" |
-    # sign-local-ci-receipt.shs --results -` pipeline once WP3 lands.
-    echo "land.shs: running the local must-check tier and signing a receipt for $TIP (up to ~60s)..." >&2
+    # HOOK POINT (WP3, being reworked to own the manifest placeholders + tier
+    # runner): scripts/check/run-gate-tier.shs is the intended tier runner once
+    # it lands on origin/main — it reads the manifest and substitutes
+    # {range}/{rev}/{base} placeholders per row, and writes `<id> <status>`
+    # lines in the exact format sign-local-ci-receipt.shs's --results expects.
+    # We call it WHEN PRESENT so this hook point stays compatible with WP3
+    # landing under us without another edit here. Until it lands,
+    # `sign-local-ci-receipt.shs --run` does the equivalent for a single host:
+    # it reads config/check/must_check_gates.sdn's `local` tier rows AS OF
+    # $TIP and runs each row's own command directly, the same way
+    # check-push-must-pass.shs's dispatch runs the push tier's rows.
     NOTE_REMOTE=${LAND_CI_RECEIPT_NOTE_REMOTE:-origin}
-    SIGN_OUT=$(sh scripts/check/sign-local-ci-receipt.shs --run --tier local \
-        --key "$CI_KEY" --identity "$CI_IDENTITY" --rev "$TIP" \
-        --note --push-note --note-remote "$NOTE_REMOTE" 2>&1)
-    SIGN_CODE=$?
+    # Only a real --submit may publish the note remotely: a --dry-run signs
+    # and attaches the receipt LOCALLY (so it can be inspected) but must never
+    # mutate any remote ref. Reviewer fix (coordinator batch review): the note
+    # push used to run unconditionally, before the dry-run/submit branch below
+    # even existed, so a plain `land.shs` (default = --dry-run) was pushing to
+    # refs/notes/ci-receipts on $NOTE_REMOTE.
+    if [ "$SUBMIT" -eq 1 ]; then
+        PUSH_NOTE_FLAG="--push-note"
+    else
+        PUSH_NOTE_FLAG=""
+    fi
+
+    if [ -f scripts/check/run-gate-tier.shs ]; then
+        echo "land.shs: scripts/check/run-gate-tier.shs found — using it for the local tier (WP3)" >&2
+        echo "land.shs: running the local must-check tier and signing a receipt for $TIP (up to ~60s)..." >&2
+        TIER_RESULTS=$(mktemp 2>/dev/null) || TIER_RESULTS="${TMPDIR:-/tmp}/land-tier-results.$$"
+        TIER_OUT=$(sh scripts/check/run-gate-tier.shs --tier local --rev "$TIP" 2>&1)
+        TIER_CODE=$?
+        printf '%s\n' "$TIER_OUT" >&2
+        TIER_VERDICT=$(printf '%s\n' "$TIER_OUT" | tail -1)
+        case "$TIER_VERDICT" in
+            PASS*) ;;
+            *)
+                rm -f "$TIER_RESULTS"
+                echo "land.shs: REFUSING — run-gate-tier.shs verdict: $TIER_VERDICT" >&2
+                exit 1
+                ;;
+        esac
+        if [ "$TIER_CODE" -ne 0 ]; then
+            rm -f "$TIER_RESULTS"
+            echo "land.shs: REFUSING — run-gate-tier.shs exited $TIER_CODE despite PASS text" >&2
+            exit 1
+        fi
+        # Every line but the trailing verdict line is a "<id> <status>" row —
+        # exactly the --results format (see run-gate-tier.shs's own contract).
+        printf '%s\n' "$TIER_OUT" | sed '$d' > "$TIER_RESULTS"
+        SIGN_OUT=$(sh scripts/check/sign-local-ci-receipt.shs --results "$TIER_RESULTS" --tier local \
+            --key "$CI_KEY" --identity "$CI_IDENTITY" --rev "$TIP" \
+            --note $PUSH_NOTE_FLAG --note-remote "$NOTE_REMOTE" 2>&1)
+        SIGN_CODE=$?
+        rm -f "$TIER_RESULTS"
+    else
+        echo "land.shs: running the local must-check tier and signing a receipt for $TIP (up to ~60s)..." >&2
+        SIGN_OUT=$(sh scripts/check/sign-local-ci-receipt.shs --run --tier local \
+            --key "$CI_KEY" --identity "$CI_IDENTITY" --rev "$TIP" \
+            --note $PUSH_NOTE_FLAG --note-remote "$NOTE_REMOTE" 2>&1)
+        SIGN_CODE=$?
+    fi
     printf '%s\n' "$SIGN_OUT" >&2
     SIGN_VERDICT=$(printf '%s\n' "$SIGN_OUT" | tail -1)
     case "$SIGN_VERDICT" in
@@ -138,7 +183,11 @@ else
     esac
     [ "$SIGN_CODE" -eq 0 ] ||
         { echo "land.shs: REFUSING TO PUSH — sign-local-ci-receipt.shs exited $SIGN_CODE despite PASS text" >&2; exit 1; }
-    echo "land.shs: local-ci receipt signed and published for $TIP" >&2
+    if [ "$SUBMIT" -eq 1 ]; then
+        echo "land.shs: local-ci receipt signed and published for $TIP" >&2
+    else
+        echo "land.shs: DRY-RUN — local-ci receipt signed and attached LOCALLY for $TIP; nothing was pushed. Rerun with --submit to also push refs/notes/ci-receipts to $NOTE_REMOTE" >&2
+    fi
 fi
 
 if [ "$SUBMIT" -ne 1 ]; then
