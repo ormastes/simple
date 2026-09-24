@@ -5061,20 +5061,57 @@ if [ "${build_mcp}" -eq 1 ]; then
   # server that is missing or broken locally. Never deploys an unverified or
   # already-healthy server; see scripts/bootstrap/bootstrap-mcp-build-deploy.shs
   # for the decision matrix and --selftest.
-  mcp_bd_args="--compiler=$(absolute_path "${full_bin}") --test-runner=$(absolute_path "${full_dir}/simple_test_runner${exe_suffix}")"
-  mcp_bd_args="${mcp_bd_args} --skip-build --mcp-candidate=$(absolute_path "${full_dir}/simple_mcp_server${exe_suffix}")"
-  mcp_bd_args="${mcp_bd_args} --lsp-candidate=$(absolute_path "${full_dir}/simple_lsp_mcp_server${exe_suffix}")"
-  mcp_bd_args="${mcp_bd_args} --assume-tests-ok --backend=${backend} --platform=${PLATFORM}"
-  mcp_bd_args="${mcp_bd_args} --cache-dir=$(absolute_path "${native_cache_dir}")"
-  [ "${no_deploy_mcp}" -eq 0 ] || mcp_bd_args="${mcp_bd_args} --no-deploy-mcp"
-  [ "${force_deploy_mcp}" -eq 0 ] || mcp_bd_args="${mcp_bd_args} --force-deploy-mcp"
-  # shellcheck disable=SC2086
-  sh "${repo_root}/scripts/bootstrap/bootstrap-mcp-build-deploy.shs" ${mcp_bd_args} \
-    >"${log_dir}/stage5b-mcp-build-deploy.log" 2>&1
-  mcp_bd_status=$?
+  #
+  # Deploy defaults OFF here unless the bootstrap itself is deploying
+  # (--deploy) or the operator explicitly forced it (--force-deploy-mcp): a
+  # plain build-only bootstrap run must never write into bin/release outside
+  # the bootstrap's own deploy transaction below. --no-deploy-mcp always wins.
+  mcp_bd_want_deploy=0
+  [ "${deploy}" -eq 0 ] || mcp_bd_want_deploy=1
+  [ "${force_deploy_mcp}" -eq 0 ] || mcp_bd_want_deploy=1
+  [ "${no_deploy_mcp}" -eq 0 ] || mcp_bd_want_deploy=0
+
+  # bin/release/linux-x86_64 is a hardlink twin of the real per-triple
+  # directory on Linux x86_64 (see .claude/rules/code-style.md); pass it so
+  # the mcp/lsp legs stay in sync there too, exactly like the Deploy section
+  # below does for the full CLI.
+  mcp_bd_deploy_platform=$(simple_release_platform_dir "${PLATFORM}" 2>/dev/null) || mcp_bd_deploy_platform=""
+  mcp_bd_mirror_root=""
+  if [ "${mcp_bd_deploy_platform}" = "x86_64-unknown-linux-gnu" ]; then
+    mcp_bd_mirror_root="${repo_root}/bin/release/linux-x86_64"
+  fi
+
+  # Build the argument list as POSITIONAL PARAMETERS, never a space-joined
+  # string (a repo path containing a space would otherwise be split apart by
+  # the unquoted expansion this used to do). `set --` inside a function only
+  # rebinds that function's own $1.. - it does not disturb the outer script's
+  # positional parameters.
+  mcp_bd_invoke() {
+    set -- \
+      "--compiler=$(absolute_path "${full_bin}")" \
+      "--test-runner=$(absolute_path "${full_dir}/simple_test_runner${exe_suffix}")" \
+      "--skip-build" \
+      "--mcp-candidate=$(absolute_path "${full_dir}/simple_mcp_server${exe_suffix}")" \
+      "--lsp-candidate=$(absolute_path "${full_dir}/simple_lsp_mcp_server${exe_suffix}")" \
+      "--backend=${backend}" \
+      "--platform=${PLATFORM}" \
+      "--cache-dir=$(absolute_path "${native_cache_dir}")"
+    [ -z "${mcp_bd_mirror_root}" ] || set -- "$@" "--mirror-root=${mcp_bd_mirror_root}"
+    [ "${mcp_bd_want_deploy}" -eq 1 ] || set -- "$@" "--no-deploy-mcp"
+    [ "${force_deploy_mcp}" -eq 0 ] || set -- "$@" "--force-deploy-mcp"
+    [ -z "${bootstrap_receipt_path}" ] || set -- "$@" "--receipt-gated"
+    sh "${repo_root}/scripts/bootstrap/bootstrap-mcp-build-deploy.shs" "$@"
+  }
+  mcp_bd_status=0
+  mcp_bd_invoke >"${log_dir}/stage5b-mcp-build-deploy.log" 2>&1 || mcp_bd_status=$?
   echo "  Stage 5b MCP build/deploy: $(tail -n1 "${log_dir}/stage5b-mcp-build-deploy.log")"
-  [ "${mcp_bd_status}" -eq 0 ] || \
+  if [ "${mcp_bd_status}" -ne 0 ]; then
     echo "  WARNING: Stage 5b MCP build/deploy reported failures - see ${log_dir}/stage5b-mcp-build-deploy.log" >&2
+    if [ "${force_deploy_mcp}" -eq 1 ]; then
+      echo "error: --force-deploy-mcp was given and Stage 5b MCP build/deploy failed - failing the bootstrap" >&2
+      exit 1
+    fi
+  fi
 else
   echo "Skipping MCP server builds (--no-mcp)"
 fi
