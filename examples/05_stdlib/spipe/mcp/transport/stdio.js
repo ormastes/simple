@@ -9,10 +9,12 @@ export function createLineHandler(router, write) {
       const response = router(message);
       if (response !== undefined) write(`${stableJson(response)}\n`);
     } catch (error) {
-      // Legacy SPipe reports handler and parse failures with a null id. Keep
-      // that wire behavior through the protocol-neutral Wave 1 extraction;
-      // request-id preservation belongs to the later versioned MCP migration.
-      write(`${stableJson(errorResult(null, error))}\n`);
+      // A JSON parse failure has no `message` to read an id from, so those
+      // stay id:null. But a handler/router throw AFTER a successful parse
+      // (e.g. an unknown tool, a missing param) has a real request id — echo
+      // it back instead of dropping it, so callers can still correlate the
+      // error response with their request.
+      write(`${stableJson(errorResult(message?.id ?? null, error))}\n`);
     }
   };
 }

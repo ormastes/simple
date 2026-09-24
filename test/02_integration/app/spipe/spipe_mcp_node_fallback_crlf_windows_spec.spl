@@ -1,0 +1,85 @@
+# Purpose: pin the Node-fallback SPipe MCP server (examples/05_stdlib/spipe/mcp/server.js)
+# against CRLF-framed JSON-RPC input, malformed JSON, an unknown tool, and a
+# missing/relative path — the server must answer a clean JSON-RPC error object
+# and keep serving the next request on the same stdin stream rather than
+# crashing, hanging, or leaving an unhandled promise rejection.
+#
+# @tag:windows-node-fallback
+use std.spec
+use std.process.{run}
+use std.fs.{write_file}
+use std.io_runtime.{env_get_opt}
+
+fn spipe_examples_root() -> text:
+    env_get_opt("SPIPE_EXAMPLES_ROOT") ?? "examples/05_stdlib/spipe"
+
+fn tmp_input_path(name: text) -> text:
+    (env_get_opt("TEMP") ?? env_get_opt("TMPDIR") ?? "/tmp") + "/" + name
+
+fn run_node_lines(tag: text, input: text) -> (text, text, i32):
+    val root = spipe_examples_root()
+    val infile = tmp_input_path("spipe_mcp_node_fallback_" + tag + ".txt")
+    val ok = write_file(infile, input)
+    expect(ok).to_equal(true)
+    val r = run("/bin/sh", ["-c", "cat '" + infile + "' | node '" + root + "/mcp/server.js'"])
+    (r.stdout, r.stderr, r.exit_code)
+
+describe "SPipe MCP Node fallback server — CRLF, malformed input, error handling":
+    it "answers initialize framed with CRLF line endings":
+        val (out, _err, code) = run_node_lines("crlf",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\r\n")
+        expect(code).to_equal(0)
+        expect(out.contains("\"protocolVersion\"")).to_equal(true)
+        expect(out.contains("\"error\"")).to_equal(false)
+
+    it "answers initialize framed with plain LF line endings (baseline)":
+        val (out, _err, code) = run_node_lines("lf",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+        expect(code).to_equal(0)
+        expect(out.contains("\"protocolVersion\"")).to_equal(true)
+
+    it "returns a JSON-RPC error (not a crash) on malformed JSON, and keeps serving the next line":
+        val (out, _err, code) = run_node_lines("malformed",
+            "not-json-at-all\r\n" +
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{}}\r\n")
+        expect(code).to_equal(0)
+        expect(out.contains("\"error\"")).to_equal(true)
+        # The well-formed second request must still be answered on the same
+        # stream — a crash or hang on the malformed line would drop this.
+        expect(out.contains("\"protocolVersion\"")).to_equal(true)
+
+    it "returns a JSON-RPC error with a non-null id when the request parsed but the method/tool is unknown":
+        val (out, _err, code) = run_node_lines("unknown_tool",
+            "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{} } }\r\n")
+        expect(code).to_equal(0)
+        expect(out.contains("\"error\"")).to_equal(true)
+        # Regression guard: a parsed request that later throws inside routing
+        # must echo the request's own id, not fall back to null.
+        expect(out.contains("\"id\":42")).to_equal(true)
+        expect(out.contains("\"id\":null")).to_equal(false)
+
+    it "returns a JSON-RPC error for a request missing required params":
+        val (out, _err, code) = run_node_lines("missing_params",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{}}\r\n")
+        expect(code).to_equal(0)
+        expect(out.contains("\"error\"")).to_equal(true)
+        expect(out.contains("\"id\":3")).to_equal(true)
+
+    it "returns a JSON-RPC error for a missing file/path argument rather than crashing":
+        val (out, _err, code) = run_node_lines("missing_path",
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"spipe_read_doc\",\"arguments\":{\"path\":\"C:/does/not/exist/nope.md\"} } }\r\n")
+        expect(code).to_equal(0)
+        expect(out.contains("\"error\"")).to_equal(true)
+        expect(out.contains("\"id\":4")).to_equal(true)
+
+    it "handles a very long single input line without crashing or hanging":
+        var padding = ""
+        var i = 0
+        while i < 2000:
+            padding = padding + "x"
+            i = i + 1
+        val (out, _err, code) = run_node_lines("long_line",
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{\"note\":\"" +
+                padding + "\"} } }\r\n")
+        expect(code).to_equal(0)
+        expect(out.contains("\"id\":5")).to_equal(true)
