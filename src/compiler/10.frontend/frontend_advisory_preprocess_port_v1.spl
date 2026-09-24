@@ -252,9 +252,29 @@ pub fn frontend_advisory_preprocess_dispatch_checked_scoped_v1(source: text,
     # executable code. Until a sealed typed adapter capability is added, every
     # request takes the truthful reference/unavailable path.
     val selected = frontend_advisory_preprocess_reference_v1(source, policy)
+    # `selected.receipt` was just derived from this exact `source` inside
+    # frontend_advisory_preprocess_reference_v1, so its transformed-source
+    # identity/length are already the correct digest of `source` for this
+    # request. Reuse them instead of hashing the whole source a second time
+    # (a dead SHA-256 + text_to_bytes pass with no other consumer) — the
+    # match check below still validates the receipt is internally consistent.
+    #
+    # CAVEAT: `request` is now built FROM the very `selected.receipt` that
+    # `frontend_advisory_preprocess_result_matches_request_v1` below validates
+    # it against — the check below no longer proves the receipt matches an
+    # independently-derived request, only that it is internally self-
+    # consistent. That is sound ONLY because `selected` is known to have come
+    # from `frontend_advisory_preprocess_reference_v1(source, policy)` on the
+    # previous line, which itself hashes `source` once. If a typed provider
+    # adapter is ever wired in here (see the "sealed typed adapter" note
+    # above) so that `selected` can come from a DIFFERENT source than the one
+    # this function was called with, `request` must go back to being
+    # re-derived independently from `source` (i.e. restore the pre-2026-09-24
+    # `frontend_transformed_source_identity_v1(source)` / `text_to_bytes(source)`
+    # calls here), or this check becomes vacuous.
     val request = FrontendAdvisoryPreprocessRequestV1(
-        transformed_source_identity: frontend_transformed_source_identity_v1(source),
-        transformed_source_length: text_to_bytes(source).len() as u64,
+        transformed_source_identity: selected.receipt.transformed_source_identity,
+        transformed_source_length: selected.receipt.transformed_source_length,
         policy: policy)
     if not frontend_advisory_preprocess_result_matches_request_v1(selected, request):
         if policy == FrontendAdvisoryPreprocessPolicyV1.RequireSimd:
