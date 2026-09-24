@@ -60,7 +60,13 @@ impl HirLowering:
             # Infer from type (use default primitive widths)
             self.infer_bit_width(f.type_)
 
-        val ftype = if f.type_.?: self.lower_type(f.type_) else: nil
+        # `ftype`'s only visible initializer on the `else` path is the bare
+        # `nil` literal, so the seed's local inference types this binding as
+        # `Nil` rather than the real `HirType?` union unless annotated
+        # explicitly. `HirBitfieldField.type_` is a DESUGARED optional slot
+        # (has_type_/type_ pair), matching the `HirSymbol.type_: HirType?`
+        # precedent used elsewhere in this file.
+        val ftype: HirType? = if f.type_.?: self.lower_type(f.type_) else: nil
         HirBitfieldField(
             symbol: symbol,
             name: f.name,
@@ -72,19 +78,21 @@ impl HirLowering:
         )
 
     fn infer_bit_width(type_: Type?) -> i64:
-        if not type_.?:
-            return 0
-
-        val t: Type = type_.unwrap()
-        match t.kind:
-            case Named(name, _):
-                if name == "bool":
-                    return 1
-                val primitive_bits = primitive_integer_bit_width_from_name(name)
-                if primitive_bits > 0:
-                    return primitive_bits
-                custom_primitive_integer_bit_width_by_name(name)
-            case _: 0  # Complex types require explicit @bits
+        # Unwrap via `if val` (the plan's Nil-subclass idiom) rather than a
+        # `.?` pre-check plus `.unwrap()` -- the bare `.unwrap()` result was
+        # an untyped receiver feeding `.kind` below.
+        if val t = type_:
+            match t.kind:
+                case Named(name, _):
+                    if name == "bool":
+                        return 1
+                    val primitive_bits = primitive_integer_bit_width_from_name(name)
+                    if primitive_bits > 0:
+                        return primitive_bits
+                    custom_primitive_integer_bit_width_by_name(name)
+                case _: 0  # Complex types require explicit @bits
+        else:
+            0
 
     me lower_trait(trait_: ParserTrait) -> HirTrait:
         val symbol = self.symbols.lookup_or_invalid(trait_.name)
@@ -195,7 +203,13 @@ impl HirLowering:
                     lowered_impl_type
         else:
             lowered_impl_type
-        val trait_ = if impl_.has_trait_: self.lower_type(impl_.trait_) else: nil
+        # `trait_`'s only visible initializer on the `else` path is the bare
+        # `nil` literal, so the seed's local inference types this binding as
+        # `Nil` rather than the real `HirType?` union unless annotated
+        # explicitly -- same DESUGARED-optional-slot pattern as `ftype` in
+        # `lower_bitfield_field` above (`HirImpl.trait_` is the has_trait_/
+        # trait_ pair).
+        val trait_: HirType? = if impl_.has_trait_: self.lower_type(impl_.trait_) else: nil
 
         # #158 generics sweep: an impl block for a generic struct/class (e.g.
         # methods nested inside `struct Box<T>: ... fn get(self) -> T: ...`,
@@ -270,15 +284,15 @@ impl HirLowering:
         # so positional dispatch against the trait's full method list aliases the
         # wrong body (or SIGSEGVs). See task #55.
         if impl_.has_trait_:
-            # `Impl.trait_` is declared `Type` (non-optional), but the
-            # DESUGARED-with-`has_trait_` construction pattern (e.g.
-            # `treesitter/heuristic.spl`) assigns literal `nil` to it when
-            # `has_trait_` is false, so the field can genuinely be Nil at
-            # runtime. Bind it to its declared type explicitly under the
-            # `has_trait_` guard (safe: `has_trait_` is only ever true when
-            # `trait_` was set to a real Type) instead of matching on
-            # `impl_.trait_.kind` directly, which the seed cannot type
-            # unambiguously across all construction sites.
+            # `Impl.trait_` is declared `Type` (non-optional); its one real
+            # construction site (`_FlatAstBridge/module_assembly.spl`)
+            # always supplies a concrete `Type` (falling back to
+            # `TypeKind.Infer` rather than `nil` when there is no trait), so
+            # this bind is always safe under the `has_trait_` guard. Bind it
+            # to its declared type explicitly rather than matching on
+            # `impl_.trait_.kind` directly -- the bare field access left the
+            # receiver an untyped/ANY receiver for the seed's field-type
+            # inference.
             val impl_trait_type: Type = impl_.trait_
             match impl_trait_type.kind:
                 case Named(trait_name, _):
