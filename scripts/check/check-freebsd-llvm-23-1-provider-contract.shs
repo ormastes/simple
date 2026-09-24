@@ -31,9 +31,14 @@ for tool in clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcop
     printf '#!/bin/sh\nprintf "%%s\\n" %s\n' "'$version'" > "$tmp/provider/bin/$tool"
     chmod +x "$tmp/provider/bin/$tool"
 done
+printf '#!/bin/sh\ncase "${0##*/}" in ld.lld) printf "LLD 23.1.0\\n" ;; *) exit 64 ;; esac\n' \
+    > "$tmp/provider/bin/lld"
+chmod +x "$tmp/provider/bin/lld"
+rm -f "$tmp/provider/bin/ld.lld"
+ln -s lld "$tmp/provider/bin/ld.lld"
 
 if ! sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider"; then
-    fail "complete explicit LLVM 23.1 provider was rejected"
+    fail "complete explicit LLVM 23.1 provider with ld.lld dispatcher was rejected"
 fi
 
 mkdir -p "$tmp/external"
@@ -52,11 +57,41 @@ if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$t
     fail "LLVM 18 llc was accepted by the explicit provider gate"
 fi
 
-printf '#!/bin/sh\nexit 0\n' > "$tmp/provider/bin/explicit-cc"
+printf '#!/bin/sh\n[ "$1" = --version ] || exit 64\n' > "$tmp/provider/bin/explicit-cc"
 chmod +x "$tmp/provider/bin/explicit-cc"
-selected_cc=$(sh -c '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' sh "$authority" "$tmp/provider/bin/explicit-cc")
+selected_cc=$(sh -c \
+    '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' \
+    sh "$authority" "$tmp/provider/bin/explicit-cc")
 [ "$selected_cc" = "$tmp/provider/bin/explicit-cc" ] \
     || fail "bootstrap authority ignored explicit CC provider"
+if sh -c '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' \
+    sh "$authority" "$tmp/provider/bin/missing-cc" >/dev/null 2>&1; then
+    fail "bootstrap authority accepted missing explicit CC provider"
+fi
+printf '#!/bin/sh\nexit 0\n' > "$tmp/provider/bin/non-executable-cc"
+chmod 0644 "$tmp/provider/bin/non-executable-cc"
+if sh -c '. "$1"; CC="$2"; bootstrap_stage3_target_c_compiler x86_64-unknown-freebsd' \
+    sh "$authority" "$tmp/provider/bin/non-executable-cc" >/dev/null 2>&1; then
+    fail "bootstrap authority accepted non-executable explicit CC provider"
+fi
+
+# Exercise the same receipt naming authority used by the remote FreeBSD
+# producer, then consume the emitted llc hash exactly as the bootstrap gate does.
+receipt="$tmp/provider-receipt.env"
+: > "$receipt"
+for tool in clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
+    receipt_name=$(sh -c '. "$1"; clang_23_1_provider_receipt_name "$2"' sh "$helper" "$tool") \
+        || fail "receipt naming rejected provider tool: $tool"
+    printf '%s=%s\n%s_SHA256=fixture-hash\n' \
+        "$receipt_name" "$tmp/provider/bin/$tool" "$receipt_name" >> "$receipt"
+done
+grep -q '^LLVM_LLC_SHA256=fixture-hash$' "$receipt" \
+    || fail "provider receipt emitter and llc hash consumer disagree"
+[ "$(grep -c '^LLVM_LLC_SHA256=' "$receipt")" -eq 1 ] \
+    || fail "provider receipt does not contain exactly one canonical llc hash"
+if sh -c '. "$1"; clang_23_1_provider_receipt_name unknown-tool' sh "$helper" >/dev/null 2>&1; then
+    fail "unknown provider tool received a receipt key"
+fi
 
 grep -Fq 'require_freebsd_llvm_23_1_provider' "$freebsd_qemu" \
     || fail "FreeBSD runner lacks provider admission"
@@ -78,7 +113,7 @@ grep -Fq 'llvm-release-tobias-hieta.asc' "$freebsd_qemu" \
     || fail "FreeBSD provider provisioning has no pinned signing key"
 grep -Fq 'build-llvm-23-1-provider.shs --clone' "$freebsd_qemu" \
     || fail "FreeBSD provider provisioning does not build in the guest"
-grep -Fq 'realpath \$provider_prefix/bin/\$provider_tool' "$freebsd_qemu" \
+grep -Fq 'realpath \"\$provider_invocation\"' "$freebsd_qemu" \
     || fail "FreeBSD provider paths can escape their explicit prefix"
 grep -Fq 'LLVM_LLC_SHA256' "$freebsd_qemu" \
     || fail "FreeBSD provider receipt does not bind llc"
@@ -96,6 +131,11 @@ grep -Fq 'llvm-23.1-provider-post-verify.log' "$freebsd_qemu" \
     || fail "FreeBSD runner does not retain post-native provider verification evidence"
 grep -F 'check-freebsd-selfhost-ci.shs' "$freebsd_qemu" | grep -Fq 'FREEBSD_RUST_SEED_ENV' \
     || fail "FreeBSD Rust seed is not bound to its LLVM 18 compatibility provider"
+grep -F 'cargo test -p simple-compiler' "$freebsd_qemu" | grep -Fq 'FREEBSD_RUST_SEED_ENV' \
+    || fail "FreeBSD Rust cargo test is not pinned to the LLVM 18 seed environment"
+if grep -F 'cargo test -p simple-compiler' "$freebsd_qemu" | grep -Fq 'FREEBSD_LLVM_23_1_ENV'; then
+    fail "FreeBSD Rust cargo test incorrectly uses the LLVM 23 post-bootstrap environment"
+fi
 grep -Fq 'LLVM_VERSIONS=18 LLVM_SYS_180_PREFIX=/usr/local/llvm18' "$freebsd_qemu" \
     || fail "FreeBSD Rust seed does not select LLVM 18 for inkwell"
 grep -Fq 'LLVM_VERSIONS=23 SIMPLE_LLVM_BIN=' "$freebsd_qemu" \
@@ -108,10 +148,9 @@ grep -Fq 'CC=${FREEBSD_LLVM_23_1_PREFIX}/bin/clang CXX=${FREEBSD_LLVM_23_1_PREFI
     || fail "FreeBSD post-bootstrap gates are not pinned to LLVM 23.1 Clang/Clang++"
 grep -Fq "clang_23_1_require '\${FREEBSD_LLVM_23_1_PREFIX}/bin/clang++' clang++" "$freebsd_qemu" \
     || fail "FreeBSD provider does not admit its Clang++ executable"
-grep -Fq 'clang++) provider_name=CLANGXX' "$freebsd_qemu" \
-    || fail "FreeBSD provider receipt uses an invalid Clang++ key"
+grep -Fq 'clang_23_1_provider_receipt_name' "$freebsd_qemu" \
+    || fail "FreeBSD provider receipt bypasses canonical tool naming"
 for compiler_gate in \
-    'cargo test -p simple-compiler' \
     'check-stage4-hosted-dynload-provider-archive.shs' \
     'NATIVE_SMOKE_BACKEND=llvm' \
     'NATIVE_PARITY_BACKEND=${PARITY_BACKEND}'; do

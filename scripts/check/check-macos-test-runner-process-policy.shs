@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+BINARY=${SIMPLE_PHASE2_FULL_CLI:-}
+EXPECTED_SHA256=${SIMPLE_PHASE2_FULL_CLI_SHA256:-}
+RSS_MAX_KIB=${MACOS_TEST_RUNNER_POLICY_RSS_MAX_KIB:-1048576}
+OUT=${MACOS_TEST_RUNNER_POLICY_OUT:-"$ROOT/build/evidence/macos-test-runner-process-policy"}
+
+usage() {
+    echo "usage: SIMPLE_PHASE2_FULL_CLI=/abs/simple SIMPLE_PHASE2_FULL_CLI_SHA256=<sha256> $0" >&2
+    exit 2
+}
+
+[ "$(uname -s)" = Darwin ] || { echo "BLOCKED: macOS host required" >&2; exit 2; }
+[ -n "$BINARY" ] && [ -x "$BINARY" ] && [ -n "$EXPECTED_SHA256" ] || usage
+
+actual_sha256=$(shasum -a 256 "$BINARY" | awk '{print $1}')
+[ "$actual_sha256" = "$EXPECTED_SHA256" ] || {
+    echo "FAIL: full CLI hash mismatch expected=$EXPECTED_SHA256 actual=$actual_sha256" >&2
+    exit 1
+}
+"$BINARY" --help 2>&1 | grep -Eq '(^|[[:space:]])test([[:space:]]|$)' || {
+    echo "BLOCKED: admitted binary has no test command" >&2
+    exit 2
+}
+
+mkdir -p "$OUT"
+uid_processes=$(ps -U "$(id -u)" -o pid= | wc -l | tr -d ' ')
+[ "$uid_processes" -gt 64 ] || {
+    echo "BLOCKED: baseline needs more than 64 live UID processes (observed $uid_processes)" >&2
+    exit 2
+}
+
+set +e
+/bin/sh -c 'ulimit -u 64 || exit 124; /bin/sh -c true' >"$OUT/baseline.out" 2>"$OUT/baseline.err"
+baseline_rc=$?
+set -e
+[ "$baseline_rc" -ne 0 ] || {
+    echo "FAIL: historical ulimit -u 64 baseline unexpectedly forked" >&2
+    exit 1
+}
+
+host_soft_max_procs=$(/bin/sh -c 'ulimit -u')
+case "$host_soft_max_procs" in
+    *[!0-9]*|'') explicit_max_procs=1048576 ;;
+    *) explicit_max_procs=$host_soft_max_procs ;;
+esac
+[ "$explicit_max_procs" -gt "$uid_processes" ] || {
+    echo "BLOCKED: host process limit $explicit_max_procs is not above current UID count $uid_processes" >&2
+    exit 2
+}
+
+max_rss_kib=0
+run_case() {
+    name=$1
+    shift
+    time_file="$OUT/$name.time"
+    log_file="$OUT/$name.log"
+    set +e
+    (cd "$ROOT" && /usr/bin/time -l -o "$time_file" "$BINARY" "$@") >"$log_file" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { echo "FAIL: $name exited $rc (see $log_file)" >&2; exit 1; }
+    grep -Eq '([1-9][0-9]* examples?, 0 failures|passed[^0-9]*[1-9][0-9]*.*failed[^0-9]*0|Results:.*0 failed)' "$log_file" || {
+        echo "FAIL: $name lacks non-vacuous green summary" >&2
+        exit 1
+    }
+    rss_bytes=$(awk '/maximum resident set size/ {print $1; exit}' "$time_file")
+    case "$rss_bytes" in ''|*[!0-9]*) echo "FAIL: $name has no Darwin RSS sample" >&2; exit 1 ;; esac
+    rss_kib=$(( (rss_bytes + 1023) / 1024 ))
+    [ "$rss_kib" -le "$RSS_MAX_KIB" ] || {
+        echo "FAIL: $name RSS ${rss_kib}KiB exceeds ${RSS_MAX_KIB}KiB" >&2
+        exit 1
+    }
+    [ "$rss_kib" -le "$max_rss_kib" ] || max_rss_kib=$rss_kib
+}
+
+run_case macos_policy test test/01_unit/app/test_runner_new/macos_process_policy_spec.spl --mode=interpreter
+run_case safe_caps test test/01_unit/app/test_runner_new/safe_mode_caps_spec.spl --mode=interpreter
+run_case args test test/01_unit/app/test_runner/args_spec.spl --mode=interpreter
+run_case single_args test test/01_unit/app/test_runner_new/single_lane_arg_parsing_neighbors_spec.spl --mode=interpreter
+run_case live_default test scripts/check/fixtures/test_runner_calibration_green_spec.spl --mode=interpreter
+run_case live_explicit test scripts/check/fixtures/test_runner_calibration_green_spec.spl --mode=interpreter --max-procs="$explicit_max_procs"
+run_case live_safe_unlimited test scripts/check/fixtures/test_runner_calibration_green_spec.spl --mode=interpreter --safe-mode --no-limits
+
+cat >"$OUT/receipt.env" <<EOF
+schema=macos-test-runner-process-policy-v1
+status=PASS
+binary=$BINARY
+binary_sha256=$actual_sha256
+uid_processes=$uid_processes
+historical_max_procs=64
+historical_baseline_rc=$baseline_rc
+default_policy=inherit
+explicit_max_procs=$explicit_max_procs
+safe_mode_no_limits=PASS
+max_rss_kib=$max_rss_kib
+rss_ceiling_kib=$RSS_MAX_KIB
+sosix_compatibility=unchanged-host-only-test-policy
+EOF
+
+echo "PASS: macOS test runner process policy (max_rss_kib=$max_rss_kib)"

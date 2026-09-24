@@ -1,5 +1,5 @@
 #!/bin/sh
-# check-bootstrap-preflight.shs — pre-bootstrap readiness detector (ADVISORY)
+# check-bootstrap-preflight.shs — pre-bootstrap readiness evidence producer
 #
 # Verifies, WITHOUT building anything, that a full bootstrap run has a fighting
 # chance. Five independent invariants (detector_standard.md rule 6):
@@ -17,38 +17,211 @@
 #
 # Verdict (last stdout line): PASS/FAIL/ERROR, exit 0/1/2. n>0 or ERROR.
 # SKIPs are counted and printed separately, never folded into checked.
-# FP-RATE: not yet measured — ADVISORY; treat FAIL lists as an UPPER BOUND.
+# FP-RATE: not yet measured; standalone FAIL lists remain an upper bound. A
+# receipt is authoritative only when every check ran and the bound state stayed
+# byte-identical for the entire scan.
 # --selftest is fatal and runs before every scan (must-PASS and must-FAIL fixtures).
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 MIN_FREE_GB=${MIN_FREE_GB:-20}
-# /mnt/data is a fast NVMe scratch volume on the Linux hosts, deliberately
-# preferred there because the root fs is space-constrained. It does not exist on
-# macOS, where hardcoding it made the cargo check fail unconditionally with
-# "failed to create directory `/mnt/data/tmp`" — and a preflight that is always
-# RED on a platform trains everyone there to skip it. Prefer /mnt/data when it
-# is actually present (unchanged Linux behaviour), else fall back to the same
-# ${TMPDIR:-/tmp} idiom this script already uses for its own scratch dir below.
-if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-  if [ -d /mnt/data ]; then
-    CARGO_TARGET_DIR=/mnt/data/tmp/cargo-seed-rebuild
+HOST_KERNEL=$(uname -s 2>/dev/null || printf unknown)
+
+is_windows_host() {
+  case "$1" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac
+}
+
+effective_cargo_target() {
+  if [ -n "$1" ]; then
+    printf '%s\n' "$1"
   else
-    CARGO_TARGET_DIR=${TMPDIR:-/tmp}/cargo-seed-rebuild
+    printf '%s\n' "$2" | sed -n 's/^host: //p' | head -1 | tr -d '\r'
   fi
-fi
+}
+
+should_pin_msvc_linker() {
+  is_windows_host "$1" && [ "$2" = x86_64-pc-windows-msvc ]
+}
+
+# /mnt/data is NVMe scratch on Linux, but resolves inside the Git installation
+# on Git Bash. Keep the Windows default on the workspace's persistent volume.
+select_cargo_target_dir() {
+  if [ -n "$1" ]; then
+    printf '%s\n' "$1"
+  elif is_windows_host "$2"; then
+    if command -v cygpath >/dev/null 2>&1; then
+      cygpath -w "$3/build/preflight_cargo_target"
+    else
+      printf '%s/build/preflight_cargo_target\n' "$3"
+    fi
+  elif [ -d "$5" ]; then
+    printf '%s/tmp/cargo-seed-rebuild\n' "$5"
+  else
+    printf '%s/cargo-seed-rebuild\n' "$4"
+  fi
+}
+
+# Git Bash's /usr/bin/link.exe is the POSIX hard-link utility. Resolve the
+# target linker from vcvars64 instead of trusting PATH order.
+msvc_linker_from_vcvars() {
+  [ -n "$1" ] || return 1
+  if command -v cygpath >/dev/null 2>&1; then
+    _vc_tools_dir=$(cygpath -u "$1" 2>/dev/null) || return 1
+  else
+    _vc_tools_dir=$1
+  fi
+  _msvc_linker="$_vc_tools_dir/bin/Hostx64/x64/link.exe"
+  [ -f "$_msvc_linker" ] && [ -r "$_msvc_linker" ] && [ -x "$_msvc_linker" ] || return 1
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$_msvc_linker"
+  else
+    printf '%s\n' "$_msvc_linker"
+  fi
+}
+
+# A caller-supplied Cargo linker stays authoritative, but must resolve to an
+# executable. In particular, Git Bash's POSIX /usr/bin/link.exe is not MSVC.
+validated_linker_override() {
+  [ -n "$1" ] || return 1
+  case "$1" in
+    /*|[A-Za-z]:*|\\\\*) _linker_override_path=$1 ;;
+    */*|*\\*) _linker_override_path="$2/$1" ;;
+    *) _linker_override_path=$(command -v "$1" 2>/dev/null) || return 1 ;;
+  esac
+  if command -v cygpath >/dev/null 2>&1; then
+    _linker_override_path=$(cygpath -u "$_linker_override_path" 2>/dev/null) || return 1
+  fi
+  [ -f "$_linker_override_path" ] && [ -r "$_linker_override_path" ] && [ -x "$_linker_override_path" ] || return 1
+  case "$_linker_override_path" in /usr/bin/link.exe) return 1 ;; esac
+  printf '%s\n' "$1"
+}
+
+CARGO_TARGET_DIR=$(select_cargo_target_dir "${CARGO_TARGET_DIR:-}" "$HOST_KERNEL" "$ROOT" "${TMPDIR:-/tmp}" /mnt/data)
 export CARGO_TARGET_DIR
 NO_CARGO=0
 SELFTEST_ONLY=0
+DISK_ONLY=0
+RECEIPT_PATH=
+VERIFY_RECEIPT=
+PREFLIGHT_CONFIG=unspecified
+EXPECTED_CONFIG=
+SEED_PATH="$ROOT/bin/simple"
 for a in "$@"; do
   case "$a" in
     --no-cargo) NO_CARGO=1 ;;
     --selftest) SELFTEST_ONLY=1 ;;
-    *) echo "usage: $0 [--no-cargo] [--selftest]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
+    --disk-only) DISK_ONLY=1 ;;
+    --receipt=*) RECEIPT_PATH=${a#*=} ;;
+    --verify-receipt=*) VERIFY_RECEIPT=${a#*=} ;;
+    --config=*) PREFLIGHT_CONFIG=${a#*=} ;;
+    --expect-config=*) EXPECTED_CONFIG=${a#*=} ;;
+    --seed=*) SEED_PATH=${a#*=} ;;
+    *) echo "usage: $0 [--no-cargo] [--selftest] [--disk-only] [--receipt=PATH] [--verify-receipt=PATH] [--config=TEXT] [--expect-config=TEXT] [--seed=PATH]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
   esac
 done
 
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+preflight_disk_free_gib() {
+  mkdir -p "$ROOT/build" || return 2
+  _df_output=$(df -Pk "$ROOT/build") || return 2
+  _free_kib=$(printf '%s\n' "$_df_output" | awk 'NR==2{print $4}') || return 2
+  case "$_free_kib" in ''|*[!0-9]*) return 2 ;; esac
+  echo $((_free_kib / 1024 / 1024))
+}
+
+manifest_value() {
+  _key=$1 _manifest=$2
+  [ "$(grep -c "^${_key}=" "$_manifest" || true)" -eq 1 ] || return 1
+  sed -n "s/^${_key}=//p" "$_manifest"
+}
+
+run_preflight_probe() {
+  _seconds=$1
+  shift
+  case "${BOOTSTRAP_PREFLIGHT_TIMEOUT_MODE:-auto}" in
+    auto)
+      if command -v timeout >/dev/null 2>&1; then
+        "$(command -v timeout)" "$_seconds" "$@"
+      elif command -v gtimeout >/dev/null 2>&1; then
+        "$(command -v gtimeout)" "$_seconds" "$@"
+      else
+        "$@"
+      fi
+      ;;
+    none) "$@" ;;
+    *) return 125 ;;
+  esac
+}
+
+capture_bindings() {
+  _out=$1
+  _facade="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  BOOTSTRAP_STAGE3_FACADE_PATH=$_facade
+  BOOTSTRAP_STAGE3_VERSION_ROOT=$ROOT
+  export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+  . "$_facade" || return 1
+  bootstrap_stage3_source_snapshot "$_out/source" "$ROOT" || return 1
+  bootstrap_stage3_git_state "$ROOT" "$_out/git" || return 1
+  git -C "$ROOT" rev-parse --verify HEAD >"$_out/head" || return 1
+  printf '%s' "$PREFLIGHT_CONFIG" >"$_out/config" || return 1
+}
+
+verify_receipt() {
+  _receipt=$1
+  [ -f "$_receipt" ] && [ ! -L "$_receipt" ] || return 1
+  for _key in schema status git_head source_snapshot_sha256 git_state_sha256 \
+    config_hex config_sha256 seed_sha256 checker_sha256 cargo_mode; do
+    manifest_value "$_key" "$_receipt" >/dev/null || return 1
+  done
+  [ "$(manifest_value schema "$_receipt")" = simple-bootstrap-preflight-v1 ] || return 1
+  [ "$(manifest_value status "$_receipt")" = pass ] || return 1
+  [ "$(manifest_value cargo_mode "$_receipt")" = checked ] || return 1
+  [ -n "$EXPECTED_CONFIG" ] || return 1
+  printf '%s' "$EXPECTED_CONFIG" >"$TMP/expected-config" || return 1
+  _expected_config_hex=$(perl -e 'print unpack("H*", <STDIN>)' <"$TMP/expected-config") || return 1
+  [ "$(manifest_value config_hex "$_receipt")" = "$_expected_config_hex" ] || return 1
+  [ "$(manifest_value config_sha256 "$_receipt")" = "$(hash_file "$TMP/expected-config")" ] || return 1
+  [ "$(manifest_value seed_sha256 "$_receipt")" = "$(hash_file "$SEED_PATH")" ] || return 1
+  [ "$(manifest_value checker_sha256 "$_receipt")" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || return 1
+  _bindings="$TMP/verify-bindings"
+  mkdir "$_bindings" || return 1
+  capture_bindings "$_bindings" || return 1
+  [ "$(manifest_value git_head "$_receipt")" = "$(cat "$_bindings/head")" ] || return 1
+  [ "$(manifest_value source_snapshot_sha256 "$_receipt")" = "$(hash_file "$_bindings/source")" ] || return 1
+  [ "$(manifest_value git_state_sha256 "$_receipt")" = "$(hash_file "$_bindings/git")" ] || return 1
+}
+
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
 trap 'rm -rf "$TMP"' EXIT
+
+if [ "$DISK_ONLY" -eq 1 ] && {
+  [ -n "$RECEIPT_PATH" ] || [ -n "$VERIFY_RECEIPT" ] ||
+  [ "$NO_CARGO" -ne 0 ] || [ "$SELFTEST_ONLY" -ne 0 ];
+}; then
+  echo "ERROR — disk-only mode does not produce or verify receipts or skip checks"
+  exit 2
+fi
+case "$MIN_FREE_GB" in
+  ''|*[!0-9]*) echo "ERROR — invalid MIN_FREE_GB"; exit 2 ;;
+esac
+
+if [ -n "$VERIFY_RECEIPT" ]; then
+  [ -z "$RECEIPT_PATH" ] && [ "$SELFTEST_ONLY" -eq 0 ] || {
+    echo "ERROR — verify mode is exclusive"; exit 2;
+  }
+  if verify_receipt "$VERIFY_RECEIPT"; then
+    echo "PASS — authoritative preflight receipt verified: $VERIFY_RECEIPT"
+    exit 0
+  fi
+  echo "FAIL — authoritative preflight receipt rejected: $VERIFY_RECEIPT"
+  exit 1
+fi
 
 # ---- helper classifiers (pure functions so selftest can fixture them) ----
 
@@ -70,6 +243,16 @@ paired_markers() {
 probe_ok() {
   grep -q "^PROBE_BYTEORDER=little,big$" "$1"
   return $?
+}
+
+# linker_error_lines <cargo-log> : actionable MSVC errors, not LNK warnings
+linker_error_lines() {
+  grep -m 5 -E '(^|[[:space:]:])(fatal )?error LNK[0-9]+' "$1"
+}
+
+# cargo_log_dir <parent> : private, persistent diagnostics for one invocation
+cargo_log_dir() {
+  mkdir -p "$1" && mktemp -d "$1/preflight-cargo.XXXXXX"
 }
 
 write_probe_spl() {
@@ -119,6 +302,81 @@ selftest() {
   if probe_ok "$TMP/p_bad"; then echo "selftest FAIL: probe must-fail fixture passed"; st_fail=1; fi
   printf 'PROBE_BYTEORDER=little,little\n' > "$TMP/p_wrong"
   if probe_ok "$TMP/p_wrong"; then echo "selftest FAIL: probe wrong-value fixture passed"; st_fail=1; fi
+  # A Windows host must not treat Git's /mnt/data as an NVMe scratch mount.
+  mkdir -p "$TMP/mnt_data" "$TMP/vc/bin/Hostx64/x64"
+  expected_win="$TMP/build/preflight_cargo_target"
+  if command -v cygpath >/dev/null 2>&1; then expected_win=$(cygpath -w "$expected_win"); fi
+  [ "$(select_cargo_target_dir '' MINGW64_NT "$TMP" "$TMP" "$TMP/mnt_data")" = "$expected_win" ] || {
+    echo "selftest FAIL: Windows Cargo target escaped worktree"; st_fail=1;
+  }
+  [ "$(select_cargo_target_dir "$TMP/explicit" MINGW64_NT "$TMP" "$TMP" "$TMP/mnt_data")" = "$TMP/explicit" ] || {
+    echo "selftest FAIL: explicit Cargo target overridden"; st_fail=1;
+  }
+  [ "$(select_cargo_target_dir '' Linux "$TMP" "$TMP" "$TMP/mnt_data")" = "$TMP/mnt_data/tmp/cargo-seed-rebuild" ] || {
+    echo "selftest FAIL: Linux NVMe target changed"; st_fail=1;
+  }
+  [ "$(select_cargo_target_dir '' Darwin "$TMP" "$TMP" "$TMP/missing_mnt")" = "$TMP/cargo-seed-rebuild" ] || {
+    echo "selftest FAIL: macOS Cargo fallback changed"; st_fail=1;
+  }
+  : > "$TMP/vc/bin/Hostx64/x64/link.exe"
+  chmod +x "$TMP/vc/bin/Hostx64/x64/link.exe"
+  expected_linker="$TMP/vc/bin/Hostx64/x64/link.exe"
+  if command -v cygpath >/dev/null 2>&1; then expected_linker=$(cygpath -w "$expected_linker"); fi
+  [ "$(msvc_linker_from_vcvars "$TMP/vc")" = "$expected_linker" ] || {
+    echo "selftest FAIL: vcvars linker not selected"; st_fail=1;
+  }
+  if msvc_linker_from_vcvars "$TMP/missing_vc" >/dev/null; then
+    echo "selftest FAIL: missing vcvars linker accepted"; st_fail=1;
+  fi
+  st_rustc_info=$(printf 'rustc 1.80.0\nhost: x86_64-pc-windows-msvc\n')
+  [ "$(effective_cargo_target '' "$st_rustc_info")" = x86_64-pc-windows-msvc ] || {
+    echo "selftest FAIL: Rust host target not detected"; st_fail=1;
+  }
+  [ "$(effective_cargo_target x86_64-pc-windows-gnu "$st_rustc_info")" = x86_64-pc-windows-gnu ] || {
+    echo "selftest FAIL: explicit Cargo target not respected"; st_fail=1;
+  }
+  should_pin_msvc_linker MINGW64_NT x86_64-pc-windows-msvc || {
+    echo "selftest FAIL: x64 MSVC linker route missed"; st_fail=1;
+  }
+  if should_pin_msvc_linker MINGW64_NT x86_64-pc-windows-gnu ||
+     should_pin_msvc_linker MINGW64_NT aarch64-pc-windows-msvc ||
+     should_pin_msvc_linker Linux x86_64-pc-windows-msvc; then
+    echo "selftest FAIL: non-x64-MSVC linker route forced"; st_fail=1;
+  fi
+  [ "$(validated_linker_override "$TMP/vc/bin/Hostx64/x64/link.exe" "$TMP")" = "$TMP/vc/bin/Hostx64/x64/link.exe" ] || {
+    echo "selftest FAIL: explicit linker override was not preserved"; st_fail=1;
+  }
+  [ "$(validated_linker_override vc/bin/Hostx64/x64/link.exe "$TMP")" = vc/bin/Hostx64/x64/link.exe ] || {
+    echo "selftest FAIL: relative explicit linker path not validated against Cargo cwd"; st_fail=1;
+  }
+  [ "$(validated_linker_override sh "$TMP")" = sh ] || {
+    echo "selftest FAIL: explicit linker command not preserved"; st_fail=1;
+  }
+  if validated_linker_override "$TMP/missing-linker.exe" "$TMP" >/dev/null; then
+    echo "selftest FAIL: missing explicit linker accepted"; st_fail=1;
+  fi
+  if [ "$(command -v link.exe 2>/dev/null || true)" = /usr/bin/link.exe ] &&
+     validated_linker_override link.exe "$TMP" >/dev/null; then
+    echo "selftest FAIL: Git POSIX link.exe accepted as MSVC"; st_fail=1;
+  fi
+  # A failed Cargo run must retain every output line; classify errors, not warnings.
+  st_cargo_dir=$(cargo_log_dir "$TMP/log-root") || { echo "selftest FAIL: cargo log directory"; return 1; }
+  printf 'warning LNK4099: symbols missing\nLINK : fatal error LNK1104: cannot open file\nother output\n' > "$st_cargo_dir/cargo-check.log"
+  [ -f "$st_cargo_dir/cargo-check.log" ] || { echo "selftest FAIL: cargo log not retained"; st_fail=1; }
+  [ "$(linker_error_lines "$st_cargo_dir/cargo-check.log")" = 'LINK : fatal error LNK1104: cannot open file' ] || {
+    echo "selftest FAIL: linker error classifier"; st_fail=1;
+  }
+  # Supported hosts may have neither GNU timeout nor Homebrew gtimeout. The
+  # canonical bootstrap wrapper executes directly there, so preflight must use
+  # the same fallback. Both fixtures terminate themselves and remain bounded.
+  BOOTSTRAP_PREFLIGHT_TIMEOUT_MODE=none \
+    run_preflight_probe 1 sh -c 'exit 0' || {
+    echo "selftest FAIL: no-timeout direct fallback rejected passing command"; st_fail=1;
+  }
+  if BOOTSTRAP_PREFLIGHT_TIMEOUT_MODE=none \
+    run_preflight_probe 1 sh -c 'exit 7'; then
+    echo "selftest FAIL: no-timeout direct fallback erased failure"; st_fail=1
+  fi
   # disk arithmetic: must-FAIL when below threshold, must-PASS above
   [ 5 -ge 3 ] || st_fail=1
   if [ 2 -ge 3 ]; then echo "selftest FAIL: disk threshold arithmetic"; st_fail=1; fi
@@ -130,15 +388,39 @@ if ! selftest; then
   exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  echo "PASS — selftest only: 9 fixture(s) checked, 0 failed"
+  echo "PASS — selftest only: all fixtures checked, 0 failed"
   exit 0
+fi
+
+# A cheap admission before Cargo prevents spending minutes rebuilding the
+# Rust seed when the existing 20 GiB full-preflight floor is already unmet.
+# The ordinary post-Cargo check below remains authoritative and remeasures.
+if [ "$DISK_ONLY" -eq 1 ]; then
+  free_gb=$(preflight_disk_free_gib) || {
+    echo "ERROR — disk space could not be measured"; exit 2;
+  }
+  if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+    echo "FAIL — disk-space(${free_gb}GiB<${MIN_FREE_GB})"
+    exit 1
+  fi
+  echo "PASS — disk-space(${free_gb}GiB>=${MIN_FREE_GB})"
+  exit 0
+fi
+
+if [ -n "$RECEIPT_PATH" ]; then
+  mkdir "$TMP/start-bindings" || exit 2
+  capture_bindings "$TMP/start-bindings" || {
+    echo "ERROR — could not bind preflight source and git state before checks"; exit 2;
+  }
+  START_SEED_SHA=$(hash_file "$SEED_PATH") || exit 2
+  START_CHECKER_SHA=$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs") || exit 2
 fi
 
 CHECKED=0; SKIPPED=0; FAILS=""
 
 # ---- 1. seed binary present + banner ----
 CHECKED=$((CHECKED+1))
-"$ROOT/bin/simple" --version > "$TMP/ver" 2>&1
+"$SEED_PATH" --version > "$TMP/ver" 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ] || ! banner_ok "$TMP/ver"; then
   FAILS="$FAILS seed-banner"
@@ -153,13 +435,66 @@ elif ! command -v cargo >/dev/null 2>&1; then
   exit 2
 else
   CHECKED=$((CHECKED+1))
-  ( cd "$ROOT/src/compiler_rust" && cargo check --release --bin simple ) > "$TMP/cargo.log" 2>&1
-  _rc=$?
+  cargo_dir=$(cargo_log_dir "$ROOT/build/native_probe") || {
+    echo "ERROR — preflight could not create a persistent Cargo log directory"
+    exit 2
+  }
+  cargo_log="$cargo_dir/cargo-check.log"
+  cargo_context="$cargo_dir/toolchain-paths.txt"
+  cargo_effective_target=${CARGO_BUILD_TARGET:-}
+  if is_windows_host "$HOST_KERNEL" && [ -z "$cargo_effective_target" ]; then
+    rustc_host_info=$("${RUSTC:-rustc}" -vV 2>/dev/null || true)
+    cargo_effective_target=$(effective_cargo_target '' "$rustc_host_info")
+  fi
+  cargo_linker=
+  cargo_linker_error=
+  if is_windows_host "$HOST_KERNEL" && [ -z "$cargo_effective_target" ]; then
+    cargo_linker_error='could not determine Windows Cargo target from CARGO_BUILD_TARGET or rustc -vV'
+  elif should_pin_msvc_linker "$HOST_KERNEL" "$cargo_effective_target"; then
+    if [ -n "${CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER:-}" ]; then
+      cargo_linker=$(validated_linker_override "$CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER" "$ROOT/src/compiler_rust") ||
+        cargo_linker_error='explicit CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER does not resolve to a readable executable linker'
+    else
+      cargo_linker=$(msvc_linker_from_vcvars "${VCToolsInstallDir:-}") ||
+        cargo_linker_error='x64 MSVC preflight requires vcvars64 VCToolsInstallDir/bin/Hostx64/x64/link.exe'
+    fi
+  fi
+  {
+    printf 'cargo_executable=%s\n' "$(command -v cargo)"
+    printf 'cargo_target_dir=%s\n' "$CARGO_TARGET_DIR"
+    printf 'cargo_build_target=%s\n' "${CARGO_BUILD_TARGET:-<host default>}"
+    printf 'cargo_effective_target=%s\n' "${cargo_effective_target:-unavailable}"
+    printf 'rustc_executable=%s\n' "${RUSTC:-$(command -v rustc 2>/dev/null || printf unavailable)}"
+    printf 'rustup_toolchain=%s\n' "${RUSTUP_TOOLCHAIN:-$(rustup show active-toolchain 2>/dev/null || printf unavailable)}"
+    printf 'msvc_linker=%s\n' "${cargo_linker:-unavailable}"
+    printf 'path_linker=%s\n' "$(command -v link.exe 2>/dev/null || printf unavailable)"
+  } > "$cargo_context" || {
+    echo "ERROR — preflight could not record Cargo toolchain paths: $cargo_context"
+    exit 2
+  }
+  if [ -n "$cargo_linker_error" ]; then
+    printf 'error: %s\n' "$cargo_linker_error" > "$cargo_log"
+    _rc=1
+  elif [ -n "$cargo_linker" ]; then
+    ( cd "$ROOT/src/compiler_rust" && CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="$cargo_linker" cargo check --release --bin simple ) > "$cargo_log" 2>&1
+    _rc=$?
+  else
+    ( cd "$ROOT/src/compiler_rust" && cargo check --release --bin simple ) > "$cargo_log" 2>&1
+    _rc=$?
+  fi
   if [ "$_rc" -ne 0 ]; then
     FAILS="$FAILS cargo-check"
-    echo "check cargo: FAIL — first error: $(grep -m1 '^error' "$TMP/cargo.log" || echo 'see log')"
+    echo "check cargo: FAIL (exit=$_rc); full log: $cargo_log"
+    echo "check cargo: toolchain paths: $cargo_context"
+    if linker_error_lines "$cargo_log"; then
+      :
+    else
+      echo "check cargo: first error: $(grep -m1 '^error' "$cargo_log" || echo 'see full log')"
+    fi
   else
     echo "check cargo: ok"
+    rm -f "$cargo_log" "$cargo_context"
+    rmdir "$cargo_dir"
   fi
 fi
 
@@ -168,7 +503,7 @@ CHECKED=$((CHECKED+1))
 PROBE_DIR="$ROOT/build/preflight_probe.$$"
 mkdir -p "$PROBE_DIR"
 write_probe_spl "$PROBE_DIR/probe.spl"
-( cd "$ROOT" && timeout 300 bin/simple run "$PROBE_DIR/probe.spl" ) > "$TMP/probe.out" 2>&1
+( cd "$ROOT" && run_preflight_probe 300 "$SEED_PATH" run "$PROBE_DIR/probe.spl" ) > "$TMP/probe.out" 2>&1
 _rc=$?
 if [ "$_rc" -ne 0 ] || ! probe_ok "$TMP/probe.out"; then
   FAILS="$FAILS blocker-probe"
@@ -180,13 +515,11 @@ rm -rf "$PROBE_DIR"
 
 # ---- 4. disk space on build/ partition ----
 CHECKED=$((CHECKED+1))
-mkdir -p "$ROOT/build" 2>/dev/null
-free_kb=$(df -Pk "$ROOT/build" | awk 'NR==2{print $4}')
+free_gb=$(preflight_disk_free_gib)
 _rc=$?
-if [ "$_rc" -ne 0 ] || [ -z "${free_kb:-}" ]; then
+if [ "$_rc" -ne 0 ]; then
   FAILS="$FAILS disk-unreadable"
 else
-  free_gb=$((free_kb / 1024 / 1024))
   if [ "$free_gb" -ge "$MIN_FREE_GB" ]; then
     echo "check disk: ok (${free_gb} GiB free >= ${MIN_FREE_GB})"
   else
@@ -212,6 +545,42 @@ fi
 if [ -n "$FAILS" ]; then
   echo "FAIL — $CHECKED check(s) run, failing:$FAILS ($SKIPPED skipped)"
   exit 1
+fi
+if [ -n "$RECEIPT_PATH" ]; then
+  case "$RECEIPT_PATH" in /*) ;; *) RECEIPT_PATH="$ROOT/$RECEIPT_PATH" ;; esac
+  [ ! -e "$RECEIPT_PATH" ] && [ ! -L "$RECEIPT_PATH" ] || {
+    echo "ERROR — refusing preflight receipt collision: $RECEIPT_PATH"; exit 2;
+  }
+  mkdir -p "$(dirname "$RECEIPT_PATH")" || exit 2
+  _bindings="$TMP/write-bindings"
+  mkdir "$_bindings" || exit 2
+  capture_bindings "$_bindings" || {
+    echo "ERROR — could not bind preflight source and git state"; exit 2;
+  }
+  cmp -s "$TMP/start-bindings/source" "$_bindings/source" &&
+    cmp -s "$TMP/start-bindings/git" "$_bindings/git" &&
+    cmp -s "$TMP/start-bindings/head" "$_bindings/head" &&
+    cmp -s "$TMP/start-bindings/config" "$_bindings/config" &&
+    [ "$START_SEED_SHA" = "$(hash_file "$SEED_PATH")" ] &&
+    [ "$START_CHECKER_SHA" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || {
+    echo "ERROR — source, Git state, configuration, seed, or checker changed during preflight"; exit 2;
+  }
+  _receipt_tmp="${RECEIPT_PATH}.tmp.$$"
+  {
+    echo schema=simple-bootstrap-preflight-v1
+    echo status=pass
+    echo git_head="$(cat "$_bindings/head")"
+    echo source_snapshot_sha256="$(hash_file "$_bindings/source")"
+    echo git_state_sha256="$(hash_file "$_bindings/git")"
+    echo config_hex="$(perl -e 'print unpack("H*", <STDIN>)' <"$_bindings/config")"
+    echo config_sha256="$(hash_file "$_bindings/config")"
+    echo seed_sha256="$(hash_file "$SEED_PATH")"
+    echo checker_sha256="$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")"
+    if [ "$NO_CARGO" -eq 1 ]; then echo cargo_mode=skipped; else echo cargo_mode=checked; fi
+  } >"$_receipt_tmp" || exit 2
+  chmod 400 "$_receipt_tmp" || exit 2
+  mv "$_receipt_tmp" "$RECEIPT_PATH" || exit 2
+  echo "receipt: $RECEIPT_PATH"
 fi
 echo "PASS — $CHECKED check(s) run, 0 failed ($SKIPPED skipped)"
 exit 0

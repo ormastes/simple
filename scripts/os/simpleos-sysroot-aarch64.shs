@@ -22,10 +22,134 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+toolchain_self_test() (
+  fixture=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-aarch64-tools.XXXXXX") || exit 1
+  trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+  host_clang=$(command -v clang 2>/dev/null) || {
+    echo 'FAIL: Clang is required for the SimpleOS wchar_t header check' >&2
+    exit 1
+  }
+  cat > "$fixture/wchar-smoke.c" <<'EOF'
+#include <stddef.h>
+#include <wchar.h>
+_Static_assert(sizeof(wchar_t) == __SIZEOF_WCHAR_T__, "wchar_t ABI");
+int simpleos_wchar_smoke(wchar_t value) { return (int)value; }
+EOF
+  "$host_clang" -target aarch64-unknown-none-elf -fsyntax-only \
+    -isystem "$REPO_ROOT/src/os/libc/include" "$fixture/wchar-smoke.c" || {
+      echo 'FAIL: SimpleOS wchar.h conflicts with the compiler wchar_t ABI' >&2
+      exit 1
+    }
+  mkdir -p "$fixture/bin" "$fixture/override"
+  for tool in clang clang++ ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
+    case "$tool" in
+      clang|clang++) version='clang version 23.1.0' ;;
+      *) version='LLVM version 23.1.0' ;;
+    esac
+    printf '#!/bin/sh\necho "%s"\n' "$version" >"$fixture/bin/$tool"
+    chmod +x "$fixture/bin/$tool"
+  done
+  rm "$fixture/bin/clang++"
+  ln -s clang "$fixture/bin/clang++"
+
+  default=$(LLVM_23_1_PREFIX="$fixture" sh "$0" --print-toolchain)
+  printf '%s\n' "$default" | grep -qx "CLANG=$fixture/bin/clang"
+  printf '%s\n' "$default" | grep -qx "CXX=$fixture/bin/clang++"
+  printf '%s\n' "$default" | grep -qx "AR=$fixture/bin/llvm-ar"
+  overridden=$(LLVM_23_1_PREFIX="$fixture" CLANG=/custom/clang AR=/custom/ar sh "$0" --print-toolchain)
+  printf '%s\n' "$overridden" | grep -qx 'CLANG=/custom/clang'
+  printf '%s\n' "$overridden" | grep -qx 'AR=/custom/ar'
+  validated=$(LLVM_23_1_PREFIX="$fixture" sh "$0" --check-toolchain)
+  printf '%s\n' "$validated" | grep -qx "CLANG=$fixture/bin/clang"
+  printf '%s\n' "$validated" | grep -qx "CXX=$fixture/bin/clang++"
+  printf '%s\n' "$validated" | grep -qx "AR=$fixture/bin/llvm-ar"
+
+  printf '#!/bin/sh\necho "LLVM version 18.1.0"\n' >"$fixture/bin/llvm-ar"
+  if LLVM_23_1_PREFIX="$fixture" sh "$0" --check-toolchain >/dev/null 2>&1; then
+    echo 'FAIL: mixed default provider was accepted' >&2
+    exit 1
+  fi
+  printf '#!/bin/sh\necho "clang version 18.1.0"\n' >"$fixture/override/clang"
+  printf '#!/bin/sh\necho "clang version 18.1.0"\n' >"$fixture/override/clang++"
+  printf '#!/bin/sh\nexit 0\n' >"$fixture/override/ar"
+  chmod +x "$fixture/override/clang" "$fixture/override/clang++" "$fixture/override/ar"
+  bare=$(PATH="$fixture/override:$PATH" LLVM_23_1_PREFIX="$fixture" CLANG=clang AR=ar sh "$0" --check-toolchain)
+  printf '%s\n' "$bare" | grep -qx "CLANG=$fixture/override/clang"
+  printf '%s\n' "$bare" | grep -qx "CXX=$fixture/override/clang++"
+  printf '%s\n' "$bare" | grep -qx "AR=$fixture/override/ar"
+
+  printf '#!/bin/sh\necho "gcc version 13.0.0"\n' >"$fixture/override/gcc"
+  printf '#!/bin/sh\necho "g++ version 13.0.0"\n' >"$fixture/override/g++"
+  chmod +x "$fixture/override/gcc" "$fixture/override/g++"
+  if PATH="$fixture/override:$PATH" CLANG=gcc CXX=g++ AR=ar sh "$0" --check-toolchain >/dev/null 2>&1; then
+    echo 'FAIL: GCC override was accepted' >&2
+    exit 1
+  fi
+  printf 'PASS: AArch64 sysroot defaults to one LLVM 23.1 provider and preserves tool overrides\n'
+)
+
+if [ "${1:-}" = --toolchain-self-test ]; then
+  toolchain_self_test
+  exit 0
+fi
+
 SYSROOT="${SIMPLEOS_SYSROOT_AARCH64:-build/os/sysroot-aarch64}"
 LIBC_DIR="src/os/libc"
-CC="${CLANG:-clang}"
-AR="${AR:-ar}"
+# Keep the compiler, archiver, and linker in one provider by default.  An
+# explicit caller selection still wins for each tool.
+LLVM_23_1_PREFIX="${LLVM_23_1_PREFIX:-$REPO_ROOT/build/toolchains/llvm-23.1.0-rc2}"
+DEFAULT_LLVM_PROVIDER=0
+if [ -z "${CLANG:-}${CC:-}${CXX:-}${CLANGXX:-}${AR:-}" ]; then
+  DEFAULT_LLVM_PROVIDER=1
+fi
+CC="${CLANG:-${CC:-$LLVM_23_1_PREFIX/bin/clang}}"
+if [ -n "${CXX:-}${CLANGXX:-}" ]; then
+  CXX="${CXX:-$CLANGXX}"
+elif [ -n "${CLANG:-}${CC:-}" ]; then
+  clang_name=$(basename "$CC")
+  case "$CC" in
+    */*) CXX="$(dirname "$CC")/clang++${clang_name#clang}" ;;
+    *) CXX="clang++${clang_name#clang}" ;;
+  esac
+else
+  CXX="$LLVM_23_1_PREFIX/bin/clang++"
+fi
+AR="${AR:-$LLVM_23_1_PREFIX/bin/llvm-ar}"
+if [ "${1:-}" = --print-toolchain ]; then
+  printf 'CLANG=%s\nCXX=%s\nAR=%s\nLLVM_23_1_PREFIX=%s\n' "$CC" "$CXX" "$AR" "$LLVM_23_1_PREFIX"
+  exit 0
+fi
+if [ "$DEFAULT_LLVM_PROVIDER" -eq 1 ]; then
+  . "$REPO_ROOT/scripts/check/lib/clang-23-1-toolchain.shs"
+  clang_23_1_require_full_provider_prefix "$LLVM_23_1_PREFIX" || {
+    echo "[sysroot-aarch64] install the signed LLVM 23.1 provider with scripts/setup/build-llvm-23-1-provider.shs, or set CLANG and AR explicitly" >&2
+    exit 1
+  }
+fi
+CC_PATH="$(command -v "$CC" 2>/dev/null)" || { echo "[sysroot-aarch64] missing clang: $CC" >&2; exit 1; }
+CXX_PATH="$(command -v "$CXX" 2>/dev/null)" || { echo "[sysroot-aarch64] missing clang++: $CXX" >&2; exit 1; }
+AR_PATH="$(command -v "$AR" 2>/dev/null)" || { echo "[sysroot-aarch64] missing archiver: $AR" >&2; exit 1; }
+[ -x "$CC_PATH" ] || { echo "[sysroot-aarch64] missing clang: $CC_PATH" >&2; exit 1; }
+[ -x "$CXX_PATH" ] || { echo "[sysroot-aarch64] missing clang++: $CXX_PATH" >&2; exit 1; }
+[ -x "$AR_PATH" ] || { echo "[sysroot-aarch64] missing archiver: $AR_PATH" >&2; exit 1; }
+case "$("$CC_PATH" --version 2>/dev/null | sed -n '1p')" in
+  *clang\ version*) : ;;
+  *) echo "[sysroot-aarch64] C compiler is not Clang: $CC_PATH" >&2; exit 1 ;;
+esac
+case "$("$CXX_PATH" --version 2>/dev/null | sed -n '1p')" in
+  *clang\ version*) : ;;
+  *) echo "[sysroot-aarch64] C++ compiler is not Clang: $CXX_PATH" >&2; exit 1 ;;
+esac
+CC="$CC_PATH"
+CXX="$CXX_PATH"
+AR="$AR_PATH"
+CLANG="$CC"
+export CC CXX CLANG
+export PATH="$LLVM_23_1_PREFIX/bin:$PATH"
+if [ "${1:-}" = --check-toolchain ]; then
+  printf 'CC=%s\nCXX=%s\nCLANG=%s\nAR=%s\n' "$CC" "$CXX" "$CLANG" "$AR"
+  exit 0
+fi
 TRIPLE="aarch64-unknown-none-elf"
 OBJ_DIR="$SYSROOT/obj"
 
@@ -148,7 +272,9 @@ for a in "\$@"; do
         exit 0
     fi
 done
-exec clang "\$@"
+PATH="$LLVM_23_1_PREFIX/bin:\$PATH"
+export PATH
+exec "$CC_PATH" -target aarch64-unknown-none-elf "\$@"
 CCEOF
 chmod +x "$SYSROOT/lib/cc-aarch64-simpleos"
 

@@ -237,6 +237,8 @@ public static class MaterializerApi {
     static readonly Dictionary<string, byte[]> Blobs = new Dictionary<string, byte[]>(StringComparer.Ordinal);
     static readonly HashSet<string> Tracked = new HashSet<string>(StringComparer.Ordinal);
     static System.Diagnostics.Process Git;
+    static readonly StringBuilder GitError = new StringBuilder();
+    static readonly System.Threading.ManualResetEvent GitErrorDone = new System.Threading.ManualResetEvent(false);
     static byte[] PolicyBytes;
     static string PolicyHash;
     public static void Initialize() {
@@ -261,7 +263,24 @@ public static class MaterializerApi {
         start.WorkingDirectory = Environment.GetEnvironmentVariable("MATERIALIZER_ROOT");
         start.UseShellExecute = false; start.CreateNoWindow = true;
         start.RedirectStandardInput = true; start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
         Git = System.Diagnostics.Process.Start(start);
+        Stream errorStream = Git.StandardError.BaseStream;
+        System.Threading.ThreadPool.QueueUserWorkItem(_ => DrainGitError(errorStream));
+    }
+    static void DrainGitError(Stream errorStream) {
+        var chunk = new byte[512];
+        try {
+            int n;
+            while ((n = errorStream.Read(chunk, 0, chunk.Length)) > 0) {
+                lock (GitError) {
+                    int remaining = 4096 - GitError.Length;
+                    if (remaining > 0) GitError.Append(Encoding.UTF8.GetString(chunk, 0, Math.Min(n, remaining)));
+                }
+            }
+        } catch (IOException) { }
+        catch (ObjectDisposedException) { }
+        finally { GitErrorDone.Set(); }
     }
     public static void Shutdown() {
         if (Git == null) return;
@@ -269,11 +288,18 @@ public static class MaterializerApi {
         finally { Git.Dispose(); }
     }
     public static string IsTracked(string path) { return Tracked.Contains(path) ? "tracked" : "untracked"; }
+    static IOException GitFailure(string reason) {
+        Git.WaitForExit(1000);
+        if (Git.HasExited) GitErrorDone.WaitOne(1000);
+        string stderr;
+        lock (GitError) stderr = GitError.ToString().Trim();
+        return new IOException(reason + ":exit=" + (Git.HasExited ? Git.ExitCode.ToString() : "pending") + ":stderr=" + stderr);
+    }
     static int GitRead(byte[] bytes, int offset, int count) {
         var read = Git.StandardOutput.BaseStream.ReadAsync(bytes, offset, count);
-        if (!read.Wait(30000)) throw new IOException("git.batch-timeout");
+        if (!read.Wait(30000)) throw GitFailure("git.batch-timeout");
         int n = read.Result;
-        if (n == 0) throw new IOException("git.batch-eof");
+        if (n == 0) throw GitFailure("git.batch-eof");
         return n;
     }
     public static void GitBlob(string oid) {
@@ -341,7 +367,7 @@ public static class MaterializerApi {
     [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle h,
         out IoStatus status, byte[] information, uint length, int informationClass);
     [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
-    static SafeFileHandle CreateDirectoryHeld(string path, bool writeAccess = false) {
+    static SafeFileHandle CreateDirectoryHeld(string path, bool junction = false) {
         string native = @"\??\" + Path.GetFullPath(path);
         IntPtr buffer = Marshal.StringToHGlobalUni(native), name = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeName)));
         try {
@@ -349,10 +375,14 @@ public static class MaterializerApi {
             Marshal.StructureToPtr(u, name, false);
             var a = new ObjectAttributes { Length = Marshal.SizeOf(typeof(ObjectAttributes)), Name = name, Attributes = 0x40 };
             SafeFileHandle h; IoStatus io;
-            // Parent authority needs only attributes and synchronization:
-            // GENERIC_WRITE conflicts with receipt rename into a new parent.
-            // Junction creation separately needs write access to set its tag.
-            uint access = writeAccess ? 0x40100080u : 0x00100080u;
+            // FILE_CREATE checks the parent's creation rights independently of
+            // the access requested on this new directory. Retain only
+            // READ_ATTRIBUTES | SYNCHRONIZE: a GENERIC_WRITE handle conflicts
+            // with Windows' destination-directory open during receipt rename.
+            // Junction creation additionally needs GENERIC_WRITE for
+            // FSCTL_SET_REPARSE_POINT. Receipt parents stay read-only.
+            // Keep share=READ, so ancestor write/delete protection never drops.
+            uint access = junction ? 0x40100080u : 0x00100080u;
             int status = NtCreateFile(out h, access, ref a, out io, IntPtr.Zero, 0x10, 1, 2, 0x00200021, IntPtr.Zero, 0);
             if (status < 0) { if (h != null) h.Dispose(); throw new IOException("directory.create-exclusive:ntstatus=" + status); }
             return h;

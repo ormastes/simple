@@ -464,6 +464,75 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     value
 }
 
+/// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
+/// payloads (images, archives). Identical admission arms and bound (O_NOFOLLOW
+/// open, regular-file check via metadata, hard byte cap, EINTR-safe bounded
+/// read via `Read::take`); the content is returned as a `[u8]` byte-array
+/// RuntimeValue instead of being UTF-8 decoded, which the text form must
+/// reject. Second lane of the C `rt_file_read_regular_no_follow_bounded_bytes`
+/// in `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded_bytes(
+    path_ptr: *const u8,
+    path_len: u64,
+    max_bytes: i64,
+) -> RuntimeValue {
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return read_no_follow_fail(READ_NF_CAPABILITY);
+    }
+    if path_ptr.is_null() || max_bytes < 0 {
+        return read_no_follow_fail(READ_NF_BAD_ARGS);
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
+        _ => return read_no_follow_fail(READ_NF_BAD_UTF8_PATH),
+    };
+    let path = Path::new(path_str);
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    #[cfg(not(any(unix, windows)))]
+    return RuntimeValue::NIL;
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(_) => return read_no_follow_fail(READ_NF_OPEN),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return read_no_follow_fail(READ_NF_METADATA),
+    };
+    if !metadata.is_file() {
+        return read_no_follow_fail(READ_NF_NOT_REGULAR);
+    }
+    if metadata.len() > max_bytes as u64 {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        return read_no_follow_fail(READ_NF_REPARSE);
+    }
+    let read_limit = match (max_bytes as u64).checked_add(1) {
+        Some(limit) => limit,
+        None => return read_no_follow_fail(READ_NF_TOO_LARGE),
+    };
+    let mut raw = Vec::new();
+    let mut bounded = file.take(read_limit);
+    if bounded.read_to_end(&mut raw).is_err() {
+        return read_no_follow_fail(READ_NF_READ);
+    }
+    if raw.len() as i64 > max_bytes {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
+    }
+    let value = bytes_to_runtime_array(&raw);
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(READ_NF_OK));
+    value
+}
+
 /// Read entire file as text (RuntimeValue wrapper)
 /// Takes a RuntimeValue string, extracts ptr/len, and calls rt_file_read_text.
 /// Returns the string directly on success, NIL on failure.

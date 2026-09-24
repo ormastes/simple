@@ -122,18 +122,25 @@ selftest() {
   # 5. The fixture SHAPE this guard depends on must behave as claimed: a
   #    sleeping parent with a CPU-burning child. If the host cannot produce
   #    that, every process check below is meaningless and we must not pass.
-  sh -c 'awk "BEGIN{while(1){x++}}" & sleep 6' &
+  sh -c 'awk "BEGIN{while(1){x++}}" & child=$!; trap '\''kill "$child" 2>/dev/null || true'\'' EXIT; trap '\''exit 0'\'' INT TERM; sleep 8 & wait $!' &
   st_pid=$!
   fixture_pids="$fixture_pids $st_pid"
-  sleep 2
-  st_root_ticks=$(awk '{r=$0; sub(/^.*\) /,"",r); split(r,a," "); print a[12]+a[13]}' \
+  # MSYS shell startup can exceed five ticks before the fixture starts sleeping.
+  # Measure the idle interval, not the process's lifetime startup cost.
+  sleep 1
+  st_root_before=$(awk '{r=$0; sub(/^.*\) /,"",r); split(r,a," "); print a[12]+a[13]}' \
     "/proc/$st_pid/stat" 2>/dev/null || echo unknown)
-  case "$st_root_ticks" in
-    ''|unknown) st_note "cannot read /proc/<pid>/stat; CPU evidence unavailable on this host" ;;
-    *) [ "$st_root_ticks" -le 5 ] 2>/dev/null ||
-         st_note "fixture parent burned $st_root_ticks ticks; it is supposed to sleep" ;;
+  sleep 2
+  st_root_after=$(awk '{r=$0; sub(/^.*\) /,"",r); split(r,a," "); print a[12]+a[13]}' \
+    "/proc/$st_pid/stat" 2>/dev/null || echo unknown)
+  case "$st_root_before:$st_root_after" in
+    *[!0-9:]*|:*|*:) st_note "cannot read /proc/<pid>/stat; CPU evidence unavailable on this host" ;;
+    *) st_root_ticks=$((st_root_after - st_root_before))
+       [ "$st_root_ticks" -ge 0 ] && [ "$st_root_ticks" -le 5 ] ||
+         st_note "fixture parent burned $st_root_ticks ticks while sleeping" ;;
   esac
   kill "$st_pid" 2>/dev/null || true
+  wait "$st_pid" 2>/dev/null || true
 
   [ "$st_fail" -eq 0 ] || { echo "ERROR — selftest failed; no scan was run"; exit 2; }
 }
@@ -221,7 +228,7 @@ expect "stale PID not logged" $?
 # ---------------------------------- (a) SUBJECT: the reproducing fixture ------
 # A parent that SLEEPS while its child BURNS CPU. This is the incident verbatim.
 # Before the fix this reported cpu_pct=0.0; it must now report the child's work.
-sh -c 'awk "BEGIN{while(1){x++}}" & sleep 25' &
+sh -c 'awk "BEGIN{while(1){x++}}" & child=$!; trap '\''kill "$child" 2>/dev/null || true'\'' EXIT; trap '\''exit 0'\'' INT TERM; sleep 25 & wait $!' &
 busy_pid=$!
 fixture_pids="$fixture_pids $busy_pid"
 sleep 1
@@ -249,6 +256,7 @@ busy_stalled=$?
 [ "$busy_stalled" -ne 0 ]
 expect "busy tree was reported alive-no-progress (false stall verdict)" $?
 kill "$busy_pid" 2>/dev/null || true
+wait "$busy_pid" 2>/dev/null || true
 
 # ------------------------------------------ genuinely idle tree must say so ---
 sh -c 'sleep 25 & sleep 25' &

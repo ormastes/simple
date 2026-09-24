@@ -6994,6 +6994,17 @@ double rt_math_hypot(double x, double y) {
     return hypot(x, y);
 }
 
+/* A fused operation is required here: x*y+z can round twice. */
+double rt_math_fma(double x, double y, double z) {
+    return fma(x, y, z);
+}
+
+/* The Simple SFFI spells this boundary rt_f64_to_bits; core memory owns the
+ * identical bit-preserving operation under its original spl_ name. */
+int64_t rt_f64_to_bits(double value) {
+    return spl_f64_to_bits(value);
+}
+
 double rt_math_min(double a, double b) {
     return fmin(a, b);
 }
@@ -7270,6 +7281,34 @@ static SplArray* rt_core_array_new(int64_t cap, uint8_t flags) {
 
 SplArray* rt_array_new(int64_t cap) {
     return rt_core_array_new(cap, 0);
+}
+
+/* Typed Simple arrays use the ordinary tagged-slot array ABI. The interpreter
+ * allocates the requested length and fills every slot with numeric zero. */
+static SplArray* rt_core_zero_array_alloc(int64_t len, int floating) {
+    if (len < 0) len = 0;
+    SplArray* array = rt_array_new(len);
+    if (!array) return NULL;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t zero = floating ? rt_value_float(0.0) : rt_value_int(0);
+        if (!rt_array_push(array, zero)) {
+            rt_array_free(array);
+            return NULL;
+        }
+    }
+    return array;
+}
+
+SplArray* rt_f64_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 1);
+}
+
+SplArray* rt_f32_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 1);
+}
+
+SplArray* rt_i64_array_alloc(int64_t len) {
+    return rt_core_zero_array_alloc(len, 0);
 }
 
 SplArray* rt_array_new_uninit(int64_t cap) {
@@ -7753,6 +7792,71 @@ SplArray* rt_byte_array_new_len(uint64_t len) {
         array->len = (int64_t)len;
     }
     return a;
+}
+
+/* The [u8] SFFI boundary returns a packed byte array. Entropy failure is
+ * reported as NIL, never as a zero-filled buffer that looks random. */
+int64_t rt_random_bytes_c(uint64_t count) {
+    if (count > INT64_MAX || count > SIZE_MAX) return rt_core_nil();
+    SplArray* result = rt_byte_array_new_len(count);
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (!array) return rt_core_nil();
+    uint8_t* bytes = (uint8_t*)array->data;
+    size_t length = (size_t)count;
+    if (length == 0) return (int64_t)(uintptr_t)result;
+#if defined(_WIN32)
+    typedef long (WINAPI *RtBCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+    wchar_t bcrypt_path[MAX_PATH];
+    static const wchar_t bcrypt_leaf[] = L"\\bcrypt.dll";
+    UINT system_len = GetSystemDirectoryW(bcrypt_path, MAX_PATH);
+    HMODULE bcrypt = NULL;
+    if (system_len != 0 &&
+        system_len <= MAX_PATH - (sizeof(bcrypt_leaf) / sizeof(bcrypt_leaf[0]))) {
+        memcpy(bcrypt_path + system_len, bcrypt_leaf, sizeof(bcrypt_leaf));
+        bcrypt = LoadLibraryW(bcrypt_path);
+    }
+    RtBCryptGenRandomFn fill = bcrypt ?
+        (RtBCryptGenRandomFn)GetProcAddress(bcrypt, "BCryptGenRandom") : NULL;
+    int ok = fill != NULL;
+    size_t offset = 0;
+    while (ok && offset < length) {
+        unsigned long chunk = (unsigned long)((length - offset) > 1048576u ? 1048576u : (length - offset));
+        ok = fill(NULL, bytes + offset, chunk, 0x00000002) == 0;
+        offset += chunk;
+    }
+    if (bcrypt) FreeLibrary(bcrypt);
+#else
+    int ok = 1;
+    int fd = -1;
+    if (length != 0) {
+#ifdef O_CLOEXEC
+        fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+#else
+        fd = open("/dev/urandom", O_RDONLY);
+        if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+            close(fd);
+            fd = -1;
+        }
+#endif
+        ok = fd >= 0;
+    }
+    size_t offset = 0;
+    while (ok && offset < length) {
+        size_t chunk = length - offset > 1048576u ? 1048576u : length - offset;
+        ssize_t n = read(fd, bytes + offset, chunk);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = 0; break; }
+        offset += (size_t)n;
+    }
+    if (fd >= 0) close(fd);
+#endif
+    if (!ok) {
+        volatile uint8_t* wipe = bytes;
+        for (size_t i = 0; i < length; i++) wipe[i] = 0;
+        rt_array_free(result);
+        return rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
 }
 
 SplArray* rt_bytes_alloc(int64_t len) {
@@ -10432,9 +10536,11 @@ int64_t rt_random_randint(int64_t min, int64_t max) {
     uint64_t range = (uint64_t)(max - min + 1);
     return min + (int64_t)(rt_bucket2_random_next() % range);
 }
+double rt_random_random(void) {
+    return (double)rt_bucket2_random_next() / RT_BUCKET2_LCG_M_F;
+}
 double rt_random_uniform(double min, double max) {
-    double r = (double)rt_bucket2_random_next() / RT_BUCKET2_LCG_M_F;
-    return min + r * (max - min);
+    return min + rt_random_random() * (max - min);
 }
 
 /* ---- collections.rs: rt_typed_bytes_u8_data_at --------------------------- */
@@ -11358,6 +11464,77 @@ int64_t rt_file_read_regular_no_follow_bounded(
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
+}
+
+/* Byte-array sibling of rt_file_read_regular_no_follow_bounded for binary
+ * payloads (images, archives). Identical admission arms and bound; the
+ * content is returned as a [u8] SplArray instead of being UTF-8 decoded,
+ * which the text form must reject. Binary image admission
+ * (image_to_markdown) reads PNG/JPEG bytes through this form. */
+int64_t rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    char path[RT_TEXT_PATH_MAX];
+    if (max_bytes < 0 || path_len == 0 ||
+        !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
+    size_t capacity = (size_t)max_bytes + 1;
+    uint8_t* bytes = (uint8_t*)malloc(capacity);
+    if (!bytes) return RT_RNF_FAIL(9);
+    size_t total = 0;
+#if defined(_WIN32)
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wide_path);
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
+    BY_HANDLE_FILE_INFORMATION info;
+    LARGE_INTEGER size;
+    if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
+        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
+    }
+    while (total < capacity) {
+        DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
+        DWORD read_count = 0;
+        if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
+            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
+        }
+        if (read_count == 0) break;
+        total += (size_t)read_count;
+    }
+    CloseHandle(handle);
+#else
+#ifndef O_NOFOLLOW
+    free(bytes);
+    return RT_RNF_FAIL(9);
+#else
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > (uint64_t)max_bytes) {
+        close(fd); free(bytes); return RT_RNF_FAIL(5);
+    }
+    while (total < capacity) {
+        ssize_t count = read(fd, bytes + total, capacity - total);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    close(fd);
+#endif
+#endif
+    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    rt_rnf_last_failure = 100;
+    SplArray* result = rt_byte_array_new_len((uint64_t)total);
+    if (!result) { free(bytes); return RT_RNF_FAIL(9); }
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (total > 0 && array) memcpy(array->data, bytes, total);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
 }
 
 /* RuntimeValue-ABI spelling of rt_file_read_text.
@@ -13719,36 +13896,6 @@ bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
     return rt_dir_create_cpath(path, recursive);
-}
-
-const char* lib__nogc_sync_mut__debug__remote__session_model__DebugExecutionMode_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "rtl_sim";
-        case 2: return "qemu_stub";
-        default: return "hw";
-    }
-}
-
-const char* lib__nogc_sync_mut__debug__remote__session_model__DebugTransportKind_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "openocd_remote_bitbang";
-        case 2: return "intel_jtagd";
-        case 3: return "trace32_native";
-        case 4: return "trace32_gdb";
-        case 5: return "gdb_remote";
-        default: return "openocd_jtag";
-    }
-}
-
-const char* lib__nogc_sync_mut__debug__remote__types__Architecture_dot_to_string(int64_t value) {
-    switch (value) {
-        case 1: return "arm64";
-        case 2: return "riscv32";
-        case 3: return "riscv64";
-        case 4: return "x86";
-        case 5: return "x86_64";
-        default: return "arm32";
-    }
 }
 
 static char* rt_core_shell_quote(const char* s) {
@@ -16554,6 +16701,22 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
 
 /* collections.rs:1708 -- remove by key/index from array or dict. */
 SPL_RT_TRAP2(rt_collection_remove)
+
+/* collections.rs:1902 -- erased receiver.set(key, value). Real semantics for
+ * the one type Rust actually supports here (Dict): mutate in place and return
+ * the receiver, exactly like rt_dict_set. Rust routes every other receiver
+ * type (Array, Tuple, ...) to rt_method_not_found, which has no C-lane
+ * equivalent to call; that path traps loudly by name rather than silently
+ * returning a wrong value. */
+int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
+    RtCoreDict* d = rt_core_as_dict(receiver);
+    if (d != NULL) {
+        rt_core_dict_put(d, key, value);
+        return receiver;
+    }
+    rt_trap_unimplemented("rt_collection_set");
+    return 0;
+}
 
 /* Wave17: one-owner, exact-byte artifact bundle publication.  Handles are
  * random registry tokens, never descriptors.  The Linux implementation keeps

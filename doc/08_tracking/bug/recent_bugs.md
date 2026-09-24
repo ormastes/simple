@@ -83,7 +83,7 @@
 | bootstrap_stage2_capability_log_phantom_2026-08-17 | P3 | open | Warning references stage2-capability.log that is never written when stage2 fails | `scripts/bootstrap/bootstrap-from-scratch.sh:2310` |
 | bootstrap_stage2_empty_mir_bodies_2026-07-05 | P1 | open | Stage-2 bootstrap: function bodies lower to empty ret-0 stubs | `src/compiler/50.mir/_MirLowering/function_lowering.spl:0` |
 | bootstrap_stage2_silent_exit1_empty_log_2026-08-17 | P2 | open | Stage2 silent exit-1 with 0-byte stage2-native-build.log | `scripts/bootstrap/bootstrap-from-scratch.sh:1963` |
-| bootstrap_stage3_module_surface_placeholder_nil_2026-08-01 | P1 | open | Stage 3 module-surface placeholder nil trap | `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:0` |
+| bootstrap_stage3_module_surface_placeholder_nil_2026-08-01 | P1 | fixed | Stage 3 module-surface placeholder nil trap | `src/compiler/80.driver/driver_source_pipeline_parsing.spl:0` |
 | bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17 | P1 | open | Stage3 self-host: stage2 binary emits only a seed-wrapper not native code | `src/app/cli/bootstrap_main.spl:0` |
 | bootstrap_stage4_ast_hir_overlap_memory_2026-07-27 | P1 | open | Stage 4 AST/HIR overlap exhausts the no-GC heap registry | `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:0` |
 | bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21 | P1 | open | Stage4 binary SIGSEGVs at startup via io.cli_ops.get_args recursion | `src/lib/nogc_sync_mut/io_runtime.spl:203` |

@@ -29,6 +29,7 @@ use std.spec.step
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_add, llvm_bootstrap_string_globals_text}
+use compiler.driver.driver_bootstrap.{bootstrap_real_llvm_translator}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -37,6 +38,7 @@ use compiler.mir.mir_lowering.{MirLowering}
 
 
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 val DECL_MARKER: text = "= private unnamed_addr constant"
 
@@ -60,6 +62,35 @@ fn lower_bootstrap_source(src: text) -> MirModule:
 
 describe "LLVM bootstrap module-level accumulators reset per compilation unit":
     # @manual scenario evidence
+    it "routes direct-emit translator strings to the trailer and checks both callers":
+        # @req REQ-SSPEC-COMPILER
+        step("routes direct-emit translator strings to the trailer and checks both callers")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+
+        llvm_bootstrap_string_globals_add("STALE_UNIT")
+        var translator = bootstrap_real_llvm_translator()
+        val name = translator.add_string_global("DIRECT_EMIT_UNIT")
+        val globals = llvm_bootstrap_string_globals_text()
+        expect(translator.bootstrap_string_globals_active).to_equal(true)
+        expect(name).to_equal("@.str.0")
+        expect(count_occurrences(globals, DECL_MARKER)).to_equal(1)
+        expect(globals).to_contain("@.str.0 = private unnamed_addr constant")
+        expect(globals).to_contain("DIRECT_EMIT_UNIT")
+        expect(globals).to_not_contain("STALE_UNIT")
+        expect(translator.string_globals.len()).to_equal(0)
+
+        # The helper is exercised above; these source slices guard both
+        # production callers without claiming an object-compile result.
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+        val object_start = driver.index_of("pub fn bootstrap_emit_real_llvm_object(")
+        val module_start = driver.index_of("pub fn bootstrap_emit_real_llvm_module_object(")
+        val next_start = driver.index_of("pub fn bootstrap_emit_driver_stub_llvm_object(")
+        expect(object_start).to_be_greater_than(-1)
+        expect(module_start).to_be_greater_than(object_start)
+        expect(next_start).to_be_greater_than(module_start)
+        expect(driver.substring(object_start, module_start)).to_contain("bootstrap_real_llvm_translator()")
+        expect(driver.substring(module_start, next_start)).to_contain("bootstrap_real_llvm_translator()")
+
     it "does not carry unit one's string constants into unit two":
         # @req REQ-SSPEC-COMPILER
         step("does not carry unit one's string constants into unit two")

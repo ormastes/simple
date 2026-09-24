@@ -1,0 +1,61 @@
+#!/bin/sh
+# Qualification must compare successful executions, never failed launches.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/scripts/check/cert" "$tmp/bin" "$tmp/corpus"
+cp "$root/scripts/check/cert/tool-qual-meta.shs" "$tmp/scripts/check/cert/"
+runner="$tmp/scripts/check/cert/tool-qual-meta.shs"
+printf 'fn main():\n    print(42)\n' > "$tmp/corpus/control.spl"
+cat > "$tmp/bin/simple" <<'FIXTURE'
+#!/bin/sh
+n=0
+[ ! -f "$COUNTER" ] || n=$(cat "$COUNTER")
+n=$((n + 1))
+printf '%s\n' "$n" > "$COUNTER"
+case "$BEHAVIOR" in
+    fail) exit 42 ;;
+    late_fail) [ "$n" -ne 2 ] || { printf '42\n'; exit 43; } ;;
+    compiled_fail) [ "${SIMPLE_EXECUTION_MODE:-}" = interpret ] || { printf '42\n'; exit 44; } ;;
+    vary) printf '%s\n' "$n"; exit 0 ;;
+    empty) exit 0 ;;
+esac
+printf '42\n'
+FIXTURE
+chmod +x "$tmp/bin/simple"
+export COUNTER="$tmp/counter" META_K=2
+
+check() {
+    label=$1 expected=$2 binary=$3 behavior=$4
+    shift 4
+    rm -f "$COUNTER"
+    rc=0
+    if [ "$binary" = default ]; then
+        env -u SIMPLE_BIN BEHAVIOR="$behavior" sh "$runner" "$@" > "$tmp/out" 2>&1 || rc=$?
+    else
+        SIMPLE_BIN="$binary" BEHAVIOR="$behavior" sh "$runner" "$@" > "$tmp/out" 2>&1 || rc=$?
+    fi
+    if [ "$expected" = pass ]; then
+        [ "$rc" -eq 0 ] && grep -qE '(RESULT|SELF-TEST): PASS' "$tmp/out" || {
+            cat "$tmp/out"; echo "FAIL: $label"; exit 1;
+        }
+    else
+        [ "$rc" -ne 0 ] && ! grep -qE '(RESULT|SELF-TEST): PASS' "$tmp/out" || {
+            cat "$tmp/out"; echo "FAIL: $label"; exit 1;
+        }
+    fi
+    printf 'PASS: %s\n' "$label"
+}
+
+check 'missing compiler is not deterministic evidence' fail "$tmp/absent" stable "$tmp/corpus"
+check 'repo-local default works on every host' pass default stable "$tmp/corpus"
+check 'successful empty stdout remains valid' pass "$tmp/bin/simple" empty "$tmp/corpus"
+check 'failed first execution is rejected' fail "$tmp/bin/simple" fail "$tmp/corpus"
+check 'failed subsequent execution is rejected' fail "$tmp/bin/simple" late_fail "$tmp/corpus"
+check 'compiled-mode failure is rejected' fail "$tmp/bin/simple" compiled_fail "$tmp/corpus"
+check 'successful varying stdout is rejected' fail "$tmp/bin/simple" vary "$tmp/corpus"
+check 'self-test rejects missing compiler' fail "$tmp/absent" stable --self-test
+check 'self-test rejects failing compiler' fail "$tmp/bin/simple" fail --self-test
+check 'self-test accepts successful deterministic control' pass "$tmp/bin/simple" stable --self-test
+echo 'PASS: tool-qualification execution regressions'

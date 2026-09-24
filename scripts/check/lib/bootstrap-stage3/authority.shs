@@ -503,8 +503,11 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # LLVM object stage returned 'llc not found' -- which surfaced only as
     # 'backend object-path status 1'. The mechanism already existed; it just
     # could not see its own configuration.
-    printf '%s' 'SIMPLE_LLVM_BIN LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    printf '%s' 'SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH MIMALLOC_EAGER_COMMIT LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
+        *apple-darwin*)
+            printf ' %s' 'CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION'
+            ;;
         *windows-gnu*)
             printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC'
             ;;
@@ -747,6 +750,137 @@ bootstrap_stage3_host_platform() {
     esac
 }
 
+# Optional exact-version gate used by pinned LLVM producer lanes.
+bootstrap_stage3_verify_llvm_pin() {
+    [ "$#" -eq 2 ] || return 1
+    case "$1" in /*) ;; *) echo 'bootstrap: LLVM pins must be absolute paths' >&2; return 1 ;; esac
+    [ -x "$1" ] || return 1
+    bootstrap_stage3_pin_version=$("$1" --version 2>/dev/null |
+        sed -n '1s/^[^0-9]*\([0-9][0-9.]*\).*/\1/p') || return 1
+    [ "$bootstrap_stage3_pin_version" = "$2" ] || {
+        echo "bootstrap: LLVM pin $1 is $bootstrap_stage3_pin_version; required $2" >&2
+        return 1
+    }
+}
+
+bootstrap_stage3_verify_rust_llvm_pin() {
+    [ -n "${SIMPLE_LLVM_REQUIRED_VERSION:-}" ] || return 0
+    bootstrap_stage3_rust_llvm_version=$("$1" -vV |
+        sed -n 's/^LLVM version: //p') || return 1
+    [ "$bootstrap_stage3_rust_llvm_version" = "$SIMPLE_LLVM_REQUIRED_VERSION" ] || {
+        echo "bootstrap: resolved rustc $1 LLVM $bootstrap_stage3_rust_llvm_version does not match $SIMPLE_LLVM_REQUIRED_VERSION" >&2
+        return 1
+    }
+}
+
+# rustc strips build-script executables using its bundled rust-objcopy. Some
+# macOS Rust distributions put libLLVM in sysroot/lib but give that helper only
+# an @loader_path/../lib runpath. Bind both files before supplying a private
+# library search directory; never repair the shared rustup installation.
+bootstrap_stage3_rust_macos_helper_authority() (
+    [ "$(uname -s)" = Darwin ] || return 0
+    [ "$#" -eq 1 ] || return 1
+    helper_sysroot=$(dirname -- "$(dirname -- "$1")")
+    helper_version=$(env -i PATH="$PATH" "$1" -vV) || return 1
+    helper_host=$(printf '%s\n' "$helper_version" | sed -n 's/^host: //p')
+    helper_llvm_version=$(printf '%s\n' "$helper_version" | sed -n 's/^LLVM version: //p')
+    case "$helper_llvm_version" in ''|*[!0-9.]*) return 1 ;; esac
+    case "$helper_host" in
+        aarch64-apple-darwin|x86_64-apple-darwin) ;;
+        *) return 1 ;;
+    esac
+    helper_objcopy="$helper_sysroot/lib/rustlib/$helper_host/bin/rust-objcopy"
+    helper_llvm="$helper_sysroot/lib/libLLVM.dylib"
+    [ -x "$helper_objcopy" ] || return 1
+    [ "$(bootstrap_stage3_canonical_file "$helper_objcopy")" = "$helper_objcopy" ] || return 1
+    helper_dependencies=$(/usr/bin/otool -L "$helper_objcopy") || return 1
+    helper_mode=absent
+    if printf '%s\n' "$helper_dependencies" | awk '$1 == "@rpath/libLLVM.dylib" { found=1 } END { exit !found }'; then
+        helper_mode=private-dylib
+        [ "$(bootstrap_stage3_canonical_file "$helper_llvm")" = "$helper_llvm" ] || return 1
+    elif printf '%s\n' "$helper_dependencies" | awk 'NR > 1 && $1 ~ /libLLVM/ { found=1 } END { exit !found }'; then
+        echo 'bootstrap: unsupported Rust helper LLVM dependency' >&2
+        return 1
+    fi
+    printf 'rust-objcopy-path=%s\nrust-objcopy-sha256=%s\n' \
+        "$helper_objcopy" "$(bootstrap_stage3_hash_file "$helper_objcopy")"
+    printf 'rust-helper-library-mode=%s\n' "$helper_mode"
+    if [ "$helper_mode" = private-dylib ]; then
+        printf 'rust-llvm-dylib-path=%s\nrust-llvm-dylib-sha256=%s\n' \
+            "$helper_llvm" "$(bootstrap_stage3_hash_file "$helper_llvm")"
+    fi
+    printf 'rust-helper-llvm-version=%s\n' "$helper_llvm_version"
+)
+
+# The caller's authority text is already included in the seed/tool snapshots.
+# Revalidate its helper identities at every Cargo boundary, including retries.
+bootstrap_stage3_rust_macos_helper_validate() (
+    [ "$#" -eq 2 ] || return 1
+    helper_authority=$1
+    helper_capsule=$2
+    helper_mode=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-helper-library-mode=//p')
+    case "$helper_mode" in
+        private-dylib) helper_roles='rust-objcopy rust-llvm-dylib' ;;
+        absent)
+            [ ! -e "$helper_capsule" ] && [ ! -L "$helper_capsule" ] || return 1
+            if printf '%s\n' "$helper_authority" | grep -q '^rust-llvm-dylib-'; then return 1; fi
+            helper_roles=rust-objcopy
+            ;;
+        *) return 1 ;;
+    esac
+    for helper_role in $helper_roles; do
+        helper_path=$(printf '%s\n' "$helper_authority" | sed -n "s/^$helper_role-path=//p")
+        helper_sha=$(printf '%s\n' "$helper_authority" | sed -n "s/^$helper_role-sha256=//p")
+        [ -n "$helper_path" ] && [ -n "$helper_sha" ] || return 1
+        [ "$(bootstrap_stage3_canonical_file "$helper_path")" = "$helper_path" ] || return 1
+        [ "$(bootstrap_stage3_hash_file "$helper_path")" = "$helper_sha" ] || return 1
+    done
+    helper_objcopy=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-objcopy-path=//p')
+    helper_expected=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-helper-llvm-version=//p')
+    if [ "$helper_mode" = private-dylib ]; then
+        [ -d "$helper_capsule" ] && [ ! -L "$helper_capsule" ] || return 1
+        [ "$(stat -f %Lp "$helper_capsule")" = 555 ] || return 1
+        for helper_entry in "$helper_capsule"/* "$helper_capsule"/.[!.]* "$helper_capsule"/..?*; do
+            [ -e "$helper_entry" ] || [ -L "$helper_entry" ] || continue
+            [ "$helper_entry" = "$helper_capsule/libLLVM.dylib" ] || return 1
+        done
+        [ "$(stat -f %Lp "$helper_capsule/libLLVM.dylib")" = 444 ] || return 1
+        [ "$(bootstrap_stage3_canonical_file "$helper_capsule/libLLVM.dylib")" = \
+            "$helper_capsule/libLLVM.dylib" ] || return 1
+        [ "$(bootstrap_stage3_hash_file "$helper_capsule/libLLVM.dylib")" = "$helper_sha" ] || return 1
+        helper_version=$(env -i PATH="$PATH" DYLD_LIBRARY_PATH="$helper_capsule" \
+            "$helper_objcopy" --version) || return 1
+    else
+        helper_version=$(env -i PATH="$PATH" "$helper_objcopy" --version) || return 1
+    fi
+    helper_actual=$(printf '%s\n' "$helper_version" | sed -n 's/^  LLVM version \([0-9.]*\).*/\1/p')
+    [ -n "$helper_expected" ] && [ "$helper_actual" = "$helper_expected" ]
+)
+
+bootstrap_stage3_rust_macos_helper_prepare() (
+    [ "$#" -eq 2 ] || return 1
+    helper_authority=$1
+    helper_capsule=$2
+    case "$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-helper-library-mode=//p')" in
+        absent) bootstrap_stage3_rust_macos_helper_validate "$helper_authority" "$helper_capsule"; return $? ;;
+        private-dylib) ;;
+        *) return 1 ;;
+    esac
+    if [ ! -e "$helper_capsule" ] && [ ! -L "$helper_capsule" ]; then
+        helper_llvm=$(printf '%s\n' "$helper_authority" | sed -n 's/^rust-llvm-dylib-path=//p')
+        [ -n "$helper_llvm" ] || return 1
+        helper_staging=$(mktemp -d "$helper_capsule.tmp.XXXXXX") || return 1
+        # cp streams the bytes; validate before atomic publication. An interrupted
+        # copy leaves only an unadmitted staging directory, never a partial cache.
+        cp "$helper_llvm" "$helper_staging/libLLVM.dylib" || return 1
+        chmod 444 "$helper_staging/libLLVM.dylib" || return 1
+        chmod 555 "$helper_staging" || return 1
+        bootstrap_stage3_rust_macos_helper_validate "$helper_authority" "$helper_staging" || return 1
+        mv "$helper_staging" "$helper_capsule" || return 1
+    fi
+    bootstrap_stage3_rust_macos_helper_validate "$helper_authority" "$helper_capsule" || return 1
+)
+
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
@@ -767,6 +901,37 @@ bootstrap_stage3_target_c_compiler() {
             "$bootstrap_stage3_gnu_tool_path" \
                 --target=x86_64-w64-windows-gnu --version >/dev/null 2>&1
             ;;
+        *-apple-darwin)
+            # Honor the same explicit Clang selection for cc-rs and C builds.
+            case "${CXX:-clang++}" in
+                g++|g++-*|gcc|gcc-*|*/gcc|*/gcc-*|*/g++|*/g++-*)
+                    echo 'bootstrap: GCC/G++ is forbidden for the macOS C++ toolchain' >&2
+                    return 1 ;;
+            esac
+            bootstrap_stage3_mac_cc=$(command -v "${CC:-clang}") || return 1
+            if [ -n "${SIMPLE_LLVM_REQUIRED_VERSION:-}" ]; then
+                for bootstrap_stage3_pin in "$bootstrap_stage3_mac_cc" "${CXX:-}" \
+                    "${AR:-}" "${LD:-}" "${LLVM_CONFIG:-}"; do
+                    bootstrap_stage3_verify_llvm_pin "$bootstrap_stage3_pin" \
+                        "$SIMPLE_LLVM_REQUIRED_VERSION" || return 1
+                done
+                [ "${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$bootstrap_stage3_mac_cc}" = "$bootstrap_stage3_mac_cc" ] || {
+                    echo 'bootstrap: pinned Rust linker must use selected CC' >&2
+                    return 1
+                }
+            fi
+            case "$bootstrap_stage3_mac_cc" in
+                */gcc|*/gcc-*|*/g++|*/g++-*)
+                    echo 'bootstrap: GCC/G++ is forbidden for the macOS C toolchain' >&2
+                    return 1 ;;
+            esac
+            "$bootstrap_stage3_mac_cc" --version 2>/dev/null |
+                grep -qi 'clang version' || {
+                    echo 'bootstrap: macOS C compiler must be Clang' >&2
+                    return 1
+                }
+            printf '%s\n' "$bootstrap_stage3_mac_cc"
+            ;;
         *-unknown-freebsd)
             # FreeBSD's QEMU/CI lane admits an explicit LLVM provider. Keep
             # that provider bound to the native target instead of silently
@@ -781,7 +946,13 @@ bootstrap_stage3_target_c_compiler() {
             fi
             ;;
         *)
-            command -v cc 2>/dev/null
+            bootstrap_stage3_target_cc=${CC:-cc}
+            bootstrap_stage3_target_cc_path=$(command -v \
+                "$bootstrap_stage3_target_cc" 2>/dev/null) || return 1
+            [ -f "$bootstrap_stage3_target_cc_path" ] || return 1
+            [ -x "$bootstrap_stage3_target_cc_path" ] || return 1
+            "$bootstrap_stage3_target_cc_path" --version >/dev/null 2>&1 || return 1
+            printf '%s\n' "$bootstrap_stage3_target_cc_path"
             ;;
     esac
 }
@@ -1391,6 +1562,10 @@ bootstrap_stage3_resolve_rust_toolchain() (
             "$bootstrap_stage3_rust_policy" \
             "$(bootstrap_stage3_hash_file "$bootstrap_stage3_rust_policy")" \
             "$bootstrap_stage3_rust_channel"
+        bootstrap_stage3_rust_selected=$(printf '%s\n' "$bootstrap_stage3_rust_installed" |
+            sed -n 's/^rustc-path=//p') || return 1
+        bootstrap_stage3_verify_rust_llvm_pin "$bootstrap_stage3_rust_selected" || return 1
+        bootstrap_stage3_rust_macos_helper_authority "$bootstrap_stage3_rust_selected" || return 1
         printf '%s\n' "$bootstrap_stage3_rust_installed"
         return 0
     else
@@ -1426,6 +1601,8 @@ bootstrap_stage3_resolve_rust_toolchain() (
         "$bootstrap_stage3_rust_policy" \
         "$(bootstrap_stage3_hash_file "$bootstrap_stage3_rust_policy")" \
         "$bootstrap_stage3_rust_channel"
+    bootstrap_stage3_verify_rust_llvm_pin "$bootstrap_stage3_rustc" || return 1
+    bootstrap_stage3_rust_macos_helper_authority "$bootstrap_stage3_rustc" || return 1
     printf 'rust-sysroot=%s\nrustc-path=%s\ncargo-path=%s\n' \
         "$bootstrap_stage3_rust_sysroot" "$bootstrap_stage3_rustc" \
         "$bootstrap_stage3_cargo"
@@ -1485,7 +1662,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     esac
     PATH=$bootstrap_stage3_llvm_path
     export PATH
-    bootstrap_stage3_llvm_config=$(command -v llvm-config) || return 1
+    bootstrap_stage3_llvm_config=$(command -v "${LLVM_CONFIG:-llvm-config}") || return 1
     bootstrap_stage3_llvm_config_canonical=$(
         perl -MCwd=abs_path -e \
             'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
@@ -1804,6 +1981,59 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 bootstrap_stage3_llvm_msvc_found=$(
                     bootstrap_stage3_llvm_msvc_find_lib                         "$bootstrap_stage3_llvm_system_token"                         "$bootstrap_stage3_llvm_libdir"
                 )
+                if [ -z "$bootstrap_stage3_llvm_msvc_found" ]; then
+                    # GNU toolchains keep the same system libraries as
+                    # lib<name>.a in the compiler driver search path (MinGW
+                    # resolves psapi.lib to libpsapi.a). Bind the exact
+                    # archive the linker will select, so the record names
+                    # what actually linked -- the same guarantee as the
+                    # MSVC/LIB branch, for hosts without an MSVC SDK.
+                    bootstrap_stage3_llvm_gnu_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
+                    bootstrap_stage3_llvm_gnu_resolved=$(gcc -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
+                    case "$bootstrap_stage3_llvm_gnu_resolved" in
+                        /*|[A-Za-z]:[\\/]*)
+                            # gcc answers with a native Windows path, which
+                            # the MSYS filesystem tests cannot see; convert
+                            # before testing and before recording.
+                            bootstrap_stage3_llvm_gnu_unix=$(cygpath -u "$bootstrap_stage3_llvm_gnu_resolved" 2>/dev/null || printf '%s' "$bootstrap_stage3_llvm_gnu_resolved")
+                            [ -f "$bootstrap_stage3_llvm_gnu_unix" ] &&
+                                bootstrap_stage3_llvm_msvc_found=$bootstrap_stage3_llvm_gnu_unix
+                            ;;
+                    esac
+                fi
+                if [ -z "$bootstrap_stage3_llvm_msvc_found" ]; then
+                    # A token nobody provides may be statically absorbed into
+                    # the runtime library itself: LLVM 18 links libxml2 in,
+                    # yet llvm-config --system-libs still names libxml2s.lib
+                    # for static consumers. Prove absorption from the runtime
+                    # library's import table -- when no DLL carrying the base
+                    # name is imported, the runtime is self-contained for this
+                    # token and a dynamic link cannot miss it.
+                    bootstrap_stage3_llvm_absorb_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
+                    bootstrap_stage3_llvm_absorb_dll=$(printf '%s' "$bootstrap_stage3_llvm_absorb_base" | sed 's/s$//')
+                    # LLVM-C.dll sits in bin/ on Windows, while libdir names
+                    # the static-library directory; check both spellings.
+                    bootstrap_stage3_llvm_runtime_dll=
+                    for bootstrap_stage3_llvm_rt_candidate in \
+                        "$bootstrap_stage3_llvm_libdir/LLVM-C.dll" \
+                        "$bootstrap_stage3_llvm_libdir/../bin/LLVM-C.dll"; do
+                        if [ -f "$bootstrap_stage3_llvm_rt_candidate" ]; then
+                            bootstrap_stage3_llvm_runtime_dll=$bootstrap_stage3_llvm_rt_candidate
+                            break
+                        fi
+                    done
+                    bootstrap_stage3_llvm_imports=
+                    if [ -f "$bootstrap_stage3_llvm_runtime_dll" ] &&
+                        command -v objdump >/dev/null 2>&1 &&
+                        bootstrap_stage3_llvm_imports=$(objdump -p "$bootstrap_stage3_llvm_runtime_dll" 2>/dev/null) &&
+                        printf '%s\n' "$bootstrap_stage3_llvm_imports" | grep -q 'DLL Name:' &&
+                        ! printf '%s\n' "$bootstrap_stage3_llvm_imports" |
+                            grep -qi "DLL Name: ${bootstrap_stage3_llvm_absorb_dll}[-0-9]*\.dll"; then
+                        printf 'llvm-system-lib-%s-absorbed-by-runtime=%s\n' \
+                            "$bootstrap_stage3_llvm_key" "$bootstrap_stage3_llvm_absorb_base"
+                        continue
+                    fi
+                fi
                 [ -n "$bootstrap_stage3_llvm_msvc_found" ] || {
                     echo "llvm authority: llvm-config --system-libs named '${bootstrap_stage3_llvm_system_token}', which is in neither the LLVM libdir (${bootstrap_stage3_llvm_libdir}) nor any LIB entry; is the MSVC environment set?" >&2
                     return 1
@@ -1889,7 +2119,7 @@ bootstrap_stage3_tool_authority_snapshot() (
     # consumes this exact selected identity.
     bootstrap_stage3_tool_c_path=$(command -v cc 2>/dev/null || printf '')
     case "$(bootstrap_stage3_host_platform)" in
-        *-pc-windows-msvc|*-pc-windows-gnu)
+        *-pc-windows-msvc|*-pc-windows-gnu|*-apple-darwin)
             bootstrap_stage3_tool_c_path=$(
                 bootstrap_stage3_target_c_compiler \
                     "$(bootstrap_stage3_host_platform)"
@@ -1987,8 +2217,8 @@ bootstrap_stage3_tool_authority_snapshot() (
                 >>"$bootstrap_stage3_tool_tmp" || return 1
         fi
     done
-    if command -v llvm-config >/dev/null 2>&1; then
-        bootstrap_stage3_tool_llvm_requested=$(command -v llvm-config) ||
+    if command -v "${LLVM_CONFIG:-llvm-config}" >/dev/null 2>&1; then
+        bootstrap_stage3_tool_llvm_requested=$(command -v "${LLVM_CONFIG:-llvm-config}") ||
             return 1
         bootstrap_stage3_tool_llvm_canonical=$(
             perl -MCwd=abs_path -e \
@@ -2531,18 +2761,20 @@ bootstrap_stage3_copy_authority() {
 # native runtime archive, and compiler backfill archive, while detecting a
 # producer that changes any member during projection.
 bootstrap_stage3_copy_seed_tuple() {
-    [ "$#" -eq 5 ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 1" >&2; return 64; }
+    { [ "$#" -eq 5 ] || [ "$#" -eq 6 ]; } || { echo "bootstrap_stage3_copy_seed_tuple: failed check 1" >&2; return 64; }
     bootstrap_stage3_tuple_source=$1
     bootstrap_stage3_tuple_destination=$2
-    shift 2
+    bootstrap_stage3_tuple_target=${6:-}
+    set -- "$3" "$4" "$5"
     [ -d "$bootstrap_stage3_tuple_source" ] &&
         [ ! -L "$bootstrap_stage3_tuple_source" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 2" >&2; return 1; }
     [ ! -e "$bootstrap_stage3_tuple_destination" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 3" >&2; return 1; }
 
     # Stage4 consumes the non-LTO Rust static runtime directly from deps.
     # Do not infer authority from everything Cargo happened to leave in the
-    # profile directory (notably the cdylib: the native linker deliberately
-    # forces the Simple runtime static).  Derive the target spelling from the
+    # profile directory. macOS also requires the runtime dylib because it owns
+    # the Cocoa ABI; retain it in the same atomically hashed vector. Derive the
+    # static archive spelling from the
     # native-all archive selected by the platform owner.
     case "$2" in
         libsimple_native_all.a)
@@ -2554,6 +2786,21 @@ bootstrap_stage3_copy_seed_tuple() {
         *) return 1 ;;
     esac
     set -- "$@" "$bootstrap_stage3_tuple_runtime_name"
+    case "$bootstrap_stage3_tuple_target" in
+        *apple-darwin*)
+            set -- "$@" libsimple_runtime.dylib
+            # Preserve optional diagnostic Cocoa candidates in the same copy
+            # transaction. These files confer no mapping authority: Phase2
+            # records cocoa_admission=unavailable until Darwin exact-byte and
+            # dependency admission are qualified. Reject half-pairs below.
+            if [ -e "$bootstrap_stage3_tuple_source/libspl_cocoa.dylib" ] ||
+                [ -L "$bootstrap_stage3_tuple_source/libspl_cocoa.dylib" ] ||
+                [ -e "$bootstrap_stage3_tuple_source/libspl_cocoa.producer.txt" ] ||
+                [ -L "$bootstrap_stage3_tuple_source/libspl_cocoa.producer.txt" ]; then
+                set -- "$@" libspl_cocoa.dylib libspl_cocoa.producer.txt
+            fi
+            ;;
+    esac
 
     # The hosted GPU/backend linker needs the Rust hosted-runtime rlib, but it
     # must never rediscover it from a mutable Cargo target after admission.
@@ -3194,7 +3441,7 @@ bootstrap_stage3_pin_private_authority() {
 # Prepare and publish immutable Rust authority generations. The current marker
 # is the commit record; a generation is never mutated after marker admission.
 bootstrap_stage3_prepare_seed_generation() {
-    [ "$#" -eq 7 ] || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
+    { [ "$#" -eq 7 ] || [ "$#" -eq 8 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
     bootstrap_stage3_generation_source=$1
     bootstrap_stage3_generation_root=$2
     bootstrap_stage3_generation_inputs=$3
@@ -3202,6 +3449,7 @@ bootstrap_stage3_prepare_seed_generation() {
     bootstrap_stage3_generation_native_name=$5
     bootstrap_stage3_generation_backfill_name=$6
     bootstrap_stage3_generation_nonce=$7
+    bootstrap_stage3_generation_target=${8:-}
     bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_generation_inputs" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 2" >&2; return 1; }
     bootstrap_stage3_generation_staging=\
 "$bootstrap_stage3_generation_root/.staging.$bootstrap_stage3_generation_nonce"
@@ -3211,7 +3459,8 @@ bootstrap_stage3_prepare_seed_generation() {
         "$bootstrap_stage3_generation_staging" \
         "$bootstrap_stage3_generation_seed_name" \
         "$bootstrap_stage3_generation_native_name" \
-        "$bootstrap_stage3_generation_backfill_name" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 4" >&2; return 1; }
+        "$bootstrap_stage3_generation_backfill_name" \
+        "$bootstrap_stage3_generation_target" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 4" >&2; return 1; }
     # Carry the successful fingerprint sidecar into the immutable generation.
     # It is optional for legacy callers and is never accepted from a symlink.
     bootstrap_stage3_generation_details_source=${BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE:-}
@@ -3323,8 +3572,7 @@ bootstrap_stage3_publish_seed_generation() {
 "${BOOTSTRAP_STAGE3_AUTHORITY_PUBLISH_HELPER:-\
 $(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")/bootstrap-authority-generation-publish.pl}"
     [ -f "$bootstrap_stage3_publish_helper" ] || return 1
-    perl "$bootstrap_stage3_publish_helper" \
-        "$bootstrap_stage3_publish_mode" \
+    set -- "$bootstrap_stage3_publish_mode" \
         "$bootstrap_stage3_publish_staging" \
         "$bootstrap_stage3_publish_final" \
         "$bootstrap_stage3_publish_marker" \
@@ -3332,6 +3580,15 @@ $(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")/bootstrap-authority-generation-pub
         "$bootstrap_stage3_publish_inputs" \
         "$bootstrap_stage3_publish_hash" \
         "$bootstrap_stage3_publish_stamp_hash"
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*)
+        # MSYS may emulate symlink() by copying the immutable generation.
+        # Require a real link, or fail closed before admitting its marker.
+        MSYS="${MSYS:+${MSYS} }winsymlinks:nativestrict" \
+            perl "$bootstrap_stage3_publish_helper" "$@"
+        ;;
+    *) perl "$bootstrap_stage3_publish_helper" "$@" ;;
+    esac
 }
 
 bootstrap_stage3_recover_seed_transaction() {
@@ -3765,11 +4022,25 @@ public static class Stage3MaterializedConsumer {
 
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    // Submodule gitlink paths (160000 commit) recorded by HeadLinks; AuditTree
+    // never descends into them, so their nested .git is not a violation.
+    static readonly HashSet<string> Gitlinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // Callers may tighten budgets, never increase the admitted ceilings.
-    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 100000);
+    // Shared by HEAD and the physical walk: 137461 + 176143 entries at the
+    // admitted source state. 400000 leaves bounded growth without bypassing
+    // the command-output, byte, or 28-second watchdog ceilings.
+    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 400000);
+    // Inventory is separate from the cumulative HEAD/physical count; retain
+    // its previous per-list ceiling and handle-retention bound.
+    const int MaxUntracked = 100000;
     const int MaxOutput = 16 * 1024 * 1024;
+    // The tracked HEAD diff is hashed, never parsed, and on a dirty tree with
+    // rebuilt binaries it far exceeds any memory buffer (a full-index binary
+    // diff of a ~100 MB seed is ~130 MB). Stream it through the hasher; this
+    // bound is a runaway guard only, not a buffer size.
+    static readonly long MaxDiffBytes = (long)Budget("BOOTSTRAP_STAGE3_GIT_MAX_DIFF_BYTES", 1024UL * 1024 * 1024);
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
-    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 28000);
+    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 300000);
     static ulong bytes;
     static int entries;
     static System.Diagnostics.Process ActiveChild;
@@ -3838,6 +4109,54 @@ public static class Stage3MaterializedConsumer {
         var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
         all.AddRange(args); return Command(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, all.ToArray());
     }
+    // The tracked HEAD diff can exceed any memory buffer on a dirty tree
+    // (rebuilt seed binaries produce 100+ MB full-index binary diffs); only
+    // its digest is consumed downstream, so stream stdout through SHA-256
+    // instead of buffering. The digest still binds Git's exact diff bytes;
+    // stderr stays bounded and stdin closes immediately.
+    static string GitHash(string root, params string[] args) {
+        var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
+        all.AddRange(args);
+        Tick(); var start = new System.Diagnostics.ProcessStartInfo(Environment.GetEnvironmentVariable("STAGE3_GIT"));
+        start.WorkingDirectory = root; start.UseShellExecute = false; start.CreateNoWindow = true;
+        start.RedirectStandardOutput = true; start.RedirectStandardError = true; start.RedirectStandardInput = true;
+        start.EnvironmentVariables["GIT_OPTIONAL_LOCKS"] = "0";
+        start.EnvironmentVariables["LC_ALL"] = "C";
+        start.EnvironmentVariables["GIT_CONFIG_NOSYSTEM"] = "1";
+        var argv = new List<string>(); foreach (string arg in all) argv.Add(Quote(arg));
+        start.Arguments = String.Join(" ", argv.ToArray());
+        using (var process = System.Diagnostics.Process.Start(start)) {
+            ActiveChild = process;
+            try {
+                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => {
+                    var hasher = System.Security.Cryptography.SHA256.Create();
+                    var buffer = new byte[65536]; int n; long total = 0;
+                    while ((n = process.StandardOutput.BaseStream.Read(buffer, 0, buffer.Length)) > 0) {
+                        if ((total += n) > MaxDiffBytes) throw new IOException("bound.command-output");
+                        hasher.TransformBlock(buffer, 0, n, null, 0);
+                    }
+                    hasher.TransformFinalBlock(new byte[0], 0, 0);
+                    return Hex(hasher.Hash);
+                });
+                var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
+                var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { process.StandardInput.Close(); });
+                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
+                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
+                return stdout.Result;
+            } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
+        }
+    }
+    // git check-ignore exits 0 when the path IS ignored (printing it) and 1
+    // when it is not; Command surfaces the non-zero exit as an IOException,
+    // so "failed:1" is the not-ignored answer and anything else still fails.
+    static bool IsGitIgnored(string root, string relative) {
+        try { Git(root, "check-ignore", "--", relative); return true; }
+        catch (IOException e) {
+            if (e.Message != null && e.Message.StartsWith("command.failed:1")) return false;
+            throw;
+        }
+    }
     static string[] Nul(byte[] b) {
         string s = Text(b); if (s.Length == 0) return new string[0];
         if (!s.EndsWith("\0")) throw new IOException("git.nul-format");
@@ -3845,14 +4164,17 @@ public static class Stage3MaterializedConsumer {
     }
     static void CheckPath(string path) {
         byte[] b = Utf8.GetBytes(path); Relative(Hex(b), b.Length.ToString(), false);
-        // The retained Stage3 line protocol cannot encode these names safely.
-        if (path.IndexOfAny(new char[] {'\n','\r','\t','\\',':','*','?','[',']'}) >= 0) throw new IOException("path.unsupported");
+        // Keep line-protocol and Windows-unsafe characters out; brackets are literal path data.
+        if (path.IndexOfAny(new char[] {'\n','\r','\t','\\',':','*','?'}) >= 0) throw new IOException("path.unsupported");
     }
-    static Dictionary<string,string> HeadLinks(string root, string head) {
+    static Dictionary<string,string> HeadLinks(string root, string head, Dictionary<string,string> gitlinks) {
         var links = new Dictionary<string,string>(StringComparer.Ordinal);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var components = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "--full-tree", head))) {
+        // -r recurses so links at every depth are seen; without it only root
+        // children are listed and the receipt row count check below can never
+        // match a real checkout (all 66 materialized links live below root).
+        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
             if (++entries > MaxEntries) throw new IOException("bound.entries");
             int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
             string path = row.Substring(tab + 1); CheckPath(path);
@@ -3865,7 +4187,9 @@ public static class Stage3MaterializedConsumer {
                 components[prefix] = prefix;
             }
             string[] f = row.Substring(0, tab).Split(' ');
-            if (f.Length != 3 || f[1] != "blob" || (f[0] != "100644" && f[0] != "100755" && f[0] != "120000")) throw new IOException("git.tree-kind");
+            if (f.Length != 3 || !((f[1] == "blob" && (f[0] == "100644" || f[0] == "100755" || f[0] == "120000")) ||
+                (f[1] == "commit" && f[0] == "160000"))) throw new IOException("git.tree-kind");
+            if (f[0] == "160000") gitlinks.Add(path, f[2]);
             if (f[0] == "120000") {
                 byte[] blob = Git(root, "cat-file", "blob", f[2]);
                 links.Add(path, Relative(Hex(blob), blob.Length.ToString(), true));
@@ -3874,7 +4198,101 @@ public static class Stage3MaterializedConsumer {
         }
         return links;
     }
-    static void AuditTree(string root, Dictionary<string,string> aliases, List<SafeFileHandle> held) {
+    static bool CheckGitlink(string root, string path, string expected, Dictionary<string,string> gitlinks,
+        bool discover, List<SafeFileHandle> held) {
+        bool metadata = false, content = false;
+        foreach (string child in Directory.EnumerateFileSystemEntries(path)) {
+            string name = Path.GetFileName(child);
+            if (name.Equals(".git", StringComparison.Ordinal)) {
+                var h = Open(child, true, 0); held.Add(h);
+                var tag = Tag(h);
+                if ((tag.Attributes & (0x400 | 0x40)) != 0) throw new IOException("path.gitlink-metadata");
+                metadata = true;
+            } else if (name.Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+            else content = true;
+        }
+        // Git ignores an uninitialized gitlink's contents in the parent tree.
+        if (!metadata) { if (content) throw new IOException("path.uninitialized-gitlink-content"); return false; }
+        string top = Text(Git(path, "rev-parse", "--show-toplevel")).TrimEnd('\n').Replace('/','\\').TrimEnd('\\');
+        // MSYS Git reports the same bound root as /d/... while native Git
+        // reports D:/...; preserve the top-level root check's exact mapping.
+        string posixRoot = Text(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64"))).Replace('/','\\').TrimEnd('\\');
+        string posixPath = posixRoot + path.Substring(root.Length).TrimEnd('\\');
+        if (!top.Equals(path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
+            !top.Equals(posixPath, StringComparison.Ordinal)) throw new IOException("git.gitlink-root");
+        if (Text(Git(path, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != expected) throw new IOException("git.gitlink-head");
+        foreach (string entry in Nul(Git(path, "ls-files", "-v", "-z")))
+            if (entry.Length < 3 || entry[1] != ' ' || Char.IsLower(entry[0]) || entry[0] == 'S') throw new IOException("git.gitlink-index-flags");
+        if (Git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none", "--ignored=matching").Length != 0)
+            throw new IOException("git.gitlink-dirty");
+        if (discover) {
+            var nested = new Dictionary<string,string>(StringComparer.Ordinal);
+            HeadLinks(path, expected, nested);
+            string prefix = path.Substring(root.Length + 1).Replace('\\','/');
+            foreach (var pair in nested) gitlinks.Add(prefix + "/" + pair.Key, pair.Value);
+        }
+        return true;
+    }
+    static Dictionary<string,string> AuthorityFields(byte[] data) {
+        string text = Text(data);
+        if (!text.EndsWith("\n") || text.IndexOf('\r') >= 0) throw new IOException("authority.format");
+        var fields = new Dictionary<string,string>(StringComparer.Ordinal);
+        foreach (string row in text.Substring(0, text.Length - 1).Split('\n')) {
+            int equal = row.IndexOf('=');
+            if (equal <= 0 || fields.ContainsKey(row.Substring(0, equal))) throw new IOException("authority.fields");
+            fields.Add(row.Substring(0, equal), row.Substring(equal + 1));
+        }
+        return fields;
+    }
+    static string AuthorityHash(Dictionary<string,string> fields, string key) {
+        string value;
+        if (!fields.TryGetValue(key, out value) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(value, "\\A[0-9a-f]{64}\\z")) throw new IOException("authority.hash:" + key);
+        return value;
+    }
+    static void AuthorityAbsent(string path) {
+        uint attrs = GetFileAttributesW(path); int error = Marshal.GetLastWin32Error();
+        if (attrs != 0xFFFFFFFFu || (error != 2 && error != 3)) throw new IOException("authority.transaction");
+    }
+    static void CheckGeneratedAuthority(string root, string link, List<SafeFileHandle> held) {
+        string parent = Path.Combine(root, "src", "compiler_rust", "target");
+        if (link != Path.Combine(parent, "bootstrap")) throw new IOException("authority.link-path");
+        string marker = Path.Combine(parent, "bootstrap.current.env");
+        AuthorityAbsent(marker + ".transaction"); AuthorityAbsent(link + ".migration.env");
+        var fields = AuthorityFields(ReadHeld(marker, held, 4096));
+        string schema, generation;
+        if (fields.Count != 5 || !fields.TryGetValue("schema", out schema) || schema != "simple-bootstrap-authority-current-v1" ||
+            !fields.TryGetValue("generation", out generation)) throw new IOException("authority.marker");
+        string inputs = AuthorityHash(fields, "inputs_fingerprint");
+        string generationHash = AuthorityHash(fields, "generation_sha256");
+        string stampHash = AuthorityHash(fields, "stamp_sha256");
+        if (generation != inputs + "-" + generationHash) throw new IOException("authority.generation-name");
+        string target = Path.Combine(parent, "bootstrap.generations", generation);
+        Parents(target, false, held);
+        var expected = Open(target, true, 0); held.Add(expected);
+        if ((Tag(expected).Attributes & 0x450) != 0x10) throw new IOException("authority.generation-kind");
+        var raw = Open(link, true, 0); held.Add(raw);
+        var tag = Tag(raw);
+        if ((tag.Attributes & 0x450) != 0x410 || tag.Tag != 0xA000000Cu)
+            throw new IOException("authority.link-tag");
+        var actual = Open(link, false, 0); held.Add(actual);
+        var x = Identity(actual); var y = Identity(expected);
+        if (x.Volume != y.Volume || x.IndexHigh != y.IndexHigh || x.IndexLow != y.IndexLow)
+            throw new IOException("authority.link-target");
+        byte[] stamp = ReadHeld(Path.Combine(target, "simple.exe.inputs.sha256"), held, 4096);
+        if (Hash(stamp) != stampHash) throw new IOException("authority.stamp-hash");
+        var stampFields = AuthorityFields(stamp);
+        string stampSchema, stampInputs;
+        if (!stampFields.TryGetValue("schema", out stampSchema) || stampSchema != "simple-bootstrap-seed-artifact-stamp-v2" ||
+            !stampFields.TryGetValue("inputs_fingerprint", out stampInputs) || stampInputs != inputs)
+            throw new IOException("authority.stamp-inputs");
+        // This proves the generated link's topology, with all proof handles held.
+        // Runtime bytes remain the committed-seed owner's content-admission job;
+        // hashing them here would consume the source audit's bounded byte budget.
+    }
+    static void AuditTree(string root, Dictionary<string,string> aliases, Dictionary<string,string> gitlinks,
+        HashSet<string> inspectedGitlinks, HashSet<string> initializedGitlinks,
+        List<string> generatedAuthorities, List<SafeFileHandle> held) {
         var todo = new Stack<string>(); todo.Push(root);
         Parents(Path.Combine(root, "leaf"), false, held);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3888,13 +4306,28 @@ public static class Stage3MaterializedConsumer {
                 if (relative == ".git") continue;
                 CheckPath(relative);
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
-                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
+                    string parent = relative.Substring(0, relative.Length - 5);
+                    if (!gitlinks.ContainsKey(parent) || relative != parent + "/.git") throw new IOException("path.nested-repository");
+                    continue;
+                }
                 var raw = Open(item, true, 0); held.Add(raw);
                 {
                     var tag = Tag(raw);
                     if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
+                    if ((tag.Attributes & 0x400) != 0 && relative == "src/compiler_rust/target/bootstrap") {
+                        CheckGeneratedAuthority(root, item, held);
+                        generatedAuthorities.Add(item);
+                        continue;
+                    }
                     if ((tag.Attributes & 0x400) != 0) throw new IOException("path.unreceipted-reparse");
                     if ((tag.Attributes & 0x40) != 0) throw new IOException("path.special");
+                    string oid;
+                    if (gitlinks.TryGetValue(relative, out oid)) {
+                        if ((tag.Attributes & 0x10) == 0) throw new IOException("path.gitlink-kind");
+                        if (CheckGitlink(root, item, oid, gitlinks, true, held)) initializedGitlinks.Add(relative);
+                        inspectedGitlinks.Add(relative);
+                    }
                     if ((tag.Attributes & 0x10) != 0) todo.Push(item);
                 }
             }
@@ -3912,7 +4345,7 @@ public static class Stage3MaterializedConsumer {
         }
     }
     static string Inventory(string root, string head, Dictionary<string,string> aliases) {
-        byte[] diff = Git(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--");
+        string diff_sha = GitHash(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--");
         var args = new List<string>(new string[] {"ls-files", "--others", "--exclude-standard", "-z", "--", "."});
         var collapsed = new List<string>();
         foreach (var pair in aliases) if (pair.Value == "directory") collapsed.Add(pair.Key);
@@ -3923,7 +4356,7 @@ public static class Stage3MaterializedConsumer {
             collapse.Append("alias-collapse-directory:").Append(Utf8.GetByteCount(path)).Append(':').Append(Hex(Utf8.GetBytes(path))).Append('\n');
         }
         string[] paths = Nul(Git(root, args.ToArray()));
-        if (paths.Length > MaxEntries) throw new IOException("bound.untracked");
+        if (paths.Length > MaxUntracked || paths.Length > MaxEntries) throw new IOException("bound.untracked");
         Array.Sort(paths, (a,b) => CompareBytes(Utf8.GetBytes(a), Utf8.GetBytes(b)));
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string path in paths) {
@@ -3932,7 +4365,7 @@ public static class Stage3MaterializedConsumer {
         }
         byte[] flags = Command(root, Environment.GetEnvironmentVariable("STAGE3_SH"), Utf8.GetBytes(paths.Length == 0 ? "" : String.Join("\0", paths) + "\0"), "-c", "while IFS= read -r -d '' p; do if test -x \"$p\"; then printf 1; else printf 0; fi; done");
         if (flags.Length != paths.Length) throw new IOException("untracked.mode-count");
-        var records = new StringBuilder("tracked-diff-sha256=" + Hash(diff) + "\n");
+        var records = new StringBuilder("tracked-diff-sha256=" + diff_sha + "\n");
         var held = new List<SafeFileHandle>();
         try {
             for (int n=0; n<paths.Length; n++) {
@@ -3964,7 +4397,8 @@ public static class Stage3MaterializedConsumer {
             string posixRoot = Text(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64"))).Replace('/','\\');
             if (!top.Equals(root, StringComparison.OrdinalIgnoreCase) && !top.Equals(posixRoot, StringComparison.Ordinal)) throw new IOException("root.git-mismatch");
             string producerHash = Hash(ReadHeld(Path.Combine(root, "scripts", "setup", "materialize-symlinks-windows.shs"), held, 1024 * 1024));
-            var headLinks = HeadLinks(root, head);
+            var gitlinks = new Dictionary<string,string>(StringComparer.Ordinal);
+            var headLinks = HeadLinks(root, head, gitlinks);
             var pending = new List<string>();
             byte[] receiptBytes = ReadHeld(source, held, 8 * 1024 * 1024);
             string receiptText = new UTF8Encoding(false,true).GetString(receiptBytes);
@@ -4099,13 +4533,31 @@ public static class Stage3MaterializedConsumer {
             // unambiguous because aliases themselves are unique and no target
             // may equal or descend from an alias path; do not reject equal or
             // nested canonical target paths here.
-            AuditTree(root, aliases, held);
+            var inspectedGitlinks = new HashSet<string>(StringComparer.Ordinal);
+            var initializedGitlinks = new HashSet<string>(StringComparer.Ordinal);
+            var generatedAuthorities = new List<string>();
+            AuditTree(root, aliases, gitlinks, inspectedGitlinks, initializedGitlinks, generatedAuthorities, held);
             // Held policy/placeholder bytes are authoritative until Git returns.
             // Absence itself cannot be locked: check at use and again at finish.
             CheckPending(pendingLinks, pending, policyRows, held);
             string result = Inventory(root, head, aliases);
             CheckPending(pendingLinks, pending, policyRows, held);
+            // The child status ran before descendant handles were acquired.
+            // Recheck every child after the full walk, including absent and
+            // uninitialized gitlinks whose empty directories cannot lock out
+            // new entries. No new path may appear after the audit.
+            foreach (var pair in gitlinks) {
+                string path = Path.Combine(root, pair.Key.Replace('/','\\'));
+                uint attr = GetFileAttributesW(path);
+                int error = Marshal.GetLastWin32Error();
+                bool present = attr != 0xFFFFFFFFu;
+                if (!present && error != 2 && error != 3) throw new IOException("path.gitlink-absence");
+                if (present != inspectedGitlinks.Contains(pair.Key)) throw new IOException("path.gitlink-appeared-or-vanished");
+                if (present && CheckGitlink(root, path, pair.Value, gitlinks, false, held) != initializedGitlinks.Contains(pair.Key))
+                    throw new IOException("path.gitlink-initialization-changed");
+            }
             if (Text(Git(root, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != head) throw new IOException("head.changed");
+            foreach (string generated in generatedAuthorities) CheckGeneratedAuthority(root, generated, held);
             if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("policy.changed");
             Tick();
             File.WriteAllText(Environment.GetEnvironmentVariable("STAGE3_RESULT"), result, new UTF8Encoding(false));
@@ -4143,7 +4595,11 @@ bootstrap_stage3_materialized_git_state() (
     STAGE3_GIT=$(cygpath -aw "$(command -v git)") || exit 1
     STAGE3_SH=$(cygpath -aw /usr/bin/sh.exe) || exit 1
     export STAGE3_ROOT STAGE3_ROOT_B64 STAGE3_RECEIPT STAGE3_RESULT STAGE3_OUTPUT STAGE3_GIT STAGE3_SH
-    /usr/bin/timeout -k 2s 30s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+    # The C# watchdog budget (MaxMillis, default 300s after the 2026-09-16
+    # full-checkout measurement) must win the race against this outer kill:
+    # a too-tight timeout here reports a healthy, still-walking consumer as a
+    # generic bind failure.
+    /usr/bin/timeout -k 2s 330s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
 )
 
 bootstrap_stage3_git_state() {
@@ -4744,8 +5200,14 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                 >>"$bootstrap_stage3_seed_records" || exit 1
         fi
         bootstrap_stage3_seed_trace native-cc-recorded
-        if command -v llvm-config >/dev/null 2>&1; then
-            bootstrap_stage3_seed_llvm_config=$(command -v llvm-config) ||
+        # Forwarded Cargo settings distinguish cached seed authorities.
+        printf 'cxx=%s\nar=%s\nld=%s\nllvm-config=%s\nrustflags=%s\nmac-linker=%s\n' \
+            "${CXX-<unset>}" "${AR-<unset>}" "${LD-<unset>}" \
+            "${LLVM_CONFIG:-llvm-config}" "${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-${RUSTFLAGS:-}}" \
+            "${CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER:-$bootstrap_stage3_seed_cc}" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        if command -v "${LLVM_CONFIG:-llvm-config}" >/dev/null 2>&1; then
+            bootstrap_stage3_seed_llvm_config=$(command -v "${LLVM_CONFIG:-llvm-config}") ||
                 exit 1
             bootstrap_stage3_seed_trace native-llvm-selected
             bootstrap_stage3_seed_llvm_config_canonical=$(

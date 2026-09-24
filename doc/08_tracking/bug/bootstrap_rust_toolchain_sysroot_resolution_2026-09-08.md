@@ -1,10 +1,12 @@
 # Bootstrap Rust toolchain sysroot resolution
-## Open 2026-09-16 — needs owner triage
+## Source fixed; focused Windows proof pending 2026-09-22
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-Owner: Astra bootstrap phase-check lane. Status: Phase 1 published; intermittent metadata failures remain under investigation before Stage 2 admission.
+Owner: Astra bootstrap phase-check lane. Status: source fix is present; focused
+Windows proof and canonical Stage 2 handoff remain pending. No Stage 2
+admission is claimed here.
 
 The previous run stopped at `could not resolve canonical Rust toolchain` in
 `scripts/bootstrap/bootstrap-from-scratch.sh`. The resolver in
@@ -198,3 +200,26 @@ The host loader now preserves declared PATH precedence while remaining
 idempotent; the MSVC chain oracle confirms rustc/cargo resolve from the rustup
 proxy and LLVM, VC, MSYS, and SDK directories retain their required order.
 
+## P1 recheck 2026-09-22
+
+Source review finds no resolver cache: `bootstrap_stage3_resolve_rust_toolchain`
+reads the selected policy and rustup metadata, then returns immutable executable
+paths. Its installed-rustup route binds the policy channel, settings digest,
+toolchain directory, exact `.exe` files, sysroot match, host, and cargo version.
+Its non-rustup route invokes the selected frontend under `env -i` with the
+policy channel and requires canonical, non-symlink rustc/cargo files beneath the
+reported sysroot. This is valid for custom toolchains; a missing or corrupt
+sysroot fails closed. Environment policy overrides are excluded by the clean
+launch and existing fault cases. The fingerprint consumer preserves the exact
+returned rustc/cargo paths for the Stage 2 handoff; it does not reconstruct
+extensionless names.
+
+The focused fixture now places the custom Windows sysroot in a spaced, long
+path. Syntax checks passed (`sh -n` for fixture and authority helper). A first
+path above the Windows cleanup limit made Git Bash cleanup hang; only the two
+test processes started by this lane were stopped, and the fixture was reduced
+below that limit. Therefore elapsed time and peak RSS for a completed focused
+matrix are not yet recorded, and this row remains proof-pending. The existing
+private Rust→Stage 2 contract test also currently fails before its fixture on a
+stale wrapper source-order assertion; that is a separate handoff-test defect,
+not evidence against sysroot resolution.

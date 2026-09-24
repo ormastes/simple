@@ -22,6 +22,49 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
+// CreateProcessW rejects command lines over 32,767 UTF-16 code units. The
+// native object cache uses long absolute paths, so a fixed 200-object archive
+// batch can exceed that limit before the archiver is even started. Keep a
+// conservative 16K budget for the tool, archive arguments, and object paths.
+pub(super) const ARCHIVE_BATCH_ARG_LIMIT: usize = 16 * 1024;
+
+pub(super) fn archive_arg_budget(arg: &OsStr) -> usize {
+    // Allow space for Windows quoting and escaped backslashes as well as the
+    // separator. This deliberately overestimates ordinary absolute paths.
+    arg.to_string_lossy().encode_utf16().count() * 2 + 3
+}
+
+pub(super) fn archive_object_batches<'a>(
+    tool: &str,
+    archive: &Path,
+    objects: &'a [PathBuf],
+) -> Result<Vec<&'a [PathBuf]>, String> {
+    const MAX_OBJECTS_PER_BATCH: usize = 200;
+    // Appending repeats the archive path for lib.exe and is the largest form.
+    let command = archive_create_command(tool, archive, &[], true, false);
+    let base_budget = archive_arg_budget(command.get_program())
+        + command.get_args().map(archive_arg_budget).sum::<usize>();
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut budget = base_budget;
+    for (index, object) in objects.iter().enumerate() {
+        let object_budget = archive_arg_budget(object.as_os_str());
+        if base_budget + object_budget > ARCHIVE_BATCH_ARG_LIMIT {
+            return Err(format!("archive object path exceeds Windows command-line budget: {}", object.display()));
+        }
+        if index - start == MAX_OBJECTS_PER_BATCH || budget + object_budget > ARCHIVE_BATCH_ARG_LIMIT {
+            batches.push(&objects[start..index]);
+            start = index;
+            budget = base_budget;
+        }
+        budget += object_budget;
+    }
+    if start < objects.len() {
+        batches.push(&objects[start..]);
+    }
+    Ok(batches)
+}
+
 fn is_windows_gnu_target(target: simple_common::target::Target) -> bool {
     target.os == simple_common::target::TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu
 }
@@ -58,6 +101,47 @@ pub(super) fn minimal_boot_source_allowed(stem: &str, ssh_live_boot: bool) -> bo
         || stem == "tls13_aes256_gcm_helper"
         || stem == "tls13_sha256_helper"
         || stem == "ed25519_verify_helper"
+}
+
+fn wrap_elf32_multiboot(output: &Path, objcopy_bin: &str) -> Result<(), String> {
+    let file_name = output
+        .file_name()
+        .ok_or_else(|| format!("ELF32 multiboot output has no file name: {}", output.display()))?;
+    let mut intermediate_name = file_name.to_os_string();
+    intermediate_name.push(format!(".elf64-wrap.{}", std::process::id()));
+    let elf64 = output.with_file_name(intermediate_name);
+    if elf64.exists() {
+        return Err(format!(
+            "ELF32 multiboot intermediate already exists: {}",
+            elf64.display()
+        ));
+    }
+
+    std::fs::rename(output, &elf64)
+        .map_err(|e| format!("save ELF64 before requested ELF32 multiboot wrap: {e}"))?;
+    let objcopy = std::process::Command::new(objcopy_bin)
+        .args(["-O", "elf32-i386"])
+        .arg(&elf64)
+        .arg(output)
+        .output();
+    match objcopy {
+        Ok(result) if result.status.success() => std::fs::remove_file(&elf64)
+            .map_err(|e| format!("remove intermediate ELF64 after ELF32 multiboot wrap: {e}")),
+        result => {
+            let _ = std::fs::remove_file(output);
+            std::fs::rename(&elf64, output).map_err(|e| {
+                format!("ELF32 multiboot wrap failed and restoring ELF64 failed: {e}")
+            })?;
+            let detail = match result {
+                Ok(result) => format!("objcopy exited with {}", result.status),
+                Err(e) => format!("cannot run objcopy: {e}"),
+            };
+            Err(format!(
+                "requested ELF32 multiboot wrap failed ({detail}); preserved ELF64 at {}",
+                output.display()
+            ))
+        }
+    }
 }
 
 /// Translate a `SIMPLE_LINKER` value into the pair the C driver needs.
@@ -204,8 +288,41 @@ fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn add_macos_base_link_args(cmd: &mut std::process::Command) {
-    cmd.arg("-Wl,-ld_classic").arg("-Wl,-dead_strip");
+fn verify_macos_llvm_tool(tool: &std::ffi::OsStr, required: &str) -> Result<(), String> {
+    let path = Path::new(tool);
+    if !path.is_absolute() {
+        return Err(format!("pinned macOS LLVM tool must be absolute: {}", path.display()));
+    }
+    let output = std::process::Command::new(tool).arg("--version").output()
+        .map_err(|error| format!("cannot inspect LLVM tool {}: {error}", path.display()))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text.split_whitespace().find(|word|
+        word.as_bytes().first().is_some_and(u8::is_ascii_digit));
+    if !output.status.success() || version != Some(required) {
+        return Err(format!("LLVM tool {} must report {required}; got {}", path.display(), text.trim()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn add_macos_base_link_args(cmd: &mut std::process::Command) -> Result<(), String> {
+    if let Ok(required) = std::env::var("SIMPLE_LLVM_REQUIRED_VERSION") {
+        verify_macos_llvm_tool(cmd.get_program(), &required)?;
+        let linker = std::env::var_os("LD")
+            .ok_or_else(|| "pinned macOS LLVM link requires explicit LD".to_string())?;
+        if Path::new(&linker).file_name() != Some(std::ffi::OsStr::new("ld64.lld")) {
+            return Err("pinned macOS LLVM link requires the Mach-O ld64.lld driver".to_string());
+        }
+        verify_macos_llvm_tool(&linker, &required)?;
+        let mut argument = std::ffi::OsString::from("--ld-path=");
+        argument.push(linker);
+        cmd.arg(argument);
+    } else {
+        // Preserve the existing Apple linker behavior for unpinned lanes.
+        cmd.arg("-Wl,-ld_classic");
+    }
+    cmd.arg("-Wl,-dead_strip");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1483,6 +1600,11 @@ int main(int argc, char** argv) {
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
+        if is_msvc {
+            if let Ok(cl) = std::env::var("CL") {
+                super::linker_env::configure_msvc_link_cl(&mut cmd, &cl);
+            }
+        }
         if is_windows_gnu_target(cross_target) {
             cmd.arg("--target=x86_64-w64-windows-gnu");
         }
@@ -1507,7 +1629,7 @@ int main(int argc, char** argv) {
         }
 
         #[cfg(target_os = "macos")]
-        add_macos_base_link_args(&mut cmd);
+        add_macos_base_link_args(&mut cmd)?;
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-no-pie");
@@ -1583,9 +1705,9 @@ int main(int argc, char** argv) {
                 let archive_path = temp_dir.join("libspl_objects.a");
                 let ar_tool = find_archive_tool();
 
-                const BATCH_SIZE: usize = 200;
+                let batches = archive_object_batches(&ar_tool, &archive_path, object_paths)?;
                 let mut ar_ok = true;
-                for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                for (i, &chunk) in batches.iter().enumerate() {
                     let status = archive_create_command(&ar_tool, &archive_path, chunk, i > 0, false)
                         .status()
                         .map_err(|e| format!("archive batch {i}: {e}"))?;
@@ -1599,7 +1721,7 @@ int main(int argc, char** argv) {
                     #[cfg(target_os = "macos")]
                     {
                         let mut sub_archives = Vec::new();
-                        for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                        for (i, &chunk) in batches.iter().enumerate() {
                             let sub = temp_dir.join(format!("_batch_{}.a", i));
                             let s = std::process::Command::new("libtool")
                                 .arg("-static")
@@ -2969,8 +3091,6 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                 && (triple.contains("x86_64") || triple.contains("i686"))
                 && !boot_objects.is_empty()
             {
-                let elf64 = self.output.with_extension("elf64");
-                let _ = std::fs::rename(&self.output, &elf64);
                 let objcopy_bin = ["llvm-objcopy", "gobjcopy", "objcopy"]
                     .iter()
                     .find(|bin| {
@@ -2980,20 +3100,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                             .is_ok_and(|o| o.status.success())
                     })
                     .unwrap_or(&"objcopy");
-                let objcopy = std::process::Command::new(objcopy_bin)
-                    .args(["-O", "elf32-i386"])
-                    .arg(&elf64)
-                    .arg(&self.output)
-                    .output();
-                match objcopy {
-                    Ok(r) if r.status.success() => {
-                        let _ = std::fs::remove_file(&elf64);
-                    }
-                    _ => {
-                        let _ = std::fs::rename(&elf64, &self.output);
-                        eprintln!("WARNING: objcopy elf32 failed, keeping 64-bit ELF");
-                    }
-                }
+                wrap_elf32_multiboot(&self.output, objcopy_bin)?;
             }
             if let Ok(meta) = std::fs::metadata(&self.output) {
                 eprintln!(
@@ -3072,6 +3179,34 @@ mod linker_tests {
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
 
+    #[cfg(unix)]
+    #[test]
+    fn failed_elf32_wrap_preserves_elf64_bytes_when_output_has_elf64_extension() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("kernel.elf64");
+        let failing_objcopy = temp.path().join("objcopy-fail");
+        let original = b"original-elf64-bytes\0\x7fELF";
+        std::fs::write(&output, original).unwrap();
+        std::fs::write(&failing_objcopy, "#!/bin/sh\nexit 9\n").unwrap();
+        let mut permissions = std::fs::metadata(&failing_objcopy).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&failing_objcopy, permissions).unwrap();
+
+        let error = wrap_elf32_multiboot(&output, failing_objcopy.to_str().unwrap()).unwrap_err();
+
+        assert!(error.contains("objcopy exited with exit status: 9"));
+        assert!(error.contains("preserved ELF64"));
+        assert_eq!(std::fs::read(&output).unwrap(), original);
+        let leftovers = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".elf64-wrap."))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
     #[test]
     fn linker_failure_diagnostics_preserve_both_streams() {
         let diagnostics = link_failure_output(
@@ -3100,8 +3235,8 @@ mod linker_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_native_all_link_args_dead_strip_and_retain_metal_support() {
-        let mut command = std::process::Command::new("clang++");
-        add_macos_base_link_args(&mut command);
+        let mut command = std::process::Command::new(find_cxx_compiler());
+        add_macos_base_link_args(&mut command).unwrap();
         add_macos_runtime_host_support(&mut command);
         let args = command
             .get_args()

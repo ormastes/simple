@@ -978,6 +978,35 @@ fn llvm_ar_archive_commands_keep_gnu_argument_forms() {
     assert_eq!(command_args(&list), ["t", "libout.a"]);
 }
 
+#[test]
+fn archive_batches_keep_long_windows_object_paths_within_command_line_limit() {
+    let archive = PathBuf::from("D:/cache/native-objects/output/libspl_objects.a");
+    let objects: Vec<PathBuf> = (0..430)
+        .map(|index| PathBuf::from(format!(
+            "D:/cache/compiler-tools/stage2/very-long-producer-sha/very-long-closure-sha/native-objects/object_{index:04}_{}.obj",
+            "segment".repeat(14)
+        )))
+        .collect();
+    let batches = super::linker::archive_object_batches("lib.exe", &archive, &objects).unwrap();
+    assert!(batches.len() > 3, "long absolute paths must be split by length");
+    assert_eq!(batches.iter().map(|batch| batch.len()).sum::<usize>(), objects.len());
+    for (index, batch) in batches.iter().enumerate() {
+        assert!(!batch.is_empty());
+        let command = archive_create_command("lib.exe", &archive, batch, index > 0, false);
+        let budget = super::linker::archive_arg_budget(command.get_program())
+            + command.get_args().map(super::linker::archive_arg_budget).sum::<usize>();
+        assert!(budget <= super::linker::ARCHIVE_BATCH_ARG_LIMIT);
+    }
+}
+
+#[test]
+fn archive_batch_rejects_an_object_path_too_long_for_one_command() {
+    let object = PathBuf::from("x".repeat(super::linker::ARCHIVE_BATCH_ARG_LIMIT));
+    let error = super::linker::archive_object_batches("lib.exe", Path::new("out.lib"), &[object])
+        .unwrap_err();
+    assert!(error.contains("archive object path exceeds Windows command-line budget"));
+}
+
 fn test_host_object_extension() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -5784,6 +5813,51 @@ fn test_build_import_map_records_primitive_return_types() {
         result.fn_return_types.get("vmm_read_pte"),
         Some(&simple_parser::Type::Simple("u64".to_string()))
     );
+}
+
+#[test]
+fn test_duplicate_imported_functions_keep_selected_owner_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let int_path = lib_root.join("int_api.spl");
+    let text_path = lib_root.join("text_api.spl");
+    let caller_path = lib_root.join("caller.spl");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    std::fs::write(&int_path, "pub fn convert(value: i64) -> i64:\n    value + 1\n").unwrap();
+    std::fs::write(&text_path, "pub fn convert(value: i64) -> text:\n    \"wrong\"\n").unwrap();
+    std::fs::write(
+        &caller_path,
+        "use lib.int_api.convert\n\nfn answer() -> i64:\n    val result = convert(41)\n    result\n",
+    )
+    .unwrap();
+
+    let paths = [&int_path, &text_path, &caller_path];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let imports = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    assert!(imports.fn_return_types.get("convert").is_none());
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&caller_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let selected = use_map.get("convert").expect("selective import must resolve an owner");
+    assert_eq!(
+        imports.fn_return_types.get(selected),
+        Some(&simple_parser::Type::Simple("i64".to_string()))
+    );
+
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types.clone()));
+    lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map));
+    let lowered = lowerer.lower_module(&ast).unwrap();
+    let answer = lowered.functions.iter().find(|function| function.name == "answer").unwrap();
+    let result = answer.locals.iter().find(|local| local.name == "result").unwrap();
+    assert_eq!(result.ty, crate::hir::TypeId::I64);
 }
 
 #[test]
