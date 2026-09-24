@@ -534,7 +534,11 @@ int rt_file_create_excl(const char* path, int64_t path_len,
     if (!path_copy) return 0;
     memcpy(path_copy, path, (size_t)path_len);
     path_copy[path_len] = '\0';
-    FILE* f = fopen(path_copy, "wx");
+    /* "b": text mode on Windows turned every LF into CRLF, so a content-
+     * addressed file (SCV inventory generations) no longer hashed to its own
+     * name and every cold init failed inventory-generation-invalid
+     * (2026-09-25). No-op on POSIX. */
+    FILE* f = fopen(path_copy, "wbx");
     if (!f) {
         free(path_copy);
         return 0;
