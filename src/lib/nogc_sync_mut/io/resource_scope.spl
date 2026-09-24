@@ -507,17 +507,20 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
     val ended = time_now_unix_micros()
     val wall_ms = if ended >= started: (ended - started) / 1000 else: 0
     if fields.len() != 30 or fields[0] != 1 or fields[19] != 2:
-        # The observed ABI returned a malformed/short payload instead of a
-        # clean ENOTSUP lifecycle_error (measured 2026-09-24 on a Windows
-        # x86_64-pc-windows-msvc seed build: rt_process_run_owned_observed_bounded_value
-        # came back short, so every caller — including every
-        # simple_ctx_execute/simple_ctx_batch_execute MCP call — hard-failed
-        # with exit_code -1 and empty stdout/stderr no matter what command
-        # was run, even a resolved real sh.exe). Previously this hard-failed
-        # unconditionally; now it falls back to the same legacy bounded
-        # facade used below for the explicit ENOTSUP-family lifecycle
-        # errors, since that facade was independently verified to work.
-        return _legacy_process_fallback(cmd, args, timeout_ms, max_output_bytes, -1)
+        # A malformed/short payload here does NOT prove the child never ran
+        # (unlike the explicit ENOTSUP lifecycle_error below, which is a
+        # clean pre-spawn refusal) -- re-running via the legacy facade could
+        # execute a side-effecting command (rm, git push, a bootstrap step)
+        # twice. Fail hard and closed, as before; only the explicit
+        # ENOTSUP-family lifecycle_error case below is safe to retry.
+        return ObservedProcessResult(
+            stdout: stdout,
+            stderr: stderr,
+            usage: _unavailable_usage(wall_ms, -1),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            runtime_error: -1
+        )
 
     val exit_code = fields[10]
     val timed_out = fields[11] != 0

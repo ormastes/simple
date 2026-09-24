@@ -1647,7 +1647,23 @@ pub fn process_output(cmd: text, args: [text]) -> text:
 # Shell Functions
 # ============================================================================
 
+# Memoized result of the Windows POSIX-shell probe below: up to 3
+# `file_exists` per PATH segment plus 6 install-location candidates, on
+# every call, was measurable overhead for callers that resolve the shell
+# once per loop iteration (e.g. simple_ctx_batch_execute over N commands).
+# The resolved shell cannot legitimately change mid-process, so this is
+# safe to compute once and reuse; "" means "not yet resolved" (a resolved
+# path is never empty -- the function always returns at least "cmd.exe").
+var _windows_posix_shell_path_cache: text = ""
+
 fn _windows_posix_shell_path() -> text:
+    if _windows_posix_shell_path_cache != "":
+        return _windows_posix_shell_path_cache
+    val resolved = _windows_posix_shell_path_uncached()
+    _windows_posix_shell_path_cache = resolved
+    resolved
+
+fn _windows_posix_shell_path_uncached() -> text:
     # Specs and drivers issue POSIX shell commands (test/grep/awk/rm -rf,
     # VAR=val command prefixes) but Windows routed shell() to cmd.exe, which
     # cannot run them -- every such spec failed on Windows with empty output
@@ -1726,7 +1742,7 @@ pub fn resolve_shell_argv(command: text) -> (text, [text]):
 # positional-parameter semantics (`sh -c script sh $1 …`) should check this
 # before appending extra argv entries, since `cmd.exe /c` cannot honor them.
 pub fn is_posix_shell_argv(shell_path: text) -> bool:
-    not shell_path.ends_with("cmd.exe")
+    not shell_path.lower().ends_with("cmd.exe")
 
 pub fn shell(command: text) -> ProcessResult:
     val (shell_path, shell_args) = _shell_command_args(command)
