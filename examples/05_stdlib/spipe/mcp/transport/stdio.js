@@ -9,11 +9,13 @@ export function createLineHandler(router, write) {
       const response = router(message);
       if (response !== undefined) write(`${stableJson(response)}\n`);
     } catch (error) {
-      // A JSON parse failure has no `message` to read an id from, so those
-      // stay id:null. But a handler/router throw AFTER a successful parse
-      // (e.g. an unknown tool, a missing param) has a real request id — echo
-      // it back instead of dropping it, so callers can still correlate the
-      // error response with their request.
+      // A JSON.parse failure has no id to recover (message stays undefined) —
+      // that case is still reported with a null id, per JSON-RPC 2.0 §5.
+      // A handler failure (thrown deep in the router, e.g. tools.js's
+      // allowlist check) DOES have a valid parsed message with its own id;
+      // discarding it here broke request/response correlation for every
+      // tool call that throws, which is most of the validated spipe_release_*
+      // tools. Preserve it when available.
       write(`${stableJson(errorResult(message?.id ?? null, error))}\n`);
     }
   };

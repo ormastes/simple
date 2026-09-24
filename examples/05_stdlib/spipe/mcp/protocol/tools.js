@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { join, sep } from "node:path";
 import { releaseCapabilities, releaseContractHash, releaseOperations, releaseSchemas } from "../../src/release/contract.js";
 import { createReleasePlan } from "../../src/release/planner.js";
 import { CompiledInventoryReverseReferenceService } from "./reverse_references.js";
@@ -23,7 +23,7 @@ export const tools = Object.freeze([
   { name: "spipe_experts", description: "List project, domain, and tool experts packaged with SPipe.", inputSchema: { type: "object", properties: {} } },
   {
     name: "spipe_read_doc",
-    description: "Read a whitelisted SPipe document by relative path.",
+    description: "Read a whitelisted SPipe document by relative path (max 256 KiB; symlinks must resolve inside the module).",
     inputSchema: {
       type: "object",
       properties: { path: { type: "string", description: "Relative path under the SPipe module." } },
@@ -64,17 +64,24 @@ function text(content) {
   return { content: [{ type: "text", text: content }] };
 }
 
+const MAX_DOC_BYTES = 256 * 1024;
+const MAX_LISTED_EXPERTS = 64;
+
 function listDirs(moduleRoot, root) {
   const abs = join(moduleRoot, root);
   if (!existsSync(abs)) return [];
-  return readdirSync(abs, { withFileTypes: true })
+  const names = readdirSync(abs, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
+  if (names.length > MAX_LISTED_EXPERTS) {
+    return [...names.slice(0, MAX_LISTED_EXPERTS), `…(+${names.length - MAX_LISTED_EXPERTS} more)`];
+  }
+  return names;
 }
 
 export function readDoc(moduleRoot, path) {
-  if (!path || path.includes("..") || path.startsWith("/") || path.startsWith("\\")) {
+  if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/") || path.startsWith("\\")) {
     throw new Error("path must be a relative path inside the SPipe module");
   }
   const allowed = [
@@ -91,6 +98,18 @@ export function readDoc(moduleRoot, path) {
   }
   const abs = join(moduleRoot, path);
   if (!existsSync(abs)) throw new Error(`document not found: ${path}`);
+  // Lexical allowlisting does not resolve symlinks: pin the read to the real
+  // module root so a whitelisted directory cannot link outside the tree.
+  const rootReal = realpathSync(moduleRoot);
+  const docReal = realpathSync(abs);
+  if (docReal !== rootReal && !docReal.startsWith(rootReal.endsWith(sep) ? rootReal : `${rootReal}${sep}`)) {
+    throw new Error("path resolves outside the SPipe module");
+  }
+  const stat = statSync(abs);
+  if (!stat.isFile()) throw new Error(`path is not a regular file: ${path}`);
+  if (stat.size > MAX_DOC_BYTES) {
+    throw new Error(`document exceeds the ${MAX_DOC_BYTES}-byte SPipe documentation cap`);
+  }
   return readFileSync(abs, "utf8");
 }
 
