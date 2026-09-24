@@ -41,13 +41,98 @@ jobs:
         run: |
           sh scripts/check/check-repo-hygiene.shs
 
+  # REQUIRED fast lane (2026-09-23). The ruleset spipe-vcs-v3-main requires the
+  # status context "Code Idiom & Structural Ratchet Gates"; this job carries
+  # that name so a PR can land in about a minute (user order: required checks
+  # < 1 min, pre-push < 20 s). It runs the SAME fast, diff-scoped set the
+  # pre-push hook runs, against the PR's own base..head range, so enforcement
+  # does not depend on local hooks (pushes bypassed the hook that day). The
+  # 47-step ratchet lane below keeps running on every PR and on main as the
+  # NON-required "(extended)" job; heavy proofs (cargo check, C compile, test
+  # sweeps, advisory gates) belong there or post-merge, never here.
+  #
+  # Checkout is sparse (only scripts/check + config/check reach the working
+  # tree; every gate reads committed objects) and depth 1; the PR endpoints
+  # are fetched at PR_COMMITS+1 depth exactly as the extended job does.
+  fast-gates:
+    name: Code Idiom & Structural Ratchet Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/check
+            config/check
+          sparse-checkout-cone-mode: true
+
+      - name: Fast push-tier gates on the PR range
+        shell: sh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          # `shell: sh` is `sh -e`; without this the first red gate aborts the
+          # step before `rc=$?` and the per-gate report below never prints.
+          set +e
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+              echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
+              exit 0
+          fi
+          case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
+          # PR_COMMITS + 1 is enough for every diff-scoped gate, but
+          # check-no-stale-snapshot-rewind consults up to --window (default 40)
+          # first-parent ancestors of each commit's parent as contributors. With
+          # only one ancestor beyond the range it would still exit 0 while
+          # examining a near-empty contributor window — a silent weakening, not a
+          # FAIL, which is exactly the fail-open shape this workflow avoids
+          # elsewhere. 41 extra commits keeps the window real.
+          git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
+              { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
+          RANGE="$BASE_SHA..$HEAD_SHA"
+          rc_total=0
+          run_gate() {
+              _gate=$1
+              _t0=$(date +%s)
+              sh "$@"
+              rc=$?
+              echo "fast-gates: $_gate exit=$rc $(( $(date +%s) - _t0 ))s"
+              [ "$rc" -eq 0 ] || rc_total=1
+          }
+          run_gate scripts/check/check-no-conflict-tree-push.shs "$RANGE"
+          run_gate scripts/check/check-no-conflict-markers-push.shs "$RANGE"
+          run_gate scripts/check/check-tree-size-push.shs --push-tip "$RANGE"
+          run_gate scripts/check/check-sdn-crc32-sealed.shs --rev "$HEAD_SHA"
+          run_gate scripts/check/check-rust-duplicate-reexport.shs --rev "$HEAD_SHA"
+          run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$HEAD_SHA" --baseline-rev "$BASE_SHA"
+          run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
+          run_gate scripts/check/check-range-shs-hygiene-push.shs "$RANGE"
+          # Blocking at push (push-no-stale-snapshot-rewind) and therefore
+          # required here too: the push tier is bypassable and the rewind class
+          # (e274cd33719 and two more, 2026-09-06) is precisely what a stale
+          # whole-tree snapshot pushed over someone else's landed work looks
+          # like. It reads committed objects only, so the sparse checkout above
+          # is sufficient; the depth fetched covers every commit in the range
+          # and its parent, which is what the single-parent walk needs.
+          run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
+          [ "$rc_total" -eq 0 ] || { echo "fast-gates: one or more fast gates failed"; exit 1; }
+
   # Idiom / structural ratchet gates. Every gate here self-passes green on the
   # current tree and ratchets: a NEW violation fails its step and this job. This
   # is the authoritative, non-bypassable enforcement lane — jj bypasses the
   # pre-commit git hook and build-lint routes the CLI lane to clippy, so CI is
   # the only place these gates are guaranteed to run.
+  #
+  # NOT a required status check since 2026-09-23 (the fast-gates job above
+  # carries the required context); it still runs on every PR and on main and
+  # its red is the signal for the heavy classes (whole-tree guard wiring, C
+  # runtime compile, ratchets). The job id stays `code-idiom-gates` because
+  # the manifest's `ci,` rows and the receipt logic key on it.
   code-idiom-gates:
-    name: Code Idiom & Structural Ratchet Gates
+    name: Code Idiom & Structural Ratchet Gates (extended)
     runs-on: ubuntu-latest
     # `pull-requests: read` is required by the "Change classification
     # (docs-only detection)" step below, which reads
@@ -555,6 +640,51 @@ jobs:
               echo "LOCAL-CI-RECEIPT: conflict-class guard failed in mode $MODE"
               exit 1
           fi
+
+      # Push-tier core classes, re-run here because the push tier is bypassable
+      # by design (a `--no-verify` push, or a push from a host whose hook is
+      # not installed) while this job is what the ruleset enforces. Same range
+      # precondition as the conflict-class floor. All committed-content guards;
+      # measured 2026-09-23 on the push host: sdn-crc32 ~1s, rust-duplicate-
+      # reexport ~2s, rt-dual delta ~1s, runtime-api-regression <1s,
+      # c-runtime-compiles ~5s (clang -fsyntax-only over src/runtime; the
+      # runner image ships clang). Deliberately NOT here: the full seed `cargo
+      # check` (check-seed-builds-push.shs) — cold on a runner it is unmeasured
+      # and the pool is two slots; measure on a branch before making it required.
+      - name: Push-tier core gates (crc32 / E0252 / rt dual-lane delta / rt_* API / stale-snapshot rewind / C runtime)
+        if: ${{ !cancelled() && steps.receipt.outputs.range != '' }}
+        shell: sh
+        env:
+          RANGE: ${{ steps.receipt.outputs.range }}
+        run: |
+          set +e
+          base=${RANGE%%..*}
+          head=${RANGE#*..}
+          rc_total=0
+          run_gate() {
+              _gate=$1
+              _t0=$(date +%s)
+              sh "$@"
+              rc=$?
+              echo "push-tier core gate $_gate exit=$rc $(( $(date +%s) - _t0 ))s"
+              [ "$rc" -eq 0 ] || rc_total=1
+          }
+          run_gate scripts/check/check-sdn-crc32-sealed.shs --rev "$head"
+          run_gate scripts/check/check-rust-duplicate-reexport.shs --rev "$head"
+          run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$head" --baseline-rev "$base"
+          # FROZEN comparison too: the push tier and fast-gates are deltas vs
+          # the base, so this is the one automatic place main's own single-lane
+          # rt_* debt stays a red verdict (non-required job: it cannot block a
+          # PR, it reports).
+          run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$head"
+          run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
+          # The stale-snapshot rewind class itself. It is BLOCKING at push
+          # (push-no-stale-snapshot-rewind), and the push tier is bypassable, so
+          # it must also have an automatic lane here; it reads committed objects
+          # only, so no working tree is needed.
+          run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
+          run_gate scripts/check/check-c-runtime-compiles-push.shs --rev "$head"
+          [ "$rc_total" -eq 0 ] || exit 1
 
       # Most gates below hard-depend on ripgrep; install once for the job.
       # Skipped in `sanity`: apt-get alone costs more than the whole 60s budget.

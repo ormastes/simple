@@ -288,8 +288,13 @@ ledger_is_unpromoted_at_rev() {
 # the invocation, never through a pipe — a pipeline's $? is the last command's.
 run_push_gate() {
     _gate_id=$1; _gate_blocking=$2; shift 2
+    _gate_t0=$(date +%s)
     sh "$@"
     _gate_rc=$?
+    # Per-gate wall time on every push, so the cost of the push tier is
+    # measurable from any push log instead of by re-running it (until
+    # 2026-09-23 no push log carried a single duration).
+    echo "push-must-check: gate $_gate_id exit=$_gate_rc $(( $(date +%s) - _gate_t0 ))s" >&2
     if [ "$_gate_rc" -eq 0 ]; then
         return 0
     fi
@@ -308,6 +313,20 @@ run_manifest_push_gates() {
     _push_rows=$(mktemp) || return 2
     printf '%s\n' "$_manifest" | awk '/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*push,/ {print}' > "$_push_rows"
     [ -s "$_push_rows" ] || { rm -f "$_push_rows"; return 2; }
+    # Advisory rows (push_blocking=false) are SKIPPED on an ordinary push since
+    # 2026-09-23. Measured that day over 67 real pushes: 50 of 75 push rows were
+    # advisory, they never block, their verdicts were red for weeks with nothing
+    # acting (perf-regression 37/37 red, process-wait-eintr 37/37 "selftest
+    # failed"), and they were ~80% of a 10-15 minute push (plan-acceptance
+    # sweep, llm-caret ~122s, merge-content-conservation ~23s). The rows stay
+    # in the manifest — wiring is preserved and MUST_CHECK_ADVISORY=1 runs every
+    # one of them — but the default push runs only the blocking set. The skip
+    # is never silent: the count is printed once at the end of the loop.
+    _advisory_skipped=0
+    _advisory_run=${MUST_CHECK_ADVISORY:-0}
+    _dispatch_text=$(git -C "$ROOT" show "$_ref:$SELF_REL" 2>/dev/null) ||
+        _dispatch_text=$(cat "$ROOT/$SELF_REL" 2>/dev/null) ||
+        { rm -f "$_push_rows"; return 2; }
     # The manifest carries `ci_job` and `inputs` between `command` and
     # `description` (see the header of config/check/must_check_gates.sdn). They
     # are read explicitly rather than swallowed into `_description` so a row
@@ -325,6 +344,17 @@ run_manifest_push_gates() {
         case "$_ci_job" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
         case "$_inputs" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
         _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
+        if [ "$_blocking" != true ] && [ "$_advisory_run" != 1 ]; then
+            # Skipped, not unchecked: the row must still have its exact dispatch
+            # arm in the COMMITTED dispatcher, so manifest/dispatch parity is
+            # enforced for advisory rows exactly as the fail-closed `*)` arm
+            # below enforces it for the rows that run.
+            printf '%s\n' "$_dispatch_text" | grep -qF "'$_id:$_mode:$_command')" || {
+                echo "push-must-check: advisory manifest row '$_id' (mode $_mode, command \"$_command\") at $_ref matches no dispatch arm in $SELF_REL — refusing the row (fail-closed)" >&2
+                rm -f "$_push_rows"; return 2; }
+            _advisory_skipped=$((_advisory_skipped + 1))
+            continue
+        fi
         case "$_id:$_mode:$_command" in
             'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
                 [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] ||
@@ -427,7 +457,13 @@ run_manifest_push_gates() {
                 # reported on content that was NOT being pushed while missing the
                 # regression in content that WAS -- see
                 # doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-dual-implementation-ratchet.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+                # DELTA vs the commit the push replaces since 2026-09-23: only a
+                # single-lane rt_* that is new relative to the base is fatal;
+                # frozen-baseline drift is printed as information. The frozen
+                # comparison blocked 15 unrelated pushes in one day once main
+                # itself was red. CI/bootstrap keep the frozen comparison.
+                _rt_dual_base=${_range%%..*}
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rt-dual-implementation-ratchet.shs" --rev "$_ref" --baseline-rev "$_rt_dual_base" || { rm -f "$_push_rows"; return 1; } ;;
             'push-no-mock-file-system-io:ref:sh scripts/check/check-no-mock-file-system-io.shs --rev')
                 # ref, not tree, since 2026-09-06 — same wrong-tree defect the
                 # rt-dual-implementation row was moved off. See
@@ -455,21 +491,20 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-bootstrap-lane-verdict-line.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-runner-binary-extern-freshness:tree:sh scripts/check/check-runner-binary-extern-freshness.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-runner-binary-extern-freshness.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            # The five arms below lacked `|| return 1` until 2026-09-23, so a
+            # blocking verdict from them was silently swallowed (the loop went
+            # on and the function returned 0): their push_blocking flag was
+            # dead. Same shape as every other arm now.
             'push-cross-unit-user-to-text-not-hijacked:tree:sh scripts/check/check-cross-unit-user-to-text-not-hijacked.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-cross-unit-user-to-text-not-hijacked.shs"
-                ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-cross-unit-user-to-text-not-hijacked.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-base64url-codegen-lane-perf:tree:sh scripts/check/check-base64url-codegen-lane-perf.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-base64url-codegen-lane-perf.shs"
-                ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-base64url-codegen-lane-perf.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-native-build-entry-memory-budget:tree:sh scripts/check/check-native-build-entry-memory-budget.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-native-build-entry-memory-budget.shs"
-                ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-native-build-entry-memory-budget.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-tracking-db-unique-ids:tree:sh scripts/check/check-tracking-db-unique-ids.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tracking-db-unique-ids.shs"
-                ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-tracking-db-unique-ids.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-frontend-closure-memory-budget:tree:sh scripts/check/check-frontend-closure-memory-budget.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-frontend-closure-memory-budget.shs"
-                ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-frontend-closure-memory-budget.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-ui-slim-closure:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui.tui/async_app.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui.tui/async_app.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
             'push-ui-slim-closure-tui-entry:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui/backend_entry_tui.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
@@ -477,7 +512,7 @@ run_manifest_push_gates() {
             'push-ui-slim-closure-cli-entry:tree:sh scripts/check/check-ui-slim-closure.shs src/app/ui/cli_entry.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-closure.shs" src/app/ui/cli_entry.spl src/os/compositor src/os/drivers src/os/kernel src/lib/skia src/lib/gc_async_mut/gpu || { rm -f "$_push_rows"; return 1; } ;;
             'push-ui-slim-pack-inventory:tree:sh scripts/check/check-ui-slim-pack-inventory.shs src/app/ui/cli_entry.spl src/app/ui/backend_entry_tui.spl')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-pack-inventory.shs" src/app/ui/cli_entry.spl src/app/ui/backend_entry_tui.spl ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-ui-slim-pack-inventory.shs" src/app/ui/cli_entry.spl src/app/ui/backend_entry_tui.spl || { rm -f "$_push_rows"; return 1; } ;;
             'push-parser-source-global-ratchet:ref:sh scripts/check/check-parser-source-global-ratchet.shs --rev')
                 # ref, not tree, since 2026-09-07 — same wrong-tree defect. The
                 # scanned sources AND the frozen baseline both come from the
@@ -657,10 +692,35 @@ run_manifest_push_gates() {
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-simpleos-harden-probe-build-target.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-allocation-registry-churn:tree:sh scripts/check/check-allocation-registry-churn.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-allocation-registry-churn.shs" || { rm -f "$_push_rows"; return 1; } ;;
-            'push-cache-writer-runtime-provisioning:tree:sh scripts/check/check-cache-writer-runtime-provisioning.shs')
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-cache-writer-runtime-provisioning.shs" || { rm -f "$_push_rows"; return 1; } ;;
             'push-windows-coff-compat-alias-gc:tree:sh scripts/check/check-windows-coff-compat-alias-gc.shs')
                 run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-windows-coff-compat-alias-gc.shs" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-sdn-crc32-sealed:ref:sh scripts/check/check-sdn-crc32-sealed.shs --rev')
+                # Every sealed *.sdn at the pushed sha must verify: reseal-on-copy
+                # is a no-op. A stale #sdn-crc32 header makes the loader read the
+                # whole file as nil (bug_db.sdn 2026-09-23, test_db.sdn
+                # 2026-09-05); no other gate looks at the header. ~1s.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-sdn-crc32-sealed.shs" --rev "$_ref" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-rust-duplicate-reexport:range:sh scripts/check/check-rust-duplicate-reexport.shs --range')
+                # The static, sub-second half of the "seed does not compile"
+                # class: a name re-exported twice in one file is rustc E0252
+                # (origin/main unbuildable 2026-09-23). Diff-scoped: only the
+                # Rust files the range touches are scanned (a duplicate is a
+                # per-file property); the whole-scope scan and the full cargo
+                # check belong to CI.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-rust-duplicate-reexport.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-range-shs-hygiene:range:sh scripts/check/check-range-shs-hygiene-push.shs')
+                # Diff-scoped half of check-guard-wiring (35s whole-tree, now
+                # advisory here and whole-tree in the extended CI job): every
+                # touched .shs still parses and every ADDED guard script is
+                # mentioned by a root. ~1s.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-range-shs-hygiene-push.shs" "$_range" || { rm -f "$_push_rows"; return 1; } ;;
+            'push-no-stale-snapshot-rewind:range:sh scripts/check/check-no-stale-snapshot-rewind.shs --range')
+                # The stale-snapshot rewind class itself (e274cd33719 and two
+                # more, 2026-09-06): a single-parent commit that REWINDS work its
+                # own parent carried. push-runtime-api-regression sees only the
+                # rt_* symptom. ~5s on a 7-commit range; revert/trailer/bulk
+                # escapes are the script's own.
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-no-stale-snapshot-rewind.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             *)
                 # Fail-closed, and never silent: until 2026-09-06 this arm returned
                 # 2 without a word, so the caller reported "one or more gates
@@ -670,6 +730,8 @@ run_manifest_push_gates() {
         esac
     done < "$_push_rows"
     rm -f "$_push_rows"
+    [ "$_advisory_skipped" -eq 0 ] ||
+        echo "push-must-check: $_advisory_skipped advisory gate(s) skipped on this push (MUST_CHECK_ADVISORY=1 runs them; they never block)" >&2
 }
 
 # The manifest is read from the COMMIT being pushed, so the dispatch arms must be

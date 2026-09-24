@@ -545,6 +545,37 @@ if [ -n "$CFG_REV" ]; then
         verdict_error "not a commit in $CFG_ROOT: $CFG_REV"
     fi
     _git_root="$CFG_ROOT"
+    # Positive-proof content cache (the check-seed-builds-push.shs pattern, not
+    # a path filter): the verdict is a pure function of the archived content
+    # below (src/runtime plus every src/**/*.h and tools/**/*.h), this script
+    # and the compiler. When that exact content was already compiled green on
+    # this host the compile is skipped and the PASS says so. A marker is written
+    # ONLY after a genuine green selftest + scan; deleting the directory merely
+    # forces recompilation. Unset/empty C_RUNTIME_GREEN_MARKER_DIR uses the
+    # scratch base; C_RUNTIME_GREEN_MARKER_DIR=none disables the cache.
+    _c_scratch_base() {
+        if [ -d /mnt/data ] && [ -w /mnt/data ]; then echo /mnt/data; return; fi
+        if [ -n "${SIMPLE_USER_STORAGE_ROOT:-}" ]; then echo "$SIMPLE_USER_STORAGE_ROOT"; return; fi
+        echo "${TMPDIR:-/tmp}"
+    }
+    C_RUNTIME_MARKER_DIR=${C_RUNTIME_GREEN_MARKER_DIR:-$(_c_scratch_base)/.c-runtime-compiles-green}
+    C_RUNTIME_MARKER=''
+    if [ "$C_RUNTIME_MARKER_DIR" != none ]; then
+        _c_digest=$( {
+            ( cd "$_git_root" && git rev-parse "$CFG_REV:$CFG_SCAN_DIR" )
+            ( cd "$_git_root" && git ls-tree -r "$CFG_REV" -- ':(glob)src/**/*.h' ':(glob)tools/**/*.h' )
+            sha256sum "$0" 2>/dev/null
+            "$CC_BIN" --version 2>/dev/null | head -1
+            uname -m
+        } 2>/dev/null | sha256sum | awk '{print $1}')
+        if [ -n "$_c_digest" ]; then
+            C_RUNTIME_MARKER="$C_RUNTIME_MARKER_DIR/$_c_digest"
+            if [ -f "$C_RUNTIME_MARKER" ]; then
+                _c_when=$(head -1 "$C_RUNTIME_MARKER" 2>/dev/null)
+                verdict_pass "$(sed -n 2p "$C_RUNTIME_MARKER" 2>/dev/null | tr -d '\n') — content ${_c_digest%"${_c_digest#??????????}"} at $CFG_REV byte-identical to a tree this guard already compiled green ($_c_when), compile skipped"
+            fi
+        fi
+    fi
     mkdir -p "$TMPROOT/rev" || verdict_error "could not create the materialisation directory"
     # src/runtime is not self-contained: two owned TUs reach OUT of it with
     # relative includes (src/compiler/70.backend/.../simple_backend_plugin_v1.h
@@ -654,4 +685,14 @@ if [ "$SCAN_FAIL" -gt 0 ]; then
     verdict_fail "$SCAN_FAIL file(s) failed to compile: $_names($SCAN_OK compiled clean, $SCAN_SKIP skipped for unavailable external dependencies)"
 fi
 
+if [ -n "${C_RUNTIME_MARKER:-}" ]; then
+    # Recorded only here, after a green selftest AND a green scan of the
+    # materialised revision. Line 1 is the timestamp, line 2 the counts the
+    # cached PASS repeats, so a cache hit never claims numbers it did not measure.
+    if mkdir -p "$C_RUNTIME_MARKER_DIR" 2>/dev/null; then
+        printf '%s\n%s file(s) compiled, 0 errors (%s skipped for unavailable external dependencies)\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SCAN_OK" "$SCAN_SKIP" > "$C_RUNTIME_MARKER.tmp.$$" 2>/dev/null &&
+            mv -f "$C_RUNTIME_MARKER.tmp.$$" "$C_RUNTIME_MARKER" 2>/dev/null || rm -f "$C_RUNTIME_MARKER.tmp.$$"
+    fi
+fi
 verdict_pass "$SCAN_OK file(s) compiled, 0 errors ($SCAN_SKIP skipped for unavailable external dependencies)"
