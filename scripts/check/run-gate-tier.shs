@@ -58,18 +58,128 @@
 #
 # Verdict (last line of stdout): `PASS — <n> row(s), 0 failed` exit 0 /
 # `FAIL — <n> row(s), <k> failed: <ids>` exit 1 / `ERROR — nothing was
-# checked (<reason>)` exit 2. A budget kill or a 0-row selection is always
-# ERROR, never a pass.
+# checked (<reason>)` exit 2. A budget kill, a placeholder with no value
+# supplied, or a 0-row selection are always ERROR, never a pass — a FAIL
+# means every row actually ran and at least one genuinely failed; an ERROR
+# means the run could not reach a real verdict for everything it selected.
 set -u
-# Job control ON: every `&` background job below gets its OWN process group
-# (pgid == its own pid), so a budget kill can signal `-$pid` (the group, i.e.
-# the row's sh -c AND every child it forked -- git, awk, grep, ...) rather
-# than only the wrapper subshell, which would otherwise leave the real work
-# running past the budget. `set -m` is a no-op, not an error, on a shell that
-# ignores it (harmless if this ever runs under a non-interactive dash build
-# that lacks monitor mode); the -TERM/-KILL calls below are best-effort either
-# way (`2>/dev/null`).
-set -m 2>/dev/null || true
+# Killing the whole tree a row spawns, portably (2026-09-24 review finding):
+# `set -m` does NOT grant job-control process groups under a non-interactive
+# dash (Ubuntu/Debian's /bin/sh, no controlling tty) -- confirmed by review,
+# not assumed -- so `kill -TERM -- -$pid` on such a host hits nothing (dash
+# also rejects the `--` before a negative pid on some builds) and only the
+# WRAPPER exits at budget-kill time while the real work keeps running. Worse,
+# a second, independent incident in a sibling script
+# (check-test-tree-divergence-delta.shs,
+# doc/08_tracking/bug/test_tree_divergence_delta_selftest_hang_2026-09-24.md,
+# work/divergence-delta-selftest-hang-20260924 @ b3dd57de40c) found that
+# calling `set -m` from a shell that is not itself a terminal-foreground
+# leader can raise SIGTTOU and STOP the whole shared process group (state T)
+# on a non-interactive nested chain -- a state SIGTERM cannot wake a process
+# out of, only SIGCONT/SIGKILL can. This script therefore never calls
+# `set -m` at all, and kill_row() always sends SIGCONT before TERM/KILL (see
+# cont_tree below) as a general precaution, not only for that one trigger.
+# There is no portable job-control primitive here, so this does not rely on
+# one:
+# - When `setsid` exists (Linux, FreeBSD, WSL -- confirmed present; MSYS/Git
+#   Bash on Windows -- confirmed ABSENT, so this is a real "when available",
+#   not the common case on every platform this runs on), each row launches
+#   as `setsid sh -c ...`. setsid(1) execs its target directly (no fork+wait
+#   layer), so the target's pid IS the new session id AND process group id,
+#   and `kill -TERM "-$pid"` (no `--` -- see kill_row below for why) reaches
+#   the whole session/group in one call.
+# - Always, regardless of setsid, a portable recursive tree walk over `ps`
+#   output (see ps_pid_ppid_pairs/kill_tree below) finds every live
+#   descendant by parent pid and signals each one individually. This needs
+#   no job control and no setsid, only `ps` -- confirmed present everywhere
+#   this runs, including MSYS's cut-down ps (no `-o`, no `-e`; its bare
+#   `ps` already prints PID/PPID as columns 1/2, which is what is used).
+# kill_row() below always does the tree walk, and ALSO does the session/group
+# kill first when setsid was used, as a belt-and-suspenders catch for a
+# process that got reparented (to init/whatever) before the tree walk's
+# single `ps` snapshot observed it.
+HAVE_SETSID=0
+command -v setsid >/dev/null 2>&1 && HAVE_SETSID=1
+
+# ps_pid_ppid_pairs: print "<pid> <ppid>" for every live process, using
+# whichever invocation this host's `ps` actually accepts (probed once).
+PS_METHOD=""
+detect_ps_method() {
+    if ps -eo pid,ppid --no-headers >/dev/null 2>&1; then PS_METHOD=eo_noheader; return; fi
+    if ps -eo pid,ppid >/dev/null 2>&1; then PS_METHOD=eo; return; fi
+    if ps -ef >/dev/null 2>&1; then PS_METHOD=ef; return; fi
+    PS_METHOD=bare
+}
+detect_ps_method
+ps_pid_ppid_pairs() {
+    case "$PS_METHOD" in
+        eo_noheader) ps -eo pid,ppid --no-headers 2>/dev/null | awk '{print $1, $2}' ;;
+        eo) ps -eo pid,ppid 2>/dev/null | awk 'NR>1{print $1, $2}' ;;
+        ef) ps -ef 2>/dev/null | awk 'NR>1{print $2, $3}' ;;
+        # MSYS/Git-Bash `ps` with no flags: "PID PPID PGID WINPID TTY UID
+        # STIME COMMAND" -- PID/PPID are already columns 1/2.
+        bare) ps 2>/dev/null | awk 'NR>1{print $1, $2}' ;;
+    esac
+}
+
+# kill_tree ROOT_PID SIG: signal ROOT_PID and every live descendant,
+# children-first, from ONE `ps` snapshot (taken once per call, not once per
+# recursion level -- cheap and avoids racing a fast-exiting child out from
+# under a second `ps` call).
+kill_tree() {
+    _kt_pairs=$(ps_pid_ppid_pairs)
+    _kt_walk "$1" "$2" "$_kt_pairs"
+}
+_kt_walk() {
+    _kt_root=$1; _kt_sig=$2; _kt_pairs=$3
+    for _kt_c in $(printf '%s\n' "$_kt_pairs" | awk -v p="$_kt_root" '$2==p{print $1}'); do
+        _kt_walk "$_kt_c" "$_kt_sig" "$_kt_pairs"
+    done
+    kill "-$_kt_sig" "$_kt_root" 2>/dev/null
+}
+
+# cont_tree ROOT_PID: SIGCONT ROOT_PID and every live descendant,
+# children-first, from ONE `ps` snapshot. Reused pattern from
+# scripts/check/check-test-tree-divergence-delta.shs's cont_tree()
+# (doc/08_tracking/bug/test_tree_divergence_delta_selftest_hang_2026-09-24.md,
+# work/divergence-delta-selftest-hang-20260924 @ b3dd57de40c): a process
+# currently STOPPED (state T -- e.g. it took SIGTTOU/SIGTTIN from terminal
+# contention while backgrounded with no controlling tty) does not act on any
+# further signal except SIGCONT/SIGKILL until resumed, so a bare SIGTERM sent
+# to a stopped target is only QUEUED, never delivered, and it sits stopped
+# forever. That script's own incident was `set -m` itself raising SIGTTOU
+# and stopping the WHOLE shared process group on a non-interactive shell --
+# this script never calls `set -m` for exactly that reason (see the header
+# comment above), but a ROW's own command is arbitrary and could still stop
+# itself or a child by some other path, so waking the tree before terminating
+# it costs nothing and closes the same failure mode here.
+cont_tree() {
+    _ct_pairs=$(ps_pid_ppid_pairs)
+    _ct_walk "$1" "$_ct_pairs"
+}
+_ct_walk() {
+    _ct_root=$1; _ct_pairs=$2
+    for _ct_c in $(printf '%s\n' "$_ct_pairs" | awk -v p="$_ct_root" '$2==p{print $1}'); do
+        _ct_walk "$_ct_c" "$_ct_pairs"
+    done
+    kill -CONT "$_ct_root" 2>/dev/null
+}
+
+# kill_row PID SIG: the one function every kill site (budget-kill, the
+# INT/TERM trap) calls. Always wakes the tree first (see cont_tree above),
+# then signals it -- a stopped target ignores TERM/KILL until resumed.
+kill_row() {
+    _kr_pid=$1; _kr_sig=$2
+    [ "$HAVE_SETSID" = 1 ] && kill -CONT "-$_kr_pid" 2>/dev/null
+    cont_tree "$_kr_pid"
+    # No `--` before the negative pid: measured on WSL dash (Ubuntu's
+    # /bin/sh) that `kill -TERM -- -$pid` is rejected ("No such process"),
+    # while the plain `kill -TERM -$pid` form works. Confirmed group-kill of
+    # a setsid-launched grandchild with exactly this form (see this file's
+    # commit message / the review report for the fixture).
+    [ "$HAVE_SETSID" = 1 ] && kill "-$_kr_sig" "-$_kr_pid" 2>/dev/null
+    kill_tree "$_kr_pid" "$_kr_sig"
+}
 
 ROOT=${RUN_GATE_TIER_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}
 [ -n "$ROOT" ] || { echo "run-gate-tier: ERROR — nothing was checked (cannot locate repository root)" >&2; exit 2; }
@@ -209,13 +319,36 @@ run_tier() {
     _t0=$(now_ms)
     _budget_ms=$(( _budget_s * 1000 ))
     _killed=0
+    _bad_placeholder=0
     _tab=$(printf '\t')
+
+    # A signal to THIS process (interrupted push hook, cancelled CI job)
+    # must not leave rows running past the runner's own death -- kill
+    # everything still active and exit non-zero rather than orphaning work.
+    on_interrupt() {
+        trap '' INT TERM
+        echo "run-gate-tier: interrupted -- killing active row(s)" >&2
+        if [ -f "$_active" ]; then
+            while IFS=" " read -r _ip _ir; do
+                [ -n "$_ip" ] || continue
+                kill_row "$_ip" TERM
+            done < "$_active"
+        fi
+        exit 2
+    }
+    trap on_interrupt INT TERM
 
     _n=0
     while IFS="$_tab" read -r _id _blocking _cmd; do
         _n=$((_n + 1))
         _expanded=$(substitute_placeholders "$_cmd") || {
+            # A placeholder with no value is a usage/configuration defect,
+            # not a gate verdict: this row never ran, so it can never be
+            # counted as a plain FAIL (that would claim the check executed
+            # and found a real problem). _bad_placeholder forces the whole
+            # tier to ERROR (exit 2) below, even if every other row passes.
             printf '%s error\n' "$_id" >> "$_work/verdicts"
+            _bad_placeholder=1
             echo "run-gate-tier: row $_id: ERROR — placeholder in '$_cmd' has no value supplied" >&2
             continue
         }
@@ -232,7 +365,7 @@ run_tier() {
                     _running=$((_running + 1))
                 else
                     wait "$_pid" 2>/dev/null
-                    _rc=$(cat "$_work/$_rid.rc" 2>/dev/null || echo 999)
+                    _rc=$?
                     if [ "$_rc" = 0 ]; then
                         printf '%s pass\n' "$_rid" >> "$_work/verdicts"
                     else
@@ -258,7 +391,20 @@ run_tier() {
         # runner (or, worse, from whatever launched the runner -- a pre-push
         # hook's stdin is the pushed ref rows, and an inherited-stdin row can
         # silently swallow lines job N+1 needed to read).
-        ( sh -c "$_expanded" </dev/null >"$_work/$_id.log" 2>&1; echo $? > "$_work/$_id.rc" ) &
+        # No wrapping subshell: `$!` must be the actual row process's pid, not
+        # a wrapper around it, both so `wait "$pid"` gives its real exit
+        # status directly (no separate .rc file needed) and so kill_row gets
+        # the right pid -- with setsid, THIS pid is the new session/group
+        # leader; a wrapper subshell would have hidden that pid entirely.
+        # setsid, when available, gives the row its own session/group so a
+        # later budget kill can signal the whole thing in one call (see
+        # kill_row/HAVE_SETSID above); the recursive kill_tree it always also
+        # does needs no setsid to work.
+        if [ "$HAVE_SETSID" = 1 ]; then
+            setsid sh -c "$_expanded" </dev/null >"$_work/$_id.log" 2>&1 &
+        else
+            sh -c "$_expanded" </dev/null >"$_work/$_id.log" 2>&1 &
+        fi
         echo "$! $_id" >> "$_active"
     done < "$_rows"
 
@@ -267,23 +413,22 @@ run_tier() {
     while [ -s "$_active" ]; do
         _elapsed=$(( $(now_ms) - _t0 ))
         if [ "$_elapsed" -ge "$_budget_ms" ]; then
-            # Signal the whole GROUP (`-$pid`, negative pid under `set -m`
-            # above), not just the wrapper subshell: the wrapper's own exit
-            # does not touch children it forked (git, awk, grep, a nested
-            # sh -c), which would otherwise keep running past the budget and
-            # keep burning the host's CPU/IO for a verdict nobody reads.
-            # Fall back to the bare pid too, in case job control did not
-            # actually grant this job its own process group on this shell.
+            # kill_row signals the whole row: the setsid session/group when
+            # one was used, AND (always) a recursive ps-based tree walk --
+            # neither needs job control, which a non-interactive dash does
+            # not grant `&` jobs (see kill_row/HAVE_SETSID above). Without
+            # this, only the row's own top process dies at the budget and
+            # anything it forked (git, awk, grep, a nested sh -c) keeps
+            # running and burning the host's CPU/IO for a verdict nobody
+            # reads.
             while IFS=" " read -r _pid _rid; do
                 [ -n "$_pid" ] || continue
-                kill -TERM -- "-$_pid" 2>/dev/null
-                kill -TERM "$_pid" 2>/dev/null
+                kill_row "$_pid" TERM
             done < "$_active"
             sleep 1
             while IFS=" " read -r _pid _rid; do
                 [ -n "$_pid" ] || continue
-                kill -KILL -- "-$_pid" 2>/dev/null
-                kill -KILL "$_pid" 2>/dev/null
+                kill_row "$_pid" KILL
                 wait "$_pid" 2>/dev/null
                 printf '%s error\n' "$_rid" >> "$_work/verdicts"
             done < "$_active"
@@ -298,7 +443,7 @@ run_tier() {
                 echo "$_pid $_rid" >> "$_active.next"
             else
                 wait "$_pid" 2>/dev/null
-                _rc=$(cat "$_work/$_rid.rc" 2>/dev/null || echo 999)
+                _rc=$?
                 if [ "$_rc" = 0 ]; then
                     printf '%s pass\n' "$_rid" >> "$_work/verdicts"
                 else
@@ -309,6 +454,8 @@ run_tier() {
         mv -f "$_active.next" "$_active"
         [ -s "$_active" ] && sleep 1
     done
+
+    trap - INT TERM
 
     [ -f "$_work/verdicts" ] || : > "$_work/verdicts"
     if [ -n "$_results" ]; then
@@ -323,8 +470,17 @@ run_tier() {
     _error_ids=$(awk '$2 == "error" {printf "%s ", $1}' "$_work/verdicts" | sed 's/ *$//')
     rm -rf "$_work" "$_rows"
 
+    # Both of these are "we did not reach a real verdict for everything
+    # selected", never a pass and never a plain FAIL either -- a FAIL claims
+    # every row ran and at least one genuinely found a problem, which is not
+    # true of a budget kill or a row that never ran because a placeholder had
+    # no value.
     if [ "$_killed" = 1 ]; then
         echo "run-gate-tier: ERROR — nothing was checked (tier '$_tier' exceeded its ${_budget_s}s budget; killed row(s): $_error_ids)" >&2
+        return 2
+    fi
+    if [ "$_bad_placeholder" = 1 ]; then
+        echo "run-gate-tier: ERROR — nothing was checked (tier '$_tier': row(s) never ran, missing placeholder value(s): $_error_ids)" >&2
         return 2
     fi
     if [ "$_failed_n" -gt 0 ]; then
@@ -437,18 +593,20 @@ EOF
         st_report bad "(S6) {range}/{rev}/{base} placeholders substitute" "rc=$rc got=$(cat "$ST_T/ph.out" 2>/dev/null)"
     fi
 
-    # (7) a placeholder with no value supplied is a fail-closed per-row ERROR,
-    # not a silently truncated command.
+    # (7) a placeholder with no value supplied is a fail-closed per-row
+    # ERROR (exit 2), not a silently truncated command, and NOT a plain FAIL
+    # (exit 1) either: the row never ran, so this cannot be reported as "a
+    # gate executed and found a real problem" (review finding 2026-09-24).
     cat > "$ST_T/m7.sdn" <<EOF
 $HDR
     g-noph, local, false, range, "sh -c 'echo {range}'", -, -, "no --range given"
 EOF
     sh "$0" --tier local --manifest-file "$ST_T/m7.sdn" --budget 20 --jobs 2 --results "$ST_T/r7.out" >/dev/null 2>"$ST_T/r7.err"
     rc=$?
-    if [ "$rc" -eq 1 ] && grep -q '^g-noph error$' "$ST_T/r7.out"; then
-        st_report ok "(S7) missing placeholder value is a fail-closed per-row error"
+    if [ "$rc" -eq 2 ] && grep -q '^g-noph error$' "$ST_T/r7.out"; then
+        st_report ok "(S7) missing placeholder value is a fail-closed ERROR (exit 2), not FAIL"
     else
-        st_report bad "(S7) missing placeholder value is a fail-closed per-row error" "rc=$rc out=$(cat "$ST_T/r7.out" 2>/dev/null)"
+        st_report bad "(S7) missing placeholder value is a fail-closed ERROR (exit 2), not FAIL" "rc=$rc out=$(cat "$ST_T/r7.out" 2>/dev/null)"
     fi
 
     # (8) `--rev H` with no --range/--base derives `origin/main..H` (this is
@@ -501,8 +659,80 @@ EOF
         st_report bad "(S9) missing origin/main fails closed, never guesses a range, never runs a row" "rc=$rc ran=$([ -f "$ST_T/derive9.out" ] && echo yes || echo no) err=$(cat "$ST_T/r9.err" 2>/dev/null)"
     fi
 
+    # (10) a budget kill also kills a sleeping GRANDCHILD, not just the
+    # row's own top process (2026-09-24 review finding: under a
+    # non-interactive dash, `set -m` grants no process group at all, so a
+    # kill of only the row's own pid leaves anything IT forked running past
+    # the budget). The row backgrounds a nested `sh -c` that writes its own
+    # pid to a file, then sleeps; after the kill, that pid must be dead.
+    # This exercises whichever mechanism this host actually has: the
+    # setsid+session-kill path when HAVE_SETSID=1, else the portable
+    # recursive ps-based kill_tree fallback -- both are asserted to work by
+    # this ONE fixture, on whichever host runs it (verified separately on
+    # WSL dash, which has setsid, and on Git Bash/MSYS, which does not).
+    rm -f "$ST_T/gc10.pid"
+    cat > "$ST_T/gc10_row.sh" <<'SH'
+#!/bin/sh
+sh -c 'echo $$ > "$GC10_PIDFILE"; sleep 60' &
+wait
+SH
+    GC10_PIDFILE="$ST_T/gc10.pid"
+    export GC10_PIDFILE
+    cat > "$ST_T/m10.sdn" <<EOF
+$HDR
+    g-grandchild, local, false, tree, "sh $ST_T/gc10_row.sh", -, -, "spawns a sleeping grandchild that must die with the budget kill"
+EOF
+    sh "$0" --tier local --manifest-file "$ST_T/m10.sdn" --budget 2 --jobs 2 --results "$ST_T/r10.out" >/dev/null 2>"$ST_T/r10.err"
+    rc=$?
+    # Give signal delivery/process teardown a moment; kill -0 is the
+    # liveness test, not a race on the file's mtime.
+    sleep 1
+    gc10_pid=$(cat "$ST_T/gc10.pid" 2>/dev/null || echo)
+    if [ -n "$gc10_pid" ] && kill -0 "$gc10_pid" 2>/dev/null; then gc10_alive=1; else gc10_alive=0; fi
+    if [ "$rc" -eq 2 ] && [ -n "$gc10_pid" ] && [ "$gc10_alive" -eq 0 ]; then
+        st_report ok "(S10) budget kill also kills a sleeping grandchild (pid $gc10_pid, setsid=$HAVE_SETSID)"
+    else
+        st_report bad "(S10) budget kill also kills a sleeping grandchild" "rc=$rc gc_pid=${gc10_pid:-none} alive=$gc10_alive setsid=$HAVE_SETSID"
+    fi
+    unset GC10_PIDFILE
+
+    # (11) an INT/TERM sent to the RUNNER ITSELF (not a budget kill) also
+    # tears down every active row's tree and exits non-zero, rather than
+    # leaving the run-gate-tier process dead with its rows orphaned.
+    rm -f "$ST_T/gc11.pid"
+    cat > "$ST_T/gc11_row.sh" <<'SH'
+#!/bin/sh
+sh -c 'echo $$ > "$GC11_PIDFILE"; sleep 60' &
+wait
+SH
+    GC11_PIDFILE="$ST_T/gc11.pid"
+    export GC11_PIDFILE
+    cat > "$ST_T/m11.sdn" <<EOF
+$HDR
+    g-interrupt, local, false, tree, "sh $ST_T/gc11_row.sh", -, -, "spawns a sleeping grandchild; runner is INT'd mid-run"
+EOF
+    sh "$0" --tier local --manifest-file "$ST_T/m11.sdn" --budget 30 --jobs 2 --results "$ST_T/r11.out" \
+        >/dev/null 2>"$ST_T/r11.err" &
+    runner_pid=$!
+    # Wait for the grandchild pidfile to appear (row actually launched)
+    # rather than a fixed sleep guessing at scheduling.
+    _w=0
+    while [ ! -s "$ST_T/gc11.pid" ] && [ "$_w" -lt 50 ]; do sleep 0.1 2>/dev/null || sleep 1; _w=$((_w + 1)); done
+    kill -TERM "$runner_pid" 2>/dev/null
+    wait "$runner_pid" 2>/dev/null
+    rc=$?
+    sleep 1
+    gc11_pid=$(cat "$ST_T/gc11.pid" 2>/dev/null || echo)
+    if [ -n "$gc11_pid" ] && kill -0 "$gc11_pid" 2>/dev/null; then gc11_alive=1; else gc11_alive=0; fi
+    if [ "$rc" -ne 0 ] && [ -n "$gc11_pid" ] && [ "$gc11_alive" -eq 0 ]; then
+        st_report ok "(S11) INT/TERM to the runner kills active rows (pid $gc11_pid) and exits non-zero (rc=$rc)"
+    else
+        st_report bad "(S11) INT/TERM to the runner kills active rows and exits non-zero" "rc=$rc gc_pid=${gc11_pid:-none} alive=$gc11_alive"
+    fi
+    unset GC11_PIDFILE
+
     if [ "$ST_FAILURES" -eq 0 ]; then
-        echo "run-gate-tier: selftest PASS — 9 fixture(s), 0 failed"
+        echo "run-gate-tier: selftest PASS — 11 fixture(s), 0 failed"
         exit 0
     fi
     echo "run-gate-tier: selftest FAIL — $ST_FAILURES fixture(s) failed"
