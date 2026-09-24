@@ -19,6 +19,12 @@ ALLOW_UNPROMOTED_LEDGER=0
 MUST_CHECK_CONFLICT_UNION_DONE=0
 RUNTIME_API_EXPECT_REMOVALS=${MUST_CHECK_EXPECT_RUNTIME_API_REMOVALS:-}
 EVIDENCE_REV=""
+MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-10}
+MUST_CHECK_BUDGET_MS=0
+MUST_CHECK_BUDGET_SPENT_MS=0
+MUST_CHECK_BLOCKING_RUN=0
+MUST_CHECK_BUDGET_OVERRUN=""
+TIMEOUT_BIN=""
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
 compiler-stage3
@@ -286,15 +292,52 @@ ledger_is_unpromoted_at_rev() {
 # line is emitted with the guard's real exit status so a human or a log scrape
 # can see it. The exit status is read directly into a variable on the line after
 # the invocation, never through a pipe — a pipeline's $? is the last command's.
+#
+# BLOCKING BUDGET (2026-09-24): every blocking gate together gets
+# MUST_CHECK_PUSH_BUDGET_S seconds (default 10), accounted in milliseconds of
+# blocking-gate time only (advisory gates, run with MUST_CHECK_ADVISORY=1, are
+# unbudgeted and do not consume it). Each blocking gate runs under timeout(1)
+# with whatever budget is left. An overrun is NEVER a pass: the gate is killed,
+# MUST_CHECK_BUDGET_OVERRUN is set, and the caller exits 2 with an ERROR verdict.
+# Slower gates live in the `local` tier of config/check/must_check_gates.sdn.
+push_now_ms() {
+    _ms=$(date +%s%N 2>/dev/null)
+    case "$_ms" in
+        *[!0-9]*|'') echo $(( $(date +%s) * 1000 )) ;;
+        *) echo $(( _ms / 1000000 )) ;;
+    esac
+}
+
 run_push_gate() {
     _gate_id=$1; _gate_blocking=$2; shift 2
-    _gate_t0=$(date +%s)
-    sh "$@"
-    _gate_rc=$?
-    # Per-gate wall time on every push, so the cost of the push tier is
-    # measurable from any push log instead of by re-running it (until
-    # 2026-09-23 no push log carried a single duration).
-    echo "push-must-check: gate $_gate_id exit=$_gate_rc $(( $(date +%s) - _gate_t0 ))s" >&2
+    _gate_t0=$(push_now_ms)
+    if [ "$_gate_blocking" = true ]; then
+        _left=$(( MUST_CHECK_BUDGET_MS - MUST_CHECK_BUDGET_SPENT_MS ))
+        if [ "$_left" -le 0 ]; then
+            MUST_CHECK_BUDGET_OVERRUN=$_gate_id
+            echo "push-must-check: ERROR — blocking gate $_gate_id not run: the ${MUST_CHECK_BUDGET_MS}ms blocking budget is exhausted (${MUST_CHECK_BUDGET_SPENT_MS}ms spent)" >&2
+            return 1
+        fi
+        "$TIMEOUT_BIN" -k 2 "$(( _left / 1000 )).$(printf '%03d' $(( _left % 1000 )))" sh "$@"
+        _gate_rc=$?
+        _gate_ms=$(( $(push_now_ms) - _gate_t0 ))
+        MUST_CHECK_BUDGET_SPENT_MS=$(( MUST_CHECK_BUDGET_SPENT_MS + _gate_ms ))
+        MUST_CHECK_BLOCKING_RUN=$(( MUST_CHECK_BLOCKING_RUN + 1 ))
+        echo "push-must-check: gate $_gate_id exit=$_gate_rc ${_gate_ms}ms (blocking budget ${MUST_CHECK_BUDGET_SPENT_MS}/${MUST_CHECK_BUDGET_MS}ms)" >&2
+        case "$_gate_rc" in
+            124|137)
+                MUST_CHECK_BUDGET_OVERRUN=$_gate_id
+                echo "push-must-check: ERROR — blocking gate $_gate_id killed at the push budget (${MUST_CHECK_BUDGET_SPENT_MS}ms of ${MUST_CHECK_BUDGET_MS}ms); its verdict is UNKNOWN, not a pass. Split the push, or run the slow tier: sign-local-ci-receipt.shs --run --tier local" >&2
+                return 1 ;;
+        esac
+    else
+        sh "$@"
+        _gate_rc=$?
+        # Per-gate wall time on every push, so the cost of the push tier is
+        # measurable from any push log instead of by re-running it (until
+        # 2026-09-23 no push log carried a single duration).
+        echo "push-must-check: gate $_gate_id exit=$_gate_rc $(( $(push_now_ms) - _gate_t0 ))ms (advisory, unbudgeted)" >&2
+    fi
     if [ "$_gate_rc" -eq 0 ]; then
         return 0
     fi
@@ -334,27 +377,47 @@ run_manifest_push_gates() {
     # a shifted field would make the `$_id:$_mode:$_command` key stop matching
     # its dispatch case, which lands on the fail-closed `*)` arm and blocks
     # every push with no explanation.
-    while IFS=, read -r _id _tier _blocking _mode _command _ci_job _inputs _description; do
-        _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        _mode=$(printf '%s' "$_mode" | tr -d ' ')
-        _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
-        [ -n "$_command" ] || { rm -f "$_push_rows"; return 2; }
-        _ci_job=$(printf '%s' "$_ci_job" | tr -d ' ')
-        _inputs=$(printf '%s' "$_inputs" | tr -d ' ')
-        case "$_ci_job" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
-        case "$_inputs" in ''|*'"'*) rm -f "$_push_rows"; return 2 ;; esac
-        _blocking=$(printf '%s' "$_blocking" | tr -d ' ')
-        if [ "$_blocking" != true ] && [ "$_advisory_run" != 1 ]; then
-            # Skipped, not unchecked: the row must still have its exact dispatch
-            # arm in the COMMITTED dispatcher, so manifest/dispatch parity is
-            # enforced for advisory rows exactly as the fail-closed `*)` arm
-            # below enforces it for the rows that run.
-            printf '%s\n' "$_dispatch_text" | grep -qF "'$_id:$_mode:$_command')" || {
-                echo "push-must-check: advisory manifest row '$_id' (mode $_mode, command \"$_command\") at $_ref matches no dispatch arm in $SELF_REL — refusing the row (fail-closed)" >&2
-                rm -f "$_push_rows"; return 2; }
-            _advisory_skipped=$((_advisory_skipped + 1))
-            continue
-        fi
+    #
+    # ONE awk pass (2026-09-24) normalises every push row and performs the
+    # advisory-row parity check. The previous per-row loop spawned ~8
+    # sed/tr/grep processes per row; with 84 push rows that was ~21s of the
+    # push hook on Windows before any gate ran. Same rules: fields split on
+    # `,` exactly as `IFS=, read` did (the 8th field absorbs the rest), an
+    # empty command or a missing/quoted ci_job/inputs column rejects the whole
+    # manifest (return 2), and a skipped advisory row must still name an exact
+    # `'<id>:<mode>:<command>')` arm in the COMMITTED dispatcher text.
+    _push_dispatch=$(mktemp) || { rm -f "$_push_rows"; return 2; }
+    _push_run=$(mktemp) || { rm -f "$_push_rows" "$_push_dispatch"; return 2; }
+    printf '%s\n' "$_dispatch_text" > "$_push_dispatch"
+    awk -F, -v advisory_run="$_advisory_run" -v ref="$_ref" -v self_rel="$SELF_REL" -v run_out="$_push_run" '
+        function trim(v) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); return v }
+        function nosp(v) { gsub(/ /, "", v); return v }
+        FNR == NR { txt = txt $0 "\n"; next }
+        {
+            id = trim($1); blocking = nosp($3); mode = nosp($4)
+            cmd = $5; sub(/^[[:space:]]*"/, "", cmd); sub(/"[[:space:]]*$/, "", cmd)
+            ci = nosp($6); inp = nosp($7)
+            if (cmd == "" || ci == "" || ci ~ /"/ || inp == "" || inp ~ /"/) { bad = 1; exit }
+            if (blocking != "true" && advisory_run != "1") {
+                if (index(txt, "\047" id ":" mode ":" cmd "\047)") == 0) {
+                    printf "push-must-check: advisory manifest row \047%s\047 (mode %s, command \"%s\") at %s matches no dispatch arm in %s — refusing the row (fail-closed)\n", id, mode, cmd, ref, self_rel > "/dev/stderr"
+                    bad = 1; exit
+                }
+                skipped++
+                next
+            }
+            printf "%s\t%s\t%s\t%s\n", id, blocking, mode, cmd > run_out
+        }
+        END { if (bad) exit 2; printf "%d\n", skipped }' "$_push_dispatch" "$_push_rows" > "$_push_dispatch.count"
+    _norm_rc=$?
+    if [ "$_norm_rc" -ne 0 ]; then
+        rm -f "$_push_rows" "$_push_dispatch" "$_push_dispatch.count" "$_push_run"; return 2
+    fi
+    read -r _advisory_skipped < "$_push_dispatch.count" || _advisory_skipped=0
+    rm -f "$_push_dispatch" "$_push_dispatch.count"
+    mv -f "$_push_run" "$_push_rows" || { rm -f "$_push_run" "$_push_rows"; return 2; }
+    _tab=$(printf '\t')
+    while IFS="$_tab" read -r _id _blocking _mode _command; do
         case "$_id:$_mode:$_command" in
             'push-conflict-tree:range:sh scripts/check/check-no-conflict-tree-push.shs')
                 [ "${MUST_CHECK_CONFLICT_UNION_DONE:-0}" = 1 ] ||
@@ -777,6 +840,49 @@ run_conflict_tree_union() {
     run_push_gate push-conflict-tree true "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$@"
 }
 
+# The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
+# tool, never an unbudgeted run. Resolved here, BEFORE --self-test, so the
+# budget/dispatcher self-test fixtures below exercise the exact same
+# TIMEOUT_BIN and MUST_CHECK_BUDGET_MS the real push path uses.
+case "$MUST_CHECK_PUSH_BUDGET_S" in
+    ''|*[!0-9]*|0) echo "push-must-check: ERROR — nothing was checked (MUST_CHECK_PUSH_BUDGET_S must be a positive integer, got '$MUST_CHECK_PUSH_BUDGET_S')"; exit 2 ;;
+esac
+[ "$MUST_CHECK_PUSH_BUDGET_S" -eq 10 ] ||
+    echo "push-must-check: NOTE — blocking budget overridden to ${MUST_CHECK_PUSH_BUDGET_S}s via MUST_CHECK_PUSH_BUDGET_S (default 10s)" >&2
+MUST_CHECK_BUDGET_MS=$(( MUST_CHECK_PUSH_BUDGET_S * 1000 ))
+# Tool selection (2026-09-24 fix): `command -v timeout` alone is unsafe on two
+# real hosts. (1) Stock macOS has no `timeout` at all — only Homebrew's
+# coreutils `gtimeout` — so a bare `command -v timeout` finding nothing must
+# still fall back to `gtimeout`, not error before checking it. (2) On Windows,
+# `C:\Windows\System32\timeout.exe` is a DIFFERENT PROGRAM (an interactive
+# countdown/sleep command, not a process-timeout wrapper) and can win the PATH
+# race ahead of Git Bash's own MSYS2 coreutils `timeout`, silently turning
+# every gate invocation into a spurious FAIL instead of a real budget. Resolve
+# by IDENTITY, not by name: prefer `gtimeout`, then a `timeout` that actually
+# reports itself as GNU coreutils via `--version`, and never accept a
+# `timeout` that fails or omits that identification (System32's does both —
+# it accepts no `--version` flag and exits non-zero). No silent alternative if
+# neither identifies: fail fast naming the missing tool and the install hint,
+# per repo policy.
+_is_gnu_timeout() {
+    # $1 = candidate binary name/path already confirmed on PATH.
+    _tv=$("$1" --version 2>/dev/null)
+    _tv_rc=$?
+    [ "$_tv_rc" -eq 0 ] || return 1
+    case "$_tv" in
+        *coreutils*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if command -v gtimeout >/dev/null 2>&1 && _is_gnu_timeout gtimeout; then
+    TIMEOUT_BIN=gtimeout
+elif command -v timeout >/dev/null 2>&1 && _is_gnu_timeout timeout; then
+    TIMEOUT_BIN=timeout
+else
+    echo "push-must-check: ERROR — nothing was checked (GNU timeout(1) not found or not identifiable via --version: install GNU coreutils so 'timeout' or 'gtimeout' resolves to it. On Windows this means Git Bash's own coreutils 'timeout' must precede C:\\Windows\\System32 on PATH — that System32 'timeout.exe' is an unrelated countdown command and is never accepted here. On stock macOS: 'brew install coreutils' provides 'gtimeout')"
+    exit 2
+fi
+
 if [ "${1:-}" = --self-test ]; then
     _tmp=$(mktemp -d) || exit 2
     trap 'rm -rf "$_tmp"' EXIT INT TERM
@@ -830,7 +936,48 @@ if [ "${1:-}" = --self-test ]; then
     sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/manifest" > "$_tmp/missing-required-manifest"
     sed '/^[[:space:]]*rust-go-benchmark-parity,/d' "$_tmp/ledger" > "$_tmp/missing-required-ledger"
     validate_ledger_text "$(cat "$_tmp/missing-required-manifest")" "$(cat "$_tmp/missing-required-ledger")" ignored && die "required TODO gate deletion accepted"
-    echo "push-must-check: PASS — 20 ledger fixtures checked"
+
+    # Budget-overrun fixture (review finding item2#4i, 2026-09-24): a
+    # blocking gate that sleeps past its budget must be killed and reported
+    # as an overrun -- an overrun is NEVER a pass, its rc must be non-zero,
+    # and MUST_CHECK_BUDGET_OVERRUN must name the exact gate. Uses the real
+    # TIMEOUT_BIN/run_push_gate the push path uses, resolved above this block.
+    MUST_CHECK_BUDGET_MS=500
+    MUST_CHECK_BUDGET_SPENT_MS=0
+    MUST_CHECK_BUDGET_OVERRUN=""
+    MUST_CHECK_BLOCKING_RUN=0
+    printf '#!/bin/sh\nsleep 3\nexit 0\n' > "$_tmp/slow-gate.shs"
+    run_push_gate "budget-overrun-fixture" true "$_tmp/slow-gate.shs"
+    _rc=$?
+    [ "$_rc" -ne 0 ] || die "budget-overrun gate reported success (rc=0), never a pass is required"
+    [ "$MUST_CHECK_BUDGET_OVERRUN" = "budget-overrun-fixture" ] || die "budget-overrun gate did not record MUST_CHECK_BUDGET_OVERRUN"
+
+    # Budget-exhausted fixture: once MUST_CHECK_BUDGET_SPENT_MS already meets
+    # or exceeds MUST_CHECK_BUDGET_MS (the overrun above left it there), the
+    # NEXT blocking gate must not even be attempted -- not run, overrun,
+    # never a pass. This is the `_left <= 0` branch of run_push_gate, distinct
+    # from the timeout-kill branch exercised just above.
+    MUST_CHECK_BUDGET_OVERRUN=""
+    printf '#!/bin/sh\nexit 0\n' > "$_tmp/fast-gate.shs"
+    run_push_gate "budget-exhausted-fixture" true "$_tmp/fast-gate.shs"
+    _rc=$?
+    [ "$_rc" -ne 0 ] || die "budget-exhausted gate reported success (rc=0), never a pass is required"
+    [ "$MUST_CHECK_BUDGET_OVERRUN" = "budget-exhausted-fixture" ] || die "budget-exhausted gate did not record MUST_CHECK_BUDGET_OVERRUN"
+
+    # Awk dispatcher parity fixture (review finding item2#4ii): a push-blocking
+    # manifest row whose `id:mode:command` key matches no exact arm in the
+    # dispatcher's case statement must fail closed with exit 2, never be
+    # silently skipped and never fall through to a pass. `HEAD` is a real
+    # revision in this checkout, so this exercises the actual
+    # `git show $ref:$SELF_REL` dispatch-text path, not a stub.
+    _no_arm_manifest='must_check_gates |id, tier, push_blocking, mode, command, ci_job, inputs, description|
+    push-no-such-fixture-gate, push, true, tree, "sh scripts/check/check-no-such-fixture-gate-9f3a1c.shs", -, -, "fixture row deliberately absent from the dispatcher"
+'
+    run_manifest_push_gates "$_no_arm_manifest" "base-oid..head-oid" "HEAD"
+    _rc=$?
+    [ "$_rc" -eq 2 ] || die "unmatched dispatch-arm row did not return 2 (got $_rc)"
+
+    echo "push-must-check: PASS — 23 ledger/budget/dispatcher fixtures checked"
     exit 0
 fi
 
@@ -859,12 +1006,35 @@ _ref_count=$(wc -l < "$_unique_refs" | tr -d ' ')
 [ "$_ref_count" -le "$MAX_PUSH_REF_ROWS" ] ||
     die "$_ref_count unique ref updates exceed the bounded limit $MAX_PUSH_REF_ROWS; split the push"
 
-run_conflict_tree_union "$_unique_refs" || die "outgoing commit union contains a conflict tree or exceeds its bounded history limit"
+budget_error_exit() {
+    echo "push-must-check: ERROR — blocking gate $MUST_CHECK_BUDGET_OVERRUN overran the ${MUST_CHECK_PUSH_BUDGET_S}s push budget; $MUST_CHECK_BLOCKING_RUN blocking gate(s) ran in ${MUST_CHECK_BUDGET_SPENT_MS}ms, verdict unknown (exit 2)"
+    exit 2
+}
+
+run_conflict_tree_union "$_unique_refs" || {
+    [ -z "$MUST_CHECK_BUDGET_OVERRUN" ] || budget_error_exit
+    die "outgoing commit union contains a conflict tree or exceeds its bounded history limit"
+}
 MUST_CHECK_CONFLICT_UNION_DONE=1
 export MUST_CHECK_CONFLICT_UNION_DONE
 
+MUST_CHECK_TOTAL_SPENT_MS=0
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
+    # PER-REF BUDGET (2026-09-24 fix): the blocking budget is per PUSHED REF,
+    # not shared across the whole invocation. Sharing one MUST_CHECK_BUDGET_MS
+    # across `while read` iterations meant a legitimate 2-ref push (the bound
+    # is MAX_PUSH_REF_ROWS=2) always exceeded it — each ref's own blocking set
+    # already costs ~5s, so two refs together routinely ran past the single
+    # shared 10s window and every multi-ref push got a spurious ERROR exit 2,
+    # never a pass, regardless of gate correctness. Resetting the spent-ms and
+    # overrun trackers at the top of each ref iteration gives every ref the
+    # full MUST_CHECK_PUSH_BUDGET_S window, which matches how a human reads
+    # the contract ("10s per push" means per ref checked, not amortized across
+    # however many refs happen to land in one invocation) and keeps the guard
+    # fail-closed per ref rather than fail-closed in aggregate.
+    MUST_CHECK_BUDGET_SPENT_MS=0
+    MUST_CHECK_BUDGET_OVERRUN=""
     # A tag push carries no new commits, and every range-scoped gate below is
     # therefore vacuous on it: `<predecessor>..<tag>` resolves to 0 commits, the
     # guards correctly report `ERROR — nothing was checked` (exit 2) rather than
@@ -916,8 +1086,14 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     if [ "$_remote_sha" = "$ZERO" ]; then
         _range="$_predecessor..$_local_sha"
     fi
-    run_manifest_push_gates "$_manifest" "$_range" "$_local_sha" ||
+    run_manifest_push_gates "$_manifest" "$_range" "$_local_sha"
+    _gates_rc=$?
+    if [ "$_gates_rc" -ne 0 ]; then
+        [ -z "$MUST_CHECK_BUDGET_OVERRUN" ] || budget_error_exit
+        [ "$_gates_rc" -ne 2 ] || { echo "push-must-check: ERROR — nothing was checked (manifest push rows at $_local_sha could not be dispatched)"; exit 2; }
         die "one or more manifest-declared push gates failed"
+    fi
+    MUST_CHECK_TOTAL_SPENT_MS=$(( MUST_CHECK_TOTAL_SPENT_MS + MUST_CHECK_BUDGET_SPENT_MS ))
 done < "$_unique_refs"
 
-echo "push-must-check: PASS — lightweight committed-tree and bootstrap-ledger checks passed"
+echo "push-must-check: PASS — $MUST_CHECK_BLOCKING_RUN blocking gate(s) checked in ${MUST_CHECK_TOTAL_SPENT_MS}ms total (each pushed ref got its own ${MUST_CHECK_PUSH_BUDGET_S}s budget), bootstrap ledger validated"
