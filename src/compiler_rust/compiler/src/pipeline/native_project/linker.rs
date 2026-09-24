@@ -2122,6 +2122,11 @@ int main(int argc, char** argv) {
             }
             if let Some(hosted_runtime) = host_gpu_hosted_runtime.as_ref() {
                 cmd.arg(hosted_runtime);
+                // The rlib's std/core/alloc and allocator-shim references must
+                // resolve from the matching std (never from stubs) on Windows,
+                // where its `win32` module is compiled in.
+                #[cfg(target_os = "windows")]
+                cmd.arg(super::tools::build_rust_std_shim_for_rlib(hosted_runtime, temp_dir)?);
             }
             if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                 cmd.arg(core_runtime);
@@ -2326,6 +2331,13 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Report every unresolved symbol, not lld-link's default first 20: the
+        // Windows stub-parity retry below needs the complete set.
+        #[cfg(target_os = "windows")]
+        if is_msvc {
+            msvc_link_args.push("/errorlimit:0".to_string());
+        }
+
         // Single `/link` group, last: everything after it belongs to the
         // linker, so this must follow every compiler argument above.
         if is_msvc && !msvc_link_args.is_empty() {
@@ -2337,7 +2349,53 @@ int main(int argc, char** argv) {
             eprintln!("Link command: {:?}", cmd);
         }
 
-        let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
+        #[allow(unused_mut)]
+        let mut output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
+
+        // Windows undefined-symbol stub parity (see stubs.rs). ELF resolves
+        // undefined symbols after `--gc-sections`, so references made only by
+        // unreachable code vanish; lld-link resolves before `/OPT:REF` and
+        // rejects them. Retry once with loud trap stubs for exactly the
+        // reported names (Rust std internals are never stubbed), print the
+        // count and write the list beside the binary.
+        #[cfg(target_os = "windows")]
+        if !output_result.status.success() && is_msvc && strict_no_stub_fallback {
+            let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
+            let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
+            if !undefined.is_empty() {
+                let (rust_internal, stubbable): (Vec<String>, Vec<String>) = undefined
+                    .into_iter()
+                    .partition(|name| super::stubs::is_rust_internal_symbol(name));
+                if !rust_internal.is_empty() {
+                    return Err(format!(
+                        "link failed: {} Rust std/alloc internal symbol(s) are unresolved and are never \
+                         stubbed (link the matching std): {}\n{}",
+                        rust_internal.len(),
+                        rust_internal.join(", "),
+                        diagnostics
+                    ));
+                }
+                let stubs_o = super::stubs::compile_coff_gc_parity_stubs(temp_dir, &stubbable)?;
+                if msvc_link_args.is_empty() {
+                    cmd.arg("/link");
+                }
+                cmd.arg(&stubs_o);
+                output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
+                if output_result.status.success() {
+                    let list_path = PathBuf::from(format!("{}.stubbed_symbols.txt", self.output.display()));
+                    let mut list = stubbable.join("\n");
+                    list.push('\n');
+                    std::fs::write(&list_path, list)
+                        .map_err(|e| format!("write {}: {e}", list_path.display()))?;
+                    eprintln!(
+                        "[native-link] stubbed {} unresolved symbol(s) (Windows parity with the ELF \
+                         --gc-sections link; each stub prints its name and aborts if called); list: {}",
+                        stubbable.len(),
+                        list_path.display()
+                    );
+                }
+            }
+        }
 
         if output_result.status.success() {
             // Dynamic lane: place the runtime beside the binary so the

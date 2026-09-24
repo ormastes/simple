@@ -828,6 +828,78 @@ pub(crate) fn runtime_authority_search_dirs(runtime_path: &Path) -> Vec<PathBuf>
     dirs
 }
 
+/// The `rustc version ...` string recorded in an rlib's metadata.
+pub(crate) fn rlib_rustc_version(rlib: &Path) -> Option<String> {
+    let bytes = std::fs::read(rlib).ok()?;
+    let needle = b"rustc version ";
+    let start = bytes.windows(needle.len()).position(|w| w == needle)? + needle.len();
+    let end = bytes[start..].iter().position(|&b| b == b')')? + start + 1;
+    String::from_utf8(bytes[start..end].to_vec()).ok()
+}
+
+/// Build the Rust standard library + allocator shim the hosted runtime rlib
+/// needs when it is linked into a non-Rust (C / Simple) image on Windows.
+///
+/// A bare `.rlib` carries none of its dependencies, and `std`'s
+/// `__rust_alloc` family is only emitted by rustc for a final artifact. Linking
+/// `libspl_hosted_runtime-*.rlib` (whose Windows-only `win32` module uses
+/// `std::sync::Mutex`, `HashMap`, `eprintln!`, ...) therefore left 28 std/core/
+/// alloc internals undefined in the host-gpu full-CLI link. An empty
+/// `staticlib` built by the SAME rustc bundles exactly those crates and the
+/// shim. The compiler must match the rlib byte-for-byte in version, or the
+/// v0-mangled crate hashes differ; a mismatch fails fast.
+pub(crate) fn build_rust_std_shim_for_rlib(rlib: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
+    let wanted = rlib_rustc_version(rlib)
+        .ok_or_else(|| format!("cannot read the rustc version recorded in {}", rlib.display()))?;
+    let dir = temp_dir.join("rust_std_shim");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let source = dir.join("spl_std_shim.rs");
+    std::fs::write(&source, "#![no_std]\nextern crate std;\n#[doc(hidden)]\npub fn spl_std_shim_anchor() {}\n")
+        .map_err(|e| format!("write {}: {e}", source.display()))?;
+    let output = dir.join("spl_std_shim.lib");
+    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    if let Ok(rustc) = std::env::var("RUSTC") {
+        candidates.push((rustc, Vec::new()));
+    }
+    candidates.push(("rustc".to_string(), Vec::new()));
+    candidates.push(("rustc".to_string(), vec!["+nightly".to_string()]));
+    let mut seen = Vec::new();
+    for (program, toolchain) in candidates {
+        let Ok(version) = std::process::Command::new(&program).args(&toolchain).arg("--version").output() else {
+            continue;
+        };
+        let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
+        let version = version.strip_prefix("rustc ").unwrap_or(&version).to_string();
+        if version != wanted {
+            seen.push(format!("{program} {} -> {version}", toolchain.join(" ")));
+            continue;
+        }
+        let status = std::process::Command::new(&program)
+            .args(&toolchain)
+            .args(["--edition", "2021", "--crate-type", "staticlib", "--crate-name", "spl_std_shim"])
+            .args(["-C", "opt-level=3", "-C", "panic=abort", "-C", "codegen-units=1"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&output)
+            .output()
+            .map_err(|e| format!("rustc std shim: {e}"))?;
+        if !status.status.success() {
+            return Err(format!(
+                "failed to build the Rust std shim: {}",
+                String::from_utf8_lossy(&status.stderr)
+            ));
+        }
+        return Ok(output);
+    }
+    Err(format!(
+        "no rustc matching the hosted runtime rlib's compiler ({wanted}) was found; tried: {}. \
+         The rlib's std/core/alloc references are v0-mangled with that compiler's crate hashes. \
+         Install that toolchain or set RUSTC. Install prerequisites with: \
+         sh scripts/setup/bootstrap-prereqs.shs install",
+        seen.join("; ")
+    ))
+}
+
 pub(crate) fn find_hosted_runtime_rlib(runtime_path: &Path) -> Option<PathBuf> {
     runtime_authority_search_dirs(runtime_path)
         .into_iter()
