@@ -100,15 +100,20 @@ python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" <<'PYEOF' || fail "im
 import sys
 img, root_off, clang_b, lld_b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 data = open(img, 'rb').read()
-want = {b'CRT0.O': None, b'SIMPLEOS.LD': None, b'LIBC.A': None, b'HELLO.C': None,
-        b'CLANG.ELF': clang_b, b'LLD.ELF': lld_b}
+# FAT 8.3 raw names are 11 space-padded bytes with NO dot; normalize by
+# dropping spaces (CRT0.O -> CRT0O, SIMPLEOS.LD -> SIMPLEOSLD).
+want = {'CRT0O': None, 'SIMPLEOSLD': None, 'LIBCA': None, 'HELLOC': None,
+        'CLANGELF': clang_b, 'LLDELF': lld_b}
 found = {}
 for slot in range(64):
     e = data[root_off + slot*32 : root_off + slot*32 + 32]
-    if e[0] in (0x00, 0xE5) or e[11] == 0x0F:
-        if e[0] == 0x00: break
+    if e[0] == 0x00:
+        break
+    if e[0] == 0xE5 or (e[11] & 0x0F) == 0x0F:
         continue
-    name = e[0:11].rstrip(b' ')
+    if e[11] & 0x08:
+        continue  # volume label
+    name = e[0:11].replace(b' ', b'').decode('ascii', 'replace')
     size = int.from_bytes(e[28:32], 'little')
     found[name] = size
 missing = [k for k in want if k not in found]
@@ -116,8 +121,8 @@ badsize = [k for k, sz in want.items() if sz is not None and k in found and foun
 if missing or badsize:
     print(f"image_verify FAIL missing={missing} badsize={badsize} found={found}")
     sys.exit(1)
-print(f"image_verify OK entries={sorted(k.decode() for k in found)} "
-      f"CLANG.ELF={found[b'CLANG.ELF']} LLD.ELF={found[b'LLD.ELF']}")
+print(f"image_verify OK entries={sorted(found)} "
+      f"CLANGELF={found['CLANGELF']} LLDELF={found['LLDELF']}")
 PYEOF
 note "R1 PASS: image at $IMAGE ($(wc -c < "$IMAGE" | tr -d ' ') bytes)"
 [ "$R1_ONLY" = 1 ] && { note "--r1-only: stopping before kernel build/boot"; exit 0; }
