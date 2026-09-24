@@ -25,28 +25,51 @@ EOF
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-hash_file() {
+# Fail closed: check the underlying tool's own exit status directly (never
+# through an awk pipe, whose exit status is awk's, not the hasher's), and
+# validate the result is exactly 64 lowercase hex characters before ever
+# printing it. A silently-broken tool returning empty/garbage output must
+# never be mistaken for a real digest by a caller comparing two hashes.
+hash_file() (
   [ -f "$1" ] || return 1
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    hf_out=$(sha256sum "$1") || return 126
+    hf_digest=${hf_out%% *}
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
+    hf_out=$(shasum -a 256 "$1") || return 126
+    hf_digest=${hf_out%% *}
   elif command -v sha256 >/dev/null 2>&1; then
-    sha256 -q "$1"
+    hf_digest=$(sha256 -q "$1") || return 126
+  elif command -v openssl >/dev/null 2>&1; then
+    hf_out=$(openssl dgst -sha256 "$1") || return 126
+    hf_digest=${hf_out##* }
   else
-    return 1
+    return 126
   fi
-}
+  [ "${#hf_digest}" -eq 64 ] || return 126
+  case "$hf_digest" in *[!0-9a-f]*) return 126 ;; esac
+  printf '%s\n' "$hf_digest"
+)
 
-hash_stream() {
+hash_stream() (
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
+    hs_out=$(sha256sum) || return 126
+    hs_digest=${hs_out%% *}
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
+    hs_out=$(shasum -a 256) || return 126
+    hs_digest=${hs_out%% *}
+  elif command -v sha256 >/dev/null 2>&1; then
+    hs_digest=$(sha256 -q) || return 126
+  elif command -v openssl >/dev/null 2>&1; then
+    hs_out=$(openssl dgst -sha256) || return 126
+    hs_digest=${hs_out##* }
   else
-    return 1
+    return 126
   fi
-}
+  [ "${#hs_digest}" -eq 64 ] || return 126
+  case "$hs_digest" in *[!0-9a-f]*) return 126 ;; esac
+  printf '%s\n' "$hs_digest"
+)
 
 canonical_file() {
   case "$1" in /*) ;; *) return 1 ;; esac
