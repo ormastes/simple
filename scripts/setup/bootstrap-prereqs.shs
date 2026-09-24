@@ -682,10 +682,30 @@ export_clang_cargo_env() {
     # is `cc` on Linux — typically a gcc symlink. Exported (not just set),
     # so it also reaches do_install_jj even when this function ran in an
     # earlier, separate do_install_rust call this same process.
+    # VERIFY-FIX (2026-09-26): `${CC:-clang}` only filled in an UNSET CC —
+    # a pre-existing `CC=gcc` in the caller's environment (a real scenario:
+    # many distro build tutorials export it) would have been honored
+    # verbatim, silently reintroducing gcc into a "clang-only" build. This
+    # function's whole job is to GUARANTEE clang is what gets used here,
+    # so it always overwrites, never defers to what was already set.
     fam="$1"
-    CC="${CC:-clang}"
-    CXX="${CXX:-clang++}"
-    export CC CXX
+    case "$fam" in
+        windows)
+            # Windows uses clang-cl as the C driver (MSVC-ABI), not bare
+            # clang/clang++ — same policy precedent as
+            # scripts/setup/llvm-toolchain-env.shs's Windows branch, which
+            # also leaves CXX unset so CMake/cc-rs can't be steered into a
+            # C++ toolchain selection for what should be a C build.
+            CC="clang-cl"
+            unset CXX
+            export CC
+            ;;
+        *)
+            CC="clang"
+            CXX="clang++"
+            export CC CXX
+            ;;
+    esac
     case "$fam" in
         linux)
             arch="$(detect_arch)"
@@ -1834,7 +1854,17 @@ EOF
         fi
     done
     # git/cmake/ninja/timeout/perl/sha256sum/xxd/vulkan/renderdoc all
-    # PRESENT so only clang (LLVM) and jj are missing/dispatched.
+    # PRESENT so only LLVM (or, on hosts where a real LLVM 23.1 install
+    # rescues clang — see apply_llvm23_path — mold instead) and jj are
+    # missing/dispatched. Deliberately NO fake `jj` binary is created here
+    # (VERIFY-FIX 2026-09-26: the previous version pre-created one, making
+    # jj PRESENT from the start — check_one(jj) never landed in
+    # missing_names, do_install_jj was NEVER dispatched, and the
+    # `^jj *PRESENT` assertion below passed vacuously regardless of whether
+    # the loop-continuation behavior under test worked at all). jj starts
+    # genuinely MISSING; the fake `cargo` below creates it as a side effect
+    # of "installing" it, so a PRESENT jj in the final table is only
+    # reachable by do_install_jj actually having run.
     cat > "$bindir14/git" <<'EOF'
 #!/bin/sh
 echo "git version 2.40.0"
@@ -1869,44 +1899,72 @@ EOF
 exit 1
 EOF
     chmod +x "$bindir14/wget"
-    # A jj "install" that succeeds trivially: `cargo install ...` succeeds,
-    # and a real `jj` becomes resolvable afterward reporting a modern
-    # version, so check_one(jj) flips from MISSING to PRESENT.
+    # `cargo --version` (the check_one probe) reports a modern version, but
+    # `cargo install --locked jj-cli --force` (what do_install_jj actually
+    # runs) is the one that must CREATE the jj binary as a side effect —
+    # into $HOME/.cargo/bin, exactly where do_install_jj puts it on PATH
+    # before checking, and exactly where apply_local_bin_path picks it up
+    # again for the final re-check. This is what makes "jj PRESENT in the
+    # final table" proof that do_install_jj ran, instead of a fixture
+    # artifact.
     cat > "$bindir14/cargo" <<'EOF'
 #!/bin/sh
-echo "cargo 1.90.0"
-exit 0
-EOF
-    cat > "$bindir14/jj" <<'EOF'
-#!/bin/sh
-echo "jj 0.30.0"
+case "$*" in
+    *"install"*"jj-cli"*)
+        mkdir -p "$HOME/.cargo/bin"
+        printf '#!/bin/sh\necho "jj 0.30.0"\n' > "$HOME/.cargo/bin/jj"
+        chmod +x "$HOME/.cargo/bin/jj"
+        exit 0
+        ;;
+    *)
+        echo "cargo 1.90.0"
+        exit 0
+        ;;
+esac
 EOF
     cat > "$bindir14/rustc" <<'EOF'
 #!/bin/sh
 echo "rustc 1.90.0"
 EOF
-    chmod +x "$bindir14/cargo" "$bindir14/jj" "$bindir14/rustc"
+    chmod +x "$bindir14/cargo" "$bindir14/rustc"
     fakehome14="$tmp/home14"
     mkdir -p "$fakehome14"
     set +e
     out="$(PATH="$bindir14" HOME="$fakehome14" BOOTSTRAP_PREREQS_UNAME_S=Linux BOOTSTRAP_PREREQS_UNAME_M=x86_64 BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release" BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version_native" run_install 0 2>&1)"; rc=$?
     set -e
-    # NOTE: this host's apply_llvm23_path legitimately finds a REAL LLVM
-    # 23.1.1 install via an absolute path check that ignores the simulated
-    # platform (by design — that IS MUST-FIX #9's whole point), so clang
-    # never lands in missing_names here and do_install_llvm23 is not the
-    # one that fails in this fixture. mold is: its wget is faked to fail
-    # (network-independent architecture is forced via
-    # BOOTSTRAP_PREREQS_UNAME_M so the failure is deterministic, not an
-    # accidental "uname not found on this fixture PATH" artifact), so mold
-    # is the failing installer, and jj (an independently dispatched
-    # installer running in the SAME loop) is the one proving the loop
-    # was not aborted.
-    [ "$rc" -ne 0 ] || selftest_fail "run_install with one failing installer (mold, no network) must still end FAIL (mold stays missing), got rc=0: $out"
-    printf '%s\n' "$out" | grep -qi "could not download.*mold stays absent" || selftest_fail "the mold install failure must be visible in run_install's output, got: $out"
+    # NOTE (corrected 2026-09-26 — the previous version of this comment was
+    # wrong): whether LLVM or mold ends up as the first-encountered failing
+    # installer here is HOST-DEPENDENT. On a host with a real, absolute-path
+    # LLVM 23.1 install (this Windows host has one — apply_llvm23_path finds
+    # it, and llvm-toolchain-env.shs's own Windows branch does too,
+    # independent of the simulated "linux" family), clang is rescued into
+    # PRESENT and do_install_llvm23 is never dispatched at all — mold (whose
+    # wget is faked to fail, with the architecture forced deterministic via
+    # BOOTSTRAP_PREREQS_UNAME_M) is then the one that fails. On a host
+    # without such a rescue (a plain WSL/Linux box, no apt-installed
+    # /usr/lib/llvm-23/bin), clang genuinely stays missing, do_install_llvm23
+    # IS dispatched, and its (also-faked-to-fail) wget call fails it first.
+    # Both are legitimate outcomes of the same fixture; the assertions below
+    # accept either by checking for EITHER failure marker, and additionally
+    # prove — not just assert past the fact — that jj's installer ran
+    # STRICTLY AFTER whichever one failed, by comparing output line numbers.
+    [ "$rc" -ne 0 ] || selftest_fail "run_install with one failing installer must still end FAIL, got rc=0: $out"
+    printf '%s\n' "$out" | grep -qiE "could not fetch apt\.llvm\.org signing key|could not download.*mold stays absent" \
+        || selftest_fail "neither the LLVM nor the mold install failure is visible in run_install's output, got: $out"
     printf '%s\n' "$out" | grep -q '^FAIL' || selftest_fail "run_install must still print the final FAIL verdict after one installer fails, got: $out"
-    printf '%s\n' "$out" | grep -q 'mold(MISSING)' || selftest_fail "the final verdict must still name mold as an offender, got: $out"
-    printf '%s\n' "$out" | grep -q '^jj *PRESENT' || selftest_fail "run_install's final re-check must show jj PRESENT — proving the jj installer still ran despite the earlier mold installer failing (the loop was not aborted), got: $out"
+    # The real proof this isn't vacuous: jj's OWN installer banner must
+    # appear at all (only possible if do_install_jj was dispatched, which
+    # only happens if jj was genuinely MISSING going in — no fake jj binary
+    # is pre-seeded on this fixture's PATH, unlike the previous version of
+    # this test), and it must appear on a LATER output line than the first
+    # failure — proving the dispatch loop moved on to the next tool instead
+    # of stopping.
+    fail_line="$(printf '%s\n' "$out" | grep -niE "could not fetch apt\.llvm\.org signing key|could not download.*mold stays absent" | head -n1 | cut -d: -f1)"
+    jj_banner_line="$(printf '%s\n' "$out" | grep -n '^=== jj (' | head -n1 | cut -d: -f1)"
+    [ -n "$fail_line" ] || selftest_fail "could not locate the failure line to order against, got: $out"
+    [ -n "$jj_banner_line" ] || selftest_fail "jj's own '=== jj (...)' installer banner never appeared — do_install_jj was not dispatched, which means jj was never genuinely missing (this is exactly the vacuous-test failure mode this fixture exists to catch), got: $out"
+    [ "$jj_banner_line" -gt "$fail_line" ] || selftest_fail "jj's installer banner (line $jj_banner_line) must appear AFTER the earlier failure (line $fail_line), proving the loop continued rather than stopping, got: $out"
+    printf '%s\n' "$out" | grep -q '^jj *PRESENT' || selftest_fail "run_install's final re-check must show jj PRESENT — the fake cargo creates \$HOME/.cargo/bin/jj as a side effect of the (real) install attempt do_install_jj made, got: $out"
 
     echo "SELFTEST OK — 14 fixture group(s) passed"
 }
