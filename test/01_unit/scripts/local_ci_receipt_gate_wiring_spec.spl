@@ -9,7 +9,7 @@ use std.spec.{describe, it, expect}
 use app.sj.gate_manifest.{parse_gate_manifest}
 
 val MANIFEST_PATH = "config/check/must_check_gates.sdn"
-val WORKFLOW_PATH = ".github/workflows/repo-hygiene.yml"
+val WORKFLOW_PATH = ".github/workflows/code-idiom-gates.yml"
 val PUSH_GATE_PATH = "scripts/check/check-push-must-pass.shs"
 val CI_JOB = "code-idiom-gates"
 
@@ -205,3 +205,32 @@ describe "Local CI receipt gate wiring":
             "push-local-ci-receipt-selftest, push, false, tree, \"sh scripts/check/verify-local-ci-receipt.shs --selftest\"")
         expect(push_gate).to_contain(
             "'push-local-ci-receipt-selftest:tree:sh scripts/check/verify-local-ci-receipt.shs --selftest')")
+
+    it "derives the skip decision from BASE code under pull_request_target":
+        # @req REQ-SSPEC-UNIT
+        step("derives the skip decision from BASE code under pull_request_target")
+        val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
+        val hygiene = rt_file_read_text(".github/workflows/repo-hygiene.yml") ?? ""
+        # ADDENDUM_2026-09-06 A: under `pull_request` the PR head's YAML ran
+        # the decision. pull_request_target evaluates BASE's YAML.
+        expect(workflow).to_contain("  pull_request_target:\n    types: [opened, synchronize, reopened]")
+        expect(workflow.contains("\n  pull_request:\n")).to_be(false)
+        expect(workflow).to_contain("[ \"$EVENT_NAME\" = pull_request_target ]")
+        expect(workflow.contains("\"$EVENT_NAME\" = pull_request ]")).to_be(false)
+        # The head is checked out explicitly, pinned, without credentials.
+        expect(workflow).to_contain(r"ref: ${{ github.event.pull_request.head.sha }}")
+        expect(workflow).to_contain("persist-credentials: false")
+        # Least privilege, no secrets, fork PRs never run in base context.
+        expect(workflow).to_contain("permissions:\n  contents: read\n  pull-requests: read\n")
+        expect(workflow.contains(": write")).to_be(false)
+        expect(workflow.contains("secrets.")).to_be(false)
+        expect(workflow).to_contain("github.event.pull_request.head.repo.full_name == github.repository")
+        # A ref-keyed concurrency group would cancel across PRs under p_r_t.
+        expect(workflow).to_contain(r"group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}")
+        # D8 kill switch, forcing full from inside the decision.
+        expect(workflow).to_contain(r"SKIP_KILL_SWITCH: ${{ vars.SIMPLE_CI_RECEIPT_DISABLED }}")
+        # The job left repo-hygiene.yml, whose `on:` still carries the REQUIRED
+        # fast-gates context on pull_request only.
+        expect(hygiene.contains("\n  code-idiom-gates:")).to_be(false)
+        expect(hygiene.contains("\n  pull_request_target:")).to_be(false)
+        expect(hygiene).to_contain("name: Code Idiom & Structural Ratchet Gates\n")
