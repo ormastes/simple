@@ -1,0 +1,124 @@
+# @cover src/app/mcp/main.spl 0%
+"""
+# MCP stdio — CRLF framing and malformed-input recovery
+
+**Requirements:** N/A
+
+## Overview
+
+Extends the plain-LF stdio contract check (`mcp_stdio_contract_spec.spl`)
+with two Windows-relevant properties of the real spawned server process
+(`src/app/mcp/main.spl`), fed over stdin exactly like a real MCP client:
+
+- every JSON-RPC line may legitimately arrive `\r\n`-terminated (every
+  Windows MCP client on this repo's own launcher, `bin/simple_mcp_server.cmd`,
+  writes CRLF-terminated stdio by default) — the server must answer the
+  `initialize`/`tools/list` round trip identically whether the request
+  lines end in `\n` or `\r\n`;
+- after a malformed (non-JSON) line, the SAME process must keep serving
+  subsequent well-formed requests on the same stdin stream — a malformed
+  line must not poison or kill the session for requests that follow it.
+
+Every spawn is wrapped in a shell-level `timeout` so a defect that hangs the
+server cannot hang this spec.
+"""
+
+# @feature mcp_stdio_contract
+# tag: system
+
+use std.spec
+use app.io.mod.{process_run, file_write}
+use std.io_runtime.{env_get}
+
+fn is_windows_host() -> bool:
+    val os_env = env_get("OS") ?? ""
+    os_env.contains("Windows")
+
+fn simple_binary() -> text:
+    if is_windows_host():
+        return "src/compiler_rust/target/release/simple.exe"
+    "src/compiler_rust/target/release/simple"
+
+fn posix_shell() -> text:
+    if is_windows_host():
+        return "sh"
+    "/bin/sh"
+
+fn init_request(id_literal: text) -> text:
+    "{\"jsonrpc\":\"2.0\",\"id\":" + id_literal + ",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"crlf-spec\",\"version\":\"1.0\"}}}"
+
+fn initialized_notification() -> text:
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
+
+fn tools_list_request(id_literal: text) -> text:
+    "{\"jsonrpc\":\"2.0\",\"id\":" + id_literal + ",\"method\":\"tools/list\",\"params\":{}}"
+
+fn is_brace_balanced(json: text) -> bool:
+    val opens = json.split("{").len() - 1
+    val closes = json.split("}").len() - 1
+    opens == closes and opens > 0
+
+# Frame every message CRLF-terminated, matching a real Windows client.
+fn crlf_line(body: text) -> text:
+    body + "\r\n"
+
+fn send_mcp_crlf(messages: text, timeout_seconds: text) -> text:
+    val tmp = "/tmp/mcp_stdio_crlf_input_" + messages.len().to_string() + ".txt"
+    file_write(tmp, messages)
+    val cmd = "cat " + tmp + " | timeout " + timeout_seconds + " " + simple_binary() + " run src/app/mcp/main.spl 2>/dev/null"
+    val (stdout, _stderr, _exit_code) = process_run(posix_shell(), ["-c", cmd])
+    stdout
+
+describe "MCP stdio JSON-RPC contract — CRLF framing":
+    """
+    ## CRLF-terminated initialize + tools/list
+
+    The exact same round trip as the LF contract spec, but every line ends
+    in `\r\n` instead of `\n` — the byte a real Windows client actually
+    sends over the pipe.
+    """
+
+    it "answers initialize and tools/list identically when every request line is CRLF-terminated":
+        val input = crlf_line(init_request("1")) + crlf_line(initialized_notification()) + crlf_line(tools_list_request("2"))
+        val output = send_mcp_crlf(input, "30")
+        assert_not_equal(output, "")
+        assert_true(is_brace_balanced(output))
+        assert_contains(output, "\"id\":1")
+        assert_contains(output, "\"serverInfo\"")
+        assert_contains(output, "\"id\":2")
+        assert_contains(output, "\"tools\":[")
+        assert_false(output.contains("\"tools\":[]"))
+
+    """
+    ## Malformed line followed by a well-formed one — session must recover
+
+    A malformed line must not poison the rest of the session: a well-formed
+    request sent on the SAME stdin stream right after it must still be
+    answered.
+    """
+
+    it "keeps serving tools/list after a preceding malformed CRLF-terminated line in the same session":
+        val input = crlf_line("this is not json") + crlf_line(init_request("9")) + crlf_line(initialized_notification()) + crlf_line(tools_list_request("10"))
+        val output = send_mcp_crlf(input, "30")
+        assert_not_equal(output, "")
+        assert_true(is_brace_balanced(output))
+        assert_contains(output, "\"id\":10")
+        assert_contains(output, "\"tools\":[")
+        assert_false(output.contains("\"tools\":[]"))
+
+    """
+    ## A lone CR (no following LF) must not hang the reader
+
+    `protocol_read_line` treats a standalone `\r` as a legitimate line
+    terminator (see `src/lib/nogc_async_mut/mcp/protocol.spl`). A stray lone
+    `\r` between two requests must not stall the process or corrupt the
+    request that follows it.
+    """
+
+    it "does not hang or corrupt the next request on a lone bare CR between messages":
+        val input = crlf_line(init_request("1")) + crlf_line(initialized_notification()) + "\r" + crlf_line(tools_list_request("2"))
+        val output = send_mcp_crlf(input, "30")
+        assert_not_equal(output, "")
+        assert_true(is_brace_balanced(output))
+        assert_contains(output, "\"id\":2")
+        assert_contains(output, "\"tools\":[")

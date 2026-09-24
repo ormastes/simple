@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+"""
+# simple_ctx_* tool handlers — Windows paths, CRLF files, error handling
+
+## Overview
+
+Exercises the real `handle_simple_ctx_*` handler functions (not the spawned
+server process) for `simple_ctx_execute_file` and `simple_ctx_index`,
+covering:
+
+- a missing-file path (including a Windows drive-letter path that does not
+  exist) must come back as a clean JSON-RPC error, never a crash;
+- a directory given where a file is expected must also fail cleanly;
+- indexing a file whose content uses CRLF line endings must produce the
+  expected chunk count and preserve the CRLF bytes end to end (round trip
+  through the on-disk chunk store), so downstream line/position math sees
+  the same content the caller wrote.
+
+The chunk store is redirected to a private temp directory via
+`SIMPLE_CTX_DIR` so this spec never touches the real `.simple/ctx/` store.
+"""
+
+use std.spec.{describe, it, expect}
+use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_execute_file, handle_simple_ctx_index, ctx_chunk_text}
+use std.io_runtime.{env_get, env_set}
+use std.io.{dir_create, dir_remove_all}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "handle_simple_ctx_execute_file — missing/invalid path handling":
+    it "returns a JSON-RPC error (not a crash) for a nonexistent Windows drive-letter path":
+        val body = "{\"path\":\"C:\\\\definitely\\\\does\\\\not\\\\exist\\\\nope.spl\",\"language\":\"shell\",\"code\":\"echo hi\"}"
+        val response = handle_simple_ctx_execute_file("1", body)
+        expect(response.contains("\"isError\":true")).to_equal(true)
+        expect(response.contains("no such file")).to_equal(true)
+
+    it "returns a JSON-RPC error (not a crash) for a nonexistent POSIX-style path":
+        val response = handle_simple_ctx_execute_file("2", "{\"path\":\"/no/such/file.spl\",\"language\":\"shell\",\"code\":\"echo hi\"}")
+        expect(response.contains("\"isError\":true")).to_equal(true)
+
+    it "returns a well-formed single-line JSON-RPC response when path is a directory, not a file":
+        val response = handle_simple_ctx_execute_file("3", "{\"path\":\"src/app/mcp\",\"language\":\"shell\",\"code\":\"echo hi\"}")
+        # A directory both "exists" and cannot be executed as a source file;
+        # the handler must not hang or crash either way — it must still
+        # answer with one well-formed JSON-RPC line.
+        expect(response.contains("\"jsonrpc\":\"2.0\"")).to_equal(true)
+        expect(response.contains("\n")).to_equal(false)
+
+    it "returns a JSON-RPC error for a missing required path argument":
+        val response = handle_simple_ctx_execute_file("4", "{\"language\":\"shell\",\"code\":\"echo hi\"}")
+        expect(response.contains("\"isError\":true")).to_equal(true)
+        expect(response.contains("Missing required parameter")).to_equal(true)
+
+describe "handle_simple_ctx_index — CRLF file content round trip":
+    it "indexes CRLF content and preserves the CRLF bytes through the chunk store":
+        val tmp_dir = "test/02_integration/app/mcp/.tmp_ctx_store_crlf"
+        dir_remove_all(tmp_dir)
+        dir_create(tmp_dir, true)
+        val prior = env_get("SIMPLE_CTX_DIR") ?? ""
+        env_set("SIMPLE_CTX_DIR", tmp_dir)
+
+        val response = handle_simple_ctx_index("5", "{\"content\":\"line one\\r\\nline two\\r\\nline three\\r\\n\",\"source\":\"crlf-test\"}")
+        expect(response.contains("\"isError\":false")).to_equal(true)
+        expect(response.contains("Indexed 1 chunk")).to_equal(true)
+        val chunks_raw = read_text(tmp_dir + "/chunks.sdn")
+        # The escaped on-disk row must carry the CRLF marker for every line
+        # break — an unescaped raw \r\n on disk would corrupt the
+        # append-only row format (see header comment in
+        # main_lazy_ctx_tools.spl on why cells are escaped).
+        expect(chunks_raw.contains("\\r\\n")).to_equal(true)
+
+        env_set("SIMPLE_CTX_DIR", prior)
+        dir_remove_all(tmp_dir)
+
+    it "the chunker produces the same chunk count for pure-LF and CRLF content of equivalent shape":
+        val lf = "a\nb\nc\n"
+        val crlf = "a\r\nb\r\nc\r\n"
+        val chunks_lf = ctx_chunk_text(lf, 1200)
+        val chunks_crlf = ctx_chunk_text(crlf, 1200)
+        expect(chunks_lf.len()).to_equal(chunks_crlf.len())
+        expect(chunks_crlf[0].contains("\r")).to_equal(true)
+
+    it "returns a JSON-RPC error for missing required content":
+        val response = handle_simple_ctx_index("6", "{\"source\":\"x\"}")
+        expect(response.contains("\"isError\":true")).to_equal(true)
+        expect(response.contains("Missing required parameter")).to_equal(true)
