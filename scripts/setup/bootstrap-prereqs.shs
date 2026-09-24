@@ -1,0 +1,545 @@
+#!/bin/sh
+set -eu
+# bootstrap-prereqs.shs — check-and-ASK prerequisite installer for bootstrapping
+# the Simple compiler on a fresh Linux/WSL host.
+#
+# Usage:
+#   sh scripts/setup/bootstrap-prereqs.shs [check|install] [--yes] [--selftest]
+#
+# Modes:
+#   check   (default) — detect every prerequisite with its required version,
+#           print a table of present / missing / wrong-version, exit 0 only
+#           if all are satisfied.
+#   install — for each missing/wrong-version item, print the exact install
+#           command and ASK "Install <tool>? [y/N]" before running it.
+#           Default answer is No. Never installs silently.
+#
+# Non-interactive safety: when stdin is not a TTY and --yes was not given
+# (e.g. under CI, or invoked from another script), `install` mode does NOT
+# prompt and does NOT install anything. It fails fast, listing every install
+# command that would have been offered, and exits 2. This mirrors the repo
+# policy of "fail fast with an install prompt" rather than silently falling
+# back to an alternative toolchain.
+#
+# --yes opts into unattended installs (explicit automation only). It is OFF
+# by default and must be passed explicitly — never inferred from CI env vars.
+#
+# Clang-only policy: this script never offers gcc/g++ as the C/C++ compiler,
+# per .claude/rules/code-style.md "Toolchain policy" and CLAUDE.md.
+#
+# Platform support: Ubuntu/Debian on native Linux or WSL2. Any other platform
+# (macOS, FreeBSD, native Windows, other distros) prints
+# "not supported by this installer yet" with a pointer and exits 2 from
+# `check`, rather than guessing at package names.
+#
+# Verdict convention (last stdout line), matching the repo's other
+# scripts/check/*.shs gates:
+#   PASS  — <n> prerequisite(s) checked                exit 0
+#   FAIL  — <n> prerequisite(s) checked, <k> missing/wrong-version: <names>
+#                                                        exit 1
+#   ERROR — nothing was checked: <reason>               exit 2
+#
+# --selftest runs fixture-based checks (a fake PATH with some tools missing
+# and some at the wrong version) and is fatal — it must prove the script
+# reports missing/wrong-version correctly and NEVER installs in
+# non-interactive mode. Run before trusting any change to this file:
+#   sh scripts/setup/bootstrap-prereqs.shs --selftest
+#
+# Fast path requirement: `check` must run in seconds with NO network calls.
+# Every detection below is `command -v` + `--version`, nothing else.
+
+# ---------------------------------------------------------------------------
+# Prerequisite table. One row per tool: name, min version (empty = any
+# version acceptable, just needs to be present), version-extraction command,
+# and the apt package(s) that provide it on Ubuntu/Debian.
+#
+# Versions are compared as dotted-integer tuples, left to right; a tool whose
+# reported version cannot be parsed is treated as "present, version unknown"
+# and passes a min-version check with a warning rather than failing closed on
+# a parse quirk (a new point release changing its --version banner format
+# should not turn into a false FAIL).
+# ---------------------------------------------------------------------------
+
+PREREQ_NAMES="clang clang++ ld.lld llvm-config mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd"
+
+version_ge() {
+    # version_ge A B -> 0 (true) if dotted-integer version A >= B
+    a="$1"; b="$2"
+    [ -z "$b" ] && return 0
+    [ -z "$a" ] && return 1
+    a_rest="$a"; b_rest="$b"
+    while [ -n "$a_rest" ] || [ -n "$b_rest" ]; do
+        a_seg="${a_rest%%.*}"; b_seg="${b_rest%%.*}"
+        case "$a_rest" in *.*) a_rest="${a_rest#*.}" ;; *) a_rest="" ;; esac
+        case "$b_rest" in *.*) b_rest="${b_rest#*.}" ;; *) b_rest="" ;; esac
+        a_seg="${a_seg:-0}"; b_seg="${b_seg:-0}"
+        case "$a_seg" in ''|*[!0-9]*) a_seg=0 ;; esac
+        case "$b_seg" in ''|*[!0-9]*) b_seg=0 ;; esac
+        if [ "$a_seg" -gt "$b_seg" ]; then return 0; fi
+        if [ "$a_seg" -lt "$b_seg" ]; then return 1; fi
+    done
+    return 0
+}
+
+extract_version() {
+    # extract_version <raw --version output> -> first dotted-number token
+    printf '%s\n' "$1" | grep -o '[0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)*' | head -n1
+}
+
+req_min_version() {
+    case "$1" in
+        clang) printf '%s' "23.1.0" ;;
+        clang++) printf '%s' "23.1.0" ;;
+        ld.lld) printf '%s' "23.1.0" ;;
+        llvm-config) printf '%s' "23.1.0" ;;
+        mold) printf '%s' "" ;;
+        rustc) printf '%s' "1.89.0" ;;
+        cargo) printf '%s' "1.89.0" ;;
+        git) printf '%s' "" ;;
+        jj) printf '%s' "" ;;
+        cmake) printf '%s' "3.13.0" ;;
+        ninja) printf '%s' "" ;;
+        timeout) printf '%s' "" ;;
+        perl) printf '%s' "" ;;
+        sha256sum) printf '%s' "" ;;
+        xxd) printf '%s' "" ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
+req_reason() {
+    case "$1" in
+        clang|clang++) printf '%s' "clang-only policy — never gcc/g++ (.claude/rules/code-style.md)" ;;
+        ld.lld) printf '%s' "LLD linker — mold preferred, LLD is the documented fallback" ;;
+        llvm-config) printf '%s' "LLVM toolchain introspection, pinned to 23.1 (.claude/rules/commands.md)" ;;
+        mold) printf '%s' "preferred Linux linker (falls back to ld.lld when absent)" ;;
+        rustc|cargo) printf '%s' "builds the Rust seed compiler (src/compiler_rust)" ;;
+        git) printf '%s' "VCS, colocated with jj" ;;
+        jj) printf '%s' "primary VCS (.claude/rules/vcs.md)" ;;
+        cmake|ninja) printf '%s' "native runtime / third-party builds" ;;
+        timeout) printf '%s' "bootstrap script guards long-running steps" ;;
+        perl) printf '%s' "used by bootstrap-from-scratch.sh helper steps" ;;
+        sha256sum) printf '%s' "bootstrap receipt hashing" ;;
+        xxd) printf '%s' "bootstrap binary/hex inspection" ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
+req_apt_pkg() {
+    case "$1" in
+        clang) printf '%s' "clang-23" ;;
+        clang++) printf '%s' "clang-23" ;;
+        ld.lld) printf '%s' "lld-23" ;;
+        llvm-config) printf '%s' "llvm-23" ;;
+        mold) printf '%s' "mold" ;;
+        rustc) printf '%s' "__RUSTUP__" ;;
+        cargo) printf '%s' "__RUSTUP__" ;;
+        git) printf '%s' "git" ;;
+        jj) printf '%s' "__CARGO_JJ__" ;;
+        cmake) printf '%s' "cmake" ;;
+        ninja) printf '%s' "ninja-build" ;;
+        timeout) printf '%s' "coreutils" ;;
+        perl) printf '%s' "perl" ;;
+        sha256sum) printf '%s' "coreutils" ;;
+        xxd) printf '%s' "xxd" ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
+install_cmd_for() {
+    pkg="$(req_apt_pkg "$1")"
+    case "$pkg" in
+        __RUSTUP__)
+            cat <<'EOF'
+# rustup needs a one-time network fetch that this installer will not run for
+# you (this host blocks curl/wget in automated tool calls by policy). Run
+# yourself, then re-run this script's check:
+sh -c 'command -v rustup >/dev/null 2>&1 || (curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default)'
+. "$HOME/.cargo/env"
+rustup component add rustfmt clippy
+EOF
+            ;;
+        __CARGO_JJ__)
+            cat <<'EOF'
+# jj-cli >=0.15 needs rustc >=1.76; current jj-cli needs rustc >=1.89.
+# Requires a rustc new enough (see the rustup step above), then:
+cargo install --locked jj-cli
+EOF
+            ;;
+        "")
+            printf '# no automated install command known for %s — see doc/07_guide/infra/toolchain/\n' "$1"
+            ;;
+        clang-23|lld-23|llvm-23)
+            cat <<EOF
+# LLVM 23 needs apt.llvm.org's repo, which needs a one-time network+root
+# fetch this installer will not run for you (root + curl/wget policy):
+wget -O /tmp/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+sudo gpg --dearmor -o /usr/share/keyrings/llvm-snapshot.gpg /tmp/llvm-snapshot.gpg.key
+echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-23 main" | sudo tee /etc/apt/sources.list.d/llvm23.list
+sudo apt-get update
+sudo apt-get install -y clang-23 clangd-23 lld-23 llvm-23 llvm-23-dev llvm-23-tools
+EOF
+            ;;
+        mold)
+            cat <<'EOF'
+sudo apt-get install -y mold || sh scripts/setup/install-mold.shs
+EOF
+            ;;
+        *)
+            printf 'sudo apt-get install -y %s\n' "$pkg"
+            ;;
+    esac
+}
+
+detect_platform() {
+    # Overridable for --selftest fixtures only; unset in normal use, in which
+    # case the real /etc/os-release and /proc/version are read.
+    os_release_path="${BOOTSTRAP_PREREQS_OS_RELEASE:-/etc/os-release}"
+    proc_version_path="${BOOTSTRAP_PREREQS_PROC_VERSION:-/proc/version}"
+    if [ ! -r "$os_release_path" ]; then
+        printf 'unsupported:no-os-release'
+        return
+    fi
+    distro_id=""
+    # shellcheck disable=SC1091
+    distro_id="$(. "$os_release_path" 2>/dev/null && printf '%s' "${ID:-}")"
+    is_wsl=0
+    if [ -r "$proc_version_path" ] && grep -qi 'microsoft' "$proc_version_path" 2>/dev/null; then
+        is_wsl=1
+    fi
+    case "$distro_id" in
+        ubuntu|debian)
+            if [ "$is_wsl" = 1 ]; then
+                printf 'wsl:%s' "$distro_id"
+            else
+                printf 'linux:%s' "$distro_id"
+            fi
+            ;;
+        *)
+            printf 'unsupported:%s' "${distro_id:-unknown}"
+            ;;
+    esac
+}
+
+check_one() {
+    # check_one <name> -> prints "<name>|<status>|<found_version>|<required>"
+    name="$1"
+    bin="$name"
+    req="$(req_min_version "$name")"
+    path="$(command -v "$bin" 2>/dev/null || true)"
+    if [ -z "$path" ]; then
+        printf '%s|MISSING||%s\n' "$name" "$req"
+        return
+    fi
+    raw="$("$bin" --version 2>&1 | head -n1 || true)"
+    found="$(extract_version "$raw")"
+    if [ -z "$req" ]; then
+        printf '%s|PRESENT|%s|%s\n' "$name" "${found:-unknown}" "$req"
+        return
+    fi
+    if [ -z "$found" ]; then
+        printf '%s|PRESENT|unknown|%s\n' "$name" "$req"
+        return
+    fi
+    if version_ge "$found" "$req"; then
+        printf '%s|PRESENT|%s|%s\n' "$name" "$found" "$req"
+    else
+        printf '%s|WRONG_VERSION|%s|%s\n' "$name" "$found" "$req"
+    fi
+}
+
+run_check() {
+    platform="$(detect_platform)"
+    case "$platform" in
+        unsupported:*)
+            echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet (Ubuntu/Debian on Linux or WSL2 only); see doc/07_guide/infra/toolchain/" >&2
+            return 2
+            ;;
+    esac
+
+    n=0
+    missing=0
+    offenders=""
+    printf '%-14s %-13s %-14s %-10s\n' "TOOL" "STATUS" "FOUND" "REQUIRED"
+    for name in $PREREQ_NAMES; do
+        row="$(check_one "$name")"
+        n=$((n + 1))
+        status="$(printf '%s' "$row" | cut -d'|' -f2)"
+        found="$(printf '%s' "$row" | cut -d'|' -f3)"
+        req="$(printf '%s' "$row" | cut -d'|' -f4)"
+        printf '%-14s %-13s %-14s %-10s\n' "$name" "$status" "${found:--}" "${req:-any}"
+        if [ "$status" != "PRESENT" ]; then
+            missing=$((missing + 1))
+            offenders="$offenders $name($status)"
+        fi
+    done
+
+    if [ "$n" -eq 0 ]; then
+        echo "ERROR — nothing was checked: empty prerequisite table" >&2
+        return 2
+    fi
+
+    if [ "$missing" -eq 0 ]; then
+        echo "PASS — $n prerequisite(s) checked"
+        return 0
+    fi
+    echo "FAIL — $n prerequisite(s) checked, $missing missing/wrong-version:$offenders"
+    return 1
+}
+
+run_install() {
+    yes_flag="$1"
+    platform="$(detect_platform)"
+    case "$platform" in
+        unsupported:*)
+            echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet; see doc/07_guide/infra/toolchain/" >&2
+            return 2
+            ;;
+    esac
+
+    interactive=1
+    if [ ! -t 0 ] && [ "$yes_flag" != "1" ]; then
+        interactive=0
+    fi
+
+    n=0
+    missing=0
+    installed=0
+    offenders=""
+    for name in $PREREQ_NAMES; do
+        row="$(check_one "$name")"
+        n=$((n + 1))
+        status="$(printf '%s' "$row" | cut -d'|' -f2)"
+        if [ "$status" = "PRESENT" ]; then
+            continue
+        fi
+        missing=$((missing + 1))
+        offenders="$offenders $name($status)"
+    done
+
+    if [ "$missing" -eq 0 ]; then
+        echo "PASS — $n prerequisite(s) checked"
+        return 0
+    fi
+
+    if [ "$interactive" -eq 0 ]; then
+        echo "Non-interactive session (no TTY / --yes not given) — refusing to prompt or install." >&2
+        echo "Install command(s) that would have been offered:" >&2
+        for name in $PREREQ_NAMES; do
+            row="$(check_one "$name")"
+            status="$(printf '%s' "$row" | cut -d'|' -f2)"
+            [ "$status" = "PRESENT" ] && continue
+            echo "--- $name ($status) ---" >&2
+            install_cmd_for "$name" >&2
+        done
+        echo "FAIL — $n prerequisite(s) checked, $missing missing/wrong-version:$offenders" >&2
+        echo "ERROR — nothing was checked: refusing to install in a non-interactive session; re-run with --yes for unattended automation, or interactively to be prompted" >&2
+        return 2
+    fi
+
+    for name in $PREREQ_NAMES; do
+        row="$(check_one "$name")"
+        status="$(printf '%s' "$row" | cut -d'|' -f2)"
+        [ "$status" = "PRESENT" ] && continue
+        reason="$(req_reason "$name")"
+        echo ""
+        echo "=== $name ($status) — $reason ==="
+        install_cmd_for "$name"
+        if [ "$yes_flag" = "1" ]; then
+            answer="y"
+        else
+            printf 'Install %s? [y/N] ' "$name" >&2
+            read -r answer || answer="n"
+        fi
+        case "$answer" in
+            y|Y|yes|YES)
+                install_cmd_for "$name" | sh -eu
+                installed=$((installed + 1))
+                ;;
+            *)
+                echo "skipped $name"
+                ;;
+        esac
+    done
+
+    # Re-check after installs.
+    run_check
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: fixtures with a fake PATH exercising missing / wrong-version /
+# present tools, proving detection is correct and that non-interactive
+# install never installs.
+# ---------------------------------------------------------------------------
+selftest_fail() {
+    echo "SELFTEST FAIL: $*" >&2
+    exit 1
+}
+
+run_selftest() {
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-prereqs-selftest.XXXXXX")"
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+
+    # Fixture 1: version_ge arithmetic
+    version_ge "23.1.0" "23.1.0" || selftest_fail "version_ge equal must be true"
+    version_ge "23.2.0" "23.1.0" || selftest_fail "version_ge greater must be true"
+    if version_ge "22.9.0" "23.1.0"; then selftest_fail "version_ge lesser must be false"; fi
+    version_ge "1.90.0" "1.89.0" || selftest_fail "version_ge patch-tuple must be true"
+    if version_ge "1.75.0" "1.89.0"; then selftest_fail "version_ge 1.75<1.89 must be false"; fi
+
+    # Fixture 2: extract_version parses common --version banners
+    v="$(extract_version 'Ubuntu clang version 14.0.0-1ubuntu1.1')"
+    [ "$v" = "14.0.0" ] || selftest_fail "extract_version clang banner got '$v'"
+    v="$(extract_version 'rustc 1.75.0 (82e1608df 2023-12-21)')"
+    [ "$v" = "1.75.0" ] || selftest_fail "extract_version rustc banner got '$v'"
+
+    # Fixture platform files: simulate Ubuntu-on-WSL so platform detection
+    # itself does not depend on the real host this selftest happens to run
+    # on (a bare Windows/Git-Bash host has no /etc/os-release at all, and a
+    # native Linux CI runner has no WSL /proc/version marker — both are
+    # legitimate ERROR/unsupported outcomes for the REAL check, but must not
+    # leak into fixtures that are testing tool detection, not platform
+    # detection).
+    fake_os_release="$tmp/os-release"
+    cat > "$fake_os_release" <<'EOF'
+PRETTY_NAME="Ubuntu 22.04.5 LTS"
+NAME="Ubuntu"
+VERSION_ID="22.04"
+ID=ubuntu
+EOF
+    fake_proc_version="$tmp/proc-version"
+    echo "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@x) (gcc)" > "$fake_proc_version"
+    export BOOTSTRAP_PREREQS_OS_RELEASE="$fake_os_release"
+    export BOOTSTRAP_PREREQS_PROC_VERSION="$fake_proc_version"
+
+    plat="$(detect_platform)"
+    [ "$plat" = "wsl:ubuntu" ] || selftest_fail "fixture platform override must report wsl:ubuntu, got '$plat'"
+
+    # Fixture 3: fake PATH — some tools missing, one at wrong version, some present
+    bindir="$tmp/bin"
+    mkdir -p "$bindir"
+    # present, satisfies min version
+    cat > "$bindir/git" <<'EOF'
+#!/bin/sh
+echo "git version 2.40.0"
+EOF
+    # present, wrong version (clang too old)
+    cat > "$bindir/clang" <<'EOF'
+#!/bin/sh
+echo "Ubuntu clang version 14.0.0-1ubuntu1.1"
+EOF
+    chmod +x "$bindir/git" "$bindir/clang"
+    # rustc, cargo, jj, mold, ld.lld, llvm-config, cmake, ninja, timeout,
+    # perl, sha256sum, xxd, clang++ deliberately absent from this fixture PATH.
+
+    # The fixture PATH below is used VERBATIM (not prepended to the real
+    # PATH), so that a host which happens to already have some of these
+    # tools installed cannot turn a fixture's intended MISSING into a false
+    # PRESENT. That means every core utility this script itself calls
+    # (grep, head, cut, cat, printf's external form, mktemp is only needed
+    # earlier) must also be reachable from inside that fixture PATH —
+    # symlink the real ones in.
+    for coreutil in grep head cut cat sh awk tr; do
+        real="$(command -v "$coreutil" 2>/dev/null || true)"
+        if [ -n "$real" ] && [ ! -e "$bindir/$coreutil" ]; then
+            ln -s "$real" "$bindir/$coreutil" 2>/dev/null || cp "$real" "$bindir/$coreutil"
+        fi
+    done
+
+    fake_path="$bindir"
+    # run_check exits non-zero on FAIL. Under `set -e`, a bare
+    # `var=$(cmd)` assignment takes on cmd's own exit status and DOES abort
+    # the script (this is a real POSIX/bash gotcha, distinct from a command
+    # substitution embedded inside a larger command) — so errexit is
+    # disabled around every fixture invocation that is expected to return
+    # non-zero, and re-enabled immediately after `rc=$?` is captured.
+    set +e
+    out="$(PATH="$fake_path" run_check 2>&1)"; rc=$?
+    set -e
+    printf '%s\n' "$out" | grep -q '^git *PRESENT' || selftest_fail "git must be detected PRESENT in fixture, got: $out"
+    printf '%s\n' "$out" | grep -q '^clang *WRONG_VERSION' || selftest_fail "clang must be WRONG_VERSION in fixture (14.0.0 < 23.1.0), got: $out"
+    printf '%s\n' "$out" | grep -q '^rustc *MISSING' || selftest_fail "rustc must be MISSING in fixture, got: $out"
+    printf '%s\n' "$out" | grep -q '^FAIL' || selftest_fail "fixture run_check must end in FAIL, got: $out"
+    [ "$rc" -eq 1 ] || selftest_fail "fixture run_check must exit 1, got $rc"
+
+    # Fixture 4: non-interactive install must never install, must exit 2,
+    # and must list every offending tool's install command.
+    set +e
+    out="$(PATH="$fake_path" sh -c '
+        exec </dev/null
+        '"$0"' install
+    ' 2>&1)"; rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || selftest_fail "non-interactive install must exit 2, got $rc"
+    printf '%s\n' "$out" | grep -qi "non-interactive" || selftest_fail "non-interactive install must say so: $out"
+    printf '%s\n' "$out" | grep -q "rustc" || selftest_fail "non-interactive install must list rustc's install command: $out"
+    printf '%s\n' "$out" | grep -qE '^ERROR' || selftest_fail "non-interactive install must end in ERROR verdict: $out"
+    # Never actually ran an installer: no apt-get/cargo install invocation
+    # markers should appear as *executed* — this fixture PATH has no real
+    # apt-get/cargo, so any attempt to invoke one would itself error loudly
+    # with "command not found", which we did not see above (rc is 2, exit
+    # reason is the refusal path, not a failed install attempt).
+
+    # Fixture 5: a fully-satisfied fixture PATH must PASS.
+    for t in clang clang++ ld.lld llvm-config mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd; do
+        case "$t" in
+            clang|clang++) ver="clang version 23.1.0" ;;
+            ld.lld) ver="LLD 23.1.0" ;;
+            llvm-config) ver="23.1.0" ;;
+            rustc) ver="rustc 1.90.0" ;;
+            cargo) ver="cargo 1.90.0" ;;
+            cmake) ver="cmake version 3.31.2" ;;
+            *) ver="1.0.0" ;;
+        esac
+        cat > "$bindir/$t" <<EOF
+#!/bin/sh
+echo "$ver"
+EOF
+        chmod +x "$bindir/$t"
+    done
+    set +e
+    out="$(PATH="$fake_path" run_check 2>&1)"; rc=$?
+    set -e
+    printf '%s\n' "$out" | grep -q '^PASS' || selftest_fail "fully-satisfied fixture must PASS, got: $out"
+    [ "$rc" -eq 0 ] || selftest_fail "fully-satisfied fixture must exit 0, got $rc"
+
+    echo "SELFTEST OK — 5 fixture(s) passed"
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+mode="check"
+yes_flag="0"
+do_selftest="0"
+
+for arg in "$@"; do
+    case "$arg" in
+        check) mode="check" ;;
+        install) mode="install" ;;
+        --yes) yes_flag="1" ;;
+        --selftest) do_selftest="1" ;;
+        *)
+            echo "unknown argument: $arg" >&2
+            echo "usage: sh scripts/setup/bootstrap-prereqs.shs [check|install] [--yes] [--selftest]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ "$do_selftest" = "1" ]; then
+    run_selftest
+    exit 0
+fi
+
+case "$mode" in
+    check)
+        run_check
+        exit $?
+        ;;
+    install)
+        run_install "$yes_flag"
+        exit $?
+        ;;
+esac
