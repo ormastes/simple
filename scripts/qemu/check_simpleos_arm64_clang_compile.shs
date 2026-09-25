@@ -33,7 +33,14 @@ STAGE_DIR=build/os/elfexec_clang_arm64
 IMAGE="$STAGE_DIR/fat32-clang-arm64.img"
 KERNEL=build/os/simpleos_arm64_clang_bringup.elf
 OUT="$STAGE_DIR/run-$(date +%Y%m%d_%H%M%S)"
-SEED="${SEED:-src/compiler_rust/target/bootstrap/simple}"
+# Compiler selection: this gate's kernel REQUIRES the FAM RuntimeArray
+# inline-accessor fix (commit 1b3e40d8b9b, 2026-09-25) — the committed
+# bootstrap seed generation (src/compiler_rust/target/bootstrap/simple,
+# pinned 2026-09-08) predates it and miscompiles Simple-level .len()/indexing
+# on aarch64-unknown-none (Wall 5: simple_len=2199023256064, "no FAT32 BPB").
+# Default to the deployed compiler bin/simple, which carries the fix; pin any
+# other compiler explicitly, e.g. SEED=src/compiler_rust/target/bootstrap/simple.
+SEED="${SEED:-bin/simple}"
 R1_ONLY=0
 [ "${1:-}" = "--r1-only" ] && R1_ONLY=1
 
@@ -45,7 +52,9 @@ note "preflight: host arch + tools"
 [ "$(uname -m)" = aarch64 ] || fail "aarch64 host required (host rule)"
 [ -e /dev/kvm ] || fail "/dev/kvm missing"
 command -v qemu-system-aarch64 >/dev/null 2>&1 || fail "qemu-system-aarch64 missing"
-[ -x "$SEED" ] || fail "seed compiler missing: $SEED"
+SEED=$(readlink -f "$SEED") || fail "SEED unresolvable: $SEED"
+[ -x "$SEED" ] || fail "compiler missing: $SEED"
+note "compiler: $SEED"
 [ -x "$GUEST_BIN_DIR/clang-20" ] || fail "guest clang missing: $GUEST_BIN_DIR/clang-20"
 [ -x "$GUEST_BIN_DIR/lld" ] || fail "guest lld missing: $GUEST_BIN_DIR/lld"
 [ -f "$SYSROOT_A64/lib/crt0.o" ] || fail "sysroot crt0 missing"
@@ -129,7 +138,7 @@ note "R1 PASS: image at $IMAGE ($(wc -c < "$IMAGE" | tr -d ' ') bytes)"
 
 # ------------------------------------------------------------------ kernel --
 if [ ! -s "$KERNEL" ] || [ "${REBUILD_KERNEL:-0}" = 1 ]; then
-    note "building arm64 clang-bringup kernel (seed compiler, cranelift)"
+    note "building arm64 clang-bringup kernel (compiler: $SEED, cranelift)"
     env TMPDIR="$STAGE_DIR/tmp" SIMPLE_BINARY="$SEED" SIMPLE_BIN="$SEED" \
         SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
         "$SEED" native-build \
@@ -171,6 +180,16 @@ timeout "$BOOT_TIMEOUT" qemu-system-aarch64 \
 
 note "serial evidence (printable, last 60 lines):"
 tr -cd '\11\12\15\40-\176' < "$OUT/serial.log" | tail -60 || true
+
+# Wall-5 fail-fast: this signature means the kernel was compiled by a compiler
+# without the FAM array-ABI fix (1b3e40d8b9b) — the owned-read .len() load
+# pairs len|cap into one i64 (512<<32|512=2199023256064). Fail with the
+# remediation instead of reporting a misleading VFS wall.
+if grep -q 'simple_len=2199023256064' "$OUT/serial.log"; then
+    fail "kernel shows FAM array-ABI miscompile (simple_len=2199023256064); \
+the compiler used ($SEED) predates 1b3e40d8b9b. Rebuild with a fixed compiler \
+(default bin/simple; or SEED=<path> to pin one)."
+fi
 
 R1S=PASS
 R2=FAIL; grep -q '=== SimpleOS ARM64 in-guest clang bring-up ===' "$OUT/serial.log" && R2=PASS

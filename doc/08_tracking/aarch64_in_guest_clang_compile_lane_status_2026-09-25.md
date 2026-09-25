@@ -370,3 +370,138 @@ R3 walls remain: -13 spawn seam and 115 MiB payload vs 16 MiB element cap /
 | R1 image staged + host-verified | PASS | run-20260925_151226 |
 | R2 guest boots | PASS | banner + completed module inits; heap ~43 MB (was 512 MiB OOM) |
 | R3-R5 | BLOCKED | boot-fs-mount BPB probe `simple_len` offset bug (new, above), then the documented -13 spawn + 115 MiB payload walls |
+
+
+----
+
+# 2026-09-25 (evening) session — Wall 5 RESOLVED: FAM fix never deployed to the gate's compiler; R3 now attempts (new Wall 6: spawn open NotFound)
+
+Boot cycles this session: 2 (run-20260925_153846 fix-verify, _154638
+named-variant). Kernel rebuilds: 2.
+
+## Wall 5 root cause: deployment gap, NOT a new code defect
+
+The `[boot-fs-mount]` owned-read `simple_len=2199023256064` recurrence is the
+SAME seed-compiler array-ABI defect Blocker 2 fixed in 1b3e40d8b9b — the fix
+is simply not present in the compiler the gate invokes by default. Evidence
+chain (all byte-exact):
+
+1. The gate builds the kernel with `SEED` (default was
+   `src/compiler_rust/target/bootstrap/simple` — the committed bootstrap
+   generation, pinned 2026-09-08, i.e. BEFORE the 09:30 fix).
+2. The native-build cache partitions objects by `producer =
+   DefaultHasher(current_exe bytes)` (src/compiler_rust/compiler/src/
+   pipeline/native_project/mod.rs:1032). Computed for both candidates:
+   - `bootstrap/simple` (Sep 8) → `4838501818b4ca1c` = cache scope
+     `0e37b028c1ff63f8` (the scope the 13:04–15:12 pm/late-pm rebuilds wrote;
+     "6 compiled, 480 cached" in run-20260925_151226's kernel-build.log).
+   - `target/release/simple` (built 10:21, AFTER the fix) → `9925fef6755f4f2a`
+     = scope `a5fc3ce8e4a9f4ed` (the 10:29–12:09 builds; the kernel that made
+     run-20260925_122232 print `simple_len=512`).
+   - `bin/release/aarch64-unknown-linux-gnu/simple` == release/simple
+     (identical sha256; the deployed `bin/simple` carries the fix).
+3. Instruction-level proof, same module source (driver_operations.spl last
+   changed 07:57, before both objects), objects from the two scopes:
+   - unfixed (`39a46226d974807e.o`, 13:04): `ldr x0,[x19,#8]` — a 64-bit load
+     pairing len|cap → 512|512<<32 = **2199023256064** (exact serial value).
+   - fixed (`a86d0f325aa0d8f5.o`, 12:09): `ldr w0,[x26,#8]` — u32 load → 512.
+4. So the 12:22 green run reused a kernel built with release/simple (SEED
+   override; that run has no kernel-build.log), while the pm/late-pm sessions
+   rebuilt with the default (unfixed) seed and regressed the 6 changed modules
+   into the unfixed cache scope.
+
+Conclusion: no second compiler site to fix; fam_abi_tests.rs (9 tests) already
+covers the codegen. The gap was purely "gate's default compiler predates the
+fix".
+
+## Fix (this session, committed)
+
+- `scripts/qemu/check_simpleos_arm64_clang_compile.shs`:
+  - Default `SEED` is now `bin/simple` (deployed compiler carrying the fix),
+    resolved via readlink -f; `SEED=` env override kept for pinning any other
+    compiler. Header comment documents why (committed bootstrap generation
+    predates 1b3e40d8b9b).
+  - Preflight prints the resolved compiler path.
+  - Post-boot fail-fast: serial signature `simple_len=2199023256064` fails the
+    gate with an explicit "compiler predates 1b3e40d8b9b" remediation instead
+    of a misleading VFS wall.
+- `src/os/services/vfs/arm_fs_exec_vfs.spl`: two bring-up diagnostics at the
+  mounted-read seam — `mounted-miss err={label}` (was a silent Err return) and
+  `fstat path=... size=...` (names stat-vs-read failures).
+- NOTE for the bootstrap lane: the committed bootstrap generation still lacks
+  the FAM fix; the proper redeploy (authority ceremony) remains open. Until
+  then, any consumer of the DEFAULT bootstrap seed on aarch64-unknown-none
+  hits the old codegen. The gate no longer depends on it.
+
+## Verification (run-20260925_153846, REBUILD_KERNEL=1 ACCEL=tcg, cycle 1)
+
+- Kernel rebuilt fully with bin/simple (fixed producer): FAM layout throughout.
+- `simple_len=512` on every owned read; sector0 `b0=235 b1=88 b2=144
+  sig510=85 sig511=170` (0x55AA) — the Blocker-2 signature values.
+- `[boot-fs-mount] FAT32 BPB confirmed and filesystem mounted` →
+  `[vfs-init] kernel FAT32 publication ready` → `VFS ready (VirtIO-BLK FAT32,
+  mounted namespace)`. **Wall 5 cleared.**
+- R3 attempted: `[clang-bringup] rung=R3-clang-version exec=/CLANG.ELF`.
+- Rung table: R1=PASS R2=PASS R3=FAIL R4=FAIL R5=FAIL FINAL=FAIL.
+
+## Wall 6 (NEW, current): R3 spawn open of /CLANG.ELF → NotFound (zero device reads)
+
+Cycle 2 (run-20260925_154638) added named-variant diagnostics:
+
+```
+[fs-exec] spawn:resolve path=/CLANG.ELF
+[vfs-read] path=/CLANG.ELF mapped=/CLANG.ELF initialized=<unknown>
+[vfs-read] mounted-miss err=notfound
+[fs-exec] spawn:bytes path=/CLANG.ELF len=0 → resolve-fail rc=-2
+```
+
+Chain: `fs_exec_prepare_spawn` → `_fs_exec_read_bytes` (arm64 seam) →
+`arm_fs_exec_read_file_bytes` → `arm_fs_exec_read_regular_file_bounded_v1`
+(mounted branch, `g_arm_mount_table_ready=true`) →
+`g_vfs_positioned_open` → MountTable.open → resolve() →
+`_driver_open_path` → `FsFat32Driver.open` → `Fat32Core.resolve_path`.
+
+Key observation: **no `[virtio-blk] owned read` lines at all during the open** —
+the failure happens BEFORE any FAT/directory I/O. Two candidate
+pre-I/O NotFound sources, both in this lane's documented baremetal
+value-semantics/module-global defect family:
+- H1: `MountTable.resolve` finds no covering mount (the `g_mount_table`
+  write-back lost the table) — this lane already hit module-global state loss
+  twice (Blocker-3 mutex handles; "freestanding module-globals are never
+  zero-initialized", arm_fs_exec_probe_init docstring).
+- H3: `FsFat32Driver.open` reached but `self.mounted` reads false (me-mutation
+  lost while the driver value travelled local var → DriverInstance →
+  MountTable → g_mount_table) — same class as the documented
+  boot_fs_mount.spl:294-297 "me mutation published pristine pre-mount value"
+  bug; the driver's text error is swallowed into NotFound.
+- Corroborating: `initialized=<unknown>` — `g_arm_vfs_initialized` (a bool
+  module global set true before R3) interpolates as `<unknown>` in the same
+  phase, i.e. module-global reads are returning erased/garbage values here.
+
+### Exact next actions (owner: this lane, ~1 boot to discriminate H1 vs H3)
+1. Add trace points reachable from src/os (NOT src/lib — hosted conformance
+   specs link fat32_stub/mount_table and must not gain arm-only externs): log
+   `MountTable.mounts.len` (or an `is-mounted` probe) from
+   `vfs_state_positioned_open`'s caller side in arm_fs_exec_vfs, plus a
+   `FsFat32Driver.mounted`-shaped probe via a tiny os-side wrapper if needed.
+   Alternatively land the missing FileBlockDeviceAuthority
+   (test/01_unit/lib/fs_driver/file_block_device_owner_contract_spec.spl is
+   the pinned target) and repro the whole open chain hosted against the real
+   image — zero boot cycles.
+2. Whichever hypothesis confirms, the fix shape mirrors the existing
+   workarounds: keep values in locals the compiler threads correctly, or route
+   the probe through the proven C-accessor/extern trace idiom.
+3. THEN the documented R3 walls arrive in order: -13 spawn seam
+   (fs_exec_prepare_spawn_from_bytes line 192, by design; needs the
+   authenticated loader pipeline or the lane-local unchecked prepare) and the
+   115 MiB payload vs rt_byte_array_new_len 16M-element cap / 2 MiB user-AS
+   arena (all three documented earlier this file).
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | run-20260925_153846 + _154638 |
+| R2 guest boots | PASS | banner, module inits, heap ~43 MB; VFS mounts (`VFS ready (VirtIO-BLK FAT32, mounted namespace)`) |
+| R3 clang --version in guest | BLOCKED | Wall 6: positioned open `/CLANG.ELF` → `mounted-miss err=notfound`, zero device reads (H1/H3 above) |
+| R4-R5 | BLOCKED | needs R3; then -13 seam + 115 MiB payload walls |
