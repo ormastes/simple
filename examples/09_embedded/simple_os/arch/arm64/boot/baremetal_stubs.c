@@ -4861,6 +4861,27 @@ static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t
 {
     char path[128];
     if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
+    /* The root directory always exists. LLVM's FileManager stats the PARENT
+     * of an input file before the file itself (getDirectoryFromFile), so
+     * stat("/") must succeed or the file is rejected pre-open with the
+     * parent's error (run-20260926_070853: stat("/") -> -ENOSYS ->
+     * "error reading '/HELLO.C': Function not implemented", rc=1). Answer
+     * a real S_IFDIR stat; every other absent path keeps the tolerated
+     * -ENOSYS below. */
+    {
+        int is_root = 1;
+        for (int64_t i = 0; i < (int64_t)path_len; i++)
+            if (path[i] != '/') { is_root = 0; break; }
+        if (is_root) {
+            serial_puts("[stat] path=/ root-dir\r\n");
+            uint8_t st[96];
+            __builtin_memset(st, 0, sizeof(st));
+            st[16] = 0xED; st[17] = 0x41;   /* mode = 0x41ED (S_IFDIR|0755) */
+            st[24] = 2;                     /* nlink = 2 (directory) */
+            if (!arm64_user_range_accessible(stat_va, sizeof(st), 1)) return -14;
+            return svc_user_memcpy_to(stat_va, st, sizeof(st)) == sizeof(st) ? 0 : -14;
+        }
+    }
     uint32_t size = 0;
     int ri = svc_ram_find(path);
     if (ri >= 0) {
