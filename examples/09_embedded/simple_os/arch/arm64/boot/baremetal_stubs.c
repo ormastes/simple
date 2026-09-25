@@ -1418,12 +1418,14 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         /* Anonymous mmap (the guest libc's malloc arena): bump-allocate
          * zeroed pages in the recorded user address space. */
         case 10: return arm64_user_mmap(a1);
-        case 33:
-            if (spl_arm64_net_close_direct) {
-                int64_t net_close = spl_arm64_net_close_direct(a0, a1, a2, a3, a4, 0);
-                if (net_close != -4096) return net_close;
-            }
-            return arm64_svc_file_close(a0);
+        /* close: route pure C like open/read/write/stat above — NOT through
+         * the spl_arm64_net_close_direct strong shim. close was the last
+         * file syscall still entering Simple-compiled code during the R4a
+         * guest run, and the run faulted (kernel control-flow corruption)
+         * right after the first close (run-20260926_071701 / _074234). The
+         * clang-bring-up lane opens no net fds; re-enable a net-close path
+         * only with a C-side net fd table (see the strong-shim note above). */
+        case 33: return arm64_svc_file_close(a0);
         case 78: return arm64_dispatch_file_shim(78, spl_handle_file_sync, a0, 0, 0, 0, 0);
         /* Ring-3 server payloads have no ambient hardware authority. Device
          * enumeration/grant/BAR/DMA remain kernel-only until the canonical
