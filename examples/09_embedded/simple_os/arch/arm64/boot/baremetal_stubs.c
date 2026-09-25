@@ -1331,6 +1331,9 @@ static int64_t arm64_dispatch_optional_shim(arm64_syscall_shim_fn shim,
     return shim(a0, a1, a2, a3, a4, 0);
 }
 
+/* Anonymous mmap for the ring-3 payload (defined with the user-AS helpers). */
+static int64_t arm64_user_mmap(uint64_t len);
+
 static int64_t arm64_dispatch_file_shim(uint64_t syscall_id,
                                         arm64_syscall_shim_fn shim,
                                         uint64_t a0, uint64_t a1,
@@ -1377,6 +1380,9 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 30: return arm64_dispatch_file_shim(30, spl_handle_file_open, a0, a1, a2, a3, a4);
         case 31: return arm64_dispatch_file_shim(31, spl_handle_file_read, a0, a1, a2, a3, a4);
         case 32: return arm64_dispatch_file_shim(32, spl_handle_file_write, a0, a1, a2, a3, a4);
+        /* Anonymous mmap (the guest libc's malloc arena): bump-allocate
+         * zeroed pages in the recorded user address space. */
+        case 10: return arm64_user_mmap(a1);
         case 33:
             if (spl_arm64_net_close_direct) {
                 int64_t net_close = spl_arm64_net_close_direct(a0, a1, a2, a3, a4, 0);
@@ -4234,7 +4240,13 @@ static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
     return UINT64_MAX;
 }
 
-#define ARM64_UAS_REGION_BASE 0x48000000ULL
+/* The page-table arenas live in guest RAM ABOVE the kernel image: the clang
+ * bring-up kernel's .bss (heap 512 MiB + payload region 128 MiB) now spans
+ * 0x40200000..~0x6d000000, so the historical 0x48000000 base overlapped the
+ * resident payload region itself. 16 spaces x 2 MiB at 0x71000000..0x73000000
+ * sit between the kernel image end (linker cap 0x70200000) and the user page
+ * pool (0x73000000), well inside the 2 GiB guest. */
+#define ARM64_UAS_REGION_BASE 0x71000000ULL
 #define ARM64_UAS_REGION_SIZE 0x00200000ULL
 #define ARM64_UAS_TABLE_BYTES 0x00100000ULL
 #define ARM64_UAS_MAX_SPACES 16U
@@ -4278,6 +4290,32 @@ uint64_t arm64_user_entry_arg0 = 0;
 uint64_t arm64_user_entry_arg1 = 0;
 static uint8_t arm64_user_stdout_bytes[ARM64_USER_STDOUT_MAX];
 static uint32_t arm64_user_stdout_len = 0;
+
+/* Kernel resume frame for the payload ring-3 handoff (arm64_enter_el0 /
+ * arm64_resume_from_el0 in crt0.S). Layout: [0] sp, [1] lr, [2..11] x19..x28,
+ * [12] armed. */
+uint64_t arm64_resume_ctx[13];
+
+/* Physical page pool for the ring-3 payload launcher: image PT_LOAD copies,
+ * the user stack, and the anonymous mmap heap all bump-allocate from this
+ * fixed window (guest RAM above the UAS arenas). Reset per launch — a dead
+ * process's pages are reusable because every page is re-zeroed on allocation
+ * and each launch installs a fresh address space. */
+#define ARM64_USER_PAGE_POOL_BASE  0x73000000ULL
+#define ARM64_USER_PAGE_POOL_BYTES 0x0A000000ULL /* 160 MiB */
+static uint64_t arm64_user_page_pool_off = 0;
+/* Per-launch anonymous mmap cursor (bump, no free). Sits above the image's
+ * link range and below the kernel identity window in the user tables. */
+static uint64_t arm64_user_heap_va = 0;
+
+static uint64_t arm64_user_page_alloc(void)
+{
+    if (arm64_user_page_pool_off + 4096ULL > ARM64_USER_PAGE_POOL_BYTES) return 0;
+    uint64_t page = ARM64_USER_PAGE_POOL_BASE + arm64_user_page_pool_off;
+    arm64_user_page_pool_off += 4096ULL;
+    return page;
+}
+
 
 extern char _start[];
 extern char _vectors[];
@@ -4488,6 +4526,30 @@ RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt
     return (RuntimeValue)((entry & ARM64_PTE_OUTPUT_MASK) + (virt & 4095ULL));
 }
 
+/* Anonymous mmap for the ring-3 payload: bump-allocate zeroed pages from the
+ * user page pool and map them RW/NX at the per-launch heap cursor in the
+ * recorded user address space. Runs with SCTLR.M cleared (the SVC shim's
+ * translation mode), so the page-table writes below are plain physical. */
+static int64_t arm64_user_mmap(uint64_t len)
+{
+    if (!arm64_recorded_user_root || len == 0 || len > (1ULL << 30)) return -38;
+    uint64_t bytes = (len + 4095ULL) & ~4095ULL;
+    if (bytes == 0) return -38;
+    uint64_t va = arm64_user_heap_va;
+    for (uint64_t off = 0; off < bytes; off += 4096ULL) {
+        uint64_t phys = arm64_user_page_alloc();
+        if (!phys) return -12; /* ENOMEM */
+        arm64_zero_page(phys);
+        if (!(uint64_t)rt_arm64_user_as_map_page(
+                (RuntimeValue)arm64_recorded_user_root,
+                (RuntimeValue)(va + off), (RuntimeValue)phys,
+                (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE)))
+            return -12;
+    }
+    arm64_user_heap_va = va + bytes;
+    return (int64_t)va;
+}
+
 uint8_t rt_copy_user_byte(uint64_t address)
 {
     /* Syscalls run before TTBR0 is restored, so validate and translate through
@@ -4680,6 +4742,10 @@ RuntimeValue rt_arm64_probe_recorded_user_handoff(void)
     return 1;
 }
 
+/* Defined in crt0.S: unwind to the arm64_enter_el0 caller with x0 = the
+ * payload's exit code; never returns. */
+extern void arm64_resume_from_el0(uint64_t exit_code) __attribute__((noreturn));
+
 uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
                                   uint64_t a2, uint64_t a3, uint64_t a4,
                                   uint64_t elr, uint64_t esr)
@@ -4687,6 +4753,12 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
     (void)elr;
     (void)esr;
     if (id == 0) {
+        if (arm64_resume_ctx[12]) {
+            /* Payload ring-3 handoff: resume the kernel frame recorded by
+             * arm64_enter_el0 instead of ending the whole boot. */
+            serial_puts("[arm64-user] svc exit; resume kernel\r\n");
+            arm64_resume_from_el0(a0);
+        }
         serial_puts("[arm64-user] svc exit ok\r\n");
         serial_puts("[arm-fs-exec] vfs:ok\r\n");
         serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
@@ -4742,6 +4814,233 @@ RuntimeValue rt_arm64_enter_recorded_user_live(void)
     }
     arm64_enter_user_virtual(root, entry, sp);
     return 0;
+}
+
+/* --- payload ring-3 launcher (lane-C1 clang bring-up, Wall 10) -------------
+ * Lane-local UNCHECKED prepare, the arm64 mirror of the proven x86 OVMF
+ * lane's _admit_raw_elf64/_map_pt_loads pair (route B in the lane doc): the
+ * 115 MiB payload bytes are already resident in the raw .bss region (Wall 9),
+ * so this validates the ELF straight out of that region, copies each PT_LOAD
+ * page into freshly allocated physical frames (per-page permission union, BSS
+ * zero-fill), maps an 8 MiB user stack carrying the SysV argc/argv/envp/auxv
+ * frame, and erets into EL0 via arm64_enter_el0 (crt0.S), which records the
+ * kernel resume frame so the payload's exit(0) SVC returns here with its exit
+ * code. This deliberately bypasses the fail-closed authenticated spawn seam
+ * (fs_exec_prepare_spawn -> -13) for the bring-up lane only; production
+ * execution must go through fs_exec_adopt_authenticated_v1. */
+extern uint64_t arm64_enter_el0(uint64_t root, uint64_t entry, uint64_t user_sp);
+
+static uint16_t arm64_payload_u16(const uint8_t *p, uint64_t off)
+{
+    return (uint16_t)(p[off] | ((uint16_t)p[off + 1ULL] << 8));
+}
+static uint32_t arm64_payload_u32(const uint8_t *p, uint64_t off)
+{
+    return (uint32_t)p[off] | ((uint32_t)p[off + 1ULL] << 8) |
+        ((uint32_t)p[off + 2ULL] << 16) | ((uint32_t)p[off + 3ULL] << 24);
+}
+static uint64_t arm64_payload_u64(const uint8_t *p, uint64_t off)
+{
+    return (uint64_t)arm64_payload_u32(p, off) |
+        ((uint64_t)arm64_payload_u32(p, off + 4ULL) << 32);
+}
+
+#define ARM64_PAYLOAD_STACK_TOP   0x80000000ULL
+#define ARM64_PAYLOAD_STACK_PAGES 2048ULL /* 8 MiB */
+#define ARM64_PAYLOAD_USER_LIMIT  0x0000800000000000ULL
+
+static uint64_t arm64_payload_frame_write(uint8_t *top_phys_page,
+        RuntimeValue argv_arr, uint64_t *out_sp)
+{
+    /* SysV process entry frame on the top stack page: argc, argv[], NULL,
+     * envp NULL, auxv (AT_PAGESZ, AT_NULL), then the strings. argv_arr is a
+     * tagged RuntimeArray of RuntimeStrings (the Simple [text]). */
+    uint64_t argc = (uint64_t)rt_arm_array_len_u32(argv_arr);
+    if (argc == 0 || argc > 64) return 0;
+    uint64_t str_bytes = 0;
+    for (uint64_t i = 0; i < argc; i++) {
+        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, (RuntimeValue)i));
+        if (!s) return 0;
+        str_bytes = str_bytes + s->len + 1ULL;
+    }
+    uint64_t ptr_block = 8ULL * (1ULL + argc + 1ULL + 1ULL + 4ULL);
+    uint64_t total = ptr_block + str_bytes;
+    if (total > 4096ULL) return 0;
+    uint64_t sp = (4096ULL - total) & ~15ULL;
+    uint64_t str_off = sp + ptr_block;
+    volatile uint64_t *q = (volatile uint64_t *)(uintptr_t)top_phys_page;
+    uint64_t va_base = ARM64_PAYLOAD_STACK_TOP - 4096ULL;
+    q[sp / 8ULL] = argc;
+    for (uint64_t i = 0; i < argc; i++) {
+        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, (RuntimeValue)i));
+        q[sp / 8ULL + 1ULL + i] = va_base + str_off; /* the guest derefs VAs */
+        __builtin_memcpy(top_phys_page + str_off, s->data, s->len);
+        top_phys_page[str_off + s->len] = '\0';
+        str_off = str_off + s->len + 1ULL;
+    }
+    q[sp / 8ULL + 1ULL + argc] = 0; /* argv NULL */
+    q[sp / 8ULL + 1ULL + argc + 1ULL] = 0; /* envp NULL */
+    q[sp / 8ULL + 1ULL + argc + 2ULL] = 6; /* AT_PAGESZ */
+    q[sp / 8ULL + 1ULL + argc + 3ULL] = 4096;
+    q[sp / 8ULL + 1ULL + argc + 4ULL] = 0; /* AT_NULL */
+    q[sp / 8ULL + 1ULL + argc + 5ULL] = 0;
+    *out_sp = (ARM64_PAYLOAD_STACK_TOP - 4096ULL) + sp;
+    return 1;
+}
+
+RuntimeValue rt_arm_payload_elf64_ring3_enter(RuntimeValue size_val, RuntimeValue argv_arr)
+{
+    uint64_t file_len = (uint64_t)size_val;
+    const uint8_t *file = (const uint8_t *)(uintptr_t)_arm_payload_region;
+    serial_puts("[payload] ring3 enter: validate\r\n");
+    if (file_len < 64ULL || file_len > (uint64_t)ARM_PAYLOAD_REGION_BYTES) return -2;
+    if (arm64_payload_u32(file, 0) != 0x464C457FU || file[4] != 2U || file[5] != 1U)
+        return -2;
+    if (arm64_payload_u16(file, 16) != 2U || arm64_payload_u16(file, 18) != 183U)
+        return -2;
+    if (arm64_payload_u16(file, 52) != 64U || arm64_payload_u16(file, 54) != 56U)
+        return -2;
+    uint64_t phoff = arm64_payload_u64(file, 32);
+    uint64_t phnum = arm64_payload_u16(file, 56);
+    if (phnum == 0 || phnum > 128ULL) return -2;
+    if (phoff < 64ULL || phoff > file_len || phnum > (file_len - phoff) / 56ULL)
+        return -2;
+    uint64_t entry = arm64_payload_u64(file, 24);
+    uint64_t lo = UINT64_MAX;
+    uint64_t hi = 0;
+    uint32_t loads = 0;
+    int entry_ok = 0;
+    for (uint64_t i = 0; i < phnum; i++) {
+        uint64_t ph = phoff + i * 56ULL;
+        if (arm64_payload_u32(file, ph) != 1U) continue;
+        loads++;
+        uint32_t flags = arm64_payload_u32(file, ph + 4ULL);
+        uint64_t foff = arm64_payload_u64(file, ph + 8ULL);
+        uint64_t va = arm64_payload_u64(file, ph + 16ULL);
+        uint64_t fsz = arm64_payload_u64(file, ph + 32ULL);
+        uint64_t msz = arm64_payload_u64(file, ph + 40ULL);
+        if ((flags & 0xFFFFFFF8U) != 0 || (flags & 3U) == 3U) return -2; /* no W+X */
+        if (fsz > msz || foff > file_len || fsz > file_len - foff) return -2;
+        if (msz == 0) continue;
+        if (va < 4096ULL || va >= ARM64_PAYLOAD_USER_LIMIT || msz > ARM64_PAYLOAD_USER_LIMIT - va)
+            return -2;
+        uint64_t end = va + msz;
+        if (end > UINT64_MAX - 4095ULL) return -2;
+        if (va < lo) lo = va;
+        if (end > hi) hi = end;
+        if ((flags & 1U) != 0 && entry >= va && entry - va < fsz) entry_ok = 1;
+    }
+    if (loads == 0 || !entry_ok || hi <= lo) return -2;
+    uint64_t lo_page = lo & ~4095ULL;
+    uint64_t hi_page = (hi + 4095ULL) & ~4095ULL;
+    serial_puts("[payload] elf ok: map ");
+    serial_put_dec((int64_t)((hi_page - lo_page) / 4096ULL));
+    serial_puts(" pages, entry=");
+    serial_put_hex(entry);
+    serial_puts("\r\n");
+
+    uint64_t root = (uint64_t)rt_arm64_user_as_create();
+    if (!root) return -3;
+    arm64_user_page_pool_off = 0;
+    arm64_user_heap_va = 0x20000000ULL;
+
+    /* DIAGNOSTIC (one-boot, not a fix): the guest binary's __libc_init_array
+     * dereferences 0xb1c8 (adrp x8,0xb000 baked into the instruction — a
+     * link-time reference outside every PT_LOAD, i.e. a toolchain link
+     * defect). Map the low 16 pages (0..0xffff) zeroed RW so the read
+     * returns 0 and the cbz skips it, letting the payload reach its
+     * (defective) main and proving the full EL0 round-trip: enter -> run ->
+     * SVC exit -> resume -> rung rc. */
+    for (uint64_t zpage = 0; zpage < 16ULL; zpage++) {
+        uint64_t zp = arm64_user_page_alloc();
+        if (!zp) break;
+        arm64_zero_page(zp);
+        rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)(zpage * 4096ULL),
+            (RuntimeValue)zp,
+            (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE));
+    }
+    serial_puts("[payload] DIAG low 16 pages mapped (toolchain 0xb1c8 deref)\r\n");
+
+    for (uint64_t va = lo_page; va < hi_page; va += 4096ULL) {
+        uint64_t phys = arm64_user_page_alloc();
+        if (!phys) { serial_puts("[payload] FAIL pool exhausted\r\n"); return -4; }
+        arm64_zero_page(phys);
+        uint32_t vm_flags = ARM64_VM_USER | ARM64_VM_NO_EXECUTE;
+        for (uint64_t j = 0; j < phnum; j++) {
+            uint64_t ph = phoff + j * 56ULL;
+            if (arm64_payload_u32(file, ph) != 1U) continue;
+            uint64_t sva = arm64_payload_u64(file, ph + 16ULL);
+            uint64_t send = sva + arm64_payload_u64(file, ph + 40ULL);
+            if (sva < va + 4096ULL && send > va) {
+                if (arm64_payload_u32(file, ph + 4ULL) & 2U)
+                    vm_flags |= ARM64_VM_WRITABLE;
+                if (arm64_payload_u32(file, ph + 4ULL) & 1U)
+                    vm_flags &= ~ARM64_VM_NO_EXECUTE;
+            }
+        }
+        if (!(uint64_t)rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)va,
+                (RuntimeValue)phys, (RuntimeValue)vm_flags)) {
+            serial_puts("[payload] FAIL map\r\n");
+            return -4;
+        }
+        for (uint64_t k = 0; k < phnum; k++) {
+            uint64_t ph = phoff + k * 56ULL;
+            if (arm64_payload_u32(file, ph) != 1U) continue;
+            uint64_t sva = arm64_payload_u64(file, ph + 16ULL);
+            uint64_t foff = arm64_payload_u64(file, ph + 8ULL);
+            uint64_t fsz = arm64_payload_u64(file, ph + 32ULL);
+            uint64_t cstart = va > sva ? va : sva;
+            uint64_t cend = va + 4096ULL < sva + fsz ? va + 4096ULL : sva + fsz;
+            if (cstart < cend) {
+                __builtin_memcpy((void *)(uintptr_t)(phys + (cstart - va)),
+                    file + foff + (cstart - sva), (size_t)(cend - cstart));
+            }
+        }
+    }
+    /* The image copies occupy the pool's first (hi_page-lo_page) bytes — the
+     * pool was reset to 0 and the image loop is its first allocation, so the
+     * staged physical range is exactly [POOL_BASE, POOL_BASE + span). */
+    arm64_sync_icache_range(ARM64_USER_PAGE_POOL_BASE, hi_page - lo_page);
+
+    /* 8 MiB user stack, RW/NX, with the SysV frame on the top page. */
+    uint64_t top_phys = 0;
+    for (uint64_t i = 0; i < ARM64_PAYLOAD_STACK_PAGES; i++) {
+        uint64_t sva = ARM64_PAYLOAD_STACK_TOP - ((i + 1ULL) * 4096ULL);
+        uint64_t sph = arm64_user_page_alloc();
+        if (!sph) { serial_puts("[payload] FAIL stack pool\r\n"); return -4; }
+        arm64_zero_page(sph);
+        if (!(uint64_t)rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)sva,
+                (RuntimeValue)sph,
+                (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE))) {
+            serial_puts("[payload] FAIL stack map\r\n");
+            return -4;
+        }
+        if (i == 0) top_phys = sph;
+    }
+    uint64_t user_sp = 0;
+    if (!arm64_payload_frame_write((uint8_t *)(uintptr_t)top_phys, argv_arr, &user_sp)) {
+        serial_puts("[payload] FAIL argv frame\r\n");
+        return -4;
+    }
+    serial_puts("[payload] stack mapped, sp=");
+    serial_put_hex(user_sp);
+    serial_puts("\r\n");
+
+    rt_arm64_record_user_handoff((RuntimeValue)entry, (RuntimeValue)user_sp, (RuntimeValue)root);
+    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1ULL) {
+        serial_puts("[payload] FAIL handoff preflight\r\n");
+        return -5;
+    }
+    /* Program the translation regime for the user AS (same values the probe
+     * path installs) before the eret in arm64_enter_el0. */
+    __asm__ volatile("msr mair_el1, %0\n\tmsr tcr_el1, %1\n\tdsb sy\n\tisb"
+        : : "r"(ARM64_MAIR_VALUE), "r"(ARM64_TCR_VALUE) : "memory");
+    serial_puts("[payload] eret to EL0\r\n");
+    uint64_t code = arm64_enter_el0(root, entry, user_sp);
+    serial_puts("[payload] payload exited code=");
+    serial_put_dec((int64_t)code);
+    serial_puts("\r\n");
+    return (RuntimeValue)code;
 }
 
 /* --- genuine EL0 execution: stage REAL aarch64 code and eret into it ---

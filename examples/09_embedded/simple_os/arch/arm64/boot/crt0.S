@@ -499,6 +499,75 @@ _alignment_handler:
     /* Fall through to print FAULT */
 
 /* ===================================================================
+ * EL0 enter with kernel resume frame — payload ring-3 handoff (lane-C1).
+ *
+ * arm64_enter_el0(root, entry, user_sp) installs the user address space and
+ * erets into EL0, but first records the kernel resume context (SP, LR, and
+ * the callee-saved x19-x28) in arm64_resume_ctx (owned by baremetal_stubs.c).
+ * When the payload later SVCs exit(0), rt_arm64_handle_user_svc calls
+ * arm64_resume_from_el0(code), which unwinds straight back to the C caller
+ * of arm64_enter_el0 with x0 = the payload's exit code — the same longjmp
+ * savepoint shape as the x86 lane's rt_x86_exec_token_install path, and the
+ * "nested kernel resume frame" the user_entry bridge documents as required.
+ *
+ * arm64_resume_ctx layout (uint64_t[13], baremetal_stubs.c):
+ *   [0] resume_sp  [1] resume_lr  [2..11] x19..x28  [12] armed
+ * =================================================================== */
+
+    .globl arm64_enter_el0
+    .type arm64_enter_el0, @function
+arm64_enter_el0:
+    adrp    x9, arm64_resume_ctx
+    add     x9, x9, :lo12:arm64_resume_ctx
+    mov     x10, sp
+    str     x10, [x9, #0]
+    str     x30, [x9, #8]
+    stp     x19, x20, [x9, #16]
+    stp     x21, x22, [x9, #32]
+    stp     x23, x24, [x9, #48]
+    stp     x25, x26, [x9, #64]
+    stp     x27, x28, [x9, #80]
+    mov     x10, #1
+    str     x10, [x9, #96]
+    /* Install the user translation and enter EL0 (same sequence as
+     * arm64_enter_user_virtual; MAIR/TCR were programmed by the caller). */
+    msr     ttbr0_el1, x0
+    dsb     sy
+    tlbi    vmalle1
+    dsb     sy
+    isb
+    mrs     x3, sctlr_el1
+    orr     x3, x3, #1
+    msr     sctlr_el1, x3
+    isb
+    msr     sp_el0, x2
+    msr     elr_el1, x1
+    msr     spsr_el1, xzr
+    isb
+    eret
+    .size arm64_enter_el0, .-arm64_enter_el0
+
+    .globl arm64_resume_from_el0
+    .type arm64_resume_from_el0, @function
+arm64_resume_from_el0:
+    /* x0 = payload exit code; never returns to the exception frame. */
+    adrp    x9, arm64_resume_ctx
+    add     x9, x9, :lo12:arm64_resume_ctx
+    mov     x11, x0
+    ldp     x19, x20, [x9, #16]
+    ldp     x21, x22, [x9, #32]
+    ldp     x23, x24, [x9, #48]
+    ldp     x25, x26, [x9, #64]
+    ldp     x27, x28, [x9, #80]
+    ldr     x30, [x9, #8]
+    ldr     x12, [x9, #0]
+    str     xzr, [x9, #96]
+    mov     sp, x12
+    mov     x0, x11
+    ret
+    .size arm64_resume_from_el0, .-arm64_resume_from_el0
+
+/* ===================================================================
  * Lower EL AArch64 synchronous handler
  *
  * Handles lower-EL AArch64 SVC traps. The handler saves a minimal complete
@@ -558,6 +627,17 @@ _lower_el_aarch64_sync_handler:
     msr     elr_el1, x9
     isb
     str     x0, [sp, #0]           /* syscall return value -> user x0 */
+
+    /* Restore the user SCTLR (saved at [sp,#248]) before the eret: the shim
+     * ran with SCTLR.M cleared so its physical/identity accesses work, but
+     * the EL0 payload resumes its virtual address space with the MMU ON.
+     * Without this the first non-exit SVC (e.g. the per-char write(60) of a
+     * version banner) returned to EL0 with the MMU off and faulted. */
+    ldr     x10, [sp, #248]
+    orr     x11, x10, #1
+    dsb     sy
+    msr     sctlr_el1, x11
+    isb
 
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]

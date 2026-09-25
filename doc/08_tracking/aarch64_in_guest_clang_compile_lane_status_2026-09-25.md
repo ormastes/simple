@@ -961,3 +961,133 @@ CLANG_IN_GUEST_ARM64_R3_FAIL rc=-13
    (doc/08_tracking/bug/index_set_return_udf_trap_arm64_2026-09-25.md) —
    8 latent trap sites; the streaming loader's no-close workaround can be
    reverted once fixed.
+
+---
+
+# 2026-09-26 (agent-30) session — Wall 10 ROUTE B LANDED: lane-local raw-region ring-3 handoff works; payload executes in EL0 and returns via SVC resume. R3 now blocked by GUEST-TOOLCHAIN binary defects (external)
+
+Boot cycles this session: 3 guest boots (run-20260926_000024 adrp link fix
+verify, _001415 low-page probe, _002603 round-trip verify) + 1 build-only
+link failure (adrp out of range, no boot). Kernel rebuilds: 3.
+
+## Route choice: B (lane-local unchecked prepare), by elimination
+
+Route A (authenticated pipeline) was evaluated against HEAD and is NOT
+tractable for this lane: `executable_prepare_image_v1`
+(src/os/kernel/loader/executable_image_prepare.spl:42-43) hard-caps
+`executable_prepare_max_source_bytes_v1() = 67108864` (64 MiB) — the 110 MiB
+payload is rejected pre-read — and its read path re-materializes the whole
+file as a tagged `[u8]` (the Wall-7/9 922 MB wall), then sha256/elf-admit over
+it. The token mint (`executable_authority_issue_verified`) is pub(package) to
+the loader verifier, and the handle it binds requires fields (image_hash,
+verified_load_ranges, mount/file coordinates) the lane cannot honestly
+produce for a host-built image. Landing A means rewriting the shared
+cross-arch prepare path to stream from the raw region — out of scope for a
+3-boot lane. Route B mirrors the proven x86 OVMF lane's private
+`_admit_raw_elf64`/`_map_pt_loads` (examples/09_embedded/simple_os/arch/x86_64/
+hello_world_ovmf_entry.spl:273,527): a lane-local admission that validates the
+ELF, maps PT_LOADs, builds the SysV stack, and enters ring 3, bypassing the
+-13 seam for the lane only. The fail-closed production seam
+(`fs_exec_prepare_spawn`/`fs_exec_adopt_authenticated_v1`) is untouched.
+
+## Changes (this session)
+
+- `examples/09_embedded/simple_os/arch/arm64/boot/crt0.S`:
+  - New `arm64_enter_el0(root, entry, user_sp)`: records the kernel resume
+    frame (SP, LR, x19-x28, armed) in `arm64_resume_ctx` (baremetal_stubs.c),
+    installs the user AS (TTBR0 + SCTLR.M), and erets to EL0.
+  - New `arm64_resume_from_el0(code)`: restores the resume frame and rets to
+    the C caller with x0 = the payload exit code — the "nested kernel resume
+    frame" the user_entry bridge documented as required (the arm64 mirror of
+    the x86 lane's `rt_x86_exec_token_install` longjmp savepoint).
+  - FIX `_lower_el_aarch64_sync_handler`: re-enable SCTLR.M (saved at
+    [sp,#248]) before eret. The handler cleared the MMU for the C shim but
+    never restored it, so any payload that SVC'd and CONTINUED returned to
+    EL0 with the MMU off and faulted (only the exit-SVC probe path ever
+    exercised the trap, so this was latent).
+- `examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`:
+  - `ARM64_UAS_REGION_BASE` 0x48000000 -> 0x71000000 (the 768 MiB kernel .bss
+    now spans 0x40200000..0x6d021000; the old base overlapped the resident
+    payload region and the 512 MiB heap). Pool at 0x73000000.
+  - `arm64_resume_ctx[13]`, the physical page pool (0x73000000, 160 MiB, bump,
+    reset per launch), and the per-launch mmap cursor.
+  - `rt_arm_payload_elf64_ring3_enter(size, argv)`: validates the ELF64 out of
+    the RAW payload region (no tagged array), creates a user AS, copies every
+    PT_LOAD page into fresh pool frames (per-page permission union, BSS
+    zero-fill, W+X rejected), maps an 8 MiB user stack with the SysV
+    argc/argv/envp/auxv frame, records the handoff, and erets via
+    `arm64_enter_el0`; returns the payload's exit code. mmap (syscall id 10)
+    bump-maps zeroed pool pages into the recorded user AS.
+  - `rt_arm64_handle_user_svc` id 0: resume the kernel frame when armed
+    (payload path); keep the old print+exit behavior for the probe path.
+  - DIAGNOSTIC (one-boot, marked in code): map the low 16 pages zeroed so the
+    guest binary's mis-linked 0xb1c8/0xb1d0/0xb1d8 derefs return 0 — lets the
+    defective binary reach its main and proves the round-trip. REMOVE when
+    the toolchain lands (bug doc below).
+- `src/os/kernel/loader/arm64_fs_exec_spawn.spl`:
+  `arm64_fs_exec_spawn_ring3_payload_resident(path, argv, envp)` — streams the
+  payload resident (Wall 9 loader) then calls the C launcher. Lane-local,
+  @cfg(arm64), explicitly NOT an authenticated admission.
+- `examples/09_embedded/simple_os/arch/arm64/clang_bringup_entry.spl`: `_rung`
+  now calls the payload-resident spawn (was `arm64_fs_exec_spawn_ring3`, which
+  fails closed at -13 by design).
+
+## Evidence (run-20260926_002603, REBUILD_KERNEL=1 ACCEL=tcg)
+
+```
+[fs-exec] spawn:resident path=/CLANG.ELF bytes=115209168
+[payload] ring3 enter: validate
+[payload] elf ok: map 20948 pages, entry=0x10000000
+[payload] DIAG low 16 pages mapped (toolchain 0xb1c8 deref)
+[payload] stack mapped, sp=0x7fffffa0
+[arm64-user] virtual entry preflight ok
+[payload] eret to EL0
+[arm64-user] svc exit; resume kernel
+[payload] payload exited code=-1
+[clang-bringup] rung=R3-clang-version rc=-1
+CLANG_IN_GUEST_ARM64_R3_FAIL rc=-1
+rung table: R1=PASS R2=PASS R3=FAIL R4=FAIL R5=FAIL FINAL=FAIL
+```
+
+- The 115 MiB payload is validated, mapped (20,948 PT_LOAD pages + 8 MiB
+  stack), and ENTERED EL0 — the Wall-10 ring-3 handoff works end to end:
+  eret -> EL0 execution -> SVC round-trips (pread's lseek/read returned
+  errors cleanly through the re-enabled MMU) -> exit(0) SVC -> kernel resume
+  -> rung continues with the payload's exit code.
+- rc=-1 (not 0) and NO version banner: the payload ran its (defective)
+  main = `pread(0,NULL,0)` and exited -1. The clang driver never ran.
+
+## R3 blocker (NEW, EXTERNAL): guest clang/lld binaries are mis-linked
+
+Full analysis + byte evidence:
+doc/08_tracking/bug/guest_aarch64_clang_lld_mislinked_crt0_main_pread_wall10_2026-09-26.md.
+Three toolchain defects in `cross-aarch64-unknown-simpleos/bin/{clang-20,lld}`:
+(1) stale crt0.o calls `main(0,0,0)` (never reads the SysV stack frame);
+(2) weak `main` = 4-byte fallthrough into `pread` — the driver
+`_Z4mainiPPc` is never called, so no banner can print; (3)
+`__libc_init_array` derefs 0xb1c8/0xb1d0/0xb1d8 (outside every PT_LOAD) and
+data-aborted at ELR 0x1447a4d0 / FAR 0xb1c8 before the low-page diagnostic.
+All three are in the external toolchain (/home/yoon/llvm-project-simpleos),
+not this repo. The kernel-side ring-3 machinery is proven up to the guest's
+own first instruction; R3-R5 stay red until the toolchain rebuilds the
+binaries.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all runs |
+| R2 guest boots | PASS | banner, module inits, VFS mounts |
+| R3 clang --version in guest | BLOCKED (EXTERNAL) | Wall 10 ring-3 handoff WORKS (payload in EL0, SVCs, exit-resume, rung continues, rc=-1); blocked only by guest-toolchain binary defects (main->pread, stale crt0, 0xb1c8 mislink) — needs toolchain rebuild |
+| R4-R5 | BLOCKED | needs R3; then in-guest file syscalls (open/read/write for /HELLO.C, /HELLO.O, /HELLO2.ELF) and a working guest driver |
+
+## Exact next actions
+
+1. Guest toolchain lane: fix the three binary link defects (bug doc above),
+   rebuild clang-20/lld, re-stage the image.
+2. This lane: with a sane binary, R3 should print the banner via SVC 60
+   (write path already proven by the SVC round-trips) and exit 0; then R4
+   needs the in-guest file syscalls (ids 30/31/32) to reach the mounted
+   FAT32 (the arm64_dispatch_file_shim owners) and the guest driver's file
+   I/O.
+3. Revert the low-16-pages DIAGNOSTIC once the toolchain lands.
