@@ -215,6 +215,20 @@ case "$test_workers" in
   [1-9]|1[0-2]) ;;
   *) die "test workers must be an integer from 1 to 12" ;;
 esac
+# Spec execution mode for the repository-test rows. Stage 2 runs each spec
+# the way the self-hosted binary must: `compile <spec> -o <spec>.smf` with the
+# stage-2 CLI, then execute the SMF (the runner's --mode=native path). The
+# in-process HIR interpreter cannot run std.spec closures, and delegating to
+# the Rust seed would be a seed verdict, not a stage-2 one.
+# BOOTSTRAP_STAGE2_TEST_MODE=interpreter restores the old rows for diagnosis.
+test_exec_mode_flag=--mode=interpreter
+if [ "$phase" = stage2 ]; then
+  case "${BOOTSTRAP_STAGE2_TEST_MODE:-native}" in
+    native) test_exec_mode_flag=--mode=native ;;
+    interpreter) test_exec_mode_flag=--mode=interpreter ;;
+    *) die "BOOTSTRAP_STAGE2_TEST_MODE must be native or interpreter" ;;
+  esac
+fi
 test_mode_flag=--sequential
 test_worker_flag=
 if [ "$test_workers" -gt 1 ]; then
@@ -1141,7 +1155,7 @@ run_inventory_row() {
           SIMPLE_MCP_TEST_BINARY="$row_mcp_server" \
           run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
             "$row_runner" "$row_relative" \
-            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            "$test_exec_mode_flag" --unstable --assert-ran --no-cache --no-db \
             --no-session-daemon "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
       else
         HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate \
@@ -1149,7 +1163,7 @@ run_inventory_row() {
           SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" \
           run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
             "$row_runner" "$row_relative" \
-            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            "$test_exec_mode_flag" --unstable --assert-ran --no-cache --no-db \
             --no-session-daemon "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
       fi
     ) >"$row_output" 2>&1 || row_status=$?
@@ -1404,7 +1418,7 @@ run_repository_full_tests() {
           SIMPLE_MCP_TEST_BINARY="$full_mcp_server" \
           run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
             "$test_runner" "$relative" \
-            --mode=interpreter --unstable --assert-ran --no-cache --no-db \
+            "$test_exec_mode_flag" --unstable --assert-ran --no-cache --no-db \
             --no-session-daemon --sequential --json
       ) >"$row_output" 2>&1 || status=$?
       cat "$row_output" >>"$log"
@@ -1732,7 +1746,7 @@ else
     run_matrix_task compiler_bootstrap_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/bootstrap --mode=interpreter --unstable \
+      test/01_unit/compiler/bootstrap "$test_exec_mode_flag" --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
     if [ "$stage2_slim_profile" -ne 1 ]; then
@@ -1748,7 +1762,7 @@ else
     run_matrix_task interpreter_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      test/01_unit/compiler/interpreter --mode=interpreter --unstable \
+      test/01_unit/compiler/interpreter "$test_exec_mode_flag" --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
     if [ "$stage2_slim_profile" -ne 1 ]; then
@@ -1766,7 +1780,7 @@ else
     run_matrix_task loader_interpreter_tests --verification-command-owner-receipt="$command_owner_receipt" \
       --verification-require-test-json \
       env SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" "$test_runner" \
-      "$loader_oracle" --mode=interpreter --unstable \
+      "$loader_oracle" "$test_exec_mode_flag" --unstable \
       --assert-ran --no-cache --no-db --no-session-daemon \
       "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
     if [ "$stage2_slim_profile" -ne 1 ]; then
