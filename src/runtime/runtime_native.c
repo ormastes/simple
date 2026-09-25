@@ -14478,13 +14478,17 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
      * this call was silently failing right after the just-fixed fsync
      * succeeded, reproducing the identical "generation-publication-failed"
      * symptom for an unrelated reason. Prefer the wide, extended-length-
-     * prefixed MoveFileExW with no replace flag -- matching rename()'s
+     * prefixed MoveFileExW. MOVEFILE_REPLACE_EXISTING gives the POSIX
+     * rename(2) contract the callers and the Rust twin (std::fs::rename)
+     * assume: without it every SCV inventory re-publish of CURRENT failed
+     * publish-current-write-failed on Windows (2026-09-25). An existing
+     * DIRECTORY destination still fails, as on POSIX. Previously: no replace flag, matching rename()'s
      * Windows semantics of failing when the destination already exists --
      * falling back to plain rename() only when a path cannot be widened. */
     wchar_t* wide_old = rt_widen_long_path_rc(old_path);
     wchar_t* wide_new = wide_old ? rt_widen_long_path_rc(new_path) : NULL;
     if (wide_old && wide_new) {
-        BOOL ok = MoveFileExW(wide_old, wide_new, 0);
+        BOOL ok = MoveFileExW(wide_old, wide_new, MOVEFILE_REPLACE_EXISTING);
         free(wide_old); free(wide_new);
         return ok != 0;
     }
