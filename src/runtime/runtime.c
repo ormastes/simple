@@ -2147,7 +2147,11 @@ int         rt_file_create_excl(const char* path, int64_t path_len,
     if (!path_copy) return 0;
     memcpy(path_copy, path, (size_t)path_len);
     path_copy[path_len] = '\0';
+#if defined(_WIN32)
+    int fd = open(path_copy, O_CREAT | O_EXCL | O_WRONLY | _O_BINARY, 0644); /* no LF->CRLF */
+#else
     int fd = open(path_copy, O_CREAT | O_EXCL | O_WRONLY, 0644);
+#endif
     if (fd < 0) {
         free(path_copy);
         return 0;

@@ -159,6 +159,21 @@ fn compile_source_inventory_cache_root_valid_v1(cache_root: text) -> bool:
         cache_root.ends_with("/build/scv") or
         cache_root.ends_with("/.simple/scv")
 
+# Byte-wise identity order (-1/0/1). Not text `<`/`>=`: native bootstrap text
+# relational operators compare tagged addresses, so the heap sort produced an
+# allocation-order inventory that failed its own canonical re-encode check
+# (inventory-noncanonical on every Windows stage-2 cold init, 2026-09-25).
+fn compile_source_inventory_identity_cmp_v1(left: text, right: text) -> i64:
+    val shared = if left.len() < right.len(): left.len() else: right.len()
+    var index = 0
+    while index < shared:
+        val a = left.byte_at(index) as i64
+        val b = right.byte_at(index) as i64
+        if a != b:
+            return if a < b: -1 else: 1
+        index = index + 1
+    if left.len() == right.len(): 0 elif left.len() < right.len(): -1 else: 1
+
 fn compile_source_inventory_sort_v1(
     values: [CompileSourceInventoryEntryV1]
 ) -> [CompileSourceInventoryEntryV1]:
@@ -166,7 +181,7 @@ fn compile_source_inventory_sort_v1(
     # Published and warm inventories are already ordered. Preserve their
     # linear validation cost instead of heap-sorting them again.
     var ordered = 1
-    while ordered < sorted.len() and sorted[ordered - 1].source_identity <= sorted[ordered].source_identity:
+    while ordered < sorted.len() and compile_source_inventory_identity_cmp_v1(sorted[ordered - 1].source_identity, sorted[ordered].source_identity) <= 0:
         ordered = ordered + 1
     if ordered >= sorted.len():
         return sorted
@@ -187,9 +202,9 @@ fn compile_source_inventory_sort_v1(
             end = end - 1
         while root * 2 + 1 <= end:
             var child = root * 2 + 1
-            if child < end and sorted[child].source_identity < sorted[child + 1].source_identity:
+            if child < end and compile_source_inventory_identity_cmp_v1(sorted[child].source_identity, sorted[child + 1].source_identity) < 0:
                 child = child + 1
-            if sorted[root].source_identity >= sorted[child].source_identity:
+            if compile_source_inventory_identity_cmp_v1(sorted[root].source_identity, sorted[child].source_identity) >= 0:
                 break
             val parent = sorted[root]
             sorted[root] = sorted[child]

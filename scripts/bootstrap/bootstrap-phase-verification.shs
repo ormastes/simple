@@ -6,6 +6,7 @@ set -u
 
 . "$(dirname -- "$0")/bootstrap-windows-cl-mode.shs"
 . "$(dirname -- "$0")/bootstrap-phase-toolchain.shs"
+. "$(dirname -- "$0")/bootstrap-scv-prime.shs"
 bootstrap_windows_preserve_cl_mode
 
 die() {
@@ -599,7 +600,9 @@ run_task() {
       # Bootstrap-only dispatch controls belong only to the Stage 1 native
       # producer below.  Do not let an operator's ambient shell silently
       # redirect version checks or later phase verification.
-      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+      # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
+      # an ambient setting: inherited, it re-lists the whole tree per child.
+      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
       if [ "$phase" = stage1 ]; then
         bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
       fi
@@ -1004,7 +1007,9 @@ run_inventory_row() {
     (
       cd "$source_root" || exit 125
       # Match run_task dispatch isolation before binding this row's CLI owner.
-      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+      # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
+      # an ambient setting: inherited, it re-lists the whole tree per child.
+      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
       if [ -n "$row_mcp_server" ]; then
         HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$row_cache" \
@@ -1266,7 +1271,7 @@ run_repository_full_tests() {
         cd "$source_root" || exit 125
         # Keep ambient bootstrap routing out of direct repository-test rows;
         # SIMPLE_BINARY below is the exact receipt-bound CLI for this matrix.
-        unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+        unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
         HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
@@ -1547,6 +1552,18 @@ else
     else
       record_unsupported_task stage4_tooling_owners stage4-cli-runner-mcp-lsp-artifact-not-built
     fi
+  fi
+
+  # Every full-CLI row below (check, and each spec child the test runner
+  # spawns) passes SCV admission, which needs build/scv in the source root.
+  # Prime it once with the just-built CLI; skipped when a valid journal
+  # already exists. Lane-independent. See bootstrap-scv-prime.shs.
+  if [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ]; then
+    scv_prime_line=$(bootstrap_scv_prime "$source_root" "$compiler_cli" "$home" "$tmp" \
+      "$logs/scv_inventory_prime.log" src/lib/common/text_whitespace.spl) ||
+      die "SCV inventory prime failed; see $logs/scv_inventory_prime.log"
+    echo "$scv_prime_line"
+    echo "scv_inventory_prime=$scv_prime_line" >>"$summary"
   fi
 
   if [ "$stage2_slim_profile" -eq 1 ]; then
