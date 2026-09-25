@@ -155,6 +155,49 @@ fn returned_vreg(mir: &MirModule) -> Option<crate::mir::instructions::VReg> {
     })
 }
 
+/// True when some `FieldSet` writes `value` (the field-receiver store-back).
+fn has_field_set_of(mir: &MirModule, value: crate::mir::instructions::VReg) -> bool {
+    mir.functions.iter().any(|f| {
+        f.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| matches!(i, MirInst::FieldSet { value: v, .. } if *v == value))
+        })
+    })
+}
+
+#[test]
+fn fam_field_push_statement_stores_back() {
+    // `w.f.push(x)` statement on a FAM target: the post-grow header must be
+    // written back into the field via FieldSet, or the loop keeps pushing the
+    // stale pre-grow field value (the append_raw/append_field shape).
+    let mir = compile_to_mir_with_push_header(
+        "class W:\n    bytes: [u8]\n\nfn write(w: W) -> i64:\n    for byte in [1u8, 2u8]:\n        w.bytes.push(byte)\n    w.bytes.len()\n",
+        true,
+    )
+    .unwrap();
+    let dests = push_call_dests(&mir, "rt_typed_bytes_u8_push");
+    // Two literal pushes (the [1u8, 2u8] fill) + one field push per loop body.
+    assert_eq!(dests.len(), 3, "two literal pushes + one field push");
+    let field_push = dests[2].expect("FAM field push must capture the returned header");
+    assert!(
+        has_field_set_of(&mir, field_push),
+        "FAM field push must store the post-grow header back into the field"
+    );
+}
+
+#[test]
+fn hosted_field_push_statement_keeps_discard_shape() {
+    let mir = compile_to_mir_with_push_header(
+        "class W:\n    bytes: [u8]\n\nfn write(w: W) -> i64:\n    for byte in [1u8, 2u8]:\n        w.bytes.push(byte)\n    w.bytes.len()\n",
+        false,
+    )
+    .unwrap();
+    let dests = push_call_dests(&mir, "rt_typed_bytes_u8_push");
+    assert_eq!(dests.len(), 3);
+    assert!(dests[2].is_none(), "hosted field push keeps the bool-return shape");
+}
+
 #[test]
 fn fam_u8_array_literal_threads_push_result() {
     // [u8] literal in expression position: the returned handle must be the

@@ -1942,14 +1942,15 @@ fn compile_inline_typed_words_push<M: Module>(
     // FAM freestanding push ABI: the push returns the possibly realloc-moved
     // header, so `dest` receives the array VALUE (the in-capacity store never
     // moves the header; the grow call returns the new one). Hosted keeps the
-    // bool-success ABI.
+    // bool-success ABI. `store_result` exists only when the call has a dest —
+    // the done block has no parameter otherwise.
     let result_type = if ctx.fam_arrays { types::I64 } else { types::I8 };
-    let store_result = if ctx.fam_arrays {
-        Some(array)
-    } else if returns_value {
-        Some(builder.ins().iconst(types::I8, 1))
-    } else {
+    let store_result = if !returns_value {
         None
+    } else if ctx.fam_arrays {
+        Some(array)
+    } else {
+        Some(builder.ins().iconst(types::I8, 1))
     };
 
     let store_block = builder.create_block();
@@ -2133,14 +2134,15 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     // FAM freestanding push ABI: the push returns the possibly realloc-moved
     // header, so `dest` receives the array VALUE (the in-capacity store never
     // moves the header; the grow call returns the new one). Hosted keeps the
-    // bool-success ABI.
+    // bool-success ABI. `store_result` exists only when the call has a dest —
+    // the done block has no parameter otherwise.
     let result_type = if ctx.fam_arrays { types::I64 } else { types::I8 };
-    let store_result = if ctx.fam_arrays {
-        Some(array)
-    } else if returns_value {
-        Some(builder.ins().iconst(types::I8, 1))
-    } else {
+    let store_result = if !returns_value {
         None
+    } else if ctx.fam_arrays {
+        Some(array)
+    } else {
+        Some(builder.ins().iconst(types::I8, 1))
     };
 
     let store_block = builder.create_block();

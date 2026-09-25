@@ -1134,11 +1134,11 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Store a post-grow array header back into the pushed receiver's place
-    /// (local slot or global) after a push on a moving-header runtime.
-    /// Non-place receivers (field accesses, call results, temporaries) get no
+    /// (local slot, global, or field) after a push on a moving-header
+    /// runtime. Non-place receivers (call results, temporaries) get no
     /// store-back: the fused `p.f = p.f.push(v)` form is already carried by
-    /// the push expression's value, and a bare statement push on those shapes
-    /// has no stable place to rebind.
+    /// the push expression's value, and a bare statement push on those
+    /// shapes has no stable place to rebind.
     pub(super) fn store_array_push_receiver_back(&mut self, receiver: &HirExpr, value: VReg) -> MirLowerResult<()> {
         match &receiver.kind {
             HirExprKind::Local(local_index) => {
@@ -1165,6 +1165,34 @@ impl<'a> MirLowerer<'a> {
                         global_name,
                         value,
                         ty: receiver.ty,
+                    });
+                })
+            }
+            HirExprKind::FieldAccess { receiver: object, field_index } => {
+                // Re-lower only side-effect-free object shapes (locals and
+                // globals) for the store-back; anything fancier must use the
+                // fused `p.f = p.f.push(v)` form.
+                if !matches!(object.kind, HirExprKind::Local(_) | HirExprKind::Global(_)) {
+                    return Ok(());
+                }
+                let object_reg = self.lower_expr(object)?;
+                let field_index = *field_index;
+                let byte_offset = (field_index as u32) * 8;
+                let owner_name = self
+                    .type_registry
+                    .and_then(|registry| registry.get_type_name(object.ty))
+                    .map(str::to_owned);
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::FieldSet {
+                        object: object_reg,
+                        owner_name,
+                        // Mirrored from the assignment path: native-project
+                        // lowering re-qualifies this authoritatively later.
+                        owner_has_vtable: None,
+                        byte_offset,
+                        field_type: receiver.ty,
+                        value,
                     });
                 })
             }
