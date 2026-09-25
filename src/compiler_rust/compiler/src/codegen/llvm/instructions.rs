@@ -121,6 +121,21 @@ impl LlvmBackend {
         }
     }
 
+    /// Ordering compares go through the dynamic, tag-aware `rt_native_cmp`
+    /// only when a side is statically ANY and neither side is proven numeric.
+    /// An UNTYPED operand (`None`) is not ANY: in this backend ints are raw
+    /// i64, and many int-producing MIR values carry no vreg type (e.g. a
+    /// `Call rt_array_len` dest). Routing `None` to rt_native_cmp compared raw
+    /// 1 and 2 as tagged values, so `while i < raw.len()` stopped early. The
+    /// stage-2 CLI then dropped its whole argv and fell into the REPL
+    /// (bootstrap41, 2026-09-25).
+    #[cfg(feature = "llvm")]
+    fn ordering_needs_dynamic_cmp(lhs: Option<crate::hir::TypeId>, rhs: Option<crate::hir::TypeId>) -> bool {
+        use crate::hir::TypeId;
+        let numeric = |t: Option<TypeId>| t.is_some_and(Self::is_native_scalar_equality_type);
+        (lhs == Some(TypeId::ANY) || rhs == Some(TypeId::ANY)) && !numeric(lhs) && !numeric(rhs)
+    }
+
     #[cfg(feature = "llvm")]
     fn is_native_scalar_equality_type(ty: crate::hir::TypeId) -> bool {
         use crate::hir::TypeId;
@@ -310,7 +325,7 @@ impl LlvmBackend {
                             builder
                                 .build_int_compare(pred, raw, zero, "text_cmp_bool")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
-                        } else if !native_scalar_eq {
+                        } else if Self::ordering_needs_dynamic_cmp(lhs_type, rhs_type) {
                             // Neither operand is PROVEN numeric (int/bool/
                             // char) by static type -- could be ANY, an
                             // untyped placeholder, a runtime-produced text
@@ -698,6 +713,7 @@ impl LlvmBackend {
                 // pointer/tag bits.
                 if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq) {
                     let is_text = matches!(lhs_type, Some(TypeId::STRING)) || matches!(rhs_type, Some(TypeId::STRING));
+                    if is_text || Self::ordering_needs_dynamic_cmp(lhs_type, rhs_type) {
                     let fn_name = if is_text { "rt_text_cmp_any" } else { "rt_native_cmp" };
                     let rt_func = module.get_function(fn_name).unwrap_or_else(|| {
                         let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
@@ -721,6 +737,18 @@ impl LlvmBackend {
                     };
                     let cmp = builder
                         .build_int_compare(pred, raw, zero, "mixed_cmp_bool")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                    return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
+                    }
+                    let pred = match op {
+                        BinOp::Lt => IntPredicate::SLT,
+                        BinOp::LtEq => IntPredicate::SLE,
+                        BinOp::Gt => IntPredicate::SGT,
+                        BinOp::GtEq => IntPredicate::SGE,
+                        _ => unreachable!(),
+                    };
+                    let cmp = builder
+                        .build_int_compare(pred, l_int, r_int, "mixed_ord")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
                     return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
                 }
@@ -758,8 +786,8 @@ impl LlvmBackend {
                     _ => Ok(l_int), // Fallback for operators like In, NotIn, Pow, etc.
                 }
                 .map_err(|e| crate::error::factory::llvm_build_failed("mixed_binop", &e))?;
-                // Lt/LtEq/Gt/GtEq always `return` above via the dynamic-cmp
-                // path, so `result` here is never an ordering compare.
+                // Lt/LtEq/Gt/GtEq always `return` above, so `result` here is
+                // never an ordering compare.
                 Ok(result.into())
             }
         }
@@ -1442,10 +1470,10 @@ mod tests {
             builder.position_at_end(entry);
             let left = function.get_nth_param(0).unwrap();
             let right = function.get_nth_param(1).unwrap();
-            // No static type proof on either side (None, None) -- the ANY /
-            // unresolved-annotation case from the systemic plan's class 4.
+            // Statically ANY on both sides: dynamic compare.
+            let any = Some(crate::hir::TypeId::ANY);
             let result = backend
-                .compile_binop(crate::hir::BinOp::Gt, left, right, builder, module, None, None, None)
+                .compile_binop(crate::hir::BinOp::Gt, left, right, builder, module, None, any, any)
                 .unwrap()
                 .into_int_value();
             builder.build_return(Some(&result)).unwrap();
@@ -1454,6 +1482,43 @@ mod tests {
         let ir = backend.get_ir().unwrap();
         assert!(ir.contains("call i64 @rt_native_cmp"));
         assert!(!ir.contains("icmp sgt i64 %0, %1"));
+        backend.verify().unwrap();
+    }
+
+    /// An UNTYPED operand is not ANY: raw ints from untyped vregs
+    /// (`Call rt_array_len`) must keep the raw icmp. Routing them to
+    /// rt_native_cmp made `while i < raw.len()` exit early and cost the
+    /// stage-2 CLI its argv (bootstrap41).
+    #[test]
+    fn untyped_ordering_compares_keep_raw_icmp() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("untyped_ordering_test").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let fn_type = rv_type.fn_type(&[rv_type.into(), rv_type.into()], false);
+
+            let function = module.add_function("lt_untyped", fn_type, None);
+            let entry = backend.context_ref().append_basic_block(function, "entry");
+            builder.position_at_end(entry);
+            let left = function.get_nth_param(0).unwrap();
+            let right = function.get_nth_param(1).unwrap();
+            let result = backend
+                .compile_binop(crate::hir::BinOp::Lt, left, right, builder, module,
+                    None, Some(crate::hir::TypeId::I64), None)
+                .unwrap()
+                .into_int_value();
+            builder.build_return(Some(&result)).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("rt_native_cmp"), "{ir}");
+        assert!(ir.contains("icmp slt i64"), "{ir}");
         backend.verify().unwrap();
     }
 }
