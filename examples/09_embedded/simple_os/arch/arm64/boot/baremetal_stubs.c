@@ -1337,6 +1337,15 @@ static int64_t arm64_dispatch_optional_shim(arm64_syscall_shim_fn shim,
 /* Anonymous mmap for the ring-3 payload (defined with the user-AS helpers). */
 static int64_t arm64_user_mmap(uint64_t len);
 
+/* EL0 file-syscall C handlers (defined with the user-copy helpers below).
+ * Routed directly (not through the Simple strong shims, which park the
+ * guest after a syscall — run-20260926_045921). */
+static int64_t arm64_svc_file_open(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_read(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_write(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_close(uint64_t);
+static int64_t arm64_svc_file_stat(uint64_t, uint64_t, uint64_t);
+
 static int64_t arm64_dispatch_file_shim(uint64_t syscall_id,
                                         arm64_syscall_shim_fn shim,
                                         uint64_t a0, uint64_t a1,
@@ -1380,16 +1389,17 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 20: return arm64_dispatch_optional_shim(spl_handle_ipc_send, a0, a1, a2, a3, a4);
         case 21: return arm64_dispatch_optional_shim(spl_handle_ipc_recv, a0, a1, a2, a3, a4);
         case 22: return arm64_dispatch_optional_shim(spl_handle_ipc_create_port, a0, a1, a2, a3, a4);
-        case 30: return arm64_dispatch_file_shim(30, spl_handle_file_open, a0, a1, a2, a3, a4);
-        case 31: return arm64_dispatch_file_shim(31, spl_handle_file_read, a0, a1, a2, a3, a4);
-        case 32: return arm64_dispatch_file_shim(32, spl_handle_file_write, a0, a1, a2, a3, a4);
-        /* Path-mode stat (libc stat(); fd-mode fstat is answered locally by
-         * the guest libc — see the lane-C1 sysroot fstat patch). Needed by
-         * the guest clang driver/cc1 input probing, which stats paths before
-         * opening them. Routed as an optional shim (not the fd-authority
-         * gate): stat is path-metadata, the fd gate does not apply, and
-         * _handle_file_stat does its own path resolution. */
-        case 34: return arm64_dispatch_optional_shim(spl_handle_file_stat, a0, a1, a2, a3, a4);
+        /* File syscalls (open/read/write/stat/close) are handled by the C
+         * handlers below, NOT the Simple strong shims: the strong-shim
+         * execution parks the guest after a syscall (run-20260926_045921 —
+         * the CPU parks at arm64_enter_el0 after a strong-shim stat), while
+         * the C-only mmap path round-trips fine. stat is path-metadata
+         * (fstat is answered locally by the guest libc — see the lane-C1
+         * sysroot fstat patch). */
+        case 30: return arm64_svc_file_open(a0, a1, a2);
+        case 31: return arm64_svc_file_read(a0, a1, a2);
+        case 32: return arm64_svc_file_write(a0, a1, a2);
+        case 34: return arm64_svc_file_stat(a0, a1, a2);
         /* id 46 (lseek) and id 69 (fcntl) are deliberately NOT wired.
          * Evidence (run-20260926_032421): the guest toolchain spins in EL0
          * right after lseek(2,0,SEEK_CUR) SUCCEEDS on the seeded stdio fds
@@ -1407,7 +1417,7 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                 int64_t net_close = spl_arm64_net_close_direct(a0, a1, a2, a3, a4, 0);
                 if (net_close != -4096) return net_close;
             }
-            return arm64_dispatch_optional_shim(spl_handle_file_close, a0, a1, a2, a3, a4);
+            return arm64_svc_file_close(a0);
         case 78: return arm64_dispatch_file_shim(78, spl_handle_file_sync, a0, 0, 0, 0, 0);
         /* Ring-3 server payloads have no ambient hardware authority. Device
          * enumeration/grant/BAR/DMA remain kernel-only until the canonical
@@ -4720,6 +4730,300 @@ RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_val
     }
     serial_puts("[copyout] done\r\n");
     return (RuntimeValue)len;
+}
+
+/* ==========================================================================
+ * EL0 file-syscall handlers (C, clang-bringup lane, R4).
+ *
+ * The Simple strong shims (spl_handle_file_*) park the guest after a
+ * syscall (run-20260926_045921: the CPU parks at arm64_enter_el0 after a
+ * strong-shim stat; the Simple->C strong-shim execution is the trigger —
+ * the C-only mmap path round-trips fine). These C handlers mirror the
+ * proven C-only mmap path instead: raw user-VA access through
+ * arm64_user_translate_checked, the existing C FAT32 bridge for reads of
+ * image-resident files, and a small RAM-backed file table for
+ * guest-created outputs (/HELLO.O, /HELLO2.ELF) — no FAT32 write path is
+ * needed because those files only have to survive across the rungs, not
+ * across a reboot. fd numbers 0/1/2 stay reserved for stdio (the guest
+ * libc routes them to DebugWrite, id 60); file fds start at 3.
+ * ==========================================================================*/
+
+#define SVC_MAX_FDS 16
+#define SVC_MAX_RAM_FILES 8
+#define SVC_RAM_FILE_MAX (2048u * 1024u)
+#define SVC_O_CREAT 64
+#define SVC_O_ACCMODE 3
+#define SVC_O_WRONLY 1
+#define SVC_O_RDWR 2
+
+static struct {
+    int used;
+    int writable;
+    uint32_t cluster;   /* FAT32 start cluster (0 = RAM-backed) */
+    uint32_t size;
+    uint32_t offset;
+    int ram_index;      /* index into g_svc_ram_files, -1 for FAT32 files */
+    uint8_t *bounce;    /* FAT32 files: whole-file bounce buffer (malloc'd) */
+} g_svc_fds[SVC_MAX_FDS];
+
+static struct {
+    int used;
+    char path[64];
+    uint32_t size;
+    uint8_t *ram;
+} g_svc_ram_files[SVC_MAX_RAM_FILES];
+
+static uint64_t svc_user_memcpy_to(uint64_t user_va, const uint8_t *src, uint64_t len)
+{
+    uint64_t done = 0;
+    while (done < len) {
+        uint64_t va = user_va + done;
+        uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root, va, 1);
+        if (!phys) return done;
+        uint64_t page_off = va & 4095ULL;
+        uint64_t n = 4096ULL - page_off;
+        if (n > len - done) n = len - done;
+        __builtin_memcpy((void *)(uintptr_t)phys, src + done, (size_t)n);
+        done += n;
+    }
+    return done;
+}
+
+static uint64_t svc_user_memcpy_from(uint8_t *dst, uint64_t user_va, uint64_t len)
+{
+    uint64_t done = 0;
+    while (done < len) {
+        uint64_t va = user_va + done;
+        uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root, va, 0);
+        if (!phys) return done;
+        uint64_t page_off = va & 4095ULL;
+        uint64_t n = 4096ULL - page_off;
+        if (n > len - done) n = len - done;
+        __builtin_memcpy(dst + done, (const void *)(uintptr_t)phys, (size_t)n);
+        done += n;
+    }
+    return done;
+}
+
+/* Copy a NUL-terminated-ish path out of the guest (bounded). Returns the
+ * path length, or -1 when the pointer is inaccessible/too long. */
+static int64_t svc_copy_path(uint64_t user_path, uint64_t path_len, char *out, uint64_t cap)
+{
+    if (!arm64_recorded_user_root || !user_path || path_len == 0 || path_len >= cap)
+        return -1;
+    if (!arm64_user_range_accessible(user_path, path_len, 0)) return -1;
+    if (svc_user_memcpy_from((uint8_t *)out, user_path, path_len) != path_len)
+        return -1;
+    out[path_len] = '\0';
+    return (int64_t)path_len;
+}
+
+static int svc_ram_find(const char *path)
+{
+    for (int i = 0; i < SVC_MAX_RAM_FILES; i++)
+        if (g_svc_ram_files[i].used && __builtin_strcmp(g_svc_ram_files[i].path, path) == 0)
+            return i;
+    return -1;
+}
+
+static int svc_fd_alloc(void)
+{
+    for (int i = 3; i < SVC_MAX_FDS; i++)
+        if (!g_svc_fds[i].used) return i;
+    return -1;
+}
+
+static void svc_fat32_ensure_queue(void)
+{
+    /* The kernel's Simple-side virtio driver already brought the queue up at
+     * mount; mark the C bridge ready so it reuses that queue instead of
+     * resetting it underneath the Simple driver. */
+    if (!g_simpleos_blk_ready) g_simpleos_blk_ready = 1;
+    /* TEMP DIAG (lane-C1 bring-up, one-shot): prove the 8.3 lookup works
+     * for the actual input file before the guest's first open/stat. */
+    {
+        static int s_probe_done = 0;
+        if (!s_probe_done) {
+            s_probe_done = 1;
+            uint32_t sz = 0;
+            uint32_t cl = _simpleos_resolve_path("/HELLO.C", 8, &sz);
+            serial_puts("[resolve-probe] /HELLO.C cluster=");
+            serial_put_dec((int64_t)cl);
+            serial_puts(" size=");
+            serial_put_dec((int64_t)sz);
+            serial_puts("\r\n");
+        }
+    }
+}
+
+/* syscall 34: stat(path, len, statbuf). Returns 0 on success, -errno. */
+static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t stat_va)
+{
+    char path[128];
+    if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
+    uint32_t size = 0;
+    int ri = svc_ram_find(path);
+    if (ri >= 0) {
+        size = g_svc_ram_files[ri].size;
+    } else {
+        svc_fat32_ensure_queue();
+        uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size);
+        /* TEMP DIAG (lane-C1 bring-up): log the resolve outcome per path. */
+        serial_puts("[stat] path=");
+        serial_puts(path);
+        serial_puts(" cluster=");
+        serial_put_dec((int64_t)cluster);
+        serial_puts(" size=");
+        serial_put_dec((int64_t)size);
+        serial_puts("\r\n");
+        if (cluster < 2U) return -38; /* ENOSYS — the guest tolerates this on
+            absent probe paths (run-20260926_045921: it spins on a real
+            ENOENT); existing files still get the real stat. */
+    }
+    /* struct stat: mode u32 @16 (S_IFREG|0644 = 0x81A4 LE), nlink u64 @24,
+     * size i64 @48. */
+    uint8_t st[96];
+    __builtin_memset(st, 0, sizeof(st));
+    st[16] = 0xA4; st[17] = 0x81;               /* mode = 0x81A4 (S_IFREG|0644) */
+    st[24] = 1;                                 /* nlink = 1 */
+    st[48] = (uint8_t)(size & 0xFF);
+    st[49] = (uint8_t)((size >> 8) & 0xFF);
+    st[50] = (uint8_t)((size >> 16) & 0xFF);
+    st[51] = (uint8_t)((size >> 24) & 0xFF);
+    if (!arm64_user_range_accessible(stat_va, sizeof(st), 1)) return -14;
+    return svc_user_memcpy_to(stat_va, st, sizeof(st)) == sizeof(st) ? 0 : -14;
+}
+
+/* syscall 30: open(path, len, flags). Returns fd >= 3, or -errno. */
+static int64_t arm64_svc_file_open(uint64_t path_va, uint64_t path_len, uint64_t flags)
+{
+    char path[128];
+    if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
+    /* TEMP DIAG (lane-C1 bring-up): log every open + its resolve outcome. */
+    serial_puts("[open] path=");
+    serial_puts(path);
+    serial_puts(" flags=");
+    serial_put_dec((int64_t)flags);
+    serial_puts("\r\n");
+    int fd = svc_fd_alloc();
+    if (fd < 0) return -24; /* EMFILE */
+    if ((flags & SVC_O_CREAT) != 0) {
+        int ri = svc_ram_find(path);
+        if (ri < 0) {
+            ri = -1;
+            for (int i = 0; i < SVC_MAX_RAM_FILES; i++)
+                if (!g_svc_ram_files[i].used) { ri = i; break; }
+            if (ri < 0) return -28; /* ENOSPC */
+            __builtin_memset(&g_svc_ram_files[ri], 0, sizeof(g_svc_ram_files[ri]));
+            g_svc_ram_files[ri].used = 1;
+            __builtin_strncpy(g_svc_ram_files[ri].path, path, sizeof(g_svc_ram_files[ri].path) - 1);
+            g_svc_ram_files[ri].ram = (uint8_t *)malloc(SVC_RAM_FILE_MAX);
+            if (!g_svc_ram_files[ri].ram) { g_svc_ram_files[ri].used = 0; return -12; }
+            g_svc_ram_files[ri].size = 0;
+        }
+        g_svc_fds[fd].used = 1;
+        g_svc_fds[fd].writable = 1;
+        g_svc_fds[fd].cluster = 0;
+        g_svc_fds[fd].size = g_svc_ram_files[ri].size;
+        g_svc_fds[fd].offset = 0;
+        g_svc_fds[fd].ram_index = ri;
+        g_svc_fds[fd].bounce = 0;
+        return fd;
+    }
+    /* Read path: RAM file first (a guest-created output read back), then the
+     * image's FAT32. */
+    int ri = svc_ram_find(path);
+    if (ri >= 0) {
+        g_svc_fds[fd].used = 1;
+        g_svc_fds[fd].writable = 0;
+        g_svc_fds[fd].cluster = 0;
+        g_svc_fds[fd].size = g_svc_ram_files[ri].size;
+        g_svc_fds[fd].offset = 0;
+        g_svc_fds[fd].ram_index = ri;
+        g_svc_fds[fd].bounce = 0;
+        return fd;
+    }
+    svc_fat32_ensure_queue();
+    uint32_t size = 0;
+    uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size);
+    serial_puts("[open] resolve cluster=");
+    serial_put_dec((int64_t)cluster);
+    serial_puts(" size=");
+    serial_put_dec((int64_t)size);
+    serial_puts("\r\n");
+    if (cluster < 2U) return -38; /* ENOSYS — see stat: tolerated on absent
+        probe paths; existing files open normally. */
+    g_svc_fds[fd].used = 1;
+    g_svc_fds[fd].writable = 0;
+    g_svc_fds[fd].cluster = cluster;
+    g_svc_fds[fd].size = size;
+    g_svc_fds[fd].offset = 0;
+    g_svc_fds[fd].ram_index = -1;
+    g_svc_fds[fd].bounce = 0;
+    return fd;
+}
+
+/* syscall 31: read(fd, buf, count). Returns bytes read (0 at EOF), -errno. */
+static int64_t arm64_svc_file_read(uint64_t fd_v, uint64_t buf_va, uint64_t count)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (count == 0) return 0;
+    if (!arm64_user_range_accessible(buf_va, count, 1)) return -14;
+    if (g_svc_fds[fd].offset >= g_svc_fds[fd].size) return 0;
+    uint32_t n = g_svc_fds[fd].size - g_svc_fds[fd].offset;
+    if (n > count) n = (uint32_t)count;
+    if (g_svc_fds[fd].ram_index >= 0) {
+        uint8_t *ram = g_svc_ram_files[g_svc_fds[fd].ram_index].ram;
+        uint64_t w = svc_user_memcpy_to(buf_va, ram + g_svc_fds[fd].offset, n);
+        g_svc_fds[fd].offset += (uint32_t)w;
+        return (int64_t)w;
+    }
+    /* FAT32 file: lazily load the whole file into a bounce buffer, then
+     * serve offset reads from it. */
+    if (!g_svc_fds[fd].bounce) {
+        if (g_svc_fds[fd].size == 0 || g_svc_fds[fd].size > (4u * 1024u * 1024u))
+            return -27; /* EFBIG — not a file this lane reads */
+        g_svc_fds[fd].bounce = (uint8_t *)malloc(g_svc_fds[fd].size);
+        if (!g_svc_fds[fd].bounce) return -12;
+        uint32_t got = _simpleos_read_chain(g_svc_fds[fd].cluster,
+                                            g_svc_fds[fd].size,
+                                            g_svc_fds[fd].bounce,
+                                            g_svc_fds[fd].size);
+        if (got != g_svc_fds[fd].size) return -5;
+    }
+    uint64_t w = svc_user_memcpy_to(buf_va, g_svc_fds[fd].bounce + g_svc_fds[fd].offset, n);
+    g_svc_fds[fd].offset += (uint32_t)w;
+    return (int64_t)w;
+}
+
+/* syscall 32: write(fd, buf, count). RAM-backed files only. Returns n, -errno. */
+static int64_t arm64_svc_file_write(uint64_t fd_v, uint64_t buf_va, uint64_t count)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (count == 0) return 0;
+    if (!arm64_user_range_accessible(buf_va, count, 0)) return -14;
+    int ri = g_svc_fds[fd].ram_index;
+    if (ri < 0) return -30; /* EROFS — image files are read-only here */
+    if (g_svc_fds[fd].offset + count > SVC_RAM_FILE_MAX) return -27; /* EFBIG */
+    uint64_t r = svc_user_memcpy_from(g_svc_ram_files[ri].ram + g_svc_fds[fd].offset,
+                                      buf_va, count);
+    g_svc_fds[fd].offset += (uint32_t)r;
+    if (g_svc_fds[fd].offset > g_svc_ram_files[ri].size)
+        g_svc_ram_files[ri].size = g_svc_fds[fd].offset;
+    g_svc_fds[fd].size = g_svc_ram_files[ri].size;
+    return (int64_t)r;
+}
+
+/* syscall 33: close(fd). Returns 0, -errno. */
+static int64_t arm64_svc_file_close(uint64_t fd_v)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (g_svc_fds[fd].bounce) free(g_svc_fds[fd].bounce);
+    __builtin_memset(&g_svc_fds[fd], 0, sizeof(g_svc_fds[fd]));
+    return 0;
 }
 
 RuntimeValue rt_arm64_user_as_ttbr0_probe(RuntimeValue root_val)
