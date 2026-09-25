@@ -441,11 +441,19 @@ RuntimeValue rt_string_len(RuntimeValue str)
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     int64_t i = DECODE_INT(idx);
-    if (!s || i < 0 || (uint32_t)i >= s->len) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)(unsigned char)s->data[i]);
+    if (!s || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
+    /* Canonical ABI (runtime_native.c:rt_string_char_at) returns a 1-char
+     * RuntimeString. Returning ENCODE_INT(byte) here instead breaks every
+     * consumer that feeds the result into a text sink: the string-builder
+     * accumulation of MountTable.resolve's relpath loop drops non-heap values
+     * (rt_string_builder_push's IS_HEAP guard), so the relpath silently
+     * materialized as "" — the in-guest /CLANG.ELF open then failed
+     * Fat32Core.resolve_path("") pre-I/O with NotFound (aarch64 clang
+     * bring-up Wall 6, run-20260925_173314: `resolve=ok mid=1 rel=`). */
+    return rt_string_new((RuntimeValue)(uintptr_t)(&s->data[i]), (RuntimeValue)1);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)

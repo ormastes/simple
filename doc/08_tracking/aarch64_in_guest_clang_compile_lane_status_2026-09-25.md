@@ -505,3 +505,102 @@ value-semantics/module-global defect family:
 | R2 guest boots | PASS | banner, module inits, heap ~43 MB; VFS mounts (`VFS ready (VirtIO-BLK FAT32, mounted namespace)`) |
 | R3 clang --version in guest | BLOCKED | Wall 6: positioned open `/CLANG.ELF` → `mounted-miss err=notfound`, zero device reads (H1/H3 above) |
 | R4-R5 | BLOCKED | needs R3; then -13 seam + 115 MiB payload walls |
+
+
+----
+
+# 2026-09-25 (evening, agent-25) session — Wall 6 ROOT-CAUSED + FIXED: freestanding rt_string_char_at returned int; MountId struct-eq also fixed
+
+Boot cycles this session: 3 guest boots (run-20260925_164029 probe-discrimination,
+_170750 fix-verify, _173314 chain-probes) + 1 build-only kernel rebuild
+(no boot) for fix landing. Kernel rebuilds: 4 (incl. the failed-link one).
+Budget note: the 3-boot cap is consumed; the char_at fix is verified at
+BUILD level (disasm), the confirmation boot is the next session's first action.
+
+## Wall 6 verdict: NEITHER H1 nor H3 — a third mechanism (relpath builder starved by an ABI-deviant char_at)
+
+H1 (mount lost from the table) and H3 (driver `mounted` flag lost) are both
+REFUTED by the instrumented runs:
+
+- `[mt-probe] count=1 first=/` at BOTH mount-commit and at the failing open
+  (run-20260925_164029/_170750/_173314) — the mount lands and persists.
+- `[mt-probe3] driver=arm64-virtio-fat32 outer=m inner=m` — BOTH the outer
+  `FsFat32Driver.mounted` AND the inner `Fat32Core.mounted` read true at R3.
+- `[mt-probe3] lookup=some mp=/` and `resolve=ok mid=1` — lookup_text, the
+  prefix check, the MountId match (after this session's struct-eq fix) all work.
+
+The decisive line is `resolve=ok mid=1 rel=` — **the relpath is EMPTY**.
+Chain: resolve's relpath loop lowers to `rt_string_builder_push(builder,
+str_char_at(...))`; the freestanding `rt_string_char_at` returned
+`ENCODE_INT(byte)` (a tagged int) instead of the canonical 1-char RuntimeString
+(`runtime_native.c:3532` returns `rt_string_new(data+i, 1)`); the builder's
+`IS_HEAP` guard silently dropped every char; `rt_string_builder_finish`
+materialized `""`. `FsFat32Driver.open("")` → `Fat32Core.resolve_path("")` →
+the `path == ""` short-circuit (zero I/O) → `Fat32Core.open("")` fails
+validation → `Err(FsError.NotFound)`. Full evidence:
+doc/08_tracking/bug/freestanding_rt_string_char_at_returns_int_wall6_2026-09-25.md
+
+**Fix (this session, committed):**
+`examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`
+`rt_string_char_at` now returns `rt_string_new(&s->data[i], 1)` (raw len 1,
+freestanding raw-int extern ABI) and NIL_VALUE on invalid input — mirrors the
+canonical ABI. Verified in the rebuilt kernel ELF: the fn now tail-calls
+`rt_string_new` with len 1. The open should now reach FAT directory I/O; the
+next walls are the ones already documented (-13 spawn seam, 115 MiB payload).
+
+## Also fixed this session: MountId struct equality (24 sites)
+
+`MountTable`'s id compares (`mounts[i].id == mount_id`,
+`binding.mount_id == mount_id`, ...) lowered to `rt_native_eq`, which is
+POINTER IDENTITY for heap non-strings on every native lane (both runtimes
+return 0 for distinct heap objects); the interpreter compares structurally.
+`resolve` reboxes the id, so the compares always failed on native.
+`src/lib/nogc_async_mut/fs_driver/mount_table.spl` now compares `.id` fields
+everywhere (24 sites); `MountId`'s docstring pins the rule.
+NOTE: the _170750 boot showed this fix alone did NOT clear the open (the
+relpath bug was the remaining gate), but the fix is correct and required for
+positioned read/close/fsync/unmount and every other MountId compare.
+Doc: doc/08_tracking/bug/struct_eq_is_pointer_identity_on_native_2026-09-25.md
+
+## New bring-up probes (kept in-tree for the next walls)
+
+- `src/os/services/vfs/vfs_boot_state.spl`:
+  `vfs_state_mount_table_probe_v1` (count + first mount point),
+  `vfs_state_mount_table_open_chain_probe_v1` (lookup/resolve/relpath/driver
+  flags), both wired into `vfs_state_positioned_open`'s error path.
+- `src/lib/nogc_async_mut/fs_driver/mount_table.spl`:
+  `mount_table_debug_first_driver_v1` (generic, read-only; prints driver
+  name + outer/inner mounted flags).
+- `src/os/services/vfs/arm_fs_exec_vfs.spl`: `mount-committed count=` log.
+
+## New bug docs recorded this session
+
+- doc/08_tracking/bug/freestanding_rt_string_char_at_returns_int_wall6_2026-09-25.md (the Wall-6 root cause)
+- doc/08_tracking/bug/struct_eq_is_pointer_identity_on_native_2026-09-25.md (audit debt: TaskId et al.)
+- doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md (65th-push stale store; latent)
+- doc/08_tracking/bug/bare_statement_call_lenient_unresolved_global_2026-09-25.md (build-break; cost one rebuild)
+
+## Exact next actions (owner: this lane)
+
+1. `REBUILD_KERNEL=1 ACCEL=tcg sh scripts/qemu/check_simpleos_arm64_clang_compile.shs`
+   — confirm the open now issues FAT directory reads and lands on the next
+   wall (expected: -13 spawn seam `spawn:auth-required`, or the 115 MiB
+   payload materialization wall).
+2. Then the documented R3 walls in order: -13 seam
+   (`fs_exec_prepare_spawn_from_bytes` line ~192, by design; needs the
+   authenticated pipeline or the lane-local unchecked prepare), 115 MiB
+   payload (cannot materialize as tagged `[u8]` in the 512 MiB heap —
+   ~922 MB needed; requires the streaming/chunked loader), 2 MiB user-AS
+   arena (`ARM64_UAS_REGION_SIZE`).
+3. The `initialized=<unknown>` interpolation quirk (bool global via
+   `rt_value_to_string`) is diagnostic-only; the branch reads of the same
+   globals are correct (`g_arm_mount_table_ready` was read true all along).
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all runs |
+| R2 guest boots | PASS | banner, module inits, heap ~43 MB; VFS mounts |
+| R3 clang --version in guest | BLOCKED | Wall 6 root-caused + fixed at build level (char_at ABI); confirmation boot pending; then -13 seam + 115 MiB payload walls (documented) |
+| R4-R5 | BLOCKED | needs R3; then the documented payload/arena walls |
