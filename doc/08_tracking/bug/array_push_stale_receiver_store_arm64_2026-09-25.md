@@ -82,3 +82,30 @@ the miscompile; this must be fixed in the compiler or the runtime ABI.
   fused `b.items = b.items.push(v)` and the split
   `var t = b.items.push(v); b.items = t` forms emit `str x22, [x20]` with the
   push result in x0 discarded.
+
+## In-guest runtime evidence (2026-09-25, agent-26)
+
+The defect is no longer only static: the clang-bringup lane's R3 payload
+read now reaches it in-guest. run-20260925_182140 and _184802: after the
+FAT32 open of /CLANG.ELF succeeded (Wall 6 cleared), the positioned read's
+`alloc_zeroed_bytes(115209168)` (created cap 1024, inline stores until
+len==cap, then `rt_array_push` per element) started growth at element 1025
+and leaked one 16,400-byte block (2048-slot doubling) per push until the
+freestanding heap died:
+
+```
+[heap] alloc bytes=16400 used_after=164332368 n=65536 lr=0x402032fc init_lr=0x4020b8a8
+[heap] consumed 192 MiB ... 448 MiB
+[PANIC] heap exhausted requested=16400 used=536858368 total=536870912 init_lr=0x4020b8a8
+```
+
+`lr=0x402032fc` resolves to `rt_array_push` (the growth realloc call site);
+the 16,400-byte size is the 2048-slot growth of the cap-1024 array
+(16 + 2048*8), i.e. the Simple-visible header never advanced past the stale
+cap-1024 block — each push took the growth path again and the returned
+header was discarded, exactly the mechanism above.
+
+Note: the same boot shows the leak shape is not payload-specific — any
+push loop past its created capacity on this lane leaks at ~16 KB per
+element until exhaustion. The kernel survives only because every existing
+push loop either stays under the created capacity or pre-sizes correctly.

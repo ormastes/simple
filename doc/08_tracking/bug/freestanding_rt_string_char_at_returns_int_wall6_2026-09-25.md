@@ -81,3 +81,26 @@ these stubs) hit the deviation.
   (baremetal_stubs.c), so `chars[index]` — e.g. `char_from_code_inline`'s
   ASCII fast path and `_split_path` — inherited the same drop; the stub fix
   covers all of them.
+
+## Follow-on defects fixed in the same function family (same Wall-6 hunt)
+
+The return-convention fix above unmasked two more tagged/raw ABI divergences
+in the same stubs (verified by mt-probe4, run-20260925_181125, and the raw
+serial of run-20260925_181759):
+
+1. `rt_string_char_at` decoded its idx arg (`DECODE_INT(idx) >> 3`) while
+   the lane's extern ABI is raw-i64 args (Blocker-4 precedent; x86_64
+   sibling uses `(int64_t)idx`). Every read below index 8 returned s[0].
+   Fixed: raw idx (ddcfd879c9e). Same decode fixed in
+   `rt_string_char_code_at`.
+2. `rt_string_len` returned `ENCODE_INT(len)` while compiled callers use the
+   result as a raw integer (the relpath loop's
+   `rt_string_new(data, rt_string_len(ch))` rebuilt every char as an 8-byte
+   string — `rlen=72` for a 9-char relpath). Fixed: raw return
+   (aed885f2680; the x86_64 sibling documents the same rule: "Cranelift
+   backend does not unbox len results").
+
+Audit rule of thumb for the freestanding lane: scalar extern args AND
+returns are raw; tagging a value that compiled code consumes as an integer
+silently corrupts it (the uxtb-truthiness consumers of eq-style returns
+survive; value consumers like len/idx do not).

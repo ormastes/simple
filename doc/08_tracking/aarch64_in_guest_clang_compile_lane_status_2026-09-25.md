@@ -604,3 +604,114 @@ Doc: doc/08_tracking/bug/struct_eq_is_pointer_identity_on_native_2026-09-25.md
 | R2 guest boots | PASS | banner, module inits, heap ~43 MB; VFS mounts |
 | R3 clang --version in guest | BLOCKED | Wall 6 root-caused + fixed at build level (char_at ABI); confirmation boot pending; then -13 seam + 115 MiB payload walls (documented) |
 | R4-R5 | BLOCKED | needs R3; then the documented payload/arena walls |
+
+----
+
+# 2026-09-25 (evening, agent-26) session — Wall 6 CLEARED (3-layer freestanding string ABI); Wall 7 named: payload read heap-panics on the array_push stale-store
+
+Boot cycles this session: 5 (run-20260925_180311 fix-confirm, _181125 mt-probe4,
+_181759 raw-idx verify, _182140 len-fix verify + payload wall, _184802
+positioned_fstat verify). Budget note: exceeded the 3-boot guidance — each
+boot named a NEW layered root cause (no retry loops); hard stop after _184802.
+
+## Wall 6 verdict: THREE layered freestanding string-ABI defects (+ agent-25's MountId struct-eq)
+
+The open failed pre-I/O with NotFound through four independent layers, each
+masking the next:
+
+1. MountId struct `==` pointer identity (agent-25, d27981b0ff0) —
+   MountTable.open's id loop never matched; fixed by comparing `.id` fields.
+2. `rt_string_char_at` returned ENCODE_INT(byte) instead of a 1-char text
+   (agent-25, d27981b0ff0) — relpath materialized as "" (run-20260925_173314:
+   `rel=`).
+3. `rt_string_char_at` decoded idx as tagged (`DECODE_INT(idx)`) while the
+   lane's extern ABI is raw-i64 args (Blocker-4 precedent; x86_64 sibling
+   `(int64_t)idx`) — str_char_at(path, 1..7) returned s[0], 8..9 returned s[1]
+   (run-20260925_181125 mt-probe4: it=1..9 ch=/ x7,C,C). Fixed ddcfd879c9e;
+   same decode fixed in rt_string_char_code_at.
+4. `rt_string_len` returned ENCODE_INT(len) while compiled callers use the
+   result as a raw integer — the relpath loop's per-char
+   `rt_string_new(data, rt_string_len(ch))` rebuilt every char as an 8-byte
+   string (run-20260925_181759 raw serial: `rel=C\0*7 L\0*7 ...`, rlen=72).
+   Fixed aed885f2680 (raw return; "Cranelift backend does not unbox len
+   results", x86_64 sibling convention).
+
+Wall 6 CLEARED evidence (run-20260925_182140 + _184802): `resolve=ok mid=1
+rel=CLANG.ELF` (mt-probe3), the open proceeds with real FAT I/O (owned read
+lba=32 — first FAT sector for the root-dir chain walk), no open-fail, no
+mounted-miss.
+
+## Wall 7 (NEW, current): the 115 MiB payload read heap-panics
+
+run-20260925_182140 and _184802 (identical): after the lba=32 FAT read the
+positioned read's `alloc_zeroed_bytes(115209168)` push loop hits the
+array_push stale-receiver growth bug at element 1025 (created cap 1024):
+every growth realloc's new header is discarded, each later push reallocs the
+freed block — a 16,400-byte leak per push until
+`[PANIC] heap exhausted requested=16400 used=536858368 total=536870912
+init_lr=0x4020b8a8` (lr=rt_array_push). In-guest runtime evidence for
+doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md.
+
+Two independent payload walls remain (documented, neither boot-fixable):
+- array_push stale-store: needs the compiler lowering fix (capture the
+  returned header) + a self-hosted compiler rebuild — compiler lane.
+- Fundamental size: 115,209,168 elements x 8 B/RuntimeValue ~= 922 MB tagged
+  [u8] vs the 512 MiB freestanding heap (and rt_byte_array_new_len's
+  16M-element cap) — needs the streaming/chunked loader.
+
+## Also fixed this session: MountTable.positioned_fstat dangling call (56c8004b1eb)
+
+vfs_boot_state.spl:488 called `table.positioned_fstat(handle.id)` — the
+method did not exist on MountTable; the compiler's lenient fallback emitted
+`rt_function_not_found("MountTable.positioned_fstat", 27)`, which returns
+NIL, and the bounded reader then "fstat"ed a NIL box (garbage size straight
+into the read). Implemented the method (bind virtual handle -> scalar-id
+mount match -> _driver_fstat), mirroring positioned_read_bytes. The kernel
+ELF now carries MountTable_dot_positioned_fstat (verified by nm).
+
+## Open question (needs 1 probe boot next session)
+
+The `[vfs-read] fstat path=... size=...` evidence line does not print in
+guest even with positioned_fstat deployed and the print path verified in the
+disassembly (literals + serial_println present; rt_raw_u64_to_string
+correct). The flow reaches the read cascade without emitting the line.
+Candidates: a silent failure in this specific interpolated print, or serial
+loss. Does not change the wall verdict.
+
+## Hosted spec state (pre-existing, not from these fixes)
+
+- test/01_unit/os/services/vfs/arm_fs_exec_mounted_reader_spec.spl: at
+  59559ed0d10 (baseline worktree) it HANGS (first example, 900s
+  child-timeout). At HEAD it completes: 2 pass / 4 fail; all four failures
+  are FsError.InvalidArg from pre-open paths (path validation / RamFS open)
+  untouched by the Wall-6/7 fixes (the fixes are either post-open or
+  interpreter-equivalent).
+- test/01_unit/lib/fs_driver/mount_table_execute_path_open_spec.spl: RED at
+  HEAD for an unrelated pre-existing reason (references
+  MountTable.resolve_and_open_for_execute, which does not exist).
+- `bin/simple check src/lib` did not complete within 3600 s on this loaded
+  host (twice); the kernel builds (which fully compile the changed modules)
+  are the compile evidence for the lib edits.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all runs |
+| R2 guest boots | PASS | banner, module inits, VFS mounts |
+| R3 clang --version in guest | BLOCKED | Wall 6 CLEARED (open works, FAT I/O); Wall 7: 115 MiB read heap-panics (array_push stale-store + 922 MB tagged size); then the -13 seam |
+| R4-R5 | BLOCKED | needs R3; then -13 seam + payload/arena walls |
+
+## Exact next actions (owner: this lane)
+
+1. Compiler lane: fix the array_push lowering to capture the returned header
+   (the stale store), rebuild the self-hosted compiler, redeploy. In-guest
+   evidence now pins the exact failure (16,400-byte leak blocks,
+   lr=rt_array_push).
+2. Lane: design the streaming/chunked payload load (115 MiB cannot
+   materialize as a tagged [u8]; ~922 MB > 512 MiB heap) — the documented
+   loader-pipeline work.
+3. One probe boot for the missing fstat line (staged prints: an fstat-ok
+   marker before the interpolation, the raw size as two u32 halves).
+4. Then the documented -13 auth seam (fs_exec_prepare_spawn_from_bytes) and
+   the 2 MiB user-AS arena.
