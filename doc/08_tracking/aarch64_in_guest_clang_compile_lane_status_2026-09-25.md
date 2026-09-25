@@ -715,3 +715,112 @@ loss. Does not change the wall verdict.
    marker before the interpolation, the raw size as two u32 halves).
 4. Then the documented -13 auth seam (fs_exec_prepare_spawn_from_bytes) and
    the 2 MiB user-AS arena.
+
+
+----
+
+# 2026-09-25 (late evening, agent-28) session — Wall 8 ROOT-CAUSED + FIXED: two freestanding tagged/raw ABI mismatches starved the FAT32 directory scan; open+fstat now work, read reaches the 922 MB payload wall
+
+Boot cycles this session: 3 (run-20260925_215257 probe, _220619 fix-1 verify,
+_221157 fix-2 verify). Kernel rebuilds: 3. Budget: the 3-boot cap is consumed;
+both fixes verified at the serial level; hard stop.
+
+## Wall 8 verdict: the read-path `len=0` was the OPEN failing NotFound at the
+## directory scan — TWO stacked freestanding ABI defects (same family as Wall 6)
+
+The task premise ("open succeeds, the read returns zero") was a misread of the
+run-20260925_210126 serial: `spawn:bytes len=0` came from
+`arm_fs_exec_read_file_bytes` swallowing an Err to `[]`, and the Err was the
+positioned open failing `mounted-miss err=notfound` AFTER real FAT I/O
+(lba=32 FAT read + lba=84..147 root-cluster read). The new `[mt-scan]` probe
+(`Fat32Core.debug_dir_scan_v1`, pure/text-only, wired into
+`vfs_state_mount_table_open_chain_probe_v1`) named both layers byte-exactly:
+
+- run-20260925_215257: `cluster=2 chain=1 dlen=32768 b0=67 b1=82 b11=32
+  b32=83 b33=73 sn0=. sn32=. entries=0 found=err` — cluster DATA correct
+  (real CRT0.O dirent bytes), but `_parse_short_name` returns `"."` for every
+  entry and `read_dir_entries` parses ZERO entries.
+- run-20260925_220619 (after layer-1 fix): `sn0=crt0.o sn32=simpleos.ld
+  entries=6 [crt0.o sz=896] [simpleos.ld sz=1247] [libc.a sz=186344]
+  [hello.c sz=108] [clang.elf sz=115209168] [lld.elf sz=60171208]
+  found=err` — parse FIXED, but no `=T` mark: `_lower_text("CLANG.ELF")`
+  does not equal `_lower_text("clang.elf")`.
+
+**Layer 1 — `rt_index_get` passed a TAGGED index to the now-RAW
+`rt_string_char_at`.** The `s[i]` operator lowers to
+`rt_index_get(s, rt_value_int(i))` (tagged `i<<3`); its HEAP_STRING arm
+forwarded that tagged idx unchanged to `rt_string_char_at`, which Wall-6
+layer-3 (ddcfd879c9e) had just flipped to take a RAW i64. `chars[35]` became
+`rt_string_char_at(chars, 280)` → out of bounds → NIL. Every
+`char_from_code` (ASCII table `chars[index]`) returned `""`, so
+`_parse_short_name` built `""` + `"."` + `""` = `"."` for every dirent → the
+`name == "."` skip dropped all entries → `entries=0` → NotFound. The array
+arm already decoded; the string arm did not (asymmetry invisible until the
+callee flipped). The x86_64 sibling decodes in BOTH arms.
+Fix: `baremetal_stubs.c rt_index_get` HEAP_STRING arm now
+`if (!IS_INT(idx)) return NIL_VALUE; return rt_string_char_at(v, DECODE_INT(idx));`
+
+**Layer 2 — `rt_string_char_code_at` returned a TAGGED int to integer
+consumers.** `_lower_text`'s `ch.char_code_at(0)` fed
+`code >= 0x41 and code <= 0x5A`; the stub returned `ENCODE_INT(byte)`
+(`byte<<3` = 536..720), which never fits 65..90, so the lowercase branch
+never fired and `_lower_text` returned its input UNCHANGED
+(`"CLANG.ELF"`). The lookup then compared `"CLANG.ELF"` against
+lowercased dirent names (`"clang.elf"`) → no match → NotFound. The x86_64
+sibling returns the RAW byte.
+Fix: `baremetal_stubs.c rt_string_char_code_at` returns
+`(RuntimeValue)(uint8_t)s->data[index]` (raw; raw -1 sentinel kept for
+invalid input).
+
+Bug doc:
+doc/08_tracking/bug/rt_index_get_tagged_idx_to_raw_char_at_wall8_2026-09-25.md
+
+## Verification (run-20260925_221157)
+
+```
+[vfs-read] fstat path=/CLANG.ELF size=115209168      ← FIRST print of this line; CORRECT size (not NIL/0)
+[heap] push-grow ... 134217744 ... 268435472
+[PANIC] heap exhausted requested=268435472 used=296706368 total=536870912 init_lr=0x4020b8b8
+```
+
+- The positioned open of /CLANG.ELF now SUCCEEDS end-to-end (no open-fail,
+  no mounted-miss).
+- `positioned_fstat` (56c8004b1eb) returns the REAL size 115209168 — the
+  task's open question ("is fstat now returning the right size, or still
+  NIL/0?") is answered: RIGHT SIZE. agent-26's "missing fstat line" mystery
+  is also closed: the line only prints on a SUCCESSFUL fstat, which the
+  Wall-8 defects had always prevented.
+- The positioned read then reaches the DOCUMENTED fundamental Wall:
+  `alloc_zeroed_bytes(115209168)` grows a tagged `[u8]` (8 B/RuntimeValue
+  slot) by doubling — 64 KiB → 256 MiB blocks — and the 512 MiB bump heap
+  panics at the 2^25 grow (requested=268435472,
+  init_lr=rt_byte_array_new+0x24, grow lr=rt_typed_bytes_u8_push+0x2c).
+  115,209,168 elements × 8 B ≈ 922 MB (and ~2 GiB of doubling churn) cannot
+  materialize in 512 MiB. This is the documented streaming/chunked-loader
+  wall, NOT a new defect.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all 3 runs |
+| R2 guest boots | PASS | banner, module inits, VFS mounts |
+| R3 clang --version in guest | BLOCKED | Wall 8 CLEARED: open+resolve+fstat(size=115209168) all work; read now hits the documented 922 MB tagged-[u8] heap wall (needs the streaming/chunked loader); then the -13 spawn seam + 2 MiB user-AS arena |
+| R4-R5 | BLOCKED | needs R3; then -13 seam + payload/arena walls |
+
+## Exact next actions (owner: this lane)
+
+1. Lane: the streaming/chunked payload load (115 MiB cannot materialize as a
+   tagged `[u8]`; ~922 MB > 512 MiB heap) — the documented loader-pipeline
+   work. `alloc_zeroed_bytes` (bytes_util.spl:4) is the materialization
+   point; the read must instead stream cluster-by-cluster into the (grown)
+   user-AS stage arena. `rt_byte_array_new_len`'s 16M-element cap is the
+   other half of the same wall.
+2. Then the documented -13 auth seam (fs_exec_prepare_spawn_from_bytes) and
+   the 2 MiB user-AS arena (ARM64_UAS_REGION_SIZE).
+3. Runtime-lane audit debt (from the Wall-8 bug doc): every freestanding
+   entry point that forwards an index to another runtime fn must state and
+   match the index tag form (rt_index_get's array arm decoded, string arm
+   did not). `rt_string_char_code_at` callers audited; arm32 is a different
+   self-consistent state (tagged idx in, ENCODE_INT(byte) out) that needs
+   its own char_at ABI decision — out of scope here.

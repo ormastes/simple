@@ -591,7 +591,18 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
-    if (h->type == HEAP_STRING) return rt_string_char_at(v, idx);
+    if (h->type == HEAP_STRING) {
+        /* rt_string_char_at takes a RAW i64 index on this lane (Wall-6 layer-3
+         * fix), but this operator entry point receives the TAGGED form
+         * (rt_value_int) — the array path below already DECODEs. Decode here
+         * too (mirrors the x86_64 sibling): passing the tagged value through
+         * shifted every string index by 3 bits, so s[i] read out of bounds and
+         * returned NIL — char_from_code's ASCII table lookup then materialized
+         * "" for every char, FAT32 _parse_short_name yielded "." for every
+         * dirent, and the /CLANG.ELF open scanned zero entries (NotFound). */
+        if (!IS_INT(idx)) return NIL_VALUE;
+        return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));
+    }
     if (h->type == HEAP_ARRAY) {
         int64_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
@@ -877,15 +888,23 @@ RuntimeValue rt_hash_text(RuntimeValue str)
 /* --- string char code (adapted from riscv64 freestanding_runtime.c) --- */
 RuntimeValue rt_string_char_code_at(RuntimeValue value, RuntimeValue index_value)
 {
-    if (!IS_HEAP(value)) return ENCODE_INT(-1);
+    if (!IS_HEAP(value)) return (RuntimeValue)(-1);
     HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
-    if (!h || h->type != HEAP_STRING) return ENCODE_INT(-1);
+    if (!h || h->type != HEAP_STRING) return (RuntimeValue)(-1);
     RuntimeString *s = (RuntimeString *)h;
     /* Raw-i64 arg per the freestanding extern ABI (see rt_string_char_at). */
     int64_t index = (int64_t)index_value;
     if (index < 0) index = (int64_t)s->len + index;
-    if (index < 0 || (uint32_t)index >= s->len) return ENCODE_INT(-1);
-    return ENCODE_INT((int64_t)(uint8_t)s->data[index]);
+    if (index < 0 || (uint32_t)index >= s->len) return (RuntimeValue)(-1);
+    /* RAW return per the same ABI — the x86_64 sibling returns
+     * (RuntimeValue)(uint8_t)s->data[i]. ENCODE_INT here tagged the code
+     * (byte<<3), so every compiled caller's range check on the result (e.g.
+     * _lower_text's `code >= 0x41 and code <= 0x5A`) compared 536..720
+     * against 65..90 and NEVER fired: _lower_text returned its input
+     * unchanged, and the /CLANG.ELF directory lookup compared "CLANG.ELF"
+     * against lowercased dirent names (mt-scan: entries=6 all correct,
+     * found=err — Wall 8 layer 2, run-20260925_220619). */
+    return (RuntimeValue)(uint8_t)s->data[index];
 }
 
 /* --- bytes <-> text. arrays here are RuntimeArray of ENCODE_INT(byte). --- */
