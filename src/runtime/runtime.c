@@ -42,6 +42,14 @@ int64_t rt_simple_abi_version_deferred(void) {
 #include "runtime_startup_args.h"
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
+#if defined(_WIN32)
+/* rt_widen_long_path_rc / rt_win_long_path_widen (shared Windows long-path
+ * helper), rt_win_long_path_rename -- included early because spl_file_exists
+ * below needs it, and every later Windows call site in this file (creat,
+ * fsync, publish) reuses the same include. This file used to carry its own
+ * byte-identical copy defined further down. */
+#include "runtime_win_long_path.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1154,9 +1162,23 @@ int spl_file_append(const char* path, const char* content) {
 
 int spl_file_exists(const char* path) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* fopen(path, "r") answers false for a directory (and is text-mode by
+     * spelling, though the process-wide _O_BINARY default already covers
+     * that). Neither matches the POSIX/Rust `exists()` contract this API's
+     * callers assume, where a directory counts. GetFileAttributesW also
+     * gets the long-path/backslash normalization the shared helper provides,
+     * where a widened fopen() would not. */
+    wchar_t* wide_path = rt_win_long_path_widen(path);
+    if (!wide_path) return 0;
+    DWORD attributes = GetFileAttributesW(wide_path);
+    free(wide_path);
+    return attributes != INVALID_FILE_ATTRIBUTES;
+#else
     FILE* f = fopen(path, "r");
     if (f) { fclose(f); return 1; }
     return 0;
+#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -1843,55 +1865,8 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
 /* Single-handle secret/config admission: no path predicate is separated from
  * the open, classification, size bound, or read. NIL is the fail-closed
  * sentinel; an allocated empty RuntimeValue remains a valid empty file. */
-#if defined(_WIN32)
-/* Widen a UTF-8 path and add the extended-length prefix when it is long enough
- * to hit the MAX_PATH ceiling. A WIDE call is not exempt on its own:
- * CreateFileW still caps at MAX_PATH unless the path carries the prefix. Twin
- * of the helper in runtime_native.c -- this file carries a byte-identical copy
- * of the reader below, and archive member order decides which one links, so
- * both must be fixed or the fix is a coin flip. Separator and prefix are built
- * from the numeric code point (92) to avoid escape sequences. Caller frees. */
-static wchar_t* rt_widen_long_path_rc(const char* path) {
-    static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
-    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
-     * resolution for a short drive-absolute path; UNC/extended paths retain
-     * their existing spelling. */
-    if (wide[0] == sep && wide[1] == sep) return wide;
-    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
-        (wide[2] == sep || wide[2] == L'/')) return wide;
-    {
-        wchar_t* scan;
-        DWORD need;
-        wchar_t* full;
-        wchar_t* out;
-        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
-        need = GetFullPathNameW(wide, 0, NULL, NULL);
-        if (need == 0) return wide;
-        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
-        if (!full) return wide;
-        {
-            DWORD written = GetFullPathNameW(wide, need, full, NULL);
-            if (written == 0 || written >= need) { free(full); return wide; }
-        }
-        if (wcslen(full) < 248) { free(full); return wide; }
-        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
-        if (!out) { free(full); return wide; }
-        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
-        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
-        free(full);
-        free(wide);
-        return out;
-    }
-}
-#endif
+/* rt_widen_long_path_rc / rt_win_long_path_widen already included near the
+ * top of this file (needed by spl_file_exists above). */
 
 /* Why the last bounded no-follow read returned nil.
  *
@@ -2005,7 +1980,14 @@ int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
 }
 int         rt_file_write(const char* path, const char* content) {
     if (!path) return 0;
+#if defined(_WIN32)
+    /* "w" is text mode by explicit spelling regardless of the process-wide
+     * _O_BINARY default; write "wb" explicitly so content is never
+     * LF->CRLF translated. */
+    FILE* f = fopen(path, "wb");
+#else
     FILE* f = fopen(path, "w");
+#endif
     if (!f) return 0;
     if (content) fputs(content, f);
     fclose(f);
@@ -3023,7 +3005,11 @@ void spl_panic(const char* msg) {
 #endif
         snprintf(crash_path, sizeof(crash_path), "%s/simple_crash_%d.log",
                  tmp, (int)getpid());
+#if defined(_WIN32)
+        FILE* f = fopen(crash_path, "ab"); /* explicit binary; "a" text-translates LF->CRLF */
+#else
         FILE* f = fopen(crash_path, "a");
+#endif
         if (f) {
             fprintf(f, "=== SIMPLE C RUNTIME CRASH ===\n");
             fprintf(f, "PID: %d\n", (int)getpid());

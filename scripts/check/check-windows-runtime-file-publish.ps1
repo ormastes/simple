@@ -16,13 +16,18 @@ function Get-CFunction([string]$source, [string]$name) {
     return $match[0].Value
 }
 $failed = $false
+# rt_widen_long_path_rc (macro alias for rt_win_long_path_widen) used to be a
+# byte-identical copy pasted separately into runtime.c and runtime_native.c;
+# it now lives once in runtime_win_long_path.h and both owners #include it, so
+# it is read from the shared header instead of regex-extracted per owner.
+$sharedHeader = [IO.File]::ReadAllText((Join-Path $root 'src/runtime/runtime_win_long_path.h'))
 foreach ($owner in @('runtime', 'runtime_native')) {
     $source = [IO.File]::ReadAllText((Join-Path $root "src/runtime/$owner.c"))
-    $widen = if ($owner -eq 'runtime') { 'rt_widen_long_path_rc' } else { 'spl_widen_long_path' }
     # Compile the production function bodies verbatim, without unrelated runtime
     # exports that prevent a standalone COFF link. No mocked filesystem calls.
     $unit = "#include <windows.h>`n#include <stdint.h>`n#include <stdio.h>`n#include <stdlib.h>`n#include <string.h>`n#include <wchar.h>`n#define RT_TEXT_PATH_MAX 4096`n"
-    foreach ($name in @('rt_text_arg_to_path', $widen, 'rt_secure_temp_dir_diag', 'rt_file_publish_noreplace')) {
+    $unit += $sharedHeader + "`n"
+    foreach ($name in @('rt_text_arg_to_path', 'rt_secure_temp_dir_diag', 'rt_file_publish_noreplace')) {
         $unit += (Get-CFunction $source $name) + "`n"
     }
     $unit += [IO.File]::ReadAllText((Join-Path $root 'src/runtime/test/rt_windows_file_publish_selfcheck.c'))

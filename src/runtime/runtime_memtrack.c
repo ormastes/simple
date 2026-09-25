@@ -218,7 +218,11 @@ int64_t spl_memtrack_snapshot(void) {
 
 void spl_memtrack_dump_since(int64_t snapshot_id, const char* out_path) {
     if (!out_path) return;
+#if defined(_WIN32)
+    FILE* f = fopen(out_path, "wb"); /* explicit binary; "w" text-translates LF->CRLF */
+#else
     FILE* f = fopen(out_path, "w");
+#endif
     if (!f) return;
 
     if (g_entries) {
