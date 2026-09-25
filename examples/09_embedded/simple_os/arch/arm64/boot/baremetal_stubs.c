@@ -3491,6 +3491,72 @@ RuntimeValue rt_arm_fat32_fat_size(void) { return ENCODE_INT(g_arm_fat32_fat_siz
 RuntimeValue rt_arm_fat32_root_cluster(void) { return ENCODE_INT(g_arm_fat32_root_cluster); }
 
 /* ==========================================================================
+ * Raw payload staging region (clang-bringup lane, Wall 9).
+ *
+ * The 115 MiB guest ELF payload cannot materialize as a tagged [u8]:
+ * 8 B/RuntimeValue ~= 922 MB exceeds the 512 MiB freestanding bump heap (and
+ * rt_byte_array_new_len caps at 16M elements).  The mounted positioned read
+ * is not a chunk source either — Fat32Core.read_cluster caches EVERY cluster
+ * into the driver object (unbounded; ~879 MB tagged for this one file, and
+ * driver-long-lived, so no heap-watermark trick can reclaim it).  Stage the
+ * bytes instead in this raw (untagged) .bss region OUTSIDE the heap: the
+ * Simple side resolves open+fstat through the mounted namespace (authoritative
+ * size + start cluster), walks the FAT chain with the proven _arm_fat_next,
+ * and pumps each cluster straight from the virtio DMA page into the region —
+ * zero tagged allocations for the payload bytes themselves.  The only tagged
+ * traffic left is one 512-element FAT-sector array per cluster (~14 MiB total
+ * for 3513 clusters), which fits the bump heap with no reclamation needed.
+ * ==========================================================================*/
+#define ARM_PAYLOAD_REGION_BYTES (128u * 1024u * 1024u)
+static uint8_t _arm_payload_region[ARM_PAYLOAD_REGION_BYTES] __attribute__((aligned(16)));
+static uint64_t g_arm_payload_region_size;
+
+RuntimeValue rt_arm_payload_region_begin(RuntimeValue size_val)
+{
+    uint64_t size = (uint64_t)size_val;
+    if (size == 0 || size > (uint64_t)ARM_PAYLOAD_REGION_BYTES) return (RuntimeValue)0ULL;
+    g_arm_payload_region_size = size;
+    return (RuntimeValue)(uintptr_t)_arm_payload_region;
+}
+
+RuntimeValue rt_arm_payload_region_byte_at(RuntimeValue off_val)
+{
+    uint64_t off = (uint64_t)off_val;
+    if (off >= g_arm_payload_region_size) return (RuntimeValue)0ULL;
+    return (RuntimeValue)_arm_payload_region[off];
+}
+
+/* Pump `len` payload bytes starting at `first_lba` into the region at
+ * `dst_off`, one sector per virtio request (the descriptor ring is
+ * single-sector oriented; multi-sector requests truncate — see
+ * _arm_read_cluster).  Returns bytes copied, or 0xffffffff on device/bounds
+ * error.  Raw u64 args/return per the freestanding extern ABI. */
+RuntimeValue rt_arm_payload_region_load_sectors(RuntimeValue first_lba_val, RuntimeValue dst_off_val, RuntimeValue len_val)
+{
+    uint64_t first_lba = (uint64_t)first_lba_val;
+    uint64_t dst_off = (uint64_t)dst_off_val;
+    uint64_t len = (uint64_t)len_val;
+    if (len == 0 || dst_off > g_arm_payload_region_size ||
+        len > g_arm_payload_region_size - dst_off)
+        return (RuntimeValue)0xffffffffULL;
+    uint64_t copied = 0;
+    uint64_t sector = 0;
+    while (copied < len) {
+        RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)(first_lba + sector));
+        if (status == (RuntimeValue)0xffffffffULL || status != 0)
+            return (RuntimeValue)0xffffffffULL;
+        uint8_t *src = g_arm_virtio_blk_dma_storage + 16;
+        arm64_invalidate_dcache_range((uint64_t)(uintptr_t)src, 512ULL);
+        uint64_t n = len - copied;
+        if (n > 512ULL) n = 512ULL;
+        __builtin_memcpy(_arm_payload_region + dst_off + copied, src, (size_t)n);
+        copied += n;
+        sector++;
+    }
+    return (RuntimeValue)copied;
+}
+
+/* ==========================================================================
  * Slice 4 — native block-storage + FAT32 bridge for the arm64 fs-exec stub.
  *
  * The arm64 kernel imports c_nvme_adapter.spl / vfs_init.spl which declare the

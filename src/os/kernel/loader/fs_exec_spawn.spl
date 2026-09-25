@@ -49,6 +49,9 @@ extern fn serial_println(msg: text)
 @cfg(arm64)
 use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
 
+@cfg(arm64)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_stream_payload_resident_v1}
+
 @cfg(arm32)
 use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
 
@@ -193,11 +196,52 @@ pub(package) fn fs_exec_prepare_spawn_from_bytes(path: text, bytes: [u8], arch: 
     FsExecPrepareResult(
         scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -13, entry: 0)
 
-pub(package) fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
-    """Resolve bytes for diagnostics, then reject without loader authority."""
+@cfg(arm64)
+fn _fs_exec_prepare_spawn_impl(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    """arm64 freestanding: stream the payload into the raw C region instead of
+    materializing a tagged [u8] (the R3 clang image is 115 MiB ~= 922 MB tagged,
+    past the 512 MiB bump heap), then the same fail-closed auth seam."""
+    val _argv = argv
+    val _envp = envp
+    serial_println("[fs-exec] spawn:resolve path={path}")
+    val staged = arm_fs_exec_stream_payload_resident_v1(path)
+    if staged.is_err():
+        serial_println("[fs-exec] spawn:bytes path={path} len=0")
+        serial_println("[fs-exec] spawn:resolve-fail path={path}")
+        return FsExecPrepareResult(scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -2, entry: 0)
+    val resident = staged.unwrap()
+    serial_println("[fs-exec] spawn:bytes path={path} len={resident}")
+    serial_println("[fs-exec] spawn:auth-required path={path}")
+    FsExecPrepareResult(scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -13, entry: 0)
+
+@cfg(arm32)
+fn _fs_exec_prepare_spawn_impl(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    _fs_exec_prepare_spawn_via_bytes(path, argv, envp)
+
+@cfg(x86_64)
+fn _fs_exec_prepare_spawn_impl(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    _fs_exec_prepare_spawn_via_bytes(path, argv, envp)
+
+@cfg(x86)
+fn _fs_exec_prepare_spawn_impl(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    _fs_exec_prepare_spawn_via_bytes(path, argv, envp)
+
+@cfg(riscv64)
+fn _fs_exec_prepare_spawn_impl(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    _fs_exec_prepare_spawn_via_bytes(path, argv, envp)
+
+@cfg(riscv32)
+fn _fs_exec_prepare_spawn_impl(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    _fs_exec_prepare_spawn_via_bytes(path, argv, envp)
+
+fn _fs_exec_prepare_spawn_via_bytes(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
     serial_println("[fs-exec] spawn:resolve path={path}")
     val bytes = _fs_exec_read_bytes(path)
     fs_exec_prepare_spawn_from_bytes(path, bytes, _fs_exec_active_arch(), argv, envp)
+
+pub(package) fn fs_exec_prepare_spawn(path: text, argv: [text], envp: [text]) -> FsExecPrepareResult:
+    """Resolve bytes for diagnostics, then reject without loader authority."""
+    _fs_exec_prepare_spawn_impl(path, argv, envp)
 
 pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     """Reject unauthenticated path-only execution.

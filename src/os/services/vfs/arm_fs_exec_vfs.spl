@@ -41,6 +41,15 @@ extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn serial_println(msg: text)
 @unsafe(reason: "raw ARM filesystem execution trace event ABI", capabilities: [ffi])
 extern fn arm_fs_exec_trace(id: u64)
+@cfg(arm64)
+@unsafe(reason: "raw ARM payload-region begin ABI; returns region base or 0", capabilities: [ffi])
+extern fn rt_arm_payload_region_begin(size: u64) -> u64
+@cfg(arm64)
+@unsafe(reason: "raw ARM payload-region sector-pump ABI; returns bytes copied or 0xffffffff", capabilities: [ffi])
+extern fn rt_arm_payload_region_load_sectors(first_lba: u64, dst_off: u64, len: u64) -> u64
+@cfg(arm64)
+@unsafe(reason: "raw ARM payload-region byte probe ABI", capabilities: [ffi])
+extern fn rt_arm_payload_region_byte_at(off: u64) -> u64
 
 @always_inline
 fn _sffi_arm_array_len_u32(arr: [u8]) -> u32:
@@ -91,6 +100,24 @@ fn _sffi_serial_println(msg: text):
 fn _sffi_arm_fs_exec_trace(id: u64):
     unsafe(capabilities: [ffi]):
         arm_fs_exec_trace(id)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_payload_region_begin(size: u64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_payload_region_begin(size)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_payload_region_load_sectors(first_lba: u64, dst_off: u64, len: u64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_payload_region_load_sectors(first_lba, dst_off, len)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_payload_region_byte_at(off: u64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_payload_region_byte_at(off)
 
 var g_arm_blk: VirtioBlkDriver? = nil
 var g_arm_vfs_initialized: bool = false
@@ -452,6 +479,78 @@ pub fn arm_fs_exec_read_file_bytes(path: text) -> [u8]:
     if result.is_err():
         return []
     result.unwrap().bytes
+
+@cfg(arm64)
+pub fn arm_fs_exec_stream_payload_resident_v1(path: text) -> Result<u64, FsError>:
+    """Stream one mounted regular file into the raw C payload region.
+
+    A 115 MiB guest ELF cannot materialize as a tagged [u8]: 8 B per
+    RuntimeValue slot ~= 922 MB, far past the 512 MiB freestanding bump heap
+    (and rt_byte_array_new_len caps at 16M elements).  The mounted positioned
+    read is not a chunk source either: Fat32Core.read_cluster caches EVERY
+    cluster into the driver object, unbounded (~879 MB tagged for this one
+    file) and driver-long-lived, so no per-chunk heap watermark can reclaim
+    it.  The mounted namespace stays authoritative for open+fstat (real size
+    and the FAT32 start cluster via FileStat.inode); the bytes then pump
+    cluster-by-cluster through the stateless direct walker straight into the
+    raw region with zero tagged payload growth.  The only tagged traffic is
+    one 512-element FAT-sector array per cluster (~14 MiB total), which the
+    bump heap absorbs with no reclamation.
+
+    The positioned handle is deliberately NOT closed (neither on success nor
+    on the error paths): the mounted close runs fat32_sync_entry_size — a
+    no-op size persist for a read-only open — which rewrites the already-
+    cached directory cluster through Fat32Core._cluster_cache_put's cache-hit
+    index-set arm, and that arm traps in the freestanding build (udf after
+    rt_index_set returns; doc/08_tracking/bug/
+    index_set_return_udf_trap_arm64_2026-09-25.md).  Leaking one bounded
+    virtual handle per payload read is safe for this one-shot bring-up boot
+    (<= 3 reads across the R3-R5 rungs).
+    """
+    if not mount_path_canonical(path) or path == "/":
+        return Err(FsError.InvalidArg)
+    val opened = g_vfs_positioned_open(path, OpenFlags.read_only())
+    if opened.is_err():
+        return Err(opened.unwrap_err())
+    val file_object_id = opened.unwrap()
+    val stat_result = g_vfs_positioned_fstat(file_object_id)
+    if stat_result.is_err():
+        return Err(stat_result.unwrap_err())
+    val file_stat = stat_result.unwrap()
+    _arm_vfs_log("[vfs-read] stream-fstat path={path} size={file_stat.size} first_cluster={file_stat.inode}")
+    val file_type = file_stat.mode & 0o170000u32
+    if file_type != 0u32 and file_type != 0o100000u32:
+        return Err(FsError.InvalidArg)
+    if file_stat.size == 0u64:
+        return Ok(0u64)
+    if _sffi_arm_payload_region_begin(file_stat.size) == 0u64:
+        return Err(FsError.TooLarge)
+    if not g_arm_blk.?:
+        return Err(FsError.IoError(code: 0u32))
+    val dev = g_arm_blk.unwrap()
+    val cluster_bytes = g_arm_spc * 512u64
+    var cluster = file_stat.inode
+    var off: u64 = 0u64
+    var pumped: u64 = 0u64
+    while off < file_stat.size and cluster >= 2 and cluster < 0x0FFFFFF8:
+        val remaining = file_stat.size - off
+        val n = if cluster_bytes < remaining: cluster_bytes else: remaining
+        val lba = _arm_cluster_sector(cluster)
+        val wrote = _sffi_arm_payload_region_load_sectors(lba, off, n)
+        if wrote != n:
+            _arm_vfs_log("[vfs-read] pump-fail off={off} wrote={wrote} want={n}")
+            return Err(FsError.IoError(code: 1u32))
+        off = off + n
+        pumped = pumped + 1u64
+        if pumped % 512u64 == 0u64:
+            _sffi_arm_fs_exec_trace(300u64 + pumped / 512u64)
+        cluster = _arm_fat_next(dev, cluster)
+    if off != file_stat.size:
+        _arm_vfs_log("[vfs-read] pump-short off={off} size={file_stat.size}")
+        return Err(FsError.Corrupt)
+    _arm_vfs_log("[vfs-read] payload resident bytes={file_stat.size}")
+    _arm_vfs_log("[vfs-read] payload magic b0={_sffi_arm_payload_region_byte_at(0u64)} b1={_sffi_arm_payload_region_byte_at(1u64)} b2={_sffi_arm_payload_region_byte_at(2u64)} b3={_sffi_arm_payload_region_byte_at(3u64)}")
+    Ok(file_stat.size)
 
 pub fn arm_fs_exec_loaded_hello_len() -> u32:
     if not g_arm_vfs_initialized:

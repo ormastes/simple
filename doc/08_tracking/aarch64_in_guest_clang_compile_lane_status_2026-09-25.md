@@ -824,3 +824,140 @@ doc/08_tracking/bug/rt_index_get_tagged_idx_to_raw_char_at_wall8_2026-09-25.md
    did not). `rt_string_char_code_at` callers audited; arm32 is a different
    self-consistent state (tagged idx in, ENCODE_INT(byte) out) that needs
    its own char_at ABI decision — out of scope here.
+
+---
+
+# 2026-09-25 (late night, agent-29) session — Wall 9 CLEARED: streaming raw-region payload loader; the 115 MiB payload is resident without the 922 MB tagged [u8]; R3 now reaches the documented -13 auth seam
+
+Boot cycles this session: 2 (run-20260925_224703 pump verify + close-trap
+diagnosis, _231214 fix verify). Kernel rebuilds: 2. Budget respected (<=3).
+
+## Wall 9 verdict: the payload read no longer materializes a tagged [u8];
+## bytes pump cluster-by-cluster into a raw (untagged) .bss region outside
+## the 512 MiB heap
+
+The task shape (chunked `g_vfs_positioned_read_at` + per-chunk copy into a
+raw buffer) was evaluated and REJECTED on byte-exact grounds — the mounted
+positioned read is not a usable chunk source:
+
+1. `driver_positioned_read_bytes` (mount_table_support.spl:68) calls
+   `alloc_zeroed_bytes(length)` — a tagged [u8] of `length` elements
+   (8 B each) PER CALL, then `_positioned_prefix` copies into a SECOND
+   tagged array.
+2. The freestanding heap is a no-free bump allocator (baremetal_stubs.c
+   `free` is a no-op), so per-chunk "transient" garbage is never reclaimed;
+   a mark/release watermark is required — and unsafe here, because:
+3. **Fatal:** `Fat32Core.read_cluster` (fat32_core.spl:432) caches EVERY
+   cluster into the driver object (`_cluster_cache_keys/_values`,
+   unbounded put at :417-430; the pread path reaches it via
+   fat32_file_ops.spl:491,515).  For the 115 MiB payload that is ~3,513
+   clusters x 256 KiB tagged ~= 879 MB held by the driver for the rest of
+   the boot — the 922 MB wall via the back door, and driver-long-lived, so
+   no heap watermark can reclaim it.
+   doc/08_tracking/bug/fat32_cluster_cache_unbounded_positioned_read_wall9_2026-09-25.md
+
+Chosen shape (minimal, fits the freestanding constraints): a 128 MiB raw
+(untagged) static .bss region OUTSIDE the heap + a cluster-granular pump.
+The mounted namespace stays authoritative for open+fstat (Wall 6/8
+victories: real size 115209168 + FAT32 start cluster 12 via
+FileStat.inode); the bytes then walk the SAME FAT with the proven
+stateless direct walker (`_arm_cluster_sector`/`_arm_fat_next`) and pump
+each cluster straight from the virtio DMA page into the raw region via a
+new C helper — ZERO tagged payload allocations.  The only tagged traffic
+is one 4 KiB FAT-sector array per cluster (~14 MiB total), which the bump
+heap absorbs with no reclamation.
+
+## Changes
+
+- examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c:3510-3566
+  — `_arm_payload_region[128 MiB]` raw .bss region (guest RAM is 2G) +
+  `rt_arm_payload_region_begin` (bounds-check vs exact fstat size),
+  `rt_arm_payload_region_load_sectors` (single-sector virtio requests —
+  the descriptor ring is single-sector oriented — memcpy from
+  `g_arm_virtio_blk_dma_storage+16` into the region; the same
+  `rt_arm_virtio_blk_read_sector_direct` primitive
+  `rt_arm_virtio_blk_read_prefix` uses),
+  `rt_arm_payload_region_byte_at` (magic-byte evidence probe).
+- src/os/services/vfs/arm_fs_exec_vfs.spl:44-53 (externs), 95-121
+  (@always_inline wrappers), 483-557
+  `arm_fs_exec_stream_payload_resident_v1(path) -> Result<u64, FsError>`
+  (@cfg(arm64)): mounted open+fstat, region begin, FAT-chain pump with
+  progress traces (300+pumped/512 every 512 clusters), `payload resident
+  bytes=` + ELF-magic evidence logs.  The positioned handle is
+  deliberately NOT closed — see Wall 10 below.
+- src/os/kernel/loader/fs_exec_spawn.spl:52-53 (import), 199-244
+  (arch-split `fs_exec_prepare_spawn` -> `_fs_exec_prepare_spawn_impl`):
+  the arm64 arm replaces the monolithic `_fs_exec_read_bytes` diagnostic
+  with the streaming resident load, then emits the seam's exact observable
+  shape (`spawn:bytes len=` + `spawn:auth-required`, pid -13).  Other
+  arches keep `_fs_exec_prepare_spawn_via_bytes` verbatim.
+
+## Wall 10 (NEW, named): positioned close traps in the driver's
+## cache-hit index-set arm (latent freestanding lowering defect)
+
+run-20260925_224703: the pump completed (traces 301-306, heap FLAT at
+~35.6 MiB — zero PANIC, the 922 MB wall gone), then trapped during
+`g_vfs_positioned_close`: `fat32_close` unconditionally runs
+`fat32_sync_entry_size` (fat32_owned_io.spl:9 — a no-op size persist for
+a read-only open), which rewrites the already-cached directory cluster
+through `Fat32Core._cluster_cache_put`'s cache-hit arm
+(`values[i] = data; return`, fat32_core.spl:426) — and that index-set-
+then-return shape lowers to `blr rt_index_set; udf #49439` (trap when the
+callee returns).  8 identical `blr`-then-`udf` sites exist in the kernel
+(cluster_cache_put x2, dbfs _record_blob, PrivilegeTable.set/add_peer,
+register_task_vmspace, syscall_spm._task_brk_set,
+vfs_state_mount_table_open_chain_probe_v1); all latent (never executed in
+prior boots).
+doc/08_tracking/bug/index_set_return_udf_trap_arm64_2026-09-25.md
+
+Lane workaround landed: the streaming loader does not close the handle
+(one bounded virtual handle leaks per payload read; <= 3 reads across the
+R3-R5 rungs).  Compiler lane owns the actual lowering fix (same family as
+Wall 7's array_push stale-store, fixed in 33336d214be/1de2f3fe21c).
+
+## Verification (run-20260925_231214)
+
+```
+[vfs-read] stream-fstat path=/CLANG.ELF size=115209168 first_cluster=12
+[arm-fs-trace] 301 0x12d ... 306 0x132        (pump traces every 512 clusters)
+[vfs-read] payload resident bytes=115209168   ← WALL 9 TARGET LINE
+[vfs-read] payload magic b0=127 b1=69 b2=76 b3=70   (0x7f 'E' 'L' 'F' — real payload)
+[fs-exec] spawn:bytes path=/CLANG.ELF len=115209168
+[fs-exec] spawn:auth-required path=/CLANG.ELF
+[clang-bringup] rung=R3-clang-version rc=-13
+CLANG_IN_GUEST_ARM64_R3_FAIL rc=-13
+```
+
+- Heap: 0 PANIC; max used_after=37,334,352 (~35.6 MiB) — the pump's only
+  heap traffic is the 4,112-byte FAT-sector arrays (one per cluster).
+- The 922 MB tagged-[u8] materialization is gone; the payload is resident
+  in the raw region, magic-verified.
+- R3 proceeds to the DOCUMENTED -13 auth seam (fail-closed by design at
+  fs_exec_spawn.spl `fs_exec_prepare_spawn_from_bytes`).  Landing R3 needs
+  the authenticated pipeline or the lane-local unchecked prepare — the
+  documented next wall, NOT a regression.
+- Serial-loss quirk note: trace 304 (pumped=2048) is missing in both runs'
+  serial while 305/306 print — same intermittent serial drop as agent-26's
+  "missing fstat line"; does not affect the verdicts.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | both runs |
+| R2 guest boots | PASS | banner, module inits, VFS mounts |
+| R3 clang --version in guest | BLOCKED | Wall 9 CLEARED: 115209168 bytes resident in the raw region (magic-verified), heap flat ~35.6 MiB, zero panic; now blocked at the documented -13 auth seam (by design) |
+| R4-R5 | BLOCKED | needs R3; then the -13 seam + 2 MiB user-AS arena (ARM64_UAS_REGION_SIZE) |
+
+## Exact next actions (owner: this lane)
+
+1. The -13 auth seam (`fs_exec_prepare_spawn_from_bytes`): land the
+   authenticated pipeline or the lane-local unchecked prepare that maps
+   the resident raw region into the ring-3 handoff (the spawn side must
+   map/copy from the raw region — the bytes are now resident and waiting).
+2. Then the 2 MiB user-AS arena (`ARM64_UAS_REGION_SIZE` — the 115 MiB
+   payload needs the UAS region grown or the stage arena moved).
+3. Compiler lane: fix the index-set-then-return lowering
+   (doc/08_tracking/bug/index_set_return_udf_trap_arm64_2026-09-25.md) —
+   8 latent trap sites; the streaming loader's no-close workaround can be
+   reverted once fixed.
