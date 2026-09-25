@@ -1345,6 +1345,9 @@ static int64_t arm64_svc_file_read(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_file_write(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_file_close(uint64_t);
 static int64_t arm64_svc_file_stat(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_clock_gettime(uint64_t, uint64_t);
+static int64_t arm64_svc_file_lseek(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_fcntl(uint64_t, uint64_t, uint64_t);
 
 static int64_t arm64_dispatch_file_shim(uint64_t syscall_id,
                                         arm64_syscall_shim_fn shim,
@@ -1400,15 +1403,18 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 31: return arm64_svc_file_read(a0, a1, a2);
         case 32: return arm64_svc_file_write(a0, a1, a2);
         case 34: return arm64_svc_file_stat(a0, a1, a2);
-        /* id 46 (lseek) and id 69 (fcntl) are deliberately NOT wired.
-         * Evidence (run-20260926_032421): the guest toolchain spins in EL0
-         * right after lseek(2,0,SEEK_CUR) SUCCEEDS on the seeded stdio fds
-         * (it tolerated -ENOSYS in the pre-wiring era and printed the R3
-         * banner). FAT32 fds are refused -ENOSYS by _handle_lseek even when
-         * wired, so wiring changed only stdio behavior — and zero R4 value:
-         * the guest's file fds get -ENOSYS either way. Keep the tolerated
-         * default (-ENOSYS) until the guest-side stderr pathology is fixed
-         * in the toolchain lane. */
+        /* clock_gettime (id 50): the guest toolchain aborts on ENOSYS here
+         * (run-20260926_071342: "clock_gettime(CLOCK_MONOTONIC) failed" ->
+         * abort, rc=134, after cc1 opened /HELLO.C). C handler like the file
+         * layer above; served from the ARM generic timer (no RTC wired). */
+        case 50: return arm64_svc_clock_gettime(a0, a1);
+        /* id 46 (lseek) and id 69 (fcntl): wired for FILE fds (>=3) — the
+         * guest's MemoryBuffer lseeks the input fd for its size and its
+         * close() path issues F_SIMPLEOS_GET_OFD. stdio fds (0/1/2) keep
+         * the tolerated -ENOSYS (the guest spins on a successful stderr
+         * lseek — run-20260926_032421). */
+        case 46: return arm64_svc_file_lseek(a0, a1, a2);
+        case 69: return arm64_svc_file_fcntl(a0, a1, a2);
         /* Anonymous mmap (the guest libc's malloc arena): bump-allocate
          * zeroed pages in the recorded user address space. */
         case 10: return arm64_user_mmap(a1);
@@ -5047,6 +5053,97 @@ static int64_t arm64_svc_file_close(uint64_t fd_v)
     return 0;
 }
 
+/* syscall 50: clock_gettime(clk_id, tp) — the libc passes a guest
+ * int64_t buf[2] = {seconds, nanoseconds}. Served from the ARM generic
+ * timer (CNTVCT_EL0/CNTFRQ_EL0, confirmed readable in this boot path —
+ * rt_time_now_unix_micros); no RTC is wired, so this is monotonic
+ * uptime-since-boot for every clock id, the honest best available. Split
+ * quotient/remainder scaling avoids u64 overflow. Returns 0, -errno. */
+static int64_t arm64_svc_clock_gettime(uint64_t clk_id, uint64_t tp_va)
+{
+    (void)clk_id;
+    uint64_t cntvct = 0;
+    uint64_t cntfrq = 0;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cntvct));
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+    uint64_t sec = 0;
+    uint64_t nsec = 0;
+    if (cntfrq != 0) {
+        sec = cntvct / cntfrq;
+        nsec = ((cntvct % cntfrq) * 1000000000ULL) / cntfrq;
+    }
+    uint8_t ts[16];
+    __builtin_memset(ts, 0, sizeof(ts));
+    for (int i = 0; i < 8; i++) ts[i] = (uint8_t)(sec >> (8 * i));
+    for (int i = 0; i < 8; i++) ts[8 + i] = (uint8_t)(nsec >> (8 * i));
+    if (!arm64_user_range_accessible(tp_va, sizeof(ts), 1)) return -14;
+    return svc_user_memcpy_to(tp_va, ts, sizeof(ts)) == sizeof(ts) ? 0 : -14;
+}
+
+/* syscall 46: lseek(fd, offset, whence). File fds (>=3) get a real seek;
+ * stdio fds (0/1/2) keep the tolerated -ENOSYS (the guest driver's stderr
+ * probe spins on a successful stderr lseek — run-20260926_032421). */
+static int64_t arm64_svc_file_lseek(uint64_t fd_v, uint64_t offset_v, uint64_t whence)
+{
+    int fd = (int)fd_v;
+    if (fd < 3) return -38; /* ENOSYS — stdio: tolerated (see above) */
+    if (fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    int64_t offset = (int64_t)offset_v;
+    if (whence == 0) {              /* SEEK_SET */
+        if (offset < 0) return -22;
+        g_svc_fds[fd].offset = (uint32_t)offset;
+    } else if (whence == 1) {       /* SEEK_CUR */
+        int64_t cur = (int64_t)g_svc_fds[fd].offset + offset;
+        if (cur < 0) return -22;
+        g_svc_fds[fd].offset = (uint32_t)cur;
+    } else if (whence == 2) {       /* SEEK_END */
+        int64_t end = (int64_t)g_svc_fds[fd].size + offset;
+        if (end < 0) return -22;
+        g_svc_fds[fd].offset = (uint32_t)end;
+    } else {
+        return -22;
+    }
+    return (int64_t)g_svc_fds[fd].offset;
+}
+
+/* syscall 69: fcntl(fd, cmd, arg). Minimal descriptor-ops subset for the
+ * guest toolchain (F_GETFL/F_GETFD/F_SETFD/F_SETFL + the SimpleOS OFD
+ * token). Unwired was -ENOSYS, which the guest's MemoryBuffer/close paths
+ * surface as "error reading '<file>': Function not implemented". */
+static int64_t arm64_svc_file_fcntl(uint64_t fd_v, uint64_t cmd_v, uint64_t arg)
+{
+    int fd = (int)fd_v;
+    int cmd = (int)cmd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (cmd == 3) return g_svc_fds[fd].writable ? SVC_O_WRONLY : 0; /* F_GETFL */
+    if (cmd == 1) return 0;   /* F_GETFD */
+    if (cmd == 2) return 0;   /* F_SETFD */
+    if (cmd == 4) return 0;   /* F_SETFL */
+    if (cmd == 1397686273) return (int64_t)fd; /* F_SIMPLEOS_GET_OFD: token = fd */
+    return -22;               /* EINVAL — unsupported cmd */
+}
+
+/* Lane-C1 bring-up diagnostic: dump the kernel stack window below the
+ * exception frame at a fatal fault. frame_sp is the exception-frame base
+ * (the 272-byte frame the sync handler pushed); the C call chain that led
+ * to the fault sits BELOW it (each frame's saved x30 = a kernel text
+ * return address, resolvable with aarch64-linux-gnu-addr2line against
+ * build/os/simpleos_arm64_clang_bringup.elf). Diagnostic only. */
+void arm64_fault_stack_dump(uint64_t frame_sp)
+{
+    serial_puts("[fault-dump] frame_sp=");
+    serial_put_hex((int64_t)frame_sp);
+    serial_puts("\r\n");
+    volatile uint64_t *w = (volatile uint64_t *)(uintptr_t)frame_sp;
+    for (int i = 1; i <= 36; i++) {
+        serial_puts("[fault-dump] sp-");
+        serial_put_dec((int64_t)(i * 8));
+        serial_puts(" = ");
+        serial_put_hex((int64_t)w[-i]);
+        serial_puts("\r\n");
+    }
+}
+
 RuntimeValue rt_arm64_user_as_ttbr0_probe(RuntimeValue root_val)
 {
     uint64_t root = (uint64_t)root_val;
@@ -5185,6 +5282,8 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
     if (id != 0 && id != 60) {
         serial_puts("[svc-in] id=");
         serial_put_dec((int64_t)id);
+        serial_puts(" elr=");
+        serial_put_hex(elr);
         serial_puts("\r\n");
         uint64_t ret = (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
         serial_puts("[svc] id=");

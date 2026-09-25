@@ -478,6 +478,12 @@ _alignment_handler:
     eret
 
 .Lnot_align_fault:
+    /* Lane-C1 bring-up diagnostic: dump the kernel stack window below the
+     * exception frame (the C call chain's saved return addresses name the
+     * fault site) BEFORE restoring registers. x0-x18 are clobbered by the
+     * call and reloaded from the frame below; x19+ are ABI-preserved. */
+    mov     x0, sp
+    bl      arm64_fault_stack_dump
     /* Restore registers, then branch to the fault printer. (This used to
      * fall through, but arm64_enter_el0 is now laid down immediately after
      * this block, so the fall-through re-entered arm64_enter_el0 and
