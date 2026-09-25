@@ -6,7 +6,7 @@
 
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use common.string_core.{str_char_at}
-use std.fs_driver.mount_table.{DbfsRootMountSealV1, DbfsRootMountSealInfoV1}
+use std.fs_driver.mount_table.{DbfsRootMountSealV1, MountId}
 use std.common.contracts.os.server_data_namespace_v1.{
     SERVER_DATA_RIGHT_READ, SERVER_DATA_RIGHT_WRITE, SERVER_DATA_RIGHT_CREATE,
     SERVER_DATA_RIGHT_REMOVE, SERVER_DATA_RIGHT_RENAME, SERVER_DATA_RIGHT_SYNC,
@@ -26,6 +26,17 @@ use os.services.vfs.vfs_boot_state.{
     vfs_state_revalidate_dbfs_root_mount_seal_v1,
     vfs_state_close_dbfs_root_mount_seal_v1
 }
+
+# std.fs_driver.mount_table does not yet declare the DBFS-root revalidation
+# facts; this local definition names the slots this owner reads until the
+# canonical struct lands there.
+struct DbfsRootMountSealInfoV1:
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    dbfs_instance_identity: i64
+    dbfs_mutation_epoch: u64
 
 pub val SERVER_DATA_NAMESPACE_LEASE_LIMIT_V1: i64 = 64
 pub val SERVER_DATA_WEB_ROOT_V1: text = SERVER_DATA_WEB_ROOT_PATH_V1
@@ -501,7 +512,8 @@ pub(package) fn server_data_namespace_acquire_current_v1(
         if not server_data_launch_redemption_rollback_v1(redemption):
             _ = server_data_launch_redemption_quarantine_v1(redemption)
         return _server_data_result_v1(nil, "dbfs-root-seal-stale")
-    val prepared = _server_data_prepare_slot_v1(redemption, initial_facts.unwrap())
+    val initial: DbfsRootMountSealInfoV1 = initial_facts.unwrap()
+    val prepared = _server_data_prepare_slot_v1(redemption, initial)
     if prepared == nil:
         if not server_data_launch_redemption_rollback_v1(redemption):
             _ = server_data_launch_redemption_quarantine_v1(redemption)
@@ -517,7 +529,8 @@ pub(package) fn server_data_namespace_acquire_current_v1(
         _ = _server_data_quarantine_lease_v1(lease)
         _ = server_data_launch_redemption_quarantine_v1(redemption)
         return _server_data_result_v1(nil, "namespace-publication-failed")
-    if not _server_data_activate_v1(lease, final_facts.unwrap()):
+    val final_facts_view: DbfsRootMountSealInfoV1 = final_facts.unwrap()
+    if not _server_data_activate_v1(lease, final_facts_view):
         _ = _server_data_quarantine_lease_v1(lease)
         _ = server_data_launch_redemption_quarantine_v1(redemption)
         return _server_data_result_v1(nil, "namespace-publication-failed")
@@ -542,7 +555,7 @@ impl Scheduler:
         var ready = false
         if index >= 0:
             val slot = _server_data_namespace_owner_v1.slots[index]
-            val current = facts.unwrap()
+            val current: DbfsRootMountSealInfoV1 = facts.unwrap()
             ready = server_data_namespace_binding_allowed_v1(
                 slot.state, slot.task_id, slot.lifecycle_generation,
                 identity.unwrap().0, identity.unwrap().1,
@@ -597,7 +610,7 @@ impl Scheduler:
         var allowed = false
         if index >= 0:
             val slot = _server_data_namespace_owner_v1.slots[index]
-            val current = facts.unwrap()
+            val current: DbfsRootMountSealInfoV1 = facts.unwrap()
             allowed = server_data_namespace_binding_allowed_v1(
                 slot.state, slot.task_id, slot.lifecycle_generation,
                 identity.unwrap().0, identity.unwrap().1,
