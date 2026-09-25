@@ -17,17 +17,28 @@
 #
 # See doc/08_tracking/bug/bootstrap_publish_blocked_windows_native_symlink_privilege_2026-09-07.md
 #
-# Why not a junction instead, which needs no privilege?
-#   * junctions are directory-only reparse points; the publisher also links
-#     non-directory targets,
-#   * a junction requires an ABSOLUTE target, while the publisher deliberately
-#     links a RELATIVE path so the authority tree stays relocatable,
-#   * MSYS sees a junction as a plain directory, not a link, so the publisher's
-#     link-identity assertion would treat it as stale legacy content and
-#     re-quarantine it on every run, and
-#   * the commit point is rename-over-existing, whose atomicity a directory
-#     reparse point does not reproduce.
-# Elevation is the supported path; the junction substitution is not equivalent.
+# CORRECTION (2026-09-25). An earlier version of this header argued that a
+# junction could not substitute for the symlink -- directory-only, absolute
+# target only, indistinguishable from a plain directory, and no
+# rename-over-existing atomicity. That was WRONG for this repo, and the
+# repo itself is the counter-example: bootstrap_stage3_create_compatibility_link
+# (scripts/check/lib/bootstrap-stage3/authority.shs) has always created this
+# very pointer with `mklink /J` on MINGW/MSYS/CYGWIN, resolving the target to an
+# absolute path with cygpath, proving it with `fsutil reparsepoint query`, and
+# letting the caller rename the reparse point into place atomically. Every
+# objection above was already solved there.
+#
+# The real defect was narrower: TWO implementations of the same pointer
+# disagreed. The recovery path used the unprivileged junction; the fresh-publish
+# path (bootstrap-authority-generation-publish.pl) used perl symlink() under
+# nativestrict and therefore needed the privilege. The publisher now uses the
+# junction on Windows too, so an unelevated phase-1 publish completes. POSIX is
+# unchanged: a real symlink with a relative target.
+#
+# This script remains useful for DIAGNOSIS -- `check` still answers whether this
+# session could create a native symlink, which other lanes and `nativestrict`
+# call sites still depend on -- and `run` remains the way to re-run something
+# elevated. It is no longer the only route past the publish step.
 #
 # Modes:
 #   check          Probe whether THIS session can create a native symlink.
@@ -141,7 +152,50 @@ if [ "$mode" = selftest ]; then
         exit 1
     fi
     echo "ok - (b) unusable directory is ERROR, never a pass"
-    echo "PASS — 2 check(s) performed, selftest green"
+
+    # (c) The junction route the authority publisher uses on Windows must work
+    # WITHOUT any privilege, and must still reject a non-reparse-point. This is
+    # the runnable check for the unelevated publish path: mklink /J at a private
+    # temporary name -> prove it is a reparse point -> prove it resolves to the
+    # intended target -> atomic rename into place. If this goes red, an
+    # unelevated phase-1 publish is broken again.
+    _st_root=$(mktemp -d 2>/dev/null) || { echo "not ok - (c) no temp dir"; echo "FAIL — 3 check(s) performed, selftest failed"; exit 1; }
+    _st_fail=0
+    mkdir -p "$_st_root/control/generations/gen-probe" || _st_fail=1
+    : > "$_st_root/control/generations/gen-probe/payload" || _st_fail=1
+    _st_link="$_st_root/control/.compat.probe"
+    if [ "$_st_fail" -eq 0 ]; then
+        _st_link_win=$(cygpath -w "$_st_link" 2>/dev/null) || _st_fail=1
+        _st_target_win=$(cygpath -w "$_st_root/control/generations/gen-probe" 2>/dev/null) || _st_fail=1
+    fi
+    if [ "$_st_fail" -eq 0 ]; then
+        cmd.exe //d //c mklink //J "$_st_link_win" "$_st_target_win" >/dev/null 2>&1 || _st_fail=1
+    fi
+    if [ "$_st_fail" -eq 0 ]; then
+        fsutil.exe reparsepoint query "$_st_link_win" >/dev/null 2>&1 || _st_fail=1
+        [ -f "$_st_link/payload" ] || _st_fail=1
+        mv "$_st_link" "$_st_root/control/bootstrap" 2>/dev/null || _st_fail=1
+        [ -f "$_st_root/control/bootstrap/payload" ] || _st_fail=1
+    fi
+    # Negative control: a plain directory must NOT read as a reparse point, so
+    # the publisher's verification cannot be satisfied by an ordinary mkdir.
+    if [ "$_st_fail" -eq 0 ]; then
+        mkdir -p "$_st_root/control/plain" || _st_fail=1
+        _st_plain_win=$(cygpath -w "$_st_root/control/plain" 2>/dev/null) || _st_fail=1
+        if fsutil.exe reparsepoint query "$_st_plain_win" >/dev/null 2>&1; then
+            echo "not ok - (c) a plain directory was accepted as a reparse point"
+            _st_fail=1
+        fi
+    fi
+    chmod -R u+w "$_st_root" 2>/dev/null || :
+    rm -rf "$_st_root" 2>/dev/null || :
+    if [ "$_st_fail" -ne 0 ]; then
+        echo "not ok - (c) unprivileged junction route is broken"
+        echo "FAIL — 3 check(s) performed, selftest failed"
+        exit 1
+    fi
+    echo "ok - (c) unprivileged junction route works and rejects a plain directory"
+    echo "PASS — 3 check(s) performed, selftest green"
     exit 0
 fi
 
