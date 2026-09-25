@@ -484,6 +484,114 @@ pub fn flat_pool_dec_text_list_list(r: FlatPoolReader) -> [[[text]]]:
         i = i + 1
     out
 
+# --- in-place decoders -------------------------------------------------------
+#
+# A pool that a reset clears IN PLACE (ast_reset's `decl_tag.clear()`, ...) has
+# one process-lifetime owner. ast_reset allocates it outside any transient
+# parser scope and every later parse reuses it. A restore that REPLACES such an
+# owner (`decl_tag = flat_pool_dec_i64(r)`) installs an array born inside the
+# driver's per-file transient scope. driver_end_transient_parse_scope frees
+# that array, and the following ast_reset() then runs `.clear()` on freed
+# memory. The runtime then rejects the dangling handle (`rejected invalid
+# array handle before dereference`: the pointer was erased from the immortal
+# registry by rt_core_reclaim_transient_immortal), every `.clear()`/`.push` on
+# it is silently dropped, and once malloc reuses the block the global aliases
+# an unrelated object. The next module's parse writes through it and HIR/MIR
+# later read garbage: 0xC0000005 in HIR of compiler.backend.backend_types
+# (warm stage-4 specs), in the MIR struct/fn pre-scan of
+# lib.nogc_sync_mut.io_runtime (single-file AOT compile), and the in-process
+# interpreter path. The cache-MISS dump had the same defect on `arm_body` and
+# `decl_body_stmts`, so a COLD run with capture armed corrupted the next module
+# too; a run with the cache disabled was clean because a real parse only
+# pushes into the owner and never replaces it.
+#
+# These decoders clear `dest` and refill it, and return `dest`, so the owner
+# identity survives the restore. The caller still assigns the result back
+# (`decl_tag = flat_pool_dec_i64_into(decl_tag, r)`). That keeps the restore
+# correct where arrays are values and a nil owner gets a fresh array.
+# scripts/check/check-flat-ast-codec-complete.shs requires the `_into` form
+# for every pool that some reset clears in place.
+#
+# INVARIANT (nested pools): the INNER arrays that `_i64_list_into` /
+# `_text_list_into` push are still born inside the transient scope and are
+# reclaimed at its end. That is correct only because (a) the bridge copies the
+# ParserModule out of the flat pools while the scope is still open, and (b) the
+# next thing that touches the outer owner after scope end is the reset's
+# `.clear()`, which drops the dead inner handles without dereferencing them.
+# Reordering driver_end_transient_parse_scope, or reading a pool between scope
+# end and the next reset, breaks (b).
+
+pub fn flat_pool_dec_i64_into(dest: [i64], r: FlatPoolReader) -> [i64]:
+    val n = r.next_len()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
+    var i: i64 = 0
+    while i < n:
+        out.push(r.next_i64())
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_bool_into(dest: [bool], r: FlatPoolReader) -> [bool]:
+    val n = r.next_len()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
+    var i: i64 = 0
+    while i < n:
+        out.push(r.next_i64() == 1)
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_text_into(dest: [text], r: FlatPoolReader) -> [text]:
+    val n = r.next_len()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
+    var i: i64 = 0
+    while i < n:
+        out.push(flat_pool_unescape(r.next()))
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_i64_list_into(dest: [[i64]], r: FlatPoolReader) -> [[i64]]:
+    val n = r.next_len()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
+    var i: i64 = 0
+    while i < n:
+        out.push(flat_pool_dec_i64(r))
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_text_list_into(dest: [[text]], r: FlatPoolReader) -> [[text]]:
+    val n = r.next_len()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
+    var i: i64 = 0
+    while i < n:
+        out.push(flat_pool_dec_text(r))
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_text_list_list_into(dest: [[[text]]], r: FlatPoolReader) -> [[[text]]]:
+    val n = r.next_len()
+    var out = dest
+    if out == nil:
+        out = []
+    out.clear()
+    var i: i64 = 0
+    while i < n:
+        out.push(flat_pool_dec_text_list(r))
+        i = i + 1
+    out
 
 # --- scalar encoders/decoders ------------------------------------------------
 #
@@ -518,5 +626,7 @@ export flat_pool_enc_i64, flat_pool_enc_bool, flat_pool_enc_text
 export flat_pool_enc_i64_list, flat_pool_enc_text_list, flat_pool_enc_text_list_list
 export flat_pool_dec_i64, flat_pool_dec_bool, flat_pool_dec_text
 export flat_pool_dec_i64_list, flat_pool_dec_text_list, flat_pool_dec_text_list_list
+export flat_pool_dec_i64_into, flat_pool_dec_bool_into, flat_pool_dec_text_into
+export flat_pool_dec_i64_list_into, flat_pool_dec_text_list_into, flat_pool_dec_text_list_list_into
 export flat_pool_enc_scalar_i64, flat_pool_enc_scalar_bool, flat_pool_enc_scalar_text
 export flat_pool_dec_scalar_i64, flat_pool_dec_scalar_bool, flat_pool_dec_scalar_text

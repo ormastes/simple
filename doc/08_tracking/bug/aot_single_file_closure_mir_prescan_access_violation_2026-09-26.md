@@ -1,6 +1,6 @@
 # Single-file AOT compile with import-closure loading crashes in MIR prescan
 
-**Status:** open. The fix is not landed; it is blocked on this crash. Owner: memory-corruption investigation (Fable agent).
+**Status:** root-caused 2026-09-26 (PR #1612). The crash is the seed or-pattern binding defect (`build_pattern_binding_stmts` bound from the first alternative only; `hir_type_metadata_symbol_free` read the one-field `Optional` payload as a tuple), fixed in the seed by #1612; it takes effect in the stage-2 CLI on the next seed redeploy / bootstrap. The routing patch below is still unlanded and belongs to its own lane. Owner: memory-corruption investigation (Fable agent).
 **Host:** Windows x86_64-pc-windows-msvc. Stage-2 self-hosted `simple_cli.exe`, built from `716b6864a3d`+#1609 by the admitted stage-2 compiler.
 
 ## Context

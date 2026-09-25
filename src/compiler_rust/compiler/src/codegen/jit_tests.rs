@@ -138,6 +138,29 @@ fn test_jit_char_code_at_as_u8_and_enum_eq() {
     );
 }
 
+/// Regression: an or-pattern whose alternatives have DIFFERENT payload
+/// arities must bind per alternative. `build_pattern_binding_stmts` used to
+/// take the binding shape from the FIRST alternative only, so
+/// `case Two(x, _) | One(x):` read the one-field `One` payload (which is the
+/// value itself) through `rt_tuple_get(payload, 0)`: the runtime rejected the
+/// non-array handle and `x` stayed stale (`one_x` printed 3, the value bound
+/// by the previous `Two` call). In the stage-2 CLI the same shape in
+/// `hir_type_metadata_symbol_free` (`Array(inner, _) | ... | Optional(inner)`)
+/// turned `inner` into nil for every `T?` return type and crashed the MIR
+/// pre-scan with 0xC0000005.
+#[test]
+fn test_jit_or_pattern_mixed_arity_binds_per_alternative() {
+    let src = "enum Shape:\n    Two(x: i64, y: i64)\n    One(x: i64)\n\n\
+fn pick(v: Shape) -> i64:\n    match v:\n        case Two(x, _) | One(x): x\n        case _: -1\n\n\
+fn two_x() -> i64:\n    pick(Shape.Two(x: 3, y: 4))\n\n\
+fn one_x() -> i64:\n    val _warm = pick(Shape.Two(x: 3, y: 4))\n    pick(Shape.One(x: 7))\n";
+    let jit = jit_compile(src).unwrap();
+    let two = unsafe { jit.call_i64_void("two_x").unwrap() };
+    let one = unsafe { jit.call_i64_void("one_x").unwrap() };
+    assert_eq!(two, 3, "two-field alternative binds its first payload field");
+    assert_eq!(one, 7, "one-field alternative binds the payload itself (buggy=3 or nil)");
+}
+
 #[test]
 fn test_jit_subtract() {
     let jit = jit_compile("fn sub(a: i64, b: i64) -> i64:\n    return a - b\n").unwrap();
