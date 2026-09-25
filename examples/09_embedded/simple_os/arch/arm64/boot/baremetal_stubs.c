@@ -5627,3 +5627,26 @@ int64_t src__lib__nogc_sync_mut__fs_driver__block_device__BlockDevice_dot_flush(
 #define CRYPTO_HAS_SERIAL_PUTHEX
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
+
+/* In-guest clang-bringup lane (2026-09-25): the current seed compiler emits
+ * calls to these two predicates (presence/enum-variant checks) that the
+ * hosted runtime implements in runtime_native.c — a translation unit the
+ * freestanding arm64 archive does not include. Faithful minimal twins,
+ * mirroring runtime_native.c:rt_is_present / rt_enum_check_variant semantics
+ * (doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+ * for the .? empty-container rule). */
+int8_t rt_is_present(int64_t value)
+{
+    if (rt_is_none((RuntimeValue)value)) return 0;
+    RuntimeEnum *e = _rt_enum_cast((RuntimeValue)value);
+    if (e) return 1;
+    return 1;
+}
+
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant)
+{
+    RuntimeEnum *e = _rt_enum_cast((RuntimeValue)value);
+    if (!e || (int64_t)e->discriminant != expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+}
