@@ -41,6 +41,7 @@ use std.io_runtime.{
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Entry format version. Bumping this invalidates every stored entry without
 # anyone having to delete a directory: an old entry's first line no longer
@@ -118,22 +119,35 @@ pub fn frontend_parse_cache_load(key: text) -> text:
 
 # Written via a pid-unique temp file then renamed, so a concurrent reader (the
 # shard workers of step 4 run in parallel processes over one cache dir) can
-# never observe a half-written entry. A failed write is silently no-op: a cache
+# never observe a half-written entry. A failed write is a no-op (reported once): a cache
 # that cannot store is a slow build, not a wrong one.
 pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
     if key == "" or blob == "" or not frontend_parse_cache_enabled():
         return false
     val dir = frontend_parse_cache_dir()
-    val _made = dir_create_all(dir)
+    val made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
     val tmp = final_path + ".{getpid()}.tmp"
     if not file_write_exact(tmp, frontend_parse_cache_header() + "\n" + blob):
+        frontend_parse_cache_note_store_failure(dir, made)
         return false
     if file_move_cross_device(tmp, final_path):
         _fe_cache_stores = _fe_cache_stores + 1
         return true
     val _cleaned = file_delete(tmp)
     false
+
+# A cache that cannot store is a slow build, not a wrong one, so a failed store
+# stays non-fatal. It is still reported once per process: on Windows the store
+# failed for every module when the cache directory's parents were missing, and
+# nothing said so.
+var _fe_cache_store_failure_noted: bool = false
+
+fn frontend_parse_cache_note_store_failure(dir: text, made: bool):
+    if _fe_cache_store_failure_noted:
+        return
+    _fe_cache_store_failure_noted = true
+    eprint("[frontend-cache] store failed: cannot write under {dir} (dir_create_all={made}); modules will be reparsed\n")
 
 pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text) -> bool:
     if key == "" or blob == "" or not frontend_parse_cache_enabled():

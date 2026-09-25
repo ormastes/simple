@@ -14026,6 +14026,30 @@ static int rt_dir_create_all_cpath(const char* path) {
     if (!copy) return 0;
 
     char* p = copy;
+#if defined(_WIN32)
+    /* host_path_native hands Windows paths over with `\` separators and, for
+     * long paths, a `\\?\` prefix. Splitting only on `/` turned every such
+     * path into ONE mkdir of the full path, which fails whenever a parent is
+     * missing (the frontend parse cache never created
+     * build/bootstrap/native_cache/<lane>/frontend). Skip the prefix and the
+     * drive root, then split on both separators. */
+    if (strncmp(p, "\\\\?\\", 4) == 0) p += 4;
+    if (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':') {
+        p += 2;
+    }
+    if (*p == '/' || *p == '\\') p++;
+    for (; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            char sep = *p;
+            *p = '\0';
+            if (!rt_core_mkdir_one(copy)) {
+                free(copy);
+                return 0;
+            }
+            *p = sep;
+        }
+    }
+#else
     if (p[0] == '/') p++;
     for (; *p; p++) {
         if (*p == '/') {
@@ -14037,6 +14061,7 @@ static int rt_dir_create_all_cpath(const char* path) {
             *p = '/';
         }
     }
+#endif
 
     int ok = rt_core_mkdir_one(copy);
     free(copy);
