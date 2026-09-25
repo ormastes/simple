@@ -13162,6 +13162,22 @@ int64_t rt_env_get_i64(const uint8_t* key_ptr, uint64_t key_len, int64_t default
     return end == value ? default_value : (int64_t)parsed;
 }
 
+#if defined(_WIN32)
+/* The UCRT rejects a "name=value" string longer than _MAX_ENV (32767) or a
+ * name that is empty / contains '=' through the invalid-parameter handler,
+ * whose default is a fail-fast (0xC0000409) -- not an error return. The
+ * frontend lexer mirrors the whole file it is lexing into
+ * SIMPLE_BOOTSTRAP_LEX_SOURCE (a legacy fallback; the in-memory slot is read
+ * first), so every source over ~32 KB (e.g. src/lib/common/process/
+ * observation_v4.spl, 60 KB) killed an in-process `run` with no output
+ * (Windows stage-2, 2026-09-25). Refuse such values up front and report
+ * failure like setenv(3) would. */
+static bool rt_win_env_fits(const char* key, const char* value) {
+    if (!key || !*key || strchr(key, '=')) return false;
+    return strlen(key) + 1 + (value ? strlen(value) : 0) < 32767;
+}
+#endif
+
 bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_ptr, uint64_t value_len) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     char* value = rt_core_text_arg_to_cstr(value_ptr, value_len);
@@ -13171,7 +13187,7 @@ bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_p
         return false;
     }
 #if defined(_WIN32)
-    bool ok = _putenv_s(key, value) == 0;
+    bool ok = rt_win_env_fits(key, value) && _putenv_s(key, value) == 0;
 #else
     bool ok = setenv(key, value, 1) == 0;
 #endif
@@ -14948,7 +14964,7 @@ const char* rt_getenv(const char* key) {
 int rt_setenv(const char* key, const char* value) {
     if (!key) return 0;
 #if defined(_WIN32)
-    return _putenv_s(key, value ? value : "") == 0 ? 1 : 0;
+    return rt_win_env_fits(key, value ? value : "") && _putenv_s(key, value ? value : "") == 0 ? 1 : 0;
 #else
     int result = value ? setenv(key, value, 1) : unsetenv(key);
     return result == 0 ? 1 : 0;

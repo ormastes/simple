@@ -525,7 +525,13 @@ fn _driver_line_end(content: text, start: i64) -> i64:
     primitive avoids a Simple-level `char_code_at` call for every byte of every
     closure source line, while still retaining just the current range rather
     than allocating `split("\n")`'s source-sized array."""
-    content.index_of("\n", start) ?? content.len()
+    # Native lowers two-arg index_of to rt_text_find, which returns a raw -1
+    # on a miss (not nil), so `?? content.len()` never fired: a final line
+    # with no trailing newline yielded end=-1, the caller rewound to 0 and
+    # looped forever, growing memory (>8 GB on 10 bootstrap specs, stage-2
+    # in-process run, 2026-09-25). Treat any negative as "to end of text".
+    val end = content.index_of("\n", start) ?? -1
+    if end < 0: content.len() else: end
 
 fn _driver_text_range_starts_with(content: text, start: i64, end: i64, prefix: text) -> bool:
     """Allocation-free prefix check for one source-line range."""
@@ -567,13 +573,15 @@ fn _driver_entry_import_line_needs_materialization(content: text, start: i64, en
     (_driver_text_range_starts_with(content, first, end, "use ") or
         _driver_text_range_starts_with(content, first, end, "pub use ") or
         _driver_text_range_starts_with(content, first, end, "export use ") or
-        _driver_text_range_starts_with(content, first, end, "import "))
+        _driver_text_range_starts_with(content, first, end, "import ") or
+        # `export a, b from M`: a re-export facade depends on M (see below).
+        _driver_text_range_starts_with(content, first, end, "export "))
 
 fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
     # Whole-content early-out, mirroring the `mod `/`export ` gate in
     # _driver_entry_sibling_paths below: a file with no use/import keyword at all
     # cannot contribute, and one `contains` beats splitting it into lines.
-    if not content.contains("use ") and not content.contains("import "):
+    if not content.contains("use ") and not content.contains("import ") and not content.contains(" from "):
         return []
     var result: [text] = []
     var in_doc = false
@@ -624,6 +632,15 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             tail = line.substring(4)
         elif line.starts_with("import "):
             tail = line.substring(7)
+        elif line.starts_with("export ") and line.contains(" from "):
+            # `export a, b from M` re-exports M's items, so the facade needs M
+            # loaded. Without this, a facade such as src/lib/io_runtime.spl
+            # (`export read_file_text, ... from nogc_sync_mut.io_runtime`) was
+            # loaded alone and every consumer failed "module std.io_runtime
+            # has no exported item read_file_text" (stage-2 in-process run,
+            # 2026-09-25). The module path is the token after the last " from ".
+            val from_at = line.last_index_of(" from ")
+            tail = line.substring(from_at + 6).trim()
         else:
             continue
 
@@ -959,6 +976,16 @@ fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) 
     if mapped != "":
         return mapped
     mapped = _driver_resolve_rewritten_import(module_path, "compiler.frontend", "compiler/10.frontend", entry_dir)
+    if mapped != "":
+        return mapped
+    # File-direct spelling `compiler.blocks.blocks.<m>` (= 15.blocks/blocks/<m>.spl,
+    # used by parser_types_expr.spl and friends to avoid the package facade)
+    # must be tried before `compiler.blocks`: otherwise it maps to the
+    # nonexistent 15.blocks/blocks/blocks/<m>.spl, the parent-strip fallback
+    # lands on 15.blocks/blocks.spl, and the alias collides with the real
+    # value.spl ("native module name collision ... compiler.blocks.blocks.value",
+    # stage-2 in-process run, 2026-09-25).
+    mapped = _driver_resolve_rewritten_import(module_path, "compiler.blocks.blocks", "compiler/15.blocks/blocks", entry_dir)
     if mapped != "":
         return mapped
     mapped = _driver_resolve_rewritten_import(module_path, "compiler.blocks", "compiler/15.blocks/blocks", entry_dir)

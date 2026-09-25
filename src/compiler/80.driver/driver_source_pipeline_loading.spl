@@ -190,7 +190,25 @@ impl CompilerDriver:
             driver_inputs = self.ctx.options.input_files
         val closure_source_roots = driver_inputs
         val explicit_entry_input = driver_explicit_source_entry(self.ctx)
-        val native_entry_input = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        # In-process `run <file.spl>` (CompileMode.Interpret, one .spl input,
+        # no explicit/native entry) must load the file's import closure too.
+        # The "interpret mode resolves imports lazily through the interpreter
+        # module loader" contract (bulk-load note below) has no implementation
+        # on the pure-Simple path: HIR import resolution only consults
+        # registered module surfaces, so a lone entry reported
+        # "missing module surface for <every import>" and then unresolved
+        # describe/it/expect (stage-2 `run` with SIMPLE_NO_BOOTSTRAP_DELEGATE=1,
+        # load_sources total=1, 2026-09-25). Route it through the same
+        # entry-closure walk native-build --entry uses; that walk loads only
+        # the transitive imports, not the bulk trees.
+        val interpret_single_entry =
+            if self.ctx.options.mode == CompileMode.Interpret and driver_inputs.len() == 1 and
+                    driver_inputs[0].ends_with(".spl"):
+                driver_inputs[0]
+            else:
+                ""
+        val native_entry_env = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val native_entry_input = if native_entry_env != "": native_entry_env else: interpret_single_entry
         val requested_entry_input = if explicit_entry_input != "":
             explicit_entry_input
         else:
