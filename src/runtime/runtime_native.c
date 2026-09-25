@@ -11912,14 +11912,12 @@ int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     const char* path = path_buf;
 #if defined(_WIN32)
     if (!path) return 0;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return 0;
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    /* Long-path widened, like rt_file_read_regular_no_follow_bounded: the
+     * plain UTF-16 conversion failed past MAX_PATH, so a long
+     * package-module index path read as "not a regular file" and admission
+     * failed package-index:generation-unavailable (2026-09-25). */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 0;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, wide_len)) {
-        free(wide_path);
-        return 0;
-    }
     DWORD attributes = GetFileAttributesW(wide_path);
     free(wide_path);
     return attributes != INVALID_FILE_ATTRIBUTES &&
@@ -13000,6 +12998,17 @@ int64_t rt_gui_get_glyph_8x16(int32_t codepoint) {
 int64_t rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+#if defined(_WIN32)
+    /* Narrow stat() fails past MAX_PATH; query the widened path instead. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (wide_path) {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        BOOL ok = GetFileAttributesExW(wide_path, GetFileExInfoStandard, &data);
+        free(wide_path);
+        if (!ok) return -1;
+        return (int64_t)(((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow);
+    }
+#endif
     struct stat st;
     if (stat(path, &st) != 0) return -1;
     return (int64_t)st.st_size;

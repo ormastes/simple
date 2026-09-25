@@ -3,8 +3,11 @@
 use app.io.file_ops.{path_absolute}
 use app.io.env_ops.{env_get, env_set}
 use compiler.driver.cache.cache_root.{machine_cache_root}
-use compiler.driver.cache.package_module_index.{package_module_index_read_current_v1}
-use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1}
+use compiler.driver.cache.package_module_index.{
+    PACKAGE_MODULE_INDEX_SCHEMA_V1, PackageModuleIndexGenerationV1, PackageModuleIndexReadV1,
+    package_module_index_publish_v1, package_module_index_read_current_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
 
 struct CompilerEntrypointAdmissionV1:
@@ -18,6 +21,35 @@ struct CompilerEntrypointAdmissionV1:
 
 fn compiler_entrypoint_invalid_v1(reason: text) -> CompilerEntrypointAdmissionV1:
     CompilerEntrypointAdmissionV1(false, reason, "", "", "", "", -1)
+
+# Binding-only generation: it records exactly which SCV snapshot the index
+# belongs to and carries no module entries. Admission consumes only this
+# binding; the warm per-module route (package_index_route.spl) stays on its
+# cold path until a real module-graph producer exists, because it is gated on
+# producer/root/variant markers nothing sets.
+fn compiler_entrypoint_binding_generation_v1(
+    snapshot: ScvCompileSnapshotV1
+) -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        schema_version: PACKAGE_MODULE_INDEX_SCHEMA_V1,
+        producer_digest: sha256_text("simple/package-module-index/admission-snapshot-binding/v1"),
+        root_generation: "scv-snapshot-binding-v1",
+        scv_revision_id: snapshot.revision_id,
+        scv_commit_id: snapshot.commit_id,
+        scv_tree_id: snapshot.tree_id,
+        inventory_digest: snapshot.inventory_digest,
+        entries: [])
+
+fn compiler_entrypoint_index_binds_snapshot_v1(
+    index: PackageModuleIndexReadV1, snapshot: ScvCompileSnapshotV1
+) -> bool:
+    if not index.valid or index.generation == nil:
+        return false
+    val generation = index.generation!
+    generation.scv_revision_id == snapshot.revision_id and
+        generation.scv_commit_id == snapshot.commit_id and
+        generation.scv_tree_id == snapshot.tree_id and
+        generation.inventory_digest == snapshot.inventory_digest
 
 fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmissionV1:
     var root = path_absolute(".").replace("\\", "/")
@@ -38,7 +70,18 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
         root, cache_root, source_roots)
     if not snapshot.valid:
         return compiler_entrypoint_invalid_v1(snapshot.reason)
-    val index = package_module_index_read_current_v1(machine_cache_root())
+    var index = package_module_index_read_current_v1(machine_cache_root())
+    if not compiler_entrypoint_index_binds_snapshot_v1(index, snapshot):
+        # Nothing else in the tree produces this index (no caller of
+        # package_module_index_publish_v1 since it was introduced), so every
+        # fresh HOME failed package-index:missing-or-invalid-generation on
+        # every platform. Publish the snapshot-binding generation here:
+        # content-addressed and idempotent (same snapshot -> same digest),
+        # and fail closed if it cannot be published or read back.
+        if not package_module_index_publish_v1(machine_cache_root(),
+                compiler_entrypoint_binding_generation_v1(snapshot)):
+            return compiler_entrypoint_invalid_v1("package-index:publish-failed")
+        index = package_module_index_read_current_v1(machine_cache_root())
     if not index.valid or index.generation == nil:
         return compiler_entrypoint_invalid_v1("package-index:" + index.reason)
     val generation = index.generation!
