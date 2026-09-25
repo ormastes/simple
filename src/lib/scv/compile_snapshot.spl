@@ -306,7 +306,11 @@ fn scv_compile_snapshot_acquire_v1(
     val planned_revision_id = scv_compile_snapshot_revision_id_v1(
         planned_tree_id, planned_inventory_digest)
     val planned_destination = "{owned_cache_root}/snapshots/{planned_revision_id}"
-    if file_exists(planned_destination):
+    # dir_exists, not file_exists: the runtime's file_exists is false for a
+    # directory on Windows, so neither this reuse nor the publish branch below
+    # ever saw an existing snapshot and every rename onto it failed
+    # snapshot-publish-failed (2026-09-25).
+    if dir_exists(planned_destination):
         val planned_commit_id = "scv-compile-v1-" + sha256_text(
             "simple/scv-compile-commit/v1|{planned_tree_id}|{planned_rows.len()}")
         val reused = scv_compile_snapshot_open_v1(
@@ -314,6 +318,10 @@ fn scv_compile_snapshot_acquire_v1(
             planned_commit_id, planned_tree_id, planned_inventory_digest)
         if reused.valid:
             return reused
+        # Content-addressed and failing its own validation (e.g. written with
+        # CRLF by an older runtime): it can never become valid, and keeping it
+        # would wedge every later publish on snapshot-destination-conflict.
+        dir_remove(planned_destination, true)
     val staging = "{owned_cache_root}/snapshots/.tmp.{rt_getpid()}.{time_now_unix_micros()}"
     if dir_exists(staging):
         return scv_compile_snapshot_invalid_v1("snapshot-staging-busy")
@@ -383,7 +391,7 @@ fn scv_compile_snapshot_acquire_v1(
     val snapshots_root = "{owned_cache_root}/snapshots"
     dir_create(snapshots_root, true)
     val destination = "{snapshots_root}/{revision_id}"
-    if file_exists(destination):
+    if dir_exists(destination):
         val existing = scv_compile_snapshot_read_text_v1(
             "{destination}/SCV_COMPILE_SNAPSHOT")
         dir_remove(staging, true)
