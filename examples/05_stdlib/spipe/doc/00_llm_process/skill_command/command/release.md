@@ -1,4 +1,4 @@
-<!-- llm-process-gen: managed source=claude_release_command source_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b content_sha256=e8588da3b96d5a3385d37ec151b1281264c582915dd9c946849ac1ca3e30bd2f -->
+<!-- llm-process-gen: managed source=claude_release_command source_sha256=8101a3f942cf7248127ec5931807a5fd55425fb7bfb11ea1aedfaa70a7a6551b content_sha256=83dbb5431a27bdfdd2396cc66d1d370420dd4da2b9b677170a4c9ff8de21814b -->
 # Release Skill
 
 Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
@@ -21,16 +21,18 @@ Release contract: isolated-session; reviewed-beta-backport; immutable-candidate;
 
 ## Retry naming for release tasks
 
-A release task owns one stable name for the whole release identity
-(`rc1`, `beta15`). When a release task fails, the retry keeps that name and
-appends an incrementing `_N` suffix — `rc1_1`, `rc1_2`, and so on; each
-suffix is one new `work/release/...` branch and worktree attempt at the same
-release. Never re-number the release (`rc2`) merely because an attempt
-failed. The prerelease number advances only when the release content version
-advances (a new beta, RC, or patch after publication or a content/policy/
-toolchain change), never as an error counter. The immutable candidate
-attempt counter (`candidate/vX.Y.Z-rc.N/aNNN`) is independent of the
-task-name suffix.
+A release task owns one stable name for the whole release identity, spelled
+as the full version (`1.0.0-rc.1`, `2.0.0-beta.3`; shorthand `rc1`,
+`beta3` is the same rule in short form). When a release task fails, the retry
+keeps that name and appends an incrementing `_N` suffix — `1.0.0-rc.1_1`,
+`1.0.0-rc.1_2`, and so on (short forms `rc1_1`, `1.0.0-rc1_1`); each suffix
+is one new `work/release/<full-version>_<N>` branch and worktree attempt at
+the same release. Never re-number the release (`1.0.0-rc.2`, short `rc2`)
+merely because an attempt failed. The prerelease number advances only when
+the release content version advances (a new beta, RC, or patch after
+publication or a content/policy/toolchain change), never as an error
+counter. The immutable candidate attempt counter
+(`candidate/vX.Y.Z-rc.N/aNNN`) is independent of the task-name suffix.
 
 ## Beta bug-fix flow
 

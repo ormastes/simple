@@ -42,7 +42,7 @@ Apply the commit only on the private work branch, rerun affected tests, and subm
 
 ### Release task retry naming
 
-A release task keeps one stable name per release identity (`rc1`, `beta15`). When a release task fails, the retry appends an incrementing `_N` suffix — `rc1_1`, `rc1_2` — as a new `work/release/...` branch and worktree at the fetched target SHA. Never re-number the release (`rc2`) merely because an attempt failed; the prerelease number advances only for a new published release version. The immutable candidate attempt counter (`candidate/vX.Y.Z-rc.N/aNNN`) is independent of the task-name suffix.
+A release task keeps one stable name per release identity, spelled as the full version (`1.0.0-rc.1`, `2.0.0-beta.3`; shorthand `rc1` is the same rule). When a release task fails, the retry appends an incrementing `_N` suffix — `1.0.0-rc.1_1`, `1.0.0-rc.1_2` — as a new `work/release/<full-version>_<N>` branch and worktree at the fetched target SHA. Never re-number the release (`1.0.0-rc.2`) merely because an attempt failed; the prerelease number advances only for a new published release version. The immutable candidate attempt counter (`candidate/vX.Y.Z-rc.N/aNNN`) is independent of the task-name suffix.
 
 ### Periodic main/release convergence
 
