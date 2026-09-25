@@ -443,7 +443,12 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
     if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int64_t i = DECODE_INT(idx);
+    /* Freestanding extern ABI: scalar args are RAW i64 (see
+     * rt_byte_array_new_len; Blocker-4 cap-decode fix; x86_64 sibling uses
+     * `(int64_t)idx`). DECODE_INT here shifted raw idx >> 3, so every read
+     * below index 8 returned s[0] (run-20260925_181125 mt-probe4:
+     * str_char_at("/CLANG.ELF", 1..7) -> '/', 8..9 -> 'C'). */
+    int64_t i = (int64_t)idx;
     if (!s || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
     /* Canonical ABI (runtime_native.c:rt_string_char_at) returns a 1-char
      * RuntimeString. Returning ENCODE_INT(byte) here instead breaks every
@@ -870,7 +875,8 @@ RuntimeValue rt_string_char_code_at(RuntimeValue value, RuntimeValue index_value
     HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
     if (!h || h->type != HEAP_STRING) return ENCODE_INT(-1);
     RuntimeString *s = (RuntimeString *)h;
-    int64_t index = DECODE_INT(index_value);
+    /* Raw-i64 arg per the freestanding extern ABI (see rt_string_char_at). */
+    int64_t index = (int64_t)index_value;
     if (index < 0) index = (int64_t)s->len + index;
     if (index < 0 || (uint32_t)index >= s->len) return ENCODE_INT(-1);
     return ENCODE_INT((int64_t)(uint8_t)s->data[index]);
