@@ -433,10 +433,16 @@ RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    /* Return RAW (untagged): compiled callers use the result as an integer
+     * value (e.g. the relpath loop's rt_string_new(data, rt_string_len(ch))
+     * rebuild), and the lane ABI does not unbox len results. ENCODE_INT here
+     * turned len 1 into 8 — every char MountTable.resolve appended became an
+     * 8-byte string (run-20260925_181759: rel=C\0*7 L\0*7 ... rlen=72). The
+     * x86_64 sibling returns raw for the same reason. */
+    if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return ENCODE_INT(0);
-    return ENCODE_INT(s->len);
+    if (!s) return 0;
+    return (RuntimeValue)s->len;
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
