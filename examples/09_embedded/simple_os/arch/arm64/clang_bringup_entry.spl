@@ -14,8 +14,15 @@
 extern fn serial_println(msg: text)
 extern fn rt_qemu_exit_success()
 extern fn rt_arm64_harden_canary_value() -> i64
+# Aggregator emitted by the native linker's generate_init_caller; every
+# `__module_init_*` body runs exactly once through it. The x86_64 crt0 and the
+# rv64 boot/entries call this before kernel code; the arm64 crt0/_c_start does
+# NOT, so without this call every dynamic module global (the VFS mount-table
+# and include-tree mutex handles, the canonical MountTable option, ...) keeps
+# its BSS zero value and vfs_state_mount fails closed before any device I/O.
+extern fn __simple_call_module_inits()
 
-use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_vfs_boot_init}
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_vfs_boot_init_mounted_v1}
 use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_ring3}
 use os.kernel.boot.mmio.{mmio_disable_test_mode}
 use os.kernel.log.klog_api.{log_init_serial, LOG_TRACE}
@@ -27,6 +34,9 @@ fn _rung(label: text, path: text, argv: [text]) -> i64:
     rc
 
 fn spl_start():
+    # Module dynamic globals must be live before log_init_serial or the VFS
+    # init reads them (mutex handles, MountTable, klog state).
+    __simple_call_module_inits()
     serial_println("")
     serial_println("=== SimpleOS ARM64 in-guest clang bring-up ===")
     serial_println("[harden] canary arch=aarch64 value={rt_arm64_harden_canary_value()}")
@@ -34,7 +44,7 @@ fn spl_start():
     # without this the failure evidence above vfs:fail is silently gated off.
     log_init_serial(LOG_TRACE)
 
-    if not arm_fs_exec_vfs_boot_init():
+    if not arm_fs_exec_vfs_boot_init_mounted_v1():
         serial_println("[clang-bringup] vfs:fail")
         serial_println("CLANG_IN_GUEST_ARM64_VFS_FAIL")
         rt_qemu_exit_success()

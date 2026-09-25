@@ -159,10 +159,49 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
 void rt_print_value(RuntimeValue val);
 void *calloc(size_t n, size_t sz);
 
-static char   _heap[160 * 1024 * 1024] __attribute__((aligned(16)));
+/* 512 MiB: the full entry-closure module-init set allocates ~168 MiB of
+ * runtime arrays/strings at __simple_call_module_inits time (the x86_64 and
+ * rv64 lanes always ran these inits; the arm64 CRT only started calling them
+ * for the clang-bringup lane), and the mounted-namespace payload read for the
+ * R3 clang image needs another ~115 MiB on top. 160 MiB exhausted before
+ * spl_start finished (run-20260925_130440: "[PANIC] heap exhausted
+ * requested=131088 used=167709904 total=167772160"). */
+static char   _heap[512 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
-static void *_heap_alloc(size_t sz)
+/* Boot-time heap allocation profile (bring-up instrumentation): one line per
+ * allocation >= 64 KiB (size + wrapper-level return address) and one sampled
+ * line per 8192 allocations of any size. The lr values resolve with
+ * `aarch64-linux-gnu-addr2line -f -e build/os/simpleos_arm64_clang_bringup.elf
+ * <lr...>` to the exact allocating init body — added to pin the module-init
+ * set's ~512 MiB allocation demand that OOMs the freestanding heap before
+ * spl_start's banner (see doc/08_tracking/aarch64_in_guest_clang_compile_
+ * lane_status_2026-09-25.md, Blocker 4). */
+static uint64_t g_heap_alloc_count;
+static void _heap_alloc_profile(size_t sz, size_t used_after, uintptr_t lr)
+{
+    static size_t next_milestone = 64u * 1024u * 1024u;
+    g_heap_alloc_count++;
+    if (sz >= 65536u || (g_heap_alloc_count & 0x1FFFu) == 0) {
+        serial_puts("[heap] alloc bytes=");
+        serial_put_dec((int64_t)sz);
+        serial_puts(" used_after=");
+        serial_put_dec((int64_t)used_after);
+        serial_puts(" n=");
+        serial_put_dec((int64_t)g_heap_alloc_count);
+        serial_puts(" lr=0x");
+        serial_puthex((uint64_t)lr);
+        serial_puts("\r\n");
+    }
+    if (used_after >= next_milestone) {
+        serial_puts("[heap] consumed ");
+        serial_put_dec((int64_t)(next_milestone / (1024u * 1024u)));
+        serial_puts(" MiB\r\n");
+        next_milestone += 64u * 1024u * 1024u;
+    }
+}
+
+static void *_heap_alloc_lr(size_t sz, uintptr_t lr)
 {
     sz = (sz + 15) & ~(size_t)15;
     if (_heap_off + sz > sizeof(_heap)) {
@@ -177,7 +216,13 @@ static void *_heap_alloc(size_t sz)
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
+    _heap_alloc_profile(sz, _heap_off, lr);
     return p;
+}
+
+static void *_heap_alloc(size_t sz)
+{
+    return _heap_alloc_lr(sz, (uintptr_t)__builtin_return_address(0));
 }
 
 static int arm64_heap_contains(const void *p, size_t min_size)
@@ -190,7 +235,7 @@ static int arm64_heap_contains(const void *p, size_t min_size)
 
 void *malloc(size_t sz)
 {
-    return _heap_alloc(sz);
+    return _heap_alloc_lr(sz, (uintptr_t)__builtin_return_address(0));
 }
 
 void free(void *p)
@@ -200,7 +245,7 @@ void free(void *p)
 
 void *realloc(void *p, size_t sz)
 {
-    void *n = malloc(sz);
+    void *n = _heap_alloc_lr(sz, (uintptr_t)__builtin_return_address(0));
     if (p && n) __builtin_memcpy(n, p, sz);
     return n;
 }
@@ -208,7 +253,7 @@ void *realloc(void *p, size_t sz)
 void *calloc(size_t n, size_t sz)
 {
     size_t total = n * sz;
-    void *p = malloc(total);
+    void *p = _heap_alloc_lr(total, (uintptr_t)__builtin_return_address(0));
     if (p) __builtin_memset(p, 0, total);
     return p;
 }
@@ -1353,7 +1398,7 @@ void _c_start(void)
 
     serial_puts("SimpleOS ARM64 boot\r\n");
     serial_puts("[BOOT] PL011 UART initialized at 0x09000000\r\n");
-    serial_puts("[BOOT] Heap: 160 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 512 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit\r\n");
 
     _pci_scan();
@@ -1761,6 +1806,13 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
         uint32_t old_cap = a->cap;
         uint32_t new_cap = old_cap ? old_cap * 2 : 64;
         size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
+        if (new_size >= 256u * 1024u) {
+            serial_puts("[heap] push-grow new_bytes=");
+            serial_put_dec((int64_t)new_size);
+            serial_puts(" lr=0x");
+            serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
+            serial_puts("\r\n");
+        }
         RuntimeArray *grown = (RuntimeArray *)realloc(a, new_size);
         if (!grown) return ENCODE_PTR(a);
         grown->hdr.size = (uint32_t)new_size;
@@ -1777,6 +1829,15 @@ RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
     if (cap <= 0) cap = 1;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    if (alloc_size >= 256u * 1024u) {
+        serial_puts("[heap] new_with_cap cap=");
+        serial_put_dec((int64_t)cap);
+        serial_puts(" bytes=");
+        serial_put_dec((int64_t)alloc_size);
+        serial_puts(" lr=0x");
+        serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
+        serial_puts("\r\n");
+    }
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
@@ -5313,6 +5374,15 @@ RuntimeValue rt_byte_array_new_len(RuntimeValue len)
     if (len < 0 || len > 0x1000000) return NIL_VALUE;
     size_t count = (size_t)len;
     size_t alloc_size = sizeof(RuntimeArray) + count * sizeof(RuntimeValue);
+    if (alloc_size >= 256u * 1024u) {
+        serial_puts("[heap] byte_array_new_len len=");
+        serial_put_dec((int64_t)count);
+        serial_puts(" bytes=");
+        serial_put_dec((int64_t)alloc_size);
+        serial_puts(" lr=0x");
+        serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
+        serial_puts("\r\n");
+    }
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;

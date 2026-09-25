@@ -143,3 +143,142 @@ the one that mattered here).
 
 - Guest clang/lld: `/home/yoon/llvm-project-simpleos/build-os-llvm/cross-aarch64-unknown-simpleos/bin/`
 - Sysroot: `/home/yoon/llvm-project-simpleos/build-os-llvm/sysroot-aarch64/`
+
+---
+
+# 2026-09-25 (pm) session — Blocker 2 confirmed resolved; Blocker 3 (MountTable 221/0xdd) root-caused + fixed; Blocker 4 (module-init memory) exposed
+
+Boot cycles this session: 3 (run-20260925_130440, _132145, _134622). Kernel rebuilds: 3.
+
+## Blocker 2 status: RESOLVED (compiler lane)
+
+The 12:22 run already showed `simple_len=512` on trait-path reads — the
+seed array-ABI fix landed before this session. No further action.
+
+## Blocker 3 (RESOLVED this session): `[vfs-init] canonical MountTable mount failed` / trace 221 / `0xdd`
+
+**Decoding first:** `[arm-fs-trace] 221 0xdd` is NOT error 221/0xdd. The
+printer (`baremetal_stubs.c arm_fs_exec_trace`) emits `{id} 0x{id:x}` — 221
+is the trace-id at the `vfs_state_mount` failure branch
+(`src/os/services/vfs/arm_fs_exec_vfs.spl`), and 0xdd is just 221 in hex.
+The FsError itself was never printed (that site logs no `err=`; the 219
+site does) — added `err={_arm_fs_error_label(...)}` so any recurrence names
+the variant.
+
+**Root cause (no device I/O before the failure):** in the full serial of
+run-20260925_122232, exactly ONE `[virtio-blk] owned read lba=0` sits between
+`[boot-fs-mount] FAT32 BPB confirmed...` and trace 221 — that read is the
+line-257 `execute_driver.mount()` (first `Fat32Core.mount`). `vfs_state_mount`
+→ `MountTable.mount` would have issued a SECOND `lba=0` read via
+`_driver_mount`; none appears, so the failure is in `vfs_state_mount`'s
+preamble:
+- `_mount_affects_include_v1("/")` → true →
+  `vfs_include_mutation_begin_v1("/usr/include")` → `_lock_v1()` →
+  `_include_tree_mutex_v1 > 0` is FALSE → `Err("include-tree-serialization-unavailable")`
+  → `Err(FsError.Permission)`; or the mount-table lock fails the same way.
+- Both mutex handles are module-level CALL initializers:
+  `val g_mount_table_mutex_v1 = mutex_raw_create()` (vfs_boot_state.spl:86) and
+  `val _include_tree_mutex_v1 = mutex_raw_create` (vfs_immutable_include_tree_state_v1.spl:19).
+
+**Why they are 0:** the x86_64 crt0.s and the rv64 boot/entries call
+`__simple_call_module_inits()` before kernel code; the arm64 crt0.S /
+_c_start NEVER does. The seed's freestanding link generates the init caller
+(`linker.rs:2425 generate_init_caller`) but nothing references it on arm64,
+so `--gc-sections` dropped it AND every `__module_init_*` body — the pre-fix
+kernel ELF contained ZERO `__module_init` symbols (verified with nm). The C
+mutex stubs themselves are fine (`spl_mutex_create` returns ENCODE_INT(1),
+always-succeed lock/unlock, added Blocker-1).
+
+**Fix (committed):**
+1. `examples/09_embedded/simple_os/arch/arm64/clang_bringup_entry.spl` —
+   `extern fn __simple_call_module_inits()` called as the FIRST statement of
+   `spl_start()` (the rv64-gui-entry idiom; the symbol is a known
+   compiler-provided runtime symbol in the seed's stub exemption list).
+   Post-fix kernel ELF: `__simple_call_module_inits` (T) + 169
+   `__module_init_*` bodies retained, 169 `bl` calls in the aggregator
+   (verified with nm/objdump).
+2. `src/os/services/vfs/arm_fs_exec_vfs.spl` — extracted
+   `_arm_fs_exec_vfs_mount_root_v1()` (virtio init → BPB probe →
+   `boot_fs_mount_fat32_from_device` → FsFat32Driver mount → canonical
+   `vfs_state_mount("/")` → readiness + `g_arm_blk`); kept
+   `arm_fs_exec_vfs_boot_init()` = mount + the existing
+   /SYS/APPS/HELLOSMF.SMF preload/schedule/probe for the classic lanes; added
+   `arm_fs_exec_vfs_boot_init_mounted_v1()` (mount-only) because the clang
+   image is root-only 8.3 (`fsexec_mkimg_clang_arm64.spl` stages CRT0.O /
+   SIMPLEOS.LD / LIBC.A / HELLO.C / CLANG.ELF / LLD.ELF only) and the hello
+   probe can never pass there.
+3. Bringup entry now calls `arm_fs_exec_vfs_boot_init_mounted_v1()`.
+
+**Verification so far (3 boots):** boot 1 (160 MiB heap): the failure moved
+PAST the mutex/lock/include-ticket code into module-init ALLOCATION — i.e.
+the include-tree lock, both mutex creates, and the dynamic-global
+assignments now execute; the heap died inside an alphabetically-early init
+(pmm's init never ran). That is the expected post-fix signature: the mount
+code itself is no longer the blocker.
+
+## Blocker 4 (NEW, current): module-init set allocates ≥512 MiB — freestanding heap OOM before `spl_start` banner
+
+Evidence (all runs die before the bring-up banner prints):
+- 160 MiB heap: `[PANIC] heap exhausted requested=131088 used=167709904 total=167772160`
+- 512 MiB heap: `[PANIC] heap exhausted requested=131088 used=536853712 total=536870912`
+- Host probe (same import closure, self-hosted aarch64 binary):
+  `use os.services.vfs.arm_fs_exec_vfs` peak RSS 678 MB vs 36 MB trivial
+  baseline. `os.services.vfs.vfs_boot_state` alone 647 MB;
+  `os.kernel.scheduler.scheduler_types` 423 MB; `netstack_init` 456 MB
+  (host numbers include compile/JIT; the guest numbers are pure
+  runtime-array allocation — every allocation <1 MiB, deterministic
+  sequence, identical failing request 131088 both runs).
+- The x86_64/rv64 lanes never hit this: hosted heaps are unbounded and the
+  rv64 heap is half the post-image remainder of a 510 MiB region with a
+  much smaller resident closure. The arm64 lane never ran inits at all
+  before, so this demand was latent.
+
+Supporting changes committed with the diagnosis:
+- `fs_exec_linker.ld` RAM 254M → 768M (0x40200000+768M = 0x70200000, well
+  inside the 2G guest); required for any heap >~15 MiB growth.
+- `baremetal_stubs.c` C heap 160 MiB → 512 MiB + `[heap]` allocation
+  profiling (one line per alloc ≥64 KiB with wrapper-level lr, one sampled
+  line per 8192 allocs, 64 MiB milestones; push-grow/new_with_cap/
+  byte_array_new_len print at ≥256 KiB with the INIT-BODY lr). Next boot
+  resolves every lr via `aarch64-linux-gnu-addr2line -f -e
+  build/os/simpleos_arm64_clang_bringup.elf <lr...>`.
+
+### Exact next actions (owner: this lane, ~1 boot to name, then fix + verify)
+1. `REBUILD_KERNEL=1 ACCEL=tcg sh scripts/qemu/check_simpleos_arm64_clang_compile.shs`
+   — the `[heap]` trace now names the top allocator init bodies directly.
+2. Fix whichever module(s) dominate: candidates are large eager global
+   tables pulled in by the shared VFS/scheduler/netstack imports. Fix shapes:
+   (a) make the global lazy (init on first use), (b) shrink the fixed
+   table, or (c) narrow the arm64 entry closure so unused subsystems
+   (dbfs/nvfs/sctp/arch-siblings) are not imported. If total demand after
+   the fix is ≤~300 MiB, the 512 MiB heap + 768M linker region already
+   committed has headroom for the R3 payload read (115 MiB) too.
+3. THEN the rungs: R3 will attempt `/CLANG.ELF` spawn. Known further walls,
+   documented for scope control:
+   - `fs_exec_prepare_spawn`/`fs_exec_spawn_as` fail closed with -13
+     ("auth-required") by design on HEAD; `arm64_fs_exec_spawn_ring3`
+     routes through it. The lane needs either the authenticated loader
+     pipeline (registry/token/`fs_exec_adopt_authenticated_v1`, cf.
+     arm32/authenticated fixtures) or a lane-local real prepare
+     (`build_user_process_image_unchecked` +
+     `scheduler_create_bootstrap_user_task_pid`, both present at HEAD;
+     test/01_unit/os/kernel/loader/fs_exec_terminal_status_v1_spec.spl is
+     RED at HEAD and pins the exact target body shape for ring3).
+   - 115 MiB clang payload vs loader memory: `rt_byte_array_new_len` caps
+     at 16M elements, `_owned_bytes` is a per-byte Simple copy, and the
+     arm64 user-AS stage arena is `ARM64_UAS_REGION_SIZE = 2 MiB`
+     (`rt_arm_stage_elf64_load_image` stages at phys_root+1 MiB) — all
+     three need work (streaming/C-side copies, arena resize + base move;
+     regions currently overlap the grown kernel image at 0x48000000) before
+     R3-R5 can pass. `test/01_unit/os/kernel/loader/fs_exec_terminal_status_v1_spec.spl`
+     and `arm64_user_exit_return_contract_spec.spl` encode the expected
+     spawn/reap contracts.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | unchanged, all 3 runs |
+| R2 guest boots | PARTIAL | crt0/PCI/virtio/BPB/boot-fs-mount all print; boot now dies in module-init heap OOM (Blocker 4) |
+| R3-R5 | BLOCKED | Blocker 4 (init memory) → then the -13 spawn seam + 115MB payload walls above |
+

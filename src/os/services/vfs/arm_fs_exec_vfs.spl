@@ -154,6 +154,24 @@ fn _arm_fs_error_is_not_found(err: FsError) -> bool:
         case FsError.NotFound: true
         case _: false
 
+fn _arm_fs_error_label(err: FsError) -> text:
+    match err:
+        case FsError.Unsupported: "unsupported"
+        case FsError.Transient(_): "transient"
+        case FsError.Corrupt: "corrupt"
+        case FsError.NoSpace: "nospace"
+        case FsError.Permission: "permission"
+        case FsError.NotFound: "notfound"
+        case FsError.AlreadyExists: "alreadyexists"
+        case FsError.Busy: "busy"
+        case FsError.IoError(_): "ioerror"
+        case FsError.Interrupted: "interrupted"
+        case FsError.TooLarge: "toolarge"
+        case FsError.ReadOnly: "readonly"
+        case FsError.InvalidArg: "invalidarg"
+        case FsError.StaleHandle: "stalehandle"
+        case FsError.PathTraversal: "pathtraversal"
+
 fn _arm_vfs_read_mounted_regular_file_bounded_v1(
     path: text, max_bytes: u64
 ) -> Result<ArmFsExecRegularFileReadV1, FsError>:
@@ -225,7 +243,12 @@ pub fn arm_fs_exec_read_mounted_regular_file_bounded_v1(
         return Err(FsError.TooLarge)
     _arm_vfs_read_mounted_regular_file_bounded_v1(path, max_bytes)
 
-pub fn arm_fs_exec_vfs_boot_init() -> bool:
+# Mount VirtIO-BLK, publish the kernel FAT32, and register the canonical
+# MountTable root — everything before the hello_world.smf preload. Shared by
+# the classic fs-exec boot init (which then preloads + schedules the hello
+# image) and the aarch64 clang-bringup lane, whose staged FAT32 image is
+# root-only 8.3 and can never carry /SYS/APPS/HELLOSMF.SMF.
+fn _arm_fs_exec_vfs_mount_root_v1() -> bool:
     _sffi_arm_fs_exec_trace(211)
     g_arm_mount_table_ready = false
     vfs_state_reset_rootfs()
@@ -263,15 +286,43 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
         "/", DriverInstance.Fat32(execute_driver), MountOptions.default())
     if canonical_mount.is_err():
         _sffi_arm_fs_exec_trace(221)
-        _arm_vfs_log("[vfs-init] canonical MountTable mount failed")
+        _arm_vfs_log("[vfs-init] canonical MountTable mount failed err={_arm_fs_error_label(canonical_mount.unwrap_err())}")
         return false
     # Publish readiness only after the real root driver is in the canonical
     # table. This lets bounded production media readers use the same generic
     # VFS byte path as x86_64 and RV64 instead of a second ARM-only parser.
     vfs_state_mark_rootfs_ready()
     g_arm_mount_table_ready = true
+    g_arm_hello_smf_bytes = []
+    g_arm_version_bytes = []
+    g_arm_blk = Some(dev)
+    g_arm_vfs_initialized = true
     _arm_vfs_log("[vfs-init] kernel FAT32 publication ready")
+    true
+
+pub fn arm_fs_exec_vfs_boot_init_mounted_v1() -> bool:
+    """Mount-only VFS init for the aarch64 clang-bringup lane.
+
+    The clang FAT32 image (scripts/os/fsexec_mkimg_clang_arm64.spl) is
+    root-only 8.3 (CRT0.O/CLANG.ELF/LLD.ELF/HELLO.C/...), so the classic
+    boot init's /SYS/APPS/HELLOSMF.SMF preload probe can never pass there.
+    This entry publishes the same canonical MountTable root and stops;
+    payloads are then resolved per-rung through the mounted namespace.
+    """
+    if not _arm_fs_exec_vfs_mount_root_v1():
+        return false
     _sffi_arm_fs_exec_trace(214)
+    _arm_vfs_log("[vfs-init] VFS ready (VirtIO-BLK FAT32, mounted namespace)")
+    true
+
+pub fn arm_fs_exec_vfs_boot_init() -> bool:
+    if not _arm_fs_exec_vfs_mount_root_v1():
+        return false
+    _sffi_arm_fs_exec_trace(214)
+    if not g_arm_blk.?:
+        _arm_vfs_log("[vfs-init] mount published no device")
+        return false
+    val dev = g_arm_blk.unwrap()
     val hello_smf_bytes = _arm_fat32_read_path_from_dev(dev, "/sys/apps/hello_world.smf")
     val hello_smf_len = _sffi_arm_array_len_u32(hello_smf_bytes)
     if hello_smf_len <= 4:
@@ -280,7 +331,6 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
         return false
     g_arm_hello_smf_len = hello_smf_len
     g_arm_hello_smf_bytes = hello_smf_bytes
-    g_arm_version_bytes = []
     g_arm_blk = Some(dev)
     g_arm_vfs_initialized = true
     if not _arm_schedule_loaded_hello_smf(hello_smf_bytes):
