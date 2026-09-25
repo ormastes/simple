@@ -1696,6 +1696,22 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U8))
         {
+            // FAM freestanding push ABI: capture the possibly relocated
+            // header and rebind it (see the general rt_array_push site below).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_typed_bytes_u8_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // The push helper returns bool (success), NOT the array. The value of
             // the `arr.push(x)` expression must be the (in-place mutated) array
             // itself, so `arr = arr.push(x)` keeps a valid array pointer instead
@@ -1718,6 +1734,22 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U32))
         {
+            // FAM freestanding push ABI: capture the possibly relocated
+            // header and rebind it (see the general rt_array_push site below).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_typed_words_u32_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // Push returns bool — yield the array as the expression value (see above).
             return self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();
@@ -1737,6 +1769,22 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U64))
         {
+            // FAM freestanding push ABI: capture the possibly relocated
+            // header and rebind it (see the general rt_array_push site below).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_typed_words_u64_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // Push returns bool — yield the array as the expression value (see above).
             return self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();
@@ -1902,6 +1950,28 @@ impl<'a> MirLowerer<'a> {
         }
 
         if is_array_append_method && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
+            // FAM freestanding push ABI (aarch64/arm32/x86_32 baremetal): the
+            // call returns the possibly realloc-moved array HEADER, and the
+            // bump heap always moves at grow. That return IS the post-push
+            // array value: yield it (so `arr = arr.push(x)` stores the new
+            // header) and store it back into the receiver's place (so a bare
+            // `arr.push(x)` statement in a loop stops re-pushing the stale
+            // pre-grow block — the 16,400-byte-per-push heap leak of
+            // doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
+            if self.array_push_returns_header {
+                let pushed = self.with_func(|func, current_block| {
+                    let pushed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(pushed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_array_push"),
+                        args: vec![receiver_reg, arg_regs[0]],
+                    });
+                    pushed
+                })?;
+                self.store_array_push_receiver_back(receiver, pushed)?;
+                return Ok(pushed);
+            }
             // rt_array_push returns bool (success), NOT the array. The value of
             // the `arr.push(x)` expression must be the (in-place mutated) array
             // itself, so `arr = arr.push(x)` keeps a valid array pointer instead

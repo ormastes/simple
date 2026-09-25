@@ -764,8 +764,9 @@ impl LlvmBackend {
         let emit_zero_fill_loop = |push_fn: inkwell::values::FunctionValue<'static>,
                                    array: inkwell::values::IntValue<'static>,
                                    count: inkwell::values::IntValue<'static>,
-                                   tag: &str|
-         -> Result<(), CompileError> {
+                                   tag: &str,
+                                   thread_push_result: bool|
+         -> Result<inkwell::values::IntValue<'static>, CompileError> {
             let preheader = builder
                 .get_insert_block()
                 .ok_or_else(|| CompileError::Codegen("zero-fill loop: no insert block".to_string()))?;
@@ -779,6 +780,18 @@ impl LlvmBackend {
             let phi = builder
                 .build_phi(i64_type, &format!("{tag}_i"))
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill phi", &e))?;
+            // FAM freestanding push ABI: carry the possibly realloc-moved
+            // header around the loop as a second phi and return it as the
+            // final array handle.
+            let arr_phi = if thread_push_result {
+                let p = builder
+                    .build_phi(i64_type, &format!("{tag}_arr"))
+                    .map_err(|e| crate::error::factory::llvm_build_failed("zfill arr phi", &e))?;
+                p.add_incoming(&[(&array, preheader)]);
+                Some(p)
+            } else {
+                None
+            };
             let zero_idx = i64_type.const_int(0, false);
             phi.add_incoming(&[(&zero_idx, preheader)]);
             let idx = phi.as_basic_value().into_int_value();
@@ -790,7 +803,13 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill condbr", &e))?;
             builder.position_at_end(body_bb);
             let zero_elem = i64_type.const_int(0, false);
-            let _ = call_i64(push_fn, &[array, zero_elem], tag)?;
+            let push_target = arr_phi
+                .map(|p| p.as_basic_value().into_int_value())
+                .unwrap_or(array);
+            let pushed = call_i64(push_fn, &[push_target, zero_elem], tag)?;
+            if let Some(p) = arr_phi {
+                p.add_incoming(&[(&pushed, body_bb)]);
+            }
             let next = builder
                 .build_int_add(idx, i64_type.const_int(1, false), &format!("{tag}_next"))
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill add", &e))?;
@@ -799,7 +818,9 @@ impl LlvmBackend {
                 .build_unconditional_branch(cond_bb)
                 .map_err(|e| crate::error::factory::llvm_build_failed("zfill br back", &e))?;
             builder.position_at_end(exit_bb);
-            Ok(())
+            Ok(arr_phi
+                .map(|p| p.as_basic_value().into_int_value())
+                .unwrap_or(array))
         };
 
         // --- strings ---
@@ -830,29 +851,39 @@ impl LlvmBackend {
                 .map(|s| s.len())
                 .unwrap_or(init.values.len());
             let capacity = i64_type.const_int(element_count as u64, false);
+            // FAM freestanding push ABI: the push returns the possibly
+            // realloc-moved header — thread it through every fill so the
+            // global store publishes the post-grow handle.
+            let fam_push = self.target.array_push_returns_header();
             let array_rv = if let Some(strings) = &init.string_values {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
                 let string_new = get_rt("rt_string_new", 2);
-                let array = call_i64(array_new, &[capacity], "init_arr")?;
+                let mut array = call_i64(array_new, &[capacity], "init_arr")?;
                 for string_val in strings {
                     let bytes = string_val.as_bytes();
                     let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                     let len = i64_type.const_int(bytes.len() as u64, false);
                     let s = call_i64(string_new, &[ptr, len], "init_arr_str")?;
-                    let _ = call_i64(array_push, &[array, s], "init_arr_push")?;
+                    let pushed = call_i64(array_push, &[array, s], "init_arr_push")?;
+                    if fam_push {
+                        array = pushed;
+                    }
                 }
                 array
             } else if init.element_type == crate::hir::TypeId::U8 {
                 let byte_array_new = get_rt("rt_byte_array_new", 1);
                 let byte_push = get_rt("rt_typed_bytes_u8_push", 2);
-                let array = call_i64(byte_array_new, &[capacity], "init_barr")?;
+                let mut array = call_i64(byte_array_new, &[capacity], "init_barr")?;
                 if all_zero {
-                    emit_zero_fill_loop(byte_push, array, capacity, "init_barr_zfill")?;
+                    array = emit_zero_fill_loop(byte_push, array, capacity, "init_barr_zfill", fam_push)?;
                 } else {
                     for value in &init.values {
                         let byte = i64_type.const_int((*value & 0xff) as u64, false);
-                        let _ = call_i64(byte_push, &[array, byte], "init_barr_push")?;
+                        let pushed = call_i64(byte_push, &[array, byte], "init_barr_push")?;
+                        if fam_push {
+                            array = pushed;
+                        }
                     }
                 }
                 array
@@ -860,20 +891,23 @@ impl LlvmBackend {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
                 let value_bool = get_rt("rt_value_bool", 1);
-                let array = call_i64(array_new, &[capacity], "init_bool_arr")?;
+                let mut array = call_i64(array_new, &[capacity], "init_bool_arr")?;
                 for value in &init.values {
                     let raw = i64_type.const_int(u64::from(*value != 0), false);
                     let boxed = call_i64(value_bool, &[raw], "init_bool")?;
-                    let _ = call_i64(array_push, &[array, boxed], "init_bool_arr_push")?;
+                    let pushed = call_i64(array_push, &[array, boxed], "init_bool_arr_push")?;
+                    if fam_push {
+                        array = pushed;
+                    }
                 }
                 array
             } else {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
-                let array = call_i64(array_new, &[capacity], "init_iarr")?;
+                let mut array = call_i64(array_new, &[capacity], "init_iarr")?;
                 if all_zero {
                     // Boxed zero is `0 << 3` == 0, so pushing raw 0 is identical.
-                    emit_zero_fill_loop(array_push, array, capacity, "init_iarr_zfill")?;
+                    array = emit_zero_fill_loop(array_push, array, capacity, "init_iarr_zfill", fam_push)?;
                 } else {
                     for value in &init.values {
                         // Box small ints: raw << 3 (matches cranelift compile path).
@@ -882,7 +916,10 @@ impl LlvmBackend {
                         let boxed = builder
                             .build_left_shift(raw, shift, "box")
                             .map_err(|e| crate::error::factory::llvm_build_failed("init box shl", &e))?;
-                        let _ = call_i64(array_push, &[array, boxed], "init_iarr_push")?;
+                        let pushed = call_i64(array_push, &[array, boxed], "init_iarr_push")?;
+                        if fam_push {
+                            array = pushed;
+                        }
                     }
                 }
                 array

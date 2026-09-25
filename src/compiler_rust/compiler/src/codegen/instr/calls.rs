@@ -1939,7 +1939,14 @@ fn compile_inline_typed_words_push<M: Module>(
     let capacity = array_cap_i64(builder, ptr_bits, ctx.fam_arrays);
     let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
     let returns_value = dest.is_some();
-    let true_value = if returns_value {
+    // FAM freestanding push ABI: the push returns the possibly realloc-moved
+    // header, so `dest` receives the array VALUE (the in-capacity store never
+    // moves the header; the grow call returns the new one). Hosted keeps the
+    // bool-success ABI.
+    let result_type = if ctx.fam_arrays { types::I64 } else { types::I8 };
+    let store_result = if ctx.fam_arrays {
+        Some(array)
+    } else if returns_value {
         Some(builder.ins().iconst(types::I8, 1))
     } else {
         None
@@ -1949,7 +1956,7 @@ fn compile_inline_typed_words_push<M: Module>(
     let grow_block = builder.create_block();
     let done_block = builder.create_block();
     if returns_value {
-        builder.append_block_param(done_block, types::I8);
+        builder.append_block_param(done_block, result_type);
     }
     builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
 
@@ -1964,8 +1971,8 @@ fn compile_inline_typed_words_push<M: Module>(
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(len, 1);
     store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
-    if let Some(true_value) = true_value {
-        builder.ins().jump(done_block, &[true_value]);
+    if let Some(store_result) = store_result {
+        builder.ins().jump(done_block, &[store_result]);
     } else {
         builder.ins().jump(done_block, &[]);
     }
@@ -1980,7 +1987,7 @@ fn compile_inline_typed_words_push<M: Module>(
             .inst_results(call)
             .first()
             .copied()
-            .unwrap_or_else(|| true_value.expect("typed word push result constant"));
+            .unwrap_or_else(|| store_result.expect("typed word push result constant"));
         builder.ins().jump(done_block, &[result]);
     } else {
         builder.ins().jump(done_block, &[]);
@@ -2123,7 +2130,14 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     let capacity = array_cap_i64(builder, ptr_bits, ctx.fam_arrays);
     let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
     let returns_value = dest.is_some();
-    let true_value = if returns_value {
+    // FAM freestanding push ABI: the push returns the possibly realloc-moved
+    // header, so `dest` receives the array VALUE (the in-capacity store never
+    // moves the header; the grow call returns the new one). Hosted keeps the
+    // bool-success ABI.
+    let result_type = if ctx.fam_arrays { types::I64 } else { types::I8 };
+    let store_result = if ctx.fam_arrays {
+        Some(array)
+    } else if returns_value {
         Some(builder.ins().iconst(types::I8, 1))
     } else {
         None
@@ -2133,7 +2147,7 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     let grow_block = builder.create_block();
     let done_block = builder.create_block();
     if returns_value {
-        builder.append_block_param(done_block, types::I8);
+        builder.append_block_param(done_block, result_type);
     }
     builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
 
@@ -2163,8 +2177,8 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
         builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
         let next_len = builder.ins().iadd_imm(len, 1);
         store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
-        if let Some(true_value) = true_value {
-            builder.ins().jump(done_block, &[true_value]);
+        if let Some(store_result) = store_result {
+            builder.ins().jump(done_block, &[store_result]);
         } else {
             builder.ins().jump(done_block, &[]);
         }
@@ -2180,8 +2194,8 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(len, 1);
     store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
-    if let Some(true_value) = true_value {
-        builder.ins().jump(done_block, &[true_value]);
+    if let Some(store_result) = store_result {
+        builder.ins().jump(done_block, &[store_result]);
     } else {
         builder.ins().jump(done_block, &[]);
     }
@@ -2196,7 +2210,7 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
             .inst_results(call)
             .first()
             .copied()
-            .unwrap_or_else(|| true_value.expect("typed byte push result constant"));
+            .unwrap_or_else(|| store_result.expect("typed byte push result constant"));
         builder.ins().jump(done_block, &[result]);
     } else {
         builder.ins().jump(done_block, &[]);
@@ -2448,13 +2462,6 @@ fn coerce_vreg_to_i64<M: Module>(
 
 /// Get the return type for a runtime SFFI function.
 /// Returns None if the function is not found or has no return value.
-fn get_runtime_return_type(func_name: &str) -> Option<types::Type> {
-    RUNTIME_FUNCS
-        .iter()
-        .find(|spec| spec.name == func_name)
-        .and_then(|spec| spec.returns.first().copied())
-}
-
 /// Check if a function needs RuntimeValue tagging for certain argument positions.
 /// Currently disabled - tagging must be done at MIR level with type information.
 ///
@@ -3587,7 +3594,8 @@ pub fn compile_call<M: Module>(
                 // contracts where values like `u32 = 0xFFFFFFFF` must not
                 // sign-extend to `-1` when consumed as `i64`.
                 let dest_signed = super::core::vreg_is_signed(ctx, *d) == Some(true);
-                if let Some(ret_type) = get_runtime_return_type(sffi_name) {
+                if let Some(ret_type) = crate::codegen::runtime_sffi::fam_aware_return_type(ctx.fam_arrays, sffi_name)
+                {
                     if ret_type == types::I32 || ret_type == types::I8 {
                         result = if dest_signed {
                             builder.ins().sextend(types::I64, result)

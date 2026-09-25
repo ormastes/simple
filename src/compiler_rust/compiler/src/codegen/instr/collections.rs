@@ -91,9 +91,16 @@ pub(crate) fn compile_collection_lit<M: Module>(
             let idx = builder.ins().iconst(types::I64, i as i64);
             adapted_call(builder, add_ref, &[current_collection, idx, elem_val]);
         } else {
-            // rt_array_push returns bool (success), NOT a new array pointer.
-            // The array is mutated in-place. Do NOT update current_collection.
-            adapted_call(builder, add_ref, &[current_collection, elem_val]);
+            // Hosted ABI: rt_array_push returns bool (success), NOT a new
+            // array pointer — the array is mutated in-place, so
+            // current_collection stays. FAM freestanding ABI: the push
+            // returns the possibly realloc-moved header — thread it (the
+            // stale-receiver store of
+            // doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
+            let call = adapted_call(builder, add_ref, &[current_collection, elem_val]);
+            if ctx.fam_arrays {
+                current_collection = builder.inst_results(call)[0];
+            }
         }
     }
 

@@ -163,11 +163,87 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
 /// - Normal targets get Core + Alloc + Sys + Async
 /// - Ext tier (SIMD, GPU, Cranelift) is always included for now
 ///   (individual features are opt-in at the Simple source level)
-pub fn runtime_funcs_for_target(_target: &simple_common::target::Target) -> Vec<&'static RuntimeFuncSpec> {
+pub fn runtime_funcs_for_target(target: &simple_common::target::Target) -> Vec<&'static RuntimeFuncSpec> {
     // Declare all runtime functions as imports for every target.
     // Baremetal OS kernels (SimpleOS) provide shim implementations;
     // truly bare targets get linker errors for unresolved symbols.
-    RUNTIME_FUNCS.iter().collect()
+    if target.array_push_returns_header() {
+        // The FAM freestanding C runtime's push family returns the possibly
+        // realloc-moved array header (RuntimeValue), not a bool success flag
+        // (see Target::array_push_returns_header). Declare the import with the
+        // I64 return the runtime actually has, or a captured return would read
+        // a truncated bool as the array pointer.
+        RUNTIME_FUNCS
+            .iter()
+            .map(|spec| fam_push_spec_override(spec.name).unwrap_or(spec))
+            .collect()
+    } else {
+        RUNTIME_FUNCS.iter().collect()
+    }
+}
+
+/// FAM-layout freestanding variants of the push-family specs: same params,
+/// I64 return (the possibly relocated array header). See
+/// `runtime_funcs_for_target`.
+///
+/// Built as struct literals, NOT via the `RuntimeFuncSpec::new` call form: the
+/// runtime build script's signature scanner (`runtime_signature_scan.rs`)
+/// parses every such call in this file and rejects duplicate names — the
+/// hosted runtime must keep retaining the canonical I8-return spec.
+static FAM_PUSH_RETURN_SPECS: &[RuntimeFuncSpec] = &[
+    RuntimeFuncSpec {
+        name: "rt_array_push",
+        params: &[I64, I64],
+        returns: &[I64],
+    },
+    RuntimeFuncSpec {
+        name: "rt_typed_bytes_u8_push",
+        params: &[I64, I64],
+        returns: &[I64],
+    },
+    RuntimeFuncSpec {
+        name: "rt_typed_words_u32_push",
+        params: &[I64, I64],
+        returns: &[I64],
+    },
+    RuntimeFuncSpec {
+        name: "rt_typed_words_u64_push",
+        params: &[I64, I64],
+        returns: &[I64],
+    },
+];
+
+fn fam_push_spec_override(name: &str) -> Option<&'static RuntimeFuncSpec> {
+    FAM_PUSH_RETURN_SPECS.iter().find(|spec| spec.name == name)
+}
+
+/// Return-type lookup for codegen result-width handling, aware of the FAM
+/// freestanding push-return ABI: when `fam_arrays` is set, the push family
+/// returns I64 (the possibly relocated header), not I8.
+pub fn fam_aware_return_type(fam_arrays: bool, func_name: &str) -> Option<types::Type> {
+    if fam_arrays {
+        if let Some(spec) = fam_push_spec_override(func_name) {
+            return spec.returns.first().copied();
+        }
+    }
+    RUNTIME_FUNCS
+        .iter()
+        .find(|spec| spec.name == func_name)
+        .and_then(|spec| spec.returns.first().copied())
+}
+
+/// Look up the declared spec for a runtime symbol by exact name, adjusted for
+/// the target's push-return ABI (see `runtime_funcs_for_target`).
+pub fn spec_for_target(
+    target: &simple_common::target::Target,
+    name: &str,
+) -> Option<&'static RuntimeFuncSpec> {
+    if target.array_push_returns_header() {
+        if let Some(spec) = fam_push_spec_override(name) {
+            return Some(spec);
+        }
+    }
+    spec_for(name)
 }
 
 /// Look up the declared spec for a runtime symbol by exact name.

@@ -805,6 +805,27 @@ impl Target {
             )
     }
 
+    /// True when this target's freestanding C runtime implements
+    /// `rt_array_push` (and the typed `rt_typed_*_push` family) as
+    /// grow-by-`realloc` of the whole FAM block, RETURNING the possibly
+    /// relocated array header: `RuntimeValue rt_array_push(RuntimeValue arr,
+    /// RuntimeValue val)`. The canonical hosted ABI instead returns `bool`
+    /// and keeps the header in a stable allocation
+    /// (`runtime/src/value/collections.rs::rt_array_push_grow`).
+    ///
+    /// On a bump-allocator freestanding heap the realloc ALWAYS moves, so a
+    /// compiled push loop that discards the return keeps re-growing the stale
+    /// pre-grow block — a per-element leak that OOMs the heap
+    /// (doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
+    /// The compiler must therefore thread the post-grow return as the array
+    /// value at every push emission on these targets. Currently coincides
+    /// with the FAM-layout baremetal set (aarch64/arm32/x86_32
+    /// `baremetal_stubs.c`); kept as a separate predicate so a runtime
+    /// migration to stable headers flips only this bit.
+    pub const fn array_push_returns_header(&self) -> bool {
+        self.uses_fam_array_abi()
+    }
+
     /// Check if this is a WASM target.
     pub const fn is_wasm(&self) -> bool {
         matches!(self.arch, TargetArch::Wasm32 | TargetArch::Wasm64)
@@ -1133,6 +1154,23 @@ mod tests {
         assert!(!Target::new(TargetArch::Arm, TargetOS::Linux).uses_fam_array_abi());
         assert!(!Target::new(TargetArch::X86, TargetOS::Linux).uses_fam_array_abi());
         assert!(!Target::host().uses_fam_array_abi());
+    }
+
+    #[test]
+    fn test_array_push_returns_header() {
+        // The moving-header push ABI (rt_array_push returns the possibly
+        // realloc-moved FAM header) ships with the FAM-layout freestanding C
+        // runtimes: aarch64/arm32/x86_32 baremetal. Everything else keeps the
+        // canonical hosted bool-return, stable-header push ABI.
+        for os in [TargetOS::None, TargetOS::SimpleOS] {
+            assert!(Target::new(TargetArch::Aarch64, os).array_push_returns_header());
+            assert!(Target::new(TargetArch::Arm, os).array_push_returns_header());
+            assert!(Target::new(TargetArch::X86, os).array_push_returns_header());
+            assert!(!Target::new(TargetArch::Riscv64, os).array_push_returns_header());
+            assert!(!Target::new(TargetArch::X86_64, os).array_push_returns_header());
+        }
+        assert!(!Target::new(TargetArch::Aarch64, TargetOS::Linux).array_push_returns_header());
+        assert!(!Target::host().array_push_returns_header());
     }
 
     #[test]

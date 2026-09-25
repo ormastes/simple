@@ -41,20 +41,33 @@ impl LlvmBackend {
             .basic()
             .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
-        // Push each element via rt_array_push(array, element)
+        // Push each element via rt_array_push(array, element).
+        // FAM freestanding push ABI: the push returns the possibly
+        // realloc-moved header — declare the import i64-returning and thread
+        // the handle across pushes. Hosted keeps the bool-return, in-place ABI.
+        let fam_push_returns_header = self.target.array_push_returns_header();
         let array_push = module.get_function("rt_array_push").unwrap_or_else(|| {
-            let fn_type = self
-                .context_ref()
-                .bool_type()
-                .fn_type(&[i64_type.into(), i64_type.into()], false);
+            let fn_type = if fam_push_returns_header {
+                i64_type.fn_type(&[i64_type.into(), i64_type.into()], false)
+            } else {
+                self.context_ref()
+                    .bool_type()
+                    .fn_type(&[i64_type.into(), i64_type.into()], false)
+            };
             module.add_function("rt_array_push", fn_type, None)
         });
+        let mut collection = collection;
         for elem in elements.iter() {
             let elem_val = self.get_vreg(elem, vreg_map)?;
             let elem_i64 = self.coerce_value_to_type(elem_val, Some(i64_type.into()), builder)?;
-            builder
+            let push_call = builder
                 .build_call(array_push, &[collection.into(), elem_i64.into()], "")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_array_push", &e))?;
+            if fam_push_returns_header {
+                if let Some(new_handle) = push_call.try_as_basic_value().basic() {
+                    collection = new_handle.into_int_value();
+                }
+            }
         }
 
         vreg_map.insert(dest, collection);

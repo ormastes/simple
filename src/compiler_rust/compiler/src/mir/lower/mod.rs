@@ -69,15 +69,22 @@ pub fn lower_to_mir_with_mode_and_di(
 }
 
 /// Lower HIR to MIR with project-wide trait implementation metadata.
+///
+/// `array_push_returns_header` selects the target push-return ABI: pass
+/// `target.array_push_returns_header()` so push emissions capture the
+/// possibly realloc-moved header on FAM freestanding runtimes (false for
+/// every hosted/canonical-ABI target).
 pub fn lower_to_mir_with_global_trait_impls(
     hir: &HirModule,
     trait_impls: &std::collections::HashMap<String, Vec<String>>,
+    array_push_returns_header: bool,
 ) -> MirLowerResult<MirModule> {
     MirLowerer::new()
         .with_refined_types(&hir.refined_types)
         .with_type_registry(&hir.types)
         .with_trait_infos(&hir.trait_infos)
         .with_global_trait_impls(trait_impls)
+        .with_array_push_returns_header(array_push_returns_header)
         .lower_module(hir)
 }
 

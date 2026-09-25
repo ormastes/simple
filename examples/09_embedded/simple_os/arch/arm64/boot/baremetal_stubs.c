@@ -982,10 +982,13 @@ RuntimeValue rt_typed_words_u64_at(RuntimeValue arr, RuntimeValue idx)
     if (i < 0 || (uint32_t)i >= a->len) return ENCODE_INT(0);
     return a->items[i];
 }
-int8_t rt_typed_words_u64_push(RuntimeValue arr, int64_t val)
+/* FAM push-return ABI (Target::array_push_returns_header): the typed pushes
+ * return the possibly realloc-moved array header, exactly like rt_array_push,
+ * so compiled push loops can rebind the post-grow value. The canonical hosted
+ * runtime keeps the bool-success, stable-header ABI instead. */
+RuntimeValue rt_typed_words_u64_push(RuntimeValue arr, int64_t val)
 {
-    rt_array_push(arr, ENCODE_INT(val));
-    return 1;
+    return rt_array_push(arr, ENCODE_INT(val));
 }
 int8_t rt_typed_words_u64_set(RuntimeValue arr, int64_t idx, int64_t val)
 {
@@ -5112,14 +5115,16 @@ RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue v
 
 RuntimeValue rt_byte_array_new(RuntimeValue capacity) { g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0); return rt_array_new(capacity); }
 
+/* FAM push-return ABI: return the possibly realloc-moved array header (see
+ * rt_typed_words_u64_push above), not a bool success flag. */
 RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(((uint64_t)value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(((uint64_t)value) & 0xFF));
 }
 
 RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL));
 }
 
 RuntimeValue rt_simd_str_equal(RuntimeValue a, RuntimeValue b) { return rt_native_eq(a, b); }

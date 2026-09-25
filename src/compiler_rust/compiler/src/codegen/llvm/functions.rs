@@ -3211,10 +3211,12 @@ impl LlvmBackend {
                     }
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         all_args_vregs.iter().map(|_| i64_type.into()).collect();
+                    // FAM freestanding push ABI: rt_array_push returns the
+                    // possibly realloc-moved header (i64), not a bool.
+                    let fam_push_returns_header = self.target.array_push_returns_header();
                     let returns_bool = matches!(
                         rt_name,
-                        "rt_array_push"
-                            | "rt_array_clear"
+                        "rt_array_clear"
                             | "rt_array_reverse"
                             | "rt_array_sort"
                             | "rt_contains"
@@ -3223,7 +3225,7 @@ impl LlvmBackend {
                             | "rt_is_some"
                             | "rt_array_any"
                             | "rt_array_all"
-                    );
+                    ) || (rt_name == "rt_array_push" && !fam_push_returns_header);
                     let fn_type = if returns_bool {
                         self.context_ref().bool_type().fn_type(&param_types, false)
                     } else {

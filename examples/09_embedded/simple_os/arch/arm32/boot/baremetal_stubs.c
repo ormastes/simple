@@ -1853,13 +1853,17 @@ RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue v
 }
 
 RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capacity); }
+/* FAM push-return ABI (Target::array_push_returns_header): the typed pushes
+ * return the possibly realloc-moved array header, exactly like rt_array_push,
+ * so compiled push loops can rebind the post-grow value. The canonical hosted
+ * runtime keeps the bool-success, stable-header ABI instead. */
 RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(((uint32_t)value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(((uint32_t)value) & 0xFF));
 }
 RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(arm32_raw_or_encoded_int(value))) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(arm32_raw_or_encoded_int(value)));
 }
 RuntimeValue rt_typed_words_u32_at(RuntimeValue array, RuntimeValue index)
 {

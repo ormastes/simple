@@ -53,9 +53,11 @@ fn jit_array_fn(
     runtime_names: &[&str],
     build: impl FnOnce(&mut InstrContext<'_, JITModule>, &mut FunctionBuilder, VReg),
 ) -> (JITModule, extern "C" fn(i64) -> i64) {
-    extern "C" fn grow_fallback(_array: i64, _value: i64) -> u8 {
+    extern "C" fn grow_fallback(_array: i64, _value: i64) -> i64 {
         // Grow-path fallback for fast-path push tests: never invoked (the
-        // fixtures always have spare capacity), only linked.
+        // fixtures always have spare capacity), only linked. Returns the
+        // FAM-ABI shape (a header-sized word), matching the I64 return the
+        // push-family imports carry when fam_arrays is set.
         1
     }
     let isa_builder = cranelift_native::builder().expect("host ISA");
@@ -72,7 +74,14 @@ fn jit_array_fn(
         let mut sig = module.make_signature();
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I8));
+        // Mirror runtime_funcs_for_target: the FAM freestanding push family
+        // returns the possibly moved header (I64); everything else keeps the
+        // canonical bool (I8) return.
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(if fam_arrays {
+            types::I64
+        } else {
+            types::I8
+        }));
         let id = module
             .declare_function(rt, Linkage::Import, &sig)
             .expect("declare runtime import");
@@ -342,15 +351,236 @@ fn fam_typed_words_push_appends_slot_and_bumps_u32_len() {
             let v = fb.ins().iconst(types::I64, 0xDEAD);
             ctx.vreg_values.insert(value, v);
             assert!(compile_inline_typed_words_push(ctx, fb, &Some(dest), &[a, value], 4).expect("inline"));
-            let flag = ctx.vreg_values[&dest];
-            let widened = fb.ins().uextend(types::I64, flag);
-            ctx.vreg_values.insert(dest, widened);
         },
     );
-    assert_eq!(fam(arr.tagged_ptr), 1);
+    // FAM push-return ABI: dest is the array VALUE, not a bool success flag.
+    // The in-capacity store never moves the header, so the handle is unchanged.
+    assert_eq!(fam(arr.tagged_ptr), arr.tagged_ptr);
     // len bumped to 4 in the u32 field, cap untouched at 8.
     assert_eq!(arr.storage[1] & 0xFFFF_FFFF, 4);
     assert_eq!(arr.storage[1] >> 32, 8);
     // items[3] = ENCODE_INT(0xDEAD & 0xFFFFFFFF).
     assert_eq!(arr.storage[2 + 3], (0xDEADu64) << 3);
+}
+
+// ---------------------------------------------------------------------------
+// Freestanding-shaped push-grow regression (bump allocator ALWAYS moves).
+//
+// Evidence: doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md
+// — on the aarch64 guest, `alloc_zeroed_bytes(115209168)` push loop leaked one
+// 16,400-byte block per push from element 1025 on: the compiled loop kept
+// re-pushing the stale pre-grow array value because rt_array_push's return
+// (the relocated header) was discarded. The bump-allocator fixture below
+// reproduces that runtime shape exactly: realloc NEVER extends in place, so
+// every grow relocates the header, and the push returns the NEW header.
+// ---------------------------------------------------------------------------
+
+/// Moving bump-allocator FAM runtime mirroring
+/// examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c.
+/// GROWS/ALLOCS pin the exact allocation behavior: the stale-receiver defect
+/// re-grows the pre-grow block once PER PUSH instead of once per doubling.
+mod fam_bump {
+    use std::alloc::{alloc, Layout};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub static GROWS: AtomicUsize = AtomicUsize::new(0);
+    pub static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+    const HDR: usize = 2; // {u32 type|u32 size, u32 len|u32 cap}
+
+    fn layout(cap: usize) -> Layout {
+        Layout::from_size_align((HDR + cap) * 8, 8).unwrap()
+    }
+
+    unsafe fn len_cap(p: *mut u64) -> (usize, usize) {
+        let w = *p.add(1);
+        ((w & 0xFFFF_FFFF) as usize, (w >> 32) as usize)
+    }
+
+    unsafe fn set_len(p: *mut u64, len: usize, cap: usize) {
+        *p.add(1) = (len as u64) | ((cap as u64) << 32);
+    }
+
+    /// FAM rt_array_new: cap clamped to the 64-element minimum like the
+    /// freestanding stub.
+    pub extern "C" fn rt_array_new(cap_val: i64) -> i64 {
+        let cap = if cap_val < 64 { 64 } else { cap_val as usize };
+        unsafe {
+            let p = alloc(layout(cap)) as *mut u64;
+            *p = 2u64 | (((16 + cap * 8) as u64) << 32); // HEAP_ARRAY = 2
+            set_len(p, 0, cap);
+            for i in 0..cap {
+                *p.add(HDR + i) = 3; // tagged nil
+            }
+            ALLOCS.fetch_add(1, Ordering::SeqCst);
+            (p as i64) | 1
+        }
+    }
+
+    /// FAM rt_byte_array_new: on the FAM layout byte arrays are ordinary
+    /// tagged-slot arrays (the aarch64/arm32 stubs forward to rt_array_new).
+    pub extern "C" fn rt_byte_array_new(cap_val: i64) -> i64 {
+        rt_array_new(cap_val)
+    }
+
+    /// FAM rt_array_push: bump realloc ALWAYS moves; returns the new header.
+    pub extern "C" fn rt_array_push(arr: i64, val: i64) -> i64 {
+        unsafe {
+            let mut p = (arr & !7) as *mut u64;
+            let (len, cap) = len_cap(p);
+            if len >= cap {
+                GROWS.fetch_add(1, Ordering::SeqCst);
+                ALLOCS.fetch_add(1, Ordering::SeqCst);
+                let new_cap = cap * 2;
+                let np = alloc(layout(new_cap)) as *mut u64;
+                for i in 0..len {
+                    *np.add(HDR + i) = *p.add(HDR + i);
+                }
+                for i in len..new_cap {
+                    *np.add(HDR + i) = 3;
+                }
+                *np = 2u64 | (((16 + new_cap * 8) as u64) << 32);
+                set_len(np, len, new_cap);
+                p = np;
+            }
+            let (len, cap) = len_cap(p);
+            *p.add(HDR + len) = val as u64;
+            set_len(p, len + 1, cap);
+            (p as i64) | 1
+        }
+    }
+
+    /// FAM rt_typed_bytes_u8_push: forward to rt_array_push with the tagged
+    /// byte slot (ENCODE_INT(byte) = byte << 3, TAG_INT = 0).
+    pub extern "C" fn rt_typed_bytes_u8_push(arr: i64, val: i64) -> i64 {
+        rt_array_push(arr, (val & 0xFF) << 3)
+    }
+}
+
+/// Lower `source` with the FAM push-return ABI, compile it for an
+/// `aarch64-unknown-none` target (fam_arrays inline accessors, I64-returning
+/// push imports), and execute `entry` against the moving bump-allocator
+/// runtime above. Returns the entry function's i64 result.
+fn jit_fam_module(source: &str, entry: &str) -> i64 {
+    use crate::codegen::common_backend::CodegenBackend;
+    use simple_common::target::{Target, TargetArch, TargetOS};
+    use simple_native_loader::RuntimeSymbolProvider;
+
+    let mut parser = simple_parser::Parser::new(source);
+    let ast = parser.parse().expect("parse fixture");
+    let hir = crate::hir::lower(&ast).expect("hir lower fixture");
+    let mir = crate::mir::MirLowerer::new()
+        .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
+        .with_array_push_returns_header(true)
+        .lower_module(&hir)
+        .expect("mir lower fixture");
+
+    let isa_builder = cranelift_native::builder().expect("host ISA");
+    let flags = settings::Flags::new(settings::builder());
+    let isa = isa_builder.finish(flags).expect("ISA");
+    let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let provider = simple_native_loader::static_provider();
+    for &name in simple_native_loader::RUNTIME_SYMBOL_NAMES {
+        if let Some(ptr) = provider.get_symbol(name) {
+            jit_builder.symbol(name, ptr);
+        }
+    }
+    // Override the array constructor/push family with the moving FAM twins.
+    jit_builder.symbol("rt_array_new", fam_bump::rt_array_new as usize as *const u8);
+    jit_builder.symbol("rt_byte_array_new", fam_bump::rt_byte_array_new as usize as *const u8);
+    jit_builder.symbol("rt_array_push", fam_bump::rt_array_push as usize as *const u8);
+    jit_builder.symbol(
+        "rt_typed_bytes_u8_push",
+        fam_bump::rt_typed_bytes_u8_push as usize as *const u8,
+    );
+    let module = JITModule::new(jit_builder);
+
+    let target = Target::new(TargetArch::Aarch64, TargetOS::None);
+    let mut backend = CodegenBackend::with_module_and_target(module, target).expect("backend");
+    backend.compile_all_functions(&mir).expect("compile fixture");
+    backend.module.finalize_definitions().expect("finalize");
+    if let Some(&init_id) = backend.func_ids.get("__module_init") {
+        let init_ptr = backend.module.get_finalized_function(init_id);
+        let init: extern "C" fn() = unsafe { std::mem::transmute(init_ptr) };
+        init();
+    }
+    let func_id = backend.func_ids[entry];
+    let ptr = backend.module.get_finalized_function(func_id);
+    let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
+    f()
+}
+
+/// The exact Wall-7 shape: a fused `arr = arr.push(x)` loop pushing far past
+/// the created capacity on a heap whose realloc ALWAYS moves. Must end with
+/// len == N and correct contents, with exactly one allocation per doubling
+/// (6 grows for 3000 elements from the 64-element minimum capacity).
+#[test]
+fn fam_grow_loop_fused_push_survives_moving_realloc() {
+    use std::sync::atomic::Ordering;
+    fam_bump::GROWS.store(0, Ordering::SeqCst);
+    fam_bump::ALLOCS.store(0, Ordering::SeqCst);
+    let rc = jit_fam_module(
+        "fn grow_loop() -> i64:\n    var arr: [i64] = []\n    var i: i64 = 0\n    while i < 3000:\n        arr = arr.push(i)\n        i = i + 1\n    if arr.len() != 3000:\n        return -1\n    if arr[0] != 0:\n        return -2\n    if arr[1023] != 1023:\n        return -3\n    if arr[2999] != 2999:\n        return -4\n    return 0\n",
+        "grow_loop",
+    );
+    assert_eq!(rc, 0, "grow loop must end with len=3000 and correct contents");
+    assert_eq!(
+        fam_bump::GROWS.load(Ordering::SeqCst),
+        6,
+        "exactly one grow per capacity doubling (64->128->256->512->1024->2048)"
+    );
+    assert_eq!(fam_bump::ALLOCS.load(Ordering::SeqCst), 7, "one new + six grows");
+}
+
+/// Statement-position `arr.push(x)` (no assignment): the store-back into the
+/// receiver local is the only thing that keeps the loop-carried value
+/// advancing across grows.
+#[test]
+fn fam_grow_loop_statement_push_survives_moving_realloc() {
+    use std::sync::atomic::Ordering;
+    fam_bump::GROWS.store(0, Ordering::SeqCst);
+    fam_bump::ALLOCS.store(0, Ordering::SeqCst);
+    let len = jit_fam_module(
+        "fn grow_loop_stmt() -> i64:\n    var arr: [i64] = []\n    var i: i64 = 0\n    while i < 3000:\n        arr.push(i)\n        i = i + 1\n    return arr.len()\n",
+        "grow_loop_stmt",
+    );
+    assert_eq!(len, 3000, "statement push loop must keep the receiver advanced");
+    assert_eq!(fam_bump::GROWS.load(Ordering::SeqCst), 6);
+    assert_eq!(fam_bump::ALLOCS.load(Ordering::SeqCst), 7);
+}
+
+/// Typed [u8] statement push through the inline fast path: in-capacity pushes
+/// store inline; the grow call must still rebind the receiver local.
+#[test]
+fn fam_grow_loop_typed_u8_push_survives_moving_realloc() {
+    use std::sync::atomic::Ordering;
+    fam_bump::GROWS.store(0, Ordering::SeqCst);
+    fam_bump::ALLOCS.store(0, Ordering::SeqCst);
+    let len = jit_fam_module(
+        "fn grow_loop_u8() -> i64:\n    var arr: [u8] = []\n    var i: i64 = 0\n    while i < 3000:\n        arr.push(i as u8)\n        i = i + 1\n    return arr.len()\n",
+        "grow_loop_u8",
+    );
+    // The empty [u8] literal starts at the codec-table capacity 1024.
+    assert_eq!(len, 3000, "typed u8 push loop must keep the receiver advanced");
+    assert_eq!(fam_bump::GROWS.load(Ordering::SeqCst), 2, "grows at 1024 and 2048");
+}
+
+/// Module-init `[0; N]` fill loop on the FAM target: the compact zero-fill
+/// push loop must still produce a real length-N array handle (the loop
+/// restructure that threads the push return must not break the no-grow case),
+/// and the global store must publish the post-fill handle.
+#[test]
+fn fam_module_init_zero_fill_loop_produces_len_n_array() {
+    use std::sync::atomic::Ordering;
+    fam_bump::GROWS.store(0, Ordering::SeqCst);
+    fam_bump::ALLOCS.store(0, Ordering::SeqCst);
+    let rc = jit_fam_module(
+        "var big: [i64; 1000] = [0; 1000]\n\nfn read_big() -> i64:\n    if big.len() != 1000:\n        return -1\n    if big[0] != 0:\n        return -2\n    if big[999] != 0:\n        return -3\n    return 0\n",
+        "read_big",
+    );
+    assert_eq!(rc, 0, "module-init [0; N] fill must yield a length-N zero array");
+    assert_eq!(fam_bump::GROWS.load(Ordering::SeqCst), 0, "cap == count: no grow expected");
+    assert_eq!(fam_bump::ALLOCS.load(Ordering::SeqCst), 1, "exactly the constructor allocation");
 }

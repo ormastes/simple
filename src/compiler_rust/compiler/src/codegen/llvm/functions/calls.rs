@@ -2228,10 +2228,14 @@ impl LlvmBackend {
             }
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 arg_vals.iter().map(|_| i64_type.into()).collect();
+            // FAM freestanding push ABI: rt_array_push returns the possibly
+            // realloc-moved header (i64), not a bool — declare the import to
+            // match or a captured return reads a truncated bool.
+            let fam_push_returns_header = self.target.array_push_returns_header();
             let returns_bool = matches!(
                 rt_fn_name,
-                "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort" | "rt_index_set"
-            );
+                "rt_array_clear" | "rt_array_reverse" | "rt_array_sort" | "rt_index_set"
+            ) || (rt_fn_name == "rt_array_push" && !fam_push_returns_header);
             let fn_type = if returns_bool {
                 self.context_ref().bool_type().fn_type(&param_types, false)
             } else {
@@ -2460,10 +2464,12 @@ impl LlvmBackend {
                         }
                         let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                             arg_vals.iter().map(|_| i64_type.into()).collect();
+                        // FAM freestanding push ABI: rt_array_push returns the
+                        // possibly realloc-moved header (i64), not a bool.
+                        let fam_push_returns_header = self.target.array_push_returns_header();
                         let returns_bool = matches!(
                             rt_fn_name,
-                            "rt_array_push"
-                                | "rt_array_clear"
+                            "rt_array_clear"
                                 | "rt_array_reverse"
                                 | "rt_array_sort"
                                 | "rt_index_set"
@@ -2473,7 +2479,7 @@ impl LlvmBackend {
                                 | "rt_is_present"
                                 | "rt_enum_check_discriminant"
                                 | "rt_enum_check_variant"
-                        );
+                        ) || (rt_fn_name == "rt_array_push" && !fam_push_returns_header);
                         let fn_type = if returns_bool {
                             self.context_ref().bool_type().fn_type(&param_types, false)
                         } else {
@@ -2701,10 +2707,7 @@ impl LlvmBackend {
                 let context = self.context_ref();
                 let i8_type = context.i8_type();
                 let i32_type = context.i32_type();
-                if let Some(spec) = crate::codegen::runtime_sffi::RUNTIME_FUNCS
-                    .iter()
-                    .find(|spec| spec.name == sffi_name)
-                {
+                if let Some(spec) = crate::codegen::runtime_sffi::spec_for_target(&self.target, sffi_name) {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = spec
                         .params
                         .iter()

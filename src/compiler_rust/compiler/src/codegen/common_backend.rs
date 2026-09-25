@@ -2462,33 +2462,70 @@ impl<M: Module> CodegenBackend<M> {
         /// megabytes of dead .text (e.g. fd_table's seven [T; 65536] arrays).
         /// Semantics are identical: the array handle is still created and filled
         /// to length N; only the code size drops from O(N) to O(1).
+        ///
+        /// When `thread_push_result` is set (FAM freestanding push ABI), the
+        /// push's return — the possibly realloc-moved header — is carried
+        /// around the loop as a second block parameter and returned as the
+        /// final array handle; otherwise the created handle is returned
+        /// unchanged (hosted bool-return, stable-header push ABI).
         fn emit_zero_fill_push_loop(
             builder: &mut cranelift_frontend::FunctionBuilder,
             push_ref: cranelift_codegen::ir::FuncRef,
             array: cranelift_codegen::ir::Value,
             count: i64,
-        ) {
+            thread_push_result: bool,
+        ) -> cranelift_codegen::ir::Value {
             use cranelift_codegen::ir::condcodes::IntCC;
             use cranelift_codegen::ir::{types, InstBuilder};
             let header = builder.create_block();
             builder.append_block_param(header, types::I64);
+            if thread_push_result {
+                builder.append_block_param(header, types::I64);
+            }
             let body = builder.create_block();
             let exit = builder.create_block();
+            if thread_push_result {
+                builder.append_block_param(exit, types::I64);
+            }
             let start = builder.ins().iconst(types::I64, 0);
-            builder.ins().jump(header, &[start]);
+            if thread_push_result {
+                builder.ins().jump(header, &[start, array]);
+            } else {
+                builder.ins().jump(header, &[start]);
+            }
             builder.switch_to_block(header);
             let idx = builder.block_params(header)[0];
             let cond = builder.ins().icmp_imm(IntCC::SignedLessThan, idx, count);
-            builder.ins().brif(cond, body, &[], exit, &[]);
+            if thread_push_result {
+                let current = builder.block_params(header)[1];
+                builder.ins().brif(cond, body, &[], exit, &[current]);
+            } else {
+                builder.ins().brif(cond, body, &[], exit, &[]);
+            }
             builder.switch_to_block(body);
             builder.seal_block(body);
             let zero_elem = builder.ins().iconst(types::I64, 0);
-            builder.ins().call(push_ref, &[array, zero_elem]);
+            let push_target = if thread_push_result {
+                builder.block_params(header)[1]
+            } else {
+                array
+            };
+            let call = builder.ins().call(push_ref, &[push_target, zero_elem]);
             let next = builder.ins().iadd_imm(idx, 1);
-            builder.ins().jump(header, &[next]);
+            if thread_push_result {
+                let grown = builder.inst_results(call)[0];
+                builder.ins().jump(header, &[next, grown]);
+            } else {
+                builder.ins().jump(header, &[next]);
+            }
             builder.seal_block(header);
             builder.switch_to_block(exit);
             builder.seal_block(exit);
+            if thread_push_result {
+                builder.block_params(exit)[0]
+            } else {
+                array
+            }
         }
 
         let init_name = module_init_symbol(self.module_prefix.as_deref());
@@ -2686,6 +2723,10 @@ impl<M: Module> CodegenBackend<M> {
 
         let mut sorted_arrays: Vec<_> = init_arrays.iter().collect();
         sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
+        // FAM freestanding push ABI: the push returns the possibly
+        // realloc-moved header — thread it through every fill so the global
+        // store publishes the post-grow handle, not the created one.
+        let thread_push_result = self.target.array_push_returns_header();
         for (global_name, init) in &sorted_arrays {
             trace_module_init!(format!("array:{global_name}"));
             // All-zero initializers ([0; N]) get a compact fill loop instead of
@@ -2702,7 +2743,7 @@ impl<M: Module> CodegenBackend<M> {
                 // String-literal elements: allocate each via rt_string_new and push.
                 let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
                 let string_new_ref = self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
                 for (idx, string_val) in strings.iter().enumerate() {
@@ -2735,7 +2776,10 @@ impl<M: Module> CodegenBackend<M> {
                     let str_len = builder.ins().iconst(types::I64, bytes.len() as i64);
                     let call_inst = builder.ins().call(string_new_ref, &[str_ptr, str_len]);
                     let string_rv = builder.inst_results(call_inst)[0];
-                    builder.ins().call(push_ref, &[array, string_rv]);
+                    let push_call = builder.ins().call(push_ref, &[array, string_rv]);
+                    if thread_push_result {
+                        array = builder.inst_results(push_call)[0];
+                    }
                 }
                 array
             } else if init.element_type == TypeId::U8 {
@@ -2743,44 +2787,65 @@ impl<M: Module> CodegenBackend<M> {
                     .module
                     .declare_func_in_func(byte_array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(byte_push_id.unwrap(), builder.func);
                 if all_zero {
-                    emit_zero_fill_push_loop(&mut builder, push_ref, array, element_count as i64);
+                    array = emit_zero_fill_push_loop(
+                        &mut builder,
+                        push_ref,
+                        array,
+                        element_count as i64,
+                        thread_push_result,
+                    );
                 } else {
                     for value in &init.values {
                         let byte = builder.ins().iconst(types::I64, (*value & 0xff) as i64);
-                        builder.ins().call(push_ref, &[array, byte]);
+                        let push_call = builder.ins().call(push_ref, &[array, byte]);
+                        if thread_push_result {
+                            array = builder.inst_results(push_call)[0];
+                        }
                     }
                 }
                 array
             } else if init.element_type == TypeId::BOOL {
                 let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
                 let bool_ref = self.module.declare_func_in_func(bool_value_id.unwrap(), builder.func);
                 for value in &init.values {
                     let raw = builder.ins().iconst(types::I64, i64::from(*value != 0));
                     let call_inst = builder.ins().call(bool_ref, &[raw]);
                     let boxed = builder.inst_results(call_inst)[0];
-                    builder.ins().call(push_ref, &[array, boxed]);
+                    let push_call = builder.ins().call(push_ref, &[array, boxed]);
+                    if thread_push_result {
+                        array = builder.inst_results(push_call)[0];
+                    }
                 }
                 array
             } else {
                 let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
-                let array = builder.inst_results(call_inst)[0];
+                let mut array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
                 if all_zero {
                     // Boxed zero is `0 << 3` == 0, so pushing raw 0 is identical.
-                    emit_zero_fill_push_loop(&mut builder, push_ref, array, element_count as i64);
+                    array = emit_zero_fill_push_loop(
+                        &mut builder,
+                        push_ref,
+                        array,
+                        element_count as i64,
+                        thread_push_result,
+                    );
                 } else {
                     for value in &init.values {
                         let raw = builder.ins().iconst(types::I64, *value);
                         let shift = builder.ins().iconst(types::I64, 3);
                         let boxed = builder.ins().ishl(raw, shift);
-                        builder.ins().call(push_ref, &[array, boxed]);
+                        let push_call = builder.ins().call(push_ref, &[array, boxed]);
+                        if thread_push_result {
+                            array = builder.inst_results(push_call)[0];
+                        }
                     }
                 }
                 array
