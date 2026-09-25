@@ -178,6 +178,12 @@ static size_t _heap_off = 0;
  * spl_start's banner (see doc/08_tracking/aarch64_in_guest_clang_compile_
  * lane_status_2026-09-25.md, Blocker 4). */
 static uint64_t g_heap_alloc_count;
+/* Simple-code caller of the most recent array/string constructor (Blocker 4
+ * module-init attribution): set by rt_array_new / rt_array_new_with_cap /
+ * rt_byte_array_new(_len) / rt_string_new right before they malloc, so the
+ * per-alloc profile line can name the compiled module-init body that asked
+ * for the array, not just the C wrapper. */
+static uintptr_t g_array_ctor_caller_lr;
 static void _heap_alloc_profile(size_t sz, size_t used_after, uintptr_t lr)
 {
     static size_t next_milestone = 64u * 1024u * 1024u;
@@ -191,6 +197,8 @@ static void _heap_alloc_profile(size_t sz, size_t used_after, uintptr_t lr)
         serial_put_dec((int64_t)g_heap_alloc_count);
         serial_puts(" lr=0x");
         serial_puthex((uint64_t)lr);
+        serial_puts(" init_lr=0x");
+        serial_puthex((uint64_t)g_array_ctor_caller_lr);
         serial_puts("\r\n");
     }
     if (used_after >= next_milestone) {
@@ -211,6 +219,8 @@ static void *_heap_alloc_lr(size_t sz, uintptr_t lr)
         serial_put_dec((int64_t)_heap_off);
         serial_puts(" total=");
         serial_put_dec((int64_t)sizeof(_heap));
+        serial_puts(" init_lr=0x");
+        serial_puthex((uint64_t)g_array_ctor_caller_lr);
         serial_puts("\r\n");
         for(;;) __asm__ volatile("wfe");
     }
@@ -376,6 +386,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
     int64_t len = len_val;
     if (len < 0 || len > 0x100000) return NIL_VALUE;
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -1787,11 +1798,19 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 }
 
 RuntimeValue rt_array_new(RuntimeValue cap_val) {
-    int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
+    /* Freestanding extern ABI passes integer args RAW (see the mmio note
+     * above): cap_val is a plain i64. Do NOT run it through
+     * simpleos_raw_or_encoded_int -- with TAG_INT==0 any raw cap divisible
+     * by 8 mis-decodes to cap/8 (e.g. fd_table's [u8; 65536] inits became
+     * cap 8192, and every module-init fill push then grew the array,
+     * leaking ~131 KiB per push and OOMing the 512 MiB heap -- Blocker 4,
+     * doc/08_tracking/aarch64_in_guest_clang_compile_lane_status_2026-09-25.md). */
+    int64_t cap = (int64_t)cap_val;
     if (cap <= 0) cap = 64;
     if (cap < 64) cap = 64;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE; a->hdr.type = HEAP_ARRAY; a->hdr.size = (uint32_t)alloc_size; a->len = 0; a->cap = (uint32_t)cap;
     for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
@@ -1806,7 +1825,7 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
         uint32_t old_cap = a->cap;
         uint32_t new_cap = old_cap ? old_cap * 2 : 64;
         size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
-        if (new_size >= 256u * 1024u) {
+        if (new_size >= 60u * 1024u) {
             serial_puts("[heap] push-grow new_bytes=");
             serial_put_dec((int64_t)new_size);
             serial_puts(" lr=0x");
@@ -1825,7 +1844,9 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
 }
 
 RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
-    int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
+    /* Same RAW-integer ABI contract as rt_array_new: cap_val is a plain i64,
+     * not a tagged RuntimeValue. */
+    int64_t cap = (int64_t)cap_val;
     if (cap <= 0) cap = 1;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
@@ -1838,6 +1859,7 @@ RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
         serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
         serial_puts("\r\n");
     }
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
@@ -2393,7 +2415,11 @@ RuntimeValue rt_port_io_wait(void) { return NIL_VALUE; }
 RuntimeValue rt_hlt(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
 RuntimeValue rt_sti(void) { __asm__ volatile("msr daifclr, #0xF"); return NIL_VALUE; }
 RuntimeValue rt_cli(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VALUE; }
-S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr) S1(rt_invlpg)
+S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr)
+/* x86 TLB shootdown op: no architectural equivalent is needed here (the
+ * arm64 page-table walks are not cached stale across our PTE writes in this
+ * bringup), so flush rather than FATAL-spin if some shared code calls it. */
+RuntimeValue rt_invlpg(RuntimeValue a) { (void)a; __asm__ volatile("dsb ish" ::: "memory"); return NIL_VALUE; }
 S0(rt_read_cr0) S1(rt_write_cr0) S1(rt_read_cr2) S1(rt_read_cr3) S1(rt_write_cr3)
 S0(rt_read_cr4) S1(rt_write_cr4) S1(rt_read_msr) S2(rt_write_msr) S0(rt_cpuid) S0(rt_rdtsc)
 
@@ -2492,7 +2518,51 @@ S1(rt_thread_create) S1(rt_thread_join)
 RuntimeValue rt_thread_yield(void) { return NIL_VALUE; }
 RuntimeValue rt_thread_current(void) { return ENCODE_INT(0); }
 RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }
-S0(rt_mutex_new) S1(rt_mutex_lock) S1(rt_mutex_unlock) S1(rt_mutex_try_lock)
+
+/* Boxed RuntimeValue mutex (was a FATAL S-stub: module inits -- e.g. the
+ * scheduler_types identity allocator and friends -- create these before
+ * spl_start). Spinlock + wfe/sev: correct on the 4-vCPU guest and for the
+ * single-threaded init phase. Contract per
+ * src/lib/nogc_sync_mut/concurrent/mutex.spl: lock returns the protected
+ * value (nil = stale/foreign handle), try_lock returns nil when contended,
+ * unlock stores new_value and returns 1 (0 = invalid handle). */
+typedef struct { uint64_t locked; RuntimeValue value; } Arm64RtMutex;
+
+RuntimeValue rt_mutex_new(RuntimeValue initial) {
+    Arm64RtMutex *m = (Arm64RtMutex *)calloc(1, sizeof(Arm64RtMutex));
+    if (!m) return NIL_VALUE;
+    m->locked = 0;
+    m->value = initial;
+    return ENCODE_PTR(m);
+}
+
+RuntimeValue rt_mutex_lock(RuntimeValue handle) {
+    if (!IS_HEAP(handle)) return NIL_VALUE;
+    Arm64RtMutex *m = (Arm64RtMutex *)DECODE_PTR(handle);
+    if (!m) return NIL_VALUE;
+    while (__atomic_exchange_n(&m->locked, 1, __ATOMIC_ACQUIRE) != 0)
+        __asm__ volatile("wfe");
+    return m->value;
+}
+
+RuntimeValue rt_mutex_try_lock(RuntimeValue handle) {
+    if (!IS_HEAP(handle)) return NIL_VALUE;
+    Arm64RtMutex *m = (Arm64RtMutex *)DECODE_PTR(handle);
+    if (!m) return NIL_VALUE;
+    if (__atomic_exchange_n(&m->locked, 1, __ATOMIC_ACQUIRE) != 0)
+        return NIL_VALUE;
+    return m->value;
+}
+
+RuntimeValue rt_mutex_unlock(RuntimeValue handle, RuntimeValue new_value) {
+    if (!IS_HEAP(handle)) return ENCODE_INT(0);
+    Arm64RtMutex *m = (Arm64RtMutex *)DECODE_PTR(handle);
+    if (!m) return ENCODE_INT(0);
+    m->value = new_value;
+    __atomic_store_n(&m->locked, 0, __ATOMIC_RELEASE);
+    __asm__ volatile("sev");
+    return ENCODE_INT(1);
+}
 S0(rt_condvar_new) S1(rt_condvar_wait) S1(rt_condvar_notify) S1(rt_condvar_notify_all)
 
 S0(rt_channel_new) S2(rt_channel_send) S1(rt_channel_recv) S1(rt_channel_try_recv) S1(rt_channel_close)
@@ -5020,7 +5090,7 @@ RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue v
     return 1;
 }
 
-RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capacity); }
+RuntimeValue rt_byte_array_new(RuntimeValue capacity) { g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0); return rt_array_new(capacity); }
 
 RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
 {
@@ -5383,6 +5453,7 @@ RuntimeValue rt_byte_array_new_len(RuntimeValue len)
         serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
         serial_puts("\r\n");
     }
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;

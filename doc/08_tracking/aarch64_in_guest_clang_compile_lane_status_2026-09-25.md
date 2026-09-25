@@ -282,3 +282,91 @@ Supporting changes committed with the diagnosis:
 | R2 guest boots | PARTIAL | crt0/PCI/virtio/BPB/boot-fs-mount all print; boot now dies in module-init heap OOM (Blocker 4) |
 | R3-R5 | BLOCKED | Blocker 4 (init memory) → then the -13 spawn seam + 115MB payload walls above |
 
+
+----
+
+# 2026-09-25 (late pm) session — Blocker 4 RESOLVED: rt_array_new cap mis-decode (raw i64 >> 3); R2 green
+
+Boot cycles this session: 3 (run-20260925_144406 measure, _150410 fix-evidence,
+_151226 verify). Kernel rebuilds: 3.
+
+## Root cause (evidence-driven)
+
+The committed `[heap]` profiler only printed wrapper-level lrs (all allocations
+funnel through `_heap_alloc`), so this session first extended it to also print
+`init_lr=` — the Simple-code caller of the last array/string constructor, and
+lowered the push-grow print threshold to 60 KiB
+(`examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`).
+
+Measured top site (run-20260925_144406, 512 MiB heap): **3956 allocations of
+exactly 131088 bytes (= 16 + 16384 * 8) consumed ~494 MiB**, all
+`init_lr=0x402ed950` → `__module_init_src__os__kernel__fd_table`.
+
+Mechanism (two stacked defects, one trigger):
+
+1. `fd_table.spl` declares seven `[u8/u32/u64; 65536] = [0; 65536]` globals.
+   The compiler emits the capacity as a RAW i64 literal
+   (`MirInst::ConstInt`; see `lowering_expr_call.rs` "The native rt_array_new
+   ABI takes one capacity argument"). But arm64 `rt_array_new` /
+   `rt_array_new_with_cap` ran the cap through `simpleos_raw_or_encoded_int`,
+   whose `TAG_INT==0` heuristic treats any raw value divisible by 8 as a
+   tagged int and shifts it right by 3: cap 65536 → **8192**. (The sibling
+   mmio helper in the same file already documented this exact trap in its
+   comment; the array constructors missed the fix.)
+2. The module-init fill loops push 65536 elements into that cap-8192 array,
+   and the generated fill loop keeps re-pushing the PRE-GROW array value
+   (x28/x0 threaded around the call, return discarded). The original never
+   sees its len advance, so EVERY push grows a fresh cap-16384 buffer
+   (131088 bytes, leaked forever on the bump heap) → 65536 iterations x
+   131088 B = 8.6 GB demand; the heap dies at the 3956th grow. x86/rv64 never
+   ran these inits (doc above); the hosted lanes decode caps correctly, which
+   is why the hosted probe of the same closure stayed at 647 MB (JIT-dominated).
+
+## Fix (all in `examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`)
+
+- `rt_array_new` / `rt_array_new_with_cap`: treat `cap_val` as the RAW i64
+  the compiler emits (drop the `simpleos_raw_or_encoded_int` decode), matching
+  `rt_byte_array_new_len` / `rt_string_new` and the documented freestanding
+  integer ABI.
+- The heap profiler gained per-allocation `init_lr=` attribution
+  (`g_array_ctor_caller_lr` captured in the array/string constructors) and a
+  60 KiB push-grow print threshold. Kept: the next walls below need it.
+- The boot then FATAL-spun on `rt_mutex_new` (next module-init wall):
+  implemented the boxed RuntimeValue mutex trio as a real spinlock
+  (`Arm64RtMutex`, wfe/sev, contract per
+  `src/lib/nogc_sync_mut/concurrent/mutex.spl`) and made `rt_invlpg` a dsb
+  no-op instead of a FATAL S-stub. Symbol-table filter: the only FATAL-stub
+  rt functions this kernel references at all are rt_mutex_{new,lock,unlock},
+  rt_invlpg, rt_ipc_send_bytes, rt_ipc_recv_bytes, rt_collection_remove; the
+  last three are runtime-phase (out of init scope).
+
+## Verification (run-20260925_151226)
+
+- `[heap]` total: ~43 MB peak across the whole boot (was: 512 MiB OOM before
+  spl_start). Largest single allocs 8 MiB + 2 MiB.
+- `=== SimpleOS ARM64 in-guest clang bring-up ===` banner prints; module-init
+  set completes.
+- **R2 = PASS** (gate rung table: R1=PASS R2=PASS R3=FAIL R4=FAIL R5=FAIL).
+- VFS proceeds: virtio-blk probe ok, FAT32 BPB parsed (bps=512 spc=64),
+  root probe read ok.
+
+## Next wall (new, R3-stage; NOT Blocker 4)
+
+`[boot-fs-mount] Probing NVMe for FAT32 BPB...` reads LBA0 via the
+`[virtio-blk] owned read` path and gets `simple_len=2199023256064` (= 512 x
+2^32, i.e. the 64-bit length read 4 bytes off) with a zeroed buffer
+(`b0=0 b1=0 b2=0`) → "No FAT32 BPB at LBA 0" →
+`[vfs-init] kernel FAT32 publication failed err=boot-fs-mount: no FAT32 BPB`
+→ `CLANG_IN_GUEST_ARM64_VFS_FAIL`. Same ABI/offset family as the Blocker 2
+`simple_len` fix, new site: the owned-read length plumbing in
+`boot_fs_mount.spl` / its virtio-blk read adapter. After that, the documented
+R3 walls remain: -13 spawn seam and 115 MiB payload vs 16 MiB element cap /
+2 MiB user-AS arena.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | run-20260925_151226 |
+| R2 guest boots | PASS | banner + completed module inits; heap ~43 MB (was 512 MiB OOM) |
+| R3-R5 | BLOCKED | boot-fs-mount BPB probe `simple_len` offset bug (new, above), then the documented -13 spawn + 115 MiB payload walls |
