@@ -3797,9 +3797,13 @@ int64_t simpleos_nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t b
 /* ---- FAT32 read path (over virtio-blk) ---- */
 
 /* Hardcoded geometry helpers, matching arm_fs_exec_vfs.spl. */
+/* Geometry helpers — use the PROBED BPB globals (rt_arm_fat32_probe_bpb_from_virtio),
+ * not the hardcoded constants: the clang image is spc=64 data_start=84, while
+ * the classic fs-exec image is spc=1 data_start=96. */
 static uint32_t _simpleos_fat_cluster_lba(uint32_t cluster)
 {
-    return SIMPLEOS_ARM_FAT32_DATA_START + ((cluster - 2U) * SIMPLEOS_ARM_FAT32_SPC);
+    uint64_t data_start = g_arm_fat32_reserved + g_arm_fat32_fats * g_arm_fat32_fat_size;
+    return (uint32_t)(data_start + ((uint64_t)(cluster - 2U) * g_arm_fat32_spc));
 }
 
 static uint32_t _simpleos_rd16(const uint8_t *p)
@@ -3817,8 +3821,8 @@ static uint32_t _simpleos_fat_next(uint32_t cluster)
 {
     uint8_t sec[512];
     uint32_t fat_offset = cluster * 4U;
-    uint32_t lba = SIMPLEOS_ARM_FAT32_RESERVED + (fat_offset / 512U);
-    uint32_t off = fat_offset % 512U;
+    uint32_t lba = (uint32_t)(g_arm_fat32_reserved + (fat_offset / g_arm_fat32_bps));
+    uint32_t off = fat_offset % (uint32_t)g_arm_fat32_bps;
     if (!_simpleos_blk_read_sector(lba, sec)) return 0x0fffffffU;
     return _simpleos_rd32(sec + off) & 0x0fffffffU;
 }
@@ -3867,7 +3871,7 @@ static uint32_t _simpleos_find_entry(uint32_t dir_cluster, const char name11[11]
     uint32_t cluster = dir_cluster;
     while (cluster >= 2U && cluster < 0x0ffffff8U) {
         uint32_t first_lba = _simpleos_fat_cluster_lba(cluster);
-        for (uint32_t s = 0; s < SIMPLEOS_ARM_FAT32_SPC; s++) {
+        for (uint32_t s = 0; s < (uint32_t)g_arm_fat32_spc; s++) {
             if (!_simpleos_blk_read_sector(first_lba + s, sec)) return 0;
             for (uint32_t off = 0; off < 512U; off += 32U) {
                 const uint8_t *e = sec + off;
@@ -3942,7 +3946,7 @@ static uint32_t _simpleos_read_chain(uint32_t first_cluster, uint32_t size,
     uint32_t cur = first_cluster;
     while (cur >= 2U && cur < 0x0ffffff8U && copied < size) {
         uint32_t first_lba = _simpleos_fat_cluster_lba(cur);
-        for (uint32_t s = 0; s < SIMPLEOS_ARM_FAT32_SPC && copied < size; s++) {
+        for (uint32_t s = 0; s < (uint32_t)g_arm_fat32_spc && copied < size; s++) {
             if (!_simpleos_blk_read_sector(first_lba + s, sec)) return 0;
             for (uint32_t k = 0; k < 512U && copied < size; k++) {
                 out[copied++] = sec[k];
@@ -4672,7 +4676,12 @@ RuntimeValue rt_arm64_user_copyin(RuntimeValue dst_value, RuntimeValue user_valu
         uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
                                                      user + i, 0);
         if (!phys) return -14;
-        dst[i] = *(volatile uint8_t *)(uintptr_t)phys;
+        /* Freestanding [u8] elements are TAGGED (ENCODE_INT(byte), 8-byte
+         * slots — rt_typed_bytes_u8_push / the virtio read path store the
+         * same shape). A raw byte store here mis-tags every element and the
+         * consumer (_bytes_to_text) builds a garbage path. */
+        ((RuntimeValue *)(uintptr_t)dst)[i] =
+            ENCODE_INT(*(volatile uint8_t *)(uintptr_t)phys);
     }
     serial_puts("[copyin] done\r\n");
     return (RuntimeValue)len;
@@ -4704,7 +4713,10 @@ RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_val
         uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
                                                      user + i, 1);
         if (!phys) return -14;
-        *(volatile uint8_t *)(uintptr_t)phys = src[i];
+        /* Source elements are TAGGED (ENCODE_INT(byte)); decode to the raw
+         * byte the user buffer expects (mirrors copyin's tagging). */
+        *(volatile uint8_t *)(uintptr_t)phys =
+            (uint8_t)(DECODE_INT(((const RuntimeValue *)(uintptr_t)src)[i]));
     }
     serial_puts("[copyout] done\r\n");
     return (RuntimeValue)len;
