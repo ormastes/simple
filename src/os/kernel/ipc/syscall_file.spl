@@ -9,6 +9,7 @@ use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.memory.user_copy.{user_copyout_bytes, user_copyin_bytes_validated}
+use std.common.text_bytes.{bytes_to_text}
 # TEMP DIAG (lane-C1 bring-up): stage markers in _handle_file_stat.
 extern fn serial_println(msg: text)
 use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek}
@@ -165,16 +166,13 @@ fn _fs_copyout_exact(ptr_addr: u64, bytes: [u8]) -> bool:
     user_copyout_bytes(ptr_addr, bytes) == bytes.len() as i64
 
 fn _bytes_to_text(b: [u8]) -> text:
-    """Build `text` from raw path bytes one byte at a time via `.chr()` —
-    the same forward-concatenation pattern fat32.spl uses to decode 8.3/LFN
-    names, chosen because `text` byte-indexing is unreliable on dynamically
-    built strings in this freestanding kernel (see module doc above)."""
-    var out = ""
-    var i: u64 = 0
-    while i < b.len():
-        out = out + b[i].chr()
-        i = i + 1
-    out
+    """Build `text` from raw path bytes via the always-linked `rt_bytes_to_text`
+    primitive (single C pass that DECODEs the tagged [u8] slots the copyin
+    writes). Replaces the per-byte `.chr()` concat loop: that loop degrades on
+    this freestanding lane — run-20260926_042943 showed the built path losing
+    every component, so `Fat32Filesystem.stat_at` failed EINVAL
+    (`fat32_split_path` -> 0 parts) before any FAT I/O."""
+    bytes_to_text(b)
 
 fn _path_is_absolute(p: [u8]) -> bool:
     """True when the path's first byte is '/'."""

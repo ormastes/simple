@@ -478,7 +478,11 @@ _alignment_handler:
     eret
 
 .Lnot_align_fault:
-    /* Restore registers and fall through to fault handler */
+    /* Restore registers, then branch to the fault printer. (This used to
+     * fall through, but arm64_enter_el0 is now laid down immediately after
+     * this block, so the fall-through re-entered arm64_enter_el0 and
+     * re-faulted forever — a non-alignment fault here became an infinite
+     * loop instead of a named FAULT report.) */
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]
     ldp     x4,  x5,  [sp, #32]
@@ -496,7 +500,7 @@ _alignment_handler:
     ldp     x28, x29, [sp, #224]
     ldr     x30,       [sp, #240]
     add     sp, sp, #272
-    /* Fall through to print FAULT */
+    b       _fault_handler
 
 /* ===================================================================
  * EL0 enter with kernel resume frame — payload ring-3 handoff (lane-C1).
