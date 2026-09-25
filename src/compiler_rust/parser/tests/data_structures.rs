@@ -85,6 +85,28 @@ fn parse_class_definition() {
     }
 }
 
+// A self-less `fn new(...)` is a static constructor. Left non-static, HIR
+// injected an implicit `self` and every `Type.new(args)` call passed its
+// arguments one register late (stage-2 CLI 0xC0000005, bootstrap42).
+#[test]
+fn parse_selfless_new_is_static_in_class_and_struct() {
+    for src in [
+        "class Rdr:\n    var pos: i64\n    fn new(blob: text) -> Rdr:\n        Rdr(pos: 0)",
+        "struct Rdr:\n    pos: i64\n    fn new(blob: text) -> Rdr:\n        Rdr(pos: 0)",
+    ] {
+        let items = parse(src);
+        let methods = match &items[0] {
+            Node::Class(c) => &c.methods,
+            Node::Struct(s) => &s.methods,
+            other => panic!("expected class/struct for {src}, got {other:?}"),
+        };
+        let new_fn = methods.iter().find(|m| m.name == "new").expect("new method");
+        assert!(new_fn.is_static, "{src}");
+        assert_eq!(new_fn.params.len(), 1, "{src}");
+        assert_eq!(new_fn.params[0].name, "blob", "{src}");
+    }
+}
+
 // 'new' is a keyword, use 'init' instead
 #[test]
 fn parse_class_with_methods() {
