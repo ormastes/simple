@@ -2929,6 +2929,15 @@ int64_t stdin_read_char(void) {
  * below differs per compiler.
  */
 static void rt_win_set_binary_stdio(void) {
+    /* Same defect for FILES: every open()/fopen() in this runtime without an
+     * explicit _O_BINARY / "b" (rt_file_write_text_at, rt_file_open, the
+     * mmap and lock paths, ...) translated LF->CRLF, so SCV snapshot
+     * provenance written through file_write read back with CRLF and failed
+     * snapshot-open-provenance-mismatch (2026-09-25), after the same class
+     * had already broken inventory generations. Make binary the process
+     * default, which is the POSIX and Rust-std contract every caller assumes;
+     * an explicit "t" still opts into translation. */
+    _set_fmode(_O_BINARY);
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
@@ -14478,13 +14487,23 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
      * this call was silently failing right after the just-fixed fsync
      * succeeded, reproducing the identical "generation-publication-failed"
      * symptom for an unrelated reason. Prefer the wide, extended-length-
-     * prefixed MoveFileExW with no replace flag -- matching rename()'s
+     * prefixed MoveFileExW. MOVEFILE_REPLACE_EXISTING gives the POSIX
+     * rename(2) contract the callers and the Rust twin (std::fs::rename)
+     * assume: without it every SCV inventory re-publish of CURRENT failed
+     * publish-current-write-failed on Windows (2026-09-25). An existing
+     * DIRECTORY destination still fails, as on POSIX. Previously: no replace flag, matching rename()'s
      * Windows semantics of failing when the destination already exists --
      * falling back to plain rename() only when a path cannot be widened. */
     wchar_t* wide_old = rt_widen_long_path_rc(old_path);
     wchar_t* wide_new = wide_old ? rt_widen_long_path_rc(new_path) : NULL;
     if (wide_old && wide_new) {
-        BOOL ok = MoveFileExW(wide_old, wide_new, 0);
+        /* MOVEFILE_REPLACE_EXISTING is rejected for DIRECTORY moves (SCV
+         * snapshot staging -> snapshots/<rev> failed snapshot-publish-failed
+         * with it), so pass it for files only. */
+        DWORD attrs = GetFileAttributesW(wide_old);
+        DWORD flags = (attrs != INVALID_FILE_ATTRIBUTES &&
+                       (attrs & FILE_ATTRIBUTE_DIRECTORY)) ? 0 : MOVEFILE_REPLACE_EXISTING;
+        BOOL ok = MoveFileExW(wide_old, wide_new, flags);
         free(wide_old); free(wide_new);
         return ok != 0;
     }
