@@ -67,6 +67,57 @@ var _g_entry_scan_read_count: i64 = 0
 var _g_entry_scan_scan_count: i64 = 0
 var _g_entry_scan_hit_count: i64 = 0
 var _g_source_classification_count: i64 = 0
+# Physical key of the in-process `run` entry that gets the SSpec prelude.
+var _g_spec_prelude_entry_key: text = ""
+
+pub fn driver_set_spec_prelude_entry(path: text):
+    """Mark the interpret-mode entry that receives the implicit SSpec prelude.
+
+    The seed treats describe/context/it/expect as language builtins
+    (hir/lower/stmt_lowering.rs, interpreter_call/bdd.rs), so ~2100 specs
+    under test/01_unit never import them and 19 import them from the
+    nonexistent `std.test`. The pure-Simple path only has them as ordinary
+    `std.spec` functions, so an in-process `run` of such a spec reported
+    `unresolved name: describe/it/expect`. Only a `*_spec.spl` entry qualifies,
+    and only on the in-process run path. Compiled spec wrappers bring their
+    own harness."""
+    _g_spec_prelude_entry_key = if path.ends_with("_spec.spl"): _driver_physical_source_key(path) else: ""
+
+fn _driver_spec_line_imports_spec_module(line: text) -> bool:
+    """True for `use std.spec`, `use std.spec.*`, or `use std.spec.{...}`."""
+    for prefix in ["use std.spec", "import std.spec"]:
+        if line.starts_with(prefix):
+            val rest = line.substring(prefix.len())
+            if rest == "" or rest.starts_with(".*") or rest.starts_with(".{") or rest.starts_with(" ") or rest.starts_with(","):
+                return true
+    false
+
+pub fn driver_spec_prelude_source(content: text) -> text:
+    """Apply the implicit SSpec prelude without moving any source line.
+
+    - `use std.test.*` / `use std.test.{..}` / `use std.test {..}` name no real
+      module; the seed accepted them only because the names are builtins.
+      Rewrite them in place to `std.spec`.
+    - If no line imports the `std.spec` module itself, append
+      `use std.spec.*` after the last line. A module-level `use` may appear
+      anywhere (parse_module_body dispatches every top-level item alike), and
+      appending keeps every diagnostic line number unchanged."""
+    val lines = content.split("\n")
+    var out: [text] = []
+    var has_spec = false
+    for line in lines:
+        var cur = line
+        for form in ["use std.test.*", "use std.test.{", "use std.test {"]:
+            if cur.starts_with(form):
+                cur = "use std.spec" + cur.substring("use std.test".len())
+        if _driver_spec_line_imports_spec_module(cur):
+            has_spec = true
+        out.push(cur)
+    var result = out.join("\n")
+    if not has_spec:
+        val sep = if result.ends_with("\n") or result == "": "" else: "\n"
+        result = result + sep + "use std.spec.*\n"
+    result
 
 @unsafe(reason: "raw monotonic clock; negative values are the provider-failure sentinel", capabilities: [ffi])
 extern fn rt_time_now_monotonic_ms() -> i64
@@ -742,6 +793,8 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
     driver_closure_scan_phase_trace("read:start", path)
     unsafe(capabilities: [ffi]):
         content = rt_file_read_text(path) ?? ""
+    if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
+        content = driver_spec_prelude_source(content)
     _g_entry_scan_read_count = _g_entry_scan_read_count + 1
     driver_closure_scan_phase_trace("read:done", path)
     driver_closure_scan_phase_trace("imports:start", path)
