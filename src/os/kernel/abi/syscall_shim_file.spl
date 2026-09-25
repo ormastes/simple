@@ -68,6 +68,29 @@ fn spl_shim_file_capability_check(syscall_id: u64, a0: u64, a1: u64, a2: u64, a3
         case _: false
     if allowed: 0 else: -1
 
+pub fn shim_file_authorize_bootstrap_caller_v1():
+    """Lane-C1 bring-up seed: admit the ring-3 payload's file I/O.
+
+    _handle_file_open gates on ipc.cap_manager.check_file_access, which
+    fails closed when the caller task has no capability record. The ring-3
+    payload runs as the bootstrap scheduler's current task and never passes
+    the authenticated spawn that would seed its record, so open() would
+    return EPERM. Seed the full record through the same
+    CapabilityManager.init_task_record API the spawn paths use (idempotent).
+    Value-semantics note: `me` mutations apply to the receiver copy, so the
+    manager is stored back into g_shim_ipc explicitly.
+    """
+    val current = g_shim_scheduler.get_current()
+    var mgr = g_shim_ipc.cap_manager
+    mgr.init_task_record(current, true)
+    g_shim_ipc.cap_manager = mgr
+    # Activate the caller's fd context so the stdio descriptors (0/1/2,
+    # FD_TYPE_SERIAL) exist for the optional-shim syscalls that bypass the
+    # fd-authority gate (lseek/fcntl): without activation the table is
+    # empty and lseek(2,...) returns EBADF — which the guest toolchain
+    # treats as fatal (only ENOSYS is tolerated as "unimplemented").
+    fd_activate_task(current.id)
+
 @export("C", name: "spl_handle_file_sync")
 fn spl_handle_file_sync(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     val args = _make_args(78, a0, a1, a2, a3, a4, a5)

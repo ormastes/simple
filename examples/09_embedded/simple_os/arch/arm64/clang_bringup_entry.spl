@@ -24,6 +24,7 @@ extern fn __simple_call_module_inits()
 
 use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_vfs_boot_init_mounted_v1}
 use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_ring3_payload_resident}
+use os.kernel.abi.syscall_shim_file.{shim_file_authorize_bootstrap_caller_v1}
 use os.kernel.boot.mmio.{mmio_disable_test_mode}
 use os.kernel.log.klog_api.{log_init_serial, LOG_TRACE}
 
@@ -50,6 +51,12 @@ fn spl_start():
         rt_qemu_exit_success()
         return
 
+    # Seed the bootstrap caller's capability record so the production
+    # check_file_access gate in _handle_file_open admits the ring-3
+    # payload's file I/O (the payload never passes the authenticated
+    # spawn that would seed it; without this, open returns EPERM).
+    shim_file_authorize_bootstrap_caller_v1()
+
     # R3: guest clang --version (exit code 0 expected)
     val rc3 = _rung("R3-clang-version", "/CLANG.ELF", ["/CLANG.ELF", "--version"])
     if rc3 != 0:
@@ -58,9 +65,12 @@ fn spl_start():
         return
 
     # R4a: in-guest cc1 compile /HELLO.C -> /HELLO.O
+    # (-nostdlibinc is driver-only in this clang's Options.td — no CC1Option
+    # visibility — and cc1 rejects it as "unknown argument"; HELLO.C has no
+    # #includes so the include-path flag is unnecessary anyway.)
     val rc4a = _rung("R4a-cc1-compile", "/CLANG.ELF",
         ["/CLANG.ELF", "-cc1", "-triple", "aarch64-unknown-simpleos",
-         "-ffreestanding", "-nostdlibinc", "-O0",
+         "-ffreestanding", "-O0",
          "-emit-obj", "-o", "/HELLO.O", "/HELLO.C"])
     if rc4a != 0:
         serial_println("CLANG_IN_GUEST_ARM64_R4_COMPILE_FAIL rc={rc4a}")

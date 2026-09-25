@@ -1308,6 +1308,9 @@ extern int64_t spl_handle_file_open(uint64_t, uint64_t, uint64_t, uint64_t, uint
 extern int64_t spl_handle_file_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_file_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_file_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_file_stat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_file_sync(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_server_startup_evidence_consume_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_shim_file_capability_check(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
@@ -1380,6 +1383,22 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 30: return arm64_dispatch_file_shim(30, spl_handle_file_open, a0, a1, a2, a3, a4);
         case 31: return arm64_dispatch_file_shim(31, spl_handle_file_read, a0, a1, a2, a3, a4);
         case 32: return arm64_dispatch_file_shim(32, spl_handle_file_write, a0, a1, a2, a3, a4);
+        /* Path-mode stat (libc stat(); fd-mode fstat is answered locally by
+         * the guest libc — see the lane-C1 sysroot fstat patch). Needed by
+         * the guest clang driver/cc1 input probing, which stats paths before
+         * opening them. Routed as an optional shim (not the fd-authority
+         * gate): stat is path-metadata, the fd gate does not apply, and
+         * _handle_file_stat does its own path resolution. */
+        case 34: return arm64_dispatch_optional_shim(spl_handle_file_stat, a0, a1, a2, a3, a4);
+        /* id 46 (lseek) and id 69 (fcntl) are deliberately NOT wired.
+         * Evidence (run-20260926_032421): the guest toolchain spins in EL0
+         * right after lseek(2,0,SEEK_CUR) SUCCEEDS on the seeded stdio fds
+         * (it tolerated -ENOSYS in the pre-wiring era and printed the R3
+         * banner). FAT32 fds are refused -ENOSYS by _handle_lseek even when
+         * wired, so wiring changed only stdio behavior — and zero R4 value:
+         * the guest's file fds get -ENOSYS either way. Keep the tolerated
+         * default (-ENOSYS) until the guest-side stderr pathology is fixed
+         * in the toolchain lane. */
         /* Anonymous mmap (the guest libc's malloc arena): bump-allocate
          * zeroed pages in the recorded user address space. */
         case 10: return arm64_user_mmap(a1);
@@ -2211,7 +2230,32 @@ RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
-RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n)
+{
+    /* [value; count] lowering (mir/lower/lowering_expr_collection.rs
+     * lower_array_repeat_expr): both args arrive as RAW i64 (freestanding
+     * integer ABI, Blocker-4 contract). Elements are stored tagged exactly
+     * like the element-wise push paths (rt_typed_bytes_u8_push stores
+     * ENCODE_INT(byte)); heap element values (text, boxed u32/u64) pass
+     * through unchanged. The NIL stub this replaces silently broke every
+     * [0u8; n] consumer: the EL0 file syscalls' user_copyin_bytes dst array
+     * was NIL, so rt_array_data_ptr_text yielded 0 and
+     * rt_arm64_user_copyin returned EFAULT — stat(id 34) failed -14. */
+    int64_t count = (int64_t)n;
+    if (count < 0) count = 0;
+    if (count > 0x1000000) count = 0x1000000; /* 16M elements, rt_byte_array_new_len cap */
+    RuntimeValue elem = IS_HEAP(v) ? v : ENCODE_INT((int64_t)v);
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue);
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = (uint32_t)count;
+    a->cap = (uint32_t)count;
+    for (int64_t i = 0; i < count; i++) a->items[i] = elem;
+    return ENCODE_PTR(a);
+}
 RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
 RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
 RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
@@ -4609,13 +4653,28 @@ RuntimeValue rt_arm64_user_copyin(RuntimeValue dst_value, RuntimeValue user_valu
     uint64_t user = (uint64_t)user_value;
     uint64_t len = (uint64_t)len_value;
     if (len == 0ULL) return 0;
-    if (!dst || !arm64_user_range_accessible(user, len, 0)) return -14;
+    /* TEMP DIAG (lane-C1 bring-up): name the EFAULT source (null dst vs
+     * inaccessible user range) and bracket the per-byte translate loop. */
+    serial_puts("[copyin] dst=");
+    serial_put_hex((uint64_t)(uintptr_t)dst);
+    serial_puts(" user=");
+    serial_put_hex(user);
+    serial_puts(" len=");
+    serial_put_dec((int64_t)len);
+    serial_puts("\r\n");
+    if (!dst) { serial_puts("[copyin] fail:null-dst\r\n"); return -14; }
+    if (!arm64_user_range_accessible(user, len, 0)) {
+        serial_puts("[copyin] fail:range\r\n");
+        return -14;
+    }
+    serial_puts("[copyin] go\r\n");
     for (uint64_t i = 0; i < len; ++i) {
         uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
                                                      user + i, 0);
         if (!phys) return -14;
         dst[i] = *(volatile uint8_t *)(uintptr_t)phys;
     }
+    serial_puts("[copyin] done\r\n");
     return (RuntimeValue)len;
 }
 
@@ -4626,13 +4685,28 @@ RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_val
     const uint8_t *src = (const uint8_t *)(uintptr_t)(uint64_t)src_value;
     uint64_t len = (uint64_t)len_value;
     if (len == 0ULL) return 0;
-    if (!src || !arm64_user_range_accessible(user, len, 1)) return -14;
+    /* TEMP DIAG (lane-C1 bring-up): name the EFAULT source (null src vs
+     * inaccessible user range) and bracket the per-byte translate loop. */
+    serial_puts("[copyout] user=");
+    serial_put_hex(user);
+    serial_puts(" src=");
+    serial_put_hex((uint64_t)(uintptr_t)src);
+    serial_puts(" len=");
+    serial_put_dec((int64_t)len);
+    serial_puts("\r\n");
+    if (!src) { serial_puts("[copyout] fail:null-src\r\n"); return -14; }
+    if (!arm64_user_range_accessible(user, len, 1)) {
+        serial_puts("[copyout] fail:range\r\n");
+        return -14;
+    }
+    serial_puts("[copyout] go\r\n");
     for (uint64_t i = 0; i < len; ++i) {
         uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
                                                      user + i, 1);
         if (!phys) return -14;
         *(volatile uint8_t *)(uintptr_t)phys = src[i];
     }
+    serial_puts("[copyout] done\r\n");
     return (RuntimeValue)len;
 }
 
@@ -4766,6 +4840,29 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
         serial_puts("TEST PASSED\r\n");
         rt_qemu_exit_success();
     }
+    /* TEMP DIAG (lane-C1 bring-up): trace non-exit/non-DebugWrite user
+     * syscalls (id, a0..a2, result) to pinpoint ENOSYS return paths.
+     * [svc-in] prints at handler ENTRY so a missing [svc] ret line
+     * discriminates "kernel spins inside the handler" from "guest never
+     * issued the syscall". */
+    if (id != 0 && id != 60) {
+        serial_puts("[svc-in] id=");
+        serial_put_dec((int64_t)id);
+        serial_puts("\r\n");
+        uint64_t ret = (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
+        serial_puts("[svc] id=");
+        serial_put_dec((int64_t)id);
+        serial_puts(" a0=");
+        serial_put_hex(a0);
+        serial_puts(" a1=");
+        serial_put_hex(a1);
+        serial_puts(" a2=");
+        serial_put_hex(a2);
+        serial_puts(" ret=");
+        serial_put_hex(ret);
+        serial_puts("\r\n");
+        return ret;
+    }
     return (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
@@ -4859,7 +4956,12 @@ static uint64_t arm64_payload_frame_write(uint8_t *top_phys_page,
     if (argc == 0 || argc > 64) return 0;
     uint64_t str_bytes = 0;
     for (uint64_t i = 0; i < argc; i++) {
-        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, (RuntimeValue)i));
+        /* ENCODE_INT: rt_array_get DECODE_INTs its index (tagged ints,
+         * v >> 3). A raw (RuntimeValue)i decodes as i >> 3, so every
+         * element >= 1 aliased element 0 and argv[1..] duplicated argv[0]
+         * (guest clang saw ["/CLANG.ELF", "/CLANG.ELF"] and treated the
+         * second as an input: "no such file or directory"). */
+        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, ENCODE_INT(i)));
         if (!s) return 0;
         str_bytes = str_bytes + s->len + 1ULL;
     }
@@ -4872,7 +4974,7 @@ static uint64_t arm64_payload_frame_write(uint8_t *top_phys_page,
     uint64_t va_base = ARM64_PAYLOAD_STACK_TOP - 4096ULL;
     q[sp / 8ULL] = argc;
     for (uint64_t i = 0; i < argc; i++) {
-        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, (RuntimeValue)i));
+        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, ENCODE_INT(i)));
         q[sp / 8ULL + 1ULL + i] = va_base + str_off; /* the guest derefs VAs */
         __builtin_memcpy(top_phys_page + str_off, s->data, s->len);
         top_phys_page[str_off + s->len] = '\0';
