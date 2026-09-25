@@ -5,6 +5,7 @@ use std.io_runtime.{env_set, exit}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.driver_core_modes.{CompileMode}
 use compiler.frontend.frontend.{parse_full_frontend_with_advisory_policy_v1}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
@@ -687,7 +688,18 @@ impl CompilerDriver:
             # already use for the index table, so it can't alias.
             var poisoned_physical_keys: [text] = []
             var progress_parse_done = 0
-            val _cache_scope_published = _driver_publish_frontend_cache_scope()
+            # In-process `run` (Interpret) does not use the frontend parse
+            # cache. A cache MISS dumps every file's flat pools to a text blob
+            # (one string per pool element, never freed): a cold 278-file
+            # closure peaked at 8.77 GB against 5.22 GB warm, and bootstrap43's
+            # stage-2 test lane hit its 5.86 GB RSS cap on
+            # bootstrap_flat_llvm_receiver_ownership_spec. The cache also only
+            # pays off across native builds. An explicitly inherited
+            # SIMPLE_FRONTEND_CACHE_SCOPE still opts in.
+            val _cache_scope_published = if self.ctx.options.mode == CompileMode.Interpret:
+                false
+            else:
+                _driver_publish_frontend_cache_scope()
             log_build_progress("parse", "files", 0,
                 unique_entry_sources.len(), "pending", 1, 6, 0, 0, "running")
             for source in unique_entry_sources:
