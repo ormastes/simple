@@ -38,6 +38,15 @@ bootstrap_scv_journal_valid() {
 bootstrap_scv_prime() {
     bsp_root=$1 bsp_cli=$2 bsp_home=$3 bsp_tmp=$4 bsp_log=$5 bsp_probe=$6
     bsp_cursor="$bsp_root/build/scv/compile-events/CURRENT"
+    # A cursor that records filesystem rows while .scv/journal/events.log is
+    # absent can never be refreshed (filesystem-event-journal-missing); older
+    # binaries wrote rows=1 for an empty journal. Apply the error's own remedy.
+    if bootstrap_scv_journal_valid "$bsp_cursor" && \
+       ! grep -q '^filesystem_rows=0' "$bsp_cursor" && \
+       [ ! -f "$bsp_root/.scv/journal/events.log" ]; then
+        echo "scv-inventory-prime: clearing unrefreshable cache (rows recorded, no .scv journal)" >&2
+        rm -rf "$bsp_root/build/scv"
+    fi
     if bootstrap_scv_journal_valid "$bsp_cursor"; then
         echo "scv-inventory-prime: skipped (valid journal present: $bsp_cursor)"
         return 0
@@ -108,9 +117,16 @@ bootstrap_scv_prime_selftest() {
     write_cursor "$st/r4"; sed 's/$/\r/' "$st/r4/build/scv/compile-events/CURRENT" >"$st/crlf" 2>/dev/null
     bootstrap_scv_journal_valid "$st/crlf"; expect "CRLF cursor is valid" 0 $?
 
+    # 6. rows recorded but no .scv journal -> cache cleared and re-primed
+    mkdir -p "$st/r6"; write_cursor "$st/r6"
+    sed 's/^filesystem_rows=0/filesystem_rows=1/' "$st/r6/build/scv/compile-events/CURRENT" >"$st/r6c" &&
+        mv "$st/r6c" "$st/r6/build/scv/compile-events/CURRENT"; rm -f "$st/called"
+    bootstrap_scv_prime "$st/r6" "$st/good_cli" "$st" "$st" "$st/l6" probe >/dev/null 2>&1; expect "unrefreshable cursor is cleared and re-primed" 0 $?
+    [ -f "$st/called" ]; expect "re-prime invokes the CLI" 0 $?
+
     rm -rf "$st"
     if [ "$fails" -eq 0 ]; then
-        echo "PASS — 7 scv-prime check(s)"
+        echo "PASS — 9 scv-prime check(s)"
         return 0
     fi
     echo "FAIL — $fails scv-prime check(s) failed"
