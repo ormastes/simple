@@ -2,7 +2,7 @@
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.kernel.loader.container_namespace.{ContainerNamespaceView}
 use os.services.vfs.vfs_service.{VfsService}
-use common.string_core.{char_from_code}
+use common.string_core.{char_from_code, str_char_at}
 use os.services.vfs.vfs_block_adapters.{
     NvmeBlockAdapter
 }
@@ -408,6 +408,23 @@ pub fn vfs_state_mount_table_open_chain_probe_v1(path: text):
     else:
         _vfs_state_serial_println("[mt-probe3] resolve=err")
     _vfs_state_serial_println("[mt-probe3] driver={mount_table_debug_first_driver_v1(table)}")
+    # Per-iteration relpath-rebuild replica: mirrors MountTable.resolve's
+    # char-copy loop shape (loop-carried text accumulator + str_char_at +
+    # concat per iteration) to separate loop-variable threading defects from
+    # str_char_at result defects. run-20260925_180311 showed resolve's relpath
+    # materialize as "//////CC" (six s[0] reads + two s[1] reads) — these
+    # lines name which side (ci vs char) diverges. Probe assumes mp_len=1
+    # (root mount), matching the clang-bringup lane.
+    _vfs_state_serial_println("[mt-probe4] len={path.len()}")
+    _vfs_state_serial_println("[mt-probe4] c0={str_char_at(path, 0)} c1={str_char_at(path, 1)} c5={str_char_at(path, 5)}")
+    var rel: text = ""
+    var ci: i64 = 1
+    while ci < path.len():
+        val ch = str_char_at(path, ci)
+        _vfs_state_serial_println("[mt-probe4] it={ci} ch={ch}")
+        rel = rel + ch
+        ci = ci + 1
+    _vfs_state_serial_println("[mt-probe4] replica rel={rel} rlen={rel.len()}")
     _ = vfs_state_mount_table_unlock_v1()
 
 fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle, FsError>:

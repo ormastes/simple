@@ -77,3 +77,7 @@ these stubs) hit the deviation.
   this (`str_char_at(source, prefix.len()) == "/"` compared int-to-text →
   always false); it survived only because branch 1 (`prefix == "/"` →
   `starts_with`, pure C) covered the root mount.
+- `rt_index_get` routes string indexing through `rt_string_char_at`
+  (baremetal_stubs.c), so `chars[index]` — e.g. `char_from_code_inline`'s
+  ASCII fast path and `_split_path` — inherited the same drop; the stub fix
+  covers all of them.
