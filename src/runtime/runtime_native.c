@@ -2702,8 +2702,29 @@ int8_t rt_transient_heap_promote(int64_t value) {
     rt_core_heap_lifecycle_acquire();
     RtCoreTransientPlan plan = {0};
     RtCoreTransientNode root;
-    int ok = rt_core_transient_classify(value, &root) == 1 &&
+    int root_class = rt_core_transient_classify(value, &root);
+    if (root_class == 0 && rt_core_is_heap(value)) {
+        /* A registered heap string that is not transient-owned is already
+         * persistent: promotion is a no-op, not a failure. HIR phase memos
+         * keep text fields that alias persistent strings
+         * (glob_reachable_importer_owner = module_filename, set before the
+         * per-file scope), and treating those as failures made every retained
+         * HIR lowering fail "HIR phase memo ownership promotion failed"
+         * (Windows stage-2, 2026-09-25). Arrays/dicts/enums/closures still
+         * classify as 1 and walk normally; anything unregistered still fails. */
+        void* root_ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+        if (rt_core_is_registered_immortal_ptr(root_ptr) &&
+                rt_core_registered_object_kind(root_ptr) == RT_VALUE_HEAP_STRING) {
+            rt_core_heap_lifecycle_release();
+            return 1;
+        }
+    }
+    int ok = root_class == 1 &&
         rt_core_transient_add(&plan, value) == 1;
+    if (!ok && getenv("SIMPLE_TRANSIENT_PROMOTE_DEBUG")) {
+        fprintf(stderr, "[transient-promote] root refused: value=0x%016llx class=%d heap=%d\n",
+                (unsigned long long)(uint64_t)value, root_class, (int)rt_core_is_heap(value));
+    }
     for (size_t i = 0; ok && i < plan.len; i++) {
         RtCoreTransientNode node = plan.nodes[i];
         if (node.kind == RT_CORE_TRANSIENT_ARRAY) {
