@@ -135,6 +135,11 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     options.mode = CompileMode.Aot
     options.input_files = [source_file]
     options.output_file = out
+    # The AOT pipeline dispatches on options.output_format
+    # (driver_aot_pipeline.spl); leaving the Native default here silently
+    # turned `--format=smf` into a native build.
+    if output_format != "":
+        options.output_format = OutputFormat.from_text(output_format)
     options.verbose = verbose
     options.low_memory = low_memory
     options.profile = profile
@@ -211,27 +216,6 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
 fn _cli_is_wasm_target(t: text) -> bool:
     t == "wasm32" or t == "wasm32-wasi" or t == "wasm64" or t.starts_with("wasm32-") or t.starts_with("wasm64-")
 
-fn cli_compile_uses_simple_driver(args: [text]) -> bool:
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg == "--backend" and i + 1 < args.len():
-            if args[i + 1] == "vhdl" or args[i + 1] == "wasm" or args[i + 1] == "vulkan" or args[i + 1] == "spirv":
-                return true
-            i = i + 1
-        elif arg == "--backend=vhdl" or arg == "--backend=wasm" or arg == "--backend=vulkan" or arg == "--backend=spirv":
-            return true
-        elif arg == "--emit-vulkan-spirv-assembly" or arg.starts_with("--emit-vulkan-spirv-assembly="):
-            return true
-        elif arg == "--format=smf":
-            return true
-        elif arg.starts_with("--target=") and _cli_is_wasm_target(arg.substring(9)):
-            return true
-        elif arg == "--target" and i + 1 < args.len() and _cli_is_wasm_target(args[i + 1]):
-            return true
-        i = i + 1
-    false
-
 fn cli_validate_opt_level_args(args: [text]) -> i64:
     var i = 0
     while i < args.len():
@@ -267,8 +251,10 @@ fn cli_compile(args: [text]) -> i64:
     val opt_level_validation = cli_validate_opt_level_args(args)
     if opt_level_validation != 0:
         return opt_level_validation
-    if not cli_compile_uses_simple_driver(args):
-        return cli_compile_via_runtime(args)
+    # Every compile is parsed and driven here in pure Simple. A former gate
+    # sent any invocation without --format=smf / a vhdl/wasm/vulkan backend
+    # (e.g. the test runner's `compile <spec> -o <x>.smf`) to the seed's
+    # rt_cli_handle_compile, which the self-hosted CLI does not link.
 
     val _compile_target_opt_ctx = target_opt_context_default()
 
@@ -691,7 +677,10 @@ fn cli_compile(args: [text]) -> i64:
         # full target triples share the same canonical build path.
         return cli_compile_via_runtime(args)
 
-    # Use Pure Simple compiler driver for all compilation
+    # Use Pure Simple compiler driver for all compilation. Without --native
+    # or --format, `compile` emits an SMF module (the seed CLI's contract).
+    if output_format == "":
+        output_format = "smf"
     return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
