@@ -526,10 +526,10 @@ int64_t rt_crc32_text(const char* text, int64_t text_len) {
 }
 
 #if defined(_WIN32)
-/* rt_widen_long_path_rc is now the shared helper in runtime_win_long_path.h
+/* rt_widen_long_path_rc is now the shared helper in platform/runtime_win_long_path.h
  * (macro alias for rt_win_long_path_widen); used by rt_file_create_excl
  * below. This file used to carry its own byte-identical copy. */
-#include "runtime_win_long_path.h"
+#include "platform/runtime_win_long_path.h"
 #endif
 
 int rt_file_create_excl(const char* path, int64_t path_len,

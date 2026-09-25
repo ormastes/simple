@@ -18,9 +18,11 @@ function Get-CFunction([string]$source, [string]$name) {
 $failed = $false
 # rt_widen_long_path_rc (macro alias for rt_win_long_path_widen) used to be a
 # byte-identical copy pasted separately into runtime.c and runtime_native.c;
-# it now lives once in runtime_win_long_path.h and both owners #include it, so
-# it is read from the shared header instead of regex-extracted per owner.
-$sharedHeader = [IO.File]::ReadAllText((Join-Path $root 'src/runtime/runtime_win_long_path.h'))
+# it now lives once in platform/runtime_win_long_path.h (host-OS-services
+# routing: rt_* long-path/rename helpers belong next to the other Windows
+# platform shims such as windows_raw_mapping.h) and both owners #include it,
+# so it is read from the shared header instead of regex-extracted per owner.
+$sharedHeader = [IO.File]::ReadAllText((Join-Path $root 'src/runtime/platform/runtime_win_long_path.h'))
 foreach ($owner in @('runtime', 'runtime_native')) {
     $source = [IO.File]::ReadAllText((Join-Path $root "src/runtime/$owner.c"))
     # Compile the production function bodies verbatim, without unrelated runtime

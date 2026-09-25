@@ -48,7 +48,7 @@ int64_t rt_simple_abi_version_deferred(void) {
  * below needs it, and every later Windows call site in this file (creat,
  * fsync, publish) reuses the same include. This file used to carry its own
  * byte-identical copy defined further down. */
-#include "runtime_win_long_path.h"
+#include "platform/runtime_win_long_path.h"
 #endif
 
 #include <stdio.h>

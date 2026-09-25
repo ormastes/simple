@@ -1,6 +1,6 @@
 /*
  * Windows-only C conformance test for the runtime's shared long-path +
- * binary-IO helpers (runtime_win_long_path.h) and the process-wide
+ * binary-IO helpers (platform/runtime_win_long_path.h) and the process-wide
  * `_set_fmode(_O_BINARY)` default installed by runtime_native.c's
  * rt_win_set_binary_stdio constructor.
  *
@@ -37,7 +37,7 @@
 #include <fcntl.h>
 #include <io.h>
 
-#include "../runtime_win_long_path.h"
+#include "../platform/runtime_win_long_path.h"
 
 static int failures;
 static void require(int condition, const char *message) {

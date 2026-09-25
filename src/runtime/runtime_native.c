@@ -10525,11 +10525,11 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
 }
 
 #if defined(_WIN32)
-/* rt_widen_long_path_rc is the shared helper in runtime_win_long_path.h
+/* rt_widen_long_path_rc is the shared helper in platform/runtime_win_long_path.h
  * (macro alias for rt_win_long_path_widen), included early here so the fsync
  * worker above this point -- and every later user in this file -- can use it.
  * This file used to carry a forward-declared, separately-defined copy. */
-#include "runtime_win_long_path.h"
+#include "platform/runtime_win_long_path.h"
 #endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
@@ -11494,7 +11494,7 @@ int64_t rt_file_read_regular_no_follow_last_failure(void) {
 #define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
 
 /* rt_widen_long_path_rc is the shared helper included above
- * (runtime_win_long_path.h, macro alias for rt_win_long_path_widen). This
+ * (platform/runtime_win_long_path.h, macro alias for rt_win_long_path_widen). This
  * file used to carry its own byte-identical copy here. */
 
 int64_t rt_file_read_regular_no_follow_bounded(
@@ -14488,7 +14488,7 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
      * this call was silently failing right after the just-fixed fsync
      * succeeded, reproducing the identical "generation-publication-failed"
      * symptom for an unrelated reason. rt_win_long_path_rename (shared
-     * helper, runtime_win_long_path.h) prefers the wide, extended-length-
+     * helper, platform/runtime_win_long_path.h) prefers the wide, extended-length-
      * prefixed MoveFileExW(MOVEFILE_REPLACE_EXISTING) for a file
      * destination -- the POSIX rename(2) / Rust std::fs::rename contract
      * every caller here assumes; without it every SCV inventory re-publish
