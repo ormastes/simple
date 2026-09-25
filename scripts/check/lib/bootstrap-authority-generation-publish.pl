@@ -43,7 +43,47 @@ my $transaction_body="schema=simple-bootstrap-authority-transaction-v1\ngenerati
 my $marker_body="schema=simple-bootstrap-authority-current-v1\ngeneration=$final_leaf\ninputs_fingerprint=$inputs\ngeneration_sha256=$hash\nstamp_sha256=$stamp_hash\n";
 my $write_atomic=sub{my($tmp,$dest,$body)=@_;sysopen(my $fh,$tmp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600) or die "create control temporary: $!\n";print {$fh}$body or die "write control temporary: $!\n";close($fh) or die "close control temporary: $!\n";rename($tmp,$dest) or die "commit control file: $!\n";};
 my($compat_saved,$compat_installed,$error)=(0,0);
-eval{$write_atomic->($transaction_tmp,$transaction_leaf,$transaction_body);if(lstat($compat_leaf)){rename($compat_leaf,$compat_backup) or die "save compatibility: $!\n";$compat_saved=1;}symlink("$generation_leaf/$final_leaf",$compat_tmp) or die "create compatibility: $!\n";rename($compat_tmp,$compat_leaf) or die "commit compatibility: $!\n";$compat_installed=1;if(($ENV{BOOTSTRAP_STAGE3_TEST_STOP_AFTER_COMPATIBILITY}//q{}) eq 1){die "__STOP_AFTER_COMPATIBILITY__\n";}$write_atomic->($marker_tmp,$marker_leaf,$marker_body);my $control_after=realpath($control_path);my @control_after_id=defined($control_after)?stat($control_path):();defined($control_after)&&$control_after eq $control_path&&@control_after_id&&$control_after_id[0]==$control_id[0]&&$control_after_id[1]==$control_id[1] or die "authority control parent changed during marker admission\n";unlink($transaction_leaf) or die "retire transaction: $!\n";
+# The compatibility pointer is created platform-appropriately. On Windows it is
+# a DIRECTORY JUNCTION -- exactly what bootstrap_stage3_create_compatibility_link()
+# already does on MINGW/MSYS/CYGWIN (scripts/check/lib/bootstrap-stage3/authority.shs):
+# a junction preserves the directory-only compatibility ABI and needs no
+# SeCreateSymbolicLinkPrivilege, which a normal Windows session's UAC-filtered
+# token does not carry.
+#
+# Until this was aligned the two implementations of the SAME pointer disagreed:
+# the RECOVERY path used a junction, while this FRESH-PUBLISH path used perl
+# symlink() under winsymlinks:nativestrict. So phase-1 publish died with
+# "create compatibility: Operation not permitted" on every unelevated Windows
+# host, while recovering the identical pointer would have succeeded. That was a
+# missing platform accommodation, not a security boundary: nativestrict is kept
+# for POSIX, where a real symlink with a RELATIVE target is still created and
+# behaviour is byte-for-byte unchanged.
+#
+# The junction is built at this transaction's private temporary name, so the
+# caller's existing rename() still performs the atomic commit, and it is
+# verified as a real reparse point resolving to the intended target before that
+# commit -- the same two checks the shell helper makes.
+my $windows_host=($^O=~/\A(?:MSWin32|msys|cygwin)\z/)?1:0;
+my $win_path=sub{my($raw)=@_;open(my $fh,'-|','cygpath','-w','--',$raw) or die "cygpath: $!\n";my $out=<$fh>;close($fh) or die "cygpath failed for $raw\n";defined($out) or die "cygpath produced no path for $raw\n";chomp $out;length($out) or die "cygpath produced an empty path for $raw\n";return $out;};
+my $create_compat=sub{
+    my($target_rel,$link)=@_;
+    if(!$windows_host){symlink($target_rel,$link) or die "create compatibility: $!\n";return;}
+    my $target_abs="$generation_path/$final_leaf";
+    my $link_win=$win_path->("$control_path/$link");
+    my $target_win=$win_path->($target_abs);
+    system('cmd.exe','//d','//c','mklink','//J',$link_win,$target_win)==0
+        or die "create compatibility: mklink /J failed\n";
+    my $is_reparse=0;
+    if(open(my $probe,'-|','fsutil.exe','reparsepoint','query',$link_win)){local $/;my $discard=<$probe>;$is_reparse=close($probe)?1:0;}
+    my $resolved=realpath($link);
+    my $expected=realpath($target_abs);
+    if(!$is_reparse||!defined($resolved)||!defined($expected)||$resolved ne $expected){
+        rmdir($link)||unlink($link);
+        die "create compatibility: junction verification failed\n";
+    }
+    return;
+};
+eval{$write_atomic->($transaction_tmp,$transaction_leaf,$transaction_body);if(lstat($compat_leaf)){rename($compat_leaf,$compat_backup) or die "save compatibility: $!\n";$compat_saved=1;}$create_compat->("$generation_leaf/$final_leaf",$compat_tmp);rename($compat_tmp,$compat_leaf) or die "commit compatibility: $!\n";$compat_installed=1;if(($ENV{BOOTSTRAP_STAGE3_TEST_STOP_AFTER_COMPATIBILITY}//q{}) eq 1){die "__STOP_AFTER_COMPATIBILITY__\n";}$write_atomic->($marker_tmp,$marker_leaf,$marker_body);my $control_after=realpath($control_path);my @control_after_id=defined($control_after)?stat($control_path):();defined($control_after)&&$control_after eq $control_path&&@control_after_id&&$control_after_id[0]==$control_id[0]&&$control_after_id[1]==$control_id[1] or die "authority control parent changed during marker admission\n";unlink($transaction_leaf) or die "retire transaction: $!\n";
 if($compat_saved){if(-d $compat_backup&&!-l $compat_backup){my @records;find({no_chdir=>1,wanted=>sub{return if $File::Find::name eq $compat_backup;-l $File::Find::name and die "legacy symlink\n";return unless -f $File::Find::name;my $sha=Digest::SHA->new(256);$sha->addfile($File::Find::name,'b');my $relative=substr($File::Find::name,length($compat_backup)+1);push @records,join(':','file-hex',unpack('H*',$relative),(-x $File::Find::name?1:0),$sha->hexdigest);}},$compat_backup);@records or die "empty legacy authority\n";my $legacy="$generation_leaf/legacy-".sha256_hex(join("\n",sort @records)."\n");rename($compat_backup,$legacy) or die "archive legacy compatibility: $!\n";}else{unlink($compat_backup) or die "retire old compatibility: $!\n";}}1;}or$error=$@||"authority admission failed\n";
 if(defined($error)&&$error eq "__STOP_AFTER_COMPATIBILITY__\n"){exit 99;}
 if(defined($error)){unlink($marker_leaf);unlink($marker_tmp);unlink($transaction_leaf);unlink($transaction_tmp);unlink($compat_tmp);unlink($compat_leaf) if $compat_installed;rename($compat_backup,$compat_leaf) if $compat_saved&&lstat($compat_backup);$quarantine->();die $error;}
