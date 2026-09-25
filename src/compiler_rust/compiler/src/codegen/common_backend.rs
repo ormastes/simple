@@ -1929,6 +1929,7 @@ impl<M: Module> CodegenBackend<M> {
                 &self.enum_defs,
                 self.tag_runtime_pool_join_result,
                 self.target.is_baremetal(),
+                self.target.uses_fam_array_abi(),
             )
         }));
         match body_result {

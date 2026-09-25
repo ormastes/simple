@@ -51,6 +51,7 @@ pub(crate) fn inline_runtime_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
     baremetal: bool,
+    fam_arrays: bool,
 ) -> cranelift_codegen::ir::Value {
     let invalid = builder.ins().iconst(types::I64, -1);
     let tag_mask = builder.ins().iconst(types::I64, 7);
@@ -130,6 +131,13 @@ pub(crate) fn inline_runtime_len_value(
     builder.switch_to_block(len_block);
     // SplDict keeps its entry count at offset 16; everything else at offset 8.
     // Separate blocks so off16 is never loaded on a (possibly smaller) non-dict.
+    //
+    // On FAM-array baremetal targets (aarch64/arm32/x86_32 C runtimes) the
+    // offset-8 length is a `u32` for arrays AND dicts
+    // (`RuntimeMap{u32 len; u32 cap; keys*; values*}`), while RuntimeString
+    // keeps its `u64 len` — so the offset-8 group splits by width there.
+    // Without the split, an inlined `.len()` on a 512-element sector buffer
+    // reads `len | cap<<32` = 2199023256064 (aarch64 clang-bringup Blocker 2).
     let spldict_len_block = builder.create_block();
     let other_len_block = builder.create_block();
     builder
@@ -143,9 +151,27 @@ pub(crate) fn inline_runtime_len_value(
     builder.seal_block(spldict_len_block);
 
     builder.switch_to_block(other_len_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    builder.ins().jump(done_block, &[len]);
-    builder.seal_block(other_len_block);
+    if fam_arrays {
+        let str_block = builder.create_block();
+        let arrdict_block = builder.create_block();
+        builder.ins().brif(is_string, str_block, &[], arrdict_block, &[]);
+        builder.seal_block(other_len_block);
+
+        builder.switch_to_block(str_block);
+        let str_len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+        builder.ins().jump(done_block, &[str_len]);
+        builder.seal_block(str_block);
+
+        builder.switch_to_block(arrdict_block);
+        let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+        let arrdict_len = builder.ins().uextend(types::I64, len32);
+        builder.ins().jump(done_block, &[arrdict_len]);
+        builder.seal_block(arrdict_block);
+    } else {
+        let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+        builder.ins().jump(done_block, &[len]);
+        builder.seal_block(other_len_block);
+    }
 
     builder.switch_to_block(done_block);
     let result = builder.block_params(done_block)[0];
@@ -156,6 +182,7 @@ pub(crate) fn inline_runtime_len_value(
 pub(crate) fn inline_runtime_array_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
 ) -> cranelift_codegen::ir::Value {
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(value, ptr_mask);
@@ -167,7 +194,15 @@ pub(crate) fn inline_runtime_array_len_value(
     builder.ins().brif(is_null, done_block, &[zero], len_block, &[]);
 
     builder.switch_to_block(len_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    // FAM baremetal runtimes store `u32 len` at offset 8 (cap follows at 12);
+    // the hosted layout stores `u64 len` at offset 8. An i64 load across the
+    // FAM pair returns len|cap<<32 — the 512<<32 seen in the aarch64 OS lane.
+    let len = if fam_arrays {
+        let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+        builder.ins().uextend(types::I64, len32)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+    };
     builder.ins().jump(done_block, &[len]);
     builder.seal_block(len_block);
 
@@ -175,6 +210,89 @@ pub(crate) fn inline_runtime_array_len_value(
     let result = builder.block_params(done_block)[0];
     builder.seal_block(done_block);
     result
+}
+
+/// Load a RuntimeArray length field as i64 for the target's layout.
+/// Hosted / riscv64 / x86_64 freestanding: `u64 len` at offset 8.
+/// FAM baremetal (aarch64/arm32/x86_32 C runtimes): `u32 len` at offset 8,
+/// zero-extended — an i64 load there would pair `len` with `cap`.
+pub(crate) fn array_len_i64(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) -> cranelift_codegen::ir::Value {
+    if fam_arrays {
+        let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+        builder.ins().uextend(types::I64, len32)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+    }
+}
+
+/// Load a RuntimeArray capacity field as i64 for the target's layout.
+/// Hosted: `u64 cap` at offset 16. FAM: `u32 cap` at offset 12, zero-extended.
+pub(crate) fn array_cap_i64(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) -> cranelift_codegen::ir::Value {
+    if fam_arrays {
+        let cap32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 12);
+        builder.ins().uextend(types::I64, cap32)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16)
+    }
+}
+
+/// RuntimeArray element storage base for the target's layout.
+/// Hosted: `RuntimeValue *data` at offset 24 (separate allocation).
+/// FAM: the items flexible-array member starts at offset 16, so the base is
+/// the header pointer itself plus 16 — there is NO pointer indirection.
+pub(crate) fn array_items_base(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) -> cranelift_codegen::ir::Value {
+    if fam_arrays {
+        builder.ins().iadd_imm(ptr_bits, 16)
+    } else {
+        builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24)
+    }
+}
+
+/// Store an updated RuntimeArray length field.
+/// Hosted: i64 at offset 8. FAM: i32 at offset 8 (the C `u32 len` field).
+pub(crate) fn store_array_len(
+    builder: &mut FunctionBuilder,
+    ptr_bits: cranelift_codegen::ir::Value,
+    len_i64: cranelift_codegen::ir::Value,
+    fam_arrays: bool,
+) {
+    if fam_arrays {
+        let len32 = builder.ins().ireduce(types::I32, len_i64);
+        builder.ins().store(MemFlags::new(), len32, ptr_bits, 8);
+    } else {
+        builder.ins().store(MemFlags::new(), len_i64, ptr_bits, 8);
+    }
+}
+
+/// Decode one logical byte from a tagged RuntimeValue slot, mirroring the
+/// freestanding C `arm64_array_byte_at_raw_index`: integer-tagged slots carry
+/// the byte as ENCODE_INT(byte) (payload in bits 3..), any other slot's low
+/// byte is used directly.
+pub(crate) fn decode_byte_from_slot(
+    builder: &mut FunctionBuilder,
+    slot: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let zero = builder.ins().iconst(types::I64, 0);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let byte_mask = builder.ins().iconst(types::I64, 0xff);
+    let slot_tag = builder.ins().band(slot, tag_mask);
+    let slot_is_int = builder.ins().icmp(IntCC::Equal, slot_tag, zero);
+    let int_payload = builder.ins().sshr_imm(slot, 3);
+    let int_byte = builder.ins().band(int_payload, byte_mask);
+    let raw_byte = builder.ins().band(slot, byte_mask);
+    builder.ins().select(slot_is_int, int_byte, raw_byte)
 }
 
 /// Helper to create a string constant in module data and return (ptr, len) values.

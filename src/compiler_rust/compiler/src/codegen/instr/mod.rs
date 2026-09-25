@@ -189,6 +189,15 @@ pub struct InstrContext<'a, M: Module> {
     /// in the inline `.len()` fast path, whose tag numbers collide with hosted
     /// `HeapObjectType` values.
     pub baremetal: bool,
+    /// True when the target's RuntimeArray layout is the freestanding FAM ABI
+    /// (`Target::uses_fam_array_abi()`): `u32 len@8; u32 cap@12; RuntimeValue
+    /// items@16`, elements stored inline as tagged slots. The inline array
+    /// accessor fast paths (len/index/byte/word) must emit this layout instead
+    /// of the hosted `u64 len@8; RuntimeValue *data@24` layout, or every
+    /// Simple-level `.len()`/index on a freestanding array reads the wrong
+    /// offset/width (512<<32 for a 512-element array whose cap is 512).
+    /// See doc/08_tracking/aarch64_in_guest_clang_compile_lane_status_2026-09-25.md.
+    pub fam_arrays: bool,
 }
 
 impl<'a, M: Module> InstrContext<'a, M> {
@@ -300,6 +309,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             enum_defs,
             tag_runtime_pool_join_result: false,
             baremetal: false,
+            fam_arrays: false,
         }
     }
 }

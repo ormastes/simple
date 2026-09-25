@@ -13,8 +13,9 @@ use crate::mir::{CallTarget, VReg};
 
 use super::core::{compile_builtin_io_call, vreg_is_signed};
 use super::helpers::{
-    adapted_call, call_runtime_1, call_runtime_2, call_runtime_3, create_cstring_constant, get_vreg_or_default,
-    inline_runtime_array_len_value, inline_runtime_len_value,
+    adapted_call, array_cap_i64, array_items_base, array_len_i64, call_runtime_1, call_runtime_2, call_runtime_3,
+    create_cstring_constant, decode_byte_from_slot, get_vreg_or_default, inline_runtime_array_len_value,
+    inline_runtime_len_value, store_array_len,
 };
 use super::{InstrContext, InstrResult};
 
@@ -149,6 +150,10 @@ fn emit_profiler_call<M: Module>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "fam_abi_tests.rs"]
+mod fam_abi_tests;
 
 #[cfg(test)]
 mod tests {
@@ -342,9 +347,9 @@ fn compile_inline_len<M: Module>(
 
     let value = coerce_vreg_to_i64(ctx, builder, args[0]);
     let result = if trusted_array {
-        inline_runtime_array_len_value(builder, value)
+        inline_runtime_array_len_value(builder, value, ctx.fam_arrays)
     } else {
-        inline_runtime_len_value(builder, value, ctx.baremetal)
+        inline_runtime_len_value(builder, value, ctx.baremetal, ctx.fam_arrays)
     };
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
@@ -482,7 +487,7 @@ fn compile_inline_bytes_u8_at<M: Module>(
     }
 
     builder.switch_to_block(bounds_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let (normalized_index, in_bounds) = if index_is_unsigned {
         let lt_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
         (index, lt_len)
@@ -501,26 +506,39 @@ fn compile_inline_bytes_u8_at<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let packed_block = builder.create_block();
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
+    // FAM arrays never byte-pack (no gc_flags in the freestanding HeapHeader),
+    // so the packed_block arm is omitted there.
+    let packed_block = if ctx.fam_arrays {
+        None
+    } else {
+        Some(builder.create_block())
+    };
     let slot_block = builder.create_block();
-    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
-    let byte_packed = builder.ins().band_imm(gc_flags, 8);
-    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-    builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+    if let Some(packed_block) = packed_block {
+        let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+        let byte_packed = builder.ins().band_imm(gc_flags, 8);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+    } else {
+        builder.ins().jump(slot_block, &[]);
+    }
     builder.seal_block(load_block);
 
-    builder.switch_to_block(packed_block);
-    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
-    let packed_byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-    let packed_value = builder.ins().uextend(types::I64, packed_byte);
-    builder.ins().jump(done_block, &[packed_value]);
-    builder.seal_block(packed_block);
+    if let Some(packed_block) = packed_block {
+        builder.switch_to_block(packed_block);
+        let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+        let packed_byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+        let packed_value = builder.ins().uextend(types::I64, packed_byte);
+        builder.ins().jump(done_block, &[packed_value]);
+        builder.seal_block(packed_block);
+    }
 
     builder.switch_to_block(slot_block);
     let slot_offset = builder.ins().imul_imm(normalized_index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    // Same decode as decode_byte_from_slot, reusing this block's constants.
     let raw_tag = builder.ins().band(raw, tag_mask);
     let raw_is_int = builder.ins().icmp(IntCC::Equal, raw_tag, zero);
     let int_payload = builder.ins().sshr_imm(raw, 3);
@@ -561,7 +579,7 @@ fn compile_inline_bytes_le_at<M: Module>(
     let done_block = builder.create_block();
     builder.append_block_param(done_block, types::I64);
 
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let ge_zero = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, index, zero);
     let end = builder.ins().iadd_imm(index, width);
     let in_len = builder.ins().icmp(IntCC::SignedLessThanOrEqual, end, len);
@@ -569,16 +587,40 @@ fn compile_inline_bytes_le_at<M: Module>(
     builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
 
     builder.switch_to_block(load_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let byte_ptr = builder.ins().iadd(data_ptr, index);
-    let loaded = if width == 8 {
-        builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
-    } else if width == 1 {
-        let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-        builder.ins().uextend(types::I64, value)
+    let loaded = if ctx.fam_arrays {
+        // FAM elements are tagged slots at items@16; compose the little-endian
+        // value from per-slot byte decodes (mirrors the C rt_arm_array_get_u32_le).
+        let items = array_items_base(builder, ptr_bits, true);
+        let mut acc: Option<Value> = None;
+        for i in 0..width {
+            let off = builder.ins().iadd_imm(index, i);
+            let slot_off = builder.ins().imul_imm(off, 8);
+            let slot_ptr = builder.ins().iadd(items, slot_off);
+            let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+            let byte = decode_byte_from_slot(builder, slot);
+            let piece = if i == 0 {
+                byte
+            } else {
+                builder.ins().ishl_imm(byte, (i * 8) as i64)
+            };
+            acc = Some(match acc {
+                None => piece,
+                Some(a) => builder.ins().bor(a, piece),
+            });
+        }
+        acc.expect("at least one byte composed")
     } else {
-        let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
-        builder.ins().uextend(types::I64, value)
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        let byte_ptr = builder.ins().iadd(data_ptr, index);
+        if width == 8 {
+            builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+        } else if width == 1 {
+            let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        } else {
+            let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        }
     };
     builder.ins().jump(done_block, &[loaded]);
     builder.seal_block(load_block);
@@ -608,16 +650,42 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let byte_ptr = builder.ins().iadd(data_ptr, index);
-    let loaded = if width == 8 {
-        builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
-    } else if width == 1 {
-        let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-        builder.ins().uextend(types::I64, value)
+    let loaded = if ctx.fam_arrays {
+        // FAM byte arrays store each element as a tagged RuntimeValue slot at
+        // items@16 (never raw-packed), so the little-endian value must be
+        // composed from per-slot decodes — mirroring the freestanding C
+        // rt_arm_array_get_u16_le / rt_arm_array_get_u32_le helpers.
+        let items = array_items_base(builder, ptr_bits, true);
+        let mut acc: Option<Value> = None;
+        for i in 0..width {
+            let off = builder.ins().iadd_imm(index, i);
+            let slot_off = builder.ins().imul_imm(off, 8);
+            let slot_ptr = builder.ins().iadd(items, slot_off);
+            let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+            let byte = decode_byte_from_slot(builder, slot);
+            let piece = if i == 0 {
+                byte
+            } else {
+                builder.ins().ishl_imm(byte, (i * 8) as i64)
+            };
+            acc = Some(match acc {
+                None => piece,
+                Some(a) => builder.ins().bor(a, piece),
+            });
+        }
+        acc.expect("at least one byte composed")
     } else {
-        let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
-        builder.ins().uextend(types::I64, value)
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        let byte_ptr = builder.ins().iadd(data_ptr, index);
+        if width == 8 {
+            builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+        } else if width == 1 {
+            let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        } else {
+            let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+            builder.ins().uextend(types::I64, value)
+        }
     };
     ctx.vreg_values.insert(*dest, loaded);
     Ok(true)
@@ -638,7 +706,9 @@ fn compile_inline_array_data_ptr<M: Module>(
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    // FAM: the items flexible-array member starts at offset 16 — no pointer
+    // indirection (and the C runtime exports only rt_array_data_ptr_text).
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     ctx.vreg_values.insert(*dest, data_ptr);
     Ok(true)
 }
@@ -685,9 +755,15 @@ fn compile_inline_array_get<M: Module>(
     let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
 
     // Blocks: nil_check → bounds_block → load_block → {byte_block, word_block} → done_block
+    // FAM-array targets never byte-pack (no gc_flags in their HeapHeader), so the
+    // byte_block arm is omitted there and every element is a tagged slot.
     let bounds_block = builder.create_block();
     let load_block = builder.create_block();
-    let byte_block = builder.create_block();
+    let byte_block = if ctx.fam_arrays {
+        None
+    } else {
+        Some(builder.create_block())
+    };
     let word_block = builder.create_block();
     let done_block = builder.create_block();
     builder.append_block_param(done_block, types::I64);
@@ -700,7 +776,7 @@ fn compile_inline_array_get<M: Module>(
 
     // Bounds check — len and normalized_index computed here, after we know ptr is valid.
     builder.switch_to_block(bounds_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -720,22 +796,29 @@ fn compile_inline_array_get<M: Module>(
     builder.ins().brif(in_bounds, load_block, &[], done_block, &[nil]);
     builder.seal_block(bounds_block);
 
-    // Load data_ptr only after bounds check passes — avoids the wild read on OOB.
+    // Load the items base only after the bounds check passes — avoids the wild
+    // read on OOB. FAM: items base is header+16 (no indirection, no byte-packing).
     builder.switch_to_block(load_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
-    let flags64 = builder.ins().uextend(types::I64, flags);
-    let byte_packed = builder.ins().band_imm(flags64, 0x08);
-    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-    builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
+    if let Some(byte_block) = byte_block {
+        let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+        let flags64 = builder.ins().uextend(types::I64, flags);
+        let byte_packed = builder.ins().band_imm(flags64, 0x08);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
+    } else {
+        builder.ins().jump(word_block, &[]);
+    }
     builder.seal_block(load_block);
 
-    builder.switch_to_block(byte_block);
-    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
-    let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-    let byte_value = builder.ins().uextend(types::I64, byte);
-    builder.ins().jump(done_block, &[byte_value]);
-    builder.seal_block(byte_block);
+    if let Some(byte_block) = byte_block {
+        builder.switch_to_block(byte_block);
+        let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+        let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+        let byte_value = builder.ins().uextend(types::I64, byte);
+        builder.ins().jump(done_block, &[byte_value]);
+        builder.seal_block(byte_block);
+    }
 
     builder.switch_to_block(word_block);
     let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
@@ -784,7 +867,7 @@ fn compile_inline_array_get_word<M: Module>(
     builder.ins().brif(is_heap, bounds_block, &[], done_block, &[nil]);
 
     builder.switch_to_block(bounds_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -805,7 +888,7 @@ fn compile_inline_array_get_word<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let value = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
@@ -841,7 +924,12 @@ fn compile_inline_array_set<M: Module>(
 
     let bounds_block = builder.create_block();
     let store_block = builder.create_block();
-    let byte_block = builder.create_block();
+    // FAM-array targets never byte-pack, so the byte_block arm is omitted there.
+    let byte_block = if ctx.fam_arrays {
+        None
+    } else {
+        Some(builder.create_block())
+    };
     let word_block = builder.create_block();
     let done_block = builder.create_block();
     builder.append_block_param(done_block, types::I64);
@@ -852,7 +940,7 @@ fn compile_inline_array_set<M: Module>(
     builder.ins().brif(is_heap, bounds_block, &[], done_block, &[zero]);
 
     builder.switch_to_block(bounds_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -873,20 +961,26 @@ fn compile_inline_array_set<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
-    let flags64 = builder.ins().uextend(types::I64, flags);
-    let byte_packed = builder.ins().band_imm(flags64, 0x08);
-    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-    builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
+    if let Some(byte_block) = byte_block {
+        let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+        let flags64 = builder.ins().uextend(types::I64, flags);
+        let byte_packed = builder.ins().band_imm(flags64, 0x08);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, byte_block, &[], word_block, &[]);
+    } else {
+        builder.ins().jump(word_block, &[]);
+    }
     builder.seal_block(store_block);
 
-    builder.switch_to_block(byte_block);
-    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
-    let byte_value = builder.ins().ireduce(types::I8, value);
-    builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
-    builder.ins().jump(done_block, &[one]);
-    builder.seal_block(byte_block);
+    if let Some(byte_block) = byte_block {
+        builder.switch_to_block(byte_block);
+        let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+        let byte_value = builder.ins().ireduce(types::I8, value);
+        builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
+        builder.ins().jump(done_block, &[one]);
+        builder.seal_block(byte_block);
+    }
 
     builder.switch_to_block(word_block);
     let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
@@ -935,7 +1029,7 @@ fn compile_inline_array_set_word<M: Module>(
     builder.ins().brif(is_heap, bounds_block, &[], done_block, &[zero]);
 
     builder.switch_to_block(bounds_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -956,7 +1050,7 @@ fn compile_inline_array_set_word<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     builder.ins().store(MemFlags::new(), value, slot_ptr, 0);
@@ -1531,9 +1625,18 @@ fn compile_inline_typed_bytes_data_at<M: Module>(
     };
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let byte_ptr = builder.ins().iadd(data_ptr, index);
-    let loaded = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-    let widened = builder.ins().uextend(types::I64, loaded);
+    let widened = if ctx.fam_arrays {
+        // The hoisted data pointer is the FAM items base (header+16); elements
+        // are tagged slots, so decode the byte instead of reading raw memory.
+        let slot_off = builder.ins().imul_imm(index, 8);
+        let slot_ptr = builder.ins().iadd(data_ptr, slot_off);
+        let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+        decode_byte_from_slot(builder, slot)
+    } else {
+        let byte_ptr = builder.ins().iadd(data_ptr, index);
+        let loaded = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+        builder.ins().uextend(types::I64, loaded)
+    };
     ctx.vreg_values.insert(*dest, widened);
     Ok(true)
 }
@@ -1564,7 +1667,7 @@ fn compile_inline_typed_words_at<M: Module>(
     builder.append_block_param(done_block, types::I64);
 
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -1588,7 +1691,7 @@ fn compile_inline_typed_words_at<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().imul_imm(normalized_index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
@@ -1657,7 +1760,7 @@ fn compile_inline_typed_words_unchecked<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
@@ -1773,7 +1876,7 @@ fn compile_inline_typed_words_u32_set<M: Module>(
     builder.append_block_param(done_block, types::I8);
 
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
     let negative_index = builder.ins().iadd(len, index);
     let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
@@ -1791,7 +1894,7 @@ fn compile_inline_typed_words_u32_set<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().imul_imm(normalized_index, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let masked = builder.ins().band(value, word_mask);
@@ -1832,8 +1935,8 @@ fn compile_inline_typed_words_push<M: Module>(
     let value = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let capacity = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
+    let capacity = array_cap_i64(builder, ptr_bits, ctx.fam_arrays);
     let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
     let returns_value = dest.is_some();
     let true_value = if returns_value {
@@ -1851,13 +1954,16 @@ fn compile_inline_typed_words_push<M: Module>(
     builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
 
     builder.switch_to_block(store_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().imul_imm(len, 8);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    // maybe_packed_u64_store_word's gc_flags probe reads offset 1, which is 0
+    // for every FAM heap object (the u32 type tag's high bytes), so it emits
+    // the tagged-int store the FAM C runtime uses.
     let stored = maybe_packed_u64_store_word(builder, ptr_bits, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(len, 1);
-    builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
+    store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
     if let Some(true_value) = true_value {
         builder.ins().jump(done_block, &[true_value]);
     } else {
@@ -1906,13 +2012,13 @@ fn compile_inline_typed_words_push_known_at<M: Module>(
     let value = coerce_vreg_to_i64(ctx, builder, args[2]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let slot_offset = builder.ins().ishl_imm(index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let stored = maybe_packed_u64_store_word(builder, ptr_bits, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(index, 1);
-    builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
+    store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
     if let Some(dest) = dest {
         let true_value = builder.ins().iconst(types::I8, 1);
         ctx.vreg_values.insert(*dest, true_value);
@@ -1940,7 +2046,7 @@ fn compile_inline_typed_words_push_known_data_at<M: Module>(
     let stored = maybe_packed_u64_store_word(builder, header_ptr, value, width);
     builder.ins().store(MemFlags::new(), stored, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(index, 1);
-    builder.ins().store(MemFlags::new(), next_len, header_ptr, 8);
+    store_array_len(builder, header_ptr, next_len, ctx.fam_arrays);
     if let Some(dest) = dest {
         let true_value = builder.ins().iconst(types::I8, 1);
         ctx.vreg_values.insert(*dest, true_value);
@@ -1986,7 +2092,9 @@ fn compile_inline_array_set_len_known<M: Module>(
     let header_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let raw_len = coerce_vreg_to_i64(ctx, builder, args[1]);
     let len = inline_numeric_arg_typed(ctx, builder, args[1], raw_len);
-    builder.ins().store(MemFlags::new(), len, header_ptr, 8);
+    // FAM C runtimes store `u32 len` at offset 8 (mirrors their
+    // rt_array_set_len_known_text which writes a->len, not cap).
+    store_array_len(builder, header_ptr, len, ctx.fam_arrays);
     if let Some(dest) = dest {
         let true_value = builder.ins().iconst(types::I8, 1);
         ctx.vreg_values.insert(*dest, true_value);
@@ -2011,8 +2119,8 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     let value = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let capacity = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
+    let capacity = array_cap_i64(builder, ptr_bits, ctx.fam_arrays);
     let has_capacity = builder.ins().icmp(IntCC::UnsignedLessThan, len, capacity);
     let returns_value = dest.is_some();
     let true_value = if returns_value {
@@ -2030,27 +2138,38 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     builder.ins().brif(has_capacity, store_block, &[], grow_block, &[]);
 
     builder.switch_to_block(store_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let packed_block = builder.create_block();
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
+    // FAM arrays never byte-pack: no packed_block arm, straight to the slot store.
+    let packed_block = if ctx.fam_arrays {
+        None
+    } else {
+        Some(builder.create_block())
+    };
     let slot_block = builder.create_block();
-    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
-    let byte_packed = builder.ins().band_imm(gc_flags, 8);
-    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
-    builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+    if let Some(packed_block) = packed_block {
+        let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+        let byte_packed = builder.ins().band_imm(gc_flags, 8);
+        let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+        builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+    } else {
+        builder.ins().jump(slot_block, &[]);
+    }
     builder.seal_block(store_block);
 
-    builder.switch_to_block(packed_block);
-    let byte_ptr = builder.ins().iadd(data_ptr, len);
-    let byte_value = builder.ins().ireduce(types::I8, value);
-    builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
-    let next_len = builder.ins().iadd_imm(len, 1);
-    builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
-    if let Some(true_value) = true_value {
-        builder.ins().jump(done_block, &[true_value]);
-    } else {
-        builder.ins().jump(done_block, &[]);
+    if let Some(packed_block) = packed_block {
+        builder.switch_to_block(packed_block);
+        let byte_ptr = builder.ins().iadd(data_ptr, len);
+        let byte_value = builder.ins().ireduce(types::I8, value);
+        builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
+        let next_len = builder.ins().iadd_imm(len, 1);
+        store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
+        if let Some(true_value) = true_value {
+            builder.ins().jump(done_block, &[true_value]);
+        } else {
+            builder.ins().jump(done_block, &[]);
+        }
+        builder.seal_block(packed_block);
     }
-    builder.seal_block(packed_block);
 
     builder.switch_to_block(slot_block);
     let slot_offset = builder.ins().imul_imm(len, 8);
@@ -2060,7 +2179,7 @@ fn compile_inline_typed_bytes_u8_push<M: Module>(
     let tagged = builder.ins().ishl_imm(masked, 3);
     builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
     let next_len = builder.ins().iadd_imm(len, 1);
-    builder.ins().store(MemFlags::new(), next_len, ptr_bits, 8);
+    store_array_len(builder, ptr_bits, next_len, ctx.fam_arrays);
     if let Some(true_value) = true_value {
         builder.ins().jump(done_block, &[true_value]);
     } else {
@@ -2147,13 +2266,28 @@ fn compile_inline_typed_bytes_le_set_unchecked<M: Module>(
     let value = inline_numeric_arg_typed(ctx, builder, args[2], raw_value);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-    let byte_ptr = builder.ins().iadd(data_ptr, index);
-    if width == 8 {
-        builder.ins().store(MemFlags::new(), value, byte_ptr, 0);
+    if ctx.fam_arrays {
+        // FAM byte arrays store each element as a tagged slot at items@16:
+        // write ENCODE_INT(byte) = ((value >> 8*i) & 0xff) << 3 per byte.
+        let items = array_items_base(builder, ptr_bits, true);
+        for i in 0..width {
+            let shifted = builder.ins().ushr_imm(value, (i * 8) as i64);
+            let byte_val = builder.ins().band_imm(shifted, 0xff);
+            let tagged = builder.ins().ishl_imm(byte_val, 3);
+            let off = builder.ins().iadd_imm(index, i);
+            let slot_off = builder.ins().imul_imm(off, 8);
+            let slot_ptr = builder.ins().iadd(items, slot_off);
+            builder.ins().store(MemFlags::new(), tagged, slot_ptr, 0);
+        }
     } else {
-        let narrowed = builder.ins().ireduce(types::I32, value);
-        builder.ins().store(MemFlags::new(), narrowed, byte_ptr, 0);
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        let byte_ptr = builder.ins().iadd(data_ptr, index);
+        if width == 8 {
+            builder.ins().store(MemFlags::new(), value, byte_ptr, 0);
+        } else {
+            let narrowed = builder.ins().ireduce(types::I32, value);
+            builder.ins().store(MemFlags::new(), narrowed, byte_ptr, 0);
+        }
     }
     if let Some(dest) = dest {
         ctx.vreg_values.insert(*dest, builder.ins().iconst(types::I8, 1));
@@ -2206,7 +2340,7 @@ fn compile_inline_bytes_u8_set<M: Module>(
     }
 
     builder.switch_to_block(bounds_block);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let len = array_len_i64(builder, ptr_bits, ctx.fam_arrays);
     let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
     let negative_index = builder.ins().iadd(len, index);
     let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
@@ -2221,8 +2355,26 @@ fn compile_inline_bytes_u8_set<M: Module>(
     builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let data_ptr = array_items_base(builder, ptr_bits, ctx.fam_arrays);
     let byte = builder.ins().band(value, byte_mask);
+    // FAM byte arrays are tagged slots at items@16 — always the slot store,
+    // never a raw packed-byte write.
+    if ctx.fam_arrays {
+        let slot_offset = builder.ins().imul_imm(normalized_index, 8);
+        let elem_ptr = builder.ins().iadd(data_ptr, slot_offset);
+        let tagged = builder.ins().ishl_imm(byte, 3);
+        builder.ins().store(MemFlags::new(), tagged, elem_ptr, 0);
+        builder.ins().jump(done_block, &[true_value]);
+        builder.seal_block(store_block);
+
+        builder.switch_to_block(done_block);
+        let result = builder.block_params(done_block)[0];
+        builder.seal_block(done_block);
+        if let Some(dest) = dest {
+            ctx.vreg_values.insert(*dest, result);
+        }
+        return Ok(true);
+    }
     if trusted_array {
         let byte_value = builder.ins().ireduce(types::I8, byte);
         let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
@@ -3505,7 +3657,7 @@ pub fn compile_call<M: Module>(
             if method_part == "merge" && args.len() == 2 {
                 let receiver_val = get_vreg_or_default(ctx, builder, &args[0]);
                 let other_val = get_vreg_or_default(ctx, builder, &args[1]);
-                let count = inline_runtime_array_len_value(builder, other_val);
+                let count = inline_runtime_array_len_value(builder, other_val, ctx.fam_arrays);
                 if let Some(&func_id) = ctx.runtime_funcs.get("rt_array_extend_i64") {
                     let runtime_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                     adapted_call(builder, runtime_ref, &[receiver_val, other_val, count]);
