@@ -445,6 +445,10 @@ retryable close; add a distinct `BackendProviderReceiptV2` and
 `BackendCompileResultEnvelopeV2` codec/validator without changing V1 hashes or
 its fixed wire; adapt V1 results to `Unknown`; route one builtin object path as
 `Unknown`; then add LLVM confirmation from its actual target-machine setup.
+The compatibility dynamic lease/session close path now keeps failed private
+staging cleanup retryable after unloading the library once; its real-provider
+failure/retry spec is added but awaits a source-matched self-hosted runner. This
+does not implement the separate session authority or accepted-feature envelope.
 Cranelift confirmation follows only after it reports accepted versus ignored
 features. Required features must be explicitly accepted under the canonical
 registry; sorting/echoing the request is insufficient.

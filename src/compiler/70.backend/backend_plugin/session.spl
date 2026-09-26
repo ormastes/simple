@@ -58,13 +58,17 @@ class BackendSession:
         self.descriptor.build_id
 
     fn is_open() -> bool:
-        not self.closed
+        if self.closed:
+            return false
+        if val dynamic = self.dynamic_adapter:
+            return not dynamic.closed and dynamic.lease.is_open()
+        true
 
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
         """Compile through the retained admitted provider, never a fallback."""
         if self.closed:
             return Err(compileerror_backend_error(
-                self.adapter.kind,
+                BackendKind.Compiler,
                 "backend session is closed"
             ))
         if val dynamic = self.dynamic_adapter:
@@ -99,7 +103,7 @@ class BackendSession:
         """Compile one prepared AOT input through this admitted provider."""
         if self.closed:
             return Err(compileerror_backend_error(
-                self.adapter.kind,
+                BackendKind.Compiler,
                 "backend session is closed"
             ))
         if val dynamic = self.dynamic_adapter:
@@ -140,7 +144,11 @@ class BackendSession:
             var retained_dynamic = dynamic
             teardown_ok = retained_dynamic.close()
             self.dynamic_adapter = Some(retained_dynamic)
-        self.closed = true
+        # Retire the public handle even when private staging cleanup must be
+        # retried. No call may use a library that has already been unloaded.
         self.handle = 0
+        if not teardown_ok:
+            return false
+        self.closed = true
         self.close_count = self.close_count + 1
-        teardown_ok
+        true
