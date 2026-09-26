@@ -1166,6 +1166,11 @@ for already pinned uses, and retires them only after final release. Its digest
 includes the alias table as well as mapping rows and owner generation. V2 output
 is still not build authority until a live use projection is consumed inside the
 target-profile/build/cache owner rather than copied through caller fields.
+Released use records enter an owner-local free list. A later acquisition reuses
+their storage with a new serial and digest, so the 1024-record bound limits
+concurrent retained uses rather than the lifetime number of successful uses.
+An immediate duplicate release is reported as such; after storage reuse, the
+old token is stale.
 
 The native V3 process implementation must create all pipes atomically with
 close-on-exec, bound stdin work to one quantum per poll, and distinguish V2 from
