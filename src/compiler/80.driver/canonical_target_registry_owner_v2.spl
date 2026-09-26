@@ -72,6 +72,7 @@ struct _CanonicalTargetResolutionRecordV2:
 struct _CanonicalTargetUseRecordV2:
     token: CanonicalTargetUseTokenV2
     live: bool
+    next_free: i64
 
 pub class CanonicalTargetRegistryOwnerV2:
     owner_instance: u64
@@ -82,6 +83,7 @@ pub class CanonicalTargetRegistryOwnerV2:
     registry_digest: text
     resolutions: [_CanonicalTargetResolutionRecordV2]
     uses: [_CanonicalTargetUseRecordV2]
+    free_use_head: i64
 
 fn _default_aliases_ctr2() -> [CanonicalTargetAliasV2]:
     [CanonicalTargetAliasV2(alias: "amd64-unknown-linux-gnu",
@@ -127,10 +129,17 @@ fn _registry_digest_ctr2(instance: u64, generation: u64,
             entry.canonical.len().to_text() + ":" + entry.canonical)
     sha256_text("simple/canonical-target-registry-owner/v2\n" + rows.join("\n"))
 
+fn _free_use_head_valid_ctr2(owner: CanonicalTargetRegistryOwnerV2) -> bool:
+    if owner.free_use_head == -1: return true
+    if owner.free_use_head < 0 or owner.free_use_head >= owner.uses.len():
+        return false
+    not owner.uses[owner.free_use_head].live
+
 fn _owner_content_valid_ctr2(owner: CanonicalTargetRegistryOwnerV2) -> bool:
     owner.owner_instance != 0u64 and owner.generation != 0u64 and
         owner.next_serial != 0u64 and _mapping_valid_ctr2(owner.candidate) and
         _aliases_valid_ctr2(owner.candidate, owner.aliases) and
+        _free_use_head_valid_ctr2(owner) and
         _digest_shape_ctr2(owner.registry_digest) and
         owner.registry_digest == _registry_digest_ctr2(owner.owner_instance,
             owner.generation, owner.candidate, owner.aliases)
@@ -167,7 +176,7 @@ pub fn canonical_target_registry_owner_generation_v2(owner_instance: u64,
     Ok(CanonicalTargetRegistryOwnerV2(owner_instance: owner_instance, generation: generation,
         next_serial: 1u64, candidate: candidate, aliases: aliases,
         registry_digest: _registry_digest_ctr2(owner_instance, generation, candidate, aliases),
-        resolutions: [], uses: []))
+        resolutions: [], uses: [], free_use_head: -1))
 
 pub fn canonical_target_registry_resolve_v2(owner: CanonicalTargetRegistryOwnerV2,
     supplied: text
@@ -207,7 +216,7 @@ pub fn canonical_target_registry_acquire_use_v2(owner: CanonicalTargetRegistryOw
     if index < 0: return Err(CanonicalTargetRegistryErrorV2.StaleToken)
     if owner.resolutions[index].state != CanonicalTargetRegistryStateV2.Active:
         return Err(CanonicalTargetRegistryErrorV2.Draining)
-    if owner.uses.len() >= CANONICAL_TARGET_REGISTRY_MAX_USES_V2:
+    if owner.free_use_head < 0 and owner.uses.len() >= CANONICAL_TARGET_REGISTRY_MAX_USES_V2:
         return Err(CanonicalTargetRegistryErrorV2.CapacityExceeded)
     if owner.next_serial == 0xffffffffffffffffu64:
         return Err(CanonicalTargetRegistryErrorV2.SerialOverflow)
@@ -220,7 +229,13 @@ pub fn canonical_target_registry_acquire_use_v2(owner: CanonicalTargetRegistryOw
     owner.next_serial = use_serial + 1u64
     var record = owner.resolutions[index]; record.pin_count = record.pin_count + 1u64
     owner.resolutions[index] = record
-    owner.uses.push(_CanonicalTargetUseRecordV2(token: use_token, live: true))
+    val use_record = _CanonicalTargetUseRecordV2(token: use_token, live: true, next_free: -1)
+    if owner.free_use_head >= 0:
+        val slot = owner.free_use_head
+        owner.free_use_head = owner.uses[slot].next_free
+        owner.uses[slot] = use_record
+    else:
+        owner.uses.push(use_record)
     Ok(use_token)
 
 fn _use_index_ctr2(owner: CanonicalTargetRegistryOwnerV2, use_token: CanonicalTargetUseTokenV2) -> i64:
@@ -269,8 +284,11 @@ pub fn canonical_target_registry_release_v2(owner: CanonicalTargetRegistryOwnerV
             if resolution.pin_count == 0u64 and resolution.state == CanonicalTargetRegistryStateV2.Draining:
                 resolution.state = CanonicalTargetRegistryStateV2.Retired
             owner.resolutions[i] = resolution
-            var use_record = owner.uses[use_index]; use_record.live = false
+            var use_record = owner.uses[use_index]
+            use_record.live = false
+            use_record.next_free = owner.free_use_head
             owner.uses[use_index] = use_record
+            owner.free_use_head = use_index
             return Ok(())
     Err(CanonicalTargetRegistryErrorV2.StaleToken)
 
