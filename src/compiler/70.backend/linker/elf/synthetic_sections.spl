@@ -6,14 +6,14 @@
 # from the relocation scan before layout; contents are built after layout,
 # once every address is final. Pure: every function returns [i64] bytes.
 #
-# Not produced (reported, not faked): .gnu.version/_r, x86_64 IBT/CET PLT,
-# and the remaining TLS models beyond admitted LE/IE.
+# Not produced (reported, not faked): x86_64 IBT/CET PLT and the remaining
+# TLS models beyond admitted LE/IE.
 
 use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_patch_bytes,
     R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_LDST64_ABS_LO12_NC, R_AARCH64_ADD_ABS_LO12_NC
 }
-use compiler.backend.linker.elf_writer.{write_u32_le, write_u64_le, write_zeros, write_bytes}
+use compiler.backend.linker.elf_writer.{write_u16_le, write_u32_le, write_u64_le, write_zeros, write_bytes}
 
 # ============================================================================
 # Constants
@@ -55,6 +55,9 @@ val DT_PREINIT_ARRAYSZ: i64 = 33
 val DT_GNU_HASH: i64 = 0x6ffffef5
 val DT_RELACOUNT: i64 = 0x6ffffff9
 val DT_FLAGS_1: i64 = 0x6ffffffb
+val DT_VERSYM: i64 = 0x6ffffff0
+val DT_VERNEED: i64 = 0x6ffffffe
+val DT_VERNEEDNUM: i64 = 0x6fffffff
 val DF_1_PIE: i64 = 0x08000000
 
 # Section types / flags of synthetic sections.
@@ -63,6 +66,8 @@ val SHT_HASH_S: i64 = 5
 val SHT_DYNAMIC_S: i64 = 6
 val SHT_DYNSYM_S: i64 = 11
 val SHT_GNU_HASH_S: i64 = 0x6ffffff6
+val SHT_GNU_VERNEED_S: i64 = 0x6ffffffe
+val SHT_GNU_VERSYM_S: i64 = 0x6fffffff
 val SHF_INFO_LINK_S: i64 = 0x40
 
 val A64_PLT0_SIZE: i64 = 32
@@ -156,6 +161,18 @@ struct ElfDynStr:
     data: [i64]
     offsets: {text: i64}
 
+fn elf_dynsym_name(name: text) -> text:
+    val at = name.find("@")
+    if at > 0:
+        return name.substring(0, at)
+    name
+
+fn elf_dynsym_version(name: text) -> text:
+    val at = name.find("@")
+    if at > 0 and at + 1 < name.len():
+        return name.substring(at + 1)
+    ""
+
 fn elf_build_dynstr(names: [text]) -> ElfDynStr:
     """NUL-led string table; each distinct name stored once."""
     var data: [i64] = [0]
@@ -184,7 +201,7 @@ fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynS
         var typ = types[i]
         if typ == 10:
             typ = 2  # STT_GNU_IFUNC is imported as a plain STT_FUNC
-        b = write_u32_le(b, dynstr.offsets[imports[i]])
+        b = write_u32_le(b, dynstr.offsets[elf_dynsym_name(imports[i])])
         b = b.push((sym_bind << 4) | typ)
         b = b.push(0)
         b = b.push(shndx[i] & 0xff)
@@ -220,7 +237,7 @@ fn elf_build_hash(imports: [text]) -> [i64]:
         i = i + 1
     i = 1
     while i < n:
-        val h = elf_sysv_hash(imports[i - 1]) % n
+        val h = elf_sysv_hash(elf_dynsym_name(imports[i - 1])) % n
         chain[i] = bucket[h]
         bucket[h] = i
         i = i + 1
@@ -232,10 +249,40 @@ fn elf_build_hash(imports: [text]) -> [i64]:
         b = write_u32_le(b, x)
     b
 
+fn elf_build_versym(import_versions: [i64]) -> [i64]:
+    """One version index per dynamic symbol: local null, global/unversioned 1,
+    or the matching .gnu.version_r auxiliary index (2+)."""
+    var b = write_u16_le([], 0)
+    for version in import_versions:
+        b = write_u16_le(b, version)
+    b
+
+fn elf_build_verneed(libraries: [text], versions: [text], dynstr: ElfDynStr) -> [i64]:
+    """One single-auxiliary Elf64_Verneed record per distinct library/version
+    requirement. Repeating a library is valid and keeps construction bounded."""
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < versions.len():
+        b = write_u16_le(b, 1)
+        b = write_u16_le(b, 1)
+        b = write_u32_le(b, dynstr.offsets[libraries[i]])
+        b = write_u32_le(b, 16)
+        if i + 1 < versions.len():
+            b = write_u32_le(b, 32)
+        else:
+            b = write_u32_le(b, 0)
+        b = write_u32_le(b, elf_sysv_hash(versions[i]))
+        b = write_u16_le(b, 0)
+        b = write_u16_le(b, i + 2)
+        b = write_u32_le(b, dynstr.offsets[versions[i]])
+        b = write_u32_le(b, 0)
+        i = i + 1
+    b
+
 fn elf_gnu_hash(name: text) -> i64:
     """GNU (DJB) hash: h = h * 33 + c, truncated to u32."""
     var h: i64 = 5381
-    for ch in name.bytes():
+    for ch in elf_dynsym_name(name).bytes():
         h = (h * 33 + (ch as i64)) & 0xffffffff
     h
 
@@ -444,6 +491,7 @@ export ElfDynStr
 export elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy, elf_dyn_tpoff64
 export elf_build_gnu_build_id
 export elf_rela_entry, elf_sym_entry, elf_sysv_hash, elf_build_dynstr, elf_dynstr_size, elf_build_dynsym
+export elf_dynsym_name, elf_dynsym_version, elf_build_versym, elf_build_verneed
 export elf_hash_size, elf_build_hash, elf_gnu_hash, elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash
 export elf_plt0_size, elf_plt_entry_size, elf_plt_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt
 export elf_build_plt_x64, elf_build_gotplt_x64, elf_build_dynamic, elf_build_interp
@@ -453,6 +501,6 @@ export DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB
 export DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI
 export DT_PLTREL, DT_DEBUG, DT_JMPREL, DT_INIT_ARRAY, DT_FINI_ARRAY
 export DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ
-export DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE
-export SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S
+export DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM, DF_1_PIE
+export SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_GNU_VERNEED_S, SHT_GNU_VERSYM_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S
 export A64_PLT0_SIZE, A64_PLT_ENTRY_SIZE, X64_PLT0_SIZE, X64_PLT_ENTRY_SIZE, GOTPLT_RESERVED

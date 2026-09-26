@@ -1,9 +1,9 @@
 # ELF shared-object reader for the internal linker — lane A7 slice 2.
 #
 # Reads only what a link against a DSO needs: DT_SONAME (for DT_NEEDED) and
-# the defined, default-version .dynsym exports (name -> st_type). Works on a
-# stripped library (no .symtab); non-default (hidden, `@` not `@@`) versions
-# are not linkable, exactly as ld.lld treats them.
+# the defined .dynsym exports (name -> st_type). Default versions bind both
+# bare and qualified references; non-default (`@`) versions bind only explicit
+# qualified references. Works on a stripped library (no .symtab).
 
 use compiler.backend.linker.elf_inspect.{
     ElfSectionHeader, elf_parse_header, elf_read_u16_le, elf_read_u32_le, elf_read_u64_le,
@@ -14,15 +14,17 @@ use compiler.backend.linker.elf_parser.{elf_strtab_get, elf_parse_string_table}
 val SHT_DYNSYM_SO: i64 = 11
 val SHT_DYNAMIC_SO: i64 = 6
 val SHT_GNU_VERSYM: i64 = 0x6fffffff
+val SHT_GNU_VERDEF: i64 = 0x6ffffffd
 val DT_SONAME_SO: i64 = 14
 val VERSYM_HIDDEN: i64 = 0x8000
 
 struct ElfSharedLib:
     soname: text
     machine: i64
-    exports: {text: i64}   # defined default-version symbol -> STT_* type
+    exports: {text: i64}   # linkable bare/qualified symbol spelling -> STT_* type
     export_sizes: {text: i64}
     export_values: {text: i64}
+    export_versions: {text: text} # reference spelling -> required version name
 
 fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
     """Section header i with sh_addr repurposed as the FILE offset (elf_parser convention)."""
@@ -47,6 +49,7 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     var dynsym_i: i64 = -1
     var dynamic_i: i64 = -1
     var versym_i: i64 = -1
+    var verdef_i: i64 = -1
     var i: i64 = 0
     while i < shnum:
         val t = elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 4)
@@ -56,6 +59,8 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
             dynamic_i = i
         else if t == SHT_GNU_VERSYM:
             versym_i = i
+        else if t == SHT_GNU_VERDEF:
+            verdef_i = i
         i = i + 1
     if dynsym_i < 0:
         return Err("shared object has no .dynsym")
@@ -66,25 +71,62 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     if versym_i >= 0:
         versym_off = elf_so_shdr(bytes, shoff, versym_i).sh_addr
 
+    var version_names: {i64: text} = {}
+    if verdef_i >= 0:
+        val vdsec = elf_so_shdr(bytes, shoff, verdef_i)
+        val vdstr = elf_parse_string_table(bytes, elf_so_shdr(bytes, shoff, elf_so_link(bytes, shoff, verdef_i)))
+        var vd: i64 = 0
+        while vd + 20 <= vdsec.sh_size:
+            val base = vdsec.sh_addr + vd
+            val ndx = elf_read_u16_le(bytes, base + 4)
+            val aux = elf_read_u32_le(bytes, base + 12)
+            if aux < 20 or vd + aux + 8 > vdsec.sh_size:
+                return Err("malformed .gnu.version_d auxiliary record")
+            version_names[ndx] = elf_strtab_get(vdstr, elf_read_u32_le(bytes, base + aux))
+            val next = elf_read_u32_le(bytes, base + 16)
+            if next == 0:
+                vd = vdsec.sh_size
+            else if next < 20 or vd + next > vdsec.sh_size:
+                return Err("malformed .gnu.version_d next offset")
+            else:
+                vd = vd + next
+
     var exports: {text: i64} = {}
     var export_sizes: {text: i64} = {}
     var export_values: {text: i64} = {}
+    var export_versions: {text: text} = {}
     val count = symsec.sh_size / 24
+    if versym_i >= 0 and elf_so_shdr(bytes, shoff, versym_i).sh_size < count * 2:
+        return Err("truncated .gnu.version table")
     var k: i64 = 1
     while k < count:
         val e = symsec.sh_addr + k * 24
         val info = bytes[e + 4] as i64
         val shndx = elf_read_u16_le(bytes, e + 6)
         val bind = info >> 4
-        var linkable = shndx != 0 and (bind == 1 or bind == 2)
-        if linkable and versym_off >= 0:
-            if elf_read_u16_le(bytes, versym_off + k * 2) & VERSYM_HIDDEN != 0:
-                linkable = false
+        val linkable = shndx != 0 and (bind == 1 or bind == 2)
         if linkable:
             val name = elf_strtab_get(strtab, elf_read_u32_le(bytes, e))
-            exports[name] = info & 0xf
-            export_values[name] = elf_read_u64_le(bytes, e + 8)
-            export_sizes[name] = elf_read_u64_le(bytes, e + 16)
+            var hidden = false
+            if versym_off >= 0:
+                hidden = elf_read_u16_le(bytes, versym_off + k * 2) & VERSYM_HIDDEN != 0
+            if not hidden:
+                exports[name] = info & 0xf
+                export_values[name] = elf_read_u64_le(bytes, e + 8)
+                export_sizes[name] = elf_read_u64_le(bytes, e + 16)
+            if versym_off >= 0:
+                val raw_version = elf_read_u16_le(bytes, versym_off + k * 2)
+                val version = raw_version & 0x7fff
+                if version > 1:
+                    if not version_names.has(version):
+                        return Err(".gnu.version index {version} has no version definition")
+                    val qualified = name + "@" + version_names[version]
+                    exports[qualified] = info & 0xf
+                    export_values[qualified] = elf_read_u64_le(bytes, e + 8)
+                    export_sizes[qualified] = elf_read_u64_le(bytes, e + 16)
+                    export_versions[qualified] = version_names[version]
+                    if not hidden:
+                        export_versions[name] = version_names[version]
         k = k + 1
 
     var soname = ""
@@ -103,6 +145,7 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     if soname == "":
         return Err("shared object has no DT_SONAME (needed for DT_NEEDED)")
     Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,
-        export_sizes: export_sizes, export_values: export_values))
+        export_sizes: export_sizes, export_values: export_values,
+        export_versions: export_versions))
 
 export ElfSharedLib, elf_parse_shared

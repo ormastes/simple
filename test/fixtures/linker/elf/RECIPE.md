@@ -25,8 +25,10 @@ clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=global-dynamic tls_import_x64.c -o tls_global_dynamic_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=local-dynamic tls_sections_x64.c -o tls_local_dynamic_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -mtls-dialect=gnu2 tls_import_x64.c -o tls_desc_x64.o
+clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=initial-exec tls_versioned_x64.c -o tls_versioned_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector tls_provider_x64.c -o tls_provider_x64.o
 ld.lld -shared --soname libtls_x64.so -o libtls_x64.so.1 tls_provider_x64.o
+ld.lld -shared --soname libtls_versioned_x64.so.1 --version-script tls_version_x64.map -o libtls_versioned_x64.so.1 tls_provider_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables unwind_x64.c -o unwind_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections gc_sections_x64.c -o gc_sections_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables -ffunction-sections -fdata-sections gc_sections_x64.c -o gc_unwind_x64.o
@@ -49,6 +51,7 @@ Relocations exercised (`llvm-readelf -r`):
 | tls_global_dynamic_x64.o | canonical R_X86_64_TLSGD + `__tls_get_addr` sequence, relaxed to initial-exec/TPOFF64 |
 | tls_local_dynamic_x64.o | canonical R_X86_64_TLSLD + `__tls_get_addr` with DTPOFF32 uses, relaxed to local-exec/TPOFF32 |
 | tls_desc_x64.o | canonical GOTPC32_TLSDESC + TLSDESC_CALL pair, relaxed to GOTTPOFF/TPOFF64 with a two-byte NOP |
+| tls_versioned_x64.o | explicit `imported_tls@TLS_1.0` initial-exec import with `.gnu.version`/`.gnu.version_r` output |
 | unwind_x64.o | two zR/pcrel-sdata4 FDEs indexed by `.eh_frame_hdr` |
 | gc_sections_x64.o | entry-rooted relocation graph retaining live function/data/BSS while dropping dead function/data sections |
 | gc_unwind_x64.o | four input FDEs reduced to the two live-function FDEs, with compacted CIE pointers and relocation offsets |

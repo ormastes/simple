@@ -26,8 +26,7 @@
 #     sequences relax to local-exec; x86_64 TLSDESC relaxes to initial-exec;
 #     other TLS models remain unsupported
 #   - no text relocs; relocation-graph section GC includes FDE-level unwind pruning
-#   - no COMDAT dedup, no symbol versioning
-#     (unversioned references bind to the library's default version)
+#   - no COMDAT dedup; GNU versioned imports and default-version binding are emitted
 #   - single-threaded; no StageReceipts yet
 
 use compiler.backend.linker.elf_parser.{
@@ -54,6 +53,7 @@ use compiler.backend.linker.elf.reloc_scan.{
 use compiler.backend.linker.elf.synthetic_sections.{
     ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy, elf_dyn_tpoff64,
     elf_rela_entry, elf_sym_entry, elf_build_dynstr, elf_build_dynsym, elf_hash_size, elf_build_hash,
+    elf_dynsym_name, elf_dynsym_version, elf_build_versym, elf_build_verneed,
     elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash,
     elf_plt_size, elf_plt0_size, elf_plt_entry_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt,
     elf_build_plt_x64, elf_build_gotplt_x64,
@@ -61,8 +61,10 @@ use compiler.backend.linker.elf.synthetic_sections.{
     DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
-    DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1, DF_1_PIE,
-    SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S,
+    DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1,
+    DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM, DF_1_PIE,
+    SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_GNU_VERNEED_S, SHT_GNU_VERSYM_S,
+    SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S,
     GOTPLT_RESERVED
 }
 use compiler.backend.linker.elf.elf_exec_writer.{
@@ -349,23 +351,27 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
             return 1
         if n == ".dynsym":
             return 2
-        if n == ".gnu.hash":
+        if n == ".gnu.version":
             return 3
-        if n == ".hash":
-            return 3
-        if n == ".dynstr":
+        if n == ".gnu.version_r":
             return 4
-        if n == ".rela.dyn":
+        if n == ".gnu.hash":
             return 5
-        if n == ".rela.plt":
+        if n == ".hash":
+            return 5
+        if n == ".dynstr":
             return 6
-        if n == ".eh_frame_hdr":
+        if n == ".rela.dyn":
             return 7
-        if n == ".rodata":
+        if n == ".rela.plt":
             return 8
-        if n == ".eh_frame":
+        if n == ".eh_frame_hdr":
             return 9
-        return 10
+        if n == ".rodata":
+            return 10
+        if n == ".eh_frame":
+            return 11
+        return 12
     if s.seg == ELF_SEG_RX:
         if n == ".text":
             return 20
@@ -456,6 +462,18 @@ fn elf_lib_export(libs: [ElfSharedLib], name: text) -> i64:
         if l.exports.has(name):
             return l.exports[name]
     -1
+
+fn elf_lib_export_soname(libs: [ElfSharedLib], name: text) -> text:
+    for l in libs:
+        if l.exports.has(name):
+            return l.soname
+    ""
+
+fn elf_lib_export_version(libs: [ElfSharedLib], name: text) -> text:
+    for l in libs:
+        if l.export_versions.has(name):
+            return l.export_versions[name]
+    ""
 
 fn elf_lib_export_size(libs: [ElfSharedLib], name: text) -> i64:
     for l in libs:
@@ -624,6 +642,8 @@ struct ElfDynAddrs:
     dynstr: i64
     hash: i64
     gnu_hash: i64
+    versym: i64
+    verneed: i64
     rela_dyn: i64
     rela_plt: i64
     gotplt: i64
@@ -634,7 +654,7 @@ struct ElfDynAddrs:
     preinit_array: i64
 
 # reason: positional .dynamic inputs (context, scan, sizes, addresses)
-fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i64], a: ElfDynAddrs, arrays: [i64]) -> [[i64]]:
+fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i64], a: ElfDynAddrs, arrays: [i64], nverneed: i64) -> [[i64]]:
     """n_rela = [.rela.dyn entries, of which RELATIVE];
     arrays = [init_array size, fini_array size, preinit_array size] (-1 = absent)."""
     val n_rela_dyn = n_rela[0]
@@ -664,6 +684,10 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
         t = t.push([DT_SYMTAB, a.dynsym])
         t = t.push([DT_STRSZ, dynstr.data.len()])
         t = t.push([DT_SYMENT, 24])
+        if nverneed > 0:
+            t = t.push([DT_VERSYM, a.versym])
+            t = t.push([DT_VERNEED, a.verneed])
+            t = t.push([DT_VERNEEDNUM, nverneed])
     if n_rela_dyn > 0:
         t = t.push([DT_RELA, a.rela_dyn])
         t = t.push([DT_RELASZ, n_rela_dyn * 24])
@@ -1089,17 +1113,44 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             n_got_rel = n_got_rel + 1
     val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob + n_tls_ie_import + sc.sym_abs.len() + sc.copy_names.len()
     val n_rela = [n_rela_dyn, sc.relative.len() + n_got_rel]
+    var need_libs: [text] = []
+    var need_versions: [text] = []
+    var import_versions: [i64] = []
+    for name in sc.imports:
+        var version = elf_dynsym_version(name)
+        if version == "":
+            version = elf_lib_export_version(libs, name)
+        if version == "":
+            import_versions = import_versions.push(1)
+        else:
+            val library = elf_lib_export_soname(libs, name)
+            if library == "":
+                return Err("versioned import has no providing shared object: {name}")
+            var requirement: i64 = -1
+            var vi: i64 = 0
+            while vi < need_versions.len():
+                if need_libs[vi] == library and need_versions[vi] == version:
+                    requirement = vi
+                vi = vi + 1
+            if requirement < 0:
+                requirement = need_versions.len()
+                need_libs = need_libs.push(library)
+                need_versions = need_versions.push(version)
+            import_versions = import_versions.push(requirement + 2)
     var strnames: [text] = []
     for l in libs:
         strnames = strnames.push(l.soname)
     for n in sc.imports:
-        strnames = strnames.push(n)
+        strnames = strnames.push(elf_dynsym_name(n))
+    for version in need_versions:
+        strnames = strnames.push(version)
     val dynstr0 = elf_build_dynstr(strnames)
     val arrays = [elf_array_size(inputs.outs, ".init_array"), elf_array_size(inputs.outs, ".fini_array"),
         elf_array_size(inputs.outs, ".preinit_array")]
-    val zero = ElfDynAddrs(dynsym: 0, dynstr: 0, hash: 0, gnu_hash: 0, rela_dyn: 0, rela_plt: 0, gotplt: 0,
+    val zero = ElfDynAddrs(dynsym: 0, dynstr: 0, hash: 0, gnu_hash: 0, versym: 0, verneed: 0,
+        rela_dyn: 0, rela_plt: 0, gotplt: 0,
         init: 0, fini: 0, init_array: 0, fini_array: 0, preinit_array: 0)
-    val ntags = elf_dynamic_tags(ctx, sc, dynstr0, n_rela, zero, arrays).len() + 1
+    val ntags = elf_dynamic_tags(ctx, sc, dynstr0, n_rela, zero, arrays, need_versions.len()).len() + 1
 
     var secs: [ElfOutSec] = []
     for o in inputs.outs:
@@ -1107,6 +1158,11 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     if dynamic:
         secs = secs.push(elf_out_sec(".interp", SHT_PROGBITS_E, SHF_ALLOC, 1, req.interp.len() + 1, ELF_SEG_R))
         secs = secs.push(elf_sec_with(elf_out_sec(".dynsym", SHT_DYNSYM_S, SHF_ALLOC, 8, (sc.imports.len() + 1) * 24, ELF_SEG_R), 24, ".dynstr", 1))
+        if need_versions.len() > 0:
+            secs = secs.push(elf_sec_with(elf_out_sec(".gnu.version", SHT_GNU_VERSYM_S, SHF_ALLOC, 2,
+                (sc.imports.len() + 1) * 2, ELF_SEG_R), 2, ".dynsym", 0))
+            secs = secs.push(elf_sec_with(elf_out_sec(".gnu.version_r", SHT_GNU_VERNEED_S, SHF_ALLOC, 4,
+                need_versions.len() * 32, ELF_SEG_R), 0, ".dynstr", need_versions.len()))
         secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8,
             elf_gnu_hash_size(sc.copy_names.len()), ELF_SEG_R), 0, ".dynsym", 0))
         secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4, elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
@@ -1249,7 +1305,9 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         init_v = elf_entry_addr(ctx, lay, res.defined["_init"])?
     if elf_has_def(ctx, "_fini"):
         fini_v = elf_entry_addr(ctx, lay, res.defined["_fini"])?
-    val addrs = ElfDynAddrs(dynsym: elf_plan_addr(plan, ".dynsym"), dynstr: elf_plan_addr(plan, ".dynstr"), hash: elf_plan_addr(plan, ".hash"), gnu_hash: elf_plan_addr(plan, ".gnu.hash"),
+    val addrs = ElfDynAddrs(dynsym: elf_plan_addr(plan, ".dynsym"), dynstr: elf_plan_addr(plan, ".dynstr"),
+        hash: elf_plan_addr(plan, ".hash"), gnu_hash: elf_plan_addr(plan, ".gnu.hash"),
+        versym: elf_plan_addr(plan, ".gnu.version"), verneed: elf_plan_addr(plan, ".gnu.version_r"),
         rela_dyn: elf_plan_addr(plan, ".rela.dyn"), rela_plt: elf_plan_addr(plan, ".rela.plt"), gotplt: gotplt_v,
         init: init_v, fini: fini_v, init_array: elf_plan_addr(plan, ".init_array"), fini_array: elf_plan_addr(plan, ".fini_array"),
         preinit_array: elf_plan_addr(plan, ".preinit_array"))
@@ -1279,6 +1337,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         else if n == ".dynsym":
             out = out.push(elf_build_dynsym(sc.imports, sc.import_weak, sc.import_type, dynstr0,
                 dyn_shndx, dyn_values, dyn_sizes))
+        else if n == ".gnu.version":
+            out = out.push(elf_build_versym(import_versions))
+        else if n == ".gnu.version_r":
+            out = out.push(elf_build_verneed(need_libs, need_versions, dynstr0))
         else if n == ".gnu.hash":
             val copy_hash_names = elf_gnu_hash_sort(sc.copy_names)
             out = out.push(elf_build_gnu_hash(copy_hash_names,
@@ -1309,7 +1371,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         else if n == ".got":
             out = out.push(got)
         else if n == ".dynamic":
-            out = out.push(elf_build_dynamic(elf_dynamic_tags(ctx, sc, dynstr0, n_rela, addrs, arrays)))
+            out = out.push(elf_build_dynamic(elf_dynamic_tags(ctx, sc, dynstr0, n_rela, addrs, arrays, need_versions.len())))
         else:
             return Err("internal: no content for output section {n}")
         pk = pk + 1
