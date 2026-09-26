@@ -221,6 +221,10 @@ main-module ID 1, and variant-I thread-pointer bias respectively. Imported
 records now remain as symbol-bound `.rela.dyn` entries for the loader. The
 equivalent x86-64 raw `DTPMOD64`, `DTPOFF64`, and `TPOFF64` words use the same
 path. Static links and instruction-field imported TLS forms remain fail-closed.
+For locally defined x86-64 TLS, those same raw word relocations now use
+full-width `S + A` patching: module ID 1, offset from `PT_TLS`, or signed offset
+from the thread pointer as selected by the relocation class. They no longer
+fall through to an unsupported relocation or a four-byte generic patch.
 The AArch64 numeric mapping is pinned to the LLVM/GNU ABI: relocation 1028 is
 `TLS_DTPMOD64` and 1029 is `TLS_DTPREL64`; the previously reversed local names
 and relocation classes are corrected.

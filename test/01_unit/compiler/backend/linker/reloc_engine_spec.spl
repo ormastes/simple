@@ -24,6 +24,7 @@ use compiler.backend.linker.reloc_engine.{
     patch_u32_le, patch_u64_le, read_u16_le, read_u32_le,
     R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64,
     R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_PLT32,
+    R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_TPOFF64,
     R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
     R_ARM_NONE, R_ARM_PC24, R_ARM_ABS32, R_ARM_REL32, R_ARM_ABS16, R_ARM_ABS8, R_ARM_THM_CALL,
     R_ARM_CALL, R_ARM_JUMP24, R_ARM_THM_JUMP24,
@@ -293,6 +294,21 @@ describe "reloc_engine - x86_64 relocations":
         val result = reloc_apply_x86_64(bytes, 0, R_X86_64_64, 0x1000, 8, 0)
         expect(result.success).to_equal(true)
         expect(result.value).to_equal(0x1008)
+
+    it "raw x86_64 TLS words use full-width S plus A semantics":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        expect(reloc_apply_x86_64(bytes, 0,
+            R_X86_64_DTPMOD64, 1, 0, 0).value).to_equal(1)
+        expect(reloc_apply_x86_64(bytes, 0,
+            R_X86_64_DTPOFF64, 0x123456789, 7, 0).value).to_equal(0x123456790)
+        val tpoff = reloc_apply(RelocArch.X86_64, bytes, 0,
+            R_X86_64_TPOFF64, -32, 0, 0)
+        expect(tpoff.success).to_equal(true)
+        expect(tpoff.value).to_equal(-32)
+        val patched = reloc_patch_bytes(RelocArch.X86_64, bytes, 0,
+            R_X86_64_TPOFF64, -32, 0, 0)
+        expect(patched.len()).to_equal(8)
+        expect(patched[7]).to_equal(0xff)
 
     it "R_X86_64_PC32 computes S + A - P":
         # @req REQ-SSPEC-COMPILER
