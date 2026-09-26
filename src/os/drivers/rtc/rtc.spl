@@ -1,12 +1,13 @@
 # CMOS RTC Driver
 #
 # Reads the real-time clock from standard CMOS ports 0x70/0x71.
-# Register values are BCD-encoded; this driver converts to binary.
+# Register mode is read from CMOS status B before decoding the calendar.
 #
 # MDSOC: driver dimension, hardware layer
 
-extern fn x86_port_outb(port: u16, value: u8)
 use os.kernel.arch_adapt.x86_port_io.{x86_port_inb, x86_port_outb}
+use os.drivers.rtc.rtc_calendar_v1.{RtcRawCalendarV1, rtc_decode_utc_epoch_seconds_v1}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 # CMOS RTC I/O ports
 val RTC_INDEX_PORT: u16 = 0x70
 val RTC_DATA_PORT: u16 = 0x71
@@ -18,6 +19,7 @@ val REG_HOURS: u8 = 0x04
 val REG_DAY: u8 = 0x07
 val REG_MONTH: u8 = 0x08
 val REG_YEAR: u8 = 0x09
+val REG_CENTURY: u8 = 0x32
 val REG_STATUS_A: u8 = 0x0A
 val REG_STATUS_B: u8 = 0x0B
 
@@ -25,101 +27,77 @@ val REG_STATUS_B: u8 = 0x0B
 # Low-Level Register Access
 # =========================================================================
 
-fn rtc_read_register(reg: u8) -> u8:
-    """Read a single CMOS RTC register.
+var _rtc_cmos_index_gate_v1: AtomicI64 = atomic_i64_new(0)
 
-    Selects the register via the index port, then reads the data port.
-    """
+fn _rtc_try_enter_v1() -> bool:
+    # A syscall must not wait forever if another CPU stops while owning CMOS.
+    var attempts = 0
+    while attempts < 4096:
+        if _rtc_cmos_index_gate_v1.compare_exchange(
+                0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return true
+        attempts = attempts + 1
+    false
+
+fn _rtc_exit_v1():
+    _rtc_cmos_index_gate_v1.store(0, MemoryOrdering.Release)
+
+fn _rtc_read_register_owned_v1(reg: u8) -> u8:
+    """Read a CMOS index/data pair while holding the RTC owner gate."""
     x86_port_outb(RTC_INDEX_PORT, reg)
     x86_port_inb(RTC_DATA_PORT)
 
-fn _bcd_to_binary(bcd: u8) -> u8:
-    """Convert a BCD-encoded byte to binary."""
-    val high = bcd >> 4
-    val low = bcd & 0x0F
-    (high * 10 + low).to_u8()
-
-fn _rtc_update_in_progress() -> bool:
+fn _rtc_update_in_progress_owned_v1() -> bool:
     """Check whether an RTC update cycle is in progress.
 
     Bit 7 of Status Register A is set during an update.
     """
-    val status = rtc_read_register(REG_STATUS_A)
+    val status = _rtc_read_register_owned_v1(REG_STATUS_A)
     (status & 0x80) != 0
 
-# =========================================================================
-# Public Time Accessors
-# =========================================================================
+fn _rtc_raw_calendar_owned_v1() -> RtcRawCalendarV1:
+    RtcRawCalendarV1(
+        status_b: _rtc_read_register_owned_v1(REG_STATUS_B),
+        seconds: _rtc_read_register_owned_v1(REG_SECONDS),
+        minutes: _rtc_read_register_owned_v1(REG_MINUTES),
+        hours: _rtc_read_register_owned_v1(REG_HOURS),
+        day: _rtc_read_register_owned_v1(REG_DAY),
+        month: _rtc_read_register_owned_v1(REG_MONTH),
+        year: _rtc_read_register_owned_v1(REG_YEAR),
+        century: _rtc_read_register_owned_v1(REG_CENTURY)
+    )
 
-fn rtc_get_seconds() -> u8:
-    """Read the current seconds (0-59) from the RTC."""
-    val bcd = rtc_read_register(REG_SECONDS)
-    _bcd_to_binary(bcd)
+fn _rtc_same_raw_calendar_v1(a: RtcRawCalendarV1, b: RtcRawCalendarV1) -> bool:
+    a.status_b == b.status_b and a.seconds == b.seconds and
+        a.minutes == b.minutes and a.hours == b.hours and
+        a.day == b.day and a.month == b.month and
+        a.year == b.year and a.century == b.century
 
-fn rtc_get_minutes() -> u8:
-    """Read the current minutes (0-59) from the RTC."""
-    val bcd = rtc_read_register(REG_MINUTES)
-    _bcd_to_binary(bcd)
+fn _rtc_read_utc_epoch_seconds_owned_v1() -> Result<u64, text>:
+    var attempts = 0
+    while attempts < 8:
+        attempts = attempts + 1
+        if _rtc_update_in_progress_owned_v1():
+            continue
+        val first = _rtc_raw_calendar_owned_v1()
+        if _rtc_update_in_progress_owned_v1():
+            continue
+        val second = _rtc_raw_calendar_owned_v1()
+        if _rtc_update_in_progress_owned_v1():
+            continue
+        if _rtc_same_raw_calendar_v1(first, second):
+            return rtc_decode_utc_epoch_seconds_v1(second)
+    Err("rtc-unstable-snapshot")
 
-fn rtc_get_hours() -> u8:
-    """Read the current hours (0-23) from the RTC."""
-    val bcd = rtc_read_register(REG_HOURS)
-    _bcd_to_binary(bcd)
+pub fn rtc_read_utc_epoch_seconds_v1() -> Result<u64, text>:
+    """Read an x86 UTC RTC into Unix seconds with a bounded CMOS owner gate.
 
-fn rtc_get_day() -> u8:
-    """Read the current day of the month (1-31) from the RTC."""
-    val bcd = rtc_read_register(REG_DAY)
-    _bcd_to_binary(bcd)
-
-fn rtc_get_month() -> u8:
-    """Read the current month (1-12) from the RTC."""
-    val bcd = rtc_read_register(REG_MONTH)
-    _bcd_to_binary(bcd)
-
-fn rtc_get_year() -> u8:
-    """Read the current year (two-digit, 0-99) from the RTC."""
-    val bcd = rtc_read_register(REG_YEAR)
-    _bcd_to_binary(bcd)
-
-# =========================================================================
-# Composite Reads
-# =========================================================================
-
-struct RtcTime:
-    """Snapshot of the RTC time registers."""
-    hours: u8
-    minutes: u8
-    seconds: u8
-
-struct RtcDate:
-    """Snapshot of the RTC date registers."""
-    year: u8
-    month: u8
-    day: u8
-
-fn rtc_read_time() -> RtcTime:
-    """Read hours, minutes, and seconds atomically.
-
-    Waits for any in-progress update to complete, then reads
-    all three registers in quick succession.
+    The century byte at 0x32 is required. The caller must admit a platform
+    whose RTC uses UTC and exposes that century register (the x86 QEMU profile
+    does); other hardware needs its own RTC provider/century address.
     """
-    # Wait until update-in-progress clears
-    while _rtc_update_in_progress():
-        pass_dn
-
-    RtcTime(
-        hours: rtc_get_hours(),
-        minutes: rtc_get_minutes(),
-        seconds: rtc_get_seconds()
-    )
-
-fn rtc_read_date() -> RtcDate:
-    """Read year, month, and day atomically."""
-    while _rtc_update_in_progress():
-        pass_dn
-
-    RtcDate(
-        year: rtc_get_year(),
-        month: rtc_get_month(),
-        day: rtc_get_day()
-    )
+    if not _rtc_try_enter_v1():
+        return Err("rtc-index-busy")
+    val result = _rtc_read_utc_epoch_seconds_owned_v1()
+    _rtc_exit_v1()
+    result

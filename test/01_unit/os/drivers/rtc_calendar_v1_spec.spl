@@ -1,0 +1,46 @@
+"""CMOS calendar samples must identify a real Unix instant before publication."""
+
+use std.spec.*
+use os.drivers.rtc.rtc_calendar_v1.{RtcRawCalendarV1, rtc_decode_utc_epoch_seconds_v1}
+
+fn _sample(status_b: u8, seconds: u8, minutes: u8, hours: u8,
+           day: u8, month: u8, year: u8, century: u8) -> RtcRawCalendarV1:
+    RtcRawCalendarV1(status_b: status_b, seconds: seconds, minutes: minutes,
+        hours: hours, day: day, month: month, year: year, century: century)
+
+describe "x86 RTC UTC calendar decoding":
+    it "converts a BCD leap day into Unix epoch seconds":
+        match rtc_decode_utc_epoch_seconds_v1(
+            _sample(0x02, 0x56, 0x34, 0x12, 0x29, 0x02, 0x24, 0x20)):
+            case Ok(seconds): expect(seconds).to_equal(1709210096u64)
+            case Err(reason): fail("valid BCD snapshot refused: {reason}")
+
+    it "honors binary mode and 12 hour AM and PM":
+        match rtc_decode_utc_epoch_seconds_v1(
+            _sample(0x04, 0, 0, 0x8C, 1, 1, 70, 19)):
+            case Ok(seconds): expect(seconds).to_equal(43200u64)
+            case Err(reason): fail("valid binary PM snapshot refused: {reason}")
+        match rtc_decode_utc_epoch_seconds_v1(
+            _sample(0x00, 0, 0, 0x12, 0x01, 0x01, 0x70, 0x19)):
+            case Ok(seconds): expect(seconds).to_equal(0u64)
+            case Err(reason): fail("valid BCD midnight snapshot refused: {reason}")
+
+    it "refuses missing century and impossible dates":
+        match rtc_decode_utc_epoch_seconds_v1(
+            _sample(0x02, 0, 0, 0, 0x01, 0x01, 0x26, 0)):
+            case Ok(_): fail("year without century was accepted")
+            case Err(reason): expect(reason).to_equal("rtc-century-unavailable-or-out-of-range")
+        match rtc_decode_utc_epoch_seconds_v1(
+            _sample(0x02, 0, 0, 0, 0x29, 0x02, 0x25, 0x20)):
+            case Ok(_): fail("nonleap February 29 was accepted")
+            case Err(reason): expect(reason).to_equal("rtc-invalid-day")
+
+    it "refuses invalid BCD and clocks that cannot represent UTC":
+        match rtc_decode_utc_epoch_seconds_v1(
+            _sample(0x02, 0x6A, 0, 0, 0x01, 0x01, 0x26, 0x20)):
+            case Ok(_): fail("invalid BCD digit was accepted")
+            case Err(reason): expect(reason).to_equal("rtc-invalid-calendar-field")
+        match rtc_decode_utc_epoch_seconds_v1(
+            _sample(0x03, 0, 0, 0, 0x01, 0x01, 0x26, 0x20)):
+            case Ok(_): fail("RTC DST mode was accepted as UTC")
+            case Err(reason): expect(reason).to_equal("rtc-dst-mode")
