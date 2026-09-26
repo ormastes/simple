@@ -1,0 +1,58 @@
+"""
+Regression: an assignment inside a function must update the resolver's
+fast-local slot.
+
+The pure-Simple core interpreter resolves function locals to LOAD_FAST slots,
+and `eval_ident` reads the slot. The parser emits every `x = v` statement as an
+assignment EXPRESSION, whose evaluator (`eval_assign_expr`, in both
+eval_access.spl and _EvalOps/access_literal_assign_eval.spl) wrote only the
+environment binding. The next read of the slot then returned the stale
+pre-assignment value: `var r = 5; r = 6; r` inside a function returned 5, and
+assignments inside if/elif/else branches were lost.
+"""
+
+use std.spec.*
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+
+fn run_main_int(source: text, path: text) -> i64:
+    val result = core_interpret(source, path)
+    if result < 0: return -9000001
+    val_get_int(result)
+
+describe "pure-Simple interpreter fast-local assignment":
+    it "reads back a plain reassignment of a function local":
+        val source = """
+fn main() -> i64:
+    var r = 5
+    r = 6
+    r
+"""
+        expect(run_main_int(source, "fast_local_plain.spl")).to_equal(6)
+
+    it "keeps assignments made inside if and else branches":
+        val source = """
+fn pick(flag: bool) -> i64:
+    var r = 1
+    if flag:
+        r = 10
+    else:
+        r = 20
+    r
+
+fn main() -> i64:
+    pick(true) + pick(false)
+"""
+        expect(run_main_int(source, "fast_local_branches.spl")).to_equal(30)
+
+    it "accumulates across loop iterations":
+        # A bounded `for` loop: with the defect a `while` whose counter is
+        # reassigned would never terminate, turning a failure into a hang.
+        val source = """
+fn main() -> i64:
+    var total = 0
+    for i in 0..4:
+        total = total + i
+    total
+"""
+        expect(run_main_int(source, "fast_local_loop.spl")).to_equal(6)
