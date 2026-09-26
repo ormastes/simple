@@ -7,7 +7,9 @@
 # @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
 # @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
 
-use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_static_link, elf_link_configured, ElfLinkRequest, ELF_LINK_STATIC_EXEC
+}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use std.io_runtime.{file_read_bytes}
 use std.common.crypto.sha1.{sha1_bytes}
@@ -69,6 +71,24 @@ fn load_offset_with_flags(b: [i64], flags: i64) -> i64:
         val p = phdr_off(b, i)
         if rd32(b, p) == PT_LOAD and rd32(b, p + 4) == flags:
             return rd64(b, p + 8)
+        i = i + 1
+    -1
+
+fn load_file_size_with_flags(b: [i64], flags: i64) -> i64:
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        val p = phdr_off(b, i)
+        if rd32(b, p) == PT_LOAD and rd32(b, p + 4) == flags:
+            return rd64(b, p + 32)
+        i = i + 1
+    -1
+
+fn load_mem_size_with_flags(b: [i64], flags: i64) -> i64:
+    var i: i64 = 0
+    while i < rd16(b, 56):
+        val p = phdr_off(b, i)
+        if rd32(b, p) == PT_LOAD and rd32(b, p + 4) == flags:
+            return rd64(b, p + 40)
         i = i + 1
     -1
 
@@ -144,6 +164,23 @@ describe "elf_exec_writer - two-object static aarch64 exec":
         expect((insn & 0x3ffffff) * 4).to_equal(0x3c - 0x24)
 
 describe "elf_exec_writer - two-object static x86_64 exec":
+    it "garbage-collects unreachable function and data sections":
+        val obj = load_fixture("gc_sections_x64.o")
+        val r = elf_static_link([obj], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(load_file_size_with_flags(b, 5)).to_equal(31)
+        expect(load_file_size_with_flags(b, 6)).to_equal(8)
+        expect(load_mem_size_with_flags(b, 6)).to_equal(16)
+
+    it "uses retained symbols as section-GC roots":
+        val obj = load_fixture("gc_sections_x64.o")
+        val req = ElfLinkRequest(objects: [obj], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC, interp: "")
+        val r = elf_link_configured(req, false, ["dead_function"])
+        expect(r.is_ok()).to_equal(true)
+        expect(load_file_size_with_flags(r.unwrap(), 6)).to_equal(16)
+
     it "indexes relocated FDEs through .eh_frame_hdr and PT_GNU_EH_FRAME":
         val r = elf_static_link([load_fixture("unwind_x64.o")], [], "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)

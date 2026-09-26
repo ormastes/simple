@@ -23,8 +23,9 @@
 #     platform-receipt concern rather than an image-construction restriction
 #   - TLS sections/PT_TLS and x86_64 local/initial-exec are emitted; other TLS
 #     relocation models remain unsupported
-#   - no text relocs,
-#     no section GC, no COMDAT dedup, no symbol versioning
+#   - no text relocs; relocation-graph section GC is conservative around
+#     `.eh_frame` until FDE-level pruning is admitted
+#   - no COMDAT dedup, no symbol versioning
 #     (unversioned references bind to the library's default version)
 #   - single-threaded; no StageReceipts yet
 
@@ -39,6 +40,7 @@ use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_by
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
 use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
 use compiler.backend.linker.elf.eh_frame_hdr.{elf_eh_frame_fde_count, elf_build_eh_frame_hdr}
+use compiler.backend.linker.elf.section_gc.{elf_section_gc, elf_gc_undefined}
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class, elf_x86_can_relax,
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
@@ -196,7 +198,7 @@ fn elf_find_out(outs: [ElfOutSec], name: text) -> i64:
         i = i + 1
     -1
 
-fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
+fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInputs, text>:
     """Assign every allocatable input section to a named output section + offset."""
     var outs: [ElfOutSec] = []
     var sec_out: [[i64]] = []
@@ -209,7 +211,7 @@ fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
         var si: i64 = 0
         while si < obj.sections.len():
             val sec = obj.sections[si]
-            if sec.sh_flags & SHF_ALLOC == 0:
+            if sec.sh_flags & SHF_ALLOC == 0 or not live[oi][si]:
                 idxs = idxs.push(-1)
                 offs = offs.push(0)
             else:
@@ -242,14 +244,16 @@ fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
         oi = oi + 1
     Ok(ElfStaticInputs(objects: objects, sec_out: sec_out, sec_off: sec_off, outs: outs))
 
-fn elf_place_common(inputs: ElfStaticInputs, res: SymResolution) -> ElfCommonPlacement:
+fn elf_place_common(inputs: ElfStaticInputs, res: SymResolution,
+        common_live: {text: bool}) -> ElfCommonPlacement:
     """Append coalesced SHN_COMMON storage to .bss in input-symbol order."""
     var outs = inputs.outs
     var k = elf_find_out(outs, ".bss")
     var offsets: {text: i64} = {}
     for obj in inputs.objects:
         for sym in obj.symbols:
-            if sym.name == "" or sym.st_shndx != SHN_COMMON or offsets.has(sym.name) or not res.defined.has(sym.name):
+            if sym.name == "" or sym.st_shndx != SHN_COMMON or offsets.has(sym.name) or
+                    not res.defined.has(sym.name) or not common_live.has(sym.name):
                 continue
             val e = res.defined[sym.name]
             if e.section_idx != SHN_COMMON:
@@ -556,18 +560,6 @@ fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, t
 # ============================================================================
 # Checks
 # ============================================================================
-
-fn elf_static_undefined(objects: [ElfObject], res: SymResolution, libs: [ElfSharedLib]) -> [text]:
-    """Strong (STB_GLOBAL) undefined references with no definition anywhere."""
-    var out: [text] = []
-    var seen: {text: bool} = {}
-    for obj in objects:
-        for sym in obj.symbols:
-            if sym.name != "" and sym.st_shndx == SHN_UNDEF and elf_symbol_binding(sym) == STB_GLOBAL:
-                if not res.defined.has(sym.name) and not elf_is_synth(sym.name) and elf_lib_export(libs, sym.name) < 0 and not seen.has(sym.name):
-                    seen[sym.name] = true
-                    out = out.push(sym.name)
-    out
 
 fn elf_static_join(items: [text]) -> text:
     var s = ""
@@ -1049,13 +1041,17 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     for name in retained_symbols:
         if name != "" and not res.defined.has(name) and elf_lib_export(libs, name) < 0:
             return Err("retained symbol not found: {name}")
-    val undef = elf_static_undefined(all, res, libs)
+    val gc = elf_section_gc(all, res, req.entry, retained_symbols)
+    var undef: [text] = []
+    for name in elf_gc_undefined(all, gc.live, res):
+        if not elf_is_synth(name) and elf_lib_export(libs, name) < 0:
+            undef = undef.push(name)
     if undef.len() > 0:
         return Err("undefined symbol: " + elf_static_join(undef))
     if not res.defined.has(req.entry):
         return Err("entry symbol not defined: {req.entry}")
 
-    val common = elf_place_common(elf_static_place(all)?, res)
+    val common = elf_place_common(elf_static_place(all, gc.live)?, res, gc.common_live)
     val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1)
     val initial_contents = elf_static_contents(common.inputs)

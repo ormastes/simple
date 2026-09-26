@@ -25,6 +25,7 @@ clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector tls_provider_x64.c -o tls_provider_x64.o
 ld.lld -shared --soname libtls_x64.so -o libtls_x64.so.1 tls_provider_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables unwind_x64.c -o unwind_x64.o
+clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections gc_sections_x64.c -o gc_sections_x64.o
 ```
 
 Relocations exercised (`llvm-readelf -r`):
@@ -38,10 +39,11 @@ Relocations exercised (`llvm-readelf -r`):
 | lib_x64.o | PC32 (base, scratch) |
 | common_x64.o | R_X86_64_32S (`shared_block`); `SHN_COMMON`, size 48, alignment 32 |
 | canonical_plt_x64.o | R_X86_64_64 (`add_val`) in `.data`, resolved to the executable's canonical PLT entry |
-| tls_sections_x64.o | `.tdata` + `.tbss` with `SHF_TLS`, no TLS relocations (PT_TLS layout fixture) |
+| tls_sections_x64.o | `.tdata` + `.tbss` with `SHF_TLS`; two R_X86_64_TPOFF32 references keep both templates live for PT_TLS layout |
 | tls_local_exec_x64.o | R_X86_64_TPOFF32 (`local_tls`), resolved relative to the end of the static TLS block |
 | tls_import_x64.o | R_X86_64_GOTTPOFF (`imported_tls`), bound through a GOT slot carrying R_X86_64_TPOFF64 |
 | unwind_x64.o | two zR/pcrel-sdata4 FDEs indexed by `.eh_frame_hdr` |
+| gc_sections_x64.o | entry-rooted relocation graph retaining live function/data/BSS while dropping dead function/data sections |
 
 The specs depend on the exact byte offsets noted in them (e.g. the CALL26 at
 `_start+0x24`, x86_64 `call` rel32 at `.text+0x1d`); regenerate the specs'

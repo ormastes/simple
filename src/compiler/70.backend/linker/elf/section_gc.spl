@@ -1,0 +1,126 @@
+# Relocation-graph section garbage collection for internal ELF executable links.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, elf_section_name, elf_reloc_sym, elf_symbol_binding,
+    SHN_UNDEF, STB_LOCAL, STB_GLOBAL
+}
+use compiler.backend.linker.sym_resolver.{SymResolution}
+
+val SHN_COMMON_GC: i64 = 0xfff2
+val SHF_ALLOC_GC: i64 = 0x2
+val SHF_GNU_RETAIN_GC: i64 = 0x200000
+
+struct ElfSectionGc:
+    live: [[bool]]
+    common_live: {text: bool}
+
+fn _gc_mark(live: [[bool]], work_obj: [i64], work_sec: [i64], oi: i64, si: i64) -> ([[bool]], [i64], [i64]):
+    if oi < 0 or oi >= live.len() or si <= 0 or si >= live[oi].len() or live[oi][si]:
+        return (live, work_obj, work_sec)
+    var next = live
+    next[oi][si] = true
+    (next, work_obj.push(oi), work_sec.push(si))
+
+fn _gc_mark_name(res: SymResolution, live: [[bool]],
+        work_obj: [i64], work_sec: [i64], common_live: {text: bool}, name: text) -> ([[bool]], [i64], [i64], {text: bool}):
+    if name == "" or not res.defined.has(name):
+        return (live, work_obj, work_sec, common_live)
+    val e = res.defined[name]
+    if e.section_idx == SHN_COMMON_GC:
+        var commons = common_live
+        commons[name] = true
+        return (live, work_obj, work_sec, commons)
+    val marked = _gc_mark(live, work_obj, work_sec, e.obj_idx, e.section_idx)
+    (marked.get(0), marked.get(1), marked.get(2), common_live)
+
+fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
+        retained: [text]) -> ElfSectionGc:
+    var live: [[bool]] = []
+    for obj in objects:
+        var row: [bool] = []
+        for _ in obj.sections:
+            row = row.push(false)
+        live = live.push(row)
+    var work_obj: [i64] = []
+    var work_sec: [i64] = []
+    var commons: {text: bool} = {}
+
+    val entry_mark = _gc_mark_name(res, live, work_obj, work_sec, commons, entry)
+    live = entry_mark.get(0)
+    work_obj = entry_mark.get(1)
+    work_sec = entry_mark.get(2)
+    commons = entry_mark.get(3)
+    for name in retained:
+        val root = _gc_mark_name(res, live, work_obj, work_sec, commons, name)
+        live = root.get(0)
+        work_obj = root.get(1)
+        work_sec = root.get(2)
+        commons = root.get(3)
+
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        var si: i64 = 1
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            val name = elf_section_name(obj, si)
+            if sec.sh_flags & SHF_ALLOC_GC != 0 and
+                    (sec.sh_flags & SHF_GNU_RETAIN_GC != 0 or name == ".init" or name == ".fini" or
+                     name.starts_with(".init_array") or name.starts_with(".fini_array") or
+                     name.starts_with(".preinit_array") or name == ".eh_frame"):
+                val root = _gc_mark(live, work_obj, work_sec, oi, si)
+                live = root.get(0)
+                work_obj = root.get(1)
+                work_sec = root.get(2)
+            si = si + 1
+        oi = oi + 1
+
+    var wi: i64 = 0
+    while wi < work_obj.len():
+        oi = work_obj[wi]
+        val si = work_sec[wi]
+        val obj = objects[oi]
+        for reloc in obj.relocations:
+            if reloc.target_section_idx != si:
+                continue
+            val sym_idx = elf_reloc_sym(reloc)
+            if sym_idx <= 0 or sym_idx >= obj.symbols.len():
+                continue
+            val sym = obj.symbols[sym_idx]
+            if elf_symbol_binding(sym) == STB_LOCAL:
+                if sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON_GC:
+                    val marked = _gc_mark(live, work_obj, work_sec, oi, sym.st_shndx)
+                    live = marked.get(0)
+                    work_obj = marked.get(1)
+                    work_sec = marked.get(2)
+            else:
+                val marked = _gc_mark_name(res, live, work_obj, work_sec, commons, sym.name)
+                live = marked.get(0)
+                work_obj = marked.get(1)
+                work_sec = marked.get(2)
+                commons = marked.get(3)
+        wi = wi + 1
+    ElfSectionGc(live: live, common_live: commons)
+
+fn elf_gc_undefined(objects: [ElfObject], live: [[bool]], res: SymResolution) -> [text]:
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    var oi: i64 = 0
+    while oi < objects.len():
+        val obj = objects[oi]
+        for reloc in obj.relocations:
+            val si = reloc.target_section_idx
+            if si < 0 or si >= live[oi].len() or not live[oi][si]:
+                continue
+            val sym_idx = elf_reloc_sym(reloc)
+            if sym_idx <= 0 or sym_idx >= obj.symbols.len():
+                continue
+            val sym = obj.symbols[sym_idx]
+            if sym.st_shndx == SHN_UNDEF and elf_symbol_binding(sym) == STB_GLOBAL and sym.name != "" and
+                    not res.defined.has(sym.name) and not seen.has(sym.name):
+                seen[sym.name] = true
+                out = out.push(sym.name)
+        oi = oi + 1
+    out
+
+export ElfSectionGc, elf_section_gc, elf_gc_undefined
