@@ -1,11 +1,12 @@
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
-use nogc_sync_mut.platform.{is_macos}
+use std.nogc_sync_mut.env.platform.{detect_os}
 
 extern fn rt_cocoa_window_new(w: i64, h: i64, title_rv: i64) -> i64
 extern fn rt_cocoa_window_resize(win: i64, w: i64, h: i64) -> bool
 extern fn rt_cocoa_window_close(win: i64) -> bool
 extern fn rt_cocoa_layer_create(win: i64, w: i64, h: i64, fill_color: i64) -> i64
 extern fn rt_cocoa_layer_fill_rect(layer: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_cocoa_layer_write_frame(layer: i64, w: i64, h: i64, pixels_le: [u8]) -> bool
 extern fn rt_cocoa_layer_present(win: i64, layer: i64) -> bool
 extern fn rt_cocoa_layer_free(layer: i64) -> bool
 extern fn rt_cocoa_layer_read_pixel(layer: i64, x: i64, y: i64) -> i64
@@ -85,7 +86,7 @@ class HostedCocoaBackend:
         # `-1`/`false` sentinel stub. `is_macos()` is a genuine runtime OS
         # probe (`uname -s`, nogc_sync_mut.platform.host_os), not a literal,
         # so this can never claim native Cocoa on a host that cannot have it.
-        is_macos()
+        detect_os() == "macos"
 
     static fn new(window_id: i64, buffer_id: i64, w: i32, h: i32) -> HostedCocoaBackend:
         HostedCocoaBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h)
@@ -135,6 +136,20 @@ class HostedCocoaBackend:
                     self.put_pixel(x + col, y + row, pixels[src_idx])
                 col = col + 1
             row = row + 1
+
+    fn blit_frame_checked(pixels: [u32]) -> bool:
+        """Transfer one complete frame atomically through the native owner."""
+        if detect_os() != "macos" or self.buffer_id <= 0 or self.w <= 0 or self.h <= 0 or
+           pixels.len() != self.w.to_i64() * self.h.to_i64():
+            return false
+        var pixels_le: [u8] = []
+        for color in pixels:
+            pixels_le.push((color & 255u32).to_u8())
+            pixels_le.push(((color >> 8u32) & 255u32).to_u8())
+            pixels_le.push(((color >> 16u32) & 255u32).to_u8())
+            pixels_le.push(((color >> 24u32) & 255u32).to_u8())
+        rt_cocoa_layer_write_frame(
+            self.buffer_id, self.w.to_i64(), self.h.to_i64(), pixels_le)
 
     fn present_checked() -> bool:
         """Report whether the native Cocoa provider accepted this present."""

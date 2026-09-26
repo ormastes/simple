@@ -30,6 +30,9 @@
  * ---------------------------------------------------------------------- */
 extern const char *rt_string_data(int64_t rv);
 extern int64_t     rt_string_len(int64_t rv);
+extern int64_t rt_array_len_safe(int64_t value);
+extern int64_t rt_array_bytes_copy_checked(int64_t value, uint8_t *out,
+                                           int64_t capacity);
 
 /* Decode a Simple `text` RuntimeValue into a NUL-terminated C string
  * allocated with malloc.  Caller must free().  Returns strdup("untitled") on
@@ -71,6 +74,11 @@ int64_t rt_cocoa_layer_create(int64_t win, int64_t w, int64_t h, int64_t fill_co
 bool rt_cocoa_layer_fill_rect(int64_t layer, int64_t x, int64_t y,
                                int64_t w, int64_t h, int64_t color) {
     (void)layer; (void)x; (void)y; (void)w; (void)h; (void)color;
+    return false;
+}
+bool rt_cocoa_layer_write_frame(int64_t layer, int64_t w, int64_t h,
+                                int64_t pixels_le) {
+    (void)layer; (void)w; (void)h; (void)pixels_le;
     return false;
 }
 bool rt_cocoa_layer_present(int64_t win, int64_t layer) {
@@ -390,6 +398,45 @@ bool rt_cocoa_layer_fill_rect(int64_t layer_id, int64_t x, int64_t y,
             row[xx] = c;
     }
     return true;
+}
+
+/* One full-frame transfer. Validate and stage every slot before mutating the
+ * layer, so a malformed array cannot leave a half-written visible frame. */
+bool rt_cocoa_layer_write_frame(int64_t layer_id, int64_t w, int64_t h,
+                                int64_t pixels_le) {
+    if (!pixels_le || w <= 0 || h <= 0 || w > INT64_MAX / h ||
+        (uint64_t)w > (uint64_t)SIZE_MAX / (uint64_t)h)
+        return false;
+    size_t count = (size_t)w * (size_t)h;
+    if (count > SIZE_MAX / sizeof(uint32_t) ||
+        count > (size_t)(INT64_MAX / (int64_t)sizeof(uint32_t)))
+        return false;
+    int64_t byte_count = (int64_t)(count * sizeof(uint32_t));
+    if (rt_array_len_safe(pixels_le) != byte_count) return false;
+    uint8_t *staged = (uint8_t *)malloc((size_t)byte_count);
+    if (!staged) return false;
+    if (rt_array_bytes_copy_checked(pixels_le, staged, byte_count) != byte_count) {
+        free(staged);
+        return false;
+    }
+    /* The wire format is little-endian ARGB u32, independent of host byte
+     * order. Decode only after the complete validated copy is retained. */
+    uint32_t *words = (uint32_t *)staged;
+    for (size_t i = 0; i < count; ++i) {
+        size_t at = i * sizeof(uint32_t);
+        uint32_t value = (uint32_t)staged[at] |
+            ((uint32_t)staged[at + 1] << 8) |
+            ((uint32_t)staged[at + 2] << 16) |
+            ((uint32_t)staged[at + 3] << 24);
+        words[i] = value;
+    }
+    pthread_mutex_lock(&g_mutex);
+    CocoaLayer *layer = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
+    bool accepted = layer && layer->w == w && layer->h == h && layer->pixels;
+    if (accepted) memcpy(layer->pixels, words, count * sizeof(uint32_t));
+    pthread_mutex_unlock(&g_mutex);
+    free(staged);
+    return accepted;
 }
 
 bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {

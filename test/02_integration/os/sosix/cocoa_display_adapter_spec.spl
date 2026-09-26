@@ -1,6 +1,7 @@
 # @cover src/os/compositor/host_services/cocoa_display_adapter.spl 20%
 
 use std.spec
+use std.io_runtime.{host_os}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.host_services.cocoa_display_adapter.{sosix_cocoa_submit_composition}
@@ -42,7 +43,7 @@ describe "SOSIX Cocoa renderer-host boundary":
         expect(submission.state.next_frame_sequence).to_equal(1)
         raster.shutdown()
 
-    it "rejects a native present failure without consuming the frame sequence":
+    it "rejects a native frame upload failure without consuming the frame sequence":
         val surface = SosixCapabilityRef(slot: 41, generation: 2)
         val request = SosixDisplayRequest(
             operation: SosixOperationId(slot: 1, generation: 1),
@@ -57,7 +58,7 @@ describe "SOSIX Cocoa renderer-host boundary":
             "cocoa", "queue", "software", false, "")
         var raster = Engine2dCompositorBackend.create_named(2, 2, "software")
         # Positive handles pass adapter admission, but no native provider owns
-        # these IDs. A real native rejection must never become a pending fence.
+        # these IDs. A rejected bulk upload must never become a pending fence.
         val display = HostedCocoaBackend.new(999999999, 999999998, 2, 2)
         val state = sosix_display_surface_state_create(surface, 2).state
         val embedding = draw_ir_embedding_config("web", "body", 0, 0, 2, 2, 0, 1000, true)
@@ -71,7 +72,46 @@ describe "SOSIX Cocoa renderer-host boundary":
             configuration, raster, display, state, request, composition)
 
         expect(submission.accepted).to_equal(false)
-        expect(submission.reason).to_equal("cocoa-present-failed")
+        expect(submission.reason).to_equal("cocoa-frame-upload-failed")
         expect(submission.state.next_frame_sequence).to_equal(1)
         expect(submission.state.inflight_count).to_equal(0)
         raster.shutdown()
+
+    it "rejects native present failure after a successful frame upload on macOS":
+        if host_os() == "macos":
+            val surface = SosixCapabilityRef(slot: 51, generation: 2)
+            val request = SosixDisplayRequest(
+                operation: SosixOperationId(slot: 1, generation: 1),
+                api_id: SOSIX_HOST_DISPLAY_PRESENT,
+                surface: surface,
+                surface_generation: 1,
+                frame_sequence: 1,
+                buffer: SosixBufferRef(slot: 52, generation: 1),
+                deadline_ns: 1000
+            )
+            val configuration = sosix_host_configuration_snapshot_create(
+                "cocoa", "queue", "software", false, "")
+            var raster = Engine2dCompositorBackend.create_named(2, 2, "software")
+            # Cocoa layer creation does not require a valid window handle.
+            # The layer accepts the frame, then native present rejects the
+            # deliberately unowned window ID.
+            val display = HostedCocoaBackend.try_create(
+                999999997, 2, 2, 0xFF000000u32).unwrap()
+            val state = sosix_display_surface_state_create(surface, 2).state
+            val embedding = draw_ir_embedding_config(
+                "web", "body", 0, 0, 2, 2, 0, 1000, true)
+            val composition = draw_ir_composition("cocoa-frame-3", "sosix-host", "software", [
+                draw_ir_batch("body", "software", embedding, [
+                    draw_ir_rect("fill", 0, 0, 2, 2, 0xFF112233u32)
+                ])
+            ])
+
+            val submission = sosix_cocoa_submit_composition(
+                configuration, raster, display, state, request, composition)
+
+            expect(submission.accepted).to_equal(false)
+            expect(submission.reason).to_equal("cocoa-present-failed")
+            expect(submission.state.next_frame_sequence).to_equal(1)
+            expect(submission.state.inflight_count).to_equal(0)
+            display.free()
+            raster.shutdown()
