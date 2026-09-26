@@ -59,6 +59,13 @@ val R_AARCH64_ADR_PREL_LO21: i64 = 274  # S + A - P, split immlo[1:0]/immhi[20:2
 val R_AARCH64_ADR_PREL_PG_HI21: i64 = 275  # (Page(S+A) - Page(P)) >> 12, split immlo[1:0]/immhi[20:2]
 val R_AARCH64_ADD_ABS_LO12_NC: i64 = 277   # (S+A) & 0xfff, into imm12
 val R_AARCH64_LDST64_ABS_LO12_NC: i64 = 286  # ((S+A) & 0xfff) >> 3, into imm12 (8-byte scaled)
+val R_AARCH64_MOVW_PREL_G0: i64 = 287
+val R_AARCH64_MOVW_PREL_G0_NC: i64 = 288
+val R_AARCH64_MOVW_PREL_G1: i64 = 289
+val R_AARCH64_MOVW_PREL_G1_NC: i64 = 290
+val R_AARCH64_MOVW_PREL_G2: i64 = 291
+val R_AARCH64_MOVW_PREL_G2_NC: i64 = 292
+val R_AARCH64_MOVW_PREL_G3: i64 = 293
 val R_AARCH64_LDST128_ABS_LO12_NC: i64 = 299 # ((S+A) & 0xfff) >> 4, into imm12 (16-byte scaled)
 val R_AARCH64_PREL64: i64    = 260  # S + A - P (64-bit data)
 val R_AARCH64_PREL32: i64    = 261  # S + A - P (32-bit data, e.g. .eh_frame)
@@ -403,6 +410,27 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         val selected = if v < 0: ((~v) >> shift) & 0xffff else: (v >> shift) & 0xffff
         return RelocResult(success: true, offset: offset, value: selected, error: "")
 
+    if rtype >= R_AARCH64_MOVW_PREL_G0 and rtype <= R_AARCH64_MOVW_PREL_G3:
+        val v = s + a - p
+        var shift = 0
+        if rtype == R_AARCH64_MOVW_PREL_G1 or rtype == R_AARCH64_MOVW_PREL_G1_NC: shift = 16
+        elif rtype == R_AARCH64_MOVW_PREL_G2 or rtype == R_AARCH64_MOVW_PREL_G2_NC: shift = 32
+        elif rtype == R_AARCH64_MOVW_PREL_G3: shift = 48
+        val checked = rtype == R_AARCH64_MOVW_PREL_G0 or
+            rtype == R_AARCH64_MOVW_PREL_G1 or
+            rtype == R_AARCH64_MOVW_PREL_G2 or
+            rtype == R_AARCH64_MOVW_PREL_G3
+        if checked and shift < 48:
+            val limit = 1 << (shift + 16)
+            if v < 0 - limit or v >= limit:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "R_AARCH64_MOVW_PREL_G{shift / 16} overflow")
+        val selected = if checked and v < 0:
+            ((~v) >> shift) & 0xffff
+        else:
+            (v >> shift) & 0xffff
+        return RelocResult(success: true, offset: offset, value: selected, error: "")
+
     if rtype == R_AARCH64_LD_PREL_LO19 or rtype == R_AARCH64_TLSIE_LD_GOTTPREL_PREL19:
         val delta = s + a - p
         if delta & 0x3 != 0:
@@ -599,6 +627,16 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val opcode = if checked: 0x40000000 else: 0
                 patch_u32_le(bytes, offset,
                     (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype >= R_AARCH64_MOVW_PREL_G0 and rtype <= R_AARCH64_MOVW_PREL_G3:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_MOVW_PREL_G0 or
+                    rtype == R_AARCH64_MOVW_PREL_G1 or
+                    rtype == R_AARCH64_MOVW_PREL_G2 or
+                    rtype == R_AARCH64_MOVW_PREL_G3
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked and s + a - p >= 0: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
             else if rtype >= R_AARCH64_TLSLE_MOVW_TPREL_G2 and rtype <= R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
                 val insn = read_u32_le(bytes, offset)
                 val checked = rtype == R_AARCH64_TLSLE_MOVW_TPREL_G2 or
@@ -672,6 +710,9 @@ export R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G0_NC
 export R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G1_NC
 export R_AARCH64_MOVW_UABS_G2, R_AARCH64_MOVW_UABS_G2_NC, R_AARCH64_MOVW_UABS_G3
 export R_AARCH64_MOVW_SABS_G0, R_AARCH64_MOVW_SABS_G1, R_AARCH64_MOVW_SABS_G2
+export R_AARCH64_MOVW_PREL_G0, R_AARCH64_MOVW_PREL_G0_NC
+export R_AARCH64_MOVW_PREL_G1, R_AARCH64_MOVW_PREL_G1_NC
+export R_AARCH64_MOVW_PREL_G2, R_AARCH64_MOVW_PREL_G2_NC, R_AARCH64_MOVW_PREL_G3
 export R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
 export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16, R_AARCH64_CALL26, R_AARCH64_JUMP26
 export R_AARCH64_TSTBR14, R_AARCH64_CONDBR19

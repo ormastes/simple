@@ -32,6 +32,8 @@ use compiler.backend.linker.reloc_engine.{
     R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G0_NC,
     R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G2, R_AARCH64_MOVW_UABS_G3,
     R_AARCH64_MOVW_SABS_G0, R_AARCH64_MOVW_SABS_G1, R_AARCH64_MOVW_SABS_G2,
+    R_AARCH64_MOVW_PREL_G0, R_AARCH64_MOVW_PREL_G0_NC,
+    R_AARCH64_MOVW_PREL_G1, R_AARCH64_MOVW_PREL_G2, R_AARCH64_MOVW_PREL_G3,
     R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC,
     R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21, R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC,
     R_AARCH64_TLSIE_LD_GOTTPREL_PREL19,
@@ -43,7 +45,7 @@ use compiler.backend.linker.reloc_engine.{
     R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC,
     R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_HI20, R_RISCV_LO12_I
 }
-use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_ABS_NARROW, RC_BRANCH, RC_TLS_IE, RC_TLS_LE}
+use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_TLS_IE, RC_TLS_LE}
 
 # ============================================================================
 # Byte patch helpers
@@ -467,6 +469,29 @@ describe "reloc_engine - AArch64 ADR_PREL_PG_HI21 (page delta)":
             0x10000, 0, 0).success).to_equal(false)
         expect(reloc_apply_aarch64(movn, 0, R_AARCH64_MOVW_SABS_G2,
             -0x1000000000001, 0, 0).success).to_equal(false)
+
+    it "applies checked and NC position-relative MOVW groups":
+        val movn = patch_u32_le([0, 0, 0, 0], 0, 0x92800000)
+        val positive = reloc_patch_bytes(RelocArch.AArch64, movn, 0,
+            R_AARCH64_MOVW_PREL_G0, 0x3234, 0, 0x2000)
+        expect(read_u32_le(positive, 0)).to_equal(0xd2824680)
+        val negative = reloc_patch_bytes(RelocArch.AArch64, movn, 0,
+            R_AARCH64_MOVW_PREL_G0, 0x1000, 0, 0x2000)
+        expect(read_u32_le(negative, 0)).to_equal(0x9281ffe0)
+        val movk = patch_u32_le([0, 0, 0, 0], 0, 0xf2800000)
+        val nc = reloc_patch_bytes(RelocArch.AArch64, movk, 0,
+            R_AARCH64_MOVW_PREL_G0_NC, 0x1fff, 0, 0x2000)
+        expect(read_u32_le(nc, 0)).to_equal(0xf29fffe0)
+        expect(reloc_apply_aarch64(movn, 0, R_AARCH64_MOVW_PREL_G0,
+            0x12000, 0, 0x2000).success).to_equal(false)
+        expect(reloc_apply_aarch64(movn, 0, R_AARCH64_MOVW_PREL_G1,
+            0x100002000, 0, 0x2000).success).to_equal(false)
+        expect(reloc_apply_aarch64(movn, 0, R_AARCH64_MOVW_PREL_G2,
+            0x1000000002000, 0, 0x2000).success).to_equal(false)
+        expect(reloc_apply_aarch64(movn, 0, R_AARCH64_MOVW_PREL_G3,
+            0x1234000000002000, 0, 0x2000).value).to_equal(0x1234)
+        expect(elf_reloc_class(RelocArch.AArch64,
+            R_AARCH64_MOVW_PREL_G0)).to_equal(RC_PCREL)
 
     it "LD_PREL_LO19 patches a checked aligned literal-load displacement":
         # @req REQ-SSPEC-COMPILER
