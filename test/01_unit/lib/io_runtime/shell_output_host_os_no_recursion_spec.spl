@@ -1,0 +1,32 @@
+# Regression spec for
+# doc/08_tracking/bug/stage2_candidate_env_get_infinite_recursion_sigill_2026-09-26.md
+#
+# `_io_runtime_process_run_raw` gained a `host_os() == "windows"` branch
+# (dac914d9306). On every non-Windows host `host_os()` shells out through
+# `shell_output("uname -s")`, which runs through `_io_runtime_process_run_raw`,
+# which asks `host_os()` again: a 4-frame cycle that trips the interpreter's
+# 1000-frame limit and SIGILLs the stage-2 native-build worker. The frame that
+# happened to hit the limit was `env_get`, which is why the record was filed
+# against duplicate `env_get` dispatch. Dispatch was correct at every hop.
+
+use std.spec.step
+
+use std.io_runtime.{shell_output, host_os}
+
+
+describe "std.io_runtime shell_output / host_os terminate on a POSIX host":
+    # @manual scenario evidence
+    it "shell_output(\"uname -s\") returns the kernel name instead of recursing":
+        # @req REQ-SSPEC-LIB
+        step("run uname through shell_output")
+        val os = shell_output("uname -s")
+        step("a POSIX kernel name comes back")
+        expect(os.len()).to_be_greater_than(0)
+
+    it "host_os resolves to a known platform without re-entering itself":
+        # @req REQ-SSPEC-LIB
+        step("ask the host-os detector")
+        val os = host_os()
+        step("the answer is one of the supported names")
+        val known = ["linux", "macos", "freebsd", "windows"]
+        expect(known.contains(os)).to_equal(true)
