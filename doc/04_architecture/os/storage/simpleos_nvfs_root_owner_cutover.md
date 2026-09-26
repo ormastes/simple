@@ -20,19 +20,23 @@ kernel FAT32 mount and `FD_TYPE_FAT32`. The PID1 catalogue payload in
 mounts a private FAT32 root. `src/os/kernel/fd_io.spl` has an owned IPC VFS
 client, but syscall 30 does not call it.
 
-The existing `src/os/kernel/fs/positioned_fd_owner_v1.spl` already reserves a
-descriptor, opens a MountTable binding, publishes an OFD, and rolls back a
-failed publication. It is not called by the production file syscalls. The
-current syscall gate deliberately rejects `/srv/data` protected opens with
-ENOSYS for this reason; see
+`src/os/kernel/fs/positioned_fd_owner_v1.spl` sketches reservation, MountTable
+binding, OFD publication, and rollback, but it is not a compiled bridge. Its
+imports name twelve functions absent from their owner modules, and it reads a
+`positioned` member absent from `OpenFileDescriptionBackendBindingV1`. No
+production file syscall calls it. The current syscall gate deliberately
+rejects `/srv/data` protected opens with ENOSYS; see
 `doc/05_design/os/storage/server_data_namespace_syscall_gate_v1.md`.
 
 ## Decision
 
 For the first release cutover, the kernel's canonical MountTable remains the
-single writable NVFS root owner. The production file syscall path consumes
-`positioned_fd_owner_v1` with a lifecycle key derived from the scheduler's
-current TCB. It does not mint a key from a userspace PID or FD number. Read,
+single writable NVFS root owner. First complete the positioned binding,
+OFD, and descriptor owner contracts named by `positioned_fd_owner_v1`, then
+compile and exercise their rollback/failure paths. Only then may the
+production file syscall path consume that bridge with a lifecycle key derived
+from the scheduler's current TCB. It does not mint a key from a userspace PID
+or FD number. Read,
 write, seek, sync, dup/fork, close, and exit cleanup must use that same OFD and
 MountTable binding before syscall 30 may select the NVFS route.
 
@@ -87,3 +91,4 @@ release cutover.
 - `src/os/kernel/fs/positioned_fd_owner_v1.spl`
 - `src/os/kernel/fs/active_fd_context_owner_v1.spl`
 - `src/os/services/vfs/vfs_nvfs_root_transaction.spl`
+- `doc/08_tracking/bug/simpleos_positioned_fd_bridge_unresolved_2026-09-27.md`
