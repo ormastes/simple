@@ -4784,6 +4784,10 @@ RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_val
 #define SVC_MAX_FDS 16
 #define SVC_MAX_RAM_FILES 16
 #define SVC_RAM_FILE_MAX (2048u * 1024u)
+/* Whole-file bounce buffer for FAT32 image reads (the big ELFs bypass this
+ * path via the streaming payload-resident loader). Sized for the largest file
+ * this lane reads: /CXX.PCH (~11 MiB, rung R6a) — give it 3x headroom. */
+#define SVC_FAT_BOUNCE_MAX (32u * 1024u * 1024u)
 #define SVC_O_CREAT 64
 #define SVC_O_ACCMODE 3
 #define SVC_O_WRONLY 1
@@ -5099,7 +5103,7 @@ static int64_t arm64_svc_file_read(uint64_t fd_v, uint64_t buf_va, uint64_t coun
     /* FAT32 file: lazily load the whole file into a bounce buffer, then
      * serve offset reads from it. */
     if (!g_svc_fds[fd].bounce) {
-        if (g_svc_fds[fd].size == 0 || g_svc_fds[fd].size > (4u * 1024u * 1024u))
+        if (g_svc_fds[fd].size == 0 || g_svc_fds[fd].size > SVC_FAT_BOUNCE_MAX)
             return -27; /* EFBIG — not a file this lane reads */
         g_svc_fds[fd].bounce = (uint8_t *)malloc(g_svc_fds[fd].size);
         if (!g_svc_fds[fd].bounce) return -12;

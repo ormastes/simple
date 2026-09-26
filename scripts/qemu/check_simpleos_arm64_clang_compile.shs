@@ -67,15 +67,52 @@ note "compiler: $SEED"
 CLANG_BYTES=$(wc -c < "$GUEST_BIN_DIR/clang-20" | tr -d ' ')
 LLD_BYTES=$(wc -c < "$GUEST_BIN_DIR/lld" | tr -d ' ')
 note "guest clang=${CLANG_BYTES}B lld=${LLD_BYTES}B"
-# R6 C++ witness: host-side cross clang used ONLY to preprocess the witness
-# into the self-contained WITNESS.CPP (roadmap B1 method — the guest FAT32 is
-# root-only 8.3, the 568-header libc++ closure cannot live there). The guest
-# cc1 then parses+codegens the real libc++ TU in-guest.
-HOSTCXX="$LLVM_WORK/host-cross-aarch64/bin/clang++"
-[ -x "$HOSTCXX" ] || fail "host cross clang++ missing: $HOSTCXX"
+# R6 C++ witness: a host-side clang-20 used ONLY to build the witness PCH on
+# the host (cc1 -emit-pch). The guest FAT32 is root-only 8.3 — the 187-header
+# libc++ tree cannot live there, and host-preprocessing the header closure into
+# the TU (the old roadmap-B1 method) produced a ~1.8 MiB WITNESS.CPP that the
+# guest cc1 could not parse inside the boot budget under TCG (lane doc
+# 2026-09-26, agent-46 throughput wall: ~50% parsed in ~2 h).
+#
+# PCH builder MUST be the same clang version+commit as the guest binary: the
+# guest cc1 validates the PCH's branch/version, and a cross-version PCH is not
+# merely rejected — it MISREADS (run-20260926_204716: a 596122063865-built PCH
+# loaded by the 434fc5a6e1d4 guest cc1 with -fno-validate-pch produced a 2.4 GiB
+# size corruption -> operator new abort, rc=134; VERSION_MAJOR was 34 on both,
+# so the major-version gate does NOT catch it). The lane-C1 host-cross binary
+# (596122063865) is therefore NOT usable as the PCH builder for the current
+# guest binary (434fc5a6e1d4). Build the matching host clang from the guest
+# binary's commit, e.g.:
+#   git -C /home/yoon/llvm-project-simpleos worktree add --detach /home/yoon/llvm-434src <guest-commit>
+#   cmake -G Ninja -S /home/yoon/llvm-434src/llvm -B /home/yoon/llvm-434-build \
+#     -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=OFF -DLLVM_TARGETS_TO_BUILD=AArch64 \
+#     -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-simpleos -DLLVM_ENABLE_PROJECTS=clang -DBUILD_SHARED_LIBS=OFF \
+#     -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_ZLIB=OFF
+#   ninja -C /home/yoon/llvm-434-build clang
+# The preflight below enforces the version match (fail fast, no boot spent) and,
+# when the builder's CMakeCache.txt is locatable, that LLVM_ENABLE_ZLIB/ZSTD are
+# OFF — the guest cc1 has neither, and a PCH with a compressed AST section fails
+# in-guest with "malformed or corrupted AST file" only AFTER a ~2 h deserialize
+# (run-20260926_222154 zstd, run-20260927_003800 zlib). The artifact-level
+# zstd-magic scan after the PCH build is the backstop.
+PCHCXX="${PCHCXX:-/home/yoon/llvm-434-build/bin/clang-20}"
+[ -x "$PCHCXX" ] || fail "PCH builder clang-20 missing: $PCHCXX (build it from the guest binary's commit; see above)"
+GUEST_CLANG_HASH=$(strings -a "$GUEST_BIN_DIR/clang-20" | grep -oE '\b[0-9a-f]{40}\b' | head -1)
+PCH_CXX_HASH=$("$PCHCXX" --version | grep -oE '\b[0-9a-f]{40}\b' | head -1)
+[ -n "$GUEST_CLANG_HASH" ] && [ "$GUEST_CLANG_HASH" = "$PCH_CXX_HASH" ] \
+    || fail "PCH builder ($PCH_CXX_HASH) != guest clang ($GUEST_CLANG_HASH); rebuild the PCH builder from the guest binary's commit (PCHCXX=...)"
+note "PCH builder: $PCHCXX (matches guest clang $GUEST_CLANG_HASH)"
+PCH_CMAKECACHE=$(readlink -f "$(dirname "$PCHCXX")/../CMakeCache.txt" 2>/dev/null || true)
+if [ -n "$PCH_CMAKECACHE" ] && [ -f "$PCH_CMAKECACHE" ]; then
+    grep -q "LLVM_ENABLE_ZLIB:STRING=OFF" "$PCH_CMAKECACHE" \
+        || fail "PCH builder has LLVM_ENABLE_ZLIB != OFF ($PCH_CMAKECACHE); the guest cc1 has no zlib"
+    grep -q "LLVM_ENABLE_ZSTD:STRING=OFF" "$PCH_CMAKECACHE" \
+        || fail "PCH builder has LLVM_ENABLE_ZSTD != OFF ($PCH_CMAKECACHE); the guest cc1 has no zstd"
+fi
 [ -f "$SYSROOT_A64/lib/libc++.a" ] || fail "sysroot libc++.a missing"
 [ -f "$SYSROOT_A64/lib/libc++abi.a" ] || fail "sysroot libc++abi.a missing"
 [ -f "$SYSROOT_A64/lib/libclang_rt.builtins-aarch64.a" ] || fail "sysroot builtins archive missing"
+[ -f scripts/os/fsexec_witness_pch_arm64.h ] || fail "witness PCH source header missing"
 
 # ------------------------------------------------------------------- R1: img --
 note "R1: staging FAT32 image"
@@ -87,24 +124,55 @@ cat > "$STAGE_DIR/stage/HELLO.C" <<'EOF'
 extern int printf(const char *fmt, ...);
 int main(void) { printf("HELLO_C_FROM_GUEST_ARM64\n"); return 0; }
 EOF
-# R6 C++ witness: stage the C++ link archives + preprocess the canonical
-# witness source (scripts/os/fsexec_witness_arm64.cpp) into the self-contained
-# WITNESS.CPP (-E -P; same target/sysroot/flags the guest cc1 compiles with).
+# R6 C++ witness: stage the C++ link archives + the witness payloads.
+#   /WITNESS.CPP = the canonical witness source (scripts/os/fsexec_witness_arm64.cpp)
+#     staged RAW (~3 KB, NO #includes — every declaration comes from the PCH).
+#   /CXX.PCH = host-built precompiled header (cc1 -emit-pch -fmodules-embed-all-files
+#     over scripts/os/fsexec_witness_pch_arm64.h = <string>+<vector>+<cstdio>).
+#     -fmodules-embed-all-files embeds every header's contents into the AST and
+#     marks the inputs transient, so the guest cc1 needs NO headers on the FAT
+#     (verified host-side: the object is byte-identical with the header tree
+#     deleted). The guest cc1 deserializes the PCH AST instead of lexing/parsing
+#     ~1.8 MiB of libc++ header text — the agent-46 throughput wall.
+#     The PCH build uses the SAME cc1 LangOpts as the guest R6a line (raw cc1,
+#     -triple/-ffreestanding/-O0/-std=c++17/-fno-rtti; exceptions are compiled
+#     OUT by default in this fork, so no -fno-exceptions anywhere).
 cp "$SYSROOT_A64/lib/libc++.a"                          "$STAGE_DIR/stage/LIBCXX.A"
 cp "$SYSROOT_A64/lib/libc++abi.a"                       "$STAGE_DIR/stage/CXXABI.A"
 cp "$SYSROOT_A64/lib/libclang_rt.builtins-aarch64.a"    "$STAGE_DIR/stage/RTBUILT.A"
-"$HOSTCXX" --target=aarch64-unknown-simpleos --sysroot="$SYSROOT_A64" \
-    -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -O0 -x c++ -E -P \
-    scripts/os/fsexec_witness_arm64.cpp -o "$STAGE_DIR/stage/WITNESS.CPP" \
-    || fail "witness preprocess failed"
+cp scripts/os/fsexec_witness_arm64.cpp                  "$STAGE_DIR/stage/WITNESS.CPP"
+CLANG_RESOURCE_INCLUDE=$("$PCHCXX" -print-resource-dir)/include
+[ -d "$CLANG_RESOURCE_INCLUDE" ] || fail "clang resource include missing: $CLANG_RESOURCE_INCLUDE"
+"$PCHCXX" -cc1 -triple aarch64-unknown-simpleos -ffreestanding -O0 \
+    -x c++-header -std=c++17 -fno-rtti -fmodules-embed-all-files \
+    -internal-isystem "$SYSROOT_A64/include/c++/v1" \
+    -internal-isystem "$SYSROOT_A64/include" \
+    -internal-isystem "$CLANG_RESOURCE_INCLUDE" \
+    -emit-pch scripts/os/fsexec_witness_pch_arm64.h -o "$STAGE_DIR/stage/CXX.PCH" \
+    || fail "witness PCH build failed"
+# The guest cc1 is built WITHOUT zstd (LLVM_ENABLE_ZSTD off): a PCH with any
+# zstd-compressed AST section fails in-guest with "malformed or corrupted AST
+# file: 'LLVM was not built with LLVM_ENABLE_ZSTD...'" only AFTER a ~2 h
+# deserialization (run-20260926_222154). The builder must have zstd OFF; guard
+# the artifact here so a zstd-enabled builder fails fast instead of costing a
+# boot. (zstd frame magic = 28 b5 2f fd.)
+if python3 - "$STAGE_DIR/stage/CXX.PCH" <<'PYEOF'
+import sys
+sys.exit(0 if open(sys.argv[1], 'rb').read().count(bytes([0x28, 0xB5, 0x2F, 0xFD])) else 1)
+PYEOF
+then
+    fail "witness PCH contains zstd-compressed sections; rebuild the PCH builder with -DLLVM_ENABLE_ZSTD=OFF"
+fi
 WITNESS_BYTES=$(wc -c < "$STAGE_DIR/stage/WITNESS.CPP" | tr -d ' ')
+PCH_BYTES=$(wc -c < "$STAGE_DIR/stage/CXX.PCH" | tr -d ' ')
 LIBCXX_BYTES=$(wc -c < "$STAGE_DIR/stage/LIBCXX.A" | tr -d ' ')
 CXXABI_BYTES=$(wc -c < "$STAGE_DIR/stage/CXXABI.A" | tr -d ' ')
 RTBUILT_BYTES=$(wc -c < "$STAGE_DIR/stage/RTBUILT.A" | tr -d ' ')
-note "R6: witness=${WITNESS_BYTES}B libc++.a=${LIBCXX_BYTES}B libc++abi.a=${CXXABI_BYTES}B builtins=${RTBUILT_BYTES}B"
+note "R6: witness=${WITNESS_BYTES}B pch=${PCH_BYTES}B libc++.a=${LIBCXX_BYTES}B libc++abi.a=${CXXABI_BYTES}B builtins=${RTBUILT_BYTES}B"
 printf '%s\n' "$CLANG_BYTES"   > "$STAGE_DIR/clang_size.txt"
 printf '%s\n' "$LLD_BYTES"    > "$STAGE_DIR/lld_size.txt"
 printf '%s\n' "$WITNESS_BYTES" > "$STAGE_DIR/witness_size.txt"
+printf '%s\n' "$PCH_BYTES"     > "$STAGE_DIR/pch_size.txt"
 printf '%s\n' "$LIBCXX_BYTES"  > "$STAGE_DIR/libcxx_size.txt"
 printf '%s\n' "$CXXABI_BYTES"  > "$STAGE_DIR/cxxabi_size.txt"
 printf '%s\n' "$RTBUILT_BYTES" > "$STAGE_DIR/rtbuilt_size.txt"
@@ -122,11 +190,12 @@ P3_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload3_start=\([0-9]*\).*/\1
 P4_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload4_start=\([0-9]*\).*/\1/p')
 P5_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload5_start=\([0-9]*\).*/\1/p')
 P6_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload6_start=\([0-9]*\).*/\1/p')
+P7_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload7_start=\([0-9]*\).*/\1/p')
 FAT_SECTORS=$(printf '%s\n' "$STATUS" | sed -n 's/.* fat_sectors=\([0-9]*\).*/\1/p')
 TOTAL=$(printf '%s\n' "$STATUS"    | sed -n 's/.* total_bytes=\([0-9]*\).*/\1/p')
 PREFIX="$STAGE_DIR/fat32-clang-arm64-prefix.bin"
 [ -f "$PREFIX" ] || fail "prefix not written"
-note "R1: assembling image (prefix + 6 payloads, ${TOTAL} bytes)"
+note "R1: assembling image (prefix + 7 payloads, ${TOTAL} bytes)"
 cp "$PREFIX" "$IMAGE"
 # Data area base: (reserved + num_fats*fat_sectors) * 512; cluster N offset:
 DATA_BASE=$(( (32 + FAT_SECTORS) * 512 ))
@@ -141,22 +210,24 @@ append_payload "$P3_START" "$STAGE_DIR/stage/WITNESS.CPP"
 append_payload "$P4_START" "$STAGE_DIR/stage/LIBCXX.A"
 append_payload "$P5_START" "$STAGE_DIR/stage/CXXABI.A"
 append_payload "$P6_START" "$STAGE_DIR/stage/RTBUILT.A"
+append_payload "$P7_START" "$STAGE_DIR/stage/CXX.PCH"
 truncate -s "$TOTAL" "$IMAGE"
 
 # Host-side path verification: parse the image root directory and check every
 # expected 8.3 entry exists with the right size; spot-check the CLANG.ELF magic.
 note "R1: verifying image root directory (host-side)"
 ROOT_OFF="$DATA_BASE"
-python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" "$WITNESS_BYTES" "$LIBCXX_BYTES" "$CXXABI_BYTES" "$RTBUILT_BYTES" <<'PYEOF' || fail "image root-dir verification failed"
+python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" "$WITNESS_BYTES" "$PCH_BYTES" "$LIBCXX_BYTES" "$CXXABI_BYTES" "$RTBUILT_BYTES" <<'PYEOF' || fail "image root-dir verification failed"
 import sys
 (img, root_off) = sys.argv[1], int(sys.argv[2])
-clang_b, lld_b, wit_b, lxx_b, abi_b, rtb_b = (int(x) for x in sys.argv[3:9])
+clang_b, lld_b, wit_b, pch_b, lxx_b, abi_b, rtb_b = (int(x) for x in sys.argv[3:10])
 data = open(img, 'rb').read()
 # FAT 8.3 raw names are 11 space-padded bytes with NO dot; normalize by
 # dropping spaces (CRT0.O -> CRT0O, SIMPLEOS.LD -> SIMPLEOSLD).
 want = {'CRT0O': None, 'SIMPLEOSLD': None, 'LIBCA': None, 'HELLOC': None,
         'CLANGELF': clang_b, 'LLDELF': lld_b,
-        'WITNESSCPP': wit_b, 'LIBCXXA': lxx_b, 'CXXABIA': abi_b, 'RTBUILTA': rtb_b}
+        'WITNESSCPP': wit_b, 'CXXPCH': pch_b,
+        'LIBCXXA': lxx_b, 'CXXABIA': abi_b, 'RTBUILTA': rtb_b}
 found = {}
 for slot in range(64):
     e = data[root_off + slot*32 : root_off + slot*32 + 32]
