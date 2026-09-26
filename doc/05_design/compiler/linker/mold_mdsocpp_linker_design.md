@@ -259,3 +259,15 @@ quoted test command, and `RemotePcAdapter.execute` consumes it instead of the
 old hardcoded checkout-relative `bin/simple` path. Windows execution is pinned
 to non-interactive PowerShell with single-quoted arguments and propagated
 `$LASTEXITCODE`; quote or line-break injection attempts fail closed.
+
+## 14. Linux runtime and library input completion (2026-09-27)
+
+`internal:elf` consumes the same admitted runtime-provider selection already
+used by the external native path. Runtime inputs must be ar archives. User
+libraries resolve in caller path order followed by discovered CRT and
+architecture-default directories; dynamic objects precede archives. Resolution
+accepts only ar magic or little-endian ELF `ET_DYN`, which avoids interpreting
+GNU ld scripts as object bytes while permitting their versioned shared-object
+targets. Missing or malformed libraries are named errors and never trigger an
+external-linker fallback. Output-policy fields whose semantics are not yet
+implemented remain rejected before linking.

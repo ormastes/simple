@@ -243,7 +243,7 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     # it before Windows/Unix host dispatch so the same BootLayoutPlan engine
     # is used from every build host.
     if requested_linker_override().trim().lower() == "internal" and is_simpleos_target():
-        val unsupported_field = internal_unsupported_config_field(config)
+        val unsupported_field = internal_simpleos_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:simpleos does not honour it)")
         val native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
@@ -314,12 +314,12 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         val cross_plan = hosted_c_compiler_plan(target, os, arch)
         if cross_plan.requires_cross:
             return Err("internal engine: unsupported cross target '{target}' (internal:elf links against the host glibc only)")
-        val unsupported_field = internal_unsupported_config_field(config)
+        val unsupported_field = internal_elf_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:elf does not honour it; unset SIMPLE_LINKER to use the external linker)")
         if trace:
             print "[LINKER] SIMPLE_LINKER=internal: routing to internal ELF engine"
-        return internal_link_native(os, arch, config.pie, object_files, output)
+        return internal_link_native(os, arch, config, object_files, output)
 
     if hosted_cross_cc_required(target, os, arch):
         return link_native_cc(object_files, output, config)
@@ -532,7 +532,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 # First NativeLinkConfig field the internal engine would silently ignore, or ""
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
-fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
+fn internal_simpleos_unsupported_config_field(config: NativeLinkConfig) -> text:
     if config.libraries.len() > 0:
         return "libraries"
     if config.library_paths.len() > 0:
@@ -551,6 +551,16 @@ fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
         return "debug"
     ""
 
+fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
+    # ELF consumes user libraries/search paths and the selected runtime
+    # provider archives. The remaining fields need explicit implementations;
+    # rejecting them prevents a successful link with silently changed policy.
+    if config.extra_flags.len() > 0: return "extra_flags"
+    if config.retained_symbols.len() > 0: return "retained_symbols"
+    if config.strip_output: return "strip_output"
+    if config.debug: return "debug"
+    ""
+
 fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # internal:coff consumes libraries, library_paths, and runtime provider
     # archives itself.  The remaining options still require explicit support.
@@ -564,6 +574,36 @@ fn internal_coff_is_archive(bytes: [u8]) -> bool:
     bytes.len() >= 8 and bytes[0] == 0x21 and bytes[1] == 0x3c and
         bytes[2] == 0x61 and bytes[3] == 0x72 and bytes[4] == 0x63 and
         bytes[5] == 0x68 and bytes[6] == 0x3e and bytes[7] == 0x0a
+
+fn internal_elf_library_kind(path: text) -> i64:
+    """1 = ar archive, 2 = ELF shared object, 0 = unsupported input."""
+    if not file_exists(path): return 0
+    val bytes = file_read_bytes(path)
+    if internal_coff_is_archive(bytes): return 1
+    if bytes.len() >= 18 and bytes[0] == 0x7f and bytes[1] == 0x45 and
+            bytes[2] == 0x4c and bytes[3] == 0x46 and
+            bytes[16] == 3 and bytes[17] == 0:
+        return 2
+    0
+
+fn internal_elf_library_file(name: text, search_paths: [text]) -> text:
+    """Resolve a real archive/ET_DYN file, skipping GNU ld text scripts."""
+    if file_exists(name): return name
+    var base = name
+    if base.starts_with("-l"): base = base.substring(2)
+    var filenames: [text] = [base]
+    if not base.lower().ends_with(".a") and not base.lower().contains(".so"):
+        # Match the ordinary dynamic-first linker policy. Versioned candidates
+        # follow the unversioned name because glibc commonly installs that name
+        # as a text linker script rather than an ET_DYN object.
+        filenames = ["lib" + base + ".so", "lib" + base + ".so.6",
+            "lib" + base + ".so.1", "lib" + base + ".so.0",
+            "lib" + base + ".a"]
+    for directory in search_paths:
+        for filename in filenames:
+            val candidate = directory + "/" + filename
+            if internal_elf_library_kind(candidate) != 0: return candidate
+    ""
 
 fn internal_coff_library_file(name: text, search_paths: [text]) -> text:
     if file_exists(name): return name
@@ -616,7 +656,8 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text) -> R
     if not file_write_bytes(output, bytes): return Err("internal engine: could not write {output}")
     Ok(output)
 
-fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text) -> Result:
+fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
+        object_files: [text], output: text) -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
     A7 `elf_static_link.elf_link`) for SIMPLE_LINKER=internal.
 
@@ -642,7 +683,7 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
     for path in object_files:
         if not file_exists(path):
             return Err("internal engine: input {path} cannot be read")
-    val crt = find_crt_files(pie, false)
+    val crt = find_crt_files(config.pie, false)
     if crt.crt1 == "" or crt.crti == "" or crt.crtn == "":
         return Err("internal engine: unsupported host (no host crt1/crti/crtn objects found)")
     if crt.dynamic_linker == "":
@@ -659,13 +700,41 @@ fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], o
     val nonshared = "{libdir}/libc_nonshared.a"
     if file_exists(nonshared):
         archives = archives.push(internal_link_native_read_i64(nonshared))
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
+    for path in native_runtime_archive_inputs(runtime_dir, config.runtime_bundle):
+        if internal_elf_library_kind(path) != 1:
+            return Err("internal engine: runtime library '{path}' is not an ar archive")
+        archives = archives.push(internal_link_native_read_i64(path))
+    var library_paths: [text] = []
+    for directory in config.library_paths: library_paths.push(directory)
+    for directory in crt.lib_dirs:
+        if not library_paths.contains(directory): library_paths.push(directory)
+    if not library_paths.contains(libdir): library_paths.push(libdir)
+    if norm_arch == "x86_64":
+        for directory in ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]:
+            if not library_paths.contains(directory): library_paths.push(directory)
+    else:
+        for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
+            if not library_paths.contains(directory): library_paths.push(directory)
+    var shared: [[u8]] = [file_read_bytes(libc)]
+    for library in config.libraries:
+        val path = internal_elf_library_file(library, library_paths)
+        if path == "": return Err("internal engine: ELF library '{library}' was not found")
+        val kind = internal_elf_library_kind(path)
+        if kind == 1:
+            archives = archives.push(internal_link_native_read_i64(path))
+        elif kind == 2:
+            shared = shared.push(file_read_bytes(path))
+        else:
+            return Err("internal engine: ELF library '{path}' is neither an ar archive nor an ET_DYN object")
     var target_arch = RelocArch.X86_64
     if norm_arch == "aarch64":
         target_arch = RelocArch.AArch64
     var mode = ELF_LINK_DYNAMIC_EXEC
-    if pie:
+    if config.pie:
         mode = ELF_LINK_DYNAMIC_PIE
-    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [file_read_bytes(libc)],
+    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
