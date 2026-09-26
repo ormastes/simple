@@ -261,7 +261,26 @@ class ParseDialect:
 fn validate_parse_dialect(dialect: ParseDialect) -> Result<(), ParseError>
 ```
 
-The current handwritten Simple grammar remains the sole grammar during Wave 1a and is instrumented to emit through the new sink. Wave 1b mechanically extracts its rules/actions into `GrammarProgram`/`ActionProgram`, routes both `ParseRuntime` and the legacy wrapper to those tables, and removes the old rule bodies in the same cutover. Completion does not permit two live Simple grammars.
+The current handwritten Simple grammar remains the production default during
+Wave 1a. Wave 1b builds a distinct canonical Simple `GrammarProgram` and
+`ActionProgram` for `ParseRuntime`; it does not route the legacy wrapper through
+those tables or delete the handwritten rule bodies. The selected platform
+unification REQ-004 requires the recursive-descent parser to remain an
+independent oracle and migration fallback until canonical scalar output is
+qualified. Sharing one grammar implementation between the two paths would
+make differential agreement circular.
+
+The frontend owns provider admission and session pinning. A forced canonical
+candidate runs only when its grammar/action engine emits real Simple semantic
+output for the requested dialect scope. Qualification compares the same source
+snapshot and append/reset/isolated state through both independent paths. It
+checks exact tokens, regions, syntax/AST and HIR actions, source mappings,
+ordered diagnostics, invalidation, and deterministic output identity. A copied
+receipt or matching hash alone cannot establish equality. Unsupported Simple
+constructs and missing output columns reject the candidate before it can
+change production parser state; they never silently execute the legacy parser
+under the canonical provider name. The legacy path remains available as an
+oracle after any later production-default cutover.
 
 ## Frozen output reservation and sink API
 
