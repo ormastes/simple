@@ -215,6 +215,13 @@ Canonical AArch64 TLSDESC `ADRP/LDR/ADD/BLR` sequences for defined TLS symbols
 now relax to variant-I local-exec `MRS/ADD-high/ADD-low/NOP`, removing all four
 descriptor relocations and the resolver call. Incomplete, malformed, or
 undefined-symbol descriptor sequences fail closed.
+The SimpleOS boot-image path now invokes the same pre-resolution TLS relaxer as
+hosted ELF. Canonical x86-64 TLSGD and TLSDESC sequences whose symbol is
+provided by the static image become initial-exec GOT accesses, and TLSLD plus
+DTPOFF32 becomes local-exec; resolver calls are removed before symbol
+resolution. The shared AArch64 defined-symbol relaxations are enabled on this
+path as well. Imported dynamic TLS and malformed or unsupported sequences
+remain fail-closed rather than introducing a runtime TLS resolver dependency.
 Linux AArch64 `TLS_DTPREL64`, `TLS_DTPMOD64`, and `TLS_TPREL64` input records
 now resolve statically for defined TLS symbols using the `PT_TLS` block start,
 main-module ID 1, and variant-I thread-pointer bias respectively. Imported
