@@ -3,7 +3,10 @@
 Thin adapter so stdio_v1.spl stays kernel-free and host-testable; this is
 the only module that knows the syscall numbers. Ids per the interface doc
 §1 map (all wired): open=30, read=31, write=32, close=33, lseek=46, plus
-the DebugWrite id 60 fallback for console writes.
+the DebugWrite id 60 fallback for console writes. The optional isatty hook
+binds to sosix_isatty_v1 from termios_v1 (no syscall ids — the console
+owns fds 0/1/2), so sosix_stdout_v1 picks line- vs full-buffering from
+isatty(1).
 
 Byte-slice externs follow the rt_file_facade.spl precedent (declared
 locally — extern decls do not re-export, and the VFS-IPC userlib client is
@@ -17,6 +20,7 @@ test/01_unit/os/services/sosix_stdio_v1_spec.spl against a fake backend.
 """
 
 use os.services.sosix.stdio_v1.{SosixStdioOpsV1}
+use os.services.sosix.termios_v1.{sosix_isatty_v1}
 
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 extern fn rt_simpleos_file_open_bytes(path: [u8], flags: u64) -> i64
@@ -67,10 +71,13 @@ fn _sosix_guest_lseek_v1(fd: i64, offset: i64, whence: i64) -> i64:
 
 pub fn sosix_stdio_guest_ops_v1() -> SosixStdioOpsV1:
     """The raw-id vtable a SOSIX guest passes to sosix_fopen_v1 and the
-    sosix_std{in,out,err}_v1 constructors."""
+    sosix_std{in,out,err}_v1 constructors. The optional isatty hook binds
+    to sosix_isatty_v1 (termios_v1): true exactly for fds 0/1/2, so the
+    pre-opened stdout stays line-buffered on the console and becomes fully
+    buffered when fd 1 is redirected."""
     SosixStdioOpsV1(
         open: _sosix_guest_open_v1, read: _sosix_guest_read_v1,
         write: _sosix_guest_write_v1, close: _sosix_guest_close_v1,
-        lseek: _sosix_guest_lseek_v1)
+        lseek: _sosix_guest_lseek_v1, isatty: Some(sosix_isatty_v1))
 
 export sosix_stdio_guest_ops_v1

@@ -149,14 +149,16 @@ listed here is not SOSIX V1 and must be probed or avoided.
   mkdir/rmdir/unlink/rename, getcwd/chdir, opendir/readdir facade, pipe,
   dup/dup2, poll, fcntl (OFD query). Wired ids per §1.
 - **stdio**: the SOSIX FILE* surface lives in
-  `src/os/services/sosix/stdio_v1.spl` (vertical 2, roadmap item 1): fopen/fdopen/fclose/fflush,
+  `src/os/services/sosix/stdio_v1.spl` (vertical 2, roadmap item 1;
+  buffering made isatty-aware by vertical 5): fopen/fdopen/fclose/fflush,
   fread/fwrite/fgets/fgetc/fputc/fseek/ftell/rewind/feof/ferror/clearerr/
   setvbuf/fileno over an injected ops vtable (ids 30-33/46; no kernel changes),
   with stdin/stdout/stderr pre-opened on fds 0/1/2 (stdout line-buffered
-  unconditionally, stderr unbuffered, stdin line-buffered input; the isatty
-  probe into this buffering is the documented follow-up in §6, not the
-  termios slice). `stdio_v1_guest.spl` wires the vtable to the raw ids with
-  the DebugWrite (id 60) console fallback. The guest toolchain's C stdio
+  iff the vtable's optional isatty hook reports fd 1 is a tty, fully
+  buffered when redirected; stderr unbuffered regardless; stdin
+  line-buffered input). `stdio_v1_guest.spl` wires the vtable to the raw
+  ids with the DebugWrite (id 60) console fallback and binds the isatty
+  hook to `sosix_isatty_v1` (termios_v1). The guest toolchain's C stdio
   remains the lane-C1 sysroot's `libsimpleos_c.a`, not the kernel.
 - **termios**: the SOSIX terminal-attribute surface lives in
   `src/os/services/sosix/termios_v1.spl` (vertical 4, roadmap item 2):
@@ -219,10 +221,11 @@ Delivered as V1 vertical 2 (stdio, roadmap item 1): the SOSIX FILE* surface
 fputc/fseek/ftell/rewind/feof/ferror/clearerr/setvbuf/fileno over an
 injected ops vtable (ids 30-33/46 only; no kernel changes), plus
 `stdio_v1_guest.spl` wiring the vtable to the raw ids with the DebugWrite
-(id 60) console fallback for fd 1/2. Buffering contract: files fully
-buffered (4096 default), stdin line-buffered input, stdout line-buffered
-unconditionally (no tty to probe), stderr unbuffered. Host-side spec:
-`test/01_unit/os/services/sosix_stdio_v1_spec.spl` (25 examples over a
+(id 60) console fallback for fd 1/2. Buffering contract as delivered: files
+fully buffered (4096 default), stdin line-buffered input, stdout
+line-buffered unconditionally (no tty to probe yet — stdout's mode became
+isatty-aware in vertical 5), stderr unbuffered. Host-side spec:
+`test/01_unit/os/services/sosix_stdio_v1_spec.spl` (31 examples over a
 fake backend). Gaps recorded in the §1 status column: id 30's `mode` arg
 is not plumbed through the guest C-ABI open extern; id 69
 (F_SIMPLEOS_GET_OFD) is not consumed — two FILEs on dup'd fds sharing one
@@ -261,7 +264,25 @@ ISIG/ONLCR/OPOST/c_iflag/c_cflag are stored but not enforced (no
 line-discipline owner exists yet). Host-side spec:
 `test/01_unit/os/services/sosix_termios_v1_spec.spl` (28 examples over a
 fake console backend). No syscall ids consumed; stdio_v1's unconditional
-stdout line-buffering intentionally stays as-is this slice.
+stdout line-buffering intentionally stayed as-is that slice.
+
+Delivered as V1 vertical 5 (stdio isatty probe, roadmap item 2): the
+`SosixStdioOpsV1` vtable gained an optional `isatty: Option<fn(i64) -> bool>`
+hook — nil is the slice-1 shape (stdout line-buffered, fully backward
+compatible). When the hook is bound, `sosix_stdout_v1` probes `isatty(1)`
+at construction: line-buffered on a tty, fully buffered on a redirect
+(POSIX line-buffered-if-tty; flushes on buffer-full/fflush/fclose only).
+stderr stays unbuffered regardless of the probe (the doc's contract
+choice — C99/POSIX do not require it, but the doc already chose it);
+stdin stays line-buffered input and never consults the probe; fdopen
+stays fully buffered. `stdio_v1_guest.spl` binds the hook to
+`sosix_isatty_v1` (termios_v1 — true exactly for fds 0/1/2), so the guest
+console keeps line-buffered stdout while a redirected fd 1 becomes fully
+buffered (clang's driver probes `isatty(1)` for color diagnostics — that
+probe now has an honest answer). No new syscall ids. Host-side spec:
+`test/01_unit/os/services/sosix_stdio_v1_spec.spl` (31 examples: +6
+covering the tty/redirect × stdout/stderr/stdin matrix and the no-hook
+default).
 
 Recommended next slices, in order:
 
@@ -269,18 +290,13 @@ Recommended next slices, in order:
    into the id-10 family on the arm64 guest (one-line case arms + per-AS
    arena at launch; R4's QEMU cycle is the gate), then file-backed
    mappings (VFS read into the page source at map fault or map time).
-2. **stdio isatty probe** — stdio_v1 keeps its unconditional stdout
-   line-buffering (the termios slice deliberately did not touch it);
-   once a guest wires termios, probe `isatty(1)` so redirected stdout
-   becomes fully buffered (clang's driver probes `isatty(1)` for color
-   diagnostics — that probe now has an honest answer).
-3. **Kernel tty path** — a tty/input-queue syscall family plus
+2. **Kernel tty path** — a tty/input-queue syscall family plus
    `termios_v1_guest.spl` (replacing the two honest no-op hooks), the
    line-discipline owner that enforces ECHO/ISIG/ONLCR, and rewiring the
    guest C termios facades off their ENOSYS fail-closed stance.
-4. Routing id 92 in the arm64 C dispatch
+3. Routing id 92 in the arm64 C dispatch
    (`arm64_dispatch_optional_shim(spl_handle_uname, ...)` — one line, owned by
    the clang-bringup lane) once the strong-shim guest-park issue documented in
    `baremetal_stubs.c` no longer applies to this path.
-5. OFD-aware stdio coordination (id 69): let a second FILE on a dup'd fd
+4. OFD-aware stdio coordination (id 69): let a second FILE on a dup'd fd
    detect the shared cursor instead of silently double-buffering it.

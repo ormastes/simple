@@ -14,14 +14,18 @@ lseek=46. The pre-opened streams fds 0/1/2 ride the same read/write ids —
 the kernel routes them to the console/serial; the guest ops add the
 DebugWrite (id 60) fallback for fd 1/2 when that routing is down.
 
-Buffering contract (doc §6 slice 1; the guest has no tty yet, so no isatty
-probing exists — termios is a later slice):
+Buffering contract (doc §6 slice 1, made isatty-aware by slice 5):
   - regular files (fopen/fdopen): fully buffered, 4096-byte default buffer
   - stdin:  line-buffered input (reads stop at '\n'; console input is
-            line-oriented and byte-at-a-time refills cannot over-block)
-  - stdout: line-buffered unconditionally (POSIX line-buffered-if-tty, with
-            the console treated as the tty)
-  - stderr: unbuffered (POSIX default)
+            line-oriented and byte-at-a-time refills cannot over-block) —
+            the isatty probe never applies to input
+  - stdout: line-buffered when the ops vtable carries the optional isatty
+            hook and isatty(1) is true; fully buffered when the hook reports
+            a non-tty (redirected stdout); line-buffered when no hook is
+            bound (the slice-1 backward-compatible default)
+  - stderr: unbuffered regardless of the probe (the doc's contract choice;
+            C99/POSIX do not require stderr to be unbuffered, but the doc
+            already chose it — keep it)
   - setvbuf switches a live stream between the three modes (POSIX _IOFBF /
     _IOLBF / _IONBF shapes).
 
@@ -90,6 +94,12 @@ pub struct SosixStdioOpsV1:
     write(fd, bytes) -> count or -errno                    (id 32)
     close(fd) -> 0 or -errno                               (id 33)
     lseek(fd, offset, whence) -> position or -errno        (id 46)
+    isatty(fd) -> bool    OPTIONAL hook (nil = absent, the slice-1 shape):
+                          when present, sosix_stdout_v1 probes fd 1 at
+                          construction — line-buffered on true, fully
+                          buffered on false. nil keeps stdout line-buffered
+                          (backward-compatible default). stdio_v1_guest.spl
+                          binds it to sosix_isatty_v1 (termios_v1).
 
     The layer never calls these on fd < 0 and never issues a zero-length
     read; a zero-length Ok read means EOF.
@@ -99,6 +109,7 @@ pub struct SosixStdioOpsV1:
     write: fn(i64, [u8]) -> i64
     close: fn(i64) -> i64
     lseek: fn(i64, i64, i64) -> i64
+    isatty: Option<fn(i64) -> bool>
 
 fn _sosix_positive_errno_v1(raw: i64) -> i64:
     """Negated-errno syscall result to positive errno (EIO when malformed)."""
@@ -602,8 +613,9 @@ pub fn sosix_fopen_v1(ops: SosixStdioOpsV1, path: text, mode: text) -> SosixFile
 
 pub fn sosix_fdopen_v1(ops: SosixStdioOpsV1, fd: i64, mode: text) -> SosixFileV1:
     """POSIX fdopen: wrap an already-open fd (ownership passes to fclose).
-    Fully buffered regardless of fd — the guest has no tty to probe; use
-    setvbuf for line/unbuffered shapes."""
+    Fully buffered regardless of fd — fdopen does not probe tty-ness (only
+    the pre-opened stdout constructor does); use setvbuf for line/
+    unbuffered shapes."""
     val parsed = _sosix_parse_mode_v1(mode)
     if not parsed.ok:
         return _sosix_invalid_stream_v1(ops, _SOSIX_STDIO_EINVAL)
@@ -614,16 +626,27 @@ pub fn sosix_fdopen_v1(ops: SosixStdioOpsV1, fd: i64, mode: text) -> SosixFileV1
         SosixStdioBufModeV1.Full)
 
 pub fn sosix_stdin_v1(ops: SosixStdioOpsV1) -> SosixFileV1:
-    """Pre-opened stdin: fd 0, read-only, console, line-buffered input."""
+    """Pre-opened stdin: fd 0, read-only, console, line-buffered input.
+    Never consults the isatty hook — canonical-mode input is the termios
+    read-policy's job, and byte-at-a-time refills cannot over-block."""
     _sosix_new_stream_v1(ops, 0, true, false, true, SosixStdioBufModeV1.Line)
 
 pub fn sosix_stdout_v1(ops: SosixStdioOpsV1) -> SosixFileV1:
-    """Pre-opened stdout: fd 1, write-only, console, line-buffered
-    unconditionally (the guest console is the tty stand-in)."""
-    _sosix_new_stream_v1(ops, 1, false, true, true, SosixStdioBufModeV1.Line)
+    """Pre-opened stdout: fd 1, write-only, console. Line-buffered when the
+    ops vtable carries the optional isatty hook and isatty(1) is true;
+    fully buffered when the hook reports a non-tty (redirected stdout);
+    line-buffered when no hook is bound (the slice-1 default)."""
+    var mode = SosixStdioBufModeV1.Line
+    if ops.isatty.?:
+        val probe = ops.isatty.unwrap()
+        if not probe(1):
+            mode = SosixStdioBufModeV1.Full
+    _sosix_new_stream_v1(ops, 1, false, true, true, mode)
 
 pub fn sosix_stderr_v1(ops: SosixStdioOpsV1) -> SosixFileV1:
-    """Pre-opened stderr: fd 2, write-only, console, unbuffered (POSIX)."""
+    """Pre-opened stderr: fd 2, write-only, console, unbuffered — the doc's
+    contract choice, kept regardless of the isatty hook (the hook is not
+    consulted for stderr)."""
     _sosix_new_stream_v1(ops, 2, false, true, true, SosixStdioBufModeV1.Unbuffered)
 
 export SosixStdioBufModeV1, SosixStdioOpsV1, SosixFileV1
