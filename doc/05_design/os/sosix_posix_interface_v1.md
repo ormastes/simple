@@ -1,0 +1,200 @@
+# SOSIX POSIX-compatibility interface V1
+
+Date: 2026-09-26. Status: interface definition + first vertical slice (uname).
+SimpleOS program roadmap point 2. AArch64 lanes only; no x86 surface is defined
+or implied by this document.
+
+SOSIX is the SimpleOS POSIX-compatibility interface layer: the contract that
+lets FreeBSD-style userland sources (and clang's runtime expectations) target
+SimpleOS without per-program shims. It has three owners:
+
+- **Interface constants + identity** — `src/os/services/sosix/interface_v1.spl`
+- **Kernel handlers** — versioned modules under `src/os/services/sosix/`,
+  dispatched from `src/os/kernel/ipc/syscall.spl` and exported to the C boot
+  layer as optional strong shims (`src/os/kernel/abi/syscall_shim_sosix.spl`)
+- **Guest libc** — `src/os/libc/` (POSIX facades over the raw ids; owns
+  `errno`, `strerror`, stdio, malloc)
+
+Prior art this extends (do not fork): `src/os/sosix/` (process, fs positioned
+IO 134/135, dataset/queue sharing 120-131, host adapters),
+`doc/05_design/os/sosix_execve_vectors_v1.md` (execve vector ABI),
+`src/os/posix/` (errno facade re-exporting `os.kernel.errno`).
+
+## 1. Syscall-id map
+
+One id space, assigned in `src/os/kernel/ipc/syscall.spl::syscall_handler`.
+Status legend: **wired** = handler implemented and reachable from a live trap
+path; **partial** = reachable with documented semantic gaps; **absent** = id
+reserved, returns -ENOSYS. "POSIX name" is the SOSIX-facing name; ids marked
+(non-POSIX) are SimpleOS-native extensions a ported program must not call.
+
+| id | POSIX name | Signature (arg0..arg4) | Status |
+|----|-----------|------------------------|--------|
+| 0 | `exit` | status, -, -, -, - | wired |
+| 1 | (non-POSIX) `yield` | - | wired |
+| 2 | (non-POSIX) `spawn` | - | wired |
+| 3 | (non-POSIX) `wait` | - | wired |
+| 4 | `getpid` | - | wired |
+| 5 | (non-POSIX) `list_tasks` | - | wired |
+| 6 | (non-POSIX) `get_task_info` | - | wired |
+| 7 | `kill`-family `signal` | pid, sig, -, -, - | wired |
+| 8 | (non-POSIX) `set_priority` | - | wired |
+| 9 | (non-POSIX) `get_parent_pid` | - | wired |
+| 10 | `mmap` (anonymous) | hint, len, prot, flags, - | partial (anon-only; arm64 guest heap is a bump arena) |
+| 11 | `munmap` | addr, len, -, -, - | partial (no-op on the bump arena) |
+| 12 | `mprotect` | addr, len, prot, -, - | partial |
+| 13 | (non-POSIX) `spawn_binary` | - | wired |
+| 14 | (non-POSIX) `enter_user_blocking` | - | partial |
+| 15 | `brk` | addr, -, -, -, - | wired |
+| 16 | (non-POSIX) `system_reboot` | - | wired |
+| 17 | reserved | - | absent |
+| 18-23 | (non-POSIX) IPC port/endpoint | - | wired |
+| 24-29 | (non-POSIX) notification | - | wired |
+| 30 | `open` | path, pathlen, flags, mode, - | wired |
+| 31 | `read` | fd, buf, count, -, - | wired |
+| 32 | `write` | fd, buf, count, -, - | wired |
+| 33 | `close` | fd, -, -, -, - | wired |
+| 34 | `stat`/`fstat` | path, pathlen, buf, form, - | wired |
+| 35 | `mkdir` | path, len, mode, -, - | wired |
+| 36 | `readdir` (opendir/readdir facade) | fd, entry, -, -, - | wired |
+| 37/38 | (non-POSIX) `mount`/`unmount` | - | wired |
+| 39 | `unlink` | path, len, -, -, - | wired |
+| 40/41 | (non-POSIX) `pledge`/`unveil` | - | wired |
+| 42/49 | (non-POSIX) capability grant/revoke | - | wired |
+| 43 | `ftruncate` | fd, len, -, -, - | wired |
+| 44 | `rename` | old, oldlen, new, newlen, - | wired |
+| 45 | `rmdir` | path, len, -, -, - | wired |
+| 46 | `lseek` | fd, offset, whence, -, - | wired |
+| 47 | `getcwd` | buf, size, -, -, - | wired |
+| 48 | `chdir` | path, len, -, -, - | wired |
+| 50 | `clock_gettime` | clock_id, ts*, -, -, - | wired (0=REALTIME, 1=MONOTONIC) |
+| 51 | (non-POSIX) `sleep` (ns; `nanosleep` facade in libc) | ns, -, -, -, - | wired |
+| 52-56 | reserved | - | absent |
+| 57 | `fork` | - | wired |
+| 59 | `execve` | path, pathlen, argv*, envp*, 0 | wired (5-arg vector ABI, sosix_execve_vectors_v1) |
+| 60 | (non-POSIX) `debug_write` | char, -, -, -, - | wired |
+| 61 | `waitpid` | pid, -, options, -, - | wired |
+| 62 | `pipe` | fds*, -, -, -, - | wired |
+| 63/64 | `dup2`/`dup` | oldfd, newfd, -, -, - | wired |
+| 65-67 | (non-POSIX) `dlopen`/`dlsym`/`dlclose` | - | wired |
+| 68 | `poll` | fds*, nfds, timeout, -, - | wired |
+| 69 | `fcntl` | fd, cmd, arg, -, - | wired |
+| 70-77 | socket family `socket`..`ifconfig` | - | partial (arm64: virtio-net path only) |
+| 78 | `fsync` | fd, -, -, -, - | wired |
+| 79 | (non-POSIX) dbfs mount capability | - | wired |
+| 80-87 | (non-POSIX) device enumerate/grant/BAR/DMA | - | wired (kernel-only from ring-3: -EPERM) |
+| 88/89 | reserved | - | absent |
+| 90/91 | (non-POSIX) kernel log write/read | - | wired |
+| **92** | **`uname`** | **utsname_buf\*, -, -, -, -** | **wired (this slice; SOSIX_SYS_UNAME)** |
+| 93/94 | reserved | - | absent |
+| 95 | (non-POSIX) `sysinfo` | kind, -, -, -, - | wired |
+| 96/97 | (non-POSIX) `get_hostname`/`set_hostname` | - | wired |
+| 98 | (non-POSIX) `privctl` | - | wired |
+| 99-102 | (non-POSIX) memory grant/revoke/safecopy | - | wired |
+| 103/104 | `mmap`/`munmap` (VM syscall form) | addr, len, prot, flags, fd | wired |
+| 105 | reserved | - | absent |
+| 106/107 | (non-POSIX) schedule/schedctl | - | wired |
+| 108/109 | reserved | - | absent |
+| 110-115 | (non-POSIX) SPM privilege/window/approval | - | wired |
+| 116 | (non-POSIX) startup-evidence consume | - | wired |
+| 117-119 | reserved | - | absent |
+| 120-131 | (non-POSIX) SOSIX dataset/queue sharing | - | wired |
+| 132/133 | reserved | - | absent |
+| 134/135 | (non-POSIX) SOSIX positioned pread/pwrite (registered buffers) | - | wired |
+
+Guest-libc usage today (lane-C1/R4 analysis, `src/os/libc/simpleos_libc.c`,
+`simpleos_fs.c`, arm64 C dispatch in `baremetal_stubs.c`): ids
+0, 4, 10-12, 30-36, 39, 43-48, 50, 60, 69. New SOSIX ids must be allocated
+from the reserved holes above and recorded here in the same change.
+
+## 2. Errno conventions
+
+- Kernel handlers return **negated errno** in `SyscallResult.value`
+  (e.g. `-22` EINVAL, `-14` EFAULT, `-38` ENOSYS). Zero/positive is success.
+- The numeric ABI is owned by **`os.kernel.errno`** (`src/os/kernel/errno.spl`);
+  `os.posix.errno` re-exports it, and the guest `<errno.h>`
+  (`src/os/libc/include/errno.h`) mirrors the same numbers. All three move
+  together; never hardcode an errno number in a fourth place.
+- The guest libc owns the user-visible `errno` variable and `strerror()`
+  prose (`src/os/libc/simpleos_string_ext.c`). The kernel-side symbolic
+  table is `sosix_errno_name_v1` (`src/os/services/sosix/errno_text_v1.spl`).
+- Unknown syscalls return `-38` (-ENOSYS), including unassigned reserved ids.
+
+## 3. Path, fd, and open-file-description model
+
+- **Paths**: NUL-terminated byte strings, at most 256 bytes
+  (`MAX_BINARY_PATH_LEN`, `src/os/kernel/ipc/syscall.spl`). Syscalls take
+  `(pointer, length)` pairs, not NUL-terminated reads, on every path arg.
+  UTF-8 only; embedded NUL and invalid UTF-8 yield -EINVAL.
+- **File descriptors**: small per-task integers owned by the kernel fd table
+  (`os.kernel.fd_table`; `fd_activate_task` on dispatch). 0/1/2 are the stdio
+  fds. `dup`/`dup2`/`pipe`/`close` operate on caller-owned fds only.
+- **Open file descriptions (OFD)**: the cursor/status object behind an fd.
+  `fcntl(fd, F_SIMPLEOS_GET_OFD, ...)` (id 69) exposes the guest-visible OFD
+  identity so stdio can share cursors across duplicated fds. SOSIX positioned
+  IO (ids 134/135) bypasses the shared cursor by explicit offset and requires
+  registered buffers (`src/os/sosix/fs/`).
+- **VFS routing**: kernel file syscalls route to the VFS service over IPC;
+  the arm64 clang-bringup kernel instead serves them from the C layer
+  (`arm64_svc_file_*` in `baremetal_stubs.c`) because the Simple strong-shim
+  path parks the guest. Both are the same ids and semantics.
+
+## 4. Compatibility contract for FreeBSD-style sources
+
+A ported POSIX.1-2017 program may assume the following subset. Anything not
+listed here is not SOSIX V1 and must be probed or avoided.
+
+- **File IO**: open/read/write/close/lseek/ftruncate/fsync, stat/fstat,
+  mkdir/rmdir/unlink/rename, getcwd/chdir, opendir/readdir facade, pipe,
+  dup/dup2, poll, fcntl (OFD query). Wired ids per §1.
+- **stdio**: guest libc `FILE *` over fds 0-2 and fdopen'd files; the guest
+  toolchain's full stdio surface is the lane-C1 sysroot's
+  `libsimpleos_c.a`, not the kernel.
+- **malloc**: guest libc dlmalloc arena over anonymous `mmap` (id 10); the
+  arm64 heap is a bump arena — `munmap`/`mprotect` are tolerated no-ops.
+- **string**: guest libc string/memory functions (no kernel involvement).
+- **mmap**: anonymous, private mappings only; `MAP_FIXED` honored only inside
+  the user window; file-backed mappings are a later slice.
+- **clock**: `clock_gettime` id 50 (CLOCK_REALTIME from RTC, CLOCK_MONOTONIC
+  from the scheduler tick); `nanosleep` facade over id 51.
+- **uname**: id 92, `struct utsname` = 5 fields × 65 bytes
+  (`_UTSNAME_LENGTH`), NUL-padded. This slice's vertical.
+- **exec**: `execve` id 59 with the five-argument vector ABI and the bounds
+  of `sosix_execve_vectors_v1` (64 argv / 128 envp slots incl. NULL, 256-byte
+  path, 4096-byte strings, 32768-byte per-vector budget).
+
+## 5. OS identity (uname) contract
+
+`uname` (id 92) fills, per roadmap point 3:
+
+| field | value | source |
+|-------|-------|--------|
+| sysname | `SimpleOS` | constant `SOSIX_UTSNAME_SYSNAME` (MUST NOT change) |
+| nodename | `simpleos` (FreeBSD-like node name; settable via id 97) | `SOSIX_UTSNAME_NODENAME` |
+| release | `1.0.0` — FreeBSD-like `release` field | `os.packages.os_packages.os_version()` |
+| version | `SimpleOS 1.0.0 sosix-1` | `os_version()` + `SOSIX_INTERFACE_VERSION` |
+| machine | `aarch64` on arm64 lanes | arch constant |
+
+The guest libc keeps its local `uname()` (`src/os/libc/simpleos_utsname.c`)
+as the portable fallback; the syscall is the canonical source once the C
+dispatch routes id 92 to the strong shim `spl_handle_uname`.
+
+## 6. This slice (V1 vertical 1) and next slices
+
+Delivered here: interface constants (`interface_v1.spl`), the uname handler
+(`uname_v1.spl`), the kernel errno-name table (`errno_text_v1.spl`), dispatch
+case 92 (`syscall.spl`), and the optional C-ABI shim
+(`syscall_shim_sosix.spl` + hub registration).
+
+Recommended next slices, in order:
+
+1. **stdio full surface** — complete the guest FILE table, fdopen/fileno,
+   line-buffered tty behavior; depends only on ids 30-34/46/69 already wired.
+2. **mmap semantics** — real `munmap`/`mprotect` over a free-list arena
+   (replace the bump allocator), then file-backed `mmap`.
+3. **termios** — the terminal lane's `tcgetattr`/`tcsetattr`/`isatty` over a
+   tty service; clang's driver probes `isatty(1)` for color diagnostics.
+4. Routing id 92 in the arm64 C dispatch
+   (`arm64_dispatch_optional_shim(spl_handle_uname, ...)` — one line, owned by
+   the clang-bringup lane) once the strong-shim guest-park issue documented in
+   `baremetal_stubs.c` no longer applies to this path.
