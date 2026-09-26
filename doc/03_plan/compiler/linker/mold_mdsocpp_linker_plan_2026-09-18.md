@@ -268,7 +268,13 @@ import satisfies them. `/ALTERNATENAME` chains now participate in the same
 archive closure, validation, section-relative lookup, and final relocation
 resolution; a real primary definition wins, aliases may target ordinary,
 absolute, common, or imported symbols, and cycles fail closed. Native-wrapper
-`/DEFAULTLIB` discovery remains the next Windows integration slice.
+`/DEFAULTLIB` discovery now parses the initial COFF objects before archive
+loading, resolves requested libraries through explicit/runtime/MSVC SDK search
+paths, deduplicates them with configured support libraries, and fails by
+library name when missing. A selected archive member that introduces a new
+`/DEFAULTLIB` still needs an explicit core-to-wrapper dependency feedback loop;
+unused archive members are deliberately not scanned because that would admit
+their directives and false missing-library failures.
 
 The admitted aggregate producer is
 `src/app/test/mold_completion_receipt.spl`. It accepts exactly nine receipt

@@ -62,6 +62,8 @@ use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_configured}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64_retained}
+use compiler.backend.linker.coff.coff_object.{CoffObject, coff_parse_object}
+use compiler.backend.linker.coff.coff_directives.{coff_collect_directives}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -1565,11 +1567,17 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:coff does not honour it; unset SIMPLE_LINKER to use lld-link)")
         var objects: [[u8]] = []
         var archives: [[u8]] = []
+        var root_coff_objects: [CoffObject] = []
         for path in object_files:
             if not file_exists(path): return Err("internal engine: input {path} cannot be read")
             val bytes = file_read_bytes(path)
             if internal_coff_is_archive(bytes): archives = archives.push(bytes)
-            else: objects = objects.push(bytes)
+            else:
+                val parsed = coff_parse_object(bytes)
+                if parsed.is_err():
+                    return Err("internal engine: COFF input '{path}': {parsed.unwrap_err()}")
+                objects = objects.push(bytes)
+                root_coff_objects = root_coff_objects.push(parsed.unwrap())
         var search_paths: [text] = []
         for path in config.library_paths: search_paths.push(path)
         for path in _find_msvc_lib_paths():
@@ -1582,6 +1590,14 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
         for library in config.libraries:
             val path = internal_coff_library_file(library, search_paths)
             if path == "": return Err("internal engine: COFF library '{library}' was not found")
+            if not library_files.contains(path): library_files = library_files.push(path)
+        val root_directives = coff_collect_directives(root_coff_objects)
+        if root_directives.is_err():
+            return Err("internal engine: {root_directives.unwrap_err()}")
+        for library in root_directives.unwrap().default_libraries:
+            val path = internal_coff_library_file(library, search_paths)
+            if path == "":
+                return Err("internal engine: COFF /DEFAULTLIB '{library}' was not found")
             if not library_files.contains(path): library_files = library_files.push(path)
         val runtime_archives = native_runtime_archive_inputs_for_platform(
             runtime_dir, config.runtime_bundle, true)
