@@ -2430,6 +2430,10 @@ typedef struct Pov4Request {
     char** argv;
     char** environment;
     int64_t argc, environment_count;
+    uint8_t* atomic_input;
+    uint64_t atomic_input_len;
+    uint8_t atomic_input_digest[32];
+    int atomic_input_bound;
 } Pov4Request;
 
 typedef struct Pov4Cursor {
@@ -2667,6 +2671,7 @@ static void pov4_request_free(Pov4Request* request) {
     }
     RT_OWNED_HOST_FREE(request->canonical_cwd);
     RT_OWNED_HOST_FREE(request->canonical_pinned_directory);
+    RT_OWNED_HOST_FREE(request->atomic_input);
     memset(request, 0, sizeof(*request));
 }
 
@@ -2887,7 +2892,7 @@ static void pov4_reconcile_gone_child_locked(
 }
 
 static enum Pov4StartOutcome pov4_start_exact(
-    int executable_fd, int cwd_fd, const Pov4Request* request,
+    int executable_fd, int cwd_fd, Pov4Request* request,
     int64_t request_started_ns, int64_t prepared_ns,
     int64_t execution_deadline_ns, int64_t kill_deadline_ns,
     int64_t cleanup_deadline_ns, RtOwnedProcessTokenV2* token,
@@ -2922,13 +2927,17 @@ static enum Pov4StartOutcome pov4_start_exact(
         RT_OWNED_HOST_FREE(retained); errno=saved; return POV4_START_NO_CHILD;
     }
     int out_pipe[2]={-1,-1}, err_pipe[2]={-1,-1}, exec_pipe[2]={-1,-1};
+    int in_pipe[2]={-1,-1};
     if (owned_pipe_cloexec(out_pipe)!=0 || owned_pipe_cloexec(err_pipe)!=0 ||
+        (request->atomic_input_bound && owned_pipe_cloexec(in_pipe)!=0) ||
         owned_pipe_cloexec(exec_pipe)!=0 || !owned_set_nonblocking(exec_pipe[0]) ||
         !owned_set_nonblocking(out_pipe[0]) ||
-        !owned_set_nonblocking(err_pipe[0])) {
+        !owned_set_nonblocking(err_pipe[0]) ||
+        (request->atomic_input_bound && !owned_set_nonblocking(in_pipe[1]))) {
         int saved=errno;
         if(out_pipe[0]>=0){close(out_pipe[0]);close(out_pipe[1]);}
         if(err_pipe[0]>=0){close(err_pipe[0]);close(err_pipe[1]);}
+        if(in_pipe[0]>=0){close(in_pipe[0]);close(in_pipe[1]);}
         if(exec_pipe[0]>=0){close(exec_pipe[0]);close(exec_pipe[1]);}
         close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
         owned_release(index,generation); errno=saved; return POV4_START_NO_CHILD;
@@ -2936,15 +2945,22 @@ static enum Pov4StartOutcome pov4_start_exact(
     pid_t pid=fork();
     if(pid==0){
         close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]);
+        if (request->atomic_input_bound) close(in_pipe[1]);
         if(setpgid(0,0)!=0) owned_child_exec_failed(exec_pipe[1],errno);
         if(dup2(out_pipe[1],STDOUT_FILENO)<0 || dup2(err_pipe[1],STDERR_FILENO)<0)
             owned_child_exec_failed(exec_pipe[1],errno);
+        if(request->atomic_input_bound && dup2(in_pipe[0],STDIN_FILENO)<0)
+            owned_child_exec_failed(exec_pipe[1],errno);
         if(out_pipe[1]>STDERR_FILENO) close(out_pipe[1]);
         if(err_pipe[1]>STDERR_FILENO) close(err_pipe[1]);
-        int null_fd=open("/dev/null",O_RDONLY|O_CLOEXEC);
-        if(null_fd<0 || dup2(null_fd,STDIN_FILENO)<0)
-            owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
-        if(null_fd>STDERR_FILENO) close(null_fd);
+        if(request->atomic_input_bound) {
+            if(in_pipe[0]>STDERR_FILENO) close(in_pipe[0]);
+        } else {
+            int null_fd=open("/dev/null",O_RDONLY|O_CLOEXEC);
+            if(null_fd<0 || dup2(null_fd,STDIN_FILENO)<0)
+                owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
+            if(null_fd>STDERR_FILENO) close(null_fd);
+        }
         if(fchdir(cwd_fd)!=0) owned_child_exec_failed(exec_pipe[1],errno);
         close(cwd_fd);
         if(request->memory_limit>0){
@@ -2960,9 +2976,11 @@ static enum Pov4StartOutcome pov4_start_exact(
         owned_child_exec_failed(exec_pipe[1],errno);
     }
     close(exec_pipe[1]); close(out_pipe[1]); close(err_pipe[1]);
+    if(request->atomic_input_bound) close(in_pipe[0]);
     close(executable_fd); close(cwd_fd);
     if(pid<0){
         int saved=errno; close(exec_pipe[0]);close(out_pipe[0]);close(err_pipe[0]);
+        if(request->atomic_input_bound) close(in_pipe[1]);
         RT_OWNED_HOST_FREE(retained); owned_release(index,generation); errno=saved;
         return POV4_START_NO_CHILD;
     }
@@ -2972,7 +2990,17 @@ static enum Pov4StartOutcome pov4_start_exact(
     slot->pid=pid; slot->pgid=pid; slot->pidfd=-1; slot->start_identity=0;
     slot->token_high=minted.high; slot->token_low=minted.low; slot->state=1;
     slot->out_fd=out_pipe[0]; slot->err_fd=err_pipe[0]; slot->out_open=1; slot->err_open=1;
-    slot->in_fd=-1; slot->in_open=0; slot->started_ms=request_started_ns/1000000;
+    slot->in_fd=request->atomic_input_bound ? in_pipe[1] : -1;
+    slot->in_open=request->atomic_input_bound;
+    slot->input=request->atomic_input;
+    slot->input_len=request->atomic_input_len;
+    slot->input_written=0;
+    slot->input_contract_v3=request->atomic_input_bound;
+    if(request->atomic_input_bound)
+        memcpy(slot->input_sha256,request->atomic_input_digest,32);
+    request->atomic_input=NULL;
+    if(slot->in_open && slot->input_len==0) owned_async_close_input(slot);
+    slot->started_ms=request_started_ns/1000000;
     slot->finished_ms=-1; slot->request_started_ns=request_started_ns;
     slot->prepared_ns=prepared_ns; slot->process_started_ns=process_started_ns;
     slot->exec_confirmed_ns=-1; slot->leader_waited_ns=-1; slot->tree_empty_ns=-1;
@@ -3052,6 +3080,10 @@ typedef struct Pov4Slot {
     int64_t words[POV4_WORDS];
     uint8_t request_digest[POV4_DIGEST_BYTES];
     uint8_t frozen_digest[POV4_DIGEST_BYTES];
+    int atomic_input_bound;
+    uint64_t atomic_input_len;
+    uint8_t atomic_input_digest[32];
+    RtOwnedProcessInputReceiptV3 atomic_input_receipt;
     uint8_t* stdout_bytes;
     uint8_t* stderr_bytes;
     uint64_t stdout_count, stderr_count;
@@ -3477,6 +3509,22 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         owner->words[POV4_STDERR_DELIVERED] != (int64_t)owner->stderr_count) {
         errno = EAGAIN; return NULL;
     }
+    if (owner->atomic_input_bound) {
+        (void)rt_process_owned_input_receipt_v3(
+            owner->core, &owner->atomic_input_receipt);
+        const RtOwnedProcessInputReceiptV3* input = &owner->atomic_input_receipt;
+        if (input->input_bytes_accepted != owner->atomic_input_len ||
+            input->input_bytes_written != owner->atomic_input_len ||
+            !input->stdin_closed || !input->terminal || !input->reaped ||
+            input->runtime_error != 0 ||
+            memcmp(input->input_sha256, owner->atomic_input_digest, 32) != 0) {
+            /* Exec was confirmed. Keep the V4 terminal packet decodable;
+             * inspection authority additionally requires this V1 receipt. */
+            owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_STREAM;
+            owner->words[POV4_FAILURE_REASON] = POV4_REASON_PROVIDER;
+            owner->words[POV4_ERRNO] = input->runtime_error ? input->runtime_error : EIO;
+        }
+    }
     int64_t prior_words[POV4_WORDS];
     memcpy(prior_words, owner->words, sizeof(prior_words));
     owner->words[POV4_PACKET_KIND] = owner->cleanup_only
@@ -3679,8 +3727,10 @@ SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
     return result;
 }
 
-SplArray* rt_process_observation_v4_start_pinned_value(
-    int64_t executable_handle, int64_t cwd_handle, SplArray* binding) {
+static SplArray* pov4_start_pinned_impl(
+    int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
+    SplArray* atomic_input, SplArray* expected_input_digest,
+    int atomic_input_mode) {
     int64_t started = owned_now_ns(); Pov4Request request;
     if (started < 0)
         return pov4_rejected(EIO, POV4_FAIL_ADMISSION,
@@ -3688,6 +3738,51 @@ SplArray* rt_process_observation_v4_start_pinned_value(
     if (!pov4_request_from_value(binding, &request))
         return pov4_rejected(errno ? errno : EPROTO, POV4_FAIL_ADMISSION,
             POV4_REASON_INVALID_SCHEMA, started, 0, NULL);
+    if (atomic_input_mode) {
+        uint8_t expected_digest[32];
+        if (!expected_input_digest ||
+            rt_array_bytes_validate((int64_t)(uintptr_t)expected_input_digest) != 32 ||
+            rt_array_bytes_copy_checked((int64_t)(uintptr_t)expected_input_digest,
+                expected_digest, 32) != 32) {
+            SplArray* rejected = pov4_rejected(EINVAL, POV4_FAIL_ADMISSION,
+                POV4_REASON_INVALID_REQUEST, started, 1, &request);
+            pov4_request_free(&request); return rejected;
+        }
+        int64_t length = atomic_input ?
+            rt_array_bytes_validate((int64_t)(uintptr_t)atomic_input) : -1;
+        if (length < 0 || (uint64_t)length > RT_OWNED_PROCESS_MAX_INPUT_BYTES) {
+            SplArray* rejected = pov4_rejected(EINVAL, POV4_FAIL_ADMISSION,
+                POV4_REASON_INVALID_REQUEST, started, 1, &request);
+            pov4_request_free(&request); return rejected;
+        }
+        if (length > 0) {
+            request.atomic_input = (uint8_t*)RT_OWNED_HOST_MALLOC((size_t)length);
+            if (!request.atomic_input ||
+                rt_array_bytes_copy_checked((int64_t)(uintptr_t)atomic_input,
+                    request.atomic_input, length) != length) {
+                SplArray* rejected = pov4_rejected(
+                    request.atomic_input ? EPROTO : ENOMEM, POV4_FAIL_ADMISSION,
+                    POV4_REASON_PROVIDER, started, 1, &request);
+                pov4_request_free(&request); return rejected;
+            }
+        }
+        request.atomic_input_len = (uint64_t)length;
+        request.atomic_input_bound = 1;
+        owned_sha256(request.atomic_input, (size_t)length,
+            request.atomic_input_digest);
+        if (memcmp(request.atomic_input_digest, expected_digest, 32) != 0) {
+            SplArray* rejected = pov4_rejected(EPROTO, POV4_FAIL_ADMISSION,
+                POV4_REASON_BINDING, started, 1, &request);
+            pov4_request_free(&request); return rejected;
+        }
+        uint8_t bound[8 + 32 + 8 + 32];
+        static const uint8_t domain[8] = {'P','O','V','5','I','N','P',0};
+        memcpy(bound, domain, 8);
+        memcpy(bound + 8, request.request_digest, 32);
+        pov4_store_u64_le(bound + 40, (uint64_t)length);
+        memcpy(bound + 48, request.atomic_input_digest, 32);
+        owned_sha256(bound, sizeof(bound), request.request_digest);
+    }
     if (request.descendant_policy != POV4_DESCENDANT_LEADER ||
         (request.enforcement_kind != POV4_ENFORCEMENT_NONE &&
          request.enforcement_kind != POV4_ENFORCEMENT_RLIMIT_AS)) {
@@ -3754,6 +3849,10 @@ SplArray* rt_process_observation_v4_start_pinned_value(
         pov4_request_free(&request); return rejected;
     }
     Pov4Slot* owner = &pov4_slots[index];
+    owner->atomic_input_bound = atomic_input_mode;
+    owner->atomic_input_len = request.atomic_input_len;
+    if (atomic_input_mode)
+        memcpy(owner->atomic_input_digest, request.atomic_input_digest, 32);
     owner->stdout_limit = request.stdout_limit;
     owner->stderr_limit = request.stderr_limit;
     owner->stdout_bytes = request.stdout_limit ?
@@ -3876,6 +3975,52 @@ SplArray* rt_process_observation_v4_start_pinned_value(
     pov4_request_free(&request);
     if (!start_result) pov4_abandon_unpublished(index);
     return start_result;
+}
+
+SplArray* rt_process_observation_v4_start_pinned_value(
+    int64_t executable_handle, int64_t cwd_handle, SplArray* binding) {
+    return pov4_start_pinned_impl(executable_handle, cwd_handle,
+        binding, NULL, NULL, 0);
+}
+
+SplArray* rt_process_inspection_v1_start_pinned_value(
+    int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
+    SplArray* atomic_input, SplArray* expected_input_digest) {
+    return pov4_start_pinned_impl(
+        executable_handle, cwd_handle, binding, atomic_input,
+        expected_input_digest, 1);
+}
+
+/* This companion fact is issued only while the same opaque V4 ticket remains
+ * live. Its request digest includes the V4 binding and copied input digest. */
+SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
+    int64_t values[75] = {1};
+    uint32_t index = 0;
+    Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
+    if (!owner) { values[10] = errno ? errno : ESTALE; return owned_adapter_values(values, 75); }
+    if (!owner->atomic_input_bound) {
+        values[10] = EPROTO;
+        pov4_release_busy(index); return owned_adapter_values(values, 75);
+    }
+    RtOwnedProcessInputReceiptV3 receipt = owner->atomic_input_receipt;
+    if (!owner->frozen)
+        (void)rt_process_owned_input_receipt_v3(owner->core, &receipt);
+    values[1] = (int64_t)owner->request_high;
+    values[2] = (int64_t)owner->request_low;
+    values[3] = (int64_t)owner->ticket_high;
+    values[4] = (int64_t)owner->ticket_low;
+    values[5] = (int64_t)receipt.input_bytes_accepted;
+    values[6] = (int64_t)receipt.input_bytes_written;
+    values[7] = receipt.stdin_closed;
+    values[8] = receipt.terminal;
+    values[9] = receipt.reaped;
+    values[10] = receipt.runtime_error;
+    for (int i = 0; i < 32; i++) {
+        values[11 + i] = receipt.input_sha256[i];
+        values[43 + i] = owner->request_digest[i];
+    }
+    pov4_release_busy(index);
+    return owned_adapter_values(values, 75);
 }
 
 static bool owned_run_bounded_impl(const char* cmd, const char* const* argv,
@@ -5265,6 +5410,22 @@ SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
 SplArray* rt_process_observation_v4_start_pinned_value(int64_t executable_handle,
         int64_t cwd_handle, SplArray* binding) {
     (void)executable_handle; (void)cwd_handle; (void)binding; return pov4_unavailable_tuple();
+}
+SplArray* rt_process_inspection_v1_start_pinned_value(int64_t executable_handle,
+        int64_t cwd_handle, SplArray* binding, SplArray* atomic_input,
+        SplArray* expected_input_digest) {
+    (void)executable_handle; (void)cwd_handle; (void)binding;
+    (void)atomic_input; (void)expected_input_digest;
+    return pov4_unavailable_tuple();
+}
+SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {
+    (void)ticket;
+    SplArray* values = rt_array_new(75);
+    if (!values) return NULL;
+    for (int i=0;i<75;i++) if (!rt_array_push(values, rt_value_int(i==0 ? 1 : (i==10 ? ENOTSUP : 0)))) {
+        rt_array_free(values); return NULL;
+    }
+    return values;
 }
 SplArray* rt_process_observation_v4_poll_value(SplArray* ticket, int64_t wait_ns) {
     (void)ticket; (void)wait_ns; return pov4_unavailable_tuple();

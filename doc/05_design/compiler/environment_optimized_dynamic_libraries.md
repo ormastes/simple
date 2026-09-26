@@ -214,15 +214,14 @@ batch, and verify actual execution evidence. Any unimplemented helper must call
 `fail("environment optimized provider helper not implemented")`; placeholder
 passes and `expect(true).to_equal(true)` are forbidden.
 
-REQ-001..016 and NFR-001..010 are traced by the fail-fast system scaffold and
-focused Stage-1/2 unit specs; all system evidence remains red/pending.
-NFR-011 and NFR-012 have no executable scenario yet and must be added as
-explicit fail-fast SSpec cases before implementation handoff. REQ-015
+REQ-001..016 and NFR-001..012 are traced by the fail-fast system scaffold and
+focused Stage-1/2 unit specs; all system evidence remains red/pending. REQ-015
 requires live-token consumption by target-profile, cache, binding-plan, and
 receipt owners, not merely a registry lookup unit test. REQ-016 requires the
-production Simple opaque V3 adapter to prove exact input/close/drain/reap
-authority, not merely the runtime C self-check. Planned groups cover classification/OS state, catalog corruption,
-override semantics, native/SMF parity, parser facade and differential behavior,
+production Simple inspection V1 lease to prove exact input/close/drain/reap
+authority, not merely the runtime C self-check. Planned groups cover
+classification/OS state, catalog corruption, override semantics, native/SMF
+parity, parser facade and differential behavior,
 JIT/AOT host-target separation, lifetime/failure injection, truthful GPU/fence
 evidence, rendering fallback, and measured performance envelopes.
 
@@ -1173,3 +1172,13 @@ V3 leases. A safe Simple adapter uses a second runtime-owned opaque handle and
 never exposes PID, process start identity, or native token halves. Until its
 argv/byte-array and returned projection ABI is conformance-tested in both native
 and interpreter modes, the C transport cannot be called directly from Simple.
+
+V3 pinned input and V4 exact pinned tool/cwd/argv/env remain separate process
+starts; their receipts cannot be joined as one execution. Native inspection V1
+now starts one pinned exact-environment process with copied stdin, a caller
+digest check before spawn, and a 75-word ticket-bound input sideband. The
+strict Simple decoder and retained lease wrapper are written, while admitted
+Simple execution and the compiler's two-tool terminal join remain pending.
+The fixed V4 64-word packet is unchanged. Follow
+`doc/03_plan/compiler/parser_inspection_atomic_input_owner_2026-09-27.md` for
+the native owner, Simple façade, compiler join, and negative matrix.

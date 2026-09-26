@@ -1283,6 +1283,15 @@ SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
                                                        SplArray* digest);
 
+/* Inspector input V1 uses the same pinned exact-environment process and V4
+ * ticket. Its 75-word input receipt binds written/closed facts and SHA-256
+ * to that ticket and to the domain-separated request digest. */
+SplArray* rt_process_inspection_v1_start_pinned_value(
+              int64_t executable_handle, int64_t cwd_handle,
+              SplArray* binding, SplArray* atomic_input,
+              SplArray* expected_input_digest);
+SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
+
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
