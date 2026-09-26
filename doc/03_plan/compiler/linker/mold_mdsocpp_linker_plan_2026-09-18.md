@@ -166,6 +166,8 @@ positive bound and replaces ABS32 truncation with a named failure.
 `L + A - P` data relocation, including imported-function PLT addressing.
 `R_AARCH64_TSTBR14` and `R_AARCH64_CONDBR19` now enforce four-byte alignment
 and architectural reach before patching only their instruction immediate fields.
+`R_AARCH64_ADR_PREL_LO21` now patches byte-granular signed ADR deltas while
+preserving opcode and destination-register bits and rejecting overflow.
 
 The x86_64 local-exec set now includes both instruction-field `TPOFF32` and
 data-word `TPOFF64`, with the latter checked against an lld static oracle.

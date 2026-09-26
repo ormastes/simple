@@ -53,6 +53,7 @@ val R_AARCH64_JUMP26: i64    = 282  # S + A - P (bits 27:2), B — same formula 
 val R_AARCH64_CALL26: i64    = 283  # S + A - P (bits 27:2), BL
 val R_AARCH64_LDST16_ABS_LO12_NC: i64 = 284  # ((S+A) & 0xfff) >> 1, into imm12 (2-byte scaled)
 val R_AARCH64_LDST32_ABS_LO12_NC: i64 = 285  # ((S+A) & 0xfff) >> 2, into imm12 (4-byte scaled)
+val R_AARCH64_ADR_PREL_LO21: i64 = 274  # S + A - P, split immlo[1:0]/immhi[20:2]
 val R_AARCH64_ADR_PREL_PG_HI21: i64 = 275  # (Page(S+A) - Page(P)) >> 12, split immlo[1:0]/immhi[20:2]
 val R_AARCH64_ADD_ABS_LO12_NC: i64 = 277   # (S+A) & 0xfff, into imm12
 val R_AARCH64_LDST64_ABS_LO12_NC: i64 = 286  # ((S+A) & 0xfff) >> 3, into imm12 (8-byte scaled)
@@ -340,6 +341,12 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
     if rtype == R_AARCH64_PREL64:
         return RelocResult(success: true, offset: offset, value: s + a - p, error: "")
 
+    if rtype == R_AARCH64_ADR_PREL_LO21:
+        val delta = s + a - p
+        if delta < -1048576 or delta >= 1048576:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ADR_PREL_LO21 delta out of signed 21-bit range (S + A - P)")
+        return RelocResult(success: true, offset: offset, value: delta, error: "")
+
     if rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE:
         # ADR_GOT_PAGE: the caller passes S = the GOT-entry address (G) and
         # A = 0, so the ADRP page formula below is shared verbatim.
@@ -472,7 +479,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xff00001f) | ((result.value & 0x7ffff) << 5)
                 patch_u32_le(bytes, offset, patched)
-            else if rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE:
+            else if rtype == R_AARCH64_ADR_PREL_LO21 or rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE:
                 # immlo (2 bits) -> insn[30:29], immhi (19 bits) -> insn[23:5].
                 # Keep-mask 0x9f00001f preserves op(31), fixed bits(28:24), Rd(4:0).
                 val insn = read_u32_le(bytes, offset)
@@ -521,7 +528,7 @@ export R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_PLT32
 export R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
 export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16, R_AARCH64_CALL26, R_AARCH64_JUMP26
 export R_AARCH64_TSTBR14, R_AARCH64_CONDBR19
-export R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
+export R_AARCH64_ADR_PREL_LO21, R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
 export R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC
 export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL
 export R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_HI20, R_RISCV_LO12_I
