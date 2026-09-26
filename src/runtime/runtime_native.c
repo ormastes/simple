@@ -67,6 +67,7 @@ typedef SSIZE_T ssize_t;
 #if defined(_WIN32)
 #include <direct.h>
 #include <io.h>
+#include <process.h>
 #include <malloc.h>
 #include <windows.h>
 #include "platform/windows_raw_mapping.h"
@@ -14219,8 +14220,26 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
         const uint8_t* value = rt_string_data(rt_array_get(args, i));
         argv[i] = value ? (const char*)value : "";
     }
+#if defined(_WIN32)
+    /* rt_process_spawn_async returns a _spawnvp process HANDLE on Windows, and
+     * rt_process_wait only knows children registered by the MCP spawner, so
+     * the wait always answered -1: a delegated `run` whose child passed was
+     * reported as a failure with no exit status (stage-2 test rows,
+     * 2026-09-26). A synchronous _spawnvp returns the child's exit code
+     * directly. */
+    const char** wargv = (const char**)calloc((size_t)argc + 2, sizeof(char*));
+    int64_t code = -1;
+    if (wargv) {
+        wargv[0] = command;
+        for (int64_t i = 0; i < argc; i++) wargv[i + 1] = argv[i];
+        intptr_t status = _spawnvp(_P_WAIT, command, (const char* const*)wargv);
+        code = status == -1 ? -1 : (int64_t)(int32_t)status;
+        free(wargv);
+    }
+#else
     int64_t pid = rt_process_spawn_async(command, argv, argc);
     int64_t code = pid <= 0 ? -1 : rt_process_wait(pid, 0);
+#endif
     free(argv);
     free(command);
     return code;
