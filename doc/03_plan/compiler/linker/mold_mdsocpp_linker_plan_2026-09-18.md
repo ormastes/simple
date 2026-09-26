@@ -407,6 +407,10 @@ Implemented source slice:
   load-config structure publishes PE data-directory row 10 using its leading
   declared `Size`; truncated, zero-sized, or non-file-backed structures fail
   closed before image emission;
+- merged AMD64 `.pdata` is validated as complete 12-byte `RUNTIME_FUNCTION`
+  rows and sorted by relocated `BeginAddress` before PE emission, as required
+  by the Windows x64 unwinder. Truncated rows and non-increasing function ranges
+  fail closed; data-directory row 3 covers the sorted table;
 - host-independent SimpleOS x86_64/arm64 routing through the existing
   `BootLayoutPlan` + `elf_boot_link` engine.
 

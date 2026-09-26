@@ -3,7 +3,7 @@ use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
-    coff_attach_amd64_load_config}
+    coff_attach_amd64_load_config, coff_sort_amd64_exception_table}
 use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
 
@@ -301,6 +301,36 @@ describe "internal freestanding Windows linker":
             virtual_size: 48, data: directory, characteristics: 0x40000040)]
         expect(coff_attach_amd64_load_config(
             oversized, 0x2008).is_err()).to_equal(true)
+
+    it "sorts and validates AMD64 runtime-function records":
+        var records: [u8] = []
+        records = _cl_u32(records, 0x3000)
+        records = _cl_u32(records, 0x3020)
+        records = _cl_u32(records, 0x5000)
+        records = _cl_u32(records, 0x1000)
+        records = _cl_u32(records, 0x1010)
+        records = _cl_u32(records, 0x4000)
+        val pdata = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 24, data: records, characteristics: 0x40000040)
+        val sorted = coff_sort_amd64_exception_table([pdata]).unwrap()
+        expect(sorted[0].data[0] as i64).to_equal(0)
+        expect(sorted[0].data[1] as i64).to_equal(0x10)
+        expect(sorted[0].data[12] as i64).to_equal(0)
+        expect(sorted[0].data[13] as i64).to_equal(0x30)
+
+        var malformed = records
+        malformed = malformed.push(0)
+        val bad = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 25, data: malformed, characteristics: 0x40000040)
+        expect(coff_sort_amd64_exception_table([bad]).is_err()).to_equal(true)
+        var reversed: [u8] = []
+        reversed = _cl_u32(reversed, 0x2020)
+        reversed = _cl_u32(reversed, 0x2010)
+        reversed = _cl_u32(reversed, 0x4000)
+        val invalid = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 12, data: reversed, characteristics: 0x40000040)
+        expect(coff_sort_amd64_exception_table(
+            [invalid]).unwrap_err()).to_contain("BeginAddress")
 
     it "uses .drectve INCLUDE symbols as archive closure roots":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [
