@@ -1,0 +1,9 @@
+# SimpleOS release timed-receipt provenance gap
+
+**Status:** open; structural duplicate-receipt guard proposed in draft source change. **Scope:** `REQ-018..019` / `UP-AC-006` immutable cold-boot release qualification. **Owner:** SimpleOS cold-boot verifier and evidence producers; final review by the release verification owner.
+
+`simpleos_release_evidence_validate_v1` checks the shape, success flag, execution binding and chronology of caller-supplied `SimpleOsReleaseTimedReceiptV1` values. It cannot prove that a receipt ID/digest was produced by the named boot, SOSIX, guest-toolchain or persistence owner, or that its digest commits to the supplied time, duration and result fields. The production cold-boot producer/consumer is still absent in `doc/03_plan/sys_test/simple_platform_unification.md`; the unit fixture synthesizes all receipts.
+
+The source review found an additional structural replay: one timed receipt ID or digest could be reused across different release stages while each stage carried separately chosen timestamps. The accompanying validator change rejects duplicate IDs or digests across boot, SOSIX filesystem, version, run, build, native execute, marker write, reboot and marker read. This is only a necessary replay check; it does not authenticate any receipt.
+
+**Required closure:** the production verifier must obtain each stage receipt from its actual owner, validate the owner's canonical bytes/digest and execution binding, correlate the guest commands and distinct boot sessions with the immutable candidate and derived state, then feed those validated facts to the manifest/ledger owner. Add negatives for fabricated success fields, swapped owner receipts, duplicate stage receipts, stale boot sessions and a reused development VM. Run the live cold-boot, guest-compiler and reboot/read system scenarios against an immutable candidate. Until that evidence exists, `simple os release` and the UP-AC-006 live rows remain unqualified.
