@@ -94,6 +94,8 @@ val R_AARCH64_ADR_GOT_PAGE: i64 = 311      # Page(G(GDAT(S+A))) - Page(P), ADRP 
 val R_AARCH64_LD64_GOT_LO12_NC: i64 = 312  # G(GDAT(S+A)) & 0xff8, LDR imm12 (8-byte scaled)
 val R_AARCH64_LD64_GOTPAGE_LO15: i64 = 313 # G(GDAT(S+A)) - Page(GOT), LDR imm12
 val R_AARCH64_PLT32: i64       = 314  # L + A - P (checked signed 32-bit data)
+val R_AARCH64_TLSIE_MOVW_GOTTPREL_G1: i64 = 539
+val R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC: i64 = 540
 val R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21: i64 = 541
 val R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC: i64 = 542
 val R_AARCH64_TLSIE_LD_GOTTPREL_PREL19: i64 = 543
@@ -458,6 +460,17 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         return RelocResult(success: true, offset: offset,
             value: (v >> shift) & 0xffff, error: "")
 
+    if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
+            rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC:
+        val v = s + a - p
+        if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1:
+            if v < -0x100000000 or v >= 0x100000000:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 overflow")
+            val selected = if v < 0: ((~v) >> 16) & 0xffff else: (v >> 16) & 0xffff
+            return RelocResult(success: true, offset: offset, value: selected, error: "")
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
+
     if rtype == R_AARCH64_LD_PREL_LO19 or rtype == R_AARCH64_GOT_LD_PREL19 or
             rtype == R_AARCH64_TLSIE_LD_GOTTPREL_PREL19:
         var literal_name = "R_AARCH64_LD_PREL_LO19"
@@ -693,6 +706,14 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val opcode = if checked: 0x40000000 else: 0
                 patch_u32_le(bytes, offset,
                     (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
+                    rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked and s + a - p >= 0: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
             else if rtype >= R_AARCH64_TLSLE_MOVW_TPREL_G2 and rtype <= R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
                 val insn = read_u32_le(bytes, offset)
                 val checked = rtype == R_AARCH64_TLSLE_MOVW_TPREL_G2 or
@@ -777,6 +798,7 @@ export R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
 export R_AARCH64_GOT_LD_PREL19
 export R_AARCH64_LD64_GOTOFF_LO15
 export R_AARCH64_LD64_GOTPAGE_LO15
+export R_AARCH64_TLSIE_MOVW_GOTTPREL_G1, R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC
 export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16, R_AARCH64_CALL26, R_AARCH64_JUMP26
 export R_AARCH64_TSTBR14, R_AARCH64_CONDBR19
 export R_AARCH64_LD_PREL_LO19, R_AARCH64_ADR_PREL_LO21, R_AARCH64_ADR_PREL_PG_HI21
