@@ -24,7 +24,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read, file_read_bytes, file_write, file_write_bytes, file_rename, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch, getpid, time_now_unix_micros}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
@@ -623,6 +623,17 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
         i = i + 1
     out
 
+fn internal_link_publish_bytes(output: text, bytes: [u8]) -> bool:
+    """Publish one linked image only after a complete same-directory stage."""
+    val staged = output + ".simple-link-stage-{getpid()}-{time_now_unix_micros()}"
+    if not file_write_bytes(staged, bytes):
+        val _ = file_delete(staged)
+        return false
+    if not file_rename(staged, output):
+        val _ = file_delete(staged)
+        return false
+    true
+
 fn internal_link_simpleos(object_files: [text], output: text, target: text,
         strip_output: bool, retained_symbols: [text]) -> Result:
     """Link a SimpleOS kernel through BootLayoutPlan without external lld."""
@@ -649,7 +660,8 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
     if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []
     for b in linked.unwrap(): bytes = bytes.push(b as u8)
-    if not file_write_bytes(output, bytes): return Err("internal engine: could not write {output}")
+    if not internal_link_publish_bytes(output, bytes):
+        return Err("internal engine: could not publish {output}")
     Ok(output)
 
 fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
@@ -738,8 +750,8 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     var bytes: [u8] = []
     for b in linked.unwrap():
         bytes = bytes.push(b as u8)
-    if not file_write_bytes(output, bytes):
-        return Err("internal engine: could not write {output}")
+    if not internal_link_publish_bytes(output, bytes):
+        return Err("internal engine: could not publish {output}")
     val (_co, _ce, chmod_code) = process_run("chmod", ["755", output])
     if chmod_code != 0:
         return Err("internal engine: could not mark {output} executable")
@@ -1580,8 +1592,8 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             CoffLinkRequest(objects: objects, archives: archives, entry: "auto"),
             config.retained_symbols)
         if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
-        if not file_write_bytes(output, linked.unwrap()):
-            return Err("internal engine: could not write {output}")
+        if not internal_link_publish_bytes(output, linked.unwrap()):
+            return Err("internal engine: could not publish {output}")
         return Ok(output)
     # MinGW: use gcc driver (Unix-style linking)
     if _is_mingw_env():
