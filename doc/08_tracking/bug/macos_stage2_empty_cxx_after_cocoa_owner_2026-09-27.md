@@ -1,6 +1,6 @@
 # macOS Stage 2 passes an empty CXX to the native linker
 
-Status: open bootstrap blocker. Reproduced from committed revision
+Status: source fix prepared; Stage 2 admission unverified. Reproduced from committed revision
 `fbdf540ed53` in the isolated
 `/private/tmp/simpleos-stage2-cocoa-snapshot-20260927` worktree.
 
@@ -50,3 +50,15 @@ SimpleOS OFD owner specs with that admitted self-hosted runtime.
 This was the third bootstrap verify/fix cycle in this session. The
 repository's hard iteration cap requires a new scoped session for the
 next fix and admission attempt.
+
+## Source repair awaiting admission
+
+`bootstrap-from-scratch.sh` now omits each optional macOS tool assignment
+when its value is empty, using the same prepared assignments for the
+Stage 2 command hash and execution. `cc_detect.rs` treats blank `CC` and
+`CXX` overrides as absent and runs canonical target detection. Shell
+syntax and the focused `simple-common` unit test pass. The broader
+`stage2_command_transcript_contract_test.shs` currently fails its Stage 3
+`SIMPLE_ABI_POLICY` assertion, which does not check this Stage 2 change.
+The full bootstrap has not been retried after this repair because of the
+three-cycle cap; no self-hosted runtime is admitted.

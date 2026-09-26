@@ -60,6 +60,10 @@ pub fn find_c_compiler() -> String {
     detect_c_compiler_for_target(&Target::host())
 }
 
+fn nonblank_tool_override(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then(|| to_native_owned(value))
+}
+
 /// Detect the C compiler for a specific target platform.
 ///
 /// The target's resolved linker flavor selects an ABI-compatible toolchain:
@@ -71,7 +75,9 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
         // `CC=/d/llvm/bin/clang-cl` arrives here verbatim and is unusable as a
         // program path. This value goes straight to `Command::new`, so it is a
         // spawn boundary and must be converted here. Identity on Unix.
-        return to_native_owned(cc);
+        if let Some(selected) = nonblank_tool_override(cc) {
+            return selected;
+        }
     }
     let flavor = target.linker_flavor();
     if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
@@ -132,7 +138,9 @@ pub fn find_cxx_compiler() -> String {
 pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
     if let Ok(cxx) = std::env::var("CXX") {
         // Same spawn-boundary reasoning as `CC` above. Identity on Unix.
-        return to_native_owned(cxx);
+        if let Some(selected) = nonblank_tool_override(cxx) {
+            return selected;
+        }
     }
     let flavor = target.linker_flavor();
     if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
@@ -296,6 +304,13 @@ pub fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::target::TargetArch;
+
+    #[test]
+    fn blank_tool_overrides_use_target_detection() {
+        assert!(nonblank_tool_override(String::new()).is_none());
+        assert!(nonblank_tool_override(" \t ".to_string()).is_none());
+        assert!(nonblank_tool_override("clang++".to_string()).is_some());
+    }
 
     #[test]
     fn windows_gnu_uses_clang_candidates() {
