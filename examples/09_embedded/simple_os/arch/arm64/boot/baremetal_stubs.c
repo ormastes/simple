@@ -4866,23 +4866,9 @@ RuntimeValue rt_arm_svc_ram_payload_resident(RuntimeValue path_rv)
     char path[64];
     for (uint32_t i = 0; i < s->len; i++) path[i] = s->data[i];
     path[s->len] = '\0';
-    /* TEMP DIAG: dump the RAM-file table so a size mismatch names the entry. */
-    for (int i = 0; i < SVC_MAX_RAM_FILES; i++) {
-        serial_puts("[ram-dump] i="); serial_put_dec(i);
-        serial_puts(" used="); serial_put_dec(g_svc_ram_files[i].used);
-        serial_puts(" size="); serial_put_dec((int64_t)g_svc_ram_files[i].size);
-        serial_puts(" path="); serial_puts(g_svc_ram_files[i].path);
-        serial_puts("\r\n");
-    }
     int ri = svc_ram_find(path);
     if (ri < 0) return (RuntimeValue)0ULL;
     uint32_t size = g_svc_ram_files[ri].size;
-    serial_puts("[ram-dump] want="); serial_puts(path);
-    serial_puts(" ri="); serial_put_dec(ri);
-    serial_puts(" size="); serial_put_dec((int64_t)size);
-    serial_puts(" magic="); serial_put_hex(g_svc_ram_files[ri].ram ? g_svc_ram_files[ri].ram[0] : 0xEE);
-    serial_put_hex(g_svc_ram_files[ri].ram ? g_svc_ram_files[ri].ram[1] : 0xEE);
-    serial_puts("\r\n");
     if (size == 0 || size > ARM_PAYLOAD_REGION_BYTES) return (RuntimeValue)0ULL;
     g_arm_payload_region_size = size;
     __builtin_memcpy(_arm_payload_region, g_svc_ram_files[ri].ram, size);

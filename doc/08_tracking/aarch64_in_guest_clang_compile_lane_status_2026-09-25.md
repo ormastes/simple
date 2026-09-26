@@ -1091,3 +1091,316 @@ binaries.
    FAT32 (the arm64_dispatch_file_shim owners) and the guest driver's file
    I/O.
 3. Revert the low-16-pages DIAGNOSTIC once the toolchain lands.
+
+---
+
+# 2026-09-26 (agent-33) session — R4 "stat_at contract" ROOT-CAUSED + FIXED (path prep, not arg layout); next wall named: kernel ret-to-0x0 after the fat32 resolve
+
+Boot cycles this session: 4 guest boots (run-20260926_045921 probe+fix-verify,
+_054808 lock-abort, _055241 fault-name) + 3 manual monitor sessions (CPU-state
+dumps at the hang). Kernel rebuilds: 2. NOTE: a concurrent session (agent-32)
+is on the SAME lane — it committed d9b457d28b6 (copyin/copyout tagging +
+FAT32 geometry in the C bridge) and reverted this session's uncommitted edits
+once (clean-tree restore); this session's fixes were re-applied and COMMITTED
+(72744c2b5d5) so they survive. agent-32 is actively driving the ret-to-0x0 wall.
+
+## R4 "stat_at contract" verdict: NOT an argument-layout mismatch — the path CONSTRUCTION degraded
+
+The task premise (a0=path?, a1=0x23=35?, a2=buf? contract mismatch, ret=22=EINVAL)
+resolved to a DIFFERENT root cause. Disassembled the guest libc
+(`sysroot-aarch64/lib/libsimpleos_c.a:simpleos_fs.o`): `stat()` is
+`simpleos_syscall(34, path, strlen(path), buf, 0, 0)` → SVC x8=34, x0=path,
+x1=len, x2=buf — EXACTLY what `_handle_file_stat` reads. The contract was
+correct all along; a1=0x23=35 is the path LENGTH (strlen), not a flag.
+
+`ret=22` (positive) is the degraded Err-payload read (struct-field slot
+family, same as `_fs_copy_user_bytes`'s documented note): the real errno was
+EINVAL (-22), surfaced as +22. EINVAL in `resolve_path` comes from ONE place —
+`fat32_split_path` returning 0 parts — i.e. the path reaching it was
+component-less. The guest path is 35 bytes (copyin-ok, len=35), so the defect
+was UPSTREAM of split_path: `_bytes_to_text(path_resolve(...))` produced an
+empty/garbled text. The per-byte `.chr()` forward-concat loop degrades on this
+freestanding lane (the Wall-6/8 string-ABI family).
+
+**Fix (committed 72744c2b5d5):** `_bytes_to_text` now routes through the
+always-linked `rt_bytes_to_text` primitive (single C pass that DECODEs the
+tagged [u8] slots the copyin writes) via `std.common.text_bytes.bytes_to_text`.
+Verified (run-20260926_045921): `resolved=/aarch64-unknown-simpleos-clang.cfg`
+— the correct 35-char guest path. That path is clang's CONFIG-FILE probe
+(`<triple>-clang.cfg`, optional). Stat now returns a real errno (ENOENT — the
+.cfg is genuinely absent). open()/stat()/mkdir()/… all share `_bytes_to_text`,
+so they are all fixed by this one change.
+
+## Next wall (named, run-20260926_055241): kernel RETS TO 0x0 after the stat handler
+
+After the stat, the guest spins. CPU-state dump (QEMU monitor) showed the CPU
+looping between `arm64_enter_el0+0xc` and the same-EL sync vector; the
+`.Lnot_align_fault` block (reached for any non-alignment fault) was FALLING
+THROUGH into `arm64_enter_el0` (laid down immediately after it) and re-faulting
+forever — a non-alignment fault became an infinite loop instead of a report.
+Fixed (committed 72744c2b5d5): `.Lnot_align_fault` now branches to
+`_fault_handler`, which printed the fault and halted:
+
+```
+FAULT @ 0x0000000000000000
+ESR=0x8600000f        (EC 0x21 = instruction abort, same EL; IFSC 0x0f = permission fault level 3)
+FAR=0x0000000000000000
+```
+
+i.e. the KERNEL tries to execute at address 0x0 right after the stat handler
+returns — a corrupted-LR / null-call in the fat32-resolve path (the errno the
+SVC returns is also wrong: -38 ENOSYS instead of -2 ENOENT, so the return-value
+lowering degrades the same way). This is the "baremetal value semantics" defect
+family — a compiler/runtime-lane issue, NOT fixable in kernel source short of
+routing the whole stat through a C helper. agent-32 is actively on it.
+
+## Also confirmed this session
+
+- The errno payload extraction degrades on this lane (`unwrap_err()` returns
+  garbage: +22 for EINVAL earlier, -38 ENOSYS now, vs the real -2 ENOENT);
+  `is_err()` is reliable, the payload is not.
+- The guest's `fstat` is a local stub (memset + return 0, always "success"),
+  so only the path-based `stat` (id 34) carries real metadata.
+- lseek (id 46) returning -ENOSYS is deliberate and tolerated by the guest
+  (wired lseek on stdio fds makes the toolchain spin — see the dispatch
+  comment in `userlib__syscall_raw__syscall`).
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all runs |
+| R2 guest boots | PASS | banner, module inits, VFS mounts |
+| R3 clang --version in guest | BLOCKED | path prep FIXED (stat resolves correctly); blocked by the kernel ret-to-0x0 after the fat32 resolve (ESR=0x8600000f) — compiler/runtime lane / agent-32 |
+| R4 in-guest compile+link | BLOCKED | needs R3's ret-to-0x0 cleared; then open/read of /HELLO.C (path prep now fixed) |
+| R5 in-guest run | BLOCKED | needs R4 |
+
+## Exact next actions
+
+1. Compiler/runtime lane (or agent-32): the ret-to-0x0 after the fat32 resolve
+   — a corrupted-LR / null-call in the Simple-compiled stat path. Pin the
+   defective epilogue/callee in the compiled `arm64_svc_file_stat` /
+   `Fat32Filesystem.resolve_path` chain (the errno return value degrades the
+   same way, so suspect a shared defective return/struct lowering).
+2. Then R4: guest cc1 open(/HELLO.C) → read → compile (path prep now fixed;
+   the open uses the same `_bytes_to_text`), write /HELLO.O.
+
+---
+
+# 2026-09-26 (agent-35) session — R4a read link WORKS (cc1 compiles /HELLO.C, /HELLO.O = 696 B); new wall: kernel control-flow fault after the close SVC
+
+Boot cycles this session: 6 guest boots (run-20260926_070853 diag,
+_071342 stat-fix verify, _074234 dump, _080646 close-fix, _082016 dump
+reorder, _0838xx frame-x30 probe). Kernel rebuilds: 5 (one no-rebuild
+boot of the prebuilt HEAD ELF).
+
+## R4a root cause chain (three named layers, all boot-verified)
+
+The task premise ("the file read of /HELLO.C fails silently") resolved
+to THREE stacked layers, each fixed and boot-verified in turn:
+
+1. **stat("/") returned -ENOSYS — the fatal one.** cc1's
+   `FileManager::getFileRef("/HELLO.C")` first stats the PARENT
+   directory via `getDirectoryFromFile` (clang FileManager.cpp:239);
+   parent of `/HELLO.C` is `/`. The C stat handler returned -ENOSYS for
+   every non-resolving path including the root, so cc1 failed pre-open
+   with "error reading '/HELLO.C': Function not implemented" and never
+   issued open/read (run-20260926_062319 / _070853). The
+   `[resolve-probe]` diag proved the file resolve itself healthy all
+   along: `/HELLO.C cluster=11 size=108`.
+   FIX (82472718559): `arm64_svc_file_stat` answers the root directory
+   (all-'/' path) a real S_IFDIR stat. Boot _071342: stat("/") -> 0,
+   open("/HELLO.C") -> fd 3.
+2. **clock_gettime (id 50) returned -ENOSYS — fatal abort.** After the
+   open, cc1 aborted with "clock_gettime(CLOCK_MONOTONIC) failed"
+   (system_error in -fno-exceptions mode, rc=134) before the read.
+   FIX (4c4436d42fc): C handler from the ARM generic timer
+   (CNTVCT/CNTFRQ). Boot _071701: cc1 read /HELLO.C, compiled, wrote
+   /HELLO.O (696 bytes, temp+rename flow).
+3. **lseek (46) + fcntl (69) were -ENOSYS.** The guest's MemoryBuffer
+   lseeks the input fd (SEEK_END) and its close() issues
+   F_SIMPLEOS_GET_OFD. agent-34 landed C handlers concurrently; banked
+   in 4c4436d42fc (boot-proven in _071701).
+
+## RESOLVED (boot-verified run-20260926_100559): kernel control-flow fault after the close SVC — R4a GREEN
+
+cc1's compile COMPLETES (/HELLO.O = 696 bytes written via
+/HELLO-<rand>.O.tmp + copy). Right after `close(temp fd 5)` returned 0,
+the kernel faulted: **FAULT @ 0x000000007fffff10, ESR=0x8600000f**
+(instruction abort, SAME EL, permission fault level 3) — the kernel
+tried to EXECUTE the user stack top (0x7fffff10 = the payload's initial
+user_sp). Reproduced in _071701 and _082016; the _074234/_080646
+manifestations were the same corruption surfacing as a bad-SP cascade.
+
+ROOT CAUSE (QEMU `-d int` exception trace, run-20260926_100559): the
+close handler's 16-byte SIMD store to the 8-aligned fd struct
+(`str q0, [x8]` at 0x40205a5c, FAR 0x682f65b8 = &g_svc_fds[5], and
+`str q0, [x8,#16]` at 0x40205a60) takes TWO kernel alignment faults
+(ESR 0x96000061, DFSC=0x21, WnR=1) during the close SVC. Each emulation
+re-enters through `_alignment_handler`, which legitimately rewrites
+ELR_EL1 (advance past the fault) and leaves SPSR_EL1 = EL1h. The
+lower-EL SVC handler then read those hardware registers at eret and
+returned to **EL1:0x40205a68** (a kernel text address) with the guest's
+registers and the kernel sp — close's epilogue rets through a stale
+user_sp (0x7fffff10) picked off the kernel stack. The `str q0` store is
+emulated as an 8-byte x0 write (the alignment handler only models Xt
+registers, not q0), which is benign here (used=0 frees the fd) but is a
+latent limitation for 16-byte SIMD stores.
+
+FIX (992782a064f): save ELR(svc+4) and SPSR in the spare frame tail at
+SVC entry and restore them before the eret, so the guest always returns
+to EL0 at the SVC return site regardless of alignment-fault emulation
+inside the C owner. Also bound the fault-dump stack walk to the frame's
+page so a fatal fault reports one clean frame instead of cascading
+through the unmapped stack guard page (the _082016/_083650 "persistent
+data abort" ESR=0x96000007 FAR=0x402eb040 loop was that cascade, not the
+root fault).
+
+Boot-verified (run-20260926_100559): R1-R3 PASS, **R4a cc1 compile rc=0**
+(/HELLO.C -> /HELLO.O, clean svc exit, no fault).
+
+## Landed this session (committed)
+
+- 82472718559 stat("/") root-dir — the R4a gate.
+- 4c4436d42fc clock_gettime(50) + lseek(46)/fcntl(69) C handlers (the
+  latter pair agent-34's, banked with attribution) + fault-dump/elr
+  diagnostics.
+- 5247ff32c88 close pure C (drop the strong-shim call).
+- 992782a064f R4a SVC eret save/restore ELR/SPSR — the R4a gate fix.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all runs |
+| R2 guest boots | PASS | banner, module inits, VFS mounts |
+| R3 clang --version in guest | PASS | rc=0 all runs |
+| R4a cc1 compile /HELLO.C | **PASS** | run-20260926_100559 rc=0 (/HELLO.O 696 B via temp+copy, clean svc exit) |
+| R4b lld link /HELLO2.ELF | IN FLIGHT | rename(44)/ftruncate(43)/unlink(39) C handlers + `--no-mmap-output-file` (commit() openFileForWrite+write, not mmap-of-fd) |
+| R5 run /HELLO2.ELF | BLOCKED | needs R4b; the spawn reads via the FAT-only Simple stream — /HELLO2.ELF is a C RAM file, needs a C RAM->payload-region bridge first |
+
+## Exact next actions
+
+1. Land R4b (rename/ftruncate/unlink + `--no-mmap-output-file`), boot-verify rc=0.
+2. R5: C RAM->payload-region bridge so the spawn can read /HELLO2.ELF.
+3. Follow-up (latent): alignment handler models only Xt registers — a
+   16-byte SIMD store emulation writes 8 bytes (x[Rt], not q[Rt]); benign
+   for the fd memset but wrong for general SIMD stores.
+
+---
+
+# 2026-09-26 (agent-44) session — R4b GREEN (lld links /HELLO2.ELF); R5 bridge landed
+
+Boot cycles this session: 3 guest boots (run-20260926_143824 diag,
+_150014 sigprocmask-fix verify attempt, _150713 R4b GREEN) + 1 rebuild+boot
+(R5 bridge, in flight). Kernel rebuilds: 1.
+
+## Two uncommitted files assessed: KEPT + COMPLETED (both were real fixes)
+
+The previous lane session left two uncommitted files; both were correct and
+are now boot-verified parts of the R4b green:
+
+- `examples/09_embedded/simple_os/arch/arm64/clang_bringup_entry.spl` — adds
+  `-x c` to the cc1 line. The FAT32 8.3 name `/HELLO.C` is uppercase, so cc1
+  parsed it as C++ and `extern int printf` got C++ linkage (undefined
+  `_Z6printfPKcz` at the R4b link, host-reproduced). Forces C. R4a stays
+  green with it.
+- `src/os/libc/simpleos_cxxabi.c` — strong nothrow operator new/delete
+  forms. libc++'s freestanding nothrow new runs an `__is_function_overridden`
+  check and executes `brk #1` when the throwing new resolves outside
+  libc++'s `__lcxx_override` section (which the archive's strong `_Znwm`
+  shadows). Providing strong nothrow forms here overrides libc++'s weak
+  trapping definitions at link time. This was the 0x123e92f0 brk in lld's
+  error-reporting path (run-20260926_102550/_112856/_123830).
+
+## R4b root cause: guest libc `sigprocmask` returned ENOSYS for EVERY call
+
+After the two files above, the 12:38 boot (run-20260926_123830) still faulted
+at 0x123e92f0 — because the prebuilt guest `lld` binary (01:36) still had
+libc++'s trapping nothrow new; the archive rebuild alone could not reach it.
+Relinking the guest lld against the updated sysroot libc (14:36) moved the
+wall: the next boot (run-20260926_143824) printed the REAL error instead of
+trapping:
+
+```
+LLVM ERROR: IO failure on output stream: Function not implemented
+```
+
+Root cause (named layer): lld's output commit does
+`raw_fd_ostream OS(FD, shouldClose=true)`; the write itself SUCCEEDED
+(`write(fd10, buf, 0x1ae18) = 0x1ae18`), but `~raw_fd_ostream` calls
+`Process::SafelyCloseFileDescriptor()`, which wraps `close()` in
+`sigprocmask(SIG_SETMASK, full, &saved)`. The guest libc's
+`sigprocmask` (src/os/libc/simpleos_signal.c) returned `-1/ENOSYS` for every
+call, so LLVM latched the ENOSYS into the stream's error state and reported
+"IO failure on output stream: Function not implemented" + exit 1 on a
+fully-written output. (Single-threaded guest build → `sigprocmask`, not
+`pthread_sigmask`, which is why the symbol is absent from the binary.)
+
+FIX (source): `sigprocmask` is now a no-op SUCCESS — returns 0 for valid
+`how` and reports the empty current mask in `oldset`, matching the file's own
+documented model ("no signal is ever blocked"; `sigpending` already reports
+empty). ENOSYS is not viable: LLVM's fd-close treats it as the close failing.
+
+## Guest toolchain archive: do NOT full-rebuild via the repo script (drift)
+
+The guest `libsimpleos_c.a` + `crt0.o` are assembled from
+`/home/yoon/llvm-project-simpleos/build-os-llvm/libc-build-aarch64/*.o`
+(the proven object set), NOT from `scripts/os/simpleos-sysroot-aarch64.shs`.
+The repo script has drifted from the toolchain: repo crt0.S publishes a
+STRONG `environ` (toolchain: weak), repo `simpleos_pthread.c` exports cond
+symbols GLOBAL (toolchain: localized), the script lists the dead
+`simpleos_pthread_cond.c` (self-documented "never compiled", duplicates
+`simpleos_pthread.c`), and it rewrites `simpleos.ld` to base 0x50000000
+(toolchain/proven: 0x10000000). A full script rebuild produced an lld that
+linked but OOM'd in the guest (run-20260926_150014). The working recipe:
+assemble the archive from the libc-build-aarch64 objects, swap in the fixed
+members (simpleos_signal.o, simpleos_cxxabi.o), restore the toolchain crt0.o
+(weak environ) and the 0x10000000 `simpleos.ld` base, then `ninja bin/lld`.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all runs |
+| R2 guest boots | PASS | banner, module inits, VFS mounts |
+| R3 clang --version in guest | PASS | rc=0 all runs |
+| R4a cc1 compile /HELLO.C | PASS | rc=0 (run-20260926_143824, _150713) |
+| R4b lld link /HELLO2.ELF | **PASS** | run-20260926_150713 rc=0 (/HELLO2.ELF 110408 B written+closed cleanly, exit 0) |
+| R5 run /HELLO2.ELF | PASS (gate) | run-20260926_1533xx rc=0, CLANG_IN_GUEST_ARM64_OK (ram-hit bridge, 22 pages mapped, clean EL0 exit). CAVEAT: product's printf output does NOT reach serial — see R5b below |
+
+## R5b follow-up (NEW): the linked product is a hollow green
+
+The R5 gate (`rung=R5-run-hello2 rc=0` + `CLANG_IN_GUEST_ARM64_OK`) is green,
+and the in-guest lld's /HELLO2.ELF is a structurally valid ELF (spawn maps 22
+pages, enters EL0 at _start, exits 0). BUT the product's
+`printf("HELLO_C_FROM_GUEST_ARM64\n")` never reaches serial: between
+`[payload] eret to EL0` and `[payload] payload exited code=0` there are no
+DebugWrite (syscall 60) chars and no write(1) SVC, i.e. the guest binary's
+crt0→main→printf chain produces no output. The guest libc's printf is
+unbuffered (write(1)→syscall 60 per char) and the same path carried the R3
+clang banner to serial, so the defect is in the in-guest-linked binary
+itself (crt0 `bl main` resolution / printf call), NOT in the serial path.
+The host-reproduced link (identical CRT0.O + cc1 HELLO.O + LIBC.A +
+SIMPLEOS.LD, base 0x10000000) has a correct crt0→main(0x100000f0)→printf
+chain, so the in-guest lld's output differs from the host lld's — dump the
+in-guest /HELLO2.ELF's crt0 main-call site (0x100000b0) and main to name
+the mis-link. NOTE: a weak `main` override (main_shim → _Z4mainiPPc→0) is
+NOT the cause — that would abort at 0, not exit 0.
+
+## Landed this session (committed)
+
+- dcc3f47cff2 R4b green: sigprocmask no-op success (root cause) + the prior
+  session's `-x c` (cc1 C linkage) and nothrow-new cxxabi forms.
+- b779ba5ca8a + final: R5 C RAM->payload-region bridge
+  (rt_arm_svc_ram_payload_resident + ram-hit arm + extern fn decl — the
+  declaration is REQUIRED, else the u64 return marshals wrong and the spawn
+  reads a truncated size). Gate green run-20260926_152742 and _1533xx.
+
+## Exact next actions
+
+1. R5b: name the in-guest lld mis-link (crt0 `bl main` target / printf) by
+   dumping the in-guest /HELLO2.ELF text; fix so the product prints
+   HELLO_C_FROM_GUEST_ARM64 (a real product run, not a hollow rc=0).
+2. Keep the guest-toolchain sysroot assembled from libc-build-aarch64
+   objects; only swap fixed members. Do not full-script-rebuild it.
