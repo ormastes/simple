@@ -66,6 +66,11 @@ val R_AARCH64_PREL16: i64    = 262  # S + A - P (checked signed 16-bit)
 val R_AARCH64_ADR_GOT_PAGE: i64 = 311      # Page(G(GDAT(S+A))) - Page(P), ADRP encoding
 val R_AARCH64_LD64_GOT_LO12_NC: i64 = 312  # G(GDAT(S+A)) & 0xff8, LDR imm12 (8-byte scaled)
 val R_AARCH64_PLT32: i64       = 314  # L + A - P (checked signed 32-bit data)
+val R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21: i64 = 541
+val R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC: i64 = 542
+val R_AARCH64_TLSLE_ADD_TPREL_HI12: i64 = 549
+val R_AARCH64_TLSLE_ADD_TPREL_LO12: i64 = 550
+val R_AARCH64_TLSLE_ADD_TPREL_LO12_NC: i64 = 551
 
 # ============================================================================
 # RISC-V Relocation Types (subset)
@@ -360,7 +365,8 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
             return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ADR_PREL_LO21 delta out of signed 21-bit range (S + A - P)")
         return RelocResult(success: true, offset: offset, value: delta, error: "")
 
-    if rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE:
+    if rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE or
+            rtype == R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21:
         # ADR_GOT_PAGE: the caller passes S = the GOT-entry address (G) and
         # A = 0, so the ADRP page formula below is shared verbatim.
         # Page(S+A) - Page(P), right-shifted 12 to a signed 21-bit page count.
@@ -380,7 +386,18 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         val lo12 = (s + a) & 0xfff
         return RelocResult(success: true, offset: offset, value: lo12, error: "")
 
-    if rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC:
+    if rtype == R_AARCH64_TLSLE_ADD_TPREL_HI12:
+        if s < 0 or s >= 0x1000000:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_ADD_TPREL_HI12 TPREL out of unsigned 24-bit range")
+        return RelocResult(success: true, offset: offset, value: (s >> 12) & 0xfff, error: "")
+
+    if rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
+        if rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 and (s < 0 or s >= 0x1000000):
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_ADD_TPREL_LO12 TPREL out of unsigned 24-bit range")
+        return RelocResult(success: true, offset: offset, value: s & 0xfff, error: "")
+
+    if rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC or
+            rtype == R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
         # LD64_GOT_LO12_NC: S = GOT-entry address (G), A = 0 — same encoding.
         # 64-bit LDR/STR (unsigned offset) requires 8-byte alignment; the
         # AAELF64 relocation is only valid when (S+A) is 8-byte aligned.
@@ -492,7 +509,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xff00001f) | ((result.value & 0x7ffff) << 5)
                 patch_u32_le(bytes, offset, patched)
-            else if rtype == R_AARCH64_ADR_PREL_LO21 or rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE:
+            else if rtype == R_AARCH64_ADR_PREL_LO21 or rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE or rtype == R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21:
                 # immlo (2 bits) -> insn[30:29], immhi (19 bits) -> insn[23:5].
                 # Keep-mask 0x9f00001f preserves op(31), fixed bits(28:24), Rd(4:0).
                 val insn = read_u32_le(bytes, offset)
@@ -500,7 +517,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val immhi = (result.value >> 2) & 0x7ffff
                 val patched = (insn & 0x9f00001f) | (immlo << 29) | (immhi << 5)
                 patch_u32_le(bytes, offset, patched)
-            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LDST8_ABS_LO12_NC or rtype == R_AARCH64_LDST16_ABS_LO12_NC or rtype == R_AARCH64_LDST32_ABS_LO12_NC or rtype == R_AARCH64_LDST128_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC:
+            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or rtype == R_AARCH64_TLSLE_ADD_TPREL_HI12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LDST8_ABS_LO12_NC or rtype == R_AARCH64_LDST16_ABS_LO12_NC or rtype == R_AARCH64_LDST32_ABS_LO12_NC or rtype == R_AARCH64_LDST128_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC or rtype == R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
                 # imm12 -> insn[21:10]; keep-mask 0xffc003ff clears exactly that field.
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
@@ -542,6 +559,8 @@ export R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
 export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16, R_AARCH64_CALL26, R_AARCH64_JUMP26
 export R_AARCH64_TSTBR14, R_AARCH64_CONDBR19
 export R_AARCH64_LD_PREL_LO19, R_AARCH64_ADR_PREL_LO21, R_AARCH64_ADR_PREL_PG_HI21
+export R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21, R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC
+export R_AARCH64_TLSLE_ADD_TPREL_HI12, R_AARCH64_TLSLE_ADD_TPREL_LO12, R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
 export R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
 export R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC
 export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL

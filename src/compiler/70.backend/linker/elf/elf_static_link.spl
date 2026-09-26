@@ -793,6 +793,29 @@ fn elf_tls_end(plan: ElfExecPlan) -> i64:
         i = i + 1
     result
 
+fn elf_tls_start(plan: ElfExecPlan) -> i64:
+    var result: i64 = -1
+    var i: i64 = 0
+    while i < plan.secs.len():
+        if plan.secs[i].sh_flags & SHF_TLS != 0 and
+                (result < 0 or plan.vaddrs[i] < result):
+            result = plan.vaddrs[i]
+        i = i + 1
+    result
+
+fn elf_tls_tprel(plan: ElfExecPlan, target: RelocArch, address: i64) -> Result<i64, text>:
+    if elf_target_is_a64(target):
+        val start = elf_tls_start(plan)
+        if start < 0:
+            return Err("TLS relocation has no PT_TLS image")
+        # AArch64 uses TLS variant I: TP addresses a 16-byte TCB immediately
+        # before the statically allocated TLS block.
+        return Ok(address - start + 16)
+    val end = elf_tls_end(plan)
+    if end < 0:
+        return Err("TLS relocation has no PT_TLS image")
+    Ok(address - end)
+
 fn elf_array_size(ins: [ElfOutSec], name: text) -> i64:
     val k = elf_find_out(ins, name)
     if k < 0:
@@ -1306,12 +1329,11 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         var s = ref_value.address
         var a = ref_value.addend
         if r.rclass == RC_TLS_LE:
-            val tls_end = elf_tls_end(plan)
-            if tls_end < 0:
-                return Err("TLS relocation against '{r.name}' has no PT_TLS image")
-            s = s + a - tls_end
+            s = elf_tls_tprel(plan, target, s + a)?
             a = 0
-            if r.rtype == 18:
+            if a64:
+                rtype = r.rtype
+            else if r.rtype == 18:
                 rtype = 1  # R_X86_64_64 encodes the signed TPOFF64 result
             else:
                 rtype = 11  # R_X86_64_32S encodes the signed TPOFF32 result
@@ -1323,7 +1345,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
                 rtype = 10  # R_X86_64_32 applies Z + A with width checking
         else if r.rclass == RC_TLS_IE:
             s = got_v + sc.got_idx[r.key] * 8
-            rtype = 2  # R_X86_64_PC32 applies GOTTPOFF's GOT + A - P formula
+            if a64:
+                a = 0
+            else:
+                rtype = 2  # R_X86_64_PC32 applies GOTTPOFF's GOT + A - P formula
         else if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
             s = got_v + sc.got_idx[r.key] * 8
             if a64:
@@ -1357,10 +1382,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             got = write_u64_le(got, 0)
             rela_sym = elf_rela_entry(rela_sym, slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0)
         else if r.rclass == RC_TLS_IE:
-            val tls_end = elf_tls_end(plan)
-            if tls_end < 0:
-                return Err("TLS relocation against '{r.name}' has no PT_TLS image")
-            got = write_u64_le(got, elf_ref_addr(ctx, lay, r)? - tls_end)
+            got = write_u64_le(got, elf_tls_tprel(plan, target,
+                elf_ref_addr(ctx, lay, r)? + r.addend)?)
         else if r.kind == SYMREF_IMPORT and sc.copy_idx.has(r.name):
             got = write_u64_le(got, elf_ref_addr(ctx, lay, r)?)
         else if r.kind == SYMREF_IMPORT:
