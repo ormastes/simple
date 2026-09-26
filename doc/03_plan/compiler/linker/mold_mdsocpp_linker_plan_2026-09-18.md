@@ -157,6 +157,9 @@ Next: remaining TLS relocation models beyond local/initial-exec, a full-kernel r
 The AArch64 local-exec slice also covers checked and `_NC` TLSLE
 LDST8/16/32/64/128 TPREL low-12 relocations, preserving natural scaling and
 rejecting misaligned targets.
+TLSLE MOVW G2/G1/G0 materialization is also implemented with group-specific
+overflow checks and exact instruction-field patching, completing the AArch64
+local-exec relocation family represented by LLVM's ABI table.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 silently emitting their low 32 bits, matching mold/lld overflow behavior.
