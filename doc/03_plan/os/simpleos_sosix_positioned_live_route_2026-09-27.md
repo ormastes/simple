@@ -39,9 +39,9 @@ and NFR requirements still require user selection.
   owner-checked, non-consuming receive preview. The queue mints and consumes
   exact-pair reply permits. This is source wiring, not yet guest evidence;
   the trap and copyout behavior still need an admitted build and ring-3 test.
-- `root_service_catalog.spl` calls 136/137, and the same live x86_64 dispatch
-  switch has no cases for either ID. PID1 service lifecycle evidence must
-  exercise those traps, rather than inferring support from the user library.
+- `root_service_catalog.spl` calls 136/137. The live x86_64 dispatch switch
+  now reaches strong Simple catalog shims for both IDs. They adopt returned
+  scheduler/IPC state; ring-3 PID1 service lifecycle evidence is still needed.
 
 ## Live syscall ingress and copied IPC prerequisite
 
@@ -50,7 +50,7 @@ and NFR requirements still require user selection.
 | 132 | `ipc_send_owned_v1` / `ipc_reply_owned_v1` | C case and strong Simple shim now reach bounded copy-in, scheduler-current source-port check, and an exact `IpcConnect` check for cross-task requests | Verify cap issuance and ring-3 send/reply behavior. |
 | 133 | `ipc_recv_owned_v1_into` | C case and strong Simple shim now preview, copyout, then dequeue | Verify single-owner serialization and ring-3 receipt with a bad-output-pointer negative control. |
 | 134/135 | Registered positioned read/write | C switch and strong Simple shim present | Install a real registry owner and issue real file/buffer identities before claiming guest behavior. |
-| 136/137 | PID1 root-service spawn/stop | No `rt_syscall_dispatch` case | Wire scheduler-authenticated PID1 authority and test a real ring-3 service lifecycle. |
+| 136/137 | PID1 root-service spawn/stop | C switch and strong Simple shims route to the catalog's scheduler-authenticated PID1 authority | Test a real ring-3 service lifecycle and denied non-PID1 call. |
 
 `IpcManager.next_owned_payload_len` and `peek_owned` preserve the FIFO head
 while the 133 handler checks and writes the bounded user output. The handler

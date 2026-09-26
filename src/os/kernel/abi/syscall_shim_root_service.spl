@@ -1,0 +1,62 @@
+"""Live PID1 root-service catalog syscall bridge (136/137).
+
+The catalog owns image policy, root-mint authority, and child teardown. This
+bridge validates the wire values and publishes the returned kernel state.
+"""
+
+use os.kernel.abi.syscall_shim.{g_shim_scheduler, g_shim_ipc}
+use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult}
+use os.kernel.loader.root_service_catalog.{
+    RootServiceCatalogStopResult,
+    root_service_catalog_launch, root_service_catalog_stop
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.task_types.{TaskPriority}
+
+pub fn root_service_spawn_dispatch_v1(
+    catalog_id: u64, priority_code: u64, scheduler: Scheduler
+) -> FsExecPrepareResult:
+    """Reject unknown priority codes before resolving a catalog image."""
+    if priority_code > 4u64:
+        return FsExecPrepareResult(scheduler: scheduler, pid: -22, entry: 0)
+    val priority = match priority_code:
+        case 0u64: TaskPriority.Realtime
+        case 1u64: TaskPriority.High
+        case 2u64: TaskPriority.Normal
+        case 3u64: TaskPriority.Low
+        case _: TaskPriority.Idle
+    root_service_catalog_launch(catalog_id, priority, scheduler)
+
+pub fn root_service_stop_dispatch_v1(
+    target_pid: u64, exit_raw: u64, scheduler: Scheduler, ipc: IpcManager
+) -> RootServiceCatalogStopResult:
+    """Accept only the signed 32-bit exit code carried by the user ABI."""
+    val exit_code = exit_raw as i64
+    if target_pid == 0u64 or target_pid > 0x7FFFFFFFFFFFFFFFu64 or
+       exit_code < -2147483648i64 or exit_code > 2147483647i64:
+        return RootServiceCatalogStopResult(scheduler: scheduler, ipc: ipc, result: -22)
+    root_service_catalog_stop(target_pid, exit_code as i32, scheduler, ipc)
+
+@export("C", name: "spl_handle_root_service_spawn")
+fn spl_handle_root_service_spawn(
+    a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64
+) -> i64:
+    if a2 != 0u64 or a3 != 0u64 or a4 != 0u64 or a5 != 0u64:
+        return -22
+    val prepared = root_service_spawn_dispatch_v1(a0, a1, g_shim_scheduler)
+    g_shim_scheduler = prepared.scheduler
+    prepared.pid
+
+@export("C", name: "spl_handle_root_service_stop")
+fn spl_handle_root_service_stop(
+    a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64
+) -> i64:
+    if a2 != 0u64 or a3 != 0u64 or a4 != 0u64 or a5 != 0u64:
+        return -22
+    val stopped = root_service_stop_dispatch_v1(a0, a1, g_shim_scheduler, g_shim_ipc)
+    g_shim_scheduler = stopped.scheduler
+    g_shim_ipc = stopped.ipc
+    stopped.result
+
+export root_service_spawn_dispatch_v1, root_service_stop_dispatch_v1
