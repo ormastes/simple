@@ -33,6 +33,13 @@ artifact check passes, but Stage 2 has not been rerun. See
 `macos_cocoa_runtime_owner_blocks_stage2_2026-09-27.md`. Ten originally
 missing definitions and the backend-binding mismatch remain.
 
+The owner now rejects ordinary close reservations for an OFD quarantined
+after indeterminate I/O, retaining its descriptor number. Task-context
+teardown releases those aliases with an incomplete receipt while retaining
+the uncertain backend binding; it does not poison the descriptor owner.
+This path has a package-scoped spec but remains unverified until Stage 2
+admission supplies a self-hosted runtime.
+
 ## Required fix
 
 Define one exact MountTable virtual-object binding with generation and kind.

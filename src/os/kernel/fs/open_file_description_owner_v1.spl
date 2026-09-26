@@ -613,7 +613,10 @@ pub(package) fn open_file_description_begin_close_v1(
     ref_: OpenFileDescriptionRefV1
 ) -> Result<OpenFileDescriptionCloseBeginV1, text>:
     if not _ofd_lock_v1(): return Err("serialization-unavailable")
-    val index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
+    var index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
+    if index < 0:
+        index = _ofd_ref_index_v1(
+            ref_, OpenFileDescriptionStateV1.CloseQuarantined)
     if index < 0:
         _ = _ofd_unlock_v1()
         return Err("stale-open-file-description")
@@ -623,6 +626,16 @@ pub(package) fn open_file_description_begin_close_v1(
         _ = _ofd_unlock_v1()
         return Err("reference-count-corrupt")
     slot.ref_count = slot.ref_count - 1u32
+    if slot.state == OpenFileDescriptionStateV1.CloseQuarantined:
+        # The backend may have made unknown progress. Release only this alias;
+        # retain the OFD/backend quarantine even after the last alias leaves.
+        _ofd_owner_v1.slots[index] = slot
+        var result = OpenFileDescriptionCloseBeginV1(
+            disposition: OpenFileDescriptionCloseDispositionV1.AliasReleased,
+            complete: false, failure: "ofd-io-indeterminate", ticket: nil)
+        if not _ofd_unlock_v1():
+            result.failure = result.failure + ";ofd-unlock-failed"
+        return Ok(result)
     if slot.ref_count > 0u32:
         _ofd_owner_v1.slots[index] = slot
         var result = OpenFileDescriptionCloseBeginV1(
