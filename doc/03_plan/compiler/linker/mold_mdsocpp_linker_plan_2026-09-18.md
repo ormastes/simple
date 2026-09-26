@@ -404,6 +404,10 @@ patched with its signed U-bit/magnitude encoding and checked 12-bit reach; both
 forms have checked-in ELF32 oracle objects. The remaining relocation corpus,
 hosted ARM executable emission, and real target
 execution evidence remain open.
+The ARM32 raw-image integration corpus now also includes two LLVM-compiled C
+objects. Their real `THM_MOVW_ABS_NC`/`THM_MOVT_ABS`, `THM_JUMP24`, and
+`PREL31` records pass together through ELF32 parsing, cross-object resolution,
+layout, relocation, and final image construction at the remote code base.
 
 The compiler-owned ARM32 remote adapter now performs the full source-to-image
 composition: frontend and target-aware MIR lowering, explicit Thumbv7-M

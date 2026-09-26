@@ -8,6 +8,8 @@ main fixture uses `.reloc` deliberately because LLVM selects the wider
 clang --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -c thumb_pc8_main.s -o thumb_pc8_main.o
 clang --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -c thumb_pc12_main.s -o thumb_pc12_main.o
 clang --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -c thumb_pc8_target.s -o thumb_pc8_target.o
+clang --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -O1 -ffunction-sections -fdata-sections -c remote_corpus_main.c -o remote_corpus_main.o
+clang --target=arm-none-eabi -mcpu=cortex-m3 -mthumb -O1 -ffunction-sections -fdata-sections -c remote_corpus_provider.c -o remote_corpus_provider.o
 llvm-readelf -r thumb_pc8_main.o
 ```
 
@@ -17,3 +19,5 @@ choice for the unresolved symbolic literal load.
 
 With `ld.lld --image-base=0 -Ttext=0x1000 --oformat=binary`, the leading
 linked bytes are `01 48 70 47` for PC8 and `df f8 04 00 70 47` for PC12.
+The C pair is the compiler-generated remote-image integration corpus; its
+relocations cover calls, split symbol addresses, and exception indexes.
