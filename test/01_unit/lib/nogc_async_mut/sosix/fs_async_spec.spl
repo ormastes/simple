@@ -210,14 +210,29 @@ describe "SOSIX hosted positioned read over SimpleRing":
         expect(fs.service_one(0, 8u64)).to_be(true)
         expect(fs.service_one(0, 8u64)).to_be(true)
         expect(fs.pump()).to_equal(2)
+        expect(fs.occupancy()).to_equal(2u64)
         expect(fs.release(second.operation).accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(1u64)
+        val third = submit_read(fs, 8u64, 0u64)
+        expect(third.accepted).to_be(true)
+        expect(third.operation.slot).to_equal(second.operation.slot)
+        expect(third.operation.generation > second.operation.generation).to_be(true)
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
         if val completion = fs.take_completion():
             expect(completion.operation.slot).to_equal(first.operation.slot)
             expect(completion.operation.generation).to_equal(first.operation.generation)
         else:
             fail("earlier notification was lost")
+        if val completion = fs.take_completion():
+            expect(completion.operation.slot).to_equal(third.operation.slot)
+            expect(completion.operation.generation).to_equal(third.operation.generation)
+        else:
+            fail("reused-slot notification was lost")
         expect(fs.take_completion() == nil).to_be(true)
         expect(fs.release(first.operation).accepted).to_be(true)
+        expect(fs.release(third.operation).accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(0u64)
 
     it "keeps each operation's result independent of its sibling":
         step("Submit two reads and let the first fail natively")

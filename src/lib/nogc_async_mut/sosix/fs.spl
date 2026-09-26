@@ -9,8 +9,8 @@ storage.
 
 Budgets (design §7): a rejected submission touches no ring slot and allocates
 nothing; a committed one is exactly one reserve + one commit; a completion wakes
-the one token it names; `release` is refused until the ring has retired the
-lease (`take_completion`), so a timeout can never expose a live buffer.
+the one token it names. The ring retains its slot after provider retirement;
+consumer `release` frees that slot only after the provider lease has ended.
 """
 
 use std.common.contracts.execution.simple_ring_async_v1.{RingToken, RingGeneration, TaskPollResult}
@@ -191,15 +191,15 @@ impl SosixHostedFs:
         self.complete_taken(taken, status, transferred)
 
     me pump() -> i64:
-        """Drain ring completions into the typed lifecycle; each retires its lease exactly once."""
+        """Observe provider retirement; retain each ring slot until consumer release."""
         var delivered: i64 = 0
         var draining = true
         while draining:
-            # Do not retire a ring completion unless its terminal notification
-            # has reserved FIFO space. Released unread notices are discarded.
+            # Take a provider completion only when its terminal notification
+            # has FIFO space. Released unread notices are discarded.
             if self.completions.len() >= self.completions.capacity():
                 return delivered
-            match self.ring.take_completion(self.owner_id):
+            match self.ring.take_completion_retained(self.owner_id):
                 case Err(_): draining = false
                 case Ok(maybe):
                     if val completion = maybe:
@@ -252,7 +252,7 @@ impl SosixHostedFs:
         transition
 
     me release(operation: SosixOperationId) -> SosixOperationTransition:
-        """Refused until the ring retired the lease: a timed-out slot still owns its buffer."""
+        """Refused until provider retirement; then release the retained ring slot."""
         val slot = operation.slot.to_i64()
         if slot >= self.slots.len():
             return SosixOperationTransition(accepted: false, reason: "invalid-operation-slot", slot: sosix_operation_slot_new())
@@ -266,6 +266,10 @@ impl SosixHostedFs:
                 if not self.completions.discard(operation):
                     return SosixOperationTransition(accepted: false, reason: "completion-queue-mismatch", slot: self.slots[slot])
                 self.queued[slot] = false
+            match self.ring.release_retained_completion(self.owner_id, self.tokens[slot]):
+                case Err(_):
+                    return SosixOperationTransition(accepted: false, reason: "ring-release-failed", slot: self.slots[slot])
+                case Ok(_): ()
             self.slots[slot] = transition.slot
         transition
 

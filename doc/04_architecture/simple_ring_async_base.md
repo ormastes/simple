@@ -176,6 +176,13 @@ Cancellation does not manufacture a second completion. If the provider wins a
 race, the completion remains the sole terminal result and the cancellation
 receipt records that the operation was already terminal or provider-owned.
 
+A consumer that owns a separate terminal-result lifecycle may take a completion
+in retained mode. This removes it from the provider FIFO but keeps the ring
+slot occupied and its generation unchanged until that consumer releases the
+exact token. A normal completion take still frees the slot immediately. This
+lets consumers release terminal results out of order without the ring reusing
+a slot that remains terminal in the consumer lifecycle.
+
 Reset drains or marks outstanding work according to the profile, emits a
 reset receipt, increments the generation, and prevents delayed provider
 completions from waking or completing reused slots. A provider completion

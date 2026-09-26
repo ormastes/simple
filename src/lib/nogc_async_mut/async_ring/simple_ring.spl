@@ -16,6 +16,7 @@ pub enum RingSlotState:
     Committed
     InFlight
     Terminal
+    TerminalTaken
 
 pub enum SimpleRingError:
     InvalidCapacity
@@ -329,6 +330,19 @@ impl SimpleRing<Op, Cpl>:
         self._complete(token, RingTerminalKind.Cancelled, nil, reason, completed_at)
 
     me take_completion(owner_id: u64) -> Result<RingCompletion<Cpl>?, SimpleRingError>:
+        val retained = self.take_completion_retained(owner_id)
+        match retained:
+            case Err(error): Err(error)
+            case Ok(maybe):
+                if val completion = maybe:
+                    match self.release_retained_completion(owner_id, completion.token):
+                        case Ok(_): Ok(completion)
+                        case Err(error): Err(error)
+                else:
+                    Ok(nil)
+
+    me take_completion_retained(owner_id: u64) -> Result<RingCompletion<Cpl>?, SimpleRingError>:
+        """Observe a provider terminal result while keeping its slot leased."""
         if owner_id != self.owner_id:
             return Err(SimpleRingError.WrongOwner)
         if self.completion_count == 0:
@@ -341,10 +355,20 @@ impl SimpleRing<Op, Cpl>:
         val completion = RingCompletion<Cpl>(token: self._token_for(slot),
             task_key: self.task_keys[slot], kind: self.completion_kinds[slot],
             value: self.completion_values[slot], error: self.completion_errors[slot])
-        val release_result = self._release_slot(slot)
-        match release_result:
-            case Ok(_): Ok(completion)
+        self.states[slot] = RingSlotState.TerminalTaken
+        Ok(completion)
+
+    me release_retained_completion(owner_id: u64, token: RingToken) -> Result<(), SimpleRingError>:
+        """Reuse a retained slot only after its consumer releases the result."""
+        if owner_id != self.owner_id:
+            return Err(SimpleRingError.WrongOwner)
+        val found = self._token_slot(token)
+        match found:
             case Err(error): Err(error)
+            case Ok(slot):
+                if self.states[slot] != RingSlotState.TerminalTaken:
+                    return Err(SimpleRingError.InvalidTransition)
+                self._release_slot(slot)
 
     me cancel(owner_id: u64, token: RingToken) -> RingCancelOutcome:
         if owner_id != self.owner_id:
@@ -366,6 +390,7 @@ impl SimpleRing<Op, Cpl>:
                     case RingSlotState.InFlight:
                         self._request_provider_cancel(slot, token)
                     case RingSlotState.Terminal: RingCancelOutcome.AlreadyTerminal(token)
+                    case RingSlotState.TerminalTaken: RingCancelOutcome.AlreadyTerminal(token)
                     case RingSlotState.Empty: RingCancelOutcome.UnknownOrStale(token)
 
     me reset(owner_id: u64) -> Result<RingResetReceipt, SimpleRingError>:
@@ -418,7 +443,8 @@ impl SimpleRing<Op, Cpl>:
         match token_result:
             case Err(error): Err(error)
             case Ok(slot):
-                if self.states[slot] == RingSlotState.Terminal:
+                if self.states[slot] == RingSlotState.Terminal or
+                   self.states[slot] == RingSlotState.TerminalTaken:
                     self.telemetry_value.duplicate_rejects = _ring_next_counter(self.telemetry_value.duplicate_rejects)
                     return Err(SimpleRingError.TerminalAlreadyPublished)
                 if self.states[slot] != RingSlotState.InFlight:
