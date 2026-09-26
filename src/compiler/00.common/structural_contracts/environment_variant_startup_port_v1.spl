@@ -9,7 +9,8 @@ use compiler.common.structural_contracts.environment_variant_policy_collection_v
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
     EnvironmentDigest256V1
 }
-use std.common.crypto.sha256.sha256_text
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.text_to_utf8_bytes
 
 pub enum EnvironmentVariantStartupStatusV1:
     Reference
@@ -52,10 +53,9 @@ fn _environment_variant_startup_digest_material_v1(
     value.w0.to_text() + ":" + value.w1.to_text() + ":" +
         value.w2.to_text() + ":" + value.w3.to_text()
 
-# Stable content identity for frontend cache partitioning. Session coordinates
-# are deliberately excluded: they authorize dispatch lifetime, not parse-result
-# content. The exact policy, provider, variant, artifact, and host-environment
-# generation are all independently bound.
+# Compatibility key for earlier startup receipts. Production startup uses the
+# bounded canonical V2 key below. Session coordinates are excluded from both:
+# they authorize dispatch lifetime, not parse-result content.
 pub fn environment_variant_startup_cache_identity_v1(
     receipt: EnvironmentVariantStartupReceiptV1
 ) -> text:
@@ -71,3 +71,55 @@ pub fn environment_variant_startup_cache_identity_v1(
         _environment_variant_startup_digest_material_v1(receipt.environment_identity) + "|" +
         receipt.environment_generation.to_text() + "|" + status + "|" +
         receipt.rejection_code.len().to_text() + ":" + receipt.rejection_code)
+
+# V2 material has one fixed domain tag, five 32-byte digests, a u64 generation,
+# a one-byte status, and a u16-length-prefixed UTF-8 rejection code. All
+# integers are little-endian. The text cap bounds UTF-8 to at most 1024 bytes;
+# no material or hash work starts before that preflight succeeds.
+pub const ENVIRONMENT_VARIANT_STARTUP_REJECTION_MAX_V2: i64 = 256
+pub const ENVIRONMENT_VARIANT_STARTUP_REJECTION_BYTES_MAX_V2: i64 = 1024
+pub const ENVIRONMENT_VARIANT_STARTUP_MATERIAL_MAX_V2: i64 = 1239
+
+fn _startup_cache_push_u64_v2(out: [u8], value: u64):
+    for i in 0..8:
+        out.push(((value >> ((i as u64) * 8u64)) & 255u64) as u8)
+
+fn _startup_cache_push_digest_v2(out: [u8], value: EnvironmentDigest256V1):
+    _startup_cache_push_u64_v2(out, value.w0)
+    _startup_cache_push_u64_v2(out, value.w1)
+    _startup_cache_push_u64_v2(out, value.w2)
+    _startup_cache_push_u64_v2(out, value.w3)
+
+pub fn environment_variant_startup_cache_identity_v2(
+    receipt: EnvironmentVariantStartupReceiptV1
+) -> Result<text, EnvironmentVariantStartupErrorV1>:
+    if receipt.rejection_code.len() > ENVIRONMENT_VARIANT_STARTUP_REJECTION_MAX_V2:
+        return Err(EnvironmentVariantStartupErrorV1.CapacityExceeded)
+    val rejection = text_to_utf8_bytes(receipt.rejection_code)
+    if rejection.len() > ENVIRONMENT_VARIANT_STARTUP_REJECTION_BYTES_MAX_V2:
+        return Err(EnvironmentVariantStartupErrorV1.CapacityExceeded)
+    val domain = text_to_utf8_bytes("simple/environment-variant-startup-cache/v2")
+    # One domain separator, five 32-byte digests, u64 generation, status,
+    # and a u16 length use 172 bytes beyond the fixed domain bytes.
+    if domain.len() + 172 + rejection.len() > ENVIRONMENT_VARIANT_STARTUP_MATERIAL_MAX_V2:
+        return Err(EnvironmentVariantStartupErrorV1.CapacityExceeded)
+    var material: [u8] = []
+    for byte in domain:
+        material.push(byte)
+    material.push(0u8)
+    _startup_cache_push_digest_v2(material, receipt.policy_digest)
+    _startup_cache_push_digest_v2(material, receipt.provider_identity)
+    _startup_cache_push_digest_v2(material, receipt.variant_identity)
+    _startup_cache_push_digest_v2(material, receipt.artifact_identity)
+    _startup_cache_push_digest_v2(material, receipt.environment_identity)
+    _startup_cache_push_u64_v2(material, receipt.environment_generation)
+    val status_byte = if receipt.status == EnvironmentVariantStartupStatusV1.Selected:
+        1u8
+    else:
+        0u8
+    material.push(status_byte)
+    material.push((rejection.len() & 255) as u8)
+    material.push(((rejection.len() >> 8) & 255) as u8)
+    for byte in rejection:
+        material.push(byte)
+    Ok(sha256_u8_hex(material))

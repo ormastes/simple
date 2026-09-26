@@ -16,7 +16,7 @@ fn selected_receipt() -> EnvironmentVariantStartupReceiptV1:
         status: EnvironmentVariantStartupStatusV1.Selected,
         rejection_code: "")
 
-describe "environment variant startup cache identity V1":
+describe "environment variant startup cache identities":
     it "is stable for the same exact startup authority":
         expect(environment_variant_startup_cache_identity_v1(selected_receipt()))
             .to_equal(environment_variant_startup_cache_identity_v1(selected_receipt()))
@@ -53,3 +53,46 @@ describe "environment variant startup cache identity V1":
             owner_id: 99u64, session_id: 100u64, generation: 101u64)
         expect(environment_variant_startup_cache_identity_v1(later_session))
             .to_equal(environment_variant_startup_cache_identity_v1(first))
+
+    it "uses bounded canonical V2 material for the production startup key":
+        val selected = selected_receipt()
+        val key = environment_variant_startup_cache_identity_v2(selected).unwrap()
+        expect(key.len()).to_equal(64)
+        expect(key).to_equal("b14ea153f4a3ba7f107fceff4ec82099c5f7922586d561c51cfb408615be7d80")
+        expect(environment_variant_startup_cache_identity_v2(selected)).to_equal(Ok(key))
+        expect(key == environment_variant_startup_cache_identity_v1(selected)).to_be(false)
+
+        var changed = selected
+        changed.policy_digest = d(11u64)
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+        changed = selected; changed.provider_identity = d(21u64)
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+        changed = selected; changed.variant_identity = d(31u64)
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+        changed = selected; changed.artifact_identity = d(41u64)
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+        changed = selected; changed.environment_identity = d(51u64)
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+        changed = selected; changed.environment_generation = 61u64
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+        changed = selected; changed.status = EnvironmentVariantStartupStatusV1.Reference
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+        changed = selected; changed.rejection_code = "unavailable|provider:한글"
+        expect(environment_variant_startup_cache_identity_v2(changed).unwrap() == key).to_be(false)
+
+    it "rejects oversized rejection text before hashing":
+        var at_limit = selected_receipt()
+        at_limit.rejection_code = ["x"; ENVIRONMENT_VARIANT_STARTUP_REJECTION_MAX_V2].join("")
+        expect(environment_variant_startup_cache_identity_v2(at_limit).is_ok()).to_be(true)
+        var too_long = at_limit
+        too_long.rejection_code = at_limit.rejection_code + "x"
+        expect(environment_variant_startup_cache_identity_v2(too_long)).to_equal(
+            Err(EnvironmentVariantStartupErrorV1.CapacityExceeded))
+
+    it "keeps session coordinates out of the canonical V2 content identity":
+        val first = selected_receipt()
+        var later_session = first
+        later_session.handle = EnvironmentVariantStartupHandleV1(
+            owner_id: 99u64, session_id: 100u64, generation: 101u64)
+        expect(environment_variant_startup_cache_identity_v2(later_session))
+            .to_equal(environment_variant_startup_cache_identity_v2(first))
