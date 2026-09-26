@@ -1,0 +1,47 @@
+# Purpose: verify the fail-closed mold completion receipt producer contract.
+# @tag: unit, app, linker, mold, receipt
+
+use std.spec.{describe, expect, it}
+use app.test.mold_completion_receipt.{MOLD_EVIDENCE_KEYS,
+    mold_parse_evidence_receipt, mold_render_completion_aggregate}
+
+val _MOLD_HASH = "a" * 64
+
+fn _receipt(key: text) -> text:
+    "schema=mold-linker-evidence-v1\n" +
+    "evidence=" + key + "\n" +
+    "status=pass\n" +
+    "command_path=build/evidence/command.txt\n" +
+    "command_sha256=" + _MOLD_HASH + "\n" +
+    "artifact_path=build/evidence/artifact.bin\n" +
+    "artifact_sha256=" + _MOLD_HASH + "\n"
+
+describe "mold completion receipt producer":
+    it "accepts only the canonical gate-bound evidence receipt":
+        val parsed = mold_parse_evidence_receipt(
+            _receipt("linux_x86_64_internal"), "linux_x86_64_internal")
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().artifact_sha256).to_equal(_MOLD_HASH)
+        expect(mold_parse_evidence_receipt(
+            _receipt("linux_x86_64_internal").replace("status=pass", "status=fail"),
+            "linux_x86_64_internal").is_err()).to_equal(true)
+        expect(mold_parse_evidence_receipt(
+            _receipt("linux_x86_64_internal"), "performance_gate").is_err()).to_equal(true)
+        expect(mold_parse_evidence_receipt(
+            _receipt("linux_x86_64_internal").replace(_MOLD_HASH, "A" * 64),
+            "linux_x86_64_internal").is_err()).to_equal(true)
+
+    it "renders the fixed-order aggregate consumed by the linker gate":
+        var digests: [text] = []
+        var index: i64 = 0
+        while index < MOLD_EVIDENCE_KEYS.len():
+            digests.push(_MOLD_HASH)
+            index = index + 1
+        val rendered = mold_render_completion_aggregate(digests)
+        expect(rendered.is_ok()).to_equal(true)
+        expect(rendered.unwrap()).to_start_with(
+            "schema=mold-linker-completion-v1\n" +
+            "linux_x86_64_internal=sha256:" + _MOLD_HASH)
+        expect(rendered.unwrap()).to_end_with(
+            "performance_gate=sha256:" + _MOLD_HASH + "\n")
+        expect(mold_render_completion_aggregate([_MOLD_HASH]).is_err()).to_equal(true)

@@ -254,6 +254,22 @@ remain open. The user-expanded completion boundary includes
 Windows x86_64 and therefore supersedes the earlier statement that COFF did not
 gate completion.
 
+The admitted aggregate producer is
+`src/app/test/mold_completion_receipt.spl`. It accepts exactly nine receipt
+paths in the fixed `MoldCompletionEvidence` order. Each input must use
+`mold-linker-evidence-v1`, name the expected gate, report `status=pass`, and
+bind a regular no-follow command transcript and result artifact with lowercase
+SHA-256 digests. The producer re-hashes both bound files, reads each receipt
+with a 16 KiB limit, and atomically writes the aggregate only after all nine
+validate. A digest-shaped text file alone therefore cannot open the gate.
+
+```text
+simple run src/app/test/mold_completion_receipt.spl -- \
+  <linux-x86-64> <linux-aarch64> <windows-x86-64> <compiler-corpus> \
+  <digest-parity> <simpleos-x86-64-boot> <simpleos-arm64-boot> \
+  <platform-receipts> <performance-gate>
+```
+
 Remote interpreter planning now has target-aware binary placement contracts:
 Linux `/usr/local/bin/simple`, Windows
 `C:\Program Files\Simple\simple.exe`, and SimpleOS `/usr/bin/simple`, with an
