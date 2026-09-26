@@ -246,6 +246,26 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
         val text = sec_addr(b, ".text")
         expect(text + 7 + s32(rd32(b, at(b, ".text", text + 3)))).to_equal(sec_addr(b, ".got"))
 
+    it "relaxes canonical global-dynamic TLS to initial-exec without a resolver PLT":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/tls_global_dynamic_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libtls_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(shdr_by_name(b, ".plt")).to_equal(-1)
+        val ro = sec_off(b, ".rela.dyn")
+        expect(rd32(b, ro + 8)).to_equal(18)
+        expect(dynsym_name(b, rd32(b, ro + 12))).to_equal("imported_tls")
+        val text = sec_addr(b, ".text")
+        val to = sec_off(b, ".text")
+        expect(b[to + 1]).to_equal(0x64)
+        expect(b[to + 2]).to_equal(0x48)
+        expect(b[to + 3]).to_equal(0x8b)
+        expect(b[to + 9]).to_equal(0x48)
+        expect(b[to + 10]).to_equal(0x03)
+        expect(b[to + 11]).to_equal(0x05)
+        expect(text + 17 + s32(rd32(b, to + 13))).to_equal(sec_addr(b, ".got"))
+
 describe "elf_link_structural - x86_64 dynamic PIE":
     it "is ET_DYN with DT_FLAGS_1 PIE and the same PLT/GOT shape":
         val b = structural(ELF_LINK_DYNAMIC_PIE)
