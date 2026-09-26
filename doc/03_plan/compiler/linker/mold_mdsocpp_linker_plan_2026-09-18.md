@@ -168,6 +168,8 @@ positive bound and replaces ABS32 truncation with a named failure.
 and architectural reach before patching only their instruction immediate fields.
 `R_AARCH64_ADR_PREL_LO21` now patches byte-granular signed ADR deltas while
 preserving opcode and destination-register bits and rejecting overflow.
+`R_AARCH64_LD_PREL_LO19` now checks literal-load alignment and ±1 MiB reach,
+then patches only the instruction's imm19 field.
 
 The x86_64 local-exec set now includes both instruction-field `TPOFF32` and
 data-word `TPOFF64`, with the latter checked against an lld static oracle.
