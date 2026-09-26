@@ -71,7 +71,7 @@ int main(void) {
     }
 
     if (rt_atomic_int_load(-1) != 0 ||
-        rt_atomic_int_load((spl_i64)SIMPLEOS_ATOMIC_SLOT_CAPACITY + 1) != 0)
+        rt_atomic_int_load(0x7fffffffffffffffLL) != 0)
         return 17;
     rt_atomic_int_store(-1, 99);
     if (rt_atomic_int_swap(-1, 99) != 0 ||
@@ -87,12 +87,18 @@ int main(void) {
     if (rt_atomic_bool_load(flag) != 0 || rt_atomic_bool_fetch_not(flag) != 0)
         return 21;
 
-    spl_i64 allocated = 5 + THREADS;
-    while (allocated < (spl_i64)SIMPLEOS_ATOMIC_SLOT_CAPACITY) {
-        if (!rt_atomic_int_new(0)) return 22;
-        allocated++;
+    spl_i64 additional = 0;
+    while (additional <= (spl_i64)SIMPLEOS_ATOMIC_SLOT_CAPACITY) {
+        if (!rt_atomic_int_new(0)) break;
+        additional++;
     }
-    if (rt_atomic_int_new(0) != 0 || rt_atomic_bool_new(0) != 0) return 23;
+    if (additional > (spl_i64)SIMPLEOS_ATOMIC_SLOT_CAPACITY ||
+        rt_atomic_int_new(0) != 0 || rt_atomic_bool_new(0) != 0) return 22;
+    rt_atomic_int_free(later);
+    spl_i64 reused = rt_atomic_int_new(44);
+    if (!reused || reused == later || rt_atomic_int_load(later) != 0 ||
+        rt_atomic_int_load(reused) != 44) return 23;
+    if (rt_atomic_int_new(0) != 0) return 24;
     return 0;
 }
 #endif

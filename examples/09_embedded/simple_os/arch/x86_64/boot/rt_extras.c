@@ -887,74 +887,56 @@ RuntimeValue rt_async_run_until_complete(RuntimeValue future) { (void)future; re
 RuntimeValue rt_async_schedule_await(RuntimeValue future, RuntimeValue callback) { (void)future; (void)callback; return NIL_VALUE; }
 
 
-/* ---- rt_atomic_* (hardware atomics, also valid after SMP bring-up) ---- */
+/* ---- rt_atomic_* (shared freestanding slot owner) ---- */
 
-/* Keep the established boxed-handle ABI. The x86_64 __atomic builtins lower
- * to lock-prefixed instructions and do not require libatomic or a host OS. */
+typedef int64_t spl_i64;
+typedef uint64_t spl_u64;
+#include "../../../../../../src/runtime/startup/baremetal/atomic_slot_owner.inc.c"
+
 RuntimeValue rt_atomic_int_new(RuntimeValue initial) {
-    int64_t *p = (int64_t *)malloc(sizeof(int64_t));
-    if (!p) return 0;
-    __atomic_store_n(p, (int64_t)initial, __ATOMIC_SEQ_CST);
-    return (RuntimeValue)(uintptr_t)p;
+    return (RuntimeValue)simpleos_atomic_core_new((spl_i64)initial);
 }
 
 RuntimeValue rt_atomic_int_load(RuntimeValue handle) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    return p ? (RuntimeValue)__atomic_load_n(p, __ATOMIC_SEQ_CST) : 0;
+    return (RuntimeValue)simpleos_atomic_core_load((spl_i64)handle);
 }
 
 RuntimeValue rt_atomic_int_store(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (p) __atomic_store_n(p, (int64_t)value, __ATOMIC_SEQ_CST);
+    simpleos_atomic_core_store((spl_i64)handle, (spl_i64)value);
     return NIL_VALUE;
 }
 
 RuntimeValue rt_atomic_int_swap(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    return (RuntimeValue)__atomic_exchange_n(p, (int64_t)value, __ATOMIC_SEQ_CST);
+    return (RuntimeValue)simpleos_atomic_core_swap((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_compare_exchange(RuntimeValue handle, RuntimeValue current, RuntimeValue new_val) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    int64_t expected = (int64_t)current;
-    return __atomic_compare_exchange_n(p, &expected, (int64_t)new_val, 0,
-                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0;
+    return (RuntimeValue)simpleos_atomic_core_compare_exchange(
+        (spl_i64)handle, (spl_i64)current, (spl_i64)new_val);
 }
 
 RuntimeValue rt_atomic_int_fetch_add(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    return (RuntimeValue)__atomic_fetch_add(p, (int64_t)value, __ATOMIC_SEQ_CST);
+    return (RuntimeValue)simpleos_atomic_core_fetch_add((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_sub(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    return (RuntimeValue)__atomic_fetch_sub(p, (int64_t)value, __ATOMIC_SEQ_CST);
+    return (RuntimeValue)simpleos_atomic_core_fetch_sub((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_and(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    return (RuntimeValue)__atomic_fetch_and(p, (int64_t)value, __ATOMIC_SEQ_CST);
+    return (RuntimeValue)simpleos_atomic_core_fetch_and((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_or(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    return (RuntimeValue)__atomic_fetch_or(p, (int64_t)value, __ATOMIC_SEQ_CST);
+    return (RuntimeValue)simpleos_atomic_core_fetch_or((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_fetch_xor(RuntimeValue handle, RuntimeValue value) {
-    int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (!p) return 0;
-    return (RuntimeValue)__atomic_fetch_xor(p, (int64_t)value, __ATOMIC_SEQ_CST);
+    return (RuntimeValue)simpleos_atomic_core_fetch_xor((spl_i64)handle, (spl_i64)value);
 }
 
 RuntimeValue rt_atomic_int_free(RuntimeValue handle) {
-    (void)handle; /* bump allocator */
+    simpleos_atomic_core_free((spl_i64)handle);
     return NIL_VALUE;
 }
 
@@ -1001,8 +983,7 @@ RuntimeValue rt_atomic_bool_fetch_not(RuntimeValue handle) {
 }
 
 RuntimeValue rt_atomic_bool_free(RuntimeValue handle) {
-    (void)handle;
-    return NIL_VALUE;
+    return rt_atomic_int_free(handle);
 }
 
 
