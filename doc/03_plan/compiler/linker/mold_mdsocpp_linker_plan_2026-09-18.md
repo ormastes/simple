@@ -281,6 +281,10 @@ bare `/NODEFAULTLIB` suppresses all implicit defaults. Directive-owned archives
 are recomputed independently of explicit/configured/runtime libraries on each
 closure pass; contradictory selected-member policy fails after a bounded
 convergence limit rather than oscillating indefinitely.
+`/FAILIFMISMATCH:key=value` rows are merged exactly across root objects and
+selected archive members before layout. Repeated identical values are accepted,
+conflicting values fail closed with the key and values reported, and directives
+from unused archive members do not affect the link.
 
 The admitted aggregate producer is
 `src/app/test/mold_completion_receipt.spl`. It accepts exactly nine receipt

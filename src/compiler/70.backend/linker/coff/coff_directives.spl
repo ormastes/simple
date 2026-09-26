@@ -12,6 +12,7 @@ struct CoffDirectives:
     default_libraries: [text]
     excluded_default_libraries: [text]
     exclude_all_default_libraries: bool
+    fail_if_mismatch: {text: text}
     includes: [text]
     alternate_names: [CoffAlternateName]
 
@@ -44,6 +45,7 @@ fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
     var defaults: [text] = []
     var excluded_defaults: [text] = []
     var exclude_all_defaults = false
+    var mismatch: {text: text} = {}
     var includes: [text] = []
     var alternates: [CoffAlternateName] = []
     for token in tokens:
@@ -76,6 +78,15 @@ fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
             if not duplicate:
                 alternates = alternates.push(CoffAlternateName(
                     weak_name: parts[0], default_name: parts[1]))
+        elif lower.starts_with("/failifmismatch:") or lower.starts_with("-failifmismatch:"):
+            val value = token.substring("/failifmismatch:".len())
+            val parts = value.split("=")
+            if parts.len() != 2 or parts[0] == "" or parts[1] == "":
+                return Err("COFF /FAILIFMISMATCH requires key=value")
+            if mismatch.has(parts[0]) and mismatch[parts[0]] != parts[1]:
+                return Err("COFF /FAILIFMISMATCH '{parts[0]}' conflicts: " +
+                    "'{mismatch[parts[0]]}' versus '{parts[1]}'")
+            mismatch[parts[0]] = parts[1]
         elif lower.starts_with("/defaultlib") or lower.starts_with("-defaultlib"):
             return Err("malformed COFF /DEFAULTLIB directive")
         elif lower.starts_with("/nodefaultlib") or lower.starts_with("-nodefaultlib"):
@@ -84,15 +95,19 @@ fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
             return Err("malformed COFF /INCLUDE directive")
         elif lower.starts_with("/alternatename") or lower.starts_with("-alternatename"):
             return Err("malformed COFF /ALTERNATENAME directive")
+        elif lower.starts_with("/failifmismatch") or lower.starts_with("-failifmismatch"):
+            return Err("malformed COFF /FAILIFMISMATCH directive")
     Ok(CoffDirectives(default_libraries: defaults,
         excluded_default_libraries: excluded_defaults,
         exclude_all_default_libraries: exclude_all_defaults,
+        fail_if_mismatch: mismatch,
         includes: includes, alternate_names: alternates))
 
 fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text>:
     var defaults: [text] = []
     var excluded_defaults: [text] = []
     var exclude_all_defaults = false
+    var mismatch: {text: text} = {}
     var includes: [text] = []
     var alternates: [CoffAlternateName] = []
     for object in objects:
@@ -109,6 +124,12 @@ fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text
             for value in parsed.excluded_default_libraries:
                 excluded_defaults = _coff_directive_add_unique(excluded_defaults, value)
             if parsed.exclude_all_default_libraries: exclude_all_defaults = true
+            for key in parsed.fail_if_mismatch.keys():
+                val value = parsed.fail_if_mismatch[key]
+                if mismatch.has(key) and mismatch[key] != value:
+                    return Err("COFF /FAILIFMISMATCH '{key}' conflicts: " +
+                        "'{mismatch[key]}' versus '{value}'")
+                mismatch[key] = value
             for value in parsed.includes:
                 includes = _coff_directive_add_unique(includes, value)
             for alternate in parsed.alternate_names:
@@ -122,6 +143,7 @@ fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text
     Ok(CoffDirectives(default_libraries: defaults,
         excluded_default_libraries: excluded_defaults,
         exclude_all_default_libraries: exclude_all_defaults,
+        fail_if_mismatch: mismatch,
         includes: includes, alternate_names: alternates))
 
 fn _coff_library_key(name: text) -> text:

@@ -303,6 +303,37 @@ describe "internal freestanding Windows linker":
             entry: "_start"), [])
         expect(suppressed.unwrap().len()).to_equal(0)
 
+    it "enforces FAILIFMISMATCH for roots and selected archive members":
+        val compatible = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MT"),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MT")],
+            archives: [], entry: "_start"))
+        expect(compatible.is_ok()).to_equal(true)
+
+        val root_conflict = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MD"),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MT")],
+            archives: [], entry: "_start"))
+        expect(root_conflict.is_err()).to_equal(true)
+        expect(root_conflict.unwrap_err()).to_contain("FAILIFMISMATCH")
+
+        val reference = _cl_set_second_symbol_name(_cl_importing_object(), "forced")
+        val selected_conflict = coff_link_amd64(CoffLinkRequest(objects: [
+            reference, _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MD")],
+            archives: [_cl_archive(_cl_object_with_directive(
+                "forced", " /FAILIFMISMATCH:RuntimeLibrary=MT"))], entry: "_start"))
+        expect(selected_conflict.is_err()).to_equal(true)
+        expect(selected_conflict.unwrap_err()).to_contain("FAILIFMISMATCH")
+
+        val unused_conflict = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_directive_object(" /FAILIFMISMATCH:RuntimeLibrary=MD")],
+            archives: [_cl_archive(_cl_object_with_directive(
+                "unused", " /FAILIFMISMATCH:RuntimeLibrary=MT"))], entry: "_start"))
+        expect(unused_conflict.is_ok()).to_equal(true)
+
     it "uses .drectve ALTERNATENAME fallbacks for archive closure and relocation":
         val reference = _cl_set_second_symbol_name(_cl_importing_object(), "weak")
         val directive = _cl_directive_object(" /ALTERNATENAME:weak=strong")
