@@ -21,7 +21,7 @@
 # Limits (reported as errors, never silently degraded):
 #   - targets: x86_64 and aarch64; dynamic execution certification remains a
 #     platform-receipt concern rather than an image-construction restriction
-#   - TLS sections/PT_TLS and x86_64 local-exec TPOFF32 are emitted; other TLS
+#   - TLS sections/PT_TLS and x86_64 local/initial-exec are emitted; other TLS
 #     relocation models remain unsupported
 #   - no text relocs,
 #     no section GC, no COMDAT dedup, no symbol versioning
@@ -51,7 +51,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash,
     elf_plt_size, elf_plt0_size, elf_plt_entry_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt,
     elf_build_plt_x64, elf_build_gotplt_x64,
-    elf_build_dynamic, elf_build_interp,
+    elf_build_dynamic, elf_build_interp, elf_build_gnu_build_id,
     DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
@@ -62,9 +62,10 @@ use compiler.backend.linker.elf.synthetic_sections.{
 use compiler.backend.linker.elf.elf_exec_writer.{
     ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_plan, elf_exec_find, elf_write_image,
     ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW,
-    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOTE_E, SHT_NOBITS_E
 }
 use compiler.backend.linker.elf_writer.{align_up, write_zeros, write_bytes, write_u32_le, write_u64_le}
+use std.common.crypto.sha1.{sha1_bytes}
 
 val ELF_STATIC_BASE: i64 = 0x400000
 val SHN_ABS: i64 = 0xfff1
@@ -1101,6 +1102,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             elf_gnu_hash_size(sc.copy_names.len()), ELF_SEG_R), 0, ".dynsym", 0))
         secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4, elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".dynstr", SHT_STRTAB_E, SHF_ALLOC, 1, dynstr0.data.len(), ELF_SEG_R))
+    secs = secs.push(elf_out_sec(".note.gnu.build-id", SHT_NOTE_E, SHF_ALLOC, 4, 36, ELF_SEG_R))
     if n_rela_dyn > 0:
         var link = ""
         if dynamic:
@@ -1274,6 +1276,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             out = out.push(elf_build_hash(sc.imports))
         else if n == ".dynstr":
             out = out.push(dynstr0.data)
+        else if n == ".note.gnu.build-id":
+            out = out.push(elf_build_gnu_build_id([]))
         else if n == ".rela.dyn":
             out = out.push(rela_dyn)
         else if n == ".rela.plt":
@@ -1297,10 +1301,16 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         pk = pk + 1
 
     val entry_addr = elf_entry_addr(ctx, lay, res.defined[req.entry])?
-    val image = elf_write_image(e_type, machine, entry_addr, plan, out)
-    if strip_output:
-        return Ok(image)
-    elf_append_symtab(image, elf_build_symtab(ctx, lay)?)
+    var image = elf_write_image(e_type, machine, entry_addr, plan, out)
+    if not strip_output:
+        image = elf_append_symtab(image, elf_build_symtab(ctx, lay)?)
+    val digest = sha1_bytes(image)
+    val note_off = plan.offsets[elf_exec_find(plan, ".note.gnu.build-id")] + 16
+    var di: i64 = 0
+    while di < 20:
+        image[note_off + di] = digest.get(di)
+        di = di + 1
+    Ok(image)
 
 # ============================================================================
 # Exports

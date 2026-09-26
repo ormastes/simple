@@ -10,10 +10,12 @@
 use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use std.io_runtime.{file_read_bytes}
+use std.common.crypto.sha1.{sha1_bytes}
 
 val FIX: text = "test/fixtures/linker/elf"
 val PT_LOAD: i64 = 1
 val PT_TLS: i64 = 7
+val PT_NOTE: i64 = 4
 
 fn load_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("{FIX}/{name}")
@@ -73,6 +75,40 @@ fn link_a64() -> [i64]:
     r.unwrap()
 
 describe "elf_exec_writer - two-object static aarch64 exec":
+    it "emits a GNU SHA-1 build-id note covering the complete zeroed image":
+        val b = link_a64()
+        var note_off: i64 = -1
+        var note_size: i64 = 0
+        var i: i64 = 0
+        while i < rd16(b, 60):
+            val h = rd64(b, 40) + i * 64
+            if rd32(b, h + 4) == 7:
+                note_off = rd64(b, h + 24)
+                note_size = rd64(b, h + 32)
+            i = i + 1
+        expect(note_size).to_equal(36)
+        expect(rd32(b, note_off)).to_equal(4)
+        expect(rd32(b, note_off + 4)).to_equal(20)
+        expect(rd32(b, note_off + 8)).to_equal(3)
+        expect(rd32(b, note_off + 12)).to_equal(0x00554e47)
+        var zeroed = b
+        i = 0
+        while i < 20:
+            zeroed[note_off + 16 + i] = 0
+            i = i + 1
+        val digest = sha1_bytes(zeroed)
+        i = 0
+        while i < 20:
+            expect(b[note_off + 16 + i]).to_equal(digest.get(i))
+            i = i + 1
+        var has_note = false
+        i = 0
+        while i < rd16(b, 56):
+            if rd32(b, phdr_off(b, i)) == PT_NOTE:
+                has_note = true
+            i = i + 1
+        expect(has_note).to_equal(true)
+
     it "two-object static exec has PT_LOAD RX+RW and entry = _start":
         val b = link_a64()
         expect(b.len() > 64).to_equal(true)
