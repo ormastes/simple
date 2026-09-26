@@ -126,6 +126,14 @@ fn _coff_archive_satisfies(object: CoffObject, undefined: {text: bool}) -> bool:
             return true
     false
 
+fn _coff_archive_defines(members: [CoffArchiveMember], name: text) -> bool:
+    for member in members:
+        for symbol in member.object.symbols:
+            if symbol.name == name and symbol.is_external() and
+                    (symbol.is_defined() or symbol.is_absolute()):
+                return true
+    false
+
 fn coff_archive_closure(roots: [CoffObject], archives: [[u8]]) -> Result<CoffArchiveClosure, text>:
     """Select archive members until no unresolved external gains a provider."""
     coff_archive_closure_retained(roots, archives, [])
@@ -151,6 +159,11 @@ fn coff_archive_closure_retained_aliases(roots: [CoffObject], archives: [[u8]],
     for import_object in available_imports:
         library_symbols[import_object.public_name] = true
         library_symbols[import_object.iat_symbol()] = true
+    var effective_retained = retained_symbols
+    for special in ["_tls_used", "_load_config_used"]:
+        if _coff_archive_defines(candidate_members, special) and
+                not effective_retained.contains(special):
+            effective_retained = effective_retained.push(special)
     var taken: [bool] = []
     for _candidate in candidate_members: taken = taken.push(false)
     var selected: [CoffArchiveMember] = []
@@ -172,7 +185,7 @@ fn coff_archive_closure_retained_aliases(roots: [CoffObject], archives: [[u8]],
                 undefined, defined, library_symbols, member.object, aliases)
             if added.is_err(): return Err(added.unwrap_err())
             undefined = added.unwrap()
-        for name in retained_symbols:
+        for name in effective_retained:
             if name != "" and not defined.has(name):
                 val alternate = coff_resolve_alternate_name(name, aliases)
                 if alternate.is_err(): return Err(alternate.unwrap_err())
@@ -205,7 +218,7 @@ fn coff_archive_closure_retained_aliases(roots: [CoffObject], archives: [[u8]],
             final_undefined, final_defined, library_symbols, member.object, aliases)
         if added.is_err(): return Err(added.unwrap_err())
         final_undefined = added.unwrap()
-    for name in retained_symbols:
+    for name in effective_retained:
         if name != "" and not final_defined.has(name):
             val alternate = coff_resolve_alternate_name(name, aliases)
             if alternate.is_err(): return Err(alternate.unwrap_err())

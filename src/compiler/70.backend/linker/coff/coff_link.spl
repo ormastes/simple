@@ -357,6 +357,32 @@ fn coff_attach_amd64_tls_directory(sections: [PeImageSection],
         return Err("COFF _tls_used directory is not 40 file-backed bytes in an output section")
     Ok(result)
 
+fn coff_attach_amd64_load_config(sections: [PeImageSection],
+        directory_rva: i64) -> Result<[PeImageSection], text>:
+    """Attach the file-backed load-config structure using its declared size."""
+    var result = sections
+    var found = false
+    var index: i64 = 0
+    while index < result.len():
+        val section = result[index]
+        val offset = directory_rva - section.virtual_address
+        if offset >= 0 and offset + 4 <= section.data.len():
+            if found: return Err("COFF load-config directory overlaps multiple output sections")
+            val size_result = _coff_read_u32(section.data, offset)
+            if size_result.is_err(): return Err(size_result.unwrap_err())
+            val size = size_result.unwrap()
+            if size < 4 or offset + size > section.data.len():
+                return Err("COFF _load_config_used size {size} exceeds its file-backed bytes")
+            var updated = section
+            updated.load_config_offset = offset
+            updated.load_config_size = size
+            result[index] = updated
+            found = true
+        index = index + 1
+    if not found:
+        return Err("COFF _load_config_used is not file-backed in an output section")
+    Ok(result)
+
 fn _coff_global_symbol_rva(objects: [CoffObject], rvas: [[i64]], name: text) -> Result<i64, text>:
     var found = false
     var address: i64 = 0
@@ -827,6 +853,12 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
         output_sections = attached.unwrap()
     elif has_tls_data:
         return Err("COFF TLS data requires a defined _tls_used directory symbol")
+    val load_config = _coff_global_symbol_rva(objects, rvas, "_load_config_used")
+    if load_config.is_ok():
+        val attached = coff_attach_amd64_load_config(
+            output_sections, load_config.unwrap())
+        if attached.is_err(): return Err(attached.unwrap_err())
+        output_sections = attached.unwrap()
     if common_layout.size > 0:
         output_sections = output_sections.push(PeImageSection(name: ".bss",
             virtual_address: common_layout.virtual_address,
@@ -860,3 +892,4 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
 export CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained
 export coff_link_default_libraries
 export coff_attach_amd64_tls_directory
+export coff_attach_amd64_load_config

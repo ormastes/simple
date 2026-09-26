@@ -53,6 +53,38 @@ fn _ca_object(symbol: text, section: i64) -> [u8]:
     bytes = bytes.push(2).push(0)
     _ca_u32(bytes, 4)
 
+fn _ca_long_symbol_object(symbol: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ca_u16(bytes, 0x8664)
+    bytes = _ca_u16(bytes, 1)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 61)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_name(bytes, ".rdata")
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_u32(bytes, 60)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u32(bytes, 0x40000040)
+    bytes = bytes.push(0)
+    bytes = _ca_u32(bytes, 0).push(4).push(0).push(0).push(0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u16(bytes, 1)
+    bytes = _ca_u16(bytes, 0)
+    bytes = bytes.push(2).push(0)
+    bytes = _ca_u32(bytes, symbol.len() + 5)
+    var index: i64 = 0
+    while index < symbol.len():
+        bytes = bytes.push(symbol.byte_at(index) as u8)
+        index = index + 1
+    bytes.push(0)
+
 fn _ca_weak_object(policy: i64) -> [u8]:
     var bytes: [u8] = []
     bytes = _ca_u16(bytes, 0x8664)
@@ -125,3 +157,13 @@ describe "COFF archive closure":
                 _ca_archive("strong.obj", _ca_object("strong", 1))]).unwrap()
         expect(search_library.members.len()).to_equal(1)
         expect(search_library.members[0].name).to_equal("weak.obj")
+
+    it "extracts CRT loader metadata symbols when archives provide them":
+        val root = coff_parse_object(_ca_object("_start", 1)).unwrap()
+        val closure = coff_archive_closure([root], [
+            _ca_archive("tls.obj", _ca_long_symbol_object("_tls_used")),
+            _ca_archive("loadcfg.obj",
+                _ca_long_symbol_object("_load_config_used"))]).unwrap()
+        expect(closure.members.len()).to_equal(2)
+        expect(closure.members[0].name).to_equal("tls.obj")
+        expect(closure.members[1].name).to_equal("loadcfg.obj")

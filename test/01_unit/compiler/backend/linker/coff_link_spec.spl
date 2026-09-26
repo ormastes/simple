@@ -2,7 +2,8 @@ use std.spec.*
 use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
-    coff_link_default_libraries, coff_attach_amd64_tls_directory}
+    coff_link_default_libraries, coff_attach_amd64_tls_directory,
+    coff_attach_amd64_load_config}
 use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
 
@@ -286,6 +287,20 @@ describe "internal freestanding Windows linker":
             archives: [], entry: "_start"))
         expect(missing_directory.is_err()).to_equal(true)
         expect(missing_directory.unwrap_err()).to_contain("_tls_used")
+
+        directory[8] = 40
+        val config_sections = [PeImageSection(name: ".rdata",
+            virtual_address: 0x2000, virtual_size: 48, data: directory,
+            characteristics: 0x40000040)]
+        val load_config = coff_attach_amd64_load_config(
+            config_sections, 0x2008).unwrap()
+        expect(load_config[0].load_config_offset).to_equal(8)
+        expect(load_config[0].load_config_size).to_equal(40)
+        directory[8] = 64
+        val oversized = [PeImageSection(name: ".rdata", virtual_address: 0x2000,
+            virtual_size: 48, data: directory, characteristics: 0x40000040)]
+        expect(coff_attach_amd64_load_config(
+            oversized, 0x2008).is_err()).to_equal(true)
 
     it "uses .drectve INCLUDE symbols as archive closure roots":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [

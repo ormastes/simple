@@ -402,6 +402,11 @@ Implemented source slice:
   cannot initialize. Dollar-subsection grouping now applies even when the raw
   COFF name already fits eight bytes, so `.tls$*`, `.CRT$*`, and short
   `.text$*` names merge and sort under their base output section;
+- CRT loader metadata is now retained from otherwise-unreferenced archive
+  members when `_tls_used` or `_load_config_used` is advertised. A resolved
+  load-config structure publishes PE data-directory row 10 using its leading
+  declared `Size`; truncated, zero-sized, or non-file-backed structures fail
+  closed before image emission;
 - host-independent SimpleOS x86_64/arm64 routing through the existing
   `BootLayoutPlan` + `elf_boot_link` engine.
 
