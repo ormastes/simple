@@ -38,6 +38,7 @@ use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_o
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
 use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
+use compiler.backend.linker.elf.eh_frame_hdr.{elf_eh_frame_fde_count, elf_build_eh_frame_hdr}
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class, elf_x86_can_relax,
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
@@ -351,11 +352,13 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
             return 5
         if n == ".rela.plt":
             return 6
-        if n == ".rodata":
+        if n == ".eh_frame_hdr":
             return 7
-        if n == ".eh_frame":
+        if n == ".rodata":
             return 8
-        return 9
+        if n == ".eh_frame":
+            return 9
+        return 10
     if s.seg == ELF_SEG_RX:
         if n == ".text":
             return 20
@@ -1064,6 +1067,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         common_offsets: common.offsets, common_out: common.out_idx,
         copy_offsets: copies.offsets, copy_out: copies.out_idx)
     var contents = elf_static_contents(inputs)
+    val eh_out = elf_find_out(inputs.outs, ".eh_frame")
+    var eh_fdes: i64 = 0
+    if eh_out >= 0:
+        eh_fdes = elf_eh_frame_fde_count(contents[eh_out])?
 
     # --- synthetic section sizes (content comes after layout) ---
     val a64 = elf_target_is_a64(target)
@@ -1103,6 +1110,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4, elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".dynstr", SHT_STRTAB_E, SHF_ALLOC, 1, dynstr0.data.len(), ELF_SEG_R))
     secs = secs.push(elf_out_sec(".note.gnu.build-id", SHT_NOTE_E, SHF_ALLOC, 4, 36, ELF_SEG_R))
+    if eh_fdes > 0:
+        secs = secs.push(elf_out_sec(".eh_frame_hdr", SHT_PROGBITS_E, SHF_ALLOC, 4, 12 + eh_fdes * 8, ELF_SEG_R))
     if n_rela_dyn > 0:
         var link = ""
         if dynamic:
@@ -1278,6 +1287,9 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             out = out.push(dynstr0.data)
         else if n == ".note.gnu.build-id":
             out = out.push(elf_build_gnu_build_id([]))
+        else if n == ".eh_frame_hdr":
+            out = out.push(elf_build_eh_frame_hdr(contents[eh_out], elf_plan_addr(plan, ".eh_frame"),
+                elf_plan_addr(plan, ".eh_frame_hdr"))?)
         else if n == ".rela.dyn":
             out = out.push(rela_dyn)
         else if n == ".rela.plt":

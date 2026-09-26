@@ -16,6 +16,7 @@ val FIX: text = "test/fixtures/linker/elf"
 val PT_LOAD: i64 = 1
 val PT_TLS: i64 = 7
 val PT_NOTE: i64 = 4
+val PT_GNU_EH_FRAME: i64 = 0x6474e550
 
 fn load_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("{FIX}/{name}")
@@ -34,6 +35,11 @@ fn rd32(b: [i64], o: i64) -> i64:
 
 fn rd64(b: [i64], o: i64) -> i64:
     rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn s32(v: i64) -> i64:
+    if v >= 0x80000000:
+        return v - 0x100000000
+    v
 
 fn phdr_off(b: [i64], i: i64) -> i64:
     rd64(b, 32) + i * 56
@@ -138,6 +144,30 @@ describe "elf_exec_writer - two-object static aarch64 exec":
         expect((insn & 0x3ffffff) * 4).to_equal(0x3c - 0x24)
 
 describe "elf_exec_writer - two-object static x86_64 exec":
+    it "indexes relocated FDEs through .eh_frame_hdr and PT_GNU_EH_FRAME":
+        val r = elf_static_link([load_fixture("unwind_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var ph: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = phdr_off(b, i)
+            if rd32(b, p) == PT_GNU_EH_FRAME:
+                ph = p
+            i = i + 1
+        expect(ph > 0).to_equal(true)
+        expect(rd64(b, ph + 32)).to_equal(28)
+        val ho = rd64(b, ph + 8)
+        val hv = rd64(b, ph + 16)
+        expect(rd32(b, ho)).to_equal(0x3b031b01)
+        expect(rd32(b, ho + 8)).to_equal(2)
+        val eh = hv + 4 + s32(rd32(b, ho + 4))
+        val text = load_vaddr_with_flags(b, 5)
+        expect(hv + s32(rd32(b, ho + 12))).to_equal(text)
+        expect(hv + s32(rd32(b, ho + 16))).to_equal(eh + 0x18)
+        expect(hv + s32(rd32(b, ho + 20))).to_equal(text + 5)
+        expect(hv + s32(rd32(b, ho + 24))).to_equal(eh + 0x2c)
+
     it "emits PT_TLS spanning initialized .tdata and zero-file-byte .tbss":
         val r = elf_static_link([load_fixture("tls_sections_x64.o")], [], "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)

@@ -24,6 +24,7 @@ clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protec
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=initial-exec tls_import_x64.c -o tls_import_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector tls_provider_x64.c -o tls_provider_x64.o
 ld.lld -shared --soname libtls_x64.so -o libtls_x64.so.1 tls_provider_x64.o
+clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables unwind_x64.c -o unwind_x64.o
 ```
 
 Relocations exercised (`llvm-readelf -r`):
@@ -40,6 +41,7 @@ Relocations exercised (`llvm-readelf -r`):
 | tls_sections_x64.o | `.tdata` + `.tbss` with `SHF_TLS`, no TLS relocations (PT_TLS layout fixture) |
 | tls_local_exec_x64.o | R_X86_64_TPOFF32 (`local_tls`), resolved relative to the end of the static TLS block |
 | tls_import_x64.o | R_X86_64_GOTTPOFF (`imported_tls`), bound through a GOT slot carrying R_X86_64_TPOFF64 |
+| unwind_x64.o | two zR/pcrel-sdata4 FDEs indexed by `.eh_frame_hdr` |
 
 The specs depend on the exact byte offsets noted in them (e.g. the CALL26 at
 `_start+0x24`, x86_64 `call` rel32 at `.text+0x1d`); regenerate the specs'

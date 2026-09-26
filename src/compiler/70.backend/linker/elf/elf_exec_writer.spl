@@ -17,7 +17,7 @@
 # (offset mod page), so p_offset == p_vaddr (mod p_align) holds and no two
 # segments with different permissions share a page.
 #
-# Not produced (slice 2 limits): PT_GNU_EH_FRAME.
+# `.eh_frame_hdr` receives its dedicated read-only PT_GNU_EH_FRAME segment.
 
 use compiler.backend.linker.elf_writer.{
     ElfLayoutSection,
@@ -38,6 +38,7 @@ val PT_INTERP: i64 = 3
 val PT_NOTE: i64 = 4
 val PT_PHDR: i64 = 6
 val PT_TLS: i64 = 7
+val PT_GNU_EH_FRAME: i64 = 0x6474e550
 val PT_GNU_STACK: i64 = 0x6474e551
 val PT_GNU_RELRO: i64 = 0x6474e552
 val PF_X: i64 = 1
@@ -136,6 +137,7 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     var has_dynamic = false
     var has_relro = false
     var has_tls = false
+    var has_eh_frame_hdr = false
     var notes: i64 = 0
     var prev_seg: i64 = 0
     var seen_nobits = false
@@ -160,6 +162,8 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
             has_relro = true
         if s.sh_flags & SHF_TLS != 0:
             has_tls = true
+        if s.name == ".eh_frame_hdr":
+            has_eh_frame_hdr = true
         if s.sh_type == SHT_NOTE_E:
             notes = notes + 1
 
@@ -175,6 +179,8 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     if has_relro:
         phnum = phnum + 1
     if has_tls:
+        phnum = phnum + 1
+    if has_eh_frame_hdr:
         phnum = phnum + 1
 
     var offsets: [i64] = []
@@ -296,6 +302,13 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
             p_offset: offsets[first], p_vaddr: vaddrs[first], p_paddr: vaddrs[first],
             p_filesz: tls_filesz, p_memsz: vaddrs[last] + secs[last].size - vaddrs[first],
             p_align: tls_align))
+    if has_eh_frame_hdr:
+        var eh: i64 = 0
+        while eh < secs.len() and secs[eh].name != ".eh_frame_hdr":
+            eh = eh + 1
+        segs = segs.push(ElfExecSegment(p_type: PT_GNU_EH_FRAME, p_flags: PF_R,
+            p_offset: offsets[eh], p_vaddr: vaddrs[eh], p_paddr: vaddrs[eh],
+            p_filesz: secs[eh].size, p_memsz: secs[eh].size, p_align: 4))
     segs = segs.push(ElfExecSegment(p_type: PT_GNU_STACK, p_flags: PF_R | PF_W, p_offset: 0, p_vaddr: 0, p_paddr: 0,
         p_filesz: 0, p_memsz: 0, p_align: 0))
     k = 0
@@ -374,6 +387,6 @@ fn elf_write_image(e_type: i64, e_machine: i64, e_entry: i64, plan: ElfExecPlan,
 export ElfOutSec, ElfExecSegment, ElfExecPlan
 export elf_out_sec, elf_exec_plan, elf_exec_find, elf_write_image
 export ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW
-export PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_STACK, PT_GNU_RELRO, PF_X, PF_W, PF_R
+export PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_EH_FRAME, PT_GNU_STACK, PT_GNU_RELRO, PF_X, PF_W, PF_R
 export SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR
 export SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOTE_E, SHT_NOBITS_E
