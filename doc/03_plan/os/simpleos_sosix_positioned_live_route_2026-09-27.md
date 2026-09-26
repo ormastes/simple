@@ -23,6 +23,10 @@ and NFR requirements still require user selection.
   copied service message does not carry that authenticated task identity to
   `VfsService`. The current VFS IPC fd is also not a MountTable positioned
   file-object ID. Do not derive positioned authority from either number.
+- The kernel copied-receive status/header/payload now has one canonical
+  `OwnedIpcReceiveResult` type in `ipc_types.spl`, replacing the syscall's
+  local `any` view. It does not add sender provenance to the queue or wire;
+  the positioned control route remains uninstalled.
 
 ## Contract and owner placement
 
