@@ -337,6 +337,9 @@ Between upload and publication, the adapter hashes the selected local binary
 and requires the remote staging file to match that lowercase SHA-256. Linux
 and SimpleOS use `sha256sum`; Windows uses `Get-FileHash`. Missing hash tools,
 read failures, malformed local digests, or byte mismatches stop publication.
+The publication command carries the same digest and re-hashes the sibling copy
+after mode changes but before rename. A copy mismatch removes that sibling and
+leaves the installed interpreter untouched.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and

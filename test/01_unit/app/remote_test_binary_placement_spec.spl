@@ -5,6 +5,7 @@ use app.remote_test.binary_placement.{
     remote_simple_stage_guard_command, remote_simple_stage_verify_command,
     remote_simple_install_command}
 extern fn rt_file_read_text(path: text) -> text
+val TEST_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 describe "remote interpreter binary placement":
     it "maps every supported target filesystem to its installed Simple path":
@@ -37,19 +38,23 @@ describe "remote interpreter binary placement":
         expect(remote_simple_test_command("windows", "auto", "bad\npath.spl").is_err()).to_equal(true)
 
     it "renders atomic target-specific binary publication commands":
-        val linux = remote_simple_install_command("linux", "auto", "/tmp/simple upload").unwrap()
+        val linux = remote_simple_install_command("linux", "auto", "/tmp/simple upload", TEST_SHA256).unwrap()
         expect(linux).to_contain("cp -- '/tmp/simple upload' '/usr/local/bin/simple.remote-test-new'")
         expect(linux).to_contain("chmod 0755 -- '/usr/local/bin/simple.remote-test-new'")
         expect(linux).to_contain("rm -f -- '/tmp/simple upload'")
         expect(linux).to_end_with("mv -f -- '/usr/local/bin/simple.remote-test-new' '/usr/local/bin/simple'")
 
-        val simpleos = remote_simple_install_command("simpleos", "auto", "/tmp/simple").unwrap()
+        val simpleos = remote_simple_install_command("simpleos", "auto", "/tmp/simple", TEST_SHA256).unwrap()
         expect(simpleos).to_contain("'/usr/bin/simple.remote-test-new'")
 
-        val windows = remote_simple_install_command("windows", "auto", "C:\\Temp\\simple upload.exe").unwrap()
+        val windows = remote_simple_install_command("windows", "auto", "C:\\Temp\\simple upload.exe", TEST_SHA256).unwrap()
         expect(windows).to_contain("$dst = 'C:\\Program Files\\Simple\\simple.exe'")
         expect(windows).to_contain("Remove-Item -LiteralPath $src -Force")
         expect(windows).to_contain("Move-Item -LiteralPath $tmp -Destination $dst -Force")
+        expect(windows).to_contain("Get-FileHash -LiteralPath $tmp -Algorithm SHA256")
+        expect(windows).to_contain("publication copy SHA-256 mismatch")
+        expect(linux).to_contain("sha256sum -- '/usr/local/bin/simple.remote-test-new'")
+        expect(linux).to_contain("exit 75")
 
     it "renders a pre-upload absence guard for both mutable leaves":
         val linux = remote_simple_stage_guard_command("linux", "auto", "/tmp/simple upload").unwrap()
@@ -76,7 +81,7 @@ describe "remote interpreter binary placement":
         expect(upload).to_be_greater_than(guard)
 
     it "renders target-side SHA-256 verification for uploaded bytes":
-        val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val digest = TEST_SHA256
         val linux = remote_simple_stage_verify_command("linux", "/tmp/simple upload", digest).unwrap()
         expect(linux).to_contain("sha256sum -- '/tmp/simple upload'")
         expect(linux).to_contain("actual=${actual%% *}")
@@ -106,25 +111,26 @@ describe "remote interpreter binary placement":
         expect(publish).to_be_greater_than(verify)
 
     it "rejects unsafe Windows staging values and unknown automatic targets":
-        expect(remote_simple_install_command("windows", "auto", "bad\"stage.exe").is_err()).to_equal(true)
-        expect(remote_simple_install_command("plan9", "auto", "/tmp/simple").is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "bad\"stage.exe", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("plan9", "auto", "/tmp/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "/tmp/simple", "bad-digest").is_err()).to_equal(true)
 
     it "keeps uploads away from the live and sibling publication paths":
-        expect(remote_simple_install_command("linux", "auto", "").is_err()).to_equal(true)
-        expect(remote_simple_install_command("linux", "auto", "/usr/local/bin/simple").is_err()).to_equal(true)
-        expect(remote_simple_install_command("simpleos", "auto", "/usr/bin/simple.remote-test-new").is_err()).to_equal(true)
-        expect(remote_simple_install_command("windows", "auto", "c:/program files/simple/SIMPLE.EXE").is_err()).to_equal(true)
-        expect(remote_simple_install_command("win", "auto", "C:\\Program Files\\Simple\\simple.exe.remote-test-new").is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "/usr/local/bin/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("simpleos", "auto", "/usr/bin/simple.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "c:/program files/simple/SIMPLE.EXE", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("win", "auto", "C:\\Program Files\\Simple\\simple.exe.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
 
     it "rejects lexical aliases of live publication paths":
-        expect(remote_simple_install_command("linux", "auto", "/usr/local/lib/../bin/simple").is_err()).to_equal(true)
-        expect(remote_simple_install_command("simpleos", "auto", "/usr/lib/../bin/simple.remote-test-new").is_err()).to_equal(true)
-        expect(remote_simple_install_command("windows", "auto", "c:\\Program Files\\Other\\..\\Simple\\SIMPLE.EXE").is_err()).to_equal(true)
-        expect(remote_simple_install_command("win", "auto", "C:/Program Files/Simple/cache/../simple.exe.remote-test-new").is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "/usr/local/lib/../bin/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("simpleos", "auto", "/usr/lib/../bin/simple.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "c:\\Program Files\\Other\\..\\Simple\\SIMPLE.EXE", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("win", "auto", "C:/Program Files/Simple/cache/../simple.exe.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
 
     it "requires absolute staging and installed paths":
-        expect(remote_simple_install_command("linux", "auto", "tmp/simple").is_err()).to_equal(true)
-        expect(remote_simple_install_command("windows", "auto", "Temp\\simple.exe").is_err()).to_equal(true)
-        expect(remote_simple_install_command("windows", "auto", "1:\\Temp\\simple.exe").is_err()).to_equal(true)
-        expect(remote_simple_install_command("linux", "relative/simple", "/tmp/simple").is_err()).to_equal(true)
-        expect(remote_simple_install_command("windows", "Simple\\simple.exe", "C:\\Temp\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "tmp/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "Temp\\simple.exe", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "1:\\Temp\\simple.exe", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "relative/simple", "/tmp/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "Simple\\simple.exe", "C:\\Temp\\simple.exe", TEST_SHA256).is_err()).to_equal(true)

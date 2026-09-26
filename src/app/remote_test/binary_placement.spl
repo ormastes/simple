@@ -163,7 +163,7 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
     Err("remote-test cannot verify an uploaded binary for remote OS '{remote_os}'")
 
 fn remote_simple_install_command(remote_os: text, configured: text,
-        staged_path: text) -> Result<text, text>:
+        staged_path: text, expected_sha256: text) -> Result<text, text>:
     """Publish an uploaded binary at the target-owned Simple path.
 
     The caller uploads to `staged_path` first. Publication uses a sibling
@@ -172,6 +172,9 @@ fn remote_simple_install_command(remote_os: text, configured: text,
     """
     val binary = remote_simple_binary_path(remote_os, configured)
     if binary.is_err(): return Err(binary.unwrap_err())
+    val digest = expected_sha256.trim().lower()
+    if not _remote_sha256_valid(digest):
+        return Err("remote Simple expected SHA-256 must be 64 hexadecimal digits")
     val destination = binary.unwrap()
     val staging = _remote_validate_staging_path(remote_os, staged_path, destination)
     if staging.is_err(): return Err(staging.unwrap_err())
@@ -186,6 +189,9 @@ fn remote_simple_install_command(remote_os: text, configured: text,
             "$tmp = $dst + '.remote-test-new'; " +
             "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
             "Copy-Item -LiteralPath $src -Destination $tmp -Force; " +
+            "$actual = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant(); " +
+            "if ($actual -ne '" + digest + "') { Remove-Item -LiteralPath $tmp -Force; " +
+            "Write-Error 'remote-test publication copy SHA-256 mismatch'; exit 75 }; " +
             "Remove-Item -LiteralPath $src -Force; " +
             "Move-Item -LiteralPath $tmp -Destination $dst -Force\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
@@ -193,7 +199,11 @@ fn remote_simple_install_command(remote_os: text, configured: text,
         val target = _remote_posix_quote(destination)
         val temporary = _remote_posix_quote(destination + ".remote-test-new")
         return Ok("mkdir -p -- $(dirname -- " + target + ") && cp -- " + source + " " +
-            temporary + " && chmod 0755 -- " + temporary + " && rm -f -- " + source +
+            temporary + " && chmod 0755 -- " + temporary + " && { actual=$(sha256sum -- " +
+            temporary + ") || { rm -f -- " + temporary + "; exit 75; }; " +
+            "actual=${actual%% *}; if [ \"$actual\" != '" + digest + "' ]; then rm -f -- " +
+            temporary + "; echo 'remote-test publication copy SHA-256 mismatch' >&2; exit 75; fi; }" +
+            " && rm -f -- " + source +
             " && mv -f -- " + temporary + " " + target)
     Err("remote-test cannot render an install command for remote OS '{remote_os}'")
 
