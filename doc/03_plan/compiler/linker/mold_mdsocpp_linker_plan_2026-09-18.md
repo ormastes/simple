@@ -420,6 +420,11 @@ Implemented source slice:
   pointer table, ordinal table, and NUL-terminated names before PE
   data-directory row 0 is published. Truncated tables and out-of-range name
   ordinals fail closed;
+- `/EXPORT:name[=internal]` directives now retain archive providers and
+  synthesize deterministic `.edata` tables. Explicit ordinals, `NONAME`,
+  `DATA`, and `PRIVATE` are parsed as typed policy; duplicate ordinals,
+  conflicting declarations, missing targets, absolute targets, malformed
+  options, and mixed prebuilt/synthesized export directories fail closed;
 - object-only CodeView `.debug$*` streams are discarded from internal PE
   images instead of being treated as loadable sections. `debug=true` remains a
   named unsupported policy until PDB and PE debug-directory production exist;

@@ -18,7 +18,9 @@ use compiler.backend.linker.coff.archive_closure.{
     CoffArchiveClosure, coff_archive_closure_retained_aliases}
 use compiler.backend.linker.coff.pe_import_builder.{pe_build_amd64_imports}
 use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
+use compiler.backend.linker.coff.pe_export_builder.{pe_build_amd64_exports}
 use compiler.backend.linker.coff.coff_directives.{
+    CoffExportDirective,
     coff_collect_directives, coff_alternate_name_map, coff_resolve_alternate_name,
     coff_effective_default_libraries}
 
@@ -47,6 +49,7 @@ struct CoffPreparedLink:
     closure_roots: [text]
     aliases: {text: text}
     default_libraries: [text]
+    exports: [CoffExportDirective]
 
 fn _coff_read_u32(section: [u8], offset: i64) -> Result<i64, text>:
     if offset < 0 or offset + 4 > section.len(): return Err("32-bit relocation patch is outside its section")
@@ -602,6 +605,37 @@ fn _coff_global_symbol_address(objects: [CoffObject], rvas: [[i64]], name: text)
     if not found: return Err("unresolved external COFF symbol '{name}'")
     Ok(CoffResolvedAddress(address: address, absolute: absolute))
 
+fn _coff_export_symbol_rvas(exports: [CoffExportDirective],
+        objects: [CoffObject], rvas: [[i64]], import_symbols: {text: i64},
+        common_symbols: {text: i64}, aliases: {text: text}) -> Result<{text: i64}, text>:
+    var result: {text: i64} = {}
+    for exported in exports:
+        var name = exported.internal_name
+        if common_symbols.has(name):
+            result[name] = common_symbols[name]
+            continue
+        if import_symbols.has(name):
+            result[name] = import_symbols[name]
+            continue
+        var address = _coff_global_symbol_address(objects, rvas, name)
+        if address.is_err():
+            val address_error = address.unwrap_err()
+            if not address_error.contains("unresolved external"):
+                return Err(address_error)
+            val alternate = coff_resolve_alternate_name(name, aliases)
+            if alternate.is_err(): return Err(alternate.unwrap_err())
+            val target = alternate.unwrap()
+            if common_symbols.has(target): result[name] = common_symbols[target]
+            elif import_symbols.has(target): result[name] = import_symbols[target]
+            else:
+                address = _coff_global_symbol_address(objects, rvas, target)
+                if address.is_err(): return Err("COFF /EXPORT symbol not found: {name}")
+        if address.is_ok():
+            if address.unwrap().absolute:
+                return Err("COFF /EXPORT cannot target absolute symbol '{name}'")
+            result[name] = address.unwrap().address - PE_AMD64_IMAGE_BASE
+    Ok(result)
+
 fn _coff_relocation_symbol_address(objects: [CoffObject], rvas: [[i64]], object_index: i64,
         symbol: CoffSymbol, import_symbols: {text: i64},
         common_symbols: {text: i64}, aliases: {text: text}) -> Result<CoffResolvedAddress, text>:
@@ -807,9 +841,13 @@ fn _coff_prepare_link(request: CoffLinkRequest,
     if aliases_result.is_err(): return Err(aliases_result.unwrap_err())
     var aliases = aliases_result.unwrap()
     var alias_count = directives.alternate_names.len()
+    var export_count = directives.exports.len()
     var closure_roots = retained_symbols
     for name in directives.includes:
         if not closure_roots.contains(name): closure_roots = closure_roots.push(name)
+    for exported in directives.exports:
+        if not closure_roots.contains(exported.internal_name):
+            closure_roots = closure_roots.push(exported.internal_name)
     var closure = coff_archive_closure_retained_aliases(
         roots, request.archives, closure_roots, aliases)
     if closure.is_err(): return Err(closure.unwrap_err())
@@ -827,6 +865,12 @@ fn _coff_prepare_link(request: CoffLinkRequest,
             if not closure_roots.contains(name):
                 closure_roots = closure_roots.push(name)
                 roots_changed = true
+        if all_directives.exports.len() != export_count:
+            for exported in all_directives.exports:
+                if not closure_roots.contains(exported.internal_name):
+                    closure_roots = closure_roots.push(exported.internal_name)
+                    roots_changed = true
+            export_count = all_directives.exports.len()
         if all_directives.alternate_names.len() != alias_count:
             val more_aliases = coff_alternate_name_map(all_directives)
             if more_aliases.is_err(): return Err(more_aliases.unwrap_err())
@@ -842,7 +886,8 @@ fn _coff_prepare_link(request: CoffLinkRequest,
     for member in selected.members: objects = objects.push(member.object)
     Ok(CoffPreparedLink(objects: objects, selected: selected,
         closure_roots: closure_roots, aliases: aliases,
-        default_libraries: coff_effective_default_libraries(all_directives)))
+        default_libraries: coff_effective_default_libraries(all_directives),
+        exports: all_directives.exports))
 
 fn coff_link_default_libraries(request: CoffLinkRequest,
         retained_symbols: [text]) -> Result<[text], text>:
@@ -865,13 +910,15 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
     val selected = prepared.selected
     val closure_roots = prepared.closure_roots
     val aliases = prepared.aliases
+    val exports = prepared.exports
     for name in closure_roots:
         if name == "": continue
         var found = false
         for object in objects:
             for symbol in object.symbols:
                 if symbol.name == name and symbol.is_external() and
-                        (symbol.is_defined() or symbol.is_absolute()):
+                        (symbol.is_defined() or symbol.is_absolute() or
+                         (symbol.section_number == 0 and symbol.value > 0)):
                     found = true
         for import_object in selected.imports:
             if import_object.public_name == name or import_object.iat_symbol() == name:
@@ -883,7 +930,8 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
             for object in objects:
                 for symbol in object.symbols:
                     if symbol.name == target and symbol.is_external() and
-                            (symbol.is_defined() or symbol.is_absolute()):
+                            (symbol.is_defined() or symbol.is_absolute() or
+                             (symbol.section_number == 0 and symbol.value > 0)):
                         found = true
             for import_object in selected.imports:
                 if import_object.public_name == target or import_object.iat_symbol() == target:
@@ -914,6 +962,19 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
     val symbols_valid = _coff_validate_symbols(objects, rvas,
         import_image.symbol_rvas, common_layout.symbol_rvas, aliases)
     if symbols_valid.is_err(): return Err(symbols_valid.unwrap_err())
+    var export_base_rva = import_base_rva
+    if import_image.thunk_data.len() > 0:
+        export_base_rva = import_thunk_rva +
+            pe_align_up(import_image.thunk_data.len(), PE_SECTION_ALIGNMENT)
+    if import_image.idata_data.len() > 0:
+        export_base_rva = import_idata_rva +
+            pe_align_up(import_image.idata_data.len(), PE_SECTION_ALIGNMENT)
+    val export_symbols = _coff_export_symbol_rvas(exports, objects, rvas,
+        import_image.symbol_rvas, common_layout.symbol_rvas, aliases)
+    if export_symbols.is_err(): return Err(export_symbols.unwrap_err())
+    val export_image = pe_build_amd64_exports(
+        exports, export_symbols.unwrap(), export_base_rva, "simple.exe")
+    if export_image.is_err(): return Err(export_image.unwrap_err())
     val entry = _coff_entry_rva(objects, rvas, request.entry)
     if entry.is_err(): return Err(entry.unwrap_err())
     var output_sections: [PeImageSection] = []
@@ -1019,10 +1080,12 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
             si = si + 1
         oi = oi + 1
     output_sections = _coff_merge_object_sections(output_sections)
+    if export_image.unwrap().len() > 0:
+        for section in output_sections:
+            if section.name == ".edata":
+                return Err("COFF /EXPORT directives conflict with an input .edata section")
     val resources_valid = coff_validate_resource_sections(output_sections)
     if resources_valid.is_err(): return Err(resources_valid.unwrap_err())
-    val exports_valid = coff_validate_export_sections(output_sections)
-    if exports_valid.is_err(): return Err(exports_valid.unwrap_err())
     val sorted_exception_table = coff_sort_amd64_exception_table(output_sections)
     if sorted_exception_table.is_err(): return Err(sorted_exception_table.unwrap_err())
     output_sections = sorted_exception_table.unwrap()
@@ -1057,6 +1120,13 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
             data: import_image.idata_data, characteristics: 0xc0000040,
             import_directory_size: import_image.descriptor_size,
             iat_offset: import_image.iat_offset, iat_size: import_image.iat_size))
+    if export_image.unwrap().len() > 0:
+        output_sections = output_sections.push(PeImageSection(name: ".edata",
+            virtual_address: export_base_rva,
+            virtual_size: export_image.unwrap().len(),
+            data: export_image.unwrap(), characteristics: 0x40000040))
+    val exports_valid = coff_validate_export_sections(output_sections)
+    if exports_valid.is_err(): return Err(exports_valid.unwrap_err())
     val base_relocations = pe_build_amd64_base_relocations(base_relocation_rvas)
     if base_relocations.is_err(): return Err(base_relocations.unwrap_err())
     if base_relocations.unwrap().len() > 0:
@@ -1067,6 +1137,9 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
         if import_image.idata_data.len() > 0:
             relocation_rva = import_idata_rva +
                 pe_align_up(import_image.idata_data.len(), PE_SECTION_ALIGNMENT)
+        if export_image.unwrap().len() > 0:
+            relocation_rva = export_base_rva +
+                pe_align_up(export_image.unwrap().len(), PE_SECTION_ALIGNMENT)
         output_sections = output_sections.push(PeImageSection(name: ".reloc",
             virtual_address: relocation_rva,
             virtual_size: base_relocations.unwrap().len(),
