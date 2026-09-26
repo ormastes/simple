@@ -1,0 +1,473 @@
+"""SOSIX termios (POSIX.1 terminal control) surface, v1 — user-side terminal
+state over an injected console backend vtable.
+
+The SOSIX interface doc (doc/05_design/os/sosix_posix_interface_v1.md, §6
+slice 4) defines this layer as the terminal lane's contract: what a ported
+line-oriented program (and clang's isatty(1) color-diagnostics probe) needs
+from a serial console. Like stdio_v1, this module makes NO kernel changes
+and imports NO kernel modules — the only backend contact is the injected
+SosixTermiosOpsV1 vtable (drain/flush_input hooks), so the whole contract
+is host-testable with a fake backend
+(test/01_unit/os/services/sosix_termios_v1_spec.spl).
+
+Numeric ABI parity: every constant below mirrors the guest
+src/os/libc/include/termios.h exactly (NCCS=32, the c_cc indices, the
+c_iflag/c_oflag/c_cflag/c_lflag bit values, the TCS*/TC*/TCIO* action
+codes, and the B* speed tokens B0/B9600/B19200/B38400/B115200 — the
+0x1002 encoding shared by Linux and FreeBSD). The c_lflag ISIG/ICANON/ECHO
+values also match os/services/tty_service.spl's Termios component layout,
+so a future kernel tty path can pass a termios struct through with no
+bit-remapping. Never change one side alone. Flag words are u64 here (the
+stdio_v1 idiom); the guest C header's tcflag_t/speed_t is 32-bit — the
+VALUES are the parity contract, this struct never crosses a syscall
+boundary in v1.
+
+Backend binding (guest): the console is the serial port. Output goes out
+through the fd-1/2 write path (id 32) with the DebugWrite (id 60)
+fallback — both are blocking per-byte writes, so a completed write IS the
+drain point and tcdrain has nothing left to wait for. Input arrives only
+when a program reads fd 0 (id 31; the Simple-kernel lanes route it to the
+serial async_io path, the arm64 C lane has no fd-0 input yet), so there
+is no user-reachable input queue for tcflush to discard. Both hooks are
+therefore honest no-ops in sosix_termios_console_ops_v1(), each with its
+rationale; when the kernel grows a real tty/input-queue path, a
+termios_v1_guest.spl takes over these two functions (the only change
+point). Until then the guest C facades in src/os/libc/simpleos_termios.c
+keep their documented ENOSYS fail-closed stance — this module is the
+Simple-side contract and the host-tested semantics, not a C rewrite.
+
+The contract, flag by flag:
+  - ICANON (c_lflag): STORED. No line discipline exists user-side, so
+    reads deliver bytes as they arrive; sosix_termios_read_size_v1()
+    below implements the canonical read-size decision (one line per
+    read) for whoever owns the read loop.
+  - ECHO/ECHOE/ECHOK/ECHONL (c_lflag): STORED, no echo is performed —
+    no line-discipline owner exists to do it.
+  - ISIG (c_lflag): STORED, no signal generation from the console.
+    tty_service.spl already implements the VINTR->SIGINT discipline
+    kernel-side; wiring it to this surface is a later slice.
+  - IEXTEN/NOFLSH/TOSTOP (c_lflag): STORED (defined for ported sources).
+  - ONLCR/OPOST (c_oflag): STORED, NOT applied — stdio writes bytes
+    as-is; output post-processing lands with the line-discipline owner.
+  - ICRNL/IXON and the other c_iflag bits: STORED, not enforced (same
+    reason).
+  - CS8/CREAD/CLOCAL (c_cflag): STORED. The PL011 driver sets 8N1 at
+    init; character-size/parity changes are not applied to hardware.
+  - VMIN/VTIME (c_cc): IMPLEMENTED as the non-canonical read policy in
+    sosix_termios_read_size_v1().
+  - Speeds: store-and-return (cfget/cfset{ispeed,ospeed}) — the serial
+    driver sets baud (115200) at init; cfset* does not touch hardware.
+  - tcdrain: calls the drain hook (guest: no-op — writes already block).
+  - tcflush: TCOFLUSH is a no-op success (no output queue); TCIFLUSH and
+    TCIOFLUSH call the flush_input hook (guest: no-op — no input queue).
+  - tcflow: validates the action, then no-op success for all four —
+    the console has no software flow-control path.
+
+isatty(fd): true exactly for fds 0/1/2. fd_table.spl binds 0/1/2 to the
+serial console at task launch; everything else (files, pipes, sockets) is
+not a tty. POSIX isatty returns 1/0 and sets errno=ENOTTY (25) on 0 —
+the bool here is the Simple-side form; the C facade applies the ENOTTY
+recipe: `if (!sosix_isatty_v1(fd)) { errno = ENOTTY; return 0; }`.
+Dup'd console fds (dup2(1, n)) are NOT recognized in v1 — no user-side
+fd-table introspection exists (recorded gap).
+
+stdio_v1's unconditional stdout line-buffering intentionally stays as-is
+this slice; probing isatty(1) from stdio is the documented follow-up.
+"""
+
+use os.services.sosix.errno_text_v1.{sosix_errno_name_v1}
+
+# === c_cc layout (parity: src/os/libc/include/termios.h) ===
+
+pub val SOSIX_TERMIOS_NCCS: u64 = 32
+pub val SOSIX_TERMIOS_VINTR: u64 = 0
+pub val SOSIX_TERMIOS_VQUIT: u64 = 1
+pub val SOSIX_TERMIOS_VERASE: u64 = 2
+pub val SOSIX_TERMIOS_VKILL: u64 = 3
+pub val SOSIX_TERMIOS_VEOF: u64 = 4
+pub val SOSIX_TERMIOS_VTIME: u64 = 5
+pub val SOSIX_TERMIOS_VMIN: u64 = 6
+pub val SOSIX_TERMIOS_VSTART: u64 = 8
+pub val SOSIX_TERMIOS_VSTOP: u64 = 9
+pub val SOSIX_TERMIOS_VSUSP: u64 = 10
+pub val SOSIX_TERMIOS_VEOL: u64 = 11
+export SOSIX_TERMIOS_NCCS
+export SOSIX_TERMIOS_VINTR, SOSIX_TERMIOS_VQUIT, SOSIX_TERMIOS_VERASE
+export SOSIX_TERMIOS_VKILL, SOSIX_TERMIOS_VEOF, SOSIX_TERMIOS_VTIME
+export SOSIX_TERMIOS_VMIN, SOSIX_TERMIOS_VSTART, SOSIX_TERMIOS_VSTOP
+export SOSIX_TERMIOS_VSUSP, SOSIX_TERMIOS_VEOL
+
+# === c_iflag bits (stored; not enforced — no line-discipline owner) ===
+
+pub val SOSIX_TERMIOS_BRKINT: u64 = 1
+pub val SOSIX_TERMIOS_ICRNL: u64 = 2
+pub val SOSIX_TERMIOS_IGNBRK: u64 = 4
+pub val SOSIX_TERMIOS_IGNCR: u64 = 8
+pub val SOSIX_TERMIOS_IGNPAR: u64 = 16
+pub val SOSIX_TERMIOS_INLCR: u64 = 32
+pub val SOSIX_TERMIOS_INPCK: u64 = 64
+pub val SOSIX_TERMIOS_ISTRIP: u64 = 128
+pub val SOSIX_TERMIOS_IXOFF: u64 = 256
+pub val SOSIX_TERMIOS_IXON: u64 = 512
+pub val SOSIX_TERMIOS_PARMRK: u64 = 1024
+export SOSIX_TERMIOS_BRKINT, SOSIX_TERMIOS_ICRNL, SOSIX_TERMIOS_IGNBRK
+export SOSIX_TERMIOS_IGNCR, SOSIX_TERMIOS_IGNPAR, SOSIX_TERMIOS_INLCR
+export SOSIX_TERMIOS_INPCK, SOSIX_TERMIOS_ISTRIP, SOSIX_TERMIOS_IXOFF
+export SOSIX_TERMIOS_IXON, SOSIX_TERMIOS_PARMRK
+
+# === c_oflag bits (stored; output post-processing is a follow-up) ===
+
+pub val SOSIX_TERMIOS_OPOST: u64 = 1
+pub val SOSIX_TERMIOS_ONLCR: u64 = 2
+export SOSIX_TERMIOS_OPOST, SOSIX_TERMIOS_ONLCR
+
+# === c_cflag bits (stored; PL011 is fixed 8N1 from init) ===
+
+pub val SOSIX_TERMIOS_CS8: u64 = 48
+pub val SOSIX_TERMIOS_CREAD: u64 = 128
+pub val SOSIX_TERMIOS_CLOCAL: u64 = 2048
+export SOSIX_TERMIOS_CS8, SOSIX_TERMIOS_CREAD, SOSIX_TERMIOS_CLOCAL
+
+# === c_lflag bits (parity: termios.h AND tty_service.spl's layout) ===
+
+pub val SOSIX_TERMIOS_ISIG: u64 = 1
+pub val SOSIX_TERMIOS_ICANON: u64 = 2
+pub val SOSIX_TERMIOS_ECHO: u64 = 8
+pub val SOSIX_TERMIOS_ECHOE: u64 = 16
+pub val SOSIX_TERMIOS_ECHOK: u64 = 32
+pub val SOSIX_TERMIOS_ECHONL: u64 = 64
+pub val SOSIX_TERMIOS_IEXTEN: u64 = 256
+pub val SOSIX_TERMIOS_NOFLSH: u64 = 512
+pub val SOSIX_TERMIOS_TOSTOP: u64 = 1024
+export SOSIX_TERMIOS_ISIG, SOSIX_TERMIOS_ICANON, SOSIX_TERMIOS_ECHO
+export SOSIX_TERMIOS_ECHOE, SOSIX_TERMIOS_ECHOK, SOSIX_TERMIOS_ECHONL
+export SOSIX_TERMIOS_IEXTEN, SOSIX_TERMIOS_NOFLSH, SOSIX_TERMIOS_TOSTOP
+
+# === tcsetattr optional_actions (parity: termios.h) ===
+
+pub val SOSIX_TERMIOS_TCSANOW: i64 = 0
+pub val SOSIX_TERMIOS_TCSADRAIN: i64 = 1
+pub val SOSIX_TERMIOS_TCSAFLUSH: i64 = 2
+export SOSIX_TERMIOS_TCSANOW, SOSIX_TERMIOS_TCSADRAIN, SOSIX_TERMIOS_TCSAFLUSH
+
+# === tcflush queue selectors (parity: termios.h) ===
+
+pub val SOSIX_TERMIOS_TCIFLUSH: i64 = 0
+pub val SOSIX_TERMIOS_TCOFLUSH: i64 = 1
+pub val SOSIX_TERMIOS_TCIOFLUSH: i64 = 2
+export SOSIX_TERMIOS_TCIFLUSH, SOSIX_TERMIOS_TCOFLUSH, SOSIX_TERMIOS_TCIOFLUSH
+
+# === tcflow actions (parity: termios.h) ===
+
+pub val SOSIX_TERMIOS_TCOOFF: i64 = 0
+pub val SOSIX_TERMIOS_TCOON: i64 = 1
+pub val SOSIX_TERMIOS_TCIOFF: i64 = 2
+pub val SOSIX_TERMIOS_TCION: i64 = 3
+export SOSIX_TERMIOS_TCOOFF, SOSIX_TERMIOS_TCOON
+export SOSIX_TERMIOS_TCIOFF, SOSIX_TERMIOS_TCION
+
+# === Baud tokens (opaque, NOT literal bps; parity: termios.h) ===
+# B115200 = 0x1002, the Linux/FreeBSD shared encoding for post-38400 speeds.
+
+pub val SOSIX_TERMIOS_B0: u64 = 0
+pub val SOSIX_TERMIOS_B9600: u64 = 13
+pub val SOSIX_TERMIOS_B19200: u64 = 14
+pub val SOSIX_TERMIOS_B38400: u64 = 15
+pub val SOSIX_TERMIOS_B115200: u64 = 4098
+export SOSIX_TERMIOS_B0, SOSIX_TERMIOS_B9600, SOSIX_TERMIOS_B19200
+export SOSIX_TERMIOS_B38400, SOSIX_TERMIOS_B115200
+
+# Errno numbers used below (os.kernel.errno ABI; names via errno_text_v1).
+val _SOSIX_TERMIOS_EIO: i64 = 5
+val _SOSIX_TERMIOS_EINVAL: i64 = 22
+
+pub struct SosixTermiosOpsV1:
+    """Console backend touchpoints — the only kernel contact, both honest
+    no-ops on today's guest (see the module doc for the rationale).
+
+    drain() -> 0 or -errno       wait for console TX to complete (tcdrain,
+                                 and tcsetattr's TCSADRAIN/TCSAFLUSH)
+    flush_input() -> 0 or -errno discard queued-but-unread console input
+                                 (tcflush's TCIFLUSH/TCIOFLUSH)
+
+    When the kernel grows a real tty/input-queue path, a
+    termios_v1_guest.spl replaces these two bindings and nothing else.
+    """
+    drain: fn() -> i64
+    flush_input: fn() -> i64
+
+fn _sosix_termios_drain_noop_v1() -> i64:
+    0
+
+fn _sosix_termios_flush_noop_v1() -> i64:
+    0
+
+pub fn sosix_termios_console_ops_v1() -> SosixTermiosOpsV1:
+    """The guest-console binding: both hooks are honest no-ops.
+
+    drain: fd-1/2 writes (id 32 with the id-60 fallback) block per byte
+    until the PL011 TX FIFO accepts each byte — when write() returns, the
+    console has already taken everything, so there is nothing to wait for.
+    flush_input: input arrives only when a program reads fd 0 (id 31);
+    no user-reachable input queue exists to discard, so discarding zero
+    queued bytes succeeds vacuously. Both become real hooks in
+    termios_v1_guest.spl when the kernel grows a tty path.
+    """
+    SosixTermiosOpsV1(
+        drain: _sosix_termios_drain_noop_v1,
+        flush_input: _sosix_termios_flush_noop_v1)
+
+pub class SosixTermiosV1:
+    """One termios attribute set (parity: the guest struct termios member
+    set). c_cc always holds exactly SOSIX_TERMIOS_NCCS entries."""
+    c_iflag: u64
+    c_oflag: u64
+    c_cflag: u64
+    c_lflag: u64
+    c_cc: [u8]
+    c_ispeed: u64
+    c_ospeed: u64
+
+impl SosixTermiosV1:
+    # === speed accessors (POSIX cf*speed; store-and-return, no hardware) ===
+
+    pub fn cfgetispeed() -> u64:
+        self.c_ispeed
+
+    pub fn cfgetospeed() -> u64:
+        self.c_ospeed
+
+    pub me cfsetispeed(speed: u64) -> i64:
+        """Store the input speed token; returns 0. The serial driver set
+        the real baud (115200) at init — cfset* never touches hardware,
+        and any token round-trips (parity with the guest C cfset*)."""
+        self.c_ispeed = speed
+        0
+
+    pub me cfsetospeed(speed: u64) -> i64:
+        """Store the output speed token; returns 0 (cfsetispeed's note
+        applies). B0 (hang-up) is stored like any other token."""
+        self.c_ospeed = speed
+        0
+
+    pub me cfsetspeed(speed: u64) -> i64:
+        """Set both speed tokens at once (BSD cfsetspeed); returns 0."""
+        self.c_ispeed = speed
+        self.c_ospeed = speed
+        0
+
+    pub me cfmakeraw():
+        """POSIX cfmakeraw: the raw-mode transform, byte-identical to the
+        guest C (src/os/libc/simpleos_termios.c): clear the cooked input
+        bits, OPOST, the echo/canonical/signal local bits; force CS8;
+        VMIN=1, VTIME=0."""
+        self.c_iflag = self.c_iflag & ~(SOSIX_TERMIOS_BRKINT | SOSIX_TERMIOS_ICRNL | SOSIX_TERMIOS_IGNBRK | SOSIX_TERMIOS_IGNCR | SOSIX_TERMIOS_INLCR | SOSIX_TERMIOS_INPCK | SOSIX_TERMIOS_ISTRIP | SOSIX_TERMIOS_IXON)
+        self.c_oflag = self.c_oflag & ~SOSIX_TERMIOS_OPOST
+        self.c_lflag = self.c_lflag & ~(SOSIX_TERMIOS_ECHO | SOSIX_TERMIOS_ECHONL | SOSIX_TERMIOS_ICANON | SOSIX_TERMIOS_IEXTEN | SOSIX_TERMIOS_ISIG)
+        self.c_cflag = (self.c_cflag & ~SOSIX_TERMIOS_CS8) | SOSIX_TERMIOS_CS8
+        self.c_cc[SOSIX_TERMIOS_VMIN] = 1
+        self.c_cc[SOSIX_TERMIOS_VTIME] = 0
+
+fn _sosix_termios_copy_v1(attrs: SosixTermiosV1) -> SosixTermiosV1:
+    """Deep copy: c_cc is rebuilt byte-by-byte so no array alias survives
+    (the deployed interpreter detaches inner-array aliases of globals)."""
+    var cc = [0u8; SOSIX_TERMIOS_NCCS]
+    var i = 0u64
+    while i < SOSIX_TERMIOS_NCCS:
+        cc[i] = attrs.c_cc[i]
+        i = i + 1
+    SosixTermiosV1(
+        c_iflag: attrs.c_iflag, c_oflag: attrs.c_oflag,
+        c_cflag: attrs.c_cflag, c_lflag: attrs.c_lflag, c_cc: cc,
+        c_ispeed: attrs.c_ispeed, c_ospeed: attrs.c_ospeed)
+
+pub fn sosix_termios_default_console_v1() -> SosixTermiosV1:
+    """The cooked serial-console defaults (FreeBSD-like): ICANON|ECHO|
+    ECHOK|ISIG|IEXTEN, ICRNL|IXON, OPOST|ONLCR, CS8|CREAD, B115200 both
+    directions (the PL011 init baud), ^C/^\\/^?/^U/^D/^Q/^S/^Z cc values,
+    VMIN=1, VTIME=0."""
+    var cc = [0u8; SOSIX_TERMIOS_NCCS]
+    cc[SOSIX_TERMIOS_VINTR] = 3
+    cc[SOSIX_TERMIOS_VQUIT] = 28
+    cc[SOSIX_TERMIOS_VERASE] = 127
+    cc[SOSIX_TERMIOS_VKILL] = 21
+    cc[SOSIX_TERMIOS_VEOF] = 4
+    cc[SOSIX_TERMIOS_VTIME] = 0
+    cc[SOSIX_TERMIOS_VMIN] = 1
+    cc[SOSIX_TERMIOS_VSTART] = 17
+    cc[SOSIX_TERMIOS_VSTOP] = 19
+    cc[SOSIX_TERMIOS_VSUSP] = 26
+    SosixTermiosV1(
+        c_iflag: SOSIX_TERMIOS_ICRNL | SOSIX_TERMIOS_IXON,
+        c_oflag: SOSIX_TERMIOS_OPOST | SOSIX_TERMIOS_ONLCR,
+        c_cflag: SOSIX_TERMIOS_CS8 | SOSIX_TERMIOS_CREAD,
+        c_lflag: SOSIX_TERMIOS_ICANON | SOSIX_TERMIOS_ECHO | SOSIX_TERMIOS_ECHOK | SOSIX_TERMIOS_ISIG | SOSIX_TERMIOS_IEXTEN,
+        c_cc: cc,
+        c_ispeed: SOSIX_TERMIOS_B115200, c_ospeed: SOSIX_TERMIOS_B115200)
+
+pub class SosixTerminalV1:
+    """The guest's serial console as a termios-controlled terminal: one
+    stored attribute set plus the injected backend hooks. isatty(fd) is
+    the free function sosix_isatty_v1 — the console owns fds 0/1/2."""
+    ops: SosixTermiosOpsV1
+    attrs: SosixTermiosV1
+    errno_val: i64
+
+impl SosixTerminalV1:
+    pub fn errno_name() -> text:
+        """Symbolic name of the last errno on this terminal (errno_text_v1)."""
+        sosix_errno_name_v1(self.errno_val)
+
+    me _fail(errno_value: i64) -> i64:
+        self.errno_val = errno_value
+        -1
+
+    me _fail_io(raw: i64):
+        val _ = self._fail(_sosix_positive_errno(raw))
+        0
+
+    # === POSIX tcgetattr/tcsetattr ===
+
+    pub fn tcgetattr() -> SosixTermiosV1:
+        """POSIX tcgetattr: a deep copy of the stored attributes — mutating
+        the result cannot alias terminal state."""
+        _sosix_termios_copy_v1(self.attrs)
+
+    pub me tcsetattr(optional_actions: i64, attrs: SosixTermiosV1) -> i64:
+        """POSIX tcsetattr: TCSANOW applies at once; TCSADRAIN drains
+        output first; TCSAFLUSH drains, applies, then discards unread
+        input. A drain failure leaves the old attributes in force; a
+        flush failure reports -1 with the new attributes already applied
+        (POSIX leaves this unspecified). Unknown optional_actions fails
+        EINVAL without touching state. 0 or -1."""
+        if optional_actions != SOSIX_TERMIOS_TCSANOW and optional_actions != SOSIX_TERMIOS_TCSADRAIN and optional_actions != SOSIX_TERMIOS_TCSAFLUSH:
+            return self._fail(_SOSIX_TERMIOS_EINVAL)
+        if optional_actions == SOSIX_TERMIOS_TCSADRAIN or optional_actions == SOSIX_TERMIOS_TCSAFLUSH:
+            val rc = self.ops.drain()
+            if rc < 0:
+                self._fail_io(rc)
+                return -1
+        self.attrs = _sosix_termios_copy_v1(attrs)
+        if optional_actions == SOSIX_TERMIOS_TCSAFLUSH:
+            val rc = self.ops.flush_input()
+            if rc < 0:
+                self._fail_io(rc)
+                return -1
+        0
+
+    # === POSIX tcdrain/tcflush/tcflow ===
+
+    pub me tcdrain() -> i64:
+        """POSIX tcdrain: waits for output to drain via the backend hook.
+        Guest binding: no-op success — console writes already block per
+        byte, so a returned write() IS the drained point. 0 or -1."""
+        val rc = self.ops.drain()
+        if rc < 0:
+            self._fail_io(rc)
+            return -1
+        0
+
+    pub me tcflush(queue_selector: i64) -> i64:
+        """POSIX tcflush: TCOFLUSH is a no-op success (there is no output
+        queue — writes are synchronous); TCIFLUSH and TCIOFLUSH discard
+        unread input via the backend hook (guest: vacuous — no input
+        queue exists). Unknown selector fails EINVAL. 0 or -1."""
+        if queue_selector != SOSIX_TERMIOS_TCIFLUSH and queue_selector != SOSIX_TERMIOS_TCOFLUSH and queue_selector != SOSIX_TERMIOS_TCIOFLUSH:
+            return self._fail(_SOSIX_TERMIOS_EINVAL)
+        if queue_selector == SOSIX_TERMIOS_TCOFLUSH:
+            return 0
+        val rc = self.ops.flush_input()
+        if rc < 0:
+            self._fail_io(rc)
+            return -1
+        0
+
+    pub me tcflow(action: i64) -> i64:
+        """POSIX tcflow: validates the action, then succeeds as a
+        documented no-op — the serial console has no software
+        flow-control path (IXON/IXOFF are stored, not enforced).
+        Unknown action fails EINVAL. 0 or -1."""
+        if action != SOSIX_TERMIOS_TCOOFF and action != SOSIX_TERMIOS_TCOON and action != SOSIX_TERMIOS_TCIOFF and action != SOSIX_TERMIOS_TCION:
+            return self._fail(_SOSIX_TERMIOS_EINVAL)
+        0
+
+fn _sosix_positive_errno(raw: i64) -> i64:
+    """Negated-errno hook result to positive errno (EIO when malformed)."""
+    if raw < 0:
+        return -raw
+    _SOSIX_TERMIOS_EIO
+
+pub fn sosix_terminal_console_v1(ops: SosixTermiosOpsV1) -> SosixTerminalV1:
+    """The guest's serial console terminal: the cooked default attributes
+    over the injected backend hooks."""
+    SosixTerminalV1(
+        ops: ops, attrs: sosix_termios_default_console_v1(), errno_val: 0)
+
+pub fn sosix_isatty_v1(fd: i64) -> bool:
+    """POSIX isatty: true exactly for fds 0/1/2 — fd_table.spl binds the
+    stdio fds to the serial console at task launch; files, pipes, and
+    sockets are not ttys. Dup'd console fds are not recognized in v1
+    (no user-side fd-table introspection). The C facade maps false to
+    `errno = ENOTTY; return 0`."""
+    fd >= 0 and fd <= 2
+
+pub fn sosix_termios_read_size_v1(
+    attrs: SosixTermiosV1, available: [u8], requested: u64, eof: bool
+) -> u64:
+    """The read-size decision for one console read, given the bytes
+    readable right now — the VMIN/VTIME and ICANON behavior as a pure
+    function so any read-loop owner gets identical semantics.
+
+    Returns how many bytes the read returns NOW; 0 means "nothing
+    returnable yet" (would-block in blocking modes, an empty poll in
+    VMIN=0/VTIME=0, or EOF) — the caller distinguishes those by its own
+    EOF state and these attributes.
+
+    - ICANON on: one line per read — through the first '\\n' (inclusive),
+      capped by requested. No newline yet: EOF drains the partial line,
+      otherwise 0 (would-block).
+    - ICANON off, VMIN=0, VTIME=0: pure poll — min(available, requested),
+      possibly 0, never blocks.
+    - ICANON off, VMIN=0, VTIME>0: min(available, requested) as the
+      timer-expiry answer; the caller owns the wait loop and clock.
+    - ICANON off, VMIN>0: min(available, requested) once at least VMIN
+      bytes are readable, else 0 (would-block) — the same shape for
+      VTIME=0 and VTIME>0; the inter-byte timer is the caller's wait.
+    - EOF (eof=true) in any mode: whatever is readable drains,
+      min(available, requested); a later read returns 0.
+    - requested==0: 0, no policy consulted."""
+    if requested == 0:
+        return 0
+    val avail = available.len()
+    if (attrs.c_lflag & SOSIX_TERMIOS_ICANON) != 0:
+        var i = 0u64
+        while i < avail:
+            if available[i] == 10:
+                if i + 1 < requested:
+                    return i + 1
+                return requested
+            i = i + 1
+        if eof:
+            if avail < requested:
+                return avail
+            return requested
+        return 0
+    if eof:
+        if avail < requested:
+            return avail
+        return requested
+    val vmin = attrs.c_cc[SOSIX_TERMIOS_VMIN] as u64
+    if vmin == 0:
+        if avail < requested:
+            return avail
+        return requested
+    if avail >= vmin:
+        if avail < requested:
+            return avail
+        return requested
+    0
+
+export SosixTermiosOpsV1, SosixTermiosV1, SosixTerminalV1
+export sosix_termios_console_ops_v1, sosix_termios_default_console_v1
+export sosix_terminal_console_v1, sosix_isatty_v1
+export sosix_termios_read_size_v1

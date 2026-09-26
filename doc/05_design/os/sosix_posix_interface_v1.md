@@ -1,8 +1,9 @@
 # SOSIX POSIX-compatibility interface V1
 
 Date: 2026-09-26. Status: interface definition + vertical slices 1 (uname),
-2 (stdio), and 3 (mmap arena). SimpleOS program roadmap point 2. AArch64
-lanes only; no x86 surface is defined or implied by this document.
+2 (stdio), 3 (mmap arena), and 4 (termios). SimpleOS program roadmap point
+2. AArch64 lanes only; no x86 surface is defined or implied by this
+document.
 
 SOSIX is the SimpleOS POSIX-compatibility interface layer: the contract that
 lets FreeBSD-style userland sources (and clang's runtime expectations) target
@@ -151,11 +152,26 @@ listed here is not SOSIX V1 and must be probed or avoided.
   `src/os/services/sosix/stdio_v1.spl` (vertical 2, roadmap item 1): fopen/fdopen/fclose/fflush,
   fread/fwrite/fgets/fgetc/fputc/fseek/ftell/rewind/feof/ferror/clearerr/
   setvbuf/fileno over an injected ops vtable (ids 30-33/46; no kernel changes),
-  with stdin/stdout/stderr pre-opened on fds 0/1/2 (stdout line-buffered,
-  stderr unbuffered, stdin line-buffered input; no tty probing until the
+  with stdin/stdout/stderr pre-opened on fds 0/1/2 (stdout line-buffered
+  unconditionally, stderr unbuffered, stdin line-buffered input; the isatty
+  probe into this buffering is the documented follow-up in §6, not the
   termios slice). `stdio_v1_guest.spl` wires the vtable to the raw ids with
   the DebugWrite (id 60) console fallback. The guest toolchain's C stdio
   remains the lane-C1 sysroot's `libsimpleos_c.a`, not the kernel.
+- **termios**: the SOSIX terminal-attribute surface lives in
+  `src/os/services/sosix/termios_v1.spl` (vertical 4, roadmap item 2):
+  tcgetattr/tcsetattr (TCSANOW/TCSADRAIN/TCSAFLUSH), isatty(fd) (true
+  exactly for fds 0/1/2, the serial console), tcdrain/tcflush/tcflow
+  (backend hooks; honest no-ops on today's guest), and
+  cfget/cfset{ispeed,ospeed} (store-and-return — the serial driver sets
+  baud at init), over an injected drain/flush_input ops vtable (no kernel
+  changes). Every constant mirrors the guest `<termios.h>` numeric ABI
+  (NCCS=32, flag bits, B0..B115200); ICANON/VMIN/VTIME are implemented as
+  the pure read-size policy `sosix_termios_read_size_v1`, while ECHO/ISIG/
+  ONLCR and the remaining flags are stored but not enforced (no
+  line-discipline owner exists yet — see the module doc's flag-by-flag
+  contract). The guest C facades (`src/os/libc/simpleos_termios.c`) keep
+  their ENOSYS fail-closed stance until a kernel tty path exists.
 - **malloc**: guest libc dlmalloc arena over anonymous `mmap` (id 10); the
   arm64 heap is still the bump arena on the live dispatch path — the
   free-list arena (vertical 3) replaces it when the id-10 case arm flips.
@@ -229,19 +245,42 @@ arms (the Simple-kernel `case 10/11/12` in `syscall.spl` →
 line per arm plus per-AS arena instantiation at launch, gated on the R4
 lane's QEMU boot cycle. No R4-owned file was touched by this slice.
 
+Delivered as V1 vertical 4 (termios, roadmap item 2): the SOSIX
+terminal-attribute surface (`src/os/services/sosix/termios_v1.spl`) —
+tcgetattr/tcsetattr (TCSANOW/TCSADRAIN/TCSAFLUSH discipline over the
+injected drain/flush_input hooks), isatty(fd) (true exactly for fds
+0/1/2, the serial console; dup'd console fds unrecognized in v1),
+tcdrain/tcflush/tcflow (honest no-ops on today's guest, rationale in the
+module doc), cfget/cfset{ispeed,ospeed} (store-and-return; the PL011
+driver sets 115200 at init), and the pure ICANON/VMIN/VTIME read-size
+policy `sosix_termios_read_size_v1` — all over the
+`SosixTermiosOpsV1` vtable with no kernel imports, numeric ABI in parity
+with the guest `<termios.h>` (NCCS=32, flag bits, B0..B115200). Flag
+honesty: ICANON/VMIN/VTIME drive the read policy; ECHO/ECHOE/ECHOK/ECHONL/
+ISIG/ONLCR/OPOST/c_iflag/c_cflag are stored but not enforced (no
+line-discipline owner exists yet). Host-side spec:
+`test/01_unit/os/services/sosix_termios_v1_spec.spl` (28 examples over a
+fake console backend). No syscall ids consumed; stdio_v1's unconditional
+stdout line-buffering intentionally stays as-is this slice.
+
 Recommended next slices, in order:
 
 1. **mmap case-arm flip + file-backed `mmap`** — wire the verified arena
    into the id-10 family on the arm64 guest (one-line case arms + per-AS
    arena at launch; R4's QEMU cycle is the gate), then file-backed
    mappings (VFS read into the page source at map fault or map time).
-2. **termios** — the terminal lane's `tcgetattr`/`tcsetattr`/`isatty` over a
-   tty service; clang's driver probes `isatty(1)` for color diagnostics.
-   Once `isatty` exists, revisit stdio's unconditional stdout line
-   buffering to probe it.
-3. Routing id 92 in the arm64 C dispatch
+2. **stdio isatty probe** — stdio_v1 keeps its unconditional stdout
+   line-buffering (the termios slice deliberately did not touch it);
+   once a guest wires termios, probe `isatty(1)` so redirected stdout
+   becomes fully buffered (clang's driver probes `isatty(1)` for color
+   diagnostics — that probe now has an honest answer).
+3. **Kernel tty path** — a tty/input-queue syscall family plus
+   `termios_v1_guest.spl` (replacing the two honest no-op hooks), the
+   line-discipline owner that enforces ECHO/ISIG/ONLCR, and rewiring the
+   guest C termios facades off their ENOSYS fail-closed stance.
+4. Routing id 92 in the arm64 C dispatch
    (`arm64_dispatch_optional_shim(spl_handle_uname, ...)` — one line, owned by
    the clang-bringup lane) once the strong-shim guest-park issue documented in
    `baremetal_stubs.c` no longer applies to this path.
-4. OFD-aware stdio coordination (id 69): let a second FILE on a dup'd fd
+5. OFD-aware stdio coordination (id 69): let a second FILE on a dup'd fd
    detect the shared cursor instead of silently double-buffering it.
