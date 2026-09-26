@@ -1,7 +1,9 @@
 # macOS Cocoa ownership blocks admitted Stage 2 bootstrap
 
-Status: Cocoa artifact ownership fixed in this branch; Stage 2 admission
-rerun pending. Reproduced on aarch64-apple-darwin on 2026-09-27.
+Status: Cocoa artifact ownership fixed in this branch and passed in the
+isolated bootstrap retry. Stage 2 admission is blocked by the separate
+empty-CXX failure recorded in
+`macos_stage2_empty_cxx_after_cocoa_owner_2026-09-27.md`.
 
 ## Reproduction
 
@@ -70,4 +72,5 @@ message dispatch for the same source at the macOS 11 deployment target.
 The build script now resolves Xcode Clang through `xcrun --find clang`
 for this Objective-C file only and sets the macOS 11 target. A rebuilt
 dylib and the Cocoa owner checker both pass with that compiler. The
-cache-preserving bootstrap admission retry remains pending.
+cache-preserving bootstrap retry passed the Cocoa gate, then failed at
+Stage 2's empty CXX assignment; it admitted no runtime.

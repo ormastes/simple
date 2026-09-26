@@ -27,10 +27,10 @@ the managed `/srv/data` path fails ENOSYS instead of publishing an unowned FD.
 `open_file_description_complete_io_indeterminate_v1` and
 `open_file_description_cancel_undispatched_io_v1` now have owner
 implementations and a package-scoped behavior spec. They are **unverified**:
-the isolated macOS Stage 2 bootstrap stopped at the Cocoa runtime owner
-preflight before producing an admitted product runtime. The repaired Cocoa
-artifact check passes, but Stage 2 has not been rerun. See
-`macos_cocoa_runtime_owner_blocks_stage2_2026-09-27.md`. Ten originally
+the isolated macOS Stage 2 bootstrap first stopped at the Cocoa runtime
+owner preflight. The repaired Cocoa gate passed on retry, but Stage 2
+then failed on an empty CXX assignment before admitting a runtime. See
+`macos_stage2_empty_cxx_after_cocoa_owner_2026-09-27.md`. Ten originally
 missing definitions and the backend-binding mismatch remain.
 
 The owner now rejects ordinary close reservations for an OFD quarantined

@@ -11,8 +11,8 @@ are implementation inputs, not NVFS release evidence.
    missing VFS, descriptor, and OFD functions enumerated in
    `doc/08_tracking/bug/simpleos_positioned_fd_bridge_unresolved_2026-09-27.md`.
    Two OFD completion functions are implemented but await self-hosted tests;
-   the macOS Cocoa artifact ownership check now passes, while an immutable
-   Stage 2 admission rerun remains pending.
+   the macOS Cocoa artifact ownership check now passes, but Stage 2
+   admission is blocked by an empty CXX assignment in the hermetic build.
    Reconcile `OpenFileDescriptionBackendBindingV1` with the bridge's
    positioned binding and prove exact close, rollback, stale generation, and
    copyout failure semantics. Compile this capsule with an admitted
