@@ -53,11 +53,69 @@ last marker `aot:format:done` down to the exact statement. The SIGILL was the
    (`SIMPLE_COMPILER_PHASE_PROFILE=1` or extra `print`s flipped it to a clean
    `error: native-build worker exited with code 1`). The worker's own spilled
    stderr (`/tmp/native-build-stderr-<pid>-N.log`) always ended cleanly with
-   `error: ...`. **Not fixed** — no longer reachable for a passing build, but any
-   future worker failure can still be reported as SIGILL instead of its message.
-   Open: bisect `native_build_main.spl`'s `code != 0` branch; note
-   `std.nogc_sync_mut.io.process_ops.spl:1910 fn eprint` shadows the prelude
-   `eprint` program-wide (the worker log warns about it).
+   `error: ...`.
+
+   **MITIGATED, not root-caused, 2026-09-26 (later the same day).** Could not
+   reproduce a live rc=132 in this session: forcing the worker past its cheap
+   `SCV-E-SNAPSHOT` failure into a real compile (to get enough real output to
+   plausibly retrigger the trap) took >150s per attempt without finishing on
+   this 7.4 GiB host (`CAP_MEM_MAX=4G` under `scripts/resource/run_capped.shs`,
+   `SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1`), so the fix below is
+   **not verified by observing a clean non-signal exit from an actual rc=132
+   case** — only by exercising the same relay code path (`eprint_bounded` with
+   a 90 KB synthetic stderr, and the real `native-build` clean-failure repro
+   from this record's own "Symptom" section) with no crash, both before and
+   after.
+
+   What changed in `src/app/cli/native_build_main.spl`:
+   - The worker-failure relay (`eprint_bounded`, `native_build_print_failure_hints`,
+     the `code != 0` branch, the `code == 0`-but-no-output-file branch, and the
+     `SIMPLE_NO_STUB_FALLBACK` violation branch) now writes via
+     `std.nogc_sync_mut.io.stderr_ops.stderr_write` (a thin, non-builtin wrapper
+     over `rt_stderr_write`) instead of the bare `eprint` statement. `eprint` is
+     a compiler builtin that a co-compiled `fn eprint` in
+     `std.nogc_sync_mut.io.process_ops` shadows program-wide under the
+     interpreter but NOT under native/JIT codegen — two prior, independent
+     `eprint`-dispatch defects have this exact shape
+     (`doc/08_tracking/bug/stdlib_eprint_shadows_prelude_builtin_program_wide_2026-08-17.md`,
+     `doc/08_tracking/bug/eprint_loses_newline_on_jit_and_llvm_backend_2026-08-17.md`),
+     so a third one (this SIGILL) landing on the same builtin is a real
+     possibility, not proven. Routing through `stderr_write` removes the
+     dependency on that dispatch for the whole relay, whether or not THIS
+     defect turns out to be dispatch-related.
+   - New `native_build_last_diagnostic_line(stderr)` extracts the worker's own
+     last matching diagnostic line, and the `code != 0` branch now writes a
+     one-line summary (`error: native-build worker exited with code {code}.` +
+     `  worker error: <line>`) via `stderr_write` FIRST, before calling
+     `eprint_bounded(stderr)` (previously the bulk dump ran first and the
+     "exited with code" summary was the LAST statement in the branch, after
+     every signal/timeout arm). If the bulk dump traps for any reason,
+     including a cause this record has not identified, the essential fact
+     now already reached the terminal.
+   - Verified (bootstrap seed, `src/compiler_rust/target/bootstrap/simple`,
+     built 2026-09-26 14:40): the clean `SCV-E-SNAPSHOT` repro from this
+     record's "Symptom" section still exits 1 (not 132) after the change, and
+     the front-loaded summary line now appears in stderr BEFORE the
+     `!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!` bulk-dump marker, both for a
+     small (<12000 byte) and a >90000-byte captured worker stderr.
+   - Regression specs (both fail on the pre-fix source, pass on the fix):
+     `test/01_unit/app/cli_native_build_main_contract_spec.spl` — "prints the
+     worker's own error line before the crash-prone bulk relay" (ordering) and
+     "routes the worker-failure relay through the unambiguous stderr_write"
+     (dispatch). Both are source-content assertions (`file_read` + `to_contain`
+     / `index_of`), matching this spec file's existing convention for this CLI
+     entrypoint — they do not and cannot execute the native/JIT path that
+     actually traps.
+
+   **Still open:** the exact trapping statement was never directly observed
+   in this session (no gdb attach, no reproduced core), so "which statement
+   traps" from the original filing is unconfirmed, not fixed. Anyone who can
+   reproduce rc=132 again should re-attach gdb with this fix deployed and
+   confirm whether it now exits cleanly; if it still traps, the trap is
+   somewhere other than the `eprint`/`stderr_write` dispatch difference and
+   this mitigation should be noted as insufficient rather than removed (the
+   front-loaded summary line is a real improvement regardless: it survives a
+   trap wherever it occurs later in the same branch).
 
 Also observed, open: in the `both` branch the `case Err(error)` binding printed
 as `<fn:error>` (a `Value::Function` named `error`) — the interpreter resolved
