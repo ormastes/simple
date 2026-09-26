@@ -1,3 +1,7 @@
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+val MOLD_COMPLETION_RECEIPT_PATH: text = "build/linker/mold_completion_receipt.v1"
+
 enum MoldCompatibilityRole:
     LinkerDetection
     LinkerExecution
@@ -137,28 +141,84 @@ fn mold_completion_from_evidence(evidence: MoldCompletionEvidence) -> bool:
         evidence.simpleos_x86_64_boot and evidence.simpleos_arm64_boot and
         evidence.platform_receipts and evidence.performance_gate)
 
+fn mold_completion_receipt_row_valid(row: text, key: text) -> bool:
+    val prefix = key + "=sha256:"
+    if not row.starts_with(prefix):
+        return false
+    val digest = row.substring(prefix.len())
+    if digest.len() != 64:
+        return false
+    var i: i64 = 0
+    while i < digest.len():
+        val ch = digest[i:i + 1]
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn mold_completion_evidence_from_receipt(content: text) -> Result<MoldCompletionEvidence, text>:
+    """Parse the canonical aggregate of verified real-run receipt digests.
+
+    Rows are fixed-order and lowercase SHA-256 only. The producer/verifier owns
+    checking each referenced platform artifact before publishing this aggregate;
+    this consumer rejects partial, reordered, duplicated, or hand-wavy `pass`
+    values rather than silently treating them as evidence.
+    """
+    val rows = content.trim().split("\n")
+    if rows.len() != 10:
+        return Err("mold completion receipt must contain schema plus nine evidence rows")
+    if rows[0].trim() != "schema=mold-linker-completion-v1":
+        return Err("mold completion receipt has unsupported schema")
+    val keys = [
+        "linux_x86_64_internal",
+        "linux_aarch64_internal",
+        "windows_x86_64_internal",
+        "full_compiler_corpus",
+        "fast_bounded_digest_parity",
+        "simpleos_x86_64_boot",
+        "simpleos_arm64_boot",
+        "platform_receipts",
+        "performance_gate"
+    ]
+    var i: i64 = 0
+    while i < keys.len():
+        if not mold_completion_receipt_row_valid(rows[i + 1].trim(), keys[i]):
+            return Err("mold completion receipt row '{keys[i]}' is missing or invalid")
+        i = i + 1
+    Ok(MoldCompletionEvidence(
+        linux_x86_64_internal: true,
+        linux_aarch64_internal: true,
+        windows_x86_64_internal: true,
+        full_compiler_corpus: true,
+        fast_bounded_digest_parity: true,
+        simpleos_x86_64_boot: true,
+        simpleos_arm64_boot: true,
+        platform_receipts: true,
+        performance_gate: true
+    ))
+
 fn mold_is_pure_simple_linker_complete() -> bool:
     """Return whether this module is a complete in-process mold reimplementation."""
-    mold_completion_from_evidence(MoldCompletionEvidence(
-        linux_x86_64_internal: false,
-        linux_aarch64_internal: false,
-        windows_x86_64_internal: false,
-        full_compiler_corpus: false,
-        fast_bounded_digest_parity: false,
-        simpleos_x86_64_boot: false,
-        simpleos_arm64_boot: false,
-        platform_receipts: false,
-        performance_gate: false,
-    ))
+    val content = file_read_regular_no_follow_bounded(
+        MOLD_COMPLETION_RECEIPT_PATH, 4096)
+    if content.is_err():
+        return false
+    val parsed = mold_completion_evidence_from_receipt(
+        content.unwrap())
+    if parsed.is_err():
+        return false
+    mold_completion_from_evidence(parsed.unwrap())
 
 export MoldCompatibilityRole
 export MoldCompatibilityFeature
 export MoldLinkPlatform
 export MoldCompletionEvidence
+export MOLD_COMPLETION_RECEIPT_PATH
 export mold_default_linker_order
 export mold_supported_override_aliases
 export mold_bundled_search_suffixes
 export mold_compatibility_features
 export mold_platform_status
 export mold_completion_from_evidence
+export mold_completion_evidence_from_receipt
 export mold_is_pure_simple_linker_complete

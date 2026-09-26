@@ -44,6 +44,7 @@ use compiler.backend.linker.mold_compatibility.{
     mold_compatibility_features,
     mold_platform_status,
     mold_completion_from_evidence,
+    mold_completion_evidence_from_receipt,
     mold_is_pure_simple_linker_complete,
 }
 
@@ -192,3 +193,25 @@ describe "find_linker priority — mold-first invariant":
             simpleos_x86_64_boot: true, simpleos_arm64_boot: true,
             platform_receipts: false, performance_gate: false)
         expect(mold_completion_from_evidence(missing_windows_and_perf)).to_equal(false)
+
+    it "parses only a complete SHA-256-bound aggregate receipt":
+        val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val receipt = "schema=mold-linker-completion-v1\n" +
+            "linux_x86_64_internal=sha256:{digest}\n" +
+            "linux_aarch64_internal=sha256:{digest}\n" +
+            "windows_x86_64_internal=sha256:{digest}\n" +
+            "full_compiler_corpus=sha256:{digest}\n" +
+            "fast_bounded_digest_parity=sha256:{digest}\n" +
+            "simpleos_x86_64_boot=sha256:{digest}\n" +
+            "simpleos_arm64_boot=sha256:{digest}\n" +
+            "platform_receipts=sha256:{digest}\n" +
+            "performance_gate=sha256:{digest}\n"
+        val parsed = mold_completion_evidence_from_receipt(receipt)
+        expect(parsed.is_ok()).to_equal(true)
+        expect(mold_completion_from_evidence(parsed.unwrap())).to_equal(true)
+        val partial = mold_completion_evidence_from_receipt(
+            receipt.replace("performance_gate=sha256:{digest}\n", ""))
+        expect(partial.is_err()).to_equal(true)
+        val noncanonical = mold_completion_evidence_from_receipt(
+            receipt.replace("linux_x86_64_internal=sha256:0", "linux_x86_64_internal=sha256:A"))
+        expect(noncanonical.is_err()).to_equal(true)

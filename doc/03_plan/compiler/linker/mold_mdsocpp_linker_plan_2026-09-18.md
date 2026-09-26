@@ -61,7 +61,7 @@
 | **A10** COFF / Mach-O / FreeBSD / RISC-V | no | `L/pe_*.spl`, `L/macho_*.spl`, `backend/native/macho_writer.spl`, `L/msvc.spl`, new `L/{coff,macho}/**`, riscv rows of `L/reloc_engine.spl` by handoff from A4a | A7 | One capsule per format; external tool remains oracle; Windows ARM64 = new capability, not a regression fix | per platform red spec + native run on that OS; FreeBSD via `scripts/check/check-freebsd-bootstrap-qemu.shs --smoke` | opus |
 | **A11** conformance / perf | no | `test/05_perf/compiler/linker/**`; `scripts/check/check-link-mutation-gates.shs`; `doc/10_metrics/compiler/linker/` recipes | A7 | Paired runs vs pinned mold/lld, cold and warm; mutation gates from research §11 (each mutation must turn its gate red) | red: mutation script `--selftest` with 9 mutations → green; 2 % regression = investigation | sonnet |
 | **A12** SMF read dedup | no | `L/smf_reader.spl`; `L/obj_taker.spl`; `L/_SmfReaderMemory/**`; `L/smf_reader_memory.spl`; `T/compiler/backend/linker/smf_reader_*_spec.spl` | A1 | `smf_reader` becomes a file→`SmfReaderMemory` shim; pin `obj_taker` behaviour first | red: spec pins `objtaker_take_object` results on a fixture SMF before the swap → green after | sonnet |
-| **A13** completion gate | no | `L/mold_compatibility.spl`; `test/01_unit/os/memory/mold_linker_spec.spl`; `test/unit/os/memory/mold_linker_spec.spl` | G6 | Flip `mold_is_pure_simple_linker_complete()` to a computed value (internal engine wired for ELF x86_64+aarch64 and receipts prove it); edit both mirrors identically | red: both specs updated to expect `true` fail until G6 → green | sonnet |
+| **A13** completion gate | no | `L/mold_compatibility.spl`; `test/01_unit/os/memory/mold_linker_spec.spl`; `test/unit/os/memory/mold_linker_spec.spl` | G6 | Publish the verified `mold_completion_receipt.v1` aggregate after every platform/corpus/performance receipt exists; the predicate computes from its strict digest-bound rows | red: missing, partial, malformed, or symlinked aggregate remains `false`; complete verified aggregate → `true` | sonnet |
 
 **Start now in parallel (no shared files, no deps): A0, A1, A2, A4a, A5.** A3 starts when A2's struct names land (can stub against the design table in the meantime in its own file only).
 
@@ -230,7 +230,14 @@ extent rather than the undefined reference row's zero size, also checked against
 ## 13. Windows/Linux/SimpleOS completion continuation — 2026-09-26
 
 The compatibility predicate is now expressed as explicit receipt inputs instead
-of an undocumented literal. It remains fail-closed. Linux is implemented but
+of an undocumented literal. It remains fail-closed. The no-argument predicate
+reads `build/linker/mold_completion_receipt.v1`, whose strict v1 schema contains
+nine fixed-order `key=sha256:<lowercase-64-hex>` rows matching
+`MoldCompletionEvidence`. Missing, partial, reordered, duplicated, uppercase,
+or malformed rows keep completion false. The aggregate producer is the trust
+boundary and must verify each referenced real-run artifact before publishing
+its digest; the consumer uses a bounded no-follow regular-file read, and plain
+`pass` values are never accepted. Linux is implemented but
 not certified and SimpleOS is awaiting full boot evidence. Windows now has a
 fail-closed freestanding AMD64 COFF parser, relocation core, PE32+ writer, and
 `SIMPLE_LINKER=internal` route. Static `.lib` archive closure, COMDAT metadata,
