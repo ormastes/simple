@@ -351,6 +351,9 @@ Windows publication no longer relies on `Move-Item -Force`: an existing file
 is replaced with sibling-volume `System.IO.File.Replace`, an absent path uses
 `File.Move`, and a non-file destination fails closed. This preserves the old
 binary until the verified candidate is atomically committed.
+Linux and SimpleOS publication now reject symlink and non-regular installed
+leaves and use `mv -T`, preventing a destination directory from silently
+turning replacement into a move beneath the intended installed path.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and

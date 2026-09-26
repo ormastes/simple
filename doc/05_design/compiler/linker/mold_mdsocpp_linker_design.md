@@ -284,6 +284,9 @@ On Windows, an existing installed file is committed through
 `System.IO.File.Replace` and a first install through `System.IO.File.Move`;
 `Move-Item -Force` is not used because its overwrite sequence does not provide
 the required replace-without-an-absent-window contract.
+Linux and SimpleOS likewise reject symlink and non-regular installed leaves,
+then use `mv -T` so a destination directory can never reinterpret publication
+as a move into that directory.
 
 ## 14. Linux runtime and library input completion (2026-09-27)
 
