@@ -427,6 +427,62 @@ fn coff_sort_amd64_exception_table(
         index = index + 1
     Ok(result)
 
+fn coff_validate_resource_sections(
+        sections: [PeImageSection]) -> Result<bool, text>:
+    """Validate the offset-based resource tree before publishing directory 2."""
+    for section in sections:
+        if section.name != ".rsrc": continue
+        if section.data.len() < 16:
+            return Err("PE .rsrc root directory is truncated")
+        var pending: [i64] = [0]
+        var visited: {i64: bool} = {}
+        while pending.len() > 0:
+            val directory_offset = pending[pending.len() - 1]
+            pending = pending.slice(0, pending.len() - 1)
+            if visited.has(directory_offset):
+                return Err("PE .rsrc directory tree contains a cycle")
+            visited[directory_offset] = true
+            if directory_offset < 0 or directory_offset + 16 > section.data.len():
+                return Err("PE .rsrc directory header is out of bounds")
+            val named = _coff_read_u16(section.data, directory_offset + 12).unwrap()
+            val ids = _coff_read_u16(section.data, directory_offset + 14).unwrap()
+            val entry_count = named + ids
+            val entries_end = directory_offset + 16 + entry_count * 8
+            if entries_end > section.data.len():
+                return Err("PE .rsrc directory entries are out of bounds")
+            var entry: i64 = 0
+            while entry < entry_count:
+                val base = directory_offset + 16 + entry * 8
+                val name = _coff_read_u32(section.data, base).unwrap()
+                if (name & 0x80000000) != 0:
+                    val name_offset = name & 0x7fffffff
+                    if name_offset + 2 > section.data.len():
+                        return Err("PE .rsrc name length is out of bounds")
+                    val length = _coff_read_u16(section.data, name_offset).unwrap()
+                    if name_offset + 2 + length * 2 > section.data.len():
+                        return Err("PE .rsrc UTF-16 name is out of bounds")
+                val target = _coff_read_u32(section.data, base + 4).unwrap()
+                val target_offset = target & 0x7fffffff
+                if (target & 0x80000000) != 0:
+                    pending = pending.push(target_offset)
+                else:
+                    if target_offset + 16 > section.data.len():
+                        return Err("PE .rsrc data entry is out of bounds")
+                    val data_rva = _coff_read_u32(
+                        section.data, target_offset).unwrap()
+                    val data_size = _coff_read_u32(
+                        section.data, target_offset + 4).unwrap()
+                    val payload_offset = data_rva - section.virtual_address
+                    if payload_offset < 0 or
+                            payload_offset + data_size > section.data.len():
+                        return Err("PE .rsrc payload is not file-backed in the resource section")
+                    if _coff_read_u32(section.data,
+                            target_offset + 12).unwrap() != 0:
+                        return Err("PE .rsrc data entry reserved field must be zero")
+                entry = entry + 1
+        return Ok(true)
+    Ok(true)
+
 fn _coff_global_symbol_rva(objects: [CoffObject], rvas: [[i64]], name: text) -> Result<i64, text>:
     var found = false
     var address: i64 = 0
@@ -886,6 +942,8 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
             si = si + 1
         oi = oi + 1
     output_sections = _coff_merge_object_sections(output_sections)
+    val resources_valid = coff_validate_resource_sections(output_sections)
+    if resources_valid.is_err(): return Err(resources_valid.unwrap_err())
     val sorted_exception_table = coff_sort_amd64_exception_table(output_sections)
     if sorted_exception_table.is_err(): return Err(sorted_exception_table.unwrap_err())
     output_sections = sorted_exception_table.unwrap()
@@ -941,3 +999,4 @@ export coff_link_default_libraries
 export coff_attach_amd64_tls_directory
 export coff_attach_amd64_load_config
 export coff_sort_amd64_exception_table
+export coff_validate_resource_sections

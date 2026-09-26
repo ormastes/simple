@@ -3,7 +3,8 @@ use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
-    coff_attach_amd64_load_config, coff_sort_amd64_exception_table}
+    coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
+    coff_validate_resource_sections}
 use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
 
@@ -331,6 +332,40 @@ describe "internal freestanding Windows linker":
             virtual_size: 12, data: reversed, characteristics: 0x40000040)
         expect(coff_sort_amd64_exception_table(
             [invalid]).unwrap_err()).to_contain("BeginAddress")
+
+    it "validates the file-backed PE resource tree":
+        var resource: [u8] = []
+        resource = _cl_u32(resource, 0)
+        resource = _cl_u32(resource, 0)
+        resource = _cl_u16(resource, 0)
+        resource = _cl_u16(resource, 0)
+        resource = _cl_u16(resource, 0)
+        resource = _cl_u16(resource, 1)
+        resource = _cl_u32(resource, 1)
+        resource = _cl_u32(resource, 24)
+        resource = _cl_u32(resource, 0x2028)
+        resource = _cl_u32(resource, 4)
+        resource = _cl_u32(resource, 0)
+        resource = _cl_u32(resource, 0)
+        resource = resource.push(1).push(2).push(3).push(4)
+        val section = PeImageSection(name: ".rsrc", virtual_address: 0x2000,
+            virtual_size: 44, data: resource, characteristics: 0x40000040)
+        expect(coff_validate_resource_sections([section]).unwrap()).to_equal(true)
+        val truncated = PeImageSection(name: ".rsrc", virtual_address: 0x2000,
+            virtual_size: 1, data: [0 as u8], characteristics: 0x40000040)
+        expect(coff_validate_resource_sections([truncated]).is_err()).to_equal(true)
+
+        var cyclic: [u8] = []
+        while cyclic.len() < 24: cyclic = cyclic.push(0)
+        cyclic[14] = 1
+        cyclic[20] = 0
+        cyclic[21] = 0
+        cyclic[22] = 0
+        cyclic[23] = 0x80
+        val cycle = PeImageSection(name: ".rsrc", virtual_address: 0x2000,
+            virtual_size: 24, data: cyclic, characteristics: 0x40000040)
+        expect(coff_validate_resource_sections(
+            [cycle]).unwrap_err()).to_contain("cycle")
 
     it "uses .drectve INCLUDE symbols as archive closure roots":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [

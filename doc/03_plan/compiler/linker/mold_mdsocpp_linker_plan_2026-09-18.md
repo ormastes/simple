@@ -411,6 +411,10 @@ Implemented source slice:
   rows and sorted by relocated `BeginAddress` before PE emission, as required
   by the Windows x64 unwinder. Truncated rows and non-increasing function ranges
   fail closed; data-directory row 3 covers the sorted table;
+- `.rsrc$*` inputs merge into `.rsrc`, undergo bounded validation of directory
+  nodes, UTF-16 names, leaf records, cycles, reserved fields, and file-backed
+  payload ranges, then publish PE data-directory row 2. Malformed resource
+  objects cannot produce a loader-visible resource directory;
 - host-independent SimpleOS x86_64/arm64 routing through the existing
   `BootLayoutPlan` + `elf_boot_link` engine.
 
