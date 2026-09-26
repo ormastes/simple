@@ -193,6 +193,8 @@ Implemented source slice:
   Microsoft short-import decoding plus `.idata`/IAT/thunk synthesis, and both
   GNU and MSVC Windows `SIMPLE_LINKER=internal` routing without external
   fallback;
+- Windows SDK/CRT search-root discovery plus demand-driven system and
+  `simple_native_all` import-library closure for hosted runtime archives;
 - host-independent SimpleOS x86_64/arm64 routing through the existing
   `BootLayoutPlan` + `elf_boot_link` engine.
 

@@ -241,9 +241,12 @@ Windows capsule is layered as follows:
    materialization. Linked-image inspection remains in `pe_inspect.spl`.
 6. `_LinkerWrapper/native_linking.spl` is the only platform router and writes
    `internal:coff` output for explicit GNU and MSVC Windows requests. The
-   existing external MSVC/LLD path remains the
-   default until hosted imports/CRT, COMDAT selection, execution, and perf
-   evidence pass.
+   internal resolver combines configured paths, detected MSVC/SDK roots, and
+   the selected runtime-provider directory. It offers canonical Windows and
+   `simple_native_all` support import libraries to archive closure, which
+   extracts only members demanded by unresolved symbols. The existing external
+   MSVC/LLD path remains the default until hosted execution and perf evidence
+   pass.
 
 SimpleOS uses the existing `BootLayoutPlan` and `elf_boot_link`; the wrapper
 now routes explicit `internal` requests there for x86_64 and arm64 instead of

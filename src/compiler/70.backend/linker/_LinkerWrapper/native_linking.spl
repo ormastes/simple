@@ -1411,7 +1411,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
             args.push(flag)
-        var support_inputs = object_files
+        var support_inputs: [text] = []
+        for path in object_files: support_inputs.push(path)
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
         for flag in native_all_gnu_support_args(support_inputs, os_name, brew_prefix):
@@ -1542,15 +1543,37 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             val bytes = file_read_bytes(path)
             if internal_coff_is_archive(bytes): archives = archives.push(bytes)
             else: objects = objects.push(bytes)
-        var library_files: [text] = []
-        for library in config.libraries:
-            val path = internal_coff_library_file(library, config.library_paths)
-            if path == "": return Err("internal engine: COFF library '{library}' was not found")
-            if not library_files.contains(path): library_files = library_files.push(path)
+        var search_paths: [text] = []
+        for path in config.library_paths: search_paths.push(path)
+        for path in _find_msvc_lib_paths():
+            if not search_paths.contains(path): search_paths.push(path)
         var runtime_dir = config.runtime_path
         if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
-        for path in native_runtime_archive_inputs_for_platform(runtime_dir, config.runtime_bundle, true):
+        if runtime_dir != "" and runtime_dir != "none" and not search_paths.contains(runtime_dir):
+            search_paths.push(runtime_dir)
+        var library_files: [text] = []
+        for library in config.libraries:
+            val path = internal_coff_library_file(library, search_paths)
+            if path == "": return Err("internal engine: COFF library '{library}' was not found")
             if not library_files.contains(path): library_files = library_files.push(path)
+        val runtime_archives = native_runtime_archive_inputs_for_platform(
+            runtime_dir, config.runtime_bundle, true)
+        for path in runtime_archives:
+            if not library_files.contains(path): library_files = library_files.push(path)
+        var support_inputs = object_files
+        for path in runtime_archives: support_inputs.push(path)
+        var support_libraries = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib",
+            "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
+        for library in native_all_msvc_support_libraries(support_inputs):
+            if not support_libraries.contains(library): support_libraries.push(library)
+        # Do not make an unused SDK library an unconditional prerequisite.
+        # Adding every library found is safe because archive closure extracts
+        # members only for currently unresolved symbols; a genuinely missing
+        # import remains a named unresolved external below.
+        for library in support_libraries:
+            val path = internal_coff_library_file(library, search_paths)
+            if path != "" and not library_files.contains(path):
+                library_files = library_files.push(path)
         for path in library_files:
             val bytes = file_read_bytes(path)
             if not internal_coff_is_archive(bytes):
