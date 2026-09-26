@@ -60,8 +60,14 @@ impl Parser<'_> {
             ));
         }
 
-        // Check for `val generic T ...` — type constraint declaration
-        if self.check_identifier("generic") {
+        // Check for `val generic T ...` — type constraint declaration.
+        // `generic` is a contextual word, not a keyword: `val generic = x` and
+        // `val generic: T = x` are ordinary bindings (the self-hosted parser
+        // accepts them, e.g. src/compiler/99.loader/
+        // parser_lexical_mapping_authorization_v1.spl).
+        if self.check_identifier("generic")
+            && !matches!(self.peek_next().kind, TokenKind::Assign | TokenKind::Colon)
+        {
             return self.parse_val_generic(start_span);
         }
 
@@ -1670,6 +1676,21 @@ mod tests {
             "fn invalid(value: i64?) -> i64:\n    val Some(mut inner) = value else: return 0\n    return inner\n",
         );
         assert!(mutable_payload.parse().is_err());
+    }
+
+    #[test]
+    fn val_named_generic_is_an_ordinary_binding() {
+        // Regression: the seed treated every `val generic` as the start of a
+        // `val generic T` constraint and failed with
+        // "expected identifier, found Assign".
+        let mut plain = Parser::new("fn f() -> i64:\n    val generic = 3\n    generic\n");
+        assert!(plain.parse().is_ok(), "`val generic = 3` must parse");
+
+        let mut typed = Parser::new("fn f() -> i64:\n    val generic: i64 = 3\n    generic\n");
+        assert!(typed.parse().is_ok(), "`val generic: i64 = 3` must parse");
+
+        let mut constraint = Parser::new("val generic T limits [f32, i32]\n");
+        assert!(constraint.parse().is_ok(), "`val generic T limits [...]` must still parse");
     }
 
     #[test]
