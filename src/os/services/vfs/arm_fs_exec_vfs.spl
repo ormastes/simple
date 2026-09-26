@@ -50,6 +50,9 @@ extern fn rt_arm_payload_region_load_sectors(first_lba: u64, dst_off: u64, len: 
 @cfg(arm64)
 @unsafe(reason: "raw ARM payload-region byte probe ABI", capabilities: [ffi])
 extern fn rt_arm_payload_region_byte_at(off: u64) -> u64
+@cfg(arm64)
+@unsafe(reason: "raw ARM RAM-file payload-resident bridge ABI; returns file size or 0", capabilities: [ffi])
+extern fn rt_arm_svc_ram_payload_resident(path: text) -> u64
 
 @always_inline
 fn _sffi_arm_array_len_u32(arr: [u8]) -> u32:
@@ -118,6 +121,12 @@ fn _sffi_arm_payload_region_load_sectors(first_lba: u64, dst_off: u64, len: u64)
 fn _sffi_arm_payload_region_byte_at(off: u64) -> u64:
     unsafe(capabilities: [ffi]):
         rt_arm_payload_region_byte_at(off)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_svc_ram_payload_resident(path: text) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_svc_ram_payload_resident(path)
 
 var g_arm_blk: VirtioBlkDriver? = nil
 var g_arm_vfs_initialized: bool = false
@@ -509,6 +518,13 @@ pub fn arm_fs_exec_stream_payload_resident_v1(path: text) -> Result<u64, FsError
     """
     if not mount_path_canonical(path) or path == "/":
         return Err(FsError.InvalidArg)
+    # RAM-backed guest files first: the in-guest toolchain writes its outputs
+    # (e.g. /HELLO2.ELF) through the C file-syscall layer into kernel RAM
+    # files that the FAT32 namespace can never resolve.
+    val ram_size = _sffi_arm_svc_ram_payload_resident(path)
+    if ram_size > 0u64:
+        _arm_vfs_log("[vfs-read] ram-hit path={path} bytes={ram_size}")
+        return Ok(ram_size)
     val opened = g_vfs_positioned_open(path, OpenFlags.read_only())
     if opened.is_err():
         return Err(opened.unwrap_err())

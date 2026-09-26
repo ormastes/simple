@@ -4853,6 +4853,42 @@ static int svc_ram_find(const char *path)
     return -1;
 }
 
+/* R5 spawn bridge: the guest lld writes /HELLO2.ELF through the C
+ * file-syscall layer into g_svc_ram_files (RAM-backed, never on the FAT32
+ * image), so the FAT32-only resident stream cannot resolve it. Look the
+ * path up among the RAM-backed files; on a hit, lay the bytes into the raw
+ * payload region (same contract as the FAT32 cluster pump) and return the
+ * size. 0 means "not a RAM file" — the caller falls through to FAT32. */
+RuntimeValue rt_arm_svc_ram_payload_resident(RuntimeValue path_rv)
+{
+    RuntimeString *s = decode_string(path_rv);
+    if (!s || s->len == 0 || s->len >= 64) return (RuntimeValue)0ULL;
+    char path[64];
+    for (uint32_t i = 0; i < s->len; i++) path[i] = s->data[i];
+    path[s->len] = '\0';
+    /* TEMP DIAG: dump the RAM-file table so a size mismatch names the entry. */
+    for (int i = 0; i < SVC_MAX_RAM_FILES; i++) {
+        serial_puts("[ram-dump] i="); serial_put_dec(i);
+        serial_puts(" used="); serial_put_dec(g_svc_ram_files[i].used);
+        serial_puts(" size="); serial_put_dec((int64_t)g_svc_ram_files[i].size);
+        serial_puts(" path="); serial_puts(g_svc_ram_files[i].path);
+        serial_puts("\r\n");
+    }
+    int ri = svc_ram_find(path);
+    if (ri < 0) return (RuntimeValue)0ULL;
+    uint32_t size = g_svc_ram_files[ri].size;
+    serial_puts("[ram-dump] want="); serial_puts(path);
+    serial_puts(" ri="); serial_put_dec(ri);
+    serial_puts(" size="); serial_put_dec((int64_t)size);
+    serial_puts(" magic="); serial_put_hex(g_svc_ram_files[ri].ram ? g_svc_ram_files[ri].ram[0] : 0xEE);
+    serial_put_hex(g_svc_ram_files[ri].ram ? g_svc_ram_files[ri].ram[1] : 0xEE);
+    serial_puts("\r\n");
+    if (size == 0 || size > ARM_PAYLOAD_REGION_BYTES) return (RuntimeValue)0ULL;
+    g_arm_payload_region_size = size;
+    __builtin_memcpy(_arm_payload_region, g_svc_ram_files[ri].ram, size);
+    return (RuntimeValue)(uintptr_t)size;
+}
+
 static int svc_fd_alloc(void)
 {
     for (int i = 3; i < SVC_MAX_FDS; i++)
