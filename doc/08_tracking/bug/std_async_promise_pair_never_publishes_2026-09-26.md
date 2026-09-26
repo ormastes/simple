@@ -1,6 +1,6 @@
 # `std.async.Promise` does not publish its result to its returned `Future`
 
-**Status:** open; source defect confirmed on committed `5390c648662` (2026-09-26). A repair and behavioral spec are drafted in the isolated SOSIX worktree, but no source-matched pure-Simple run has admitted them. This is the RU-021 Future/Promise compatibility gap, not a claim that the whole canonical task bridge is fixed.
+**Status:** source mitigation committed, executable qualification open. The defect was confirmed on committed `5390c648662` (2026-09-26). `Future.complete` and a Promise-held shared Future now publish the value in source, with a real production-importing behavioral spec, but no source-matched pure-Simple run has admitted them. This is the RU-021 Future/Promise compatibility gap, not a claim that the whole canonical task bridge is fixed.
 
 ## Evidence
 
@@ -20,4 +20,4 @@ This differs from [the July anonymous-tuple report](async_spec_promise_future_an
 - The newer `bin/release/aarch64-apple-darwin-macho/simple` test command exited 139 during setup; its direct `run` command also identifies itself as a Rust-built bootstrap seed. Its diagnostic interpreter probe printed `false`, `true`, `42`, `false` after the draft patch, but this is **not** pure-Simple verification.
 - `bin/local/phase2-aarch64-apple-darwin/simple` exists, but no matching admission receipt was found for a general SPipe/test-runner claim. Do not substitute it for the required deployed self-hosted runner.
 
-Next: produce or identify an admitted source-matched pure-Simple test runner, run `test/01_unit/lib/nogc_async_mut/async_promise_pair_spec.spl` in interpreter and native modes, then execute the required `src/lib`, compiler, MCP/LSP and runtime smoke gates before merging the draft.
+Next: produce or identify an admitted source-matched pure-Simple test runner, run `test/01_unit/lib/nogc_async_mut/async_promise_pair_spec.spl` in interpreter and native modes, then execute the required `src/lib`, compiler, MCP/LSP and runtime smoke gates. Until those pass, the source change is unqualified and RU-021 remains open.

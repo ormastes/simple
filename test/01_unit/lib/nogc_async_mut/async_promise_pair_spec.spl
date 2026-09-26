@@ -1,0 +1,53 @@
+"""A Promise publishes exactly one value to its associated Future."""
+
+use std.spec.*
+use std.async.promise.{Promise}
+use std.async.poll.{Poll}
+
+describe "Promise and Future pair":
+    it "starts pending and publishes the completed value to the returned future":
+        val (future, promise) = Promise<i64>.new()
+        expect(future.is_ready()).to_be(false)
+        expect(promise.is_completed()).to_be(false)
+        expect(promise.complete(42)).to_be(true)
+        expect(promise.is_completed()).to_be(true)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(42)
+            case Poll.Pending: fail("completed promise left its future pending")
+
+    it "rejects a second completion and preserves the first value":
+        var pair = Promise<text>.new()
+        var future = pair[0]
+        var promise = pair[1]
+        expect(promise.complete("first")).to_be(true)
+        expect(promise.complete("second")).to_be(false)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal("first")
+            case Poll.Pending: fail("completed promise lost its first value")
+
+    it "keeps independent pairs isolated":
+        var first = Promise<i64>.new()
+        var second = Promise<i64>.new()
+        var first_future = first[0]
+        var first_promise = first[1]
+        var second_future = second[0]
+        var second_promise = second[1]
+        expect(first_promise.complete(7)).to_be(true)
+        expect(first_future.is_ready()).to_be(true)
+        expect(second_future.is_ready()).to_be(false)
+        expect(second_promise.complete(9)).to_be(true)
+        match second_future.poll():
+            case Poll.Ready(value): expect(value).to_equal(9)
+            case Poll.Pending: fail("second promise did not publish its own value")
+
+    it "rejects completion when its future was resolved independently":
+        var pair = Promise<i64>.new()
+        var future = pair[0]
+        var promise = pair[1]
+        expect(future.complete(12)).to_be(true)
+        expect(future.complete(14)).to_be(false)
+        expect(promise.complete(13)).to_be(false)
+        expect(promise.is_completed()).to_be(true)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(12)
+            case Poll.Pending: fail("independently resolved future became pending")
