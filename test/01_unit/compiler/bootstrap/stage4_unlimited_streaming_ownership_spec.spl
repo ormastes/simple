@@ -1,14 +1,18 @@
 use std.io.{file_read}
 use std.spec.{describe, it, expect}
-use compiler.driver.driver_phase_gates.{driver_streaming_surface_gate_values}
 
-val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
+# The streaming-surface selector lives in driver_phase_gates.spl
+# (driver_orchestration.spl only re-exports it); its entry authority is
+# driver_source_entry_closure_enabled since 5cee6490581.
 val PHASE_GATES = "src/compiler/80.driver/driver_phase_gates.spl"
+val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
 val PRODUCER = "scripts/bootstrap/bootstrap-from-scratch.sh"
 
 fn streaming_selector(source: text) -> text:
-    val start = source.index_of("pub fn driver_streaming_surface_enabled")
-    val end = source.index_of("impl CompilerDriver:")
+    val start = source.index_of("fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:")
+    val end = source.index_of("fn bootstrap_last_fixed_input")
+    if start < 0 or end <= start:
+        return ""
     source.substring(start, end)
 
 describe "Stage4 unlimited streaming ownership":
@@ -16,26 +20,32 @@ describe "Stage4 unlimited streaming ownership":
         val selector = streaming_selector(file_read(PHASE_GATES))
         expect(selector).to_contain("ctx.options.mode == CompileMode.Aot")
         expect(selector).to_contain("ctx.options.cli_mode_text == \"aot\"")
-        expect(selector.contains("ctx.options.low_memory")).to_equal(false)
+        expect(selector.contains("low_memory")).to_equal(false)
+        expect(selector.contains("LOW_MEMORY")).to_equal(false)
         expect(selector).to_contain("SIMPLE_STAGE4_STREAMING_SURFACES")
         expect(selector).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES")
 
     it "retains legacy Stage4 admission while adding the Stage3 owner gate":
-        val selector = streaming_selector(file_read(ORCHESTRATION))
-        expect(selector).to_contain("SIMPLE_BOOTSTRAP")
-        expect(selector).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES")
-        expect(selector).to_contain("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
-        expect(selector).to_contain("SIMPLE_BOOTSTRAP_STAGE4")
-        expect(selector).to_contain("SIMPLE_STAGE4_STREAMING_SURFACES")
+        val gates = file_read(PHASE_GATES)
+        val selector = streaming_selector(gates)
+        expect(selector).to_contain("(driver_env_get_opt(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\"")
+        expect(selector).to_contain("((driver_env_get_opt(\"SIMPLE_STAGE3_STREAMING_SURFACES\") ?? \"\") == \"1\" or")
+        expect(selector).to_contain("((driver_env_get_opt(\"SIMPLE_BOOTSTRAP_STAGE4\") ?? \"\") == \"1\" and")
+        expect(selector).to_contain("(driver_env_get_opt(\"SIMPLE_STAGE4_STREAMING_SURFACES\") ?? \"\") == \"1\")) and")
+        expect(selector).to_contain("driver_source_entry_closure_enabled(ctx) and")
         expect(selector).to_contain("ctx.options.backend != \"vhdl\"")
+        expect(gates).to_contain("(driver_env_get_opt(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\") ?? \"\") == \"1\"")
+        expect(file_read(ORCHESTRATION)).to_contain("pub use compiler.driver.driver_phase_gates.\{driver_streaming_surface_enabled}")
 
     it "keeps full workers while making Stage4 ownership unconditional across profiles":
+        # a54fc9c57cf made --low-memory opt-in (SIMPLE_NATIVE_LOW_MEMORY, default 0):
+        # it forced single-worker compilation regardless of --threads.
         val producer = file_read(PRODUCER)
         expect(producer).to_contain("execution_profile=incremental-unlimited")
-        expect(producer).to_contain("jobs=")
         expect(producer).to_contain("host_cpus")
         expect(producer).to_contain("--threads")
         expect(producer).to_contain("selfhost_jobs")
-        expect(producer).to_contain("--low-memory")
-        expect(producer).to_contain("SIMPLE_BOOTSTRAP_LOW_MEMORY=1")
+        expect(producer).to_contain("NATIVE_LOW_MEMORY=$\{SIMPLE_NATIVE_LOW_MEMORY:-0}")
+        expect(producer).to_contain("$([ \"$\{NATIVE_LOW_MEMORY}\" = 0 ] || printf -- --low-memory)")
+        expect(producer).to_contain("    SIMPLE_BOOTSTRAP_STAGE4=1 \\\n    SIMPLE_BOOTSTRAP_LOW_MEMORY=\"$\{NATIVE_LOW_MEMORY}\" \\\n    SIMPLE_STAGE4_STREAMING_SURFACES=1 \\")
         expect(producer.contains("stage4_low_memory=0")).to_equal(false)
