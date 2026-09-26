@@ -413,8 +413,10 @@ where
 
         let head_limit = max_bytes / 2 + max_bytes % 2;
         let tail_limit = max_bytes / 2;
-        let mut head = Vec::with_capacity(head_limit);
-        let mut tail = Vec::with_capacity(tail_limit);
+        // Cap the up-front reservation: an unlimited (-1) bound makes the
+        // limits ~usize::MAX / 2, which with_capacity would abort on.
+        let mut head = Vec::with_capacity(head_limit.min(64 * 1024));
+        let mut tail = Vec::with_capacity(tail_limit.min(64 * 1024));
         let mut total = 0_u64;
         let mut chunk = [0_u8; 8192];
         if let Some(mut pipe) = reader {
@@ -1375,8 +1377,16 @@ pub unsafe extern "C" fn rt_process_run_bounded(
         rt_tuple_set(tuple, 2, RuntimeValue::from_int(exit_code));
         tuple
     };
-    let Ok(max_output_bytes) = usize::try_from(max_output_bytes) else {
-        return make_tuple(b"", b"", -1);
+    // -1 means unlimited output, matching the C runtime's Windows owner
+    // (runtime_process.c win_process_run_capture). The std Windows
+    // process_run path passes -1; rejecting it made every spawn exit -1.
+    let max_output_bytes = if max_output_bytes == -1 {
+        usize::MAX
+    } else {
+        let Ok(max_output_bytes) = usize::try_from(max_output_bytes) else {
+            return make_tuple(b"", b"", -1);
+        };
+        max_output_bytes
     };
     let Some(cmd_str) = ptr_string(cmd_ptr, cmd_len, 1024 * 1024) else {
         return make_tuple(b"", b"", -1);
@@ -2067,6 +2077,21 @@ mod tests {
             assert!(stderr.starts_with("ERRHEAD"));
             assert!(stderr.ends_with("ERRTAIL"));
             assert!(stderr.contains("[output truncated: 198990 bytes omitted]"));
+        }
+    }
+
+    #[test]
+    fn test_process_run_bounded_minus_one_is_unlimited() {
+        unsafe {
+            let (cmd, args) = if cfg!(windows) {
+                ("cmd", runtime_args(&["/c", "echo hi& exit 3"]))
+            } else {
+                ("/bin/sh", runtime_args(&["-c", "echo hi; exit 3"]))
+            };
+            let result = rt_process_run_bounded(cmd.as_ptr(), cmd.len() as u64, args, 0, -1);
+
+            assert_eq!(rt_tuple_get(result, 2).as_int(), 3);
+            assert!(extract_string_test(rt_tuple_get(result, 0)).starts_with("hi"));
         }
     }
 
