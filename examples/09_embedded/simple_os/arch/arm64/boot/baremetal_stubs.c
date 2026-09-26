@@ -159,10 +159,57 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
 void rt_print_value(RuntimeValue val);
 void *calloc(size_t n, size_t sz);
 
-static char   _heap[160 * 1024 * 1024] __attribute__((aligned(16)));
+/* 512 MiB: the full entry-closure module-init set allocates ~168 MiB of
+ * runtime arrays/strings at __simple_call_module_inits time (the x86_64 and
+ * rv64 lanes always ran these inits; the arm64 CRT only started calling them
+ * for the clang-bringup lane), and the mounted-namespace payload read for the
+ * R3 clang image needs another ~115 MiB on top. 160 MiB exhausted before
+ * spl_start finished (run-20260925_130440: "[PANIC] heap exhausted
+ * requested=131088 used=167709904 total=167772160"). */
+static char   _heap[512 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
-static void *_heap_alloc(size_t sz)
+/* Boot-time heap allocation profile (bring-up instrumentation): one line per
+ * allocation >= 64 KiB (size + wrapper-level return address) and one sampled
+ * line per 8192 allocations of any size. The lr values resolve with
+ * `aarch64-linux-gnu-addr2line -f -e build/os/simpleos_arm64_clang_bringup.elf
+ * <lr...>` to the exact allocating init body — added to pin the module-init
+ * set's ~512 MiB allocation demand that OOMs the freestanding heap before
+ * spl_start's banner (see doc/08_tracking/aarch64_in_guest_clang_compile_
+ * lane_status_2026-09-25.md, Blocker 4). */
+static uint64_t g_heap_alloc_count;
+/* Simple-code caller of the most recent array/string constructor (Blocker 4
+ * module-init attribution): set by rt_array_new / rt_array_new_with_cap /
+ * rt_byte_array_new(_len) / rt_string_new right before they malloc, so the
+ * per-alloc profile line can name the compiled module-init body that asked
+ * for the array, not just the C wrapper. */
+static uintptr_t g_array_ctor_caller_lr;
+static void _heap_alloc_profile(size_t sz, size_t used_after, uintptr_t lr)
+{
+    static size_t next_milestone = 64u * 1024u * 1024u;
+    g_heap_alloc_count++;
+    if (sz >= 65536u || (g_heap_alloc_count & 0x1FFFu) == 0) {
+        serial_puts("[heap] alloc bytes=");
+        serial_put_dec((int64_t)sz);
+        serial_puts(" used_after=");
+        serial_put_dec((int64_t)used_after);
+        serial_puts(" n=");
+        serial_put_dec((int64_t)g_heap_alloc_count);
+        serial_puts(" lr=0x");
+        serial_puthex((uint64_t)lr);
+        serial_puts(" init_lr=0x");
+        serial_puthex((uint64_t)g_array_ctor_caller_lr);
+        serial_puts("\r\n");
+    }
+    if (used_after >= next_milestone) {
+        serial_puts("[heap] consumed ");
+        serial_put_dec((int64_t)(next_milestone / (1024u * 1024u)));
+        serial_puts(" MiB\r\n");
+        next_milestone += 64u * 1024u * 1024u;
+    }
+}
+
+static void *_heap_alloc_lr(size_t sz, uintptr_t lr)
 {
     sz = (sz + 15) & ~(size_t)15;
     if (_heap_off + sz > sizeof(_heap)) {
@@ -172,12 +219,20 @@ static void *_heap_alloc(size_t sz)
         serial_put_dec((int64_t)_heap_off);
         serial_puts(" total=");
         serial_put_dec((int64_t)sizeof(_heap));
+        serial_puts(" init_lr=0x");
+        serial_puthex((uint64_t)g_array_ctor_caller_lr);
         serial_puts("\r\n");
         for(;;) __asm__ volatile("wfe");
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
+    _heap_alloc_profile(sz, _heap_off, lr);
     return p;
+}
+
+static void *_heap_alloc(size_t sz)
+{
+    return _heap_alloc_lr(sz, (uintptr_t)__builtin_return_address(0));
 }
 
 static int arm64_heap_contains(const void *p, size_t min_size)
@@ -190,7 +245,7 @@ static int arm64_heap_contains(const void *p, size_t min_size)
 
 void *malloc(size_t sz)
 {
-    return _heap_alloc(sz);
+    return _heap_alloc_lr(sz, (uintptr_t)__builtin_return_address(0));
 }
 
 void free(void *p)
@@ -200,7 +255,7 @@ void free(void *p)
 
 void *realloc(void *p, size_t sz)
 {
-    void *n = malloc(sz);
+    void *n = _heap_alloc_lr(sz, (uintptr_t)__builtin_return_address(0));
     if (p && n) __builtin_memcpy(n, p, sz);
     return n;
 }
@@ -208,7 +263,7 @@ void *realloc(void *p, size_t sz)
 void *calloc(size_t n, size_t sz)
 {
     size_t total = n * sz;
-    void *p = malloc(total);
+    void *p = _heap_alloc_lr(total, (uintptr_t)__builtin_return_address(0));
     if (p) __builtin_memset(p, 0, total);
     return p;
 }
@@ -331,6 +386,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
     int64_t len = len_val;
     if (len < 0 || len > 0x100000) return NIL_VALUE;
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -377,19 +433,38 @@ RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    /* Return RAW (untagged): compiled callers use the result as an integer
+     * value (e.g. the relpath loop's rt_string_new(data, rt_string_len(ch))
+     * rebuild), and the lane ABI does not unbox len results. ENCODE_INT here
+     * turned len 1 into 8 — every char MountTable.resolve appended became an
+     * 8-byte string (run-20260925_181759: rel=C\0*7 L\0*7 ... rlen=72). The
+     * x86_64 sibling returns raw for the same reason. */
+    if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return ENCODE_INT(0);
-    return ENCODE_INT(s->len);
+    if (!s) return 0;
+    return (RuntimeValue)s->len;
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int64_t i = DECODE_INT(idx);
-    if (!s || i < 0 || (uint32_t)i >= s->len) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)(unsigned char)s->data[i]);
+    /* Freestanding extern ABI: scalar args are RAW i64 (see
+     * rt_byte_array_new_len; Blocker-4 cap-decode fix; x86_64 sibling uses
+     * `(int64_t)idx`). DECODE_INT here shifted raw idx >> 3, so every read
+     * below index 8 returned s[0] (run-20260925_181125 mt-probe4:
+     * str_char_at("/CLANG.ELF", 1..7) -> '/', 8..9 -> 'C'). */
+    int64_t i = (int64_t)idx;
+    if (!s || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
+    /* Canonical ABI (runtime_native.c:rt_string_char_at) returns a 1-char
+     * RuntimeString. Returning ENCODE_INT(byte) here instead breaks every
+     * consumer that feeds the result into a text sink: the string-builder
+     * accumulation of MountTable.resolve's relpath loop drops non-heap values
+     * (rt_string_builder_push's IS_HEAP guard), so the relpath silently
+     * materialized as "" — the in-guest /CLANG.ELF open then failed
+     * Fat32Core.resolve_path("") pre-I/O with NotFound (aarch64 clang
+     * bring-up Wall 6, run-20260925_173314: `resolve=ok mid=1 rel=`). */
+    return rt_string_new((RuntimeValue)(uintptr_t)(&s->data[i]), (RuntimeValue)1);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -516,7 +591,18 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
-    if (h->type == HEAP_STRING) return rt_string_char_at(v, idx);
+    if (h->type == HEAP_STRING) {
+        /* rt_string_char_at takes a RAW i64 index on this lane (Wall-6 layer-3
+         * fix), but this operator entry point receives the TAGGED form
+         * (rt_value_int) — the array path below already DECODEs. Decode here
+         * too (mirrors the x86_64 sibling): passing the tagged value through
+         * shifted every string index by 3 bits, so s[i] read out of bounds and
+         * returned NIL — char_from_code's ASCII table lookup then materialized
+         * "" for every char, FAT32 _parse_short_name yielded "." for every
+         * dirent, and the /CLANG.ELF open scanned zero entries (NotFound). */
+        if (!IS_INT(idx)) return NIL_VALUE;
+        return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));
+    }
     if (h->type == HEAP_ARRAY) {
         int64_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
@@ -802,14 +888,23 @@ RuntimeValue rt_hash_text(RuntimeValue str)
 /* --- string char code (adapted from riscv64 freestanding_runtime.c) --- */
 RuntimeValue rt_string_char_code_at(RuntimeValue value, RuntimeValue index_value)
 {
-    if (!IS_HEAP(value)) return ENCODE_INT(-1);
+    if (!IS_HEAP(value)) return (RuntimeValue)(-1);
     HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
-    if (!h || h->type != HEAP_STRING) return ENCODE_INT(-1);
+    if (!h || h->type != HEAP_STRING) return (RuntimeValue)(-1);
     RuntimeString *s = (RuntimeString *)h;
-    int64_t index = DECODE_INT(index_value);
+    /* Raw-i64 arg per the freestanding extern ABI (see rt_string_char_at). */
+    int64_t index = (int64_t)index_value;
     if (index < 0) index = (int64_t)s->len + index;
-    if (index < 0 || (uint32_t)index >= s->len) return ENCODE_INT(-1);
-    return ENCODE_INT((int64_t)(uint8_t)s->data[index]);
+    if (index < 0 || (uint32_t)index >= s->len) return (RuntimeValue)(-1);
+    /* RAW return per the same ABI — the x86_64 sibling returns
+     * (RuntimeValue)(uint8_t)s->data[i]. ENCODE_INT here tagged the code
+     * (byte<<3), so every compiled caller's range check on the result (e.g.
+     * _lower_text's `code >= 0x41 and code <= 0x5A`) compared 536..720
+     * against 65..90 and NEVER fired: _lower_text returned its input
+     * unchanged, and the /CLANG.ELF directory lookup compared "CLANG.ELF"
+     * against lowercased dirent names (mt-scan: entries=6 all correct,
+     * found=err — Wall 8 layer 2, run-20260925_220619). */
+    return (RuntimeValue)(uint8_t)s->data[index];
 }
 
 /* --- bytes <-> text. arrays here are RuntimeArray of ENCODE_INT(byte). --- */
@@ -906,10 +1001,13 @@ RuntimeValue rt_typed_words_u64_at(RuntimeValue arr, RuntimeValue idx)
     if (i < 0 || (uint32_t)i >= a->len) return ENCODE_INT(0);
     return a->items[i];
 }
-int8_t rt_typed_words_u64_push(RuntimeValue arr, int64_t val)
+/* FAM push-return ABI (Target::array_push_returns_header): the typed pushes
+ * return the possibly realloc-moved array header, exactly like rt_array_push,
+ * so compiled push loops can rebind the post-grow value. The canonical hosted
+ * runtime keeps the bool-success, stable-header ABI instead. */
+RuntimeValue rt_typed_words_u64_push(RuntimeValue arr, int64_t val)
 {
-    rt_array_push(arr, ENCODE_INT(val));
-    return 1;
+    return rt_array_push(arr, ENCODE_INT(val));
 }
 int8_t rt_typed_words_u64_set(RuntimeValue arr, int64_t idx, int64_t val)
 {
@@ -1210,6 +1308,9 @@ extern int64_t spl_handle_file_open(uint64_t, uint64_t, uint64_t, uint64_t, uint
 extern int64_t spl_handle_file_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_file_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_file_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_file_stat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_file_sync(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_handle_server_startup_evidence_consume_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
 extern int64_t spl_shim_file_capability_check(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
@@ -1232,6 +1333,24 @@ static int64_t arm64_dispatch_optional_shim(arm64_syscall_shim_fn shim,
     if (!shim) return -38; /* ENOSYS: entry closure did not link the owner. */
     return shim(a0, a1, a2, a3, a4, 0);
 }
+
+/* Anonymous mmap for the ring-3 payload (defined with the user-AS helpers). */
+static int64_t arm64_user_mmap(uint64_t len);
+
+/* EL0 file-syscall C handlers (defined with the user-copy helpers below).
+ * Routed directly (not through the Simple strong shims, which park the
+ * guest after a syscall — run-20260926_045921). */
+static int64_t arm64_svc_file_open(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_read(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_write(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_close(uint64_t);
+static int64_t arm64_svc_file_stat(uint64_t, uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_clock_gettime(uint64_t, uint64_t);
+static int64_t arm64_svc_file_lseek(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_fcntl(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_unlink(uint64_t, uint64_t);
+static int64_t arm64_svc_file_ftruncate(uint64_t, uint64_t);
+static int64_t arm64_svc_file_rename(uint64_t, uint64_t, uint64_t, uint64_t);
 
 static int64_t arm64_dispatch_file_shim(uint64_t syscall_id,
                                         arm64_syscall_shim_fn shim,
@@ -1276,15 +1395,58 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 20: return arm64_dispatch_optional_shim(spl_handle_ipc_send, a0, a1, a2, a3, a4);
         case 21: return arm64_dispatch_optional_shim(spl_handle_ipc_recv, a0, a1, a2, a3, a4);
         case 22: return arm64_dispatch_optional_shim(spl_handle_ipc_create_port, a0, a1, a2, a3, a4);
-        case 30: return arm64_dispatch_file_shim(30, spl_handle_file_open, a0, a1, a2, a3, a4);
-        case 31: return arm64_dispatch_file_shim(31, spl_handle_file_read, a0, a1, a2, a3, a4);
-        case 32: return arm64_dispatch_file_shim(32, spl_handle_file_write, a0, a1, a2, a3, a4);
-        case 33:
-            if (spl_arm64_net_close_direct) {
-                int64_t net_close = spl_arm64_net_close_direct(a0, a1, a2, a3, a4, 0);
-                if (net_close != -4096) return net_close;
-            }
-            return arm64_dispatch_optional_shim(spl_handle_file_close, a0, a1, a2, a3, a4);
+        /* File syscalls (open/read/write/stat/close) are handled by the C
+         * handlers below, NOT the Simple strong shims: the strong-shim
+         * execution parks the guest after a syscall (run-20260926_045921 —
+         * the CPU parks at arm64_enter_el0 after a strong-shim stat), while
+         * the C-only mmap path round-trips fine. stat is path-metadata;
+         * a3=1 selects fd-mode (the guest libc's fstat), answered from the
+         * fd table so LLVM sees the real size (R5b: a zeroed fstat made
+         * cc1 compile an empty translation unit — the linked product lost
+         * main/printf). */
+        case 30: return arm64_svc_file_open(a0, a1, a2);
+        case 31: return arm64_svc_file_read(a0, a1, a2);
+        case 32: return arm64_svc_file_write(a0, a1, a2);
+        case 34: return arm64_svc_file_stat(a0, a1, a2, a3);
+        /* clock_gettime (id 50): the guest toolchain aborts on ENOSYS here
+         * (run-20260926_071342: "clock_gettime(CLOCK_MONOTONIC) failed" ->
+         * abort, rc=134, after cc1 opened /HELLO.C). C handler like the file
+         * layer above; served from the ARM generic timer (no RTC wired). */
+        case 50: return arm64_svc_clock_gettime(a0, a1);
+        /* id 46 (lseek) and id 69 (fcntl): wired for FILE fds (>=3) — the
+         * guest's MemoryBuffer lseeks the input fd for its size and its
+         * close() path issues F_SIMPLEOS_GET_OFD. stdio fds (0/1/2) keep
+         * the tolerated -ENOSYS (the guest spins on a successful stderr
+         * lseek — run-20260926_032421). */
+        case 46: return arm64_svc_file_lseek(a0, a1, a2);
+        case 69: return arm64_svc_file_fcntl(a0, a1, a2);
+        /* Anonymous mmap (the guest libc's malloc arena): bump-allocate
+         * zeroed pages in the recorded user address space. */
+        case 10: return arm64_user_mmap(a1);
+        /* munmap(11)/mprotect(12): the anonymous mmap heap is a bump
+         * allocator (no free), so these are accepted as no-ops rather than
+         * -ENOSYS. The guest lld's malloc arena calls munmap to shrink/free;
+         * an -ENOSYS there corrupts the arena and the next nothrow-new traps
+         * (run-20260926_101506, R4b BRK in operator new(nothrow)). The leak
+         * is bounded by the 160 MiB user page pool. */
+        case 11: return 0;
+        case 12: return 0;
+        /* close: route pure C like open/read/write/stat above — NOT through
+         * the spl_arm64_net_close_direct strong shim. close was the last
+         * file syscall still entering Simple-compiled code during the R4a
+         * guest run, and the run faulted (kernel control-flow corruption)
+         * right after the first close (run-20260926_071701 / _074234). The
+         * clang-bring-up lane opens no net fds; re-enable a net-close path
+         * only with a C-side net fd table (see the strong-shim note above). */
+        case 33: return arm64_svc_file_close(a0);
+        /* unlink(39)/ftruncate(43)/rename(44): the guest lld's
+         * FileOutputBuffer commit does create-temp + write + ftruncate +
+         * rename(temp -> output); unimplemented they return -ENOSYS and lld
+         * reports "cannot open output file" (run-20260926_100559, R4b).
+         * RAM-backed files only — image files stay read-only. */
+        case 39: return arm64_svc_file_unlink(a0, a1);
+        case 43: return arm64_svc_file_ftruncate(a0, a1);
+        case 44: return arm64_svc_file_rename(a0, a1, a2, a3);
         case 78: return arm64_dispatch_file_shim(78, spl_handle_file_sync, a0, 0, 0, 0, 0);
         /* Ring-3 server payloads have no ambient hardware authority. Device
          * enumeration/grant/BAR/DMA remain kernel-only until the canonical
@@ -1353,7 +1515,7 @@ void _c_start(void)
 
     serial_puts("SimpleOS ARM64 boot\r\n");
     serial_puts("[BOOT] PL011 UART initialized at 0x09000000\r\n");
-    serial_puts("[BOOT] Heap: 160 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 512 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit\r\n");
 
     _pci_scan();
@@ -1742,11 +1904,19 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 }
 
 RuntimeValue rt_array_new(RuntimeValue cap_val) {
-    int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
+    /* Freestanding extern ABI passes integer args RAW (see the mmio note
+     * above): cap_val is a plain i64. Do NOT run it through
+     * simpleos_raw_or_encoded_int -- with TAG_INT==0 any raw cap divisible
+     * by 8 mis-decodes to cap/8 (e.g. fd_table's [u8; 65536] inits became
+     * cap 8192, and every module-init fill push then grew the array,
+     * leaking ~131 KiB per push and OOMing the 512 MiB heap -- Blocker 4,
+     * doc/08_tracking/aarch64_in_guest_clang_compile_lane_status_2026-09-25.md). */
+    int64_t cap = (int64_t)cap_val;
     if (cap <= 0) cap = 64;
     if (cap < 64) cap = 64;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE; a->hdr.type = HEAP_ARRAY; a->hdr.size = (uint32_t)alloc_size; a->len = 0; a->cap = (uint32_t)cap;
     for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
@@ -1761,6 +1931,13 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
         uint32_t old_cap = a->cap;
         uint32_t new_cap = old_cap ? old_cap * 2 : 64;
         size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
+        if (new_size >= 60u * 1024u) {
+            serial_puts("[heap] push-grow new_bytes=");
+            serial_put_dec((int64_t)new_size);
+            serial_puts(" lr=0x");
+            serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
+            serial_puts("\r\n");
+        }
         RuntimeArray *grown = (RuntimeArray *)realloc(a, new_size);
         if (!grown) return ENCODE_PTR(a);
         grown->hdr.size = (uint32_t)new_size;
@@ -1773,10 +1950,22 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
 }
 
 RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
-    int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
+    /* Same RAW-integer ABI contract as rt_array_new: cap_val is a plain i64,
+     * not a tagged RuntimeValue. */
+    int64_t cap = (int64_t)cap_val;
     if (cap <= 0) cap = 1;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    if (alloc_size >= 256u * 1024u) {
+        serial_puts("[heap] new_with_cap cap=");
+        serial_put_dec((int64_t)cap);
+        serial_puts(" bytes=");
+        serial_put_dec((int64_t)alloc_size);
+        serial_puts(" lr=0x");
+        serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
+        serial_puts("\r\n");
+    }
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
@@ -2080,7 +2269,32 @@ RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
-RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n)
+{
+    /* [value; count] lowering (mir/lower/lowering_expr_collection.rs
+     * lower_array_repeat_expr): both args arrive as RAW i64 (freestanding
+     * integer ABI, Blocker-4 contract). Elements are stored tagged exactly
+     * like the element-wise push paths (rt_typed_bytes_u8_push stores
+     * ENCODE_INT(byte)); heap element values (text, boxed u32/u64) pass
+     * through unchanged. The NIL stub this replaces silently broke every
+     * [0u8; n] consumer: the EL0 file syscalls' user_copyin_bytes dst array
+     * was NIL, so rt_array_data_ptr_text yielded 0 and
+     * rt_arm64_user_copyin returned EFAULT — stat(id 34) failed -14. */
+    int64_t count = (int64_t)n;
+    if (count < 0) count = 0;
+    if (count > 0x1000000) count = 0x1000000; /* 16M elements, rt_byte_array_new_len cap */
+    RuntimeValue elem = IS_HEAP(v) ? v : ENCODE_INT((int64_t)v);
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue);
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = (uint32_t)count;
+    a->cap = (uint32_t)count;
+    for (int64_t i = 0; i < count; i++) a->items[i] = elem;
+    return ENCODE_PTR(a);
+}
 RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
 RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
 RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
@@ -2332,7 +2546,11 @@ RuntimeValue rt_port_io_wait(void) { return NIL_VALUE; }
 RuntimeValue rt_hlt(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
 RuntimeValue rt_sti(void) { __asm__ volatile("msr daifclr, #0xF"); return NIL_VALUE; }
 RuntimeValue rt_cli(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VALUE; }
-S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr) S1(rt_invlpg)
+S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr)
+/* x86 TLB shootdown op: no architectural equivalent is needed here (the
+ * arm64 page-table walks are not cached stale across our PTE writes in this
+ * bringup), so flush rather than FATAL-spin if some shared code calls it. */
+RuntimeValue rt_invlpg(RuntimeValue a) { (void)a; __asm__ volatile("dsb ish" ::: "memory"); return NIL_VALUE; }
 S0(rt_read_cr0) S1(rt_write_cr0) S1(rt_read_cr2) S1(rt_read_cr3) S1(rt_write_cr3)
 S0(rt_read_cr4) S1(rt_write_cr4) S1(rt_read_msr) S2(rt_write_msr) S0(rt_cpuid) S0(rt_rdtsc)
 
@@ -2431,7 +2649,51 @@ S1(rt_thread_create) S1(rt_thread_join)
 RuntimeValue rt_thread_yield(void) { return NIL_VALUE; }
 RuntimeValue rt_thread_current(void) { return ENCODE_INT(0); }
 RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }
-S0(rt_mutex_new) S1(rt_mutex_lock) S1(rt_mutex_unlock) S1(rt_mutex_try_lock)
+
+/* Boxed RuntimeValue mutex (was a FATAL S-stub: module inits -- e.g. the
+ * scheduler_types identity allocator and friends -- create these before
+ * spl_start). Spinlock + wfe/sev: correct on the 4-vCPU guest and for the
+ * single-threaded init phase. Contract per
+ * src/lib/nogc_sync_mut/concurrent/mutex.spl: lock returns the protected
+ * value (nil = stale/foreign handle), try_lock returns nil when contended,
+ * unlock stores new_value and returns 1 (0 = invalid handle). */
+typedef struct { uint64_t locked; RuntimeValue value; } Arm64RtMutex;
+
+RuntimeValue rt_mutex_new(RuntimeValue initial) {
+    Arm64RtMutex *m = (Arm64RtMutex *)calloc(1, sizeof(Arm64RtMutex));
+    if (!m) return NIL_VALUE;
+    m->locked = 0;
+    m->value = initial;
+    return ENCODE_PTR(m);
+}
+
+RuntimeValue rt_mutex_lock(RuntimeValue handle) {
+    if (!IS_HEAP(handle)) return NIL_VALUE;
+    Arm64RtMutex *m = (Arm64RtMutex *)DECODE_PTR(handle);
+    if (!m) return NIL_VALUE;
+    while (__atomic_exchange_n(&m->locked, 1, __ATOMIC_ACQUIRE) != 0)
+        __asm__ volatile("wfe");
+    return m->value;
+}
+
+RuntimeValue rt_mutex_try_lock(RuntimeValue handle) {
+    if (!IS_HEAP(handle)) return NIL_VALUE;
+    Arm64RtMutex *m = (Arm64RtMutex *)DECODE_PTR(handle);
+    if (!m) return NIL_VALUE;
+    if (__atomic_exchange_n(&m->locked, 1, __ATOMIC_ACQUIRE) != 0)
+        return NIL_VALUE;
+    return m->value;
+}
+
+RuntimeValue rt_mutex_unlock(RuntimeValue handle, RuntimeValue new_value) {
+    if (!IS_HEAP(handle)) return ENCODE_INT(0);
+    Arm64RtMutex *m = (Arm64RtMutex *)DECODE_PTR(handle);
+    if (!m) return ENCODE_INT(0);
+    m->value = new_value;
+    __atomic_store_n(&m->locked, 0, __ATOMIC_RELEASE);
+    __asm__ volatile("sev");
+    return ENCODE_INT(1);
+}
 S0(rt_condvar_new) S1(rt_condvar_wait) S1(rt_condvar_notify) S1(rt_condvar_notify_all)
 
 S0(rt_channel_new) S2(rt_channel_send) S1(rt_channel_recv) S1(rt_channel_try_recv) S1(rt_channel_close)
@@ -3318,6 +3580,72 @@ RuntimeValue rt_arm_fat32_fat_size(void) { return ENCODE_INT(g_arm_fat32_fat_siz
 RuntimeValue rt_arm_fat32_root_cluster(void) { return ENCODE_INT(g_arm_fat32_root_cluster); }
 
 /* ==========================================================================
+ * Raw payload staging region (clang-bringup lane, Wall 9).
+ *
+ * The 115 MiB guest ELF payload cannot materialize as a tagged [u8]:
+ * 8 B/RuntimeValue ~= 922 MB exceeds the 512 MiB freestanding bump heap (and
+ * rt_byte_array_new_len caps at 16M elements).  The mounted positioned read
+ * is not a chunk source either — Fat32Core.read_cluster caches EVERY cluster
+ * into the driver object (unbounded; ~879 MB tagged for this one file, and
+ * driver-long-lived, so no heap-watermark trick can reclaim it).  Stage the
+ * bytes instead in this raw (untagged) .bss region OUTSIDE the heap: the
+ * Simple side resolves open+fstat through the mounted namespace (authoritative
+ * size + start cluster), walks the FAT chain with the proven _arm_fat_next,
+ * and pumps each cluster straight from the virtio DMA page into the region —
+ * zero tagged allocations for the payload bytes themselves.  The only tagged
+ * traffic left is one 512-element FAT-sector array per cluster (~14 MiB total
+ * for 3513 clusters), which fits the bump heap with no reclamation needed.
+ * ==========================================================================*/
+#define ARM_PAYLOAD_REGION_BYTES (128u * 1024u * 1024u)
+static uint8_t _arm_payload_region[ARM_PAYLOAD_REGION_BYTES] __attribute__((aligned(16)));
+static uint64_t g_arm_payload_region_size;
+
+RuntimeValue rt_arm_payload_region_begin(RuntimeValue size_val)
+{
+    uint64_t size = (uint64_t)size_val;
+    if (size == 0 || size > (uint64_t)ARM_PAYLOAD_REGION_BYTES) return (RuntimeValue)0ULL;
+    g_arm_payload_region_size = size;
+    return (RuntimeValue)(uintptr_t)_arm_payload_region;
+}
+
+RuntimeValue rt_arm_payload_region_byte_at(RuntimeValue off_val)
+{
+    uint64_t off = (uint64_t)off_val;
+    if (off >= g_arm_payload_region_size) return (RuntimeValue)0ULL;
+    return (RuntimeValue)_arm_payload_region[off];
+}
+
+/* Pump `len` payload bytes starting at `first_lba` into the region at
+ * `dst_off`, one sector per virtio request (the descriptor ring is
+ * single-sector oriented; multi-sector requests truncate — see
+ * _arm_read_cluster).  Returns bytes copied, or 0xffffffff on device/bounds
+ * error.  Raw u64 args/return per the freestanding extern ABI. */
+RuntimeValue rt_arm_payload_region_load_sectors(RuntimeValue first_lba_val, RuntimeValue dst_off_val, RuntimeValue len_val)
+{
+    uint64_t first_lba = (uint64_t)first_lba_val;
+    uint64_t dst_off = (uint64_t)dst_off_val;
+    uint64_t len = (uint64_t)len_val;
+    if (len == 0 || dst_off > g_arm_payload_region_size ||
+        len > g_arm_payload_region_size - dst_off)
+        return (RuntimeValue)0xffffffffULL;
+    uint64_t copied = 0;
+    uint64_t sector = 0;
+    while (copied < len) {
+        RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)(first_lba + sector));
+        if (status == (RuntimeValue)0xffffffffULL || status != 0)
+            return (RuntimeValue)0xffffffffULL;
+        uint8_t *src = g_arm_virtio_blk_dma_storage + 16;
+        arm64_invalidate_dcache_range((uint64_t)(uintptr_t)src, 512ULL);
+        uint64_t n = len - copied;
+        if (n > 512ULL) n = 512ULL;
+        __builtin_memcpy(_arm_payload_region + dst_off + copied, src, (size_t)n);
+        copied += n;
+        sector++;
+    }
+    return (RuntimeValue)copied;
+}
+
+/* ==========================================================================
  * Slice 4 — native block-storage + FAT32 bridge for the arm64 fs-exec stub.
  *
  * The arm64 kernel imports c_nvme_adapter.spl / vfs_init.spl which declare the
@@ -3508,9 +3836,13 @@ int64_t simpleos_nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t b
 /* ---- FAT32 read path (over virtio-blk) ---- */
 
 /* Hardcoded geometry helpers, matching arm_fs_exec_vfs.spl. */
+/* Geometry helpers — use the PROBED BPB globals (rt_arm_fat32_probe_bpb_from_virtio),
+ * not the hardcoded constants: the clang image is spc=64 data_start=84, while
+ * the classic fs-exec image is spc=1 data_start=96. */
 static uint32_t _simpleos_fat_cluster_lba(uint32_t cluster)
 {
-    return SIMPLEOS_ARM_FAT32_DATA_START + ((cluster - 2U) * SIMPLEOS_ARM_FAT32_SPC);
+    uint64_t data_start = g_arm_fat32_reserved + g_arm_fat32_fats * g_arm_fat32_fat_size;
+    return (uint32_t)(data_start + ((uint64_t)(cluster - 2U) * g_arm_fat32_spc));
 }
 
 static uint32_t _simpleos_rd16(const uint8_t *p)
@@ -3528,8 +3860,8 @@ static uint32_t _simpleos_fat_next(uint32_t cluster)
 {
     uint8_t sec[512];
     uint32_t fat_offset = cluster * 4U;
-    uint32_t lba = SIMPLEOS_ARM_FAT32_RESERVED + (fat_offset / 512U);
-    uint32_t off = fat_offset % 512U;
+    uint32_t lba = (uint32_t)(g_arm_fat32_reserved + (fat_offset / g_arm_fat32_bps));
+    uint32_t off = fat_offset % (uint32_t)g_arm_fat32_bps;
     if (!_simpleos_blk_read_sector(lba, sec)) return 0x0fffffffU;
     return _simpleos_rd32(sec + off) & 0x0fffffffU;
 }
@@ -3578,7 +3910,7 @@ static uint32_t _simpleos_find_entry(uint32_t dir_cluster, const char name11[11]
     uint32_t cluster = dir_cluster;
     while (cluster >= 2U && cluster < 0x0ffffff8U) {
         uint32_t first_lba = _simpleos_fat_cluster_lba(cluster);
-        for (uint32_t s = 0; s < SIMPLEOS_ARM_FAT32_SPC; s++) {
+        for (uint32_t s = 0; s < (uint32_t)g_arm_fat32_spc; s++) {
             if (!_simpleos_blk_read_sector(first_lba + s, sec)) return 0;
             for (uint32_t off = 0; off < 512U; off += 32U) {
                 const uint8_t *e = sec + off;
@@ -3653,7 +3985,7 @@ static uint32_t _simpleos_read_chain(uint32_t first_cluster, uint32_t size,
     uint32_t cur = first_cluster;
     while (cur >= 2U && cur < 0x0ffffff8U && copied < size) {
         uint32_t first_lba = _simpleos_fat_cluster_lba(cur);
-        for (uint32_t s = 0; s < SIMPLEOS_ARM_FAT32_SPC && copied < size; s++) {
+        for (uint32_t s = 0; s < (uint32_t)g_arm_fat32_spc && copied < size; s++) {
             if (!_simpleos_blk_read_sector(first_lba + s, sec)) return 0;
             for (uint32_t k = 0; k < 512U && copied < size; k++) {
                 out[copied++] = sec[k];
@@ -3995,7 +4327,13 @@ static uint64_t arm64_elf64_load_phoff(RuntimeValue bytes, uint32_t wanted)
     return UINT64_MAX;
 }
 
-#define ARM64_UAS_REGION_BASE 0x48000000ULL
+/* The page-table arenas live in guest RAM ABOVE the kernel image: the clang
+ * bring-up kernel's .bss (heap 512 MiB + payload region 128 MiB) now spans
+ * 0x40200000..~0x6d000000, so the historical 0x48000000 base overlapped the
+ * resident payload region itself. 16 spaces x 2 MiB at 0x71000000..0x73000000
+ * sit between the kernel image end (linker cap 0x70200000) and the user page
+ * pool (0x73000000), well inside the 2 GiB guest. */
+#define ARM64_UAS_REGION_BASE 0x71000000ULL
 #define ARM64_UAS_REGION_SIZE 0x00200000ULL
 #define ARM64_UAS_TABLE_BYTES 0x00100000ULL
 #define ARM64_UAS_MAX_SPACES 16U
@@ -4039,6 +4377,36 @@ uint64_t arm64_user_entry_arg0 = 0;
 uint64_t arm64_user_entry_arg1 = 0;
 static uint8_t arm64_user_stdout_bytes[ARM64_USER_STDOUT_MAX];
 static uint32_t arm64_user_stdout_len = 0;
+
+/* Kernel resume frame for the payload ring-3 handoff (arm64_enter_el0 /
+ * arm64_resume_from_el0 in crt0.S). Layout: [0] sp, [1] lr, [2..11] x19..x28,
+ * [12] armed. */
+uint64_t arm64_resume_ctx[13];
+
+/* Physical page pool for the ring-3 payload launcher: image PT_LOAD copies,
+ * the user stack, and the anonymous mmap heap all bump-allocate from this
+ * fixed window (guest RAM above the UAS arenas). Reset per launch — a dead
+ * process's pages are reusable because every page is re-zeroed on allocation
+ * and each launch installs a fresh address space. */
+#define ARM64_USER_PAGE_POOL_BASE  0x73000000ULL
+#define ARM64_USER_PAGE_POOL_BYTES 0x40000000ULL /* 1 GiB (R6: guest cc1 on
+    the 1.9 MiB preprocessed C++ TU churns past 280 MiB by 40% parsed — the
+    guest bump-arena malloc never returns pages, so the high-water mark, not
+    the host's 92 MiB peak, is the budget. 0x73000000+1 GiB = 0xB3000000,
+    inside the 2 GiB guest). */
+static uint64_t arm64_user_page_pool_off = 0;
+/* Per-launch anonymous mmap cursor (bump, no free). Sits above the image's
+ * link range and below the kernel identity window in the user tables. */
+static uint64_t arm64_user_heap_va = 0;
+
+static uint64_t arm64_user_page_alloc(void)
+{
+    if (arm64_user_page_pool_off + 4096ULL > ARM64_USER_PAGE_POOL_BYTES) return 0;
+    uint64_t page = ARM64_USER_PAGE_POOL_BASE + arm64_user_page_pool_off;
+    arm64_user_page_pool_off += 4096ULL;
+    return page;
+}
+
 
 extern char _start[];
 extern char _vectors[];
@@ -4249,6 +4617,30 @@ RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt
     return (RuntimeValue)((entry & ARM64_PTE_OUTPUT_MASK) + (virt & 4095ULL));
 }
 
+/* Anonymous mmap for the ring-3 payload: bump-allocate zeroed pages from the
+ * user page pool and map them RW/NX at the per-launch heap cursor in the
+ * recorded user address space. Runs with SCTLR.M cleared (the SVC shim's
+ * translation mode), so the page-table writes below are plain physical. */
+static int64_t arm64_user_mmap(uint64_t len)
+{
+    if (!arm64_recorded_user_root || len == 0 || len > (1ULL << 30)) return -38;
+    uint64_t bytes = (len + 4095ULL) & ~4095ULL;
+    if (bytes == 0) return -38;
+    uint64_t va = arm64_user_heap_va;
+    for (uint64_t off = 0; off < bytes; off += 4096ULL) {
+        uint64_t phys = arm64_user_page_alloc();
+        if (!phys) return -12; /* ENOMEM */
+        arm64_zero_page(phys);
+        if (!(uint64_t)rt_arm64_user_as_map_page(
+                (RuntimeValue)arm64_recorded_user_root,
+                (RuntimeValue)(va + off), (RuntimeValue)phys,
+                (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE)))
+            return -12;
+    }
+    arm64_user_heap_va = va + bytes;
+    return (int64_t)va;
+}
+
 uint8_t rt_copy_user_byte(uint64_t address)
 {
     /* Syscalls run before TTBR0 is restored, so validate and translate through
@@ -4308,13 +4700,33 @@ RuntimeValue rt_arm64_user_copyin(RuntimeValue dst_value, RuntimeValue user_valu
     uint64_t user = (uint64_t)user_value;
     uint64_t len = (uint64_t)len_value;
     if (len == 0ULL) return 0;
-    if (!dst || !arm64_user_range_accessible(user, len, 0)) return -14;
+    /* TEMP DIAG (lane-C1 bring-up): name the EFAULT source (null dst vs
+     * inaccessible user range) and bracket the per-byte translate loop. */
+    serial_puts("[copyin] dst=");
+    serial_put_hex((uint64_t)(uintptr_t)dst);
+    serial_puts(" user=");
+    serial_put_hex(user);
+    serial_puts(" len=");
+    serial_put_dec((int64_t)len);
+    serial_puts("\r\n");
+    if (!dst) { serial_puts("[copyin] fail:null-dst\r\n"); return -14; }
+    if (!arm64_user_range_accessible(user, len, 0)) {
+        serial_puts("[copyin] fail:range\r\n");
+        return -14;
+    }
+    serial_puts("[copyin] go\r\n");
     for (uint64_t i = 0; i < len; ++i) {
         uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
                                                      user + i, 0);
         if (!phys) return -14;
-        dst[i] = *(volatile uint8_t *)(uintptr_t)phys;
+        /* Freestanding [u8] elements are TAGGED (ENCODE_INT(byte), 8-byte
+         * slots — rt_typed_bytes_u8_push / the virtio read path store the
+         * same shape). A raw byte store here mis-tags every element and the
+         * consumer (_bytes_to_text) builds a garbage path. */
+        ((RuntimeValue *)(uintptr_t)dst)[i] =
+            ENCODE_INT(*(volatile uint8_t *)(uintptr_t)phys);
     }
+    serial_puts("[copyin] done\r\n");
     return (RuntimeValue)len;
 }
 
@@ -4325,14 +4737,568 @@ RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_val
     const uint8_t *src = (const uint8_t *)(uintptr_t)(uint64_t)src_value;
     uint64_t len = (uint64_t)len_value;
     if (len == 0ULL) return 0;
-    if (!src || !arm64_user_range_accessible(user, len, 1)) return -14;
+    /* TEMP DIAG (lane-C1 bring-up): name the EFAULT source (null src vs
+     * inaccessible user range) and bracket the per-byte translate loop. */
+    serial_puts("[copyout] user=");
+    serial_put_hex(user);
+    serial_puts(" src=");
+    serial_put_hex((uint64_t)(uintptr_t)src);
+    serial_puts(" len=");
+    serial_put_dec((int64_t)len);
+    serial_puts("\r\n");
+    if (!src) { serial_puts("[copyout] fail:null-src\r\n"); return -14; }
+    if (!arm64_user_range_accessible(user, len, 1)) {
+        serial_puts("[copyout] fail:range\r\n");
+        return -14;
+    }
+    serial_puts("[copyout] go\r\n");
     for (uint64_t i = 0; i < len; ++i) {
         uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
                                                      user + i, 1);
         if (!phys) return -14;
-        *(volatile uint8_t *)(uintptr_t)phys = src[i];
+        /* Source elements are TAGGED (ENCODE_INT(byte)); decode to the raw
+         * byte the user buffer expects (mirrors copyin's tagging). */
+        *(volatile uint8_t *)(uintptr_t)phys =
+            (uint8_t)(DECODE_INT(((const RuntimeValue *)(uintptr_t)src)[i]));
     }
+    serial_puts("[copyout] done\r\n");
     return (RuntimeValue)len;
+}
+
+/* ==========================================================================
+ * EL0 file-syscall handlers (C, clang-bringup lane, R4).
+ *
+ * The Simple strong shims (spl_handle_file_*) park the guest after a
+ * syscall (run-20260926_045921: the CPU parks at arm64_enter_el0 after a
+ * strong-shim stat; the Simple->C strong-shim execution is the trigger —
+ * the C-only mmap path round-trips fine). These C handlers mirror the
+ * proven C-only mmap path instead: raw user-VA access through
+ * arm64_user_translate_checked, the existing C FAT32 bridge for reads of
+ * image-resident files, and a small RAM-backed file table for
+ * guest-created outputs (/HELLO.O, /HELLO2.ELF) — no FAT32 write path is
+ * needed because those files only have to survive across the rungs, not
+ * across a reboot. fd numbers 0/1/2 stay reserved for stdio (the guest
+ * libc routes them to DebugWrite, id 60); file fds start at 3.
+ * ==========================================================================*/
+
+#define SVC_MAX_FDS 16
+#define SVC_MAX_RAM_FILES 16
+#define SVC_RAM_FILE_MAX (2048u * 1024u)
+#define SVC_O_CREAT 64
+#define SVC_O_ACCMODE 3
+#define SVC_O_WRONLY 1
+#define SVC_O_RDWR 2
+
+static struct {
+    int used;
+    int writable;
+    uint32_t cluster;   /* FAT32 start cluster (0 = RAM-backed) */
+    uint32_t size;
+    uint32_t offset;
+    int ram_index;      /* index into g_svc_ram_files, -1 for FAT32 files */
+    uint8_t *bounce;    /* FAT32 files: whole-file bounce buffer (malloc'd) */
+} g_svc_fds[SVC_MAX_FDS];
+
+static struct {
+    int used;
+    char path[64];
+    uint32_t size;
+    uint8_t *ram;
+} g_svc_ram_files[SVC_MAX_RAM_FILES];
+
+static uint64_t svc_user_memcpy_to(uint64_t user_va, const uint8_t *src, uint64_t len)
+{
+    uint64_t done = 0;
+    while (done < len) {
+        uint64_t va = user_va + done;
+        uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root, va, 1);
+        if (!phys) return done;
+        uint64_t page_off = va & 4095ULL;
+        uint64_t n = 4096ULL - page_off;
+        if (n > len - done) n = len - done;
+        __builtin_memcpy((void *)(uintptr_t)phys, src + done, (size_t)n);
+        done += n;
+    }
+    return done;
+}
+
+static uint64_t svc_user_memcpy_from(uint8_t *dst, uint64_t user_va, uint64_t len)
+{
+    uint64_t done = 0;
+    while (done < len) {
+        uint64_t va = user_va + done;
+        uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root, va, 0);
+        if (!phys) return done;
+        uint64_t page_off = va & 4095ULL;
+        uint64_t n = 4096ULL - page_off;
+        if (n > len - done) n = len - done;
+        __builtin_memcpy(dst + done, (const void *)(uintptr_t)phys, (size_t)n);
+        done += n;
+    }
+    return done;
+}
+
+/* Copy a NUL-terminated-ish path out of the guest (bounded). Returns the
+ * path length, or -1 when the pointer is inaccessible/too long. */
+static int64_t svc_copy_path(uint64_t user_path, uint64_t path_len, char *out, uint64_t cap)
+{
+    if (!arm64_recorded_user_root || !user_path || path_len == 0 || path_len >= cap)
+        return -1;
+    if (!arm64_user_range_accessible(user_path, path_len, 0)) return -1;
+    if (svc_user_memcpy_from((uint8_t *)out, user_path, path_len) != path_len)
+        return -1;
+    out[path_len] = '\0';
+    return (int64_t)path_len;
+}
+
+static int svc_ram_find(const char *path)
+{
+    for (int i = 0; i < SVC_MAX_RAM_FILES; i++)
+        if (g_svc_ram_files[i].used && __builtin_strcmp(g_svc_ram_files[i].path, path) == 0)
+            return i;
+    return -1;
+}
+
+/* R5 spawn bridge: the guest lld writes /HELLO2.ELF through the C
+ * file-syscall layer into g_svc_ram_files (RAM-backed, never on the FAT32
+ * image), so the FAT32-only resident stream cannot resolve it. Look the
+ * path up among the RAM-backed files; on a hit, lay the bytes into the raw
+ * payload region (same contract as the FAT32 cluster pump) and return the
+ * size. 0 means "not a RAM file" — the caller falls through to FAT32. */
+RuntimeValue rt_arm_svc_ram_payload_resident(RuntimeValue path_rv)
+{
+    RuntimeString *s = decode_string(path_rv);
+    if (!s || s->len == 0 || s->len >= 64) return (RuntimeValue)0ULL;
+    char path[64];
+    for (uint32_t i = 0; i < s->len; i++) path[i] = s->data[i];
+    path[s->len] = '\0';
+    int ri = svc_ram_find(path);
+    if (ri < 0) return (RuntimeValue)0ULL;
+    uint32_t size = g_svc_ram_files[ri].size;
+    if (size == 0 || size > ARM_PAYLOAD_REGION_BYTES) return (RuntimeValue)0ULL;
+    g_arm_payload_region_size = size;
+    __builtin_memcpy(_arm_payload_region, g_svc_ram_files[ri].ram, size);
+    return (RuntimeValue)(uintptr_t)size;
+}
+
+static int svc_fd_alloc(void)
+{
+    for (int i = 3; i < SVC_MAX_FDS; i++)
+        if (!g_svc_fds[i].used) return i;
+    return -1;
+}
+
+static void svc_fat32_ensure_queue(void)
+{
+    /* The kernel's Simple-side virtio driver already brought the queue up at
+     * mount; mark the C bridge ready so it reuses that queue instead of
+     * resetting it underneath the Simple driver. */
+    if (!g_simpleos_blk_ready) g_simpleos_blk_ready = 1;
+    /* TEMP DIAG (lane-C1 bring-up, one-shot): prove the 8.3 lookup works
+     * for the actual input file before the guest's first open/stat. */
+    {
+        static int s_probe_done = 0;
+        if (!s_probe_done) {
+            s_probe_done = 1;
+            uint32_t sz = 0;
+            uint32_t cl = _simpleos_resolve_path("/HELLO.C", 8, &sz);
+            serial_puts("[resolve-probe] /HELLO.C cluster=");
+            serial_put_dec((int64_t)cl);
+            serial_puts(" size=");
+            serial_put_dec((int64_t)sz);
+            serial_puts("\r\n");
+        }
+    }
+}
+
+/* syscall 34: stat(path, len, statbuf). Returns 0 on success, -errno. */
+static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t stat_va, uint64_t a3)
+{
+    /* fd-mode (a3=1, the guest libc's fstat): answer from the fd table so
+     * LLVM's MemoryBuffer learns the real file size. A zeroed SIZE here is
+     * fatal upstream: clang trusts st_size=0 and builds an empty buffer
+     * WITHOUT a read syscall (R5b: cc1 compiled an empty translation unit
+     * from /HELLO.C, the in-guest-linked product lost main/printf, and the
+     * gate's R5 was a hollow rc=0). The mode stays NON-regular (0) on
+     * purpose: LLVM only mmaps regular files, and the guest kernel's mmap
+     * is anonymous-only — it would hand back zeroed pages and lld would
+     * read a zeroed /LIBC.A ("unknown file type"). With a non-regular mode
+     * LLVM takes getMemoryBufferForStream (read-to-EOF), which is correct
+     * for every file size (the pre-fix lld read its inputs exactly this
+     * way). stdio fds (0/1/2) keep the fully-zeroed stat the guest-libc
+     * stub used to return (R3-proven); unknown fds get -EBADF. */
+    if (a3 == 1) {
+        int fd = (int)path_va;
+        uint8_t st[96];
+        __builtin_memset(st, 0, sizeof(st));
+        if (fd >= 3) {
+            if (fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9; /* EBADF */
+            uint32_t size = g_svc_fds[fd].size;
+            st[48] = (uint8_t)(size & 0xFF);
+            st[49] = (uint8_t)((size >> 8) & 0xFF);
+            st[50] = (uint8_t)((size >> 16) & 0xFF);
+            st[51] = (uint8_t)((size >> 24) & 0xFF);
+            /* S_IFIFO, not mode 0 (R6): clang's FileManager builds its
+             * FileEntry from open+fstat, and getBufferForFile only falls back
+             * to the size-probing stream read when the entry is a named pipe
+             * (isNamedPipe -> FileSize=-1 -> getOpenFileImpl's type check ->
+             * getMemoryBufferForStream). With mode 0 the entry was neither
+             * regular nor pipe, clang passed the real size straight to
+             * getBuffer, getOpenFileImpl skipped the type check, and
+             * shouldUseMmap mmap'd the fd — the anonymous-only guest mmap
+             * handed back zeroed pages and cc1 compiled 1.87 MB of NULs
+             * (run-20260926_174206, 323k "null character ignored"). fifo_file
+             * is still non-regular for LLVM's mmap check, so lld's reads are
+             * unchanged. */
+            st[16] = 0x00; st[17] = 0x10;           /* mode = 0x1000 (S_IFIFO) */
+        }
+        if (!arm64_user_range_accessible(stat_va, sizeof(st), 1)) return -14;
+        return svc_user_memcpy_to(stat_va, st, sizeof(st)) == sizeof(st) ? 0 : -14;
+    }
+    char path[128];
+    if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
+    /* The root directory always exists. LLVM's FileManager stats the PARENT
+     * of an input file before the file itself (getDirectoryFromFile), so
+     * stat("/") must succeed or the file is rejected pre-open with the
+     * parent's error (run-20260926_070853: stat("/") -> -ENOSYS ->
+     * "error reading '/HELLO.C': Function not implemented", rc=1). Answer
+     * a real S_IFDIR stat; every other absent path keeps the tolerated
+     * -ENOSYS below. */
+    {
+        int is_root = 1;
+        for (int64_t i = 0; i < (int64_t)path_len; i++)
+            if (path[i] != '/') { is_root = 0; break; }
+        if (is_root) {
+            serial_puts("[stat] path=/ root-dir\r\n");
+            uint8_t st[96];
+            __builtin_memset(st, 0, sizeof(st));
+            st[16] = 0xED; st[17] = 0x41;   /* mode = 0x41ED (S_IFDIR|0755) */
+            st[24] = 2;                     /* nlink = 2 (directory) */
+            if (!arm64_user_range_accessible(stat_va, sizeof(st), 1)) return -14;
+            return svc_user_memcpy_to(stat_va, st, sizeof(st)) == sizeof(st) ? 0 : -14;
+        }
+    }
+    uint32_t size = 0;
+    int ri = svc_ram_find(path);
+    if (ri >= 0) {
+        size = g_svc_ram_files[ri].size;
+    } else {
+        svc_fat32_ensure_queue();
+        uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size);
+        /* TEMP DIAG (lane-C1 bring-up): log the resolve outcome per path. */
+        serial_puts("[stat] path=");
+        serial_puts(path);
+        serial_puts(" cluster=");
+        serial_put_dec((int64_t)cluster);
+        serial_puts(" size=");
+        serial_put_dec((int64_t)size);
+        serial_puts("\r\n");
+        if (cluster < 2U) return -38; /* ENOSYS — the guest tolerates this on
+            absent probe paths (run-20260926_045921: it spins on a real
+            ENOENT); existing files still get the real stat. */
+    }
+    /* struct stat: mode u32 @16 (S_IFREG|0644 = 0x81A4 LE), nlink u64 @24,
+     * size i64 @48. */
+    uint8_t st[96];
+    __builtin_memset(st, 0, sizeof(st));
+    st[16] = 0xA4; st[17] = 0x81;               /* mode = 0x81A4 (S_IFREG|0644) */
+    st[24] = 1;                                 /* nlink = 1 */
+    st[48] = (uint8_t)(size & 0xFF);
+    st[49] = (uint8_t)((size >> 8) & 0xFF);
+    st[50] = (uint8_t)((size >> 16) & 0xFF);
+    st[51] = (uint8_t)((size >> 24) & 0xFF);
+    if (!arm64_user_range_accessible(stat_va, sizeof(st), 1)) return -14;
+    return svc_user_memcpy_to(stat_va, st, sizeof(st)) == sizeof(st) ? 0 : -14;
+}
+
+/* syscall 30: open(path, len, flags). Returns fd >= 3, or -errno. */
+static int64_t arm64_svc_file_open(uint64_t path_va, uint64_t path_len, uint64_t flags)
+{
+    char path[128];
+    if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
+    /* TEMP DIAG (lane-C1 bring-up): log every open + its resolve outcome. */
+    serial_puts("[open] path=");
+    serial_puts(path);
+    serial_puts(" flags=");
+    serial_put_dec((int64_t)flags);
+    serial_puts("\r\n");
+    int fd = svc_fd_alloc();
+    if (fd < 0) return -24; /* EMFILE */
+    if ((flags & SVC_O_CREAT) != 0) {
+        int ri = svc_ram_find(path);
+        if (ri < 0) {
+            ri = -1;
+            for (int i = 0; i < SVC_MAX_RAM_FILES; i++)
+                if (!g_svc_ram_files[i].used) { ri = i; break; }
+            if (ri < 0) return -28; /* ENOSPC */
+            __builtin_memset(&g_svc_ram_files[ri], 0, sizeof(g_svc_ram_files[ri]));
+            g_svc_ram_files[ri].used = 1;
+            __builtin_strncpy(g_svc_ram_files[ri].path, path, sizeof(g_svc_ram_files[ri].path) - 1);
+            g_svc_ram_files[ri].ram = (uint8_t *)malloc(SVC_RAM_FILE_MAX);
+            if (!g_svc_ram_files[ri].ram) { g_svc_ram_files[ri].used = 0; return -12; }
+            g_svc_ram_files[ri].size = 0;
+        }
+        g_svc_fds[fd].used = 1;
+        g_svc_fds[fd].writable = 1;
+        g_svc_fds[fd].cluster = 0;
+        g_svc_fds[fd].size = g_svc_ram_files[ri].size;
+        g_svc_fds[fd].offset = 0;
+        g_svc_fds[fd].ram_index = ri;
+        g_svc_fds[fd].bounce = 0;
+        return fd;
+    }
+    /* Read path: RAM file first (a guest-created output read back), then the
+     * image's FAT32. */
+    int ri = svc_ram_find(path);
+    if (ri >= 0) {
+        g_svc_fds[fd].used = 1;
+        g_svc_fds[fd].writable = 0;
+        g_svc_fds[fd].cluster = 0;
+        g_svc_fds[fd].size = g_svc_ram_files[ri].size;
+        g_svc_fds[fd].offset = 0;
+        g_svc_fds[fd].ram_index = ri;
+        g_svc_fds[fd].bounce = 0;
+        return fd;
+    }
+    svc_fat32_ensure_queue();
+    uint32_t size = 0;
+    uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size);
+    serial_puts("[open] resolve cluster=");
+    serial_put_dec((int64_t)cluster);
+    serial_puts(" size=");
+    serial_put_dec((int64_t)size);
+    serial_puts("\r\n");
+    if (cluster < 2U) return -38; /* ENOSYS — see stat: tolerated on absent
+        probe paths; existing files open normally. */
+    g_svc_fds[fd].used = 1;
+    g_svc_fds[fd].writable = 0;
+    g_svc_fds[fd].cluster = cluster;
+    g_svc_fds[fd].size = size;
+    g_svc_fds[fd].offset = 0;
+    g_svc_fds[fd].ram_index = -1;
+    g_svc_fds[fd].bounce = 0;
+    return fd;
+}
+
+/* syscall 31: read(fd, buf, count). Returns bytes read (0 at EOF), -errno. */
+static int64_t arm64_svc_file_read(uint64_t fd_v, uint64_t buf_va, uint64_t count)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (count == 0) return 0;
+    if (!arm64_user_range_accessible(buf_va, count, 1)) return -14;
+    if (g_svc_fds[fd].offset >= g_svc_fds[fd].size) return 0;
+    uint32_t n = g_svc_fds[fd].size - g_svc_fds[fd].offset;
+    if (n > count) n = (uint32_t)count;
+    if (g_svc_fds[fd].ram_index >= 0) {
+        uint8_t *ram = g_svc_ram_files[g_svc_fds[fd].ram_index].ram;
+        uint64_t w = svc_user_memcpy_to(buf_va, ram + g_svc_fds[fd].offset, n);
+        g_svc_fds[fd].offset += (uint32_t)w;
+        return (int64_t)w;
+    }
+    /* FAT32 file: lazily load the whole file into a bounce buffer, then
+     * serve offset reads from it. */
+    if (!g_svc_fds[fd].bounce) {
+        if (g_svc_fds[fd].size == 0 || g_svc_fds[fd].size > (4u * 1024u * 1024u))
+            return -27; /* EFBIG — not a file this lane reads */
+        g_svc_fds[fd].bounce = (uint8_t *)malloc(g_svc_fds[fd].size);
+        if (!g_svc_fds[fd].bounce) return -12;
+        uint32_t got = _simpleos_read_chain(g_svc_fds[fd].cluster,
+                                            g_svc_fds[fd].size,
+                                            g_svc_fds[fd].bounce,
+                                            g_svc_fds[fd].size);
+        if (got != g_svc_fds[fd].size) return -5;
+    }
+    uint64_t w = svc_user_memcpy_to(buf_va, g_svc_fds[fd].bounce + g_svc_fds[fd].offset, n);
+    g_svc_fds[fd].offset += (uint32_t)w;
+    return (int64_t)w;
+}
+
+/* syscall 32: write(fd, buf, count). RAM-backed files only. Returns n, -errno. */
+static int64_t arm64_svc_file_write(uint64_t fd_v, uint64_t buf_va, uint64_t count)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (count == 0) return 0;
+    if (!arm64_user_range_accessible(buf_va, count, 0)) return -14;
+    int ri = g_svc_fds[fd].ram_index;
+    if (ri < 0) return -30; /* EROFS — image files are read-only here */
+    if (g_svc_fds[fd].offset + count > SVC_RAM_FILE_MAX) return -27; /* EFBIG */
+    uint64_t r = svc_user_memcpy_from(g_svc_ram_files[ri].ram + g_svc_fds[fd].offset,
+                                      buf_va, count);
+    g_svc_fds[fd].offset += (uint32_t)r;
+    if (g_svc_fds[fd].offset > g_svc_ram_files[ri].size)
+        g_svc_ram_files[ri].size = g_svc_fds[fd].offset;
+    g_svc_fds[fd].size = g_svc_ram_files[ri].size;
+    return (int64_t)r;
+}
+
+/* syscall 33: close(fd). Returns 0, -errno. */
+static int64_t arm64_svc_file_close(uint64_t fd_v)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (g_svc_fds[fd].bounce) free(g_svc_fds[fd].bounce);
+    __builtin_memset(&g_svc_fds[fd], 0, sizeof(g_svc_fds[fd]));
+    return 0;
+}
+
+/* syscall 39: unlink(path, len). RAM-backed guest files only — image files
+ * stay read-only. Returns 0, -errno. */
+static int64_t arm64_svc_file_unlink(uint64_t path_va, uint64_t path_len)
+{
+    char path[128];
+    if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
+    int ri = svc_ram_find(path);
+    if (ri < 0) return -2; /* ENOENT — not a guest-created RAM file */
+    g_svc_ram_files[ri].used = 0;
+    return 0;
+}
+
+/* syscall 43: ftruncate(fd, size). RAM-backed files only. Returns 0, -errno. */
+static int64_t arm64_svc_file_ftruncate(uint64_t fd_v, uint64_t size_v)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    int ri = g_svc_fds[fd].ram_index;
+    if (ri < 0) return -30; /* EROFS — image files are read-only here */
+    if (size_v > SVC_RAM_FILE_MAX) return -27; /* EFBIG */
+    g_svc_ram_files[ri].size = (uint32_t)size_v;
+    g_svc_fds[fd].size = (uint32_t)size_v;
+    if (g_svc_fds[fd].offset > (uint32_t)size_v) g_svc_fds[fd].offset = (uint32_t)size_v;
+    return 0;
+}
+
+/* syscall 44: rename(old, old_len, new, new_len). RAM-backed guest files
+ * only — image files stay read-only. rename() overwrites the destination.
+ * Returns 0, -errno. */
+static int64_t arm64_svc_file_rename(uint64_t old_va, uint64_t old_len,
+                                     uint64_t new_va, uint64_t new_len)
+{
+    char oldp[128], newp[128];
+    if (svc_copy_path(old_va, old_len, oldp, sizeof(oldp) - 1) < 0) return -14;
+    if (svc_copy_path(new_va, new_len, newp, sizeof(newp) - 1) < 0) return -14;
+    int ri = svc_ram_find(oldp);
+    if (ri < 0) return -2; /* ENOENT — not a guest-created RAM file */
+    int ex = svc_ram_find(newp);
+    if (ex >= 0 && ex != ri) g_svc_ram_files[ex].used = 0; /* overwrite dest */
+    __builtin_strncpy(g_svc_ram_files[ri].path, newp, sizeof(g_svc_ram_files[ri].path) - 1);
+    g_svc_ram_files[ri].path[sizeof(g_svc_ram_files[ri].path) - 1] = '\0';
+    return 0;
+}
+
+/* syscall 50: clock_gettime(clk_id, tp) — the libc passes a guest
+ * int64_t buf[2] = {seconds, nanoseconds}. Served from the ARM generic
+ * timer (CNTVCT_EL0/CNTFRQ_EL0, confirmed readable in this boot path —
+ * rt_time_now_unix_micros); no RTC is wired, so this is monotonic
+ * uptime-since-boot for every clock id, the honest best available. Split
+ * quotient/remainder scaling avoids u64 overflow. Returns 0, -errno. */
+static int64_t arm64_svc_clock_gettime(uint64_t clk_id, uint64_t tp_va)
+{
+    (void)clk_id;
+    uint64_t cntvct = 0;
+    uint64_t cntfrq = 0;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cntvct));
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+    uint64_t sec = 0;
+    uint64_t nsec = 0;
+    if (cntfrq != 0) {
+        sec = cntvct / cntfrq;
+        nsec = ((cntvct % cntfrq) * 1000000000ULL) / cntfrq;
+    }
+    uint8_t ts[16];
+    __builtin_memset(ts, 0, sizeof(ts));
+    for (int i = 0; i < 8; i++) ts[i] = (uint8_t)(sec >> (8 * i));
+    for (int i = 0; i < 8; i++) ts[8 + i] = (uint8_t)(nsec >> (8 * i));
+    if (!arm64_user_range_accessible(tp_va, sizeof(ts), 1)) return -14;
+    return svc_user_memcpy_to(tp_va, ts, sizeof(ts)) == sizeof(ts) ? 0 : -14;
+}
+
+/* syscall 46: lseek(fd, offset, whence). File fds (>=3) get a real seek;
+ * stdio fds (0/1/2) keep the tolerated -ENOSYS (the guest driver's stderr
+ * probe spins on a successful stderr lseek — run-20260926_032421). */
+static int64_t arm64_svc_file_lseek(uint64_t fd_v, uint64_t offset_v, uint64_t whence)
+{
+    int fd = (int)fd_v;
+    if (fd < 3) return -38; /* ENOSYS — stdio: tolerated (see above) */
+    if (fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    int64_t offset = (int64_t)offset_v;
+    if (whence == 0) {              /* SEEK_SET */
+        if (offset < 0) return -22;
+        g_svc_fds[fd].offset = (uint32_t)offset;
+    } else if (whence == 1) {       /* SEEK_CUR */
+        int64_t cur = (int64_t)g_svc_fds[fd].offset + offset;
+        if (cur < 0) return -22;
+        g_svc_fds[fd].offset = (uint32_t)cur;
+    } else if (whence == 2) {       /* SEEK_END */
+        int64_t end = (int64_t)g_svc_fds[fd].size + offset;
+        if (end < 0) return -22;
+        g_svc_fds[fd].offset = (uint32_t)end;
+    } else {
+        return -22;
+    }
+    return (int64_t)g_svc_fds[fd].offset;
+}
+
+/* syscall 69: fcntl(fd, cmd, arg). Minimal descriptor-ops subset for the
+ * guest toolchain (F_GETFL/F_GETFD/F_SETFD/F_SETFL + the SimpleOS OFD
+ * token). Unwired was -ENOSYS, which the guest's MemoryBuffer/close paths
+ * surface as "error reading '<file>': Function not implemented". */
+static int64_t arm64_svc_file_fcntl(uint64_t fd_v, uint64_t cmd_v, uint64_t arg)
+{
+    int fd = (int)fd_v;
+    int cmd = (int)cmd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    if (cmd == 3) return g_svc_fds[fd].writable ? SVC_O_WRONLY : 0; /* F_GETFL */
+    if (cmd == 1) return 0;   /* F_GETFD */
+    if (cmd == 2) return 0;   /* F_SETFD */
+    if (cmd == 4) return 0;   /* F_SETFL */
+    if (cmd == 1397686273) return (int64_t)fd; /* F_SIMPLEOS_GET_OFD: token = fd */
+    return -22;               /* EINVAL — unsupported cmd */
+}
+
+/* Lane-C1 bring-up diagnostic: dump the kernel stack window below the
+ * exception frame at a fatal fault. frame_sp is the exception-frame base
+ * (the 272-byte frame the sync handler pushed); the C call chain that led
+ * to the fault sits BELOW it (each frame's saved x30 = a kernel text
+ * return address, resolvable with aarch64-linux-gnu-addr2line against
+ * build/os/simpleos_arm64_clang_bringup.elf). Diagnostic only. */
+void arm64_fault_stack_dump(uint64_t frame_sp)
+{
+    serial_puts("[fault-dump] frame_sp=");
+    serial_put_hex((int64_t)frame_sp);
+    serial_puts("\r\n");
+    /* The exception frame's own slots: x30 (LR at the fault — distinguishes
+     * `ret` to a corrupted LR from `blr` to a bad function pointer) and the
+     * SPSR (faulting EL). frame_sp is the 272-byte sync frame base; x30 sits
+     * at +240. */
+    volatile uint64_t *f = (volatile uint64_t *)(uintptr_t)frame_sp;
+    serial_puts("[fault-dump] frame x30=");
+    serial_put_hex((int64_t)f[30]);
+    serial_puts(" x0=");
+    serial_put_hex((int64_t)f[0]);
+    serial_puts(" x1=");
+    serial_put_hex((int64_t)f[1]);
+    serial_puts("\r\n");
+    uint64_t spsr = 0;
+    __asm__ volatile("mrs %0, spsr_el1" : "=r"(spsr));
+    serial_puts("[fault-dump] spsr=");
+    serial_put_hex((int64_t)spsr);
+    serial_puts("\r\n");
+    volatile uint64_t *w = (volatile uint64_t *)(uintptr_t)frame_sp;
+    /* Bound the walk to the frame's own page: the kernel stack's used region
+     * is one page, and reading past its floor hits the unmapped guard page,
+     * which re-faults and cascades (run-20260926_082016/_083650 looped the
+     * fault handler instead of reporting the original fault). */
+    uint64_t room = (frame_sp & 0xfffULL) / 8ULL;
+    int max_i = (int)(room > 36 ? 36 : room);
+    for (int i = 1; i <= max_i; i++) {
+        serial_puts("[fault-dump] sp-");
+        serial_put_dec((int64_t)(i * 8));
+        serial_puts(" = ");
+        serial_put_hex((int64_t)w[-i]);
+        serial_puts("\r\n");
+    }
 }
 
 RuntimeValue rt_arm64_user_as_ttbr0_probe(RuntimeValue root_val)
@@ -4441,6 +5407,10 @@ RuntimeValue rt_arm64_probe_recorded_user_handoff(void)
     return 1;
 }
 
+/* Defined in crt0.S: unwind to the arm64_enter_el0 caller with x0 = the
+ * payload's exit code; never returns. */
+extern void arm64_resume_from_el0(uint64_t exit_code) __attribute__((noreturn));
+
 uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
                                   uint64_t a2, uint64_t a3, uint64_t a4,
                                   uint64_t elr, uint64_t esr)
@@ -4448,12 +5418,43 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
     (void)elr;
     (void)esr;
     if (id == 0) {
+        if (arm64_resume_ctx[12]) {
+            /* Payload ring-3 handoff: resume the kernel frame recorded by
+             * arm64_enter_el0 instead of ending the whole boot. */
+            serial_puts("[arm64-user] svc exit; resume kernel\r\n");
+            arm64_resume_from_el0(a0);
+        }
         serial_puts("[arm64-user] svc exit ok\r\n");
         serial_puts("[arm-fs-exec] vfs:ok\r\n");
         serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
         serial_puts("[arm-fs-exec] user-svc-exit:ok\r\n");
         serial_puts("TEST PASSED\r\n");
         rt_qemu_exit_success();
+    }
+    /* TEMP DIAG (lane-C1 bring-up): trace non-exit/non-DebugWrite user
+     * syscalls (id, a0..a2, result) to pinpoint ENOSYS return paths.
+     * [svc-in] prints at handler ENTRY so a missing [svc] ret line
+     * discriminates "kernel spins inside the handler" from "guest never
+     * issued the syscall". */
+    if (id != 0 && id != 60) {
+        serial_puts("[svc-in] id=");
+        serial_put_dec((int64_t)id);
+        serial_puts(" elr=");
+        serial_put_hex(elr);
+        serial_puts("\r\n");
+        uint64_t ret = (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
+        serial_puts("[svc] id=");
+        serial_put_dec((int64_t)id);
+        serial_puts(" a0=");
+        serial_put_hex(a0);
+        serial_puts(" a1=");
+        serial_put_hex(a1);
+        serial_puts(" a2=");
+        serial_put_hex(a2);
+        serial_puts(" ret=");
+        serial_put_hex(ret);
+        serial_puts("\r\n");
+        return ret;
     }
     return (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
@@ -4503,6 +5504,238 @@ RuntimeValue rt_arm64_enter_recorded_user_live(void)
     }
     arm64_enter_user_virtual(root, entry, sp);
     return 0;
+}
+
+/* --- payload ring-3 launcher (lane-C1 clang bring-up, Wall 10) -------------
+ * Lane-local UNCHECKED prepare, the arm64 mirror of the proven x86 OVMF
+ * lane's _admit_raw_elf64/_map_pt_loads pair (route B in the lane doc): the
+ * 115 MiB payload bytes are already resident in the raw .bss region (Wall 9),
+ * so this validates the ELF straight out of that region, copies each PT_LOAD
+ * page into freshly allocated physical frames (per-page permission union, BSS
+ * zero-fill), maps an 8 MiB user stack carrying the SysV argc/argv/envp/auxv
+ * frame, and erets into EL0 via arm64_enter_el0 (crt0.S), which records the
+ * kernel resume frame so the payload's exit(0) SVC returns here with its exit
+ * code. This deliberately bypasses the fail-closed authenticated spawn seam
+ * (fs_exec_prepare_spawn -> -13) for the bring-up lane only; production
+ * execution must go through fs_exec_adopt_authenticated_v1. */
+extern uint64_t arm64_enter_el0(uint64_t root, uint64_t entry, uint64_t user_sp);
+
+static uint16_t arm64_payload_u16(const uint8_t *p, uint64_t off)
+{
+    return (uint16_t)(p[off] | ((uint16_t)p[off + 1ULL] << 8));
+}
+static uint32_t arm64_payload_u32(const uint8_t *p, uint64_t off)
+{
+    return (uint32_t)p[off] | ((uint32_t)p[off + 1ULL] << 8) |
+        ((uint32_t)p[off + 2ULL] << 16) | ((uint32_t)p[off + 3ULL] << 24);
+}
+static uint64_t arm64_payload_u64(const uint8_t *p, uint64_t off)
+{
+    return (uint64_t)arm64_payload_u32(p, off) |
+        ((uint64_t)arm64_payload_u32(p, off + 4ULL) << 32);
+}
+
+#define ARM64_PAYLOAD_STACK_TOP   0x80000000ULL
+#define ARM64_PAYLOAD_STACK_PAGES 2048ULL /* 8 MiB */
+#define ARM64_PAYLOAD_USER_LIMIT  0x0000800000000000ULL
+
+static uint64_t arm64_payload_frame_write(uint8_t *top_phys_page,
+        RuntimeValue argv_arr, uint64_t *out_sp)
+{
+    /* SysV process entry frame on the top stack page: argc, argv[], NULL,
+     * envp NULL, auxv (AT_PAGESZ, AT_NULL), then the strings. argv_arr is a
+     * tagged RuntimeArray of RuntimeStrings (the Simple [text]). */
+    uint64_t argc = (uint64_t)rt_arm_array_len_u32(argv_arr);
+    if (argc == 0 || argc > 64) return 0;
+    uint64_t str_bytes = 0;
+    for (uint64_t i = 0; i < argc; i++) {
+        /* ENCODE_INT: rt_array_get DECODE_INTs its index (tagged ints,
+         * v >> 3). A raw (RuntimeValue)i decodes as i >> 3, so every
+         * element >= 1 aliased element 0 and argv[1..] duplicated argv[0]
+         * (guest clang saw ["/CLANG.ELF", "/CLANG.ELF"] and treated the
+         * second as an input: "no such file or directory"). */
+        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, ENCODE_INT(i)));
+        if (!s) return 0;
+        str_bytes = str_bytes + s->len + 1ULL;
+    }
+    uint64_t ptr_block = 8ULL * (1ULL + argc + 1ULL + 1ULL + 4ULL);
+    uint64_t total = ptr_block + str_bytes;
+    if (total > 4096ULL) return 0;
+    uint64_t sp = (4096ULL - total) & ~15ULL;
+    uint64_t str_off = sp + ptr_block;
+    volatile uint64_t *q = (volatile uint64_t *)(uintptr_t)top_phys_page;
+    uint64_t va_base = ARM64_PAYLOAD_STACK_TOP - 4096ULL;
+    q[sp / 8ULL] = argc;
+    for (uint64_t i = 0; i < argc; i++) {
+        RuntimeString *s = decode_string(rt_array_get_text(argv_arr, ENCODE_INT(i)));
+        q[sp / 8ULL + 1ULL + i] = va_base + str_off; /* the guest derefs VAs */
+        __builtin_memcpy(top_phys_page + str_off, s->data, s->len);
+        top_phys_page[str_off + s->len] = '\0';
+        str_off = str_off + s->len + 1ULL;
+    }
+    q[sp / 8ULL + 1ULL + argc] = 0; /* argv NULL */
+    q[sp / 8ULL + 1ULL + argc + 1ULL] = 0; /* envp NULL */
+    q[sp / 8ULL + 1ULL + argc + 2ULL] = 6; /* AT_PAGESZ */
+    q[sp / 8ULL + 1ULL + argc + 3ULL] = 4096;
+    q[sp / 8ULL + 1ULL + argc + 4ULL] = 0; /* AT_NULL */
+    q[sp / 8ULL + 1ULL + argc + 5ULL] = 0;
+    *out_sp = (ARM64_PAYLOAD_STACK_TOP - 4096ULL) + sp;
+    return 1;
+}
+
+RuntimeValue rt_arm_payload_elf64_ring3_enter(RuntimeValue size_val, RuntimeValue argv_arr)
+{
+    uint64_t file_len = (uint64_t)size_val;
+    const uint8_t *file = (const uint8_t *)(uintptr_t)_arm_payload_region;
+    serial_puts("[payload] ring3 enter: validate\r\n");
+    if (file_len < 64ULL || file_len > (uint64_t)ARM_PAYLOAD_REGION_BYTES) return -2;
+    if (arm64_payload_u32(file, 0) != 0x464C457FU || file[4] != 2U || file[5] != 1U)
+        return -2;
+    if (arm64_payload_u16(file, 16) != 2U || arm64_payload_u16(file, 18) != 183U)
+        return -2;
+    if (arm64_payload_u16(file, 52) != 64U || arm64_payload_u16(file, 54) != 56U)
+        return -2;
+    uint64_t phoff = arm64_payload_u64(file, 32);
+    uint64_t phnum = arm64_payload_u16(file, 56);
+    if (phnum == 0 || phnum > 128ULL) return -2;
+    if (phoff < 64ULL || phoff > file_len || phnum > (file_len - phoff) / 56ULL)
+        return -2;
+    uint64_t entry = arm64_payload_u64(file, 24);
+    uint64_t lo = UINT64_MAX;
+    uint64_t hi = 0;
+    uint32_t loads = 0;
+    int entry_ok = 0;
+    for (uint64_t i = 0; i < phnum; i++) {
+        uint64_t ph = phoff + i * 56ULL;
+        if (arm64_payload_u32(file, ph) != 1U) continue;
+        loads++;
+        uint32_t flags = arm64_payload_u32(file, ph + 4ULL);
+        uint64_t foff = arm64_payload_u64(file, ph + 8ULL);
+        uint64_t va = arm64_payload_u64(file, ph + 16ULL);
+        uint64_t fsz = arm64_payload_u64(file, ph + 32ULL);
+        uint64_t msz = arm64_payload_u64(file, ph + 40ULL);
+        if ((flags & 0xFFFFFFF8U) != 0 || (flags & 3U) == 3U) return -2; /* no W+X */
+        if (fsz > msz || foff > file_len || fsz > file_len - foff) return -2;
+        if (msz == 0) continue;
+        if (va < 4096ULL || va >= ARM64_PAYLOAD_USER_LIMIT || msz > ARM64_PAYLOAD_USER_LIMIT - va)
+            return -2;
+        uint64_t end = va + msz;
+        if (end > UINT64_MAX - 4095ULL) return -2;
+        if (va < lo) lo = va;
+        if (end > hi) hi = end;
+        if ((flags & 1U) != 0 && entry >= va && entry - va < fsz) entry_ok = 1;
+    }
+    if (loads == 0 || !entry_ok || hi <= lo) return -2;
+    uint64_t lo_page = lo & ~4095ULL;
+    uint64_t hi_page = (hi + 4095ULL) & ~4095ULL;
+    serial_puts("[payload] elf ok: map ");
+    serial_put_dec((int64_t)((hi_page - lo_page) / 4096ULL));
+    serial_puts(" pages, entry=");
+    serial_put_hex(entry);
+    serial_puts("\r\n");
+
+    uint64_t root = (uint64_t)rt_arm64_user_as_create();
+    if (!root) return -3;
+    arm64_user_page_pool_off = 0;
+    arm64_user_heap_va = 0x20000000ULL;
+
+    /* DIAGNOSTIC (one-boot, not a fix): the guest binary's __libc_init_array
+     * dereferences 0xb1c8 (adrp x8,0xb000 baked into the instruction — a
+     * link-time reference outside every PT_LOAD, i.e. a toolchain link
+     * defect). Map the low 16 pages (0..0xffff) zeroed RW so the read
+     * returns 0 and the cbz skips it, letting the payload reach its
+     * (defective) main and proving the full EL0 round-trip: enter -> run ->
+     * SVC exit -> resume -> rung rc. */
+    for (uint64_t zpage = 0; zpage < 16ULL; zpage++) {
+        uint64_t zp = arm64_user_page_alloc();
+        if (!zp) break;
+        arm64_zero_page(zp);
+        rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)(zpage * 4096ULL),
+            (RuntimeValue)zp,
+            (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE));
+    }
+    serial_puts("[payload] DIAG low 16 pages mapped (toolchain 0xb1c8 deref)\r\n");
+
+    for (uint64_t va = lo_page; va < hi_page; va += 4096ULL) {
+        uint64_t phys = arm64_user_page_alloc();
+        if (!phys) { serial_puts("[payload] FAIL pool exhausted\r\n"); return -4; }
+        arm64_zero_page(phys);
+        uint32_t vm_flags = ARM64_VM_USER | ARM64_VM_NO_EXECUTE;
+        for (uint64_t j = 0; j < phnum; j++) {
+            uint64_t ph = phoff + j * 56ULL;
+            if (arm64_payload_u32(file, ph) != 1U) continue;
+            uint64_t sva = arm64_payload_u64(file, ph + 16ULL);
+            uint64_t send = sva + arm64_payload_u64(file, ph + 40ULL);
+            if (sva < va + 4096ULL && send > va) {
+                if (arm64_payload_u32(file, ph + 4ULL) & 2U)
+                    vm_flags |= ARM64_VM_WRITABLE;
+                if (arm64_payload_u32(file, ph + 4ULL) & 1U)
+                    vm_flags &= ~ARM64_VM_NO_EXECUTE;
+            }
+        }
+        if (!(uint64_t)rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)va,
+                (RuntimeValue)phys, (RuntimeValue)vm_flags)) {
+            serial_puts("[payload] FAIL map\r\n");
+            return -4;
+        }
+        for (uint64_t k = 0; k < phnum; k++) {
+            uint64_t ph = phoff + k * 56ULL;
+            if (arm64_payload_u32(file, ph) != 1U) continue;
+            uint64_t sva = arm64_payload_u64(file, ph + 16ULL);
+            uint64_t foff = arm64_payload_u64(file, ph + 8ULL);
+            uint64_t fsz = arm64_payload_u64(file, ph + 32ULL);
+            uint64_t cstart = va > sva ? va : sva;
+            uint64_t cend = va + 4096ULL < sva + fsz ? va + 4096ULL : sva + fsz;
+            if (cstart < cend) {
+                __builtin_memcpy((void *)(uintptr_t)(phys + (cstart - va)),
+                    file + foff + (cstart - sva), (size_t)(cend - cstart));
+            }
+        }
+    }
+    /* The image copies occupy the pool's first (hi_page-lo_page) bytes — the
+     * pool was reset to 0 and the image loop is its first allocation, so the
+     * staged physical range is exactly [POOL_BASE, POOL_BASE + span). */
+    arm64_sync_icache_range(ARM64_USER_PAGE_POOL_BASE, hi_page - lo_page);
+
+    /* 8 MiB user stack, RW/NX, with the SysV frame on the top page. */
+    uint64_t top_phys = 0;
+    for (uint64_t i = 0; i < ARM64_PAYLOAD_STACK_PAGES; i++) {
+        uint64_t sva = ARM64_PAYLOAD_STACK_TOP - ((i + 1ULL) * 4096ULL);
+        uint64_t sph = arm64_user_page_alloc();
+        if (!sph) { serial_puts("[payload] FAIL stack pool\r\n"); return -4; }
+        arm64_zero_page(sph);
+        if (!(uint64_t)rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)sva,
+                (RuntimeValue)sph,
+                (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE))) {
+            serial_puts("[payload] FAIL stack map\r\n");
+            return -4;
+        }
+        if (i == 0) top_phys = sph;
+    }
+    uint64_t user_sp = 0;
+    if (!arm64_payload_frame_write((uint8_t *)(uintptr_t)top_phys, argv_arr, &user_sp)) {
+        serial_puts("[payload] FAIL argv frame\r\n");
+        return -4;
+    }
+    serial_puts("[payload] stack mapped, sp=");
+    serial_put_hex(user_sp);
+    serial_puts("\r\n");
+
+    rt_arm64_record_user_handoff((RuntimeValue)entry, (RuntimeValue)user_sp, (RuntimeValue)root);
+    if ((uint64_t)rt_arm64_probe_recorded_user_handoff() != 1ULL) {
+        serial_puts("[payload] FAIL handoff preflight\r\n");
+        return -5;
+    }
+    /* Program the translation regime for the user AS (same values the probe
+     * path installs) before the eret in arm64_enter_el0. */
+    __asm__ volatile("msr mair_el1, %0\n\tmsr tcr_el1, %1\n\tdsb sy\n\tisb"
+        : : "r"(ARM64_MAIR_VALUE), "r"(ARM64_TCR_VALUE) : "memory");
+    serial_puts("[payload] eret to EL0\r\n");
+    uint64_t code = arm64_enter_el0(root, entry, user_sp);
+    serial_puts("[payload] payload exited code=");
+    serial_put_dec((int64_t)code);
+    serial_puts("\r\n");
+    return (RuntimeValue)code;
 }
 
 /* --- genuine EL0 execution: stage REAL aarch64 code and eret into it ---
@@ -4959,16 +6192,18 @@ RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue v
     return 1;
 }
 
-RuntimeValue rt_byte_array_new(RuntimeValue capacity) { return rt_array_new(capacity); }
+RuntimeValue rt_byte_array_new(RuntimeValue capacity) { g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0); return rt_array_new(capacity); }
 
+/* FAM push-return ABI: return the possibly realloc-moved array header (see
+ * rt_typed_words_u64_push above), not a bool success flag. */
 RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(((uint64_t)value) & 0xFF)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(((uint64_t)value) & 0xFF));
 }
 
 RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value)
 {
-    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL)) ? TRUE_VALUE : FALSE_VALUE;
+    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL));
 }
 
 RuntimeValue rt_simd_str_equal(RuntimeValue a, RuntimeValue b) { return rt_native_eq(a, b); }
@@ -5313,6 +6548,16 @@ RuntimeValue rt_byte_array_new_len(RuntimeValue len)
     if (len < 0 || len > 0x1000000) return NIL_VALUE;
     size_t count = (size_t)len;
     size_t alloc_size = sizeof(RuntimeArray) + count * sizeof(RuntimeValue);
+    if (alloc_size >= 256u * 1024u) {
+        serial_puts("[heap] byte_array_new_len len=");
+        serial_put_dec((int64_t)count);
+        serial_puts(" bytes=");
+        serial_put_dec((int64_t)alloc_size);
+        serial_puts(" lr=0x");
+        serial_puthex((uint64_t)(uintptr_t)__builtin_return_address(0));
+        serial_puts("\r\n");
+    }
+    g_array_ctor_caller_lr = (uintptr_t)__builtin_return_address(0);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
@@ -5627,3 +6872,26 @@ int64_t src__lib__nogc_sync_mut__fs_driver__block_device__BlockDevice_dot_flush(
 #define CRYPTO_HAS_SERIAL_PUTHEX
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
+
+/* In-guest clang-bringup lane (2026-09-25): the current seed compiler emits
+ * calls to these two predicates (presence/enum-variant checks) that the
+ * hosted runtime implements in runtime_native.c — a translation unit the
+ * freestanding arm64 archive does not include. Faithful minimal twins,
+ * mirroring runtime_native.c:rt_is_present / rt_enum_check_variant semantics
+ * (doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+ * for the .? empty-container rule). */
+int8_t rt_is_present(int64_t value)
+{
+    if (rt_is_none((RuntimeValue)value)) return 0;
+    RuntimeEnum *e = _rt_enum_cast((RuntimeValue)value);
+    if (e) return 1;
+    return 1;
+}
+
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant)
+{
+    RuntimeEnum *e = _rt_enum_cast((RuntimeValue)value);
+    if (!e || (int64_t)e->discriminant != expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+}

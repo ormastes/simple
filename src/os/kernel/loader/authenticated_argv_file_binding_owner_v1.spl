@@ -1,8 +1,6 @@
 """Owner-issued, generation-live bindings for files referenced by argv."""
 
-use std.fs_driver.mount_table.{
-    MountTable, StableFileSnapshotLeaseV1, StableFileSnapshotSealV1
-}
+use std.fs_driver.mount_table.{MountTable, MountId, StableFileSnapshotLeaseV1}
 use std.common.crypto.sha256.{
     Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_update,
     sha256_stream_v1_finish_hex
@@ -10,6 +8,21 @@ use std.common.crypto.sha256.{
 use os.kernel.scheduler.process_execution_observation.{
     SchedulerArgvFileRoleV1, SchedulerArgvFileBindingV1
 }
+
+# std.fs_driver.mount_table does not yet declare the stable-snapshot API; these
+# local views name the slots this owner reads until the canonical structs land.
+struct _StableSnapshotOpenView:
+    lease: any
+    size: u64
+
+struct StableFileSnapshotSealV1:
+    canonical_source_path: text
+    content_sha256: text
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    file_generation: u64
+    size: u64
 
 const AUTH_ARGV_FILE_MAX_BYTES_V1: u64 = 1073741824u64
 const AUTH_ARGV_FILE_CHUNK_BYTES_V1: u64 = 65536u64
@@ -29,15 +42,16 @@ pub(package) fn authenticated_argv_file_binding_acquire_v1(
     if argv_index < 0: return Err("argv-file-index-invalid")
     val opened = table.open_stable_snapshot(path, AUTH_ARGV_FILE_MAX_BYTES_V1)
     if opened.is_err(): return Err("argv-file-open-failed")
-    val lease = opened.unwrap().lease
+    val opened_view: _StableSnapshotOpenView = opened.unwrap()
+    val lease = opened_view.lease
     if table.begin_stable_snapshot_promotion_hash_v1(lease).is_err():
         val closed = table.close_stable_snapshot(lease)
         if closed.is_err(): return Err("argv-file-cleanup-indeterminate")
         return Err("argv-file-hash-admission-failed")
     val stream: Sha256StreamV1 = sha256_stream_v1_new()
     var offset: u64 = 0u64
-    var failed = opened.unwrap().size == 0u64
-    while offset < opened.unwrap().size and not failed:
+    var failed = opened_view.size == 0u64
+    while offset < opened_view.size and not failed:
         val read = table.read_stable_snapshot(
             lease, offset, AUTH_ARGV_FILE_CHUNK_BYTES_V1)
         if read.is_err():
@@ -58,8 +72,9 @@ pub(package) fn authenticated_argv_file_binding_acquire_v1(
         val closed = table.close_stable_snapshot(lease)
         if closed.is_err(): return Err("argv-file-cleanup-indeterminate")
         return Err("argv-file-seal-failed")
+    val seal_view: StableFileSnapshotSealV1 = seal.unwrap()
     Ok(AuthenticatedArgvFileLeaseV1(
-        role: role, argv_index: argv_index, lease: lease, seal: seal.unwrap()))
+        role: role, argv_index: argv_index, lease: lease, seal: seal_view))
 
 pub(package) fn authenticated_argv_file_binding_finish_v1(
     table: MountTable,
@@ -72,16 +87,17 @@ pub(package) fn authenticated_argv_file_binding_finish_v1(
         val closed = table.close_stable_snapshot(owned.lease)
         if closed.is_err(): return Err("argv-file-cleanup-indeterminate")
         return Err("argv-file-changed-during-execution")
-    val seal = current.unwrap()
+    val seal_view: StableFileSnapshotSealV1 = current.unwrap()
     val closed = table.close_stable_snapshot(owned.lease)
     if closed.is_err(): return Err("argv-file-cleanup-indeterminate")
     Ok(SchedulerArgvFileBindingV1(
         role: owned.role, argv_index: owned.argv_index,
-        canonical_path: seal.canonical_source_path,
-        content_sha256: seal.content_sha256, mount_id: seal.mount_id.id as u64,
-        mount_generation: seal.mount_generation,
-        namespace_generation: seal.namespace_generation,
-        file_generation: seal.file_generation, size: seal.size))
+        canonical_path: seal_view.canonical_source_path,
+        content_sha256: seal_view.content_sha256,
+        mount_id: seal_view.mount_id.id as u64,
+        mount_generation: seal_view.mount_generation,
+        namespace_generation: seal_view.namespace_generation,
+        file_generation: seal_view.file_generation, size: seal_view.size))
 
 pub(package) fn authenticated_argv_file_binding_cancel_v1(
     table: MountTable,

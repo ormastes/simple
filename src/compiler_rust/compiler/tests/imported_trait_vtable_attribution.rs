@@ -76,7 +76,7 @@ fn imported_trait_parameter_retains_owner_for_virtual_call() {
     let consume_hir = hir.functions.iter().find(|function| function.name == "consume").unwrap();
     assert_eq!(consume_hir.params[0].type_name_hint.as_deref(), Some("Gateway"));
     let trait_impls = std::collections::HashMap::from([("Gateway".to_string(), vec!["Adapter".to_string()])]);
-    let mir = mir::lower_to_mir_with_global_trait_impls(&hir, &trait_impls).expect("MIR lowering");
+    let mir = mir::lower_to_mir_with_global_trait_impls(&hir, &trait_impls, false).expect("MIR lowering");
     let consume = mir.functions.iter().find(|function| function.name == "consume").unwrap();
     assert!(consume.blocks.iter().flat_map(|block| &block.instructions).any(
         |instruction| matches!(instruction, mir::MirInst::MethodCallVirtual { vtable_slot: 0, .. })

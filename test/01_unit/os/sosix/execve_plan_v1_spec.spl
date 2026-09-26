@@ -1,0 +1,80 @@
+# Value-only checks; not physical syscall or guest qualification evidence.
+use std.spec.{describe, it, expect}
+use os.userlib.execve_plan_v1.{execve_plan_v1}
+use std.common.string_core.{bytes_to_text}
+
+fn _execve_repeat_v1(value: text, count: i64) -> [text]:
+    var out: [text] = []
+    for index in 0..count:
+        out.push(value)
+    out
+
+fn _execve_ascii_v1(count: i64) -> text:
+    var bytes: [u8] = []
+    for index in 0..count:
+        bytes.push(65u8)
+    bytes_to_text(bytes)
+
+describe "execve value-only wire plan":
+    it "defaults argv to the executable and reserves two NULL terminators":
+        val plan = execve_plan_v1("/a", [], []).unwrap()
+        expect(plan.path_length).to_equal(2)
+        expect(plan.path_offset).to_equal(24)
+        expect(plan.env_table_offset).to_equal(16)
+        expect(plan.argv_offsets).to_equal([27])
+        expect(plan.envp_offsets.len()).to_equal(0)
+        expect(plan.bytes.len()).to_equal(32)
+        expect(plan.bytes.slice(24, 30)).to_equal([47u8, 97u8, 0u8, 47u8, 97u8, 0u8])
+        expect(plan.bytes.slice(0, 24)).to_equal([0u8; 24])
+
+    it "preserves UTF-8, explicit argv zero, empty arguments and environment order":
+        val plan = execve_plan_v1("/a", ["custom", "é", ""], ["K=é", ""]).unwrap()
+        expect(plan.argv_offsets).to_equal([59, 66, 69])
+        expect(plan.envp_offsets).to_equal([70, 75])
+        expect(plan.bytes.slice(66, 70)).to_equal([195u8, 169u8, 0u8, 0u8])
+        expect(plan.bytes.slice(70, 76)).to_equal([75u8, 61u8, 195u8, 169u8, 0u8, 0u8])
+        expect(plan.bytes.len() % 8).to_equal(0)
+
+    it "rejects an empty path and explicit empty argv zero":
+        expect(execve_plan_v1("", [], []).unwrap_err()).to_equal(-22)
+        expect(execve_plan_v1("/a", [""], []).unwrap_err()).to_equal(-22)
+
+    it "admits exactly 63 argv and 127 environment strings":
+        val plan = execve_plan_v1("/a", _execve_repeat_v1("x", 63), _execve_repeat_v1("", 127)).unwrap()
+        expect(plan.argv_offsets.len()).to_equal(63)
+        expect(plan.envp_offsets.len()).to_equal(127)
+        expect(plan.env_table_offset).to_equal(512)
+        expect(plan.path_offset).to_equal(1536)
+
+    it "rejects vectors that leave no slot for the NULL terminator":
+        expect(execve_plan_v1("/a", _execve_repeat_v1("x", 64), []).unwrap_err()).to_equal(-7)
+        expect(execve_plan_v1("/a", [], _execve_repeat_v1("", 128)).unwrap_err()).to_equal(-7)
+
+    it "counts path bytes separately from terminating argument NULs":
+        expect(execve_plan_v1(_execve_ascii_v1(256), [], []).unwrap().path_length).to_equal(256)
+        expect(execve_plan_v1(_execve_ascii_v1(257), [], []).unwrap_err()).to_equal(-36)
+        expect(execve_plan_v1("/a", [_execve_ascii_v1(4095)], []).is_ok()).to_equal(true)
+        expect(execve_plan_v1("/a", [_execve_ascii_v1(4096)], []).unwrap_err()).to_equal(-7)
+        expect(execve_plan_v1("/a", [], [_execve_ascii_v1(4096)]).unwrap_err()).to_equal(-7)
+
+    it "enforces each vector's 32768 byte budget including NULs":
+        val full = _execve_repeat_v1(_execve_ascii_v1(4095), 8)
+        expect(execve_plan_v1("/a", full, full).is_ok()).to_equal(true)
+        var over = full
+        over.push("")
+        expect(execve_plan_v1("/a", over, []).unwrap_err()).to_equal(-7)
+        expect(execve_plan_v1("/a", [], over).unwrap_err()).to_equal(-7)
+
+    it "rejects embedded NUL in path, argv and environment":
+        val nul = bytes_to_text([65u8, 0u8, 66u8])
+        expect(execve_plan_v1(nul, [], []).unwrap_err()).to_equal(-22)
+        expect(execve_plan_v1("/a", [nul], []).unwrap_err()).to_equal(-22)
+        expect(execve_plan_v1("/a", [], [nul]).unwrap_err()).to_equal(-22)
+
+    it "rejects malformed UTF-8 instead of repairing or truncating it":
+        val overlong = bytes_to_text([192u8, 175u8])
+        val surrogate = bytes_to_text([237u8, 160u8, 128u8])
+        val truncated = bytes_to_text([240u8, 159u8])
+        expect(execve_plan_v1(overlong, [], []).unwrap_err()).to_equal(-22)
+        expect(execve_plan_v1("/a", [surrogate], []).unwrap_err()).to_equal(-22)
+        expect(execve_plan_v1("/a", [], [truncated]).unwrap_err()).to_equal(-22)

@@ -780,6 +780,52 @@ impl Target {
         matches!(self.os, TargetOS::None | TargetOS::SimpleOS) && self.wasm_runtime.is_none()
     }
 
+    /// True when the freestanding C runtime for this target lays `RuntimeArray`
+    /// out as a header plus a flexible array member — `{HeapHeader(8),
+    /// u32 len@8, u32 cap@12, RuntimeValue items@16}` — with every element
+    /// (including bytes) stored as one tagged `RuntimeValue` slot, instead of
+    /// the hosted layout `{u64 len@8, u64 cap@16, RuntimeValue *data@24}` with
+    /// elements in a separate allocation.
+    ///
+    /// This is a property of the per-arch freestanding C runtimes under
+    /// `examples/09_embedded/simple_os/arch/`: aarch64, arm32 and x86_32 use
+    /// the FAM layout (see their `baremetal_stubs.c` / `baremetal_runtime.h`);
+    /// riscv64 and x86_64 freestanding use the hosted layout, as does the
+    /// hosted Rust runtime (`runtime/src/value/collections.rs`). The seed
+    /// compiler's inline array fast paths must emit loads/stores for the
+    /// target's actual layout or `.len()` reads `len | cap<<32` and indexing
+    /// dereferences an element slot as a pointer
+    /// (doc/08_tracking/aarch64_in_guest_clang_compile_lane_status_2026-09-25.md,
+    /// Blocker 2).
+    pub const fn uses_fam_array_abi(&self) -> bool {
+        self.is_baremetal()
+            && matches!(
+                self.arch,
+                TargetArch::Aarch64 | TargetArch::Arm | TargetArch::X86
+            )
+    }
+
+    /// True when this target's freestanding C runtime implements
+    /// `rt_array_push` (and the typed `rt_typed_*_push` family) as
+    /// grow-by-`realloc` of the whole FAM block, RETURNING the possibly
+    /// relocated array header: `RuntimeValue rt_array_push(RuntimeValue arr,
+    /// RuntimeValue val)`. The canonical hosted ABI instead returns `bool`
+    /// and keeps the header in a stable allocation
+    /// (`runtime/src/value/collections.rs::rt_array_push_grow`).
+    ///
+    /// On a bump-allocator freestanding heap the realloc ALWAYS moves, so a
+    /// compiled push loop that discards the return keeps re-growing the stale
+    /// pre-grow block — a per-element leak that OOMs the heap
+    /// (doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
+    /// The compiler must therefore thread the post-grow return as the array
+    /// value at every push emission on these targets. Currently coincides
+    /// with the FAM-layout baremetal set (aarch64/arm32/x86_32
+    /// `baremetal_stubs.c`); kept as a separate predicate so a runtime
+    /// migration to stable headers flips only this bit.
+    pub const fn array_push_returns_header(&self) -> bool {
+        self.uses_fam_array_abi()
+    }
+
     /// Check if this is a WASM target.
     pub const fn is_wasm(&self) -> bool {
         matches!(self.arch, TargetArch::Wasm32 | TargetArch::Wasm64)
@@ -1088,6 +1134,43 @@ mod tests {
 
         let t = Target::new(TargetArch::Riscv64, TargetOS::SimpleOS);
         assert!(t.is_baremetal());
+    }
+
+    #[test]
+    fn test_uses_fam_array_abi() {
+        // Freestanding C runtimes with the FAM RuntimeArray layout
+        // (`u32 len@8; u32 cap@12; RuntimeValue items@16`): aarch64, arm32, x86_32.
+        for os in [TargetOS::None, TargetOS::SimpleOS] {
+            assert!(Target::new(TargetArch::Aarch64, os).uses_fam_array_abi());
+            assert!(Target::new(TargetArch::Arm, os).uses_fam_array_abi());
+            assert!(Target::new(TargetArch::X86, os).uses_fam_array_abi());
+            // riscv64/x86_64 freestanding C runtimes mirror the hosted layout
+            // (`u64 len@8; u64 cap@16; RuntimeValue *data@24`).
+            assert!(!Target::new(TargetArch::Riscv64, os).uses_fam_array_abi());
+            assert!(!Target::new(TargetArch::X86_64, os).uses_fam_array_abi());
+        }
+        // Hosted targets never use the FAM layout.
+        assert!(!Target::new(TargetArch::Aarch64, TargetOS::Linux).uses_fam_array_abi());
+        assert!(!Target::new(TargetArch::Arm, TargetOS::Linux).uses_fam_array_abi());
+        assert!(!Target::new(TargetArch::X86, TargetOS::Linux).uses_fam_array_abi());
+        assert!(!Target::host().uses_fam_array_abi());
+    }
+
+    #[test]
+    fn test_array_push_returns_header() {
+        // The moving-header push ABI (rt_array_push returns the possibly
+        // realloc-moved FAM header) ships with the FAM-layout freestanding C
+        // runtimes: aarch64/arm32/x86_32 baremetal. Everything else keeps the
+        // canonical hosted bool-return, stable-header push ABI.
+        for os in [TargetOS::None, TargetOS::SimpleOS] {
+            assert!(Target::new(TargetArch::Aarch64, os).array_push_returns_header());
+            assert!(Target::new(TargetArch::Arm, os).array_push_returns_header());
+            assert!(Target::new(TargetArch::X86, os).array_push_returns_header());
+            assert!(!Target::new(TargetArch::Riscv64, os).array_push_returns_header());
+            assert!(!Target::new(TargetArch::X86_64, os).array_push_returns_header());
+        }
+        assert!(!Target::new(TargetArch::Aarch64, TargetOS::Linux).array_push_returns_header());
+        assert!(!Target::host().array_push_returns_header());
     }
 
     #[test]

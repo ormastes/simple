@@ -603,6 +603,11 @@ pub fn compile_function_body<M: Module>(
     // `.len()` fast path only applies freestanding heap tags on freestanding
     // targets -- those tag numbers collide with hosted `HeapObjectType`s.
     baremetal: bool,
+    // True when the target's RuntimeArray uses the freestanding FAM layout
+    // (`Target::uses_fam_array_abi()`). Threaded into `InstrContext` so the
+    // inline array accessor fast paths emit `u32 len@8; items@16` instead of
+    // the hosted `u64 len@8; data*@24` layout.
+    fam_arrays: bool,
 ) -> InstrResult<()> {
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
@@ -1047,6 +1052,7 @@ pub fn compile_function_body<M: Module>(
                     enum_defs,
                     tag_runtime_pool_join_result,
                     baremetal,
+                    fam_arrays,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
@@ -1089,6 +1095,7 @@ pub fn compile_function_body<M: Module>(
                     enum_defs,
                     tag_runtime_pool_join_result,
                     baremetal,
+                    fam_arrays,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
                 // Ensure all vreg values are i64 (extend smaller int types)

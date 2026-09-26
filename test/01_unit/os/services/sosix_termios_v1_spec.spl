@@ -1,0 +1,367 @@
+# @cover src/os/services/sosix/termios_v1.spl 80%
+"""SOSIX termios v1: terminal-attribute semantics over an injected fake
+console backend.
+
+Mirrors the sosix_stdio_v1_spec idiom: the module under test takes its
+kernel contact as an ops vtable (drain/flush_input hooks), so the spec
+injects recording fakes and exercises the console defaults, tcgetattr/
+tcsetattr round-trips, the TCSANOW/TCSADRAIN/TCSAFLUSH discipline, the
+isatty table, the ICANON/VMIN/VTIME read policy, the speed accessors,
+and the drain/flush/flow contracts host-side.
+"""
+
+use std.spec
+use std.common.text_bytes.{text_to_bytes}
+use os.services.sosix.termios_v1.{
+    SosixTermiosOpsV1, SosixTermiosV1, SosixTerminalV1,
+    sosix_terminal_console_v1, sosix_isatty_v1,
+    sosix_termios_read_size_v1, sosix_termios_default_console_v1,
+    sosix_termios_console_ops_v1,
+    SOSIX_TERMIOS_NCCS,
+    SOSIX_TERMIOS_VINTR, SOSIX_TERMIOS_VQUIT, SOSIX_TERMIOS_VERASE,
+    SOSIX_TERMIOS_VKILL, SOSIX_TERMIOS_VEOF, SOSIX_TERMIOS_VTIME,
+    SOSIX_TERMIOS_VMIN, SOSIX_TERMIOS_VSTART, SOSIX_TERMIOS_VSTOP,
+    SOSIX_TERMIOS_VSUSP,
+    SOSIX_TERMIOS_ICRNL, SOSIX_TERMIOS_IXON,
+    SOSIX_TERMIOS_OPOST, SOSIX_TERMIOS_ONLCR,
+    SOSIX_TERMIOS_CS8, SOSIX_TERMIOS_CREAD,
+    SOSIX_TERMIOS_ISIG, SOSIX_TERMIOS_ICANON, SOSIX_TERMIOS_ECHO,
+    SOSIX_TERMIOS_ECHOE, SOSIX_TERMIOS_ECHOK, SOSIX_TERMIOS_ECHONL,
+    SOSIX_TERMIOS_IEXTEN, SOSIX_TERMIOS_NOFLSH, SOSIX_TERMIOS_TOSTOP,
+    SOSIX_TERMIOS_IGNBRK, SOSIX_TERMIOS_INLCR,
+    SOSIX_TERMIOS_TCSANOW, SOSIX_TERMIOS_TCSADRAIN, SOSIX_TERMIOS_TCSAFLUSH,
+    SOSIX_TERMIOS_TCIFLUSH, SOSIX_TERMIOS_TCOFLUSH, SOSIX_TERMIOS_TCIOFLUSH,
+    SOSIX_TERMIOS_TCOOFF, SOSIX_TERMIOS_TCOON,
+    SOSIX_TERMIOS_TCIOFF, SOSIX_TERMIOS_TCION,
+    SOSIX_TERMIOS_B0, SOSIX_TERMIOS_B9600, SOSIX_TERMIOS_B19200,
+    SOSIX_TERMIOS_B38400, SOSIX_TERMIOS_B115200
+}
+
+# === fake backend state ===
+
+var _drain_calls: i64 = 0
+var _flush_calls: i64 = 0
+var _drain_err: i64 = 0     # positive errno to inject on drain (0 = off)
+var _flush_err: i64 = 0
+
+fn _reset():
+    _drain_calls = 0
+    _flush_calls = 0
+    _drain_err = 0
+    _flush_err = 0
+
+fn _drain() -> i64:
+    _drain_calls = _drain_calls + 1
+    if _drain_err != 0:
+        return -_drain_err
+    0
+
+fn _flush_input() -> i64:
+    _flush_calls = _flush_calls + 1
+    if _flush_err != 0:
+        return -_flush_err
+    0
+
+fn _ops() -> SosixTermiosOpsV1:
+    SosixTermiosOpsV1(drain: _drain, flush_input: _flush_input)
+
+fn _term() -> SosixTerminalV1:
+    sosix_terminal_console_v1(_ops())
+
+describe "SOSIX termios v1 — cooked console defaults":
+    it "delivers the documented default attribute set":
+        _reset()
+        val t = _term()
+        val a = t.tcgetattr()
+        expect((a.c_lflag & SOSIX_TERMIOS_ICANON) != 0).to_be(true)
+        expect((a.c_lflag & SOSIX_TERMIOS_ECHO) != 0).to_be(true)
+        expect((a.c_lflag & SOSIX_TERMIOS_ECHOK) != 0).to_be(true)
+        expect((a.c_lflag & SOSIX_TERMIOS_ISIG) != 0).to_be(true)
+        expect((a.c_lflag & SOSIX_TERMIOS_IEXTEN) != 0).to_be(true)
+        expect(a.c_iflag).to_equal(SOSIX_TERMIOS_ICRNL | SOSIX_TERMIOS_IXON)
+        expect(a.c_oflag).to_equal(SOSIX_TERMIOS_OPOST | SOSIX_TERMIOS_ONLCR)
+        expect(a.c_cflag).to_equal(SOSIX_TERMIOS_CS8 | SOSIX_TERMIOS_CREAD)
+        expect(a.c_ispeed).to_equal(SOSIX_TERMIOS_B115200)
+        expect(a.c_ospeed).to_equal(SOSIX_TERMIOS_B115200)
+        expect(a.c_cc.len()).to_equal(SOSIX_TERMIOS_NCCS)
+
+    it "seeds the FreeBSD-like control characters with VMIN=1, VTIME=0":
+        _reset()
+        val a = _term().tcgetattr()
+        expect(a.c_cc[SOSIX_TERMIOS_VINTR]).to_equal(3)
+        expect(a.c_cc[SOSIX_TERMIOS_VQUIT]).to_equal(28)
+        expect(a.c_cc[SOSIX_TERMIOS_VERASE]).to_equal(127)
+        expect(a.c_cc[SOSIX_TERMIOS_VKILL]).to_equal(21)
+        expect(a.c_cc[SOSIX_TERMIOS_VEOF]).to_equal(4)
+        expect(a.c_cc[SOSIX_TERMIOS_VMIN]).to_equal(1)
+        expect(a.c_cc[SOSIX_TERMIOS_VTIME]).to_equal(0)
+        expect(a.c_cc[SOSIX_TERMIOS_VSTART]).to_equal(17)
+        expect(a.c_cc[SOSIX_TERMIOS_VSTOP]).to_equal(19)
+        expect(a.c_cc[SOSIX_TERMIOS_VSUSP]).to_equal(26)
+
+    it "tcgetattr returns a deep copy — mutating it cannot alias state":
+        _reset()
+        val t = _term()
+        val a = t.tcgetattr()
+        a.c_cc[SOSIX_TERMIOS_VMIN] = 99
+        a.c_lflag = 0
+        val b = t.tcgetattr()
+        expect(b.c_cc[SOSIX_TERMIOS_VMIN]).to_equal(1)
+        expect((b.c_lflag & SOSIX_TERMIOS_ICANON) != 0).to_be(true)
+
+describe "SOSIX termios v1 — tcsetattr round-trip and flag toggles":
+    it "round-trips every flag word, cc slot, and speed through TCSANOW":
+        _reset()
+        val t = _term()
+        val want = sosix_termios_default_console_v1()
+        want.c_iflag = SOSIX_TERMIOS_IGNBRK | SOSIX_TERMIOS_INLCR
+        want.c_oflag = 0
+        want.c_cflag = SOSIX_TERMIOS_CS8 | SOSIX_TERMIOS_CREAD | SOSIX_TERMIOS_CLOCAL
+        want.c_lflag = SOSIX_TERMIOS_ICANON | SOSIX_TERMIOS_ECHO
+        want.c_cc[SOSIX_TERMIOS_VMIN] = 4
+        want.c_cc[SOSIX_TERMIOS_VTIME] = 7
+        want.c_cc[SOSIX_TERMIOS_VEOF] = 1
+        val rc = t.tcsetattr(SOSIX_TERMIOS_TCSANOW, want)
+        expect(rc).to_equal(0)
+        val got = t.tcgetattr()
+        expect(got.c_iflag).to_equal(want.c_iflag)
+        expect(got.c_oflag).to_equal(want.c_oflag)
+        expect(got.c_cflag).to_equal(want.c_cflag)
+        expect(got.c_lflag).to_equal(want.c_lflag)
+        expect(got.c_cc[SOSIX_TERMIOS_VMIN]).to_equal(4)
+        expect(got.c_cc[SOSIX_TERMIOS_VTIME]).to_equal(7)
+        expect(got.c_cc[SOSIX_TERMIOS_VEOF]).to_equal(1)
+        expect(_drain_calls).to_equal(0)
+        expect(_flush_calls).to_equal(0)
+
+    it "toggles ICANON and ECHO off (raw shape) and back on":
+        _reset()
+        val t = _term()
+        val raw = t.tcgetattr()
+        raw.c_lflag = raw.c_lflag & ~(SOSIX_TERMIOS_ICANON | SOSIX_TERMIOS_ECHO | SOSIX_TERMIOS_ISIG)
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSANOW, raw)).to_equal(0)
+        var got = t.tcgetattr()
+        expect((got.c_lflag & SOSIX_TERMIOS_ICANON) == 0).to_be(true)
+        expect((got.c_lflag & SOSIX_TERMIOS_ECHO) == 0).to_be(true)
+        expect((got.c_lflag & SOSIX_TERMIOS_ISIG) == 0).to_be(true)
+        got.c_lflag = got.c_lflag | SOSIX_TERMIOS_ICANON | SOSIX_TERMIOS_ECHO
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSANOW, got)).to_equal(0)
+        val back = t.tcgetattr()
+        expect((back.c_lflag & SOSIX_TERMIOS_ICANON) != 0).to_be(true)
+        expect((back.c_lflag & SOSIX_TERMIOS_ECHO) != 0).to_be(true)
+
+    it "stores a defensive copy — later caller mutation does not alias":
+        _reset()
+        val t = _term()
+        val want = sosix_termios_default_console_v1()
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSANOW, want)).to_equal(0)
+        want.c_cc[SOSIX_TERMIOS_VMIN] = 42
+        want.c_lflag = 0
+        val got = t.tcgetattr()
+        expect(got.c_cc[SOSIX_TERMIOS_VMIN]).to_equal(1)
+        expect((got.c_lflag & SOSIX_TERMIOS_ICANON) != 0).to_be(true)
+
+    it "rejects an unknown optional_actions with EINVAL, state untouched":
+        _reset()
+        val t = _term()
+        val want = sosix_termios_default_console_v1()
+        want.c_lflag = 0
+        expect(t.tcsetattr(9, want)).to_equal(-1)
+        expect(t.errno_name()).to_equal("EINVAL")
+        expect((t.tcgetattr().c_lflag & SOSIX_TERMIOS_ICANON) != 0).to_be(true)
+
+describe "SOSIX termios v1 — TCSADRAIN/TCSAFLUSH discipline":
+    it "TCSADRAIN drains output before applying":
+        _reset()
+        val t = _term()
+        val want = sosix_termios_default_console_v1()
+        want.c_oflag = 0
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSADRAIN, want)).to_equal(0)
+        expect(_drain_calls).to_equal(1)
+        expect(_flush_calls).to_equal(0)
+        expect(t.tcgetattr().c_oflag).to_equal(0)
+
+    it "TCSAFLUSH drains, applies, then discards unread input":
+        _reset()
+        val t = _term()
+        val want = sosix_termios_default_console_v1()
+        want.c_oflag = 0
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSAFLUSH, want)).to_equal(0)
+        expect(_drain_calls).to_equal(1)
+        expect(_flush_calls).to_equal(1)
+        expect(t.tcgetattr().c_oflag).to_equal(0)
+
+    it "a drain failure blocks the apply and latches the errno":
+        _reset()
+        _drain_err = 5
+        val t = _term()
+        val want = sosix_termios_default_console_v1()
+        want.c_oflag = 0
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSADRAIN, want)).to_equal(-1)
+        expect(t.errno_name()).to_equal("EIO")
+        expect(t.tcgetattr().c_oflag).to_equal(SOSIX_TERMIOS_OPOST | SOSIX_TERMIOS_ONLCR)
+
+    it "a flush failure reports -1 with the new attributes applied":
+        _reset()
+        _flush_err = 5
+        val t = _term()
+        val want = sosix_termios_default_console_v1()
+        want.c_oflag = 0
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSAFLUSH, want)).to_equal(-1)
+        expect(t.errno_name()).to_equal("EIO")
+        expect(t.tcgetattr().c_oflag).to_equal(0)
+
+describe "SOSIX termios v1 — isatty":
+    it "is true exactly for fds 0/1/2 and false for everything else":
+        expect(sosix_isatty_v1(0)).to_be(true)
+        expect(sosix_isatty_v1(1)).to_be(true)
+        expect(sosix_isatty_v1(2)).to_be(true)
+        expect(sosix_isatty_v1(-1)).to_be(false)
+        expect(sosix_isatty_v1(3)).to_be(false)
+        expect(sosix_isatty_v1(7)).to_be(false)
+
+describe "SOSIX termios v1 — ICANON/VMIN/VTIME read policy":
+    it "canonical mode returns one line: through the first newline, capped":
+        val a = sosix_termios_default_console_v1()
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc\ndef"), 10, false)).to_equal(4)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc\ndef"), 2, false)).to_equal(2)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("\n"), 10, false)).to_equal(1)
+
+    it "canonical mode would-block without a newline and drains at EOF":
+        val a = sosix_termios_default_console_v1()
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc"), 10, false)).to_equal(0)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc"), 10, true)).to_equal(3)
+        expect(sosix_termios_read_size_v1(a, [], 10, true)).to_equal(0)
+
+    it "non-canonical VMIN=1/VTIME=0 returns min(available, requested) or blocks":
+        val a = sosix_termios_default_console_v1()
+        a.c_lflag = a.c_lflag & ~SOSIX_TERMIOS_ICANON
+        a.c_cc[SOSIX_TERMIOS_VMIN] = 1
+        a.c_cc[SOSIX_TERMIOS_VTIME] = 0
+        expect(sosix_termios_read_size_v1(a, [], 10, false)).to_equal(0)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("xy"), 10, false)).to_equal(2)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("xy"), 1, false)).to_equal(1)
+
+    it "non-canonical VMIN=4 blocks until four bytes are readable":
+        val a = sosix_termios_default_console_v1()
+        a.c_lflag = a.c_lflag & ~SOSIX_TERMIOS_ICANON
+        a.c_cc[SOSIX_TERMIOS_VMIN] = 4
+        a.c_cc[SOSIX_TERMIOS_VTIME] = 0
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc"), 10, false)).to_equal(0)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abcde"), 10, false)).to_equal(5)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abcde"), 2, false)).to_equal(2)
+
+    it "non-canonical VMIN=0/VTIME=0 is a pure poll and never blocks":
+        val a = sosix_termios_default_console_v1()
+        a.c_lflag = a.c_lflag & ~SOSIX_TERMIOS_ICANON
+        a.c_cc[SOSIX_TERMIOS_VMIN] = 0
+        a.c_cc[SOSIX_TERMIOS_VTIME] = 0
+        expect(sosix_termios_read_size_v1(a, [], 10, false)).to_equal(0)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc"), 10, false)).to_equal(3)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc"), 2, false)).to_equal(2)
+
+    it "non-canonical VMIN=0/VTIME>0 answers with what a timer expiry returns":
+        val a = sosix_termios_default_console_v1()
+        a.c_lflag = a.c_lflag & ~SOSIX_TERMIOS_ICANON
+        a.c_cc[SOSIX_TERMIOS_VMIN] = 0
+        a.c_cc[SOSIX_TERMIOS_VTIME] = 3
+        expect(sosix_termios_read_size_v1(a, [], 10, false)).to_equal(0)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("ab"), 10, false)).to_equal(2)
+
+    it "requested==0 consults no policy and EOF drains in every mode":
+        val a = sosix_termios_default_console_v1()
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("abc\n"), 0, false)).to_equal(0)
+        a.c_lflag = a.c_lflag & ~SOSIX_TERMIOS_ICANON
+        a.c_cc[SOSIX_TERMIOS_VMIN] = 4
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("ab"), 10, true)).to_equal(2)
+
+describe "SOSIX termios v1 — speed accessors (store-and-return)":
+    it "defaults to B115200 both directions and round-trips cfset*":
+        _reset()
+        val a = sosix_termios_default_console_v1()
+        expect(a.cfgetispeed()).to_equal(SOSIX_TERMIOS_B115200)
+        expect(a.cfgetospeed()).to_equal(SOSIX_TERMIOS_B115200)
+        expect(a.cfsetispeed(SOSIX_TERMIOS_B9600)).to_equal(0)
+        expect(a.cfsetospeed(SOSIX_TERMIOS_B38400)).to_equal(0)
+        expect(a.cfgetispeed()).to_equal(SOSIX_TERMIOS_B9600)
+        expect(a.cfgetospeed()).to_equal(SOSIX_TERMIOS_B38400)
+        expect(a.cfsetspeed(SOSIX_TERMIOS_B19200)).to_equal(0)
+        expect(a.cfgetispeed()).to_equal(SOSIX_TERMIOS_B19200)
+        expect(a.cfgetospeed()).to_equal(SOSIX_TERMIOS_B19200)
+
+    it "stores any token without touching hardware (B0 hang-up included)":
+        val a = sosix_termios_default_console_v1()
+        expect(a.cfsetospeed(SOSIX_TERMIOS_B0)).to_equal(0)
+        expect(a.cfgetospeed()).to_equal(SOSIX_TERMIOS_B0)
+        expect(a.cfsetispeed(77)).to_equal(0)
+        expect(a.cfgetispeed()).to_equal(77)
+
+    it "speed changes survive a tcsetattr/tcgetattr round-trip":
+        _reset()
+        val t = _term()
+        val want = t.tcgetattr()
+        expect(want.cfsetspeed(SOSIX_TERMIOS_B9600)).to_equal(0)
+        expect(t.tcsetattr(SOSIX_TERMIOS_TCSANOW, want)).to_equal(0)
+        val got = t.tcgetattr()
+        expect(got.cfgetispeed()).to_equal(SOSIX_TERMIOS_B9600)
+        expect(got.cfgetospeed()).to_equal(SOSIX_TERMIOS_B9600)
+
+describe "SOSIX termios v1 — tcdrain/tcflush/tcflow":
+    it "tcdrain calls the drain hook and propagates its failure":
+        _reset()
+        val t = _term()
+        expect(t.tcdrain()).to_equal(0)
+        expect(_drain_calls).to_equal(1)
+        _drain_err = 5
+        expect(t.tcdrain()).to_equal(-1)
+        expect(t.errno_name()).to_equal("EIO")
+        expect(_drain_calls).to_equal(2)
+
+    it "tcflush: TCOFLUSH is a no-op success; the input queues hit the hook":
+        _reset()
+        val t = _term()
+        expect(t.tcflush(SOSIX_TERMIOS_TCOFLUSH)).to_equal(0)
+        expect(_flush_calls).to_equal(0)
+        expect(t.tcflush(SOSIX_TERMIOS_TCIFLUSH)).to_equal(0)
+        expect(t.tcflush(SOSIX_TERMIOS_TCIOFLUSH)).to_equal(0)
+        expect(_flush_calls).to_equal(2)
+        _flush_err = 5
+        expect(t.tcflush(SOSIX_TERMIOS_TCIFLUSH)).to_equal(-1)
+        expect(t.errno_name()).to_equal("EIO")
+
+    it "tcflush rejects an unknown queue selector with EINVAL":
+        _reset()
+        val t = _term()
+        expect(t.tcflush(9)).to_equal(-1)
+        expect(t.errno_name()).to_equal("EINVAL")
+        expect(_flush_calls).to_equal(0)
+
+    it "tcflow validates the action then succeeds as a documented no-op":
+        _reset()
+        val t = _term()
+        expect(t.tcflow(SOSIX_TERMIOS_TCOOFF)).to_equal(0)
+        expect(t.tcflow(SOSIX_TERMIOS_TCOON)).to_equal(0)
+        expect(t.tcflow(SOSIX_TERMIOS_TCIOFF)).to_equal(0)
+        expect(t.tcflow(SOSIX_TERMIOS_TCION)).to_equal(0)
+        expect(t.tcflow(9)).to_equal(-1)
+        expect(t.errno_name()).to_equal("EINVAL")
+        expect(_drain_calls).to_equal(0)
+        expect(_flush_calls).to_equal(0)
+
+    it "the guest console ops bind both hooks as honest no-ops":
+        _reset()
+        val ops = sosix_termios_console_ops_v1()
+        expect(ops.drain()).to_equal(0)
+        expect(ops.flush_input()).to_equal(0)
+
+describe "SOSIX termios v1 — cfmakeraw":
+    it "clears the cooked bits, forces CS8, and sets VMIN=1/VTIME=0":
+        val a = sosix_termios_default_console_v1()
+        a.cfmakeraw()
+        expect((a.c_iflag & (SOSIX_TERMIOS_IGNBRK | SOSIX_TERMIOS_ICRNL | SOSIX_TERMIOS_IXON)) == 0).to_be(true)
+        expect((a.c_oflag & SOSIX_TERMIOS_OPOST) == 0).to_be(true)
+        expect((a.c_lflag & (SOSIX_TERMIOS_ICANON | SOSIX_TERMIOS_ECHO | SOSIX_TERMIOS_ISIG | SOSIX_TERMIOS_IEXTEN)) == 0).to_be(true)
+        expect((a.c_cflag & SOSIX_TERMIOS_CS8) == SOSIX_TERMIOS_CS8).to_be(true)
+        expect(a.c_cc[SOSIX_TERMIOS_VMIN]).to_equal(1)
+        expect(a.c_cc[SOSIX_TERMIOS_VTIME]).to_equal(0)
+        expect(sosix_termios_read_size_v1(a, text_to_bytes("z"), 10, false)).to_equal(1)

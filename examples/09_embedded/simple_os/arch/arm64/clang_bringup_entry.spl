@@ -6,7 +6,12 @@
 #   R4a: /CLANG.ELF -cc1 -triple aarch64-unknown-simpleos -emit-obj /HELLO.C -o /HELLO.O
 #   R4b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /HELLO.O /LIBC.A -o /HELLO2.ELF
 #   R5: /HELLO2.ELF                     (prints HELLO_C_FROM_GUEST_ARM64)
-# Final marker: CLANG_IN_GUEST_ARM64_OK
+#   R6a: /CLANG.ELF -cc1 -x c++ -std=c++17 -fno-exceptions -fno-rtti
+#        -emit-obj /WITNESS.CPP -o /WITNESS.O     (in-guest C++ compile)
+#   R6b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /WITNESS.O
+#        /LIBCXX.A /LIBC.A /CXXABI.A /RTBUILT.A -o /WITNESS2.ELF (C++ link)
+#   R6c: /WITNESS2.ELF                  (prints WITNESS_CXX_OK)
+# Final markers: CLANG_IN_GUEST_ARM64_OK (R1-R5), CLANG_IN_GUEST_ARM64_CXX_OK (R6)
 #
 # Staged by scripts/qemu/check_simpleos_arm64_clang_compile.shs via
 # scripts/os/fsexec_mkimg_clang_arm64.spl (FAT32 root-only, 8.3 names).
@@ -14,19 +19,30 @@
 extern fn serial_println(msg: text)
 extern fn rt_qemu_exit_success()
 extern fn rt_arm64_harden_canary_value() -> i64
+# Aggregator emitted by the native linker's generate_init_caller; every
+# `__module_init_*` body runs exactly once through it. The x86_64 crt0 and the
+# rv64 boot/entries call this before kernel code; the arm64 crt0/_c_start does
+# NOT, so without this call every dynamic module global (the VFS mount-table
+# and include-tree mutex handles, the canonical MountTable option, ...) keeps
+# its BSS zero value and vfs_state_mount fails closed before any device I/O.
+extern fn __simple_call_module_inits()
 
-use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_vfs_boot_init}
-use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_ring3}
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_vfs_boot_init_mounted_v1}
+use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_ring3_payload_resident}
+use os.kernel.abi.syscall_shim_file.{shim_file_authorize_bootstrap_caller_v1}
 use os.kernel.boot.mmio.{mmio_disable_test_mode}
 use os.kernel.log.klog_api.{log_init_serial, LOG_TRACE}
 
 fn _rung(label: text, path: text, argv: [text]) -> i64:
     serial_println("[clang-bringup] rung={label} exec={path}")
-    val rc = arm64_fs_exec_spawn_ring3(path, argv, [])
+    val rc = arm64_fs_exec_spawn_ring3_payload_resident(path, argv, [])
     serial_println("[clang-bringup] rung={label} rc={rc}")
     rc
 
 fn spl_start():
+    # Module dynamic globals must be live before log_init_serial or the VFS
+    # init reads them (mutex handles, MountTable, klog state).
+    __simple_call_module_inits()
     serial_println("")
     serial_println("=== SimpleOS ARM64 in-guest clang bring-up ===")
     serial_println("[harden] canary arch=aarch64 value={rt_arm64_harden_canary_value()}")
@@ -34,11 +50,17 @@ fn spl_start():
     # without this the failure evidence above vfs:fail is silently gated off.
     log_init_serial(LOG_TRACE)
 
-    if not arm_fs_exec_vfs_boot_init():
+    if not arm_fs_exec_vfs_boot_init_mounted_v1():
         serial_println("[clang-bringup] vfs:fail")
         serial_println("CLANG_IN_GUEST_ARM64_VFS_FAIL")
         rt_qemu_exit_success()
         return
+
+    # Seed the bootstrap caller's capability record so the production
+    # check_file_access gate in _handle_file_open admits the ring-3
+    # payload's file I/O (the payload never passes the authenticated
+    # spawn that would seed it; without this, open returns EPERM).
+    shim_file_authorize_bootstrap_caller_v1()
 
     # R3: guest clang --version (exit code 0 expected)
     val rc3 = _rung("R3-clang-version", "/CLANG.ELF", ["/CLANG.ELF", "--version"])
@@ -48,9 +70,16 @@ fn spl_start():
         return
 
     # R4a: in-guest cc1 compile /HELLO.C -> /HELLO.O
+    # (-nostdlibinc is driver-only in this clang's Options.td — no CC1Option
+    # visibility — and cc1 rejects it as "unknown argument"; HELLO.C has no
+    # #includes so the include-path flag is unnecessary anyway.)
+    # -x c: the FAT32 8.3 name is uppercase, so cc1 parses /HELLO.C as C++
+    # by extension; the `extern int printf` declaration then gets C++ linkage
+    # (undefined _Z6printfPKcz at the R4b link — host-reproduced with the
+    # same -cc1 line + host lld). Force C so printf keeps C linkage.
     val rc4a = _rung("R4a-cc1-compile", "/CLANG.ELF",
         ["/CLANG.ELF", "-cc1", "-triple", "aarch64-unknown-simpleos",
-         "-ffreestanding", "-nostdlibinc", "-O0",
+         "-ffreestanding", "-O0", "-x", "c",
          "-emit-obj", "-o", "/HELLO.O", "/HELLO.C"])
     if rc4a != 0:
         serial_println("CLANG_IN_GUEST_ARM64_R4_COMPILE_FAIL rc={rc4a}")
@@ -58,9 +87,13 @@ fn spl_start():
         return
 
     # R4b: in-guest lld link -> /HELLO2.ELF
+    # --no-mmap-output-file: force FileOutputBuffer::commit() down the
+    # openFileForWrite+write path; the default mmap-of-fd lands in an
+    # anonymous mapping and the temp rename comes up empty (lane doc R4b).
     val rc4b = _rung("R4b-lld-link", "/LLD.ELF",
         ["/LLD.ELF", "-flavor", "gnu", "-T", "/SIMPLEOS.LD",
-         "/CRT0.O", "/HELLO.O", "/LIBC.A", "-o", "/HELLO2.ELF"])
+         "/CRT0.O", "/HELLO.O", "/LIBC.A", "--no-mmap-output-file",
+         "-o", "/HELLO2.ELF"])
     if rc4b != 0:
         serial_println("CLANG_IN_GUEST_ARM64_R4_LINK_FAIL rc={rc4b}")
         rt_qemu_exit_success()
@@ -74,4 +107,46 @@ fn spl_start():
         return
 
     serial_println("CLANG_IN_GUEST_ARM64_OK")
+
+    # R6a: in-guest cc1 C++ compile /WITNESS.CPP -> /WITNESS.O
+    # The TU is host-preprocessed (self-contained; the guest FAT32 is root-only
+    # 8.3 so the 568-header libc++ closure cannot live there — roadmap B1
+    # method). -fno-rtti matches the prebuilt guest libc++ (built -fno-rtti);
+    # NO -fno-exceptions: this fork's cc1 option table lacks it ("unknown
+    # argument" — same family as R4a's -nostdlibinc), and it is unnecessary:
+    # the preprocessed TU already resolved libc++ to its no-exceptions form.
+    val rc6a = _rung("R6a-cc1-cxx-compile", "/CLANG.ELF",
+        ["/CLANG.ELF", "-cc1", "-triple", "aarch64-unknown-simpleos",
+         "-ffreestanding", "-O0", "-x", "c++", "-std=c++17",
+         "-fno-rtti",
+         "-emit-obj", "-o", "/WITNESS.O", "/WITNESS.CPP"])
+    if rc6a != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R6_COMPILE_FAIL rc={rc6a}")
+        rt_qemu_exit_success()
+        return
+
+    # R6b: in-guest lld C++ link -> /WITNESS2.ELF
+    # Archive order: libc++ first, then the C libc (its simpleos_cxxabi.o
+    # satisfies __cxa_pure_virtual + operator new BEFORE libc++abi is
+    # searched — cxa_virtual_cpp.o would collide strong/strong), then
+    # libc++abi (exception runtime + new_handler), then compiler-rt builtins
+    # (strtold's __extenddftf2 in the libcxx compat shims).
+    val rc6b = _rung("R6b-lld-cxx-link", "/LLD.ELF",
+        ["/LLD.ELF", "-flavor", "gnu", "-T", "/SIMPLEOS.LD",
+         "/CRT0.O", "/WITNESS.O", "/LIBCXX.A", "/LIBC.A",
+         "/CXXABI.A", "/RTBUILT.A", "--no-mmap-output-file",
+         "-o", "/WITNESS2.ELF"])
+    if rc6b != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R6_LINK_FAIL rc={rc6b}")
+        rt_qemu_exit_success()
+        return
+
+    # R6c: run the guest-produced C++ binary (prints WITNESS_CXX_OK)
+    val rc6c = _rung("R6c-run-witness2", "/WITNESS2.ELF", ["/WITNESS2.ELF"])
+    if rc6c != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R6_RUN_FAIL rc={rc6c}")
+        rt_qemu_exit_success()
+        return
+
+    serial_println("CLANG_IN_GUEST_ARM64_CXX_OK")
     rt_qemu_exit_success()

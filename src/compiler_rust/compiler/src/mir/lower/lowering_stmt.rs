@@ -1225,6 +1225,32 @@ impl<'a> MirLowerer<'a> {
                                 ("rt_typed_words_u64_push", Some(_)) => "rt_typed_words_u64_push_known_at",
                                 _ => target,
                             };
+                            // FAM freestanding push ABI: the typed push returns
+                            // the possibly realloc-moved header — capture it,
+                            // store it back into the receiver local, and yield
+                            // it as the statement value. (The known_at /
+                            // known_data_at proof variants write through
+                            // hoisted pointers inside a capacity-bounded loop:
+                            // no grow, no move, so they keep the bool-ABI
+                            // shape below.)
+                            if self.array_push_returns_header && append_index.is_none() {
+                                let pushed = self.with_func(|func, current_block| {
+                                    let pushed = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(pushed),
+                                        target: CallTarget::from_name(target),
+                                        args: vec![receiver_reg, value_reg],
+                                    });
+                                    pushed
+                                })?;
+                                self.store_array_push_receiver_back(receiver, pushed)?;
+                                let ret_ty = self.with_func(|func, _| func.return_type)?;
+                                let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, pushed)?;
+                                let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
+                                self.last_expr_value = Some(result);
+                                return Ok(());
+                            }
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::Call {

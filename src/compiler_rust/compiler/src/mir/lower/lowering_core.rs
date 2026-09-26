@@ -373,6 +373,14 @@ pub struct MirLowerer<'a> {
     pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
     /// Array locals allocated only to receive ignored appends.
     pub(super) dead_append_array_locals: HashSet<usize>,
+    /// True when the compilation target's `rt_array_push` returns the
+    /// possibly realloc-moved array header (FAM freestanding C runtimes; see
+    /// `Target::array_push_returns_header`). If set, every push emission must
+    /// capture the call result as the post-grow array value — for the
+    /// expression value AND for the statement-position receiver store-back —
+    /// or a grow loop keeps re-pushing the stale pre-grow block
+    /// (doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
+    pub(super) array_push_returns_header: bool,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -416,6 +424,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
+            array_push_returns_header: false,
         }
     }
 
@@ -454,6 +463,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
+            array_push_returns_header: false,
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -1110,6 +1120,84 @@ impl<'a> MirLowerer<'a> {
     pub fn with_global_trait_impls(mut self, trait_impls: &'a std::collections::HashMap<String, Vec<String>>) -> Self {
         self.global_trait_impls = Some(trait_impls);
         self
+    }
+
+    /// Set the target push-return ABI: when true, `rt_array_push` (and the
+    /// typed push family) returns the possibly realloc-moved array header
+    /// (FAM freestanding C runtimes; see `Target::array_push_returns_header`),
+    /// so push emissions must capture the call result as the post-grow array
+    /// value. Defaults to false (canonical hosted bool-return, stable-header
+    /// push ABI).
+    pub fn with_array_push_returns_header(mut self, returns_header: bool) -> Self {
+        self.array_push_returns_header = returns_header;
+        self
+    }
+
+    /// Store a post-grow array header back into the pushed receiver's place
+    /// (local slot, global, or field) after a push on a moving-header
+    /// runtime. Non-place receivers (call results, temporaries) get no
+    /// store-back: the fused `p.f = p.f.push(v)` form is already carried by
+    /// the push expression's value, and a bare statement push on those
+    /// shapes has no stable place to rebind.
+    pub(super) fn store_array_push_receiver_back(&mut self, receiver: &HirExpr, value: VReg) -> MirLowerResult<()> {
+        match &receiver.kind {
+            HirExprKind::Local(local_index) => {
+                let local_index = *local_index;
+                self.with_func(|func, current_block| {
+                    let addr = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr,
+                        local_index,
+                    });
+                    block.instructions.push(MirInst::Store {
+                        addr,
+                        value,
+                        ty: receiver.ty,
+                    });
+                })
+            }
+            HirExprKind::Global(name) => {
+                let global_name = name.clone();
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GlobalStore {
+                        global_name,
+                        value,
+                        ty: receiver.ty,
+                    });
+                })
+            }
+            HirExprKind::FieldAccess { receiver: object, field_index } => {
+                // Re-lower only side-effect-free object shapes (locals and
+                // globals) for the store-back; anything fancier must use the
+                // fused `p.f = p.f.push(v)` form.
+                if !matches!(object.kind, HirExprKind::Local(_) | HirExprKind::Global(_)) {
+                    return Ok(());
+                }
+                let object_reg = self.lower_expr(object)?;
+                let field_index = *field_index;
+                let byte_offset = (field_index as u32) * 8;
+                let owner_name = self
+                    .type_registry
+                    .and_then(|registry| registry.get_type_name(object.ty))
+                    .map(str::to_owned);
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::FieldSet {
+                        object: object_reg,
+                        owner_name,
+                        // Mirrored from the assignment path: native-project
+                        // lowering re-qualifies this authoritatively later.
+                        owner_has_vtable: None,
+                        byte_offset,
+                        field_type: receiver.ty,
+                        value,
+                    });
+                })
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Get vtable slot for a method on a trait

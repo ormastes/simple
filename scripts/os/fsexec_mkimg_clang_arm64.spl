@@ -9,6 +9,10 @@
 # BIG payloads (never loaded into a Simple array; shell-appended by the caller):
 #   payload 1 = CLANG.ELF  (cross-aarch64-unknown-simpleos static clang-20)
 #   payload 2 = LLD.ELF    (cross-aarch64-unknown-simpleos static lld)
+#   payload 3 = WITNESS.CPP (host-preprocessed self-contained C++ TU, rung R6a)
+#   payload 4 = LIBCXX.A   (libc++.a, rung R6b)
+#   payload 5 = CXXABI.A   (libc++abi.a, rung R6b)
+#   payload 6 = RTBUILT.A  (libclang_rt.builtins-aarch64.a, rung R6b)
 # SMALL files (staged under build/os/elfexec_clang_arm64/stage/):
 #   CRT0.O, SIMPLEOS.LD, LIBC.A, HELLO.C
 # Free clusters past the payloads let the in-guest FAT32 write path persist
@@ -146,6 +150,10 @@ fn main() -> i64:
         print "fsexec_mkimg_clang_arm64_error=missing or zero build/os/elfexec_clang_arm64/clang_size.txt (CLANG.ELF size)"
         return 1
     val payload2: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/lld_size.txt") ?? [])
+    val payload3: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/witness_size.txt") ?? [])
+    val payload4: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/libcxx_size.txt") ?? [])
+    val payload5: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/cxxabi_size.txt") ?? [])
+    val payload6: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/rtbuilt_size.txt") ?? [])
 
     # ---- Pass 1: which small files exist, how big, which cluster ----------
     val names: [text] = _small_names()
@@ -165,14 +173,24 @@ fn main() -> i64:
             next_cluster = next_cluster + _clusters_for(n, CLUSTER_BYTES)
         i = i + 1
 
-    val P1_START: u64 = next_cluster
-    val p1_clusters: u64 = _clusters_for(payload1, CLUSTER_BYTES)
-    val P2_START: u64 = P1_START + p1_clusters
-    var p2_clusters: u64 = 0u64
-    if payload2 > 0u64:
-        p2_clusters = _clusters_for(payload2, CLUSTER_BYTES)
+    # ---- BIG payloads: sequential cluster allocation, all optional but p1 --
+    val p_names: [text] = ["CLANG.ELF", "LLD.ELF", "WITNESS.CPP", "LIBCXX.A", "CXXABI.A", "RTBUILT.A"]
+    val p_sizes: [u64] = [payload1, payload2, payload3, payload4, payload5, payload6]
+    var p_starts: [u64] = []
+    var p_clusters: [u64] = []
+    var cursor: u64 = next_cluster
+    var pi: i64 = 0
+    while pi < p_names.len():
+        var pc: u64 = 0u64
+        if p_sizes[pi] > 0u64:
+            pc = _clusters_for(p_sizes[pi], CLUSTER_BYTES)
+        p_starts.push(cursor)
+        p_clusters.push(pc)
+        cursor = cursor + pc
+        pi = pi + 1
+    val P1_START: u64 = p_starts[0]
 
-    val highest_cluster: u64 = (P2_START + p2_clusters) - 1u64
+    val highest_cluster: u64 = cursor - 1u64
     val fat_entries: u64 = highest_cluster + 1u64 + SPARE_CLUSTERS
     var fat_sectors: u64 = (fat_entries * 4u64) / 512u64
     if (fat_entries * 4u64) % 512u64 != 0u64:
@@ -188,7 +206,7 @@ fn main() -> i64:
     val used_clusters: u64 = (highest_cluster - 1u64)      # clusters 2..highest
     val total_sectors: u64 = data_start_sector + ((used_clusters + SPARE_CLUSTERS) * SPC)
     val total_bytes: u64 = total_sectors * 512u64
-    val payload1_padded: u64 = p1_clusters * CLUSTER_BYTES
+    val payload1_padded: u64 = p_clusters[0] * CLUSTER_BYTES
 
     var img: [u8] = rt_byte_array_new_len(prefix_bytes_u)
 
@@ -311,32 +329,24 @@ fn main() -> i64:
                 c = c + 1u64
         ci = ci + 1
 
-    var pc: u64 = P1_START
-    val p1_last: u64 = (P1_START + p1_clusters) - 1u64
-    while pc <= p1_last:
-        var pn: u64 = 0x0FFFFFFFu64
-        if pc < p1_last:
-            pn = pc + 1u64
-        val peo: i64 = fat_base + ((pc * 4u64) as i64)
-        img[peo + 0] = (pn & 0xFFu64) as u8
-        img[peo + 1] = ((pn >> 8) & 0xFFu64) as u8
-        img[peo + 2] = ((pn >> 16) & 0xFFu64) as u8
-        img[peo + 3] = ((pn >> 24) & 0xFFu64) as u8
-        pc = pc + 1u64
-
-    if p2_clusters > 0u64:
-        var qc: u64 = P2_START
-        val p2_last: u64 = (P2_START + p2_clusters) - 1u64
-        while qc <= p2_last:
-            var qn: u64 = 0x0FFFFFFFu64
-            if qc < p2_last:
-                qn = qc + 1u64
-            val qeo: i64 = fat_base + ((qc * 4u64) as i64)
-            img[qeo + 0] = (qn & 0xFFu64) as u8
-            img[qeo + 1] = ((qn >> 8) & 0xFFu64) as u8
-            img[qeo + 2] = ((qn >> 16) & 0xFFu64) as u8
-            img[qeo + 3] = ((qn >> 24) & 0xFFu64) as u8
-            qc = qc + 1u64
+    # One contiguous chain per BIG payload. Written directly, not via a
+    # helper, to keep it O(1) per entry.
+    var ppi: i64 = 0
+    while ppi < p_names.len():
+        if p_clusters[ppi] > 0u64:
+            var pc: u64 = p_starts[ppi]
+            val p_last: u64 = (p_starts[ppi] + p_clusters[ppi]) - 1u64
+            while pc <= p_last:
+                var pn: u64 = 0x0FFFFFFFu64
+                if pc < p_last:
+                    pn = pc + 1u64
+                val peo: i64 = fat_base + ((pc * 4u64) as i64)
+                img[peo + 0] = (pn & 0xFFu64) as u8
+                img[peo + 1] = ((pn >> 8) & 0xFFu64) as u8
+                img[peo + 2] = ((pn >> 16) & 0xFFu64) as u8
+                img[peo + 3] = ((pn >> 24) & 0xFFu64) as u8
+                pc = pc + 1u64
+        ppi = ppi + 1
 
     # ---- Root directory (cluster 2) — ROOT-ONLY, no subdirectories -------
     val rd: i64 = (data_start_sector * 512u64) as i64
@@ -350,15 +360,14 @@ fn main() -> i64:
             staged = staged + names[di] + ","
             slot = slot + 1
         di = di + 1
-    img = _write_bytes_at(img, rd + (slot * 32),
-        _dir_entry(_name83_of("CLANG.ELF"), P1_START, payload1, 0x20u8))
-    staged = staged + "CLANG.ELF,"
-    slot = slot + 1
-    if p2_clusters > 0u64:
-        img = _write_bytes_at(img, rd + (slot * 32),
-            _dir_entry(_name83_of("LLD.ELF"), P2_START, payload2, 0x20u8))
-        staged = staged + "LLD.ELF,"
-        slot = slot + 1
+    var pdi: i64 = 0
+    while pdi < p_names.len():
+        if p_clusters[pdi] > 0u64:
+            img = _write_bytes_at(img, rd + (slot * 32),
+                _dir_entry(_name83_of(p_names[pdi]), p_starts[pdi], p_sizes[pdi], 0x20u8))
+            staged = staged + p_names[pdi] + ","
+            slot = slot + 1
+        pdi = pdi + 1
 
     # ---- Small-file DATA into their clusters (inside the prefix) ---------
     var wi: i64 = 0
@@ -376,5 +385,12 @@ fn main() -> i64:
         print "fsexec_mkimg_clang_arm64_error=write prefix failed: " + prefix_path
         return 1
 
-    print "fsexec_mkimg_clang_arm64_status=ok staged=" + staged + " root_entries=" + slot.to_text() + " spc=" + SPC.to_text() + " fat_sectors=" + fat_sectors.to_text() + " prefix_bytes=" + prefix_bytes_u.to_text() + " payload1_start=" + P1_START.to_text() + " payload1_bytes=" + payload1.to_text() + " payload1_padded_bytes=" + payload1_padded.to_text() + " payload2_start=" + P2_START.to_text() + " payload2_bytes=" + payload2.to_text() + " spare_clusters=" + SPARE_CLUSTERS.to_text() + " total_bytes=" + total_bytes.to_text()
+    var out: text = "fsexec_mkimg_clang_arm64_status=ok staged=" + staged + " root_entries=" + slot.to_text() + " spc=" + SPC.to_text() + " fat_sectors=" + fat_sectors.to_text() + " prefix_bytes=" + prefix_bytes_u.to_text() + " payload1_start=" + P1_START.to_text() + " payload1_bytes=" + payload1.to_text() + " payload1_padded_bytes=" + payload1_padded.to_text()
+    var opi: i64 = 0
+    while opi < p_names.len():
+        val pn2: i64 = opi + 1
+        out = out + " payload" + pn2.to_text() + "_start=" + p_starts[opi].to_text() + " payload" + pn2.to_text() + "_bytes=" + p_sizes[opi].to_text()
+        opi = opi + 1
+    out = out + " spare_clusters=" + SPARE_CLUSTERS.to_text() + " total_bytes=" + total_bytes.to_text()
+    print out
     return 0

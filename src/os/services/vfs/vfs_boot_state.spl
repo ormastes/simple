@@ -2,7 +2,7 @@
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.kernel.loader.container_namespace.{ContainerNamespaceView}
 use os.services.vfs.vfs_service.{VfsService}
-use common.string_core.{char_from_code}
+use common.string_core.{char_from_code, str_char_at}
 use os.services.vfs.vfs_block_adapters.{
     NvmeBlockAdapter
 }
@@ -39,14 +39,15 @@ use os.services.vfs.vfs_immutable_include_tree_state_v1.{
     vfs_include_mutation_finish_v1
 }
 use std.fs_driver.mount_table.{
-    MountTable, MountId, DbfsRootMountSealV1, DbfsRootMountSealInfoV1
+    MountTable, MountId, DbfsRootMountSealV1, DbfsRootMountSealInfoV1,
+    mount_table_debug_first_driver_v1, mount_table_debug_fat32_scan_v1
 }
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{MountOptions}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.mount_table.{PositionedDriverKind}
-use std.fs_driver.types.{FileHandle, FileStat, OpenFlags}
+use std.fs_driver.types.{FileHandle, FileStat, OpenFlags, Path}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 use os.kernel.log.klog_api.{log_raw_println}
@@ -366,6 +367,70 @@ fn vfs_state_unmount(path: text) -> Result<(), FsError>:
         return Err(FsError.IoError(code: 0u32))
     result
 
+pub fn vfs_state_mount_table_probe_v1() -> i64:
+    """Bring-up diagnostic (aarch64 clang lane): canonical table entry count.
+
+    Read-only under the owner lock; logs count plus the first mount point so a
+    serial diff discriminates mount-write-back loss from lookup/open lowering
+    defects without a debugger. Returns the count, or a negative code when the
+    owner is locked out or the table option is nil."""
+    if not vfs_state_mount_table_lock_v1(): return -1
+    if not g_mount_table.?:
+        _ = vfs_state_mount_table_unlock_v1()
+        return -2
+    val table = g_mount_table.unwrap()
+    val count = table.mounts.len()
+    _vfs_state_serial_println("[mt-probe] count={count}")
+    if count > 0:
+        val first_mp = table.mounts[0].mount_point
+        _vfs_state_serial_println("[mt-probe] first={first_mp}")
+    _ = vfs_state_mount_table_unlock_v1()
+    count
+
+pub fn vfs_state_mount_table_open_chain_probe_v1(path: text):
+    """Bring-up diagnostic: walk the same steps MountTable.open takes, logging
+    each intermediate so one serial run localizes the failing link. Read-only;
+    takes the owner lock itself."""
+    if not vfs_state_mount_table_lock_v1(): return
+    if not g_mount_table.?:
+        _ = vfs_state_mount_table_unlock_v1()
+        return
+    val table = g_mount_table.unwrap()
+    if table.lookup_text(path).?:
+        val entry = table.lookup_text(path).unwrap()
+        _vfs_state_serial_println("[mt-probe3] lookup=some mp={entry.mount_point}")
+    else:
+        _vfs_state_serial_println("[mt-probe3] lookup=nil")
+    val resolved = table.resolve(Path(raw: path))
+    var scan_target = ""
+    if resolved.is_ok():
+        val pair = resolved.unwrap()
+        scan_target = pair.relpath.raw
+        _vfs_state_serial_println("[mt-probe3] resolve=ok mid={pair.mount_id.id} rel={pair.relpath.raw}")
+    else:
+        _vfs_state_serial_println("[mt-probe3] resolve=err")
+    _vfs_state_serial_println("[mt-probe3] driver={mount_table_debug_first_driver_v1(table)}")
+    if scan_target != "":
+        _vfs_state_serial_println("[mt-scan] {mount_table_debug_fat32_scan_v1(table, scan_target)}")
+    # Per-iteration relpath-rebuild replica: mirrors MountTable.resolve's
+    # char-copy loop shape (loop-carried text accumulator + str_char_at +
+    # concat per iteration) to separate loop-variable threading defects from
+    # str_char_at result defects. run-20260925_180311 showed resolve's relpath
+    # materialize as "//////CC" (six s[0] reads + two s[1] reads) — these
+    # lines name which side (ci vs char) diverges. Probe assumes mp_len=1
+    # (root mount), matching the clang-bringup lane.
+    _vfs_state_serial_println("[mt-probe4] len={path.len()}")
+    _vfs_state_serial_println("[mt-probe4] c0={str_char_at(path, 0)} c1={str_char_at(path, 1)} c5={str_char_at(path, 5)}")
+    var rel: text = ""
+    var ci: i64 = 1
+    while ci < path.len():
+        val ch = str_char_at(path, ci)
+        _vfs_state_serial_println("[mt-probe4] it={ci} ch={ch}")
+        rel = rel + ch
+        ci = ci + 1
+    _vfs_state_serial_println("[mt-probe4] replica rel={rel} rlen={rel.len()}")
+    _ = vfs_state_mount_table_unlock_v1()
+
 fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle, FsError>:
     var include_ticket: VfsIncludeMutationTicketV1? = nil
     if _positioned_open_may_write_v1(flags):
@@ -394,6 +459,9 @@ fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle,
             _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
     if result.is_err():
+        _vfs_state_serial_println("[mt-probe] open-fail path={path}")
+        _ = vfs_state_mount_table_probe_v1()
+        _ = vfs_state_mount_table_open_chain_probe_v1(path)
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return result
     result

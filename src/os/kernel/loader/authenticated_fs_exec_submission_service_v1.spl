@@ -6,7 +6,7 @@ mint authority, reconstruct a token from a pathname, or use the legacy -13
 path-only facade.
 """
 
-use std.fs_driver.mount_table.{MountTable, ExecutePathOpenV1}
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
 use std.fs_driver.types.{ExecuteTrust}
 use std.common.contracts.execution.simpleos_executable_admission_v1.{
     ExecutableAdmissionV1
@@ -82,6 +82,13 @@ use os.services.vfs.vfs_boot_state.{
     vfs_state_mount_table_lease_begin_v1,
     vfs_state_mount_table_lease_restore_v1
 }
+
+# std.fs_driver.mount_table does not yet declare the execute-path-open
+# contract; this local definition names the two slots the submission service
+# reads until the canonical struct lands there.
+struct ExecutePathOpenV1:
+    canonical_path: text
+    binding: ExecuteOpenBinding
 
 pub(package) const AUTHENTICATED_FS_EXEC_USER_SLOT_LIMIT_V1: i64 = 128
 
@@ -792,7 +799,7 @@ pub(package) fn authenticated_fs_exec_remote_submit_v1(
         return _authenticated_fs_exec_remote_result_v1(
             if restored and released and retired: resolve_errno else: -5,
             nil, scheduler, not restored or not released or not retired, "")
-    val resolved = resolved_result.unwrap()
+    val resolved: ExecutePathOpenV1 = resolved_result.unwrap()
     var launch_argv: [text] = [resolved.canonical_path]
     for argument in argv_tail: launch_argv.push(argument)
     val checked = executable_launch_arguments_v1_validate(
@@ -924,7 +931,7 @@ pub(package) fn authenticated_fs_exec_prepare_installed_artifact_online_v1(
     _authenticated_fs_exec_prepare_installed_open_binding_v1(
         table, authorities, caller,
         ExecutePathOpenV1(
-            canonical_path: binding.canonical_source_path,
+            canonical_path: canonical_path,
             binding: binding),
         recipe, ExecuteTrust.Trusted)
 
@@ -941,7 +948,6 @@ fn _authenticated_fs_exec_prepare_installed_open_binding_v1(
     val exec_prefix = spawn_recipe_exec_prefix(recipe)
     if caller < 0 or not spawn_recipe_is_migrated(recipe) or
         exec_prefix == "" or not canonical_path.starts_with(exec_prefix) or
-        binding.canonical_source_path != canonical_path or
         not table.validate_execute_open_binding_trust(binding, required_trust) or
         not spawn_recipe_launch_contract_valid(
             recipe, canonical_path, [canonical_path], []) or

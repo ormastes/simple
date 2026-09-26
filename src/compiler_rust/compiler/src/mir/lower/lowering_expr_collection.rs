@@ -120,7 +120,7 @@ impl<'a> MirLowerer<'a> {
                 });
                 reg
             })?;
-            let array_reg = self.with_func(|func, current_block| {
+            let mut array_reg = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
@@ -132,7 +132,7 @@ impl<'a> MirLowerer<'a> {
             })?;
             for elem in elements {
                 let value_reg = self.lower_expr(elem)?;
-                self.with_func(|func, current_block| {
+                let pushed = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::Call {
@@ -142,6 +142,9 @@ impl<'a> MirLowerer<'a> {
                     });
                     dest
                 })?;
+                if self.array_push_returns_header {
+                    array_reg = pushed;
+                }
             }
             return Ok(array_reg);
         }
@@ -157,7 +160,7 @@ impl<'a> MirLowerer<'a> {
                 });
                 reg
             })?;
-            let array_reg = self.with_func(|func, current_block| {
+            let mut array_reg = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
@@ -169,7 +172,7 @@ impl<'a> MirLowerer<'a> {
             })?;
             for elem in elements {
                 let value_reg = self.lower_expr(elem)?;
-                self.with_func(|func, current_block| {
+                let pushed = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::Call {
@@ -179,6 +182,9 @@ impl<'a> MirLowerer<'a> {
                     });
                     dest
                 })?;
+                if self.array_push_returns_header {
+                    array_reg = pushed;
+                }
             }
             return Ok(array_reg);
         }
@@ -220,7 +226,7 @@ impl<'a> MirLowerer<'a> {
                 });
                 reg
             })?;
-            let array_reg = self.with_func(|func, current_block| {
+            let mut array_reg = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
@@ -289,7 +295,7 @@ impl<'a> MirLowerer<'a> {
                 } else {
                     reg
                 };
-                self.with_func(|func, current_block| {
+                let pushed_dest = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::Call {
@@ -299,6 +305,9 @@ impl<'a> MirLowerer<'a> {
                     });
                     dest
                 })?;
+                if self.array_push_returns_header {
+                    array_reg = pushed_dest;
+                }
             }
             return Ok(array_reg);
         }

@@ -6,7 +6,8 @@
 use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_arm_init}
 use os.kernel.boot.boot_fs_mount.{boot_fs_mount_fat32_from_device}
 use os.services.vfs.vfs_boot_state.{
-    vfs_state_reset_rootfs, vfs_state_mount, vfs_state_mark_rootfs_ready}
+    vfs_state_reset_rootfs, vfs_state_mount, vfs_state_mark_rootfs_ready,
+    vfs_state_mount_table_probe_v1}
 use os.services.vfs.vfs_positioned_ops.{
     g_vfs_positioned_open, g_vfs_positioned_close,
     g_vfs_positioned_fstat, g_vfs_positioned_read_at}
@@ -40,6 +41,18 @@ extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn serial_println(msg: text)
 @unsafe(reason: "raw ARM filesystem execution trace event ABI", capabilities: [ffi])
 extern fn arm_fs_exec_trace(id: u64)
+@cfg(arm64)
+@unsafe(reason: "raw ARM payload-region begin ABI; returns region base or 0", capabilities: [ffi])
+extern fn rt_arm_payload_region_begin(size: u64) -> u64
+@cfg(arm64)
+@unsafe(reason: "raw ARM payload-region sector-pump ABI; returns bytes copied or 0xffffffff", capabilities: [ffi])
+extern fn rt_arm_payload_region_load_sectors(first_lba: u64, dst_off: u64, len: u64) -> u64
+@cfg(arm64)
+@unsafe(reason: "raw ARM payload-region byte probe ABI", capabilities: [ffi])
+extern fn rt_arm_payload_region_byte_at(off: u64) -> u64
+@cfg(arm64)
+@unsafe(reason: "raw ARM RAM-file payload-resident bridge ABI; returns file size or 0", capabilities: [ffi])
+extern fn rt_arm_svc_ram_payload_resident(path: text) -> u64
 
 @always_inline
 fn _sffi_arm_array_len_u32(arr: [u8]) -> u32:
@@ -90,6 +103,30 @@ fn _sffi_serial_println(msg: text):
 fn _sffi_arm_fs_exec_trace(id: u64):
     unsafe(capabilities: [ffi]):
         arm_fs_exec_trace(id)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_payload_region_begin(size: u64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_payload_region_begin(size)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_payload_region_load_sectors(first_lba: u64, dst_off: u64, len: u64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_payload_region_load_sectors(first_lba, dst_off, len)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_payload_region_byte_at(off: u64) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_payload_region_byte_at(off)
+
+@cfg(arm64)
+@always_inline
+fn _sffi_arm_svc_ram_payload_resident(path: text) -> u64:
+    unsafe(capabilities: [ffi]):
+        rt_arm_svc_ram_payload_resident(path)
 
 var g_arm_blk: VirtioBlkDriver? = nil
 var g_arm_vfs_initialized: bool = false
@@ -154,6 +191,24 @@ fn _arm_fs_error_is_not_found(err: FsError) -> bool:
         case FsError.NotFound: true
         case _: false
 
+fn _arm_fs_error_label(err: FsError) -> text:
+    match err:
+        case FsError.Unsupported: "unsupported"
+        case FsError.Transient(_): "transient"
+        case FsError.Corrupt: "corrupt"
+        case FsError.NoSpace: "nospace"
+        case FsError.Permission: "permission"
+        case FsError.NotFound: "notfound"
+        case FsError.AlreadyExists: "alreadyexists"
+        case FsError.Busy: "busy"
+        case FsError.IoError(_): "ioerror"
+        case FsError.Interrupted: "interrupted"
+        case FsError.TooLarge: "toolarge"
+        case FsError.ReadOnly: "readonly"
+        case FsError.InvalidArg: "invalidarg"
+        case FsError.StaleHandle: "stalehandle"
+        case FsError.PathTraversal: "pathtraversal"
+
 fn _arm_vfs_read_mounted_regular_file_bounded_v1(
     path: text, max_bytes: u64
 ) -> Result<ArmFsExecRegularFileReadV1, FsError>:
@@ -175,6 +230,7 @@ fn _arm_vfs_read_mounted_regular_file_bounded_v1(
         val _ = g_vfs_positioned_close(file_object_id)
         return Err(stat_result.unwrap_err())
     val file_stat = stat_result.unwrap()
+    _arm_vfs_log("[vfs-read] fstat path={path} size={file_stat.size}")
     # Reject every explicitly non-regular object.  Legacy FAT32 regular files
     # publish permission bits without S_IFREG, while directories still publish
     # S_IFDIR; a zero type is therefore the common-driver regular-file fallback.
@@ -225,7 +281,12 @@ pub fn arm_fs_exec_read_mounted_regular_file_bounded_v1(
         return Err(FsError.TooLarge)
     _arm_vfs_read_mounted_regular_file_bounded_v1(path, max_bytes)
 
-pub fn arm_fs_exec_vfs_boot_init() -> bool:
+# Mount VirtIO-BLK, publish the kernel FAT32, and register the canonical
+# MountTable root — everything before the hello_world.smf preload. Shared by
+# the classic fs-exec boot init (which then preloads + schedules the hello
+# image) and the aarch64 clang-bringup lane, whose staged FAT32 image is
+# root-only 8.3 and can never carry /SYS/APPS/HELLOSMF.SMF.
+fn _arm_fs_exec_vfs_mount_root_v1() -> bool:
     _sffi_arm_fs_exec_trace(211)
     g_arm_mount_table_ready = false
     vfs_state_reset_rootfs()
@@ -263,15 +324,44 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
         "/", DriverInstance.Fat32(execute_driver), MountOptions.default())
     if canonical_mount.is_err():
         _sffi_arm_fs_exec_trace(221)
-        _arm_vfs_log("[vfs-init] canonical MountTable mount failed")
+        _arm_vfs_log("[vfs-init] canonical MountTable mount failed err={_arm_fs_error_label(canonical_mount.unwrap_err())}")
         return false
     # Publish readiness only after the real root driver is in the canonical
     # table. This lets bounded production media readers use the same generic
     # VFS byte path as x86_64 and RV64 instead of a second ARM-only parser.
     vfs_state_mark_rootfs_ready()
     g_arm_mount_table_ready = true
+    _arm_vfs_log("[vfs-init] mount-committed count={vfs_state_mount_table_probe_v1()}")
+    g_arm_hello_smf_bytes = []
+    g_arm_version_bytes = []
+    g_arm_blk = Some(dev)
+    g_arm_vfs_initialized = true
     _arm_vfs_log("[vfs-init] kernel FAT32 publication ready")
+    true
+
+pub fn arm_fs_exec_vfs_boot_init_mounted_v1() -> bool:
+    """Mount-only VFS init for the aarch64 clang-bringup lane.
+
+    The clang FAT32 image (scripts/os/fsexec_mkimg_clang_arm64.spl) is
+    root-only 8.3 (CRT0.O/CLANG.ELF/LLD.ELF/HELLO.C/...), so the classic
+    boot init's /SYS/APPS/HELLOSMF.SMF preload probe can never pass there.
+    This entry publishes the same canonical MountTable root and stops;
+    payloads are then resolved per-rung through the mounted namespace.
+    """
+    if not _arm_fs_exec_vfs_mount_root_v1():
+        return false
     _sffi_arm_fs_exec_trace(214)
+    _arm_vfs_log("[vfs-init] VFS ready (VirtIO-BLK FAT32, mounted namespace)")
+    true
+
+pub fn arm_fs_exec_vfs_boot_init() -> bool:
+    if not _arm_fs_exec_vfs_mount_root_v1():
+        return false
+    _sffi_arm_fs_exec_trace(214)
+    if not g_arm_blk.?:
+        _arm_vfs_log("[vfs-init] mount published no device")
+        return false
+    val dev = g_arm_blk.unwrap()
     val hello_smf_bytes = _arm_fat32_read_path_from_dev(dev, "/sys/apps/hello_world.smf")
     val hello_smf_len = _sffi_arm_array_len_u32(hello_smf_bytes)
     if hello_smf_len <= 4:
@@ -280,7 +370,6 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
         return false
     g_arm_hello_smf_len = hello_smf_len
     g_arm_hello_smf_bytes = hello_smf_bytes
-    g_arm_version_bytes = []
     g_arm_blk = Some(dev)
     g_arm_vfs_initialized = true
     if not _arm_schedule_loaded_hello_smf(hello_smf_bytes):
@@ -355,6 +444,8 @@ pub fn arm_fs_exec_read_regular_file_bounded_v1(
             mapped, max_bytes)
         if mounted.is_ok():
             _arm_vfs_log("[vfs-read] mounted-hit len={_sffi_arm_array_len_u32(mounted.unwrap().bytes)}")
+        else:
+            _arm_vfs_log("[vfs-read] mounted-miss err={_arm_fs_error_label(mounted.unwrap_err())}")
         return mounted
     if val Some(dev) = g_arm_blk:
         val result = _arm_fat32_read_regular_path_from_dev_v1(dev, mapped, max_bytes)
@@ -397,6 +488,85 @@ pub fn arm_fs_exec_read_file_bytes(path: text) -> [u8]:
     if result.is_err():
         return []
     result.unwrap().bytes
+
+@cfg(arm64)
+pub fn arm_fs_exec_stream_payload_resident_v1(path: text) -> Result<u64, FsError>:
+    """Stream one mounted regular file into the raw C payload region.
+
+    A 115 MiB guest ELF cannot materialize as a tagged [u8]: 8 B per
+    RuntimeValue slot ~= 922 MB, far past the 512 MiB freestanding bump heap
+    (and rt_byte_array_new_len caps at 16M elements).  The mounted positioned
+    read is not a chunk source either: Fat32Core.read_cluster caches EVERY
+    cluster into the driver object, unbounded (~879 MB tagged for this one
+    file) and driver-long-lived, so no per-chunk heap watermark can reclaim
+    it.  The mounted namespace stays authoritative for open+fstat (real size
+    and the FAT32 start cluster via FileStat.inode); the bytes then pump
+    cluster-by-cluster through the stateless direct walker straight into the
+    raw region with zero tagged payload growth.  The only tagged traffic is
+    one 512-element FAT-sector array per cluster (~14 MiB total), which the
+    bump heap absorbs with no reclamation.
+
+    The positioned handle is deliberately NOT closed (neither on success nor
+    on the error paths): the mounted close runs fat32_sync_entry_size — a
+    no-op size persist for a read-only open — which rewrites the already-
+    cached directory cluster through Fat32Core._cluster_cache_put's cache-hit
+    index-set arm, and that arm traps in the freestanding build (udf after
+    rt_index_set returns; doc/08_tracking/bug/
+    index_set_return_udf_trap_arm64_2026-09-25.md).  Leaking one bounded
+    virtual handle per payload read is safe for this one-shot bring-up boot
+    (<= 3 reads across the R3-R5 rungs).
+    """
+    if not mount_path_canonical(path) or path == "/":
+        return Err(FsError.InvalidArg)
+    # RAM-backed guest files first: the in-guest toolchain writes its outputs
+    # (e.g. /HELLO2.ELF) through the C file-syscall layer into kernel RAM
+    # files that the FAT32 namespace can never resolve.
+    val ram_size = _sffi_arm_svc_ram_payload_resident(path)
+    if ram_size > 0u64:
+        _arm_vfs_log("[vfs-read] ram-hit path={path} bytes={ram_size}")
+        return Ok(ram_size)
+    val opened = g_vfs_positioned_open(path, OpenFlags.read_only())
+    if opened.is_err():
+        return Err(opened.unwrap_err())
+    val file_object_id = opened.unwrap()
+    val stat_result = g_vfs_positioned_fstat(file_object_id)
+    if stat_result.is_err():
+        return Err(stat_result.unwrap_err())
+    val file_stat = stat_result.unwrap()
+    _arm_vfs_log("[vfs-read] stream-fstat path={path} size={file_stat.size} first_cluster={file_stat.inode}")
+    val file_type = file_stat.mode & 0o170000u32
+    if file_type != 0u32 and file_type != 0o100000u32:
+        return Err(FsError.InvalidArg)
+    if file_stat.size == 0u64:
+        return Ok(0u64)
+    if _sffi_arm_payload_region_begin(file_stat.size) == 0u64:
+        return Err(FsError.TooLarge)
+    if not g_arm_blk.?:
+        return Err(FsError.IoError(code: 0u32))
+    val dev = g_arm_blk.unwrap()
+    val cluster_bytes = g_arm_spc * 512u64
+    var cluster = file_stat.inode
+    var off: u64 = 0u64
+    var pumped: u64 = 0u64
+    while off < file_stat.size and cluster >= 2 and cluster < 0x0FFFFFF8:
+        val remaining = file_stat.size - off
+        val n = if cluster_bytes < remaining: cluster_bytes else: remaining
+        val lba = _arm_cluster_sector(cluster)
+        val wrote = _sffi_arm_payload_region_load_sectors(lba, off, n)
+        if wrote != n:
+            _arm_vfs_log("[vfs-read] pump-fail off={off} wrote={wrote} want={n}")
+            return Err(FsError.IoError(code: 1u32))
+        off = off + n
+        pumped = pumped + 1u64
+        if pumped % 512u64 == 0u64:
+            _sffi_arm_fs_exec_trace(300u64 + pumped / 512u64)
+        cluster = _arm_fat_next(dev, cluster)
+    if off != file_stat.size:
+        _arm_vfs_log("[vfs-read] pump-short off={off} size={file_stat.size}")
+        return Err(FsError.Corrupt)
+    _arm_vfs_log("[vfs-read] payload resident bytes={file_stat.size}")
+    _arm_vfs_log("[vfs-read] payload magic b0={_sffi_arm_payload_region_byte_at(0u64)} b1={_sffi_arm_payload_region_byte_at(1u64)} b2={_sffi_arm_payload_region_byte_at(2u64)} b3={_sffi_arm_payload_region_byte_at(3u64)}")
+    Ok(file_stat.size)
 
 pub fn arm_fs_exec_loaded_hello_len() -> u32:
     if not g_arm_vfs_initialized:

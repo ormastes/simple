@@ -313,6 +313,7 @@ impl LlvmBackend {
             .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
             .into_int_value();
         if trusted_array {
+            let fam_arrays = self.target.uses_fam_array_abi();
             let ptr_bits = builder
                 .build_and(value, i64_type.const_int(!7u64, false), "array_len_ptr_bits")
                 .map_err(|e| crate::error::factory::llvm_build_failed("array len ptr bits", &e))?;
@@ -334,10 +335,23 @@ impl LlvmBackend {
                     .build_gep(i8_type, object_ptr, &[i64_type.const_int(8, false)], "array_len_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("array len gep", &e))?
             };
-            let len = builder
-                .build_load(i64_type, len_ptr, "array_len_value")
-                .map_err(|e| crate::error::factory::llvm_build_failed("array len load", &e))?
-                .into_int_value();
+            // FAM baremetal arrays store u32 len at offset 8; an i64 load there
+            // returns len|cap<<32 (see Target::uses_fam_array_abi).
+            let len = if fam_arrays {
+                let i32_type = self.context_ref().i32_type();
+                let len32 = builder
+                    .build_load(i32_type, len_ptr, "array_len_value32")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("array len load32", &e))?
+                    .into_int_value();
+                builder
+                    .build_int_z_extend(len32, i64_type, "array_len_value_zext")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("array len zext", &e))?
+            } else {
+                builder
+                    .build_load(i64_type, len_ptr, "array_len_value")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("array len load", &e))?
+                    .into_int_value()
+            };
             builder
                 .build_unconditional_branch(done_block)
                 .map_err(|e| crate::error::factory::llvm_build_failed("array len done branch", &e))?;
@@ -427,13 +441,35 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("len collection or", &e))?;
         // Only string and array have known kind constants; dict/tuple lack rt_len inline support.
         let is_collection = string_or_array;
+        // FAM baremetal arrays store u32 len at offset 8 while RuntimeString
+        // keeps u64 len — split the offset-8 load by width there. Non-FAM
+        // targets keep the historical shared i64 load.
+        let fam_arrays = self.target.uses_fam_array_abi();
+        let kind_block = if fam_arrays {
+            self.context_ref().append_basic_block(function, "len_kind")
+        } else {
+            len_block
+        };
         builder
-            .build_conditional_branch(is_collection, len_block, done_block)
+            .build_conditional_branch(is_collection, kind_block, done_block)
             .map_err(|e| crate::error::factory::llvm_build_failed("len type branch", &e))?;
         let type_loaded_block = builder
             .get_insert_block()
             .ok_or_else(|| CompileError::semantic("LLVM len type block missing".to_string()))?;
 
+        // FAM dispatch: arrays take the u32 load, strings the u64 load.
+        let array_len_block = if fam_arrays {
+            let array_len_block = self.context_ref().append_basic_block(function, "len_array_load");
+            builder.position_at_end(kind_block);
+            builder
+                .build_conditional_branch(is_array, array_len_block, len_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("len kind branch", &e))?;
+            array_len_block
+        } else {
+            len_block
+        };
+
+        // String arm: u64 length at offset 8 (also the shared arm on non-FAM).
         builder.position_at_end(len_block);
         let len_ptr = unsafe {
             builder
@@ -450,6 +486,43 @@ impl LlvmBackend {
         let len_loaded_block = builder
             .get_insert_block()
             .ok_or_else(|| CompileError::semantic("LLVM len load block missing".to_string()))?;
+
+        // FAM array arm: u32 length at offset 8, zero-extended.
+        if fam_arrays {
+            builder.position_at_end(array_len_block);
+            let i32_type = self.context_ref().i32_type();
+            let len_ptr = unsafe {
+                builder
+                    .build_gep(i8_type, object_ptr, &[i64_type.const_int(8, false)], "len_array_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("len array gep", &e))?
+            };
+            let len32 = builder
+                .build_load(i32_type, len_ptr, "len_array_value32")
+                .map_err(|e| crate::error::factory::llvm_build_failed("len array load32", &e))?
+                .into_int_value();
+            let array_len = builder
+                .build_int_z_extend(len32, i64_type, "len_array_value_zext")
+                .map_err(|e| crate::error::factory::llvm_build_failed("len array zext", &e))?;
+            builder
+                .build_unconditional_branch(done_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("len array done branch", &e))?;
+            let array_len_loaded_block = builder
+                .get_insert_block()
+                .ok_or_else(|| CompileError::semantic("LLVM len array block missing".to_string()))?;
+
+            builder.position_at_end(done_block);
+            let phi = builder
+                .build_phi(i64_type, "rt_len_inline")
+                .map_err(|e| crate::error::factory::llvm_build_failed("len phi", &e))?;
+            phi.add_incoming(&[
+                (&invalid, current_block),
+                (&invalid, type_loaded_block),
+                (&len, len_loaded_block),
+                (&array_len, array_len_loaded_block),
+            ]);
+            vreg_map.insert(dest, phi.as_basic_value());
+            return Ok(true);
+        }
 
         builder.position_at_end(done_block);
         let phi = builder
@@ -2155,10 +2228,14 @@ impl LlvmBackend {
             }
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 arg_vals.iter().map(|_| i64_type.into()).collect();
+            // FAM freestanding push ABI: rt_array_push returns the possibly
+            // realloc-moved header (i64), not a bool — declare the import to
+            // match or a captured return reads a truncated bool.
+            let fam_push_returns_header = self.target.array_push_returns_header();
             let returns_bool = matches!(
                 rt_fn_name,
-                "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort" | "rt_index_set"
-            );
+                "rt_array_clear" | "rt_array_reverse" | "rt_array_sort" | "rt_index_set"
+            ) || (rt_fn_name == "rt_array_push" && !fam_push_returns_header);
             let fn_type = if returns_bool {
                 self.context_ref().bool_type().fn_type(&param_types, false)
             } else {
@@ -2418,10 +2495,12 @@ impl LlvmBackend {
                         }
                         let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                             arg_vals.iter().map(|_| i64_type.into()).collect();
+                        // FAM freestanding push ABI: rt_array_push returns the
+                        // possibly realloc-moved header (i64), not a bool.
+                        let fam_push_returns_header = self.target.array_push_returns_header();
                         let returns_bool = matches!(
                             rt_fn_name,
-                            "rt_array_push"
-                                | "rt_array_clear"
+                            "rt_array_clear"
                                 | "rt_array_reverse"
                                 | "rt_array_sort"
                                 | "rt_index_set"
@@ -2431,7 +2510,7 @@ impl LlvmBackend {
                                 | "rt_is_present"
                                 | "rt_enum_check_discriminant"
                                 | "rt_enum_check_variant"
-                        );
+                        ) || (rt_fn_name == "rt_array_push" && !fam_push_returns_header);
                         let fn_type = if returns_bool {
                             self.context_ref().bool_type().fn_type(&param_types, false)
                         } else {
@@ -2659,10 +2738,7 @@ impl LlvmBackend {
                 let context = self.context_ref();
                 let i8_type = context.i8_type();
                 let i32_type = context.i32_type();
-                if let Some(spec) = crate::codegen::runtime_sffi::RUNTIME_FUNCS
-                    .iter()
-                    .find(|spec| spec.name == sffi_name)
-                {
+                if let Some(spec) = crate::codegen::runtime_sffi::spec_for_target(&self.target, sffi_name) {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = spec
                         .params
                         .iter()

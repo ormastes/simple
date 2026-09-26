@@ -148,6 +148,335 @@ fn _initial_backend_slot_state_v1() -> _BlockBackendSlotStateV1:
         last_teardown: BlockBackendTeardownReceiptV1(
             slot: -1, retired_generation: 0u64, flushed: false))
 
+# Lock bodies live in typed helpers so `mutex_with_lock`'s callback parameter
+# stays a concrete state struct; the erased inline-lambda form fails HIR
+# field-type inference in the full native closure.
+fn _block_backend_install_locked_v1(
+    state: _BlockBackendSlotStateV1, slot_index: i32, backend: BlockDevice,
+    identity: BlockDeviceRegistrationV1, binding: BlockDeviceRegionBindingV1,
+    base_pin: BlockDevicePinLeaseV1, nonce: u64, close_nonce: u64
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    next.last_registration = BlockBackendCapsuleRegistrationV1.invalid_probe()
+    if state.state != _BlockBackendCapsuleStateV1.Free:
+        next.last_error = Some(BlockBackendCapsuleErrorV1.Busy)
+    else:
+        val seal = BlockBackendCapsuleSealV1(
+            _slot: slot_index, _generation: state.generation, _nonce: nonce)
+        next.state = _BlockBackendCapsuleStateV1.Active
+        next.nonce = nonce
+        next.close_nonce = close_nonce
+        next.identity_slot = identity.seal().owner_slot_index()
+        next.identity_generation = identity.seal().generation()
+        next.base_pin = base_pin
+        next.teardown_flushed = false
+        next.base_pin_quarantined = false
+        next.binding = binding
+        next.backend = Some(backend)
+        next.next_nonce = 1u64
+        next.active_leases = 0
+        next.leases = []
+        next.last_registration = BlockBackendCapsuleRegistrationV1(
+            _seal: seal, _close_nonce: close_nonce)
+    next
+
+fn _block_backend_reserve_locked_v1(
+    state: _BlockBackendSlotStateV1, seal: BlockBackendCapsuleSealV1,
+    identity: BlockDeviceRegistrationV1, binding: BlockDeviceRegionBindingV1,
+    pin: BlockDevicePinLeaseV1
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    next.last_lease = BlockBackendIoLeaseV1.invalid_probe()
+    if state.state == _BlockBackendCapsuleStateV1.Quarantined:
+        next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
+    elif state.state != _BlockBackendCapsuleStateV1.Active:
+        next.last_error = Some(BlockBackendCapsuleErrorV1.Closing)
+    elif (seal._generation != state.generation or seal._nonce != state.nonce):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
+    elif (identity.seal().owner_slot_index() != state.identity_slot or
+          identity.seal().generation() != state.identity_generation or
+          pin.device_slot_index() != state.identity_slot or
+          pin.device_generation() != state.identity_generation or
+          not _backend_binding_equal_v1(binding, state.binding)):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.IdentityRejected)
+    elif state.next_nonce == 0u64 or state.next_nonce == _BLOCK_BACKEND_COUNTER_MAX_V1:
+        next.state = _BlockBackendCapsuleStateV1.Quarantined
+        next.last_error = Some(BlockBackendCapsuleErrorV1.CounterExhausted)
+    else:
+        var lease_slot: i32 = -1
+        var i: i32 = 0
+        while i < state.leases.len():
+            if lease_slot < 0 and state.leases[i].state == _BlockBackendLeaseStateV1.Free:
+                lease_slot = i
+            i = i + 1
+        if lease_slot < 0 and state.leases.len() >= BLOCK_BACKEND_LEASE_CAPACITY_V1:
+            next.last_error = Some(BlockBackendCapsuleErrorV1.CapacityExhausted)
+        else:
+            if lease_slot < 0:
+                lease_slot = state.leases.len()
+                next.leases.push(_empty_backend_lease_slot_v1(1u64))
+            val generation = next.leases[lease_slot].generation
+            val nonce = state.next_nonce
+            next.leases[lease_slot] = _BlockBackendLeaseSlotV1(
+                state: _BlockBackendLeaseStateV1.Active,
+                generation: generation, nonce: nonce)
+            next.active_leases = state.active_leases + 1
+            next.next_nonce = nonce + 1u64
+            next.last_lease = BlockBackendIoLeaseV1(
+                _capsule: seal, _lease_slot: lease_slot,
+                _lease_generation: generation, _lease_nonce: nonce,
+                _device_pin: pin)
+    next
+
+fn _block_backend_read_locked_v1(
+    state: _BlockBackendSlotStateV1, lease: BlockBackendIoLeaseV1,
+    relative_lba: u64
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    next.last_bytes = []
+    if (state.state != _BlockBackendCapsuleStateV1.Active or
+        lease._capsule._generation != state.generation or
+        lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
+        lease._lease_slot >= state.leases.len()):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+    else:
+        val held = state.leases[lease._lease_slot]
+        if (held.state != _BlockBackendLeaseStateV1.Active or
+            held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
+            next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+        elif relative_lba >= state.binding.sector_count:
+            next.last_error = Some(BlockBackendCapsuleErrorV1.RegionViolation)
+        elif val backend_value = state.backend:
+            var backend = backend_value
+            val result = backend.read_sector(state.binding.base_lba + relative_lba)
+            next.backend = Some(backend)
+            match result:
+                Ok(bytes): next.last_bytes = bytes
+                Err(_): next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
+        else:
+            next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
+    next
+
+fn _block_backend_write_locked_v1(
+    state: _BlockBackendSlotStateV1, lease: BlockBackendIoLeaseV1,
+    relative_lba: u64, data: [u8]
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    next.last_bool = false
+    if (state.state != _BlockBackendCapsuleStateV1.Active or
+        lease._capsule._generation != state.generation or
+        lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
+        lease._lease_slot >= state.leases.len()):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+    else:
+        val held = state.leases[lease._lease_slot]
+        if (held.state != _BlockBackendLeaseStateV1.Active or
+            held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
+            next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+        elif relative_lba >= state.binding.sector_count:
+            next.last_error = Some(BlockBackendCapsuleErrorV1.RegionViolation)
+        elif val backend_value = state.backend:
+            var backend = backend_value
+            val result = backend.write_sector(state.binding.base_lba + relative_lba, data)
+            next.backend = Some(backend)
+            match result:
+                Ok(ok):
+                    if ok: next.last_bool = true
+                    else: next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
+                Err(_): next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
+        else:
+            next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
+    next
+
+fn _block_backend_flush_locked_v1(
+    state: _BlockBackendSlotStateV1, lease: BlockBackendIoLeaseV1
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    next.last_bool = false
+    if (state.state != _BlockBackendCapsuleStateV1.Active or
+        lease._capsule._generation != state.generation or
+        lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
+        lease._lease_slot >= state.leases.len()):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+    else:
+        val held = state.leases[lease._lease_slot]
+        if (held.state != _BlockBackendLeaseStateV1.Active or
+            held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
+            next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+        elif val backend_value = state.backend:
+            var backend = backend_value
+            val result = backend.flush()
+            next.backend = Some(backend)
+            match result:
+                Ok(ok):
+                    if ok: next.last_bool = true
+                    else: next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
+                Err(_): next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
+        else:
+            next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
+    next
+
+fn _block_backend_begin_release_locked_v1(
+    state: _BlockBackendSlotStateV1, lease: BlockBackendIoLeaseV1
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    if (lease._capsule._generation != state.generation or
+        lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
+        lease._lease_slot >= state.leases.len()):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+    else:
+        val held = state.leases[lease._lease_slot]
+        if (held.state != _BlockBackendLeaseStateV1.Active or
+            held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
+            next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+        else:
+            var releasing = held
+            releasing.state = _BlockBackendLeaseStateV1.Releasing
+            next.leases[lease._lease_slot] = releasing
+    next
+
+fn _block_backend_quarantine_release_locked_v1(
+    state: _BlockBackendSlotStateV1, lease: BlockBackendIoLeaseV1
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    if lease._lease_slot < 0 or lease._lease_slot >= state.leases.len():
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+    else:
+        val held = state.leases[lease._lease_slot]
+        if (held.state != _BlockBackendLeaseStateV1.Releasing or
+            held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
+            next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+        else:
+            var quarantined = held
+            quarantined.state = _BlockBackendLeaseStateV1.Quarantined
+            next.leases[lease._lease_slot] = quarantined
+    next
+
+fn _block_backend_finish_release_locked_v1(
+    state: _BlockBackendSlotStateV1, lease: BlockBackendIoLeaseV1,
+    require_quarantined: bool
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    if lease._lease_slot < 0 or lease._lease_slot >= state.leases.len():
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+    else:
+        val held = state.leases[lease._lease_slot]
+        val expected = if require_quarantined:
+            held.state == _BlockBackendLeaseStateV1.Quarantined
+        else:
+            held.state == _BlockBackendLeaseStateV1.Releasing
+        if (not expected or held.generation != lease._lease_generation or
+            held.nonce != lease._lease_nonce or state.active_leases <= 0):
+            next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
+        elif held.generation == _BLOCK_BACKEND_COUNTER_MAX_V1:
+            var retired = held
+            retired.state = _BlockBackendLeaseStateV1.Quarantined
+            retired.nonce = 0u64
+            next.leases[lease._lease_slot] = retired
+            next.active_leases = state.active_leases - 1
+        else:
+            next.leases[lease._lease_slot] =
+                _empty_backend_lease_slot_v1(held.generation + 1u64)
+            next.active_leases = state.active_leases - 1
+    next
+
+fn _block_backend_prepare_teardown_locked_v1(
+    state: _BlockBackendSlotStateV1,
+    registration: BlockBackendCapsuleRegistrationV1, slot_index: i32,
+    retry_quarantined: bool
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    next.last_teardown = BlockBackendTeardownReceiptV1(
+        slot: -1, retired_generation: 0u64, flushed: false)
+    val seal = registration._seal
+    if (seal._slot != slot_index or seal._generation != state.generation or
+        seal._nonce != state.nonce or registration._close_nonce != state.close_nonce):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
+    elif (state.state == _BlockBackendCapsuleStateV1.Quarantined and
+          not retry_quarantined):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
+    elif (state.state != _BlockBackendCapsuleStateV1.Active and
+          state.state != _BlockBackendCapsuleStateV1.Quarantined):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.Closing)
+    elif state.active_leases != 0:
+        next.last_error = Some(BlockBackendCapsuleErrorV1.Busy)
+    elif state.teardown_flushed:
+        next.state = _BlockBackendCapsuleStateV1.Closing
+    elif val backend_value = state.backend:
+        var backend = backend_value
+        val result = backend.flush()
+        next.backend = Some(backend)
+        match result:
+            Ok(ok):
+                if ok:
+                    next.state = _BlockBackendCapsuleStateV1.Closing
+                    next.teardown_flushed = true
+                else:
+                    next.state = _BlockBackendCapsuleStateV1.Quarantined
+                    next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
+            Err(_):
+                next.state = _BlockBackendCapsuleStateV1.Quarantined
+                next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
+    else:
+        next.state = _BlockBackendCapsuleStateV1.Quarantined
+        next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
+    next
+
+fn _block_backend_quarantine_teardown_locked_v1(
+    state: _BlockBackendSlotStateV1,
+    registration: BlockBackendCapsuleRegistrationV1
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    if (registration._seal._generation != state.generation or
+        registration._seal._nonce != state.nonce or
+        registration._close_nonce != state.close_nonce or
+        state.state != _BlockBackendCapsuleStateV1.Closing or
+        not state.teardown_flushed):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
+    else:
+        next.state = _BlockBackendCapsuleStateV1.Quarantined
+        next.base_pin_quarantined = true
+    next
+
+fn _block_backend_finish_teardown_locked_v1(
+    state: _BlockBackendSlotStateV1,
+    registration: BlockBackendCapsuleRegistrationV1, slot_index: i32
+) -> _BlockBackendSlotStateV1:
+    var next = state
+    next.last_error = nil
+    val retired_generation = state.generation
+    if (registration._seal._generation != state.generation or
+        registration._seal._nonce != state.nonce or
+        registration._close_nonce != state.close_nonce or
+        (state.state != _BlockBackendCapsuleStateV1.Closing and
+         state.state != _BlockBackendCapsuleStateV1.Quarantined) or
+        not state.teardown_flushed or state.active_leases != 0):
+        next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
+    elif state.generation == _BLOCK_BACKEND_COUNTER_MAX_V1:
+        next.state = _BlockBackendCapsuleStateV1.Quarantined
+        next.backend = nil
+        next.base_pin = BlockDevicePinLeaseV1.invalid_probe()
+        next.last_teardown = BlockBackendTeardownReceiptV1(
+            slot: slot_index, retired_generation: retired_generation,
+            flushed: true)
+    else:
+        next = _initial_backend_slot_state_v1()
+        next.generation = retired_generation + 1u64
+        next.last_teardown = BlockBackendTeardownReceiptV1(
+            slot: slot_index, retired_generation: retired_generation,
+            flushed: true)
+    next
+
 class _BlockBackendSlotV1:
     _state: Mutex
 
@@ -155,7 +484,8 @@ class _BlockBackendSlotV1:
         _BlockBackendSlotV1(_state: mutex_new(_initial_backend_slot_state_v1()))
 
     fn is_free() -> bool:
-        mutex_with_lock(self._state, \state: state).state == _BlockBackendCapsuleStateV1.Free
+        val locked: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state: state)
+        locked.state == _BlockBackendCapsuleStateV1.Free
 
     fn install(
         slot_index: i32, backend: BlockDevice,
@@ -163,31 +493,10 @@ class _BlockBackendSlotV1:
         base_pin: BlockDevicePinLeaseV1,
         nonce: u64, close_nonce: u64
     ) -> Result<BlockBackendCapsuleRegistrationV1, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            next.last_registration = BlockBackendCapsuleRegistrationV1.invalid_probe()
-            if state.state != _BlockBackendCapsuleStateV1.Free:
-                next.last_error = Some(BlockBackendCapsuleErrorV1.Busy)
-            else:
-                val seal = BlockBackendCapsuleSealV1(
-                    _slot: slot_index, _generation: state.generation, _nonce: nonce)
-                next.state = _BlockBackendCapsuleStateV1.Active
-                next.nonce = nonce
-                next.close_nonce = close_nonce
-                next.identity_slot = identity.seal().owner_slot_index()
-                next.identity_generation = identity.seal().generation()
-                next.base_pin = base_pin
-                next.teardown_flushed = false
-                next.base_pin_quarantined = false
-                next.binding = binding
-                next.backend = Some(backend)
-                next.next_nonce = 1u64
-                next.active_leases = 0
-                next.leases = []
-                next.last_registration = BlockBackendCapsuleRegistrationV1(
-                    _seal: seal, _close_nonce: close_nonce)
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_install_locked_v1(
+                state, slot_index, backend, identity, binding, base_pin, nonce,
+                close_nonce))
         if val err = updated.last_error: return Err(err)
         Ok(updated.last_registration)
 
@@ -195,215 +504,48 @@ class _BlockBackendSlotV1:
         seal: BlockBackendCapsuleSealV1, identity: BlockDeviceRegistrationV1,
         binding: BlockDeviceRegionBindingV1, pin: BlockDevicePinLeaseV1
     ) -> Result<BlockBackendIoLeaseV1, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            next.last_lease = BlockBackendIoLeaseV1.invalid_probe()
-            if state.state == _BlockBackendCapsuleStateV1.Quarantined:
-                next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
-            elif state.state != _BlockBackendCapsuleStateV1.Active:
-                next.last_error = Some(BlockBackendCapsuleErrorV1.Closing)
-            elif (seal._generation != state.generation or seal._nonce != state.nonce):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
-            elif (identity.seal().owner_slot_index() != state.identity_slot or
-                  identity.seal().generation() != state.identity_generation or
-                  pin.device_slot_index() != state.identity_slot or
-                  pin.device_generation() != state.identity_generation or
-                  not _backend_binding_equal_v1(binding, state.binding)):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.IdentityRejected)
-            elif state.next_nonce == 0u64 or state.next_nonce == _BLOCK_BACKEND_COUNTER_MAX_V1:
-                next.state = _BlockBackendCapsuleStateV1.Quarantined
-                next.last_error = Some(BlockBackendCapsuleErrorV1.CounterExhausted)
-            else:
-                var lease_slot: i32 = -1
-                var i: i32 = 0
-                while i < state.leases.len():
-                    if lease_slot < 0 and state.leases[i].state == _BlockBackendLeaseStateV1.Free:
-                        lease_slot = i
-                    i = i + 1
-                if lease_slot < 0 and state.leases.len() >= BLOCK_BACKEND_LEASE_CAPACITY_V1:
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.CapacityExhausted)
-                else:
-                    if lease_slot < 0:
-                        lease_slot = state.leases.len()
-                        next.leases.push(_empty_backend_lease_slot_v1(1u64))
-                    val generation = next.leases[lease_slot].generation
-                    val nonce = state.next_nonce
-                    next.leases[lease_slot] = _BlockBackendLeaseSlotV1(
-                        state: _BlockBackendLeaseStateV1.Active,
-                        generation: generation, nonce: nonce)
-                    next.active_leases = state.active_leases + 1
-                    next.next_nonce = nonce + 1u64
-                    next.last_lease = BlockBackendIoLeaseV1(
-                        _capsule: seal, _lease_slot: lease_slot,
-                        _lease_generation: generation, _lease_nonce: nonce,
-                        _device_pin: pin)
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_reserve_locked_v1(state, seal, identity, binding, pin))
         if val err = updated.last_error: return Err(err)
         Ok(updated.last_lease)
 
     fn read(lease: BlockBackendIoLeaseV1, relative_lba: u64) -> Result<[u8], BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            next.last_bytes = []
-            if (state.state != _BlockBackendCapsuleStateV1.Active or
-                lease._capsule._generation != state.generation or
-                lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
-                lease._lease_slot >= state.leases.len()):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-            else:
-                val held = state.leases[lease._lease_slot]
-                if (held.state != _BlockBackendLeaseStateV1.Active or
-                    held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-                elif relative_lba >= state.binding.sector_count:
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.RegionViolation)
-                elif val backend_value = state.backend:
-                    var backend = backend_value
-                    val result = backend.read_sector(state.binding.base_lba + relative_lba)
-                    next.backend = Some(backend)
-                    match result:
-                        Ok(bytes): next.last_bytes = bytes
-                        Err(_): next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
-                else:
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_read_locked_v1(state, lease, relative_lba))
         if val err = updated.last_error: return Err(err)
         Ok(updated.last_bytes)
 
     fn write(
         lease: BlockBackendIoLeaseV1, relative_lba: u64, data: [u8]
     ) -> Result<bool, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            next.last_bool = false
-            if (state.state != _BlockBackendCapsuleStateV1.Active or
-                lease._capsule._generation != state.generation or
-                lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
-                lease._lease_slot >= state.leases.len()):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-            else:
-                val held = state.leases[lease._lease_slot]
-                if (held.state != _BlockBackendLeaseStateV1.Active or
-                    held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-                elif relative_lba >= state.binding.sector_count:
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.RegionViolation)
-                elif val backend_value = state.backend:
-                    var backend = backend_value
-                    val result = backend.write_sector(state.binding.base_lba + relative_lba, data)
-                    next.backend = Some(backend)
-                    match result:
-                        Ok(ok):
-                            if ok: next.last_bool = true
-                            else: next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
-                        Err(_): next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
-                else:
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_write_locked_v1(state, lease, relative_lba, data))
         if val err = updated.last_error: return Err(err)
         Ok(updated.last_bool)
 
     fn flush(lease: BlockBackendIoLeaseV1) -> Result<bool, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            next.last_bool = false
-            if (state.state != _BlockBackendCapsuleStateV1.Active or
-                lease._capsule._generation != state.generation or
-                lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
-                lease._lease_slot >= state.leases.len()):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-            else:
-                val held = state.leases[lease._lease_slot]
-                if (held.state != _BlockBackendLeaseStateV1.Active or
-                    held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-                elif val backend_value = state.backend:
-                    var backend = backend_value
-                    val result = backend.flush()
-                    next.backend = Some(backend)
-                    match result:
-                        Ok(ok):
-                            if ok: next.last_bool = true
-                            else: next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
-                        Err(_): next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
-                else:
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_flush_locked_v1(state, lease))
         if val err = updated.last_error: return Err(err)
         Ok(updated.last_bool)
 
     fn begin_release(lease: BlockBackendIoLeaseV1) -> Result<bool, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            if (lease._capsule._generation != state.generation or
-                lease._capsule._nonce != state.nonce or lease._lease_slot < 0 or
-                lease._lease_slot >= state.leases.len()):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-            else:
-                val held = state.leases[lease._lease_slot]
-                if (held.state != _BlockBackendLeaseStateV1.Active or
-                    held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-                else:
-                    var releasing = held
-                    releasing.state = _BlockBackendLeaseStateV1.Releasing
-                    next.leases[lease._lease_slot] = releasing
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_begin_release_locked_v1(state, lease))
         if val err = updated.last_error: return Err(err)
         Ok(true)
 
     fn quarantine_release(lease: BlockBackendIoLeaseV1) -> Result<bool, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            if lease._lease_slot < 0 or lease._lease_slot >= state.leases.len():
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-            else:
-                val held = state.leases[lease._lease_slot]
-                if (held.state != _BlockBackendLeaseStateV1.Releasing or
-                    held.generation != lease._lease_generation or held.nonce != lease._lease_nonce):
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-                else:
-                    var quarantined = held
-                    quarantined.state = _BlockBackendLeaseStateV1.Quarantined
-                    next.leases[lease._lease_slot] = quarantined
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_quarantine_release_locked_v1(state, lease))
         if val err = updated.last_error: return Err(err)
         Ok(true)
 
     fn finish_release(
         lease: BlockBackendIoLeaseV1, require_quarantined: bool
     ) -> Result<bool, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            if lease._lease_slot < 0 or lease._lease_slot >= state.leases.len():
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-            else:
-                val held = state.leases[lease._lease_slot]
-                val expected = if require_quarantined:
-                    held.state == _BlockBackendLeaseStateV1.Quarantined
-                else:
-                    held.state == _BlockBackendLeaseStateV1.Releasing
-                if (not expected or held.generation != lease._lease_generation or
-                    held.nonce != lease._lease_nonce or state.active_leases <= 0):
-                    next.last_error = Some(BlockBackendCapsuleErrorV1.StaleLease)
-                elif held.generation == _BLOCK_BACKEND_COUNTER_MAX_V1:
-                    var retired = held
-                    retired.state = _BlockBackendLeaseStateV1.Quarantined
-                    retired.nonce = 0u64
-                    next.leases[lease._lease_slot] = retired
-                    next.active_leases = state.active_leases - 1
-                else:
-                    next.leases[lease._lease_slot] =
-                        _empty_backend_lease_slot_v1(held.generation + 1u64)
-                    next.active_leases = state.active_leases - 1
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_finish_release_locked_v1(state, lease, require_quarantined))
         if val err = updated.last_error: return Err(err)
         Ok(true)
 
@@ -411,44 +553,9 @@ class _BlockBackendSlotV1:
         registration: BlockBackendCapsuleRegistrationV1, slot_index: i32,
         retry_quarantined: bool
     ) -> Result<_BlockBackendTeardownTicketV1, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            next.last_teardown = BlockBackendTeardownReceiptV1(
-                slot: -1, retired_generation: 0u64, flushed: false)
-            val seal = registration._seal
-            if (seal._slot != slot_index or seal._generation != state.generation or
-                seal._nonce != state.nonce or registration._close_nonce != state.close_nonce):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
-            elif (state.state == _BlockBackendCapsuleStateV1.Quarantined and
-                  not retry_quarantined):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
-            elif (state.state != _BlockBackendCapsuleStateV1.Active and
-                  state.state != _BlockBackendCapsuleStateV1.Quarantined):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.Closing)
-            elif state.active_leases != 0:
-                next.last_error = Some(BlockBackendCapsuleErrorV1.Busy)
-            elif state.teardown_flushed:
-                next.state = _BlockBackendCapsuleStateV1.Closing
-            elif val backend_value = state.backend:
-                var backend = backend_value
-                val result = backend.flush()
-                next.backend = Some(backend)
-                match result:
-                    Ok(ok):
-                        if ok:
-                            next.state = _BlockBackendCapsuleStateV1.Closing
-                            next.teardown_flushed = true
-                        else:
-                            next.state = _BlockBackendCapsuleStateV1.Quarantined
-                            next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
-                    Err(_):
-                        next.state = _BlockBackendCapsuleStateV1.Quarantined
-                        next.last_error = Some(BlockBackendCapsuleErrorV1.BackendFailure)
-            else:
-                next.state = _BlockBackendCapsuleStateV1.Quarantined
-                next.last_error = Some(BlockBackendCapsuleErrorV1.Quarantined)
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_prepare_teardown_locked_v1(
+                state, registration, slot_index, retry_quarantined))
         if val err = updated.last_error: return Err(err)
         Ok(_BlockBackendTeardownTicketV1(
             pin: updated.base_pin, retry_pin: updated.base_pin_quarantined))
@@ -456,50 +563,16 @@ class _BlockBackendSlotV1:
     fn quarantine_teardown(
         registration: BlockBackendCapsuleRegistrationV1
     ) -> Result<bool, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            if (registration._seal._generation != state.generation or
-                registration._seal._nonce != state.nonce or
-                registration._close_nonce != state.close_nonce or
-                state.state != _BlockBackendCapsuleStateV1.Closing or
-                not state.teardown_flushed):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
-            else:
-                next.state = _BlockBackendCapsuleStateV1.Quarantined
-                next.base_pin_quarantined = true
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_quarantine_teardown_locked_v1(state, registration))
         if val err = updated.last_error: return Err(err)
         Ok(true)
 
     fn finish_teardown(
         registration: BlockBackendCapsuleRegistrationV1, slot_index: i32
     ) -> Result<BlockBackendTeardownReceiptV1, BlockBackendCapsuleErrorV1>:
-        val updated = mutex_with_lock(self._state, \state:
-            var next = state
-            next.last_error = nil
-            val retired_generation = state.generation
-            if (registration._seal._generation != state.generation or
-                registration._seal._nonce != state.nonce or
-                registration._close_nonce != state.close_nonce or
-                (state.state != _BlockBackendCapsuleStateV1.Closing and
-                 state.state != _BlockBackendCapsuleStateV1.Quarantined) or
-                not state.teardown_flushed or state.active_leases != 0):
-                next.last_error = Some(BlockBackendCapsuleErrorV1.StaleCapsule)
-            elif state.generation == _BLOCK_BACKEND_COUNTER_MAX_V1:
-                next.state = _BlockBackendCapsuleStateV1.Quarantined
-                next.backend = nil
-                next.base_pin = BlockDevicePinLeaseV1.invalid_probe()
-                next.last_teardown = BlockBackendTeardownReceiptV1(
-                    slot: slot_index, retired_generation: retired_generation,
-                    flushed: true)
-            else:
-                next = _initial_backend_slot_state_v1()
-                next.generation = retired_generation + 1u64
-                next.last_teardown = BlockBackendTeardownReceiptV1(
-                    slot: slot_index, retired_generation: retired_generation,
-                    flushed: true)
-            next)
+        val updated: _BlockBackendSlotStateV1 = mutex_with_lock(self._state, \state:
+            _block_backend_finish_teardown_locked_v1(state, registration, slot_index))
         if val err = updated.last_error: return Err(err)
         Ok(updated.last_teardown)
 
@@ -541,11 +614,48 @@ fn _backend_binding_equal_v1(
      left.backend_generation == right.backend_generation and
      left.base_lba == right.base_lba and left.sector_count == right.sector_count)
 
+# Read-only registry view: the mutex value must round-trip unchanged, so this
+# uses the explicit lock/unlock pair rather than mutex_with_lock (whose
+# store-back would replace the registry state with the looked-up slot).
 fn _lookup_backend_slot_v1(seal: BlockBackendCapsuleSealV1) -> _BlockBackendSlotV1?:
     if not _capsule_seal_shape_valid_v1(seal): return nil
-    mutex_with_lock(_block_backend_registry_v1, \state:
-        if seal._slot < state.slots.len(): Some(state.slots[seal._slot])
-        else: nil)
+    val current = _block_backend_registry_v1.lock()
+    if not current.?: return nil
+    val state: _BlockBackendRegistryStateV1 = current.unwrap()
+    val found: _BlockBackendSlotV1? = if seal._slot < state.slots.len():
+        Some(state.slots[seal._slot])
+    else:
+        nil
+    _ = _block_backend_registry_v1.unlock(state)
+    found
+
+fn _block_backend_register_locked_v1(
+    state: _BlockBackendRegistryStateV1, backend: BlockDevice,
+    identity: BlockDeviceRegistrationV1, binding: BlockDeviceRegionBindingV1,
+    base_pin: BlockDevicePinLeaseV1
+) -> _BlockBackendRegistryStateV1:
+    var next = state
+    next.last_error = nil
+    next.last_registration = BlockBackendCapsuleRegistrationV1.invalid_probe()
+    if state.next_nonce == 0u64 or state.next_nonce > _BLOCK_BACKEND_COUNTER_MAX_V1 - 2u64:
+        next.last_error = Some(BlockBackendCapsuleErrorV1.CounterExhausted)
+    else:
+        var slot_index: i32 = -1
+        var i: i32 = 0
+        while i < state.slots.len():
+            if slot_index < 0 and state.slots[i].is_free(): slot_index = i
+            i = i + 1
+        if slot_index < 0:
+            next.last_error = Some(BlockBackendCapsuleErrorV1.CapacityExhausted)
+        else:
+            match state.slots[slot_index].install(
+                slot_index, backend, identity, binding,
+                base_pin, state.next_nonce, state.next_nonce + 1u64):
+                Ok(registration):
+                    next.last_registration = registration
+                    next.next_nonce = state.next_nonce + 2u64
+                Err(err): next.last_error = Some(err)
+    next
 
 # Provider boundary: production controller/namespace owners call this after
 # creating the canonical identity registration.  Ordinary BlockDevice values
@@ -558,29 +668,8 @@ pub(package) fn block_backend_capsule_register_v1(
     val base_pin_result = block_device_identity_backend_pin_v1(identity, binding)
     if not base_pin_result.?: return Err(BlockBackendCapsuleErrorV1.IdentityRejected)
     val base_pin = base_pin_result.unwrap()
-    val updated = mutex_with_lock(_block_backend_registry_v1, \state:
-        var next = state
-        next.last_error = nil
-        next.last_registration = BlockBackendCapsuleRegistrationV1.invalid_probe()
-        if state.next_nonce == 0u64 or state.next_nonce > _BLOCK_BACKEND_COUNTER_MAX_V1 - 2u64:
-            next.last_error = Some(BlockBackendCapsuleErrorV1.CounterExhausted)
-        else:
-            var slot_index: i32 = -1
-            var i: i32 = 0
-            while i < state.slots.len():
-                if slot_index < 0 and state.slots[i].is_free(): slot_index = i
-                i = i + 1
-            if slot_index < 0:
-                next.last_error = Some(BlockBackendCapsuleErrorV1.CapacityExhausted)
-            else:
-                match state.slots[slot_index].install(
-                    slot_index, backend, identity, binding,
-                    base_pin, state.next_nonce, state.next_nonce + 1u64):
-                    Ok(registration):
-                        next.last_registration = registration
-                        next.next_nonce = state.next_nonce + 2u64
-                    Err(err): next.last_error = Some(err)
-        next)
+    val updated: _BlockBackendRegistryStateV1 = mutex_with_lock(_block_backend_registry_v1, \state:
+        _block_backend_register_locked_v1(state, backend, identity, binding, base_pin))
     if val err = updated.last_error:
         match block_device_identity_unpin_v1(base_pin):
             Ok(_): pass_do_nothing("failed capsule install released its identity pin")

@@ -28,7 +28,16 @@ use os.kernel.types.task_types.{TaskId}
 use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_pid, wait_collect_result_status}
 use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
 
+@cfg(arm64)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_stream_payload_resident_v1}
+
 extern fn serial_println(msg: text)
+
+# Lane-C1 clang bring-up (Wall 10): the raw-region ring-3 launcher in
+# examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c. Raw u64
+# size + tagged [text] argv per the freestanding extern ABI.
+@cfg(arm64)
+extern fn rt_arm_payload_elf64_ring3_enter(size: u64, argv: [text]) -> i64
 
 fn _arm64_launch_token(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
     CapabilityToken(kind: kind, generation: token_id, owner: owner,
@@ -121,6 +130,31 @@ pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
        wait_collect_result_status(collected) != rc.to_i32():
         return -10
     rc
+
+@cfg(arm64)
+pub fn arm64_fs_exec_spawn_ring3_payload_resident(path: text, argv: [text], envp: [text]) -> i64:
+    """Lane-local UNCHECKED ring-3 launch of the resident raw-region payload.
+
+    Bypasses the fail-closed authenticated spawn seam (fs_exec_prepare_spawn
+    -> -13, by design) for the lane-C1 bring-up only — the arm64 mirror of the
+    proven x86 OVMF lane's private _admit_raw_elf64/_map_pt_loads admission
+    (route B in the lane status doc). The payload bytes are already resident
+    in the raw .bss region (Wall 9); the C launcher validates the ELF out of
+    that region, copies PT_LOADs into fresh physical frames, maps the user
+    stack with a SysV argc/argv frame, and erets into EL0 with a kernel
+    resume frame so exit(0) returns the payload's exit code.
+
+    This is NOT an authenticated admission: production filesystem execution
+    must go through fs_exec_adopt_authenticated_v1.
+    """
+    val _envp = envp
+    val staged = arm_fs_exec_stream_payload_resident_v1(path)
+    if staged.is_err():
+        serial_println("[fs-exec] spawn:resolve-fail path={path}")
+        return -2
+    val resident = staged.unwrap()
+    serial_println("[fs-exec] spawn:resident path={path} bytes={resident}")
+    rt_arm_payload_elf64_ring3_enter(resident, argv)
 
 pub fn arm64_fs_exec_spawn_authenticated_v1(
     scheduler: Scheduler,

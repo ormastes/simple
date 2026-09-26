@@ -478,7 +478,11 @@ _alignment_handler:
     eret
 
 .Lnot_align_fault:
-    /* Restore registers and fall through to fault handler */
+    /* Restore registers, then branch to the fault printer. (This used to
+     * fall through, but arm64_enter_el0 is now laid down immediately after
+     * this block, so the fall-through re-entered arm64_enter_el0 and
+     * re-faulted forever — a non-alignment fault here became an infinite
+     * loop instead of a named FAULT report.) */
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]
     ldp     x4,  x5,  [sp, #32]
@@ -496,7 +500,76 @@ _alignment_handler:
     ldp     x28, x29, [sp, #224]
     ldr     x30,       [sp, #240]
     add     sp, sp, #272
-    /* Fall through to print FAULT */
+    b       _fault_handler
+
+/* ===================================================================
+ * EL0 enter with kernel resume frame — payload ring-3 handoff (lane-C1).
+ *
+ * arm64_enter_el0(root, entry, user_sp) installs the user address space and
+ * erets into EL0, but first records the kernel resume context (SP, LR, and
+ * the callee-saved x19-x28) in arm64_resume_ctx (owned by baremetal_stubs.c).
+ * When the payload later SVCs exit(0), rt_arm64_handle_user_svc calls
+ * arm64_resume_from_el0(code), which unwinds straight back to the C caller
+ * of arm64_enter_el0 with x0 = the payload's exit code — the same longjmp
+ * savepoint shape as the x86 lane's rt_x86_exec_token_install path, and the
+ * "nested kernel resume frame" the user_entry bridge documents as required.
+ *
+ * arm64_resume_ctx layout (uint64_t[13], baremetal_stubs.c):
+ *   [0] resume_sp  [1] resume_lr  [2..11] x19..x28  [12] armed
+ * =================================================================== */
+
+    .globl arm64_enter_el0
+    .type arm64_enter_el0, @function
+arm64_enter_el0:
+    adrp    x9, arm64_resume_ctx
+    add     x9, x9, :lo12:arm64_resume_ctx
+    mov     x10, sp
+    str     x10, [x9, #0]
+    str     x30, [x9, #8]
+    stp     x19, x20, [x9, #16]
+    stp     x21, x22, [x9, #32]
+    stp     x23, x24, [x9, #48]
+    stp     x25, x26, [x9, #64]
+    stp     x27, x28, [x9, #80]
+    mov     x10, #1
+    str     x10, [x9, #96]
+    /* Install the user translation and enter EL0 (same sequence as
+     * arm64_enter_user_virtual; MAIR/TCR were programmed by the caller). */
+    msr     ttbr0_el1, x0
+    dsb     sy
+    tlbi    vmalle1
+    dsb     sy
+    isb
+    mrs     x3, sctlr_el1
+    orr     x3, x3, #1
+    msr     sctlr_el1, x3
+    isb
+    msr     sp_el0, x2
+    msr     elr_el1, x1
+    msr     spsr_el1, xzr
+    isb
+    eret
+    .size arm64_enter_el0, .-arm64_enter_el0
+
+    .globl arm64_resume_from_el0
+    .type arm64_resume_from_el0, @function
+arm64_resume_from_el0:
+    /* x0 = payload exit code; never returns to the exception frame. */
+    adrp    x9, arm64_resume_ctx
+    add     x9, x9, :lo12:arm64_resume_ctx
+    mov     x11, x0
+    ldp     x19, x20, [x9, #16]
+    ldp     x21, x22, [x9, #32]
+    ldp     x23, x24, [x9, #48]
+    ldp     x25, x26, [x9, #64]
+    ldp     x27, x28, [x9, #80]
+    ldr     x30, [x9, #8]
+    ldr     x12, [x9, #0]
+    str     xzr, [x9, #96]
+    mov     sp, x12
+    mov     x0, x11
+    ret
+    .size arm64_resume_from_el0, .-arm64_resume_from_el0
 
 /* ===================================================================
  * Lower EL AArch64 synchronous handler
@@ -533,6 +606,20 @@ _lower_el_aarch64_sync_handler:
     cmp     x9, #0x15              /* EC=0x15: SVC from AArch64 */
     b.ne    _fault_handler
 
+    /* Save the guest return context (ELR = svc+4, SPSR) in the spare frame
+     * tail BEFORE calling the C owner. An alignment-fault emulation inside
+     * the owner (e.g. the close handler's 16-byte store to the 8-aligned fd
+     * struct) re-enters through _alignment_handler, which legitimately
+     * rewrites ELR_EL1 (advance past the fault) and leaves SPSR_EL1 = EL1h.
+     * Restoring from the hardware registers at eret then returns to EL1 at a
+     * kernel text address with the guest's registers — the run-20260926
+     * "kernel jumps to user_sp" control-flow fault. */
+    mrs     x10, elr_el1
+    add     x10, x10, #4
+    str     x10, [sp, #256]
+    mrs     x11, spsr_el1
+    str     x11, [sp, #264]
+
     /* The boot kernel has no separate translated TTBR root. Run the C syscall
      * owner under its original identity-addressed translation mode, retaining
      * the user SCTLR in the unused tail of this 272-byte exception frame. */
@@ -553,11 +640,26 @@ _lower_el_aarch64_sync_handler:
     bl      rt_arm64_handle_user_svc
     str     x0, [sp, #0]           /* syscall return value -> user x0 */
 
-    mrs     x9, elr_el1
-    add     x9, x9, #4
-    msr     elr_el1, x9
-    isb
     str     x0, [sp, #0]           /* syscall return value -> user x0 */
+
+    /* Restore the user SCTLR (saved at [sp,#248]) before the eret: the shim
+     * ran with SCTLR.M cleared so its physical/identity accesses work, but
+     * the EL0 payload resumes its virtual address space with the MMU ON.
+     * Without this the first non-exit SVC (e.g. the per-char write(60) of a
+     * version banner) returned to EL0 with the MMU off and faulted. */
+    ldr     x10, [sp, #248]
+    orr     x11, x10, #1
+    dsb     sy
+    msr     sctlr_el1, x11
+    isb
+
+    /* Restore the guest return context saved at entry (alignment-safe):
+     * ELR_EL1 = svc+4, SPSR_EL1 = the interrupted EL0 PSTATE. */
+    ldr     x11, [sp, #256]
+    msr     elr_el1, x11
+    ldr     x11, [sp, #264]
+    msr     spsr_el1, x11
+    isb
 
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]
@@ -825,6 +927,13 @@ _fault_handler:
     str     w0, [x1]
     mov     w0, #'\n'
     str     w0, [x1]
+
+    /* Lane-C1 bring-up diagnostic: dump the C call chain below the
+     * exception frame (sync path: the frame sits at sp-272). Runs AFTER
+     * the ELR/ESR/FAR prints so the original fault's details survive even
+     * if the walk itself re-faults and cascades. */
+    sub     x0, sp, #272
+    bl      arm64_fault_stack_dump
 
 .Lfault_halt:
     wfe

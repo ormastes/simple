@@ -89,7 +89,8 @@ int sigismember(const sigset_t *set, int signum) {
 }
 
 /* ====================================================================
- * sigprocmask — query-only until the kernel owns masking and pending delivery
+ * sigprocmask — no-op success until the kernel owns masking and pending
+ * delivery
  * ==================================================================== */
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
@@ -97,10 +98,16 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
         errno = EINVAL;
         return -1;
     }
+    /* SimpleOS never blocks signal delivery (the sigpending model below), so
+     * every valid mask operation succeeds without changing anything, and
+     * oldset truthfully reports the empty current mask. The failure return
+     * must stay success: LLVM's SafelyCloseFileDescriptor() does
+     * sigprocmask(SIG_SETMASK, full, &saved) around close() and treats a
+     * failure as the close itself failing ("IO failure on output stream"),
+     * which made in-guest lld exit 1 on a fully-written output (R4b). */
     (void)set;
-    (void)oldset;
-    errno = ENOSYS;
-    return -1;
+    if (oldset) (void)sigemptyset(oldset);
+    return 0;
 }
 
 /*

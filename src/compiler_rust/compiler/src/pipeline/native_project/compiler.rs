@@ -775,8 +775,12 @@ pub(crate) fn compile_file_to_object(
     pipeline.rewrite_hir_simd_loops(&mut hir);
 
     // MIR
-    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
-        .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(
+        &hir,
+        imports.trait_impls.as_ref(),
+        target.array_push_returns_header(),
+    )
+    .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
     qualify_native_struct_layouts(
         &mut mir,
         &module_prefix,

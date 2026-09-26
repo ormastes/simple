@@ -8,8 +8,10 @@
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
-use os.kernel.memory.user_copy.{user_copyin_bytes, user_copyout_bytes}
-use os.kernel.memory.vmm.{vmm_copy_bytes_result_ok}
+use os.kernel.memory.user_copy.{user_copyout_bytes, user_copyin_bytes_validated}
+use std.common.text_bytes.{bytes_to_text}
+# TEMP DIAG (lane-C1 bring-up): stage markers in _handle_file_stat.
+extern fn serial_println(msg: text)
 use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek}
 use os.kernel.ipc.syscall.{MAX_BINARY_PATH_LEN, _is_userspace_range}
 use os.kernel.fd_table.{
@@ -41,6 +43,20 @@ val _FS_ERANGE: i64 = -34
 val _FS_ENOMEM: i64 = -12
 val _FS_ENOSYS: i64 = -38
 val _FS_ENAMETOOLONG: i64 = -36
+
+fn _fs_clamp_errno(e: i32) -> i64:
+    """Normalize an errno extracted from a Result payload for the SVC return.
+
+    aarch64 freestanding note (run-20260926_041028): the errno payload
+    extraction degrades on this lane (Err(-2) surfaced as +22 — a positive
+    value the guest's syscall wrappers read as "success", after which the
+    guest consumed uninitialized output and spun). is_err() is reliable;
+    pass an in-range negative value through untouched and fall back to
+    ENOENT (the dominant probe outcome) for anything else.
+    """
+    if e <= 0 and e >= -4095:
+        return e as i64
+    _FS_ENOENT
 
 pub enum ServerDataManagedGateDispositionV1:
     Unmanaged
@@ -134,29 +150,29 @@ fn cwd_clear(task_id: u64):
     g_cwd_table = kept
 
 fn _fs_copy_user_bytes(ptr_addr: u64, len: u64) -> [u8]?:
-    """Copy exactly `len` bytes through the architecture-selected owner."""
-    val copied = user_copyin_bytes(ptr_addr, len)
-    if not vmm_copy_bytes_result_ok(copied):
-        return nil
-    if copied.status.bytes_read != len or copied.bytes.len() != len:
-        return nil
-    Some(copied.bytes)
+    """Copy exactly `len` bytes through the architecture-selected owner.
+
+    aarch64 freestanding note (runs 20260926_034615/_035958): the
+    VmmCopyBytesResult wrapper's `bytes` field read degrades on this lane
+    (struct-field slot family — a successful 35-byte copy nil'd on
+    `copied.bytes.len() != len`), so the validated helper drives the copyin
+    directly there and checks the payload length; other arches keep the
+    wrapper contract.
+    """
+    user_copyin_bytes_validated(ptr_addr, len)
 
 fn _fs_copyout_exact(ptr_addr: u64, bytes: [u8]) -> bool:
     """Publish all bytes through the architecture-selected owner or fail."""
     user_copyout_bytes(ptr_addr, bytes) == bytes.len() as i64
 
 fn _bytes_to_text(b: [u8]) -> text:
-    """Build `text` from raw path bytes one byte at a time via `.chr()` —
-    the same forward-concatenation pattern fat32.spl uses to decode 8.3/LFN
-    names, chosen because `text` byte-indexing is unreliable on dynamically
-    built strings in this freestanding kernel (see module doc above)."""
-    var out = ""
-    var i: u64 = 0
-    while i < b.len():
-        out = out + b[i].chr()
-        i = i + 1
-    out
+    """Build `text` from raw path bytes via the always-linked `rt_bytes_to_text`
+    primitive (single C pass that DECODEs the tagged [u8] slots the copyin
+    writes). Replaces the per-byte `.chr()` concat loop: that loop degrades on
+    this freestanding lane — run-20260926_042943 showed the built path losing
+    every component, so `Fat32Filesystem.stat_at` failed EINVAL
+    (`fat32_split_path` -> 0 parts) before any FAT I/O."""
+    bytes_to_text(b)
 
 fn _path_is_absolute(p: [u8]) -> bool:
     """True when the path's first byte is '/'."""
@@ -386,11 +402,14 @@ fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     if open_r.is_ok() and (flags & O_CREAT) != 0 and (flags & O_EXCL) != 0:
         return SyscallResult(value: -17)
     if open_r.is_err():
-        val err = open_r.unwrap_err()
-        if err == -2 and _open_flags_want_create(flags):
+        # The errno payload degrades on aarch64 freestanding
+        # (run-20260926_041028), so the exact err == -2 test cannot be
+        # trusted; with O_CREAT the honest recovery is to attempt the
+        # create and let IT report an existing entry.
+        if _open_flags_want_create(flags):
             open_r = fs.create_at(dev, resolved_path)
         if open_r.is_err():
-            return SyscallResult(value: open_r.unwrap_err() as i64)
+            return SyscallResult(value: _fs_clamp_errno(open_r.unwrap_err()))
     val handle = open_r.unwrap()
     val fd = fd_alloc()
     if fd < 0:
@@ -437,7 +456,7 @@ fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
             i = i + 1
         val read_r = fat32_fd_read_into(current.id, fd, buf)
         if read_r.is_err():
-            return SyscallResult(value: read_r.unwrap_err() as i64)
+            return SyscallResult(value: _fs_clamp_errno(read_r.unwrap_err()))
         val n = read_r.unwrap()
         var output: [u8] = []
         var w: u64 = 0
@@ -480,7 +499,7 @@ fn _handle_file_write(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
         val bytes = copied.unwrap()
         val write_r = fat32_fd_write_from(current.id, fd, bytes)
         if write_r.is_err():
-            return SyscallResult(value: write_r.unwrap_err() as i64)
+            return SyscallResult(value: _fs_clamp_errno(write_r.unwrap_err()))
         return SyscallResult(value: write_r.unwrap() as i64)
     if not _is_userspace_range(buf_ptr, count):
         return SyscallResult(value: -14)
@@ -590,18 +609,27 @@ fn _handle_file_stat(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     val current = sched.get_current()
     val raw_copy = _fs_copy_user_bytes(path_ptr, path_len)
     if raw_copy == nil:
+        serial_println("[kstat] copyin-nil")
         return SyscallResult(value: _FS_EFAULT)
+    serial_println("[kstat] copyin-ok")
     val raw = raw_copy.unwrap()
     val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    serial_println("[kstat] path-ok")
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     val stat_r = fs.stat_at(dev, resolved_path)
     if stat_r.is_err():
-        return SyscallResult(value: stat_r.unwrap_err() as i64)
+        val raw_errno = stat_r.unwrap_err()
+        serial_println("[kstat] errno={raw_errno} enoent={_FS_ENOENT}")
+        return SyscallResult(value: _fs_clamp_errno(raw_errno))
+    serial_println("[kstat] stat_at-ok")
     val st = stat_r.unwrap()
     val bytes = _stat_bytes(st.is_dir, st.size, st.mtime)
+    serial_println("[kstat] bytes-built")
     if not _fs_copyout_exact(stat_buf, bytes):
+        serial_println("[kstat] copyout-fail")
         return SyscallResult(value: _FS_EFAULT)
+    serial_println("[kstat] done")
     SyscallResult(value: 0)
 
 fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
