@@ -10,7 +10,8 @@ use os.kernel.ipc.syscall_ipc.{
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.ipc_types.{IpcMessage, IpcFlags}
-use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.task_types.{TaskId, TaskPriority}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallId}
 use os.kernel.errno.{EAGAIN, EFAULT, EMSGSIZE, ENOSYS, EPERM}
 
@@ -85,6 +86,24 @@ describe "owned-copy IPC syscall authentication and bounds":
             _args(132, destination.id, 5, 0, 0, source.id, 0), scheduler, ipc)
         expect(state.result.value).to_equal(-(EPERM as i64))
         expect(state.ipc.next_owned_payload_len(service, destination)).to_equal(-3)
+
+    it "accepts a cross-task named destination with its exact minted grant":
+        var scheduler = Scheduler.new()
+        val launched = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        expect(caller.id).to_equal(launched.id)
+        val source = ipc.create_port(caller, "owned-granted-client")
+        val service = TaskId(id: caller.id + 1u64)
+        val destination = ipc.create_port(service, "owned-granted-service")
+        val granted = ipc.mint_task_capability_set(
+            caller, [CapabilityKind.IpcConnect(port_name: "owned-granted-service")])
+        expect(granted != nil).to_equal(true)
+        val state = _handle_ipc_send_owned_v1_state(
+            _args(132, destination.id, 5, 0, 0, source.id, 0), scheduler, ipc)
+        expect(state.result.value).to_equal(0i64)
+        expect(state.ipc.next_owned_payload_len(service, destination)).to_equal(0)
 
     it "rejects oversized send before touching the user pointer":
         val state = _handle_ipc_send_owned_v1_state(_args(132, 1, 1, 0, 4097, 1, 0), Scheduler.new(), IpcManager.new())

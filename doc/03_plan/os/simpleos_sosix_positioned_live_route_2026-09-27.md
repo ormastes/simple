@@ -61,10 +61,11 @@ their tests have not executed on an admitted self-hosted binary. Direct
 `IpcManager.send_owned` calls still accept a caller-supplied `TaskId`; only
 the trap shim derives it from `Scheduler.get_current()`. Do not use copied IPC
 for positioned control until the guest path and its denial cases pass.
-The cross-task request check requires a named `IpcConnect` grant. Current
-source has a call from `IpcManager.mint_task_capability_set` to the capability
-manager method, but no method definition was found in `src/os/kernel/ipc/`;
-verify the grant issuer before claiming a successful service request.
+The cross-task request check requires a named `IpcConnect` grant. The finite
+`CapabilityManager.mint_task_capability_set` issuer now builds a pledged pouch
+with fresh identities and publishes it through the existing scheduler-pouch
+check. Unit scenarios cover exact-name admission and identity freshness;
+the issuer and its ring-3 service request still need admitted execution.
 
 ## Contract and owner placement
 
