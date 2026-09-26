@@ -26,7 +26,7 @@
 #     sequences relax to local-exec; x86_64 TLSDESC relaxes to initial-exec;
 #     other TLS models remain unsupported
 #   - no text relocs; relocation-graph section GC includes FDE-level unwind pruning
-#   - exact SHF_MERGE|SHF_STRINGS fragments coalesce with relocation remapping
+#   - exact string and fixed-size SHF_MERGE entities coalesce with relocation remapping
 #   - no COMDAT dedup; GNU versioned imports and default-version binding are emitted
 #   - single-threaded; no StageReceipts yet
 
@@ -45,7 +45,7 @@ use compiler.backend.linker.elf.section_gc.{elf_section_gc, elf_gc_undefined}
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.tls_relax.{elf_relax_tls}
 use compiler.backend.linker.elf.merge_strings.{
-    ElfMergeStringPlan, elf_merge_string_section, elf_merge_strings, elf_merge_offset
+    ElfMergePlan, elf_merge_section, elf_merge_sections, elf_merge_offset
 }
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class, elf_x86_can_relax,
@@ -111,7 +111,7 @@ struct ElfStaticInputs:
     sec_out: [[i64]]      # [obj][sec] -> index into outs, -1 = not placed
     sec_off: [[i64]]      # [obj][sec] -> offset inside that output section
     outs: [ElfOutSec]     # input-backed output sections, first-appearance order
-    merge: ElfMergeStringPlan
+    merge: ElfMergePlan
 
 struct ElfLinkCtx:
     inputs: ElfStaticInputs
@@ -211,10 +211,17 @@ fn elf_find_out(outs: [ElfOutSec], name: text) -> i64:
 fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInputs, text>:
     """Assign every allocatable input section to a named output section + offset."""
     var outs: [ElfOutSec] = []
-    val merge = elf_merge_strings(objects, live)?
+    val merge = elf_merge_sections(objects, live)?
     if merge.has_sections:
+        var merge_flags = SHF_ALLOC
+        var merge_entsize: i64 = 0
+        if merge.metadata_compatible:
+            merge_flags = merge_flags | 0x10
+            merge_entsize = merge.entsize
+            if merge.strings:
+                merge_flags = merge_flags | 0x20
         outs = outs.push(elf_sec_with(elf_out_sec(".rodata", SHT_PROGBITS_E,
-            SHF_ALLOC | 0x10 | 0x20, 1, merge.data.len(), ELF_SEG_R), 1, "", 0))
+            merge_flags, merge.align, merge.data.len(), ELF_SEG_R), merge_entsize, "", 0))
     var sec_out: [[i64]] = []
     var sec_off: [[i64]] = []
     var oi: i64 = 0
@@ -233,7 +240,7 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
                 if oname.is_err():
                     return Err("object {oi}: {oname.unwrap_err()}")
                 val name = oname.unwrap()
-                if elf_merge_string_section(obj, si):
+                if elf_merge_section(obj, si):
                     if name != ".rodata":
                         return Err("object {oi}: merge-string section {elf_section_name(obj, si)} maps to unsupported output {name}")
                     val merge_out = elf_find_out(outs, ".rodata")
@@ -350,7 +357,7 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[i64]]:
                 val obj = inputs.objects[oi]
                 var si: i64 = 0
                 while si < obj.sections.len():
-                    if inputs.sec_out[oi][si] == k and not elf_merge_string_section(obj, si):
+                    if inputs.sec_out[oi][si] == k and not elf_merge_section(obj, si):
                         val sec = obj.sections[si]
                         buf = write_zeros(buf, inputs.sec_off[oi][si] - buf.len())
                         # sections[si].sh_addr is the FILE offset (elf_parser convention)
@@ -566,7 +573,7 @@ struct ElfLayout:
 
 fn elf_placed_offset(inputs: ElfStaticInputs, oi: i64, si: i64,
         input_offset: i64) -> Result<i64, text>:
-    if elf_merge_string_section(inputs.objects[oi], si):
+    if elf_merge_section(inputs.objects[oi], si):
         return elf_merge_offset(inputs.merge, oi, si, input_offset)
     Ok(inputs.sec_off[oi][si] + input_offset)
 
@@ -625,7 +632,7 @@ fn elf_ref_value(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<ElfRe
         si = e.section_idx
         offset = e.offset
     if si >= 0 and si < ctx.inputs.objects[oi].sections.len() and
-            elf_merge_string_section(ctx.inputs.objects[oi], si):
+            elf_merge_section(ctx.inputs.objects[oi], si):
         if elf_symbol_type(sym) == STT_SECTION:
             var bias: i64 = 0
             if ctx.target == RelocArch.X86_64 and (r.rtype == 2 or r.rtype == 4):
@@ -673,8 +680,8 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], 
             val rtype = elf_reloc_type(r)
             if o.sh_type == SHT_NOBITS_E:
                 return Err("object {oi}: relocation type {rtype} targets a NOBITS section")
-            if elf_merge_string_section(obj, tsec):
-                return Err("object {oi}: relocation type {rtype} targets merge-string contents")
+            if elf_merge_section(obj, tsec):
+                return Err("object {oi}: relocation type {rtype} targets merge-section contents")
             val seed = elf_symref(ctx, oi, elf_reloc_sym(r))?
             val place = elf_placed_offset(inputs, oi, tsec, r.r_offset)?
             val rclass = elf_reloc_class(ctx.target, rtype)

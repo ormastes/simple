@@ -32,6 +32,8 @@ ld.lld -shared --soname libtls_versioned_x64.so.1 --version-script tls_version_x
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables unwind_x64.c -o unwind_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -fmerge-all-constants merge_strings_a_x64.c -o merge_strings_a_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -fmerge-all-constants merge_strings_b_x64.c -o merge_strings_b_x64.o
+clang --target=x86_64-linux-gnu -c merge_const_a_x64.s -o merge_const_a_x64.o
+clang --target=x86_64-linux-gnu -c merge_const_b_x64.s -o merge_const_b_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections gc_sections_x64.c -o gc_sections_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables -ffunction-sections -fdata-sections gc_sections_x64.c -o gc_unwind_x64.o
 ```
@@ -58,6 +60,7 @@ Relocations exercised (`llvm-readelf -r`):
 | gc_sections_x64.o | entry-rooted relocation graph retaining live function/data/BSS while dropping dead function/data sections |
 | gc_unwind_x64.o | four input FDEs reduced to the two live-function FDEs, with compacted CIE pointers and relocation offsets |
 | merge_strings_{a,b}_x64.o | duplicate `.rodata.str1.1` fragments coalesce and both local-symbol relocations resolve to the pooled string |
+| merge_const_{a,b}_x64.o | duplicate aligned `.rodata.cst8` entities coalesce and both PC-relative relocations resolve to the pooled constant |
 
 The specs depend on the exact byte offsets noted in them (e.g. the CALL26 at
 `_start+0x24`, x86_64 `call` rel32 at `.text+0x1d`); regenerate the specs'
