@@ -42,6 +42,15 @@ extern uint32_t cm33_policy_fs_find(uint32_t index,
                                    uint32_t file_count,
                                    uint32_t names_equal);
 
+/* The Simple policy module keeps its scalar `const` values in .bss and fills
+ * them from a generated module initializer, so every constant reads 0 until this
+ * runs. Without the call cm33_policy_fs_init() returned 0 instead of
+ * CM33_FS_INIT_DONE and fs_init() looped forever re-adding readme.txt (measured
+ * 2026-09-19 on QEMU MPS2-AN505: boot stopped silently after "[TICK] SysTick
+ * enabled", no fault). Underlying codegen issue is filed at
+ * doc/08_tracking/bug/simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19.md */
+extern void __module_init_src_os_kernel_arch_cortex_m33_scalar_parser_fs_policy_spl_dynamic(void);
+
 #define CM33_TEXT_STEP_MISMATCH 0u
 #define CM33_TEXT_STEP_ADVANCE  1u
 #define CM33_TEXT_STEP_MATCHED  2u
@@ -1078,6 +1087,8 @@ void _c_main(void) {
 
     uint32_t canary_loc = ((uint32_t)&_ebss + 3) & ~3u;
     *(volatile uint32_t *)canary_loc = STACK_CANARY;
+
+    __module_init_src_os_kernel_arch_cortex_m33_scalar_parser_fs_policy_spl_dynamic();
 
     faults_init();
     mpu_init();

@@ -526,48 +526,10 @@ int64_t rt_crc32_text(const char* text, int64_t text_len) {
 }
 
 #if defined(_WIN32)
-/* Byte-identical copy of runtime_native.c's static rt_widen_long_path_rc (same
- * name, see the note there); used by rt_file_create_excl below. Caller frees. */
-static wchar_t* rt_widen_long_path_rc(const char* path) {
-    static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
-    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
-     * resolution for a short drive-absolute path; UNC/extended paths retain
-     * their existing spelling. */
-    if (wide[0] == sep && wide[1] == sep) return wide;
-    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
-        (wide[2] == sep || wide[2] == L'/')) return wide;
-    {
-        wchar_t* scan;
-        DWORD need;
-        wchar_t* full;
-        wchar_t* out;
-        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
-        need = GetFullPathNameW(wide, 0, NULL, NULL);
-        if (need == 0) return wide;
-        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
-        if (!full) return wide;
-        {
-            DWORD written = GetFullPathNameW(wide, need, full, NULL);
-            if (written == 0 || written >= need) { free(full); return wide; }
-        }
-        if (wcslen(full) < 248) { free(full); return wide; }
-        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
-        if (!out) { free(full); return wide; }
-        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
-        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
-        free(full);
-        free(wide);
-        return out;
-    }
-}
+/* rt_widen_long_path_rc is now the shared helper in platform/runtime_win_long_path.h
+ * (macro alias for rt_win_long_path_widen); used by rt_file_create_excl
+ * below. This file used to carry its own byte-identical copy. */
+#include "platform/runtime_win_long_path.h"
 #endif
 
 int rt_file_create_excl(const char* path, int64_t path_len,

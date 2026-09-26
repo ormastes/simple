@@ -696,10 +696,15 @@ impl<'a> Parser<'a> {
                     f.is_static = is_static;
 
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present.
-                    // Skip auto-injection for constructors (methods named "new").
+                    // A constructor `fn new(...)` without self/me is static like any other
+                    // factory. It used to be skipped here, which left it non-static, so
+                    // HIR injected an implicit `self`: the definition took (self, args)
+                    // while `Type.new(args)` passed (args) and every argument arrived one
+                    // register late (FlatPoolReader.new(blob) -> 0xC0000005 on every
+                    // frontend-cache hit in the stage-2 CLI, bootstrap42, 2026-09-25).
                     // Methods whose first param is not `self` or `me` are implicitly static
                     // (factory methods like `fn wrap(v: T) -> Foo<T>` don't need `self`).
-                    if !is_static && f.name != "new" {
+                    if !is_static {
                         let has_self_param =
                             !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {
@@ -909,9 +914,14 @@ impl<'a> Parser<'a> {
                     f.is_static = is_static;
 
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present.
-                    // Skip auto-injection for constructors (methods named "new").
+                    // A constructor `fn new(...)` without self/me is static like any other
+                    // factory. It used to be skipped here, which left it non-static, so
+                    // HIR injected an implicit `self`: the definition took (self, args)
+                    // while `Type.new(args)` passed (args) and every argument arrived one
+                    // register late (FlatPoolReader.new(blob) -> 0xC0000005 on every
+                    // frontend-cache hit in the stage-2 CLI, bootstrap42, 2026-09-25).
                     // Methods whose first param is not `self` or `me` are implicitly static.
-                    if !is_static && f.name != "new" {
+                    if !is_static {
                         let has_self_param =
                             !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {

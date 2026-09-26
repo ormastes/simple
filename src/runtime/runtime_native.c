@@ -67,6 +67,7 @@ typedef SSIZE_T ssize_t;
 #if defined(_WIN32)
 #include <direct.h>
 #include <io.h>
+#include <process.h>
 #include <malloc.h>
 #include <windows.h>
 #include "platform/windows_raw_mapping.h"
@@ -10525,10 +10526,11 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
 }
 
 #if defined(_WIN32)
-/* rt_widen_long_path_rc is defined later in this file (twin of runtime.c's
- * copy, same name, see that definition's comment); forward-declare it here so
- * the fsync worker above that point can use it too. Caller frees. */
-static wchar_t* rt_widen_long_path_rc(const char* path);
+/* rt_widen_long_path_rc is the shared helper in platform/runtime_win_long_path.h
+ * (macro alias for rt_win_long_path_widen), included early here so the fsync
+ * worker above this point -- and every later user in this file -- can use it.
+ * This file used to carry a forward-declared, separately-defined copy. */
+#include "platform/runtime_win_long_path.h"
 #endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
@@ -11492,62 +11494,9 @@ int64_t rt_file_read_regular_no_follow_last_failure(void) {
 
 #define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
 
-#if defined(_WIN32)
-/* Widen a UTF-8 path and, when it is long enough to hit the MAX_PATH ceiling,
- * qualify it and add the extended-length prefix. A WIDE call is not by itself
- * exempt: CreateFileW still caps at MAX_PATH unless the path carries the
- * prefix, which is why a 266-character diagnostic file written successfully
- * could not be read back. Twin of rt_widen_long_path_rc in runtime.c -- this
- * file carries a byte-identical copy of the reader below, and archive member
- * order decides which one links, so both copies must widen or the fix is a
- * coin flip (see 08987610e54, which fixed the runtime.c copy only after
- * finding this file's copy still unfixed). Separator and prefix are built
- * from the numeric code point (92) to keep this free of escape sequences.
- * Same name as the runtime.c twin (not a fresh one) so the
- * push-rt-dual-implementation ratchet's already-baselined single-lane entry
- * for rt_widen_long_path_rc covers this copy too, instead of requiring a new
- * baseline row for a second name. Caller frees. */
-static wchar_t* rt_widen_long_path_rc(const char* path) {
-    static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
-    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
-     * resolution for a short drive-absolute path; UNC/extended paths retain
-     * their existing spelling. */
-    if (wide[0] == sep && wide[1] == sep) return wide;
-    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
-        (wide[2] == sep || wide[2] == L'/')) return wide;
-    {
-        wchar_t* scan;
-        DWORD need;
-        wchar_t* full;
-        wchar_t* out;
-        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
-        need = GetFullPathNameW(wide, 0, NULL, NULL);
-        if (need == 0) return wide;
-        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
-        if (!full) return wide;
-        {
-            DWORD written = GetFullPathNameW(wide, need, full, NULL);
-            if (written == 0 || written >= need) { free(full); return wide; }
-        }
-        if (wcslen(full) < 248) { free(full); return wide; }
-        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
-        if (!out) { free(full); return wide; }
-        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
-        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
-        free(full);
-        free(wide);
-        return out;
-    }
-}
-#endif
+/* rt_widen_long_path_rc is the shared helper included above
+ * (platform/runtime_win_long_path.h, macro alias for rt_win_long_path_widen). This
+ * file used to carry its own byte-identical copy here. */
 
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
@@ -11920,8 +11869,21 @@ int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
     if (rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) {
+#if defined(_WIN32)
+        /* fopen(path, "r") answers false for a directory and caps at
+         * MAX_PATH. GetFileAttributesW (long-path widened, like the other
+         * Windows entry points in this file) matches the POSIX/Rust
+         * `exists()` contract, where a directory counts. */
+        wchar_t* wide_path = rt_widen_long_path_rc(path);
+        if (wide_path) {
+            DWORD attributes = GetFileAttributesW(wide_path);
+            free(wide_path);
+            exists = (attributes != INVALID_FILE_ATTRIBUTES);
+        }
+#else
         FILE* f = fopen(path, "r");
         if (f) { fclose(f); exists = 1; }
+#endif
     }
     rt_file_exists_probe_record(lease, exists);
     return exists;
@@ -13162,6 +13124,22 @@ int64_t rt_env_get_i64(const uint8_t* key_ptr, uint64_t key_len, int64_t default
     return end == value ? default_value : (int64_t)parsed;
 }
 
+#if defined(_WIN32)
+/* The UCRT rejects a "name=value" string longer than _MAX_ENV (32767) or a
+ * name that is empty / contains '=' through the invalid-parameter handler,
+ * whose default is a fail-fast (0xC0000409) -- not an error return. The
+ * frontend lexer mirrors the whole file it is lexing into
+ * SIMPLE_BOOTSTRAP_LEX_SOURCE (a legacy fallback; the in-memory slot is read
+ * first), so every source over ~32 KB (e.g. src/lib/common/process/
+ * observation_v4.spl, 60 KB) killed an in-process `run` with no output
+ * (Windows stage-2, 2026-09-25). Refuse such values up front and report
+ * failure like setenv(3) would. */
+static bool rt_win_env_fits(const char* key, const char* value) {
+    if (!key || !*key || strchr(key, '=')) return false;
+    return strlen(key) + 1 + (value ? strlen(value) : 0) < 32767;
+}
+#endif
+
 bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_ptr, uint64_t value_len) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     char* value = rt_core_text_arg_to_cstr(value_ptr, value_len);
@@ -13171,7 +13149,7 @@ bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_p
         return false;
     }
 #if defined(_WIN32)
-    bool ok = _putenv_s(key, value) == 0;
+    bool ok = rt_win_env_fits(key, value) && _putenv_s(key, value) == 0;
 #else
     bool ok = setenv(key, value, 1) == 0;
 #endif
@@ -13955,7 +13933,17 @@ int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
     char dst[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
     if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
+#if defined(_WIN32)
+    /* Plain CRT rename() is narrow/MAX_PATH-capped and, unlike POSIX
+     * rename(2), fails outright when `dst` already exists as a file. Use
+     * the same shared long-path + MoveFileExW(MOVEFILE_REPLACE_EXISTING)
+     * helper as rt_file_rename below, so this entry point gets the same
+     * POSIX-compatible replace semantics instead of silently disagreeing
+     * with its sibling. */
+    return rt_win_long_path_rename(src, dst) != 0 ? 1 : 0;
+#else
     return rename(src, dst) == 0 ? 1 : 0;
+#endif
 }
 
 /* () -> RuntimeValue, per runtime_sffi.rs:1773 `RuntimeFuncSpec::new(
@@ -14039,6 +14027,30 @@ static int rt_dir_create_all_cpath(const char* path) {
     if (!copy) return 0;
 
     char* p = copy;
+#if defined(_WIN32)
+    /* host_path_native hands Windows paths over with `\` separators and, for
+     * long paths, a `\\?\` prefix. Splitting only on `/` turned every such
+     * path into ONE mkdir of the full path, which fails whenever a parent is
+     * missing (the frontend parse cache never created
+     * build/bootstrap/native_cache/<lane>/frontend). Skip the prefix and the
+     * drive root, then split on both separators. */
+    if (strncmp(p, "\\\\?\\", 4) == 0) p += 4;
+    if (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':') {
+        p += 2;
+    }
+    if (*p == '/' || *p == '\\') p++;
+    for (; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            char sep = *p;
+            *p = '\0';
+            if (!rt_core_mkdir_one(copy)) {
+                free(copy);
+                return 0;
+            }
+            *p = sep;
+        }
+    }
+#else
     if (p[0] == '/') p++;
     for (; *p; p++) {
         if (*p == '/') {
@@ -14050,6 +14062,7 @@ static int rt_dir_create_all_cpath(const char* path) {
             *p = '/';
         }
     }
+#endif
 
     int ok = rt_core_mkdir_one(copy);
     free(copy);
@@ -14207,8 +14220,26 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
         const uint8_t* value = rt_string_data(rt_array_get(args, i));
         argv[i] = value ? (const char*)value : "";
     }
+#if defined(_WIN32)
+    /* rt_process_spawn_async returns a _spawnvp process HANDLE on Windows, and
+     * rt_process_wait only knows children registered by the MCP spawner, so
+     * the wait always answered -1: a delegated `run` whose child passed was
+     * reported as a failure with no exit status (stage-2 test rows,
+     * 2026-09-26). A synchronous _spawnvp returns the child's exit code
+     * directly. */
+    const char** wargv = (const char**)calloc((size_t)argc + 2, sizeof(char*));
+    int64_t code = -1;
+    if (wargv) {
+        wargv[0] = command;
+        for (int64_t i = 0; i < argc; i++) wargv[i + 1] = argv[i];
+        intptr_t status = _spawnvp(_P_WAIT, command, (const char* const*)wargv);
+        code = status == -1 ? -1 : (int64_t)(int32_t)status;
+        free(wargv);
+    }
+#else
     int64_t pid = rt_process_spawn_async(command, argv, argc);
     int64_t code = pid <= 0 ? -1 : rt_process_wait(pid, 0);
+#endif
     free(argv);
     free(command);
     return code;
@@ -14516,30 +14547,19 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
      * exceed MAX_PATH (the incident that motivated this whole fix pass), so
      * this call was silently failing right after the just-fixed fsync
      * succeeded, reproducing the identical "generation-publication-failed"
-     * symptom for an unrelated reason. Prefer the wide, extended-length-
-     * prefixed MoveFileExW. MOVEFILE_REPLACE_EXISTING gives the POSIX
-     * rename(2) contract the callers and the Rust twin (std::fs::rename)
-     * assume: without it every SCV inventory re-publish of CURRENT failed
-     * publish-current-write-failed on Windows (2026-09-25). An existing
-     * DIRECTORY destination still fails, as on POSIX. Previously: no replace flag, matching rename()'s
-     * Windows semantics of failing when the destination already exists --
-     * falling back to plain rename() only when a path cannot be widened. */
-    wchar_t* wide_old = rt_widen_long_path_rc(old_path);
-    wchar_t* wide_new = wide_old ? rt_widen_long_path_rc(new_path) : NULL;
-    if (wide_old && wide_new) {
-        /* MOVEFILE_REPLACE_EXISTING is rejected for DIRECTORY moves (SCV
-         * snapshot staging -> snapshots/<rev> failed snapshot-publish-failed
-         * with it), so pass it for files only. */
-        DWORD attrs = GetFileAttributesW(wide_old);
-        DWORD flags = (attrs != INVALID_FILE_ATTRIBUTES &&
-                       (attrs & FILE_ATTRIBUTE_DIRECTORY)) ? 0 : MOVEFILE_REPLACE_EXISTING;
-        BOOL ok = MoveFileExW(wide_old, wide_new, flags);
-        free(wide_old); free(wide_new);
-        return ok != 0;
-    }
-    free(wide_old); free(wide_new);
-#endif
+     * symptom for an unrelated reason. rt_win_long_path_rename (shared
+     * helper, platform/runtime_win_long_path.h) prefers the wide, extended-length-
+     * prefixed MoveFileExW(MOVEFILE_REPLACE_EXISTING) for a file
+     * destination -- the POSIX rename(2) / Rust std::fs::rename contract
+     * every caller here assumes; without it every SCV inventory re-publish
+     * of CURRENT failed publish-current-write-failed on Windows
+     * (2026-09-25) -- and plain MoveFileExW (no replace flag) for a
+     * directory destination, matching POSIX rename()'s own refusal to
+     * replace a directory. */
+    return rt_win_long_path_rename(old_path, new_path) != 0;
+#else
     return rename(old_path, new_path) == 0;
+#endif
 }
 
 #if defined(_WIN32)
@@ -14948,7 +14968,7 @@ const char* rt_getenv(const char* key) {
 int rt_setenv(const char* key, const char* value) {
     if (!key) return 0;
 #if defined(_WIN32)
-    return _putenv_s(key, value ? value : "") == 0 ? 1 : 0;
+    return rt_win_env_fits(key, value ? value : "") && _putenv_s(key, value ? value : "") == 0 ? 1 : 0;
 #else
     int result = value ? setenv(key, value, 1) : unsetenv(key);
     return result == 0 ? 1 : 0;

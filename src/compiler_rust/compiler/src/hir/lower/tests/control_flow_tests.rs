@@ -1067,3 +1067,179 @@ fn test_force_unwrap_on_optional_does_not_gain_try_early_return() {
         "force unwrap incorrectly gained `?` propagation: {repr}"
     );
 }
+
+/// Package C, class 5: `if c: make() else: nil` must report the sibling's
+/// real type, not `Nil`, even though `lower_if`'s base rule takes the
+/// then-branch's type. Regression for the join always taking `then_hir.ty`
+/// unconditionally.
+#[test]
+fn test_if_value_with_nil_else_arm_joins_to_then_type() {
+    let module = parse_and_lower(
+        "class Widget:\n    id: i64\n\nfn make() -> Widget:\n    Widget(id: 1)\n\nfn pick(c: bool) -> Widget?:\n    val x = if c: make() else: nil\n    return x\n",
+    )
+    .unwrap();
+    let pick = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let x = pick.locals.iter().find(|local| local.name == "x").unwrap();
+    assert!(
+        matches!(module.types.get(x.ty), Some(HirType::Struct { name, .. }) if name == "Widget"),
+        "`if`-value with a `nil` else-arm degraded to a non-Widget type: {:?}",
+        module.types.get(x.ty)
+    );
+}
+
+/// The mirror direction: `if c: nil else: make()` must also join to the
+/// non-bottom (else) arm's type, not `Nil`.
+#[test]
+fn test_if_value_with_nil_then_arm_joins_to_else_type() {
+    let module = parse_and_lower(
+        "class Widget:\n    id: i64\n\nfn make() -> Widget:\n    Widget(id: 1)\n\nfn pick(c: bool) -> Widget?:\n    val x = if c: nil else: make()\n    return x\n",
+    )
+    .unwrap();
+    let pick = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let x = pick.locals.iter().find(|local| local.name == "x").unwrap();
+    assert!(
+        matches!(module.types.get(x.ty), Some(HirType::Struct { name, .. }) if name == "Widget"),
+        "`if`-value with a `nil` then-arm degraded to a non-Widget type: {:?}",
+        module.types.get(x.ty)
+    );
+}
+
+/// Package C, class 5 (match): a `panic(...)` arm lowers to `rt_panic` typed
+/// `TypeId::NIL`, and must not degrade the match's value type the same way a
+/// `return`-only arm was already fixed to not degrade it.
+#[test]
+fn test_panic_arm_does_not_degrade_match_value_type() {
+    let module = parse_and_lower(
+        "fn load() -> Result<i64, text>:\n    Ok(6)\n\nfn read() -> i64:\n    val result = load()\n    val value = match result:\n        Err(error): panic(error)\n        Ok(found): found\n    return value\n",
+    )
+    .unwrap();
+    let read = module.functions.iter().find(|f| f.name == "read").unwrap();
+    let value = read.locals.iter().find(|local| local.name == "value").unwrap();
+    assert_eq!(
+        value.ty,
+        TypeId::I64,
+        "a panic arm must not force an ANY/Nil match join"
+    );
+}
+
+/// Package C, class 2: `f(x!)` where `x`'s static type is ANY (a leaked/
+/// unresolved annotation, not a declared Result/Option) must dynamically
+/// unwrap via `rt_unwrap_or_self`, never take the propagate-style
+/// `rt_enum_check_variant` + early-`Return` + `rt_enum_payload` path, since a
+/// non-enum ANY value would then silently unwrap to `nil` through
+/// `rt_enum_payload`.
+#[test]
+fn test_bare_force_unwrap_on_any_subject_uses_dynamic_unwrap_not_early_return() {
+    let module = parse_and_lower("fn f(x: any) -> any:\n    return x!\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "bare `!` on an ANY subject must use the dynamic tag-aware unwrap: {repr}"
+    );
+    assert!(
+        !repr.contains("rt_enum_check_variant"),
+        "bare `!` on an ANY subject must not take the propagate-style Err check: {repr}"
+    );
+    assert!(
+        !repr.contains("rt_enum_payload"),
+        "bare `!` on an ANY subject must not call rt_enum_payload (nils on non-enum): {repr}"
+    );
+}
+
+/// `?` (propagate_absence = true) on the same kind of untyped/ANY subject
+/// must keep its existing propagate behavior — this fix is scoped to bare
+/// `!` only.
+#[test]
+fn test_try_operator_on_any_subject_keeps_propagate_behavior() {
+    let module = parse_and_lower("fn f(x: any) -> any:\n    return x?\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_enum_check_variant"),
+        "`?` on an ANY subject must keep testing for the Err-tagged variant: {repr}"
+    );
+    assert!(
+        repr.contains("Return(Some"),
+        "`?` on an ANY subject must keep its early-return propagation: {repr}"
+    );
+}
+
+/// Find the params of the first `HirExprKind::Lambda` reachable from a
+/// function body (lambda-local params are truncated out of `ctx.locals`
+/// once the lambda body is lowered, so `function.locals` never carries
+/// them — the params must be read off the `Lambda` node itself). Only
+/// covers the node shapes these tests' fixtures actually produce
+/// (`val f = <lambda-or-call>`, `<receiver>.method(<lambda>)`,
+/// `return <expr>`).
+fn find_lambda_params(body: &[HirStmt]) -> Vec<(String, TypeId)> {
+    fn walk_expr(expr: &HirExpr) -> Option<Vec<(String, TypeId)>> {
+        match &expr.kind {
+            HirExprKind::Lambda { params, .. } => Some(params.clone()),
+            HirExprKind::Call { func, args } => walk_expr(func).or_else(|| args.iter().find_map(walk_expr)),
+            HirExprKind::MethodCall { receiver, args, .. } => {
+                walk_expr(receiver).or_else(|| args.iter().find_map(walk_expr))
+            }
+            HirExprKind::Block(stmts) => stmts.iter().find_map(walk_stmt),
+            _ => None,
+        }
+    }
+    fn walk_stmt(stmt: &HirStmt) -> Option<Vec<(String, TypeId)>> {
+        match stmt {
+            HirStmt::Let { value: Some(v), .. } => walk_expr(v),
+            HirStmt::Expr(e) => walk_expr(e),
+            HirStmt::Return(Some(e)) => walk_expr(e),
+            _ => None,
+        }
+    }
+    body.iter().find_map(walk_stmt).expect("no Lambda found in function body")
+}
+
+/// Package C, class 3: `list.filter(_.flag)` — the placeholder lambda's
+/// generated `__p0` param must default to ANY (not I64) when no expected
+/// callee param type is available, so a non-numeric receiver field access
+/// routes dynamically instead of being wrongly "proven scalar".
+#[test]
+fn test_placeholder_lambda_param_defaults_to_any_without_expected_type() {
+    let module = parse_and_lower("fn double(x: any) -> any:\n    val f = _ * 2\n    f(x)\n").unwrap();
+    let function = module.functions.iter().find(|f| f.name == "double").unwrap();
+    let params = find_lambda_params(&function.body);
+    assert_eq!(
+        params,
+        vec![("__p0".to_string(), TypeId::ANY)],
+        "an untyped placeholder-lambda param must default to ANY, not I64: {params:?}"
+    );
+}
+
+/// A NAMED unannotated lambda param is intentionally excluded from the
+/// class-3 fix and must keep its existing I64 default (no behavior change
+/// for already-typed/named code).
+#[test]
+fn test_named_unannotated_lambda_param_keeps_i64_default() {
+    let module = parse_and_lower("fn apply() -> i64:\n    val f = \\x: x * 2\n    f(3)\n").unwrap();
+    let function = module.functions.iter().find(|f| f.name == "apply").unwrap();
+    let params = find_lambda_params(&function.body);
+    assert_eq!(
+        params,
+        vec![("x".to_string(), TypeId::I64)],
+        "a named unannotated lambda param must keep its I64 default: {params:?}"
+    );
+}
+
+/// When an expected callee param type IS available at the call site (e.g.
+/// `.map`), a placeholder param must use it, not ANY — no behavior change
+/// for the existing contextual-typing call sites.
+#[test]
+fn test_placeholder_lambda_param_uses_expected_type_when_available() {
+    let module = parse_and_lower(
+        "class Boxed:\n    value: i64\n\nfn run(items: [Boxed]) -> [i64]:\n    return items.map(_.value)\n",
+    )
+    .unwrap();
+    let function = module.functions.iter().find(|f| f.name == "run").unwrap();
+    let params = find_lambda_params(&function.body);
+    assert_ne!(
+        params.first().map(|(_, ty)| *ty),
+        Some(TypeId::ANY),
+        "a placeholder param with an available expected element type must not fall back to ANY: {params:?}"
+    );
+}
