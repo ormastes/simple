@@ -8,7 +8,8 @@ provider slot is declared UNAVAILABLE on this host with an honest receipt.
 
 Parity here is `seam vs direct parser`, not `legacy vs canonical`: the claim
 under test is that routing an admitted request through the provider port does
-not perturb the parse result after normalization. Corpus:
+not perturb the parse result after normalization. That same-parser comparison
+must refuse canonical scalar promotion. Corpus:
 `test/fixtures/parse_result_provider_seam_v1/*.spl`.
 """
 
@@ -29,9 +30,7 @@ use compiler.driver.parse_result_provider_seam_v1.{
     parse_result_parity_evidence_v1
 }
 use compiler.driver.parser_scalar_parity_v1.{
-    ParserScalarNormalizedOutputV1,
-    ParserScalarParityErrorV1,
-    parser_scalar_parity_qualify_v1
+    ParserScalarNormalizedOutputV1
 }
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
 use compiler.core.parser.{parser_has_errors, parser_get_errors}
@@ -170,7 +169,7 @@ describe "parse-result provider seam":
         # @req REQ-009
         val simd = parse_result_provider_simd_v1()
         assert_false(simd.available)
-        expect(simd.unavailable_reason).to_contain("aarch64")
+        expect(simd.unavailable_reason).to_contain("no admitted SIMD parse provider")
         expect(simd.unavailable_reason).to_contain("package 5")
         val outcome = parse_result_seam_request_v1(
             simd, seam_request("f01_functions.spl", PARSE_DIALECT_SIMPLE_V1))
@@ -209,7 +208,7 @@ describe "parse-result provider seam":
             case Err(refusal):
                 assert_true(refusal == ParseResultRefusalV1.ProviderSchemaMismatch)
 
-    it "qualifies seam-versus-direct parity through the parity owner":
+    it "refuses to promote seam-versus-direct self-comparison":
         # @req REQ-009
         val scalar = parse_result_provider_scalar_v1()
         val name = "f03_interpolation.spl"
@@ -222,28 +221,18 @@ describe "parse-result provider seam":
                     result, direct, "frontend.flat_ast_bridge.direct.v1", 1u64)
                 match evidence:
                     case Ok(ev):
-                        match parser_scalar_parity_qualify_v1(ev):
-                            case Ok(receipt):
-                                assert_true(receipt.default_promotion_qualified)
-                                expect(receipt.dialect_id).to_equal(
-                                    PARSE_DIALECT_SIMPLE_V1)
-                            case Err(err):
-                                assert_true(false)
-                        # A perturbed normalized output must be refused, so a
-                        # green qualification is not a vacuous one.
-                        var mutated = ev
-                        mutated.legacy_output = ParserScalarNormalizedOutputV1(
-                            token_digest: ev.legacy_output.span_digest,
-                            span_digest: ev.legacy_output.token_digest,
-                            node_digest: ev.legacy_output.node_digest,
-                            diagnostic_digest: ev.legacy_output.diagnostic_digest)
-                        match parser_scalar_parity_qualify_v1(mutated):
-                            case Ok(receipt):
-                                assert_true(false)
-                            case Err(err):
-                                assert_true(err ==
-                                    ParserScalarParityErrorV1.NormalizedOutputMismatch)
-                    case Err(refusal):
                         assert_true(false)
+                    case Err(refusal):
+                        assert_true(refusal ==
+                            ParseResultRefusalV1.ImplementationsNotIndependent)
+                var relabeled = result
+                relabeled.provider_id = "parser.simple.canonical-scalar.claimed"
+                match parse_result_parity_evidence_v1(
+                    relabeled, direct, "frontend.flat_ast_bridge.direct.v1", 1u64):
+                    case Ok(ev):
+                        assert_true(false)
+                    case Err(refusal):
+                        assert_true(refusal ==
+                            ParseResultRefusalV1.ImplementationsNotIndependent)
             case Err(e):
                 assert_true(false)
