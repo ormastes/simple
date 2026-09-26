@@ -1,0 +1,236 @@
+# A build-plan owner that joins canonical target identities to live registry
+# uses. Caller-carried profile fields and copied binding digests are not
+# sufficient to project a cache or artifact identity from this owner.
+
+use std.common.crypto.sha256.sha256_bytes
+use std.common.string_core.text_to_utf8_bytes
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1}
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.TargetCodegenProfileV1
+use compiler.driver.canonical_target_registry_owner_v2.{
+    CanonicalTargetRegistryOwnerV2, CanonicalTargetUseTokenV2,
+    CanonicalTargetProfileBindingV2, canonical_target_registry_bind_profile_v2}
+use compiler.driver.environment_variant_build_planner_v1.{
+    EnvironmentVariantBuildRequestV1, EnvironmentVariantArtifactPlanV1,
+    EnvironmentVariantBuildPlanV1, environment_variant_build_plan_v1}
+
+pub const ENV_REGISTRY_BUILD_PLAN_SCHEMA_V2: u16 = 2u16
+pub const ENV_REGISTRY_BUILD_PLAN_MAX_RECORDS_V2: i64 = 256
+
+pub enum EnvironmentRegistryBuildPlanErrorV2:
+    InvalidOwner
+    InvalidInput
+    CapacityExceeded
+    SerialOverflow
+    PlannerRejected
+    RegistryRejected
+    UnknownOrStale
+
+pub struct EnvironmentRegistryBuildInputV2:
+    baseline_core_identity: EnvironmentDigest256V1
+    baseline_core_profile: TargetCodegenProfileV1
+    baseline_feature_words: [u64]
+    baseline_use: CanonicalTargetUseTokenV2
+    requests: [EnvironmentVariantBuildRequestV1]
+    request_feature_words: [[u64]]
+    backend_supported_features: [EnvironmentFeatureSetV1]
+    backend_feature_words: [[u64]]
+    request_uses: [CanonicalTargetUseTokenV2]
+
+pub struct EnvironmentRegistryBoundArtifactV2:
+    base_artifact: EnvironmentVariantArtifactPlanV1
+    target_binding: CanonicalTargetProfileBindingV2
+    artifact_identity: EnvironmentDigest256V1
+    cache_key: EnvironmentDigest256V1
+
+pub struct EnvironmentRegistryBuildPlanV2:
+    schema_version: u16
+    base_plan_identity: EnvironmentDigest256V1
+    baseline_binding: CanonicalTargetProfileBindingV2
+    artifacts: [EnvironmentRegistryBoundArtifactV2]
+    plan_identity: EnvironmentDigest256V1
+
+pub struct EnvironmentRegistryBuildPlanTokenV2:
+    owner_instance: u64
+    serial: u64
+
+struct _EnvironmentRegistryBuildPlanRecordV2:
+    token: EnvironmentRegistryBuildPlanTokenV2
+    base_plan: EnvironmentVariantBuildPlanV1
+    plan: EnvironmentRegistryBuildPlanV2
+    baseline_words: [u64]
+    baseline_use: CanonicalTargetUseTokenV2
+    artifact_words: [[u64]]
+    artifact_uses: [CanonicalTargetUseTokenV2]
+
+pub class EnvironmentRegistryBuildPlanOwnerV2:
+    owner_instance: u64
+    next_serial: u64
+    records: [_EnvironmentRegistryBuildPlanRecordV2]
+
+pub fn environment_registry_build_plan_owner_v2(owner_instance: u64
+) -> Result<EnvironmentRegistryBuildPlanOwnerV2, EnvironmentRegistryBuildPlanErrorV2>:
+    if owner_instance == 0u64:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.InvalidOwner)
+    Ok(EnvironmentRegistryBuildPlanOwnerV2(owner_instance: owner_instance,
+        next_serial: 1u64, records: []))
+
+fn _push_u64_erbp(out: [i64], value: u64):
+    for shift in 0..8:
+        out.push(((value >> ((shift as u64) * 8u64)) & 255u64) as i64)
+
+fn _push_digest_erbp(out: [i64], value: EnvironmentDigest256V1):
+    _push_u64_erbp(out, value.w0); _push_u64_erbp(out, value.w1)
+    _push_u64_erbp(out, value.w2); _push_u64_erbp(out, value.w3)
+
+fn _push_text_erbp(out: [i64], value: text):
+    val bytes = text_to_utf8_bytes(value)
+    _push_u64_erbp(out, bytes.len() as u64)
+    for byte in bytes: out.push(byte as i64)
+
+fn _hash_erbp(material: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(material)
+    fn word(at: i64) -> u64:
+        var result = 0u64
+        for index in 0..8:
+            result = result | ((raw[at + index] as u64) << ((index as u64) * 8u64))
+        result
+    EnvironmentDigest256V1(w0: word(0), w1: word(8),
+        w2: word(16), w3: word(24))
+
+fn _copy_words_erbp(words: [u64]) -> [u64]:
+    var copied: [u64] = []
+    for word in words: copied.push(word)
+    copied
+
+fn _copy_word_rows_erbp(rows: [[u64]]) -> [[u64]]:
+    var copied: [[u64]] = []
+    for row in rows: copied.push(_copy_words_erbp(row))
+    copied
+
+fn _copy_uses_erbp(uses: [CanonicalTargetUseTokenV2]) -> [CanonicalTargetUseTokenV2]:
+    var copied: [CanonicalTargetUseTokenV2] = []
+    for token in uses: copied.push(token)
+    copied
+
+fn _bound_plan_erbp(base: EnvironmentVariantBuildPlanV1,
+    baseline: CanonicalTargetProfileBindingV2,
+    bindings: [CanonicalTargetProfileBindingV2]
+) -> EnvironmentRegistryBuildPlanV2:
+    var artifacts: [EnvironmentRegistryBoundArtifactV2] = []
+    var plan_material: [i64] = []
+    _push_u64_erbp(plan_material, ENV_REGISTRY_BUILD_PLAN_SCHEMA_V2 as u64)
+    _push_digest_erbp(plan_material, base.plan_identity)
+    _push_text_erbp(plan_material, baseline.profile_binding_digest)
+    for index in 0..base.artifacts.len():
+        val artifact = base.artifacts[index]
+        val binding = bindings[index]
+        var cache_material: [i64] = []
+        _push_u64_erbp(cache_material, ENV_REGISTRY_BUILD_PLAN_SCHEMA_V2 as u64)
+        _push_digest_erbp(cache_material, artifact.cache_key)
+        _push_text_erbp(cache_material, baseline.profile_binding_digest)
+        _push_text_erbp(cache_material, binding.profile_binding_digest)
+        val cache_key = _hash_erbp([1] + cache_material)
+        var artifact_material: [i64] = [2]
+        _push_digest_erbp(artifact_material, artifact.artifact_identity)
+        _push_digest_erbp(artifact_material, cache_key)
+        val artifact_identity = _hash_erbp(artifact_material)
+        artifacts.push(EnvironmentRegistryBoundArtifactV2(base_artifact: artifact,
+            target_binding: binding, artifact_identity: artifact_identity,
+            cache_key: cache_key))
+        _push_digest_erbp(plan_material, artifact_identity)
+        _push_digest_erbp(plan_material, cache_key)
+    EnvironmentRegistryBuildPlanV2(schema_version: ENV_REGISTRY_BUILD_PLAN_SCHEMA_V2,
+        base_plan_identity: base.plan_identity, baseline_binding: baseline,
+        artifacts: artifacts, plan_identity: _hash_erbp(plan_material))
+
+pub fn environment_registry_build_plan_create_v2(
+    owner: EnvironmentRegistryBuildPlanOwnerV2,
+    registry: CanonicalTargetRegistryOwnerV2, input: EnvironmentRegistryBuildInputV2
+) -> Result<EnvironmentRegistryBuildPlanTokenV2, EnvironmentRegistryBuildPlanErrorV2>:
+    if owner.owner_instance == 0u64:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.InvalidOwner)
+    if owner.records.len() >= ENV_REGISTRY_BUILD_PLAN_MAX_RECORDS_V2:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.CapacityExceeded)
+    if owner.next_serial == 0u64 or owner.next_serial == 0xffffffffffffffffu64:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.SerialOverflow)
+    if input.requests.len() != input.request_uses.len():
+        return Err(EnvironmentRegistryBuildPlanErrorV2.InvalidInput)
+    val planned = environment_variant_build_plan_v1(input.baseline_core_identity,
+        input.baseline_core_profile, input.baseline_feature_words, input.requests,
+        input.request_feature_words, input.backend_supported_features,
+        input.backend_feature_words)
+    if planned.is_err(): return Err(EnvironmentRegistryBuildPlanErrorV2.PlannerRejected)
+    val baseline = canonical_target_registry_bind_profile_v2(registry,
+        input.baseline_use, input.baseline_core_profile, input.baseline_feature_words)
+    if baseline.is_err(): return Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected)
+    var bindings: [CanonicalTargetProfileBindingV2] = []
+    for index in 0..input.requests.len():
+        val bound = canonical_target_registry_bind_profile_v2(registry,
+            input.request_uses[index], input.requests[index].target_profile,
+            input.request_feature_words[index])
+        if bound.is_err(): return Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected)
+        bindings.push(bound.unwrap())
+    val base_plan = planned.unwrap()
+    val bound_plan = _bound_plan_erbp(base_plan, baseline.unwrap(), bindings)
+    val token = EnvironmentRegistryBuildPlanTokenV2(owner_instance: owner.owner_instance,
+        serial: owner.next_serial)
+    owner.records.push(_EnvironmentRegistryBuildPlanRecordV2(token: token,
+        base_plan: base_plan, plan: bound_plan,
+        baseline_words: _copy_words_erbp(input.baseline_feature_words),
+        baseline_use: input.baseline_use,
+        artifact_words: _copy_word_rows_erbp(input.request_feature_words),
+        artifact_uses: _copy_uses_erbp(input.request_uses)))
+    owner.next_serial = owner.next_serial + 1u64
+    Ok(token)
+
+pub fn environment_registry_build_plan_project_v2(
+    owner: EnvironmentRegistryBuildPlanOwnerV2,
+    registry: CanonicalTargetRegistryOwnerV2,
+    token: EnvironmentRegistryBuildPlanTokenV2
+) -> Result<EnvironmentRegistryBuildPlanV2, EnvironmentRegistryBuildPlanErrorV2>:
+    if owner.owner_instance == 0u64:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.InvalidOwner)
+    if token.owner_instance != owner.owner_instance:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.UnknownOrStale)
+    for record in owner.records:
+        if record.token == token:
+            val baseline = canonical_target_registry_bind_profile_v2(registry,
+                record.baseline_use, record.base_plan.baseline_core_profile,
+                record.baseline_words)
+            if baseline.is_err():
+                return Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected)
+            if record.artifact_uses.len() != record.base_plan.artifacts.len() or
+               record.artifact_words.len() != record.base_plan.artifacts.len():
+                return Err(EnvironmentRegistryBuildPlanErrorV2.InvalidOwner)
+            var bindings: [CanonicalTargetProfileBindingV2] = []
+            for index in 0..record.base_plan.artifacts.len():
+                val bound = canonical_target_registry_bind_profile_v2(registry,
+                    record.artifact_uses[index],
+                    record.base_plan.artifacts[index].target_profile,
+                    record.artifact_words[index])
+                if bound.is_err():
+                    return Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected)
+                bindings.push(bound.unwrap())
+            val rebuilt = _bound_plan_erbp(record.base_plan, baseline.unwrap(), bindings)
+            if rebuilt.plan_identity != record.plan.plan_identity:
+                return Err(EnvironmentRegistryBuildPlanErrorV2.InvalidOwner)
+            return Ok(rebuilt)
+    Err(EnvironmentRegistryBuildPlanErrorV2.UnknownOrStale)
+
+pub fn environment_registry_build_plan_release_v2(
+    owner: EnvironmentRegistryBuildPlanOwnerV2,
+    token: EnvironmentRegistryBuildPlanTokenV2
+) -> Result<(), EnvironmentRegistryBuildPlanErrorV2>:
+    if owner.owner_instance == 0u64:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.InvalidOwner)
+    if token.owner_instance != owner.owner_instance:
+        return Err(EnvironmentRegistryBuildPlanErrorV2.UnknownOrStale)
+    var kept: [_EnvironmentRegistryBuildPlanRecordV2] = []
+    var found = false
+    for record in owner.records:
+        if record.token == token: found = true
+        else: kept.push(record)
+    if not found: return Err(EnvironmentRegistryBuildPlanErrorV2.UnknownOrStale)
+    owner.records = kept
+    Ok(())

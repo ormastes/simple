@@ -780,6 +780,17 @@ action, and actual bytes; raw plans and feature arrays are not accepted. Its
 join remains non-authoritative for cache/JIT use until an authenticated backend
 feature receipt and canonical target textual/numeric mapping are available.
 
+`EnvironmentRegistryBuildPlanOwnerV2` adds the canonical target join. Creation
+requires one live registry use for the baseline and each artifact profile. It
+validates each profile tuple through the registry before deriving versioned
+cache, artifact, and plan identities from the V1 planner result plus stable
+profile binding digests. Projection rechecks every retained use and recomputes
+the identities from the owner-held base plan; a released use or changed profile
+cannot authorize the copied result. Registry uses remain owned by the caller:
+release the build-plan owner token before releasing those uses. Emission and
+cache publication must consume this V2 owner projection, not the inert V1
+planner result, and still require authenticated backend and exact-byte evidence.
+
 ### Backend feature receipt boundary
 
 `BackendFeatureAuthorityV1` is the bounded declaration store, keyed by full
