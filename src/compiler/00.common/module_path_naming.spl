@@ -58,6 +58,30 @@ fn _module_path_naming_strip_numbered_dirs(path: text) -> text:
             logical_parts.push(part)
     logical_parts.join("/")
 
+pub fn module_source_relative_path(path: text) -> text:
+    """Repo-relative source path (`src/...` / `examples/...`) from any
+    spelling of it: `../`/`./` prefixes and everything before an absolute
+    `/src/` or `/examples/` are dropped, so a worktree, a frozen SCV snapshot
+    (`build/scv_snapshots/<revision>/src/...`) and a bare relative path all
+    name the same module. This is the ONLY path identity that may reach a
+    native symbol: `mir_dynamic_module_init_name` used the raw parsed path,
+    and under SCV freeze that is the absolute snapshot path, which embeds the
+    host directory and a content hash -- so `__module_init_*` could never
+    match the fixed name a C shim declares (cm33_shim.c, gate
+    check-cm33-scalar-parser-fs-object.shs)."""
+    var mod_path = path.replace("\\", "/")
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    val absolute_src = _module_path_naming_text_index_of(mod_path, "/src/")
+    if absolute_src >= 0:
+        return mod_path.substring(absolute_src + 1)
+    val absolute_examples = _module_path_naming_text_index_of(mod_path, "/examples/")
+    if absolute_examples >= 0:
+        return mod_path.substring(absolute_examples + 1)
+    mod_path
+
 pub fn module_logical_name_from_path(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
     source path (e.g. `src/_wallB_mod_a.spl`). Under `SIMPLE_BOOTSTRAP=1`,
@@ -70,18 +94,7 @@ pub fn module_logical_name_from_path(path: text) -> text:
     resolved imports may arrive as absolute workspace paths; module identity
     is kept repo-relative so temporary/worktree directory names cannot leak
     host-path punctuation into native symbols."""
-    var mod_path = path.replace("\\", "/")
-    while mod_path.starts_with("../"):
-        mod_path = mod_path.substring(3)
-    if mod_path.starts_with("./"):
-        mod_path = mod_path.substring(2)
-    val absolute_src = _module_path_naming_text_index_of(mod_path, "/src/")
-    if absolute_src >= 0:
-        mod_path = mod_path.substring(absolute_src + 5)
-    else:
-        val absolute_examples = _module_path_naming_text_index_of(mod_path, "/examples/")
-        if absolute_examples >= 0:
-            mod_path = mod_path.substring(absolute_examples + 1)
+    var mod_path = module_source_relative_path(path)
     if mod_path.starts_with("src/"):
         mod_path = mod_path.substring(4)
     # Stage 2 native currently miscompiles deletion replacement and can turn
