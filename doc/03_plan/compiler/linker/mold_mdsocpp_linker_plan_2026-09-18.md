@@ -317,7 +317,9 @@ bits, applies the shared ARM relocation engine, and rejects common symbols,
 unsupported allocatable sections, malformed bounds, undefined strong symbols,
 and duplicate strong definitions. This connects parsed LLVM-style ARM32 objects
 to the raw-image boundary required by remote and bare-metal placement. The
-remaining relocation corpus, hosted ARM executable emission, and real target
+raw path also decodes and applies narrow Thumb-1 `R_ARM_THM_JUMP11` and
+`R_ARM_THM_JUMP8` REL branches with signed range checks while preserving their
+opcode and condition fields. The remaining relocation corpus, hosted ARM executable emission, and real target
 execution evidence remain open.
 
 The compiler-owned ARM32 remote adapter now performs the full source-to-image
