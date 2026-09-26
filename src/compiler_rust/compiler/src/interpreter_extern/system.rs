@@ -896,11 +896,17 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
             ))
         }
     };
+    // -1 means unlimited, the same contract as the C runtime owner
+    // (runtime_process.c win_process_run_capture: `limit = max < 0 ? SIZE_MAX`).
+    // std process_run passes -1 on Windows since dac914d9306. Map it to the
+    // largest accepted bound rather than usize::MAX so read_bounded's
+    // `(max_bytes + 1) / 2` cannot overflow.
     let max_output_bytes = match args[3] {
+        Value::Int(-1) => i64::MAX as usize,
         Value::Int(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
         _ => {
             return Err(CompileError::runtime(
-                "rt_process_run_bounded: max_output_bytes must be a non-negative integer",
+                "rt_process_run_bounded: max_output_bytes must be a non-negative integer or -1 (unlimited)",
             ))
         }
     };
@@ -2051,6 +2057,39 @@ mod tests {
         unsafe {
             std::env::remove_var("_SIMPLE_STACK_SET");
         }
+    }
+
+    /// -1 is the documented "unlimited" bound (C runtime contract; std
+    /// process_run passes it on Windows). It must run the child, not error.
+    #[test]
+    fn process_run_bounded_accepts_minus_one_as_unlimited() {
+        let (cmd, script) = if cfg!(windows) {
+            ("cmd.exe", vec!["/C", "echo bounded-ok"])
+        } else {
+            ("/bin/sh", vec!["-c", "echo bounded-ok"])
+        };
+        let result = rt_process_run_bounded(&[
+            Value::text(cmd.to_string()),
+            Value::Array(Arc::new(script.into_iter().map(|s| Value::text(s.to_string())).collect())),
+            Value::Int(0),
+            Value::Int(-1),
+        ])
+        .expect("-1 must be accepted as unlimited");
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple");
+        };
+        assert_eq!(parts[2], Value::Int(0));
+        let Value::Str(stdout) = &parts[0] else {
+            panic!("expected stdout string");
+        };
+        assert!(stdout.contains("bounded-ok"), "stdout: {}", stdout);
+        assert!(rt_process_run_bounded(&[
+            Value::text(cmd.to_string()),
+            Value::Array(Arc::new(vec![])),
+            Value::Int(0),
+            Value::Int(-2),
+        ])
+        .is_err());
     }
 
     #[cfg(unix)]
