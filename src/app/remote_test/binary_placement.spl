@@ -128,6 +128,40 @@ fn remote_simple_stage_guard_command(remote_os: text, configured: text,
             "echo 'remote-test staging or publication path already exists' >&2; exit 73; fi")
     Err("remote-test cannot render a staging guard for remote OS '{remote_os}'")
 
+fn _remote_sha256_valid(digest: text) -> bool:
+    if digest.len() != 64: return false
+    var i: i64 = 0
+    while i < digest.len():
+        val ch = digest[i:i + 1]
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
+        expected_sha256: text) -> Result<text, text>:
+    """Render a target-side digest check for the uploaded interpreter."""
+    val digest = expected_sha256.trim().lower()
+    if not _remote_sha256_valid(digest):
+        return Err("remote Simple expected SHA-256 must be 64 hexadecimal digits")
+    val platform = remote_os.trim().lower()
+    if platform == "windows" or platform == "win":
+        if not _remote_path_is_absolute(staged_path, true):
+            return Err("remote Windows Simple staging path must be absolute")
+        val stage = _remote_windows_command_value(staged_path)
+        if stage.is_err(): return Err(stage.unwrap_err())
+        return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$actual = (Get-FileHash -LiteralPath " + stage.unwrap() + " -Algorithm SHA256).Hash.ToLowerInvariant(); " +
+            "if ($actual -ne '" + digest + "') { Write-Error 'remote-test uploaded Simple SHA-256 mismatch'; exit 74 }\"")
+    if platform == "linux" or platform == "simpleos" or platform == "simple-os":
+        if not _remote_path_is_absolute(staged_path, false):
+            return Err("remote POSIX Simple staging path must be absolute")
+        val stage = _remote_posix_quote(staged_path)
+        return Ok("actual=$(sha256sum -- " + stage + ") || exit 74; actual=${actual%% *}; " +
+            "if [ \"$actual\" != '" + digest + "' ]; then " +
+            "echo 'remote-test uploaded Simple SHA-256 mismatch' >&2; exit 74; fi")
+    Err("remote-test cannot verify an uploaded binary for remote OS '{remote_os}'")
+
 fn remote_simple_install_command(remote_os: text, configured: text,
         staged_path: text) -> Result<text, text>:
     """Publish an uploaded binary at the target-owned Simple path.
@@ -164,4 +198,5 @@ fn remote_simple_install_command(remote_os: text, configured: text,
     Err("remote-test cannot render an install command for remote OS '{remote_os}'")
 
 export remote_simple_binary_path, remote_simple_test_command
-export remote_simple_stage_guard_command, remote_simple_install_command
+export remote_simple_stage_guard_command, remote_simple_stage_verify_command
+export remote_simple_install_command

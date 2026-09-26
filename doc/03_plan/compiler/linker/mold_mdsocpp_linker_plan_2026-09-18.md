@@ -333,6 +333,10 @@ therefore fails before `scp`/terminal upload can follow it.
 After the sibling copy and permission step succeeds, publication removes the
 uploaded staging leaf before the atomic replacement, so a successful install
 does not poison the next absence preflight.
+Between upload and publication, the adapter hashes the selected local binary
+and requires the remote staging file to match that lowercase SHA-256. Linux
+and SimpleOS use `sha256sum`; Windows uses `Get-FileHash`. Missing hash tools,
+read failures, malformed local digests, or byte mismatches stop publication.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and

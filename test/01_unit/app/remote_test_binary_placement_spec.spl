@@ -2,7 +2,8 @@ use std.spec.*
 use std.spec.step
 use app.remote_test.binary_placement.{
     remote_simple_binary_path, remote_simple_test_command,
-    remote_simple_stage_guard_command, remote_simple_install_command}
+    remote_simple_stage_guard_command, remote_simple_stage_verify_command,
+    remote_simple_install_command}
 extern fn rt_file_read_text(path: text) -> text
 
 describe "remote interpreter binary placement":
@@ -73,6 +74,36 @@ describe "remote interpreter binary placement":
         val upload = source.index_of("terminal_upload(self.connection, local_path, staged_path)") ?? -1
         expect(guard).to_be_greater_than(-1)
         expect(upload).to_be_greater_than(guard)
+
+    it "renders target-side SHA-256 verification for uploaded bytes":
+        val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val linux = remote_simple_stage_verify_command("linux", "/tmp/simple upload", digest).unwrap()
+        expect(linux).to_contain("sha256sum -- '/tmp/simple upload'")
+        expect(linux).to_contain("actual=${actual%% *}")
+        expect(linux).to_contain("exit 74")
+
+        val windows = remote_simple_stage_verify_command(
+            "windows", "C:\\Temp\\simple upload.exe", digest.upper()).unwrap()
+        expect(windows).to_contain("Get-FileHash -LiteralPath 'C:\\Temp\\simple upload.exe' -Algorithm SHA256")
+        expect(windows).to_contain(".Hash.ToLowerInvariant()")
+        expect(windows).to_contain("'" + digest + "'")
+
+    it "rejects malformed digest verification requests":
+        val zero_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+        val bad_digest = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        expect(remote_simple_stage_verify_command("linux", "/tmp/simple", "abc").is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("linux", "tmp/simple", zero_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("windows", "C:\\Temp\\simple.exe", bad_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("plan9", "/tmp/simple", zero_digest).is_err()).to_equal(true)
+
+    it "verifies uploaded bytes before publishing the interpreter":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val upload = source.index_of("terminal_upload(self.connection, local_path, staged_path)") ?? -1
+        val verify = source.index_of("val verified = terminal_execute(self.connection, verify_command, timeout_ms)") ?? -1
+        val publish = source.index_of("val result = terminal_execute(self.connection, command, timeout_ms)") ?? -1
+        expect(upload).to_be_greater_than(-1)
+        expect(verify).to_be_greater_than(upload)
+        expect(publish).to_be_greater_than(verify)
 
     it "rejects unsafe Windows staging values and unknown automatic targets":
         expect(remote_simple_install_command("windows", "auto", "bad\"stage.exe").is_err()).to_equal(true)

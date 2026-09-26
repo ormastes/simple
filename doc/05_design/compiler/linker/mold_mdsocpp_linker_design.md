@@ -273,6 +273,10 @@ leaves; Windows uses literal `Get-Item` probes so reparse entries are included.
 Any occupied leaf is an error rather than an overwrite or cleanup request.
 Successful publication consumes the uploaded staging leaf after the sibling
 copy is complete and before replacing the live interpreter.
+The upload result is not integrity evidence by itself. Before publication the
+adapter compares a local `file_hash_sha256` value with a target-side SHA-256
+(`sha256sum` on Linux/SimpleOS, `Get-FileHash` on Windows); only equality can
+advance to the sibling-copy/rename command.
 
 ## 14. Linux runtime and library input completion (2026-09-27)
 
