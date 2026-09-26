@@ -1,6 +1,8 @@
 use std.spec.*
 use std.spec.step
-use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained}
+use compiler.backend.linker.coff.coff_link.{
+    CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
+    coff_link_default_libraries}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
 
 fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
@@ -136,6 +138,39 @@ fn _cl_directive_object(content: text) -> [u8]:
         index = index + 1
     bytes
 
+fn _cl_object_with_directive(symbol: text, directive: text) -> [u8]:
+    val symbol_offset = 101 + directive.len()
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664).push(2).push(0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, symbol_offset)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0).push(0).push(0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 100)
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u16(bytes, 0).push(0).push(0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = _cl_name(bytes, ".drectve")
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u32(bytes, directive.len())
+    bytes = _cl_u32(bytes, 101)
+    bytes = _cl_u32(bytes, 0).push(0).push(0).push(0).push(0)
+    bytes = _cl_u16(bytes, 0).push(0).push(0)
+    bytes = _cl_u32(bytes, 0x200)
+    bytes = bytes.push(0xc3)
+    var index: i64 = 0
+    while index < directive.len():
+        bytes = bytes.push(directive.byte_at(index) as u8)
+        index = index + 1
+    bytes = _cl_name(bytes, symbol)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20).push(2).push(0)
+    _cl_u32(bytes, 4)
+
 fn _cl_importing_object() -> [u8]:
     # CALL rel32 ExitProcess; RET. Symbol table has _start plus the import.
     var bytes: [u8] = []
@@ -246,6 +281,20 @@ describe "internal freestanding Windows linker":
             archives: [], entry: "_start"))
         expect(missing.is_err()).to_equal(true)
         expect(missing.unwrap_err()).to_contain("retained COFF symbol not found")
+
+    it "reports DEFAULTLIB directives from selected archive members only":
+        val reference = _cl_set_second_symbol_name(_cl_importing_object(), "forced")
+        val selected = _cl_object_with_directive(
+            "forced", " /DEFAULTLIB:selected.lib")
+        val dependencies = coff_link_default_libraries(CoffLinkRequest(
+            objects: [reference], archives: [_cl_archive(selected)], entry: "_start"), [])
+        expect(dependencies.is_ok()).to_equal(true)
+        expect(dependencies.unwrap()).to_equal(["selected.lib"])
+
+        val unused = coff_link_default_libraries(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)],
+            archives: [_cl_archive(selected)], entry: "_start"), [])
+        expect(unused.unwrap().len()).to_equal(0)
 
     it "uses .drectve ALTERNATENAME fallbacks for archive closure and relocation":
         val reference = _cl_set_second_symbol_name(_cl_importing_object(), "weak")

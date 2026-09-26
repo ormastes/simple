@@ -14,7 +14,8 @@ use compiler.backend.linker.coff.coff_object.{
 use compiler.backend.linker.coff.pe_image_writer.{
     PeImageSection, PE_AMD64_IMAGE_BASE, PE_SECTION_ALIGNMENT,
     pe_align_up, pe_write_amd64_console}
-use compiler.backend.linker.coff.archive_closure.{coff_archive_closure_retained_aliases}
+use compiler.backend.linker.coff.archive_closure.{
+    CoffArchiveClosure, coff_archive_closure_retained_aliases}
 use compiler.backend.linker.coff.pe_import_builder.{pe_build_amd64_imports}
 use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
 use compiler.backend.linker.coff.coff_directives.{
@@ -38,6 +39,13 @@ struct CoffSymbolLocation:
 struct CoffResolvedAddress:
     address: i64
     absolute: bool
+
+struct CoffPreparedLink:
+    objects: [CoffObject]
+    selected: CoffArchiveClosure
+    closure_roots: [text]
+    aliases: {text: text}
+    default_libraries: [text]
 
 fn _coff_read_u32(section: [u8], offset: i64) -> Result<i64, text>:
     if offset < 0 or offset + 4 > section.len(): return Err("32-bit relocation patch is outside its section")
@@ -550,26 +558,21 @@ fn _coff_validate_symbols(objects: [CoffObject], rvas: [[i64]],
                     return Err("unresolved external COFF symbol '{name}'")
     Ok(true)
 
-fn coff_link_amd64(request: CoffLinkRequest) -> Result<[u8], text>:
-    """Link AMD64 COFF objects and libraries into a PE32+ console executable."""
-    coff_link_amd64_retained(request, [])
-
-fn coff_link_amd64_retained(request: CoffLinkRequest,
-        retained_symbols: [text]) -> Result<[u8], text>:
-    """Link with `/INCLUDE`-style archive roots."""
+fn _coff_prepare_link(request: CoffLinkRequest,
+        retained_symbols: [text]) -> Result<CoffPreparedLink, text>:
     if request.objects.len() == 0: return Err("COFF link request has no objects")
     if request.entry == "": return Err("COFF link request has no entry symbol")
-    var objects: [CoffObject] = []
+    var roots: [CoffObject] = []
     var input_index: i64 = 0
     while input_index < request.objects.len():
         val parsed = coff_parse_object(request.objects[input_index])
         if parsed.is_err(): return Err("COFF object {input_index}: {parsed.unwrap_err()}")
         val object = parsed.unwrap()
         if object.machine != COFF_MACHINE_AMD64: return Err("COFF object {input_index} is not AMD64")
-        objects = objects.push(object)
+        roots = roots.push(object)
         input_index = input_index + 1
 
-    val directives_result = coff_collect_directives(objects)
+    val directives_result = coff_collect_directives(roots)
     if directives_result.is_err(): return Err(directives_result.unwrap_err())
     val directives = directives_result.unwrap()
     val aliases_result = coff_alternate_name_map(directives)
@@ -580,33 +583,60 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
     for name in directives.includes:
         if not closure_roots.contains(name): closure_roots = closure_roots.push(name)
     var closure = coff_archive_closure_retained_aliases(
-        objects, request.archives, closure_roots, aliases)
+        roots, request.archives, closure_roots, aliases)
     if closure.is_err(): return Err(closure.unwrap_err())
     var selected = closure.unwrap()
     var roots_changed = true
+    var all_directives = directives
     while roots_changed:
         roots_changed = false
-        var directive_objects = objects
+        var directive_objects = roots
         for member in selected.members: directive_objects = directive_objects.push(member.object)
         val selected_directives = coff_collect_directives(directive_objects)
         if selected_directives.is_err(): return Err(selected_directives.unwrap_err())
-        val more_directives = selected_directives.unwrap()
-        for name in more_directives.includes:
+        all_directives = selected_directives.unwrap()
+        for name in all_directives.includes:
             if not closure_roots.contains(name):
                 closure_roots = closure_roots.push(name)
                 roots_changed = true
-        if more_directives.alternate_names.len() != alias_count:
-            val more_aliases = coff_alternate_name_map(more_directives)
+        if all_directives.alternate_names.len() != alias_count:
+            val more_aliases = coff_alternate_name_map(all_directives)
             if more_aliases.is_err(): return Err(more_aliases.unwrap_err())
             aliases = more_aliases.unwrap()
-            alias_count = more_directives.alternate_names.len()
+            alias_count = all_directives.alternate_names.len()
             roots_changed = true
         if roots_changed:
             closure = coff_archive_closure_retained_aliases(
-                objects, request.archives, closure_roots, aliases)
+                roots, request.archives, closure_roots, aliases)
             if closure.is_err(): return Err(closure.unwrap_err())
             selected = closure.unwrap()
+    var objects = roots
     for member in selected.members: objects = objects.push(member.object)
+    Ok(CoffPreparedLink(objects: objects, selected: selected,
+        closure_roots: closure_roots, aliases: aliases,
+        default_libraries: all_directives.default_libraries))
+
+fn coff_link_default_libraries(request: CoffLinkRequest,
+        retained_symbols: [text]) -> Result<[text], text>:
+    """Return `/DEFAULTLIB` rows from roots plus currently selected members."""
+    val prepared = _coff_prepare_link(request, retained_symbols)
+    if prepared.is_err(): return Err(prepared.unwrap_err())
+    Ok(prepared.unwrap().default_libraries)
+
+fn coff_link_amd64(request: CoffLinkRequest) -> Result<[u8], text>:
+    """Link AMD64 COFF objects and libraries into a PE32+ console executable."""
+    coff_link_amd64_retained(request, [])
+
+fn coff_link_amd64_retained(request: CoffLinkRequest,
+        retained_symbols: [text]) -> Result<[u8], text>:
+    """Link with `/INCLUDE`-style archive roots."""
+    val prepared_result = _coff_prepare_link(request, retained_symbols)
+    if prepared_result.is_err(): return Err(prepared_result.unwrap_err())
+    val prepared = prepared_result.unwrap()
+    val objects = prepared.objects
+    val selected = prepared.selected
+    val closure_roots = prepared.closure_roots
+    val aliases = prepared.aliases
     for name in closure_roots:
         if name == "": continue
         var found = false
@@ -792,3 +822,4 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
     pe_write_amd64_console(output_sections, entry.unwrap())
 
 export CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained
+export coff_link_default_libraries
