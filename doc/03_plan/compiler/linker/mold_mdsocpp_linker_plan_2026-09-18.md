@@ -211,6 +211,10 @@ undefined-symbol TLSGD sequences fail closed.
 The equivalent large-model `MOVW_G1`/`MOVW_G0_NC` TLSGD and TLSLD sequences
 share the same checked relaxation, completing both three-instruction address
 materialization forms without synthesizing runtime resolver GOT records.
+Canonical AArch64 TLSDESC `ADRP/LDR/ADD/BLR` sequences for defined TLS symbols
+now relax to variant-I local-exec `MRS/ADD-high/ADD-low/NOP`, removing all four
+descriptor relocations and the resolver call. Incomplete, malformed, or
+undefined-symbol descriptor sequences fail closed.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 

@@ -31,6 +31,20 @@ fn a64_tls_movw_object(primary: i64, low: i64) -> ElfObject:
         relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab,
         raw: [0, 0, 0xa0, 0xd2, 0, 0, 0x80, 0xf2, 0, 0, 0, 0x94])
 
+fn a64_tlsdesc_object() -> ElfObject:
+    val base = a64_tls_object(562, 563)
+    val sections = [base.sections[0],
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 6, sh_addr: 0, sh_size: 16)]
+    val relocs = [base.relocations[0], base.relocations[1],
+        ElfRelocation(r_offset: 8, r_info: (1 << 32) | 564, r_addend: 0,
+            section_idx: 0, target_section_idx: 1),
+        ElfRelocation(r_offset: 12, r_info: (1 << 32) | 569, r_addend: 0,
+            section_idx: 0, target_section_idx: 1)]
+    ElfObject(header: base.header, sections: sections, symbols: base.symbols,
+        relocations: relocs, strtab: base.strtab, shstrtab: base.shstrtab,
+        raw: [0, 0, 0, 0x90, 1, 0, 0x40, 0xf9,
+            0, 0, 0, 0x91, 0x20, 0, 0x3f, 0xd6])
+
 fn u32_at(bytes: [u8], at: i64) -> i64:
     (bytes[at] as i64) | ((bytes[at + 1] as i64) << 8) |
         ((bytes[at + 2] as i64) << 16) | ((bytes[at + 3] as i64) << 24)
@@ -68,6 +82,18 @@ describe "AArch64 TLS relaxation":
         expect(u32_at(ld.raw, 4)).to_equal(0x91004000)
         expect(u32_at(ld.raw, 8)).to_equal(0xd503201f)
         expect(ld.relocations.len()).to_equal(0)
+
+    it "relaxes canonical TLSDESC to a local-exec sequence":
+        val result = elf_relax_tls([a64_tlsdesc_object()], RelocArch.AArch64)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()[0]
+        expect(u32_at(obj.raw, 0)).to_equal(0xd53bd040)
+        expect(u32_at(obj.raw, 4)).to_equal(0x91400000)
+        expect(u32_at(obj.raw, 8)).to_equal(0x91000000)
+        expect(u32_at(obj.raw, 12)).to_equal(0xd503201f)
+        expect(obj.relocations.len()).to_equal(2)
+        expect(elf_reloc_type(obj.relocations[0])).to_equal(549)
+        expect(elf_reloc_type(obj.relocations[1])).to_equal(551)
 
     it "rejects an unpaired TLSGD sequence":
         val base = a64_tls_object(513, 514)
