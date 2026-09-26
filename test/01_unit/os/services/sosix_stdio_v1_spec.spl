@@ -1,0 +1,443 @@
+# @cover src/os/services/sosix/stdio_v1.spl 80%
+"""SOSIX stdio v1: FILE* semantics over an injected fake syscall backend.
+
+Mirrors the pm_process_launch_v1_spec idiom: the module under test takes its
+kernel contact as an ops vtable, so the spec injects an in-memory fake fs
+plus a console log and exercises buffering, EOF/error latching, positioning,
+and the pre-opened 0/1/2 streams host-side.
+"""
+
+use std.spec
+use std.common.text_bytes.{bytes_to_text, text_to_bytes}
+use os.services.sosix.stdio_v1.{
+    SosixStdioBufModeV1, SosixStdioOpsV1,
+    sosix_fopen_v1, sosix_fdopen_v1,
+    sosix_stdin_v1, sosix_stdout_v1, sosix_stderr_v1,
+    SOSIX_STDIO_SEEK_SET, SOSIX_STDIO_SEEK_CUR, SOSIX_STDIO_SEEK_END
+}
+
+# === fake backend state ===
+
+var _paths: [text] = []
+var _files: [[u8]] = []
+var _fd_file: [i64] = []      # fd -> file index; -9 = closed (0/1/2 = stdio)
+var _fd_cursor: [i64] = []
+var _fd_append: [bool] = []
+var _console: [u8] = []       # bytes written to fd 1/2
+var _stdin_bytes: [u8] = []
+var _stdin_pos: u64 = 0
+var _read_err: i64 = 0        # positive errno to inject on read (0 = off)
+var _write_err: i64 = 0
+var _next_fd: i64 = 3
+
+fn _reset():
+    _paths = []
+    _files = []
+    _fd_file = []
+    _fd_cursor = []
+    _fd_append = []
+    _console = []
+    _stdin_bytes = []
+    _stdin_pos = 0
+    _read_err = 0
+    _write_err = 0
+    _next_fd = 3
+
+fn _add_file(path: text, contents: text):
+    _paths.push(path)
+    _files.push(text_to_bytes(contents))
+
+fn _file_text(index: i64) -> text:
+    bytes_to_text(_files[index as u64])
+
+fn _grow_fds(fd: i64):
+    while _fd_file.len() <= fd as u64:
+        _fd_file.push(-9)
+        _fd_cursor.push(0)
+        _fd_append.push(false)
+
+fn _open(path: [u8], flags: u64, mode: u64) -> i64:
+    val _ = mode
+    val name = bytes_to_text(path)
+    var index = -1i64
+    var i = 0u64
+    while i < _paths.len():
+        if _paths[i] == name:
+            index = i as i64
+        i = i + 1
+    if index < 0:
+        if (flags & 64) == 0:
+            return -2
+        _paths.push(name)
+        _files.push([])
+        index = _paths.len() as i64 - 1
+    if (flags & 512) != 0:
+        _files[index as u64] = []
+    val fd = _next_fd
+    _next_fd = _next_fd + 1
+    _grow_fds(fd)
+    _fd_file[fd as u64] = index
+    _fd_cursor[fd as u64] = 0
+    _fd_append[fd as u64] = (flags & 1024) != 0
+    fd
+
+fn _read(fd: i64, max_len: u64) -> Result<[u8], i64>:
+    if _read_err != 0:
+        return Result.Err(-_read_err)
+    if fd == 0:
+        val avail = _stdin_bytes.len() - _stdin_pos
+        var take = avail
+        if take > max_len:
+            take = max_len
+        val out = _stdin_bytes.slice(_stdin_pos, _stdin_pos + take)
+        _stdin_pos = _stdin_pos + take
+        return Result.Ok(out)
+    if fd < 0 or fd as u64 >= _fd_file.len() or _fd_file[fd as u64] < 0:
+        return Result.Err(-9)
+    val index = _fd_file[fd as u64]
+    val content = _files[index as u64]
+    val cursor = _fd_cursor[fd as u64]
+    val avail = content.len() as i64 - cursor
+    if avail <= 0:
+        return Result.Ok([])
+    var take = avail
+    if take > max_len as i64:
+        take = max_len as i64
+    val out = content.slice(cursor as u64, (cursor + take) as u64)
+    _fd_cursor[fd as u64] = cursor + take
+    Result.Ok(out)
+
+fn _write(fd: i64, data: [u8]) -> i64:
+    if _write_err != 0:
+        return -_write_err
+    if fd == 1 or fd == 2:
+        var i = 0u64
+        while i < data.len():
+            _console.push(data[i])
+            i = i + 1
+        return data.len() as i64
+    if fd < 0 or fd as u64 >= _fd_file.len() or _fd_file[fd as u64] < 0:
+        return -9
+    val index = _fd_file[fd as u64]
+    var cursor = _fd_cursor[fd as u64]
+    if _fd_append[fd as u64]:
+        cursor = _files[index as u64].len() as i64
+    # Functional copy-back: the deployed interpreter detaches an inner-array
+    # alias of a global [[u8]] (element writes on the alias are lost), so
+    # build the new content locally and store it back.
+    var content: [u8] = []
+    var j = 0u64
+    while j < _files[index as u64].len():
+        content.push(_files[index as u64][j])
+        j = j + 1
+    while content.len() as i64 < cursor + data.len() as i64:
+        content.push(0)
+    var i = 0u64
+    while i < data.len():
+        content[(cursor as u64) + i] = data[i]
+        i = i + 1
+    _files[index as u64] = content
+    _fd_cursor[fd as u64] = cursor + data.len() as i64
+    data.len() as i64
+
+fn _close(fd: i64) -> i64:
+    if fd >= 0 and fd as u64 < _fd_file.len():
+        _fd_file[fd as u64] = -9
+        return 0
+    if fd >= 0 and fd <= 2:
+        return 0
+    -9
+
+fn _lseek(fd: i64, offset: i64, whence: i64) -> i64:
+    if fd >= 0 and fd <= 2:
+        return -29
+    if fd < 0 or fd as u64 >= _fd_file.len() or _fd_file[fd as u64] < 0:
+        return -9
+    val index = _fd_file[fd as u64]
+    var pos = offset
+    if whence == SOSIX_STDIO_SEEK_CUR:
+        pos = _fd_cursor[fd as u64] + offset
+    elif whence == SOSIX_STDIO_SEEK_END:
+        pos = _files[index as u64].len() as i64 + offset
+    if pos < 0:
+        return -22
+    _fd_cursor[fd as u64] = pos
+    pos
+
+fn _ops() -> SosixStdioOpsV1:
+    SosixStdioOpsV1(
+        open: _open, read: _read, write: _write, close: _close, lseek: _lseek)
+
+describe "SOSIX stdio v1 — fopen/fdopen and the NULL-stream contract":
+    it "rejects an invalid mode with EINVAL on an invalid stream":
+        _reset()
+        val f = sosix_fopen_v1(_ops(), "/a.txt", "q")
+        expect(f.valid()).to_be(false)
+        expect(f.errno_name()).to_equal("EINVAL")
+
+    it "maps a backend open failure to the NULL-stream with its errno":
+        _reset()
+        val f = sosix_fopen_v1(_ops(), "/missing.txt", "r")
+        expect(f.valid()).to_be(false)
+        expect(f.errno_name()).to_equal("ENOENT")
+
+    it "rejects an over-long path with ENAMETOOLONG before any syscall":
+        _reset()
+        var long = "/"
+        var i = 0
+        while i < 300:
+            long = long + "x"
+            i = i + 1
+        val f = sosix_fopen_v1(_ops(), long, "r")
+        expect(f.valid()).to_be(false)
+        expect(f.errno_name()).to_equal("ENAMETOOLONG")
+
+    it "creates and truncates with w, appends with a, requires existence with r":
+        _reset()
+        _add_file("/keep.txt", "data")
+        val w = sosix_fopen_v1(_ops(), "/keep.txt", "w")
+        expect(w.valid()).to_be(true)
+        expect(w.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("")
+        val a = sosix_fopen_v1(_ops(), "/keep.txt", "a")
+        expect(a.fwrite(text_to_bytes("X"), 1, 1)).to_equal(1)
+        expect(a.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("X")
+        val r = sosix_fopen_v1(_ops(), "/gone.txt", "r")
+        expect(r.valid()).to_be(false)
+        expect(r.errno_name()).to_equal("ENOENT")
+
+    it "accepts b/+ arrangement variants and maps them to the right access":
+        _reset()
+        _add_file("/m.txt", "abc")
+        val rp = sosix_fopen_v1(_ops(), "/m.txt", "rb+")
+        expect(rp.valid()).to_be(true)
+        expect(rp.fread(1, 2).len()).to_equal(2)
+        expect(rp.fwrite(text_to_bytes("Z"), 1, 1)).to_equal(1)
+        expect(rp.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("abZ")
+        val bad = sosix_fopen_v1(_ops(), "/m.txt", "r++")
+        expect(bad.valid()).to_be(false)
+        expect(bad.errno_name()).to_equal("EINVAL")
+
+    it "fdopen wraps a live fd, fileno reports it, fclose closes it":
+        _reset()
+        _add_file("/fd.txt", "hello")
+        val raw = _open(text_to_bytes("/fd.txt"), 0, 0)
+        val f = sosix_fdopen_v1(_ops(), raw, "r")
+        expect(f.valid()).to_be(true)
+        expect(f.fileno()).to_equal(raw)
+        expect(f.fread(1, 5).len()).to_equal(5)
+        expect(f.fclose()).to_equal(0)
+        expect(f.valid()).to_be(false)
+        expect(f.fread(1, 1).len()).to_equal(0)
+        expect(f.ferror()).to_be(true)
+        expect(f.errno_name()).to_equal("EBADF")
+
+describe "SOSIX stdio v1 — buffering semantics":
+    it "fully buffers file writes until fflush and flushes again at fclose":
+        _reset()
+        _add_file("/buf.txt", "")
+        val f = sosix_fopen_v1(_ops(), "/buf.txt", "w")
+        expect(f.fwrite(text_to_bytes("hello"), 1, 5)).to_equal(5)
+        expect(_file_text(0)).to_equal("")
+        expect(f.fflush()).to_equal(0)
+        expect(_file_text(0)).to_equal("hello")
+        expect(f.fwrite(text_to_bytes(" world"), 1, 6)).to_equal(6)
+        expect(f.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("hello world")
+
+    it "line-buffers stdout: flush only once a newline is written":
+        _reset()
+        val out = sosix_stdout_v1(_ops())
+        expect(out.fwrite(text_to_bytes("abc"), 1, 3)).to_equal(3)
+        expect(_console.len()).to_equal(0)
+        expect(out.fwrite(text_to_bytes("def\n"), 1, 4)).to_equal(4)
+        expect(bytes_to_text(_console)).to_equal("abcdef\n")
+        expect(out.fileno()).to_equal(1)
+
+    it "keeps stderr unbuffered: every write hits the console at once":
+        _reset()
+        val err = sosix_stderr_v1(_ops())
+        expect(err.fwrite(text_to_bytes("boom"), 1, 4)).to_equal(4)
+        expect(bytes_to_text(_console)).to_equal("boom")
+        expect(err.fileno()).to_equal(2)
+
+    it "honours setvbuf mode switches on a live stream":
+        _reset()
+        _add_file("/sv.txt", "")
+        val f = sosix_fopen_v1(_ops(), "/sv.txt", "w")
+        expect(f.setvbuf(SosixStdioBufModeV1.Unbuffered, 0)).to_equal(0)
+        expect(f.fwrite(text_to_bytes("now"), 1, 3)).to_equal(3)
+        expect(_file_text(0)).to_equal("now")
+        expect(f.setvbuf(SosixStdioBufModeV1.Line, 4)).to_equal(0)
+        expect(f.fwrite(text_to_bytes("12345678"), 1, 8)).to_equal(8)
+        expect(_file_text(0)).to_equal("now1234")
+        expect(f.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("now12345678")
+
+    it "serves reads from the buffer and refills only when drained":
+        _reset()
+        _add_file("/r.txt", "abcdefgh")
+        val f = sosix_fopen_v1(_ops(), "/r.txt", "r")
+        expect(f.fread(1, 3).len()).to_equal(3)
+        expect(bytes_to_text(f.fread(1, 3))).to_equal("def")
+        expect(bytes_to_text(f.fread(1, 3))).to_equal("gh")
+        expect(f.feof()).to_be(true)
+
+describe "SOSIX stdio v1 — getc/gets, EOF and error latching":
+    it "fgetc walks bytes then reports EOF exactly at the end":
+        _reset()
+        _add_file("/c.txt", "xy")
+        val f = sosix_fopen_v1(_ops(), "/c.txt", "r")
+        expect(f.fgetc()).to_equal(120)
+        expect(f.fgetc()).to_equal(121)
+        expect(f.fgetc()).to_equal(-1)
+        expect(f.feof()).to_be(true)
+        expect(f.ferror()).to_be(false)
+        expect(f.fclose()).to_equal(0)
+
+    it "fgets returns lines with the newline and '' only at EOF":
+        _reset()
+        _stdin_bytes = text_to_bytes("one\ntwo\n")
+        val f = sosix_stdin_v1(_ops())
+        expect(f.fgets(16)).to_equal("one\n")
+        expect(f.fgets(16)).to_equal("two\n")
+        expect(f.fgets(16)).to_equal("")
+        expect(f.feof()).to_be(true)
+        expect(f.fileno()).to_equal(0)
+
+    it "latches EIO on a backend read failure and clears with clearerr":
+        _reset()
+        _add_file("/e.txt", "abc")
+        val f = sosix_fopen_v1(_ops(), "/e.txt", "r")
+        _read_err = 5
+        expect(f.fgetc()).to_equal(-1)
+        expect(f.ferror()).to_be(true)
+        expect(f.feof()).to_be(false)
+        expect(f.errno_name()).to_equal("EIO")
+        f.clearerr()
+        expect(f.ferror()).to_be(false)
+        _read_err = 0
+        expect(f.fgetc()).to_equal(97)
+
+    it "rejects direction violations with EBADF on the stream":
+        _reset()
+        _add_file("/d.txt", "abc")
+        val w = sosix_fopen_v1(_ops(), "/d.txt", "w")
+        expect(w.fread(1, 1).len()).to_equal(0)
+        expect(w.ferror()).to_be(true)
+        expect(w.errno_name()).to_equal("EBADF")
+        val r = sosix_fopen_v1(_ops(), "/d.txt", "r")
+        expect(r.fwrite(text_to_bytes("n"), 1, 1)).to_equal(0)
+        expect(r.ferror()).to_be(true)
+        expect(r.errno_name()).to_equal("EBADF")
+
+describe "SOSIX stdio v1 — positioning on the shared cursor":
+    it "ftell reports the logical position under buffered reads":
+        _reset()
+        _add_file("/p.txt", "abcdefgh")
+        val f = sosix_fopen_v1(_ops(), "/p.txt", "r")
+        expect(f.fread(1, 3).len()).to_equal(3)
+        expect(f.ftell()).to_equal(3)
+        expect(f.fclose()).to_equal(0)
+
+    it "fseek discards the buffer, clears eof, and repositions exactly":
+        _reset()
+        _add_file("/s.txt", "abcdefgh")
+        val f = sosix_fopen_v1(_ops(), "/s.txt", "r")
+        expect(f.fread(1, 8).len()).to_equal(8)
+        expect(f.feof()).to_be(false)
+        expect(f.fgetc()).to_equal(-1)
+        expect(f.feof()).to_be(true)
+        expect(f.fseek(2, SOSIX_STDIO_SEEK_SET)).to_equal(0)
+        expect(f.feof()).to_be(false)
+        expect(f.ftell()).to_equal(2)
+        expect(bytes_to_text(f.fread(1, 2))).to_equal("cd")
+        expect(f.fclose()).to_equal(0)
+
+    it "fseek SEEK_CUR measures from the caller-visible position":
+        _reset()
+        _add_file("/cur.txt", "abcdefgh")
+        val f = sosix_fopen_v1(_ops(), "/cur.txt", "r")
+        expect(f.fread(1, 3).len()).to_equal(3)
+        expect(f.fseek(2, SOSIX_STDIO_SEEK_CUR)).to_equal(0)
+        expect(f.ftell()).to_equal(5)
+        expect(bytes_to_text(f.fread(1, 1))).to_equal("f")
+        expect(f.fseek(-1, SOSIX_STDIO_SEEK_END)).to_equal(0)
+        expect(f.ftell()).to_equal(7)
+        expect(f.fclose()).to_equal(0)
+
+    it "rewind resets to the start and clears both indicators":
+        _reset()
+        _add_file("/w.txt", "abc")
+        val f = sosix_fopen_v1(_ops(), "/w.txt", "r")
+        expect(f.fread(1, 3).len()).to_equal(3)
+        expect(f.fgetc()).to_equal(-1)
+        expect(f.feof()).to_be(true)
+        f.rewind()
+        expect(f.feof()).to_be(false)
+        expect(f.ferror()).to_be(false)
+        expect(f.ftell()).to_equal(0)
+        expect(f.fgetc()).to_equal(97)
+        expect(f.fclose()).to_equal(0)
+
+    it "update streams reposition the shared cursor across direction switches":
+        _reset()
+        _add_file("/u.txt", "abc")
+        val f = sosix_fopen_v1(_ops(), "/u.txt", "r+")
+        expect(bytes_to_text(f.fread(1, 1))).to_equal("a")
+        expect(f.fwrite(text_to_bytes("Z"), 1, 1)).to_equal(1)
+        expect(bytes_to_text(f.fread(1, 2))).to_equal("c")
+        expect(f.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("aZc")
+
+describe "SOSIX stdio v1 — console streams and POSIX item semantics":
+    it "console streams are not seekable: ESPIPE without latching ferror":
+        _reset()
+        val out = sosix_stdout_v1(_ops())
+        expect(out.fseek(0, SOSIX_STDIO_SEEK_SET)).to_equal(-1)
+        expect(out.errno_name()).to_equal("ESPIPE")
+        expect(out.ferror()).to_be(false)
+        val err = sosix_stderr_v1(_ops())
+        expect(err.ftell()).to_equal(-1)
+        expect(err.errno_name()).to_equal("ESPIPE")
+
+    it "fread returns whole items and delivers a partial trailing item at EOF":
+        _reset()
+        _add_file("/i.txt", "abcde")
+        val f = sosix_fopen_v1(_ops(), "/i.txt", "r")
+        val got = f.fread(2, 3)
+        expect(got.len()).to_equal(5)
+        expect(got.len() / 2).to_equal(2)
+        expect(f.feof()).to_be(true)
+        expect(f.fclose()).to_equal(0)
+
+    it "fwrite returns whole items and zero for a zero-sized request":
+        _reset()
+        _add_file("/o.txt", "")
+        val f = sosix_fopen_v1(_ops(), "/o.txt", "w")
+        expect(f.fwrite(text_to_bytes("hello"), 2, 2)).to_equal(2)
+        expect(f.fwrite(text_to_bytes("hello"), 0, 5)).to_equal(0)
+        expect(f.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("hell")
+
+    it "fputc writes one byte and reports the byte back":
+        _reset()
+        _add_file("/pc.txt", "")
+        val f = sosix_fopen_v1(_ops(), "/pc.txt", "w")
+        expect(f.fputc(65)).to_equal(65)
+        expect(f.fputc(10)).to_equal(10)
+        expect(f.fclose()).to_equal(0)
+        expect(_file_text(0)).to_equal("A\n")
+
+    it "a backend write failure latches the stream error at flush time":
+        _reset()
+        _add_file("/we.txt", "")
+        val f = sosix_fopen_v1(_ops(), "/we.txt", "w")
+        expect(f.fwrite(text_to_bytes("abc"), 1, 3)).to_equal(3)
+        _write_err = 28
+        expect(f.fflush()).to_equal(-1)
+        expect(f.ferror()).to_be(true)
+        expect(f.errno_name()).to_equal("ENOSPC")
+        expect(f.fclose()).to_equal(-1)

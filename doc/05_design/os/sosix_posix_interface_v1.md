@@ -1,8 +1,8 @@
 # SOSIX POSIX-compatibility interface V1
 
-Date: 2026-09-26. Status: interface definition + first vertical slice (uname).
-SimpleOS program roadmap point 2. AArch64 lanes only; no x86 surface is defined
-or implied by this document.
+Date: 2026-09-26. Status: interface definition + vertical slices 1 (uname)
+and 2 (stdio). SimpleOS program roadmap point 2. AArch64 lanes only; no x86
+surface is defined or implied by this document.
 
 SOSIX is the SimpleOS POSIX-compatibility interface layer: the contract that
 lets FreeBSD-style userland sources (and clang's runtime expectations) target
@@ -50,7 +50,7 @@ reserved, returns -ENOSYS. "POSIX name" is the SOSIX-facing name; ids marked
 | 17 | reserved | - | absent |
 | 18-23 | (non-POSIX) IPC port/endpoint | - | wired |
 | 24-29 | (non-POSIX) notification | - | wired |
-| 30 | `open` | path, pathlen, flags, mode, - | wired |
+| 30 | `open` | path, pathlen, flags, mode, - | wired (gap: the guest C-ABI byte-slice open extern does not plumb the `mode` argument — create perms default in the kernel; recorded by the stdio slice) |
 | 31 | `read` | fd, buf, count, -, - | wired |
 | 32 | `write` | fd, buf, count, -, - | wired |
 | 33 | `close` | fd, -, -, -, - | wired |
@@ -78,7 +78,7 @@ reserved, returns -ENOSYS. "POSIX name" is the SOSIX-facing name; ids marked
 | 63/64 | `dup2`/`dup` | oldfd, newfd, -, -, - | wired |
 | 65-67 | (non-POSIX) `dlopen`/`dlsym`/`dlclose` | - | wired |
 | 68 | `poll` | fds*, nfds, timeout, -, - | wired |
-| 69 | `fcntl` | fd, cmd, arg, -, - | wired |
+| 69 | `fcntl` | fd, cmd, arg, -, - | wired (F_SIMPLEOS_GET_OFD available; stdio_v1 does not consume it — one FILE per fd is the supported shape, see §6) |
 | 70-77 | socket family `socket`..`ifconfig` | - | partial (arm64: virtio-net path only) |
 | 78 | `fsync` | fd, -, -, -, - | wired |
 | 79 | (non-POSIX) dbfs mount capability | - | wired |
@@ -147,9 +147,15 @@ listed here is not SOSIX V1 and must be probed or avoided.
 - **File IO**: open/read/write/close/lseek/ftruncate/fsync, stat/fstat,
   mkdir/rmdir/unlink/rename, getcwd/chdir, opendir/readdir facade, pipe,
   dup/dup2, poll, fcntl (OFD query). Wired ids per §1.
-- **stdio**: guest libc `FILE *` over fds 0-2 and fdopen'd files; the guest
-  toolchain's full stdio surface is the lane-C1 sysroot's
-  `libsimpleos_c.a`, not the kernel.
+- **stdio**: the SOSIX FILE* surface lives in
+  `src/os/services/sosix/stdio_v1.spl` (vertical 2, roadmap item 1): fopen/fdopen/fclose/fflush,
+  fread/fwrite/fgets/fgetc/fputc/fseek/ftell/rewind/feof/ferror/clearerr/
+  setvbuf/fileno over an injected ops vtable (ids 30-33/46; no kernel changes),
+  with stdin/stdout/stderr pre-opened on fds 0/1/2 (stdout line-buffered,
+  stderr unbuffered, stdin line-buffered input; no tty probing until the
+  termios slice). `stdio_v1_guest.spl` wires the vtable to the raw ids with
+  the DebugWrite (id 60) console fallback. The guest toolchain's C stdio
+  remains the lane-C1 sysroot's `libsimpleos_c.a`, not the kernel.
 - **malloc**: guest libc dlmalloc arena over anonymous `mmap` (id 10); the
   arm64 heap is a bump arena — `munmap`/`mprotect` are tolerated no-ops.
 - **string**: guest libc string/memory functions (no kernel involvement).
@@ -179,22 +185,39 @@ The guest libc keeps its local `uname()` (`src/os/libc/simpleos_utsname.c`)
 as the portable fallback; the syscall is the canonical source once the C
 dispatch routes id 92 to the strong shim `spl_handle_uname`.
 
-## 6. This slice (V1 vertical 1) and next slices
+## 6. Delivered verticals and next slices
 
-Delivered here: interface constants (`interface_v1.spl`), the uname handler
-(`uname_v1.spl`), the kernel errno-name table (`errno_text_v1.spl`), dispatch
-case 92 (`syscall.spl`), and the optional C-ABI shim
-(`syscall_shim_sosix.spl` + hub registration).
+Delivered as V1 vertical 1 (uname): interface constants (`interface_v1.spl`),
+the uname handler (`uname_v1.spl`), the kernel errno-name table
+(`errno_text_v1.spl`), dispatch case 92 (`syscall.spl`), and the optional
+C-ABI shim (`syscall_shim_sosix.spl` + hub registration).
+
+Delivered as V1 vertical 2 (stdio, roadmap item 1): the SOSIX FILE* surface
+(`stdio_v1.spl`) — fopen/fdopen/fclose/fflush, fread/fwrite/fgets/fgetc/
+fputc/fseek/ftell/rewind/feof/ferror/clearerr/setvbuf/fileno over an
+injected ops vtable (ids 30-33/46 only; no kernel changes), plus
+`stdio_v1_guest.spl` wiring the vtable to the raw ids with the DebugWrite
+(id 60) console fallback for fd 1/2. Buffering contract: files fully
+buffered (4096 default), stdin line-buffered input, stdout line-buffered
+unconditionally (no tty to probe), stderr unbuffered. Host-side spec:
+`test/01_unit/os/services/sosix_stdio_v1_spec.spl` (25 examples over a
+fake backend). Gaps recorded in the §1 status column: id 30's `mode` arg
+is not plumbed through the guest C-ABI open extern; id 69
+(F_SIMPLEOS_GET_OFD) is not consumed — two FILEs on dup'd fds sharing one
+kernel cursor stay POSIX-undefined (one FILE per fd is the supported
+shape).
 
 Recommended next slices, in order:
 
-1. **stdio full surface** — complete the guest FILE table, fdopen/fileno,
-   line-buffered tty behavior; depends only on ids 30-34/46/69 already wired.
-2. **mmap semantics** — real `munmap`/`mprotect` over a free-list arena
+1. **mmap semantics** — real `munmap`/`mprotect` over a free-list arena
    (replace the bump allocator), then file-backed `mmap`.
-3. **termios** — the terminal lane's `tcgetattr`/`tcsetattr`/`isatty` over a
+2. **termios** — the terminal lane's `tcgetattr`/`tcsetattr`/`isatty` over a
    tty service; clang's driver probes `isatty(1)` for color diagnostics.
-4. Routing id 92 in the arm64 C dispatch
+   Once `isatty` exists, revisit stdio's unconditional stdout line
+   buffering to probe it.
+3. Routing id 92 in the arm64 C dispatch
    (`arm64_dispatch_optional_shim(spl_handle_uname, ...)` — one line, owned by
    the clang-bringup lane) once the strong-shim guest-park issue documented in
    `baremetal_stubs.c` no longer applies to this path.
+4. OFD-aware stdio coordination (id 69): let a second FILE on a dup'd fd
+   detect the shared cursor instead of silently double-buffering it.

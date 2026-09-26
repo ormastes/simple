@@ -1,0 +1,631 @@
+"""SOSIX stdio (POSIX.1 FILE*) surface, v1 — user-side layer over the raw ids.
+
+The SOSIX interface doc (doc/05_design/os/sosix_posix_interface_v1.md) defines
+the OFD model and the id map this layer rides on. This module is the stdio
+half of interface slice 1 (doc §6): a thin, honest FILE* implementation for
+SOSIX userland, making NO kernel changes and importing NO kernel modules —
+every kernel contact goes through the injected SosixStdioOpsV1 vtable, so the
+whole layer is host-testable with a fake backend (see
+test/01_unit/os/services/sosix_stdio_v1_spec.spl) and guest-wirable by
+passing the raw-id ops from stdio_v1_guest.spl.
+
+Id map consumed (doc §1, all wired): open=30, read=31, write=32, close=33,
+lseek=46. The pre-opened streams fds 0/1/2 ride the same read/write ids —
+the kernel routes them to the console/serial; the guest ops add the
+DebugWrite (id 60) fallback for fd 1/2 when that routing is down.
+
+Buffering contract (doc §6 slice 1; the guest has no tty yet, so no isatty
+probing exists — termios is a later slice):
+  - regular files (fopen/fdopen): fully buffered, 4096-byte default buffer
+  - stdin:  line-buffered input (reads stop at '\n'; console input is
+            line-oriented and byte-at-a-time refills cannot over-block)
+  - stdout: line-buffered unconditionally (POSIX line-buffered-if-tty, with
+            the console treated as the tty)
+  - stderr: unbuffered (POSIX default)
+  - setvbuf switches a live stream between the three modes (POSIX _IOFBF /
+    _IOLBF / _IONBF shapes).
+
+Error semantics (doc §2): backend calls return negated errno; this layer
+stores the POSITIVE errno per stream (errno_val) and exposes the symbolic
+name through sosix_errno_name_v1 (errno_text_v1). feof is set only when a
+read returns zero bytes; ferror is sticky until clearerr/rewind. fseek/ftell
+failures set errno_val (ESPIPE on the console streams) without latching the
+sticky error indicator, matching hosted fseek behavior.
+
+Known gaps recorded in the interface doc status column:
+  - id 30's mode argument is not plumbed through the C-ABI byte-slice open
+    extern the guest uses (create permissions default in the kernel).
+  - id 69 (fcntl F_SIMPLEOS_GET_OFD) is not consumed here: two FILEs on
+    dup'd fds sharing one kernel cursor stay POSIX-undefined; one FILE per
+    fd is the supported shape.
+"""
+
+use std.common.text_bytes.{bytes_to_text, text_to_bytes}
+use os.services.sosix.errno_text_v1.{sosix_errno_name_v1}
+
+# === Open flags / seek whence (numeric ABI parity) ===
+# Literals mirror os.kernel.fd_table (O_*, SEEK_*) and the guest <fcntl.h>.
+# Duplicated here so this module stays importable from host-side tests
+# without dragging in the kernel import graph; never change one side alone.
+
+pub val SOSIX_STDIO_O_RDONLY: u64 = 0
+pub val SOSIX_STDIO_O_WRONLY: u64 = 1
+pub val SOSIX_STDIO_O_RDWR: u64 = 2
+pub val SOSIX_STDIO_O_CREAT: u64 = 64
+pub val SOSIX_STDIO_O_TRUNC: u64 = 512
+pub val SOSIX_STDIO_O_APPEND: u64 = 1024
+export SOSIX_STDIO_O_RDONLY, SOSIX_STDIO_O_WRONLY, SOSIX_STDIO_O_RDWR
+export SOSIX_STDIO_O_CREAT, SOSIX_STDIO_O_TRUNC, SOSIX_STDIO_O_APPEND
+
+pub val SOSIX_STDIO_SEEK_SET: i64 = 0
+pub val SOSIX_STDIO_SEEK_CUR: i64 = 1
+pub val SOSIX_STDIO_SEEK_END: i64 = 2
+export SOSIX_STDIO_SEEK_SET, SOSIX_STDIO_SEEK_CUR, SOSIX_STDIO_SEEK_END
+
+pub val SOSIX_STDIO_DEFAULT_BUF: u64 = 4096
+# MAX_BINARY_PATH_LEN parity (src/os/kernel/ipc/syscall.spl).
+pub val SOSIX_STDIO_PATH_MAX: u64 = 256
+export SOSIX_STDIO_DEFAULT_BUF, SOSIX_STDIO_PATH_MAX
+
+# Errno numbers used below (os.kernel.errno ABI; names via errno_text_v1).
+val _SOSIX_STDIO_EIO: i64 = 5
+val _SOSIX_STDIO_EBADF: i64 = 9
+val _SOSIX_STDIO_EINVAL: i64 = 22
+val _SOSIX_STDIO_EFBIG: i64 = 27
+val _SOSIX_STDIO_ENAMETOOLONG: i64 = 36
+# Sanity bound for size*nmemb before touching the buffer (1 GiB).
+val _SOSIX_STDIO_MAX_IO: u64 = 1073741824
+
+pub enum SosixStdioBufModeV1:
+    """setvbuf shapes: Full = _IOFBF, Line = _IOLBF, Unbuffered = _IONBF."""
+    Full
+    Line
+    Unbuffered
+
+pub struct SosixStdioOpsV1:
+    """Raw SOSIX id surface the stdio layer rides on (doc §1 map).
+
+    open(path_bytes, flags, mode) -> fd or -errno          (id 30)
+    read(fd, max_len) -> Ok(bytes) | Err(-errno)           (id 31)
+    write(fd, bytes) -> count or -errno                    (id 32)
+    close(fd) -> 0 or -errno                               (id 33)
+    lseek(fd, offset, whence) -> position or -errno        (id 46)
+
+    The layer never calls these on fd < 0 and never issues a zero-length
+    read; a zero-length Ok read means EOF.
+    """
+    open: fn([u8], u64, u64) -> i64
+    read: fn(i64, u64) -> Result<[u8], i64>
+    write: fn(i64, [u8]) -> i64
+    close: fn(i64) -> i64
+    lseek: fn(i64, i64, i64) -> i64
+
+fn _sosix_positive_errno_v1(raw: i64) -> i64:
+    """Negated-errno syscall result to positive errno (EIO when malformed)."""
+    if raw < 0:
+        return -raw
+    _SOSIX_STDIO_EIO
+
+pub class SosixFileV1:
+    """One SOSIX FILE*: a buffered view of one fd (the doc's OFD model).
+
+    Invariants: buf holds exactly the buffered bytes (unread input or
+    pending output — never both); buf_pos is the read consume cursor;
+    buf_cap is 0 only in Unbuffered mode; fd is -1 once closed.
+    """
+    fd: i64
+    readable: bool
+    writable: bool
+    console: bool
+    ops: SosixStdioOpsV1
+    buf: [u8]
+    buf_pos: u64
+    buf_cap: u64
+    buf_mode: SosixStdioBufModeV1
+    eof: bool
+    err: bool
+    errno_val: i64
+    closed: bool
+
+impl SosixFileV1:
+    # === status / accessors ===
+
+    pub fn valid() -> bool:
+        """fopen/fdopen NULL-stream test: false for a failed or closed stream."""
+        self.fd >= 0 and not self.closed
+
+    pub fn fileno() -> i64:
+        self.fd
+
+    pub fn feof() -> bool:
+        self.eof
+
+    pub fn ferror() -> bool:
+        self.err
+
+    pub fn errno_name() -> text:
+        """Symbolic name of the last errno on this stream (errno_text_v1)."""
+        sosix_errno_name_v1(self.errno_val)
+
+    pub me clearerr():
+        self.eof = false
+        self.err = false
+
+    # === internal helpers ===
+
+    me _fail(errno_value: i64) -> i64:
+        """Latch the sticky error indicator + errno; returns -1."""
+        self.err = true
+        self.errno_val = errno_value
+        -1
+
+    me _fail_io(raw: i64):
+        """Backend returned a negated errno (or a malformed result)."""
+        val _ = self._fail(_sosix_positive_errno_v1(raw))
+
+    me _ready_read() -> bool:
+        if not self.valid() or not self.readable:
+            val _ = self._fail(_SOSIX_STDIO_EBADF)
+            return false
+        # Update-stream discipline: flush pending output before reading.
+        if self.writable and self.buf.len() > 0:
+            return self._flush_write()
+        true
+
+    me _ready_write() -> bool:
+        if not self.valid() or not self.writable:
+            val _ = self._fail(_SOSIX_STDIO_EBADF)
+            return false
+        true
+
+    me _flush_write() -> bool:
+        """Write out the pending output buffer. False with err latched on
+        failure; a short write retains the unwritten tail for the next
+        flush (retried by fflush/fclose/the next buffer-full flush)."""
+        if self.buf.len() == 0:
+            return true
+        val rc = self.ops.write(self.fd, self.buf)
+        if rc <= 0:
+            self._fail_io(rc)
+            return false
+        if rc as u64 >= self.buf.len():
+            self.buf = []
+            self.buf_pos = 0
+            return true
+        var rest: [u8] = []
+        var i = rc as u64
+        while i < self.buf.len():
+            rest.push(self.buf[i])
+            i = i + 1
+        self.buf = rest
+        self.buf_pos = 0
+        true
+
+    me _discard_input():
+        self.buf = []
+        self.buf_pos = 0
+
+    me _rewind_input() -> bool:
+        """Reposition the kernel cursor to the logical read position (drop
+        the unread buffered bytes). Fails ESPIPE-family on non-seekable
+        streams with err latched."""
+        val unread = self.buf.len() - self.buf_pos
+        self._discard_input()
+        if unread == 0:
+            return true
+        val rc = self.ops.lseek(self.fd, -(unread as i64), SOSIX_STDIO_SEEK_CUR)
+        if rc < 0:
+            self._fail_io(rc)
+            return false
+        true
+
+    me _refill() -> bool:
+        """Fill the input buffer. True = buf non-empty; false = EOF or
+        error (the matching indicator is already latched). Never called in
+        Unbuffered mode (fread/fgetc bypass the buffer there)."""
+        self._discard_input()
+        if self.buf_mode == SosixStdioBufModeV1.Line:
+            # Line-buffered input: one byte at a time until '\n', EOF, or
+            # the buffer cap (bounds a newline-less flood).
+            var got: [u8] = []
+            while got.len() < self.buf_cap:
+                val r = self.ops.read(self.fd, 1)
+                match r:
+                    Result.Err(raw):
+                        self._fail_io(raw)
+                        return false
+                    Result.Ok(chunk):
+                        if chunk.len() == 0:
+                            break
+                        got.push(chunk[0])
+                        if chunk[0] == 10:
+                            break
+            if got.len() == 0:
+                self.eof = true
+                return false
+            self.buf = got
+            return true
+        val r = self.ops.read(self.fd, self.buf_cap)
+        match r:
+            Result.Err(raw):
+                self._fail_io(raw)
+                false
+            Result.Ok(chunk):
+                if chunk.len() == 0:
+                    self.eof = true
+                    return false
+                self.buf = chunk
+                true
+
+    me _read_byte() -> i64:
+        """The fgetc engine: next byte 0..255, or -1 with eof/err latched."""
+        while true:
+            if self.buf_pos < self.buf.len():
+                val b = self.buf[self.buf_pos]
+                self.buf_pos = self.buf_pos + 1
+                if self.buf_pos >= self.buf.len():
+                    self._discard_input()
+                return b as i64
+            if self.eof or self.err:
+                return -1
+            if self.buf_mode == SosixStdioBufModeV1.Unbuffered:
+                val r = self.ops.read(self.fd, 1)
+                match r:
+                    Result.Err(raw):
+                        self._fail_io(raw)
+                        return -1
+                    Result.Ok(chunk):
+                        if chunk.len() == 0:
+                            self.eof = true
+                            return -1
+                        return chunk[0] as i64
+            if not self._refill():
+                return -1
+
+    # === output ===
+
+    pub me fwrite(data: [u8], size: u64, nmemb: u64) -> u64:
+        """POSIX fwrite: returns whole items accepted. Bytes of a partial
+        trailing item may already be buffered/written (hosted behavior)."""
+        if size == 0 or nmemb == 0:
+            return 0
+        if not self._ready_write():
+            return 0
+        if size > _SOSIX_STDIO_MAX_IO or nmemb > _SOSIX_STDIO_MAX_IO:
+            val _ = self._fail(_SOSIX_STDIO_EFBIG)
+            return 0
+        val wanted = size * nmemb
+        if data.len() < wanted:
+            val _ = self._fail(_SOSIX_STDIO_EINVAL)
+            return 0
+        # Update-stream discipline: a write after a read repositions the
+        # kernel cursor to the caller-visible position first.
+        if self.readable and self.buf.len() > self.buf_pos:
+            if not self._rewind_input():
+                return 0
+        var accepted = 0u64
+        if self.buf_mode == SosixStdioBufModeV1.Unbuffered:
+            while accepted < wanted:
+                val rc = self.ops.write(
+                    self.fd, data.slice(accepted, wanted))
+                if rc <= 0:
+                    self._fail_io(rc)
+                    break
+                accepted = accepted + rc as u64
+            return accepted / size
+        while accepted < wanted:
+            if self.buf.len() >= self.buf_cap and not self._flush_write():
+                break
+            var take = self.buf_cap - self.buf.len()
+            if take > wanted - accepted:
+                take = wanted - accepted
+            var saw_newline = false
+            var i = 0u64
+            while i < take:
+                val b = data[accepted + i]
+                self.buf.push(b)
+                if b == 10:
+                    saw_newline = true
+                i = i + 1
+            accepted = accepted + take
+            # Line-buffered: a newline in the accepted chunk flushes the
+            # whole pending buffer (flush-early is conforming).
+            if self.buf_mode == SosixStdioBufModeV1.Line and saw_newline:
+                if not self._flush_write():
+                    break
+        accepted / size
+
+    pub me fputc(c: i64) -> i64:
+        """POSIX fputc: c is 0..255; returns c, or -1 with err latched."""
+        val b = c as u8
+        if self.fwrite([b], 1, 1) == 1:
+            return c
+        -1
+
+    pub me fflush() -> i64:
+        """POSIX fflush: flush pending output; for a readable stream,
+        discard buffered input (POSIX input-stream fflush). 0 or -1."""
+        if not self.valid():
+            return self._fail(_SOSIX_STDIO_EBADF)
+        if self.writable and not self._flush_write():
+            return -1
+        if self.readable:
+            self._discard_input()
+        0
+
+    # === input ===
+
+    pub me fread(size: u64, nmemb: u64) -> [u8]:
+        """POSIX fread as a byte-slice return: at most size*nmemb bytes;
+        whole items = bytes.len() / size. A partial trailing item is
+        delivered at EOF (hosted behavior); eof/err latch the reason."""
+        if size == 0 or nmemb == 0:
+            return []
+        if not self._ready_read():
+            return []
+        if size > _SOSIX_STDIO_MAX_IO or nmemb > _SOSIX_STDIO_MAX_IO:
+            val _ = self._fail(_SOSIX_STDIO_EFBIG)
+            return []
+        val wanted = size * nmemb
+        var out: [u8] = []
+        while out.len() < wanted:
+            if self.buf_pos < self.buf.len():
+                var take = self.buf.len() - self.buf_pos
+                if take > wanted - out.len():
+                    take = wanted - out.len()
+                var i = 0u64
+                while i < take:
+                    out.push(self.buf[self.buf_pos + i])
+                    i = i + 1
+                self.buf_pos = self.buf_pos + take
+                if self.buf_pos >= self.buf.len():
+                    self._discard_input()
+            else:
+                if self.eof or self.err:
+                    break
+                if self.buf_mode == SosixStdioBufModeV1.Unbuffered:
+                    val r = self.ops.read(self.fd, wanted - out.len())
+                    match r:
+                        Result.Err(raw):
+                            self._fail_io(raw)
+                        Result.Ok(chunk):
+                            if chunk.len() == 0:
+                                self.eof = true
+                            else:
+                                var j = 0u64
+                                while j < chunk.len():
+                                    out.push(chunk[j])
+                                    j = j + 1
+                else:
+                    if not self._refill():
+                        if self.eof or self.err:
+                            break
+        out
+
+    pub me fgetc() -> i64:
+        """POSIX fgetc: next byte 0..255, or -1 with eof/err latched."""
+        if not self._ready_read():
+            return -1
+        self._read_byte()
+
+    pub me fgets(max: u64) -> text:
+        """POSIX fgets: through '\n' (included), max-1 bytes, or EOF.
+        Returns "" only when nothing was read — check feof()/ferror()."""
+        if not self._ready_read():
+            return ""
+        if max <= 1:
+            return ""
+        var out: [u8] = []
+        while out.len() < max - 1:
+            val b = self._read_byte()
+            if b < 0:
+                break
+            out.push(b as u8)
+            if b == 10:
+                break
+        bytes_to_text(out)
+
+    # === positioning ===
+
+    pub me fseek(offset: i64, whence: i64) -> i64:
+        """POSIX fseek: 0 or -1. Flushes pending output, drops buffered
+        input (repositioning the kernel cursor to the logical read
+        position first), clears eof. Failure sets errno_val only (no
+        sticky err), matching hosted fseek."""
+        if not self.valid():
+            return self._fail(_SOSIX_STDIO_EBADF)
+        if whence != SOSIX_STDIO_SEEK_SET and whence != SOSIX_STDIO_SEEK_CUR and whence != SOSIX_STDIO_SEEK_END:
+            return self._fail(_SOSIX_STDIO_EINVAL)
+        if self.writable and self.buf.len() > 0 and not self._flush_write():
+            return -1
+        if self.readable:
+            if not self._rewind_input():
+                return -1
+        else:
+            self._discard_input()
+        self.eof = false
+        val rc = self.ops.lseek(self.fd, offset, whence)
+        if rc < 0:
+            self.errno_val = _sosix_positive_errno_v1(rc)
+            return -1
+        0
+
+    pub me ftell() -> i64:
+        """POSIX ftell: logical position (buffer-aware), or -1 with
+        errno_val set (ESPIPE on the console streams)."""
+        if not self.valid():
+            return self._fail(_SOSIX_STDIO_EBADF)
+        val rc = self.ops.lseek(self.fd, 0, SOSIX_STDIO_SEEK_CUR)
+        if rc < 0:
+            self.errno_val = _sosix_positive_errno_v1(rc)
+            return -1
+        var pos = rc
+        if self.readable and self.buf.len() > self.buf_pos:
+            pos = pos - ((self.buf.len() - self.buf_pos) as i64)
+        if self.writable:
+            pos = pos + (self.buf.len() as i64)
+        pos
+
+    pub me rewind():
+        """POSIX rewind: fseek(0, SEEK_SET) + clearerr."""
+        val _ = self.fseek(0, SOSIX_STDIO_SEEK_SET)
+        self.clearerr()
+
+    # === buffering mode ===
+
+    pub me setvbuf(mode: SosixStdioBufModeV1, size: u64) -> i64:
+        """POSIX setvbuf: switch buffering on a live stream. size 0 picks
+        the 4096 default for Full/Line; Unbuffered ignores size. 0 or -1."""
+        if not self.valid():
+            return self._fail(_SOSIX_STDIO_EBADF)
+        if self.writable and self.buf.len() > 0 and not self._flush_write():
+            return -1
+        self._discard_input()
+        self.buf_mode = mode
+        if mode == SosixStdioBufModeV1.Unbuffered:
+            self.buf_cap = 0
+        else:
+            self.buf_cap = size
+            if self.buf_cap == 0:
+                self.buf_cap = SOSIX_STDIO_DEFAULT_BUF
+        0
+
+    # === teardown ===
+
+    pub me fclose() -> i64:
+        """POSIX fclose: flush pending output, close the fd (including the
+        pre-opened 0/1/2 — POSIX closes them too), 0 or -1."""
+        if self.closed:
+            return self._fail(_SOSIX_STDIO_EBADF)
+        var rc = 0
+        if self.writable and not self._flush_write():
+            rc = -1
+        if self.fd >= 0:
+            val crc = self.ops.close(self.fd)
+            if crc < 0 and rc == 0:
+                self._fail_io(crc)
+                rc = -1
+        self.closed = true
+        self.fd = -1
+        self._discard_input()
+        rc
+
+fn _sosix_invalid_stream_v1(ops: SosixStdioOpsV1, errno_value: i64) -> SosixFileV1:
+    """The fopen NULL-stream: fd -1, errno_val carrying the failure."""
+    SosixFileV1(
+        fd: -1, readable: false, writable: false, console: false, ops: ops,
+        buf: [], buf_pos: 0, buf_cap: 0,
+        buf_mode: SosixStdioBufModeV1.Full, eof: false, err: false,
+        errno_val: errno_value, closed: true)
+
+struct _SosixModeParseV1:
+    ok: bool
+    readable: bool
+    writable: bool
+    flags: u64
+
+fn _sosix_mode_invalid_v1() -> _SosixModeParseV1:
+    _SosixModeParseV1(ok: false, readable: false, writable: false, flags: 0)
+
+fn _sosix_parse_mode_v1(mode: text) -> _SosixModeParseV1:
+    """fopen mode grammar: [rwa] then any arrangement of one 'b' and one
+    '+' (POSIX 7.21.5.2). 'b' is accepted and ignored — SOSIX has no text
+    translation layer."""
+    val n = mode.len()
+    if n == 0:
+        return _sosix_mode_invalid_v1()
+    val c0 = mode.byte_at(0)
+    var plus = false
+    var bin = false
+    var i = 1u64
+    while i < n:
+        val c = mode.byte_at(i)
+        if c == 43:
+            if plus:
+                return _sosix_mode_invalid_v1()
+            plus = true
+        elif c == 98:
+            if bin:
+                return _sosix_mode_invalid_v1()
+            bin = true
+        else:
+            return _sosix_mode_invalid_v1()
+        i = i + 1
+    var readable = false
+    var writable = false
+    var flags = 0u64
+    if c0 == 114:
+        readable = true
+        flags = SOSIX_STDIO_O_RDONLY
+    elif c0 == 119:
+        writable = true
+        flags = SOSIX_STDIO_O_WRONLY | SOSIX_STDIO_O_CREAT | SOSIX_STDIO_O_TRUNC
+    elif c0 == 97:
+        writable = true
+        flags = SOSIX_STDIO_O_WRONLY | SOSIX_STDIO_O_CREAT | SOSIX_STDIO_O_APPEND
+    else:
+        return _sosix_mode_invalid_v1()
+    if plus:
+        readable = true
+        writable = true
+        flags = (flags & (SOSIX_STDIO_O_CREAT | SOSIX_STDIO_O_TRUNC | SOSIX_STDIO_O_APPEND)) | SOSIX_STDIO_O_RDWR
+    _SosixModeParseV1(ok: true, readable: readable, writable: writable, flags: flags)
+
+fn _sosix_new_stream_v1(
+    ops: SosixStdioOpsV1, fd: i64, readable: bool, writable: bool,
+    console: bool, buf_mode: SosixStdioBufModeV1
+) -> SosixFileV1:
+    var cap = SOSIX_STDIO_DEFAULT_BUF
+    if buf_mode == SosixStdioBufModeV1.Unbuffered:
+        cap = 0
+    SosixFileV1(
+        fd: fd, readable: readable, writable: writable, console: console,
+        ops: ops, buf: [], buf_pos: 0, buf_cap: cap, buf_mode: buf_mode,
+        eof: false, err: false, errno_val: 0, closed: false)
+
+pub fn sosix_fopen_v1(ops: SosixStdioOpsV1, path: text, mode: text) -> SosixFileV1:
+    """POSIX fopen: open path via ops (id 30) and wrap the fd fully
+    buffered. Returns the NULL-stream (valid() == false, errno_val set)
+    on failure — invalid mode/path or a backend -errno."""
+    val parsed = _sosix_parse_mode_v1(mode)
+    if not parsed.ok:
+        return _sosix_invalid_stream_v1(ops, _SOSIX_STDIO_EINVAL)
+    val path_bytes = text_to_bytes(path)
+    if path_bytes.len() == 0:
+        return _sosix_invalid_stream_v1(ops, _SOSIX_STDIO_EINVAL)
+    if path_bytes.len() > SOSIX_STDIO_PATH_MAX:
+        return _sosix_invalid_stream_v1(ops, _SOSIX_STDIO_ENAMETOOLONG)
+    val fd = ops.open(path_bytes, parsed.flags, 0)
+    if fd < 0:
+        return _sosix_invalid_stream_v1(ops, _sosix_positive_errno_v1(fd))
+    _sosix_new_stream_v1(ops, fd, parsed.readable, parsed.writable, false, SosixStdioBufModeV1.Full)
+
+pub fn sosix_fdopen_v1(ops: SosixStdioOpsV1, fd: i64, mode: text) -> SosixFileV1:
+    """POSIX fdopen: wrap an already-open fd (ownership passes to fclose).
+    Fully buffered regardless of fd — the guest has no tty to probe; use
+    setvbuf for line/unbuffered shapes."""
+    val parsed = _sosix_parse_mode_v1(mode)
+    if not parsed.ok:
+        return _sosix_invalid_stream_v1(ops, _SOSIX_STDIO_EINVAL)
+    if fd < 0:
+        return _sosix_invalid_stream_v1(ops, _SOSIX_STDIO_EBADF)
+    _sosix_new_stream_v1(
+        ops, fd, parsed.readable, parsed.writable, fd >= 0 and fd <= 2,
+        SosixStdioBufModeV1.Full)
+
+pub fn sosix_stdin_v1(ops: SosixStdioOpsV1) -> SosixFileV1:
+    """Pre-opened stdin: fd 0, read-only, console, line-buffered input."""
+    _sosix_new_stream_v1(ops, 0, true, false, true, SosixStdioBufModeV1.Line)
+
+pub fn sosix_stdout_v1(ops: SosixStdioOpsV1) -> SosixFileV1:
+    """Pre-opened stdout: fd 1, write-only, console, line-buffered
+    unconditionally (the guest console is the tty stand-in)."""
+    _sosix_new_stream_v1(ops, 1, false, true, true, SosixStdioBufModeV1.Line)
+
+pub fn sosix_stderr_v1(ops: SosixStdioOpsV1) -> SosixFileV1:
+    """Pre-opened stderr: fd 2, write-only, console, unbuffered (POSIX)."""
+    _sosix_new_stream_v1(ops, 2, false, true, true, SosixStdioBufModeV1.Unbuffered)
+
+export SosixStdioBufModeV1, SosixStdioOpsV1, SosixFileV1
+export sosix_fopen_v1, sosix_fdopen_v1
+export sosix_stdin_v1, sosix_stdout_v1, sosix_stderr_v1

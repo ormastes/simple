@@ -1,0 +1,76 @@
+"""Guest-side SosixStdioOpsV1 wiring: raw SOSIX ids -> the stdio vtable.
+
+Thin adapter so stdio_v1.spl stays kernel-free and host-testable; this is
+the only module that knows the syscall numbers. Ids per the interface doc
+§1 map (all wired): open=30, read=31, write=32, close=33, lseek=46, plus
+the DebugWrite id 60 fallback for console writes.
+
+Byte-slice externs follow the rt_file_facade.spl precedent (declared
+locally — extern decls do not re-export, and the VFS-IPC userlib client is
+not codegen-clean for guest images). fopen's mode argument has no plumbing
+through the C-ABI open extern; create permissions default in the kernel
+(gap recorded in the interface doc).
+
+Not host-tested (extern-bound); exercised in the guest by the clang-
+bringup lane's boot cycles. Host-side stdio behavior is covered by
+test/01_unit/os/services/sosix_stdio_v1_spec.spl against a fake backend.
+"""
+
+use os.services.sosix.stdio_v1.{SosixStdioOpsV1}
+
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+extern fn rt_simpleos_file_open_bytes(path: [u8], flags: u64) -> i64
+extern fn rt_simpleos_file_read_bytes(fd: u64, out: [u8], max_len: u64) -> i64
+extern fn rt_simpleos_file_write_bytes(fd: u64, data: [u8]) -> i64
+
+val _SOSIX_STDIO_GUEST_CLOSE: u64 = 33
+val _SOSIX_STDIO_GUEST_LSEEK: u64 = 46
+val _SOSIX_STDIO_GUEST_DEBUG_WRITE: u64 = 60
+
+fn _sosix_guest_open_v1(path: [u8], flags: u64, mode: u64) -> i64:
+    # id 30 via the C-ABI byte-slice extern; the create-mode argument is
+    # not plumbed through it (recorded gap — kernel defaults apply).
+    val _ = mode
+    rt_simpleos_file_open_bytes(path, flags)
+
+fn _sosix_guest_read_v1(fd: i64, max_len: u64) -> Result<[u8], i64>:
+    if max_len == 0:
+        return Result.Ok([])
+    var buf: [u8] = [0u8; max_len]
+    val rc = rt_simpleos_file_read_bytes(fd as u64, buf, max_len)
+    if rc < 0:
+        return Result.Err(rc)
+    if rc as u64 > max_len:
+        return Result.Err(-5)
+    Result.Ok(buf.slice(0, rc as u64))
+
+fn _sosix_guest_write_v1(fd: i64, data: [u8]) -> i64:
+    val rc = rt_simpleos_file_write_bytes(fd as u64, data)
+    if rc < 0 and (fd == 1 or fd == 2):
+        # Console fallback: DebugWrite (id 60) reaches the serial port even
+        # when the fd-1/2 kernel routing is not yet up in the guest.
+        var i = 0u64
+        while i < data.len():
+            val _r = syscall(
+                _SOSIX_STDIO_GUEST_DEBUG_WRITE, data[i] as u64, 0, 0, 0, 0)
+            i = i + 1
+        return data.len() as i64
+    rc
+
+fn _sosix_guest_close_v1(fd: i64) -> i64:
+    syscall(_SOSIX_STDIO_GUEST_CLOSE, fd as u64, 0, 0, 0, 0)
+
+fn _sosix_guest_lseek_v1(fd: i64, offset: i64, whence: i64) -> i64:
+    syscall(
+        _SOSIX_STDIO_GUEST_LSEEK, fd as u64, offset as u64, whence as u64,
+        0, 0)
+
+pub fn sosix_stdio_guest_ops_v1() -> SosixStdioOpsV1:
+    """The raw-id vtable a SOSIX guest passes to sosix_fopen_v1 and the
+    sosix_std{in,out,err}_v1 constructors."""
+    SosixStdioOpsV1(
+        open: _sosix_guest_open_v1, read: _sosix_guest_read_v1,
+        write: _sosix_guest_write_v1, close: _sosix_guest_close_v1,
+        lseek: _sosix_guest_lseek_v1)
+
+export sosix_stdio_guest_ops_v1
