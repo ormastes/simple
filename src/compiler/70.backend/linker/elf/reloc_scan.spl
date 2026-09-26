@@ -8,7 +8,7 @@
 #     R_*_GLOB_DAT for GOT slots of imports, symbolic ABS64 for data words
 #     that point into a shared library),
 # or a named error when the output cannot represent it (copy relocations,
-# canonical PLTs, text relocations, TLS, absolute narrow relocs in a PIE,
+# text relocations, TLS, absolute narrow relocs in a PIE,
 # RELATIVE relocs in a static PIE that has no self-relocating startup).
 #
 # The driver (elf_static_link) resolves each relocation's symbol into an
@@ -164,7 +164,9 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                 import_type = import_type.push(r.stype)
             else if not r.weak:
                 import_weak[import_idx[r.name] - 1] = false
-            if c == RC_BRANCH:
+            val canonical_plt = not pie and (r.stype == 2 or r.stype == 10) and
+                c != RC_GOT and c != RC_GOT_RELAX
+            if c == RC_BRANCH or canonical_plt:
                 if not plt_idx.has(r.name):
                     plt_idx[r.name] = plt_names.len()
                     plt_names = plt_names.push(r.name)
@@ -178,7 +180,9 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     return Err("UnsupportedFeature: text relocation: {elf_reloc_what(r)} in a read-only section")
                 sym_abs = sym_abs.push(j)
             else:
-                return Err("UnsupportedFeature: {elf_reloc_what(r)} (a shared-library symbol) needs a copy relocation or canonical PLT; recompile with -fPIC")
+                if r.stype == 1:
+                    return Err("UnsupportedFeature: {elf_reloc_what(r)} (a shared-library object) needs a copy relocation; recompile with -fPIC")
+                return Err("UnsupportedFeature: {elf_reloc_what(r)} cannot represent this shared-library symbol in the selected link mode; recompile with -fPIC")
         else:
             if c == RC_GOT or (c == RC_GOT_RELAX and not r.relax):
                 if a64 and r.addend != 0:
