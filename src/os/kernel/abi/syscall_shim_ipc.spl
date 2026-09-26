@@ -4,9 +4,10 @@
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.ipc.syscall.{_handle_ipc_send}
 use os.kernel.ipc.syscall.{_handle_ipc_recv}
-use os.kernel.ipc.syscall.{_handle_ipc_create_port}
-use os.kernel.ipc.syscall.{_handle_ipc_connect}
-use os.kernel.ipc.syscall_ipc.{_handle_ipc_send_owned_v1_state, _handle_ipc_recv_owned_v1_state}
+use os.kernel.ipc.syscall_ipc.{
+    _handle_ipc_create_port_state, _handle_ipc_connect_state,
+    _handle_ipc_send_owned_v1_state, _handle_ipc_recv_owned_v1_state
+}
 use os.kernel.ipc.syscall.{_handle_notification_create}
 use os.kernel.ipc.syscall.{_handle_notification_signal}
 use os.kernel.ipc.syscall.{_handle_notification_wait}
@@ -80,39 +81,39 @@ fn spl_handle_ipc_recv(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
 # ===========================================================================
 # syscall 22 — ipc_create_port   [IMPLEMENTED]
 #
-# a0 = port name hash (or 0 for anonymous)
-# a1..a5 unused
+# a0 = pointer to name bytes (ignored when a1 = 0 for anonymous)
+# a1 = name length; a2..a5 unused
 # returns new port ID on success, negative errno on failure
 # ===========================================================================
 @export("C", name: "spl_handle_ipc_create_port")
 fn spl_handle_ipc_create_port(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_ipc_create_port stub.
 
-    Forwards to _handle_ipc_create_port() in syscall.spl.
-    Syscall number 22: allocate a new IPC message port.
+    Retains the updated IPC owner state after exact named-listen admission.
     """
     val args = _make_args(22, a0, a1, a2, a3, a4, a5)
-    val result = _handle_ipc_create_port(args, g_shim_scheduler, g_shim_ipc)
-    result.value
+    val state = _handle_ipc_create_port_state(args, g_shim_scheduler, g_shim_ipc)
+    g_shim_scheduler = state.scheduler
+    g_shim_ipc = state.ipc
+    state.result.value
 
 # ===========================================================================
 # syscall 23 — ipc_connect   [IMPLEMENTED]
 #
-# a0 = target port ID
-# a1..a5 unused
-# returns connection handle on success, negative errno on failure
+# a0 = pointer to exact endpoint name; a1 = name length
+# a2..a5 unused; returns port ID on success, negative errno on failure
 # ===========================================================================
 @export("C", name: "spl_handle_ipc_connect")
 fn spl_handle_ipc_connect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_ipc_connect stub.
 
-    Forwards to _handle_ipc_connect() in syscall.spl.
-    Syscall number 23: connect to an existing IPC port.
-    Note: _handle_ipc_connect takes (args, ipc) only — no scheduler.
+    Uses the live scheduler caller for exact named-connect admission.
     """
     val args = _make_args(23, a0, a1, a2, a3, a4, a5)
-    val result = _handle_ipc_connect(args, g_shim_ipc)
-    result.value
+    val state = _handle_ipc_connect_state(args, g_shim_scheduler, g_shim_ipc)
+    g_shim_scheduler = state.scheduler
+    g_shim_ipc = state.ipc
+    state.result.value
 
 # ===========================================================================
 # syscall 24 — notification_create   [IMPLEMENTED]

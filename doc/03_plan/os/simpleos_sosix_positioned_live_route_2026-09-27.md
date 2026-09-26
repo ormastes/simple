@@ -48,6 +48,11 @@ and NFR requirements still require user selection.
   owner-checked, non-consuming receive preview. The queue mints and consumes
   exact-pair reply permits. This is source wiring, not yet guest evidence;
   the trap and copyout behavior still need an admitted build and ring-3 test.
+- The live x86_64 22/23 shims now retain the IPC manager state and use the
+  scheduler caller. Their leaves validate name copy-in and require exact
+  `IpcListen(name)` or `IpcConnect(name)` authority. Anonymous reply-port
+  creation remains available without a named listen grant. The source change
+  still needs ring-3 allow/deny and bad-pointer evidence.
 - `root_service_catalog.spl` calls 136/137. The live x86_64 dispatch switch
   now reaches strong Simple catalog shims for both IDs. They adopt returned
   scheduler/IPC state; ring-3 PID1 service lifecycle evidence is still needed.
@@ -62,6 +67,7 @@ and NFR requirements still require user selection.
 
 | ID | User request | Live x86_64 route at this revision | Release action |
 |---|---|---|---|
+| 22/23 | Create anonymous/named endpoint; resolve named endpoint | Strong Simple shims retain returned IPC state; leaves validate names and exact named capability | Test allowed anonymous creation, denied service-name squatting, denied cross-name discovery, and bad user pointers in ring 3. |
 | 132 | `ipc_send_owned_v1` / `ipc_reply_owned_v1` | C case and strong Simple shim now reach bounded copy-in, scheduler-current source-port check, and an exact `IpcConnect` check for cross-task requests | Verify cap issuance and ring-3 send/reply behavior. |
 | 133 | `ipc_recv_owned_v1_into` | C case and strong Simple shim now preview, copyout, then dequeue | Verify single-owner serialization and ring-3 receipt with a bad-output-pointer negative control. |
 | 134/135 | Registered positioned read/write | C switch and strong Simple shim present | Install a real registry owner and issue real file/buffer identities before claiming guest behavior. |
@@ -118,6 +124,9 @@ assumption needs a serialized transition before multicore release.
    flag; the client receives and validates the 133 header and frame length.
    It yields on EAGAIN to preserve its synchronous caller API. Admit this
    round trip and the kernel `fd_io` legacy bridge in a guest before promotion.
+   Measure wait-loop yield count, response latency, and CPU service time under
+   a delayed or failed VFS service; replace the polling wait with an admitted
+   blocking notification or receive transition if it misses the selected NFR.
 3. The source contracts now reflect both routes. Add executable old-client /
    new-service and new-client / new-service round trips, malformed lengths,
    wrong receiver, missing reply permit, and EAGAIN handling. The 133 path is

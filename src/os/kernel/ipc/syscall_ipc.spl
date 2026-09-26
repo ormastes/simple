@@ -37,13 +37,10 @@ val IPC_OWNED_V1_REPLY_METHOD_FLAG: u64 = 0x80000000u64
 # payload property may select this ABI: every other arg4 value is legacy.
 val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
-fn _ipc_copy_user_text(addr: u64, length: u64) -> text:
-    var bytes: [u8] = []
-    var offset: u64 = 0
-    while offset < length:
-        bytes.push(rt_copy_user_byte(addr + offset))
-        offset = offset + 1
-    rt_string_from_byte_array(bytes)
+fn _ipc_copy_user_text(addr: u64, length: u64) -> text?:
+    if val bytes = user_copyin_bytes_validated(addr, length):
+        return Some(rt_string_from_byte_array(bytes))
+    nil
 
 fn _ipc_push_u32(bytes: [u8], value: u32):
     bytes.push((value & 0xFFu32).to_u8())
@@ -299,10 +296,20 @@ fn _handle_ipc_create_port_state(args: SyscallArgs, scheduler: Scheduler, ipc: I
     val current = scheduler.get_current()
     if args.arg1 > IPC_SYSCALL_MAX_PORT_NAME_BYTES:
         return IpcSyscallState(result: SyscallResult(value: -1), scheduler: scheduler, ipc: ipc_mgr)
-    val name = if args.arg1 == 0u64:
-        ""
-    else:
-        _ipc_copy_user_text(args.arg0, args.arg1)
+    var name = ""
+    if args.arg1 != 0u64:
+        if val copied_name = _ipc_copy_user_text(args.arg0, args.arg1):
+            name = copied_name
+        else:
+            return IpcSyscallState(
+                result: SyscallResult(value: -(EFAULT as i64)),
+                scheduler: scheduler, ipc: ipc_mgr
+            )
+    if name != "" and not ipc_mgr.cap_check(current, CapabilityKind.IpcListen(port_name: name)):
+        return IpcSyscallState(
+            result: SyscallResult(value: -(EPERM as i64)),
+            scheduler: scheduler, ipc: ipc_mgr
+        )
     val port = ipc_mgr.create_port(current, name)
     if port.id == 0u64:
         # Both a full table and a duplicate service name are creation failures;
@@ -348,15 +355,27 @@ fn _handle_ipc_connect_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcMa
     var ipc_mgr = ipc
     if args.arg1 == 0u64 or args.arg1 > IPC_SYSCALL_MAX_PORT_NAME_BYTES:
         return IpcSyscallState(result: SyscallResult(value: -1), scheduler: scheduler, ipc: ipc_mgr)
-    val name = _ipc_copy_user_text(args.arg0, args.arg1)
+    val copied_name = _ipc_copy_user_text(args.arg0, args.arg1)
+    if copied_name == nil:
+        return IpcSyscallState(
+            result: SyscallResult(value: -(EFAULT as i64)),
+            scheduler: scheduler, ipc: ipc_mgr
+        )
+    val name = copied_name.unwrap()
+    val current = scheduler.get_current()
+    if not ipc_mgr.cap_check(current, CapabilityKind.IpcConnect(port_name: name)):
+        return IpcSyscallState(
+            result: SyscallResult(value: -(EPERM as i64)),
+            scheduler: scheduler, ipc: ipc_mgr
+        )
     val port = ipc_mgr.connect(name)
     if port != nil:
         val p = port
         return IpcSyscallState(result: SyscallResult(value: p.id.to_i64()), scheduler: scheduler, ipc: ipc_mgr)
     IpcSyscallState(result: SyscallResult(value: -1), scheduler: scheduler, ipc: ipc_mgr)
 
-fn _handle_ipc_connect(args: SyscallArgs, ipc: IpcManager) -> SyscallResult:
-    _handle_ipc_connect_state(args, Scheduler.new_bootstrap(), ipc).result
+fn _handle_ipc_connect(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    _handle_ipc_connect_state(args, scheduler, ipc).result
 
 fn _handle_ipc_port_owner(args: SyscallArgs, ipc: IpcManager) -> SyscallResult:
     """Return the authenticated task owner of arg0's live IPC port."""

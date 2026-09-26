@@ -5,7 +5,9 @@ use os.kernel.ipc.syscall_ipc.{
     IPC_OWNED_V1_HEADER_BYTES,
     ipc_owned_v1_encode,
     _handle_ipc_send_owned_v1_state,
-    _handle_ipc_recv_owned_v1_state
+    _handle_ipc_recv_owned_v1_state,
+    _handle_ipc_create_port_state,
+    _handle_ipc_connect_state
 }
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.scheduler.scheduler.{Scheduler}
@@ -149,3 +151,21 @@ describe "owned-copy IPC syscall authentication and bounds":
 
         val timeout = _handle_ipc_recv_owned_v1_state(_args(133, destination.id, 0x1000, 32, 1, 10, 0), fault.scheduler, fault.ipc)
         expect(timeout.result.value).to_equal(-(ENOSYS as i64))
+
+describe "live IPC endpoint creation and name-copy bounds":
+    it "creates a caller-owned anonymous reply port without a named listen grant":
+        val scheduler = Scheduler.new()
+        val current = scheduler.get_current()
+        val state = _handle_ipc_create_port_state(
+            _args(22, 0, 0, 0, 0, 0, 0), scheduler, IpcManager.new())
+        expect(state.result.value).to_be_greater_than(0)
+        expect(state.ipc.port_is_owned_by(state.result.value as u64, current.id)).to_equal(true)
+
+    it "rejects invalid name pointers before creating or resolving a port":
+        val scheduler = Scheduler.new()
+        val created = _handle_ipc_create_port_state(
+            _args(22, 0, 3, 0, 0, 0, 0), scheduler, IpcManager.new())
+        expect(created.result.value).to_equal(-(EFAULT as i64))
+        val connected = _handle_ipc_connect_state(
+            _args(23, 0, 3, 0, 0, 0, 0), scheduler, created.ipc)
+        expect(connected.result.value).to_equal(-(EFAULT as i64))
