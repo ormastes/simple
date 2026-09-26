@@ -19,12 +19,13 @@ use std.spec.step
 use compiler.backend.linker.reloc_engine.{
 
     RelocArch, RelocTarget, RelocResult,
-    reloc_apply, reloc_apply_x86_64, reloc_apply_aarch64, reloc_apply_riscv,
+    reloc_apply, reloc_apply_x86_64, reloc_apply_arm32, reloc_apply_aarch64, reloc_apply_riscv,
     reloc_patch_bytes, reloc_arch_from_machine,
     patch_u32_le, patch_u64_le, read_u32_le,
     R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64,
     R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_PLT32,
     R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
+    R_ARM_NONE, R_ARM_PC24, R_ARM_ABS32, R_ARM_REL32, R_ARM_CALL, R_ARM_JUMP24,
     R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16,
     R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PLT32,
     R_AARCH64_TSTBR14, R_AARCH64_CONDBR19, R_AARCH64_CALL26, R_AARCH64_JUMP26,
@@ -121,11 +122,53 @@ describe "reloc_engine - reloc_arch_from_machine":
         val arch = reloc_arch_from_machine(183)
         expect(arch == RelocArch.AArch64).to_equal(true)
 
+    it "machine 40 maps to Arm32":
+        step("Verify: machine 40 maps to Arm32")
+        val arch = reloc_arch_from_machine(40)
+        expect(arch == RelocArch.Arm32).to_equal(true)
+
     it "machine 243 maps to Riscv64":
         # @req: REQ-SSPEC-LOCAL-001
         step("Verify: machine 243 maps to Riscv64")
         val arch = reloc_arch_from_machine(243)
         expect(arch == RelocArch.Riscv64).to_equal(true)
+
+# ============================================================================
+# ARM32 relocations
+# ============================================================================
+
+describe "reloc_engine - ARM32 relocations":
+    it "applies absolute and relative 32-bit data formulas":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val absolute = reloc_apply_arm32(bytes, 0, R_ARM_ABS32, 0x1000, 8, 0)
+        val relative = reloc_apply_arm32(bytes, 0, R_ARM_REL32, 0x1800, 4, 0x1000)
+
+        expect(absolute.success).to_equal(true)
+        expect(absolute.value).to_equal(0x1008)
+        expect(relative.success).to_equal(true)
+        expect(relative.value).to_equal(0x804)
+
+    it "encodes forward and backward ARM branch immediates":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val forward = reloc_apply_arm32(bytes, 0, R_ARM_CALL, 0x1100, 0, 0x1000)
+        val backward = reloc_apply_arm32(bytes, 0, R_ARM_JUMP24, 0x0f00, 0, 0x1000)
+
+        expect(forward.success).to_equal(true)
+        expect(forward.value).to_equal(0x40)
+        expect(backward.success).to_equal(true)
+        expect(backward.value).to_equal(0xffffc0)
+
+    it "rejects misaligned out-of-range and unsupported ARM relocations":
+        val bytes: [i64] = [0, 0, 0, 0]
+        expect(reloc_apply_arm32(bytes, 0, R_ARM_PC24, 0x1002, 0, 0x1000).success).to_equal(false)
+        expect(reloc_apply_arm32(bytes, 0, R_ARM_CALL, 0x2100000, 0, 0).success).to_equal(false)
+        expect(reloc_apply_arm32(bytes, 0, 255, 0, 0, 0).success).to_equal(false)
+
+    it "preserves an ARM branch opcode while patching imm24":
+        val branch: [i64] = [0, 0, 0, 0xeb]
+        val patched = reloc_patch_bytes(RelocArch.Arm32, branch, 0, R_ARM_CALL, 0x1100, 0, 0x1000)
+
+        expect(patched).to_equal([0x40, 0x00, 0x00, 0xeb])
 
 # ============================================================================
 # x86_64 relocations

@@ -274,7 +274,12 @@ HIR and target-specific MIR lowering with that raw backend. It resolves
 internal `R_RISCV_CALL_PLT` AUIPC/JALR pairs against the placed image and fails
 closed on undefined, malformed, or unsupported relocations. RV32 QEMU/GHDL
 integration lanes use this real source compiler. The Arm32 backend remains an
-explicit completion gap; remote placement itself is wired.
+explicit completion gap; remote placement itself is wired. The linker
+relocation layer now recognizes `EM_ARM` and applies the foundational AAELF32
+`NONE`, `ABS32`, `REL32`, `PC24`, `CALL`, and `JUMP24` formulas with checked
+range/alignment and opcode-preserving ARM branch patching. ELF32 parsing,
+Thumb relocations, and ARM executable emission remain before that lane can
+consume the existing LLVM ARM32 object backend.
 
 Implemented source slice:
 
