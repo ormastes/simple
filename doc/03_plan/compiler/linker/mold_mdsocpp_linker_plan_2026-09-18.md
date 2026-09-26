@@ -394,7 +394,15 @@ raw path also decodes and applies narrow Thumb-1 `R_ARM_THM_JUMP11` and
 `R_ARM_THM_JUMP8` REL branches with signed range checks while preserving their
 opcode and condition fields. Width-correct `R_ARM_ABS8`/`R_ARM_ABS16` data
 relocations and bare-metal-default `R_ARM_TARGET1` (`ABS32`) are also admitted
-with signed-or-unsigned overflow checks. The remaining relocation corpus, hosted ARM executable emission, and real target
+with signed-or-unsigned overflow checks. `R_ARM_THM_PC8` now decodes the
+AAELF32 wrap-adjusted REL addend and patches LDR-literal/ADR immediates from
+`S + A - (P & ~3)` with alignment and range checks. Raw-image bounds validation
+uses each relocation's actual one-, two-, or four-byte field width, so a narrow
+Thumb relocation may occupy the final halfword of an input section. The
+natural LLVM Cortex-M3 `R_ARM_THM_PC12` literal-load form is also decoded and
+patched with its signed U-bit/magnitude encoding and checked 12-bit reach; both
+forms have checked-in ELF32 oracle objects. The remaining relocation corpus,
+hosted ARM executable emission, and real target
 execution evidence remain open.
 
 The compiler-owned ARM32 remote adapter now performs the full source-to-image

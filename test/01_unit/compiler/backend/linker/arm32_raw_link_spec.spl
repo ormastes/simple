@@ -5,7 +5,10 @@ use compiler.backend.linker.elf_parser.{
     ElfObject, ElfSymbol, ElfRelocation, elf_make_empty_strtab,
     STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC
 }
-use compiler.backend.linker.elf.arm32_raw_link.{elf_arm32_link_parsed}
+use compiler.backend.linker.elf.arm32_raw_link.{elf_arm32_link_parsed, elf_arm32_link_raw}
+use std.io_runtime.{file_read_bytes}
+
+val ARM32_FIX: text = "test/fixtures/linker/arm32"
 
 fn arm32_raw_symbol(name: text, binding: i64, section: i64, value: i64,
         symbol_type: i64) -> ElfSymbol:
@@ -53,6 +56,16 @@ fn arm32_raw_main_object(target_binding: i64) -> ElfObject:
         r_addend: 0, section_idx: 0, target_section_idx: 1)]
     arm32_raw_object(symbols, relocations, [0, 0, 0, 0])
 
+fn arm32_raw_pc8_main_object() -> ElfObject:
+    val symbols = [
+        arm32_raw_blank_symbol(),
+        arm32_raw_symbol("main", STB_GLOBAL, 1, 1, STT_FUNC),
+        arm32_raw_symbol("target", STB_GLOBAL, 0, 0, STT_NOTYPE)
+    ]
+    val relocations = [ElfRelocation(r_offset: 0, r_info: (2 << 32) | 11,
+        r_addend: 0, section_idx: 0, target_section_idx: 1)]
+    arm32_raw_object(symbols, relocations, [0x00, 0x48])
+
 fn arm32_raw_target_object(binding: i64) -> ElfObject:
     arm32_raw_object([
         arm32_raw_blank_symbol(),
@@ -91,6 +104,28 @@ fn arm32_raw_exidx_object() -> ElfObject:
         relocations: [], strtab: empty, shstrtab: empty, raw: raw)
 
 describe "ARM32 raw ELF linker":
+    it "parses and links the LLVM AAELF32 Thumb PC8 fixture":
+        val linked = elf_arm32_link_raw([
+            file_read_bytes("{ARM32_FIX}/thumb_pc8_main.o"),
+            file_read_bytes("{ARM32_FIX}/thumb_pc8_target.o")
+        ], 0x1000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        expect(linked.unwrap().entry_addr).to_equal(0x1001)
+        expect(linked.unwrap().bytes[0]).to_equal(0x01)
+        expect(linked.unwrap().bytes[1]).to_equal(0x48)
+
+    it "links LLVM's natural Cortex-M3 Thumb PC12 literal relocation":
+        val linked = elf_arm32_link_raw([
+            file_read_bytes("{ARM32_FIX}/thumb_pc12_main.o"),
+            file_read_bytes("{ARM32_FIX}/thumb_pc8_target.o")
+        ], 0x1000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        expect(linked.unwrap().entry_addr).to_equal(0x1001)
+        expect(linked.unwrap().bytes[0]).to_equal(0xdf)
+        expect(linked.unwrap().bytes[1]).to_equal(0xf8)
+        expect(linked.unwrap().bytes[2]).to_equal(0x04)
+        expect(linked.unwrap().bytes[3]).to_equal(0x00)
+
     it "lays out objects, preserves a Thumb entry, and applies ABS32":
         val linked = elf_arm32_link_parsed([
             arm32_raw_main_object(STB_GLOBAL),
@@ -104,6 +139,15 @@ describe "ARM32 raw ELF linker":
         expect(image.bytes[1]).to_equal(0x10)
         expect(image.bytes[4]).to_equal(0xaa)
         expect(image.bytes[7]).to_equal(0xdd)
+
+    it "applies a two-byte Thumb PC8 relocation at a section boundary":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_pc8_main_object(),
+            arm32_raw_target_object(STB_GLOBAL)
+        ], 0x1000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        expect(linked.unwrap().bytes[0]).to_equal(0x01)
+        expect(linked.unwrap().bytes[1]).to_equal(0x48)
 
     it "resolves an absent weak relocation target to zero":
         val linked = elf_arm32_link_parsed([
