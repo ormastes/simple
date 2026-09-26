@@ -1173,3 +1173,11 @@ V3 leases. A safe Simple adapter uses a second runtime-owned opaque handle and
 never exposes PID, process start identity, or native token halves. Until its
 argv/byte-array and returned projection ABI is conformance-tested in both native
 and interpreter modes, the C transport cannot be called directly from Simple.
+
+Current source implements pinned input in V3 and exact pinned tool/cwd/argv/env
+in V4 as separate process starts. Their receipts cannot be joined as one
+execution. The selected inspector requires a new versioned request and receipt
+combining those facts with explicit stdin write/close status and a retained
+opaque lease. Keep V4's fixed packet unchanged and follow
+`doc/03_plan/compiler/parser_inspection_atomic_input_owner_2026-09-27.md` for
+the native owner, Simple façade, compiler join, and negative matrix.

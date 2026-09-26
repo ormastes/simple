@@ -36,3 +36,8 @@ bootstrap-seed diagnostics cannot close product gates. The next product-critical
 unit is the canonical Simple grammar/action provider and its differential
 corpus. GPU, SIMD, and generated-code promotion must consume that same semantic
 oracle rather than define separate parser behavior.
+
+The external binary-inspection authority for generated artifacts also remains
+blocked by `doc/08_tracking/bug/parser_inspection_atomic_input_owner_gap_2026-09-27.md`:
+the current pinned-input V3 process and exact-environment V4 process are
+different executions. Their receipts cannot be joined to satisfy EODL REQ-016.

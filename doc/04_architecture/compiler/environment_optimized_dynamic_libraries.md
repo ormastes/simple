@@ -22,6 +22,10 @@ active-to-draining replacement, and retirement after retained uses reach zero.
 Runtime process V3 is likewise a transport primitive; exact tool/argv/
 environment and output identities are joined by a separate admitted inspector
 owner before any inspection token can authorize publication.
+The current V3 pinned-input and V4 exact-environment process paths do not
+produce one shared authority. EODL REQ-016 requires the versioned atomic-input
+owner in `doc/03_plan/compiler/parser_inspection_atomic_input_owner_2026-09-27.md`;
+neither existing receipt may be promoted by a metadata-only join.
 
 ## Context
 
