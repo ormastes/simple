@@ -159,6 +159,9 @@ Cross-object `R_X86_64_PC16` and `R_X86_64_PC8` now apply only when their
 signed deltas fit, with the successful bytes pinned to an ld.lld 23.1 oracle.
 Low-address boot layouts can now apply `R_X86_64_16` and `R_X86_64_8`;
 hosted addresses that do not zero-extend from those fields fail by name.
+AArch64 `ABS32`, `ABS16`, `PREL32`, and `PREL16` now implement the exact
+AAELF64 static-data overflow ranges; this fixes PREL32's former over-wide
+positive bound and replaces ABS32 truncation with a named failure.
 
 The x86_64 local-exec set now includes both instruction-field `TPOFF32` and
 data-word `TPOFF64`, with the latter checked against an lld static oracle.

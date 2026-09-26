@@ -25,7 +25,8 @@ use compiler.backend.linker.reloc_engine.{
     R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64,
     R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_PLT32,
     R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
-    R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26, R_AARCH64_JUMP26,
+    R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16,
+    R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_CALL26, R_AARCH64_JUMP26,
     R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC,
     R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC,
     R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_HI20, R_RISCV_LO12_I
@@ -222,6 +223,26 @@ describe "reloc_engine - AArch64 relocations":
         val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS64, 0x10000, 0, 0)
         expect(result.success).to_equal(true)
         expect(result.value).to_equal(0x10000)
+
+    it "AArch64 ABS32 and ABS16 enforce AAELF64 signed-or-unsigned ranges":
+        # @req REQ-SSPEC-COMPILER
+        val bytes: [i64] = [0, 0, 0, 0]
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS32, -2147483648, 0, 0).success).to_equal(true)
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS32, 4294967295, 0, 0).success).to_equal(true)
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS32, 4294967296, 0, 0).success).to_equal(false)
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS16, -32768, 0, 0).success).to_equal(true)
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS16, 65535, 0, 0).success).to_equal(true)
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS16, 65536, 0, 0).success).to_equal(false)
+
+    it "AArch64 PREL32 and PREL16 enforce signed PC-relative ranges":
+        # @req REQ-SSPEC-COMPILER
+        val bytes: [i64] = [0, 0, 0, 0]
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_PREL32, 2147483647, 0, 0).success).to_equal(true)
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_PREL32, 2147483648, 0, 0).success).to_equal(false)
+        expect(reloc_apply_aarch64(bytes, 0, R_AARCH64_PREL16, -32768, 0, 0).success).to_equal(true)
+        val overflow = reloc_apply_aarch64(bytes, 0, R_AARCH64_PREL16, 32768, 0, 0)
+        expect(overflow.success).to_equal(false)
+        expect(overflow.error).to_contain("signed 16-bit")
 
     it "R_AARCH64_CALL26 computes (S + A - P) >> 2 masked to 26 bits":
         # @req REQ-SSPEC-COMPILER

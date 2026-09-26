@@ -44,7 +44,8 @@ val R_X86_64_REX_GOTPCRELX: i64 = 42  # G + GOT + A - P (relaxable, REX-prefixed
 
 val R_AARCH64_NONE: i64      = 0
 val R_AARCH64_ABS64: i64     = 257  # S + A
-val R_AARCH64_ABS32: i64     = 258  # S + A (u32)
+val R_AARCH64_ABS32: i64     = 258  # S + A (checked signed-or-unsigned 32-bit)
+val R_AARCH64_ABS16: i64     = 259  # S + A (checked signed-or-unsigned 16-bit)
 val R_AARCH64_LDST8_ABS_LO12_NC: i64 = 278   # (S+A) & 0xfff, into imm12 (byte, unscaled)
 val R_AARCH64_JUMP26: i64    = 282  # S + A - P (bits 27:2), B — same formula as CALL26
 val R_AARCH64_CALL26: i64    = 283  # S + A - P (bits 27:2), BL
@@ -56,6 +57,7 @@ val R_AARCH64_LDST64_ABS_LO12_NC: i64 = 286  # ((S+A) & 0xfff) >> 3, into imm12 
 val R_AARCH64_LDST128_ABS_LO12_NC: i64 = 299 # ((S+A) & 0xfff) >> 4, into imm12 (16-byte scaled)
 val R_AARCH64_PREL64: i64    = 260  # S + A - P (64-bit data)
 val R_AARCH64_PREL32: i64    = 261  # S + A - P (32-bit data, e.g. .eh_frame)
+val R_AARCH64_PREL16: i64    = 262  # S + A - P (checked signed 16-bit)
 val R_AARCH64_ADR_GOT_PAGE: i64 = 311      # Page(G(GDAT(S+A))) - Page(P), ADRP encoding
 val R_AARCH64_LD64_GOT_LO12_NC: i64 = 312  # G(GDAT(S+A)) & 0xff8, LDR imm12 (8-byte scaled)
 
@@ -280,7 +282,15 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
 
     if rtype == R_AARCH64_ABS32:
         val v = s + a
+        if v < -2147483648 or v >= 4294967296:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ABS32 out of range: (S + A) must be in [-2^31, 2^32)")
         return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_AARCH64_ABS16:
+        val v = s + a
+        if v < -32768 or v >= 65536:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ABS16 out of range: (S + A) must be in [-2^15, 2^16)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
 
     if rtype == R_AARCH64_CALL26 or rtype == R_AARCH64_JUMP26:
         # AAELF64: BL (CALL26) and B (JUMP26) share the formula and imm26
@@ -296,11 +306,17 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         return RelocResult(success: true, offset: offset, value: (v >> 2) & 0x3ffffff, error: "")
 
     if rtype == R_AARCH64_PREL32:
-        # AAELF64 PREL32: -2^31 <= S + A - P < 2^32; reject rather than mask.
+        # AAELF64 PREL32: -2^31 <= S + A - P < 2^31; reject rather than mask.
         val v = s + a - p
-        if v < -2147483648 or v >= 4294967296:
-            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_PREL32 out of range: (S + A - P) must be in [-2^31, 2^32)")
+        if v < -2147483648 or v >= 2147483648:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_PREL32 out of range: (S + A - P) must be in [-2^31, 2^31)")
         return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_AARCH64_PREL16:
+        val v = s + a - p
+        if v < -32768 or v >= 32768:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_PREL16 out of signed 16-bit range (S + A - P)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
 
     if rtype == R_AARCH64_PREL64:
         return RelocResult(success: true, offset: offset, value: s + a - p, error: "")
@@ -423,6 +439,8 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
         case AArch64:
             if rtype == R_AARCH64_ABS64 or rtype == R_AARCH64_PREL64:
                 patch_u64_le(bytes, offset, result.value)
+            else if rtype == R_AARCH64_ABS16 or rtype == R_AARCH64_PREL16:
+                patch_u16_le(bytes, offset, result.value)
             else if rtype == R_AARCH64_CALL26 or rtype == R_AARCH64_JUMP26:
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xfc000000) | (result.value & 0x3ffffff)
@@ -472,8 +490,8 @@ export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64
 export R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_GOT32
 export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
 export R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX
-export R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
-export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26, R_AARCH64_JUMP26
+export R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
+export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16, R_AARCH64_CALL26, R_AARCH64_JUMP26
 export R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
 export R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC
 export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL
