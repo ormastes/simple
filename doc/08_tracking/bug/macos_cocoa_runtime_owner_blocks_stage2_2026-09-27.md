@@ -61,3 +61,13 @@ ownership: PASS` against the resulting dylib and native archive. This
 proves the Cocoa ownership repair, not the separate generic C provider
 export gap in `cdylib_hides_c_runtime_exports_2026-09-06.md` or Stage 2
 admission. A fresh immutable bootstrap must still verify that whole chain.
+
+The first committed bootstrap retry then exposed a second macOS build
+error: the LLVM 23 Objective-C object referenced four
+`_objc_msgSendClass$...` symbols that the macOS 11 dylib link could not
+resolve. A local object comparison showed Xcode Clang emitted ordinary
+message dispatch for the same source at the macOS 11 deployment target.
+The build script now resolves Xcode Clang through `xcrun --find clang`
+for this Objective-C file only and sets the macOS 11 target. A rebuilt
+dylib and the Cocoa owner checker both pass with that compiler. The
+cache-preserving bootstrap admission retry remains pending.
