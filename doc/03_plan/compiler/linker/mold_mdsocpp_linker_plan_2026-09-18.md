@@ -287,9 +287,15 @@ addends are decoded from ARM data words, ARM branch immediates, Thumb-2 branch
 pairs, and split Thumb MOVW/MOVT instructions during object admission; malformed
 fields and unsupported ARM REL types fail closed. ARM-state MOVW/MOVT, V4BX,
 and signed PREL31 compact-unwind references are also decoded and applied, with
-PREL31 preserving its high compact-model flag bit. The remaining relocation
-corpus and ARM executable emission remain before that lane can consume the
-existing LLVM ARM32 object backend end to end.
+PREL31 preserving its high compact-model flag bit. A deterministic ARM32 raw
+image linker now lays out allocatable PROGBITS/NOBITS sections from ELF32 ARM
+objects, resolves local/global/weak symbols across inputs, preserves Thumb entry
+bits, applies the shared ARM relocation engine, and rejects common symbols,
+unsupported allocatable sections, malformed bounds, undefined strong symbols,
+and duplicate strong definitions. This connects parsed LLVM-style ARM32 objects
+to the raw-image boundary required by remote and bare-metal placement. The
+remaining relocation corpus, compiler-adapter wiring, hosted ARM executable
+emission, and real target execution evidence remain open.
 
 Implemented source slice:
 
