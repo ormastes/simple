@@ -487,7 +487,11 @@ Implemented source slice:
 LLVM COFF oracle evidence on this Windows host confirms the parser model against
 a real Clang object (`IMAGE_FILE_MACHINE_AMD64`, eight sections, long
 `.llvm_addrsig`, zero-file-byte `.bss`, primary+aux symbols, `REL32` and
-`ADDR32NB`). Executable Simple specs remain `TEST_BLOCKED`: neither this clean
+`ADDR32NB`). A checked-in two-object Clang corpus now exercises the production
+COFF link through COMDAT selection, cross-object `REL32`, `.xdata`, relocated
+and sorted `.pdata`, entry resolution, writable data, and PE32+ emission;
+`lld-link` provides the independent entry/section/exception-directory oracle.
+Executable Simple specs remain `TEST_BLOCKED`: neither this clean
 worktree nor the shared checkout has an admitted Stage 2/3 or deployed Stage 4
 pure-Simple binary, and the Rust seed is bootstrap-only.
 The canonical Windows-GNU Stage-2 bootstrap now publishes all four immutable

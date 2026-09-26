@@ -7,6 +7,9 @@ use compiler.backend.linker.coff.coff_link.{
     coff_validate_resource_sections, coff_validate_export_sections}
 use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
+use std.io_runtime.{file_read_bytes}
+
+val COFF_FIX: text = "test/fixtures/linker/coff"
 
 fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
     var result = bytes.push((value & 0xff) as u8)
@@ -519,6 +522,31 @@ describe "internal freestanding Windows linker":
         expect(inspected.is_ok()).to_equal(true)
         expect(inspected.unwrap().header.entry_point_rva).to_equal(0x1000)
         expect(inspected.unwrap().sections[0].name).to_equal(".text")
+
+    it "links the compiler-generated Windows corpus with unwind metadata":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [
+            file_read_bytes("{COFF_FIX}/windows_corpus_main.obj"),
+            file_read_bytes("{COFF_FIX}/windows_corpus_provider.obj")
+        ], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val bytes = linked.unwrap()
+        val inspected = pe_inspect(bytes).unwrap()
+        expect(inspected.header.entry_point_rva).to_equal(0x1000)
+        expect(inspected.data_directories[3].size).to_equal(12)
+        var saw_text = false
+        var saw_xdata = false
+        var saw_pdata = false
+        var saw_value = false
+        for section in inspected.sections:
+            if section.name == ".text": saw_text = true
+            if section.name == ".xdata": saw_xdata = true
+            if section.name == ".pdata": saw_pdata = true
+            if section.name == ".data":
+                saw_value = bytes[section.raw_pointer] == 41
+        expect(saw_text).to_equal(true)
+        expect(saw_xdata).to_equal(true)
+        expect(saw_pdata).to_equal(true)
+        expect(saw_value).to_equal(true)
 
     it "fails closed when the entry symbol is unresolved":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_object("_start", 0)], archives: [], entry: "_start"))
