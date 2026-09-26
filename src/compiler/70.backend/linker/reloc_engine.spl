@@ -82,6 +82,7 @@ val R_AARCH64_MOVW_SABS_G0: i64 = 270
 val R_AARCH64_MOVW_SABS_G1: i64 = 271
 val R_AARCH64_MOVW_SABS_G2: i64 = 272
 val R_AARCH64_GOT_LD_PREL19: i64 = 309  # G(GDAT(S+A)) - P, literal-load imm19
+val R_AARCH64_LD64_GOTOFF_LO15: i64 = 310 # G(GDAT(S+A)) - GOT, LDR imm12
 val R_AARCH64_ADR_GOT_PAGE: i64 = 311      # Page(G(GDAT(S+A))) - Page(P), ADRP encoding
 val R_AARCH64_LD64_GOT_LO12_NC: i64 = 312  # G(GDAT(S+A)) & 0xff8, LDR imm12 (8-byte scaled)
 val R_AARCH64_LD64_GOTPAGE_LO15: i64 = 313 # G(GDAT(S+A)) - Page(GOT), LDR imm12
@@ -556,15 +557,19 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         val lo12 = (s + a) & 0xfff
         return RelocResult(success: true, offset: offset, value: lo12 >> 4, error: "")
 
-    if rtype == R_AARCH64_LD64_GOTPAGE_LO15:
-        val got_page_offset = s + a - p
-        if got_page_offset < 0 or got_page_offset > 32767:
+    if rtype == R_AARCH64_LD64_GOTOFF_LO15 or rtype == R_AARCH64_LD64_GOTPAGE_LO15:
+        val got_offset = s + a - p
+        val name = if rtype == R_AARCH64_LD64_GOTOFF_LO15:
+            "R_AARCH64_LD64_GOTOFF_LO15"
+        else:
+            "R_AARCH64_LD64_GOTPAGE_LO15"
+        if got_offset < 0 or got_offset > 32767:
             return RelocResult(success: false, offset: offset, value: 0,
-                error: "R_AARCH64_LD64_GOTPAGE_LO15 offset from Page(GOT) exceeds unsigned 15-bit range")
-        if got_page_offset & 0x7 != 0:
+                error: "{name} GOT offset exceeds unsigned 15-bit range")
+        if got_offset & 0x7 != 0:
             return RelocResult(success: false, offset: offset, value: 0,
-                error: "R_AARCH64_LD64_GOTPAGE_LO15 GOT entry is not 8-byte aligned")
-        return RelocResult(success: true, offset: offset, value: got_page_offset >> 3, error: "")
+                error: "{name} GOT entry is not 8-byte aligned")
+        return RelocResult(success: true, offset: offset, value: got_offset >> 3, error: "")
 
     RelocResult(success: false, offset: offset, value: 0, error: "unsupported aarch64 reloc type {rtype}")
 
@@ -687,7 +692,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val immhi = (result.value >> 2) & 0x7ffff
                 val patched = (insn & 0x9f00001f) | (immlo << 29) | (immhi << 5)
                 patch_u32_le(bytes, offset, patched)
-            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or rtype == R_AARCH64_TLSLE_ADD_TPREL_HI12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12_NC or (rtype >= R_AARCH64_TLSLE_LDST8_TPREL_LO12 and rtype <= R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC) or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LDST8_ABS_LO12_NC or rtype == R_AARCH64_LDST16_ABS_LO12_NC or rtype == R_AARCH64_LDST32_ABS_LO12_NC or rtype == R_AARCH64_LDST128_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC or rtype == R_AARCH64_LD64_GOTPAGE_LO15 or rtype == R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
+            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or rtype == R_AARCH64_TLSLE_ADD_TPREL_HI12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12_NC or (rtype >= R_AARCH64_TLSLE_LDST8_TPREL_LO12 and rtype <= R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC) or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LDST8_ABS_LO12_NC or rtype == R_AARCH64_LDST16_ABS_LO12_NC or rtype == R_AARCH64_LDST32_ABS_LO12_NC or rtype == R_AARCH64_LDST128_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC or rtype == R_AARCH64_LD64_GOTOFF_LO15 or rtype == R_AARCH64_LD64_GOTPAGE_LO15 or rtype == R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
                 # imm12 -> insn[21:10]; keep-mask 0xffc003ff clears exactly that field.
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
@@ -734,6 +739,7 @@ export R_AARCH64_MOVW_PREL_G1, R_AARCH64_MOVW_PREL_G1_NC
 export R_AARCH64_MOVW_PREL_G2, R_AARCH64_MOVW_PREL_G2_NC, R_AARCH64_MOVW_PREL_G3
 export R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
 export R_AARCH64_GOT_LD_PREL19
+export R_AARCH64_LD64_GOTOFF_LO15
 export R_AARCH64_LD64_GOTPAGE_LO15
 export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16, R_AARCH64_CALL26, R_AARCH64_JUMP26
 export R_AARCH64_TSTBR14, R_AARCH64_CONDBR19

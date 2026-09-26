@@ -184,6 +184,9 @@ single-instruction AArch64 GOT access model in addition to ADRP+LDR pairs.
 `R_AARCH64_LD64_GOTPAGE_LO15` now supports the medium-GOT sequence by encoding
 an aligned 15-bit slot offset from `Page(.got)`. The ELF driver supplies that
 page base explicitly and rejects entries outside the ABI's 32 KiB window.
+`R_AARCH64_LD64_GOTOFF_LO15` shares the checked LDR field encoding but uses the
+exact `.got` start as its base, preserving the ABI distinction when `.got` is
+not page-aligned.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 
