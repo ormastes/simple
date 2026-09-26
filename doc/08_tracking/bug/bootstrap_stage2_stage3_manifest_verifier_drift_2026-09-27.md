@@ -39,3 +39,14 @@ Stage 3 calls separately and to use the current transcript verifier API.
 Then verify both a valid transcript and mutated env/argv rejection before
 attempting another full bootstrap. No full bootstrap rerun is claimed here;
 the feature's three-cycle verify/fix cap was already reached in this session.
+
+### Focused test harness prerequisite
+
+An attempted update to the transcript contract test stopped at
+`FAIL: valid_transcript` before reaching the producer/verifier comparison.
+`bootstrap_stage3_verify_command_transcript` requires canonical HOME and TMPDIR
+paths, while the test creates its scratch directory through `${TMPDIR:-/tmp}`.
+On the inspected macOS host, `TMPDIR` begins with `/var/folders` and `/var` is
+a symlink to `/private/var`. Canonicalize the scratch directory before passing
+its child paths to the transcript writer and verifier. The unverified test edit
+was reverted; the checked-in test still has the stale assertions above.
