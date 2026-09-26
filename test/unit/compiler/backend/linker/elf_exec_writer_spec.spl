@@ -181,6 +181,27 @@ describe "elf_exec_writer - two-object static x86_64 exec":
         expect(r.is_ok()).to_equal(true)
         expect(load_file_size_with_flags(r.unwrap(), 6)).to_equal(16)
 
+    it "prunes dead FDEs without letting unwind metadata retain dead code":
+        val r = elf_static_link([load_fixture("gc_unwind_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var ph: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = phdr_off(b, i)
+            if rd32(b, p) == PT_GNU_EH_FRAME:
+                ph = p
+            i = i + 1
+        val ho = rd64(b, ph + 8)
+        val hv = rd64(b, ph + 16)
+        expect(rd32(b, ho + 8)).to_equal(2)
+        val eh = hv + 4 + s32(rd32(b, ho + 4))
+        val text = load_vaddr_with_flags(b, 5)
+        expect(hv + s32(rd32(b, ho + 12))).to_equal(text)
+        expect(hv + s32(rd32(b, ho + 16))).to_equal(eh + 0x18)
+        expect(hv + s32(rd32(b, ho + 20))).to_equal(text + 0x10)
+        expect(hv + s32(rd32(b, ho + 24))).to_equal(eh + 0x2c)
+
     it "indexes relocated FDEs through .eh_frame_hdr and PT_GNU_EH_FRAME":
         val r = elf_static_link([load_fixture("unwind_x64.o")], [], "_start", RelocArch.X86_64)
         expect(r.is_ok()).to_equal(true)

@@ -26,6 +26,7 @@ clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector
 ld.lld -shared --soname libtls_x64.so -o libtls_x64.so.1 tls_provider_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables unwind_x64.c -o unwind_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections gc_sections_x64.c -o gc_sections_x64.o
+clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables -ffunction-sections -fdata-sections gc_sections_x64.c -o gc_unwind_x64.o
 ```
 
 Relocations exercised (`llvm-readelf -r`):
@@ -44,6 +45,7 @@ Relocations exercised (`llvm-readelf -r`):
 | tls_import_x64.o | R_X86_64_GOTTPOFF (`imported_tls`), bound through a GOT slot carrying R_X86_64_TPOFF64 |
 | unwind_x64.o | two zR/pcrel-sdata4 FDEs indexed by `.eh_frame_hdr` |
 | gc_sections_x64.o | entry-rooted relocation graph retaining live function/data/BSS while dropping dead function/data sections |
+| gc_unwind_x64.o | four input FDEs reduced to the two live-function FDEs, with compacted CIE pointers and relocation offsets |
 
 The specs depend on the exact byte offsets noted in them (e.g. the CALL26 at
 `_start+0x24`, x86_64 `call` rel32 at `.text+0x1d`); regenerate the specs'
