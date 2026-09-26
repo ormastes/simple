@@ -1,0 +1,59 @@
+"""The live socket shim's shared policy requires explicit, exact grants."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.syscall_net_portable_v1.{
+    portable_net_capability_allowed_v1,
+    portable_net_dispatch_bind_checked_v1
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.socket_compat.{SockaddrIn}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
+use os.kernel.types.syscall_types.{SyscallArgs}
+
+fn _socket_args(id: u64) -> SyscallArgs:
+    SyscallArgs(id: id, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0)
+
+describe "portable socket authority used by the live shim":
+    it "does not borrow socket creation from outbound connect authority":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        expect(scheduler.get_current().id).to_equal(caller.id)
+        var ipc = IpcManager.new()
+        expect(portable_net_capability_allowed_v1(
+            _socket_args(70u64), scheduler, ipc)).to_equal(false)
+        val granted = ipc.mint_task_capability_set(
+            caller, [CapabilityKind.NetConnect(port: 0u16)])
+        expect(granted != nil).to_equal(true)
+        expect(portable_net_capability_allowed_v1(
+            _socket_args(70u64), scheduler, ipc)).to_equal(false)
+        expect(portable_net_capability_allowed_v1(
+            _socket_args(73u64), scheduler, ipc)).to_equal(true)
+
+    it "admits a separately granted socket creation right":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(
+            caller, [CapabilityKind.NetSocketCreate])
+        expect(granted != nil).to_equal(true)
+        expect(portable_net_capability_allowed_v1(
+            _socket_args(70u64), scheduler, ipc)).to_equal(true)
+
+    it "denies a bind when the IPv4 address differs from the pledged grant":
+        var scheduler = Scheduler.new()
+        val caller = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val granted = ipc.mint_task_capability_set(caller, [
+            CapabilityKind.NetBindIpv4(address: 0x0100007Fu32, port: 8080u16),
+            CapabilityKind.NetListen(port: 8080u16)
+        ])
+        expect(granted != nil).to_equal(true)
+        val wrong = SockaddrIn(family: 2, port: 8080u16, addr: 0u32)
+        val denied = portable_net_dispatch_bind_checked_v1(
+            0, wrong, scheduler, ipc)
+        expect(denied.value).to_equal(-1)

@@ -1,24 +1,15 @@
 # Network syscall shims — split from syscall_shim.spl (Wave 10F).
 # Contains spl_handle_* for network syscalls 70–77.
 
-use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
-use os.kernel.socket_compat.{
-    SockaddrIn, posix_socket, posix_bind, posix_listen, posix_connect,
-    posix_accept, posix_send_bytes, posix_recv_bytes
-}
 use os.kernel.ipc.syscall.{_handle_net_if_config}
+use os.kernel.ipc.syscall_net_portable_v1.{
+    portable_net_bind_args_checked_v1,
+    portable_net_capability_allowed_v1,
+    portable_net_dispatch_v1
+}
 use os.kernel.abi.syscall_shim.{_make_args}
 use os.kernel.abi.syscall_shim.{g_shim_scheduler, g_shim_ipc}
 use os.kernel.types.capability_types.{CapabilityKind}
-use os.kernel.memory.vmm.{vmm_copy_bytes_result_ok}
-use os.kernel.memory.user_copy.{user_copyin_bytes, user_copyout_bytes}
-
-val _SOCKADDR_IN_LEN: u64 = 16
-val _AF_INET: u16 = 2
-val _MAX_SYSCALL_IO: u64 = 1048576
-val _EFAULT: i64 = -14
-val _EINVAL: i64 = -22
-val _EOPNOTSUPP: i64 = -95
 val _EPERM: i64 = -1
 
 @export("C", name: "spl_shim_current_task_id")
@@ -27,11 +18,8 @@ fn spl_shim_current_task_id() -> u64:
 
 @export("C", name: "spl_shim_net_capability_check")
 fn spl_shim_net_capability_check(syscall_id: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64:
-    """Architecture-neutral live capability gate for C-ABI network dispatch.
-
-    Uses the same scheduler caller and CapabilityManager owner as the canonical
-    syscall dispatcher. Port-zero capability requests intentionally preserve
-    that dispatcher's current wildcard contract.
+    """Legacy ARM64 direct-path precheck; exact shim policy lives in the
+    portable socket owner below. ARM64 direct binding still needs migration.
     """
     val caller = g_shim_scheduler.get_current()
     var ipc = g_shim_ipc
@@ -47,26 +35,6 @@ fn spl_shim_net_capability_check(syscall_id: u64, a0: u64, a1: u64, a2: u64, a3:
         case _: false
     if allowed: 0 else: _EPERM
 
-fn _copy_sockaddr_in(ptr: u64, len: u64) -> Result<SockaddrIn, i64>:
-    if len < _SOCKADDR_IN_LEN:
-        return Err(_EFAULT)
-    val copied = user_copyin_bytes(ptr, _SOCKADDR_IN_LEN)
-    if not vmm_copy_bytes_result_ok(copied):
-        return Err(_EFAULT)
-    val bytes = copied.bytes
-    val family = (bytes[0] as u16) | ((bytes[1] as u16) << 8)
-    if family != _AF_INET:
-        return Err(_EINVAL)
-    # POSIX sockaddr_in: native-endian family, network-endian port and address.
-    # socket_compat stores octet 0 in the low byte; this matches
-    # sockaddr_in()/userlib _pack_sockaddr and its endpoint formatter.
-    val port = ((bytes[2] as u16) << 8) | (bytes[3] as u16)
-    val addr = (bytes[4] as u32) |
-        ((bytes[5] as u32) << 8) |
-        ((bytes[6] as u32) << 16) |
-        ((bytes[7] as u32) << 24)
-    Ok(SockaddrIn(family: _AF_INET as i32, port: port, addr: addr))
-
 # ===========================================================================
 # syscall 70 — net_socket   [IMPLEMENTED]
 #
@@ -80,7 +48,7 @@ fn _copy_sockaddr_in(ptr: u64, len: u64) -> Result<SockaddrIn, i64>:
 fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_socket stub.
 
-    Routes directly to posix_socket() in socket_compat.spl, which allocates
+    Routes through the portable checked owner to posix_socket(), which allocates
     a local POSIX fd without depending on netstack IPC or a NIC driver
     (loopback traffic on 127.0.0.1 is served entirely by
     os.kernel.net.loopback_socket; see posix_bind/posix_connect).
@@ -92,7 +60,10 @@ fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
     with ENOSYS regardless of destination. Syscall number 70: create a
     network socket.
     """
-    posix_socket(a0 as i32, a1 as i32, a2 as i32)
+    val args = _make_args(70u64, a0, a1, a2, a3, a4, a5)
+    if not portable_net_capability_allowed_v1(args, g_shim_scheduler, g_shim_ipc):
+        return _EPERM
+    portable_net_dispatch_v1(args).value
 
 # ===========================================================================
 # syscall 71 — net_bind   [IMPLEMENTED]
@@ -107,14 +78,13 @@ fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
 fn spl_handle_net_bind(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_bind stub.
 
-    Validates and copies the bounded POSIX sockaddr_in from the caller before
-    routing it to the shared socket owner. The kernel retains all mutable
+    The portable owner validates and copies the bounded POSIX sockaddr_in
+    once, checks exact bind authority, then routes to the socket owner. It retains all mutable
     socket state; the caller pointer is never retained.
     Syscall number 71: bind a socket to a local address and port.
     """
-    match _copy_sockaddr_in(a1, a2):
-        Ok(addr): posix_bind(a0 as i32, addr)
-        Err(errno): errno
+    val args = _make_args(71u64, a0, a1, a2, a3, a4, a5)
+    portable_net_bind_args_checked_v1(args, g_shim_scheduler, g_shim_ipc).value
 
 # ===========================================================================
 # syscall 72 — net_listen   [IMPLEMENTED]
@@ -128,10 +98,13 @@ fn spl_handle_net_bind(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
 fn spl_handle_net_listen(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_listen stub.
 
-    Routes directly to the shared socket owner.
+    Checks the descriptor's bound port before using the shared socket owner.
     Syscall number 72: mark a socket as passive (listening for connections).
     """
-    posix_listen(a0 as i32, a1 as i32)
+    val args = _make_args(72u64, a0, a1, a2, a3, a4, a5)
+    if not portable_net_capability_allowed_v1(args, g_shim_scheduler, g_shim_ipc):
+        return _EPERM
+    portable_net_dispatch_v1(args).value
 
 # ===========================================================================
 # syscall 73 — net_connect   [IMPLEMENTED]
@@ -146,12 +119,14 @@ fn spl_handle_net_listen(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
 fn spl_handle_net_connect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_connect stub.
 
-    Copies the bounded sockaddr and routes directly to the shared socket owner.
+    Checks caller authority, then copies the bounded sockaddr through the
+    shared socket owner.
     Syscall number 73: initiate a connection to a remote address.
     """
-    match _copy_sockaddr_in(a1, a2):
-        Ok(addr): posix_connect(a0 as i32, addr)
-        Err(errno): errno
+    val args = _make_args(73u64, a0, a1, a2, a3, a4, a5)
+    if not portable_net_capability_allowed_v1(args, g_shim_scheduler, g_shim_ipc):
+        return _EPERM
+    portable_net_dispatch_v1(args).value
 
 # ===========================================================================
 # syscall 74 — net_accept   [IMPLEMENTED]
@@ -171,9 +146,10 @@ fn spl_handle_net_accept(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
     address fails explicitly rather than returning fabricated bytes.
     Syscall number 74: accept an incoming connection on a listening socket.
     """
-    if a1 != 0 or a2 != 0:
-        return _EOPNOTSUPP
-    posix_accept(a0 as i32)
+    val args = _make_args(74u64, a0, a1, a2, a3, a4, a5)
+    if not portable_net_capability_allowed_v1(args, g_shim_scheduler, g_shim_ipc):
+        return _EPERM
+    portable_net_dispatch_v1(args).value
 
 # ===========================================================================
 # syscall 75 — net_send_to   [IMPLEMENTED]
@@ -190,21 +166,15 @@ fn spl_handle_net_accept(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
 fn spl_handle_net_send_to(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_send_to stub.
 
-    Connected-socket sends are routed directly to the shared socket owner.
+    Checks the accepted-listener or outbound descriptor authority before
+    sending through the shared socket owner.
     Destination-address sendto remains explicit unsupported behavior.
     Syscall number 75: send data through a socket to a specified address.
     """
-    if a2 > _MAX_SYSCALL_IO:
-        return _EINVAL
-    if a3 != 0 or a4 != 0:
-        return _EOPNOTSUPP
-    if a2 == 0:
-        val empty: [u8] = []
-        return posix_send_bytes(a0 as i32, empty, a5 as i32)
-    val copied = user_copyin_bytes(a1, a2)
-    if not vmm_copy_bytes_result_ok(copied):
-        return _EFAULT
-    posix_send_bytes(a0 as i32, copied.bytes, a5 as i32)
+    val args = _make_args(75u64, a0, a1, a2, a3, a4, a5)
+    if not portable_net_capability_allowed_v1(args, g_shim_scheduler, g_shim_ipc):
+        return _EPERM
+    portable_net_dispatch_v1(args).value
 
 # ===========================================================================
 # syscall 76 — net_recv_from   [IMPLEMENTED]
@@ -221,21 +191,15 @@ fn spl_handle_net_send_to(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) 
 fn spl_handle_net_recv_from(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """Strong override for the weak spl_handle_net_recv_from stub.
 
-    Connected-socket receives are routed directly to the shared socket owner.
+    Checks the accepted-listener or outbound descriptor authority before
+    receiving through the shared socket owner.
     Source-address output remains explicit unsupported behavior.
     Syscall number 76: receive data from a socket along with source address.
     """
-    if a2 > _MAX_SYSCALL_IO:
-        return _EINVAL
-    if a3 != 0 or a4 != 0:
-        return _EOPNOTSUPP
-    match posix_recv_bytes(a0 as i32, a2, a5 as i32):
-        Ok(reply):
-            val copied = user_copyout_bytes(a1, reply)
-            if copied < 0:
-                return _EFAULT
-            copied as i64
-        Err(_): -5
+    val args = _make_args(76u64, a0, a1, a2, a3, a4, a5)
+    if not portable_net_capability_allowed_v1(args, g_shim_scheduler, g_shim_ipc):
+        return _EPERM
+    portable_net_dispatch_v1(args).value
 
 # ===========================================================================
 # syscall 77 — net_if_config   [IMPLEMENTED]
@@ -254,5 +218,7 @@ fn spl_handle_net_if_config(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64
     Syscall number 77: configure a network interface (IP, MTU, flags).
     """
     val args = _make_args(77, a0, a1, a2, a3, a4, a5)
+    if not g_shim_ipc.cap_check(g_shim_scheduler.get_current(), CapabilityKind.NetRaw):
+        return _EPERM
     val result = _handle_net_if_config(args)
     result.value

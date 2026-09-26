@@ -42,6 +42,11 @@ and NFR requirements still require user selection.
 - `root_service_catalog.spl` calls 136/137. The live x86_64 dispatch switch
   now reaches strong Simple catalog shims for both IDs. They adopt returned
   scheduler/IPC state; ring-3 PID1 service lifecycle evidence is still needed.
+- The x86_64 network C switch reaches Simple shims for 70–77. Those shims now
+  use the portable socket owner for exact socket-create, bind, listener, and
+  accepted-connection checks; 77 checks `NetRaw`. ARM64's separate direct
+  precheck and RV64 network dispatch still lack this parity. No guest denial
+  or successful network request has been admitted for the changed x86 route.
 
 ## Live syscall ingress and copied IPC prerequisite
 
