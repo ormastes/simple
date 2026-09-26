@@ -21,6 +21,8 @@ struct ElfSharedLib:
     soname: text
     machine: i64
     exports: {text: i64}   # defined default-version symbol -> STT_* type
+    export_sizes: {text: i64}
+    export_values: {text: i64}
 
 fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
     """Section header i with sh_addr repurposed as the FILE offset (elf_parser convention)."""
@@ -65,6 +67,8 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
         versym_off = elf_so_shdr(bytes, shoff, versym_i).sh_addr
 
     var exports: {text: i64} = {}
+    var export_sizes: {text: i64} = {}
+    var export_values: {text: i64} = {}
     val count = symsec.sh_size / 24
     var k: i64 = 1
     while k < count:
@@ -77,7 +81,10 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
             if elf_read_u16_le(bytes, versym_off + k * 2) & VERSYM_HIDDEN != 0:
                 linkable = false
         if linkable:
-            exports[elf_strtab_get(strtab, elf_read_u32_le(bytes, e))] = info & 0xf
+            val name = elf_strtab_get(strtab, elf_read_u32_le(bytes, e))
+            exports[name] = info & 0xf
+            export_values[name] = elf_read_u64_le(bytes, e + 8)
+            export_sizes[name] = elf_read_u64_le(bytes, e + 16)
         k = k + 1
 
     var soname = ""
@@ -95,6 +102,7 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
                 d = d + 16
     if soname == "":
         return Err("shared object has no DT_SONAME (needed for DT_NEEDED)")
-    Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports))
+    Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,
+        export_sizes: export_sizes, export_values: export_values))
 
 export ElfSharedLib, elf_parse_shared
