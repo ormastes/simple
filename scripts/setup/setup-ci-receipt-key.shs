@@ -1,0 +1,576 @@
+#!/bin/sh
+# Per-host local-CI receipt signing key setup (schema simple.local-ci-receipt/v1).
+#
+# Owner decision: EACH HOST makes its own signing key (never a shared key
+# copied between hosts), and every key is separately registered on GitHub as
+# an SSH *signing* key. This script is the mechanical half of that decision:
+# generate a key, register it with GitHub, and append its line to the repo's
+# allowlist in the exact format scripts/check/verify-local-ci-receipt.shs and
+# scripts/check/sign-local-ci-receipt.shs both require.
+#
+# Consumers (read these first if the format below looks surprising):
+#   config/check/ci_receipt_allowed_signers   — the allowlist this appends to
+#   scripts/check/sign-local-ci-receipt.shs   — reads simple.ciReceiptKey /
+#                                                simple.ciReceiptIdentity via
+#                                                SIMPLE_CI_RECEIPT_KEY /
+#                                                SIMPLE_CI_RECEIPT_IDENTITY or
+#                                                git config, per land.shs
+#   scripts/check/verify-local-ci-receipt.shs — verifies against the allowlist
+#   scripts/check/land.shs                    — the caller that refuses to
+#                                                sign without a configured key
+#
+# Verdict line is ALWAYS the last line of stdout:
+#   PASS  — <n> step(s) completed (<summary>)   exit 0
+#   FAIL  — <reason>                             exit 1
+#   ERROR — nothing was checked (<reason>)       exit 2
+# Non-vacuity is absolute: 0 steps completed is ERROR, never PASS.
+#
+# Usage:
+#   sh scripts/setup/setup-ci-receipt-key.shs [init|register-gh|add-signer|all]
+#       [--key-path FILE] [--principal ID] [--local-config]
+#   sh scripts/setup/setup-ci-receipt-key.shs --selftest
+#
+#   init          (default when no subcommand given) generate a per-host key
+#                 at $HOME/.ssh/simple_ci_receipt_<host> if absent, and set
+#                 git config simple.ciReceiptKey / simple.ciReceiptIdentity.
+#   register-gh   upload the .pub to the current `gh` account as an SSH
+#                 *signing* key (`gh ssh-key add --type signing`). Skips if
+#                 the exact key material is already registered.
+#   add-signer    append this host's allowlist line to
+#                 config/check/ci_receipt_allowed_signers in the current
+#                 checkout, if the key material is not already present.
+#   all           init && register-gh && add-signer, in that order.
+#
+#   --key-path FILE    override the default $HOME/.ssh/simple_ci_receipt_<host>
+#   --principal ID     override the computed `<gh-login>@<host>` principal;
+#                      required (and used) when `gh api user` cannot resolve
+#                      a login (e.g. gh not authenticated yet)
+#   --local-config     use `git config --local` instead of `--global` for
+#                      simple.ciReceiptKey / simple.ciReceiptIdentity
+#   --root DIR         repository root (default: git toplevel), used only by
+#                      add-signer to locate config/check/ci_receipt_allowed_signers
+set -u
+export LC_ALL=C
+
+SIG_NAMESPACE=simple-ci-receipt
+ALLOWED_REL=${SIMPLE_CI_RECEIPT_ALLOWED_REL:-config/check/ci_receipt_allowed_signers}
+
+pass_verdict() {
+    printf 'PASS — %s step(s) completed (%s)\n' "$1" "$2"
+    exit 0
+}
+fail_verdict() {
+    printf 'FAIL — %s\n' "$1"
+    exit 1
+}
+error_verdict() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+mktempdir() {
+    mktemp -d 2>/dev/null || mktemp -d -t ci-receipt-key
+}
+
+sanitize_host() {
+    # [A-Za-z0-9._-], lowercased; anything else becomes '-'.
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g'
+}
+
+# Resolve the repo root without ever silently operating on the wrong tree.
+resolve_root() {
+    if [ -n "$ROOT" ]; then
+        ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) || {
+            fail_verdict "cannot canonicalize --root $ROOT"
+        }
+        return
+    fi
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+    [ -n "$ROOT" ] || fail_verdict "cannot locate the repository root (not inside a git checkout and no --root given)"
+    ROOT=$(CDPATH= cd -- "$ROOT" 2>/dev/null && pwd -P) || fail_verdict "cannot canonicalize the repository root"
+}
+
+# --- init -------------------------------------------------------------------
+do_init() {
+    command -v ssh-keygen >/dev/null 2>&1 || fail_verdict "ssh-keygen is not on PATH"
+    command -v git >/dev/null 2>&1 || fail_verdict "git is not on PATH"
+
+    _host=$(hostname 2>/dev/null) || _host=""
+    [ -n "$_host" ] || fail_verdict "cannot determine a hostname (hostname failed)"
+    _host=$(sanitize_host "$_host")
+    [ -n "$_host" ] || fail_verdict "sanitized hostname is empty"
+
+    if [ -z "$KEY_PATH" ]; then
+        [ -n "${HOME:-}" ] || fail_verdict "HOME is not set; cannot derive a default key path (use --key-path)"
+        KEY_PATH="$HOME/.ssh/simple_ci_receipt_$_host"
+    fi
+
+    _keydir=$(dirname -- "$KEY_PATH")
+    mkdir -p "$_keydir" 2>/dev/null || fail_verdict "cannot create $_keydir"
+
+    _created=0
+    if [ -f "$KEY_PATH" ]; then
+        [ ! -L "$KEY_PATH" ] || fail_verdict "existing key path $KEY_PATH is a symlink"
+        [ -f "$KEY_PATH.pub" ] || fail_verdict "$KEY_PATH exists but $KEY_PATH.pub does not; refusing to overwrite a private key with no matching public key"
+    else
+        # No passphrase: land.shs signs receipts unattended, inside an
+        # automated landing flow with nobody present to type one.
+        ssh-keygen -q -t ed25519 -N '' -C "ci-receipt@$_host" -f "$KEY_PATH" >/dev/null 2>&1
+        _kg_rc=$?
+        [ "$_kg_rc" -eq 0 ] || fail_verdict "ssh-keygen failed (exit $_kg_rc) generating $KEY_PATH"
+        [ -f "$KEY_PATH" ] && [ -f "$KEY_PATH.pub" ] || fail_verdict "ssh-keygen reported success but $KEY_PATH/$KEY_PATH.pub are missing"
+        chmod 600 "$KEY_PATH" 2>/dev/null || :
+        chmod 644 "$KEY_PATH.pub" 2>/dev/null || :
+        _created=1
+    fi
+
+    if [ -z "$PRINCIPAL" ]; then
+        if command -v gh >/dev/null 2>&1; then
+            _login=$(gh api user --jq .login 2>/dev/null) || _login=""
+        else
+            _login=""
+        fi
+        [ -n "$_login" ] || fail_verdict "cannot resolve a GitHub login via \`gh api user\`; pass --principal explicitly"
+        PRINCIPAL="$_login@$_host"
+    fi
+    case "$PRINCIPAL" in
+        *[!A-Za-z0-9._@+-]*) fail_verdict "principal \"$PRINCIPAL\" contains characters outside [A-Za-z0-9._@+-]" ;;
+        '') fail_verdict "principal is empty" ;;
+    esac
+
+    _scope=--global
+    _gitcwd=""
+    if [ "$LOCAL_CONFIG" = 1 ]; then
+        _scope=--local
+        resolve_root
+        _gitcwd=$ROOT
+    fi
+    if [ -n "$_gitcwd" ]; then
+        git -C "$_gitcwd" config $_scope simple.ciReceiptKey "$KEY_PATH" 2>/dev/null
+        _c1=$?
+        git -C "$_gitcwd" config $_scope simple.ciReceiptIdentity "$PRINCIPAL" 2>/dev/null
+        _c2=$?
+    else
+        git config $_scope simple.ciReceiptKey "$KEY_PATH" 2>/dev/null
+        _c1=$?
+        git config $_scope simple.ciReceiptIdentity "$PRINCIPAL" 2>/dev/null
+        _c2=$?
+    fi
+    [ "$_c1" -eq 0 ] && [ "$_c2" -eq 0 ] || fail_verdict "git config $_scope failed setting simple.ciReceiptKey/simple.ciReceiptIdentity (exit $_c1/$_c2)"
+
+    _publine=$(cat "$KEY_PATH.pub") || fail_verdict "cannot read $KEY_PATH.pub"
+    _keymat=$(printf '%s\n' "$_publine" | cut -d' ' -f1,2)
+    printf 'host: %s\n' "$_host"
+    printf 'principal: %s\n' "$PRINCIPAL"
+    printf 'key: %s%s\n' "$KEY_PATH" "$( [ "$_created" = 1 ] && printf ' (created)' || printf ' (already existed)')"
+    printf 'git config: %s simple.ciReceiptKey=%s simple.ciReceiptIdentity=%s\n' "$_scope" "$KEY_PATH" "$PRINCIPAL"
+    printf 'allowed_signers line:\n'
+    printf '%s namespaces="%s" %s\n' "$PRINCIPAL" "$SIG_NAMESPACE" "$_keymat"
+    pass_verdict 1 "key at $KEY_PATH, principal $PRINCIPAL"
+}
+
+# --- register-gh --------------------------------------------------------------
+do_register_gh() {
+    command -v gh >/dev/null 2>&1 || fail_verdict "gh is not on PATH"
+
+    if [ -z "$KEY_PATH" ]; then
+        _host=$(hostname 2>/dev/null) || _host=""
+        [ -n "$_host" ] || fail_verdict "cannot determine a hostname to locate the default key (use --key-path)"
+        _host=$(sanitize_host "$_host")
+        [ -n "${HOME:-}" ] || fail_verdict "HOME is not set; cannot derive a default key path (use --key-path)"
+        KEY_PATH="$HOME/.ssh/simple_ci_receipt_$_host"
+    fi
+    [ -f "$KEY_PATH.pub" ] || fail_verdict "$KEY_PATH.pub does not exist; run \`init\` first (or pass --key-path)"
+
+    _publine=$(cat "$KEY_PATH.pub") || fail_verdict "cannot read $KEY_PATH.pub"
+    _keymat=$(printf '%s\n' "$_publine" | cut -d' ' -f2)
+    [ -n "$_keymat" ] || fail_verdict "cannot extract key material from $KEY_PATH.pub"
+
+    _existing=$(gh api user/ssh_signing_keys --jq '.[].key' 2>&1)
+    _api_rc=$?
+    if [ "$_api_rc" -ne 0 ]; then
+        case "$_existing" in
+            *admin:ssh_signing_key*|*insufficient*scope*|*Resource\ not\ accessible*|*403*)
+                printf 'gh lacks the admin:ssh_signing_key scope needed to read/register signing keys.\n'
+                printf 'Run: gh auth refresh -h github.com -s admin:ssh_signing_key\n'
+                error_verdict "gh auth refresh -h github.com -s admin:ssh_signing_key"
+                ;;
+            *) fail_verdict "gh api user/ssh_signing_keys failed (exit $_api_rc): $_existing" ;;
+        esac
+    fi
+
+    _keyonly=$(printf '%s' "$_keymat" | tr -d '\n')
+    if printf '%s\n' "$_existing" | grep -F -q "$_keyonly"; then
+        pass_verdict 1 "key already registered on GitHub as a signing key; nothing to do"
+    fi
+
+    _host2=$(hostname 2>/dev/null) || _host2="host"
+    _host2=$(sanitize_host "$_host2")
+    _out=$(gh ssh-key add "$KEY_PATH.pub" --type signing --title "simple-ci-receipt $_host2" 2>&1)
+    _add_rc=$?
+    case "$_add_rc:$_out" in
+        0:*) ;;
+        *:*admin:ssh_signing_key*|*:*insufficient*scope*)
+            printf 'gh lacks the admin:ssh_signing_key scope needed to register a signing key.\n'
+            printf 'Run: gh auth refresh -h github.com -s admin:ssh_signing_key\n'
+            error_verdict "gh auth refresh -h github.com -s admin:ssh_signing_key"
+            ;;
+        *) fail_verdict "gh ssh-key add failed (exit $_add_rc): $_out" ;;
+    esac
+    pass_verdict 1 "registered $KEY_PATH.pub with GitHub as a signing key"
+}
+
+# --- add-signer ---------------------------------------------------------------
+do_add_signer() {
+    resolve_root
+
+    if [ -z "$KEY_PATH" ]; then
+        _host=$(hostname 2>/dev/null) || _host=""
+        [ -n "$_host" ] || fail_verdict "cannot determine a hostname to locate the default key (use --key-path)"
+        _host=$(sanitize_host "$_host")
+        [ -n "${HOME:-}" ] || fail_verdict "HOME is not set; cannot derive a default key path (use --key-path)"
+        KEY_PATH="$HOME/.ssh/simple_ci_receipt_$_host"
+    fi
+    [ -f "$KEY_PATH.pub" ] || fail_verdict "$KEY_PATH.pub does not exist; run \`init\` first (or pass --key-path)"
+
+    if [ -z "$PRINCIPAL" ]; then
+        PRINCIPAL=$(git config --get simple.ciReceiptIdentity 2>/dev/null) || PRINCIPAL=""
+        [ -n "$PRINCIPAL" ] || fail_verdict "no --principal given and simple.ciReceiptIdentity is not configured; run \`init\` first or pass --principal"
+    fi
+    case "$PRINCIPAL" in
+        *[!A-Za-z0-9._@+-]*) fail_verdict "principal \"$PRINCIPAL\" contains characters outside [A-Za-z0-9._@+-]" ;;
+        '') fail_verdict "principal is empty" ;;
+    esac
+
+    _publine=$(cat "$KEY_PATH.pub") || fail_verdict "cannot read $KEY_PATH.pub"
+    _keymat=$(printf '%s\n' "$_publine" | cut -d' ' -f1,2)
+    _keyonly=$(printf '%s\n' "$_publine" | cut -d' ' -f2)
+
+    _target="$ROOT/$ALLOWED_REL"
+    [ -f "$_target" ] || fail_verdict "$_target does not exist"
+    [ ! -L "$_target" ] || fail_verdict "$_target is a symlink"
+
+    if grep -F -q "$_keyonly" "$_target" 2>/dev/null; then
+        pass_verdict 1 "key material already present in $ALLOWED_REL; nothing to do"
+    fi
+
+    _line=$(printf '%s namespaces="%s" %s' "$PRINCIPAL" "$SIG_NAMESPACE" "$_keymat")
+    printf '%s\n' "$_line" >> "$_target" || fail_verdict "cannot append to $_target"
+
+    printf 'appended: %s\n' "$_line"
+    printf 'REMINDER: this line must land on the BASE branch through its own PR,\n'
+    printf 'separate from any PR it would let skip gates — see the header of\n'
+    printf '%s.\n' "$ALLOWED_REL"
+    pass_verdict 1 "appended allowlist line for $PRINCIPAL to $ALLOWED_REL"
+}
+
+do_all() {
+    do_init
+}
+
+run_all() {
+    # Run the three steps in-process (not via three `sh "$SELF"` calls) so a
+    # later step can rely on state (KEY_PATH/PRINCIPAL) resolved by an earlier
+    # one within the same invocation.
+    _steps=0
+    _summary=""
+
+    _out1=$(cmd_dispatch init) ; _rc1=$?
+    printf '%s\n' "$_out1"
+    [ "$_rc1" -eq 0 ] || fail_verdict "init step failed"
+    _steps=$((_steps + 1))
+    _summary="init"
+
+    # Re-derive KEY_PATH/PRINCIPAL the same way init did, so register-gh and
+    # add-signer act on the same host key even though each subcommand also
+    # supports being invoked standalone.
+    _host=$(hostname 2>/dev/null) || _host=""
+    _host=$(sanitize_host "$_host")
+    [ -n "$KEY_PATH" ] || KEY_PATH="$HOME/.ssh/simple_ci_receipt_$_host"
+    if [ -z "$PRINCIPAL" ]; then
+        PRINCIPAL=$(git config --get simple.ciReceiptIdentity 2>/dev/null) || PRINCIPAL=""
+    fi
+
+    _out2=$(cmd_dispatch register-gh) ; _rc2=$?
+    printf '%s\n' "$_out2"
+    [ "$_rc2" -eq 0 ] || fail_verdict "register-gh step failed"
+    _steps=$((_steps + 1))
+    _summary="$_summary, register-gh"
+
+    _out3=$(cmd_dispatch add-signer) ; _rc3=$?
+    printf '%s\n' "$_out3"
+    [ "$_rc3" -eq 0 ] || fail_verdict "add-signer step failed"
+    _steps=$((_steps + 1))
+    _summary="$_summary, add-signer"
+
+    pass_verdict "$_steps" "$_summary"
+}
+
+cmd_dispatch() {
+    case "$1" in
+        init) do_init ;;
+        register-gh) do_register_gh ;;
+        add-signer) do_add_signer ;;
+        *) error_verdict "unknown subcommand \"$1\"" ;;
+    esac
+}
+
+# ===========================================================================
+# Selftest — runs with a temp HOME, a temp git repo, and a fake `gh` on PATH.
+# ===========================================================================
+ST_FAILURES=0
+ST_CASES=0
+
+st_report() {
+    ST_CASES=$((ST_CASES + 1))
+    if [ "$1" = ok ]; then
+        printf 'selftest: ok   %s\n' "$2"
+    else
+        printf 'selftest: FAIL %s — %s\n' "$2" "$3"
+        ST_FAILURES=$((ST_FAILURES + 1))
+    fi
+}
+
+run_selftest() {
+    command -v ssh-keygen >/dev/null 2>&1 || { echo "selftest: ssh-keygen is not on PATH"; return 1; }
+    command -v git >/dev/null 2>&1 || { echo "selftest: git is not on PATH"; return 1; }
+    # A git hook exports GIT_DIR (and friends) pointing at the real repo; with
+    # it set, `git -C <fixture> config --local` writes the REAL .git/config.
+    # That leaked fixtureuser@fixturehost into a shared repo config once.
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_PREFIX
+
+    T=$(mktempdir) || { echo "selftest: cannot create temp dir"; return 1; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$T'" EXIT INT TERM
+
+    ST_HOME="$T/home"
+    mkdir -p "$ST_HOME/.ssh" "$ST_HOME/bin"
+
+    REPO="$T/repo"
+    mkdir -p "$REPO/config/check"
+    ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; cd "$REPO" && git init -q . ) >/dev/null 2>&1 ||
+        { echo "selftest: cannot init fixture repo"; return 1; }
+    ( cd "$REPO" && git config user.name Fixture && git config user.email fixture@example.invalid ) >/dev/null 2>&1
+
+    cat > "$REPO/config/check/ci_receipt_allowed_signers" <<'EOF'
+# fixture allowlist, deliberately empty of keys
+EOF
+
+    # A fake `gh` good enough for register-gh/add-signer's --principal path
+    # and for exercising both the success and the missing-scope branches.
+    cat > "$ST_HOME/bin/gh" <<'GHEOF'
+#!/bin/sh
+# Fixture gh: behavior is switched by $GH_FIXTURE_MODE.
+mode=${GH_FIXTURE_MODE:-ok}
+store=${GH_FIXTURE_STORE:-/dev/null}
+case "$1 $2" in
+    "api user")
+        [ "$mode" != "noauth" ] || { echo "gh: not logged in" >&2; exit 1; }
+        echo '{"login":"fixtureuser"}' | true
+        printf 'fixtureuser\n'
+        exit 0
+        ;;
+    "api user/ssh_signing_keys")
+        if [ "$mode" = "noscope" ]; then
+            echo 'HTTP 403: Resource not accessible (admin:ssh_signing_key scope required)' >&2
+            exit 1
+        fi
+        if [ -s "$store" ]; then
+            awk '{print}' "$store"
+        fi
+        exit 0
+        ;;
+    "ssh-key add")
+        if [ "$mode" = "noscope" ]; then
+            echo 'HTTP 403: insufficient scope: admin:ssh_signing_key' >&2
+            exit 1
+        fi
+        shift 2
+        # args: <pubfile> --type signing --title <title>
+        pubfile=$1
+        cut -d' ' -f2 "$pubfile" >> "$store"
+        exit 0
+        ;;
+    *) echo "gh fixture: unhandled args: $*" >&2; exit 2 ;;
+esac
+GHEOF
+    chmod +x "$ST_HOME/bin/gh"
+
+    export HOME="$ST_HOME"
+    export PATH="$ST_HOME/bin:$PATH"
+    export GH_FIXTURE_STORE="$T/gh_registered_keys"
+    : > "$GH_FIXTURE_STORE"
+
+    HOSTNAME_SAN=$(sanitize_host "$(hostname 2>/dev/null || printf fixturehost)")
+
+    # (S1) fresh key created + git config set (local, so it doesn't touch the
+    # real global config of whatever machine runs this selftest)
+    _out1=$(GH_FIXTURE_MODE=ok sh "$SELF" init --local-config --principal fixtureuser@fixturehost --root "$REPO" 2>&1)
+    _rc1=$?
+    _last1=$(printf '%s\n' "$_out1" | sed -n '$p')
+    case "$_rc1:$_last1" in
+        0:PASS*) st_report ok "(S1) init creates a key and sets git config" ;;
+        *) st_report bad "(S1) init creates a key and sets git config" "exit $_rc1: $_last1" ;;
+    esac
+    KP="$ST_HOME/.ssh/simple_ci_receipt_$HOSTNAME_SAN"
+    if [ -f "$KP" ] && [ -f "$KP.pub" ]; then
+        st_report ok "(S1b) key files exist at the expected default path"
+    else
+        st_report bad "(S1b) key files exist at the expected default path" "missing $KP or $KP.pub"
+    fi
+    _cfgkey=$(cd "$REPO" && git config --local --get simple.ciReceiptKey 2>/dev/null)
+    _cfgid=$(cd "$REPO" && git config --local --get simple.ciReceiptIdentity 2>/dev/null)
+    # On Windows/MSYS, git.exe rewrites a POSIX-style argument path (e.g.
+    # under /tmp) to its native Windows form before storing it, so the
+    # stored value is not always byte-identical to $KP even though it names
+    # the same file. Compare by basename-suffix + on-disk identity instead
+    # of exact string equality, which is portable across that translation
+    # and still catches a wrong-path regression.
+    _kp_base=$(basename -- "$KP")
+    case "$_cfgkey" in
+        */"$_kp_base") _cfgkey_suffix_ok=1 ;;
+        "$_kp_base") _cfgkey_suffix_ok=1 ;;
+        *) _cfgkey_suffix_ok=0 ;;
+    esac
+    if [ "$_cfgkey_suffix_ok" = 1 ] && [ -f "$_cfgkey" ] && [ "$_cfgid" = "fixtureuser@fixturehost" ]; then
+        st_report ok "(S1c) git config simple.ciReceiptKey/simple.ciReceiptIdentity set correctly"
+    else
+        st_report bad "(S1c) git config simple.ciReceiptKey/simple.ciReceiptIdentity set correctly" "key=$_cfgkey (want suffix $_kp_base) id=$_cfgid"
+    fi
+
+    # (S2) rerun is idempotent: key material unchanged, no duplicate config
+    _pub_before=$(cat "$KP.pub")
+    _out2=$(GH_FIXTURE_MODE=ok sh "$SELF" init --local-config --principal fixtureuser@fixturehost --root "$REPO" 2>&1)
+    _rc2=$?
+    _pub_after=$(cat "$KP.pub")
+    _last2=$(printf '%s\n' "$_out2" | sed -n '$p')
+    if [ "$_rc2" -eq 0 ] && [ "$_pub_before" = "$_pub_after" ]; then
+        st_report ok "(S2) rerunning init is idempotent (key unchanged)"
+    else
+        st_report bad "(S2) rerunning init is idempotent (key unchanged)" "exit $_rc2, pub changed=$([ "$_pub_before" = "$_pub_after" ] && echo no || echo yes)"
+    fi
+
+    # (S3) add-signer line format matches the required pattern, and a second
+    # call does not duplicate the line
+    _out3=$(sh "$SELF" add-signer --key-path "$KP" --principal fixtureuser@fixturehost --root "$REPO" 2>&1)
+    _rc3=$?
+    _added_line=$(grep -F 'fixtureuser@fixturehost' "$REPO/config/check/ci_receipt_allowed_signers" 2>/dev/null | head -n1)
+    case "$_added_line" in
+        *' namespaces="simple-ci-receipt" ssh-ed25519 '*)
+            if printf '%s' "$_added_line" | grep -Eq '^[A-Za-z0-9._@+-]+ namespaces="simple-ci-receipt" ssh-ed25519 [A-Za-z0-9+/=]+$'; then
+                st_report ok "(S3) add-signer line format matches the required pattern"
+            else
+                st_report bad "(S3) add-signer line format matches the required pattern" "line: $_added_line"
+            fi
+            ;;
+        *) st_report bad "(S3) add-signer line format matches the required pattern" "exit $_rc3, line: $_added_line" ;;
+    esac
+    _count_before=$(grep -c -F 'fixtureuser@fixturehost' "$REPO/config/check/ci_receipt_allowed_signers")
+    sh "$SELF" add-signer --key-path "$KP" --principal fixtureuser@fixturehost --root "$REPO" >/dev/null 2>&1
+    _count_after=$(grep -c -F 'fixtureuser@fixturehost' "$REPO/config/check/ci_receipt_allowed_signers")
+    if [ "$_count_before" = "1" ] && [ "$_count_after" = "1" ]; then
+        st_report ok "(S3b) add-signer does not duplicate an already-present line"
+    else
+        st_report bad "(S3b) add-signer does not duplicate an already-present line" "before=$_count_before after=$_count_after"
+    fi
+
+    # (S4) register-gh skip-when-present
+    _out4=$(GH_FIXTURE_MODE=ok sh "$SELF" register-gh --key-path "$KP" 2>&1)
+    _rc4=$?
+    _last4=$(printf '%s\n' "$_out4" | sed -n '$p')
+    case "$_rc4:$_last4" in
+        0:*"already registered"*) st_report ok "(S4) register-gh registers then a rerun skips (already present)" ;;
+        *)
+            # First call may have registered; ensure a SECOND call reports skip.
+            _out4b=$(GH_FIXTURE_MODE=ok sh "$SELF" register-gh --key-path "$KP" 2>&1)
+            _last4b=$(printf '%s\n' "$_out4b" | sed -n '$p')
+            case "$_last4b" in
+                *"already registered"*) st_report ok "(S4) register-gh registers then a rerun skips (already present)" ;;
+                *) st_report bad "(S4) register-gh registers then a rerun skips (already present)" "first=$_last4 second=$_last4b" ;;
+            esac
+            ;;
+    esac
+
+    # (S5) register-gh missing scope -> exit 2 with the refresh command
+    _out5=$(GH_FIXTURE_MODE=noscope GH_FIXTURE_STORE="$T/gh_registered_keys_empty" sh "$SELF" register-gh --key-path "$KP" 2>&1)
+    _rc5=$?
+    case "$_rc5" in
+        2)
+            case "$_out5" in
+                *"gh auth refresh -h github.com -s admin:ssh_signing_key"*)
+                    st_report ok "(S5) register-gh missing scope exits 2 with the refresh command" ;;
+                *) st_report bad "(S5) register-gh missing scope exits 2 with the refresh command" "no refresh command in output: $_out5" ;;
+            esac
+            ;;
+        *) st_report bad "(S5) register-gh missing scope exits 2 with the refresh command" "exit $_rc5" ;;
+    esac
+
+    # (S6) end-to-end sign+verify using the freshly generated key
+    _payload="$T/payload.txt"
+    printf 'selftest payload\n' > "$_payload"
+    ssh-keygen -Y sign -f "$KP" -n "$SIG_NAMESPACE" "$_payload" >/dev/null 2>&1
+    _sign_rc=$?
+    if [ "$_sign_rc" -eq 0 ] && [ -s "$_payload.sig" ]; then
+        _signers_file="$T/signers_for_verify"
+        printf 'fixtureuser@fixturehost namespaces="simple-ci-receipt" %s\n' "$(cut -d' ' -f1,2 "$KP.pub")" > "$_signers_file"
+        ssh-keygen -Y verify -n "$SIG_NAMESPACE" -f "$_signers_file" -I fixtureuser@fixturehost -s "$_payload.sig" < "$_payload" >/dev/null 2>&1
+        _verify_rc=$?
+        if [ "$_verify_rc" -eq 0 ]; then
+            st_report ok "(S6) end-to-end sign+verify with the generated key succeeds"
+        else
+            st_report bad "(S6) end-to-end sign+verify with the generated key succeeds" "verify exit $_verify_rc"
+        fi
+    else
+        st_report bad "(S6) end-to-end sign+verify with the generated key succeeds" "sign exit $_sign_rc"
+    fi
+
+    printf 'selftest: %s case(s), %s failure(s)\n' "$ST_CASES" "$ST_FAILURES"
+    [ "$ST_CASES" -gt 0 ] || return 1
+    [ "$ST_FAILURES" -eq 0 ]
+}
+
+# ===========================================================================
+# Argument parsing
+# ===========================================================================
+SELF=$0
+SELFTEST_ONLY=0
+SUBCMD=""
+KEY_PATH=""
+PRINCIPAL=""
+LOCAL_CONFIG=0
+ROOT=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        init|register-gh|add-signer|all)
+            [ -z "$SUBCMD" ] || fail_verdict "multiple subcommands given: \"$SUBCMD\" and \"$1\""
+            SUBCMD=$1
+            ;;
+        --key-path) shift; [ $# -gt 0 ] || fail_verdict "--key-path needs a value"; KEY_PATH=$1 ;;
+        --principal) shift; [ $# -gt 0 ] || fail_verdict "--principal needs a value"; PRINCIPAL=$1 ;;
+        --local-config) LOCAL_CONFIG=1 ;;
+        --root) shift; [ $# -gt 0 ] || fail_verdict "--root needs a value"; ROOT=$1 ;;
+        -h|--help) sed -n '2,58p' "$0"; exit 0 ;;
+        *) fail_verdict "unknown argument \"$1\"" ;;
+    esac
+    shift
+done
+
+if [ "$SELFTEST_ONLY" = 1 ]; then
+    run_selftest
+    _st=$?
+    if [ "$_st" -ne 0 ]; then
+        printf 'FAIL — selftest failed (%s of %s case(s))\n' "$ST_FAILURES" "$ST_CASES"
+        exit 1
+    fi
+    printf 'PASS — %s selftest case(s) passed\n' "$ST_CASES"
+    exit 0
+fi
+
+[ -n "$SUBCMD" ] || SUBCMD=init
+
+case "$SUBCMD" in
+    all) run_all ;;
+    *) cmd_dispatch "$SUBCMD" ;;
+esac
