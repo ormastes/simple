@@ -10,7 +10,9 @@
  * and an owned array, including for an
  * empty file, on success. No operation follows a symlink or crosses a mount
  * below the retained root. Linux requires openat2 and O_TMPFILE support.
- * Other platforms fail closed until they provide those guarantees.
+ * macOS walks no-follow directory descriptors and publishes from an
+ * owner-private staged file with an exclusive hard link. Other platforms
+ * fail closed until they provide those guarantees.
  *
  * Publish statuses: 0 durable; -1 rejected; -2 destination already exists;
  * -3 unsupported; -4 visible but durability/close failed; -5 cleanup failed.
