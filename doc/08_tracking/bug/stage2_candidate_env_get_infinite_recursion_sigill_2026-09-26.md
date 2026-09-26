@@ -1,7 +1,7 @@
 # Stage 2 candidate sanity SIGILLs: `env_get` recurses into itself via duplicate co-compiled definitions
 
 - **Filed:** 2026-09-26
-- **Status:** FIXED 2026-09-26 — see "Resolution" at the end. The root cause is
+- **Status:** PARTIALLY FIXED 2026-09-26 — the io_runtime cycle is fixed and landed, but Stage 2 admission is STILL RED; see "Post-fix state" at the end. The root cause is
   NOT duplicate `env_get` dispatch; the sections below are kept as the
   investigation trail and are corrected there.
 - **Area:** cross-module symbol resolution / co-compiled duplicate dispatch
@@ -186,3 +186,54 @@ and pass after.
   generalization: the primitive's body references no spawning helper
   (`host_os(`/`shell_output(`/`shell_exec(`), `process_run` through it returns a
   real exit code, `platform_name()` is the spawn-free detector.
+
+## Post-fix state (2026-09-26, later the same day) — Stage 2 admission is STILL RED
+
+The `io_runtime` cycle fix above is real and landed, and it fixed the *standalone*
+reproducer. It did **not** clear Stage 2 admission. Recording this so the FIXED
+status above is not misread as "Stage 2 works".
+
+What is true after the fix:
+
+- Standalone, the stage-2 candidate now builds the fixture: `rc=132 -> rc=0`, and
+  the produced binary prints `hello`.
+- `run-phase1-local.shs --jobs=4` still aborts with
+  `candidate_frontend_smoke: hello-world-positional-build failed (raw rc=132)`.
+- This is **not** the stale-object-cache trap. The 160 MB
+  `stage3/<triple>/stage2-native-cache` was deleted and Stage 2 rebuilt cold;
+  the probe still returns 132.
+- No `host_os()` call sites remain in `io_runtime.spl` (only its own definition
+  and comments), and `platform_name()` delegates to `platform_name_raw()`
+  (`rt_platform_name`, no spawn), so the documented cycle is genuinely gone.
+
+The discriminating fact:
+
+| invocation of the SAME candidate binary | result |
+|---|---|
+| `SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_FREEZE_FALLBACK=1 ... native-build <fixture>` | **rc=0**, prints `hello` |
+| `SIMPLE_BOOTSTRAP=1 ... native-build <fixture>` (no SCV fallback) | rc=1, clean `SCV freeze has no admitted source inventory` |
+| the stage-2 sanity probe's own sandboxed invocation | **rc=132** |
+
+So the failure is specific to the probe's environment, not to the binary and not
+to the command. The probe sanitizes the environment (`bootstrap-from-scratch.sh`
+~`:1885-1893` resets `HOME`/`TMPDIR`/`PATH`, sets `LC_ALL=C`/`LANG=C`, and unsets
+a list of `SIMPLE_*` vars) and runs the child via `setsid` under a 180 s bounded
+wrapper. **Which specific variable flips the outcome has NOT been identified** —
+that is the open question, and it is the next thing to bisect.
+
+Evidence quality note: the probe's own captured log
+(`stage2-sanity.env.frontend-bootstrap-0.log.hello-world-positional`, 1354 bytes)
+ends mid-`phase=parse` with **no diagnostic at all**, and its bounded-env sidecar
+records only `reason=child-signal raw_status=132`. The readable `stack overflow
+... in function 'env_get'` text came from the worker's SPILLED stderr
+(`/tmp/native-build-stderr-<pid>-N.log`), not from the probe log. That is the
+still-open parent-relay defect in
+`native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md` (defect 3)
+actively costing diagnosis here: the probe loses the child's message. Fixing that
+relay should be done BEFORE further bisection, because right now every stage-2
+failure is reported as a bare signal.
+
+Revised unblock condition: bisect the sanity probe's sanitized environment against
+a working standalone invocation of the same binary, one variable at a time, and
+name the variable that turns rc=0 into rc=132. Do not assume it is SCV-related —
+removing `SIMPLE_SCV_FREEZE_FALLBACK` produces a clean rc=1, never 132.
