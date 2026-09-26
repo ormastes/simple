@@ -478,12 +478,6 @@ _alignment_handler:
     eret
 
 .Lnot_align_fault:
-    /* Lane-C1 bring-up diagnostic: dump the kernel stack window below the
-     * exception frame (the C call chain's saved return addresses name the
-     * fault site) BEFORE restoring registers. x0-x18 are clobbered by the
-     * call and reloaded from the frame below; x19+ are ABI-preserved. */
-    mov     x0, sp
-    bl      arm64_fault_stack_dump
     /* Restore registers, then branch to the fault printer. (This used to
      * fall through, but arm64_enter_el0 is now laid down immediately after
      * this block, so the fall-through re-entered arm64_enter_el0 and
@@ -612,6 +606,20 @@ _lower_el_aarch64_sync_handler:
     cmp     x9, #0x15              /* EC=0x15: SVC from AArch64 */
     b.ne    _fault_handler
 
+    /* Save the guest return context (ELR = svc+4, SPSR) in the spare frame
+     * tail BEFORE calling the C owner. An alignment-fault emulation inside
+     * the owner (e.g. the close handler's 16-byte store to the 8-aligned fd
+     * struct) re-enters through _alignment_handler, which legitimately
+     * rewrites ELR_EL1 (advance past the fault) and leaves SPSR_EL1 = EL1h.
+     * Restoring from the hardware registers at eret then returns to EL1 at a
+     * kernel text address with the guest's registers — the run-20260926
+     * "kernel jumps to user_sp" control-flow fault. */
+    mrs     x10, elr_el1
+    add     x10, x10, #4
+    str     x10, [sp, #256]
+    mrs     x11, spsr_el1
+    str     x11, [sp, #264]
+
     /* The boot kernel has no separate translated TTBR root. Run the C syscall
      * owner under its original identity-addressed translation mode, retaining
      * the user SCTLR in the unused tail of this 272-byte exception frame. */
@@ -632,10 +640,6 @@ _lower_el_aarch64_sync_handler:
     bl      rt_arm64_handle_user_svc
     str     x0, [sp, #0]           /* syscall return value -> user x0 */
 
-    mrs     x9, elr_el1
-    add     x9, x9, #4
-    msr     elr_el1, x9
-    isb
     str     x0, [sp, #0]           /* syscall return value -> user x0 */
 
     /* Restore the user SCTLR (saved at [sp,#248]) before the eret: the shim
@@ -647,6 +651,14 @@ _lower_el_aarch64_sync_handler:
     orr     x11, x10, #1
     dsb     sy
     msr     sctlr_el1, x11
+    isb
+
+    /* Restore the guest return context saved at entry (alignment-safe):
+     * ELR_EL1 = svc+4, SPSR_EL1 = the interrupted EL0 PSTATE. */
+    ldr     x11, [sp, #256]
+    msr     elr_el1, x11
+    ldr     x11, [sp, #264]
+    msr     spsr_el1, x11
     isb
 
     ldp     x0,  x1,  [sp, #0]
@@ -915,6 +927,13 @@ _fault_handler:
     str     w0, [x1]
     mov     w0, #'\n'
     str     w0, [x1]
+
+    /* Lane-C1 bring-up diagnostic: dump the C call chain below the
+     * exception frame (sync path: the frame sits at sp-272). Runs AFTER
+     * the ELR/ESR/FAR prints so the original fault's details survive even
+     * if the walk itself re-faults and cascades. */
+    sub     x0, sp, #272
+    bl      arm64_fault_stack_dump
 
 .Lfault_halt:
     wfe

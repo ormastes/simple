@@ -5136,8 +5136,31 @@ void arm64_fault_stack_dump(uint64_t frame_sp)
     serial_puts("[fault-dump] frame_sp=");
     serial_put_hex((int64_t)frame_sp);
     serial_puts("\r\n");
+    /* The exception frame's own slots: x30 (LR at the fault — distinguishes
+     * `ret` to a corrupted LR from `blr` to a bad function pointer) and the
+     * SPSR (faulting EL). frame_sp is the 272-byte sync frame base; x30 sits
+     * at +240. */
+    volatile uint64_t *f = (volatile uint64_t *)(uintptr_t)frame_sp;
+    serial_puts("[fault-dump] frame x30=");
+    serial_put_hex((int64_t)f[30]);
+    serial_puts(" x0=");
+    serial_put_hex((int64_t)f[0]);
+    serial_puts(" x1=");
+    serial_put_hex((int64_t)f[1]);
+    serial_puts("\r\n");
+    uint64_t spsr = 0;
+    __asm__ volatile("mrs %0, spsr_el1" : "=r"(spsr));
+    serial_puts("[fault-dump] spsr=");
+    serial_put_hex((int64_t)spsr);
+    serial_puts("\r\n");
     volatile uint64_t *w = (volatile uint64_t *)(uintptr_t)frame_sp;
-    for (int i = 1; i <= 36; i++) {
+    /* Bound the walk to the frame's own page: the kernel stack's used region
+     * is one page, and reading past its floor hits the unmapped guard page,
+     * which re-faults and cascades (run-20260926_082016/_083650 looped the
+     * fault handler instead of reporting the original fault). */
+    uint64_t room = (frame_sp & 0xfffULL) / 8ULL;
+    int max_i = (int)(room > 36 ? 36 : room);
+    for (int i = 1; i <= max_i; i++) {
         serial_puts("[fault-dump] sp-");
         serial_put_dec((int64_t)(i * 8));
         serial_puts(" = ");
