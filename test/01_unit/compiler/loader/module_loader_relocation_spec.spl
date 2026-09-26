@@ -50,7 +50,10 @@ fn patch_first_reloc_symbol_index_zero(smf_bytes: [u8], code_len: i64) -> [u8]:
 
 describe "Module Loader relocation application":
     it "applies a live relocation entry from a compiled object":
-        val (tmp_stdout, _tmp_stderr, _tmp_code) = run_sh("mktemp -d")
+        # `mktemp -d` under MSYS/Git Bash prints a POSIX path (/d/...) that the
+        # native file externs cannot open; `cygpath -m` turns it into D:/...
+        # and is absent on Unix, where the POSIX path is already native.
+        val (tmp_stdout, _tmp_stderr, _tmp_code) = run_sh("d=$(mktemp -d) && (cygpath -m \"$d\" 2>/dev/null || printf \"%s\\n\" \"$d\")")
         val tmpdir = tmp_stdout.trim()
         if tmpdir == "":
             fail("failed to create a temporary directory")
@@ -66,7 +69,11 @@ describe "Module Loader relocation application":
         val source = "extern long external_value;\nlong main(void) { return (long)&external_value; }\n"
         expect(rt_file_write_text(src_path, source)).to_equal(true)
 
-        val (compile_stdout, compile_stderr, compile_code) = run_sh("cc -c -O0 -fno-pic -fno-pie -o '{obj_path}' '{src_path}' 2>&1")
+        # The object is fed to build_smf_with_relocations for
+        # x86_64-unknown-linux-gnu, so request that ELF target explicitly: a
+        # host-default `cc` emits COFF on Windows (0 relocations parsed).
+        # Toolchain policy is clang-only.
+        val (compile_stdout, compile_stderr, compile_code) = run_sh("clang --target=x86_64-unknown-linux-gnu -c -O0 -fno-pic -fno-pie -o '{obj_path}' '{src_path}' 2>&1")
         if compile_code != 0:
             cleanup_tmpdir(tmpdir)
             fail("cc failed: {compile_stdout}{compile_stderr}")
