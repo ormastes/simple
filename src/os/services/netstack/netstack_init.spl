@@ -186,6 +186,7 @@ val ARM64_NET_RESERVED: u8 = 0u8
 val ARM64_NET_LISTENER: u8 = 1u8
 val ARM64_NET_ACCEPTED: u8 = 2u8
 val ARM64_NET_OUTBOUND: u8 = 3u8
+val ARM64_NET_CLOSING: u8 = 4u8
 var g_arm64_net_fd_map: [Arm64NetFdMap] = []
 var g_arm64_net_fd_ready: bool = false
 var g_arm64_net_next_fd: i32 = 100
@@ -281,15 +282,37 @@ fn _arm64_net_fd_remove(external_fd: i32) -> i32:
         i = i + 1
     -4096
 
+fn _arm64_net_fd_begin_close(external_fd: i32) -> i32:
+    var i: u64 = 0
+    while i < g_arm64_net_fd_map.len():
+        val entry = g_arm64_net_fd_map[i]
+        if entry.owner_task == spl_shim_current_task_id() and
+           entry.external_fd == external_fd:
+            g_arm64_net_fd_map[i] = Arm64NetFdMap(
+                owner_task: entry.owner_task, external_fd: entry.external_fd,
+                internal_fd: entry.internal_fd, route: ARM64_NET_CLOSING,
+                address: entry.address, port: entry.port)
+            return entry.internal_fd
+        i = i + 1
+    -4096
+
 pub fn net_arm64_task_teardown(owner_task: u64):
     """Close and remove every direct socket owned by one exiting EL0 task."""
     var i: u64 = 0
     while i < g_arm64_net_fd_map.len():
         if g_arm64_net_fd_map[i].owner_task == owner_task:
-            val internal = g_arm64_net_fd_map[i].internal_fd
-            g_arm64_net_fd_map.remove(i)
-            if internal >= 0:
-                net_tcp_close(internal as i64)
+            val entry = g_arm64_net_fd_map[i]
+            if entry.internal_fd >= 0 and
+               not net_tcp_close(entry.internal_fd as i64):
+                # A failed physical close stays quarantined after task exit.
+                # No new task can inherit its external descriptor identity.
+                g_arm64_net_fd_map[i] = Arm64NetFdMap(
+                    owner_task: entry.owner_task, external_fd: entry.external_fd,
+                    internal_fd: entry.internal_fd, route: ARM64_NET_CLOSING,
+                    address: entry.address, port: entry.port)
+                i = i + 1
+            else:
+                g_arm64_net_fd_map.remove(i)
         else:
             i = i + 1
 
@@ -427,15 +450,17 @@ fn spl_arm64_net_recv_direct(external: u64, ptr: u64, max: u64, src: u64, src_le
 
 @export("C", name: "spl_arm64_net_close_direct")
 fn spl_arm64_net_close_direct(external: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
-    # -4096 is an ownership sentinel, not an errno: the C dispatcher then
-    # routes ordinary file descriptors to the VFS close owner.
+    # -4096 is an ownership sentinel; the C dispatcher maps it to EBADF.
     if not _arm64_net_external_fd_valid(external):
         return -4096
-    val internal = _arm64_net_fd_remove(external as i32)
+    val internal = _arm64_net_fd_begin_close(external as i32)
     if internal == -4096:
         return -4096
-    if internal >= 0:
-        net_tcp_close(internal as i64)
+    if internal >= 0 and not net_tcp_close(internal as i64):
+        # Keep the descriptor in Closing so no new I/O can use a mapping whose
+        # physical retirement is unknown. A later close may retry it.
+        return -5
+    _arm64_net_fd_remove(external as i32)
     0
 
 # ============================================================================

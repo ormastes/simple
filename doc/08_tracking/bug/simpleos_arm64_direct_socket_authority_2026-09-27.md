@@ -42,7 +42,10 @@ Release impact: ARM64 network parity and the SimpleOS release row remain unquali
 - The ARM64 C syscall-33 path now separates its bounded file descriptor range
   from direct network descriptors starting at 100. It calls the direct owner
   only for network-range numbers and maps its non-owner sentinel to `EBADF`;
-  task teardown remains a second retirement path. The earlier all-descriptor
+  task teardown remains a second retirement path. Direct close and teardown
+  now retain a `Closing` quarantine entry when `net_tcp_close` fails, rather
+  than reporting success or losing the last mapping. No supervisor drain or
+  physical-retirement receipt exists for that quarantine yet. The earlier all-descriptor
   strong-shim close caused a kernel fault, so this narrower path still needs
   a ring-3 guest close/reopen and file-close regression before admission. The
   map retains its single-core transition assumption; multicore delivery needs
