@@ -13,7 +13,7 @@
 
 use compiler.backend.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
 use compiler.backend.linker.smf_writer.{RelocationType}
-use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute, smf_reloc_compute_rel64}
 
 # ============================================================================
 # x86_64 Relocation Types (elf.h R_X86_64_*)
@@ -22,6 +22,7 @@ use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute}
 val R_X86_64_NONE: i64       = 0
 val R_X86_64_64: i64         = 1   # S + A
 val R_X86_64_PC32: i64       = 2   # S + A - P
+val R_X86_64_PC64: i64       = 24  # S + A - P
 val R_X86_64_GOT32: i64      = 3
 val R_X86_64_PLT32: i64      = 4   # L + A - P (treated as S + A - P for static)
 val R_X86_64_32: i64         = 10  # S + A (truncated u32)
@@ -174,6 +175,10 @@ fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: 
         if r.ok:
             return RelocResult(success: true, offset: offset, value: r.value, error: "")
         return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_PC32 out of signed 32-bit range (S + A - P)")
+
+    if rtype == R_X86_64_PC64:
+        val r = smf_reloc_compute_rel64(s, a, p)
+        return RelocResult(success: r.ok, offset: offset, value: r.value, error: "")
 
     if rtype == R_X86_64_PLT32:
         val r = smf_reloc_compute(RelocationType.PltRel32, s, a, p)
@@ -350,7 +355,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
 
     match arch:
         case X86_64:
-            if rtype == R_X86_64_64:
+            if rtype == R_X86_64_64 or rtype == R_X86_64_PC64:
                 patch_u64_le(bytes, offset, result.value)
             else:
                 patch_u32_le(bytes, offset, result.value)
@@ -402,7 +407,7 @@ export RelocArch, RelocTarget, RelocResult
 export reloc_apply, reloc_apply_x86_64, reloc_apply_aarch64, reloc_apply_riscv
 export reloc_patch_bytes, reloc_arch_from_machine
 export patch_u32_le, patch_u64_le, read_u32_le
-export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_GOT32
+export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64, R_X86_64_GOT32
 export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
 export R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX
 export R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC

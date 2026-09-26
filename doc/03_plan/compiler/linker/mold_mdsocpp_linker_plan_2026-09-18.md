@@ -151,7 +151,7 @@ Next: A9 rung 3 (BootLayoutPlan in the ELF writer + `ld.lld -T` parity), `link_t
 
 Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7).
 
-Next: remaining TLS relocation models beyond x86_64 local/initial-exec, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed. Exact `SHF_MERGE` pooling now matches the lld `-O1` duplicate-string and aligned `.rodata.cst8` oracles, including symbol/addend remapping. Installed Mold and lld both retain non-identical suffix strings, so tail folding is not part of the compatibility contract.
+Next: remaining TLS relocation models beyond x86_64 local/initial-exec, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed. Exact `SHF_MERGE` pooling now matches the lld `-O1` duplicate-string and aligned `.rodata.cst8` oracles, including symbol/addend remapping. Installed Mold and lld both retain non-identical suffix strings, so tail folding is not part of the compatibility contract. Cross-object `R_X86_64_PC64` now patches the complete signed `S + A - P` value and is pinned by an ld.lld 23.1 fixture oracle.
 
 The x86_64 local-exec set now includes both instruction-field `TPOFF32` and
 data-word `TPOFF64`, with the latter checked against an lld static oracle.
