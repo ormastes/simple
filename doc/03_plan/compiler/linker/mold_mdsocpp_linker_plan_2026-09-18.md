@@ -265,8 +265,12 @@ download are functional without a fabricated session; password auth and
 interactive channels remain explicitly fail-closed.
 The adjacent Arm32/RiscV32 compiler bridge no longer returns successful fixed
 return-zero byte sequences while ignoring source. It now fails closed until a
-real source-derived target backend is connected; remote placement is wired,
-but remote compilation remains an explicit completion gap.
+real source-derived target backend is connected. The native RV32 backend now
+exposes a raw instruction-image entry point, distinct from its ELF32 object
+entry point, so the remote compiler adapter can upload source-derived bytes at
+the target-selected code base without leaking container headers into target
+memory. Source-to-MIR composition and the Arm32 backend remain explicit
+completion gaps; remote placement itself is wired.
 
 Implemented source slice:
 

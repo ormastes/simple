@@ -118,12 +118,25 @@ fn compile_native_riscv32(module: MirModule) -> [i64]:
     # Phase 4: ELF32 Emission (minimal: header + single PT_LOAD segment)
     emit_elf32_riscv32(encoded_funcs)
 
-fn emit_elf32_riscv32(encoded_funcs: [EncodedFunction]) -> [i64]:
-    # Concatenate all function code
+# Compile a MIR module into the exact RV32 instruction image uploaded by the
+# remote executor. Unlike compile_native_riscv32, this deliberately omits the
+# ELF header and program header: the target writes these bytes directly at the
+# caller-selected code base.
+fn compile_native_riscv32_raw(module: MirModule) -> [i64]:
+    val mach_module = isel_module_riscv32(module)
+    val allocated = regalloc_module(mach_module)
+    val encoded_funcs = encode_module_rv32(allocated)
+    rv32_encoded_code(encoded_funcs)
+
+fn rv32_encoded_code(encoded_funcs: [EncodedFunction]) -> [i64]:
     var all_code: [i64] = []
     for func in encoded_funcs:
         for byte in func.code:
             all_code = all_code.push(byte)
+    all_code
+
+fn emit_elf32_riscv32(encoded_funcs: [EncodedFunction]) -> [i64]:
+    val all_code = rv32_encoded_code(encoded_funcs)
 
     # ELF32 layout: header(52) + phdr(32) + code
     val header_size = 52
