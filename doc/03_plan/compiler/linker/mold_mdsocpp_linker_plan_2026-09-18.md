@@ -319,7 +319,9 @@ and duplicate strong definitions. This connects parsed LLVM-style ARM32 objects
 to the raw-image boundary required by remote and bare-metal placement. The
 raw path also decodes and applies narrow Thumb-1 `R_ARM_THM_JUMP11` and
 `R_ARM_THM_JUMP8` REL branches with signed range checks while preserving their
-opcode and condition fields. The remaining relocation corpus, hosted ARM executable emission, and real target
+opcode and condition fields. Width-correct `R_ARM_ABS8`/`R_ARM_ABS16` data
+relocations and bare-metal-default `R_ARM_TARGET1` (`ABS32`) are also admitted
+with signed-or-unsigned overflow checks. The remaining relocation corpus, hosted ARM executable emission, and real target
 execution evidence remain open.
 
 The compiler-owned ARM32 remote adapter now performs the full source-to-image
