@@ -1,0 +1,57 @@
+use std.spec.*
+use compiler.backend.linker.coff.coff_import.{
+    COFF_IMPORT_CODE, COFF_IMPORT_NAME, COFF_IMPORT_NAME_UNDECORATE,
+    coff_is_short_import, coff_parse_short_import}
+
+fn _ci16(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff) as u8).push(((value >> 8) & 0xff) as u8)
+
+fn _ci32(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff) as u8).push(((value >> 8) & 0xff) as u8)
+        .push(((value >> 16) & 0xff) as u8).push(((value >> 24) & 0xff) as u8)
+
+fn _ci_text(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < value.len():
+        result = result.push(value.byte_at(i) as u8)
+        i = i + 1
+    result.push(0)
+
+fn _short_import(public_name: text, dll: text, name_type: i64) -> [u8]:
+    val payload_size = public_name.len() + dll.len() + 2
+    var bytes: [u8] = []
+    bytes = _ci16(bytes, 0)
+    bytes = _ci16(bytes, 0xffff)
+    bytes = _ci16(bytes, 0)
+    bytes = _ci16(bytes, 0x8664)
+    bytes = _ci32(bytes, 0)
+    bytes = _ci32(bytes, payload_size)
+    bytes = _ci16(bytes, 7)
+    bytes = _ci16(bytes, COFF_IMPORT_CODE | (name_type << 2))
+    bytes = _ci_text(bytes, public_name)
+    _ci_text(bytes, dll)
+
+describe "COFF short import objects":
+    it "decodes a named AMD64 code import":
+        val bytes = _short_import("ExitProcess", "KERNEL32.dll", COFF_IMPORT_NAME)
+        expect(coff_is_short_import(bytes)).to_equal(true)
+        val parsed = coff_parse_short_import(bytes)
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().public_name).to_equal("ExitProcess")
+        expect(parsed.unwrap().import_name).to_equal("ExitProcess")
+        expect(parsed.unwrap().dll_name).to_equal("KERNEL32.dll")
+        expect(parsed.unwrap().iat_symbol()).to_equal("__imp_ExitProcess")
+        expect(parsed.unwrap().is_code()).to_equal(true)
+
+    it "applies undecorated import-name semantics":
+        val parsed = coff_parse_short_import(
+            _short_import("_MessageBoxA@16", "USER32.dll", COFF_IMPORT_NAME_UNDECORATE))
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().import_name).to_equal("MessageBoxA")
+
+    it "rejects malformed payload bounds":
+        var bytes = _short_import("ExitProcess", "KERNEL32.dll", COFF_IMPORT_NAME)
+        bytes[12] = 0xff
+        bytes[13] = 0xff
+        expect(coff_parse_short_import(bytes).is_err()).to_equal(true)

@@ -1,0 +1,88 @@
+use std.spec.*
+use compiler.backend.linker.coff.coff_object.{coff_parse_object}
+use compiler.backend.linker.coff.archive_closure.{
+    coff_archive_members, coff_archive_closure}
+
+fn _ca_ascii(bytes: [u8], value: text, width: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0x20) as u8)
+        i = i + 1
+    result
+
+fn _ca_u16(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff) as u8).push(((value >> 8) & 0xff) as u8)
+
+fn _ca_u32(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff) as u8).push(((value >> 8) & 0xff) as u8)
+        .push(((value >> 16) & 0xff) as u8).push(((value >> 24) & 0xff) as u8)
+
+fn _ca_name(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _ca_object(symbol: text, section: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ca_u16(bytes, 0x8664)
+    bytes = _ca_u16(bytes, 1)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 61)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_name(bytes, ".text")
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_u32(bytes, 60)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _ca_name(bytes, symbol)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u16(bytes, section)
+    bytes = _ca_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _ca_u32(bytes, 4)
+
+fn _ca_archive(name: text, member: [u8]) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ca_ascii(bytes, "!<arch>\n", 8)
+    bytes = _ca_ascii(bytes, name + "/", 16)
+    bytes = _ca_ascii(bytes, "0", 12)
+    bytes = _ca_ascii(bytes, "0", 6)
+    bytes = _ca_ascii(bytes, "0", 6)
+    bytes = _ca_ascii(bytes, "100644", 8)
+    bytes = _ca_ascii(bytes, member.len().to_text(), 10)
+    bytes = bytes.push(0x60).push(0x0a)
+    for b in member: bytes = bytes.push(b)
+    if member.len() % 2 != 0: bytes = bytes.push(0x0a)
+    bytes
+
+describe "COFF archive closure":
+    it "decodes ordinary AMD64 members from an MSVC-style library container":
+        val members = coff_archive_members([_ca_archive("provider.obj", _ca_object("foo", 1))])
+        expect(members.is_ok()).to_equal(true)
+        expect(members.unwrap().len()).to_equal(1)
+        expect(members.unwrap()[0].name).to_equal("provider.obj")
+
+    it "extracts a member that resolves a root external":
+        val root = coff_parse_object(_ca_object("foo", 0)).unwrap()
+        val closure = coff_archive_closure([root], [_ca_archive("provider.obj", _ca_object("foo", 1))])
+        expect(closure.is_ok()).to_equal(true)
+        expect(closure.unwrap().members.len()).to_equal(1)
+        expect(closure.unwrap().passes).to_equal(1)
+
+    it "does not extract an unrelated member":
+        val root = coff_parse_object(_ca_object("foo", 0)).unwrap()
+        val closure = coff_archive_closure([root], [_ca_archive("other.obj", _ca_object("bar", 1))])
+        expect(closure.is_ok()).to_equal(true)
+        expect(closure.unwrap().members.len()).to_equal(0)

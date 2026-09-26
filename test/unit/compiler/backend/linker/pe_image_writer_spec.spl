@@ -1,0 +1,82 @@
+use std.spec.*
+use std.spec.step
+use compiler.backend.linker.coff.pe_image_writer.{
+    PeImageSection, PE_AMD64_IMAGE_BASE, pe_align_up, pe_write_amd64_console}
+use compiler.backend.linker.pe_inspect.{
+    IMAGE_FILE_MACHINE_AMD64, IMAGE_OPTIONAL_MAGIC_PE32_PLUS, pe_inspect}
+
+fn _tiny_text_section() -> PeImageSection:
+    PeImageSection(name: ".text", virtual_address: 0x1000, virtual_size: 1,
+        data: [0xc3 as u8], characteristics: 0x60000020)
+
+fn _u16_at(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _u32_at(bytes: [u8], offset: i64) -> i64:
+    _u16_at(bytes, offset) | (_u16_at(bytes, offset + 2) << 16)
+
+describe "internal PE32+ image writer":
+    it "emits a parseable deterministic AMD64 console image":
+        step("Write one executable section and inspect its PE headers")
+        val written = pe_write_amd64_console([_tiny_text_section()], 0x1000)
+        expect(written.is_ok()).to_equal(true)
+        val bytes = written.unwrap()
+        expect(bytes.len()).to_equal(1024)
+        expect(bytes[0] as i64).to_equal(0x4d)
+        expect(bytes[1] as i64).to_equal(0x5a)
+        val inspected = pe_inspect(bytes)
+        expect(inspected.is_ok()).to_equal(true)
+        val image = inspected.unwrap()
+        expect(image.header.machine).to_equal(IMAGE_FILE_MACHINE_AMD64)
+        expect(image.header.optional_magic).to_equal(IMAGE_OPTIONAL_MAGIC_PE32_PLUS)
+        expect(image.header.entry_point_rva).to_equal(0x1000)
+        expect(image.header.image_base).to_equal(PE_AMD64_IMAGE_BASE)
+        expect(image.sections.len()).to_equal(1)
+        expect(image.sections[0].name).to_equal(".text")
+        expect(image.sections[0].raw_pointer).to_equal(0x200)
+        expect(_u16_at(bytes, 0xde)).to_equal(0x8100)
+
+    it "advertises ASLR only when a base-relocation directory exists":
+        val reloc = PeImageSection(name: ".reloc", virtual_address: 0x2000,
+            virtual_size: 8, data: [0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                8 as u8, 0 as u8, 0 as u8, 0 as u8], characteristics: 0x42000040)
+        val written = pe_write_amd64_console([_tiny_text_section(), reloc], 0x1000)
+        expect(written.is_ok()).to_equal(true)
+        expect(_u16_at(written.unwrap(), 0xde)).to_equal(0x8160)
+
+    it "records only import descriptors in the import data directory":
+        var idata: [u8] = []
+        while idata.len() < 96: idata = idata.push(0)
+        val imports = PeImageSection(name: ".idata", virtual_address: 0x2000,
+            virtual_size: 96, data: idata, characteristics: 0xc0000040,
+            import_directory_size: 40)
+        val written = pe_write_amd64_console([_tiny_text_section(), imports], 0x1000).unwrap()
+        expect(_u32_at(written, 0x110)).to_equal(0x2000)
+        expect(_u32_at(written, 0x114)).to_equal(40)
+
+    it "rejects an entry point outside all sections":
+        val written = pe_write_amd64_console([_tiny_text_section()], 0x2000)
+        expect(written.is_err()).to_equal(true)
+        expect(written.unwrap_err()).to_contain("outside every section")
+
+    it "represents BSS without file bytes and accounts for uninitialized data":
+        val bss = PeImageSection(name: ".bss", virtual_address: 0x2000,
+            virtual_size: 32, data: [], characteristics: 0xc0000080)
+        val written = pe_write_amd64_console([_tiny_text_section(), bss], 0x1000).unwrap()
+        val inspected = pe_inspect(written).unwrap()
+        expect(inspected.sections[1].raw_size).to_equal(0)
+        expect(inspected.sections[1].raw_pointer).to_equal(0)
+        expect(_u32_at(written, 0xa4)).to_equal(0x200)
+
+    it "rejects overlapping section RVAs and invalid names":
+        val first = _tiny_text_section()
+        val overlap = PeImageSection(name: ".data", virtual_address: 0x1000,
+            virtual_size: 4, data: [1 as u8], characteristics: 0xc0000040)
+        expect(pe_write_amd64_console([first, overlap], 0x1000).is_err()).to_equal(true)
+        val long_name = PeImageSection(name: ".verylong", virtual_address: 0x1000,
+            virtual_size: 1, data: [0xc3 as u8], characteristics: 0x60000020)
+        expect(pe_write_amd64_console([long_name], 0x1000).is_err()).to_equal(true)
+
+    it "aligns headers, sections, and images upward":
+        expect(pe_align_up(513, 512)).to_equal(1024)
+        expect(pe_align_up(4096, 4096)).to_equal(4096)

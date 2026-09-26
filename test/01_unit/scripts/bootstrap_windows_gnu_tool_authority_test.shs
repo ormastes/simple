@@ -64,14 +64,17 @@ grep -F 'abi="${SIMPLE_WINDOWS_ABI:-msvc}"' \
     "$root/scripts/bootstrap/bootstrap-windows.sh" >/dev/null
 awk '
   /CC=\$\{mingw_cc\}/ && !cc { cc=NR }
-  /if \[ "\$\{full_bootstrap\}" -eq 1 \]/ && !full { full=NR }
+  /if \[ "\$\{full_bootstrap\}" -eq 1 \]/ && cc && !full { full=NR }
   END { exit !(cc && full && cc < full) }
 ' "$bootstrap_source"
 grep -F "SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC" \
     "$root/scripts/check/lib/bootstrap-stage3/authority.shs" >/dev/null
 grep -F 'if [ "${os}" != windows ] && [ -n "${sanity_cxx}" ]; then' \
     "$bootstrap_source" >/dev/null
-if grep -Eq 'bootstrap_windows_cxx_env|mingw_cxx|CXX_x86_64_pc_windows_gnu|CXXFLAGS_x86_64_pc_windows_gnu|clang\+\+' \
+# `clang++` is a legitimate macOS-only default in authority.shs.  Guard the
+# Windows-specific C++ authority names here; generated Windows source paths are
+# separately sliced and checked below for target_cxx_compiler.
+if grep -Eq 'bootstrap_windows_cxx_env|mingw_cxx|CXX_x86_64_pc_windows_gnu|CXXFLAGS_x86_64_pc_windows_gnu' \
     "$bootstrap_source" "$root/scripts/check/lib/bootstrap-stage3/authority.shs"; then
     echo 'FAIL: Windows bootstrap retained a C++ tool authority' >&2
     exit 1
@@ -116,6 +119,15 @@ grep -F 'tools::target_c_compiler(target)' "$security_registry_source" >/dev/nul
 grep -F 'fn windows_gnu_target_flag' "$native_project_tools" >/dev/null
 grep -F 'windows_gnu_target_flag(target)' "$native_project_tools" >/dev/null
 grep -F 'windows_gnu_target_flag(effective_target())' "$inline_asm_source" >/dev/null
+# MSYS passes Windows verbatim paths (\\?\C:\...) through PathBuf.  GNU
+# clang/ld do not understand that namespace and used to collapse the final
+# link inputs to names such as \\_main_stub.o.  Every generated-path operand at
+# the final external-tool boundary must use the already-tested normalizer.
+grep -F '.arg(external_tool_path(&self.output))' "$native_project_linker" >/dev/null
+grep -F '.arg(external_tool_path(&main_o))' "$native_project_linker" >/dev/null
+grep -F '.arg(external_tool_path(&archive_path))' "$native_project_linker" >/dev/null
+grep -F 'cmd.arg(external_tool_path(obj));' "$native_project_linker" >/dev/null
+grep -F 'cmd.arg(external_tool_path(runtime_lib));' "$native_project_linker" >/dev/null
 if grep -Fq '.cpp' "$native_project_linker" "$security_registry_source" || \
     grep -Fq 'const_cast' "$native_project_linker" "$security_registry_source"; then
     echo 'FAIL: generated Windows bootstrap sources retained C++ syntax or extensions' >&2

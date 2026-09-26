@@ -81,10 +81,11 @@
 
 `mold_is_pure_simple_linker_complete()` (`L/mold_compatibility.spl:109`) is the single completion predicate. It returns `true` only when all hold, each backed by a receipt from a real run:
 1. `find_linker_path()` resolves `internal` on Linux x86_64 and aarch64 and the receipt names capsule `link_elf_fast`;
-2. the full compiler corpus (A5 row "full compiler release") links internally and the execution corpus passes;
-3. fast/bounded output digests match for the same request (G3);
-4. SimpleOS x86_64 + arm64 kernels boot from `BootLayoutPlan` output on real firmware and a board (or a dated board-blocked record exists) (G4).
-COFF/Mach-O completion extend `mold_compatibility_features` rows; they do not gate the predicate. Both `mold_linker_spec.spl` mirrors flip in the same commit (A13).
+2. the Windows x86_64 COFF/PE engine links and runs the execution corpus without delegating to `lld-link`/`link.exe`;
+3. the full compiler corpus (A5 row "full compiler release") links internally and the execution corpus passes;
+4. fast/bounded output digests match for the same request (G3);
+5. SimpleOS x86_64 + arm64 kernels boot from `BootLayoutPlan` output on real firmware and a board (or a dated board-blocked record exists) (G4).
+Mach-O completion extends `mold_compatibility_features`; Windows COFF is now a completion gate. Both `mold_linker_spec.spl` mirrors flip in the same commit (A13).
 
 ## 7. Blocked / external dependencies
 
@@ -151,3 +152,71 @@ Next: A9 rung 3 (BootLayoutPlan in the ELF writer + `ld.lld -T` parity), `link_t
 Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7).
 
 Next: RELRO, section GC, lld `-O1` string merge, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed.
+
+## 13. Windows/Linux/SimpleOS completion continuation — 2026-09-26
+
+The compatibility predicate is now expressed as explicit receipt inputs instead
+of an undocumented literal. It remains fail-closed. Linux is implemented but
+not certified and SimpleOS is awaiting full boot evidence. Windows now has a
+fail-closed freestanding AMD64 COFF parser, relocation core, PE32+ writer, and
+`SIMPLE_LINKER=internal` route. Static `.lib` archive closure, COMDAT metadata,
+short-import decoding, PE import descriptors, ILT/IAT directories, AMD64 import
+thunks, COFF common-symbol `.bss`, and zero-file-byte BSS output are now
+implemented. Object `$` subsections are ordered and merged into bounded PE
+sections, all standard COMDAT selection modes are handled, undefined and
+duplicate externals are rejected before emission, import-directory sizes are
+descriptor-exact, and AMD64 `ABSOLUTE`/`SECTION`/`SECREL` join the address
+relocations. `ADDR64` sites produce sorted/deduplicated `.reloc` blocks, so
+PE ASLR flags are backed by real `IMAGE_REL_BASED_DIR64` records. Hosted CRT
+completion and native execution evidence
+remain open. The user-expanded completion boundary includes
+Windows x86_64 and therefore supersedes the earlier statement that COFF did not
+gate completion.
+
+Remote interpreter planning now has target-aware binary placement contracts:
+Linux `/usr/local/bin/simple`, Windows
+`C:\Program Files\Simple\simple.exe`, and SimpleOS `/usr/bin/simple`, with an
+explicit `--simple-bin` override and rejection of unknown automatic targets.
+The same resolver now owns the real remote-PC adapter command, eliminating its
+previous hardcoded `bin/simple` execution path.
+
+Implemented source slice:
+
+- raw AMD64/ARM64 COFF object decoding with section, primary/aux symbol, long
+  name, BSS, and relocation bounds checks;
+- AMD64 `ADDR64`, `ADDR32`, `ADDR32NB`, and `REL32..REL32_5` formulas with
+  truncation rejection;
+- deterministic PE32+ section/image writer with import, exception, and base
+  relocation directories, including synthesized DIR64 page blocks;
+- AMD64 multi-object symbol resolution, static `.lib` fixpoint extraction,
+  COMDAT selection metadata with fail-closed unsupported replacement modes,
+  Microsoft short-import decoding plus `.idata`/IAT/thunk synthesis, and both
+  GNU and MSVC Windows `SIMPLE_LINKER=internal` routing without external
+  fallback;
+- host-independent SimpleOS x86_64/arm64 routing through the existing
+  `BootLayoutPlan` + `elf_boot_link` engine.
+
+LLVM COFF oracle evidence on this Windows host confirms the parser model against
+a real Clang object (`IMAGE_FILE_MACHINE_AMD64`, eight sections, long
+`.llvm_addrsig`, zero-file-byte `.bss`, primary+aux symbols, `REL32` and
+`ADDR32NB`). Executable Simple specs remain `TEST_BLOCKED`: neither this clean
+worktree nor the shared checkout has an admitted Stage 2/3 or deployed Stage 4
+pure-Simple binary, and the Rust seed is bootstrap-only.
+The canonical Windows-GNU Stage-2 bootstrap now publishes all four immutable
+Rust authority artifacts and passes the 5/5 authority preflight. With
+`--backend=cranelift`, one build entered the pure-Simple Stage-2 compilation
+and reached approximately 9.8 GiB RSS before Windows commit pressure ended it
+with `memory allocation of 270352 bytes failed`; it did not reach the linker
+and produced no admitted compiler. This replaces the earlier transient-status
+125 fingerprint blocker with a measured memory blocker.
+
+The Stage-2 sealed environment now sets `MIMALLOC_ARENA_EAGER_COMMIT=0`,
+`MIMALLOC_PURGE_DELAY=0`, and `MIMALLOC_PURGE_DECOMMITS=1`, includes those
+bindings in the command digest, and admits their names through the fail-closed
+canonical transcript contract. A focused contract test proves one binding in
+the digest and one in execution, preventing the duplicate assignment that
+caused the first pre-exec refusal. The required rerun is deferred: this session
+used its three allowed verify/fix cycles, so no fourth canonical bootstrap was
+started. Full Windows native execution, Linux certification, SimpleOS full
+boot, and performance receipts remain open; consequently the completion
+predicate correctly remains false.

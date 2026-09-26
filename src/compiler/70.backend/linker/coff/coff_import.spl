@@ -1,0 +1,106 @@
+# Microsoft short-import object decoder.
+# Binary contract: PE/COFF Import Library Format, Import Header.
+
+use compiler.backend.linker.coff.coff_object.{COFF_MACHINE_AMD64}
+
+val COFF_IMPORT_CODE: i64 = 0
+val COFF_IMPORT_DATA: i64 = 1
+val COFF_IMPORT_CONST: i64 = 2
+val COFF_IMPORT_ORDINAL: i64 = 0
+val COFF_IMPORT_NAME: i64 = 1
+val COFF_IMPORT_NAME_NOPREFIX: i64 = 2
+val COFF_IMPORT_NAME_UNDECORATE: i64 = 3
+val COFF_IMPORT_NAME_EXPORTAS: i64 = 4
+
+struct CoffImportObject:
+    machine: i64
+    public_name: text
+    import_name: text
+    dll_name: text
+    hint_or_ordinal: i64
+    import_type: i64
+    name_type: i64
+
+    fn iat_symbol() -> text: "__imp_" + self.public_name
+    fn is_code() -> bool: self.import_type == COFF_IMPORT_CODE
+    fn is_ordinal() -> bool: self.name_type == COFF_IMPORT_ORDINAL
+
+fn _ci_u16(bytes: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 2 > bytes.len(): return -1
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _ci_u32(bytes: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 4 > bytes.len(): return -1
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
+
+fn _ci_string(bytes: [u8], offset: i64, end: i64) -> Result<(text, i64), text>:
+    if offset < 0 or offset >= end or end > bytes.len(): return Err("short-import string is out of bounds")
+    var value = ""
+    var cursor = offset
+    while cursor < end:
+        val byte = bytes[cursor]
+        if byte == 0: return Ok((value, cursor + 1))
+        value = value + text.from_char_code(byte)
+        cursor = cursor + 1
+    Err("short-import string is not NUL terminated")
+
+fn _ci_skip_prefix(name: text) -> text:
+    if name.starts_with("?") or name.starts_with("@") or name.starts_with("_"):
+        return name.substring(1)
+    name
+
+fn _ci_import_name(public_name: text, name_type: i64, export_name: text) -> text:
+    if name_type == COFF_IMPORT_ORDINAL: return ""
+    if name_type == COFF_IMPORT_NAME: return public_name
+    if name_type == COFF_IMPORT_NAME_EXPORTAS: return export_name
+    val unprefixed = _ci_skip_prefix(public_name)
+    if name_type == COFF_IMPORT_NAME_NOPREFIX: return unprefixed
+    if name_type == COFF_IMPORT_NAME_UNDECORATE:
+        val parts = unprefixed.split("@")
+        return parts[0]
+    ""
+
+fn coff_is_short_import(bytes: [u8]) -> bool:
+    bytes.len() >= 20 and _ci_u16(bytes, 0) == 0 and _ci_u16(bytes, 2) == 0xffff
+
+fn coff_parse_short_import(bytes: [u8]) -> Result<CoffImportObject, text>:
+    """Decode one canonical short-import member from an MSVC .lib archive."""
+    if not coff_is_short_import(bytes): return Err("not a COFF short-import object")
+    val machine = _ci_u16(bytes, 6)
+    if machine != COFF_MACHINE_AMD64: return Err("unsupported short-import machine {machine}")
+    val string_size = _ci_u32(bytes, 12)
+    val hint_or_ordinal = _ci_u16(bytes, 16)
+    val flags = _ci_u16(bytes, 18)
+    if string_size < 3 or 20 + string_size > bytes.len():
+        return Err("short-import string payload is out of bounds")
+    val import_type = flags & 0x3
+    val name_type = (flags >> 2) & 0x7
+    if import_type > COFF_IMPORT_CONST: return Err("unsupported short-import type {import_type}")
+    if name_type > COFF_IMPORT_NAME_EXPORTAS: return Err("unsupported short-import name type {name_type}")
+    val end = 20 + string_size
+    val public_result = _ci_string(bytes, 20, end)
+    if public_result.is_err(): return Err(public_result.unwrap_err())
+    val public_pair = public_result.unwrap()
+    if public_pair.0 == "": return Err("short-import public symbol is empty")
+    val dll_result = _ci_string(bytes, public_pair.1, end)
+    if dll_result.is_err(): return Err(dll_result.unwrap_err())
+    val dll_pair = dll_result.unwrap()
+    if dll_pair.0 == "": return Err("short-import DLL name is empty")
+    var export_name = ""
+    if name_type == COFF_IMPORT_NAME_EXPORTAS:
+        val export_result = _ci_string(bytes, dll_pair.1, end)
+        if export_result.is_err(): return Err(export_result.unwrap_err())
+        export_name = export_result.unwrap().0
+        if export_name == "": return Err("short-import export-as name is empty")
+    val import_name = _ci_import_name(public_pair.0, name_type, export_name)
+    Ok(CoffImportObject(machine: machine, public_name: public_pair.0,
+        import_name: import_name, dll_name: dll_pair.0,
+        hint_or_ordinal: hint_or_ordinal, import_type: import_type,
+        name_type: name_type))
+
+export CoffImportObject
+export COFF_IMPORT_CODE, COFF_IMPORT_DATA, COFF_IMPORT_CONST
+export COFF_IMPORT_ORDINAL, COFF_IMPORT_NAME, COFF_IMPORT_NAME_NOPREFIX
+export COFF_IMPORT_NAME_UNDECORATE, COFF_IMPORT_NAME_EXPORTAS
+export coff_is_short_import, coff_parse_short_import

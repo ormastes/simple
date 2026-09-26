@@ -1,0 +1,243 @@
+use std.spec.*
+use std.spec.step
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
+use compiler.backend.linker.pe_inspect.{pe_inspect}
+
+fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _cl_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _cl_name(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _cl_object(symbol_name: text, section_number: i64) -> [u8]:
+    # Header 20 + section 40 + one-byte RET + symbol 18 + string size 4.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, section_number)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_set_section_name(bytes: [u8], name: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result[20 + i] = (if i < name.len(): name.byte_at(i) else: 0) as u8
+        i = i + 1
+    result
+
+fn _cl_ascii(bytes: [u8], value: text, width: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0x20) as u8)
+        i = i + 1
+    result
+
+fn _cl_short_import() -> [u8]:
+    val symbol = "ExitProcess"
+    val dll = "KERNEL32.dll"
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0xffff)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, symbol.len() + dll.len() + 2)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 4)
+    var i: i64 = 0
+    while i < symbol.len():
+        bytes = bytes.push(symbol.byte_at(i) as u8)
+        i = i + 1
+    bytes = bytes.push(0)
+    i = 0
+    while i < dll.len():
+        bytes = bytes.push(dll.byte_at(i) as u8)
+        i = i + 1
+    bytes.push(0)
+
+fn _cl_archive(member: [u8]) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _cl_ascii(bytes, "!<arch>\n", 8)
+    bytes = _cl_ascii(bytes, "exit.obj/", 16)
+    bytes = _cl_ascii(bytes, "0", 12)
+    bytes = _cl_ascii(bytes, "0", 6)
+    bytes = _cl_ascii(bytes, "0", 6)
+    bytes = _cl_ascii(bytes, "100644", 8)
+    bytes = _cl_ascii(bytes, member.len().to_text(), 10)
+    bytes = bytes.push(0x60).push(0x0a)
+    for b in member: bytes = bytes.push(b)
+    if member.len() % 2 != 0: bytes = bytes.push(0x0a)
+    bytes
+
+fn _cl_importing_object() -> [u8]:
+    # CALL rel32 ExitProcess; RET. Symbol table has _start plus the import.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 76)
+    bytes = _cl_u32(bytes, 2)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 6)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 66)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xe8).push(0).push(0).push(0).push(0).push(0xc3)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 4)
+    bytes = _cl_name(bytes, "_start")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _cl_name(bytes, "ExitProc")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2).push(0)
+    # Long symbol name: replace the inline truncated name with a string-table reference.
+    val second_symbol = 94
+    bytes[second_symbol] = 0
+    bytes[second_symbol + 1] = 0
+    bytes[second_symbol + 2] = 0
+    bytes[second_symbol + 3] = 0
+    bytes[second_symbol + 4] = 4
+    bytes[second_symbol + 5] = 0
+    bytes[second_symbol + 6] = 0
+    bytes[second_symbol + 7] = 0
+    bytes = _cl_u32(bytes, 16)
+    var i: i64 = 0
+    val long_name = "ExitProcess"
+    while i < long_name.len():
+        bytes = bytes.push(long_name.byte_at(i) as u8)
+        i = i + 1
+    bytes.push(0)
+
+describe "internal freestanding Windows linker":
+    it "links a raw AMD64 object into a PE32+ executable":
+        step("Resolve _start, retain its code section, and emit PE headers")
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_object("_start", 1)], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap())
+        expect(inspected.is_ok()).to_equal(true)
+        expect(inspected.unwrap().header.entry_point_rva).to_equal(0x1000)
+        expect(inspected.unwrap().sections[0].name).to_equal(".text")
+
+    it "fails closed when the entry symbol is unresolved":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_object("_start", 0)], archives: [], entry: "_start"))
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("unresolved external")
+
+    it "rejects unreferenced unresolved externals and duplicate definitions":
+        var unresolved = _cl_importing_object()
+        unresolved[52] = 0
+        unresolved[53] = 0
+        val missing = coff_link_amd64(CoffLinkRequest(objects: [unresolved],
+            archives: [], entry: "_start"))
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.unwrap_err()).to_contain("unresolved external COFF symbol 'ExitProcess'")
+
+        val duplicate = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1), _cl_object("helper", 1),
+            _cl_object("helper", 1)], archives: [], entry: "_start"))
+        expect(duplicate.is_err()).to_equal(true)
+        expect(duplicate.unwrap_err()).to_contain("duplicate external COFF symbol 'helper'")
+
+    it "rejects an empty request":
+        expect(coff_link_amd64(CoffLinkRequest(objects: [], archives: [], entry: "_start")).is_err()).to_equal(true)
+
+    it "links a selected short import through .idata and an AMD64 thunk":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_importing_object()],
+            archives: [_cl_archive(_cl_short_import())], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.sections.len()).to_equal(3)
+        expect(inspected.sections[1].name).to_equal(".text$im")
+        expect(inspected.sections[2].name).to_equal(".idata")
+
+    it "allocates unresolved nonzero common symbols in zero-file-byte BSS":
+        var object = _cl_importing_object()
+        object[74] = 3
+        object[102] = 8
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [object],
+            archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.sections.len()).to_equal(2)
+        expect(inspected.sections[1].name).to_equal(".bss")
+        expect(inspected.sections[1].virtual_size).to_equal(8)
+        expect(inspected.sections[1].raw_size).to_equal(0)
+
+    it "applies SECTION and SECREL debug relocations":
+        var section_object = _cl_importing_object()
+        section_object[74] = 0x0a
+        section_object[106] = 1
+        val section_image = coff_link_amd64(CoffLinkRequest(objects: [section_object],
+            archives: [], entry: "_start")).unwrap()
+        expect(section_image[0x201] as i64).to_equal(1)
+        expect(section_image[0x202] as i64).to_equal(0)
+
+        var secrel_object = _cl_importing_object()
+        secrel_object[74] = 0x0b
+        secrel_object[102] = 4
+        secrel_object[106] = 1
+        val secrel_image = coff_link_amd64(CoffLinkRequest(objects: [secrel_object],
+            archives: [], entry: "_start")).unwrap()
+        expect(secrel_image[0x201] as i64).to_equal(4)
+        expect(secrel_image[0x202] as i64).to_equal(0)
+
+    it "sorts dollar subsections and merges them into one PE section":
+        var z_section = _cl_set_section_name(_cl_object("_start", 1), ".text$z")
+        var a_section = _cl_set_section_name(_cl_object("helper", 1), ".text$a")
+        z_section[60] = 0x5a
+        a_section[60] = 0x41
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [z_section, a_section],
+            archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(linked).unwrap()
+        expect(inspected.sections.len()).to_equal(1)
+        expect(inspected.sections[0].name).to_equal(".text")
+        expect(inspected.header.entry_point_rva).to_equal(0x1001)
+        expect(linked[0x200] as i64).to_equal(0x41)
+        expect(linked[0x201] as i64).to_equal(0x5a)

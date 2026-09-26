@@ -1,0 +1,143 @@
+# PE32+ import directory and AMD64 import-thunk synthesis.
+
+use compiler.backend.linker.coff.coff_import.{CoffImportObject}
+
+struct PeImportImage:
+    thunk_data: [u8]
+    idata_data: [u8]
+    symbol_rvas: {text: i64}
+    descriptor_size: i64
+    iat_offset: i64
+    iat_size: i64
+
+fn _pi_align(value: i64, alignment: i64) -> i64:
+    ((value + alignment - 1) / alignment) * alignment
+
+fn _pi_put_u16(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = (value & 0xff) as u8
+    result[offset + 1] = ((value >> 8) & 0xff) as u8
+    result
+
+fn _pi_put_u32(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 4:
+        result[offset + i] = ((value >> (i * 8)) & 0xff) as u8
+        i = i + 1
+    result
+
+fn _pi_put_u64(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result[offset + i] = ((value >> (i * 8)) & 0xff) as u8
+        i = i + 1
+    result
+
+fn _pi_put_text(bytes: [u8], offset: i64, value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < value.len():
+        result[offset + i] = value.byte_at(i) as u8
+        i = i + 1
+    result[offset + value.len()] = 0
+    result
+
+fn _pi_dll_names(imports: [CoffImportObject]) -> [text]:
+    var result: [text] = []
+    var seen: {text: bool} = {}
+    for import_object in imports:
+        val key = import_object.dll_name.lower()
+        if not seen.has(key):
+            result = result.push(import_object.dll_name)
+            seen[key] = true
+    result
+
+fn _pi_dll_import_count(imports: [CoffImportObject], dll: text) -> i64:
+    var count: i64 = 0
+    for import_object in imports:
+        if import_object.dll_name.lower() == dll.lower(): count = count + 1
+    count
+
+fn pe_build_amd64_imports(imports: [CoffImportObject], thunk_rva: i64,
+        idata_rva: i64) -> Result<PeImportImage, text>:
+    """Build deterministic .idata plus RIP-relative jump thunks for imports."""
+    if imports.len() == 0:
+        return Ok(PeImportImage(thunk_data: [], idata_data: [],
+            symbol_rvas: {}, descriptor_size: 0, iat_offset: 0, iat_size: 0))
+    if idata_rva <= 0: return Err("PE import directory requires a positive RVA")
+    val dlls = _pi_dll_names(imports)
+    val descriptor_size = (dlls.len() + 1) * 20
+    var ilt_offsets: {text: i64} = {}
+    var iat_offsets: {text: i64} = {}
+    var cursor = descriptor_size
+    for dll in dlls:
+        val count = _pi_dll_import_count(imports, dll)
+        ilt_offsets[dll.lower()] = cursor
+        cursor = cursor + (count + 1) * 8
+    val iat_start = cursor
+    for dll in dlls:
+        val count = _pi_dll_import_count(imports, dll)
+        iat_offsets[dll.lower()] = cursor
+        cursor = cursor + (count + 1) * 8
+    val iat_end = cursor
+    var hint_offsets: {text: i64} = {}
+    for import_object in imports:
+        if not import_object.is_ordinal():
+            cursor = _pi_align(cursor, 2)
+            hint_offsets[import_object.iat_symbol()] = cursor
+            cursor = cursor + 2 + import_object.import_name.len() + 1
+    var dll_offsets: {text: i64} = {}
+    for dll in dlls:
+        dll_offsets[dll.lower()] = cursor
+        cursor = cursor + dll.len() + 1
+    var idata: [u8] = []
+    while idata.len() < cursor: idata = idata.push(0)
+    var symbols: {text: i64} = {}
+    var thunks: [u8] = []
+    var descriptor_index: i64 = 0
+    for dll in dlls:
+        val key = dll.lower()
+        val descriptor = descriptor_index * 20
+        idata = _pi_put_u32(idata, descriptor, idata_rva + ilt_offsets[key])
+        idata = _pi_put_u32(idata, descriptor + 12, idata_rva + dll_offsets[key])
+        idata = _pi_put_u32(idata, descriptor + 16, idata_rva + iat_offsets[key])
+        idata = _pi_put_text(idata, dll_offsets[key], dll)
+        var import_index: i64 = 0
+        for import_object in imports:
+            if import_object.dll_name.lower() == key:
+                var lookup_value: i64 = 0
+                if import_object.is_ordinal():
+                    lookup_value = -9223372036854775808 + import_object.hint_or_ordinal
+                else:
+                    val hint_offset = hint_offsets[import_object.iat_symbol()]
+                    idata = _pi_put_u16(idata, hint_offset, import_object.hint_or_ordinal)
+                    idata = _pi_put_text(idata, hint_offset + 2, import_object.import_name)
+                    lookup_value = idata_rva + hint_offset
+                val ilt_entry = ilt_offsets[key] + import_index * 8
+                val iat_entry = iat_offsets[key] + import_index * 8
+                idata = _pi_put_u64(idata, ilt_entry, lookup_value)
+                idata = _pi_put_u64(idata, iat_entry, lookup_value)
+                val iat_rva = idata_rva + iat_entry
+                symbols[import_object.iat_symbol()] = iat_rva
+                if import_object.is_code():
+                    val thunk_address = thunk_rva + thunks.len()
+                    val displacement = iat_rva - (thunk_address + 6)
+                    if displacement < -2147483648 or displacement > 2147483647:
+                        return Err("AMD64 import thunk for '{import_object.public_name}' is out of REL32 range")
+                    symbols[import_object.public_name] = thunk_address
+                    thunks = thunks.push(0xff as u8).push(0x25 as u8)
+                    var byte_index: i64 = 0
+                    while byte_index < 4:
+                        thunks = thunks.push(((displacement >> (byte_index * 8)) & 0xff) as u8)
+                        byte_index = byte_index + 1
+                else:
+                    symbols[import_object.public_name] = iat_rva
+                import_index = import_index + 1
+        descriptor_index = descriptor_index + 1
+    Ok(PeImportImage(thunk_data: thunks, idata_data: idata,
+        symbol_rvas: symbols, descriptor_size: descriptor_size,
+        iat_offset: iat_start, iat_size: iat_end - iat_start))
+
+export PeImportImage, pe_build_amd64_imports

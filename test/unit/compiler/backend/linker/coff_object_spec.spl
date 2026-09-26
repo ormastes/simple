@@ -1,0 +1,185 @@
+use std.spec.*
+use std.spec.step
+use compiler.backend.linker.coff.coff_object.{
+    COFF_MACHINE_AMD64, COFF_REL_AMD64_ADDR32, COFF_REL_AMD64_REL32,
+    COFF_REL_AMD64_REL32_5, coff_parse_object, coff_symbol_at_table_index,
+    coff_apply_amd64_relocation}
+
+fn _push_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _push_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _push_fixed(bytes: [u8], value: text, count: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < count:
+        val b = if i < value.len(): value.byte_at(i) else: 0
+        result = result.push(b as u8)
+        i = i + 1
+    result
+
+fn _minimal_amd64_object(relocation_symbol_index: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
+    bytes = _push_u16(bytes, 1)       # one section
+    bytes = _push_u32(bytes, 0)       # reproducible timestamp
+    bytes = _push_u32(bytes, 74)      # symbol table offset
+    bytes = _push_u32(bytes, 1)       # one symbol
+    bytes = _push_u16(bytes, 0)       # object files have no optional header
+    bytes = _push_u16(bytes, 0)
+
+    bytes = _push_fixed(bytes, ".text", 8)
+    bytes = _push_u32(bytes, 0)       # virtual size
+    bytes = _push_u32(bytes, 0)       # virtual address
+    bytes = _push_u32(bytes, 4)       # raw size
+    bytes = _push_u32(bytes, 60)      # raw data offset
+    bytes = _push_u32(bytes, 64)      # relocation table offset
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 1)       # one relocation
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0x60000020)
+
+    bytes = _push_u32(bytes, 0x90909090)
+    bytes = _push_u32(bytes, 0)       # relocation offset in section
+    bytes = _push_u32(bytes, relocation_symbol_index)
+    bytes = _push_u16(bytes, COFF_REL_AMD64_REL32)
+
+    bytes = _push_fixed(bytes, "_start", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)              # external, no aux record
+    _push_u32(bytes, 4)               # empty string table
+
+fn _minimal_bss_object() -> [u8]:
+    var bytes: [u8] = []
+    bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 60)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_fixed(bytes, ".bss", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 4)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0xc0300080)
+    bytes = _push_fixed(bytes, "scratch", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    _push_u32(bytes, 4)
+
+fn _minimal_comdat_object() -> [u8]:
+    var bytes: [u8] = []
+    bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 61)
+    bytes = _push_u32(bytes, 3)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_fixed(bytes, ".text", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 60)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0x60001020)
+    bytes = bytes.push(0xc3)
+    bytes = _push_fixed(bytes, ".text", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = bytes.push(3).push(1)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0x1234)
+    bytes = _push_u16(bytes, 0)
+    bytes = bytes.push(1).push(0).push(0).push(0)
+    bytes = _push_fixed(bytes, "function", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _push_u32(bytes, 4)
+
+describe "raw COFF object parser":
+    it "decodes an AMD64 section, symbol, and relocation":
+        step("Parse the raw object form emitted by LLVM on Windows")
+        val parsed = coff_parse_object(_minimal_amd64_object(0))
+        expect(parsed.is_ok()).to_equal(true)
+        val object = parsed.unwrap()
+        expect(object.machine).to_equal(COFF_MACHINE_AMD64)
+        expect(object.sections.len()).to_equal(1)
+        expect(object.sections[0].name).to_equal(".text")
+        expect(object.sections[0].data.len()).to_equal(4)
+        expect(object.sections[0].relocations.len()).to_equal(1)
+        expect(object.sections[0].relocations[0].relocation_type).to_equal(COFF_REL_AMD64_REL32)
+        val symbol = coff_symbol_at_table_index(object, 0)
+        expect(symbol.is_ok()).to_equal(true)
+        expect(symbol.unwrap().name).to_equal("_start")
+        expect(symbol.unwrap().is_defined()).to_equal(true)
+
+    it "rejects a relocation that escapes the symbol table":
+        step("Corrupt the relocation symbol index and require a named error")
+        val parsed = coff_parse_object(_minimal_amd64_object(1))
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.unwrap_err()).to_contain("outside table size")
+
+    it "models zero-file-byte BSS using its logical raw size":
+        val parsed = coff_parse_object(_minimal_bss_object())
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().sections[0].name).to_equal(".bss")
+        expect(parsed.unwrap().sections[0].data.len()).to_equal(0)
+        expect(parsed.unwrap().sections[0].virtual_size).to_equal(4)
+
+    it "uses the external definition as the COMDAT identity key":
+        val parsed = coff_parse_object(_minimal_comdat_object())
+        expect(parsed.is_ok()).to_equal(true)
+        val section = parsed.unwrap().sections[0]
+        expect(section.comdat_selection).to_equal(1)
+        expect(section.comdat_checksum).to_equal(0x1234)
+        expect(section.comdat_key).to_equal("function")
+
+    it "rejects linked PE input instead of confusing it with an object":
+        val parsed = coff_parse_object([0x4d as u8, 0x5a as u8])
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.unwrap_err()).to_contain("20-byte header")
+
+    it "computes AMD64 absolute and PC-relative relocation values":
+        val absolute = coff_apply_amd64_relocation(COFF_REL_AMD64_ADDR32, 0x1000, 4, 0, 0)
+        expect(absolute.success).to_equal(true)
+        expect(absolute.value).to_equal(0x1004)
+        val relative = coff_apply_amd64_relocation(COFF_REL_AMD64_REL32, 0x1100, 0, 0x1000, 0)
+        expect(relative.success).to_equal(true)
+        expect(relative.value).to_equal(0xfc)
+        val relative5 = coff_apply_amd64_relocation(COFF_REL_AMD64_REL32_5, 0x1100, 0, 0x1000, 0)
+        expect(relative5.value).to_equal(0xf7)
+
+    it "rejects relocation overflow and unsupported kinds":
+        val overflow = coff_apply_amd64_relocation(COFF_REL_AMD64_ADDR32, 4294967296, 0, 0, 0)
+        expect(overflow.success).to_equal(false)
+        expect(overflow.error).to_contain("out of range")
+        val unsupported = coff_apply_amd64_relocation(0x7fff, 0, 0, 0, 0)
+        expect(unsupported.success).to_equal(false)
+        expect(unsupported.error).to_contain("unsupported")

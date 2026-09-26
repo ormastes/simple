@@ -24,7 +24,7 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read, file_read_bytes, file_write, file_write_bytes, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
 use std.common.crypto.sha256.{sha256_text}
 # Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
 # host_os()/is_windows_env() ultimately delegates to
@@ -58,7 +58,10 @@ use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compile
 # own LinkRequestV1-shaped entry point -- internal_link_native() below is the
 # one shared implementation both callers now use.
 use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -120,10 +123,10 @@ impl NativeLinkConfig:
 # for no benefit.
 
 fn is_simpleos_target() -> bool:
-    val t = env_get("SIMPLE_TARGET")
-    if t == nil:
-        return false
-    t.ends_with("-simpleos")
+    val explicit = env_get("SIMPLE_TARGET") ?? ""
+    val native = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = if explicit != "": explicit.lower() else: native.lower()
+    target == "simpleos" or target.contains("simpleos-") or target.contains("-simpleos")
 
 fn detect_preferred_backend(extra_flags: [text]) -> text:
     for flag in extra_flags:
@@ -236,6 +239,18 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     if object_files.len() == 0:
         return Err("No object files to link")
 
+    # SimpleOS is a cross-target decision, independent of the host OS. Route
+    # it before Windows/Unix host dispatch so the same BootLayoutPlan engine
+    # is used from every build host.
+    if requested_linker_override().trim().lower() == "internal" and is_simpleos_target():
+        val unsupported_field = internal_unsupported_config_field(config)
+        if unsupported_field != "":
+            return Err("internal engine: unsupported config field '{unsupported_field}' (internal:simpleos does not honour it)")
+        val native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        val explicit_target = env_get("SIMPLE_TARGET") ?? ""
+        val simpleos_target = if native_target != "": native_target elif explicit_target != "": explicit_target else: "simpleos"
+        return internal_link_simpleos(object_files, output, simpleos_target)
+
     val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
     if trace:
         print "[LINKER] os={os}"
@@ -268,6 +283,8 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
 
     # Platform-specific linking
     if os == "windows-mingw":
+        if requested_linker_override().trim().lower() == "internal":
+            return link_native_windows(object_files, output, config)
         return _link_native_mingw(object_files, output, config)
     if os == "windows-msvc" or os == "windows":
         return link_native_windows(object_files, output, config)
@@ -294,8 +311,6 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # error, never a silent fallback to the external toolchain those arms
     # would otherwise select.
     if requested_linker_override().trim().lower() == "internal":
-        if is_simpleos_target():
-            return Err("internal engine: unsupported target 'simpleos' (internal:elf links host Linux targets only)")
         val cross_plan = hosted_c_compiler_plan(target, os, arch)
         if cross_plan.requires_cross:
             return Err("internal engine: unsupported cross target '{target}' (internal:elf links against the host glibc only)")
@@ -536,6 +551,35 @@ fn internal_unsupported_config_field(config: NativeLinkConfig) -> text:
         return "debug"
     ""
 
+fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
+    # internal:coff consumes libraries, library_paths, and runtime provider
+    # archives itself.  The remaining options still require explicit support.
+    if config.extra_flags.len() > 0: return "extra_flags"
+    if config.retained_symbols.len() > 0: return "retained_symbols"
+    if config.strip_output: return "strip_output"
+    if config.debug: return "debug"
+    ""
+
+fn internal_coff_is_archive(bytes: [u8]) -> bool:
+    bytes.len() >= 8 and bytes[0] == 0x21 and bytes[1] == 0x3c and
+        bytes[2] == 0x61 and bytes[3] == 0x72 and bytes[4] == 0x63 and
+        bytes[5] == 0x68 and bytes[6] == 0x3e and bytes[7] == 0x0a
+
+fn internal_coff_library_file(name: text, search_paths: [text]) -> text:
+    if file_exists(name): return name
+    var base = name
+    if base.starts_with("-l"): base = base.substring(2)
+    var filenames: [text] = [base]
+    if not base.lower().ends_with(".lib") and not base.lower().ends_with(".a"):
+        filenames = filenames.push(base + ".lib")
+        filenames = filenames.push("lib" + base + ".a")
+        filenames = filenames.push(base + ".a")
+    for directory in search_paths:
+        for filename in filenames:
+            val candidate = directory + "/" + filename
+            if file_exists(candidate): return candidate
+    ""
+
 fn internal_link_native_read_i64(path: text) -> [i64]:
     """Bytes of `path` widened to `[i64]`, the element type ElfLinkRequest wants."""
     val raw = file_read_bytes(path)
@@ -545,6 +589,32 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
         out = out.push(raw[i] as i64)
         i = i + 1
     out
+
+fn internal_link_simpleos(object_files: [text], output: text, target: text) -> Result:
+    """Link a SimpleOS kernel through BootLayoutPlan without external lld."""
+    var target_arch = RelocArch.X86_64
+    var default_script = "src/os/kernel/arch/x86_64/linker.ld"
+    val normalized = target.lower()
+    if normalized.contains("aarch64") or normalized.contains("arm64"):
+        target_arch = RelocArch.AArch64
+        default_script = "src/os/kernel/arch/arm64/linker.ld"
+    elif normalized != "" and not normalized.contains("x86_64") and not normalized.contains("amd64") and normalized != "simpleos":
+        return Err("internal engine: unsupported SimpleOS target '{target}' (internal:simpleos supports x86_64 and arm64)")
+    val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+    val script_path = if configured_script != "": configured_script else: default_script
+    if not file_exists(script_path): return Err("internal engine: SimpleOS linker script not found: {script_path}")
+    var objects: [[i64]] = []
+    for path in object_files:
+        if not file_exists(path): return Err("internal engine: input {path} cannot be read")
+        objects = objects.push(internal_link_native_read_i64(path))
+    val plan = boot_layout_from_text(file_read(script_path))
+    if plan.is_err(): return Err("internal engine: SimpleOS linker script: {plan.unwrap_err()}")
+    val linked = elf_boot_link(objects, plan.unwrap(), target_arch)
+    if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
+    var bytes: [u8] = []
+    for b in linked.unwrap(): bytes = bytes.push(b as u8)
+    if not file_write_bytes(output, bytes): return Err("internal engine: could not write {output}")
+    Ok(output)
 
 fn internal_link_native(os: text, arch: text, pie: bool, object_files: [text], output: text) -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
@@ -1392,6 +1462,36 @@ fn _is_mingw_env() -> bool:
     linker_flavor == "gnu"
 
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    if requested_linker_override().trim().lower() == "internal":
+        val unsupported_field = internal_coff_unsupported_config_field(config)
+        if unsupported_field != "":
+            return Err("internal engine: unsupported config field '{unsupported_field}' (internal:coff does not honour it; unset SIMPLE_LINKER to use lld-link)")
+        var objects: [[u8]] = []
+        var archives: [[u8]] = []
+        for path in object_files:
+            if not file_exists(path): return Err("internal engine: input {path} cannot be read")
+            val bytes = file_read_bytes(path)
+            if internal_coff_is_archive(bytes): archives = archives.push(bytes)
+            else: objects = objects.push(bytes)
+        var library_files: [text] = []
+        for library in config.libraries:
+            val path = internal_coff_library_file(library, config.library_paths)
+            if path == "": return Err("internal engine: COFF library '{library}' was not found")
+            if not library_files.contains(path): library_files = library_files.push(path)
+        var runtime_dir = config.runtime_path
+        if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
+        for path in native_runtime_archive_inputs_for_platform(runtime_dir, config.runtime_bundle, true):
+            if not library_files.contains(path): library_files = library_files.push(path)
+        for path in library_files:
+            val bytes = file_read_bytes(path)
+            if not internal_coff_is_archive(bytes):
+                return Err("internal engine: COFF library '{path}' is not an ar archive")
+            archives = archives.push(bytes)
+        val linked = coff_link_amd64(CoffLinkRequest(objects: objects, archives: archives, entry: "auto"))
+        if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
+        if not file_write_bytes(output, linked.unwrap()):
+            return Err("internal engine: could not write {output}")
+        return Ok(output)
     # MinGW: use gcc driver (Unix-style linking)
     if _is_mingw_env():
         return _link_native_mingw(object_files, output, config)

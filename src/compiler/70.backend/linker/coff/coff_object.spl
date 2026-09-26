@@ -1,0 +1,298 @@
+# Raw PE/COFF object parser for the internal Windows linker.
+# This is intentionally separate from pe_parser.spl, which parses linked PE
+# images with a DOS header and optional header. A compiler-produced `.obj`
+# starts directly with the 20-byte COFF file header.
+
+val COFF_MACHINE_AMD64: i64 = 0x8664
+val COFF_MACHINE_ARM64: i64 = 0xaa64
+val COFF_HEADER_SIZE: i64 = 20
+val COFF_SECTION_HEADER_SIZE: i64 = 40
+val COFF_SYMBOL_SIZE: i64 = 18
+val COFF_RELOCATION_SIZE: i64 = 10
+
+val COFF_STORAGE_CLASS_EXTERNAL: i64 = 2
+val COFF_STORAGE_CLASS_STATIC: i64 = 3
+val COFF_SECTION_CNT_UNINITIALIZED_DATA: i64 = 0x00000080
+val COFF_SECTION_LNK_INFO: i64 = 0x00000200
+val COFF_SECTION_LNK_REMOVE: i64 = 0x00000800
+val COFF_SECTION_LNK_COMDAT: i64 = 0x00001000
+
+val COFF_REL_AMD64_ADDR64: i64 = 0x0001
+val COFF_REL_AMD64_ABSOLUTE: i64 = 0x0000
+val COFF_REL_AMD64_ADDR32: i64 = 0x0002
+val COFF_REL_AMD64_ADDR32NB: i64 = 0x0003
+val COFF_REL_AMD64_REL32: i64 = 0x0004
+val COFF_REL_AMD64_REL32_1: i64 = 0x0005
+val COFF_REL_AMD64_REL32_2: i64 = 0x0006
+val COFF_REL_AMD64_REL32_3: i64 = 0x0007
+val COFF_REL_AMD64_REL32_4: i64 = 0x0008
+val COFF_REL_AMD64_REL32_5: i64 = 0x0009
+val COFF_REL_AMD64_SECTION: i64 = 0x000a
+val COFF_REL_AMD64_SECREL: i64 = 0x000b
+
+struct CoffRelocation:
+    virtual_address: i64
+    symbol_index: i64
+    relocation_type: i64
+
+struct CoffSection:
+    name: text
+    virtual_size: i64
+    raw_size: i64
+    raw_pointer: i64
+    relocation_pointer: i64
+    relocation_count: i64
+    characteristics: i64
+    comdat_selection: i64
+    associative_section: i64
+    comdat_checksum: i64
+    comdat_key: text
+    data: [u8]
+    relocations: [CoffRelocation]
+
+struct CoffSymbol:
+    name: text
+    value: i64
+    section_number: i64
+    symbol_type: i64
+    storage_class: i64
+    auxiliary_count: i64
+    table_index: i64
+
+    fn is_defined() -> bool: self.section_number > 0
+    fn is_external() -> bool: self.storage_class == COFF_STORAGE_CLASS_EXTERNAL
+
+struct CoffObject:
+    machine: i64
+    timestamp: i64
+    characteristics: i64
+    sections: [CoffSection]
+    symbols: [CoffSymbol]
+    symbol_table_offset: i64
+    symbol_table_count: i64
+
+struct CoffRelocationValue:
+    success: bool
+    value: i64
+    width: i64
+    error: text
+
+fn _coff_u16(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 2 > data.len(): return -1
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _coff_u32(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 4 > data.len(): return -1
+    ((data[offset] as i64) | ((data[offset + 1] as i64) << 8) |
+        ((data[offset + 2] as i64) << 16) | ((data[offset + 3] as i64) << 24)
+    )
+
+fn _coff_i16(data: [u8], offset: i64) -> i64:
+    val value = _coff_u16(data, offset)
+    if value >= 32768: value - 65536 else: value
+
+fn _coff_fixed_name(data: [u8], offset: i64, count: i64) -> text:
+    var result = ""
+    var i: i64 = 0
+    while i < count and offset + i < data.len():
+        val b = data[offset + i]
+        if b == 0: return result
+        result = result + text.from_char_code(b)
+        i = i + 1
+    result
+
+fn _coff_string(data: [u8], string_table: i64, offset: i64) -> Result<text, text>:
+    val table_size = _coff_u32(data, string_table)
+    if table_size < 4 or offset < 4 or offset >= table_size or string_table + table_size > data.len():
+        return Err("COFF string-table offset {offset} is out of bounds")
+    Ok(_coff_fixed_name(data, string_table + offset, table_size - offset))
+
+fn _coff_symbol_name(data: [u8], symbol_offset: i64, string_table: i64) -> Result<text, text>:
+    val zeroes = _coff_u32(data, symbol_offset)
+    if zeroes < 0: return Err("truncated COFF symbol name")
+    if zeroes != 0: return Ok(_coff_fixed_name(data, symbol_offset, 8))
+    val string_offset = _coff_u32(data, symbol_offset + 4)
+    if string_offset < 0: return Err("truncated COFF long symbol name")
+    _coff_string(data, string_table, string_offset)
+
+fn _coff_section_name(data: [u8], offset: i64, string_table: i64) -> Result<text, text>:
+    val short_name = _coff_fixed_name(data, offset, 8)
+    if not short_name.starts_with("/"): return Ok(short_name)
+    val decimal = short_name.substring(1)
+    val string_offset = decimal.to_int() ?? -1
+    if string_offset < 0: return Err("invalid COFF long section name '{short_name}'")
+    _coff_string(data, string_table, string_offset)
+
+fn _coff_bytes(data: [u8], offset: i64, count: i64) -> Result<[u8], text>:
+    if offset < 0 or count < 0 or offset + count > data.len():
+        return Err("COFF byte range [{offset}, {offset + count}) is out of bounds")
+    var result: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        result = result.push(data[offset + i])
+        i = i + 1
+    Ok(result)
+
+fn _coff_relocations(data: [u8], offset: i64, count: i64, symbol_count: i64) -> Result<[CoffRelocation], text>:
+    if count > 0 and (offset <= 0 or offset + count * COFF_RELOCATION_SIZE > data.len()):
+        return Err("COFF relocation table is out of bounds")
+    var result: [CoffRelocation] = []
+    var i: i64 = 0
+    while i < count:
+        val base = offset + i * COFF_RELOCATION_SIZE
+        val virtual_address = _coff_u32(data, base)
+        val symbol_index = _coff_u32(data, base + 4)
+        val relocation_type = _coff_u16(data, base + 8)
+        if virtual_address < 0 or symbol_index < 0 or relocation_type < 0:
+            return Err("truncated COFF relocation {i}")
+        if symbol_index >= symbol_count:
+            return Err("COFF relocation {i} references symbol {symbol_index} outside table size {symbol_count}")
+        result = result.push(CoffRelocation(
+            virtual_address: virtual_address,
+            symbol_index: symbol_index,
+            relocation_type: relocation_type))
+        i = i + 1
+    Ok(result)
+
+fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
+    """Parse one raw compiler-produced COFF object and reject malformed ranges."""
+    if data.len() < COFF_HEADER_SIZE: return Err("COFF object is shorter than its 20-byte header")
+    val machine = _coff_u16(data, 0)
+    if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64:
+        return Err("unsupported COFF machine {machine}")
+    val section_count = _coff_u16(data, 2)
+    val timestamp = _coff_u32(data, 4)
+    val symbol_table_offset = _coff_u32(data, 8)
+    val symbol_count = _coff_u32(data, 12)
+    val optional_header_size = _coff_u16(data, 16)
+    val characteristics = _coff_u16(data, 18)
+    if section_count < 0 or symbol_table_offset < 0 or symbol_count < 0:
+        return Err("truncated COFF header")
+    if optional_header_size != 0:
+        return Err("COFF object unexpectedly contains a {optional_header_size}-byte optional header")
+    val section_table_end = COFF_HEADER_SIZE + section_count * COFF_SECTION_HEADER_SIZE
+    if section_table_end > data.len(): return Err("COFF section table is out of bounds")
+    val symbol_table_end = symbol_table_offset + symbol_count * COFF_SYMBOL_SIZE
+    if symbol_count > 0 and (symbol_table_offset < section_table_end or symbol_table_end + 4 > data.len()):
+        return Err("COFF symbol table is out of bounds")
+    val string_table = symbol_table_end
+    if symbol_count > 0:
+        val string_table_size = _coff_u32(data, string_table)
+        if string_table_size < 4 or string_table + string_table_size > data.len():
+            return Err("COFF string table is out of bounds")
+
+    var symbols: [CoffSymbol] = []
+    var comdat_selections: [i64] = []
+    var associative_sections: [i64] = []
+    var comdat_checksums: [i64] = []
+    var comdat_keys: [text] = []
+    var selection_index: i64 = 0
+    while selection_index < section_count:
+        comdat_selections = comdat_selections.push(0)
+        associative_sections = associative_sections.push(0)
+        comdat_checksums = comdat_checksums.push(0)
+        comdat_keys = comdat_keys.push("")
+        selection_index = selection_index + 1
+    var symbol_index: i64 = 0
+    while symbol_index < symbol_count:
+        val base = symbol_table_offset + symbol_index * COFF_SYMBOL_SIZE
+        val name_result = _coff_symbol_name(data, base, string_table)
+        if name_result.is_err(): return Err(name_result.unwrap_err())
+        val value = _coff_u32(data, base + 8)
+        val section_number = _coff_i16(data, base + 12)
+        val symbol_type = _coff_u16(data, base + 14)
+        val storage_class = data[base + 16] as i64
+        val auxiliary_count = data[base + 17] as i64
+        if symbol_index + auxiliary_count >= symbol_count:
+            return Err("COFF symbol {symbol_index} auxiliary records exceed table size {symbol_count}")
+        symbols = symbols.push(CoffSymbol(name: name_result.unwrap(), value: value,
+            section_number: section_number, symbol_type: symbol_type,
+            storage_class: storage_class, auxiliary_count: auxiliary_count,
+            table_index: symbol_index))
+        if storage_class == COFF_STORAGE_CLASS_EXTERNAL and section_number > 0 and
+                section_number <= section_count and comdat_keys[section_number - 1] == "":
+            comdat_keys[section_number - 1] = name_result.unwrap()
+        if storage_class == COFF_STORAGE_CLASS_STATIC and section_number > 0 and
+                section_number <= section_count and auxiliary_count > 0:
+            val auxiliary = base + COFF_SYMBOL_SIZE
+            comdat_selections[section_number - 1] = data[auxiliary + 14] as i64
+            associative_sections[section_number - 1] = _coff_u16(data, auxiliary + 12)
+            comdat_checksums[section_number - 1] = _coff_u32(data, auxiliary + 8)
+        symbol_index = symbol_index + 1 + auxiliary_count
+
+    var sections: [CoffSection] = []
+    var section_index: i64 = 0
+    while section_index < section_count:
+        val base = COFF_HEADER_SIZE + section_index * COFF_SECTION_HEADER_SIZE
+        val name_result = _coff_section_name(data, base, string_table)
+        if name_result.is_err(): return Err(name_result.unwrap_err())
+        var virtual_size = _coff_u32(data, base + 8)
+        val raw_size = _coff_u32(data, base + 16)
+        val raw_pointer = _coff_u32(data, base + 20)
+        val relocation_pointer = _coff_u32(data, base + 24)
+        val relocation_count = _coff_u16(data, base + 32)
+        val section_characteristics = _coff_u32(data, base + 36)
+        var section_data: Result<[u8], text> = Ok([])
+        if raw_size > 0 and raw_pointer == 0:
+            if (section_characteristics & COFF_SECTION_CNT_UNINITIALIZED_DATA) == 0:
+                return Err("section '{name_result.unwrap()}' has data bytes but no raw-data pointer")
+            if virtual_size < raw_size: virtual_size = raw_size
+        else:
+            section_data = _coff_bytes(data, raw_pointer, raw_size)
+        if section_data.is_err(): return Err("section '{name_result.unwrap()}': {section_data.unwrap_err()}")
+        val relocations = _coff_relocations(data, relocation_pointer, relocation_count, symbol_count)
+        if relocations.is_err(): return Err("section '{name_result.unwrap()}': {relocations.unwrap_err()}")
+        sections = sections.push(CoffSection(name: name_result.unwrap(), virtual_size: virtual_size,
+            raw_size: raw_size, raw_pointer: raw_pointer, relocation_pointer: relocation_pointer,
+            relocation_count: relocation_count, characteristics: section_characteristics,
+            comdat_selection: comdat_selections[section_index],
+            associative_section: associative_sections[section_index],
+            comdat_checksum: comdat_checksums[section_index],
+            comdat_key: comdat_keys[section_index],
+            data: section_data.unwrap(), relocations: relocations.unwrap()))
+        section_index = section_index + 1
+
+    Ok(CoffObject(machine: machine, timestamp: timestamp, characteristics: characteristics,
+        sections: sections, symbols: symbols, symbol_table_offset: symbol_table_offset,
+        symbol_table_count: symbol_count))
+
+fn coff_symbol_at_table_index(object: CoffObject, table_index: i64) -> Result<CoffSymbol, text>:
+    """Resolve a relocation's raw symbol-table index without confusing aux rows."""
+    for symbol in object.symbols:
+        if symbol.table_index == table_index: return Ok(symbol)
+    Err("COFF symbol-table index {table_index} names an auxiliary or missing record")
+
+fn coff_apply_amd64_relocation(relocation_type: i64, symbol_address: i64,
+        addend: i64, place_address: i64, image_base: i64) -> CoffRelocationValue:
+    """Compute one AMD64 COFF relocation, rejecting truncation and unknown types."""
+    if relocation_type == COFF_REL_AMD64_ADDR64:
+        return CoffRelocationValue(success: true, value: symbol_address + addend, width: 8, error: "")
+    if relocation_type == COFF_REL_AMD64_ADDR32:
+        val value = symbol_address + addend
+        if value < 0 or value >= 4294967296:
+            return CoffRelocationValue(success: false, value: 0, width: 4, error: "IMAGE_REL_AMD64_ADDR32 out of range")
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    if relocation_type == COFF_REL_AMD64_ADDR32NB:
+        val value = symbol_address + addend - image_base
+        if value < 0 or value >= 4294967296:
+            return CoffRelocationValue(success: false, value: 0, width: 4, error: "IMAGE_REL_AMD64_ADDR32NB out of range")
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    if relocation_type >= COFF_REL_AMD64_REL32 and relocation_type <= COFF_REL_AMD64_REL32_5:
+        val trailing = relocation_type - COFF_REL_AMD64_REL32
+        val value = symbol_address + addend - (place_address + 4 + trailing)
+        if value < -2147483648 or value > 2147483647:
+            return CoffRelocationValue(success: false, value: 0, width: 4, error: "IMAGE_REL_AMD64_REL32_{trailing} out of range")
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    CoffRelocationValue(success: false, value: 0, width: 0,
+        error: "unsupported AMD64 COFF relocation type {relocation_type}")
+
+export CoffRelocation, CoffSection, CoffSymbol, CoffObject, CoffRelocationValue
+export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64
+export COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC
+export COFF_SECTION_CNT_UNINITIALIZED_DATA, COFF_SECTION_LNK_INFO
+export COFF_SECTION_LNK_REMOVE, COFF_SECTION_LNK_COMDAT
+export COFF_REL_AMD64_ABSOLUTE, COFF_REL_AMD64_ADDR64, COFF_REL_AMD64_ADDR32, COFF_REL_AMD64_ADDR32NB
+export COFF_REL_AMD64_REL32, COFF_REL_AMD64_REL32_1, COFF_REL_AMD64_REL32_2
+export COFF_REL_AMD64_REL32_3, COFF_REL_AMD64_REL32_4, COFF_REL_AMD64_REL32_5
+export COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL
+export coff_parse_object, coff_symbol_at_table_index, coff_apply_amd64_relocation

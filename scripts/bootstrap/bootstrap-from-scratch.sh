@@ -1506,7 +1506,14 @@ SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}
 export SIMPLE_K1_COMPOSITION_SHA256_BEFORE
 
 . "${bootstrap_entry_dir}/bootstrap-jobs.shs"
+. "${bootstrap_entry_dir}/bootstrap-build-jobs-policy.shs"
 bootstrap_select_jobs "${jobs}" "${bootstrap_early_repo_root}/config/bootstrap.sdn" || exit 1
+bootstrap_jobs_before_memory_clamp=${selfhost_jobs}
+selfhost_jobs=$(bootstrap_build_jobs_memory_clamp "${selfhost_jobs}") || exit 1
+jobs=$(bootstrap_build_jobs_memory_clamp "${jobs}") || exit 1
+if [ "${selfhost_jobs}" -lt "${bootstrap_jobs_before_memory_clamp}" ]; then
+  job_source="${job_source}+memory"
+fi
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}, source: ${job_source})"
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
 {
@@ -2625,8 +2632,8 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   #   - simple_abi_cflags: forwarded as CFLAGS (SIMPLE_ABI_VERSION defines).
   #   - mingw_linker/cc/ar/cflags/rustflags: the resolved Windows-GNU C
   #     toolchain and its per-target RUSTFLAGS.
-  #   - CXX/AR/LD/LLVM_CONFIG: forwarded verbatim into the Cargo environment
-  #     by run_rust_authority_env whenever ambiently set.
+  #   - CXX (non-Windows only), AR/LD/LLVM_CONFIG: forwarded verbatim into the
+  #     Cargo environment by run_rust_authority_env whenever ambiently set.
   #   - rust_llvm_prefix (LLVM_SYS_231_PREFIX) and rust_llvm_link_kind
   #     (static vs dynamic-c-api): which LLVM install/link mode Cargo builds
   #     LLVM-dependent crates against.
@@ -2637,7 +2644,9 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   #     compiled objects depend on.
   #   - a sha256 of src/compiler_rust/.cargo/config.toml's contents (registry
   #     replacement, vendor directory, any [build] settings it carries).
-  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${CXX:-};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
+  rust_authority_cxx=${CXX:-}
+  if [ "${os}" = windows ]; then rust_authority_cxx=; fi
+  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${rust_authority_cxx};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
   rust_authority_config_key=$(
     bootstrap_authority_rust_build_config_key \
       "${rust_authority_rustc_version}" "${rust_authority_cargo_version}" \
@@ -2721,7 +2730,7 @@ prepare_rust_authority_workspace() {
 run_rust_authority_env() {
   rust_env_log=$1
   shift
-  if [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
+  if [ "${os}" != windows ] && [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
   if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
   if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
   if [ "${LLVM_CONFIG+x}" = x ]; then set -- "LLVM_CONFIG=$LLVM_CONFIG" "$@"; fi
@@ -3428,6 +3437,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   esac
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
+      "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
+      "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
+      "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
+      "MIMALLOC_ARENA_EAGER_COMMIT=0" \
+      "MIMALLOC_PURGE_DELAY=0" \
+      "MIMALLOC_PURGE_DECOMMITS=1" \
+      "LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-}" \
+      "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
@@ -3566,6 +3583,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
       "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
       "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
+      "MIMALLOC_ARENA_EAGER_COMMIT=0" \
+      "MIMALLOC_PURGE_DELAY=0" \
+      "MIMALLOC_PURGE_DECOMMITS=1" \
       "LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \

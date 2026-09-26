@@ -1,0 +1,216 @@
+# Deterministic PE32+ image writer used by the pure-Simple Windows linker.
+
+val PE_AMD64_IMAGE_BASE: i64 = 0x140000000
+val PE_SECTION_ALIGNMENT: i64 = 0x1000
+val PE_FILE_ALIGNMENT: i64 = 0x200
+val PE_SUBSYSTEM_CONSOLE: i64 = 3
+
+struct PeImageSection:
+    name: text
+    virtual_address: i64
+    virtual_size: i64
+    data: [u8]
+    characteristics: i64
+    import_directory_size: i64 = 0
+    iat_offset: i64 = 0
+    iat_size: i64 = 0
+
+fn pe_align_up(value: i64, alignment: i64) -> i64:
+    if alignment <= 0: return value
+    ((value + alignment - 1) / alignment) * alignment
+
+fn _pe_put_u8(bytes: [u8], value: i64) -> [u8]: bytes.push((value & 0xff) as u8)
+
+fn _pe_put_u16(bytes: [u8], value: i64) -> [u8]:
+    _pe_put_u8(_pe_put_u8(bytes, value), value >> 8)
+
+fn _pe_put_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes
+    var shift: i64 = 0
+    while shift < 32:
+        result = _pe_put_u8(result, value >> shift)
+        shift = shift + 8
+    result
+
+fn _pe_put_u64(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes
+    var shift: i64 = 0
+    while shift < 64:
+        result = _pe_put_u8(result, value >> shift)
+        shift = shift + 8
+    result
+
+fn _pe_put_name(bytes: [u8], name: text) -> Result<[u8], text>:
+    if name.len() == 0 or name.len() > 8: return Err("PE section name must contain 1..8 bytes")
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        val value = if i < name.len(): name.byte_at(i) else: 0
+        result = _pe_put_u8(result, value)
+        i = i + 1
+    Ok(result)
+
+fn _pe_pad_to(bytes: [u8], size: i64) -> Result<[u8], text>:
+    if bytes.len() > size: return Err("PE writer crossed planned offset {size}")
+    var result = bytes
+    while result.len() < size: result = result.push(0)
+    Ok(result)
+
+fn _pe_validate_sections(sections: [PeImageSection], entry_rva: i64) -> Result<bool, text>:
+    if sections.len() == 0: return Err("PE image requires at least one section")
+    if sections.len() > 96: return Err("PE image section count exceeds 96")
+    var entry_found = false
+    var previous_end: i64 = 0
+    for section in sections:
+        if section.virtual_address < PE_SECTION_ALIGNMENT or section.virtual_address % PE_SECTION_ALIGNMENT != 0:
+            return Err("PE section '{section.name}' RVA is not 4096-byte aligned")
+        val logical_size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
+        if section.virtual_address < previous_end:
+            return Err("PE section '{section.name}' overlaps its predecessor")
+        previous_end = section.virtual_address + pe_align_up(logical_size, PE_SECTION_ALIGNMENT)
+        if entry_rva >= section.virtual_address and entry_rva < section.virtual_address + logical_size:
+            entry_found = true
+    if not entry_found: return Err("PE entry RVA {entry_rva} is outside every section")
+    Ok(true)
+
+fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
+    var wanted = ""
+    if directory == 1: wanted = ".idata"
+    elif directory == 3: wanted = ".pdata"
+    elif directory == 5: wanted = ".reloc"
+    elif directory == 12:
+        for section in sections:
+            if section.name == ".idata" and section.iat_size > 0:
+                return (section.virtual_address + section.iat_offset, section.iat_size)
+        return (0, 0)
+    if wanted == "": return (0, 0)
+    for section in sections:
+        if section.name == wanted:
+            val size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
+            if directory == 1 and section.import_directory_size > 0:
+                return (section.virtual_address, section.import_directory_size)
+            return (section.virtual_address, size)
+    (0, 0)
+
+fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 PE32+ console executable from planned sections."""
+    val valid = _pe_validate_sections(sections, entry_rva)
+    if valid.is_err(): return Err(valid.unwrap_err())
+    val pe_offset: i64 = 0x80
+    val optional_header_size: i64 = 0xf0
+    val headers_end = pe_offset + 4 + 20 + optional_header_size + sections.len() * 40
+    val size_of_headers = pe_align_up(headers_end, PE_FILE_ALIGNMENT)
+
+    var raw_pointers: [i64] = []
+    var next_raw = size_of_headers
+    var size_of_code: i64 = 0
+    var size_of_initialized_data: i64 = 0
+    var size_of_uninitialized_data: i64 = 0
+    var base_of_code: i64 = 0
+    for section in sections:
+        val raw_size = pe_align_up(section.data.len(), PE_FILE_ALIGNMENT)
+        if raw_size > 0:
+            raw_pointers = raw_pointers.push(next_raw)
+            next_raw = next_raw + raw_size
+        else:
+            raw_pointers = raw_pointers.push(0)
+        if (section.characteristics & 0x20) != 0:
+            size_of_code = size_of_code + raw_size
+            if base_of_code == 0: base_of_code = section.virtual_address
+        elif (section.characteristics & 0x80) != 0:
+            size_of_uninitialized_data = size_of_uninitialized_data +
+                pe_align_up(section.virtual_size, PE_FILE_ALIGNMENT)
+        elif section.data.len() > 0:
+            size_of_initialized_data = size_of_initialized_data + raw_size
+    if base_of_code == 0: return Err("PE image requires an executable code section")
+
+    val last = sections[sections.len() - 1]
+    val last_size = if last.virtual_size > last.data.len(): last.virtual_size else: last.data.len()
+    val size_of_image = pe_align_up(last.virtual_address + last_size, PE_SECTION_ALIGNMENT)
+    val relocation_directory = _pe_directory(sections, 5)
+    # ASLR flags are only truthful when the image carries base relocations.
+    val dll_characteristics = if relocation_directory.1 > 0: 0x8160 else: 0x8100
+
+    var output: [u8] = []
+    output = _pe_put_u16(output, 0x5a4d)
+    output = _pe_pad_to(output, 0x3c).unwrap()
+    output = _pe_put_u32(output, pe_offset)
+    output = _pe_pad_to(output, pe_offset).unwrap()
+    output = _pe_put_u32(output, 0x00004550)
+
+    output = _pe_put_u16(output, 0x8664)
+    output = _pe_put_u16(output, sections.len())
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u16(output, optional_header_size)
+    output = _pe_put_u16(output, 0x0022)
+
+    output = _pe_put_u16(output, 0x20b)
+    output = _pe_put_u8(output, 0)
+    output = _pe_put_u8(output, 0)
+    output = _pe_put_u32(output, size_of_code)
+    output = _pe_put_u32(output, size_of_initialized_data)
+    output = _pe_put_u32(output, size_of_uninitialized_data)
+    output = _pe_put_u32(output, entry_rva)
+    output = _pe_put_u32(output, base_of_code)
+    output = _pe_put_u64(output, PE_AMD64_IMAGE_BASE)
+    output = _pe_put_u32(output, PE_SECTION_ALIGNMENT)
+    output = _pe_put_u32(output, PE_FILE_ALIGNMENT)
+    output = _pe_put_u16(output, 6)
+    output = _pe_put_u16(output, 0)
+    output = _pe_put_u16(output, 0)
+    output = _pe_put_u16(output, 0)
+    output = _pe_put_u16(output, 6)
+    output = _pe_put_u16(output, 0)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, size_of_image)
+    output = _pe_put_u32(output, size_of_headers)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u16(output, PE_SUBSYSTEM_CONSOLE)
+    output = _pe_put_u16(output, dll_characteristics)
+    output = _pe_put_u64(output, 0x100000)
+    output = _pe_put_u64(output, 0x1000)
+    output = _pe_put_u64(output, 0x100000)
+    output = _pe_put_u64(output, 0x1000)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, 16)
+    var directory: i64 = 0
+    while directory < 16:
+        val data_directory = _pe_directory(sections, directory)
+        output = _pe_put_u32(output, data_directory.0)
+        output = _pe_put_u32(output, data_directory.1)
+        directory = directory + 1
+
+    var section_index: i64 = 0
+    while section_index < sections.len():
+        val section = sections[section_index]
+        val named = _pe_put_name(output, section.name)
+        if named.is_err(): return Err(named.unwrap_err())
+        output = named.unwrap()
+        output = _pe_put_u32(output, section.virtual_size)
+        output = _pe_put_u32(output, section.virtual_address)
+        output = _pe_put_u32(output, pe_align_up(section.data.len(), PE_FILE_ALIGNMENT))
+        output = _pe_put_u32(output, raw_pointers[section_index])
+        output = _pe_put_u32(output, 0)
+        output = _pe_put_u32(output, 0)
+        output = _pe_put_u16(output, 0)
+        output = _pe_put_u16(output, 0)
+        output = _pe_put_u32(output, section.characteristics)
+        section_index = section_index + 1
+
+    output = _pe_pad_to(output, size_of_headers).unwrap()
+    section_index = 0
+    while section_index < sections.len():
+        if raw_pointers[section_index] == 0:
+            section_index = section_index + 1
+            continue
+        output = _pe_pad_to(output, raw_pointers[section_index]).unwrap()
+        for b in sections[section_index].data: output = output.push(b)
+        output = _pe_pad_to(output, raw_pointers[section_index] + pe_align_up(sections[section_index].data.len(), PE_FILE_ALIGNMENT)).unwrap()
+        section_index = section_index + 1
+    Ok(output)
+
+export PeImageSection
+export PE_AMD64_IMAGE_BASE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_CONSOLE
+export pe_align_up, pe_write_amd64_console

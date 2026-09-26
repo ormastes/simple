@@ -1,0 +1,34 @@
+use std.spec.*
+use std.spec.step
+use app.remote_test.binary_placement.{
+    remote_simple_binary_path, remote_simple_test_command}
+
+describe "remote interpreter binary placement":
+    it "maps every supported target filesystem to its installed Simple path":
+        step("Resolve Linux, Windows, and SimpleOS independently of the local host")
+        expect(remote_simple_binary_path("linux", "auto").unwrap()).to_equal("/usr/local/bin/simple")
+        expect(remote_simple_binary_path("windows", "auto").unwrap()).to_equal("C:\\Program Files\\Simple\\simple.exe")
+        expect(remote_simple_binary_path("win", "").unwrap()).to_equal("C:\\Program Files\\Simple\\simple.exe")
+        expect(remote_simple_binary_path("simpleos", "auto").unwrap()).to_equal("/usr/bin/simple")
+        expect(remote_simple_binary_path("simple-os", "auto").unwrap()).to_equal("/usr/bin/simple")
+
+    it "preserves an explicit remote path byte for byte":
+        val explicit = "D:\\tools\\simple-custom.exe"
+        expect(remote_simple_binary_path("unknown", explicit).unwrap()).to_equal(explicit)
+
+    it "rejects an unknown target when automatic placement was requested":
+        val result = remote_simple_binary_path("plan9", "auto")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("use --remote-os linux|windows|simpleos")
+
+    it "renders target-specific quoted test commands with the placed binary":
+        val linux = remote_simple_test_command("linux", "auto", "test/a user's spec.spl").unwrap()
+        expect(linux).to_equal("'/usr/local/bin/simple' test 'test/a user'\"'\"'s spec.spl' --no-session-daemon --sequential 2>&1")
+        val windows = remote_simple_test_command("windows", "auto", "C:\\repo\\spec file.spl").unwrap()
+        expect(windows).to_equal("powershell.exe -NoProfile -NonInteractive -Command \"& 'C:\\Program Files\\Simple\\simple.exe' test 'C:\\repo\\spec file.spl' --no-session-daemon --sequential 2>&1; exit $LASTEXITCODE\"")
+
+    it "quotes PowerShell apostrophes and rejects command-breaking Windows values":
+        val quoted = remote_simple_test_command("windows", "auto", "C:\\repo\\user's spec.spl").unwrap()
+        expect(quoted).to_contain("'C:\\repo\\user''s spec.spl'")
+        expect(remote_simple_test_command("windows", "auto", "bad\"path.spl").is_err()).to_equal(true)
+        expect(remote_simple_test_command("windows", "auto", "bad\npath.spl").is_err()).to_equal(true)

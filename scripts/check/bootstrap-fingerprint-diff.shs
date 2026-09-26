@@ -12,6 +12,7 @@ usage() {
     cat >&2 <<'EOF'
 usage: bootstrap-fingerprint-diff.shs --published-stamp=FILE --output=FILE
        [--published-details=FILE] [--current-details=FILE]
+       [--current-details-output=FILE] [--current-error-output=FILE]
        [--root=DIR --backend=NAME --features=TEXT --tool-path=PATH
         [--target=TRIPLE]]
 EOF
@@ -20,11 +21,15 @@ EOF
 die() { echo "bootstrap fingerprint diff: $*" >&2; exit 2; }
 root= published_stamp= published_details= current_details= output= backend=
 features= tool_path= target= current_inputs= current_error=
+current_details_output=
+current_error_output=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --published-stamp=*) published_stamp=${1#*=} ;;
         --published-details=*) published_details=${1#*=} ;;
         --current-details=*) current_details=${1#*=} ;;
+        --current-details-output=*) current_details_output=${1#*=} ;;
+        --current-error-output=*) current_error_output=${1#*=} ;;
         --output=*) output=${1#*=} ;;
         --root=*) root=${1#*=} ;;
         --backend=*) backend=${1#*=} ;;
@@ -38,6 +43,8 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$published_stamp" ] && [ -f "$published_stamp" ] || die 'published stamp is missing'
 [ -n "$output" ] || die 'output receipt is required'
+[ -z "$current_details" ] || [ -z "$current_details_output" ] ||
+    die 'current details input and output are mutually exclusive'
 
 value() { sed -n "s/^$1=//p" "$2" | head -n 1; }
 valid_sha() {
@@ -84,8 +91,24 @@ if [ -z "$current_details" ] && [ -n "$root" ]; then
     case "$tool_path" in /*) ;; *) die 'current tool path must be absolute' ;; esac
     # shellcheck disable=SC1091
     . "$(dirname -- "$0")/lib/bootstrap-stage3/authority.shs" || die 'cannot load authority helper'
-    current_details="$tmp/current.details.env"
-    current_error="$tmp/current.error.log"
+    if [ -n "$current_details_output" ]; then
+        valid_path "$current_details_output" ||
+            die 'current details output path is not canonical'
+        mkdir -p "$(dirname -- "$current_details_output")" ||
+            die 'cannot create current details output directory'
+        current_details=$current_details_output
+    else
+        current_details="$tmp/current.details.env"
+    fi
+    if [ -n "$current_error_output" ]; then
+        valid_path "$current_error_output" ||
+            die 'current error output path is not canonical'
+        mkdir -p "$(dirname -- "$current_error_output")" ||
+            die 'cannot create current error output directory'
+        current_error=$current_error_output
+    else
+        current_error="$tmp/current.error.log"
+    fi
     current_inputs=$(BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="$current_details" \
         BOOTSTRAP_STAGE3_FINGERPRINT_TRACE=1 TMPDIR="$tmp" \
         bootstrap_stage3_seed_inputs_fingerprint "$root" "$backend" \

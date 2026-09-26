@@ -1,0 +1,43 @@
+# Target-filesystem placement and command rendering for remote Simple execution.
+
+fn remote_simple_binary_path(remote_os: text, configured: text) -> Result<text, text>:
+    """Resolve the interpreter/compiler path in the remote filesystem."""
+    val requested = configured.trim()
+    if requested != "" and requested.lower() != "auto": return Ok(requested)
+    val platform = remote_os.trim().lower()
+    if platform == "linux": return Ok("/usr/local/bin/simple")
+    if platform == "windows" or platform == "win": return Ok("C:\\Program Files\\Simple\\simple.exe")
+    if platform == "simpleos" or platform == "simple-os": return Ok("/usr/bin/simple")
+    Err("remote-test cannot place the Simple binary for remote OS '{remote_os}'; use --remote-os linux|windows|simpleos or an explicit --simple-bin path")
+
+fn _remote_posix_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn _remote_powershell_quote(value: text) -> text:
+    "'" + value.replace("'", "''") + "'"
+
+fn _remote_windows_command_value(value: text) -> Result<text, text>:
+    if value.contains("\"") or value.contains("\r") or value.contains("\n"):
+        return Err("remote-test Windows command values cannot contain quotes or line breaks")
+    Ok(_remote_powershell_quote(value))
+
+fn remote_simple_test_command(remote_os: text, configured: text,
+        test_path: text) -> Result<text, text>:
+    """Render a target-specific quoted remote `simple test` command."""
+    val binary = remote_simple_binary_path(remote_os, configured)
+    if binary.is_err(): return Err(binary.unwrap_err())
+    val platform = remote_os.trim().lower()
+    if platform == "windows" or platform == "win":
+        val executable = _remote_windows_command_value(binary.unwrap())
+        if executable.is_err(): return Err(executable.unwrap_err())
+        val test = _remote_windows_command_value(test_path)
+        if test.is_err(): return Err(test.unwrap_err())
+        return Ok("powershell.exe -NoProfile -NonInteractive -Command \"& " +
+            executable.unwrap() + " test " + test.unwrap() +
+            " --no-session-daemon --sequential 2>&1; exit $LASTEXITCODE\"")
+    if platform == "linux" or platform == "simpleos" or platform == "simple-os":
+        return Ok(_remote_posix_quote(binary.unwrap()) + " test " +
+            _remote_posix_quote(test_path) + " --no-session-daemon --sequential 2>&1")
+    Err("remote-test cannot render a command for remote OS '{remote_os}'")
+
+export remote_simple_binary_path, remote_simple_test_command

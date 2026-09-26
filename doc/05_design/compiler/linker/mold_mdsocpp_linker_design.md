@@ -209,3 +209,53 @@ Owner: `L/boot_layout/` (parser + `app/linker_gen` generator + `BootLayoutPlan`)
 4. Is dropping `lld_sffi`/`lld_shim.cpp` (never built) acceptable before the internal engine owns SimpleOS, given it only changes an error message?
 
 **Decided 2026-09-18:** (1) slice 1 = static ET_EXEC over native-backend objects; (2) `Link*V1` plain structs until S1 handoff; (3) kernel loader twins stay separate with golden parity; (4) `lld_sffi`/`lld_shim` retirement deferred to post-RC1 (not in any RC1 lane).
+
+## 13. Windows and remote-placement extension (2026-09-26)
+
+The user-expanded platform boundary makes Windows a completion gate. The
+Windows capsule is layered as follows:
+
+1. `coff/coff_object.spl` owns raw `.obj` decoding. It is distinct from
+   `pe_parser.spl`, which inspects an already-linked image. Every byte range,
+   symbol/aux index, section, and relocation reference is bounds checked.
+2. `coff/archive_closure.spl` owns selective `.lib` member extraction to a
+   symbol-resolution fixpoint and identifies selected Microsoft short imports.
+   `coff/coff_import.spl` owns the canonical 20-byte import-header decoder.
+3. `coff/pe_import_builder.spl` projects selected short imports into PE import
+   descriptors, ILT/IAT entries, hint/name rows, and AMD64 RIP-relative jump
+   thunks. Both the direct public symbol and `__imp_` symbol resolve to the
+   generated projection; descriptor-exact import and IAT data directories
+   describe it.
+4. `coff/coff_link.spl` owns AMD64 symbol resolution, COMDAT selection, and
+   relocation application. It orders `$` subsections lexically, merges them by
+   PE base name to stay below the 96-section image limit, and translates
+   `SECTION`/`SECREL` against the merged output identity. A whole-symbol-table
+   pass rejects duplicate and unresolved externals even when no relocation
+   references them. `ADDR64` fixup sites feed `pe_base_relocation.spl`, which
+   emits deterministic page-grouped `IMAGE_REL_BASED_DIR64` blocks. Remaining unsupported
+   CRT features return a named error; they never fall
+   through to `lld-link` when `SIMPLE_LINKER=internal` was explicit.
+   Nonzero undefined COFF common symbols are allocated deterministically in
+   `.bss` after archive resolution, so a real strong definition still wins.
+5. `coff/pe_image_writer.spl` owns deterministic PE32+ headers and section
+   materialization. Linked-image inspection remains in `pe_inspect.spl`.
+6. `_LinkerWrapper/native_linking.spl` is the only platform router and writes
+   `internal:coff` output for explicit GNU and MSVC Windows requests. The
+   existing external MSVC/LLD path remains the
+   default until hosted imports/CRT, COMDAT selection, execution, and perf
+   evidence pass.
+
+SimpleOS uses the existing `BootLayoutPlan` and `elf_boot_link`; the wrapper
+now routes explicit `internal` requests there for x86_64 and arm64 instead of
+rejecting the target before the boot engine.
+
+Remote interpreter placement is a target-filesystem decision, not a host-path
+guess. `remote-test` resolves automatic placement to `/usr/local/bin/simple`
+on Linux, `C:\Program Files\Simple\simple.exe` on Windows, and
+`/usr/bin/simple` on SimpleOS. An explicit `--simple-bin` is authoritative;
+unknown automatic targets fail closed. The shared
+`app.remote_test.binary_placement` capsule also renders the target-specific
+quoted test command, and `RemotePcAdapter.execute` consumes it instead of the
+old hardcoded checkout-relative `bin/simple` path. Windows execution is pinned
+to non-interactive PowerShell with single-quoted arguments and propagated
+`$LASTEXITCODE`; quote or line-break injection attempts fail closed.

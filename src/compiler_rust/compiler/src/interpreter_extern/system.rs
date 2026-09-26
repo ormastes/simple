@@ -864,6 +864,18 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Truncated streams contain their retained head and tail separated by
 /// `\n[output truncated: N bytes omitted]\n`; the marker is outside the byte budget.
+fn bounded_output_limit(value: &Value) -> Option<usize> {
+    match value {
+        // -1 means unlimited, the same contract as the C runtime owner. Use
+        // i64::MAX rather than usize::MAX so read_bounded's `(max + 1) / 2`
+        // cannot overflow.
+        Value::Int(-1) => Some(i64::MAX as usize),
+        Value::Int(value) if *value >= 0 => Some(usize::try_from(*value).unwrap_or(usize::MAX)),
+        Value::UInt { value, .. } => Some(usize::try_from(*value).unwrap_or(usize::MAX)),
+        _ => None,
+    }
+}
+
 pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 4 {
         return Err(CompileError::runtime(
@@ -896,15 +908,13 @@ pub fn rt_process_run_bounded(args: &[Value]) -> Result<Value, CompileError> {
             ))
         }
     };
-    // -1 means unlimited, the same contract as the C runtime owner
-    // (runtime_process.c win_process_run_capture: `limit = max < 0 ? SIZE_MAX`).
-    // std process_run passes -1 on Windows since dac914d9306. Map it to the
-    // largest accepted bound rather than usize::MAX so read_bounded's
-    // `(max_bytes + 1) / 2` cannot overflow.
-    let max_output_bytes = match args[3] {
-        Value::Int(-1) => i64::MAX as usize,
-        Value::Int(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-        _ => {
+    // Imported `i64` constants can retain their unsigned literal carrier in
+    // bootstrap interpretation even though binding/type checking has already
+    // admitted them as i64. Accept that equivalent representation as well as
+    // the canonical signed -1 unlimited sentinel.
+    let max_output_bytes = match bounded_output_limit(&args[3]) {
+        Some(value) => value,
+        None => {
             return Err(CompileError::runtime(
                 "rt_process_run_bounded: max_output_bytes must be a non-negative integer or -1 (unlimited)",
             ))
@@ -1012,8 +1022,14 @@ pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<V
 
 pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Array(std::sync::Arc::new(vec![
-        Value::Int(4), Value::Int(8), Value::Int(0), Value::Int(0),
-        Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(95),
+        Value::Int(4),
+        Value::Int(8),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(0),
+        Value::Int(95),
     ])))
 }
 
@@ -2070,7 +2086,9 @@ mod tests {
         };
         let result = rt_process_run_bounded(&[
             Value::text(cmd.to_string()),
-            Value::Array(Arc::new(script.into_iter().map(|s| Value::text(s.to_string())).collect())),
+            Value::Array(Arc::new(
+                script.into_iter().map(|s| Value::text(s.to_string())).collect(),
+            )),
             Value::Int(0),
             Value::Int(-1),
         ])
@@ -2120,6 +2138,30 @@ mod tests {
             assert!(output.ends_with("TAIL"));
             assert!(output.contains("\n[output truncated: 9944 bytes omitted]\n"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_run_bounded_accepts_unsigned_nonnegative_output_limit() {
+        let result = rt_process_run_bounded(&[
+            Value::text("/bin/true".to_string()),
+            Value::Array(Arc::new(vec![])),
+            Value::Int(5_000),
+            Value::UInt { value: 64, width: 64 },
+        ])
+        .unwrap();
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple");
+        };
+        assert_eq!(parts[2], Value::Int(0));
+    }
+
+    #[test]
+    fn bounded_output_limit_accepts_both_integer_carriers() {
+        assert_eq!(bounded_output_limit(&Value::Int(64)), Some(64));
+        assert_eq!(bounded_output_limit(&Value::UInt { value: 64, width: 64 }), Some(64));
+        assert_eq!(bounded_output_limit(&Value::Int(-1)), Some(i64::MAX as usize));
+        assert_eq!(bounded_output_limit(&Value::Int(-2)), None);
     }
 
     #[cfg(unix)]

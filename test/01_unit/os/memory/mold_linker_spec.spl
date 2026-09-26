@@ -42,10 +42,14 @@ use std.io_runtime.{file_exists}
 use compiler.backend.linker.mold_compatibility.{
 
     MoldCompatibilityRole,
+    MoldLinkPlatform,
+    MoldCompletionEvidence,
     mold_default_linker_order,
     mold_supported_override_aliases,
     mold_bundled_search_suffixes,
     mold_compatibility_features,
+    mold_platform_status,
+    mold_completion_from_evidence,
     mold_is_pure_simple_linker_complete,
 }
 
@@ -171,5 +175,26 @@ describe "find_linker priority — mold-first invariant":
         expect(features[0].role).to_equal(MoldCompatibilityRole.LinkerDetection)
         expect(features[0].status).to_equal("implemented")
         expect(features[6].role).to_equal(MoldCompatibilityRole.PureSimpleLinker)
-        expect(features[6].status).to_equal("missing")
+        expect(features[6].status).to_equal("partial")
         expect(mold_is_pure_simple_linker_complete()).to_equal(false)
+
+    it "reports fail-closed platform certification states":
+        expect(mold_platform_status(MoldLinkPlatform.Linux)).to_equal("implemented-not-certified")
+        expect(mold_platform_status(MoldLinkPlatform.Windows)).to_equal("implemented-hosted-partial-not-certified")
+        expect(mold_platform_status(MoldLinkPlatform.SimpleOs)).to_equal("implemented-boot-evidence-pending")
+
+    it "requires every real-run receipt before completing the pure linker":
+        val complete = MoldCompletionEvidence(
+            linux_x86_64_internal: true, linux_aarch64_internal: true,
+            windows_x86_64_internal: true,
+            full_compiler_corpus: true, fast_bounded_digest_parity: true,
+            simpleos_x86_64_boot: true, simpleos_arm64_boot: true,
+            platform_receipts: true, performance_gate: true)
+        expect(mold_completion_from_evidence(complete)).to_equal(true)
+        val missing_windows_and_perf = MoldCompletionEvidence(
+            linux_x86_64_internal: true, linux_aarch64_internal: true,
+            windows_x86_64_internal: false,
+            full_compiler_corpus: true, fast_bounded_digest_parity: true,
+            simpleos_x86_64_boot: true, simpleos_arm64_boot: true,
+            platform_receipts: false, performance_gate: false)
+        expect(mold_completion_from_evidence(missing_windows_and_perf)).to_equal(false)

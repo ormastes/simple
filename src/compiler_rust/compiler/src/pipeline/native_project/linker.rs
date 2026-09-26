@@ -374,7 +374,7 @@ fn configured_extra_link_objects() -> Result<Vec<PathBuf>, String> {
 
 pub(super) fn add_extra_link_objects(cmd: &mut std::process::Command, providers: &[PathBuf]) {
     for provider in providers {
-        cmd.arg(provider);
+        cmd.arg(external_tool_path(provider));
     }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
     {
@@ -1700,9 +1700,11 @@ int main(int argc, char** argv) {
             }
             cmd.arg(format!("/Fe:{}", self.output.display()));
         } else {
-            cmd.arg("-o").arg(&self.output).arg(&main_o);
+            cmd.arg("-o")
+                .arg(external_tool_path(&self.output))
+                .arg(external_tool_path(&main_o));
             if let Some(ref init) = init_o {
-                cmd.arg(init);
+                cmd.arg(external_tool_path(init));
             }
         }
 
@@ -1799,14 +1801,14 @@ int main(int argc, char** argv) {
                         msvc_link_args.push(clang_cl_whole_archive_arg(&archive_path));
                     } else {
                         cmd.arg("-Wl,--whole-archive")
-                            .arg(&archive_path)
+                            .arg(external_tool_path(&archive_path))
                             .arg("-Wl,--no-whole-archive");
                     }
                 }
             }
         } else {
             for obj in object_paths {
-                cmd.arg(obj);
+                cmd.arg(external_tool_path(obj));
             }
         }
         add_extra_link_objects(&mut cmd, &extra_link_objects);
@@ -1958,7 +1960,7 @@ int main(int argc, char** argv) {
                                 msvc_link_args.push(clang_cl_whole_archive_arg(runtime_lib));
                             } else {
                                 cmd.arg("-Wl,--whole-archive");
-                                cmd.arg(runtime_lib);
+                                cmd.arg(external_tool_path(runtime_lib));
                                 cmd.arg("-Wl,--no-whole-archive");
                             }
                         } else {
@@ -1992,7 +1994,7 @@ int main(int argc, char** argv) {
                                     cmd.arg(format!("-Wl,-u,{root}"));
                                 }
                             }
-                            cmd.arg(runtime_lib);
+                            cmd.arg(external_tool_path(runtime_lib));
                         }
                     }
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2016,7 +2018,7 @@ int main(int argc, char** argv) {
                     if std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() == Ok("1") {
                         let core_c_runtime = build_stage4_c_runtime_library(&temp_dir.join("stage4_core_c_runtime"))
                             .ok_or_else(|| "failed to build Stage 4 core-C runtime supplement".to_string())?;
-                        cmd.arg(core_c_runtime);
+                        cmd.arg(external_tool_path(core_c_runtime));
                     } else if cfg!(target_os = "windows")
                         && runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle)
                     {
@@ -2072,7 +2074,7 @@ int main(int argc, char** argv) {
                         let core_c_runtime =
                             build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
                                 .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
-                        cmd.arg(core_c_runtime);
+                        cmd.arg(external_tool_path(core_c_runtime));
                         // TODO: [driver][P2] Establish which runtime actually wins a hosted link: native_all and the core-C supplement both define the ~514 overlapping rt_* symbols counted below and archive order alone decides, but no nm dump over a produced link artifact has ever been inspected -- that dump is the missing evidence, and until it exists the precedence claimed here is asserted, not measured
                         // Archive members resolve at OBJECT granularity, not
                         // symbol granularity: pulling runtime_native.obj to
@@ -2117,22 +2119,24 @@ int main(int argc, char** argv) {
                         cmd.arg(runtime_lib);
                     }
                     #[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "freebsd")))]
-                    cmd.arg(runtime_lib);
+                    cmd.arg(external_tool_path(runtime_lib));
                 }
             }
             if let Some(hosted_runtime) = host_gpu_hosted_runtime.as_ref() {
-                cmd.arg(hosted_runtime);
+                cmd.arg(external_tool_path(hosted_runtime));
                 // The rlib's std/core/alloc and allocator-shim references must
                 // resolve from the matching std (never from stubs) on Windows,
                 // where its `win32` module is compiled in.
                 #[cfg(target_os = "windows")]
-                cmd.arg(super::tools::build_rust_std_shim_for_rlib(hosted_runtime, temp_dir)?);
+                cmd.arg(external_tool_path(
+                    super::tools::build_rust_std_shim_for_rlib(hosted_runtime, temp_dir)?,
+                ));
             }
             if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
-                cmd.arg(core_runtime);
+                cmd.arg(external_tool_path(core_runtime));
             }
             if let Some(mutex_runtime) = bootstrap_mutex_runtime.as_ref() {
-                cmd.arg(mutex_runtime);
+                cmd.arg(external_tool_path(mutex_runtime));
             }
         }
 
@@ -2282,7 +2286,7 @@ int main(int argc, char** argv) {
             }
             provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, &imports)?;
-            cmd.arg(&stubs_o);
+            cmd.arg(external_tool_path(&stubs_o));
         }
         let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
         if !strict_no_stub_fallback {
