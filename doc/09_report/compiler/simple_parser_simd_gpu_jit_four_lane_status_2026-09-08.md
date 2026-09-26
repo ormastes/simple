@@ -40,6 +40,7 @@ oracle rather than define separate parser behavior.
 The external binary-inspection authority for generated artifacts also remains
 blocked by `doc/08_tracking/bug/parser_inspection_atomic_input_owner_gap_2026-09-27.md`:
 the native inspection V1 start now combines pinned exact-environment execution
-with one copied input and a ticket-bound sideband receipt, but the Simple lease,
-two-tool compiler owner, and product admission are unfinished. Separate V3 and
-V4 receipts still cannot be joined to satisfy EODL REQ-016.
+with one copied input and a ticket-bound sideband receipt. The Simple decoder
+and lease wrapper are written but lack admitted execution evidence; the two-tool
+compiler owner and product admission are unfinished. Separate V3 and V4
+receipts still cannot be joined to satisfy EODL REQ-016.

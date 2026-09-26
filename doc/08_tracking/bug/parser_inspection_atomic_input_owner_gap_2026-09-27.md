@@ -1,7 +1,8 @@
 # Parser binary inspection has no single atomic input/process authority
 
-**Status:** native inspection V1 process path implemented; Simple owner and
-product admission remain open. EODL REQ-016 and NFR-012 are unqualified.
+**Status:** native inspection V1 process path implemented. Simple decoder and
+lease façade are written but unverified on an admitted runtime; compiler join
+and product admission remain open. EODL REQ-016 and NFR-012 are unqualified.
 
 The selected inspector contract requires one identity-owned process to bind a
 pinned executable, exact argv and environment, one immutable bounded stdin
@@ -32,7 +33,8 @@ receipt reports accepted/written bytes, closure, terminal/reap, error, input
 digest, and the domain-separated request digest. Native Linux selfcheck covers
 large simultaneous streams, source mutation, malformed input, digest mismatch,
 early child exit, and stale/legacy tickets. The compiler cannot consume this
-receipt until the Simple lease and two-tool owner are implemented and admitted.
+receipt as product authority until the Simple lease is executed and the two-tool
+compiler owner is implemented and admitted.
 
 ## Required repair
 

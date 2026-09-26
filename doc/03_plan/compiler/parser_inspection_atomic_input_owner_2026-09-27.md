@@ -2,7 +2,9 @@
 
 Status: implementation plan for selected EODL REQ-016 / NFR-012. Native
 inspection V1 start/pump/receipt is implemented and selfchecked on Linux;
-Simple lease, compiler join, and product admission remain open.
+The strict Simple receipt decoder and retained lease façade are written but
+not yet checked on an admitted self-hosted runtime. The compiler join and
+product admission remain open.
 
 ## Boundary to build
 
@@ -48,9 +50,9 @@ the opaque native lease, so a copied receipt cannot forge completion.
 
 | Step | Owner | Proof before next step |
 |---|---|---|
-| 1. Versioned request/receipt schema | `src/lib/common/process/`, native codec | canonical round trip; malformed, duplicate, oversized and digest-mismatch rejection |
+| 1. Versioned request/receipt schema | `src/lib/common/process/inspection_v1.spl`, native codec | decoder and unit spec written; admitted Simple run and complete canonical request test pending |
 | 2. Native start and pump | `src/runtime/runtime_process_owned.c` | Linux C selfcheck passes pinned exact-env input, simultaneous large streams, mismatch and early-exit negatives; product check pending |
-| 3. Retained Simple process façade | `src/lib/nogc_sync_mut/io/process_ops.spl` | opaque lease, exact collection/ack, no raw process shortcut |
+| 3. Retained Simple process façade | `src/lib/nogc_sync_mut/io/process_ops.spl` and `process_inspection_v1.spl` | lease wrapper written; admitted Simple check, live integration, and error cleanup proof pending |
 | 4. Compiler inspector owner | `src/compiler/80.driver/parser_external_inspection_tool_owner_v1.spl` | two tools, distinct argv policy, same input identity, exact output and terminal join |
 | 5. Product admission | EODL SPipe and compiler/MCP gates | negative matrix and representative binary inspection run on admitted self-hosted runtime |
 

@@ -1174,10 +1174,12 @@ never exposes PID, process start identity, or native token halves. Until its
 argv/byte-array and returned projection ABI is conformance-tested in both native
 and interpreter modes, the C transport cannot be called directly from Simple.
 
-Current source implements pinned input in V3 and exact pinned tool/cwd/argv/env
-in V4 as separate process starts. Their receipts cannot be joined as one
-execution. The selected inspector requires a new versioned request and receipt
-combining those facts with explicit stdin write/close status and a retained
-opaque lease. Keep V4's fixed packet unchanged and follow
+V3 pinned input and V4 exact pinned tool/cwd/argv/env remain separate process
+starts; their receipts cannot be joined as one execution. Native inspection V1
+now starts one pinned exact-environment process with copied stdin, a caller
+digest check before spawn, and a 75-word ticket-bound input sideband. The
+strict Simple decoder and retained lease wrapper are written, while admitted
+Simple execution and the compiler's two-tool terminal join remain pending.
+The fixed V4 64-word packet is unchanged. Follow
 `doc/03_plan/compiler/parser_inspection_atomic_input_owner_2026-09-27.md` for
 the native owner, Simple façade, compiler join, and negative matrix.
