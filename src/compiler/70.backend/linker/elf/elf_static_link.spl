@@ -43,10 +43,10 @@ use compiler.backend.linker.elf.reloc_scan.{
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
-    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE
+    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE
 }
 use compiler.backend.linker.elf.synthetic_sections.{
-    ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy,
+    ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy, elf_dyn_tpoff64,
     elf_rela_entry, elf_sym_entry, elf_build_dynstr, elf_build_dynsym, elf_hash_size, elf_build_hash,
     elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash,
     elf_plt_size, elf_plt0_size, elf_plt_entry_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt,
@@ -1069,12 +1069,15 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val nplt = sc.plt_names.len()
     var n_got_rel: i64 = 0      # GOT slots needing RELATIVE (PIE, defined)
     var n_got_glob: i64 = 0     # GOT slots needing GLOB_DAT (imports)
+    var n_tls_ie_import: i64 = 0 # GOT slots needing TPOFF64 (imported TLS)
     for j in sc.got_ref:
-        if refs[j].kind == SYMREF_IMPORT and not sc.copy_idx.has(refs[j].name):
+        if refs[j].kind == SYMREF_IMPORT and refs[j].rclass == RC_TLS_IE:
+            n_tls_ie_import = n_tls_ie_import + 1
+        else if refs[j].kind == SYMREF_IMPORT and not sc.copy_idx.has(refs[j].name):
             n_got_glob = n_got_glob + 1
-        else if pie and refs[j].kind == SYMREF_DEFINED:
+        else if pie and refs[j].kind == SYMREF_DEFINED and refs[j].rclass != RC_TLS_IE:
             n_got_rel = n_got_rel + 1
-    val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob + sc.sym_abs.len() + sc.copy_names.len()
+    val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob + n_tls_ie_import + sc.sym_abs.len() + sc.copy_names.len()
     val n_rela = [n_rela_dyn, sc.relative.len() + n_got_rel]
     var strnames: [text] = []
     for l in libs:
@@ -1157,6 +1160,9 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             s = s + a - tls_end
             a = 0
             rtype = 11  # R_X86_64_32S encodes the signed TPOFF32 result
+        else if r.rclass == RC_TLS_IE:
+            s = got_v + sc.got_idx[r.key] * 8
+            rtype = 2  # R_X86_64_PC32 applies GOTTPOFF's GOT + A - P formula
         else if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
             s = got_v + sc.got_idx[r.key] * 8
             if a64:
@@ -1186,7 +1192,15 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     while gi < sc.got_keys.len():
         val r = refs[sc.got_ref[gi]]
         val slot = got_v + gi * 8
-        if r.kind == SYMREF_IMPORT and sc.copy_idx.has(r.name):
+        if r.rclass == RC_TLS_IE and r.kind == SYMREF_IMPORT:
+            got = write_u64_le(got, 0)
+            rela_sym = elf_rela_entry(rela_sym, slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0)
+        else if r.rclass == RC_TLS_IE:
+            val tls_end = elf_tls_end(plan)
+            if tls_end < 0:
+                return Err("TLS relocation against '{r.name}' has no PT_TLS image")
+            got = write_u64_le(got, elf_ref_addr(ctx, lay, r)? - tls_end)
+        else if r.kind == SYMREF_IMPORT and sc.copy_idx.has(r.name):
             got = write_u64_le(got, elf_ref_addr(ctx, lay, r)?)
         else if r.kind == SYMREF_IMPORT:
             got = write_u64_le(got, 0)
