@@ -197,6 +197,11 @@ The complete AArch64 local-dynamic `DTPREL` materialization family now resolves
 defined TLS symbols relative to the `PT_TLS` block start, with MOVW, ADD, and
 naturally scaled LD/ST encodings for 8/16/32/64/128-bit accesses. Imported or
 weak DTPREL references fail closed instead of being assigned a local offset.
+Canonical page-based AArch64 TLSGD and TLSLD address-plus-`__tls_get_addr`
+sequences now relax before resolution: TLSGD becomes variant-I local-exec
+MRS/ADD-high/ADD-low with TPREL relocations, while TLSLD becomes the TLS block
+base (`TPIDR_EL0 + 16`) consumed by DTPREL uses. Unpaired, noncanonical, and
+undefined-symbol TLSGD sequences fail closed.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 

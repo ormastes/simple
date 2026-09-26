@@ -1,0 +1,65 @@
+use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader, SHT_NULL, SHT_PROGBITS}
+use compiler.backend.linker.elf_parser.{ElfSymbol, ElfRelocation, ElfStringTable, ElfObject, elf_reloc_type}
+use compiler.backend.linker.elf.tls_relax.{elf_relax_tls}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn a64_tls_object(primary: i64, add: i64) -> ElfObject:
+    val header = ElfHeader(e_type: 1, e_machine: 183, e_entry: 0,
+        e_phoff: 0, e_shoff: 0, e_shnum: 2, e_shstrndx: 0)
+    val sections = [
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_NULL, sh_flags: 0, sh_addr: 0, sh_size: 0),
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 6, sh_addr: 0, sh_size: 12)
+    ]
+    val symbols = [
+        ElfSymbol(st_name: 0, st_info: 0, st_other: 0, st_shndx: 0, st_value: 0, st_size: 0, name: ""),
+        ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 8, name: "tls_value"),
+        ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 0, st_value: 0, st_size: 0, name: "__tls_get_addr")
+    ]
+    val relocs = [
+        ElfRelocation(r_offset: 0, r_info: (1 << 32) | primary, r_addend: 0, section_idx: 0, target_section_idx: 1),
+        ElfRelocation(r_offset: 4, r_info: (1 << 32) | add, r_addend: 0, section_idx: 0, target_section_idx: 1),
+        ElfRelocation(r_offset: 8, r_info: (2 << 32) | 283, r_addend: 0, section_idx: 0, target_section_idx: 1)
+    ]
+    val empty = ElfStringTable(data: [], offset: 0)
+    ElfObject(header: header, sections: sections, symbols: symbols, relocations: relocs,
+        strtab: empty, shstrtab: empty,
+        raw: [0, 0, 0, 0x90, 0, 0, 0, 0x91, 0, 0, 0, 0x94])
+
+fn u32_at(bytes: [u8], at: i64) -> i64:
+    (bytes[at] as i64) | ((bytes[at + 1] as i64) << 8) |
+        ((bytes[at + 2] as i64) << 16) | ((bytes[at + 3] as i64) << 24)
+
+describe "AArch64 TLS relaxation":
+    it "relaxes canonical TLSGD to MRS plus local-exec high and low adds":
+        val result = elf_relax_tls([a64_tls_object(513, 514)], RelocArch.AArch64)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()[0]
+        expect(u32_at(obj.raw, 0)).to_equal(0xd53bd040)
+        expect(u32_at(obj.raw, 4)).to_equal(0x91400000)
+        expect(u32_at(obj.raw, 8)).to_equal(0x91000000)
+        expect(obj.relocations.len()).to_equal(2)
+        expect(elf_reloc_type(obj.relocations[0])).to_equal(549)
+        expect(elf_reloc_type(obj.relocations[1])).to_equal(551)
+
+    it "relaxes canonical TLSLD to the AArch64 variant-I TLS block base":
+        val result = elf_relax_tls([a64_tls_object(518, 519)], RelocArch.AArch64)
+        expect(result.is_ok()).to_equal(true)
+        val obj = result.unwrap()[0]
+        expect(u32_at(obj.raw, 0)).to_equal(0xd53bd040)
+        expect(u32_at(obj.raw, 4)).to_equal(0x91004000)
+        expect(u32_at(obj.raw, 8)).to_equal(0xd503201f)
+        expect(obj.relocations.len()).to_equal(0)
+
+    it "rejects an unpaired TLSGD sequence":
+        val base = a64_tls_object(513, 514)
+        val obj = ElfObject(header: base.header, sections: base.sections, symbols: base.symbols,
+            relocations: [base.relocations[0], base.relocations[1]], strtab: base.strtab,
+            shstrtab: base.shstrtab, raw: base.raw)
+        expect(elf_relax_tls([obj], RelocArch.AArch64).is_err()).to_equal(true)
+
+    it "rejects a noncanonical TLSLD instruction sequence":
+        val base = a64_tls_object(518, 519)
+        val obj = ElfObject(header: base.header, sections: base.sections, symbols: base.symbols,
+            relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab,
+            raw: [1, 0, 0, 0x90, 0, 0, 0, 0x91, 0, 0, 0, 0x94])
+        expect(elf_relax_tls([obj], RelocArch.AArch64).is_err()).to_equal(true)
