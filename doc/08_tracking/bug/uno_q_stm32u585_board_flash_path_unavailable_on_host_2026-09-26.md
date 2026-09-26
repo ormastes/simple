@@ -1,7 +1,10 @@
 # SimpleOS Cortex-M cannot be flashed to the connected Arduino UNO Q from this host
 
 - **Filed:** 2026-09-26
-- **Status:** OPEN — board-run blocked. Scope is explicitly NOT "QEMU-only is fine";
+- **Status:** OPEN — board-run still blocked, but narrowed on 2026-09-26 from "no
+  tool can reach the board" to "one root udev rule" (see the 2026-09-26 update
+  below: `adb` is now installed root-free and enumerates the board by serial).
+  Scope is explicitly NOT "QEMU-only is fine";
   this record exists because `.claude/rules/board-runnable.md` requires a blocked
   board path to be named and filed rather than silently shipped as QEMU-only.
 - **Area:** `scripts/os/run_simpleos_stm32u585.shs` flash lane / host tooling
@@ -47,8 +50,8 @@ So the image side is done. What is missing is a way to get it onto the MCU.
 | `dfu-util` | no |
 | `STM32_Programmer_CLI` / `stm32prog` | no |
 | `openocd` | **yes** |
-| `adb` | no |
-| `arduino-cli` | no |
+| `adb` | **yes as of 2026-09-26** — see below |
+| `arduino-cli` | no (no apt candidate on this host) |
 
 `openocd` alone is not sufficient, because the UNO Q exposes **no SWD/debug
 interface over USB**. Its USB descriptors are a vendor-specific interface
@@ -69,12 +72,97 @@ supported route is *through* the board's Linux side, which needs either `adb`
 nothing, and writing `\r\n\r\n` then reading for 8 more seconds produced nothing
 (port set `115200 raw -echo`). No login prompt, no boot log.
 
+Re-probed 2026-09-26 as an **AT-command modem port**, since the descriptor says
+`bInterfaceProtocol 1 AT-commands (v.25ter)`: `AT\r` then `ATI\r` at 115200 raw
+-echo -crtscts, reading for 6s, returned **0 bytes** as well. `/dev/ttyACM0`
+binds interface `3-9:1.1` of the Arduino device, so it is the right device and
+simply answers nothing. The console route remains dead.
+
+## 2026-09-26 update: `adb` installed without root; blocker narrowed to ONE root action
+
+`adb` is no longer missing. It was deployed **without root** using the same
+`.deb`-into-a-private-prefix technique as
+`doc/07_guide/infra/toolchain/llvm_23_deploy_2026-08-21.md` (that guide names
+`/mnt/data`, which **does not exist on this host** — the prefix used is
+`$HOME/.local/opt/adb-root`):
+
+```
+apt-get download adb android-libbase android-libboringssl android-libcutils \
+                 android-liblog android-libziparchive libprotobuf32t64
+dpkg-deb -x <each>.deb $HOME/.local/opt/adb-root
+```
+
+The Debian `adb` links against `libbase/libcrypto/libcutils/liblog/libssl/libziparchive`
+`.so.0` which land in `usr/lib/x86_64-linux-gnu/android/` and are NOT on the
+default loader path, so `$HOME/.local/opt/adb-root/bin/adb` is a two-line
+`LD_LIBRARY_PATH` wrapper, symlinked to `$HOME/.local/bin/adb` (already on PATH).
+`adb version` -> `Android Debug Bridge version 1.0.41 / 34.0.4-debian`.
+
+**`adb` positively identifies the board** — this is the first host-side tool that
+talks to the UNO Q's vendor-specific (class 255, protocol 1) interface at all:
+
+```
+$ adb devices -l
+3655308719   no permissions (missing udev rules? user is in the plugdev group)   usb:3-9 transport_id:1
+```
+
+Serial `3655308719` matches the USB descriptor exactly, so the ADB-shaped
+interface really is ADB and the transport is one permission away from working.
+
+**The remaining blocker is a udev rule, which requires root exactly once:**
+
+```
+$ ls -l /dev/bus/usb/003/004
+crw-rw-r-- 1 root root 189, 259 ...        # 0664 root:root
+$ getfacl /dev/bus/usb/003/004             # user::rw- group::rw- other::r--  (no uaccess ACL)
+```
+
+The node is world-**readable** but not writable, and `adb`'s USB transport needs
+`O_RDWR` on usbfs. Confirmed non-root workarounds do not exist here:
+
+- `sudo -n true` -> `sudo: a password is required` (user IS in `sudo`/`plugdev`,
+  but there is no passwordless sudo, per CLAUDE.md);
+- no `uaccess` ACL is applied to the node, and no `/etc/udev/rules.d/` rule
+  mentions `2341` (only snap rules are installed);
+- no USB network interface appears (`ip -o link` shows only `lo` + `wlp3s0`), so
+  `adb connect` over TCP is not available as a permission-free side door.
+
+### The one root command that unblocks this
+
+```sh
+printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="2341", ATTR{idProduct}=="0078", MODE="0664", GROUP="plugdev"\n' \
+  | sudo tee /etc/udev/rules.d/51-arduino-uno-q.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+adb kill-server && adb devices          # must show `3655308719  device`, not `no permissions`
+```
+
+(`pkexec` exists and would prompt on the desktop session instead of the terminal;
+it was not invoked, since popping a password dialog is the user's call.)
+
+### Still unverified beyond that point
+
+Nothing about the board's *own* flash path could be checked, because it needs a
+working `adb shell` to look at: which on-board tool/service the QRB2210 Linux
+side uses to program the STM32U585, and whether the ELF must be converted to
+`.bin`/`.hex` first. That is the next step once `adb devices` reports `device`,
+and it is **not** established.
+
+### The three `run_simpleos_stm32u585.shs` lanes are all probe-only
+
+Re-read at `:96-110`: `st-flash write ... 0x08000000`, `openocd -f
+interface/stlink.cfg -f target/stm32u5x.cfg`, and `STM32_Programmer_CLI -c
+port=SWD`. Every one assumes a host-visible SWD/ST-Link probe. **None of them has
+a route that works through the board's own USB connection**, so no combination of
+them flashes this board without either an external probe or the adb path above.
+Nothing was flashed and nothing was written to the board.
+
 ## Unblock condition
 
 Any ONE of:
 
-- install `adb` (or `arduino-cli` with the UNO Q core) on this host and flash the
-  STM32 from the board's Linux side, which is Arduino's supported UNO Q flow;
+- **(closest — `adb` half is DONE)** apply the udev rule above so `adb devices`
+  reports `device`, then flash the STM32 from the board's Linux side, which is
+  Arduino's supported UNO Q flow;
 - attach an external SWD probe (ST-Link/CMSIS-DAP) to the board's debug pads and
   use the already-present `openocd` lane;
 - install `st-flash` (`stlink-tools`) **and** confirm a DFU/SWD route actually
