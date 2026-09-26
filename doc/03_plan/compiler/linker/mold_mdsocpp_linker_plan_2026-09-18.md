@@ -204,6 +204,10 @@ Linux `/usr/local/bin/simple`, Windows
 explicit `--simple-bin` override and rejection of unknown automatic targets.
 The same resolver now owns the real remote-PC adapter command, eliminating its
 previous hardcoded `bin/simple` execution path.
+The adjacent Arm32/RiscV32 compiler bridge no longer returns successful fixed
+return-zero byte sequences while ignoring source. It now fails closed until a
+real source-derived target backend is connected; remote placement is wired,
+but remote compilation remains an explicit completion gap.
 
 Implemented source slice:
 
