@@ -29,6 +29,7 @@ use os.services.sosix.uname_v1.{sosix_uname_handle_v1}
 # Re-export handlers from sub-modules so external callers (syscall_shim.spl)
 # that use `use os.kernel.ipc.syscall.{_handle_*}` still resolve.
 use os.kernel.ipc.syscall_ipc.{IpcSyscallState, _handle_ipc_send, _handle_ipc_recv, _handle_ipc_create_port, _handle_ipc_destroy_port, _handle_ipc_connect, _handle_ipc_port_owner, _handle_ipc_send_state, _handle_ipc_recv_state, _handle_ipc_create_port_state, _handle_ipc_destroy_port_state, _handle_ipc_connect_state}
+use os.kernel.ipc.syscall_ipc.{_handle_ipc_send_owned_v1_state, _handle_ipc_recv_owned_v1_state}
 use os.kernel.ipc.syscall_security_debug.{_handle_pledge, _handle_unveil, _handle_cap_grant, _handle_cap_revoke, _handle_debug_write}
 use os.kernel.ipc.syscall_process.{_handle_exit, _handle_exit_state, _handle_yield, _handle_yield_state, _handle_spawn, _handle_spawn_state, _handle_wait, _handle_wait_state, _handle_fork, _handle_fork_state, _handle_exec, _handle_exec_state, _handle_waitpid, _handle_waitpid_state, _handle_pipe, _handle_dup2, _handle_dup, _handle_dlopen, _handle_dlsym, _handle_dlclose, _handle_poll, _handle_fcntl, _handle_getpid, _handle_spawn_binary, _handle_spawn_binary_state, dispatch_spawn_binary_direct, dispatch_spawn_binary_direct_state, SpawnBinaryDirectState}
 use os.kernel.ipc.syscall_proc_ext.{_handle_list_tasks, _handle_get_task_info, _handle_signal, _handle_set_priority, _handle_schedule, _handle_schedctl, _handle_get_parent_pid, _handle_mount, _handle_unmount}
@@ -165,22 +166,10 @@ val USER_BRK_BASE: u64 = 0x30000000
 val USER_BRK_LIMIT: u64 = 0x38000000
 var _current_brk: u64 = USER_BRK_BASE
 
-# ============================================================================
-# Capability Enforcement Helpers
-#
-# CORRECTION to the _cap_check STATUS note below (2026-08-06, second pass):
-# the accurate posture is "never runs in production", NOT "denies everything in
-# production". The live ring-3 path is syscall_entry.s -> rt_syscall_dispatch
-# (baremetal_stubs.c) -> the `spl_handle_*` C-ABI overrides in
-# abi/syscall_shim_*.spl -> the `_handle_*` leaves DIRECTLY — it never enters
-# syscall_handler / syscall_handler_ipc_state, so these arms are not reached at
-# all and those syscalls carry no capability protection there. The only
-# dispatcher that does reach them, x86_dispatch_installed_syscall(_abi)
-# (arch/x86_64/interrupt.spl), is exported to C as
-# spl_x86_dispatch_installed_syscall_abi but has no C, assembly, linker-script
-# or .shs caller anywhere — specs only. On that spec path it does deny
-# everything, as the note below describes.
-# ============================================================================
+# Capability checks here are spec-only on x86_64. Live ring-3 calls go from
+# syscall_entry.s through rt_syscall_dispatch to spl_handle_* shims, then to
+# _handle_* leaves. The exported x86_dispatch_installed_syscall_abi has no
+# production caller. Live shims must enforce their own authority checks.
 
 fn _cap_check(ipc: IpcManager, task: TaskId, kind: CapabilityKind) -> bool:
     """Check if a task holds a capability of the required kind.
@@ -261,20 +250,11 @@ fn syscall_dispatch(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, kl
     syscall_dispatch_with(result.value, SyscallTrapDisposition.ReturnToCaller)
 
 fn syscall_handler_ipc_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> IpcSyscallState:
-    """Dispatch IPC + scheduler-mutating process syscalls and return updated
-    scheduler/IPC state.
+    """Return updated scheduler and IPC owners for installed trap runtimes.
 
-    This is the state-preserving path used by installed trap runtimes.
-    Scheduler instances behave as value-copied across a plain function-call
-    boundary in this codebase (see SpawnBinaryDirectState/IpcSyscallState
-    docstrings), so any syscall whose handler mutates the scheduler (task
-    creation, exec-image replacement, fork, wait, exit, yield) must return its
-    updated Scheduler explicitly and have the caller adopt it — a plain
-    result-only call silently drops the mutation. IPC syscalls (20-23) were
-    the first converted; process syscalls (0,1,2,3,13,57,59,61) are converted
-    here too. The legacy result-only syscall_handler remains for the
-    remaining, non-scheduler-mutating (or not-yet-converted) syscall ids and
-    for existing test/call sites that have not migrated to state threading.
+    Both owners may be value-copied across calls. Callers must adopt this
+    state for IPC and process syscalls that mutate either owner; the legacy
+    result-only dispatcher remains for older spec and call sites.
     """
     var sched_for_cap = scheduler
     val caller = sched_for_cap.get_current()
@@ -338,6 +318,10 @@ fn syscall_handler_ipc_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcMa
             IpcSyscallState(
                 result: _handle_server_startup_evidence_consume(scheduler),
                 scheduler: scheduler, ipc: ipc)
+        case 132:   # Bounded copied send with scheduler-current source identity
+            _handle_ipc_send_owned_v1_state(args, scheduler, ipc)
+        case 133:   # Checked copied receive; failed copyout preserves FIFO head
+            _handle_ipc_recv_owned_v1_state(args, scheduler, ipc)
         case _:
             IpcSyscallState(result: syscall_handler(args, scheduler, ipc, klog), scheduler: scheduler, ipc: ipc)
 
@@ -806,6 +790,10 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.ProcessQueue(queue_id: args.arg0, generation: 0, rights: CAP_RIGHT_ADMIN)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_queue_close(args)
+        case 132:   # owned copied IPC send
+            _handle_ipc_send_owned_v1_state(args, scheduler, ipc).result
+        case 133:   # owned copied IPC receive
+            _handle_ipc_recv_owned_v1_state(args, scheduler, ipc).result
 
         # -- Unknown ---------------------------------------------------------
         case _:

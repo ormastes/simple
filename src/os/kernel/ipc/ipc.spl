@@ -104,6 +104,12 @@ impl MessageQueue:
         self.count = self.count - 1
         msg
 
+    fn peek() -> QueuedIpcMessage?:
+        """Read the FIFO head without changing queue ownership or counters."""
+        if self.count == 0:
+            return nil
+        self.messages[self.head]
+
     fn peek_owned_payload_len() -> i64:
         """Inspect the FIFO head without releasing its owned byte copy."""
         if self.count == 0:
@@ -443,6 +449,35 @@ impl IpcManager:
         if live.port.owner != receiver_task.id:
             return -2
         live.queue.peek_owned_payload_len()
+
+    fn peek_owned(receiver_task: TaskId, port: IpcPort) -> OwnedIpcReceiveResult:
+        """Copy the next owned record for a checked user copyout before dequeue."""
+        val slot = self._find_port_by_id(port.id)
+        if slot < 0:
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.MissingPort)
+        val state = self.ports[slot]
+        if state == nil:
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.MissingPort)
+        val live = state
+        if live.port.owner != receiver_task.id:
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.Unauthorized)
+        val message = live.queue.peek()
+        if message == nil:
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.Empty)
+        val queued = message
+        if queued.delivery_kind == QueuedIpcDeliveryKind.LegacyMetadata:
+            return OwnedIpcReceiveResult(
+                status: OwnedIpcReceiveStatus.MetadataOnly,
+                header: Some(queued.header), payload: []
+            )
+        if queued.header.payload_len.to_u64() != queued.payload.len().to_u64():
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.InvalidState)
+        if queued.header.cap_count != 0u32 or queued.header.flags == (IpcFlags.CapTransfer as u32):
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.InvalidState)
+        OwnedIpcReceiveResult(
+            status: OwnedIpcReceiveStatus.Delivered,
+            header: Some(queued.header), payload: _copy_owned_payload(queued.payload)
+        )
 
     # -- Message Passing -----------------------------------------------------
 

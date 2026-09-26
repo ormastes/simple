@@ -34,13 +34,11 @@ and NFR requirements still require user selection.
   `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` handles
   134/135. A new control trap must be registered in that live switch and its
   C-ABI shim, not only in the Simple `syscall_handler` compatibility path.
-- The owned IPC user library calls 132/133, but the live x86_64 dispatcher
-  currently has no 132/133 cases, and the `ipc_owned_syscall_v1_spec.spl`
-  imports handler and encoder names absent from `syscall_ipc.spl`. The queue
-  now exposes an owner-checked, non-consuming head-size preflight; the live
-  copied send/receive traps, bounded user copies, and one-use reply permits
-  still need implementation and executable evidence before this ABI can carry
-  service control traffic.
+- The owned IPC user library calls 132/133. The x86_64 dispatcher now routes
+  those IDs to strong Simple handlers with bounded user copy and an
+  owner-checked, non-consuming receive preview. The queue mints and consumes
+  exact-pair reply permits. This is source wiring, not yet guest evidence;
+  the trap and copyout behavior still need an admitted build and ring-3 test.
 - `root_service_catalog.spl` calls 136/137, and the same live x86_64 dispatch
   switch has no cases for either ID. PID1 service lifecycle evidence must
   exercise those traps, rather than inferring support from the user library.
@@ -49,24 +47,24 @@ and NFR requirements still require user selection.
 
 | ID | User request | Live x86_64 route at this revision | Release action |
 |---|---|---|---|
-| 132 | `ipc_send_owned_v1` / `ipc_reply_owned_v1` | No `rt_syscall_dispatch` case or strong shim | Add bounded copy-in, scheduler-current source-port check, exact destination authority, and atomic one-use reply-permit transition. |
-| 133 | `ipc_recv_owned_v1_into` | No `rt_syscall_dispatch` case or strong shim | Check owner, timeout mode, FIFO head size, output capacity, and writable mapping before dequeue; serialize the 32-byte little-endian header plus owned payload through `vmm_copyout_bytes`. |
+| 132 | `ipc_send_owned_v1` / `ipc_reply_owned_v1` | C case and strong Simple shim now reach bounded copy-in, scheduler-current source-port check, and an exact `IpcConnect` check for cross-task requests | Verify cap issuance and ring-3 send/reply behavior. |
+| 133 | `ipc_recv_owned_v1_into` | C case and strong Simple shim now preview, copyout, then dequeue | Verify single-owner serialization and ring-3 receipt with a bad-output-pointer negative control. |
 | 134/135 | Registered positioned read/write | C switch and strong Simple shim present | Install a real registry owner and issue real file/buffer identities before claiming guest behavior. |
 | 136/137 | PID1 root-service spawn/stop | No `rt_syscall_dispatch` case | Wire scheduler-authenticated PID1 authority and test a real ring-3 service lifecycle. |
 
-`IpcManager.next_owned_payload_len` is a non-consuming length preflight, not
-the receive transaction. The current `ipc_owned_syscall_v1_spec.spl` and
-`ipc_endpoint_namespace_spec.spl` reference further names missing from their
-source owners, including the 132/133 handlers, header encoder, endpoint
-inspection helpers, and reply-permit methods. Endpoint inspection and a
-bounded exact-pair reply-permit ledger now exist. Accepted copied requests
-mint one permit and accepted copied replies consume one inside the queue owner;
-the live 132/133 traps still do not reach that owner. The handler and encoder
-imports remain unresolved,
-so these tests are not passing evidence. Implement and execute those contracts
-before using owned IPC for positioned control. The queue's `send_owned` owner
-check receives a `TaskId` argument; only the trap shim may supply it from
-`Scheduler.get_current()`.
+`IpcManager.next_owned_payload_len` and `peek_owned` preserve the FIFO head
+while the 133 handler checks and writes the bounded user output. The handler
+then dequeues under the current single-core owner assumption; multi-core
+delivery needs a serialized transition before release. The 132/133 handlers,
+header encoder, endpoint inspection, and reply-permit methods now exist, but
+their tests have not executed on an admitted self-hosted binary. Direct
+`IpcManager.send_owned` calls still accept a caller-supplied `TaskId`; only
+the trap shim derives it from `Scheduler.get_current()`. Do not use copied IPC
+for positioned control until the guest path and its denial cases pass.
+The cross-task request check requires a named `IpcConnect` grant. Current
+source has a call from `IpcManager.mint_task_capability_set` to the capability
+manager method, but no method definition was found in `src/os/kernel/ipc/`;
+verify the grant issuer before claiming a successful service request.
 
 ## Contract and owner placement
 

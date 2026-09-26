@@ -10,6 +10,7 @@ use os.kernel.ipc.syscall_ipc.{
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.ipc_types.{IpcMessage, IpcFlags}
+use os.kernel.types.task_types.{TaskId}
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallId}
 use os.kernel.errno.{EAGAIN, EFAULT, EMSGSIZE, ENOSYS, EPERM}
 
@@ -59,7 +60,7 @@ describe "owned-copy IPC syscall authentication and bounds":
         val caller = scheduler.get_current()
         val source = ipc.create_port(caller, "owned-source")
         val destination = ipc.create_port(caller, "owned-destination")
-        val state = _handle_ipc_send_owned_v1_state(_args(132, destination.id, 7, 0x1000, 0, source.id + 1000, 0), scheduler, ipc)
+        val state = _handle_ipc_send_owned_v1_state(_args(132, destination.id, 7, 1, 1, source.id + 1000, 0), scheduler, ipc)
         expect(state.result.value).to_equal(-(EPERM as i64))
         expect(state.ipc.next_owned_payload_len(caller, destination)).to_equal(-3)
 
@@ -73,12 +74,30 @@ describe "owned-copy IPC syscall authentication and bounds":
         expect(state.result.value).to_equal(0)
         expect(state.ipc.next_owned_payload_len(caller, destination)).to_equal(0)
 
+    it "denies a cross-task named destination without its exact connect grant":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val source = ipc.create_port(caller, "owned-cap-client")
+        val service = TaskId(id: caller.id + 1u64)
+        val destination = ipc.create_port(service, "owned-cap-service")
+        val state = _handle_ipc_send_owned_v1_state(
+            _args(132, destination.id, 5, 0, 0, source.id, 0), scheduler, ipc)
+        expect(state.result.value).to_equal(-(EPERM as i64))
+        expect(state.ipc.next_owned_payload_len(service, destination)).to_equal(-3)
+
     it "rejects oversized send before touching the user pointer":
         val state = _handle_ipc_send_owned_v1_state(_args(132, 1, 1, 0, 4097, 1, 0), Scheduler.new(), IpcManager.new())
         expect(state.result.value).to_equal(-(EMSGSIZE as i64))
 
     it "returns EFAULT for an unreadable send buffer":
-        val state = _handle_ipc_send_owned_v1_state(_args(132, 1, 1, 0, 1, 1, 0), Scheduler.new(), IpcManager.new())
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val source = ipc.create_port(caller, "owned-unreadable-source")
+        val destination = ipc.create_port(caller, "owned-unreadable-destination")
+        val state = _handle_ipc_send_owned_v1_state(
+            _args(132, destination.id, 1, 1, 1, source.id, 0), scheduler, ipc)
         expect(state.result.value).to_equal(-(EFAULT as i64))
 
     it "distinguishes empty receive, undersized buffer, bad output pointer, and unsupported timeout":

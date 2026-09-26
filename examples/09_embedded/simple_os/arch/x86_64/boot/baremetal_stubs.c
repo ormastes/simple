@@ -15250,6 +15250,8 @@ __attribute__((weak)) int64_t spl_handle_schedule(uint64_t, uint64_t, uint64_t, 
 __attribute__((weak)) int64_t spl_handle_schedctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_fs_pread_registered_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_fs_pwrite_registered_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_ipc_send_owned_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_ipc_recv_owned_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 /* ----------------------------------------------------------------------------
  * User-exec anonymous heap — bump allocator backing mmap/brk for freestanding
@@ -16182,6 +16184,8 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 97: return spl_handle_set_hostname(a0, a1, a2, a3, a4, a5);
         case 106: return spl_handle_schedule(a0, a1, a2, a3, a4, a5);
         case 107: return spl_handle_schedctl(a0, a1, a2, a3, a4, a5);
+        case 132: return spl_handle_ipc_send_owned_v1(a0, a1, a2, a3, a4, a5);
+        case 133: return spl_handle_ipc_recv_owned_v1(a0, a1, a2, a3, a4, a5);
         case 134: return spl_handle_fs_pread_registered_v1(a0, a1, a2, a3, a4, a5);
         case 135: return spl_handle_fs_pwrite_registered_v1(a0, a1, a2, a3, a4, a5);
         default: return -38; /* ENOSYS */
@@ -16674,6 +16678,18 @@ __attribute__((weak)) int64_t spl_handle_schedctl(uint64_t a0, uint64_t a1, uint
 
 __attribute__((weak)) int64_t spl_handle_fs_pread_registered_v1(uint64_t a0, uint64_t a1, uint64_t a2,
                                                                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_ipc_send_owned_v1(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                             uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+__attribute__((weak)) int64_t spl_handle_ipc_recv_owned_v1(uint64_t a0, uint64_t a1, uint64_t a2,
+                                                             uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;
 }
