@@ -26,8 +26,9 @@ and inspector-input authority)
 ## Initial scope
 
 The next implementation slice adds the canonical target-triple registry owner
-and atomic-byte owned-process V3 inspector authority, then joins their opaque
-live tokens to the existing target profile and binary-inspection projections.
+and atomic-byte inspection V1 authority over a pinned exact-environment process,
+then joins their opaque live tokens to the existing target profile and
+binary-inspection projections.
 SIMD parser artifacts, generated dynlib/JIT/AOT specialization, and GPU-resident
 execution remain staged extensions that must reuse these contracts.
 

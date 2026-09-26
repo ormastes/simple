@@ -1223,6 +1223,7 @@ pub class ProcessInspectionLeaseV1:
     observation: ProcessObservationLeaseV4
     expected_input_len: i64
     expected_input_digest: [u8]
+    expected_request_digest: [u8]
 
     pub fn input_receipt(self) -> Result<ProcessInspectionInputReceiptV1, text>:
         if not self.observation.active or self.observation.acknowledged:
@@ -1235,7 +1236,9 @@ pub class ProcessInspectionLeaseV1:
                 input.request_id_low != ticket[2] or
                 input.ticket_high != ticket[3] or input.ticket_low != ticket[4] or
                 input.input_bytes_accepted != self.expected_input_len or
-                input.input_digest != self.expected_input_digest:
+                input.input_digest != self.expected_input_digest or
+                self.expected_request_digest.len() != 32 or
+                input.request_digest != self.expected_request_digest:
             return Err("process inspection V1 input receipt does not match its retained lease")
         Ok(input)
 
@@ -1314,13 +1317,27 @@ pub fn process_inspection_owner_start_pinned_v1(
         active = true
     var copied_digest: [u8] = []
     for value in expected_input_digest: copied_digest.push(value)
+    var initial_request_digest: [u8] = []
+    if active:
+        val initial_words = unsafe(capabilities: [ffi]):
+            rt_process_inspection_v1_input_receipt_value(ticket)
+        val initial = decode_process_inspection_input_v1(initial_words)
+        if initial.is_ok():
+            val fact = initial.unwrap()
+            if fact.request_id_high == ticket[1] and
+                    fact.request_id_low == ticket[2] and
+                    fact.ticket_high == ticket[3] and fact.ticket_low == ticket[4] and
+                    fact.input_bytes_accepted == input_length and
+                    fact.input_digest == copied_digest:
+                initial_request_digest = fact.request_digest
     Ok(ProcessInspectionStartV1(receipt: receipt,
         lease: ProcessInspectionLeaseV1(
             observation: ProcessObservationLeaseV4(ticket: ticket, active: active,
                 frozen_kind: ProcessObservationPacketKindV4.Unknown,
                 acknowledged: false),
             expected_input_len: input_length,
-            expected_input_digest: copied_digest)))
+            expected_input_digest: copied_digest,
+            expected_request_digest: initial_request_digest)))
 
 # ============================================================================
 # Process Execution

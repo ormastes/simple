@@ -217,6 +217,11 @@ int main(int argc, char** argv) {
     assert(rt_array_get(input_words,3)==POV4_STATUS_RUNNING);
     assert(rt_array_set(input,0,255));
     SplArray* input_ticket=ticket_from(input_words), *input_frozen=NULL;
+    SplArray* initial_input_receipt=rt_process_inspection_v1_input_receipt_value(input_ticket);
+    assert(initial_input_receipt->len==75);
+    assert(rt_array_get(initial_input_receipt,5)==131072);
+    for(int i=0;i<32;i++)
+        assert(rt_array_get(initial_input_receipt,11+i)==expected_digest[i]);
     for(int i=0;i<100;i++) {
         input_frozen=rt_process_observation_v4_collect_value(input_ticket,50000000);
         input_words=tuple_item(input_frozen,3);
@@ -239,6 +244,8 @@ int main(int argc, char** argv) {
     assert(rt_array_get(input_receipt,9)==1 && rt_array_get(input_receipt,10)==0);
     for(int i=0;i<32;i++)
         assert(rt_array_get(input_receipt,11+i)==expected_digest[i]);
+    for(int i=0;i<32;i++)
+        assert(rt_array_get(input_receipt,43+i)==rt_array_get(initial_input_receipt,43+i));
     SplArray* input_ack=rt_process_observation_v4_ack_collect_value(
         input_ticket,tuple_item(input_frozen,2));
     assert(rt_array_get(tuple_item(input_ack,3),1)==POV4_KIND_ACK);

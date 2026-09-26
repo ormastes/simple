@@ -205,7 +205,7 @@ mismatch, early child exit, or unreaped state must remain non-authoritative.
 - **NFR-011 Registry overhead:** canonical target lookup is bounded and
   allocation-free after construction, requires no network/signature service,
   and never runs in provider hot execution.
-- **NFR-012 Inspector progress:** V3 atomic input and stdout/stderr drain make
+- **NFR-012 Inspector progress:** inspection V1 atomic input and stdout/stderr drain make
   bounded concurrent progress without pipe deadlock; every input or lifecycle
   failure yields an explicit non-authoritative receipt and no leaked lease.
 

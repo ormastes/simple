@@ -1,7 +1,7 @@
 # Atomic input owner for parser binary inspection
 
 Status: implementation plan for selected EODL REQ-016 / NFR-012. Native
-inspection V1 start/pump/receipt is implemented and selfchecked on Linux;
+inspection V1 start/pump/receipt is implemented and selfchecked on Linux.
 The strict Simple receipt decoder and retained lease façade are written but
 not yet checked on an admitted self-hosted runtime. The compiler join and
 product admission remain open.
@@ -15,7 +15,7 @@ inspection request/receipt rather than changing V4's fixed 64-word packet or
 accepting V3 and V4 receipts as if they came from one process.
 
 The start call receives `(executable_pin, cwd_pin, canonical_request,
-input_bytes)` once. Before creating a child it must:
+input_bytes, expected_input_digest)` once. Before creating a child it must:
 
 1. Validate length against the selected 16 MiB input bound and all request,
    output, deadline, environment, and slot bounds without arithmetic wrap.
