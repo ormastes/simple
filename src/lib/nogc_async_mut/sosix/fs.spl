@@ -32,7 +32,6 @@ use std.common.contracts.sosix.error_v1.{
 }
 use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingTelemetry}
 use std.nogc_async_mut.async.future.{Future}
-use std.nogc_async_mut.async_ring.future_compat_adapter.{poll_future_compat}
 
 pub struct SosixFsSubmit:
     accepted: bool
@@ -270,6 +269,7 @@ impl SosixHostedFs:
         Ok(typed.completion)
 
     fn future_of(operation: SosixOperationId) -> Future<Result<SosixCompletion, SosixError>>:
+        """Compatibility snapshot. Use poll(operation) for live ring progress."""
         if not self._operation_is_current(operation):
             return Future.from_value(Err(sosix_error_new(SOSIX_ERROR_INVALID_CAPABILITY)))
         if val ready = self.result_of(operation):
@@ -277,13 +277,13 @@ impl SosixHostedFs:
         Future.pending<Result<SosixCompletion, SosixError>>()
 
     fn poll(operation: SosixOperationId) -> TaskPollResult<Result<SosixCompletion, SosixError>>:
-        """Consumer view: Ready(result) or Pending(the exact ring token that will wake it)."""
+        """Poll the live owner; pending names the exact ring token that will wake it."""
         if not self._operation_is_current(operation):
             return TaskPollResult.Ready(Err(sosix_error_new(SOSIX_ERROR_INVALID_CAPABILITY)))
+        if val ready = self.result_of(operation):
+            return TaskPollResult.Ready(ready)
         val slot = operation.slot.to_i64()
-        match poll_future_compat(self.future_of(operation), self.tokens[slot]):
-            case Ok(receipt): receipt.poll_result
-            case Err(_): TaskPollResult.Pending(self.tokens[slot])
+        TaskPollResult.Pending(self.tokens[slot])
 
     fn take_completion() -> SosixCompletion?:
         self.completions.take()

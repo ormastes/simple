@@ -38,3 +38,7 @@ Signatures below use the source declaration's parameter and result types; member
 3. **SimpleOS admission is conditional.** The trap shim retains a typed default FAT32 backend and can install another typed route, but dispatch rejects until an authenticated registry owner is installed. Native board and QEMU execution evidence must identify the installed owner and backend.
 4. **Cross-runtime evidence remains open.** The Rust seed interpreter and native C runtime both implement `rt_fd_pread`; equivalence, direct native lowering, and the self-hosted interpreter route need executable evidence. The existing `posix_spec.spl`, hosted file-driver specs, and SimpleOS positioned specs are test surfaces, not a substitute for that comparison.
 5. **Next inventory pass.** Start with interpreter extern registration, pure-Simple compiler driver and loader imports, Future implementations, and host renderer calls; assign a route key to each symbol. Mark ambiguous callers unresolved rather than assuming a migration is complete.
+
+### 2026-09-26 async completion addendum
+
+The companion [async completion route manifest](sosix_async_completion_route_manifest_v1_2026-09-26.md) classifies the legacy, hosted, SOSIX ring, and SimpleOS Future/task surfaces. It closes one family of RU-001 classification, while the global census and RU-021 runtime qualification remain open.
