@@ -470,7 +470,9 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::canonicalize(&path) {
-        Ok(canonical) => Ok(Value::text(canonical.to_string_lossy().to_string())),
+        Ok(canonical) => Ok(Value::text(strip_verbatim_prefix(
+            canonical.to_string_lossy().to_string(),
+        ))),
         Err(_) => {
             // Fallback: make absolute
             match std::env::current_dir() {
@@ -481,6 +483,59 @@ pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
                 Err(_) => Ok(Value::text(path)),
             }
         }
+    }
+}
+
+/// Drop the Windows verbatim prefix (`\\?\C:\...` -> `C:\...`,
+/// `\\?\UNC\srv\share` -> `\\srv\share`) that `fs::canonicalize` returns, so
+/// the interpreter lane agrees with the runtime's `rt_path_absolute`
+/// (`runtime/src/value/sffi/file_io/path.rs`) and a canonicalized path compares
+/// equal to the same path produced by the cwd-join fallback. Backslash built
+/// from its code point, as in that file.
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: String) -> String {
+    let sep = char::from(92u8);
+    let verbatim: String = [sep, sep, '?', sep].iter().collect();
+    let unc: String = format!("{}UNC{}", verbatim, sep);
+    if let Some(rest) = path.strip_prefix(&unc) {
+        let mut out = String::with_capacity(rest.len() + 2);
+        out.push(sep);
+        out.push(sep);
+        out.push_str(rest);
+        return out;
+    }
+    match path.strip_prefix(&verbatim) {
+        Some(rest) => rest.to_string(),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: String) -> String {
+    path
+}
+
+#[cfg(test)]
+mod canonicalize_tests {
+    use super::*;
+
+    /// Canonicalizing an existing file must not leak the Windows `\\?\`
+    /// verbatim prefix (the runtime lane strips it; the lanes must agree).
+    #[test]
+    fn canonicalize_returns_plain_absolute_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("probe.spl");
+        std::fs::write(&file, "x").expect("write probe");
+        let got = rt_file_canonicalize(&[Value::text(file.to_string_lossy().to_string())])
+            .expect("canonicalize call");
+        let text = match got {
+            Value::Str(s) => s.to_string(),
+            other => panic!("expected text, got {}", other.type_name()),
+        };
+        let verbatim: String = [char::from(92u8), char::from(92u8), '?'].iter().collect();
+        assert!(!text.starts_with(&verbatim), "verbatim prefix leaked: {}", text);
+        assert!(std::path::Path::new(&text).is_absolute(), "not absolute: {}", text);
+        assert!(text.ends_with("probe.spl"), "wrong target: {}", text);
     }
 }
 
