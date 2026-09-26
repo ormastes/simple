@@ -340,6 +340,10 @@ read failures, malformed local digests, or byte mismatches stop publication.
 The publication command carries the same digest and re-hashes the sibling copy
 after mode changes but before rename. A copy mismatch removes that sibling and
 leaves the installed interpreter untouched.
+Windows publication no longer relies on `Move-Item -Force`: an existing file
+is replaced with sibling-volume `System.IO.File.Replace`, an absent path uses
+`File.Move`, and a non-file destination fails closed. This preserves the old
+binary until the verified candidate is atomically committed.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and

@@ -280,6 +280,10 @@ advance to the sibling-copy/rename command.
 Publication also verifies the sibling copy against that digest immediately
 before rename. This closes the integrity gap between staging verification and
 the immutable atomic-replacement candidate.
+On Windows, an existing installed file is committed through
+`System.IO.File.Replace` and a first install through `System.IO.File.Move`;
+`Move-Item -Force` is not used because its overwrite sequence does not provide
+the required replace-without-an-absent-window contract.
 
 ## 14. Linux runtime and library input completion (2026-09-27)
 
