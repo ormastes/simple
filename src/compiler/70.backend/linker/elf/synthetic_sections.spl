@@ -102,6 +102,13 @@ fn elf_dyn_abs64(target: RelocArch) -> i64:
         case _:
             1
 
+fn elf_dyn_copy(target: RelocArch) -> i64:
+    match target:
+        case AArch64:
+            1024
+        case _:
+            5
+
 # ============================================================================
 # Builders
 # ============================================================================
@@ -141,8 +148,9 @@ fn elf_dynstr_size(names: [text]) -> i64:
     elf_build_dynstr(names).data.len()
 
 # reason: positional dynsym inputs (imports, binding flags, types, string table)
-fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynStr) -> [i64]:
-    """Null symbol + one undefined global/weak entry per import."""
+fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynStr,
+        shndx: [i64], values: [i64], sizes: [i64]) -> [i64]:
+    """Null symbol + imported UND entries or executable-defined COPY entries."""
     var b = write_zeros([], 24)
     var i: i64 = 0
     while i < imports.len():
@@ -155,10 +163,10 @@ fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynS
         b = write_u32_le(b, dynstr.offsets[imports[i]])
         b = b.push((sym_bind << 4) | typ)
         b = b.push(0)
-        b = b.push(0)
-        b = b.push(0)
-        b = write_u64_le(b, 0)
-        b = write_u64_le(b, 0)
+        b = b.push(shndx[i] & 0xff)
+        b = b.push((shndx[i] >> 8) & 0xff)
+        b = write_u64_le(b, values[i])
+        b = write_u64_le(b, sizes[i])
         i = i + 1
     b
 
@@ -409,7 +417,7 @@ fn elf_build_interp(path: text) -> [i64]:
 # ============================================================================
 
 export ElfDynStr
-export elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64
+export elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy
 export elf_rela_entry, elf_sym_entry, elf_sysv_hash, elf_build_dynstr, elf_dynstr_size, elf_build_dynsym
 export elf_hash_size, elf_build_hash, elf_gnu_hash, elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash
 export elf_plt0_size, elf_plt_entry_size, elf_plt_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt

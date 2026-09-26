@@ -21,7 +21,7 @@
 # Limits (reported as errors, never silently degraded):
 #   - targets: x86_64 and aarch64; dynamic execution certification remains a
 #     platform-receipt concern rather than an image-construction restriction
-#   - no TLS, no copy relocations, no text relocs,
+#   - no TLS or text relocs,
 #     no section GC, no COMDAT dedup, no symbol versioning
 #     (unversioned references bind to the library's default version)
 #   - single-threaded; no StageReceipts yet
@@ -44,9 +44,9 @@ use compiler.backend.linker.elf.reloc_scan.{
     RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX
 }
 use compiler.backend.linker.elf.synthetic_sections.{
-    ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64,
+    ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy,
     elf_rela_entry, elf_sym_entry, elf_build_dynstr, elf_build_dynsym, elf_hash_size, elf_build_hash,
-    elf_gnu_hash_size, elf_build_gnu_hash,
+    elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash,
     elf_plt_size, elf_plt0_size, elf_plt_entry_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt,
     elf_build_plt_x64, elf_build_gotplt_x64,
     elf_build_dynamic, elf_build_interp,
@@ -105,8 +105,15 @@ struct ElfLinkCtx:
     mode: i64
     common_offsets: {text: i64}
     common_out: i64
+    copy_offsets: {text: i64}
+    copy_out: i64
 
 struct ElfCommonPlacement:
+    inputs: ElfStaticInputs
+    offsets: {text: i64}
+    out_idx: i64
+
+struct ElfCopyPlacement:
     inputs: ElfStaticInputs
     offsets: {text: i64}
     out_idx: i64
@@ -259,6 +266,34 @@ fn elf_place_common(inputs: ElfStaticInputs, res: SymResolution) -> ElfCommonPla
         out_idx: k
     )
 
+fn elf_place_copies(inputs: ElfStaticInputs, sc: ElfScan) -> ElfCopyPlacement:
+    """Append imported object copies to writable NOBITS storage in scan order."""
+    var outs = inputs.outs
+    var k = elf_find_out(outs, ".bss")
+    var offsets: {text: i64} = {}
+    var i: i64 = 0
+    while i < sc.copy_names.len():
+        if k < 0:
+            outs = outs.push(elf_out_sec(".bss", SHT_NOBITS_E, SHF_ALLOC | SHF_WRITE, 1, 0, ELF_SEG_RW))
+            k = outs.len() - 1
+        var al = sc.copy_align[i]
+        if al < 1:
+            al = 1
+        val at = align_up(outs[k].size, al)
+        offsets[sc.copy_names[i]] = at
+        var nal = outs[k].align
+        if al > nal:
+            nal = al
+        outs[k] = elf_out_sec(".bss", SHT_NOBITS_E, SHF_ALLOC | SHF_WRITE,
+            nal, at + sc.copy_size[i], ELF_SEG_RW)
+        i = i + 1
+    ElfCopyPlacement(
+        inputs: ElfStaticInputs(objects: inputs.objects, sec_out: inputs.sec_out,
+            sec_off: inputs.sec_off, outs: outs),
+        offsets: offsets,
+        out_idx: k
+    )
+
 fn elf_static_contents(inputs: ElfStaticInputs) -> [[i64]]:
     """Concatenate input section bytes per input-backed output section."""
     var out: [[i64]] = []
@@ -401,10 +436,28 @@ fn elf_lib_export(libs: [ElfSharedLib], name: text) -> i64:
             return l.exports[name]
     -1
 
+fn elf_lib_export_size(libs: [ElfSharedLib], name: text) -> i64:
+    for l in libs:
+        if l.export_sizes.has(name):
+            return l.export_sizes[name]
+    0
+
+fn elf_lib_export_align(libs: [ElfSharedLib], name: text) -> i64:
+    """Infer a conservative natural alignment from DSO value and extent."""
+    for l in libs:
+        if l.export_values.has(name):
+            val v = l.export_values[name]
+            val size = l.export_sizes[name]
+            var al: i64 = 1
+            while al < 16 and al * 2 <= size and v % (al * 2) == 0:
+                al = al * 2
+            return al
+    1
+
 fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text>:
     """Resolve relocation symbol (oi, sym_idx) to its SYMREF_* kind (placement fields zero)."""
     if sym_idx == 0:
-        return Ok(elf_ref(oi, 0, SYMREF_ABS, "", "", 0, false))
+        return Ok(elf_ref(oi, 0, SYMREF_ABS, "", "", 0, 0, 1, false))
     val obj = ctx.inputs.objects[oi]
     if sym_idx >= obj.symbols.len():
         return Err("object {oi}: relocation symbol index {sym_idx} out of range")
@@ -414,28 +467,31 @@ fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text
         val weak = bind == STB_WEAK
         if ctx.res.defined.has(sym.name):
             if ctx.res.defined[sym.name].section_idx == SHN_ABS:
-                return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, sym.name, 0, weak))
-            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, weak))
+                return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, sym.name, 0, sym.st_size, 1, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, sym.st_size, 1, weak))
         if elf_is_synth(sym.name):
-            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, sym.st_size, 1, weak))
         val t = elf_lib_export(ctx.libs, sym.name)
         if t >= 0:
-            return Ok(elf_ref(oi, sym_idx, SYMREF_IMPORT, sym.name, sym.name, t, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_IMPORT, sym.name, sym.name, t,
+                elf_lib_export_size(ctx.libs, sym.name), elf_lib_export_align(ctx.libs, sym.name), weak))
         if weak:
-            return Ok(elf_ref(oi, sym_idx, SYMREF_WEAK_ZERO, sym.name, sym.name, 0, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_WEAK_ZERO, sym.name, sym.name, 0, 0, 1, weak))
         return Err("undefined symbol: {sym.name}")
     if sym.st_shndx == SHN_ABS or sym.st_shndx == SHN_UNDEF:
-        return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, "{oi}#{sym_idx}", 0, false))
+        return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, "{oi}#{sym_idx}", 0, sym.st_size, 1, false))
     if sym.st_shndx == SHN_COMMON:
         return Err("local symbol {sym.name}: SHN_COMMON is invalid")
     if sym.st_shndx >= SHN_LORESERVE:
         return Err("symbol {sym.name}: reserved section index {sym.st_shndx} unsupported")
-    Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "{oi}#{sym_idx}", 0, false))
+    Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "{oi}#{sym_idx}", 0, sym.st_size, 1, false))
 
 # reason: positional ElfScanRef seed (placement fields are filled by the caller)
-fn elf_ref(oi: i64, sym_idx: i64, kind: i64, name: text, key: text, stype: i64, weak: bool) -> ElfScanRef:
+fn elf_ref(oi: i64, sym_idx: i64, kind: i64, name: text, key: text, stype: i64,
+        size: i64, alignment: i64, weak: bool) -> ElfScanRef:
     ElfScanRef(oi: oi, sym_idx: sym_idx, out_sec: -1, out_off: 0, writable: false, rtype: 0,
-        rclass: RC_NONE, kind: kind, key: key, name: name, stype: stype, weak: weak, addend: 0, relax: false)
+        rclass: RC_NONE, kind: kind, key: key, name: name, stype: stype, size: size,
+        alignment: alignment, weak: weak, addend: 0, relax: false)
 
 struct ElfLayout:
     plan: ElfExecPlan
@@ -465,6 +521,8 @@ fn elf_entry_addr(ctx: ElfLinkCtx, lay: ElfLayout, e: SymEntry) -> Result<i64, t
 
 fn elf_ref_addr(ctx: ElfLinkCtx, lay: ElfLayout, r: ElfScanRef) -> Result<i64, text>:
     """Link-time value S of a DEFINED / ABS / WEAK_ZERO reference (imports: 0)."""
+    if r.kind == SYMREF_IMPORT and ctx.copy_offsets.has(r.name):
+        return Ok(lay.plan.vaddrs[lay.in_to_plan[ctx.copy_out]] + ctx.copy_offsets[r.name])
     if r.kind == SYMREF_IMPORT or r.kind == SYMREF_WEAK_ZERO or r.sym_idx == 0:
         return Ok(0)
     val sym = ctx.inputs.objects[r.oi].symbols[r.sym_idx]
@@ -538,7 +596,8 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], 
             val relax = rclass == RC_GOT_RELAX and seed.kind == SYMREF_DEFINED and r.r_offset >= 2 and elf_x86_can_relax(contents[k], place)
             refs = refs.push(ElfScanRef(oi: oi, sym_idx: seed.sym_idx, out_sec: k, out_off: place,
                 writable: o.sh_flags & SHF_WRITE != 0, rtype: rtype, rclass: rclass, kind: seed.kind,
-                key: seed.key, name: seed.name, stype: seed.stype, weak: seed.weak,
+                key: seed.key, name: seed.name, stype: seed.stype, size: seed.size,
+                alignment: seed.alignment, weak: seed.weak,
                 addend: r.r_addend, relax: relax))
         oi = oi + 1
     Ok(refs)
@@ -754,7 +813,12 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
     for n in order:
         if demoted.has(n) or elf_is_synth(n):
             continue
-        if ctx.res.defined.has(n):
+        if ctx.copy_offsets.has(n):
+            val sh = lay.in_to_plan[ctx.copy_out] + 1
+            val v = lay.plan.vaddrs[lay.in_to_plan[ctx.copy_out]] + ctx.copy_offsets[n]
+            rows = elf_sym_row(rows, n, (STB_GLOBAL << 4) | ref_type[n], 0, sh, v,
+                elf_lib_export_size(ctx.libs, n))
+        else if ctx.res.defined.has(n):
             val e = ctx.res.defined[n]
             var def_sym = objs[e.obj_idx].symbols[0]
             for s in objs[e.obj_idx].symbols:
@@ -956,12 +1020,17 @@ fn elf_link_mode(req: ElfLinkRequest) -> Result<[i64], text>:
         return Err("entry symbol not defined: {req.entry}")
 
     val common = elf_place_common(elf_static_place(all)?, res)
-    val inputs = common.inputs
-    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
-        common_offsets: common.offsets, common_out: common.out_idx)
-    var contents = elf_static_contents(inputs)
-    val refs = elf_collect_refs(ctx, contents)?
+    val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, target: target, mode: mode,
+        common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1)
+    val initial_contents = elf_static_contents(common.inputs)
+    val refs = elf_collect_refs(ctx0, initial_contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
+    val copies = elf_place_copies(common.inputs, sc)
+    val inputs = copies.inputs
+    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
+        common_offsets: common.offsets, common_out: common.out_idx,
+        copy_offsets: copies.offsets, copy_out: copies.out_idx)
+    var contents = elf_static_contents(inputs)
 
     # --- synthetic section sizes (content comes after layout) ---
     val a64 = elf_target_is_a64(target)
@@ -969,11 +1038,11 @@ fn elf_link_mode(req: ElfLinkRequest) -> Result<[i64], text>:
     var n_got_rel: i64 = 0      # GOT slots needing RELATIVE (PIE, defined)
     var n_got_glob: i64 = 0     # GOT slots needing GLOB_DAT (imports)
     for j in sc.got_ref:
-        if refs[j].kind == SYMREF_IMPORT:
+        if refs[j].kind == SYMREF_IMPORT and not sc.copy_idx.has(refs[j].name):
             n_got_glob = n_got_glob + 1
         else if pie and refs[j].kind == SYMREF_DEFINED:
             n_got_rel = n_got_rel + 1
-    val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob + sc.sym_abs.len()
+    val n_rela_dyn = sc.relative.len() + n_got_rel + n_got_glob + sc.sym_abs.len() + sc.copy_names.len()
     val n_rela = [n_rela_dyn, sc.relative.len() + n_got_rel]
     var strnames: [text] = []
     for l in libs:
@@ -993,7 +1062,8 @@ fn elf_link_mode(req: ElfLinkRequest) -> Result<[i64], text>:
     if dynamic:
         secs = secs.push(elf_out_sec(".interp", SHT_PROGBITS_E, SHF_ALLOC, 1, req.interp.len() + 1, ELF_SEG_R))
         secs = secs.push(elf_sec_with(elf_out_sec(".dynsym", SHT_DYNSYM_S, SHF_ALLOC, 8, (sc.imports.len() + 1) * 24, ELF_SEG_R), 24, ".dynstr", 1))
-        secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8, elf_gnu_hash_size(0), ELF_SEG_R), 0, ".dynsym", 0))
+        secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8,
+            elf_gnu_hash_size(sc.copy_names.len()), ELF_SEG_R), 0, ".dynsym", 0))
         secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4, elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".dynstr", SHT_STRTAB_E, SHF_ALLOC, 1, dynstr0.data.len(), ELF_SEG_R))
     if n_rela_dyn > 0:
@@ -1077,7 +1147,9 @@ fn elf_link_mode(req: ElfLinkRequest) -> Result<[i64], text>:
     while gi < sc.got_keys.len():
         val r = refs[sc.got_ref[gi]]
         val slot = got_v + gi * 8
-        if r.kind == SYMREF_IMPORT:
+        if r.kind == SYMREF_IMPORT and sc.copy_idx.has(r.name):
+            got = write_u64_le(got, elf_ref_addr(ctx, lay, r)?)
+        else if r.kind == SYMREF_IMPORT:
             got = write_u64_le(got, 0)
             rela_sym = elf_rela_entry(rela_sym, slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0)
         else:
@@ -1093,6 +1165,9 @@ fn elf_link_mode(req: ElfLinkRequest) -> Result<[i64], text>:
     for js in sc.sym_abs:
         val r = refs[js]
         rela_sym = elf_rela_entry(rela_sym, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend)
+    for name in sc.copy_names:
+        val addr = plan.vaddrs[in_to_plan[ctx.copy_out]] + ctx.copy_offsets[name]
+        rela_sym = elf_rela_entry(rela_sym, addr, sc.import_idx[name], elf_dyn_copy(target), 0)
     var rela_dyn = rela_rel
     for x in rela_sym:
         rela_dyn = rela_dyn.push(x)
@@ -1113,6 +1188,19 @@ fn elf_link_mode(req: ElfLinkRequest) -> Result<[i64], text>:
         init: init_v, fini: fini_v, init_array: elf_plan_addr(plan, ".init_array"), fini_array: elf_plan_addr(plan, ".fini_array"),
         preinit_array: elf_plan_addr(plan, ".preinit_array"))
 
+    var dyn_shndx: [i64] = []
+    var dyn_values: [i64] = []
+    var dyn_sizes: [i64] = []
+    for name in sc.imports:
+        if sc.copy_idx.has(name):
+            dyn_shndx = dyn_shndx.push(in_to_plan[ctx.copy_out] + 1)
+            dyn_values = dyn_values.push(plan.vaddrs[in_to_plan[ctx.copy_out]] + ctx.copy_offsets[name])
+            dyn_sizes = dyn_sizes.push(sc.copy_size[sc.copy_idx[name]])
+        else:
+            dyn_shndx = dyn_shndx.push(0)
+            dyn_values = dyn_values.push(0)
+            dyn_sizes = dyn_sizes.push(0)
+
     var out: [[i64]] = []
     var pk: i64 = 0
     while pk < plan.secs.len():
@@ -1123,10 +1211,12 @@ fn elf_link_mode(req: ElfLinkRequest) -> Result<[i64], text>:
         else if n == ".interp":
             out = out.push(elf_build_interp(req.interp))
         else if n == ".dynsym":
-            out = out.push(elf_build_dynsym(sc.imports, sc.import_weak, sc.import_type, dynstr0))
+            out = out.push(elf_build_dynsym(sc.imports, sc.import_weak, sc.import_type, dynstr0,
+                dyn_shndx, dyn_values, dyn_sizes))
         else if n == ".gnu.hash":
-            # every .dynsym entry is an import (UND), so nothing is hashed: symoffset = .dynsym count
-            out = out.push(elf_build_gnu_hash([], sc.imports.len() + 1))
+            val copy_hash_names = elf_gnu_hash_sort(sc.copy_names)
+            out = out.push(elf_build_gnu_hash(copy_hash_names,
+                sc.imports.len() - copy_hash_names.len() + 1))
         else if n == ".hash":
             out = out.push(elf_build_hash(sc.imports))
         else if n == ".dynstr":
