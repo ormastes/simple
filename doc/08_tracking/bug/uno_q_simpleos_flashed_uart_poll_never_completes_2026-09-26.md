@@ -1,9 +1,11 @@
 # SimpleOS runs on the real UNO Q board but spins forever in a UART status poll
 
 - **Filed:** 2026-09-26
-- **Status:** OPEN — the image is FLASHED and EXECUTING on real hardware; it never
-  reaches a console. This is a board-vs-QEMU divergence, exactly the class
-  `.claude/rules/board-runnable.md` exists to prevent shipping as "board-runnable".
+- **Status:** RESOLVED 2026-09-26 — see "Resolution" at the end. The "poll" was
+  the shell's `RXNE` wait (the OS had already booted and printed its banner); the
+  real defect was the console UART/pins: USART1 PA9/PA10 (NUCLEO layout) instead
+  of the Uno Q's MCU<->MPU link LPUART1 PG7/PG8. Console output is now captured
+  on the board's `/dev/ttyHS1`.
 - **Area:** `src/os/kernel/arch/cortex_m33/cm33_shim.c` UART bring-up / STM32U585
   peripheral setup
 - **Board:** Arduino UNO Q, USB `2341:0078`, `iSerial 3655308719`;
@@ -136,3 +138,78 @@ unproven.
   that made this linkable image exist.
 - `simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19.md` — the
   `.bss`/module-init hazard on this same shim.
+
+## Resolution (2026-09-26)
+
+**Step 1 — name the register.** `openocd -d2 ... -c 'halt; echo [get_reg {r9 pc}];
+echo [read_memory 0x4001381C 32 4]'` (note: `reg`/`mdw` print nothing under `-c`;
+`echo [get_reg ...]` / `echo [read_memory ...]` do):
+
+```
+r9  = 0x4001381C            = USART1_BASE + 0x1C = USART1->ISR
+ISR = 0x006200C2            TEACK|REACK (clocked, TE/RE on), TC|TXE (all sent),
+                            FE (floating RX), RXNE=0
+tick_count 0x560af -> 0x56177 across 2 s  (= 100 Hz SysTick, OS alive)
+```
+
+So `[r9]`/`[r9,#8]`/`[r9,#0xC]` are `ISR`/`RDR`/`TDR`, and bit 5 is `RXNE`: the
+loop at `0x08001288` is the **shell's read-char wait**, not a broken TX poll. The
+banner had already gone out — on PA9, which reaches nothing on this board.
+
+**Step 2/4 — where the pins go.** The Zephyr UNO Q devicetree
+(`variants/arduino_uno_q_stm32u585xx/llext-edk`, `devicetree_generated.h`):
+`usart1` = PB6/PB7 AF7 (= header D1/D0), `lpuart1` = PG7/PG8 AF8. On the
+Qualcomm side `arduino-router --serial-port /dev/ttyHS1 --serial-baudrate 115200`
+holds the MCU link (`serial1` alias, `4a88000.serial`), so LPUART1 is the only
+MCU UART that reaches something observable.
+
+**Fix.** `src/os/kernel/arch/cortex_m33/board_stm32u585.h`: console moved to
+LPUART1 @ `0x46002400` on PG7/PG8 AF8 (RCC AHB3 PWREN, AHB2ENR1 GPIOGEN, APB3ENR
+LPUART1EN, `PWR_SVMCR.IO2SV` for the VDDIO2 domain that PG[15:2] live in, BRR =
+256*4 MHz/115200 = 8889). Spec:
+`test/01_unit/os/arch/cortex_m33_uno_q_console_lpuart1_spec.spl` (executed=3).
+QEMU MPS2-AN505 path (`board_an505.h`) untouched.
+
+**Board evidence.** After reflash (`flash write_image erase` — note the first
+attempt hit "timeout waiting for algorithm" after `reset; halt`; `reset halt`
+then succeeded), LPUART1 ISR = `0x006000D0` (TEACK|REACK|TXE|TC|IDLE, no FE),
+tick_count `0x8dd -> 0x9a5` in 2 s, and the router journal filled with
+`invalid packet, expected array, got: int8` (our ASCII hitting its msgpack
+decoder). Capture, with the router paused (it opens ttyHS1 exclusively; the
+`arduino` user has no sudo but is in `docker`, so a privileged container as root
+can `kill -STOP` it, read the tty, and `kill -CONT` it — verified back in
+`State: S` afterwards):
+
+```
+adb shell 'docker run --rm --privileged --pid=host -v /dev/ttyHS1:/dev/ttyHS1 -v /tmp:/out \
+  influxdb:2.7-alpine sh -c "kill -STOP 527; stty -F /dev/ttyHS1 115200 raw -echo; \
+  timeout 25 cat /dev/ttyHS1 > /out/hs1_cap.bin; kill -CONT 527"' &
+adb shell "/opt/openocd/bin/openocd -d1 -s /opt/openocd -f openocd_gpiod.cfg -c 'init; reset; shutdown'"
+adb shell cat -v /tmp/hs1_cap.bin
+```
+
+```
+[BOOT] SimpleOS Lite v0.5 - Cortex-M33 (ARMv8-M)
+[BOOT] Platform: STM32U585 (Arduino Uno Q)
+[BOOT] UART initialized (LPUART1 @ 0x46002400)
+[FAULT] MemManage, BusFault, UsageFault enabled; DIV0 trap on
+[MPU] Enabled, 8 regions available, 4 configured
+[TICK] SysTick enabled (~100 Hz)
+[FS] In-memory filesystem: 6 files, 400 bytes used
+[BOOT] Flash CRC: 0xad6b2db0
+protection=enforce
+kind=pmsav8-mpu
+protection_probe=pass
+protection_enabled=pass
+region_contract=pass
+[BOOT] Entering shell...
+
+SimpleOS Lite v0.5 (hardened)
+Type 'help' for commands.
+
+simpleos>
+```
+
+Open follow-up: a permanent capture path that does not need the router paused
+(e.g. a `systemctl stop arduino-router` with proper sudo, or teaching the shim to
+speak the router's msgpack framing so `arduino-app-cli monitor` shows it).
