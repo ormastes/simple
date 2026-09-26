@@ -103,6 +103,22 @@ impl MessageQueue:
         self.count = self.count - 1
         msg
 
+    fn peek_owned_payload_len() -> i64:
+        """Inspect the FIFO head without releasing its owned byte copy."""
+        if self.count == 0:
+            return -3
+        val message = self.messages[self.head]
+        if message == nil:
+            return -5
+        val queued = message
+        if queued.delivery_kind == QueuedIpcDeliveryKind.LegacyMetadata:
+            return 0
+        if queued.header.payload_len.to_u64() != queued.payload.len().to_u64():
+            return -5
+        if queued.header.cap_count != 0u32 or queued.header.flags == (IpcFlags.CapTransfer as u32):
+            return -5
+        queued.payload.len()
+
     me clear():
         """Release every queued payload exactly once and reset accounting."""
         var remaining = self.count
@@ -310,6 +326,24 @@ impl IpcManager:
             return false
         val live = state
         live.port.owner == owner_id
+
+    fn next_owned_payload_len(receiver_task: TaskId, port: IpcPort) -> i64:
+        """Preflight a copied receive without consuming or exposing the FIFO head.
+
+        -1 means missing port, -2 wrong receiver, -3 empty queue, and -5
+        invalid queued metadata. A nonnegative result is the payload length.
+        The dispatcher must supply its authenticated current task.
+        """
+        val slot = self._find_port_by_id(port.id)
+        if slot < 0:
+            return -1
+        val state = self.ports[slot]
+        if state == nil:
+            return -1
+        val live = state
+        if live.port.owner != receiver_task.id:
+            return -2
+        live.queue.peek_owned_payload_len()
 
     # -- Message Passing -----------------------------------------------------
 

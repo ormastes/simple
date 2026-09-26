@@ -34,6 +34,13 @@ and NFR requirements still require user selection.
   `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` handles
   134/135. A new control trap must be registered in that live switch and its
   C-ABI shim, not only in the Simple `syscall_handler` compatibility path.
+- The owned IPC user library calls 132/133, but the live x86_64 dispatcher
+  currently has no 132/133 cases, and the `ipc_owned_syscall_v1_spec.spl`
+  imports handler and encoder names absent from `syscall_ipc.spl`. The queue
+  now exposes an owner-checked, non-consuming head-size preflight; the live
+  copied send/receive traps, bounded user copies, and one-use reply permits
+  still need implementation and executable evidence before this ABI can carry
+  service control traffic.
 
 ## Contract and owner placement
 
