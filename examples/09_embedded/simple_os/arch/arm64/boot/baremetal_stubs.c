@@ -1348,6 +1348,9 @@ static int64_t arm64_svc_file_stat(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_clock_gettime(uint64_t, uint64_t);
 static int64_t arm64_svc_file_lseek(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_file_fcntl(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_unlink(uint64_t, uint64_t);
+static int64_t arm64_svc_file_ftruncate(uint64_t, uint64_t);
+static int64_t arm64_svc_file_rename(uint64_t, uint64_t, uint64_t, uint64_t);
 
 static int64_t arm64_dispatch_file_shim(uint64_t syscall_id,
                                         arm64_syscall_shim_fn shim,
@@ -1418,6 +1421,14 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         /* Anonymous mmap (the guest libc's malloc arena): bump-allocate
          * zeroed pages in the recorded user address space. */
         case 10: return arm64_user_mmap(a1);
+        /* munmap(11)/mprotect(12): the anonymous mmap heap is a bump
+         * allocator (no free), so these are accepted as no-ops rather than
+         * -ENOSYS. The guest lld's malloc arena calls munmap to shrink/free;
+         * an -ENOSYS there corrupts the arena and the next nothrow-new traps
+         * (run-20260926_101506, R4b BRK in operator new(nothrow)). The leak
+         * is bounded by the 160 MiB user page pool. */
+        case 11: return 0;
+        case 12: return 0;
         /* close: route pure C like open/read/write/stat above — NOT through
          * the spl_arm64_net_close_direct strong shim. close was the last
          * file syscall still entering Simple-compiled code during the R4a
@@ -1426,6 +1437,14 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
          * clang-bring-up lane opens no net fds; re-enable a net-close path
          * only with a C-side net fd table (see the strong-shim note above). */
         case 33: return arm64_svc_file_close(a0);
+        /* unlink(39)/ftruncate(43)/rename(44): the guest lld's
+         * FileOutputBuffer commit does create-temp + write + ftruncate +
+         * rename(temp -> output); unimplemented they return -ENOSYS and lld
+         * reports "cannot open output file" (run-20260926_100559, R4b).
+         * RAM-backed files only — image files stay read-only. */
+        case 39: return arm64_svc_file_unlink(a0, a1);
+        case 43: return arm64_svc_file_ftruncate(a0, a1);
+        case 44: return arm64_svc_file_rename(a0, a1, a2, a3);
         case 78: return arm64_dispatch_file_shim(78, spl_handle_file_sync, a0, 0, 0, 0, 0);
         /* Ring-3 server payloads have no ambient hardware authority. Device
          * enumeration/grant/BAR/DMA remain kernel-only until the canonical
@@ -5052,6 +5071,50 @@ static int64_t arm64_svc_file_close(uint64_t fd_v)
     if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
     if (g_svc_fds[fd].bounce) free(g_svc_fds[fd].bounce);
     __builtin_memset(&g_svc_fds[fd], 0, sizeof(g_svc_fds[fd]));
+    return 0;
+}
+
+/* syscall 39: unlink(path, len). RAM-backed guest files only — image files
+ * stay read-only. Returns 0, -errno. */
+static int64_t arm64_svc_file_unlink(uint64_t path_va, uint64_t path_len)
+{
+    char path[128];
+    if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
+    int ri = svc_ram_find(path);
+    if (ri < 0) return -2; /* ENOENT — not a guest-created RAM file */
+    g_svc_ram_files[ri].used = 0;
+    return 0;
+}
+
+/* syscall 43: ftruncate(fd, size). RAM-backed files only. Returns 0, -errno. */
+static int64_t arm64_svc_file_ftruncate(uint64_t fd_v, uint64_t size_v)
+{
+    int fd = (int)fd_v;
+    if (fd < 3 || fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9;
+    int ri = g_svc_fds[fd].ram_index;
+    if (ri < 0) return -30; /* EROFS — image files are read-only here */
+    if (size_v > SVC_RAM_FILE_MAX) return -27; /* EFBIG */
+    g_svc_ram_files[ri].size = (uint32_t)size_v;
+    g_svc_fds[fd].size = (uint32_t)size_v;
+    if (g_svc_fds[fd].offset > (uint32_t)size_v) g_svc_fds[fd].offset = (uint32_t)size_v;
+    return 0;
+}
+
+/* syscall 44: rename(old, old_len, new, new_len). RAM-backed guest files
+ * only — image files stay read-only. rename() overwrites the destination.
+ * Returns 0, -errno. */
+static int64_t arm64_svc_file_rename(uint64_t old_va, uint64_t old_len,
+                                     uint64_t new_va, uint64_t new_len)
+{
+    char oldp[128], newp[128];
+    if (svc_copy_path(old_va, old_len, oldp, sizeof(oldp) - 1) < 0) return -14;
+    if (svc_copy_path(new_va, new_len, newp, sizeof(newp) - 1) < 0) return -14;
+    int ri = svc_ram_find(oldp);
+    if (ri < 0) return -2; /* ENOENT — not a guest-created RAM file */
+    int ex = svc_ram_find(newp);
+    if (ex >= 0 && ex != ri) g_svc_ram_files[ex].used = 0; /* overwrite dest */
+    __builtin_strncpy(g_svc_ram_files[ri].path, newp, sizeof(g_svc_ram_files[ri].path) - 1);
+    g_svc_ram_files[ri].path[sizeof(g_svc_ram_files[ri].path) - 1] = '\0';
     return 0;
 }
 
