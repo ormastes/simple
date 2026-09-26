@@ -33,3 +33,7 @@ Status: **partial RU-001 census**, inspected at `acd63771621` on 2026-09-27. Thi
 1. Prove the x86_64 and ARM64 live traps enforce the same exact socket-create, bind, listen, connect, send, and receive authority as the portable owner, including wrong endpoint, absent grant, and changed user-address negatives.
 2. Qualify one network operation end to end through the common SOSIX ID, a bounded completion and retirement owner, a hosted provider, and a SimpleOS provider. Test partial I/O, error mapping, cancellation, and socket close while work is pending.
 3. Inventory remaining UDP, DNS, TLS, HTTP, and direct `rt_net_*`/`rt_io_tcp_*` callers before declaring RU-001 complete. This manifest does not classify those families.
+
+## Later source candidate
+
+PR #1691 commit `2d453ab592b` routes the x86_64 strong shims for 70–76 through `portable_net_capability_allowed_v1` or the atomic checked-bind helper, and gates 77 with `NetRaw`. This addresses the x86_64 source bypass recorded at the inspected baseline. It has no admitted Simple or ring-3 guest execution evidence. ARM64's separate direct precheck and the absent RV64 production socket route remain open.
