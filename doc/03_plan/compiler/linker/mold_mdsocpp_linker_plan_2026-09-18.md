@@ -178,6 +178,9 @@ and architectural reach before patching only their instruction immediate fields.
 preserving opcode and destination-register bits and rejecting overflow.
 `R_AARCH64_LD_PREL_LO19` now checks literal-load alignment and ±1 MiB reach,
 then patches only the instruction's imm19 field.
+`R_AARCH64_GOT_LD_PREL19` now allocates a linker GOT slot and applies the same
+checked literal-load encoding against the slot address, covering the compact
+single-instruction AArch64 GOT access model in addition to ADRP+LDR pairs.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 
