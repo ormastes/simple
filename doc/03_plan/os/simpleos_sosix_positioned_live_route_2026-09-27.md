@@ -143,6 +143,13 @@ assumption needs a serialized transition before multicore release.
    ABI feed a task identity to positioned control. Neither the source port nor
    the VFS fd may stand in for that identity.
 
+The catalogue payload currently mounts a private FAT32 filesystem. Its adapter
+now supplies the full `Filesystem` method surface, including FAT32's
+non-following stat and explicit unsupported readlink. This is a compatibility
+bridge, not the required canonical NVFS root. A release guest must route the
+catalogue VFS and positioned file authority to the admitted NVFS image and
+prove persistence across a cold reboot.
+
 ## Contract and owner placement
 
 1. Keep the registry and request-token state beside the existing
