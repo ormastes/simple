@@ -2,7 +2,8 @@
 
 Callables carry a copied identity, never the native handle or function pointer.
 Retirement revokes new uses under the same lock that admits invocations. An
-already admitted invocation closes the mapping when its last use finishes.
+already admitted invocation attempts close when its last use finishes; failed
+close retains a revoked entry for a later cleanup retry.
 """
 
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
@@ -18,6 +19,7 @@ struct _NativeCallableEntryV1:
     native_fptr: i64
     active_uses: i64
     retiring: bool
+    close_in_progress: bool
 
 struct _NativeCallableStateV1:
     next_identity: u64
@@ -68,7 +70,7 @@ pub(package) fn native_callable_owner_register_v1(handle: i64, fptr: i64) -> u64
                 identity + 1u64
             next.entries.push(_NativeCallableEntryV1(
                 identity: identity, native_handle: handle, native_fptr: fptr,
-                active_uses: 0, retiring: false))
+                active_uses: 0, retiring: false, close_in_progress: false))
             next.last_identity = identity
         next)
     updated.last_identity
@@ -88,6 +90,20 @@ fn _native_callable_acquire_v1(identity: u64) -> i64:
         next)
     updated.last_fptr
 
+fn _native_callable_complete_close_v1(identity: u64, closed: bool):
+    val _ = mutex_with_lock(_native_callable_owner_v1, \state:
+        var next = state
+        val index = _native_callable_index_v1(state, identity)
+        if index >= 0:
+            var entry = state.entries[index]
+            if entry.retiring and entry.close_in_progress and entry.active_uses == 0:
+                if closed:
+                    next.entries.remove(index)
+                else:
+                    entry.close_in_progress = false
+                    next.entries[index] = entry
+        next)
+
 fn _native_callable_end_v1(identity: u64):
     val updated = mutex_with_lock(_native_callable_owner_v1, \state:
         var next = state
@@ -97,15 +113,16 @@ fn _native_callable_end_v1(identity: u64):
             var entry = state.entries[index]
             if entry.active_uses > 0:
                 entry.active_uses = entry.active_uses - 1
-                if entry.retiring and entry.active_uses == 0:
+                if entry.retiring and entry.active_uses == 0 and
+                   not entry.close_in_progress:
+                    entry.close_in_progress = true
                     next.last_close_handle = entry.native_handle
-                    next.entries.remove(index)
-                else:
-                    next.entries[index] = entry
+                next.entries[index] = entry
         next)
     if updated.last_close_handle > 0:
-        unsafe(capabilities: [ffi]):
+        val closed = unsafe(capabilities: [ffi]):
             dynlib_admitted_close_v1(updated.last_close_handle)
+        _native_callable_complete_close_v1(identity, closed)
 
 # The native call occurs outside the owner lock so provider code may re-enter
 # unrelated services. The retained use keeps its mapping live until return.
@@ -120,8 +137,8 @@ pub(package) fn native_callable_owner_invoke_v1(
     _native_callable_end_v1(identity)
     Ok(result)
 
-# True means this call made the one live-to-retiring transition. If invocations
-# remain, the last one closes the mapping; no later invocation can start.
+# A failed close retains a revoked entry so a later release can retry. A
+# close-in-progress entry cannot claim a second concurrent unload.
 pub(package) fn native_callable_owner_retire_v1(identity: u64) -> bool:
     val updated = mutex_with_lock(_native_callable_owner_v1, \state:
         var next = state
@@ -133,14 +150,16 @@ pub(package) fn native_callable_owner_retire_v1(identity: u64) -> bool:
             if not entry.retiring:
                 entry.retiring = true
                 next.last_accepted = true
-                if entry.active_uses == 0:
-                    next.last_close_handle = entry.native_handle
-                    next.entries.remove(index)
-                else:
-                    next.entries[index] = entry
+            if entry.retiring and entry.active_uses == 0 and
+               not entry.close_in_progress:
+                entry.close_in_progress = true
+                next.last_close_handle = entry.native_handle
+                next.last_accepted = true
+            next.entries[index] = entry
         next)
     if updated.last_close_handle > 0:
         val closed = unsafe(capabilities: [ffi]):
             dynlib_admitted_close_v1(updated.last_close_handle)
-        return updated.last_accepted and closed
+        _native_callable_complete_close_v1(identity, closed)
+        return closed
     updated.last_accepted
