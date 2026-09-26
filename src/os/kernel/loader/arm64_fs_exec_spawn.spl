@@ -79,8 +79,11 @@ pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     var owner = prepared.scheduler
     owner.exit_task_by_id(launch_id, rc.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), launch_id, false)
-    net_arm64_task_teardown(launch_id.id)
+    val net_retirement = net_arm64_task_teardown(launch_id.id)
     shim_init(Scheduler.new_bootstrap(), IpcManager.new(), KernelLog.new(64))
+    if net_retirement.pending != 0u64:
+        serial_println("[net-retire] task={launch_id.id} pending={net_retirement.pending}")
+        return -5
     if wait_collect_result_error(collected) != 0 or
        wait_collect_result_status(collected) != rc.to_i32():
         return -10
@@ -135,7 +138,10 @@ pub fn arm64_fs_exec_spawn_authenticated_v1(
     var owner = prepared.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
-    net_arm64_task_teardown(child.id)
+    val net_retirement = net_arm64_task_teardown(child.id)
+    if net_retirement.pending != 0u64:
+        serial_println("[net-retire] task={child.id} pending={net_retirement.pending}")
+        return -5
     if wait_collect_result_error(collected) != 0 or
        wait_collect_result_status(collected) != exit_code.to_i32():
         return -10
@@ -195,7 +201,12 @@ pub(package) fn arm64_fs_exec_spawn_authenticated_with_launch_v1(
     var owner = prepared.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
-    net_arm64_task_teardown(child.id)
+    val net_retirement = net_arm64_task_teardown(child.id)
+    if net_retirement.pending != 0u64:
+        serial_println("[net-retire] task={child.id} pending={net_retirement.pending}")
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: -5, evidence: nil, scheduler: owner)
     if (wait_collect_result_error(collected) != 0 or
         wait_collect_result_pid(collected) != child.id or
         wait_collect_result_status(collected) != exit_code.to_i32()):

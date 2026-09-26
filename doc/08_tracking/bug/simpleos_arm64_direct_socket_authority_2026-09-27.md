@@ -44,8 +44,11 @@ Release impact: ARM64 network parity and the SimpleOS release row remain unquali
   only for network-range numbers and maps its non-owner sentinel to `EBADF`;
   task teardown remains a second retirement path. Direct close and teardown
   now retain a `Closing` quarantine entry when `net_tcp_close` fails, rather
-  than reporting success or losing the last mapping. No supervisor drain or
-  physical-retirement receipt exists for that quarantine yet. The earlier all-descriptor
+  than reporting success or losing the last mapping. A bounded owner drain
+  returns attempted, retired, and pending counts; task teardown retries and
+  refuses a successful launcher result while any quarantine remains. A full
+  recurring supervisor schedule and durable physical-retirement receipt are
+  still absent. The earlier all-descriptor
   strong-shim close caused a kernel fault, so this narrower path still needs
   a ring-3 guest close/reopen and file-close regression before admission. The
   map retains its single-core transition assumption; multicore delivery needs

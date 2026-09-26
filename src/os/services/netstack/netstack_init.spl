@@ -191,6 +191,11 @@ var g_arm64_net_fd_map: [Arm64NetFdMap] = []
 var g_arm64_net_fd_ready: bool = false
 var g_arm64_net_next_fd: i32 = 100
 
+pub struct Arm64NetRetirementReceiptV1:
+    attempted: u64
+    retired: u64
+    pending: u64
+
 fn _arm64_net_fd_ensure():
     if not g_arm64_net_fd_ready:
         g_arm64_net_fd_map = []
@@ -203,7 +208,9 @@ fn _arm64_net_external_fd_valid(external: u64) -> bool:
 fn _arm64_net_fd_reserve() -> i64:
     _arm64_net_fd_ensure()
     if g_arm64_net_fd_map.len() >= ARM64_NET_FD_CAPACITY:
-        return -24
+        _ = net_arm64_reap_quarantine_v1(4u64)
+        if g_arm64_net_fd_map.len() >= ARM64_NET_FD_CAPACITY:
+            return -24
     # Never recycle an external number during one boot: a stale user fd must
     # not gain authority over a later socket owned by the same task.
     if g_arm64_net_next_fd == 2147483647:
@@ -296,14 +303,46 @@ fn _arm64_net_fd_begin_close(external_fd: i32) -> i32:
         i = i + 1
     -4096
 
-pub fn net_arm64_task_teardown(owner_task: u64):
-    """Close and remove every direct socket owned by one exiting EL0 task."""
+pub fn net_arm64_reap_quarantine_v1(max_attempts: u64) -> Arm64NetRetirementReceiptV1:
+    """Attempt bounded physical retirement through the canonical netstack owner."""
+    var attempted: u64 = 0u64
+    var retired: u64 = 0u64
+    var i: u64 = 0u64
+    while i < g_arm64_net_fd_map.len():
+        val entry = g_arm64_net_fd_map[i]
+        if entry.route == ARM64_NET_CLOSING and attempted < max_attempts:
+            if entry.internal_fd < 0:
+                g_arm64_net_fd_map.remove(i)
+                retired = retired + 1u64
+            else:
+                attempted = attempted + 1u64
+                if net_tcp_close(entry.internal_fd as i64):
+                    g_arm64_net_fd_map.remove(i)
+                    retired = retired + 1u64
+                else:
+                    i = i + 1u64
+        else:
+            i = i + 1u64
+    var pending: u64 = 0u64
+    for entry in g_arm64_net_fd_map:
+        if entry.route == ARM64_NET_CLOSING:
+            pending = pending + 1u64
+    Arm64NetRetirementReceiptV1(
+        attempted: attempted, retired: retired, pending: pending)
+
+pub fn net_arm64_task_teardown(owner_task: u64) -> Arm64NetRetirementReceiptV1:
+    """Retire an exiting task's sockets and report any retained quarantine."""
+    var attempted: u64 = 0u64
+    var retired: u64 = 0u64
     var i: u64 = 0
     while i < g_arm64_net_fd_map.len():
         if g_arm64_net_fd_map[i].owner_task == owner_task:
             val entry = g_arm64_net_fd_map[i]
-            if entry.internal_fd >= 0 and
-               not net_tcp_close(entry.internal_fd as i64):
+            var closed = true
+            if entry.internal_fd >= 0:
+                attempted = attempted + 1u64
+                closed = net_tcp_close(entry.internal_fd as i64)
+            if not closed:
                 # A failed physical close stays quarantined after task exit.
                 # No new task can inherit its external descriptor identity.
                 g_arm64_net_fd_map[i] = Arm64NetFdMap(
@@ -313,8 +352,13 @@ pub fn net_arm64_task_teardown(owner_task: u64):
                 i = i + 1
             else:
                 g_arm64_net_fd_map.remove(i)
+                retired = retired + 1u64
         else:
             i = i + 1
+    val drained = net_arm64_reap_quarantine_v1(ARM64_NET_FD_CAPACITY)
+    Arm64NetRetirementReceiptV1(
+        attempted: attempted + drained.attempted,
+        retired: retired + drained.retired, pending: drained.pending)
 
 struct Arm64SockaddrCopy:
     ip: u32
