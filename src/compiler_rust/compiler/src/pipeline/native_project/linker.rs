@@ -14,7 +14,9 @@ use super::tools::{
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
-    find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
+    external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, missing_llvm_tool_error,
+    nm_command,
+    strip_llvm_constructors,
     target_c_compiler, target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
 };
 
@@ -501,10 +503,10 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
-            .arg(obj)
+            .arg(external_tool_path(obj))
             .output()
             .map_err(|e| format!("nm: {e}"))?;
         if !output.status.success() {
@@ -703,13 +705,20 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
-            .arg(obj)
+            .arg(external_tool_path(obj))
             .output()
             .map_err(|e| format!("nm: {e}"))?;
         if !output.status.success() {
-            return Ok(Vec::new());
+            // Fail closed: an unreadable object used to yield "no symbols",
+            // which silently dropped every `__module_init_*` from the init
+            // caller and shipped a binary whose module globals were null.
+            return Err(format!(
+                "nm failed on {}: {}",
+                obj.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
         // The leading-underscore prefix is a Mach-O convention. Only strip it
         // when the *output* objects are Mach-O — for cross-compiled ELF objects
@@ -740,10 +749,10 @@ impl NativeProjectBuilder {
     }
 
     fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
-            .arg(obj)
+            .arg(external_tool_path(obj))
             .output()
             .map_err(|e| format!("nm undefined: {e}"))?;
         if !output.status.success() {
@@ -1597,6 +1606,9 @@ int main(int argc, char** argv) {
         } else {
             target_c_compiler(cross_target)
         };
+        // Fail fast with the install hint instead of a bare spawn error: the
+        // detector reports a clang name even when none is installed.
+        simple_common::platform::cc_detect::require_compiler(&cc)?;
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
@@ -1703,7 +1715,7 @@ int main(int argc, char** argv) {
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             {
                 let archive_path = temp_dir.join("libspl_objects.a");
-                let ar_tool = find_archive_tool();
+                let ar_tool = find_archive_tool()?;
 
                 let batches = archive_object_batches(&ar_tool, &archive_path, object_paths)?;
                 let mut ar_ok = true;
@@ -2110,6 +2122,11 @@ int main(int argc, char** argv) {
             }
             if let Some(hosted_runtime) = host_gpu_hosted_runtime.as_ref() {
                 cmd.arg(hosted_runtime);
+                // The rlib's std/core/alloc and allocator-shim references must
+                // resolve from the matching std (never from stubs) on Windows,
+                // where its `win32` module is compiled in.
+                #[cfg(target_os = "windows")]
+                cmd.arg(super::tools::build_rust_std_shim_for_rlib(hosted_runtime, temp_dir)?);
             }
             if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                 cmd.arg(core_runtime);
@@ -2314,6 +2331,13 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Report every unresolved symbol, not lld-link's default first 20: the
+        // Windows stub-parity retry below needs the complete set.
+        #[cfg(target_os = "windows")]
+        if is_msvc {
+            msvc_link_args.push("/errorlimit:0".to_string());
+        }
+
         // Single `/link` group, last: everything after it belongs to the
         // linker, so this must follow every compiler argument above.
         if is_msvc && !msvc_link_args.is_empty() {
@@ -2325,7 +2349,53 @@ int main(int argc, char** argv) {
             eprintln!("Link command: {:?}", cmd);
         }
 
-        let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
+        #[allow(unused_mut)]
+        let mut output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
+
+        // Windows undefined-symbol stub parity (see stubs.rs). ELF resolves
+        // undefined symbols after `--gc-sections`, so references made only by
+        // unreachable code vanish; lld-link resolves before `/OPT:REF` and
+        // rejects them. Retry once with loud trap stubs for exactly the
+        // reported names (Rust std internals are never stubbed), print the
+        // count and write the list beside the binary.
+        #[cfg(target_os = "windows")]
+        if !output_result.status.success() && is_msvc && strict_no_stub_fallback {
+            let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
+            let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
+            if !undefined.is_empty() {
+                let (rust_internal, stubbable): (Vec<String>, Vec<String>) = undefined
+                    .into_iter()
+                    .partition(|name| super::stubs::is_rust_internal_symbol(name));
+                if !rust_internal.is_empty() {
+                    return Err(format!(
+                        "link failed: {} Rust std/alloc internal symbol(s) are unresolved and are never \
+                         stubbed (link the matching std): {}\n{}",
+                        rust_internal.len(),
+                        rust_internal.join(", "),
+                        diagnostics
+                    ));
+                }
+                let stubs_o = super::stubs::compile_coff_gc_parity_stubs(temp_dir, &stubbable)?;
+                if msvc_link_args.is_empty() {
+                    cmd.arg("/link");
+                }
+                cmd.arg(&stubs_o);
+                output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
+                if output_result.status.success() {
+                    let list_path = PathBuf::from(format!("{}.stubbed_symbols.txt", self.output.display()));
+                    let mut list = stubbable.join("\n");
+                    list.push('\n');
+                    std::fs::write(&list_path, list)
+                        .map_err(|e| format!("write {}: {e}", list_path.display()))?;
+                    eprintln!(
+                        "[native-link] stubbed {} unresolved symbol(s) (Windows parity with the ELF \
+                         --gc-sections link; each stub prints its name and aborts if called); list: {}",
+                        stubbable.len(),
+                        list_path.display()
+                    );
+                }
+            }
+        }
 
         if output_result.status.success() {
             // Dynamic lane: place the runtime beside the binary so the
@@ -2356,7 +2426,8 @@ int main(int argc, char** argv) {
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             if self.config.strip {
-                if let Some(objcopy) = find_objcopy_tool() {
+                {
+                    let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy"))?;
                     let _ = std::process::Command::new(objcopy)
                         .arg("--remove-section=.comment")
                         .arg(&self.output)
@@ -3105,16 +3176,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                 && (triple.contains("x86_64") || triple.contains("i686"))
                 && !boot_objects.is_empty()
             {
-                let objcopy_bin = ["llvm-objcopy", "gobjcopy", "objcopy"]
-                    .iter()
-                    .find(|bin| {
-                        std::process::Command::new(bin)
-                            .arg("--version")
-                            .output()
-                            .is_ok_and(|o| o.status.success())
-                    })
-                    .unwrap_or(&"objcopy");
-                wrap_elf32_multiboot(&self.output, objcopy_bin)?;
+                let objcopy_bin = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy"))?;
+                wrap_elf32_multiboot(&self.output, &objcopy_bin)?;
             }
             if let Ok(meta) = std::fs::metadata(&self.output) {
                 eprintln!(

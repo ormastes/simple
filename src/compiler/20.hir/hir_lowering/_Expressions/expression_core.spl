@@ -151,6 +151,68 @@ impl HirLowering:
                                         type_: nil,
                                         span: e.span
                                     )
+                        # A call through a struct FIELD that holds a function
+                        # value (`port.current_owner_fn()` where
+                        # `current_owner_fn: fn() -> i64` is a field, not a
+                        # method) is syntactically identical to an ordinary
+                        # method call, so the parser always emits
+                        # ExprKind.MethodCall for it -- there is no dedicated
+                        # "field-then-call" grammar production. Left as a plain
+                        # MethodCall, later resolution (35.semantics) tries
+                        # instance-method / trait-method / UFCS lookups, all of
+                        # which fail (the name is a FIELD, not a method), and a
+                        # lenient fallback elsewhere synthesizes a bogus
+                        # `Type.field_fn` symbol call -- producing an undefined
+                        # link symbol instead of an indirect call through the
+                        # field's runtime value (P2, undefined-symbol audit
+                        # `stage2_cli_link_undefined.md`: `RtHalIsolatedHostPort
+                        # .*_fn`, `UiAccessPersistence.*_fn`).
+                        #
+                        # PRECEDENCE: a real instance method with the same name
+                        # must always win over a same-named function-typed
+                        # field -- this rewrite only fires when the receiver's
+                        # type has NO method called `method_name_t`, checked
+                        # via the same `lookup_method_in_type_raw` the later
+                        # 35.semantics resolution pass uses
+                        # (`resolve_strategies.try_instance_method`), so this
+                        # arm's outcome matches what normal method resolution
+                        # would have chosen first. Struct field types are known
+                        # statically at HIR-lowering time via
+                        # `field_type_for_base` (built from each struct's
+                        # declaration, independent of type inference), so
+                        # resolve this here and rewrite to a plain indirect
+                        # Call over a Field access -- `lower_call`'s existing
+                        # is_direct==false path already lowers an arbitrary
+                        # function-valued callee expression (including a Field
+                        # read) to `emit_call_indirect`, so no MIR change is
+                        # needed once the HIR shape is corrected.
+                        val mc_owner_type_id = self.owner_type_id_for_base_raw(mc_base_sym.id)
+                        val mc_has_same_named_method = (
+                            mc_owner_type_id >= 0 and
+                            self.symbols.lookup_method_in_type_raw(mc_owner_type_id, method_name_t).?
+                        )
+                        if not mc_has_same_named_method:
+                            val mc_field_type = self.field_type_for_base(mc_base_sym, method_name_t)
+                            if val mc_fn_field_type = mc_field_type:
+                                match mc_fn_field_type.kind:
+                                    case HirTypeKind.Function(_, _, _):
+                                        return HirExpr(
+                                            kind: HirExprKind.Call(
+                                                HirExpr(
+                                                    kind: HirExprKind.Field(mc_lowered_receiver, method_name_t, nil),
+                                                    has_type_: true,
+                                                    type_: mc_fn_field_type,
+                                                    span: e.span
+                                                ),
+                                                hir_args,
+                                                []
+                                            ),
+                                            has_type_: false,
+                                            type_: nil,
+                                            span: e.span
+                                        )
+                                    case _:
+                                        ()
                     return HirExpr(
                         kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, MethodResolution.Unresolved),
                         has_type_: false,

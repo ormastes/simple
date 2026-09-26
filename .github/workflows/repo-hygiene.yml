@@ -65,6 +65,7 @@ jobs:
         with:
           sparse-checkout: |
             scripts/check
+            scripts/bootstrap
             config/check
           sparse-checkout-cone-mode: true
 
@@ -75,8 +76,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          # `shell: sh` is `sh -e`; without this the first red gate aborts the
-          # step before `rc=$?` and the per-gate report below never prints.
+          # `shell: sh` is `sh -e`; without this a red runner exit aborts the
+          # step before the exit-code check below runs.
           set +e
           if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
               echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
@@ -90,35 +91,66 @@ jobs:
           # examining a near-empty contributor window — a silent weakening, not a
           # FAIL, which is exactly the fail-open shape this workflow avoids
           # elsewhere. 41 extra commits keeps the window real.
-          git fetch --no-tags --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
+          # --no-recurse-submodules: the range routinely spans a .spipe/spipe (or
+          # other) gitlink bump, and on-demand recursion then tries to fetch a
+          # submodule this sparse job never initialised -> "Could not access
+          # submodule" and a spurious RED on every PR (2026-09-26, PR #1619/#1621).
+          git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
               { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
-          RANGE="$BASE_SHA..$HEAD_SHA"
-          rc_total=0
-          run_gate() {
-              _gate=$1
-              _t0=$(date +%s)
-              sh "$@"
-              rc=$?
-              echo "fast-gates: $_gate exit=$rc $(( $(date +%s) - _t0 ))s"
-              [ "$rc" -eq 0 ] || rc_total=1
-          }
-          run_gate scripts/check/check-no-conflict-tree-push.shs "$RANGE"
-          run_gate scripts/check/check-no-conflict-markers-push.shs "$RANGE"
-          run_gate scripts/check/check-tree-size-push.shs --push-tip "$RANGE"
-          run_gate scripts/check/check-sdn-crc32-sealed.shs --rev "$HEAD_SHA"
-          run_gate scripts/check/check-rust-duplicate-reexport.shs --rev "$HEAD_SHA"
-          run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$HEAD_SHA" --baseline-rev "$BASE_SHA"
-          run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
-          run_gate scripts/check/check-range-shs-hygiene-push.shs "$RANGE"
-          # Blocking at push (push-no-stale-snapshot-rewind) and therefore
-          # required here too: the push tier is bypassable and the rewind class
-          # (e274cd33719 and two more, 2026-09-06) is precisely what a stale
-          # whole-tree snapshot pushed over someone else's landed work looks
-          # like. It reads committed objects only, so the sparse checkout above
-          # is sufficient; the depth fetched covers every commit in the range
-          # and its parent, which is what the single-parent walk needs.
-          run_gate scripts/check/check-no-stale-snapshot-rewind.shs --range "$RANGE"
-          [ "$rc_total" -eq 0 ] || { echo "fast-gates: one or more fast gates failed"; exit 1; }
+          # One runner, one manifest, for both local and remote (goal item 5,
+          # WP3): this used to be 9 hardcoded `run_gate` lines that had
+          # drifted from the pre-push `local` tier (rust-dup --rev vs --range,
+          # no linux-phase2). --manifest-rev "$BASE_SHA" reads
+          # config/check/must_check_gates.sdn from BASE, not from the PR's
+          # own head, so a PR cannot rewrite the manifest ROW LIST or its
+          # command TEXT (which script to run, with which placeholders) to
+          # admit itself. Same trust root check-pr-fast.shs already uses for
+          # its own manifest row (its V5 selftest fixture) and the same
+          # shape as code-idiom-receipt.yml's pull_request_target-from-BASE
+          # receipt-skip decision.
+          #
+          # RESIDUAL GAP, stated plainly rather than implied away (2026-09-24
+          # review finding): pinning the MANIFEST to BASE does not pin the
+          # CODE that executes it. actions/checkout above checks out the
+          # PR's HEAD (the whole point of testing the PR), so
+          # run-gate-tier.shs itself and every `sh scripts/check/<gate>.shs`
+          # the manifest's command text names are read from the WORKING TREE
+          # at HEAD, not from BASE. A PR can still weaken a gate SCRIPT
+          # (make check-no-conflict-tree-push.shs a no-op, or edit
+          # run-gate-tier.shs to always report pass) even though it cannot
+          # touch which rows run or their command text. This mirrors the
+          # same gap in the existing pre-push hook (check-push-must-pass.shs
+          # also runs from the working tree) and is not new here -- it is
+          # NOT closed by this step, and this comment must not be read as
+          # claiming "a PR cannot edit the gate that admits it": it can edit
+          # the gate, just not the manifest that selects which gates run.
+          # Closing the script-side gap would need materializing
+          # scripts/check/*.shs from BASE too (like pr-fast-check.yml does
+          # for check-pr-fast.shs itself) -- left as follow-up, not done
+          # here.
+          #
+          # Consequence of the manifest-side pin, stated rather than hidden:
+          # a PR that itself edits must_check_gates.sdn (such as the WP3
+          # landing PR that introduced this step) is checked against the
+          # PRE-CHANGE manifest at its own base and may still show the
+          # base's failure mode; that PR lands like any other required-check
+          # exception (documented admin-bypass merge path,
+          # .claude/rules/vcs.md), not by weakening this trust root. Every
+          # ORDINARY PR after that lands sees the fixed manifest already in
+          # place at its base and is unaffected.
+          #
+          # --tier local selects the 6 local rows plus the push tier's 4
+          # blocking rows — exactly the "local tier == required remote check"
+          # rule (see the runner's header and must_check_gates.sdn's `local`
+          # tier comment). --range/--ref/--base are always the live PR
+          # endpoints from THIS event, never from the manifest file, so a row
+          # runs against the real PR content even though its COMMAND TEXT
+          # came from BASE.
+          sh scripts/check/run-gate-tier.shs --tier local \
+              --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
+              --manifest-rev "$BASE_SHA" --jobs 16 --budget 240
+          rc=$?
+          [ "$rc" -eq 0 ] || { echo "fast-gates: one or more fast gates failed or errored (exit $rc)"; exit 1; }
 
   # The extended lane (job `code-idiom-gates`, "Code Idiom & Structural Ratchet
   # Gates (extended)") moved to .github/workflows/code-idiom-gates.yml on

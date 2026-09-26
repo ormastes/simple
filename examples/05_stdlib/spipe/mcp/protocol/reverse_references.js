@@ -39,6 +39,9 @@ function openNoFollow(path) {
   try { return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
   catch (error) {
     if (error?.code === "ELOOP") throw new TypeError("inventory_path must name a regular file, not a symbolic link");
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      throw new Error(`compiled inventory not found: ${path}`);
+    }
     throw error;
   }
 }

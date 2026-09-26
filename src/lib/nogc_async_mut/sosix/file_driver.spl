@@ -43,6 +43,8 @@ use std.nogc_async_mut.io.native_driver.{
 
 # The alias reports failure without an errno; EIO is the documented stand-in for
 # every failure the driver can see (bad table slot, alias error, buffer window).
+# These reference drivers only append table entries, so generation 1 is the
+# only generation they issue. A different generation must never address a slot.
 pub val SOSIX_FILE_DRIVER_STATUS_IO: i32 = -5
 
 class SosixHostedFileDriver:
@@ -64,11 +66,11 @@ class SosixHostedFileDriver:
 
     fn buffer_bytes(buffer: SosixBufferRef) -> text:
         val slot = buffer.slot.to_i64()
-        if slot <= 0 or slot >= self.buffers.len(): "" else: self.buffers[slot]
+        if buffer.generation != 1u32 or slot <= 0 or slot >= self.buffers.len(): "" else: self.buffers[slot]
 
     fn _path_of(file: SosixCapabilityRef) -> text:
         val slot = file.slot.to_i64()
-        if slot <= 0 or slot >= self.paths.len(): "" else: self.paths[slot]
+        if file.generation != 1u32 or slot <= 0 or slot >= self.paths.len(): "" else: self.paths[slot]
 
     me service(fs: SosixHostedFs) -> bool:
         """Take the oldest submission, perform it on the host filesystem, publish the result."""
@@ -79,7 +81,7 @@ class SosixHostedFileDriver:
         val request = taken.request
         val path = self._path_of(request.file)
         val buffer_slot = request.buffer.slot.to_i64()
-        if path == "" or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
+        if path == "" or request.buffer.generation != 1u32 or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
             return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
         if request.api_id == SOSIX_FS_READ_AT:
             val current = self.buffers[buffer_slot]
@@ -149,11 +151,11 @@ class SosixLinuxUringFileDriver:
 
     fn buffer_bytes(buffer: SosixBufferRef) -> text:
         val slot = buffer.slot.to_i64()
-        if slot <= 0 or slot >= self.buffers.len(): "" else: self.buffers[slot]
+        if buffer.generation != 1u32 or slot <= 0 or slot >= self.buffers.len(): "" else: self.buffers[slot]
 
     fn _path_of(file: SosixCapabilityRef) -> text:
         val slot = file.slot.to_i64()
-        if slot <= 0 or slot >= self.paths.len(): "" else: self.paths[slot]
+        if file.generation != 1u32 or slot <= 0 or slot >= self.paths.len(): "" else: self.paths[slot]
 
     fn _wait_result(operation: i64) -> i64:
         if operation < 0: return operation
@@ -175,7 +177,7 @@ class SosixLinuxUringFileDriver:
         val request = taken.request
         val path = self._path_of(request.file)
         val buffer_slot = request.buffer.slot.to_i64()
-        if path == "" or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
+        if path == "" or request.buffer.generation != 1u32 or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
             return fs.complete_taken(taken, -22, 0u64)
 
         # Open and close are submitted native operations too; the positioned

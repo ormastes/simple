@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createRouter } from "../../mcp/protocol/router.js";
 import { CompiledInventoryReverseReferenceService } from "../../mcp/protocol/reverse_references.js";
+import { createLineHandler } from "../../mcp/transport/stdio.js";
 
 const snapshot = `spks1-${"1".repeat(64)}`;
 const graphRoot = `sha256:${"2".repeat(64)}`;
@@ -73,6 +74,8 @@ test("MCP query rejects malformed, aliased, and unknown inputs", { skip: !secure
     assert.throws(() => call(route, { inventory_path: path, target_uid: target, limit: 0 }), /between 1 and 1000/);
     writeFileSync(join(root, "bad.json"), "not-json");
     assert.throws(() => call(route, { inventory_path: join(root, "bad.json"), target_uid: target }), /valid JSON/);
+    assert.throws(() => call(route, { inventory_path: join(root, "missing.json"), target_uid: target }), /inventory not found/);
+    assert.throws(() => call(route, { inventory_path: join(root, "missing.json"), target_uid: target }), (error) => !/ENOENT/.test(error.message), "missing inventory must not leak a raw ENOENT message");
     symlinkSync(path, join(root, "inventory-link.json"));
     assert.throws(() => call(route, { inventory_path: join(root, "inventory-link.json"), target_uid: target }), /not a symbolic link/);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -132,5 +135,22 @@ test("MCP inventory read stays on one descriptor across an adversarial pathname 
     const page = JSON.parse(call(createRouter({ moduleRoot: root, reverseReferenceService: service }), args).result.content[0].text);
     assert.deepEqual(page.items.map(({ source_path }) => source_path), ["doc/a/one.md"]);
     assert.throws(() => service.query(args), /not a symbolic link/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("stdio transport keeps the request id on a missing-inventory error", { skip: !secureNoFollowAvailable }, () => {
+  const root = mkdtempSync(join(tmpdir(), "spipe-mcp-reverse-"));
+  try {
+    const route = createRouter({ moduleRoot: root });
+    const output = [];
+    const handleLine = createLineHandler(route, (line) => output.push(JSON.parse(line)));
+    handleLine(JSON.stringify({
+      jsonrpc: "2.0", id: 77, method: "tools/call",
+      params: { name: "spipe_folder_reverse_references", arguments: { inventory_path: join(root, "missing.json"), target_uid: target } }
+    }));
+    assert.equal(output[0].id, 77);
+    assert.equal(output[0].error.code, -32000);
+    assert.match(output[0].error.message, /inventory not found/);
+    assert.doesNotMatch(output[0].error.message, /ENOENT/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

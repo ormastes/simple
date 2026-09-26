@@ -1,0 +1,127 @@
+# rendering_2d_extended.spl — Engine2D extended-tier rendering showcase entry.
+# lane: 2d
+# tier: extended
+# core: examples.ui.rendering_2d_core
+#
+# Headless Engine2D render of the extended scene: the shared core grid plus
+# images, nested compositing, masks/clips/blend, offscreen readback, two
+# draggable overlapping translucent panels (topmost-grab via the compositor
+# hit test, app-level drag_offset tracking), and a hit-tested click button
+# with an on-screen counter. Frame 0 renders the pure tier-core scene (the
+# import-based tier split made visible); frames 1+ apply the canonical demo
+# pointer script and render the extended scene, so the capture shows the
+# dragged panel and the click count. Backend via SIMPLE_2D_BACKEND
+# (cpu|cpu_simd|vulkan|metal, default vulkan, exact — unavailable backends exit
+# `showcase status=blocked`).
+#
+# Env knobs (shared contract): SIMPLE_SHOWCASE_W/H (default 960x640),
+# SHOWCASE_RESOLUTION ("WxH" override), SIMPLE_SHOWCASE_FRAMES (default 3),
+# SIMPLE_2D_BACKEND (cpu|cpu_simd|vulkan|metal, default vulkan), SIMPLE_SHOWCASE_CAPTURE (PPM path),
+# SIMPLE_SHOWCASE_IMAGE (optional PPM fixture for the image cell).
+
+use std.io_runtime.{env_get, file_write_bytes, mkdir_p}
+use std.gpu.engine2d.engine.{Engine2D}
+use examples.ui.rendering_2d_core.{rendering_2d_core_scene}
+use examples.ui.rendering_2d_extended.{
+    rendering_2d_extended_scene, rendering_2d_extended_state_new,
+    rendering_2d_extended_apply, rendering_2d_extended_script_events
+}
+use app.ui_showcase.hosts.scene_raster.{raster_to_ppm_bytes, raster_distinct_pixel_count}
+
+fn _env_i32(key: text, fallback: i32) -> i32:
+    val raw = env_get(key).trim()
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn _parse_dim(s: text) -> i32:
+    val t = s.trim()
+    if t == "":
+        return 0
+    t.to_int() ?? 0
+
+fn _resolve_size() -> (i32, i32):
+    val res = (env_get("SHOWCASE_RESOLUTION") ?? "").trim()
+    if res != "":
+        var parts = res.split("x")
+        if parts.len() != 2:
+            parts = res.split("X")
+        if parts.len() == 2:
+            val w = _parse_dim(parts[0])
+            val h = _parse_dim(parts[1])
+            if w > 0 and h > 0:
+                return (w, h)
+    (_env_i32("SIMPLE_SHOWCASE_W", 960), _env_i32("SIMPLE_SHOWCASE_H", 640))
+
+fn _parent_dir(path: text) -> text:
+    val idx = path.last_index_of("/")
+    if idx <= 0:
+        return ""
+    path.substring(0, idx)
+
+fn main() -> i64:
+    val (w, h) = _resolve_size()
+    val frames = _env_i32("SIMPLE_SHOWCASE_FRAMES", 3).to_i64()
+    val capture = (env_get("SIMPLE_SHOWCASE_CAPTURE") ?? "").trim()
+    var backend = (env_get("SIMPLE_2D_BACKEND") ?? "").trim().to_lower()
+    if backend == "":
+        backend = "vulkan"
+
+    var engine: Engine2D
+    match Engine2D.create_requested_backend(w, h, backend):
+        case Ok(eng):
+            engine = eng
+        case Err(reason):
+            print "showcase status=blocked backend={backend} reason={reason}"
+            return 1
+
+    var state = rendering_2d_extended_state_new()
+    var rendered: i64 = 0
+    while rendered < frames:
+        for ev in rendering_2d_extended_script_events(rendered):
+            state = rendering_2d_extended_apply(state, ev)
+        if rendered == 0:
+            # Tier split made visible: frame 0 is the pure shared core scene.
+            engine = rendering_2d_core_scene(engine, w.to_i64(), h.to_i64())
+        else:
+            engine = rendering_2d_extended_scene(engine, state, w.to_i64(), h.to_i64())
+        engine.present()
+        rendered = rendered + 1
+
+    val actual = engine.backend_name()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+
+    var nonzero: i64 = 0
+    for p in pixels:
+        if p != 0u32:
+            nonzero = nonzero + 1
+    print ("showcase lane=2d tier=extended backend={actual} frames={rendered} " +
+        "pixels={pixels.len()} nonzero={nonzero} clicks={state.clicks} " +
+        "last_event={state.last_event} panelB={state.panel_b_x},{state.panel_b_y}")
+
+    if frames <= 0 or rendered != frames:
+        print "showcase status=blocked backend={actual} reason=incomplete-frame-sequence"
+        return 1
+    if pixels.len() != w.to_i64() * h.to_i64() or nonzero == 0:
+        print "showcase status=blocked backend={actual} reason=blank-or-short-readback"
+        return 1
+    if state.clicks < 1 and frames >= 2:
+        print "showcase status=blocked backend={actual} reason=button-click-not-observed"
+        return 1
+
+    if capture != "":
+        val dir = _parent_dir(capture)
+        if dir != "":
+            mkdir_p(dir)
+        if not file_write_bytes(capture, raster_to_ppm_bytes(pixels, w, h)):
+            print "showcase status=blocked backend={actual} reason=capture-write path={capture}"
+            return 1
+        val distinct = raster_distinct_pixel_count(pixels, 8)
+        if distinct < 2:
+            print "showcase status=blocked backend={actual} reason=capture-blank path={capture}"
+            return 1
+        print "showcase status=pass {capture}"
+    else:
+        print "showcase status=pass rendered backend={actual} frames={rendered} (set SIMPLE_SHOWCASE_CAPTURE=<path>.ppm for a PPM artifact)"
+    0

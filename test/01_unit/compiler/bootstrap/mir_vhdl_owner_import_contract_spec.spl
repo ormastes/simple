@@ -8,21 +8,30 @@ describe "MIR and VHDL owner import contracts":
         val method_calls = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
         val optimizer = file_read("src/compiler/60.mir_opt/_OptimizationPasses/engine.spl")
         val process_codegen = file_read("src/compiler/70.backend/backend/_VhdlProcess/process_codegen.spl")
+        # Constant folding is owned by mir_instruction_graph since 7bf9d6e533d
+        # (split MIR instruction owners); the optimizer engine only delegates.
+        val instruction_graph = file_read("src/compiler/50.mir/mir_instruction_graph.spl")
 
-        expect(function_lowering).to_contain("use compiler.mir.mir_types.{MirConstant}")
-        expect(module_lowering).to_contain("use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}")
-        expect(module_lowering).to_contain("use compiler.common.dependency.visibility.{Visibility}")
-        expect(module_lowering).to_contain("use compiler.mir.mir_types.{MirConstant, MirFieldDef, MirStatic, MirTypeDefKind}")
-        expect(method_calls).to_contain("use compiler.mir.mir_instruction_support.{GpuMemoryScope, GpuBarrierScope}")
-        expect(optimizer).to_contain("use compiler.mir.mir_instruction_graph.{mir_fold_binop}")
-        expect(process_codegen).to_contain("use compiler.mir.mir_instruction_support.{vhdl_clock_domain_from_metadata}")
+        expect(function_lowering).to_contain("use compiler.mir.mir_types.\{MirConstant}")
+        expect(module_lowering).to_contain("use compiler.common._Attributes.decl_attrs.\{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}")
+        expect(module_lowering).to_contain("use compiler.common.dependency.visibility.\{Visibility}")
+        expect(module_lowering).to_contain("use compiler.mir.mir_types.\{MirConstant, MirFieldDef, MirStatic, MirTypeDefKind}")
+        # import order as landed in f7b1e508e89
+        expect(method_calls).to_contain("use compiler.mir.mir_instruction_support.\{GpuBarrierScope, GpuMemoryScope}")
+        expect(optimizer).to_contain("use compiler.mir.mir_instruction_graph.\{mir_fold_binop}")
+        expect(process_codegen).to_contain("use compiler.mir.mir_instruction_support.\{vhdl_clock_domain_from_metadata}")
 
         expect(function_lowering).to_contain("MirConstant(")
         expect(module_lowering).to_contain("DriverManifestAttr(")
         expect(module_lowering).to_contain("MirFieldDef(")
         expect(method_calls).to_contain("GpuMemoryScope.")
-        expect(optimizer).to_contain("mir_fold_binop(")
-        expect(optimizer).to_contain("case Add: result = l + r")
-        expect(optimizer).to_contain("case Div:")
-        expect(optimizer).to_contain("if r != 0:")
+        expect(method_calls).to_contain("GpuBarrierScope.")
+        expect(optimizer).to_contain("mir_fold_binop(op, left_value, right_value)")
+        expect(optimizer.contains("fn mir_fold_binop(")).to_be(false)
+        val fold_at = instruction_graph.index_of("fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> MirConstValue?:")
+        val add_at = instruction_graph.find("case Add: result = l + r", fold_at) ?? -1
+        val div_at = instruction_graph.find("case Div:\n                    if r != 0:\n                        result = l / r\n                    else:\n                        has_result = false", add_at) ?? -1
+        expect(fold_at).to_be_greater_than(-1)
+        expect(add_at).to_be_greater_than(fold_at)
+        expect(div_at).to_be_greater_than(add_at)
         expect(process_codegen).to_contain("vhdl_clock_domain_from_metadata(")

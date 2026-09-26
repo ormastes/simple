@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -17,7 +17,9 @@ import { WorkspaceRegistry } from "../../src/workspace/registry.js";
 const WORKSPACE = "W-000000000000000000000000000000B1";
 
 function root() {
-  const cacheRoot = mkdtempSync(join(tmpdir(), "spipe-target-inventory-"));
+  // macOS tmpdir() is a /var -> /private/var symlink; canonicalize so paths
+  // shared with spawned children match the canonicalRoot() used by the source.
+  const cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), "spipe-target-inventory-")));
   const registry = new WorkspaceRegistry({ root: cacheRoot, workspaceUid: WORKSPACE });
   return { cacheRoot, registry, snapshotStore: new ImmutableSnapshotStore({ cacheRoot }) };
 }

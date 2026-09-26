@@ -13,6 +13,7 @@ use app.io.mod.{
 use app.io.file_ops.{path_absolute}
 use app.io.time_ops.{time_now_unix_micros}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
 use std.nogc_sync_mut.io_runtime.{
     dir_list, dir_remove, file_rename,
@@ -24,7 +25,8 @@ use std.scv.store.{
     scv_content_id_for_u8, scv_create_parent_dir, scv_write_text
 }
 use std.scv.compile_source_inventory.{
-    CompileSourceInventoryEntryV1, compile_source_inventory_read_current_v1
+    CompileSourceInventoryEntryV1, compile_source_inventory_read_current_v1,
+    compile_source_inventory_identity_cmp_v1
 }
 
 extern fn rt_getpid() -> i64
@@ -94,10 +96,10 @@ fn scv_compile_snapshot_sift_down_v1(
         if left >= heap_len:
             return
         var largest = root
-        if values[largest] < values[left]:
+        if compile_source_inventory_identity_cmp_v1(values[largest], values[left]) < 0:
             largest = left
         val right = left + 1
-        if right < heap_len and values[largest] < values[right]:
+        if right < heap_len and compile_source_inventory_identity_cmp_v1(values[largest], values[right]) < 0:
             largest = right
         if largest == root:
             return
@@ -115,7 +117,7 @@ fn scv_compile_snapshot_read_source_v1(path: text) -> text?:
 
 fn scv_compile_snapshot_source_digest_v1(path: text) -> text:
     val content = scv_compile_snapshot_read_source_v1(path)
-    if content == nil: "" else: scv_content_id_for_u8(content!.bytes())
+    if content == nil: "" else: scv_content_id_for_u8(text_to_utf8_bytes(content!))
 
 fn scv_compile_snapshot_inventory_entries_v1(
     root: text, cache_root: text, source_roots: [text]
@@ -287,6 +289,40 @@ fn scv_compile_snapshot_acquire_v1(
     if entries!.len() == 0:
         return scv_compile_snapshot_invalid_v1("snapshot-inventory-empty")
     dir_create(owned_cache_root, true)
+    # Reuse an already-published snapshot of exactly this inventory. The rows
+    # a materialization would write are fully determined by the admitted
+    # entries (the loop below fails unless each file hashes to
+    # sha256_{content_digest} with byte_count bytes), so the revision is known
+    # up front. Without this every compiler entrypoint re-read, re-hashed and
+    # re-copied all ~17k sources: minutes per spec child on Windows
+    # (2026-09-25). open_v1 re-validates provenance, inventory digest, rows
+    # and receipt before the snapshot is trusted.
+    val planned_entries: [CompileSourceInventoryEntryV1] = entries!
+    var planned_rows: [text] = []
+    for planned in planned_entries:
+        planned_rows = planned_rows.push(
+            "{planned.source_identity}|sha256_{planned.content_digest}|{planned.byte_count}")
+    val planned_inventory_digest = sha256_text(planned_rows.join("\n"))
+    val planned_tree_id = "scv-tree-v1-" + planned_inventory_digest
+    val planned_revision_id = scv_compile_snapshot_revision_id_v1(
+        planned_tree_id, planned_inventory_digest)
+    val planned_destination = "{owned_cache_root}/snapshots/{planned_revision_id}"
+    # dir_exists, not file_exists: the runtime's file_exists is false for a
+    # directory on Windows, so neither this reuse nor the publish branch below
+    # ever saw an existing snapshot and every rename onto it failed
+    # snapshot-publish-failed (2026-09-25).
+    if dir_exists(planned_destination):
+        val planned_commit_id = "scv-compile-v1-" + sha256_text(
+            "simple/scv-compile-commit/v1|{planned_tree_id}|{planned_rows.len()}")
+        val reused = scv_compile_snapshot_open_v1(
+            canonical_root, planned_destination, planned_revision_id,
+            planned_commit_id, planned_tree_id, planned_inventory_digest)
+        if reused.valid:
+            return reused
+        # Content-addressed and failing its own validation (e.g. written with
+        # CRLF by an older runtime): it can never become valid, and keeping it
+        # would wedge every later publish on snapshot-destination-conflict.
+        dir_remove(planned_destination, true)
     val staging = "{owned_cache_root}/snapshots/.tmp.{rt_getpid()}.{time_now_unix_micros()}"
     if dir_exists(staging):
         return scv_compile_snapshot_invalid_v1("snapshot-staging-busy")
@@ -305,7 +341,11 @@ fn scv_compile_snapshot_acquire_v1(
         if content == nil:
             dir_remove(staging, true)
             return scv_compile_snapshot_invalid_v1("snapshot-read-failed:{rel}")
-        val bytes = content!.bytes()
+        # rt_text_to_bytes (byte-packed), not `.bytes()`: native `.bytes()` built
+        # a slot array the C SHA-256 decoded as tagged ints, so every file
+        # hashed wrong and the snapshot failed snapshot-index-drift on the
+        # first entry (Windows stage-2, 2026-09-25).
+        val bytes = text_to_utf8_bytes(content!)
         val digest = scv_content_id_for_u8(bytes)
         if digest != "sha256_{entry.content_digest}" or
                 bytes.len() != entry.byte_count:
@@ -324,9 +364,16 @@ fn scv_compile_snapshot_acquire_v1(
             dir_remove(staging, true)
             return scv_compile_snapshot_invalid_v1("snapshot-materialize-digest:{rel}")
         inventory_rows = inventory_rows.push("{rel}|{digest}|{bytes.len()}")
+        # `if val`, not `x == nil or f(x!)`: native code hands the Option box
+        # to the unwrap inside an `or` operand (same defect as
+        # compile_source_inventory_read_current_v1).
         val current = scv_compile_snapshot_read_source_v1(path)
-        if current == nil or scv_content_id_for_u8(current!.bytes()) != digest:
+        if current == nil:
             source_drifted = true
+        else:
+            val current_text = current!
+            if scv_content_id_for_u8(text_to_utf8_bytes(current_text)) != digest:
+                source_drifted = true
     val inventory = inventory_rows.join("\n")
     val inventory_digest = sha256_text(inventory)
     val tree_id = "scv-tree-v1-" + inventory_digest
@@ -345,7 +392,7 @@ fn scv_compile_snapshot_acquire_v1(
     val snapshots_root = "{owned_cache_root}/snapshots"
     dir_create(snapshots_root, true)
     val destination = "{snapshots_root}/{revision_id}"
-    if file_exists(destination):
+    if dir_exists(destination):
         val existing = scv_compile_snapshot_read_text_v1(
             "{destination}/SCV_COMPILE_SNAPSHOT")
         dir_remove(staging, true)

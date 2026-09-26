@@ -149,3 +149,39 @@ fn imported_defaults_flattened_functions_use_resolved_owner_symbol() {
         assert!(matches!(&args[0].kind, HirExprKind::String(s) if s == expected), "{name}: {args:?}");
     }
 }
+
+fn method_call_args<'a>(module: &'a crate::hir::HirModule, name: &str) -> &'a [crate::hir::HirExpr] {
+    let function = module.functions.iter().find(|f| f.name == name).expect(name);
+    let expr = function.body.iter().find_map(|stmt| match stmt {
+        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) => Some(expr),
+        _ => None,
+    }).expect("call statement");
+    let HirExprKind::MethodCall { args, .. } = &expr.kind else { panic!("expected method call: {expr:?}"); };
+    args
+}
+
+#[test]
+fn imported_method_defaults_fill_cross_module_method_calls() {
+    // A method with a defaulted parameter declared in ANOTHER module (on the
+    // class body and in a separate impl block) must have its omitted trailing
+    // argument filled at the call site. Before, only same-module methods were
+    // filled and the callee read an unset argument slot on the native lane.
+    let dir = create_test_project();
+    let src = dir.path().join("src");
+    fs::write(src.join("owner.spl"),
+        "class Table:\n    var n: i64\n\n    fn body(x: i64, flag: bool = true) -> bool:\n        flag\n\nimpl Table:\n    fn split(x: i64, tag: text = \"dflt\") -> text:\n        tag\n").unwrap();
+    Parser::new(&fs::read_to_string(src.join("owner.spl")).unwrap()).parse().expect("owner parses");
+    let source = "use owner.{Table}\nfn from_class() -> bool:\n    Table(n: 1).body(1)\nfn from_impl() -> text:\n    Table(n: 1).split(1)\nfn explicit() -> bool:\n    Table(n: 1).body(1, false)\n";
+    let ast = Parser::new(source).parse().unwrap();
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+    let module = Lowerer::with_module_resolver(resolver, src.join("main.spl")).lower_module(&ast).unwrap();
+    let body = method_call_args(&module, "from_class");
+    assert_eq!(body.len(), 2, "{body:?}");
+    assert!(matches!(&body[1].kind, HirExprKind::Bool(true)), "{body:?}");
+    let split = method_call_args(&module, "from_impl");
+    assert_eq!(split.len(), 2, "{split:?}");
+    assert!(matches!(&split[1].kind, HirExprKind::String(s) if s == "dflt"), "{split:?}");
+    let explicit = method_call_args(&module, "explicit");
+    assert_eq!(explicit.len(), 2);
+    assert!(matches!(&explicit[1].kind, HirExprKind::Bool(false)));
+}

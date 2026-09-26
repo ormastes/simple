@@ -77,13 +77,18 @@ cp "${repo_root}/scripts/lib/host-executable.shs" .simple-host-executable.shs
 # Deploy the stable bin/ entrypoints only where an UNSUFFIXED native artifact
 # exists — i.e. everywhere except Windows. This is deliberate and narrow:
 # `bin/simple.exe` is a tracked artifact owned by the Windows bootstrap lane,
-# and platform-detect.shs derives the Windows ABI from MSYSTEM, which Git Bash
-# always sets to MINGW64 -> `gnu`, while the tracked artifacts in this repo are
-# `msvc`. Relinking from here therefore replaced the tracked msvc binary with a
-# stale gnu one (measured 2026-09-13: bin/simple.exe 16,347,136 -> 28,291,570
-# bytes). Wrapper generation below is the part Windows actually needs from this
-# script and is unaffected by the skip. The ABI-selection mismatch itself is a
-# separate defect and is NOT fixed here.
+# named with an `.exe` suffix, so `release/${PLATFORM_TRIPLE}/simple` (no
+# suffix) never exists there and this block naturally no-ops on Windows.
+# Historically this ALSO papered over a second bug: platform-detect.shs used
+# to derive the Windows ABI from MSYSTEM, which Git Bash always sets to
+# MINGW64 -> `gnu`, while the tracked release artifacts in this repo are
+# `msvc` — so a hypothetical unsuffixed gnu binary would have relinked over
+# the tracked msvc one (measured 2026-09-13: bin/simple.exe 16,347,136 ->
+# 28,291,570 bytes). platform-detect.shs now defaults PLATFORM_ABI to msvc on
+# Windows (single source of truth, matching bootstrap-from-scratch.sh's
+# explicit export), so that hazard no longer exists independent of the
+# exe-suffix guard below. Wrapper generation below is the part Windows
+# actually needs from this script and is unaffected either way.
 if [ -x "release/${PLATFORM_TRIPLE}/simple" ]; then
   ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
 
@@ -620,18 +625,41 @@ else
   done
 fi
 
-if [ -z "${native}" ] || [ ! -x "${native}" ]; then
+if [ -n "${native}" ] && [ -x "${native}" ]; then
+  printf 'startup wrapper=t32_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/t32_mcp_startup.log"
+  exec "${native}" "$@" 2>>"${log_dir}/t32_mcp_stderr.log"
+fi
+
+# No admitted native artifact: run the real frontend from source through the
+# deployed runtime, exactly as bin/t32_mcp_server.cmd already does on Windows.
+# This is NOT a stub server -- it is the same t32_mcp/main.spl the native build
+# compiles, so every tool answers for real. Without this branch a POSIX host
+# with no native artifact exits 127 and MCP clients report ENOENT/closed, which
+# is what .mcp.json's t32-mcp note records as fixed on 2026-09-24.
+runtime="${SIMPLE_BINARY:-${repo_root}/bin/simple${exe_suffix}}"
+tools_dir="${repo_root}/examples/10_tooling/trace32_tools"
+entry="${tools_dir}/t32_mcp/main.spl"
+if [ ! -x "${runtime}" ] || [ ! -f "${entry}" ]; then
   {
-    printf '%s\n' "error: native t32_mcp_server not found"
+    printf '%s\n' "error: no native t32_mcp_server and no usable source fallback"
     printf '%s\n' "checked release directory: ${script_dir}/release"
     printf '%s\n' "platform: ${platform_dir}"
+    printf '%s\n' "runtime: ${runtime}"
+    printf '%s\n' "entry: ${entry}"
     printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_mcp/main.spl"
   } >&2
   exit 127
 fi
-
-printf 'startup wrapper=t32_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/t32_mcp_startup.log"
-exec "${native}" "$@" 2>>"${log_dir}/t32_mcp_stderr.log"
+SIMPLE_LIB="${SIMPLE_LIB:-${tools_dir}}"
+SIMPLE_LOG="${SIMPLE_LOG:-error}"
+RUST_LOG="${RUST_LOG:-error}"
+SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-512}"
+# The seed wall-clock-kills any entry under examples/ after 10s
+# (driver/src/cli/examples_safety.rs); a long-lived stdio server must opt out.
+SIMPLE_TIMEOUT_SECONDS=0
+export SIMPLE_LIB SIMPLE_LOG RUST_LOG SIMPLE_MEMORY_LIMIT_MB SIMPLE_TIMEOUT_SECONDS
+printf 'startup wrapper=t32_mcp_server mode=source entry=%s runtime=%s cwd=%s\n' "${entry}" "${runtime}" "$(pwd)" >>"${log_dir}/t32_mcp_startup.log"
+exec "${runtime}" "${entry}" "$@" 2>>"${log_dir}/t32_mcp_stderr.log"
 EOF
 chmod +x t32_mcp_server
 
@@ -710,18 +738,39 @@ else
   done
 fi
 
-if [ -z "${native}" ] || [ ! -x "${native}" ]; then
+if [ -n "${native}" ] && [ -x "${native}" ]; then
+  printf 'startup wrapper=t32_lsp_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/t32_lsp_mcp_startup.log"
+  exec "${native}" "$@" 2>>"${log_dir}/t32_lsp_mcp_stderr.log"
+fi
+
+# Source fallback, mirroring bin/t32_lsp_mcp_server.cmd -- see the twin comment
+# in t32_mcp_server above. Same real frontend, no stub.
+runtime="${SIMPLE_BINARY:-${repo_root}/bin/simple${exe_suffix}}"
+tools_dir="${repo_root}/examples/10_tooling/trace32_tools"
+entry="${tools_dir}/t32_lsp_mcp/main.spl"
+if [ ! -x "${runtime}" ] || [ ! -f "${entry}" ]; then
   {
-    printf '%s\n' "error: native t32_lsp_mcp_server not found"
+    printf '%s\n' "error: no native t32_lsp_mcp_server and no usable source fallback"
     printf '%s\n' "checked release directory: ${script_dir}/release"
     printf '%s\n' "platform: ${platform_dir}"
+    printf '%s\n' "runtime: ${runtime}"
+    printf '%s\n' "entry: ${entry}"
     printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
   } >&2
   exit 127
 fi
-
-printf 'startup wrapper=t32_lsp_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/t32_lsp_mcp_startup.log"
-exec "${native}" "$@" 2>>"${log_dir}/t32_lsp_mcp_stderr.log"
+SIMPLE_LIB="${SIMPLE_LIB:-${tools_dir}}"
+SIMPLE_LOG="${SIMPLE_LOG:-error}"
+RUST_LOG="${RUST_LOG:-error}"
+SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-512}"
+T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
+T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
+T32_LSP_MCP_TOOL_DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-${TMPDIR:-/tmp}/t32_lsp_mcp_shared}"
+SIMPLE_TIMEOUT_SECONDS=0
+export SIMPLE_LIB SIMPLE_LOG RUST_LOG SIMPLE_MEMORY_LIMIT_MB SIMPLE_TIMEOUT_SECONDS
+export T32_LSP_MCP_TOOL_RUNNER T32_LSP_MCP_TOOL_DAEMON T32_LSP_MCP_TOOL_DAEMON_DIR
+printf 'startup wrapper=t32_lsp_mcp_server mode=source entry=%s runtime=%s cwd=%s\n' "${entry}" "${runtime}" "$(pwd)" >>"${log_dir}/t32_lsp_mcp_startup.log"
+exec "${runtime}" "${entry}" "$@" 2>>"${log_dir}/t32_lsp_mcp_stderr.log"
 EOF
 chmod +x t32_lsp_mcp_server
 
@@ -744,6 +793,11 @@ llvm_env="${repo_root}/scripts/setup/llvm-toolchain-env.shs"
 if [ -f "${llvm_env}" ]; then
   llvm_report=$(
     # Subshell: the exports must not leak into the rest of setup.
+    # host-env first: a host that records llvm_win_root_23 in
+    # config/host/<hostname>.sdn supplies the prefix the LLVM env keys off.
+    # Without it the Windows branch probes its compiled-in default path and
+    # this block reports "no versioned clang" on a host that has one.
+    . "${repo_root}/scripts/setup/host-env.shs" >/dev/null 2>&1 || true
     . "${llvm_env}" >/dev/null 2>&1 || true
     if [ -n "${SIMPLE_LLVM_MAJOR:-}" ]; then
       printf '%s|%s' "${SIMPLE_LLVM_MAJOR}" "$(${CC} --version 2>/dev/null | head -1)"

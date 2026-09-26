@@ -100,6 +100,59 @@ describe "native build main dispatch contract":
         expect(source).to_contain("native_build_print_failure_hints(stdout, stderr)")
         expect(source).to_contain("SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1")
 
+    it "prints the worker's own error line before the crash-prone bulk relay":
+        # @req REQ-SSPEC-APP
+        step("prints the worker's own error line before the crash-prone bulk relay")
+        # Reproduces doc/08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md
+        # defect 3: a real worker failure has SIGILL'd the parent while it was
+        # relaying the worker's stderr, so the caller saw a bare `rc=132` and
+        # the worker's actual `error: ...` text was lost. `eprint_bounded` is
+        # the bulk relay most likely to trip that trap (it truncates, spills to
+        # a file, and re-scans a potentially huge string); the fix front-loads
+        # a short, unambiguous summary of the worker's own last diagnostic line
+        # BEFORE that bulk relay runs, so the essential fact survives even if
+        # the bulk dump does not. This spec fails on the pre-fix source: the
+        # old code called `eprint_bounded(stderr)` as the FIRST statement in
+        # the `code != 0` branch and only printed the "exited with code"
+        # summary as the LAST statement, after the bulk relay and every
+        # signal/timeout branch.
+        val source = file_read("src/app/cli/native_build_main.spl")
+
+        expect(source).to_contain("fn native_build_last_diagnostic_line(output: text) -> text:")
+        # Anchored on the new helper call, not the bare "if code != 0:" text --
+        # that text also appears earlier in this file's unrelated parse-shard
+        # failure handling (spawn_parse_shards), which would anchor on the
+        # wrong occurrence.
+        val code_branch = source.index_of("val last_diag = native_build_last_diagnostic_line(stderr)")
+        val summary_idx = source.index_of(
+            'stderr_write("error: native-build worker exited with code ', code_branch)
+        val bulk_relay_idx = source.index_of("eprint_bounded(stderr)", code_branch)
+        assert_true(code_branch >= 0)
+        assert_true(summary_idx >= 0)
+        assert_true(bulk_relay_idx >= 0)
+        assert_true(summary_idx > code_branch)
+        assert_true(summary_idx < bulk_relay_idx)
+
+    it "routes the worker-failure relay through the unambiguous stderr_write":
+        # @req REQ-SSPEC-APP
+        step("routes the worker-failure relay through the unambiguous stderr_write")
+        # Generalization of the spec above: `eprint` is a compiler builtin that
+        # a co-compiled `fn eprint` in std.nogc_sync_mut.io.process_ops shadows
+        # program-wide under the interpreter but not under native/JIT codegen
+        # (two prior defects of this exact shape:
+        # doc/08_tracking/bug/stdlib_eprint_shadows_prelude_builtin_program_wide_2026-08-17.md,
+        # doc/08_tracking/bug/eprint_loses_newline_on_jit_and_llvm_backend_2026-08-17.md).
+        # The worker-failure relay (eprint_bounded, native_build_print_failure_hints,
+        # and the `code != 0` branch itself) now writes via the always-unambiguous
+        # `stderr_write` instead, so it no longer depends on that dispatch at all.
+        val source = file_read("src/app/cli/native_build_main.spl")
+
+        expect(source).to_contain('std.nogc_sync_mut.io.stderr_ops.{stderr_write}')
+        expect(source).to_contain('stderr_write("!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!')
+        expect(source).to_contain('stderr_write(line + "')
+        expect(source).to_contain('stderr_write(output[0:head_len] + "')
+        expect(source).to_contain('stderr_write("hint: nil `.id` field access usually lost the MIR/HIR context above.')
+
     it "guards native-build worker as an internal entrypoint":
         # @req REQ-SSPEC-APP
         step("guards native-build worker as an internal entrypoint")

@@ -6,6 +6,8 @@
 
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.common.crypto.sha256.{sha256_text}
+# Byte-wise order: native text relational operators compare tagged addresses.
+use std.scv.compile_source_inventory_core.{compile_source_inventory_identity_cmp_v1}
 use std.nogc_sync_mut.io_runtime.{dir_list}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 
@@ -78,9 +80,16 @@ fn package_module_index_text_valid_v1(value: text) -> bool:
 fn package_module_index_digest_valid_v1(value: text) -> bool:
     if value.len() != 64:
         return false
-    for ch in value:
-        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+    # Byte codes, not text `>=`/`<=` on one-character strings: native
+    # bootstrap text relational operators compare tagged addresses, so every
+    # digest was rejected and package_module_index_publish_v1 could never
+    # encode a generation (package-index:publish-failed, 2026-09-25).
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
             return false
+        index = index + 1
     true
 
 fn package_module_index_read_file_v1(path: text, max_bytes: i64) -> text?:
@@ -89,10 +98,12 @@ fn package_module_index_read_file_v1(path: text, max_bytes: i64) -> text?:
     val extent = rt_file_size(path)
     if extent <= 0 or extent > max_bytes:
         return nil
-    val content = rt_file_read_regular_no_follow_bounded(path, extent)
-    if content == nil or content!.len() != extent:
+    # `?? ""` + length check, not `x == nil or x!.len()` (native Option-box
+    # unwrap inside an `or` operand). extent > 0, so "" still returns nil.
+    val content = rt_file_read_regular_no_follow_bounded(path, extent) ?? ""
+    if content.len() != extent:
         return nil
-    content
+    Some(content)
 
 fn package_module_index_sorted_unique_v1(values: [text]) -> [text]:
     val sorted = canonical_identity_sort_texts(values)
@@ -115,11 +126,11 @@ fn package_module_index_frame_read_v1(value: text, start: i64) -> (text, i64)?:
     if colon <= 0:
         return nil
     val digits = tail.substring(0, colon)
-    val extent = digits.to_i64()
-    if extent == nil or extent! < 0 or "{extent!}" != digits:
+    val extent = digits.to_i64() ?? -1
+    if extent < 0 or "{extent}" != digits:
         return nil
     val body_start = start + colon + 1
-    val body_end = body_start + extent!
+    val body_end = body_start + extent
     if body_end > value.len():
         return nil
     Some((value.substring(body_start, body_end), body_end))
@@ -138,18 +149,21 @@ fn package_module_index_list_decode_v1(value: text) -> [text]?:
     if semicolon <= 0:
         return nil
     val count_text = value.substring(0, semicolon)
-    val count = count_text.to_i64()
-    if count == nil or count! < 0 or "{count!}" != count_text:
+    val count = count_text.to_i64() ?? -1
+    if count < 0 or "{count}" != count_text:
         return nil
     var result: [text] = []
     var cursor = semicolon + 1
     var index = 0
-    while index < count!:
+    while index < count:
         val item = package_module_index_frame_read_v1(value, cursor)
-        if item == nil or not package_module_index_text_valid_v1(item!.0):
+        if item == nil:
             return nil
-        result = result.push(item!.0)
-        cursor = item!.1
+        val pair = item!
+        if not package_module_index_text_valid_v1(pair.0):
+            return nil
+        result = result.push(pair.0)
+        cursor = pair.1
         index = index + 1
     if cursor != value.len():
         return nil
@@ -268,9 +282,10 @@ fn package_module_index_find_v1(
     while low < high:
         val middle = low + (high - low) / 2
         val entry = generation.entries[middle]
-        if entry.module_identity < module_identity:
+        val order = compile_source_inventory_identity_cmp_v1(entry.module_identity, module_identity)
+        if order < 0:
             low = middle + 1
-        elif entry.module_identity > module_identity:
+        elif order > 0:
             high = middle
         else:
             return Some(entry)
@@ -328,7 +343,7 @@ fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) 
         if entry.action_digest != package_module_index_entry_action_digest_v1(
                 generation, entry):
             return "action-snapshot-binding-mismatch:{entry.module_identity}"
-        if previous != "" and entry.module_identity <= previous:
+        if previous != "" and compile_source_inventory_identity_cmp_v1(entry.module_identity, previous) <= 0:
             return "entry-order-or-duplicate"
         previous = entry.module_identity
     for entry in generation.entries:
@@ -388,8 +403,8 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
     val inventory = lines[7].substring(10, lines[7].len())
     if not lines[8].starts_with("count="):
         return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
-    val count = lines[8].substring(6, lines[8].len()).to_i64()
-    if count == nil or count! < 0 or lines.len() != count! + 9:
+    val count = lines[8].substring(6, lines[8].len()).to_i64() ?? -1
+    if count < 0 or lines.len() != count + 9:
         return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
     var entries: [PackageModuleIndexEntryV1] = []
     var index = 9
@@ -436,42 +451,44 @@ fn package_module_index_publish_v1(
     val immutable_path = "{dir}/{digest}.index"
     if rt_file_exists(immutable_path):
         val existing = package_module_index_read_file_v1(
-            immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
-        if existing == nil or existing! != content:
+            immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1) ?? ""
+        if existing != content:
             return false
     else:
         if not file_create_excl(immutable_path, content):
-            val raced = package_module_index_read_file_v1(
-                immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
-            if raced == nil or raced! != content:
+            val raced_text = package_module_index_read_file_v1(
+                immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1) ?? ""
+            if raced_text != content:
                 return false
     val pointer = "{dir}/CURRENT"
     val pointer_tmp = "{pointer}.tmp.{digest}"
     if not file_create_excl(pointer_tmp, digest):
-        val staged = package_module_index_read_file_v1(pointer_tmp, 64)
-        if staged == nil or staged! != digest:
+        val staged = package_module_index_read_file_v1(pointer_tmp, 64) ?? ""
+        if staged != digest:
             return false
     if not rt_file_rename(pointer_tmp, pointer):
         rt_file_delete(pointer_tmp)
-        val published = package_module_index_read_file_v1(pointer, 64)
-        return published != nil and published! == digest
+        val published = package_module_index_read_file_v1(pointer, 64) ?? ""
+        return published == digest
     true
 
 fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexReadV1:
     val dir = package_module_index_storage_dir_v1(cache_root)
-    val pointer = package_module_index_read_file_v1("{dir}/CURRENT", 64)
-    if pointer == nil or not package_module_index_digest_valid_v1(pointer!):
+    # `?? ""`, not `x == nil or f(x!)` (native Option-box unwrap defect, same
+    # as compile_source_inventory_read_current_v1). "" fails validation.
+    val pointer = package_module_index_read_file_v1("{dir}/CURRENT", 64) ?? ""
+    if not package_module_index_digest_valid_v1(pointer):
         return PackageModuleIndexReadV1(false, "missing-or-invalid-generation", "", nil)
     val content = package_module_index_read_file_v1(
-        "{dir}/{pointer!}.index", PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
-    if content == nil:
+        "{dir}/{pointer}.index", PACKAGE_MODULE_INDEX_MAX_BYTES_V1) ?? ""
+    if content == "":
         return PackageModuleIndexReadV1(false, "generation-unavailable", "", nil)
-    if sha256_text(content!) != pointer!:
+    if sha256_text(content) != pointer:
         return PackageModuleIndexReadV1(false, "generation-digest-mismatch", "", nil)
-    val decoded = package_module_index_decode_v1(content!)
+    val decoded = package_module_index_decode_v1(content)
     if not decoded.valid:
         return decoded
-    if decoded.digest != pointer!:
+    if decoded.digest != pointer:
         return PackageModuleIndexReadV1(false, "generation-pointer-mismatch", "", nil)
     decoded
 

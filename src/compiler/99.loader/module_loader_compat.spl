@@ -4,7 +4,7 @@
 # root `compiler.loader` package. Newer curated loader consumers should prefer
 # the `compiler.loader.runtime` package and its explicit surface.
 
-use compiler.loader.jit_instantiator.{JitCacheRecord, JitInstantiator}
+use compiler.loader.jit_instantiator.{JitCacheRecord, JitInstantiator, MappedRecord}
 use std.nogc_sync_mut.io_runtime.{file_exists}
 use compiler.loader.compiler_sffi.{TypeInfo, type_to_string}
 use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
@@ -1314,6 +1314,10 @@ impl ModuleLoader:
                             value
                         case Err(err):
                             return LoadResult.Error(message: err)
+                    # A size-0 symbol has no code to enter; calling it jumps
+                    # into an empty allocation (0xC0000005 on `main`).
+                    if code.len() == 0:
+                        return LoadResult.Error(message: "SMF symbol {smf_sym.name} in {path} has no code (size 0); refusing to load it as executable")
                     val addr = native_alloc_exec_memory(code.len() as i64)
                     if addr == 0:
                         return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
@@ -1702,10 +1706,11 @@ impl ModuleLoader:
                     nil:
                         0
                 var owner = "__jit__"
-                val rec = self.jit.exec_mapper.lookup(sym_name)
+                val rec: MappedRecord? = self.jit.exec_mapper.lookup(sym_name)
                 match rec:
                     Some(value):
-                        owner = value.owner_id
+                        val rv: MappedRecord = value
+                        owner = rv.owner_id
                     nil:
                         pass
                 val sym = LoadedSymbol(

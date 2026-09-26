@@ -3,6 +3,102 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## Kernel plugin = core extension (same concept)
+
+- **Synonymy (project-owner terminology, recorded 2026-09-24):** "kernel
+  plugin" and "core extension" are the same architectural concept in this repo
+  and are used interchangeably — a minimal core/kernel plus loadable
+  plugin/extension modules. "Kernel" ≈ "core", "plugin" ≈ "extension".
+- **Kernel lane:** the kernel-plugin fabric — ABI v1 header
+  `include/simple_kernel_plugin_v1.h` (`SIMPLE_KPF_ABI_V1`, entry
+  `simple_kpf_plugin_entry_v1`), `sdk/kernel_plugin/`, schema generators
+  `src/tool/kernel_plugin_schema/`, plans under `doc/03_plan/kernel_plugin/`.
+  Migration is gated by the "Kernel-Plugin Migration Gates" CI jobs.
+- **Rendering/UI lane:** the same core+extension split is expressed as
+  composition kernel + selected providers + feature packs — see the
+  `ui_slim_kernel_plugin` feature expert
+  (`doc/00_llm_process/feature_expert/ui_slim_kernel_plugin/skill.md`). When a
+  rendering/UI doc says "core extension" it means this kernel-plugin concept.
+- **Exception — literal name collision:** inside `src/app/vscode_extension/`
+  only, the string "core extension" refers to Microsoft's VS Code extension
+  `ms-vscode.wasm-wasi-core` (`src/app/vscode_extension/src/wasm/wasmLspBridge.ts`)
+  — an unrelated external dependency.
+- **Agent lookup rule:** searching only "core extension" misses 266+ "kernel
+  plugin" doc occurrences across 67 files; always search both spellings, and
+  reserve the literal reading for `src/app/vscode_extension/`.
+
+## Rendering showcases (canonical subtree)
+
+- **Owner/lane:** `examples/06_io/ui/rendering/` — ten canonical entries:
+  `rendering_{tui,gui,wm}_{core,full}.spl` (brief/core vs full/extended tiers)
+  and `rendering_{2d,web}_{core,extended}.spl`, plus the cross-lane
+  `rendering_items.ui.sdn` (all-rendering-item list), `rendering_switch.spl`
+  (UI-base switch TUI|GUI|web), `doc.md` (run table), `rendering_fixture.png`.
+  Shared cores: `examples/ui/rendering_{2d,web}_{core,extended}/`; TUI host:
+  `src/app/ui_showcase/hosts/host_tui.spl`.
+- **Architecture:** host-agnostic core + `common.ui.screen_host.ScreenHost`
+  trait seam for interactive showcases; `.ui.sdn` data for the shared item
+  list (served by TUI/GUI loaders and the web-server GUI). Grammar verdict:
+  parameterized imports do NOT exist (`parse_use_decl` has no argument
+  production) — trait hosts + sdn + env config are the sanctioned sharing
+  mechanisms (research: `doc/01_research/local/rendering_showcases.md` §2).
+- **Backend config:** `SIMPLE_2D_BACKEND=cpu|cpu_simd|vulkan|metal`, default
+  **vulkan** on lanes that construct an Engine2D backend (2d core/extended,
+  web core/extended) — exact admission: an unavailable backend is
+  `showcase status=blocked`, never a silent fallback. On gui/wm the knob is
+  advisory: headless captures rasterize on CPU / compositor pixel buffer by
+  design.
+- **Web-server GUI:** `rendering_webserver.spl` serves the item list via the
+  pure-Simple server (`std.nogc_sync_mut.http_server`, bounded serve,
+  self-exits after one GET) — the working REQ-001 path (verified over a real
+  socket). `bin/simple ui web <sdn> --port 8080` remains the CLI form but is
+  BLOCKED by `doc/08_tracking/bug/ui_web_seed_exits_before_bind_2026-09-24.md`;
+  `rendering_switch.spl` `web` branch spawns the entry directly (POSIX `env`
+  spawn) with a real GET probe.
+- **Verification:** spec `test/03_system/ui_showcase/rendering_showcases_spec.spl`
+  (structural, 8 steps); runtime gates `scripts/check/check-rendering-showcase-closure.shs`
+  (NFR-001) and `check-rendering-showcase-captures.shs` (NFR-002). Honest-fail
+  lines: `showcase status=blocked <reason>` / `showcase status=pass <path>`;
+  13 of 43 WidgetKinds carry `(no tui)` markers — never render them silently.
+- **Agent lookup rule:** for "showcase" requests, use the canonical subtree
+  above, not the legacy flat demos (`widget_showcase*_gui.spl` era); tier
+  split is file-based (extended imports core), never a `SHOWCASE_TIER` env.
+
+## SPipe surfaces (which "spipe" do you mean?)
+
+- **SPipe project MCP** (release/spec-evidence workflow): the submodule
+  `.spipe/spipe` @ ceb214d is the REAL tree (stage-1 Simple migration:
+  `src/spipe_cli/main.spl`, `src/spipe_mcp/main.spl`). The `.mcp.json`
+  "spipe" entry serves the **stale vendored copy**
+  `examples/05_stdlib/spipe/mcp/server.js` (node, zero-dep; 15 tools:
+  info/experts/read_doc/fine-tune guides/release plans/folder-reverse-references).
+  Fix bugs in the SUBMODULE (pushed to the Spipe repo), never in the vendored
+  copy. `spipe doctor .` expects 7 host links under `.spipe/` (spipe_project,
+  doc, domain_expert, template, spipe_docs, project_expert/spipe,
+  tool_expert/spipe_submodule); `doc/00_llm_process/{spipe,tool_expert,...}`
+  are symlinks into the submodule.
+- **Host `spipe_mcp` parser MCP** (different thing!): `src/app/spipe_mcp`,
+  wrapper `bin/spipe_mcp_server`, API `std.nogc_sync_mut.spipe.tree_context`
+  — tree-context parsing/storage of CLI output. Guide:
+  `doc/07_guide/infra/spipe_mcp.md`. Not the release workflow.
+- **SPipe knowledge compiler:** see the next section.
+- **CLI:** node-based (`node examples/05_stdlib/spipe/cli/spipe.js`, ~40
+  commands). There is NO `bin/simple spipe` subcommand.
+- **Token/context reduction:** does NOT exist in SPipe (verified 2026-09-24;
+  every "token" hit is auth/parser/pagination). The owner is
+  `plugins/llm_caret_messaging` (`chat_get_context`, `context_bundle_id`).
+  Closest SPipe mechanisms: bounded `spipe_read_doc`, pre-digested
+  `spipe_experts`, FTS search index, 6000-token manifest cap.
+- **Known issues (2026-09-24):** tool errors return `id: null` (clients see
+  hangs; fix in flight); `folder_reverse_references` leaks raw ENOENT;
+  setup-links script must run from `.spipe/spipe/scripts/` — running the
+  vendored copy links `doc/llm_process/*` instead of the config-declared
+  `doc/00_llm_process`.
+- **Agent lookup rule:** "spipe mcp" bug/fix → submodule `.spipe/spipe`;
+  "spipe parser/tree context" → host `src/app/spipe_mcp`; "spipe release
+  gates" → the release validators below; "context/token bundle" →
+  llm_caret_messaging.
+
 ## SPipe Knowledge Compiler
 
 - **Admitted narrow kernels:** commit `6b7fc8b83f6` provides pure-library

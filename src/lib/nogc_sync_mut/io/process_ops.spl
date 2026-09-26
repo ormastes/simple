@@ -810,6 +810,49 @@ extern fn rt_process_read_stdout(pid: i64) -> text
 extern fn rt_process_is_alive(pid: i64) -> bool
 @unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
+
+# Pinned-executable host bindings (src/runtime/runtime.h:1287-1301,
+# src/runtime/runtime_process.c). Real on POSIX (open()s the executable
+# O_NOFOLLOW and returns its live fd as the handle); a documented
+# fail-closed -1/false sentinel on the Windows lane, matched by every
+# caller (see `std.nogc_sync_mut.rt_hal.process_task_arena`'s Linux-only
+# `host_bind` gate in src/app/io/rt_hal_isolated_host.spl). These externs
+# were previously undeclared here — a wrong-import bug, not a missing
+# capability — see doc/08_tracking/bug (stage2_cli_link_undefined P7).
+@unsafe(reason: "raw pinned-executable open; positive fd is the live handle and -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_pin_executable(canonical_path: text) -> i64
+@unsafe(reason: "raw pinned-executable close; false sentinel means absent or cleanup failure", capabilities: [ffi])
+extern fn rt_process_close_pinned_executable(handle: i64) -> bool
+@unsafe(reason: "raw pinned-executable spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64
+
+pub fn process_pin_executable(canonical_path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_pin_executable(canonical_path)
+
+pub fn process_close_pinned_executable(handle: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_close_pinned_executable(handle)
+
+pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_pinned_piped(executable_handle, args)
+
+# Result-carrying stdout drain, composed in pure Simple from the real
+# rt_process_read_stdout (non-blocking drain, "" sentinel = no new data
+# right now) and rt_process_is_alive primitives already backing
+# process_read_stdout/process_is_piped_alive below: Ok(Some(chunk)) for new
+# output, Ok(nil) when the child is still alive with nothing new yet, and
+# Err("process_stdout_eof") once the child is gone — the caller
+# (host_join_exact) reads that Err as "drain finished, parse the join".
+pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
+    val chunk = process_read_stdout(pid)
+    if chunk.len() > 0:
+        return Ok(Some(chunk))
+    if process_is_piped_alive(pid):
+        return Ok(nil)
+    Err("process_stdout_eof")
+
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_exists}
@@ -857,6 +900,15 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
 
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    # On Windows the C rt_process_run popen()s a POSIX single-quoted command
+    # line through cmd.exe and decodes _pclose's raw code with `>> 8`, so every
+    # command -- including one that cannot start -- reported exit 0
+    # (doc/08_tracking/bug/windows_rt_process_run_always_exit_zero_2026-09-26.md).
+    # The bounded owner uses CreateProcess and GetExitCodeProcess; timeout 0
+    # means none and -1 means unlimited output, the same as rt_process_run.
+    if _is_windows_platform():
+        unsafe(capabilities: [ffi]):
+            return rt_process_run_bounded(host_path_native(rcmd), rargs, 0, -1)
     unsafe(capabilities: [ffi]):
         rt_process_run(host_path_native(rcmd), rargs)
 

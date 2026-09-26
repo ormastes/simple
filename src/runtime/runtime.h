@@ -348,6 +348,8 @@ int64_t  rt_mlock(int64_t addr, int64_t length);
 int64_t  rt_munlock(int64_t addr, int64_t length);
 int64_t  rt_open_fd(const char* path, int64_t flags, int64_t mode);
 int64_t  rt_close_fd(int64_t fd);
+int64_t  rt_get_host_target_code(void);
+int64_t  rt_current_task_id(void);
 int64_t  rt_page_size(void);
 
 /* ===== High-Resolution Time ===== */

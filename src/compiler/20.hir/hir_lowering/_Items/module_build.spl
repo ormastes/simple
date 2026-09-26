@@ -438,7 +438,16 @@ impl HirLowering:
             var bootstrap_decl_idx = 0
             while bootstrap_decl_idx < bootstrap_function_keys.len():
                 val bootstrap_decl_fn: ParserFunction = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
-                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, nil)
+                # Declare with the function's declared signature, exactly like
+                # the non-bootstrap declare pass (module_declarations_bootstrap
+                # uses the same declared_callable_type). Declared untyped, a
+                # call's HIR result type was unknown, so `val xs = f()` with
+                # `f() -> [i64]` lowered xs as a scalar: under SIMPLE_BOOTSTRAP=1
+                # positional p2_add printed 0 (xs.len() -> rt_string_len,
+                # xs[0] + xs[1] -> rt_strcat_tagged). Generic templates stay
+                # untyped (declared_callable_type returns nil for them).
+                val bootstrap_decl_type = self.declared_callable_type(bootstrap_decl_fn, nil)
+                val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, bootstrap_decl_type, Span.empty(), Visibility.Private, false, nil)
                 # Extern fns must keep their BARE runtime symbol: qualifying
                 # them ("std.nogc_sync_mut.simd.rt_simd_has_avx2") makes every
                 # same-module call emit an undefined module-prefixed symbol at
@@ -617,7 +626,7 @@ impl HirLowering:
                 imports: bootstrap_imports,
                 exports: bootstrap_exports,
                 domain_blocks: bootstrap_domain_blocks,
-                symbols: self.symbols,
+                symbols: self.symbols.module_snapshot(),
                 functions: functions,
                 gpu_function_targets: gpu_function_targets,
                 gpu_function_backend_orders: gpu_function_backend_orders,
@@ -767,7 +776,7 @@ impl HirLowering:
             imports: imports,
             exports: exports,
             domain_blocks: domain_blocks,
-            symbols: self.symbols,
+            symbols: self.symbols.module_snapshot(),
             functions: functions,
             gpu_function_targets: gpu_function_targets,
             gpu_function_backend_orders: gpu_function_backend_orders,

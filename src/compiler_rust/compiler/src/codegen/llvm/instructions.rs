@@ -121,6 +121,21 @@ impl LlvmBackend {
         }
     }
 
+    /// Ordering compares go through the dynamic, tag-aware `rt_native_cmp`
+    /// only when a side is statically ANY and neither side is proven numeric.
+    /// An UNTYPED operand (`None`) is not ANY: in this backend ints are raw
+    /// i64, and many int-producing MIR values carry no vreg type (e.g. a
+    /// `Call rt_array_len` dest). Routing `None` to rt_native_cmp compared raw
+    /// 1 and 2 as tagged values, so `while i < raw.len()` stopped early. The
+    /// stage-2 CLI then dropped its whole argv and fell into the REPL
+    /// (bootstrap41, 2026-09-25).
+    #[cfg(feature = "llvm")]
+    fn ordering_needs_dynamic_cmp(lhs: Option<crate::hir::TypeId>, rhs: Option<crate::hir::TypeId>) -> bool {
+        use crate::hir::TypeId;
+        let numeric = |t: Option<TypeId>| t.is_some_and(Self::is_native_scalar_equality_type);
+        (lhs == Some(TypeId::ANY) || rhs == Some(TypeId::ANY)) && !numeric(lhs) && !numeric(rhs)
+    }
+
     #[cfg(feature = "llvm")]
     fn is_native_scalar_equality_type(ty: crate::hir::TypeId) -> bool {
         use crate::hir::TypeId;
@@ -268,28 +283,97 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
                         self.tagged_bool_from_i1(cmp, builder)?
                     }
-                    BinOp::Lt => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SLT, l, r, "lt")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
-                    }
-                    BinOp::LtEq => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SLE, l, r, "le")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
-                    }
-                    BinOp::Gt => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SGT, l, r, "gt")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
-                    }
-                    BinOp::GtEq => {
-                        let cmp = builder
-                            .build_int_compare(IntPredicate::SGE, l, r, "ge")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                    BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                        // P0 fix (2026-09-25, Package B): mirror the cranelift
+                        // backend's `instr/core.rs:395-457` guard order, which
+                        // this LLVM backend never had. Previously this arm
+                        // always emitted a raw `icmp` on the two tagged i64
+                        // operands regardless of static type -- correct for
+                        // proven-numeric operands (tagged ints/bools/chars
+                        // compare correctly as raw integers) but WRONG for
+                        // text or unknown/ANY operands, where it compared
+                        // string handle/pointer values (address order) or
+                        // arbitrary tag bits instead of content. See
+                        // doc/08_tracking/bug/ (native_defect_systemic_plan
+                        // class 1: `codegen/llvm/instructions.rs:271-290`).
+                        let is_text = matches!(lhs_type, Some(TypeId::STRING)) || matches!(rhs_type, Some(TypeId::STRING));
+                        let cmp = if is_text {
+                            // Text-typed (statically known on at least one
+                            // side, mirrors `vreg_is_text` in cranelift):
+                            // strcmp-style ordering via rt_text_cmp_any,
+                            // never a raw pointer/handle compare.
+                            let rt_func = module.get_function("rt_text_cmp_any").unwrap_or_else(|| {
+                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                                module.add_function("rt_text_cmp_any", fn_type, None)
+                            });
+                            let call_site = builder
+                                .build_call(rt_func, &[l.into(), r.into()], "text_cmp")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_text_cmp_any", &e))?;
+                            let raw = call_site
+                                .try_as_basic_value()
+                                .basic()
+                                .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                                .into_int_value();
+                            let zero = i64_type.const_zero();
+                            let pred = match op {
+                                BinOp::Lt => IntPredicate::SLT,
+                                BinOp::LtEq => IntPredicate::SLE,
+                                BinOp::Gt => IntPredicate::SGT,
+                                BinOp::GtEq => IntPredicate::SGE,
+                                _ => unreachable!(),
+                            };
+                            builder
+                                .build_int_compare(pred, raw, zero, "text_cmp_bool")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        } else if Self::ordering_needs_dynamic_cmp(lhs_type, rhs_type) {
+                            // Neither operand is PROVEN numeric (int/bool/
+                            // char) by static type -- could be ANY, an
+                            // untyped placeholder, a runtime-produced text
+                            // value whose vreg type wasn't threaded, etc.
+                            // Fall back to the dynamic, tag-aware
+                            // rt_native_cmp (the ordering counterpart of
+                            // rt_native_eq/rt_native_neq, which this exact
+                            // arm already uses for Eq/NotEq above), rather
+                            // than assuming raw-integer semantics.
+                            let rt_func = module.get_function("rt_native_cmp").unwrap_or_else(|| {
+                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                                module.add_function("rt_native_cmp", fn_type, None)
+                            });
+                            let call_site = builder
+                                .build_call(rt_func, &[l.into(), r.into()], "native_cmp")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_native_cmp", &e))?;
+                            let raw = call_site
+                                .try_as_basic_value()
+                                .basic()
+                                .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                                .into_int_value();
+                            let zero = i64_type.const_zero();
+                            let pred = match op {
+                                BinOp::Lt => IntPredicate::SLT,
+                                BinOp::LtEq => IntPredicate::SLE,
+                                BinOp::Gt => IntPredicate::SGT,
+                                BinOp::GtEq => IntPredicate::SGE,
+                                _ => unreachable!(),
+                            };
+                            builder
+                                .build_int_compare(pred, raw, zero, "native_cmp_bool")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        } else {
+                            // Fast path unchanged: both operands PROVEN
+                            // numeric by static type -- raw icmp on the
+                            // tagged i64 representation, no runtime call, no
+                            // perf regression vs. before this fix.
+                            let pred = match op {
+                                BinOp::Lt => IntPredicate::SLT,
+                                BinOp::LtEq => IntPredicate::SLE,
+                                BinOp::Gt => IntPredicate::SGT,
+                                BinOp::GtEq => IntPredicate::SGE,
+                                _ => unreachable!(),
+                            };
+                            builder
+                                .build_int_compare(pred, l, r, "cmp")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
+                        };
                         self.tagged_bool_from_i1(cmp, builder)?
                     }
                     BinOp::Mod => builder
@@ -616,15 +700,64 @@ impl LlvmBackend {
                     return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
                 }
 
+                // P0 fix (2026-09-25, Package B): the mixed-representation
+                // arm (operands are not both IntValue/FloatValue/PointerValue
+                // -- e.g. a tagged-string pointer vs. a raw int, an ANY
+                // placeholder vs. a scalar) NEVER has proven-numeric operands
+                // on both sides by construction: same-typed numeric operands
+                // take the IntValue x IntValue arm above. So, unlike that
+                // arm, there is no numeric fast path to preserve here --
+                // ordering compares in this arm always go through the
+                // dynamic runtime path, exactly like Eq/NotEq just above
+                // (rt_native_eq/neq), instead of a raw icmp on coerced
+                // pointer/tag bits.
+                if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq) {
+                    let is_text = matches!(lhs_type, Some(TypeId::STRING)) || matches!(rhs_type, Some(TypeId::STRING));
+                    if is_text || Self::ordering_needs_dynamic_cmp(lhs_type, rhs_type) {
+                    let fn_name = if is_text { "rt_text_cmp_any" } else { "rt_native_cmp" };
+                    let rt_func = module.get_function(fn_name).unwrap_or_else(|| {
+                        let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                        module.add_function(fn_name, fn_type, None)
+                    });
+                    let call_site = builder
+                        .build_call(rt_func, &[l_int.into(), r_int.into()], "mixed_cmp")
+                        .map_err(|e| crate::error::factory::llvm_build_failed(fn_name, &e))?;
+                    let raw = call_site
+                        .try_as_basic_value()
+                        .basic()
+                        .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                        .into_int_value();
+                    let zero = i64_type.const_zero();
+                    let pred = match op {
+                        BinOp::Lt => IntPredicate::SLT,
+                        BinOp::LtEq => IntPredicate::SLE,
+                        BinOp::Gt => IntPredicate::SGT,
+                        BinOp::GtEq => IntPredicate::SGE,
+                        _ => unreachable!(),
+                    };
+                    let cmp = builder
+                        .build_int_compare(pred, raw, zero, "mixed_cmp_bool")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                    return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
+                    }
+                    let pred = match op {
+                        BinOp::Lt => IntPredicate::SLT,
+                        BinOp::LtEq => IntPredicate::SLE,
+                        BinOp::Gt => IntPredicate::SGT,
+                        BinOp::GtEq => IntPredicate::SGE,
+                        _ => unreachable!(),
+                    };
+                    let cmp = builder
+                        .build_int_compare(pred, l_int, r_int, "mixed_ord")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
+                    return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
+                }
+
                 let result = match op {
                     BinOp::Add => builder.build_int_add(l_int, r_int, "mixed_add"),
                     BinOp::Sub => builder.build_int_sub(l_int, r_int, "mixed_sub"),
                     BinOp::Mul => builder.build_int_mul(l_int, r_int, "mixed_mul"),
                     BinOp::Div => builder.build_int_signed_div(l_int, r_int, "mixed_div"),
-                    BinOp::Lt => builder.build_int_compare(IntPredicate::SLT, l_int, r_int, "mixed_lt"),
-                    BinOp::LtEq => builder.build_int_compare(IntPredicate::SLE, l_int, r_int, "mixed_le"),
-                    BinOp::Gt => builder.build_int_compare(IntPredicate::SGT, l_int, r_int, "mixed_gt"),
-                    BinOp::GtEq => builder.build_int_compare(IntPredicate::SGE, l_int, r_int, "mixed_ge"),
                     BinOp::Mod => builder.build_int_signed_rem(l_int, r_int, "mixed_mod"),
                     BinOp::And => {
                         let l_truth = self.runtime_int_truthy_i1(l_int, builder)?;
@@ -653,11 +786,9 @@ impl LlvmBackend {
                     _ => Ok(l_int), // Fallback for operators like In, NotIn, Pow, etc.
                 }
                 .map_err(|e| crate::error::factory::llvm_build_failed("mixed_binop", &e))?;
-                if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq) {
-                    Ok(self.tagged_bool_from_i1(result, builder)?.into())
-                } else {
-                    Ok(result.into())
-                }
+                // Lt/LtEq/Gt/GtEq always `return` above, so `result` here is
+                // never an ordering compare.
+                Ok(result.into())
             }
         }
     }
@@ -1210,6 +1341,184 @@ mod tests {
         assert!(ir.contains("icmp ne i32"));
         assert!(!ir.contains("rt_native_eq"));
         assert!(!ir.contains("rt_native_neq"));
+        backend.verify().unwrap();
+    }
+
+    /// P0 fix (2026-09-25, Package B): proven-numeric operands (both
+    /// statically I64) must keep the raw `icmp` fast path for Lt/LtEq/Gt/GtEq
+    /// -- no runtime call, no perf regression from this change.
+    #[test]
+    fn scalar_ordering_compares_use_raw_icmp() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("scalar_ordering_test").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let fn_type = rv_type.fn_type(&[rv_type.into(), rv_type.into()], false);
+
+            for (name, op) in [
+                ("lt_scalar", crate::hir::BinOp::Lt),
+                ("le_scalar", crate::hir::BinOp::LtEq),
+                ("gt_scalar", crate::hir::BinOp::Gt),
+                ("ge_scalar", crate::hir::BinOp::GtEq),
+            ] {
+                let function = module.add_function(name, fn_type, None);
+                let entry = backend.context_ref().append_basic_block(function, "entry");
+                builder.position_at_end(entry);
+                let left = function.get_nth_param(0).unwrap();
+                let right = function.get_nth_param(1).unwrap();
+                let result = backend
+                    .compile_binop(
+                        op,
+                        left,
+                        right,
+                        builder,
+                        module,
+                        None,
+                        Some(crate::hir::TypeId::I64),
+                        Some(crate::hir::TypeId::I64),
+                    )
+                    .unwrap()
+                    .into_int_value();
+                builder.build_return(Some(&result)).unwrap();
+            }
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("icmp slt i64"));
+        assert!(ir.contains("icmp sle i64"));
+        assert!(ir.contains("icmp sgt i64"));
+        assert!(ir.contains("icmp sge i64"));
+        assert!(!ir.contains("rt_native_cmp"));
+        assert!(!ir.contains("rt_text_cmp_any"));
+        backend.verify().unwrap();
+    }
+
+    /// P0 fix (2026-09-25, Package B): text-typed operands must route
+    /// ordering compares through `rt_text_cmp_any` (content compare), never
+    /// a raw `icmp` on the tagged pointer/handle value.
+    #[test]
+    fn text_ordering_compares_use_rt_text_cmp_any() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("text_ordering_test").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let fn_type = rv_type.fn_type(&[rv_type.into(), rv_type.into()], false);
+
+            let function = module.add_function("lt_text", fn_type, None);
+            let entry = backend.context_ref().append_basic_block(function, "entry");
+            builder.position_at_end(entry);
+            let left = function.get_nth_param(0).unwrap();
+            let right = function.get_nth_param(1).unwrap();
+            let result = backend
+                .compile_binop(
+                    crate::hir::BinOp::Lt,
+                    left,
+                    right,
+                    builder,
+                    module,
+                    None,
+                    Some(crate::hir::TypeId::STRING),
+                    Some(crate::hir::TypeId::STRING),
+                )
+                .unwrap()
+                .into_int_value();
+            builder.build_return(Some(&result)).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        // The call happens; the only `icmp slt` left is against the
+        // call's own zero-compare result, never a direct compare of the
+        // two raw incoming params (which would mean a skipped call).
+        assert!(ir.contains("call i64 @rt_text_cmp_any"));
+        assert!(!ir.contains("icmp slt i64 %0, %1"));
+        backend.verify().unwrap();
+    }
+
+    /// P0 fix (2026-09-25, Package B): when neither operand is proven
+    /// numeric or text (e.g. ANY / untyped), ordering compares must route
+    /// through the dynamic `rt_native_cmp`, never assume raw-integer
+    /// semantics (this was the class-1 defect: `"foo" < "bar"` compiled to
+    /// an address-dependent tagged-pointer `icmp`).
+    #[test]
+    fn any_ordering_compares_use_rt_native_cmp() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("any_ordering_test").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let fn_type = rv_type.fn_type(&[rv_type.into(), rv_type.into()], false);
+
+            let function = module.add_function("gt_any", fn_type, None);
+            let entry = backend.context_ref().append_basic_block(function, "entry");
+            builder.position_at_end(entry);
+            let left = function.get_nth_param(0).unwrap();
+            let right = function.get_nth_param(1).unwrap();
+            // Statically ANY on both sides: dynamic compare.
+            let any = Some(crate::hir::TypeId::ANY);
+            let result = backend
+                .compile_binop(crate::hir::BinOp::Gt, left, right, builder, module, None, any, any)
+                .unwrap()
+                .into_int_value();
+            builder.build_return(Some(&result)).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_native_cmp"));
+        assert!(!ir.contains("icmp sgt i64 %0, %1"));
+        backend.verify().unwrap();
+    }
+
+    /// An UNTYPED operand is not ANY: raw ints from untyped vregs
+    /// (`Call rt_array_len`) must keep the raw icmp. Routing them to
+    /// rt_native_cmp made `while i < raw.len()` exit early and cost the
+    /// stage-2 CLI its argv (bootstrap41).
+    #[test]
+    fn untyped_ordering_compares_keep_raw_icmp() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("untyped_ordering_test").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let fn_type = rv_type.fn_type(&[rv_type.into(), rv_type.into()], false);
+
+            let function = module.add_function("lt_untyped", fn_type, None);
+            let entry = backend.context_ref().append_basic_block(function, "entry");
+            builder.position_at_end(entry);
+            let left = function.get_nth_param(0).unwrap();
+            let right = function.get_nth_param(1).unwrap();
+            let result = backend
+                .compile_binop(crate::hir::BinOp::Lt, left, right, builder, module,
+                    None, Some(crate::hir::TypeId::I64), None)
+                .unwrap()
+                .into_int_value();
+            builder.build_return(Some(&result)).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("rt_native_cmp"), "{ir}");
+        assert!(ir.contains("icmp slt i64"), "{ir}");
         backend.verify().unwrap();
     }
 }

@@ -1,5 +1,12 @@
 # File Driver Specification
 
+> **Source synchronization pending (2026-09-26):** This older generated page
+> describes four scenarios. The executable source now contains seven, including
+> valid/forged generation checks, buffer-offset handling, and a Windows-style
+> path case. Its counts, folded source, and source hash are historical until a
+> current pure-Simple `spipe-docgen` run regenerates this page. Do not use this
+> page as current test evidence.
+
 > <details>
 
 <!-- sdn-diagram:id=file_driver_spec.arch -->

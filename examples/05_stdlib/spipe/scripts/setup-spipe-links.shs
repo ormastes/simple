@@ -2,7 +2,25 @@
 set -eu
 
 MODULE_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-HOST_ROOT="${SPIPE_HOST_ROOT:-$(CDPATH= cd -- "${MODULE_ROOT}/../.." && pwd)}"
+if [ -n "${SPIPE_HOST_ROOT:-}" ]; then
+  HOST_ROOT="$SPIPE_HOST_ROOT"
+else
+  # The module may be mounted at any depth below the host root (e.g.
+  # .spipe/spipe, examples/spipe, or examples/05_stdlib/spipe), so walk up to
+  # the nearest ancestor that holds the host config instead of assuming ../..
+  HOST_ROOT=""
+  candidate="$MODULE_ROOT"
+  while [ -n "$candidate" ] && [ "$candidate" != "/" ]; do
+    if [ -f "$candidate/.spipe/config.sdn" ]; then
+      HOST_ROOT="$candidate"
+      break
+    fi
+    candidate="$(dirname -- "$candidate")"
+  done
+  if [ -z "$HOST_ROOT" ]; then
+    HOST_ROOT="$(CDPATH= cd -- "${MODULE_ROOT}/../.." && pwd)"
+  fi
+fi
 FORCE=0
 DRY_RUN=0
 DOC_ROOT="${SPIPE_DOC_ROOT:-}"
@@ -45,20 +63,51 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-configured_doc_root() {
-  if [ -n "$DOC_ROOT" ]; then
-    printf '%s\n' "$DOC_ROOT"
-    return 0
-  fi
+config_value() {
+  key="$1"
+  default="$2"
   config="${HOST_ROOT}/.spipe/config.sdn"
   if [ -f "$config" ]; then
-    value="$(sed -n 's/^[[:space:]]*host_process_doc:[[:space:]]*\([^[:space:]#][^[:space:]#]*\).*$/\1/p' "$config" | sed -n '1p')"
+    value="$(sed -n "s/^[[:space:]]*${key}:[[:space:]]*\([^[:space:]#][^[:space:]#]*\).*\$/\1/p" "$config" | sed -n '1p')"
     if [ -n "$value" ]; then
       printf '%s\n' "$value"
       return 0
     fi
   fi
-  printf '%s\n' "doc/llm_process"
+  printf '%s\n' "$default"
+}
+
+# Print $2 (absolute path) expressed relative to directory $1 (absolute).
+rel_path() {
+  from="$1"
+  to="$2"
+  out=""
+  while [ "$from" != "$to" ]; do
+    if [ "$from" = "/" ]; then
+      case "$to" in
+        /*) out="$out${to#/}" ;;
+      esac
+      break
+    fi
+    case "$to" in
+      "$from"/*)
+        out="$out${to#"$from"/}"
+        break
+        ;;
+    esac
+    from="$(dirname -- "$from")"
+    out="../$out"
+  done
+  [ -n "$out" ] || out="."
+  printf '%s\n' "$out"
+}
+
+configured_doc_root() {
+  if [ -n "$DOC_ROOT" ]; then
+    printf '%s\n' "$DOC_ROOT"
+    return 0
+  fi
+  config_value host_process_doc "doc/llm_process"
 }
 
 DOC_ROOT="$(configured_doc_root)"
@@ -67,6 +116,7 @@ link_one() {
   name="$1"
   source="${MODULE_ROOT}/doc/00_llm_process/${name}"
   target="${HOST_ROOT}/${DOC_ROOT}/${name}"
+  rel="$(rel_path "$(dirname -- "$target")" "$source")"
 
   if [ ! -e "$source" ]; then
     echo "missing_source doc/00_llm_process/$name" >&2
@@ -77,7 +127,7 @@ link_one() {
 
   if [ -L "$target" ]; then
     current="$(readlink "$target")"
-    if [ "$current" = "$source" ]; then
+    if [ "$current" = "$rel" ]; then
       echo "ok ${DOC_ROOT}/${name}"
       return 0
     fi
@@ -109,7 +159,7 @@ link_one() {
     return 0
   fi
 
-  ln -s "$source" "$target"
+  ln -s "$rel" "$target"
   echo "linked ${DOC_ROOT}/${name}"
 }
 
@@ -118,6 +168,7 @@ link_pair() {
   source_rel="$2"
   source="${HOST_ROOT}/${source_rel}"
   target="${HOST_ROOT}/${target_rel}"
+  rel="$(rel_path "$(dirname -- "$target")" "$source")"
 
   if [ ! -e "$source" ]; then
     echo "skip_missing_subproject_source $target_rel"
@@ -128,7 +179,7 @@ link_pair() {
 
   if [ -L "$target" ]; then
     current="$(readlink "$target")"
-    if [ "$current" = "$source_rel" ] || [ "$current" = "$source" ]; then
+    if [ "$current" = "$rel" ] || [ "$current" = "$source" ]; then
       echo "ok_subproject $target_rel"
       return 0
     fi
@@ -160,7 +211,7 @@ link_pair() {
     return 0
   fi
 
-  ln -s "$source_rel" "$target"
+  ln -s "$rel" "$target"
   echo "linked_subproject $target_rel"
 }
 
@@ -211,11 +262,20 @@ setup_root_manifest_hook() {
   echo "installed_root_manifest_hook .git/hooks/pre-commit"
 }
 
+link_configured() {
+  example_link="$(config_value example_project_link ".spipe/spipe_project")"
+  example_submodule="$(config_value example_project_submodule "examples/spipe")"
+  doc_link="$(config_value host_process_doc_link ".spipe/doc")"
+  link_pair "$example_link" "$example_submodule"
+  link_pair "$doc_link" "$DOC_ROOT"
+}
+
 link_one "skill_command"
 link_one "spipe"
 link_one "template"
 link_one "project_expert"
 link_one "domain_expert"
 link_one "tool_expert"
+link_configured
 link_subprojects
 setup_root_manifest_hook

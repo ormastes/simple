@@ -60,26 +60,44 @@ select_cargo_target_dir() {
   fi
 }
 
-# Git Bash's /usr/bin/link.exe is the POSIX hard-link utility. Resolve the
-# target linker from vcvars64 instead of trusting PATH order.
-msvc_linker_from_vcvars() {
-  [ -n "$1" ] || return 1
-  if command -v cygpath >/dev/null 2>&1; then
-    _vc_tools_dir=$(cygpath -u "$1" 2>/dev/null) || return 1
-  else
-    _vc_tools_dir=$1
-  fi
-  _msvc_linker="$_vc_tools_dir/bin/Hostx64/x64/link.exe"
-  [ -f "$_msvc_linker" ] && [ -r "$_msvc_linker" ] && [ -x "$_msvc_linker" ] || return 1
-  if command -v cygpath >/dev/null 2>&1; then
-    cygpath -w "$_msvc_linker"
-  else
-    printf '%s\n' "$_msvc_linker"
-  fi
+# clang-only policy (2026-09-24): the Windows MSVC-target Cargo linker is
+# `lld-link`, never MSVC `link.exe` (Git Bash's /usr/bin/link.exe is also not
+# MSVC -- it's the POSIX hard-link utility -- but that was never the only
+# problem: a REAL VCToolsInstallDir/bin/Hostx64/x64/link.exe is exactly as
+# disallowed now). Resolve lld-link from the LLVM 23 prefix that
+# windows-msvc-bootstrap-env.shs / llvm-toolchain-env.shs already established
+# (SIMPLE_LLVM_WIN_ROOT_23, then LLVM_SYS_231_PREFIX), falling back to PATH,
+# instead of trusting a VC tools directory at all.
+msvc_linker_from_llvm() {
+  for _llvm_prefix in "${SIMPLE_LLVM_WIN_ROOT_23:-}" "${LLVM_SYS_231_PREFIX:-}"; do
+    [ -n "$_llvm_prefix" ] || continue
+    if command -v cygpath >/dev/null 2>&1; then
+      _llvm_prefix_u=$(cygpath -u "$_llvm_prefix" 2>/dev/null) || _llvm_prefix_u=$_llvm_prefix
+    else
+      _llvm_prefix_u=$_llvm_prefix
+    fi
+    _lld_link="$_llvm_prefix_u/bin/lld-link.exe"
+    if [ -f "$_lld_link" ] && [ -r "$_lld_link" ] && [ -x "$_lld_link" ]; then
+      if command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$_lld_link"
+      else
+        printf '%s\n' "$_lld_link"
+      fi
+      return 0
+    fi
+  done
+  # PATH fallback: whatever `lld-link` resolves to, as long as it is not the
+  # MSVC-shadowing name `link.exe` (validated_linker_override enforces that).
+  _lld_link_path=$(command -v lld-link.exe 2>/dev/null || command -v lld-link 2>/dev/null) || return 1
+  validated_linker_override "$_lld_link_path" "$PWD"
 }
 
 # A caller-supplied Cargo linker stays authoritative, but must resolve to an
-# executable. In particular, Git Bash's POSIX /usr/bin/link.exe is not MSVC.
+# executable, and clang-only policy (2026-09-24) means it must never be MSVC
+# `link.exe` under any name or location -- not just Git Bash's POSIX
+# /usr/bin/link.exe (which was the only case rejected before), but a real
+# VCToolsInstallDir/bin/Hostx64/x64/link.exe too. Basename match is
+# case-insensitive because Windows paths are.
 validated_linker_override() {
   [ -n "$1" ] || return 1
   case "$1" in
@@ -91,7 +109,9 @@ validated_linker_override() {
     _linker_override_path=$(cygpath -u "$_linker_override_path" 2>/dev/null) || return 1
   fi
   [ -f "$_linker_override_path" ] && [ -r "$_linker_override_path" ] && [ -x "$_linker_override_path" ] || return 1
-  case "$_linker_override_path" in /usr/bin/link.exe) return 1 ;; esac
+  case "$(basename "$_linker_override_path" | tr '[:upper:]' '[:lower:]')" in
+    link.exe|link) return 1 ;;
+  esac
   printf '%s\n' "$1"
 }
 
@@ -165,11 +185,15 @@ capture_bindings() {
   BOOTSTRAP_STAGE3_FACADE_PATH=$_facade
   BOOTSTRAP_STAGE3_VERSION_ROOT=$ROOT
   export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
-  . "$_facade" || return 1
-  bootstrap_stage3_source_snapshot "$_out/source" "$ROOT" || return 1
-  bootstrap_stage3_git_state "$ROOT" "$_out/git" || return 1
-  git -C "$ROOT" rev-parse --verify HEAD >"$_out/head" || return 1
-  printf '%s' "$PREFLIGHT_CONFIG" >"$_out/config" || return 1
+  # Name the failing step. Every one of these five returns the same bare 1, so
+  # the caller could only report "could not bind preflight source and git
+  # state", which says nothing about which step failed or why -- an aborted
+  # full bootstrap then costs a manual re-derivation of the whole bind path.
+  . "$_facade" || { echo "preflight bind: sourcing the provenance facade failed: $_facade" >&2; return 1; }
+  bootstrap_stage3_source_snapshot "$_out/source" "$ROOT" || { echo "preflight bind: bootstrap_stage3_source_snapshot failed (root $ROOT)" >&2; return 1; }
+  bootstrap_stage3_git_state "$ROOT" "$_out/git" || { echo "preflight bind: bootstrap_stage3_git_state failed (root $ROOT)" >&2; return 1; }
+  git -C "$ROOT" rev-parse --verify HEAD >"$_out/head" || { echo "preflight bind: git rev-parse --verify HEAD failed (root $ROOT)" >&2; return 1; }
+  printf '%s' "$PREFLIGHT_CONFIG" >"$_out/config" || { echo "preflight bind: could not write the config binding to $_out/config" >&2; return 1; }
 }
 
 verify_receipt() {
@@ -318,16 +342,29 @@ selftest() {
   [ "$(select_cargo_target_dir '' Darwin "$TMP" "$TMP" "$TMP/missing_mnt")" = "$TMP/cargo-seed-rebuild" ] || {
     echo "selftest FAIL: macOS Cargo fallback changed"; st_fail=1;
   }
-  : > "$TMP/vc/bin/Hostx64/x64/link.exe"
-  chmod +x "$TMP/vc/bin/Hostx64/x64/link.exe"
-  expected_linker="$TMP/vc/bin/Hostx64/x64/link.exe"
+  # msvc_linker_from_llvm: must-PASS via SIMPLE_LLVM_WIN_ROOT_23, must-FAIL
+  # when neither prefix nor PATH has a real lld-link.
+  mkdir -p "$TMP/llvm/bin"
+  : > "$TMP/llvm/bin/lld-link.exe"
+  chmod +x "$TMP/llvm/bin/lld-link.exe"
+  expected_linker="$TMP/llvm/bin/lld-link.exe"
   if command -v cygpath >/dev/null 2>&1; then expected_linker=$(cygpath -w "$expected_linker"); fi
-  [ "$(msvc_linker_from_vcvars "$TMP/vc")" = "$expected_linker" ] || {
-    echo "selftest FAIL: vcvars linker not selected"; st_fail=1;
+  st_saved_llvm_root=${SIMPLE_LLVM_WIN_ROOT_23:-}
+  st_saved_llvm_prefix=${LLVM_SYS_231_PREFIX:-}
+  SIMPLE_LLVM_WIN_ROOT_23="$TMP/llvm"
+  unset LLVM_SYS_231_PREFIX
+  [ "$(msvc_linker_from_llvm)" = "$expected_linker" ] || {
+    echo "selftest FAIL: LLVM-prefix lld-link not selected"; st_fail=1;
   }
-  if msvc_linker_from_vcvars "$TMP/missing_vc" >/dev/null; then
-    echo "selftest FAIL: missing vcvars linker accepted"; st_fail=1;
+  SIMPLE_LLVM_WIN_ROOT_23="$TMP/missing_llvm"
+  # Neutralize PATH for this one call: the fallback correctly finds a REAL
+  # lld-link elsewhere on PATH on a normal dev host, which is not the failure
+  # this fixture means to exercise (a host with NEITHER the prefix nor PATH).
+  if PATH=/nonexistent-fixture-only msvc_linker_from_llvm >/dev/null 2>&1; then
+    echo "selftest FAIL: missing LLVM-prefix lld-link accepted"; st_fail=1;
   fi
+  if [ -n "$st_saved_llvm_root" ]; then SIMPLE_LLVM_WIN_ROOT_23=$st_saved_llvm_root; else unset SIMPLE_LLVM_WIN_ROOT_23; fi
+  if [ -n "$st_saved_llvm_prefix" ]; then LLVM_SYS_231_PREFIX=$st_saved_llvm_prefix; fi
   st_rustc_info=$(printf 'rustc 1.80.0\nhost: x86_64-pc-windows-msvc\n')
   [ "$(effective_cargo_target '' "$st_rustc_info")" = x86_64-pc-windows-msvc ] || {
     echo "selftest FAIL: Rust host target not detected"; st_fail=1;
@@ -343,10 +380,13 @@ selftest() {
      should_pin_msvc_linker Linux x86_64-pc-windows-msvc; then
     echo "selftest FAIL: non-x64-MSVC linker route forced"; st_fail=1;
   fi
-  [ "$(validated_linker_override "$TMP/vc/bin/Hostx64/x64/link.exe" "$TMP")" = "$TMP/vc/bin/Hostx64/x64/link.exe" ] || {
-    echo "selftest FAIL: explicit linker override was not preserved"; st_fail=1;
+  [ "$(validated_linker_override "$TMP/llvm/bin/lld-link.exe" "$TMP")" = "$TMP/llvm/bin/lld-link.exe" ] || {
+    echo "selftest FAIL: explicit lld-link override was not preserved"; st_fail=1;
   }
-  [ "$(validated_linker_override vc/bin/Hostx64/x64/link.exe "$TMP")" = vc/bin/Hostx64/x64/link.exe ] || {
+  mkdir -p "$TMP/rel_llvm/bin"
+  : > "$TMP/rel_llvm/bin/lld-link.exe"
+  chmod +x "$TMP/rel_llvm/bin/lld-link.exe"
+  [ "$(validated_linker_override rel_llvm/bin/lld-link.exe "$TMP")" = rel_llvm/bin/lld-link.exe ] || {
     echo "selftest FAIL: relative explicit linker path not validated against Cargo cwd"; st_fail=1;
   }
   [ "$(validated_linker_override sh "$TMP")" = sh ] || {
@@ -354,6 +394,14 @@ selftest() {
   }
   if validated_linker_override "$TMP/missing-linker.exe" "$TMP" >/dev/null; then
     echo "selftest FAIL: missing explicit linker accepted"; st_fail=1;
+  fi
+  # clang-only policy: MSVC link.exe must be rejected under ANY name/location,
+  # not just Git Bash's POSIX /usr/bin/link.exe -- a real
+  # VCToolsInstallDir/bin/Hostx64/x64/link.exe is exactly as disallowed.
+  : > "$TMP/vc/bin/Hostx64/x64/link.exe"
+  chmod +x "$TMP/vc/bin/Hostx64/x64/link.exe"
+  if validated_linker_override "$TMP/vc/bin/Hostx64/x64/link.exe" "$TMP" >/dev/null; then
+    echo "selftest FAIL: a real MSVC link.exe was accepted as the Cargo linker"; st_fail=1;
   fi
   if [ "$(command -v link.exe 2>/dev/null || true)" = /usr/bin/link.exe ] &&
      validated_linker_override link.exe "$TMP" >/dev/null; then
@@ -455,8 +503,8 @@ else
       cargo_linker=$(validated_linker_override "$CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER" "$ROOT/src/compiler_rust") ||
         cargo_linker_error='explicit CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER does not resolve to a readable executable linker'
     else
-      cargo_linker=$(msvc_linker_from_vcvars "${VCToolsInstallDir:-}") ||
-        cargo_linker_error='x64 MSVC preflight requires vcvars64 VCToolsInstallDir/bin/Hostx64/x64/link.exe'
+      cargo_linker=$(msvc_linker_from_llvm) ||
+        cargo_linker_error='x64 MSVC preflight requires lld-link.exe under the LLVM 23 prefix (SIMPLE_LLVM_WIN_ROOT_23/LLVM_SYS_231_PREFIX) or on PATH -- see scripts/setup/windows-msvc-bootstrap-env.shs'
     fi
   fi
   {
@@ -467,7 +515,7 @@ else
     printf 'rustc_executable=%s\n' "${RUSTC:-$(command -v rustc 2>/dev/null || printf unavailable)}"
     printf 'rustup_toolchain=%s\n' "${RUSTUP_TOOLCHAIN:-$(rustup show active-toolchain 2>/dev/null || printf unavailable)}"
     printf 'msvc_linker=%s\n' "${cargo_linker:-unavailable}"
-    printf 'path_linker=%s\n' "$(command -v link.exe 2>/dev/null || printf unavailable)"
+    printf 'path_lld_link=%s\n' "$(command -v lld-link.exe 2>/dev/null || command -v lld-link 2>/dev/null || printf unavailable)"
   } > "$cargo_context" || {
     echo "ERROR — preflight could not record Cargo toolchain paths: $cargo_context"
     exit 2

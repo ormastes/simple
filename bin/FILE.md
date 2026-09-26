@@ -15,6 +15,8 @@ Executables, wrappers, and MCP server launchers.
 | `gh` | `gh` shim — routes to the configured git backend (github passthrough, otherwise DevHub) |
 | `itf` | DevHub CLI compat wrapper (pre-rename name) |
 | `jira` | Jira CLI |
+| `k3` | Claude Code on Kimi K3 (Kimi Code login or Moonshot key) |
+| `kimi-code-token` | Prints a refreshed Kimi Code OAuth token (`k3`'s apiKeyHelper) |
 | `mail` | Email CLI |
 | `release` | Release directory |
 | `simple` | Main compiler binary |

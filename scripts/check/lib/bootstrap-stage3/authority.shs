@@ -797,6 +797,20 @@ bootstrap_stage3_host_platform() {
                 *) return 1 ;;
             esac
             ;;
+        arm64:MINGW*|arm64:MSYS*|arm64:CYGWIN*|arm64:Windows*|aarch64:MINGW*|aarch64:MSYS*|aarch64:CYGWIN*|aarch64:Windows*)
+            # msvc is the single Windows ABI default (matches port-L's
+            # scripts/setup/platform-detect.shs: PLATFORM_ABI defaults to
+            # msvc, not to gnu keyed off MSYSTEM/Git Bash). Only an explicit
+            # SIMPLE_WINDOWS_ABI=gnu opts into the gnu ABI.
+            case "${SIMPLE_WINDOWS_ABI:-msvc}" in
+                gnu) echo aarch64-pc-windows-gnu ;;
+                msvc) echo aarch64-pc-windows-msvc ;;
+                *) return 1 ;;
+            esac
+            ;;
+        x86_64:SimpleOS) echo x86_64-unknown-simpleos ;;
+        aarch64:SimpleOS) echo aarch64-unknown-simpleos ;;
+        riscv64:SimpleOS) echo riscv64-unknown-simpleos ;;
         *) return 1 ;;
     esac
 }
@@ -986,23 +1000,49 @@ bootstrap_stage3_target_c_compiler() {
         *-unknown-freebsd)
             # FreeBSD's QEMU/CI lane admits an explicit LLVM provider. Keep
             # that provider bound to the native target instead of silently
-            # replacing it with the ambient /usr/bin/cc wrapper.
+            # replacing it with the ambient /usr/bin/cc wrapper. Clang-only
+            # policy (2026-09-24): GCC is forbidden here exactly as on macOS.
+            case "${CC:-}" in
+                *gcc*|*g++*) return 1 ;;
+            esac
             if [ -n "${CC:-}" ]; then
                 case "$CC" in
-                    */*) [ -x "$CC" ] || return 1; printf '%s\n' "$CC" ;;
-                    *) command -v "$CC" 2>/dev/null ;;
+                    */*) [ -x "$CC" ] || return 1; bootstrap_stage3_freebsd_cc=$CC ;;
+                    *) bootstrap_stage3_freebsd_cc=$(command -v "$CC" 2>/dev/null) || return 1 ;;
                 esac
             else
-                command -v cc 2>/dev/null
+                bootstrap_stage3_freebsd_cc=$(command -v "${CC:-clang}" 2>/dev/null) || return 1
             fi
+            case "$bootstrap_stage3_freebsd_cc" in
+                */gcc|*/gcc-*|*/g++|*/g++-*) return 1 ;;
+            esac
+            "$bootstrap_stage3_freebsd_cc" --version 2>/dev/null |
+                grep -qi 'clang version' || {
+                    echo 'bootstrap: FreeBSD C compiler must be Clang' >&2
+                    return 1
+                }
+            printf '%s\n' "$bootstrap_stage3_freebsd_cc"
             ;;
         *)
-            bootstrap_stage3_target_cc=${CC:-cc}
+            # Default arm (Linux and any other non-Windows/Darwin/FreeBSD
+            # host). Clang-only policy (2026-09-24): never fall back to a
+            # bare `cc`/`gcc` default.
+            case "${CC:-}" in
+                *gcc*|*g++*) return 1 ;;
+            esac
+            bootstrap_stage3_target_cc=${CC:-clang}
             bootstrap_stage3_target_cc_path=$(command -v \
                 "$bootstrap_stage3_target_cc" 2>/dev/null) || return 1
             [ -f "$bootstrap_stage3_target_cc_path" ] || return 1
             [ -x "$bootstrap_stage3_target_cc_path" ] || return 1
-            "$bootstrap_stage3_target_cc_path" --version >/dev/null 2>&1 || return 1
+            case "$bootstrap_stage3_target_cc_path" in
+                */gcc|*/gcc-*|*/g++|*/g++-*) return 1 ;;
+            esac
+            "$bootstrap_stage3_target_cc_path" --version 2>/dev/null |
+                grep -qi 'clang version' || {
+                    echo 'bootstrap: C compiler must be Clang' >&2
+                    return 1
+                }
             printf '%s\n' "$bootstrap_stage3_target_cc_path"
             ;;
     esac
@@ -1941,7 +1981,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 return 0
             done
         done
-        bootstrap_stage3_llvm_system_cc=$(command -v cc) || return 1
+        bootstrap_stage3_llvm_system_cc=$(command -v "${CC:-clang}") || return 1
         for bootstrap_stage3_llvm_system_suffix in so dylib a; do
             bootstrap_stage3_llvm_system_candidate=$(
                 env -i PATH="$PATH" LC_ALL=C LANG=C \
@@ -2059,9 +2099,15 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 ;;
             /*)
                 bootstrap_stage3_llvm_system_canonical=$(
-                    bootstrap_stage3_canonical_file \
+                    # Homebrew llvm-config may name a symlink such as
+                    # /opt/homebrew/lib/libz3.dylib. Bind the physical bytes
+                    # while retaining the requested linker token above.
+                    bootstrap_stage3_resolve_symlinks \
                         "$bootstrap_stage3_llvm_system_token"
-                ) || return 1
+                ) || {
+                    echo "llvm authority: cannot resolve absolute system library: ${bootstrap_stage3_llvm_system_token}" >&2
+                    return 1
+                }
                 printf 'llvm-system-lib-%s-path=%s\n' \
                     "$bootstrap_stage3_llvm_key" \
                     "$bootstrap_stage3_llvm_system_canonical"
@@ -2133,7 +2179,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                     # what actually linked -- the same guarantee as the
                     # MSVC/LIB branch, for hosts without an MSVC SDK.
                     bootstrap_stage3_llvm_gnu_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
-                    bootstrap_stage3_llvm_gnu_resolved=$(gcc -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
+                    bootstrap_stage3_llvm_gnu_resolved=$("${CC_x86_64_pc_windows_gnu:-clang}" --target=x86_64-w64-windows-gnu -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
                     case "$bootstrap_stage3_llvm_gnu_resolved" in
                         /*|[A-Za-z]:[\\/]*)
                             # gcc answers with a native Windows path, which
@@ -2257,22 +2303,19 @@ bootstrap_stage3_tool_authority_snapshot() (
     ) || return 1
     [ -n "$bootstrap_stage3_real_rustc" ] &&
         [ -n "$bootstrap_stage3_real_cargo" ] || return 1
-    bootstrap_stage3_tool_c_name=cc
-    # Unix hosts bind their cc command. Both Windows ABIs must use the same
-    # target C-driver owner as the Rust build. The requested-path helper
-    # consumes this exact selected identity.
-    bootstrap_stage3_tool_c_path=$(command -v cc 2>/dev/null || printf '')
-    case "$(bootstrap_stage3_host_platform)" in
-        *-pc-windows-msvc|*-pc-windows-gnu|*-apple-darwin)
-            bootstrap_stage3_tool_c_path=$(
-                bootstrap_stage3_target_c_compiler \
-                    "$(bootstrap_stage3_host_platform)"
-            ) || return 1
-            bootstrap_stage3_tool_c_name=$(basename \
-                "$bootstrap_stage3_tool_c_path")
-            bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
-            ;;
-    esac
+    # Clang-only policy (2026-09-24): every host, not only Windows/macOS,
+    # resolves its C driver through bootstrap_stage3_target_c_compiler so
+    # the same clang-vs-gcc admission applies uniformly. (bootstrap_stage3_
+    # tool_c_name is set below from the resolved path's basename; the
+    # earlier unconditional `=clang` pre-assignment here was dead code,
+    # always overwritten by that basename assignment.)
+    bootstrap_stage3_tool_c_path=$(
+        bootstrap_stage3_target_c_compiler \
+            "$(bootstrap_stage3_host_platform)"
+    ) || return 1
+    bootstrap_stage3_tool_c_name=$(basename \
+        "$bootstrap_stage3_tool_c_path")
+    bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
     bootstrap_stage3_hash_tool=""
     for bootstrap_stage3_hash_candidate in \
         sha256sum shasum sha256 openssl; do
@@ -2282,8 +2325,13 @@ bootstrap_stage3_tool_authority_snapshot() (
         fi
     done
     [ -n "$bootstrap_stage3_hash_tool" ] || return 1
+    # Clang-only policy (2026-09-24): bootstrap_stage3_tool_c_name now always
+    # resolves to the admitted Clang driver's own basename (clang, clang-cl,
+    # clang.exe, ...), so a separate literal "clang" entry here would request
+    # the same path twice -- and the receipt writer below rejects a
+    # duplicate path (receipt.duplicate-path). Dropped as redundant.
     for bootstrap_stage3_tool_name in \
-        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file cmp \
+        cargo rustc "$bootstrap_stage3_tool_c_name" ld ar ranlib sh env perl sed file cmp \
         "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
@@ -4173,6 +4221,31 @@ public static class Stage3MaterializedConsumer {
     // Shared by HEAD and the physical walk: 137461 + 176143 entries at the
     // admitted source state. 400000 leaves bounded growth without bypassing
     // the command-output, byte, or 28-second watchdog ceilings.
+    // Ceiling for HEAD + physical-walk entries, cumulative across both.
+    //
+    // DO NOT raise this to accommodate a large working tree without first
+    // bounding handle retention below. Measured 2026-09-25 on a 15.7 GB host:
+    // a post-build tree walks 138,273 tracked + 355,042 physical = ~493k
+    // entries and trips bound.entries here, because the earlier figure in this
+    // comment ("137461 + 176143") was measured on a CLEAN checkout and the
+    // physical half more than doubles once build/c/, .simple/storage/ and
+    // src/compiler_rust/target/ exist.
+    //
+    // Raising the ceiling to 1,000,000 was tried and REVERTED: the walk holds
+    // an open handle per entry (held.Add(...) on every Open below), so letting
+    // it run to ~493k entries got the whole bootstrap OOM-killed by the OS
+    // instead of failing here. A clean fail-closed bound.entries is strictly
+    // more useful than a kill, so this limit stays where it is until the
+    // retention is bounded or ignored caches are excluded from the walk.
+    // See doc/08_tracking/bug/stage3_walk_retains_handle_per_entry_2026-09-25.md
+    //
+    // Workaround for a host that trips it: remove the regenerable cargo cache
+    // (build/c/ alone was 119,089 of those entries; deleting it brought the
+    // total to 374,415 and the audit ran). Note also that Budget() passes this
+    // value to Number() as the MAXIMUM, so BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES can
+    // only ever LOWER it; a larger value throws metadata.number while the
+    // static fields initialize, surfacing as the opaque "The type initializer
+    // for 'Stage3MaterializedConsumer' threw an exception."
     static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 400000);
     // Inventory is separate from the cumulative HEAD/physical count; retain
     // its previous per-list ceiling and handle-retention bound.
@@ -4417,7 +4490,27 @@ public static class Stage3MaterializedConsumer {
         if ((Tag(expected).Attributes & 0x450) != 0x10) throw new IOException("authority.generation-kind");
         var raw = Open(link, true, 0); held.Add(raw);
         var tag = Tag(raw);
-        if ((tag.Attributes & 0x450) != 0x410 || tag.Tag != 0xA000000Cu)
+        // The compatibility pointer is accepted as EITHER reparse kind:
+        // 0xA000000C IO_REPARSE_TAG_SYMLINK (created on POSIX, and on Windows
+        // sessions that hold SeCreateSymbolicLinkPrivilege) or 0xA0000003
+        // IO_REPARSE_TAG_MOUNT_POINT, a directory junction. Windows creates the
+        // junction form deliberately: bootstrap_stage3_create_compatibility_link
+        // above, and the publisher, both use `mklink /J` there because a normal
+        // Windows session's UAC-filtered token does not carry that privilege,
+        // and a junction preserves the directory-only compatibility ABI.
+        // Accepting only the symlink tag rejected every pointer this repo
+        // actually creates on Windows -- including the one its own recovery
+        // path builds -- which is why phase-1 preflight failed with
+        // authority.link-tag on an unelevated host.
+        //
+        // This does NOT weaken the proof. The attribute mask still demands a
+        // directory reparse point (0x410), and authority.link-target below is
+        // what actually binds the pointer to the intended generation: it
+        // compares the OPENED target's volume + file index against the
+        // generation directory's, so a pointer aimed anywhere else fails
+        // regardless of which reparse tag carried it.
+        if ((tag.Attributes & 0x450) != 0x410 ||
+            (tag.Tag != 0xA000000Cu && tag.Tag != 0xA0000003u))
             throw new IOException("authority.link-tag");
         var actual = Open(link, false, 0); held.Add(actual);
         var x = Identity(actual); var y = Identity(expected);
@@ -4452,8 +4545,23 @@ public static class Stage3MaterializedConsumer {
                 if (!cases.Add(relative)) throw new IOException("path.case-collision");
                 if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) {
                     string parent = relative.Substring(0, relative.Length - 5);
-                    if (!gitlinks.ContainsKey(parent) || relative != parent + "/.git") throw new IOException("path.nested-repository");
-                    continue;
+                    // A registered submodule gitlink carries its own nested
+                    // repository; the walk records it and never descends.
+                    if (gitlinks.ContainsKey(parent) && relative == parent + "/.git") continue;
+                    // A nested repository inside a git-IGNORED subtree is
+                    // FOREIGN content -- an experiment clone under a scratch or
+                    // output directory -- not smuggling of the source tree, so
+                    // it cannot affect what this audit is binding. Excuse it;
+                    // every other unregistered .git still fails closed.
+                    //
+                    // IsGitIgnored() was written for exactly this and had no
+                    // caller at all, so the audit rejected any host that kept a
+                    // clone under an ignored path (measured: an 87 MB glslang
+                    // checkout under an ignored scratch_fx/ aborted phase-1
+                    // preflight with path.nested-repository, having survived
+                    // every other check).
+                    if (IsGitIgnored(root, relative)) continue;
+                    throw new IOException("path.nested-repository");
                 }
                 var raw = Open(item, true, 0); held.Add(raw);
                 {

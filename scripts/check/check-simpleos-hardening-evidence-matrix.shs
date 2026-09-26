@@ -4,6 +4,8 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 . "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
+SIMPLE_WORKTREE_STORAGE_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT:-$ROOT_DIR/.simple/storage}"
+export SIMPLE_WORKTREE_STORAGE_ROOT
 
 BUILD_DIR="${BUILD_DIR:-build/simpleos_hardening_evidence_matrix}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_hardening_evidence_matrix_$(date -u +%F).md}"
@@ -115,6 +117,7 @@ contains() {
 OWNED_MATRIX_KEYS="
 status reason passed executable_launch_from_fs ssh_shell_smf_and_exec
 blocked_rows recovery_hints stale_reports stale_report_names
+compiler_selection_status compiler_selection_log
 formal_lean_proofs formal_lean_proofs_log formal_riscv_dual_track
 formal_riscv_dual_track_log formal_critical_concurrency
 formal_critical_concurrency_log formal_memory_safety
@@ -210,18 +213,10 @@ file_size() {
 
 resolve_simple_bin() {
     if [ -n "${SIMPLE_BIN:-}" ]; then
-        echo "$SIMPLE_BIN"
-        return 0
+        SIMPLE_BUILD_COMPILER="$SIMPLE_BIN" simple_compiler_select --root "$ROOT_DIR" --quiet
+    else
+        simple_compiler_select --root "$ROOT_DIR" --quiet
     fi
-    # Was a first-match-wins loop that accepted on bare `-x` (fail-open: takes
-    # the first executable, including a seed or a cross-target payload). Now
-    # delegates to the shared positive-capability probe.
-    _rsb_sel="$(simple_compiler_select --root "$ROOT_DIR" --quiet 2>/dev/null || true)"
-    if [ -n "$_rsb_sel" ]; then
-        echo "$_rsb_sel"
-        return 0
-    fi
-    echo "bin/simple"
 }
 
 pass_fail() {
@@ -501,8 +496,15 @@ fi
 # (see riscv_rtl_sby_proof / async hardening evidence checkers for the same
 # lesson); re-derive pass/fail from the printed "Passed: N" / "Failed: N"
 # summary instead.
-SIMPLE_BIN="$(resolve_simple_bin)"
-if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+compiler_selection_status=fail
+compiler_selection_log="$BUILD_DIR/compiler_selection.log"
+if selected_simple_bin="$(resolve_simple_bin 2>"$compiler_selection_log")"; then
+    SIMPLE_BIN="$selected_simple_bin"
+    compiler_selection_status=pass
+else
+    SIMPLE_BIN=
+fi
+if [ "$compiler_selection_status" = pass ] && command -v qemu-system-x86_64 >/dev/null 2>&1; then
     set +e
     SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 "$SIMPLE_BIN" test "$qemu_scheduler_smp_handoff_gate" --mode=interpreter --clean --timeout 240 --sequential >"$qemu_scheduler_smp_handoff_log" 2>&1
     set -e
@@ -513,8 +515,8 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1; then
     set -e
     qemu_scheduler_hw_handoff_status="$(sspec_summary_status "$qemu_scheduler_hw_handoff_log")"
 else
-    echo "qemu-system-x86_64 missing; live QEMU scheduler/AP handoff evidence not executed" >"$qemu_scheduler_smp_handoff_log"
-    echo "qemu-system-x86_64 missing; live QEMU final hardware handoff evidence not executed" >"$qemu_scheduler_hw_handoff_log"
+    echo "admitted Simple compiler or qemu-system-x86_64 missing; live QEMU scheduler/AP handoff evidence not executed" >"$qemu_scheduler_smp_handoff_log"
+    echo "admitted Simple compiler or qemu-system-x86_64 missing; live QEMU final hardware handoff evidence not executed" >"$qemu_scheduler_hw_handoff_log"
 fi
 
 prereq_out="$BUILD_DIR/mission_critical_prereqs.out"
@@ -840,8 +842,7 @@ if [ -n "$GUI_DIR" ]; then
         && [ "$qemu_mdi_input_before_sha256" != "$qemu_mdi_input_after_sha256" ]; then
         qemu_mdi_input_status=pass
     fi
-    if [ -f "$GUI_DIR/capture.ppm" ]; then
-        SIMPLE_BIN="$(resolve_simple_bin)"
+    if [ -f "$GUI_DIR/capture.ppm" ] && [ "$compiler_selection_status" = pass ]; then
         set +e
         SIMPLEOS_HARDENING_QEMU_MDI_PPM="$GUI_DIR/capture.ppm" "$SIMPLE_BIN" run scripts/check/validate_simpleos_hardening_qemu_mdi_ppm.spl --mode=interpreter >"$qemu_mdi_ppm_anchor_log"
         ppm_validator_code=$?
@@ -959,13 +960,14 @@ add_mission_blocker() {
 }
 
 [ "$status" = pass ] || add_mission_blocker hardening_matrix
+[ "$compiler_selection_status" = pass ] || add_mission_blocker compiler_selection
 [ "$riscv_rtl_sby_proof_status" = pass ] || add_mission_blocker riscv_rtl_sby_proof
 [ "$qemu_scheduler_smp_handoff_status" = pass ] || add_mission_blocker qemu_scheduler_smp_handoff
 [ "$qemu_scheduler_hw_handoff_status" = pass ] || add_mission_blocker qemu_scheduler_hw_handoff
 [ "$mission_critical_prereqs_status" = ready ] || add_mission_blocker mission_critical_prereqs
 [ "$nvme_baremetal_wrapper_coverage_status" = pass ] || add_mission_blocker nvme_baremetal_wrapper_coverage
 [ "$async_library_hardening_status" = pass ] || add_mission_blocker async_library_hardening
-if [ "$status" = fail ] || [ "$riscv_rtl_sby_proof_status" = fail ] || [ "$qemu_scheduler_smp_handoff_status" = fail ] || [ "$qemu_scheduler_hw_handoff_status" = fail ] || [ "$nvme_baremetal_wrapper_coverage_status" = fail ] || [ "$async_library_hardening_status" = fail ]; then
+if [ "$status" = fail ] || [ "$compiler_selection_status" = fail ] || [ "$riscv_rtl_sby_proof_status" = fail ] || [ "$qemu_scheduler_smp_handoff_status" = fail ] || [ "$qemu_scheduler_hw_handoff_status" = fail ] || [ "$nvme_baremetal_wrapper_coverage_status" = fail ] || [ "$async_library_hardening_status" = fail ]; then
     mission_critical_release_status=fail
 fi
 
@@ -976,6 +978,8 @@ fi
     echo "- reason: $reason"
     echo "- mission_critical_release_status: $mission_critical_release_status"
     echo "- mission_critical_release_blockers: $mission_critical_release_blockers"
+    echo "- compiler_selection_status: $compiler_selection_status"
+    echo "- compiler_selection_log: $compiler_selection_log"
     echo "- stale_reports: $stale_reports"
     echo "- stale_report_names: $stale_report_names"
     echo "- mission_critical_release_gate: scripts/check/check-simpleos-mission-critical-release.shs"
@@ -1146,6 +1150,7 @@ echo "simpleos_hardening_matrix_status=$status"
 echo "simpleos_hardening_matrix_reason=$reason"
 echo "simpleos_hardening_mission_critical_release_status=$mission_critical_release_status"
 echo "simpleos_hardening_mission_critical_release_blockers=$mission_critical_release_blockers"
+echo "simpleos_hardening_compiler_selection_status=$compiler_selection_status"
 echo "simpleos_hardening_mission_critical_prereqs_status=$mission_critical_prereqs_status"
 echo "simpleos_hardening_mission_critical_prereqs_missing=$mission_critical_prereqs_missing"
 echo "simpleos_hardening_mission_critical_prereqs_next_action=$mission_critical_prereqs_next_action"

@@ -1,0 +1,289 @@
+#!/bin/sh
+# windows-symlink-privilege.shs
+#
+# Windows bootstrap publish creates its authority compatibility pointer with a
+# REAL native NTFS symlink:
+#
+#     MSYS=winsymlinks:nativestrict ... symlink(...)
+#
+# `nativestrict` fails outright rather than degrading to MSYS's copy emulation
+# -- deliberately, because a copied "link" would silently duplicate an
+# immutable generation instead of pointing at it. Creating a native symlink
+# needs the process token to hold SeCreateSymbolicLinkPrivilege, which a normal
+# non-elevated Windows session does not have. Without it, phase-1 publish fails:
+#
+#     create compatibility: Operation not permitted
+#     error: could not commit immutable Rust authority generation
+#
+# See doc/08_tracking/bug/bootstrap_publish_blocked_windows_native_symlink_privilege_2026-09-07.md
+#
+# CORRECTION (2026-09-25). An earlier version of this header argued that a
+# junction could not substitute for the symlink -- directory-only, absolute
+# target only, indistinguishable from a plain directory, and no
+# rename-over-existing atomicity. That was WRONG for this repo, and the
+# repo itself is the counter-example: bootstrap_stage3_create_compatibility_link
+# (scripts/check/lib/bootstrap-stage3/authority.shs) has always created this
+# very pointer with `mklink /J` on MINGW/MSYS/CYGWIN, resolving the target to an
+# absolute path with cygpath, proving it with `fsutil reparsepoint query`, and
+# letting the caller rename the reparse point into place atomically. Every
+# objection above was already solved there.
+#
+# The real defect was narrower: TWO implementations of the same pointer
+# disagreed. The recovery path used the unprivileged junction; the fresh-publish
+# path (bootstrap-authority-generation-publish.pl) used perl symlink() under
+# nativestrict and therefore needed the privilege. The publisher now uses the
+# junction on Windows too, so an unelevated phase-1 publish completes. POSIX is
+# unchanged: a real symlink with a relative target.
+#
+# This script remains useful for DIAGNOSIS -- `check` still answers whether this
+# session could create a native symlink, which other lanes and `nativestrict`
+# call sites still depend on -- and `run` remains the way to re-run something
+# elevated. It is no longer the only route past the publish step.
+#
+# Modes:
+#   check          Probe whether THIS session can create a native symlink.
+#                  Changes nothing. The probe CREATES one and reads it back --
+#                  a privilege named in a token that the filesystem then
+#                  refuses is not evidence.
+#   run -- CMD...  Re-run CMD in an ELEVATED shell (one UAC prompt), whose
+#                  token does carry the privilege. Output goes to a log,
+#                  because Start-Process -Verb RunAs cannot redirect streams;
+#                  the elevated job redirects its own output instead.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — ...   exit 0
+#   FAIL  — ...   exit 1
+#   ERROR — ...   exit 2  (nothing was checked / could not run)
+#
+# Usage:
+#   sh scripts/setup/windows-symlink-privilege.shs check
+#   sh scripts/setup/windows-symlink-privilege.shs run -- sh scripts/bootstrap/run-phase1-local.shs
+#   sh scripts/setup/windows-symlink-privilege.shs --log /abs/path.log run -- CMD...
+#   sh scripts/setup/windows-symlink-privilege.shs --selftest
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+fail_error() {
+    echo "windows-symlink-privilege: $1" >&2
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+
+require_windows() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MINGW*|MSYS*|CYGWIN*) ;;
+        *) fail_error "not a Windows host; this privilege only exists on Windows" ;;
+    esac
+}
+
+# probe_native_symlink [DIR]
+#   0 = a real native symlink was created AND read back as a link
+#   1 = refused (no privilege)
+#   2 = could not run the probe at all (never reported as a pass)
+probe_native_symlink() {
+    _psl_dir=${1:-}
+    _psl_cleanup=0
+    if [ -z "$_psl_dir" ]; then
+        _psl_dir=$(mktemp -d 2>/dev/null) || return 2
+        _psl_cleanup=1
+    fi
+    [ -d "$_psl_dir" ] || return 2
+    _psl_target="$_psl_dir/.symlink-probe-target.$$"
+    _psl_link="$_psl_dir/.symlink-probe-link.$$"
+    : > "$_psl_target" 2>/dev/null || return 2
+    MSYS="${MSYS:+${MSYS} }winsymlinks:nativestrict" \
+        perl -e 'symlink($ARGV[0], $ARGV[1]) or exit 1; exit 0' \
+        "$_psl_target" "$_psl_link" 2>/dev/null
+    _psl_rc=$?
+    # An emulated "symlink" is a copy. Require it to read back AS a link.
+    if [ "$_psl_rc" -eq 0 ] && [ ! -L "$_psl_link" ]; then
+        _psl_rc=1
+    fi
+    rm -f "$_psl_link" "$_psl_target" 2>/dev/null || :
+    if [ "$_psl_cleanup" -eq 1 ]; then
+        rmdir "$_psl_dir" 2>/dev/null || :
+    fi
+    return "$_psl_rc"
+}
+
+mode=""
+log_path=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --log)
+            shift
+            [ "$#" -ge 1 ] || fail_error "--log needs a path"
+            log_path=$1
+            ;;
+        --selftest) mode=selftest ;;
+        check) mode=check ;;
+        run)
+            mode=run
+            shift
+            # Accept both `run CMD...` and `run -- CMD...`; a literal
+            # `--` must not become argv[0] of the elevated command.
+            [ "${1:-}" = "--" ] && shift
+            break
+            ;;
+        *) fail_error "unknown argument: $1" ;;
+    esac
+    shift
+done
+[ -n "$mode" ] || fail_error "no mode given (check | run -- CMD... | --selftest)"
+
+if [ "$mode" = selftest ]; then
+    require_windows
+    probe_native_symlink >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0|1) echo "ok - (a) probe returns a definite verdict (rc=$rc)" ;;
+        *)
+            echo "not ok - (a) probe returned $rc, neither created nor refused"
+            echo "FAIL — 1 check performed, selftest failed"
+            exit 1
+            ;;
+    esac
+    probe_native_symlink "/nonexistent-probe-dir-$$" >/dev/null 2>&1
+    if [ "$?" -ne 2 ]; then
+        echo "not ok - (b) a probe with no usable directory did not report ERROR"
+        echo "FAIL — 2 check(s) performed, selftest failed"
+        exit 1
+    fi
+    echo "ok - (b) unusable directory is ERROR, never a pass"
+
+    # (c) The junction route the authority publisher uses on Windows must work
+    # WITHOUT any privilege, and must still reject a non-reparse-point. This is
+    # the runnable check for the unelevated publish path: mklink /J at a private
+    # temporary name -> prove it is a reparse point -> prove it resolves to the
+    # intended target -> atomic rename into place. If this goes red, an
+    # unelevated phase-1 publish is broken again.
+    _st_root=$(mktemp -d 2>/dev/null) || { echo "not ok - (c) no temp dir"; echo "FAIL — 3 check(s) performed, selftest failed"; exit 1; }
+    _st_fail=0
+    mkdir -p "$_st_root/control/generations/gen-probe" || _st_fail=1
+    : > "$_st_root/control/generations/gen-probe/payload" || _st_fail=1
+    _st_link="$_st_root/control/.compat.probe"
+    if [ "$_st_fail" -eq 0 ]; then
+        _st_link_win=$(cygpath -w "$_st_link" 2>/dev/null) || _st_fail=1
+        _st_target_win=$(cygpath -w "$_st_root/control/generations/gen-probe" 2>/dev/null) || _st_fail=1
+    fi
+    if [ "$_st_fail" -eq 0 ]; then
+        cmd.exe //d //c mklink //J "$_st_link_win" "$_st_target_win" >/dev/null 2>&1 || _st_fail=1
+    fi
+    if [ "$_st_fail" -eq 0 ]; then
+        fsutil.exe reparsepoint query "$_st_link_win" >/dev/null 2>&1 || _st_fail=1
+        [ -f "$_st_link/payload" ] || _st_fail=1
+        mv "$_st_link" "$_st_root/control/bootstrap" 2>/dev/null || _st_fail=1
+        [ -f "$_st_root/control/bootstrap/payload" ] || _st_fail=1
+    fi
+    # Negative control: a plain directory must NOT read as a reparse point, so
+    # the publisher's verification cannot be satisfied by an ordinary mkdir.
+    if [ "$_st_fail" -eq 0 ]; then
+        mkdir -p "$_st_root/control/plain" || _st_fail=1
+        _st_plain_win=$(cygpath -w "$_st_root/control/plain" 2>/dev/null) || _st_fail=1
+        if fsutil.exe reparsepoint query "$_st_plain_win" >/dev/null 2>&1; then
+            echo "not ok - (c) a plain directory was accepted as a reparse point"
+            _st_fail=1
+        fi
+    fi
+    chmod -R u+w "$_st_root" 2>/dev/null || :
+    rm -rf "$_st_root" 2>/dev/null || :
+    if [ "$_st_fail" -ne 0 ]; then
+        echo "not ok - (c) unprivileged junction route is broken"
+        echo "FAIL — 3 check(s) performed, selftest failed"
+        exit 1
+    fi
+    echo "ok - (c) unprivileged junction route works and rejects a plain directory"
+    echo "PASS — 3 check(s) performed, selftest green"
+    exit 0
+fi
+
+require_windows
+command -v perl >/dev/null 2>&1 || fail_error "perl not found; it ships with Git Bash"
+
+if [ "$mode" = check ]; then
+    probe_dir="$repo_root/src/compiler_rust/target"
+    [ -d "$probe_dir" ] || probe_dir="$repo_root"
+    probe_native_symlink "$probe_dir"
+    rc=$?
+    [ "$rc" -eq 2 ] && fail_error "could not run the probe in $probe_dir"
+    if [ "$rc" -eq 0 ]; then
+        echo "native symlink: created in $probe_dir and read back as a link"
+        echo "PASS — 1 probe performed, this session can create native symlinks"
+        exit 0
+    fi
+    echo "native symlink: refused in $probe_dir (Operation not permitted)" >&2
+    echo "this session's token lacks SeCreateSymbolicLinkPrivilege; re-run elevated:" >&2
+    echo "  sh $0 run -- sh scripts/bootstrap/run-phase1-local.shs" >&2
+    echo "FAIL — 1 probe performed, native symlink refused in this session"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# mode = run
+# ---------------------------------------------------------------------------
+[ "$#" -ge 1 ] || fail_error "run needs a command after --"
+command -v powershell.exe >/dev/null 2>&1 || fail_error "powershell.exe not found"
+command -v cygpath >/dev/null 2>&1 || fail_error "cygpath not found; run from Git Bash"
+
+elevated_dir="$repo_root/build/elevated"
+mkdir -p "$elevated_dir" || fail_error "cannot create $elevated_dir"
+[ -n "$log_path" ] || log_path="$elevated_dir/elevated.$$.log"
+mkdir -p "$(dirname -- "$log_path")" || fail_error "cannot create the log directory"
+
+job="$elevated_dir/job.$$.sh"
+status_file="$elevated_dir/status.$$"
+
+# Quote each argument for the inner `sh -c`, so spaces and quotes survive the
+# trip through PowerShell's argument list.
+inner=""
+for a in "$@"; do
+    inner="${inner:+$inner }'$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+done
+
+# The elevated job redirects its OWN output and records its OWN exit status:
+# Start-Process -Verb RunAs refuses -RedirectStandardOutput, and an elevated
+# console that closes would otherwise leave no evidence that anything ran.
+{
+    echo '#!/bin/sh'
+    echo "cd '$repo_root' || exit 2"
+    echo "exec > '$log_path' 2>&1"
+    echo "$inner"
+    echo "printf '%s' \"\$?\" > '$status_file'"
+} > "$job" || fail_error "cannot write the elevated job script"
+
+job_win=$(cygpath -w "$job") || fail_error "cygpath failed on the job script"
+bash_bin=$(command -v bash) || fail_error "bash not found"
+bash_win=$(cygpath -w "$bash_bin") || fail_error "cygpath failed on bash"
+
+echo "requesting elevation (UAC) for: $inner"
+echo "elevated output -> $log_path"
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+    "\$ErrorActionPreference='Stop'; try { \$p = Start-Process -FilePath '$bash_win' -ArgumentList '$job_win' -Verb RunAs -Wait -PassThru; exit \$p.ExitCode } catch { [Console]::Error.WriteLine(\$_.Exception.Message); exit 3 }"
+ps_rc=$?
+
+job_rc=""
+[ -f "$status_file" ] && job_rc=$(cat "$status_file" 2>/dev/null)
+rm -f "$job" "$status_file" 2>/dev/null || :
+
+if [ "$ps_rc" -eq 3 ]; then
+    echo "elevation was refused or failed (UAC declined?)" >&2
+    echo "ERROR — nothing was checked (elevation not granted)"
+    exit 2
+fi
+if [ -z "$job_rc" ]; then
+    echo "the elevated job recorded no exit status; see $log_path" >&2
+    echo "ERROR — nothing was checked (elevated job status missing)"
+    exit 2
+fi
+
+echo "elevated command exit status: $job_rc"
+tail -5 "$log_path" 2>/dev/null || :
+if [ "$job_rc" -eq 0 ]; then
+    echo "PASS — 1 elevated command run, exit 0 (log: $log_path)"
+    exit 0
+fi
+echo "FAIL — 1 elevated command run, exit $job_rc (log: $log_path)"
+exit 1

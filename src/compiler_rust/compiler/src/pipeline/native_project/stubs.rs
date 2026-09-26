@@ -7,7 +7,7 @@ use simple_common::target::TargetOS;
 use super::{effective_target, ModuleImports};
 use super::tools::{
     archive_create_command, find_archive_tool, find_c_compiler, find_runtime_library,
-    is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
+    external_tool_path, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
 };
 
 pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
@@ -531,7 +531,7 @@ pub(crate) fn generate_stub_object_freestanding(
     use std::collections::{BTreeSet, HashSet};
 
     fn scan_nm_defined_undefined(path: &Path) -> Option<(HashSet<String>, BTreeSet<String>)> {
-        let output = nm_command().arg("-g").arg("-p").arg(path).output().ok()?;
+        let output = nm_command().ok()?.arg("-g").arg("-p").arg(external_tool_path(path)).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -930,10 +930,10 @@ pub(crate) fn generate_stub_object(
     };
 
     for path in &scan_paths {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
-            .arg(path)
+            .arg(external_tool_path(path))
             .output()
             .map_err(|e| format!("nm: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -962,10 +962,10 @@ pub(crate) fn generate_stub_object(
         selected_runtime_libs.to_vec()
     };
     for rt_path in runtime_libs {
-        let output = nm_command()
+        let output = nm_command()?
             .arg("-g")
             .arg("-p")
-            .arg(rt_path)
+            .arg(external_tool_path(rt_path))
             .output()
             .map_err(|e| format!("nm runtime: {e}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -986,11 +986,11 @@ pub(crate) fn generate_stub_object(
     let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
     for lib_path in &plat_config.system_scan_libs {
         if std::path::Path::new(lib_path).exists() {
-            let mut nm_cmd = nm_command();
+            let mut nm_cmd = nm_command()?;
             for flag in &plat_config.nm_flags {
                 nm_cmd.arg(flag);
             }
-            nm_cmd.arg(lib_path);
+            nm_cmd.arg(external_tool_path(lib_path));
             if let Ok(output) = nm_cmd.output() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
@@ -1344,7 +1344,7 @@ the old fabricating behaviour.",
                 return Err("strict Windows compatibility aliases produced no COFF members".to_string());
             }
             let archive = temp_dir.join("_compat_aliases.lib");
-            let archive_tool = find_archive_tool();
+            let archive_tool = find_archive_tool()?;
             // `lib.exe`/`llvm-lib` receive object paths directly.  Bound each
             // invocation by its encoded Windows command-line length, not a
             // member count: 128 generated paths can exceed CreateProcess'
@@ -1411,7 +1411,10 @@ the old fabricating behaviour.",
         std::fs::write(&stub_c, &c_code).map_err(|e| format!("write stubs: {e}"))?;
 
         let stub_o = temp_dir.join("_stubs.o");
-        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "gcc".to_string());
+        // GNU-style driver flags and `__asm__` labels below: clang's GNU
+        // driver, never gcc (clang-only toolchain). Fail fast if it is absent.
+        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        simple_common::platform::cc_detect::require_compiler(&stub_cc)?;
         let output = std::process::Command::new(&stub_cc)
             .arg("-c")
             .arg("-ffunction-sections")
@@ -1519,6 +1522,150 @@ the old fabricating behaviour.",
         }
 
         Ok(stub_o)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows undefined-symbol stub parity (MSVC ABI, lld-link)
+//
+// ELF links resolve undefined symbols AFTER `--gc-sections` (the LLVM backend
+// gives every body its own ELF section), so a reference made only by
+// unreachable code is dropped with that code and never reported. lld-link
+// reports every undefined symbol BEFORE `/OPT:REF`, and Simple's COFF bodies
+// are not COMDAT (most are `weak`, and a weak COMDAT would stop a strong
+// definition from overriding them), so the same object set fails on Windows.
+// Owner decision 2026-09-25 ("parity now, fix later"): after a strict link
+// fails on undefined symbols, relink once with trap stubs for exactly those
+// names. Differences from ELF, tracked in
+// doc/08_tracking/bug/windows_stage2_cli_stubbed_symbols_2026-09-25.md: ELF
+// still rejects an unresolved reference from REACHABLE code at link time;
+// here it links and the stub prints its name and aborts when called.
+// Rust std/alloc internals are never stubbed.
+// ---------------------------------------------------------------------------
+
+/// Undefined symbol names reported by an lld-link run (`undefined symbol: X`).
+pub(crate) fn lld_link_undefined_symbols(diagnostics: &str) -> Vec<String> {
+    let mut names: Vec<String> = diagnostics
+        .lines()
+        .filter_map(|line| line.split("undefined symbol: ").nth(1))
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// True when `name` is a (demangled) Rust standard-library / allocator
+/// internal. Those must be resolved by linking the matching std, never stubbed.
+pub(crate) fn is_rust_internal_symbol(name: &str) -> bool {
+    const RUST_CRATES: [&str; 6] = ["std::", "core::", "alloc::", "hashbrown::", "__rustc::", "compiler_builtins::"];
+    name.contains('<')
+        || name.contains(' ')
+        || name.starts_with("_ZN")
+        || name.starts_with("_R")
+        || name.starts_with("__rust_")
+        || RUST_CRATES.iter().any(|krate| name.starts_with(krate))
+}
+
+/// True when `name` can be the asm label of a C stub definition.
+fn is_coff_stub_label(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$' | ':'))
+}
+
+/// C source for trap stubs: each named symbol, if ever called, prints its name
+/// and aborts. `/Gy` gives each stub its own COMDAT so the linker can drop
+/// stubs nothing references.
+pub(crate) fn coff_gc_parity_stub_source(names: &[String]) -> Result<String, String> {
+    let mut source = String::from(
+        "/* Generated: Windows undefined-symbol trap stubs. See stubs.rs. */\n\
+         #include <stdio.h>\n\
+         #include <stdlib.h>\n\
+         static __declspec(noinline) void spl_unresolved_symbol_trap(const char* name) {\n\
+         \x20   fprintf(stderr, \"fatal: called unresolved symbol `%s` (stubbed for link only)\\n\", name);\n\
+         \x20   fflush(stderr);\n\
+         \x20   abort();\n\
+         }\n",
+    );
+    for (index, name) in names.iter().enumerate() {
+        if !is_coff_stub_label(name) {
+            return Err(format!("cannot stub unresolved symbol with non-label name `{name}`"));
+        }
+        source.push_str(&format!(
+            "long long spl_gc_parity_stub_{index}(void) __asm__(\"{name}\");\n\
+             long long spl_gc_parity_stub_{index}(void) {{ spl_unresolved_symbol_trap(\"{name}\"); return 0; }}\n"
+        ));
+    }
+    Ok(source)
+}
+
+/// Compile the trap stubs with clang-cl (MSVC ABI). Fails fast if clang-cl is
+/// not installed.
+pub(crate) fn compile_coff_gc_parity_stubs(temp_dir: &Path, names: &[String]) -> Result<PathBuf, String> {
+    let source = coff_gc_parity_stub_source(names)?;
+    let stub_c = temp_dir.join("_gc_parity_stubs.c");
+    let stub_o = temp_dir.join("_gc_parity_stubs.obj");
+    std::fs::write(&stub_c, source).map_err(|e| format!("write {}: {e}", stub_c.display()))?;
+    let cc = "clang-cl";
+    simple_common::platform::cc_detect::require_compiler(cc)?;
+    let output = std::process::Command::new(cc)
+        .arg("/nologo")
+        .arg("/c")
+        .arg("/O1")
+        .arg("/Gy")
+        .arg(format!("/Fo{}", stub_o.display()))
+        .arg(&stub_c)
+        .output()
+        .map_err(|e| format!("compile GC-parity stubs ({cc}): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to compile GC-parity stubs ({cc}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(stub_o)
+}
+
+#[cfg(test)]
+mod coff_gc_parity_tests {
+    use super::*;
+
+    #[test]
+    fn parses_lld_link_undefined_symbols() {
+        let log = "lld-link: error: undefined symbol: rt_cuda_malloc\n>>> referenced by x.o\n\
+                   lld-link: error: undefined symbol: DocBlock::Heading\n\
+                   lld-link: error: undefined symbol: rt_cuda_malloc\n";
+        assert_eq!(
+            lld_link_undefined_symbols(log),
+            vec!["DocBlock::Heading".to_string(), "rt_cuda_malloc".to_string()]
+        );
+    }
+
+    #[test]
+    fn rust_internals_are_never_stub_candidates() {
+        for name in [
+            "std::env::_var_os",
+            "core::option::unwrap_failed",
+            "__rustc::__rust_alloc",
+            "<core::fmt::Formatter>::debug_struct",
+            "_RNvNtCs6DFWowmz9po_4core6option13unwrap_failed",
+        ] {
+            assert!(is_rust_internal_symbol(name), "{name}");
+        }
+        for name in ["rt_cuda_malloc", "DocBlock::Heading", "EditSession._find_doc_index"] {
+            assert!(!is_rust_internal_symbol(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn stub_source_traps_loudly_and_rejects_non_labels() {
+        let source = coff_gc_parity_stub_source(&["rt_x".to_string(), "T.m".to_string()]).unwrap();
+        assert!(source.contains("__asm__(\"rt_x\")") && source.contains("__asm__(\"T.m\")"));
+        assert!(source.contains("abort();") && source.contains("fatal: called unresolved symbol"));
+        assert!(coff_gc_parity_stub_source(&["a b".to_string()]).is_err());
     }
 }
 

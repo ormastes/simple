@@ -102,7 +102,9 @@ pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -
 }
 
 fn archive_has_exact_runtime_members(archive: &Path, inputs: &[&str]) -> bool {
-    let tool = find_archive_tool();
+    let Ok(tool) = find_archive_tool() else {
+        return false;
+    };
     let output = archive_list_command(&tool, archive).output();
     let Ok(output) = output else {
         return false;
@@ -168,9 +170,33 @@ pub(crate) fn find_c_compiler() -> String {
     simple_common::platform::cc_detect::find_c_compiler()
 }
 
-/// Find an archive tool -- delegates to `simple_common::platform::cc_detect`.
-pub(crate) fn find_archive_tool() -> String {
-    simple_common::platform::cc_detect::find_archive_tool()
+/// Error for a required LLVM tool that is not installed. Toolchain policy is
+/// clang/LLVM only and fail-fast: GNU binutils (`nm`, `ar`, `objcopy`) and
+/// MSVC `lib.exe` are never used as silent substitutes -- a fallback to GNU
+/// `nm` is exactly what hid the Windows MAX_PATH object-path bug.
+pub(crate) fn missing_llvm_tool_error(tool: &str) -> String {
+    format!(
+        "required LLVM tool `{tool}` was not found on PATH (clang/LLVM-only toolchain;          GNU binutils and MSVC tools are not used as a fallback).          Install it with: sh scripts/setup/bootstrap-prereqs.shs install"
+    )
+}
+
+/// True when `tool` names an LLVM archiver (`llvm-ar[.exe]` / `llvm-lib[.exe]`).
+fn is_llvm_archive_tool(tool: &str) -> bool {
+    Path::new(tool)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("llvm-ar") || stem.eq_ignore_ascii_case("llvm-lib"))
+}
+
+/// Find the LLVM archive tool. `cc_detect` still probes GNU `ar` / MSVC `lib`
+/// for other consumers; the native build accepts only an LLVM archiver.
+pub(crate) fn find_archive_tool() -> Result<String, String> {
+    let tool = simple_common::platform::cc_detect::find_archive_tool();
+    if is_llvm_archive_tool(&tool) {
+        Ok(tool)
+    } else {
+        Err(missing_llvm_tool_error("llvm-ar"))
+    }
 }
 
 fn is_msvc_archive_tool(tool: &str) -> bool {
@@ -574,7 +600,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     let build_dir_ino_before: u64 = 0;
 
     let cc = target_c_compiler(target);
-    let ar = find_archive_tool();
+    let ar = find_archive_tool().ok()?;
     let obj_ext = host_object_extension();
     let mut objects = Vec::new();
 
@@ -823,6 +849,78 @@ pub(crate) fn runtime_authority_search_dirs(runtime_path: &Path) -> Vec<PathBuf>
     dirs
 }
 
+/// The `rustc version ...` string recorded in an rlib's metadata.
+pub(crate) fn rlib_rustc_version(rlib: &Path) -> Option<String> {
+    let bytes = std::fs::read(rlib).ok()?;
+    let needle = b"rustc version ";
+    let start = bytes.windows(needle.len()).position(|w| w == needle)? + needle.len();
+    let end = bytes[start..].iter().position(|&b| b == b')')? + start + 1;
+    String::from_utf8(bytes[start..end].to_vec()).ok()
+}
+
+/// Build the Rust standard library + allocator shim the hosted runtime rlib
+/// needs when it is linked into a non-Rust (C / Simple) image on Windows.
+///
+/// A bare `.rlib` carries none of its dependencies, and `std`'s
+/// `__rust_alloc` family is only emitted by rustc for a final artifact. Linking
+/// `libspl_hosted_runtime-*.rlib` (whose Windows-only `win32` module uses
+/// `std::sync::Mutex`, `HashMap`, `eprintln!`, ...) therefore left 28 std/core/
+/// alloc internals undefined in the host-gpu full-CLI link. An empty
+/// `staticlib` built by the SAME rustc bundles exactly those crates and the
+/// shim. The compiler must match the rlib byte-for-byte in version, or the
+/// v0-mangled crate hashes differ; a mismatch fails fast.
+pub(crate) fn build_rust_std_shim_for_rlib(rlib: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
+    let wanted = rlib_rustc_version(rlib)
+        .ok_or_else(|| format!("cannot read the rustc version recorded in {}", rlib.display()))?;
+    let dir = temp_dir.join("rust_std_shim");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let source = dir.join("spl_std_shim.rs");
+    std::fs::write(&source, "#![no_std]\nextern crate std;\n#[doc(hidden)]\npub fn spl_std_shim_anchor() {}\n")
+        .map_err(|e| format!("write {}: {e}", source.display()))?;
+    let output = dir.join("spl_std_shim.lib");
+    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    if let Ok(rustc) = std::env::var("RUSTC") {
+        candidates.push((rustc, Vec::new()));
+    }
+    candidates.push(("rustc".to_string(), Vec::new()));
+    candidates.push(("rustc".to_string(), vec!["+nightly".to_string()]));
+    let mut seen = Vec::new();
+    for (program, toolchain) in candidates {
+        let Ok(version) = std::process::Command::new(&program).args(&toolchain).arg("--version").output() else {
+            continue;
+        };
+        let version = String::from_utf8_lossy(&version.stdout).trim().to_string();
+        let version = version.strip_prefix("rustc ").unwrap_or(&version).to_string();
+        if version != wanted {
+            seen.push(format!("{program} {} -> {version}", toolchain.join(" ")));
+            continue;
+        }
+        let status = std::process::Command::new(&program)
+            .args(&toolchain)
+            .args(["--edition", "2021", "--crate-type", "staticlib", "--crate-name", "spl_std_shim"])
+            .args(["-C", "opt-level=3", "-C", "panic=abort", "-C", "codegen-units=1"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&output)
+            .output()
+            .map_err(|e| format!("rustc std shim: {e}"))?;
+        if !status.status.success() {
+            return Err(format!(
+                "failed to build the Rust std shim: {}",
+                String::from_utf8_lossy(&status.stderr)
+            ));
+        }
+        return Ok(output);
+    }
+    Err(format!(
+        "no rustc matching the hosted runtime rlib's compiler ({wanted}) was found; tried: {}. \
+         The rlib's std/core/alloc references are v0-mangled with that compiler's crate hashes. \
+         Install that toolchain or set RUSTC. Install prerequisites with: \
+         sh scripts/setup/bootstrap-prereqs.shs install",
+        seen.join("; ")
+    ))
+}
+
 pub(crate) fn find_hosted_runtime_rlib(runtime_path: &Path) -> Option<PathBuf> {
     runtime_authority_search_dirs(runtime_path)
         .into_iter()
@@ -900,6 +998,28 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
     None
 }
 
+/// Spell a path for an external tool's argv. The native-build cache root is
+/// Windows verbatim (`\\?\C:\...`, see `win_long_path`), so every path under it
+/// inherits that form, but `llvm-nm` rejects it ("invalid argument"). That nm
+/// failure made `read_global_symbols` return no symbols, `generate_init_caller`
+/// found no `__module_init_*`, and the stage-2 binary ran with every module
+/// global null (SEGV in the first registry read). LLVM tools lift MAX_PATH
+/// themselves, so the plain absolute form is safe to pass.
+pub(crate) fn external_tool_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+    #[cfg(windows)]
+    {
+        let raw = path.as_os_str().to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Resolve the `nm`-style symbol-table reader to use for scanning archives and
 /// object files.
 ///
@@ -919,12 +1039,12 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
 ///    `PATH`): `/opt/homebrew/opt/llvm*/bin/llvm-nm`,
 ///    `/usr/local/opt/llvm*/bin/llvm-nm`.
 /// 3. Fall back to plain `nm`.
-pub(super) fn nm_command() -> std::process::Command {
-    static NM_TOOL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub(super) fn nm_command() -> Result<std::process::Command, String> {
+    static NM_TOOL: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     let tool = NM_TOOL.get_or_init(|| {
         if let Ok(path) = std::env::var("SIMPLE_NM") {
             if !path.is_empty() {
-                return PathBuf::from(path);
+                return Some(PathBuf::from(path));
             }
         }
 
@@ -938,23 +1058,56 @@ pub(super) fn nm_command() -> std::process::Command {
             .into_iter()
             .filter_map(|path| llvm_nm_major_version(&path).map(|version| (version, path)))
             .max_by_key(|(version, _)| *version);
-        match best {
-            Some((_, path)) => path,
-            None => PathBuf::from("nm"),
-        }
+        // No plain-`nm` fallback: see missing_llvm_tool_error.
+        best.map(|(_, path)| path)
     });
-    std::process::Command::new(tool)
+    match tool {
+        Some(path) => Ok(std::process::Command::new(path)),
+        None => Err(missing_llvm_tool_error("llvm-nm")),
+    }
 }
 
 fn which_on_path(tool: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(tool);
-        if candidate.is_file() {
-            return Some(candidate);
+        for name in executable_file_names(tool) {
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None
+}
+
+/// File names an executable `tool` can have on disk. On Windows a bare
+/// `llvm-nm` never exists -- the file is `llvm-nm.exe` -- so probing only the
+/// bare name made `nm_command` silently fall back to plain `nm`, which on the
+/// bootstrap PATH is MSYS2's GNU nm. GNU nm cannot open paths longer than
+/// MAX_PATH ("No such file"), which failed the stage-2 full-CLI link on the
+/// deep native-incremental cache; llvm-nm widens long paths itself.
+fn executable_file_names(tool: &str) -> Vec<String> {
+    if cfg!(windows) && !tool.to_ascii_lowercase().ends_with(".exe") {
+        vec![format!("{tool}.exe"), tool.to_string()]
+    } else {
+        vec![tool.to_string()]
+    }
+}
+
+#[cfg(test)]
+mod executable_file_name_tests {
+    use super::executable_file_names;
+
+    #[test]
+    fn windows_probes_the_exe_name_first() {
+        let names = executable_file_names("llvm-nm");
+        if cfg!(windows) {
+            assert_eq!(names, vec!["llvm-nm.exe".to_string(), "llvm-nm".to_string()]);
+        } else {
+            assert_eq!(names, vec!["llvm-nm".to_string()]);
+        }
+        assert_eq!(executable_file_names("llvm-nm.exe"), vec!["llvm-nm.exe".to_string()]);
+    }
 }
 
 fn homebrew_llvm_nm_candidates() -> Vec<PathBuf> {
@@ -994,7 +1147,7 @@ fn llvm_nm_major_version(path: &Path) -> Option<u32> {
 }
 
 pub(super) fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
-    let output = nm_command().arg("-g").arg("--defined-only").arg(path).output();
+    let output = nm_command().ok()?.arg("-g").arg("--defined-only").arg(external_tool_path(path)).output();
     let Ok(output) = output else {
         return None;
     };
@@ -1170,9 +1323,7 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
     {
         return Some("llvm-objcopy".to_string());
     }
-    if std::process::Command::new("objcopy").arg("--version").output().is_ok() {
-        return Some("objcopy".to_string());
-    }
+    // No GNU `objcopy` fallback: see missing_llvm_tool_error.
     None
 }
 
@@ -1198,12 +1349,12 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
     // accept BOTH formats below, so the stage-4 runtime capsule check does
     // not misread Apple weak fallbacks (e.g. rt_heap_live_bytes) as STRONG.
     let output = {
-        let mut cmd = nm_command();
+        let mut cmd = nm_command()?;
         cmd.arg("-g").arg("-p");
         if cfg!(target_os = "macos") {
             cmd.arg("-m");
         }
-        cmd.arg(path).output()
+        cmd.arg(external_tool_path(path)).output()
     }
     .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
@@ -1241,10 +1392,10 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
     // Apple's `nm -m` does report it, as "weak external". Names keep their
     // leading underscore here, matching archive_global_symbols' raw keys.
     if cfg!(target_os = "macos") {
-        let detailed = nm_command()
+        let detailed = nm_command()?
             .arg("-g")
             .arg("-m")
-            .arg(path)
+            .arg(external_tool_path(path))
             .output()
             .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
         if detailed.status.success() {
@@ -1264,10 +1415,10 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
 }
 
 pub(super) fn archive_global_symbols(path: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String>), String> {
-    let output = nm_command()
+    let output = nm_command()?
         .arg("-g")
         .arg("-p")
-        .arg(path)
+        .arg(external_tool_path(path))
         .output()
         .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
     if !output.status.success() {
@@ -1649,11 +1800,11 @@ fn stage4_system_library_path(cc: &str, name: &str) -> Result<PathBuf, String> {
 }
 
 fn stage4_shared_library_definitions(path: &Path) -> Result<BTreeSet<String>, String> {
-    let output = nm_command()
+    let output = nm_command()?
         .arg("-D")
         .arg("-g")
         .arg("--defined-only")
-        .arg(path)
+        .arg(external_tool_path(path))
         .output()
         .map_err(|err| format!("failed to inspect system library {}: {err}", path.display()))?;
     if !output.status.success() {
@@ -1893,7 +2044,7 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
         )
     })?;
     let cc = target_c_compiler(target);
-    let ar = find_archive_tool();
+    let ar = find_archive_tool()?;
     let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
     let mut archives = Vec::new();
 
@@ -2306,7 +2457,7 @@ fn project_stage4_archive_closure(
         std::fs::write(&weaken_path, weaken_text + "\n")
             .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
 
-        let objcopy = find_objcopy_tool().ok_or_else(|| "Stage4 runtime capsule requires objcopy".to_string())?;
+        let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy") + " (Stage4 runtime capsule)")?;
         let localized = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
             .arg(format!("--weaken-symbols={}", weaken_path.display()))
@@ -2386,7 +2537,7 @@ fn project_stage4_archive_closure(
             ));
         }
 
-        let ar = find_archive_tool();
+        let ar = find_archive_tool()?;
         let archived = archive_create_command(&ar, &output, std::slice::from_ref(&localized_object), false, true)
             .output()
             .map_err(|err| format!("failed to execute deterministic archive tool {ar}: {err}"))?;
@@ -2584,7 +2735,7 @@ pub(crate) fn build_compiler_backfill_archive(
         )
         .map_err(|err| format!("failed to write compiler backfill localization list: {err}"))?;
 
-        let objcopy = find_objcopy_tool().ok_or_else(|| "compiler backfill requires objcopy".to_string())?;
+        let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy") + " (compiler backfill)")?;
         let command_output = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
             .arg("--remove-section=.init_array")
@@ -2678,7 +2829,7 @@ pub(crate) fn build_compiler_backfill_archive(
             ));
         }
 
-        let archive_tool = find_archive_tool();
+        let archive_tool = find_archive_tool()?;
         let archive_result = archive_create_command(
             &archive_tool,
             &output,
@@ -2741,9 +2892,10 @@ impl std::fmt::Display for StripError {
         match self {
             StripError::ObjcopyNotFound => write!(
                 f,
-                "[LIM-010] no llvm-objcopy/objcopy was found, so LLVM static constructors could not \
+                "[LIM-010] no llvm-objcopy was found, so LLVM static constructors could not \
                  be removed from the archive. Linking it unstripped re-registers LLVM's CLI options \
-                 twice and segfaults Stage 3 (exit 139). Install LLVM binutils or put objcopy on PATH."
+                 twice and segfaults Stage 3 (exit 139). {}",
+                missing_llvm_tool_error("llvm-objcopy")
             ),
             StripError::ObjcopyFailed { exit_code, stderr } => write!(
                 f,
@@ -3844,4 +3996,27 @@ fn is_known_system_name(name: &str) -> bool {
             | "__isoc23_strtoll"
             | "__isoc23_strtoull"
     )
+}
+
+#[cfg(test)]
+mod llvm_tool_policy_tests {
+    use super::{is_llvm_archive_tool, missing_llvm_tool_error};
+
+    #[test]
+    fn missing_tool_error_names_the_tool_and_the_install_command() {
+        let message = missing_llvm_tool_error("llvm-nm");
+        assert!(message.contains("`llvm-nm`"), "{message}");
+        assert!(message.contains("sh scripts/setup/bootstrap-prereqs.shs install"), "{message}");
+    }
+
+    #[test]
+    fn only_llvm_archivers_are_accepted() {
+        assert!(is_llvm_archive_tool("llvm-ar"));
+        assert!(is_llvm_archive_tool(r"C:\LLVM\bin\llvm-ar.exe"));
+        assert!(is_llvm_archive_tool("/usr/lib/llvm-23/bin/llvm-lib"));
+        assert!(!is_llvm_archive_tool("ar"));
+        assert!(!is_llvm_archive_tool("/usr/bin/ar"));
+        assert!(!is_llvm_archive_tool("lib"));
+        assert!(!is_llvm_archive_tool(r"C:\msys64\mingw64\bin\ar.exe"));
+    }
 }

@@ -40,6 +40,10 @@ Validate each fix with `simple release backport-check` and record:
 
 Apply the commit only on the private work branch, rerun affected tests, and submit by compare-and-swap. Feature commits, ranges, moving branch names, automatic “all fixes” selection, stale review, or pre-application evidence are rejected. Every changed input creates a new candidate attempt and, after publication, a new beta number.
 
+### Release task retry naming
+
+A release task keeps one stable name per release identity, spelled as the full version (`1.0.0-rc.1`, `2.0.0-beta.3`; shorthand `rc1` is the same rule). When a release task fails, the retry appends an incrementing `_N` suffix — `1.0.0-rc.1_1`, `1.0.0-rc.1_2` — as a new `work/release/<full-version>_<N>` branch and worktree at the fetched target SHA. Never re-number the release (`1.0.0-rc.2`) merely because an attempt failed; the prerelease number advances only for a new published release version. The immutable candidate attempt counter (`candidate/vX.Y.Z-rc.N/aNNN`) is independent of the task-name suffix.
+
 ### Periodic main/release convergence
 
 During a long beta or bootstrap qualification run, schedule a bounded read-only fetch-and-compare checkpoint before every candidate attempt, after a bootstrap failure is repaired, and before release admission. `inspect_release_main_convergence` fetches exact remote heads with bounded refspecs, compares at most 256 source-only commits, and verifies that every selected SHA is review-bound, reachable from the source, and not already represented in the target. It must not choose, cherry-pick, merge, or push a fix. Avoid tight polling and do not give the bootstrap worker protected-ref credentials.

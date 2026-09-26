@@ -238,7 +238,7 @@ spec is placed under `doc/06_spec`.
 | Shared parser unification | Legacy frontend remains the oracle; a frontend-owned lazy advisory seam, scalar lexical summaries, and a 22-state transition-table foundation exist. Canonical Simple/SDN/sosh grammar parity and full parser replacement do not. | Foundation implemented; unification incomplete | Differential dialect, malformed-input, incremental, interpolation, indentation, and facade parity |
 | GPU parser/offload | Generic provider/device contracts and owner-scoped packed proof/callback schemas exist. The hosted native ABI now authenticates an exact sealed Linux provider image, issues unguessable bounded session/resource/completion capabilities, pins calls and generations through fence/readback, stages and checksums output before commit, and blocks unload until retained owners drain. No packed parser batch is connected to this substrate; compatibility completion remains routing-only. | Native provider substrate implemented; parser integration incomplete | Authenticated device-program image owner, task-owner bridge, Vulkan parser kernel, physical device readback, and negative control |
 | SIMD optimization of Simple/parser | An authenticated x86-64 SysV AVX2 32-byte equality primitive and lexical mask batch exist; exact bytes executed under QEMU TCG. Scalar code still owns lexical-state resolution; native hardware, Win64, v4, and full-parser execution remain open. | Narrow SIMD kernel implemented; product optimization incomplete | Physical/self-host execution, full ABI/artifact receipts, parity, parser-only packaging, and NFR speedup |
-| Generated JIT/AOT/binary SIMD | Target-codegen contracts and a parser variant build plan separate host and target. Existing AOT is whole-module; parser sibling emission, target-aware JIT materialization, cache V2 implementation, and emitted/executed ISA proof are missing. | Design/contracts in progress | Cache V2 validation, actual sibling artifacts/JIT units, disassembly/metadata checks, callable execution, rollback |
+| Generated JIT/AOT/binary SIMD | Target-codegen contracts and a parser variant build plan separate host and target. Existing AOT is whole-module; parser sibling emission, target-aware JIT materialization, cache V2 implementation, and emitted/executed ISA proof are missing. Native callable release also leaves stale copies able to invoke an unloaded mapping (see `doc/08_tracking/bug/environment_variant_callable_release_lifetime_2026-09-26.md`). | Design/contracts in progress | Cache V2 validation, actual sibling artifacts/JIT units, disassembly/metadata checks, callable execution, rollback, and unique mapping lifetime/revocation evidence |
 
 None of the four workstreams is complete. The native GPU substrate is not a
 parser-execution claim: `FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE` remains false.
@@ -418,11 +418,15 @@ bounded pure-Simple codec now decodes exact `SHT_GROUP` bytes plus
 `sh_link`/`sh_info`, validates member/signature identity and executable-group
 uniqueness, and passes 4/4 focused tests. Actual tool authority remains open.
 
-User decision gate: select the target-ID mapping policy in
-`doc/02_requirements/feature/environment_optimized_dynamic_libraries_options.md`.
-The parser backend join must bind the chosen registry version/digest and a
-canonical named-feature-to-word expansion; it may not compare unrelated text
-and numeric digests or infer equality from the v3 preset name.
+The target-ID mapping decision is recorded as Option B in
+`doc/02_requirements/feature/environment_optimized_dynamic_libraries.md`:
+the repository-owned canonical target-triple registry. Its V1/V2 owners exist.
+The parser variant planner now canonicalizes registered aliases, checks its
+numeric target profile against the selected registry row, and binds the mapping
+generation/digest into artifact and cache identities. Full REQ-015 closure still
+needs registry-bound profile and receipt identities, plus the backend join's
+canonical named-feature-to-word expansion. That join may not compare unrelated
+text and numeric digests or infer equality from the v3 preset name.
 
 Implementation lanes:
 

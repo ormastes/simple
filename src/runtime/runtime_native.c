@@ -67,6 +67,7 @@ typedef SSIZE_T ssize_t;
 #if defined(_WIN32)
 #include <direct.h>
 #include <io.h>
+#include <process.h>
 #include <malloc.h>
 #include <windows.h>
 #include "platform/windows_raw_mapping.h"
@@ -603,16 +604,45 @@ bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t h
     return false;
 }
 
-/* WebGPU backfill (hosted wgpu backend lives in the Rust runtime only).
+/* WebGPU backfill for core-C lanes (the hosted wgpu backend lives in the
+ * Rust runtime only, src/runtime/hosted/webgpu.rs). std.gpu.engine2d.
+ * webgpu_sffi declares these externs; a core-C link with no wgpu provider
+ * must still resolve them (macOS Stage-4, 2026-09-06), fail-closed:
+ * acquisition reports unavailable and teardown has nothing to release.
  *
- * The teardown half was missing: std.gpu.engine2d.webgpu_sffi declares six
- * rt_webgpu_* externs, this file backfilled only is_available/init/
- * create_surface, and a core-C Stage-4 link of any closure reaching that
- * module therefore failed with "requested symbols have no archive owner:
- * rt_webgpu_destroy_surface, rt_webgpu_shutdown" (macOS, 2026-09-06).
- * Same fail-closed contract as the three above: this lane has no wgpu
- * provider, so acquisition already returns unavailable and teardown has
- * nothing to release. */
+ * COFF (MSVC ABI) has no ELF weak / -z muldefs equivalent, and lld-link binds
+ * an undefined symbol to the FIRST archive on the line that defines it. In the
+ * Windows host-gpu link the core-C lib precedes the hosted rlib, so plain
+ * definitions here (or in a separate member) won and then collided with the
+ * rlib's real ones (bootstrap28/29). On the MSVC ABI the backfill therefore
+ * has private names plus /alternatename defaults: the linker binds
+ * rt_webgpu_* to the backfill ONLY when nothing else supplies them,
+ * regardless of link order. Verified with lld-link: core-only archive ->
+ * backfill; core before/after a real provider -> real, no duplicate. Every
+ * other target keeps plain definitions. */
+#if defined(_MSC_VER)
+bool rt_webgpu_is_available__core_c_backfill(void) { return false; }
+bool rt_webgpu_init__core_c_backfill(void) { return false; }
+int64_t rt_webgpu_create_surface__core_c_backfill(int32_t width, int32_t height) {
+    (void)width; (void)height;
+    return 0;
+}
+bool rt_webgpu_shutdown__core_c_backfill(void) { return false; }
+bool rt_webgpu_destroy_surface__core_c_backfill(int64_t handle) { (void)handle; return false; }
+#if defined(_M_IX86)
+#pragma comment(linker, "/alternatename:_rt_webgpu_is_available=_rt_webgpu_is_available__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_init=_rt_webgpu_init__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_create_surface=_rt_webgpu_create_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_shutdown=_rt_webgpu_shutdown__core_c_backfill")
+#pragma comment(linker, "/alternatename:_rt_webgpu_destroy_surface=_rt_webgpu_destroy_surface__core_c_backfill")
+#else
+#pragma comment(linker, "/alternatename:rt_webgpu_is_available=rt_webgpu_is_available__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_init=rt_webgpu_init__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_create_surface=rt_webgpu_create_surface__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_shutdown=rt_webgpu_shutdown__core_c_backfill")
+#pragma comment(linker, "/alternatename:rt_webgpu_destroy_surface=rt_webgpu_destroy_surface__core_c_backfill")
+#endif
+#else
 bool rt_webgpu_is_available(void) { return false; }
 bool rt_webgpu_init(void) { return false; }
 int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
@@ -621,6 +651,7 @@ int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
 }
 bool rt_webgpu_shutdown(void) { return false; }
 bool rt_webgpu_destroy_surface(int64_t handle) { (void)handle; return false; }
+#endif
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
 int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
@@ -747,6 +778,74 @@ int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
     if (result == MAP_FAILED) return -1;
     return (int64_t)(uintptr_t)result;
 #endif
+}
+
+/* The rest of the SMF loader's descriptor pair (smf_mmap_native.spl opens,
+   maps, closes). Same runtime.c-only situation as rt_mmap_raw: the only C
+   definitions live in platform/{unix_common,platform_win}.h. Measured
+   2026-09-25: both were stubbed in the Windows stage-2 simple_cli link.
+   `path` arrives as a native text value or a raw C string, hence
+   rt_interp_cstr. Flags use the Linux numbering the loader and the Rust
+   interpreter twin (interpreter_extern/file_io.rs rt_open_fd) share: access
+   in bits 0-1, O_CREAT 0x40, O_TRUNC 0x200, O_APPEND 0x400. POSIX passes them
+   to open(2) unchanged; Windows translates them onto _wopen and returns a CRT
+   descriptor, which is what spl_windows_mmap_raw maps. Failure is -1 with
+   errno set by the CRT. */
+int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    const char* p = rt_interp_cstr((int64_t)(uintptr_t)path);
+    if (!p) return -1;
+#if defined(_WIN32)
+    (void)mode; /* Rust's OpenOptions ignores the POSIX mode on Windows too. */
+    int access = (int)(flags & 0x3);
+    int oflag = _O_BINARY | _O_NOINHERIT |
+                (access == 0 ? _O_RDONLY : access == 1 ? _O_WRONLY : _O_RDWR);
+    if (flags & 0x40) oflag |= _O_CREAT;
+    if (flags & 0x200) oflag |= _O_TRUNC;
+    if (flags & 0x400) oflag |= _O_APPEND;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, NULL, 0);
+    if (wide_len <= 0) { errno = EINVAL; return -1; }
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) { errno = ENOMEM; return -1; }
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, wide, wide_len);
+    int fd = _wopen(wide, oflag, _S_IREAD | _S_IWRITE);
+    free(wide);
+    return (int64_t)fd;
+#else
+    return (int64_t)open(p, (int)flags, (unsigned int)mode);
+#endif
+}
+
+int64_t rt_close_fd(int64_t fd) {
+    if (fd < 0 || fd > INT_MAX) return -1;
+#if defined(_WIN32)
+    return (int64_t)_close((int)fd);
+#else
+    return (int64_t)close((int)fd);
+#endif
+}
+
+/* Host target code, same table as the Rust runtime
+   (value/sffi/env_process.rs rt_get_host_target_code): x86_64 0, aarch64 1,
+   riscv64 2, anything else -1. Read by backend_selector.spl target_code(). */
+int64_t rt_get_host_target_code(void) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+    return 0;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return 1;
+#elif defined(__riscv) && __riscv_xlen == 64
+    return 2;
+#else
+    return -1;
+#endif
+}
+
+/* Current async task id. The Rust runtime (lib.rs rt_current_task_id)
+   answers the executor, fiber, then async-runtime task, and 0 when none is
+   active. The core-C lane has no executor, fibers or async runtime, so no
+   task is ever active: 0, and callers (mcdc probe_registry.spl) fall back to
+   the thread id exactly as they do under Rust outside a task. */
+int64_t rt_current_task_id(void) {
+    return 0;
 }
 #endif
 
@@ -2604,8 +2703,29 @@ int8_t rt_transient_heap_promote(int64_t value) {
     rt_core_heap_lifecycle_acquire();
     RtCoreTransientPlan plan = {0};
     RtCoreTransientNode root;
-    int ok = rt_core_transient_classify(value, &root) == 1 &&
+    int root_class = rt_core_transient_classify(value, &root);
+    if (root_class == 0 && rt_core_is_heap(value)) {
+        /* A registered heap string that is not transient-owned is already
+         * persistent: promotion is a no-op, not a failure. HIR phase memos
+         * keep text fields that alias persistent strings
+         * (glob_reachable_importer_owner = module_filename, set before the
+         * per-file scope), and treating those as failures made every retained
+         * HIR lowering fail "HIR phase memo ownership promotion failed"
+         * (Windows stage-2, 2026-09-25). Arrays/dicts/enums/closures still
+         * classify as 1 and walk normally; anything unregistered still fails. */
+        void* root_ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+        if (rt_core_is_registered_immortal_ptr(root_ptr) &&
+                rt_core_registered_object_kind(root_ptr) == RT_VALUE_HEAP_STRING) {
+            rt_core_heap_lifecycle_release();
+            return 1;
+        }
+    }
+    int ok = root_class == 1 &&
         rt_core_transient_add(&plan, value) == 1;
+    if (!ok && getenv("SIMPLE_TRANSIENT_PROMOTE_DEBUG")) {
+        fprintf(stderr, "[transient-promote] root refused: value=0x%016llx class=%d heap=%d\n",
+                (unsigned long long)(uint64_t)value, root_class, (int)rt_core_is_heap(value));
+    }
     for (size_t i = 0; ok && i < plan.len; i++) {
         RtCoreTransientNode node = plan.nodes[i];
         if (node.kind == RT_CORE_TRANSIENT_ARRAY) {
@@ -2831,6 +2951,15 @@ int64_t stdin_read_char(void) {
  * below differs per compiler.
  */
 static void rt_win_set_binary_stdio(void) {
+    /* Same defect for FILES: every open()/fopen() in this runtime without an
+     * explicit _O_BINARY / "b" (rt_file_write_text_at, rt_file_open, the
+     * mmap and lock paths, ...) translated LF->CRLF, so SCV snapshot
+     * provenance written through file_write read back with CRLF and failed
+     * snapshot-open-provenance-mismatch (2026-09-25), after the same class
+     * had already broken inventory generations. Make binary the process
+     * default, which is the POSIX and Rust-std contract every caller assumes;
+     * an explicit "t" still opts into translation. */
+    _set_fmode(_O_BINARY);
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
@@ -7998,12 +8127,31 @@ int64_t rt_tls13_sha256(int64_t data_value) {
     return (int64_t)(uintptr_t)digest;
 }
 
+/* `[u8]` -> text, bytes copied verbatim (the interpreter's
+ * Value::text_from_bytes; also the native lowering of `text.from_bytes`).
+ * A `[u8]` arrives in one of two layouts: byte-packed
+ * (RT_CORE_ARRAY_FLAG_BYTES, one byte per element) or generic i64 slots
+ * holding tagged ints (e.g. a `[u8]` literal the backend built slot by slot).
+ * Copying `array->data` verbatim is only right for the first: for slots it
+ * produced 8 tagged bytes per element. Slots are narrowed through
+ * rt_array_bytes_copy_checked, which rejects non-int or out-of-range
+ * elements; a rejected array yields "" like a non-array did before. */
 int64_t rt_bytes_to_text(int64_t bytes_value) {
     RtCoreArray* array = rt_core_as_array(bytes_value);
     if (!array || !array->data || array->len <= 0) {
         return rt_string_new(NULL, 0);
     }
-    return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+    }
+    int64_t length = rt_array_bytes_validate(bytes_value);
+    if (length <= 0) return rt_string_new(NULL, 0);
+    uint8_t* narrowed = (uint8_t*)malloc((size_t)length);
+    if (!narrowed) return rt_string_new(NULL, 0);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
+    int64_t result = rt_string_new(narrowed, copied > 0 ? (uint64_t)copied : 0);
+    free(narrowed);
+    return result;
 }
 
 int64_t rt_array_len(SplArray* a) {
@@ -10378,10 +10526,11 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
 }
 
 #if defined(_WIN32)
-/* rt_widen_long_path_rc is defined later in this file (twin of runtime.c's
- * copy, same name, see that definition's comment); forward-declare it here so
- * the fsync worker above that point can use it too. Caller frees. */
-static wchar_t* rt_widen_long_path_rc(const char* path);
+/* rt_widen_long_path_rc is the shared helper in platform/runtime_win_long_path.h
+ * (macro alias for rt_win_long_path_widen), included early here so the fsync
+ * worker above this point -- and every later user in this file -- can use it.
+ * This file used to carry a forward-declared, separately-defined copy. */
+#include "platform/runtime_win_long_path.h"
 #endif
 static int rt_bucket2_fsync_path(const char* path) {
     if (!path) return 0;
@@ -11345,62 +11494,9 @@ int64_t rt_file_read_regular_no_follow_last_failure(void) {
 
 #define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
 
-#if defined(_WIN32)
-/* Widen a UTF-8 path and, when it is long enough to hit the MAX_PATH ceiling,
- * qualify it and add the extended-length prefix. A WIDE call is not by itself
- * exempt: CreateFileW still caps at MAX_PATH unless the path carries the
- * prefix, which is why a 266-character diagnostic file written successfully
- * could not be read back. Twin of rt_widen_long_path_rc in runtime.c -- this
- * file carries a byte-identical copy of the reader below, and archive member
- * order decides which one links, so both copies must widen or the fix is a
- * coin flip (see 08987610e54, which fixed the runtime.c copy only after
- * finding this file's copy still unfixed). Separator and prefix are built
- * from the numeric code point (92) to keep this free of escape sequences.
- * Same name as the runtime.c twin (not a fresh one) so the
- * push-rt-dual-implementation ratchet's already-baselined single-lane entry
- * for rt_widen_long_path_rc covers this copy too, instead of requiring a new
- * baseline row for a second name. Caller frees. */
-static wchar_t* rt_widen_long_path_rc(const char* path) {
-    static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
-    /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
-     * resolution for a short drive-absolute path; UNC/extended paths retain
-     * their existing spelling. */
-    if (wide[0] == sep && wide[1] == sep) return wide;
-    if (wide_len - 1 < 248 && wide_len > 3 && wide[1] == L':' &&
-        (wide[2] == sep || wide[2] == L'/')) return wide;
-    {
-        wchar_t* scan;
-        DWORD need;
-        wchar_t* full;
-        wchar_t* out;
-        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
-        need = GetFullPathNameW(wide, 0, NULL, NULL);
-        if (need == 0) return wide;
-        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
-        if (!full) return wide;
-        {
-            DWORD written = GetFullPathNameW(wide, need, full, NULL);
-            if (written == 0 || written >= need) { free(full); return wide; }
-        }
-        if (wcslen(full) < 248) { free(full); return wide; }
-        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
-        if (!out) { free(full); return wide; }
-        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
-        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
-        free(full);
-        free(wide);
-        return out;
-    }
-}
-#endif
+/* rt_widen_long_path_rc is the shared helper included above
+ * (platform/runtime_win_long_path.h, macro alias for rt_win_long_path_widen). This
+ * file used to carry its own byte-identical copy here. */
 
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
@@ -11773,8 +11869,21 @@ int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
     if (rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) {
+#if defined(_WIN32)
+        /* fopen(path, "r") answers false for a directory and caps at
+         * MAX_PATH. GetFileAttributesW (long-path widened, like the other
+         * Windows entry points in this file) matches the POSIX/Rust
+         * `exists()` contract, where a directory counts. */
+        wchar_t* wide_path = rt_widen_long_path_rc(path);
+        if (wide_path) {
+            DWORD attributes = GetFileAttributesW(wide_path);
+            free(wide_path);
+            exists = (attributes != INVALID_FILE_ATTRIBUTES);
+        }
+#else
         FILE* f = fopen(path, "r");
         if (f) { fclose(f); exists = 1; }
+#endif
     }
     rt_file_exists_probe_record(lease, exists);
     return exists;
@@ -11786,14 +11895,12 @@ int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
     const char* path = path_buf;
 #if defined(_WIN32)
     if (!path) return 0;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return 0;
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    /* Long-path widened, like rt_file_read_regular_no_follow_bounded: the
+     * plain UTF-16 conversion failed past MAX_PATH, so a long
+     * package-module index path read as "not a regular file" and admission
+     * failed package-index:generation-unavailable (2026-09-25). */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 0;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, wide_len)) {
-        free(wide_path);
-        return 0;
-    }
     DWORD attributes = GetFileAttributesW(wide_path);
     free(wide_path);
     return attributes != INVALID_FILE_ATTRIBUTES &&
@@ -12874,6 +12981,17 @@ int64_t rt_gui_get_glyph_8x16(int32_t codepoint) {
 int64_t rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+#if defined(_WIN32)
+    /* Narrow stat() fails past MAX_PATH; query the widened path instead. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (wide_path) {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        BOOL ok = GetFileAttributesExW(wide_path, GetFileExInfoStandard, &data);
+        free(wide_path);
+        if (!ok) return -1;
+        return (int64_t)(((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow);
+    }
+#endif
     struct stat st;
     if (stat(path, &st) != 0) return -1;
     return (int64_t)st.st_size;
@@ -13006,6 +13124,22 @@ int64_t rt_env_get_i64(const uint8_t* key_ptr, uint64_t key_len, int64_t default
     return end == value ? default_value : (int64_t)parsed;
 }
 
+#if defined(_WIN32)
+/* The UCRT rejects a "name=value" string longer than _MAX_ENV (32767) or a
+ * name that is empty / contains '=' through the invalid-parameter handler,
+ * whose default is a fail-fast (0xC0000409) -- not an error return. The
+ * frontend lexer mirrors the whole file it is lexing into
+ * SIMPLE_BOOTSTRAP_LEX_SOURCE (a legacy fallback; the in-memory slot is read
+ * first), so every source over ~32 KB (e.g. src/lib/common/process/
+ * observation_v4.spl, 60 KB) killed an in-process `run` with no output
+ * (Windows stage-2, 2026-09-25). Refuse such values up front and report
+ * failure like setenv(3) would. */
+static bool rt_win_env_fits(const char* key, const char* value) {
+    if (!key || !*key || strchr(key, '=')) return false;
+    return strlen(key) + 1 + (value ? strlen(value) : 0) < 32767;
+}
+#endif
+
 bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_ptr, uint64_t value_len) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     char* value = rt_core_text_arg_to_cstr(value_ptr, value_len);
@@ -13015,7 +13149,7 @@ bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_p
         return false;
     }
 #if defined(_WIN32)
-    bool ok = _putenv_s(key, value) == 0;
+    bool ok = rt_win_env_fits(key, value) && _putenv_s(key, value) == 0;
 #else
     bool ok = setenv(key, value, 1) == 0;
 #endif
@@ -13711,9 +13845,29 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
         return rt_string_new(NULL, 0);
     }
 
+#if defined(_WIN32)
+    /* Binary: text mode translated CRLF and stopped at ^Z, so the same file
+     * hashed differently than on POSIX (and than the Rust twin). */
+    int fd = open(path, O_RDONLY | _O_BINARY);
+#else
     int fd = open(path, O_RDONLY);
+#endif
     free(path);
     if (fd < 0) return 0;
+
+    /* `size` is a caller CAP, not the expected length: the SCV inventory reads
+     * every source with a 1 GiB cap, and allocating the cap per file cost
+     * ~350 ms/file on Windows (cold init ran >10 min at ~1 GB RSS for ~43k
+     * sources, 2026-09-25). Allocate only what the file can still supply. */
+    struct stat st;
+    if (fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG) {
+        int64_t remaining = (int64_t)st.st_size > offset ? (int64_t)st.st_size - offset : 0;
+        if (remaining < size) size = remaining;
+    }
+    if (size == 0) {
+        close(fd);
+        return rt_string_new(NULL, 0);
+    }
 
     uint8_t* buffer = (uint8_t*)malloc((size_t)size);
     if (!buffer) {
@@ -13779,7 +13933,17 @@ int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
     char dst[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
     if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
+#if defined(_WIN32)
+    /* Plain CRT rename() is narrow/MAX_PATH-capped and, unlike POSIX
+     * rename(2), fails outright when `dst` already exists as a file. Use
+     * the same shared long-path + MoveFileExW(MOVEFILE_REPLACE_EXISTING)
+     * helper as rt_file_rename below, so this entry point gets the same
+     * POSIX-compatible replace semantics instead of silently disagreeing
+     * with its sibling. */
+    return rt_win_long_path_rename(src, dst) != 0 ? 1 : 0;
+#else
     return rename(src, dst) == 0 ? 1 : 0;
+#endif
 }
 
 /* () -> RuntimeValue, per runtime_sffi.rs:1773 `RuntimeFuncSpec::new(
@@ -13863,6 +14027,30 @@ static int rt_dir_create_all_cpath(const char* path) {
     if (!copy) return 0;
 
     char* p = copy;
+#if defined(_WIN32)
+    /* host_path_native hands Windows paths over with `\` separators and, for
+     * long paths, a `\\?\` prefix. Splitting only on `/` turned every such
+     * path into ONE mkdir of the full path, which fails whenever a parent is
+     * missing (the frontend parse cache never created
+     * build/bootstrap/native_cache/<lane>/frontend). Skip the prefix and the
+     * drive root, then split on both separators. */
+    if (strncmp(p, "\\\\?\\", 4) == 0) p += 4;
+    if (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':') {
+        p += 2;
+    }
+    if (*p == '/' || *p == '\\') p++;
+    for (; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            char sep = *p;
+            *p = '\0';
+            if (!rt_core_mkdir_one(copy)) {
+                free(copy);
+                return 0;
+            }
+            *p = sep;
+        }
+    }
+#else
     if (p[0] == '/') p++;
     for (; *p; p++) {
         if (*p == '/') {
@@ -13874,6 +14062,7 @@ static int rt_dir_create_all_cpath(const char* path) {
             *p = '/';
         }
     }
+#endif
 
     int ok = rt_core_mkdir_one(copy);
     free(copy);
@@ -14031,8 +14220,26 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
         const uint8_t* value = rt_string_data(rt_array_get(args, i));
         argv[i] = value ? (const char*)value : "";
     }
+#if defined(_WIN32)
+    /* rt_process_spawn_async returns a _spawnvp process HANDLE on Windows, and
+     * rt_process_wait only knows children registered by the MCP spawner, so
+     * the wait always answered -1: a delegated `run` whose child passed was
+     * reported as a failure with no exit status (stage-2 test rows,
+     * 2026-09-26). A synchronous _spawnvp returns the child's exit code
+     * directly. */
+    const char** wargv = (const char**)calloc((size_t)argc + 2, sizeof(char*));
+    int64_t code = -1;
+    if (wargv) {
+        wargv[0] = command;
+        for (int64_t i = 0; i < argc; i++) wargv[i + 1] = argv[i];
+        intptr_t status = _spawnvp(_P_WAIT, command, (const char* const*)wargv);
+        code = status == -1 ? -1 : (int64_t)(int32_t)status;
+        free(wargv);
+    }
+#else
     int64_t pid = rt_process_spawn_async(command, argv, argc);
     int64_t code = pid <= 0 ? -1 : rt_process_wait(pid, 0);
+#endif
     free(argv);
     free(command);
     return code;
@@ -14107,6 +14314,24 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
     // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
         (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+}
+
+/* Same (ptr, len) vs single-text-value ABI split as the facades above, for
+ * the owned observed capsule. resource_scope.spl declares
+ * `rt_process_run_owned_observed_bounded_value(cmd: text, args, timeout_ms,
+ * max_output_bytes)`; generated native code passes 4 words, the C owner takes
+ * 5 (cmd_data, cmd_len, ...). Without this facade every argument after cmd
+ * shifted: cmd_len received the args array pointer and the call failed before
+ * CreateProcess, so on Windows (no /bin/sh, no cgroup -> this path) every
+ * `simple test` child came back exit -1 with empty output ("child produced no
+ * exit status"). The owner already returns the native 3-word tuple, so only
+ * the cmd parameter is adapted. */
+int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
+                                                    int64_t max_output_bytes) {
+    const char* cmd_c = rt_interp_cstr(cmd);
+    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    return rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+                                                       timeout_ms, max_output_bytes);
 }
 
 int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
@@ -14322,20 +14547,19 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
      * exceed MAX_PATH (the incident that motivated this whole fix pass), so
      * this call was silently failing right after the just-fixed fsync
      * succeeded, reproducing the identical "generation-publication-failed"
-     * symptom for an unrelated reason. Prefer the wide, extended-length-
-     * prefixed MoveFileExW with no replace flag -- matching rename()'s
-     * Windows semantics of failing when the destination already exists --
-     * falling back to plain rename() only when a path cannot be widened. */
-    wchar_t* wide_old = rt_widen_long_path_rc(old_path);
-    wchar_t* wide_new = wide_old ? rt_widen_long_path_rc(new_path) : NULL;
-    if (wide_old && wide_new) {
-        BOOL ok = MoveFileExW(wide_old, wide_new, 0);
-        free(wide_old); free(wide_new);
-        return ok != 0;
-    }
-    free(wide_old); free(wide_new);
-#endif
+     * symptom for an unrelated reason. rt_win_long_path_rename (shared
+     * helper, platform/runtime_win_long_path.h) prefers the wide, extended-length-
+     * prefixed MoveFileExW(MOVEFILE_REPLACE_EXISTING) for a file
+     * destination -- the POSIX rename(2) / Rust std::fs::rename contract
+     * every caller here assumes; without it every SCV inventory re-publish
+     * of CURRENT failed publish-current-write-failed on Windows
+     * (2026-09-25) -- and plain MoveFileExW (no replace flag) for a
+     * directory destination, matching POSIX rename()'s own refusal to
+     * replace a directory. */
+    return rt_win_long_path_rename(old_path, new_path) != 0;
+#else
     return rename(old_path, new_path) == 0;
+#endif
 }
 
 #if defined(_WIN32)
@@ -14744,7 +14968,7 @@ const char* rt_getenv(const char* key) {
 int rt_setenv(const char* key, const char* value) {
     if (!key) return 0;
 #if defined(_WIN32)
-    return _putenv_s(key, value ? value : "") == 0 ? 1 : 0;
+    return rt_win_env_fits(key, value ? value : "") && _putenv_s(key, value ? value : "") == 0 ? 1 : 0;
 #else
     int result = value ? setenv(key, value, 1) : unsetenv(key);
     return result == 0 ? 1 : 0;

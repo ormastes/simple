@@ -2226,32 +2226,25 @@ impl MirLowering:
             # may reference their own value!").
             val sw_receiver_raw = prelowered_method_receiver
             val sw_receiver = self.ensure_tagged_str(sw_receiver_raw)
-            val sw_prefix_ptr = self.lower_expr(args[0].value)
-            val strlen_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_strlen"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            # The prefix goes through the same runtime-checked tagging as the
+            # receiver. An unconditional rt_strlen + rt_string_new here assumed
+            # a literal argument lowers to a RAW char*; the pure-Simple
+            # cranelift backend emits every Str constant already TAGGED
+            # (rt_string_new_literal), so the re-tag copied RtCoreString header
+            # bytes as the prefix and every `x.starts_with("lit")` compiled by
+            # a stage-2 candidate returned false (Stage-2 admission arm 2,
+            # `stage2 positional Stage-3 route returned unexpected output`).
+            val sw_prefix_raw = self.lower_expr(args[0].value)
+            val sw_tagged_prefix = self.ensure_tagged_str(sw_prefix_raw)
+            val starts_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_starts_with"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.bool(), is_variadic: false)))
             ))
-            var b_swlen = self.builder
-            val sw_len_res = b_swlen.emit_call(strlen_op, [mir_operand_copy(sw_prefix_ptr)], MirType.i64())
-            self.builder = b_swlen
-            if val sw_prefix_len = sw_len_res:
-                val newstr_op = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_string_new"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                ))
-                var b_swnew = self.builder
-                val sw_tagged_res = b_swnew.emit_call(newstr_op, [mir_operand_copy(sw_prefix_ptr), mir_operand_copy(sw_prefix_len)], MirType.i64())
-                self.builder = b_swnew
-                if val sw_tagged_prefix = sw_tagged_res:
-                    val starts_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_string_starts_with"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.bool(), is_variadic: false)))
-                    ))
-                    var b_sw = self.builder
-                    val sw_res = b_sw.emit_call(starts_op, [mir_operand_copy(sw_receiver), mir_operand_copy(sw_tagged_prefix)], MirType.bool())
-                    self.builder = b_sw
-                    if val sw_local = sw_res:
-                        return sw_local
+            var b_sw = self.builder
+            val sw_res = b_sw.emit_call(starts_op, [mir_operand_copy(sw_receiver), mir_operand_copy(sw_tagged_prefix)], MirType.bool())
+            self.builder = b_sw
+            if val sw_local = sw_res:
+                return sw_local
             return sw_receiver
 
         # Bug #138 (follow-up): same untyped-receiver gap as starts_with above,
@@ -2312,32 +2305,19 @@ impl MirLowering:
             # lane, 2026-07-14) -- avoid `self.X(self.lower_expr(receiver))`.
             val ew_receiver_raw = prelowered_method_receiver
             val ew_receiver = self.ensure_tagged_str(ew_receiver_raw)
-            val ew_suffix_ptr = self.lower_expr(args[0].value)
-            val ew_strlen_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_strlen"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            # Suffix: same runtime-checked tagging as the starts_with prefix
+            # above (a tagged literal must not be re-tagged).
+            val ew_suffix_raw = self.lower_expr(args[0].value)
+            val ew_tagged_suffix = self.ensure_tagged_str(ew_suffix_raw)
+            val ends_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_ends_with"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.bool(), is_variadic: false)))
             ))
-            var b_ewlen = self.builder
-            val ew_len_res = b_ewlen.emit_call(ew_strlen_op, [mir_operand_copy(ew_suffix_ptr)], MirType.i64())
-            self.builder = b_ewlen
-            if val ew_suffix_len = ew_len_res:
-                val ew_newstr_op = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_string_new"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                ))
-                var b_ewnew = self.builder
-                val ew_tagged_res = b_ewnew.emit_call(ew_newstr_op, [mir_operand_copy(ew_suffix_ptr), mir_operand_copy(ew_suffix_len)], MirType.i64())
-                self.builder = b_ewnew
-                if val ew_tagged_suffix = ew_tagged_res:
-                    val ends_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_string_ends_with"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.bool(), is_variadic: false)))
-                    ))
-                    var b_ew = self.builder
-                    val ew_res = b_ew.emit_call(ends_op, [mir_operand_copy(ew_receiver), mir_operand_copy(ew_tagged_suffix)], MirType.bool())
-                    self.builder = b_ew
-                    if val ew_local = ew_res:
-                        return ew_local
+            var b_ew = self.builder
+            val ew_res = b_ew.emit_call(ends_op, [mir_operand_copy(ew_receiver), mir_operand_copy(ew_tagged_suffix)], MirType.bool())
+            self.builder = b_ew
+            if val ew_local = ew_res:
+                return ew_local
             return ew_receiver
 
         # Bug #137/#138 (follow-up): the typed substring/slice special case

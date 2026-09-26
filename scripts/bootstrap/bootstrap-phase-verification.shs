@@ -6,6 +6,7 @@ set -u
 
 . "$(dirname -- "$0")/bootstrap-windows-cl-mode.shs"
 . "$(dirname -- "$0")/bootstrap-phase-toolchain.shs"
+. "$(dirname -- "$0")/bootstrap-scv-prime.shs"
 bootstrap_windows_preserve_cl_mode
 
 die() {
@@ -25,9 +26,57 @@ manifest_key_count() {
   awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$file"
 }
 
-hash_file() {
-  sha256sum "$1" | awk '{print $1}'
-}
+# Fail closed, not just fall back: a missing/broken tool or a malformed
+# digest must never be mistaken for a valid one. Two independent callers each
+# getting an empty/garbage string from a silently-broken hash helper would
+# compare equal and produce a false PASS, so this checks the underlying
+# tool's own exit status directly (never through an awk pipe, whose exit
+# status is the LAST command's, not the hasher's) and validates the result
+# is exactly 64 lowercase hex characters before ever printing it. Mirrors
+# the existing candidate_frontend_hash_file pattern in
+# scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs. Return
+# codes: 1 = bad input (missing file), 126 = no usable tool or a tool that
+# ran but produced something that is not a real sha256 digest.
+hash_file() (
+  [ -f "$1" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    hf_out=$(sha256sum -- "$1") || return 126
+    hf_digest=${hf_out%% *}
+  elif command -v shasum >/dev/null 2>&1; then
+    hf_out=$(shasum -a 256 -- "$1") || return 126
+    hf_digest=${hf_out%% *}
+  elif command -v sha256 >/dev/null 2>&1; then
+    hf_digest=$(sha256 -q "$1") || return 126
+  elif command -v openssl >/dev/null 2>&1; then
+    hf_out=$(openssl dgst -sha256 "$1") || return 126
+    hf_digest=${hf_out##* }
+  else
+    return 126
+  fi
+  [ "${#hf_digest}" -eq 64 ] || return 126
+  case "$hf_digest" in *[!0-9a-f]*) return 126 ;; esac
+  printf '%s\n' "$hf_digest"
+)
+
+hash_stream() (
+  if command -v sha256sum >/dev/null 2>&1; then
+    hs_out=$(sha256sum) || return 126
+    hs_digest=${hs_out%% *}
+  elif command -v shasum >/dev/null 2>&1; then
+    hs_out=$(shasum -a 256) || return 126
+    hs_digest=${hs_out%% *}
+  elif command -v sha256 >/dev/null 2>&1; then
+    hs_digest=$(sha256 -q) || return 126
+  elif command -v openssl >/dev/null 2>&1; then
+    hs_out=$(openssl dgst -sha256) || return 126
+    hs_digest=${hs_out##* }
+  else
+    return 126
+  fi
+  [ "${#hs_digest}" -eq 64 ] || return 126
+  case "$hs_digest" in *[!0-9a-f]*) return 126 ;; esac
+  printf '%s\n' "$hs_digest"
+)
 
 validate_hosted_runtime_authority() {
   authority=$1
@@ -230,6 +279,11 @@ if [ "$phase" = stage1 ]; then
     "$compiler" "$expected_sha" "$work_root" || die "Phase1 compiler is not the current admitted artifact"
 fi
 source_before=$(hash_file "$compiler") || die "cannot hash compiler"
+# A previous run seals the snapshot read-only; replace it instead of failing on cp.
+if [ -e "$work_root/compiler.snapshot" ]; then
+  chmod u+w "$work_root/compiler.snapshot" 2>/dev/null || :
+  rm -f "$work_root/compiler.snapshot" || die "cannot remove stale compiler snapshot"
+fi
 cp "$compiler" "$work_root/compiler.snapshot" || die "cannot snapshot compiler"
 chmod +x "$work_root/compiler.snapshot"
 source_after=$(hash_file "$compiler") || die "cannot re-hash compiler"
@@ -276,6 +330,114 @@ if [ "$phase" = stage2 ]; then
     die "Phase2 verification requires a SHA-qualified runtime capsule"
 fi
 
+# INTERIM (owner-approved 2026-09-26): Stage-2 spec rows delegate `run` to the
+# frozen authority seed. The stage-2 CLI cannot execute std.spec specs
+# in-process yet, and its native spec path (`compile <spec> -o x.smf`) does not
+# complete. The rows therefore produce SEED verdicts, and every such run is
+# labelled test_execution=delegated-seed with the seed path and sha256.
+# Scope:
+#   - only the compiler_bootstrap / interpreter / loader interpreter suites
+#     and the per-spec inventory rows;
+#   - every other row keeps SIMPLE_NO_BOOTSTRAP_DELEGATE=1.
+# BOOTSTRAP_STAGE2_TEST_DELEGATE=0 restores in-process execution for those
+# rows. A missing seed, a missing LLVM-C.dll or a seed that does not start is
+# fatal: never a silent fall-through to the in-process interpreter.
+stage2_test_delegate=0
+stage2_test_seed=""
+stage2_test_seed_sha=""
+stage2_test_llvm_bin=""
+if [ "$phase" = stage2 ]; then
+  case "${BOOTSTRAP_STAGE2_TEST_DELEGATE:-1}" in
+    1) stage2_test_delegate=1 ;;
+    0) ;;
+    *) die "BOOTSTRAP_STAGE2_TEST_DELEGATE must be 0 or 1" ;;
+  esac
+fi
+if [ "$stage2_test_delegate" -eq 1 ]; then
+  # The capsule's own simple(.exe) is the stage-2 CANDIDATE, not the seed.
+  # The seed is the frozen authority the capsule was built from
+  # (source_authority_path), admitted by the seed stamp the capsule
+  # hash-binds (seed_authority_stamp_sha256): its seed_sha256 must match.
+  stage2_capsule_receipt="$runtime_path/phase2-runtime-capsule.env"
+  stage2_authority=$(manifest_value source_authority_path "$stage2_capsule_receipt")
+  [ -n "$stage2_authority" ] && [ -d "$stage2_authority" ] ||
+    die "stage-2 test delegation: capsule names no frozen seed authority: $stage2_capsule_receipt"
+  if [ -f "$runtime_path/simple.exe.inputs.sha256" ]; then
+    stage2_test_seed="$stage2_authority/simple.exe"
+    stage2_seed_stamp="$runtime_path/simple.exe.inputs.sha256"
+  else
+    stage2_test_seed="$stage2_authority/simple"
+    stage2_seed_stamp="$runtime_path/simple.inputs.sha256"
+  fi
+  [ -f "$stage2_test_seed" ] && [ -x "$stage2_test_seed" ] && [ -f "$stage2_seed_stamp" ] ||
+    die "stage-2 test delegation: frozen authority seed missing: $stage2_test_seed"
+  [ "$(hash_file "$stage2_seed_stamp")" = "$(manifest_value seed_authority_stamp_sha256 "$stage2_capsule_receipt")" ] ||
+    die "stage-2 test delegation: seed stamp is not the one the capsule admitted: $stage2_seed_stamp"
+  stage2_test_seed_sha=$(hash_file "$stage2_test_seed") ||
+    die "stage-2 test delegation: cannot hash seed $stage2_test_seed"
+  [ "$stage2_test_seed_sha" = "$(manifest_value seed_sha256 "$stage2_seed_stamp")" ] ||
+    die "stage-2 test delegation: seed sha256 differs from the admitted stamp: $stage2_test_seed"
+  case "$stage2_test_seed" in
+    *.exe)
+      # The seed imports LLVM-C.dll; without it on PATH every delegated run
+      # exits 127 (STATUS_DLL_NOT_FOUND) before printing anything.
+      for stage2_llvm_candidate in \
+          "$(dirname "${SIMPLE_LLVM_PATH:-/nonexistent/x}")" \
+          "${LLVM_SYS_231_PREFIX:-/nonexistent}/bin" \
+          "$(dirname "$(command -v clang-cl 2>/dev/null || echo /nonexistent/x)")"; do
+        if [ -f "$stage2_llvm_candidate/LLVM-C.dll" ]; then
+          stage2_test_llvm_bin=$stage2_llvm_candidate
+          break
+        fi
+      done
+      [ -n "$stage2_test_llvm_bin" ] ||
+        die "stage-2 test delegation: LLVM-C.dll not found (set SIMPLE_LLVM_PATH or LLVM_SYS_231_PREFIX)"
+      ;;
+  esac
+  if [ -n "$stage2_test_llvm_bin" ]; then
+    stage2_seed_probe_path="$stage2_test_llvm_bin:$PATH"
+  else
+    stage2_seed_probe_path=$PATH
+  fi
+  PATH=$stage2_seed_probe_path "$stage2_test_seed" --version >/dev/null 2>&1 ||
+    die "stage-2 test delegation: seed does not start: $stage2_test_seed"
+  # The runner's MC/DC route compiles the wrapped spec with the stage-2 CLI and
+  # then `run`s that SMF; the seed only interprets .spl, so a delegated row can
+  # never execute it. Delegated rows therefore run MC/DC off, which the runner
+  # admits only under a recorded waiver. The waiver atoms come from the caller
+  # (the owner's approval record) and are never defaulted here.
+  for stage2_waiver_var in SIMPLE_MCDC_OFF_WAIVER_REASON SIMPLE_MCDC_OFF_WAIVER_REVIEWER \
+      SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID SIMPLE_MCDC_OFF_WAIVER_VERSION; do
+    eval "stage2_waiver_value=\${$stage2_waiver_var:-}"
+    case "$stage2_waiver_value" in
+      ''|*'|'*) die "stage-2 test delegation: delegated rows run MC/DC off and need $stage2_waiver_var (non-empty, no '|'); or set BOOTSTRAP_STAGE2_TEST_DELEGATE=0" ;;
+    esac
+  done
+  printf 'bootstrap-phase-verification: stage-2 spec rows use test_execution=delegated-seed seed=%s sha256=%s (BOOTSTRAP_STAGE2_TEST_DELEGATE=0 disables)\n' \
+    "$stage2_test_seed" "$stage2_test_seed_sha"
+fi
+
+# Environment for one test row: sets row_no_delegate and, when the row is a
+# delegated stage-2 spec row, exports the seed driver and LLVM PATH. Call only
+# inside the row's subshell.
+stage2_row_delegation_env() {
+  row_no_delegate=1
+  [ "$stage2_test_delegate" -eq 1 ] || return 0
+  case "$1" in
+    compiler_bootstrap_tests|interpreter_interpreter_tests|loader_interpreter_tests|inventory-row) ;;
+    *) return 0 ;;
+  esac
+  row_no_delegate=0
+  SIMPLE_BOOTSTRAP_DRIVER=$stage2_test_seed
+  SIMPLE_MCDC_MODE=off
+  export SIMPLE_BOOTSTRAP_DRIVER SIMPLE_MCDC_MODE SIMPLE_MCDC_OFF_WAIVER_REASON \
+    SIMPLE_MCDC_OFF_WAIVER_REVIEWER SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID SIMPLE_MCDC_OFF_WAIVER_VERSION
+  if [ -n "$stage2_test_llvm_bin" ]; then
+    PATH="$stage2_test_llvm_bin:$PATH"
+    export PATH
+  fi
+}
+
 : >"$summary" || die "cannot initialize verification summary"
 {
   echo "schema=bootstrap-phase-verification-v1"
@@ -288,6 +450,16 @@ fi
   echo "runtime_path=${runtime_path:--}"
   echo "native_internal_timeout_seconds=$native_internal_timeout"
   echo "timing_scope=post-admission-excludes-git-lfs-checkout"
+  if [ "$stage2_test_delegate" -eq 1 ]; then
+    echo "test_execution=delegated-seed"
+    echo "test_execution_seed=$stage2_test_seed"
+    echo "test_execution_seed_sha256=$stage2_test_seed_sha"
+    echo "test_execution_mcdc=off-waived"
+    echo "test_execution_mcdc_waiver_review_id=$SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID"
+    echo "test_execution_mcdc_waiver_reviewer=$SIMPLE_MCDC_OFF_WAIVER_REVIEWER"
+  elif [ "$phase" = stage2 ]; then
+    echo "test_execution=in-process"
+  fi
   if [ "$phase" = stage1 ]; then
     echo "phase1_generation=$p1a_generation"
     echo "phase1_admission_path=$p1a_marker"
@@ -540,13 +712,20 @@ run_task() {
   elif [ "$status" -eq 0 ]; then
     (
       cd "$source_root" || exit 125
-      HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1
+      # SIMPLE_NO_BOOTSTRAP_DELEGATE=1: a full-CLI `run` must execute in the
+      # phase binary itself, never hand the spec to a cwd bin/simple seed --
+      # otherwise a spec verdict proves the deployed seed, not this phase.
+      # Exception: the interim stage-2 seed delegation (stage2_row_delegation_env).
+      stage2_row_delegation_env "$task"
+      HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate
       SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task"
-      export HOME TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NATIVE_BUILD_CACHE_DIR
+      export HOME TMPDIR SIMPLE_NO_STUB_FALLBACK SIMPLE_NO_BOOTSTRAP_DELEGATE SIMPLE_NATIVE_BUILD_CACHE_DIR
       # Bootstrap-only dispatch controls belong only to the Stage 1 native
       # producer below.  Do not let an operator's ambient shell silently
       # redirect version checks or later phase verification.
-      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+      # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
+      # an ambient setting: inherited, it re-lists the whole tree per child.
+      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
       if [ "$phase" = stage1 ]; then
         bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
       fi
@@ -951,9 +1130,12 @@ run_inventory_row() {
     (
       cd "$source_root" || exit 125
       # Match run_task dispatch isolation before binding this row's CLI owner.
-      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
+      # SCV cold init is a one-time prime (bootstrap_scv_prime below), never
+      # an ambient setting: inherited, it re-lists the whole tree per child.
+      unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
+      stage2_row_delegation_env inventory-row
       if [ -n "$row_mcp_server" ]; then
-        HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+        HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$row_cache" \
           SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" \
           SIMPLE_MCP_TEST_BINARY="$row_mcp_server" \
@@ -962,7 +1144,7 @@ run_inventory_row() {
             --mode=interpreter --unstable --assert-ran --no-cache --no-db \
             --no-session-daemon "$test_mode_flag" ${test_worker_flag:+"$test_worker_flag"} --json
       else
-        HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+        HOME="$row_home" TMPDIR="$row_tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$row_cache" \
           SIMPLE_BINARY="$compiler_cli" SIMPLE_BIN="$compiler_cli" \
           run_measured_timeout "$row_rss_file" "$spec_timeout_seconds" 15 \
@@ -1213,8 +1395,9 @@ run_repository_full_tests() {
         cd "$source_root" || exit 125
         # Keep ambient bootstrap routing out of direct repository-test rows;
         # SIMPLE_BINARY below is the exact receipt-bound CLI for this matrix.
-        unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY
-        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+        unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_BINARY SIMPLE_SCV_INVENTORY_COLD_INIT
+        stage2_row_delegation_env inventory-row
+        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=$row_no_delegate \
           SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
           SIMPLE_BINARY="$compiler_cli" \
           SIMPLE_BIN="$compiler_cli" \
@@ -1367,7 +1550,13 @@ else
     echo "hosted_runtime_sha256=$hosted_runtime_sha" >>"$summary"
     hosted_runtime_ready=1
     tool_cache="$cache_root/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
-    tool_outputs="$outputs/compiler-tools/$phase/$snapshot_sha/$runtime_cache_identity"
+    # 16-hex prefixes, not the full 64-hex pair: the full path to the built
+    # simple_cli.exe was 288 chars on the Windows lane, past MAX_PATH, and
+    # CreateProcess cannot launch an image there (ERROR_FILE_NOT_FOUND even
+    # with LongPathsEnabled), so every spec child the runner spawned failed
+    # "process spawn failed" (bootstrap36, 2026-09-25). Identity is still the
+    # full hashes recorded in the command-owner receipt.
+    tool_outputs="$outputs/compiler-tools/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$runtime_cache_identity")"
     compiler_cli="$tool_outputs/simple_cli"
     test_runner="$tool_outputs/simple_test_runner"
     # Slim profile only: one shared object cache for both builds (same
@@ -1392,6 +1581,7 @@ else
     run_matrix_task compiler_cli_build --verification-expect-executable="$compiler_cli" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compositions/kernel_llvm_cranelift \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/cli/_CliMain/main_and_help.spl --threads "$build_threads" \
       --cache-dir "$tool_cache_cli" --output "$compiler_cli"
@@ -1399,6 +1589,7 @@ else
     run_matrix_task test_runner_build --verification-expect-executable="$test_runner" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
+      --source src/compositions/kernel_llvm_cranelift \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
       --cache-dir "$tool_cache_runner" --output "$test_runner"
@@ -1427,7 +1618,8 @@ else
       # see the stage2_slim_profile note above for why no row is emitted).
   elif [ "$hosted_runtime_ready" -eq 1 ]; then
     tool_build_cache="$cache/tool_builds/$phase/$snapshot_sha/$runtime_cache_identity"
-    server_outputs="$outputs/tool-builds/$phase/$snapshot_sha/$runtime_cache_identity"
+    # Short path for the same MAX_PATH reason as tool_outputs above.
+    server_outputs="$outputs/tool-builds/$phase/$(printf %.16s "$snapshot_sha")/$(printf %.16s "$runtime_cache_identity")"
     mcp_server="$server_outputs/simple_mcp_server"
     mkdir -p "$server_outputs"
     rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
@@ -1455,7 +1647,7 @@ else
 
   if [ -n "$compiler_cli_sha" ] && [ -n "$test_runner_sha" ]; then
     command_owner_lineage_sha=$(printf '%s\n' "$compiler_cli_sha" "$test_runner_sha" "$mcp_server_sha" |
-      sha256sum | awk '{print $1}')
+      hash_stream)
     command_owner_receipt="$tool_outputs/command-owners.$command_owner_lineage_sha.env"
     write_command_owner_receipt "$command_owner_receipt" "$compiler_cli" "$compiler_cli_sha" \
       "$test_runner" "$test_runner_sha" "$mcp_server" "$mcp_server_sha" || die "cannot freeze command-owner receipt"
@@ -1480,7 +1672,7 @@ else
       # rebuilt MCP/LSP/runtime lineage onto an incompatible existing receipt.
       stage4_tooling_lineage_sha=$(printf '%s\n' "$snapshot_sha" "$command_owner_receipt_sha" \
         "$runtime_path" "$hosted_runtime_sha" "$stage4_mcp_sha" "$stage4_lsp_sha" |
-        sha256sum | awk '{print $1}')
+        hash_stream)
       stage4_tooling_receipt="$server_outputs/stage4-tooling-owners.$stage4_tooling_lineage_sha.env"
       write_stage4_tooling_receipt "$stage4_tooling_receipt" \
         "$server_outputs/simple_mcp_server" "$stage4_mcp_sha" \
@@ -1492,6 +1684,18 @@ else
     else
       record_unsupported_task stage4_tooling_owners stage4-cli-runner-mcp-lsp-artifact-not-built
     fi
+  fi
+
+  # Every full-CLI row below (check, and each spec child the test runner
+  # spawns) passes SCV admission, which needs build/scv in the source root.
+  # Prime it once with the just-built CLI; skipped when a valid journal
+  # already exists. Lane-independent. See bootstrap-scv-prime.shs.
+  if [ "$compiler_cli_ready" -eq 1 ] && [ -x "$compiler_cli" ]; then
+    scv_prime_line=$(bootstrap_scv_prime "$source_root" "$compiler_cli" "$home" "$tmp" \
+      "$logs/scv_inventory_prime.log" src/lib/common/text_whitespace.spl) ||
+      die "SCV inventory prime failed; see $logs/scv_inventory_prime.log"
+    echo "$scv_prime_line"
+    echo "scv_inventory_prime=$scv_prime_line" >>"$summary"
   fi
 
   if [ "$stage2_slim_profile" -eq 1 ]; then

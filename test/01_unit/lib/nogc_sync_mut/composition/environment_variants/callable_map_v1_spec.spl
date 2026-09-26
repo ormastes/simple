@@ -56,7 +56,8 @@ use std.nogc_sync_mut.composition.environment_variants.callable_map_v1.{
     VARIANT_CALLABLE_SYMBOL_ABSENT_V1,
     VARIANT_CALLABLE_ABI_MISMATCH_V1,
     VARIANT_CALLABLE_GENERATION_STALE_V1,
-    VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1
+    VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1,
+    VARIANT_CALLABLE_NOT_CALLABLE_V1
 }
 use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
     dynlib_artifact_digest_hex_v1
@@ -343,7 +344,33 @@ describe "Environment variant native placement parity V1":
             expect(native.placement != twin.placement).to_equal(true)
             expect(native.artifact_digest.w0 != twin.artifact_digest.w0).to_equal(true)
 
+            # A second dlopen of the same artifact has its own lifetime even
+            # when the runtime reuses an underlying library address.
+            val peer = match variant_callable_map_v1(
+                    request(ENV_PLACEMENT_NATIVE_DYNLIB_V1, FIXTURE_SYMBOL, so,
+                            hash, abi_identity(), PROVIDER_GENERATION,
+                            FIXTURE_ARITY),
+                    static_table()):
+                case Ok(value): value
+                case Err(refusal):
+                    fail("peer native mapping refused: {refusal.reason}")
+                    return
+            val retained_copy = native
+            expect(peer.mapping_handle != native.mapping_handle).to_equal(true)
+            var invalid_identity = native
+            invalid_identity.native_owner_identity = 0u64
+            match variant_callable_invoke_v1(invalid_identity, [7, 5]):
+                case Ok(_): fail("invalid native owner identity invoked a mapping")
+                case Err(refusal):
+                    expect(refusal.code).to_equal(VARIANT_CALLABLE_NOT_CALLABLE_V1)
             expect(variant_callable_release_v1(native)).to_equal(true)
+            match variant_callable_invoke_v1(retained_copy, [7, 5]):
+                case Ok(_): fail("retained copy invoked after native release")
+                case Err(refusal):
+                    expect(refusal.code).to_equal(VARIANT_CALLABLE_NOT_CALLABLE_V1)
+            expect(variant_callable_release_v1(retained_copy)).to_equal(false)
+            expect(invoke(peer, [7, 5])).to_equal(222)
+            expect(variant_callable_release_v1(peer)).to_equal(true)
             expect(variant_callable_release_v1(twin)).to_equal(true)
             file_delete(csrc)
             file_delete(so)

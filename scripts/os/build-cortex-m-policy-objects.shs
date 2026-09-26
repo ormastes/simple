@@ -1,0 +1,38 @@
+#!/bin/sh
+# Build the two pure-Simple Cortex-M policy objects the C bring-up shim links
+# against, and print their paths (one per line) on stdout.
+#
+# cm33_shim.c declares cm33_policy_* / cm33_access_* as `extern` — they are
+# implemented in Simple (scalar_parser_fs_policy.spl, access_policy.spl). Until
+# 2026-09-19 the three board runners compiled only the shim, so every SimpleOS
+# Cortex-M image failed to link with "undefined symbol: cm33_policy_fs_add_file".
+# The recipe here is the one check-cm33-scalar-parser-fs-policy.shs already used.
+set -eu
+
+usage() { echo "usage: $0 <target-triple> <out-dir>" >&2; exit 2; }
+[ "$#" -eq 2 ] || usage
+TARGET=$1
+OUT_DIR=$2
+case "$TARGET" in
+    thumbv8m.main-none-eabi|thumbv7em-none-eabi) ;;
+    *) echo "ERROR unsupported Cortex-M policy target: $TARGET" >&2; exit 2 ;;
+esac
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT_DIR/bin/simple}
+SOURCE_DIR=src/os/kernel/arch/cortex_m33
+[ -x "$SIMPLE_BIN" ] || { echo "ERROR no executable Simple compiler: $SIMPLE_BIN" >&2; exit 1; }
+mkdir -p "$OUT_DIR"
+
+for entry in access_policy scalar_parser_fs_policy; do
+    object=$OUT_DIR/$entry-$TARGET.o
+    (cd "$ROOT_DIR" && "$SIMPLE_BIN" native-build --backend llvm \
+        --source "$SOURCE_DIR" --entry "$SOURCE_DIR/$entry.spl" --entry-closure \
+        --target "$TARGET" --emit-object \
+        --cache-dir "$OUT_DIR/.cache-$entry-$TARGET" -o "$object" >/dev/null 2>&1) || {
+        echo "ERROR policy object build failed: $entry ($TARGET)" >&2
+        exit 1
+    }
+    [ -s "$object" ] || { echo "ERROR policy object is empty: $object" >&2; exit 1; }
+    echo "$object"
+done

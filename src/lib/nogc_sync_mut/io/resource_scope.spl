@@ -9,6 +9,7 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_acquire, proc_slot_release}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.io_runtime.{getpid}
 use std.convert.{try_parse_int}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, TerminationEvidence, ResourceBudget, BudgetDecision, evaluate_resource_budget, classify_termination}
@@ -494,12 +495,52 @@ fn _legacy_process_fallback(cmd: text, args: [text], timeout_ms: i64, max_output
         evidence_quality: ResourceEvidenceQuality.Unavailable,
         termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
         signal: legacy_signal, exit_code: legacy_exit)
+    # `process_run_bounded` (rt_process_run_bounded) has no receipt flag for
+    # "hit the cap" — it returns only (stdout, stderr, exit_code). Verified
+    # directly against all three parallel runtime implementations that this
+    # facade can resolve to, that a truncated stream is always STRICTLY
+    # LONGER than the requested `max_output_bytes`, so a plain length
+    # comparison is an exact structural substitute for the missing flag:
+    #   - interpreter_extern/system.rs: cuts the stream to exactly
+    #     `max_bytes` then appends the marker AFTER it (comment at :866,
+    #     "the marker is outside the byte budget") -> final len = max_bytes +
+    #     marker_len, always > max_bytes when truncated.
+    #   - runtime_fork.c (POSIX) / runtime_process.c (Windows,
+    #     `win_capture_finish`): a head+tail-split capture where
+    #     `capture->limit` is set to `max_output_bytes` exactly
+    #     (runtime_fork.c:295, runtime_process.c:386-387) and
+    #     `head_limit + tail_limit == capture->limit`. Truncation (`total >
+    #     head_len + tail_len`) only occurs once both the head buffer and the
+    #     tail ring are saturated, so `head_len == head_limit` and
+    #     `tail_len == tail_limit` at that point, and the marker is inserted
+    #     BETWEEN them: final len = head_limit + marker_len + tail_limit =
+    #     `max_output_bytes` + marker_len, again always > max_output_bytes.
+    # A stream that was NOT truncated is always at or under the cap on all
+    # three (no marker is ever inserted). This is a structural length check
+    # against the numeric cap the caller itself requested — not a scan of the
+    # stream's text content — and it is exact for this facade's contract on
+    # every backend, unlike scanning for the marker text (which sits at the
+    # very end on the first implementation but in the MIDDLE of the buffer,
+    # before the retained tail, on the other two).
     ObservedProcessResult(
         stdout: legacy_stdout, stderr: legacy_stderr, usage: legacy_usage,
-        stdout_truncated: false, stderr_truncated: false,
+        stdout_truncated: legacy_stdout.len() > max_output_bytes,
+        stderr_truncated: legacy_stderr.len() > max_output_bytes,
         runtime_error: if legacy_exit == -1 and not legacy_timed_out: reported_error else: 0)
 
 fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ObservedProcessResult:
+    # ponytail: Windows takes the established bounded facade
+    # (rt_process_run_bounded, runtime_process.c: CreateProcess + job object +
+    # pipes) instead of the owned observed capsule. Measured 2026-09-25: the
+    # seed-built stage-2 tools pass the capsule's `cmd` as one word (C owner
+    # takes ptr+len) and read its raw 3-word tuple result as a runtime array,
+    # so every spawn came back exit -1 ("child produced no exit status").
+    # Ceiling: resource evidence is Unavailable on Windows (the test RSS cap
+    # is still enforced by the runner's Job-Object guard). Upgrade path: an
+    # array-returning owned-process wrapper with Rust twins, tracked in
+    # doc/08_tracking/todo/windows_owned_process_capsule_seed_abi_2026-09-25.md.
+    if host_is_windows_host():
+        return _legacy_process_fallback(cmd, args, timeout_ms, max_output_bytes, -1)
     val started = time_now_unix_micros()
     proc_slot_acquire()
     val (stdout, stderr, fields) = _process_run_observed_raw(cmd, args, timeout_ms, max_output_bytes)
@@ -589,7 +630,7 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
 pub fn run_in_execution_resource_scope(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ExecutionScopeResult:
     """Run one owned process tree and evaluate its declared budget independently."""
     val cgroup_path = _prepare_cgroup_v2(scope)
-    val process = if cgroup_path == "":
+    val process: ObservedProcessResult = if cgroup_path == "":
         if file_exists("/bin/sh"):
             _run_with_unix_limits(scope, cmd, args)
         else:

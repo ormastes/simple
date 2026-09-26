@@ -49,7 +49,11 @@ use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
     dynlib_symbol_address_v1,
     dynlib_admitted_close_v1
 }
-use std.nogc_sync_mut.sffi.dynamic.{spl_wffi_call_i64}
+use std.nogc_sync_mut.composition.environment_variants.native_callable_owner_v1.{
+    native_callable_owner_register_v1,
+    native_callable_owner_invoke_v1,
+    native_callable_owner_retire_v1
+}
 use std.common.string_core.{text_to_bytes}
 
 # The placement is not part of package 2 at all (JIT, contained worker).
@@ -74,6 +78,7 @@ pub const VARIANT_CALLABLE_NOT_CALLABLE_V1: i32 = 10
 # while the artifact is still inert, and this one is refused after its
 # constructors have already run — an operator needs to tell those apart.
 pub const VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1: i32 = 11
+pub const VARIANT_CALLABLE_OWNER_UNAVAILABLE_V1: i32 = 12
 
 # The mapped operation family: `i64(i64...)` over this arity range, uniformly
 # across placements. The upper bound is the widest shape the design asks an
@@ -119,9 +124,9 @@ pub struct VariantCallableRefusalV1:
     operation_id: u32
     reason: text
 
-# A mapped, resolvable callable. `native_fptr` and `static_op` are file-private:
-# exactly one of them is live, chosen by `placement`, and neither leaves this
-# module.
+# A mapped, resolvable callable. Native copies carry only one owner identity;
+# the owner keeps the raw pointer and mapping handle until all admitted calls
+# finish. A copied value cannot revive a retired mapping.
 pub class VariantCallableV1:
     placement: u16
     operation_id: u32
@@ -131,8 +136,7 @@ pub class VariantCallableV1:
     artifact_digest: EnvironmentDigest256V1
     mapping_handle: u64
     callable_handle: u64
-    native_fptr: i64
-    native_handle: i64
+    native_owner_identity: u64
     static_op: (([i64]) -> i64)?
 
 fn _refuse(code: i32, request: VariantOperationRequestV1,
@@ -215,8 +219,7 @@ fn _map_static(
                 artifact_digest: artifact,
                 mapping_handle: mapping,
                 callable_handle: _token_of(seed: mapping, value: "call:{request.symbol_name}"),
-                native_fptr: 0,
-                native_handle: 0,
+                native_owner_identity: 0u64,
                 static_op: entry.op))
     Err(_refuse(VARIANT_CALLABLE_SYMBOL_ABSENT_V1, request,
         "no static operation is registered for {request.symbol_name}"))
@@ -256,8 +259,15 @@ fn _map_native(
             dynlib_admitted_close_v1(handle)
         return Err(_refuse(VARIANT_CALLABLE_SYMBOL_ABSENT_V1, request,
             "admitted artifact does not export {request.symbol_name}"))
+    val owner_identity = native_callable_owner_register_v1(handle, address)
+    if owner_identity == 0u64:
+        unsafe(capabilities: [ffi]):
+            dynlib_admitted_close_v1(handle)
+        return Err(_refuse(VARIANT_CALLABLE_OWNER_UNAVAILABLE_V1, request,
+            "native callable lifetime owner is full or identity space is exhausted"))
     val artifact = _digest_from_hex(request.artifact_digest_hex)
-    val mapping = _token_of(seed: artifact.w0, value: "native-map:{request.provider_generation}")
+    val mapping = _token_of(seed: artifact.w0,
+        value: "native-map:{request.provider_generation}:{owner_identity}")
     Ok(VariantCallableV1(
         placement: ENV_PLACEMENT_NATIVE_DYNLIB_V1,
         operation_id: request.operation_id,
@@ -267,8 +277,7 @@ fn _map_native(
         artifact_digest: artifact,
         mapping_handle: mapping,
         callable_handle: _token_of(seed: mapping, value: "call:{request.symbol_name}"),
-        native_fptr: address,
-        native_handle: handle,
+        native_owner_identity: owner_identity,
         static_op: nil))
 
 # Maps one admitted operation onto a callable, or refuses with a stable code.
@@ -322,10 +331,15 @@ pub fn variant_callable_invoke_v1(
                     placement: callable.placement,
                     operation_id: callable.operation_id,
                     reason: "static callable carries no operation"))
-    if callable.placement == ENV_PLACEMENT_NATIVE_DYNLIB_V1 and callable.native_fptr > 0:
-        val value = unsafe(capabilities: [ffi, raw_ptr]):
-            spl_wffi_call_i64(callable.native_fptr, args, args.len())
-        return Ok(value)
+    if callable.placement == ENV_PLACEMENT_NATIVE_DYNLIB_V1:
+        match native_callable_owner_invoke_v1(callable.native_owner_identity, args):
+            case Ok(value): return Ok(value)
+            case Err(_):
+                return Err(VariantCallableRefusalV1(
+                    code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
+                    placement: callable.placement,
+                    operation_id: callable.operation_id,
+                    reason: "native callable mapping is retired or unavailable"))
     Err(VariantCallableRefusalV1(
         code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
         placement: callable.placement,
@@ -346,10 +360,10 @@ pub fn variant_callable_receipt_mark_v1(
     environment_variant_receipt_mark_callable_v1(
         mapped, identity, callable.callable_handle)
 
-# Releases the mapping a native callable holds. A static callable owns no
-# mapping, so releasing it is a no-op that still reports success.
+# Revokes every copy of a native callable through its one lifetime owner. A
+# static callable owns no mapping, so releasing it is a no-op that reports
+# success. A second native release reports false.
 pub fn variant_callable_release_v1(callable: VariantCallableV1) -> bool:
-    if callable.native_handle <= 0:
+    if callable.placement != ENV_PLACEMENT_NATIVE_DYNLIB_V1:
         return true
-    unsafe(capabilities: [ffi]):
-        dynlib_admitted_close_v1(callable.native_handle)
+    native_callable_owner_retire_v1(callable.native_owner_identity)

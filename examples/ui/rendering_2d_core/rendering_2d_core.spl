@@ -1,0 +1,384 @@
+# rendering_2d_core.spl — shared Engine2D core scene (lane 2d, tier core).
+#
+# `rendering_2d_core_scene(engine, w, h)` paints the core-tier primitive grid:
+# rects (outline/filled/batch/thick), line, polyline, circle family, ellipse,
+# arc, triangles, polygon, bezier, rounded rect (+outline), gradients
+# (vertical/horizontal/stops + radial), blur and shadow effects; plus the text
+# group — draw_text, draw_text_bg, draw_text_configured — with the bitmap
+# fallback glyphs (5x7 engine blit + hand-blit 8x16 VGA path) side by side
+# against ONE stable corpus vector font (Noto Sans Mono), including the
+# word-spacing demo: two shaped lines drawn with draw_shaped_text whose space
+# advances differ by `word_spacing_px` (there is no engine word-spacing param;
+# the spacing is applied to the shaped run's space-glyph advances, the same
+# model as common.layout.text_metrics.monospace_metrics).
+#
+# Honest degradation: if the vector font file is unavailable the vector group
+# is skipped, a "VECTOR FONT UNAVAILABLE" marker is drawn in the bitmap font,
+# and a one-line note is printed — the bitmap side always renders.
+#
+# The engine is threaded through return values: paints made through a class
+# param that is passed on into another helper detach on the interpreter lane
+# (see graphics_2d_showcase.spl), so every helper takes and returns Engine2D.
+
+use std.io_runtime.{env_get, file_exists, file_read_bytes}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.common.encoding.font_registry.{selected_font_asset_candidates}
+use std.common.encoding.sfnt_glyf.{sfnt_blob_glyph_ids_into, sfnt_blob_glyph_advances_into}
+use std.common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
+use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_glyph_run_payload, draw_ir_empty_glyph_run_payload}
+use std.nogc_sync_mut.text_layout.font_types.{font_render_config_default_for_size}
+
+pub val RENDERING_2D_DESIGN_W: i32 = 960
+pub val RENDERING_2D_DESIGN_H: i32 = 640
+
+val BG: u32 = 0xFF101522u32
+val PANEL: u32 = 0xFF1B2435u32
+val WHITE: u32 = 0xFFF3F6FCu32
+val MUTE: u32 = 0xFF9AA7BDu32
+val BLUE: u32 = 0xFF3B82F6u32
+val CYAN: u32 = 0xFF22D3EEu32
+val GREEN: u32 = 0xFF22C55Eu32
+val AMBER: u32 = 0xFFF59E0Bu32
+val RED: u32 = 0xFFEF4444u32
+val PURPLE: u32 = 0xFFA855F7u32
+
+# Design space is RENDERING_2D_DESIGN_W x RENDERING_2D_DESIGN_H; everything
+# scales to the requested render size.
+fn _sx(v: i32, rw: i32) -> i32:
+    v * rw / RENDERING_2D_DESIGN_W
+
+fn _sy(v: i32, rh: i32) -> i32:
+    v * rh / RENDERING_2D_DESIGN_H
+
+fn _sd(v: i32, rw: i32, dpi: i32) -> i32:
+    val r = v * rw / RENDERING_2D_DESIGN_W * dpi / 96
+    if r < 1:
+        return 1
+    r
+
+fn _env_dpi() -> i32:
+    val raw = (env_get("SHOWCASE_DPI") ?? "").trim()
+    if raw == "":
+        return 96
+    val d = raw.to_int() ?? 96
+    if d < 1:
+        return 96
+    d
+
+fn _label(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, x: i32, y: i32, value: text) -> Engine2D:
+    e.draw_text_bg(_sx(x, rw), _sy(y, rh), value, WHITE, 0xCC101522u32, _sd(11, rw, dpi))
+    e
+
+# ---------------------------------------------------------------------------
+# Bitmap 8x16 VGA glyph path (pure data blit, glyph_bitmap_8x16).
+# ---------------------------------------------------------------------------
+
+fn _bitmap_8x16_line(value: text, scale: i32) -> ([u32], i32, i32):
+    val glyph_w = 8 * scale
+    val glyph_h = 16 * scale
+    val count = value.len()
+    val w = glyph_w * count
+    val h = glyph_h
+    var px: [u32] = []
+    val total = w * h
+    var i = 0
+    while i < total:
+        px.push(0u32)
+        i = i + 1
+    var ci = 0
+    while ci < count:
+        val code = value.char_code_at(ci)
+        val rows = get_glyph_8x16(code as u8)
+        var r = 0
+        while r < 16:
+            val bits = rows[r].to_i32()
+            var c = 0
+            while c < 8:
+                if (bits & (1 << (7 - c))) != 0:
+                    var oy = 0
+                    while oy < scale:
+                        var ox = 0
+                        while ox < scale:
+                            val py = r * scale + oy
+                            val pxx = ci * glyph_w + c * scale + ox
+                            px[py * w + pxx] = 0xFFF3F6FCu32
+                            ox = ox + 1
+                        oy = oy + 1
+                c = c + 1
+            r = r + 1
+        ci = ci + 1
+    (px, w, h)
+
+# ---------------------------------------------------------------------------
+# Vector font: ONE stable corpus face (Noto Sans Mono). Honest "" when the
+# pinned candidate or its bytes are unavailable.
+# ---------------------------------------------------------------------------
+
+var _vector_font_note_printed: bool = false
+
+fn _vector_font_path() -> text:
+    val candidates = selected_font_asset_candidates()
+    var i = 0
+    while i < candidates.len():
+        if candidates[i].family == "Noto Sans Mono":
+            return candidates[i].local_path
+        i = i + 1
+    if candidates.len() > 0:
+        return candidates[0].local_path
+    ""
+
+fn _try_vector_font_blob() -> [u8]:
+    val path = _vector_font_path()
+    if path == "":
+        return []
+    if not file_exists(path):
+        if not _vector_font_note_printed:
+            _vector_font_note_printed = true
+            print "rendering_2d_core note=vector-font-unavailable path={path}"
+        return []
+    val blob = file_read_bytes(path)
+    if blob.len() == 0:
+        if not _vector_font_note_printed:
+            _vector_font_note_printed = true
+            print "rendering_2d_core note=vector-font-unreadable path={path}"
+        return []
+    blob
+
+# Build a shaped run for `value` through the corpus face: real glyph ids via
+# one cmap pass, natural advances via one hmtx pass, then every space glyph's
+# advance is widened by `word_spacing_px` (the shaped-run route for the
+# word-spacing gap: draw_text* has no such param and faking it with extra
+# spaces would not be word spacing). Returns (run, laid-out width in px);
+# an invalid payload reports width 0.
+fn _word_spaced_run(blob: [u8], value: text, font_size: i32, word_spacing_px: i32) -> (DrawIrGlyphRunPayload, i32):
+    var cps: [i64] = []
+    var i = 0
+    while i < value.len():
+        cps.push(value.char_code_at(i).to_i64())
+        i = i + 1
+    if cps.len() == 0:
+        return (draw_ir_empty_glyph_run_payload(), 0)
+    var ids: [i64] = []
+    var milli: [i64] = []
+    var px_adv: [i64] = []
+    i = 0
+    while i < cps.len():
+        ids.push(0)
+        milli.push(0)
+        px_adv.push(0)
+        i = i + 1
+    sfnt_blob_glyph_ids_into(blob, cps, ids)
+    sfnt_blob_glyph_advances_into(blob, ids, font_size.to_i64(), milli, px_adv)
+    var glyph_ids: [u32] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var clusters: [i64] = []
+    var pen: i32 = 0
+    var ok = true
+    i = 0
+    while i < cps.len():
+        if ids[i] <= 0:
+            ok = false
+        glyph_ids.push(ids[i].to_u32())
+        xs.push(pen)
+        ys.push(0)
+        clusters.push(i.to_i64())
+        var adv = px_adv[i].to_i32()
+        if adv <= 0:
+            adv = font_size / 2
+        if adv < 1:
+            adv = 1
+        if cps[i] == 32:
+            adv = adv + word_spacing_px
+        pen = pen + adv
+        i = i + 1
+    if not ok:
+        return (draw_ir_empty_glyph_run_payload(), 0)
+    (draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, true), pen)
+
+# Advance-array twin of _word_spaced_run: the same widening for the
+# draw_text_with_advances fallback (producer-resolved text, no glyph ids).
+fn _word_spaced_advances(blob: [u8], value: text, font_size: i32, word_spacing_px: i32) -> [i32]:
+    var out: [i32] = []
+    var cps: [i64] = []
+    var i = 0
+    while i < value.len():
+        cps.push(value.char_code_at(i).to_i64())
+        out.push(0)
+        i = i + 1
+    if cps.len() == 0:
+        return out
+    var ids: [i64] = []
+    var milli: [i64] = []
+    var px_adv: [i64] = []
+    i = 0
+    while i < cps.len():
+        ids.push(0)
+        milli.push(0)
+        px_adv.push(0)
+        i = i + 1
+    sfnt_blob_glyph_ids_into(blob, cps, ids)
+    sfnt_blob_glyph_advances_into(blob, ids, font_size.to_i64(), milli, px_adv)
+    i = 0
+    while i < cps.len():
+        var adv = px_adv[i].to_i32()
+        if adv <= 0:
+            adv = font_size / 2
+        if adv < 1:
+            adv = 1
+        if cps[i] == 32:
+            adv = adv + word_spacing_px
+        out[i] = adv
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Text + fonts cell: bitmap fallback (5x7 engine blit, 8x16 VGA blit) side by
+# side with the corpus vector face, ending in the shaped word-spacing pair.
+# ---------------------------------------------------------------------------
+
+fn _text_font_cell(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, blob: [u8]) -> Engine2D:
+    e.draw_rect_filled(_sx(16, rw), _sy(268, rh), _sx(928, rw), _sy(156, rh), PANEL)
+    e = _label(e, rw, rh, dpi, 24, 274, "TEXT: draw_text / draw_text_bg / configured | BITMAP vs VECTOR | WORD SPACING")
+
+    val demo = "The Quick Brown Fox"
+    val fs = _sd(13, rw, dpi)
+
+    # Bitmap side (engine 5x7 fallback glyphs).
+    e.draw_text(_sx(32, rw), _sy(300, rh), "bitmap 5x7: {demo}", MUTE, fs)
+    val line8 = _bitmap_8x16_line("bitmap 8x16 VGA", 1)
+    e.draw_image_scaled(_sx(32, rw), _sy(320, rh), _sx(9 * 16, rw), _sy(2 * 16, rh), line8.1, line8.2, line8.0)
+
+    if blob.len() == 0:
+        e.draw_text_bg(_sx(500, rw), _sy(300, rh), "VECTOR FONT UNAVAILABLE (bitmap only)", RED, 0xCC101522u32, fs)
+        e.draw_text(_sx(500, rw), _sy(330, rh), "expected corpus face: Noto Sans Mono", MUTE, fs)
+        return e
+
+    # Vector side (corpus face already selected via load_font by the caller).
+    e.draw_text(_sx(500, rw), _sy(300, rh), "vector: {demo}", WHITE, fs)
+    e.draw_text_bg(_sx(500, rw), _sy(320, rh), "vector draw_text_bg", WHITE, BLUE, fs)
+    val cfg = font_render_config_default_for_size(fs)
+    val configured_ok = e.draw_text_configured(_sx(500, rw), _sy(342, rh), "vector draw_text_configured", CYAN, cfg)
+    if not configured_ok:
+        e.draw_text(_sx(660, rw), _sy(342, rh), "(configured rejected)", RED, _sd(10, rw, dpi))
+
+    # Word spacing: two shaped lines, identical text, only the space-glyph
+    # advance differs — by word_spacing_px, the text_metrics spacing model.
+    val spacing_text = "THE QUICK BROWN FOX JUMPS"
+    val spacing_size = _sd(15, rw, dpi)
+    val spacing_extra = _sd(18, rw, dpi)
+    e.draw_text(_sx(32, rw), _sy(366, rh), "word spacing: draw_shaped_text, same line, word_spacing_px 0 vs +{spacing_extra}", MUTE, _sd(11, rw, dpi))
+
+    val y0 = _sy(384, rh)
+    val shaped0 = _word_spaced_run(blob, spacing_text, spacing_size, 0)
+    val x0 = _sx(32, rw)
+    if shaped0.1 > 0:
+        val drew0 = e.draw_shaped_text(x0, y0, shaped0.0, GREEN, spacing_size)
+        if not drew0:
+            e.draw_text_with_advances(x0, y0, spacing_text, _word_spaced_advances(blob, spacing_text, spacing_size, 0), GREEN, spacing_size)
+        e.draw_line(x0 + shaped0.1, y0, x0 + shaped0.1, y0 + spacing_size, RED, 1)
+    else:
+        e.draw_text(x0, y0, spacing_text, GREEN, spacing_size)
+
+    val y1 = _sy(408, rh)
+    val shaped1 = _word_spaced_run(blob, spacing_text, spacing_size, spacing_extra)
+    if shaped1.1 > 0:
+        val drew1 = e.draw_shaped_text(x0, y1, shaped1.0, AMBER, spacing_size)
+        if not drew1:
+            e.draw_text_with_advances(x0, y1, spacing_text, _word_spaced_advances(blob, spacing_text, spacing_size, spacing_extra), AMBER, spacing_size)
+        e.draw_line(x0 + shaped1.1, y1, x0 + shaped1.1, y1 + spacing_size, RED, 1)
+        e.draw_text(x0 + shaped1.1 + 6, y1, "wider by {spacing_extra}px per word", MUTE, _sd(10, rw, dpi))
+    else:
+        e.draw_text(x0, y1, spacing_text, AMBER, spacing_size)
+    e
+
+# ---------------------------------------------------------------------------
+# Core grid.
+# ---------------------------------------------------------------------------
+
+fn _rect_line_cell(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+    e.draw_rect_filled(_sx(16, rw), _sy(40, rh), _sx(296, rw), _sy(212, rh), PANEL)
+    e = _label(e, rw, rh, dpi, 24, 46, "RECT / LINE / BATCH")
+    e.draw_rect(_sx(28, rw), _sy(70, rh), _sx(44, rw), _sy(30, rh), BLUE)
+    e.draw_rect_filled(_sx(80, rw), _sy(70, rh), _sx(44, rw), _sy(30, rh), CYAN)
+    e.draw_rect_thick(_sx(132, rw), _sy(70, rh), _sx(44, rw), _sy(30, rh), GREEN, _sd(4, rw, dpi))
+    e.draw_rect_list_filled(
+        [_sx(28, rw), _sy(112, rh), _sx(20, rw), _sy(20, rh),
+         _sx(56, rw), _sy(112, rh), _sx(20, rw), _sy(20, rh),
+         _sx(84, rw), _sy(112, rh), _sx(20, rw), _sy(20, rh)],
+        [AMBER, RED, PURPLE])
+    e.draw_rounded_rect(_sx(120, rw), _sy(108, rh), _sx(80, rw), _sy(34, rh), _sx(10, rw), PURPLE)
+    e.draw_rounded_rect_outline(_sx(212, rw), _sy(108, rh), _sx(84, rw), _sy(34, rh), _sx(10, rw), AMBER, _sd(3, rw, dpi))
+    e.draw_line(_sx(28, rw), _sy(168, rh), _sx(268, rw), _sy(168, rh), RED, _sd(3, rw, dpi))
+    e.draw_polyline(
+        [_sx(28, rw), _sx(76, rw), _sx(124, rw), _sx(172, rw), _sx(220, rw), _sx(268, rw)],
+        [_sy(196, rh), _sy(180, rh), _sy(200, rh), _sy(178, rh), _sy(198, rh), _sy(182, rh)],
+        6, CYAN, _sd(2, rw, dpi))
+    e
+
+fn _curves_cell(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+    e.draw_rect_filled(_sx(328, rw), _sy(40, rh), _sx(296, rw), _sy(212, rh), PANEL)
+    e = _label(e, rw, rh, dpi, 336, 46, "CURVES / SHAPES")
+    e.draw_circle(_sx(364, rw), _sy(98, rh), _sx(22, rw), BLUE)
+    e.draw_circle_filled(_sx(418, rw), _sy(98, rh), _sx(22, rw), GREEN)
+    e.draw_circle_thick(_sx(474, rw), _sy(98, rh), _sx(22, rw), AMBER, _sd(5, rw, dpi))
+    e.draw_ellipse(_sx(370, rw), _sy(150, rh), _sx(30, rw), _sy(16, rh), CYAN)
+    e.draw_ellipse_filled(_sx(436, rw), _sy(150, rh), _sx(30, rw), _sy(16, rh), PURPLE)
+    e.draw_arc(_sx(500, rw), _sy(150, rh), _sx(24, rw), 30, 300, RED, _sd(4, rw, dpi))
+    e.draw_triangle_filled(_sx(344, rw), _sy(220, rh), _sx(386, rw), _sy(186, rh), _sx(406, rw), _sy(232, rh), BLUE)
+    e.draw_triangle_outline(_sx(416, rw), _sy(232, rh), _sx(448, rw), _sy(184, rh), _sx(486, rw), _sy(232, rh), WHITE, _sd(3, rw, dpi))
+    e.draw_polygon_filled(
+        [_sx(500, rw), _sx(528, rw), _sx(552, rw), _sx(540, rw), _sx(512, rw)],
+        [_sy(204, rh), _sy(188, rh), _sy(212, rh), _sy(238, rh), _sy(236, rh)],
+        5, GREEN)
+    e.draw_bezier(_sx(340, rw), _sy(240, rh), _sx(372, rw), _sy(206, rh), _sx(430, rw), _sy(248, rh), _sx(478, rw), _sy(210, rh), AMBER, _sd(3, rw, dpi))
+    e
+
+fn _gradient_effect_cell(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+    e.draw_rect_filled(_sx(640, rw), _sy(40, rh), _sx(304, rw), _sy(212, rh), PANEL)
+    e = _label(e, rw, rh, dpi, 648, 46, "ROUNDED / GRADIENT / EFFECT")
+    e.draw_gradient_rect(_sx(652, rw), _sy(70, rh), _sx(60, rw), _sy(52, rh), BLUE, PURPLE)
+    e.draw_gradient_rect_h(_sx(722, rw), _sy(70, rh), _sx(60, rw), _sy(52, rh), GREEN, CYAN)
+    e.draw_gradient_rect_stops(_sx(792, rw), _sy(70, rh), _sx(60, rw), _sy(52, rh),
+        [RED, AMBER, GREEN], [0, 128, 255], 90)
+    e.draw_radial_gradient(_sx(688, rw), _sy(158, rh), _sx(28, rw), WHITE, RED)
+    e.draw_radial_gradient_rect_stops(_sx(760, rw), _sy(158, rh), _sx(28, rw),
+        [WHITE, CYAN, BLUE], [0, 96, 255])
+    e.draw_shadow_rect(_sx(812, rw), _sy(140, rh), _sx(80, rw), _sy(40, rh), _sx(6, rw), _sy(6, rh), _sd(8, rw, dpi), 0xAA000000u32)
+    e.draw_rect_filled(_sx(812, rw), _sy(140, rh), _sx(80, rw), _sy(40, rh), BLUE)
+    e.draw_blur_rect(_sx(660, rw), _sy(196, rh), _sx(90, rw), _sy(34, rh), _sd(6, rw, dpi))
+    e.draw_rect_filled(_sx(660, rw), _sy(196, rh), _sx(90, rw), _sy(34, rh), 0x66F59E0Bu32)
+    e.draw_text(_sx(770, rw), _sy(200, rh), "blur_rect + alpha fill", MUTE, _sd(10, rw, dpi))
+    e
+
+pub fn rendering_2d_core_scene(mut engine: Engine2D, w: i64, h: i64) -> Engine2D:
+    """Paint the core-tier Engine2D primitive + text/font grid.
+
+    Authored in RENDERING_2D_DESIGN_W x RENDERING_2D_DESIGN_H design space and
+    scaled to the requested render size. The vector corpus face (Noto Sans
+    Mono) is selected for the vector half of the text cell; the bitmap half
+    uses the engine 5x7 fallback plus a hand-blit 8x16 VGA line."""
+    val rw = w.to_i32()
+    val rh = h.to_i32()
+    val dpi = _env_dpi()
+    engine.clear(BG)
+    engine.draw_text(_sx(20, rw), _sy(12, rh), "Simple Engine2D — rendering_2d_core (primitives + bitmap/vector fonts)", WHITE, _sd(16, rw, dpi))
+
+    # Bitmap text must stay bitmap every frame: the vector face is selected
+    # per-call below, so drop any selection left over from a previous frame.
+    engine.unload_font()
+
+    engine = _rect_line_cell(engine, rw, rh, dpi)
+    engine = _curves_cell(engine, rw, rh, dpi)
+    engine = _gradient_effect_cell(engine, rw, rh, dpi)
+
+    # Vector corpus font for the text cell (honest bitmap-only fallback inside).
+    val blob = _try_vector_font_blob()
+    if blob.len() > 0:
+        val path = _vector_font_path()
+        if not engine.load_font(path):
+            if not _vector_font_note_printed:
+                _vector_font_note_printed = true
+                print "rendering_2d_core note=vector-font-load-failed path={path}"
+    engine = _text_font_cell(engine, rw, rh, dpi, blob)
+    engine

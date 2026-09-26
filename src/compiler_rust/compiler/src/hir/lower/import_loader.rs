@@ -52,6 +52,26 @@ impl Lowerer {
         self.imported_fn_param_defaults.entry(caller.to_path_buf()).or_default().extend(selected);
     }
 
+    /// Record an imported type's method parameter defaults under the same
+    /// `Owner.method` key `collect_fn_param_defaults` uses for local types, so
+    /// a cross-module method call with omitted trailing arguments is filled
+    /// (`lower_method_call`) instead of passing an unset argument slot.
+    /// `or_insert`: a declaration in the importing module always wins.
+    fn record_imported_method_defaults(&mut self, owner: &str, methods: &[simple_parser::ast::FunctionDef]) {
+        for method in methods {
+            let user_params = if method.params.first().is_some_and(|p| p.name == "self") {
+                &method.params[1..]
+            } else {
+                &method.params[..]
+            };
+            if user_params.iter().any(|p| p.default.is_some()) {
+                self.fn_param_defaults
+                    .entry(format!("{}.{}", owner, method.name))
+                    .or_insert_with(|| user_params.iter().map(|p| p.default.clone()).collect());
+            }
+        }
+    }
+
     fn import_target_cache_key(target: &ImportTarget) -> String {
         format!("{:?}", target)
     }
@@ -394,6 +414,7 @@ impl Lowerer {
                     if self.should_import_symbol(&class_def.name, target) {
                         let class_type_id = self.register_class(class_def)?;
                         self.globals.insert(class_def.name.clone(), class_type_id);
+                        self.record_imported_method_defaults(&class_def.name, &class_def.methods);
                         imported_count += 1;
                     }
                 }
@@ -441,6 +462,7 @@ impl Lowerer {
                     if self.should_import_symbol(&struct_def.name, target) {
                         let struct_type_id = self.register_struct(struct_def)?;
                         self.globals.insert(struct_def.name.clone(), struct_type_id);
+                        self.record_imported_method_defaults(&struct_def.name, &struct_def.methods);
                         imported_count += 1;
                     }
                 }
@@ -535,6 +557,7 @@ impl Lowerer {
 
                     if let Some(ref type_name) = type_name {
                         if self.should_import_symbol(type_name, target) {
+                            self.record_imported_method_defaults(type_name, &impl_block.methods);
                             for method in &impl_block.methods {
                                 let ret_ty = self.resolve_type_opt(&method.return_type)?;
                                 let method_full_name = format!("{}.{}", type_name, method.name);

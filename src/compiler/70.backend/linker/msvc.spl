@@ -186,7 +186,7 @@ impl MsvcLinker:
                 case Some(path):
                     link_exe = path
                 case nil:
-                    return Err(LinkError(kind: LinkErrorKind.InternalError, message: "MSVC link.exe not found", symbol: nil, location: nil))
+                    return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: nil, location: nil))
 
         # Build arguments
         val args = self.config.build_args(output, object_files)
@@ -298,66 +298,22 @@ fn find_visual_studio() -> text?:
 
     Some(result.stdout.trim())
 
-# Find link.exe in Visual Studio installation
-fn is_msvc_linker_candidate(path: text) -> bool:
+# The Windows COFF linker. Toolchain policy (2026-09-24) is clang/LLD only:
+# never MSVC link.exe, and fail fast (no fallback) when lld-link is missing.
+val LLD_LINK_INSTALL_HINT = "lld-link not found on PATH (clang/LLD-only toolchain policy; MSVC link.exe is not used). Install LLVM with: sh scripts/setup/bootstrap-prereqs.shs install"
+
+fn is_lld_link_candidate(path: text) -> bool:
     val normalized = path.trim().replace("\\", "/").lower()
-    if not normalized.ends_with("link.exe"):
-        return false
-    # Git-for-Windows and MSYS ship GNU coreutils `link.exe`.  It creates hard
-    # links and accepts Unix operands, not MSVC `/OUT:` arguments.  `where`
-    # commonly exposes it before the real linker in bootstrap shells.
-    not normalized.ends_with("/usr/bin/link.exe") and
-        not normalized.contains("/mingw32/bin/link.exe") and
-        not normalized.contains("/mingw64/bin/link.exe")
+    normalized.ends_with("/lld-link.exe") or normalized == "lld-link.exe"
 
 fn find_link_exe() -> text?:
-    # Try to find Visual Studio
-    val vs_path_opt = find_visual_studio()
-    match vs_path_opt:
-        case Some(vs_path):
-            # Search for link.exe under VC/Tools/MSVC/<ver>/bin/Hostx64/x64/.
-            # Forward slashes: the lexer drops embedded `\\` from string
-            # literals, so a backslash path here becomes an unopenable string.
-            val result = msvc_shell("dir /b /s \"{vs_path}/VC/Tools/MSVC\" 2>nul | findstr link.exe")
-
-            if result.exit_code == 0:
-                val lines = result.stdout.split("\n")
-                for line in lines:
-                    val trimmed = line.trim()
-                    if is_msvc_linker_candidate(trimmed) and file_exists(trimmed):
-                        return Some(trimmed)
-
-        case nil:
-            pass
-
-    # Try to find in PATH.
-    #
-    # `where` prints ONE LINE PER MATCH and there are routinely several:
-    # measured 2026-09-02 in the MSVC bootstrap lane, `where link.exe` returned
-    # 3 lines -- MSVC's linker first, then Git-for-Windows' coreutils `link.exe`
-    # twice. Trimming the whole multi-line blob and calling file_exists on it
-    # therefore ALWAYS failed, and this function returned nil with the linker
-    # sitting first on PATH. That produced "MSVC link.exe not found", which was
-    # the Stage 2 receiver gate's real (previously unprintable) error.
-    # Iterate the lines and take the first that is an existing file, exactly as
-    # the Visual Studio branch above already does.
-    val path_result = msvc_shell("where link.exe 2>nul")
-    if path_result.exit_code == 0:
-        for path_line in path_result.stdout.split("\n"):
-            val candidate = path_line.trim()
-            if is_msvc_linker_candidate(candidate) and file_exists(candidate):
-                return Some(candidate)
-
-    # lld-link implements the MSVC command-line and COFF ABI accepted by this
-    # linker wrapper.  Prefer it to accidentally accepting a Unix `link.exe`
-    # when Visual Studio discovery is unavailable in a bootstrap environment.
+    # `where` prints one line per match; take the first existing lld-link.
     val lld_result = msvc_shell("where lld-link.exe 2>nul")
     if lld_result.exit_code == 0:
         for lld_line in lld_result.stdout.split("\n"):
             val candidate = lld_line.trim()
-            if candidate.ends_with("lld-link.exe") and file_exists(candidate):
+            if is_lld_link_candidate(candidate) and file_exists(candidate):
                 return Some(candidate)
-
     nil
 
 # ===========================================================================
@@ -424,7 +380,7 @@ impl LldLinkLinker:
         # Find lld-link
         val lld_result = msvc_shell("where lld-link 2>nul")
         if lld_result.exit_code != 0:
-            return Err(LinkError(kind: LinkErrorKind.InternalError, message: "lld-link not found", symbol: nil, location: nil))
+            return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: nil, location: nil))
 
         val lld_link = lld_result.stdout.trim()
 

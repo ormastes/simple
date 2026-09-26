@@ -63,8 +63,22 @@ expect_rejected 'failed compiler version command'
 
 CARGO_CONFIG="$ROOT/src/compiler_rust/.cargo/config.toml"
 MSVC_SECTION="$(sed -n '/^\[target\.x86_64-pc-windows-msvc\]/,/^\[/p' "$CARGO_CONFIG")"
-printf '%s\n' "$MSVC_SECTION" | grep -Fx 'linker = "link.exe"' >/dev/null || {
-    echo 'FAIL: Cargo MSVC target must use linker = "link.exe"' >&2
+# clang-only policy (2026-09-24): the Windows MSVC-target Cargo linker is
+# `lld-link` (LLD's COFF linker driver), never MSVC `link.exe`. `lld-link` is
+# not the same risk as clang-cl-as-linker: clang-cl is a C COMPILER DRIVER
+# that reinterprets argv before invoking a linker (the risk the old contract
+# and the old .cargo/config.toml comment both warned about), whereas
+# `lld-link` IS the linker itself, so Cargo's `-C link-arg=...` contract holds
+# with no driver-translation step in front of it. See
+# scripts/setup/windows-msvc-bootstrap-env.shs and
+# scripts/check/check-bootstrap-preflight.shs's msvc_linker_from_llvm, which
+# resolve/require the same binary.
+printf '%s\n' "$MSVC_SECTION" | grep -Eq '^[[:space:]]*linker[[:space:]]*=[[:space:]]*"lld-link"[[:space:]]*$' || {
+    echo 'FAIL: Cargo MSVC target must use linker = "lld-link"' >&2
+    exit 1
+}
+printf '%s\n' "$MSVC_SECTION" | grep -Fx 'linker = "link.exe"' >/dev/null && {
+    echo 'FAIL: Cargo MSVC target must not bind Rust linking to MSVC link.exe' >&2
     exit 1
 }
 printf '%s\n' "$MSVC_SECTION" | grep -Eq '^[[:space:]]*linker[[:space:]]*=[[:space:]]*"clang-cl' && {

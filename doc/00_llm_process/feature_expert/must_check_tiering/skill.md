@@ -165,13 +165,15 @@ section is the current state, checked against `origin/main` on 2026-09-24.
     checks itself as its own "Push-tier core gates" step regardless, and a
     `local`-tier note would FAIL CI's `--tier ci` verifier call outright on a
     tier mismatch.
-  - `pr` — a **separate** one-row manifest, `config/check/pr_fast_gates.sdn`
-    (row `pr-fast-changed`), delivered on `refs/notes/pr-fast-receipts` (a
-    different ref from `ci-receipts`), consumed by `pr-fast-check.yml` /
-    `check-pr-fast.shs`. Not required, for reasons unrelated to signer
-    enrollment (practicality gaps in the underlying 60 s check, not trust).
-    Its signed `session_id` binds the exact simple binary (size + sha256) that
-    produced the verdicts — documented v1 behavior, not an oversight.
+  - `pr` — one row (`pr-fast-changed`), folded into `must_check_gates.sdn`
+    from the former standalone `config/check/pr_fast_gates.sdn` on 2026-09-24
+    (WP3, goal item 5: one manifest for every tier). Delivered on
+    `refs/notes/pr-fast-receipts` (a different ref from `ci-receipts`),
+    consumed by `pr-fast-check.yml` / `check-pr-fast.shs`. Not required, for
+    reasons unrelated to signer enrollment (practicality gaps in the
+    underlying 60 s check, not trust). Its signed `session_id` binds the
+    exact simple binary (size + sha256) that produced the verdicts —
+    documented v1 behavior, not an oversight.
 
 ## 2026-09-06 push dispatcher and guard-wiring landmines
 

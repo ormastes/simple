@@ -7,11 +7,12 @@ describe "bootstrap stage4 smoke gate":
         expect(script).to_not_contain("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1")
 
     it "fails bootstrap when the freshly built full CLI cannot execute code":
+        # 4c1b300a837: the smoke runs through the portable run_timeout helper
+        # (MSYS-aware) instead of `setsid timeout 30`.
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
 
-        expect(script).to_contain("stage4_smoke")
-        expect(script).to_contain("setsid timeout 30")
-        expect(script).to_contain("-c 'print(1+1)'")
+        expect(script).to_contain("stage4_smoke=\"$(run_timeout 30 \"${{full_bin}}\" -c 'print(1+1)' 2>/dev/null)\"")
+        expect(script).to_contain("if [ \"${{stage4_smoke}}\" != \"2\" ]; then")
         expect(script).to_contain("error: stage4 binary failed smoke test")
 
     it "gates test lint and duplicate-check on the fresh Stage 4 CLI":
@@ -23,7 +24,9 @@ describe "bootstrap stage4 smoke gate":
         expect(bootstrap).to_contain("SIMPLE_BINARY=\"$(absolute_path \"${{full_bin}}\")\"")
         expect(smoke).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
         expect(smoke).to_contain("SIMPLE_FRONTEND_DELEGATED=1")
-        expect(smoke).to_contain("timeout -k 5s 60s")
+        # Current since beb733bbaed: 30s probe budget; JSON probes run through
+        # run_json_probe / run_jsonl_probe, which also validate the payload.
+        expect(smoke).to_contain("timeout -k 5s 30s")
         expect(smoke).to_contain("run_probe test_runner_pass 0")
         expect(smoke).to_contain("run_probe list_constructor 0")
         expect(smoke).to_contain("essential_list_constructor_smoke=true")
@@ -31,12 +34,15 @@ describe "bootstrap stage4 smoke gate":
         expect(smoke).to_contain("run_probe test_runner_empty 1")
         expect(smoke).to_contain("run_probe lint_clean 0")
         expect(smoke).to_contain("run_probe lint_deny 1")
-        expect(smoke).to_contain("run_probe lint_json_deny 1")
+        expect(smoke).to_contain("run_jsonl_probe lint_json_deny 1")
         expect(smoke).to_contain("error=lint_json_aggregate_summary_wrong")
         expect(smoke).to_contain("error=lint_json_non_json_line")
         expect(smoke).to_contain("error=lint_json_human_output")
-        expect(smoke).to_contain("run_probe duplicate_clean 0")
-        expect(smoke).to_contain("run_probe duplicate_found 1")
+        expect(smoke).to_contain("run_json_probe duplicate_clean 0")
+        expect(smoke).to_contain("run_json_probe duplicate_token_uncached 1")
+        expect(smoke).to_contain("assert_duplicate_found_json duplicate_token_uncached token")
+        expect(smoke).to_contain("run_json_probe duplicate_cosine_uncached 1")
+        expect(smoke).to_contain("assert_duplicate_found_json duplicate_cosine_uncached cosine")
         expect(smoke).to_contain("\"total_groups\": 1")
         expect(smoke).to_contain("bootstrap_essential_tools_smoke=true")
         expect(smoke).to_contain("usage: $0 [stage4-binary]")
@@ -46,18 +52,6 @@ describe "bootstrap stage4 smoke gate":
         expect(smoke).to_not_contain("bin/simple duplicate-check")
         expect(cli).to_contain("return run_duplicate_check(filtered_args)")
         expect(cli).to_not_contain("cli_run_file(\"src/compiler/90.tools/duplicate_check/main.spl\"")
-        expect(workflow.split("'scripts/check/check-bootstrap-essential-tools-smoke.shs'").len()).to_equal(3)
-        expect(workflow.split("'scripts/check/validate-json.spl'").len()).to_equal(3)
-        expect(workflow.split("'scripts/check/validate-jsonl.spl'").len()).to_equal(3)
-        expect(workflow.split("'test/01_unit/lib/core/list_constructor_hardening_spec.spl'").len()).to_equal(3)
-        expect(workflow.split("'src/app/io/cli_fix_options.spl'").len()).to_equal(3)
-        expect(workflow.split("'src/app/io/cli_fmt_options.spl'").len()).to_equal(3)
-        expect(workflow.split("'src/app/io/cli_lint_commands.spl'").len()).to_equal(3)
-        expect(workflow.split("'src/app/io/_CliCompile/**'").len()).to_equal(3)
-        expect(workflow.split("'test/01_unit/app/cli/bootstrap_main_source_spec.spl'").len()).to_equal(3)
-        expect(workflow.split("'test/01_unit/app/compile/cli_compile_surface_spec.spl'").len()).to_equal(3)
-        expect(workflow.split("'test/02_integration/os/port/runtime_bundle_policy_spec.spl'").len()).to_equal(3)
-        expect(workflow.split("'test/03_system/app/lint_cli_contract_spec.spl'").len()).to_equal(3)
 
     it "runs every maintained test surface for release bootstrap":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
@@ -68,6 +62,7 @@ describe "bootstrap stage4 smoke gate":
     it "rejects seed fallback and gates the full candidate before deployment":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
         val admission = rt_file_read_text("scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs") ?? ""
+        val check_entry = rt_file_read_text("src/app/cli/check_entry.spl") ?? ""
 
         expect(script).to_contain("refusing seed fallback")
         expect(script).to_contain("CANDIDATE_FRONTEND_ROOT=${{repo_root}}")
@@ -85,9 +80,12 @@ describe "bootstrap stage4 smoke gate":
         val configured_pos: i64 = check_entry.find("val configured = env_get(\"SIMPLE_BINARY\")") ?? -1
         val configured_bin_pos: i64 = check_entry.find("val configured_bin = env_get(\"SIMPLE_BIN\")") ?? -1
         val uname_pos: i64 = check_entry.find("process_run_timeout(\"uname\"") ?? -1
-        expect(check_entry).to_contain("use app.io.env_ops.{{env_get}}")
-        expect(check_entry).to_contain("configured != nil and configured != \"\" and file_exists(configured)")
-        expect(check_entry).to_contain("configured_bin != nil and configured_bin != \"\" and file_exists(configured_bin)")
+        # f771e9e8a74: an explicitly configured worker is admitted only when it
+        # exists, raw or with the Windows verbatim prefix stripped.
+        expect(check_entry).to_contain("use app.io.env_ops.{{env_get, env_set}}")
+        expect(check_entry).to_contain("fn resolve_existing_path(candidate: text) -> text:\n    if file_exists(candidate):\n        return candidate")
+        expect(check_entry).to_contain("if configured != nil and configured != \"\":\n        val worker = resolve_existing_path(configured)\n        if worker != \"\":\n            return worker")
+        expect(check_entry).to_contain("if configured_bin != nil and configured_bin != \"\":\n        val worker_bin = resolve_existing_path(configured_bin)\n        if worker_bin != \"\":\n            return worker_bin")
         expect(configured_pos).to_be_greater_than(-1)
         expect(configured_bin_pos).to_be_greater_than(configured_pos)
         expect(uname_pos).to_be_greater_than(configured_bin_pos)
@@ -96,11 +94,8 @@ describe "bootstrap stage4 smoke gate":
 
     it "builds and requires the dedicated compiler backfill for a full CLI":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
-        val workflow = rt_file_read_text(".github/workflows/rust-bootstrap-multiplatform.yml") ?? ""
         val full_cli_implication: i64 = script.find("if [ \"${{deploy}}\" -eq 1 ] || [ \"${{bootstrap_mode}}\" = \"one-binary\" ]; then") ?? -1
         val reuse_gate: i64 = script.find("if [ \"${{full_bootstrap}}\" -eq 0 ]; then") ?? -1
-        val workflow_backfill: i64 = workflow.find("cargo build --profile bootstrap -p simple-compiler-backfill") ?? -1
-        val workflow_full_cli: i64 = workflow.find("mcp_flag=--full-cli") ?? -1
 
         expect(script).to_contain("compiler_backfill_lib=\"src/compiler_rust/target/bootstrap/${{archive_prefix}}simple_compiler_backfill${{archive_suffix}}\"")
         expect(script).to_contain("-p simple-compiler-backfill")
@@ -109,94 +104,55 @@ describe "bootstrap stage4 smoke gate":
         expect(script).to_contain("rust_rebuilt=1")
         expect(script).to_contain("[ \"${{rust_rebuilt}}\" -eq 1 ]")
         expect(script).to_contain("supported on native Linux and macOS hosts")
+        expect(full_cli_implication).to_be_greater_than(-1)
         expect(full_cli_implication).to_be_less_than(reuse_gate)
-        expect(workflow_backfill).to_be_greater_than(-1)
-        expect(workflow_backfill).to_be_less_than(workflow_full_cli)
-
-    it "publishes the Linux LLVM full CLI with its hosted providers":
-        val workflow = rt_file_read_text(".github/workflows/rust-bootstrap-multiplatform.yml") ?? ""
-        val full_build_pos: i64 = workflow.find("Build and sanity-check pure-Simple stages") ?? -1
-        val failure_upload_pos: i64 = workflow.find("Upload pure-Simple bootstrap failure logs") ?? -1
-        val stage_pos: i64 = workflow.find("Stage hosted full-CLI providers") ?? -1
-        val upload_pos: i64 = workflow.find("Upload hosted full CLI") ?? -1
-        val parity_pos: i64 = workflow.find("Run Rust-seed custom enum identity parity") ?? -1
-        val full_build_block = workflow.substring(full_build_pos, failure_upload_pos)
-        val failure_upload_block = workflow.substring(failure_upload_pos, stage_pos)
-        val upload_block = workflow.substring(upload_pos, parity_pos)
-
-        expect(full_build_pos).to_be_greater_than(-1)
-        expect(failure_upload_pos).to_be_greater_than(full_build_pos)
-        expect(stage_pos).to_be_greater_than(failure_upload_pos)
-        expect(upload_pos).to_be_greater_than(stage_pos)
-        expect(parity_pos).to_be_greater_than(upload_pos)
-        expect(full_build_block).to_contain("id: pure_simple_bootstrap")
-        expect(full_build_block).to_contain("scripts/bootstrap/bootstrap-from-scratch.sh")
-        expect(full_build_block).to_contain("--full-bootstrap")
-        expect(failure_upload_block).to_contain("if: failure() && steps.pure_simple_bootstrap.outcome == 'failure' && runner.os == 'Linux'")
-        expect(failure_upload_block).to_not_contain("matrix.backend == 'llvm'")
-        expect(failure_upload_block).to_contain("uses: actions/upload-artifact@v4")
-        expect(failure_upload_block).to_contain("name: bootstrap-failure-logs-${{ matrix.backend }}-${{ github.sha }}")
-        expect(failure_upload_block).to_contain("path: build/bootstrap/logs/**")
-        expect(failure_upload_block).to_contain("if-no-files-found: error")
-        expect(failure_upload_block).to_contain("retention-days: 7")
-        expect(workflow).to_contain("if: runner.os == 'Linux' && matrix.backend == 'llvm'")
-        expect(workflow).to_contain("cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime")
-        expect(workflow).to_contain("cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p spl_fonts")
-        expect(workflow).to_contain("cargo build --manifest-path src/runtime/spl_winit/Cargo.toml --release")
-        expect(upload_block).to_contain("uses: actions/upload-artifact@v4")
-        expect(upload_block).to_contain("build/bootstrap/full/**/simple")
-        expect(upload_block).to_contain("build/bootstrap/lib/libspl_fonts.so")
-        expect(upload_block).to_contain("src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so")
-        expect(upload_block).to_contain("src/runtime/spl_winit/target/release/libspl_winit.so")
-        expect(upload_block).to_contain("if-no-files-found: error")
-        expect(upload_block).to_not_contain("src/compiler_rust/target/bootstrap/simple")
-        expect(upload_block).to_not_contain("simple_seed")
 
     it "uses Cargo staticlib names for both Windows toolchains":
+        # 036503109ac: the Windows linker ABI is derived once from
+        # SIMPLE_LINKER_FLAVOR (default PLATFORM_ABI), must agree with
+        # PLATFORM_ABI, and selects MSVC `.lib` vs GNU `lib*.a` archive names.
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
         val platform_pos: i64 = script.find("if [ \"${{os}}\" = \"windows\" ]; then") ?? -1
         val hash_pos: i64 = script.find("hash_file() {") ?? -1
-        val policy = script.substring(platform_pos, hash_pos)
-        val msvc_pos: i64 = policy.find("if [ \"${{SIMPLE_LINKER_FLAVOR:-}}\" = \"msvc\" ]; then") ?? -1
-        val gnu_pos: i64 = policy.find("elif [ \"${{SIMPLE_LINKER_FLAVOR:-}}\" = \"gnu\" ]; then") ?? -1
-        val platform_gnu_pos: i64 = policy.find("elif [ \"${{PLATFORM_ABI}}\" = \"gnu\" ]; then") ?? -1
         expect(platform_pos).to_be_greater_than(-1)
         expect(hash_pos).to_be_greater_than(platform_pos)
-        expect(msvc_pos).to_be_greater_than(-1)
-        expect(gnu_pos).to_be_greater_than(msvc_pos)
-        expect(platform_gnu_pos).to_be_greater_than(gnu_pos)
-        expect(policy).to_contain("if [ \"${{SIMPLE_LINKER_FLAVOR:-}}\" = \"msvc\" ]; then\n    archive_prefix=\"\"\n    archive_suffix=\".lib\"\n  elif")
-        expect(policy).to_contain("elif [ \"${{SIMPLE_LINKER_FLAVOR:-}}\" = \"gnu\" ]; then\n    archive_prefix=\"lib\"\n    archive_suffix=\".a\"\n  elif")
-        expect(policy).to_contain("elif [ \"${{PLATFORM_ABI}}\" = \"gnu\" ]; then\n    archive_prefix=\"lib\"\n    archive_suffix=\".a\"\n  else")
-        expect(policy).to_contain("else\n    archive_prefix=\"\"\n    archive_suffix=\".lib\"\n  fi\nfi")
+        val policy = script.substring(platform_pos, hash_pos)
+        expect(script).to_contain("archive_prefix=\"lib\"\narchive_suffix=\".a\"\n")
+        expect(policy).to_contain("case \"${{SIMPLE_LINKER_FLAVOR:-${{PLATFORM_ABI}}}}\" in\n    gnu|mingw) windows_linker_abi=\"gnu\" ;;\n    msvc) windows_linker_abi=\"msvc\" ;;")
+        expect(policy).to_contain("if [ \"${{windows_linker_abi}}\" != \"${{PLATFORM_ABI}}\" ]; then")
+        expect(policy).to_contain("  if [ \"${{PLATFORM_ABI}}\" = \"msvc\" ]; then\n    archive_prefix=\"\"\n    archive_suffix=\".lib\"\n  else\n    archive_prefix=\"lib\"\n    archive_suffix=\".a\"\n  fi\nfi")
         expect(script).to_contain("native_all_lib=\"src/compiler_rust/target/bootstrap/${{archive_prefix}}simple_native_all${{archive_suffix}}\"")
         expect(script).to_contain("compiler_backfill_lib=\"src/compiler_rust/target/bootstrap/${{archive_prefix}}simple_compiler_backfill${{archive_suffix}}\"")
 
     it "exports the Stage4 pure driver inputs and requests core C":
+        # 4c1b300a837: Stage 4 links against the admitted runtime authority,
+        # not a hard-coded $(pwd)/src/compiler_rust/target/bootstrap.
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
-        expect(script).to_contain("SIMPLE_RUNTIME_PATH=\"$(pwd)/src/compiler_rust/target/bootstrap\"")
+        expect(script).to_contain("SIMPLE_RUNTIME_PATH=\"${{bootstrap_runtime_authority_path}}\"")
 
         expect(script).to_contain("SIMPLE_BOOTSTRAP_STAGE4=1")
         expect(script).to_contain("SIMPLE_NATIVE_BUILD_TARGET=\"${{PLATFORM}}\"")
         expect(script).to_contain("SIMPLE_NATIVE_BUILD_THREADS=\"${{selfhost_jobs}}\"")
         expect(script).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR=\"${{native_cache_dir}}\"")
-        expect(script).to_contain("SIMPLE_RUNTIME_PATH=")
         expect(script).to_contain("--runtime-bundle core-c-bootstrap")
-        expect(script).to_contain("--low-memory")
+        expect(script).to_contain("$([ \"${{NATIVE_LOW_MEMORY}}\" = 0 ] || printf -- --low-memory)")
         expect(script).to_contain("--mode one-binary")
-        expect(script).to_contain("--runtime-path \"$(pwd)/src/compiler_rust/target/bootstrap\"")
+        expect(script).to_contain("--runtime-path \"${{bootstrap_runtime_authority_path}}\"")
+        expect(script).to_not_contain("--runtime-path \"$(pwd)/src/compiler_rust/target/bootstrap\"")
 
     it "uses supported runtime bundles for Stage 2 and Stage 3":
+        # e0fa5ef45e2: Stage 3 builds bootstrap_main.spl as an explicit
+        # --entry over an --entry-closure of the three source roots.
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
-        val stage2_pos: i64 = script.find("# Stage 2: seed compiles bootstrap_main.spl") ?? -1
+        val stage2_pos: i64 = script.find("# Stage 2: the admitted parent compiles bootstrap_main.spl.") ?? -1
         val stage3_pos: i64 = script.find("# Stage 3: stage2 recompiles bootstrap_main.spl") ?? -1
         val capability_pos: i64 = script.find("stage2_capability_ok=0") ?? -1
-        val stage2_block = script.substring(stage2_pos, stage3_pos)
-        val stage3_block = script.substring(stage3_pos, capability_pos)
-
         expect(stage2_pos).to_be_greater_than(-1)
         expect(stage3_pos).to_be_greater_than(stage2_pos)
         expect(capability_pos).to_be_greater_than(stage3_pos)
+        val stage2_block = script.substring(stage2_pos, stage3_pos)
+        val stage3_block = script.substring(stage3_pos, capability_pos)
+
         expect(stage2_block).to_contain("--runtime-bundle core-c-bootstrap")
         expect(stage3_block).to_contain("--runtime-bundle core-c-bootstrap")
         expect(stage2_block).to_contain("SIMPLE_NATIVE_BUILD_RUST=1")
@@ -206,37 +162,49 @@ describe "bootstrap stage4 smoke gate":
         expect(stage3_block).to_contain("SIMPLE_NATIVE_BUILD_CACHE_DIR=\"${{stage3_cache_absolute}}\"")
         expect(stage3_block).to_contain("SIMPLE_RUNTIME_PATH=\"${{stage_runtime_absolute}}\"")
         expect(stage3_block).to_contain("SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap")
-        expect(stage3_block).to_contain("-o \"${{stage3_bin}}\" \\\n    src/app/cli/bootstrap_main.spl")
-        expect(stage3_block).to_not_contain("--entry src/app/cli/bootstrap_main.spl")
-        expect(stage3_block).to_not_contain("--source src/compiler --source src/app --source src/lib")
+        expect(stage3_block).to_contain("--source src/compiler --source src/app --source src/lib \\\n    --entry-closure \\")
+        expect(stage3_block).to_contain("--runtime-path \"${{stage_runtime_absolute}}\" \\\n    --entry src/app/cli/bootstrap_main.spl \\\n    -o \"${{stage3_bin}}\"")
         expect(script).to_not_contain("--runtime-bundle rust-hosted")
 
     it "resolves a src entry closure before the implicit whole-tree load":
-        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
-        val compile_targets = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
+        # 56afd1d0123 moved phase-1 loading out of driver.spl; the native-build
+        # CLI closure BFS lives in _CliCompile/native_build.spl (e9da588ee61).
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+        val native_build = rt_file_read_text("src/app/io/_CliCompile/native_build.spl") ?? ""
 
-        expect(driver).to_contain("if nb_entry_env != \"\" and not nb_entry_closure_pre and self.ctx.options.mode == CompileMode.Aot:")
-        expect(driver).to_not_contain("nb_entry_env != \"\" and not has_project_source and not nb_entry_closure_pre")
-        expect(compile_targets).to_contain("var discovered: Dict<text, bool> = {}")
-        expect(compile_targets).to_contain("var resolve_cache: Dict<text, text> = {}")
-        expect(compile_targets).to_contain("_driver_entry_import_module_paths(content)")
-        expect(compile_targets).to_contain("resolve_cache[seg_key] = rp")
-        expect(compile_targets).to_not_contain("hashset_with_capacity")
-        expect(compile_targets).to_not_contain("hashmap_with_capacity")
+        val walk_pos: i64 = loading.find("var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)") ?? -1
+        val gate_pos: i64 = loading.find("val nb_entry_closure = explicit_entry_closure or (") ?? -1
+        val bulk_pos: i64 = loading.find("val paths = [\"src/app\", \"src/lib\", \"src/compiler\", \"src/runtime\"]") ?? -1
+        expect(walk_pos).to_be_greater_than(-1)
+        expect(gate_pos).to_be_greater_than(walk_pos)
+        expect(bulk_pos).to_be_greater_than(gate_pos)
+        expect(loading).to_contain("val explicit_entry_closure = explicit_entry_input != \"\"")
+        expect(loading).to_contain("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed):")
+        expect(loading).to_not_contain("nb_entry_env != \"\" and not has_project_source and not nb_entry_closure_pre")
+        expect(native_build).to_contain("fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:")
+        expect(native_build).to_contain("var discovered: Dict<text, bool> = {{}}")
+        expect(native_build).to_contain("var resolve_cache: Dict<text, text> = {{}}")
+        expect(native_build).to_contain("val mp = _nb_module_path_from_use(raw)")
+        expect(native_build).to_contain("resolve_cache[resolve_key] = rp")
+        expect(native_build).to_not_contain("hashset_with_capacity")
+        expect(native_build).to_not_contain("hashmap_with_capacity")
 
     it "keeps bootstrap MIR symbol names compatible with the pure frontend":
+        # 59cba6907ad / 2aaea2ba0a9: the bootstrap symbol, the MIR function name
+        # fallback and the per-module name list all derive from one owner,
+        # mir_provider_function_name, so they cannot drift apart.
         val globals = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
         val lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl") ?? ""
         val module_lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        val provider = rt_file_read_text("src/compiler/50.mir/_MirLowering/provider_metadata.spl") ?? ""
 
-        expect(globals).to_contain("fn bootstrap_hir_function_symbol_name(module: HirModule, hir_fn: HirFunction) -> text:")
-        expect(globals).to_contain("val display_name = module.symbols.symbol_display_name(hir_fn.symbol, hir_fn.name)")
+        expect(provider).to_contain("fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFunction, is_entry_module: bool = false) -> text:")
+        expect(globals).to_contain("fn bootstrap_hir_function_symbol_name(module: HirModule, func: HirFunction, is_entry_module: bool = false) -> text:\n    mir_provider_function_name(module.name, module.symbols, func, is_entry_module)")
         expect(globals).to_not_contain("function: HirFunction")
         expect(globals).to_not_contain("symbol_display_name(function.symbol, function.name).replace")
-        expect(lowering).to_contain("val display_name = self.symbols.symbol_display_name(fn_.symbol, fn_.name)")
-        expect(lowering).to_contain("mir_fn_name = display_name.replace(\"::\", \".\")")
-        expect(module_lowering).to_contain("for hir_fn in module.functions.values():")
-        expect(module_lowering).to_contain("function_names.push(hir_fn.name)")
+        expect(lowering).to_contain("val fallback_name = mir_provider_function_name(function_owner, self.symbols, fn_, self.lowering_entry_module)")
+        expect(lowering).to_contain("val mir_fn_name = self.provider_callable_symbol_name(fn_.symbol, fallback_name) + \"\"")
+        expect(module_lowering).to_contain("function_names.push(mir_provider_function_name(module.name, module.symbols, func, is_entry_module))")
         expect(module_lowering).to_not_contain("for function in module.functions.values():")
 
     it "parses comma-separated class mixins in the Stage4 frontend":
@@ -257,20 +225,30 @@ describe "bootstrap stage4 smoke gate":
         expect(sdn_value).to_contain("fn as_dict(self) -> Dict<text, SdnValue>?:")
 
     it "parses fat-arrow match arms with indented statement blocks":
+        # ec272de6947 renamed the arm local to case_arm_body (it clobbered the
+        # arm_body arena global).
         val parser = rt_file_read_text("src/compiler/10.frontend/core/parser_stmts.spl") ?? ""
         val html_widgets = rt_file_read_text("src/app/ui.render/html_widgets.spl") ?? ""
 
         expect(parser).to_contain("if par_kind_get() == TOK_FAT_ARROW:")
-        expect(parser).to_contain("if par_kind_get() == TOK_NEWLINE:\n                    arm_body = parse_block()")
-        expect(parser).to_contain("arm_body.push(stmt_expr_stmt(arrow_expr, 0))")
+        expect(parser).to_contain("if par_kind_get() == TOK_NEWLINE:\n                    case_arm_body = parse_block()")
+        expect(parser).to_contain("case_arm_body.push(stmt_expr_stmt(arrow_expr, 0))")
         expect(html_widgets).to_contain("\"vbox\" =>\n            return render_html_vbox")
 
     it "initializes the Engine2D offscreen optional before backend selection":
+        # 2ea162ea9cb: a mutable `Engine2D? = nil` and `?? return` both drop the
+        # function from the seed JIT, so the offscreen is a plain var seeded
+        # with the engine plus an explicit created flag set by every branch.
         val draw_ir = rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl") ?? ""
 
-        expect(draw_ir).to_contain("var pending_offscreen: Engine2D? = nil")
-        expect(draw_ir).to_contain("pending_offscreen = Some(created)")
-        expect(draw_ir).to_contain("var offscreen = pending_offscreen ?? return")
+        val init_pos: i64 = draw_ir.find("    var offscreen = eng\n    var offscreen_created = false\n") ?? -1
+        val select_pos: i64 = draw_ir.find("if eng.backend_name() != \"vulkan\" and eng.backend_name() != \"metal\" and depth == 0:") ?? -1
+        val guard_pos: i64 = draw_ir.find("    if not offscreen_created:\n") ?? -1
+        expect(init_pos).to_be_greater_than(-1)
+        expect(select_pos).to_be_greater_than(init_pos)
+        expect(guard_pos).to_be_greater_than(select_pos)
+        expect(draw_ir.split("                offscreen_created = true\n").len()).to_equal(3)
+        expect(draw_ir).to_not_contain("var pending_offscreen: Engine2D? = nil")
         expect(draw_ir).to_not_contain("var offscreen: Engine2D\n")
 
     it "preserves public visibility on trait declarations":

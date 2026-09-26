@@ -1,0 +1,94 @@
+# Rendering showcases — TUI brief tier.
+# lane: tui
+# tier: brief
+# core: examples.ui.rendering_widgets_core
+#
+# Renders the shared brief-tier core widget set (panel, text, button, list,
+# menubar, statusbar, divider, progress — owned by
+# examples/ui/rendering_widgets_core, imported below) through the char-grid
+# ScreenHost (app.ui_showcase.hosts.host_tui.ScreenTuiHost):
+#   widget tree -> DrawIR v2 -> DrawIrV3Scene -> 80x24 char grid
+# (grid size via SIMPLE_SHOWCASE_W/H). This entry keeps only env parse, host
+# construct, and run — the widget tree lives in the shared core module.
+#
+# Honest-fail contract: exits non-zero with
+#   showcase status=blocked <reason>
+# on capture write failure; success prints
+#   showcase status=pass examples/06_io/ui/rendering/rendering_tui_core.spl
+
+use std.io_runtime.{env_get, file_write, mkdir_p, exit}
+use common.ui.builder.{build_tree_with_title}
+use common.ui.widget.{UIState}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use examples.ui.rendering_widgets_core.{rendering_widgets_core_tui_tree}
+use app.ui_showcase.showcase_core.{
+    showcase_apply, showcase_click_count, showcase_typed_text
+}
+use app.ui_showcase.hosts.host_tui.{ScreenTuiHost}
+
+fn _env_i32(key: text, fallback: i32) -> i32:
+    val raw = env_get(key).trim()
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn _parent_dir(path: text) -> text:
+    val idx = path.last_index_of("/")
+    if idx <= 0:
+        return ""
+    path.substring(0, idx)
+
+fn _scene(st: UIState, w: i32, h: i32) -> DrawIrV3Scene:
+    """Widget tree -> DrawIR v2 composition -> DrawIrV3 scene VALUE: the same
+    production path showcase_core.showcase_scene uses (composition extras are
+    a pixel-host concern; the brief tier is all widgets)."""
+    draw_ir_v2_to_v3(widget_tree_to_draw_ir_cpu(st.tree.root_node(), w, h))
+
+fn main():
+    val w = _env_i32("SIMPLE_SHOWCASE_W", 80)
+    val h = _env_i32("SIMPLE_SHOWCASE_H", 24)
+    val max_frames = _env_i32("SIMPLE_SHOWCASE_FRAMES", 3).to_i64()
+    val script = env_get("SIMPLE_SHOWCASE_SCRIPT")
+
+    val prefix = "tui_core"
+    var st = UIState.new(build_tree_with_title(
+        rendering_widgets_core_tui_tree(prefix), "rendering_tui_core", "dark"))
+    val host = ScreenTuiHost.open(w, h, script)
+    var frames: i64 = 0
+    while frames < max_frames:
+        if not host.present_scene(_scene(st, w, h)):
+            break
+        frames = frames + 1
+        var ev = host.poll_input()
+        while ev != nil:
+            st = showcase_apply(st, ev!, w, h)
+            ev = host.poll_input()
+    host.shutdown()
+
+    val frame = host.frame_text()
+    print frame
+    # painted/fills/unsupported are the honest-fail accounting: fills are
+    # background rects the char grid elides, unsupported are scene command
+    # kinds with no char mapping. Neither is ever silently dropped.
+    val clicks = showcase_click_count(prefix)
+    val typed = showcase_typed_text(prefix)
+    val painted = host.last_painted_commands()
+    val fills = host.last_fill_commands()
+    val unsupported = host.last_unsupported_commands()
+    print "showcase host=tui tier=brief frames={frames} painted={painted} " +
+        "fills={fills} unsupported={unsupported} clicks={clicks} typed=\"{typed}\""
+
+    val capture = env_get("SIMPLE_SHOWCASE_CAPTURE").trim()
+    if capture != "":
+        val dir = _parent_dir(capture)
+        if dir != "":
+            mkdir_p(dir)
+        if file_write(capture, frame):
+            print "capture path={capture}"
+        else:
+            print "showcase status=blocked capture-write-failed {capture}"
+            exit(1)
+
+    print "showcase status=pass examples/06_io/ui/rendering/rendering_tui_core.spl"

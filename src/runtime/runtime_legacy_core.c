@@ -525,6 +525,13 @@ int64_t rt_crc32_text(const char* text, int64_t text_len) {
     return (int64_t)(crc ^ 0xFFFFFFFFU);
 }
 
+#if defined(_WIN32)
+/* rt_widen_long_path_rc is now the shared helper in platform/runtime_win_long_path.h
+ * (macro alias for rt_win_long_path_widen); used by rt_file_create_excl
+ * below. This file used to carry its own byte-identical copy. */
+#include "platform/runtime_win_long_path.h"
+#endif
+
 int rt_file_create_excl(const char* path, int64_t path_len,
                         const char* content, int64_t content_len) {
     if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
@@ -534,7 +541,29 @@ int rt_file_create_excl(const char* path, int64_t path_len,
     if (!path_copy) return 0;
     memcpy(path_copy, path, (size_t)path_len);
     path_copy[path_len] = '\0';
-    FILE* f = fopen(path_copy, "wx");
+    /* "b": text mode on Windows turned every LF into CRLF, so a content-
+     * addressed file (SCV inventory generations) no longer hashed to its own
+     * name and every cold init failed inventory-generation-invalid
+     * (2026-09-25). No-op on POSIX. */
+#if defined(_WIN32)
+    /* Long paths: the package-module index under an isolated HOME
+     * (verification/home/.cache/simple/v1/projects/<64hex>/...) exceeds
+     * MAX_PATH, the narrow fopen failed, and every admission failed
+     * package-index:publish-failed (2026-09-25). Widen like the other
+     * Windows file entry points; fall back to fopen when widening fails. */
+    FILE* f = NULL;
+    {
+        wchar_t* wide = rt_widen_long_path_rc(path_copy);
+        if (wide) {
+            f = _wfopen(wide, L"wbx");
+            free(wide);
+        } else {
+            f = fopen(path_copy, "wbx");
+        }
+    }
+#else
+    FILE* f = fopen(path_copy, "wbx");
+#endif
     if (!f) {
         free(path_copy);
         return 0;
