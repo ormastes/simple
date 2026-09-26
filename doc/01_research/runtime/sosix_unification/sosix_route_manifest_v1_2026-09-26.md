@@ -46,3 +46,7 @@ The companion [async completion route manifest](sosix_async_completion_route_man
 ### 2026-09-26 compiler/interpreter/loader addendum
 
 The companion [compiler, interpreter, and SMF loader route manifest](sosix_compiler_interpreter_loader_route_manifest_v1_2026-09-26.md) inventories selected file, environment, process, and executable-memory effects across those owners. RU-001 remains open for all unclassified services and providers.
+
+### 2026-09-27 network route addendum
+
+The companion [network route manifest](sosix_network_route_manifest_v1_2026-09-27.md) classifies hosted TCP externs and selected SimpleOS socket routes. It identifies an x86_64 live-trap capability gap and an ARM64 exact-endpoint parity gap. The network provider and global RU-001 gates remain open.
