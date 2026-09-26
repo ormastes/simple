@@ -7,8 +7,8 @@
 #
 # @cover src/compiler/70.backend/linker/elf/archive_closure.spl
 
-use compiler.backend.linker.elf.archive_closure.{elf_archive_closure, elf_archive_members}
-use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure, elf_archive_closure_retained, elf_archive_members}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link, elf_link_configured, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
 use compiler.backend.linker.elf_parser.{ElfObject, elf_parse_object}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use std.io_runtime.{file_read_bytes}
@@ -57,6 +57,22 @@ describe "elf_archive_closure - fixpoint":
         val r = elf_archive_closure([start_obj(), lib], [load_fixture("libchain_a64.a")])
         expect(r.unwrap().members.len()).to_equal(0)
         expect(r.unwrap().passes).to_equal(0)
+
+    it "retained symbols seed archive extraction even without a relocation":
+        val r = elf_archive_closure_retained([start_obj()], [load_fixture("libchain_a64.a")], ["unused_fn"])
+        expect(r.is_ok()).to_equal(true)
+        var names: [text] = []
+        for m in r.unwrap().members:
+            names = names.push(m.name)
+        expect(names.contains("unused_a64.o")).to_equal(true)
+
+    it "configured linking rejects a retained symbol absent from every input":
+        val req = ElfLinkRequest(objects: [load_fixture("start_a64.o")],
+            archives: [load_fixture("libchain_a64.a")], shared: [], entry: "_start",
+            target: RelocArch.AArch64, mode: ELF_LINK_STATIC_EXEC, interp: "")
+        val r = elf_link_configured(req, false, ["missing_retained_symbol"])
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("retained symbol not found")
 
     it "an object plus the archive links into an executable":
         val r = elf_static_link([load_fixture("start_a64.o")], [load_fixture("libchain_a64.a")], "_start", RelocArch.AArch64)

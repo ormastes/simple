@@ -34,7 +34,7 @@ use compiler.backend.linker.elf_parser.{
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
-use compiler.backend.linker.elf.archive_closure.{elf_archive_closure}
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
 use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class, elf_x86_can_relax,
@@ -960,17 +960,23 @@ fn elf_static_link(objects: [[i64]], archives: [[i64]], entry: text, target: Rel
 
 fn elf_link(req: ElfLinkRequest) -> Result<[i64], text>:
     """Link per req.mode; Err on any link error (never a partial image)."""
-    elf_link_mode(req, false)
+    elf_link_mode(req, false, [])
 
 fn elf_link_stripped(req: ElfLinkRequest) -> Result<[i64], text>:
     """Link per req.mode without non-allocated .symtab/.strtab sections."""
-    elf_link_mode(req, true)
+    elf_link_mode(req, true, [])
+
+fn elf_link_configured(req: ElfLinkRequest, strip_output: bool,
+        retained_symbols: [text]) -> Result<[i64], text>:
+    """Link with wrapper-owned strip and archive-root policies."""
+    elf_link_mode(req, strip_output, retained_symbols)
 
 fn elf_link_structural(req: ElfLinkRequest) -> Result<[i64], text>:
     """Compatibility alias retained for structural parity tooling."""
-    elf_link_mode(req, false)
+    elf_link_mode(req, false, [])
 
-fn elf_link_mode(req: ElfLinkRequest, strip_output: bool) -> Result<[i64], text>:
+fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
+        retained_symbols: [text]) -> Result<[i64], text>:
     val target = req.target
     val machine = elf_static_machine(target)?
     val mode = req.mode
@@ -1007,7 +1013,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool) -> Result<[i64], text>
         libs = libs.push(l)
         i = i + 1
 
-    val closure = elf_archive_closure(roots, req.archives)?
+    val closure = elf_archive_closure_retained(roots, req.archives, retained_symbols)?
     var all = roots
     for m in closure.members:
         if m.obj.header.e_machine != machine:
@@ -1017,6 +1023,9 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool) -> Result<[i64], text>
     val res = sym_resolve_objects(all)
     if res.errors.len() > 0:
         return Err(elf_static_join(res.errors))
+    for name in retained_symbols:
+        if name != "" and not res.defined.has(name) and elf_lib_export(libs, name) < 0:
+            return Err("retained symbol not found: {name}")
     val undef = elf_static_undefined(all, res, libs)
     if undef.len() > 0:
         return Err("undefined symbol: " + elf_static_join(undef))
@@ -1258,6 +1267,6 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool) -> Result<[i64], text>
 # ============================================================================
 
 export ElfStaticInputs, ElfLinkRequest
-export elf_static_link, elf_link, elf_link_stripped, elf_link_structural
+export elf_static_link, elf_link, elf_link_stripped, elf_link_configured, elf_link_structural
 export ELF_STATIC_BASE
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
