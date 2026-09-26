@@ -135,7 +135,7 @@ Next: A7 slice 2 (GOT/PLT/.dynamic/TLS for the LLVM/PIE corpus, and wiring `inte
 
 | Lane | Result | Evidence |
 |---|---|---|
-| A7 slice 2 | **pass** after a Fable blocker (GOTPCRELX relax on undefined-weak/ABS; shell chmod) | Static GOT, static PIE and dynamic libc exec/PIE on aarch64 all run (exit 42, "hi from libc"); x86_64 static under qemu. `readelf -l -S -d -r` parity with ld.lld. `SIMPLE_LINKER=internal` runs `internal:elf` through `link_request_to_native`; the default path is unchanged. `SHN_COMMON` tentative definitions coalesce into deterministic `.bss`, including boot/SimpleOS `*(COMMON)`. x86_64 dynamic image construction is admitted through the production API; imported object references receive aligned executable storage, defined/hashable `.dynsym` entries, and `R_*_COPY`. Dynamic metadata/arrays/GOT receive `PT_GNU_RELRO`. `.tdata`/`.tbss` retain `SHF_TLS` and receive a size/alignment-correct `PT_TLS`; TLS relocation models remain named unsupported. Native execution remains a certification receipt. Other gap: no symbol versions. Bug filed: `nogc_sync_mut file_set_mode` is a no-op stub |
+| A7 slice 2 | **pass** after a Fable blocker (GOTPCRELX relax on undefined-weak/ABS; shell chmod) | Static GOT, static PIE and dynamic libc exec/PIE on aarch64 all run (exit 42, "hi from libc"); x86_64 static under qemu. `readelf -l -S -d -r` parity with ld.lld. `SIMPLE_LINKER=internal` runs `internal:elf` through `link_request_to_native`; the default path is unchanged. `SHN_COMMON` tentative definitions coalesce into deterministic `.bss`, including boot/SimpleOS `*(COMMON)`. x86_64 dynamic image construction is admitted through the production API; imported object references receive aligned executable storage, defined/hashable `.dynsym` entries, and `R_*_COPY`. Dynamic metadata/arrays/GOT receive `PT_GNU_RELRO`. `.tdata`/`.tbss` retain `SHF_TLS` and receive a size/alignment-correct `PT_TLS`; x86_64 local-exec `R_X86_64_TPOFF32` resolves against the TLS block end with signed-range checking. Other TLS models remain named unsupported. Native execution remains a certification receipt. Other gap: no symbol versions. Bug filed: `nogc_sync_mut file_set_mode` is a no-op stub |
 | A9 boot layout | **rung 2** (Fable pass) | All 50 in-tree `.ld` parse and round-trip; BootLayoutPlan built for all 6 SimpleOS arch scripts. Rung 3 needs `elf_exec_writer` VMA/LMA/PHDRS support (next). Board blocked (record filed). The real-firmware gate baseline boots hello via EDK2 → Limine |
 | A11 conformance | **pass** (Fable) | `check-link-mutation-gates.shs`: 7/7 mutations turn their spec red on the merged tree; selftest runs in CI. Timing on the fixtures: internal ~0.37 s / 150 MB (seed interpreter) vs ld.lld/mold <10 ms / ~20 MB |
 
@@ -151,7 +151,7 @@ Next: A9 rung 3 (BootLayoutPlan in the ELF writer + `ld.lld -T` parity), `link_t
 
 Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7).
 
-Next: TLS relocation models, section GC, lld `-O1` string merge, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed.
+Next: remaining TLS relocation models, section GC, lld `-O1` string merge, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed.
 
 ## 13. Windows/Linux/SimpleOS completion continuation — 2026-09-26
 

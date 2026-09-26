@@ -21,7 +21,8 @@
 # Limits (reported as errors, never silently degraded):
 #   - targets: x86_64 and aarch64; dynamic execution certification remains a
 #     platform-receipt concern rather than an image-construction restriction
-#   - TLS sections/PT_TLS are emitted; TLS relocation models remain unsupported
+#   - TLS sections/PT_TLS and x86_64 local-exec TPOFF32 are emitted; other TLS
+#     relocation models remain unsupported
 #   - no text relocs,
 #     no section GC, no COMDAT dedup, no symbol versioning
 #     (unversioned references bind to the library's default version)
@@ -42,7 +43,7 @@ use compiler.backend.linker.elf.reloc_scan.{
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
-    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX
+    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE
 }
 use compiler.backend.linker.elf.synthetic_sections.{
     ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy,
@@ -685,6 +686,15 @@ fn elf_plan_addr(plan: ElfExecPlan, name: text) -> i64:
         return 0
     plan.vaddrs[k]
 
+fn elf_tls_end(plan: ElfExecPlan) -> i64:
+    var result: i64 = -1
+    var i: i64 = 0
+    while i < plan.secs.len():
+        if plan.secs[i].sh_flags & SHF_TLS != 0:
+            result = plan.vaddrs[i] + plan.secs[i].size
+        i = i + 1
+    result
+
 fn elf_array_size(ins: [ElfOutSec], name: text) -> i64:
     val k = elf_find_out(ins, name)
     if k < 0:
@@ -1140,7 +1150,14 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         var rtype = r.rtype
         var s = elf_ref_addr(ctx, lay, r)?
         var a = r.addend
-        if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
+        if r.rclass == RC_TLS_LE:
+            val tls_end = elf_tls_end(plan)
+            if tls_end < 0:
+                return Err("TLS relocation against '{r.name}' has no PT_TLS image")
+            s = s + a - tls_end
+            a = 0
+            rtype = 11  # R_X86_64_32S encodes the signed TPOFF32 result
+        else if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
             s = got_v + sc.got_idx[r.key] * 8
             if a64:
                 a = 0
