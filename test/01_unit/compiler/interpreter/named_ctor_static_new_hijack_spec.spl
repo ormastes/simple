@@ -5,7 +5,15 @@
 # Named-argument class literals must build fields, never dispatch to
 # `static fn new` — reproducing spec.
 #
-# *** KNOWN RED as of 2026-08-17. This spec documents a LIVE defect. ***
+# Retargeted 2026-09-27: the defect's fix landed in 9b6be7f5c98 ("keep named
+# construction out of static new"), which chose the behaviour this header
+# always named as correct — `Font(path: "x", size: 8)` is REJECTED with
+# "class `Font` has no field named `path`" (seed regression test
+# `named_literal_validates_fields_instead_of_matching_static_new`). The old
+# probe asserted `d.id == 0` after that literal, which no rejecting fix can
+# satisfy: the error aborts the probe. The defect case now lives in its own
+# probe and the oracle is the diagnostic itself plus the absence of any
+# construction (and so of the id=77 sentinel).
 #
 # Gates doc/08_tracking/bug/interp_static_fn_new_hijacks_named_ctor_2026-07-02.md.
 # The 2026-08-08 RESOLVED verdict on that report was wrong: it probed only
@@ -46,15 +54,27 @@ use std.io_runtime.{process_run, env_get}
 
 
 val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_named_ctor_static_new_hijack.spl"
+val REJECT_PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_named_ctor_param_name_rejected.spl"
+val REJECT_DIAGNOSTIC: text = "class `Font` has no field named `path`"
 
-fn run_probe_in_mode(mode: text) -> text:
+fn test_binary() -> text:
     var bin = env_get("SIMPLE_TEST_BINARY")
     if bin == "":
         bin = env_get("SIMPLE_BIN")
     if bin == "":
         bin = "bin/simple"
+    bin
+
+fn run_probe_in_mode(mode: text) -> text:
     val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
-        bin + " run " + PROBE_PATH + " 2>/dev/null"
+        test_binary() + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+# The rejection is reported on stderr, so this run keeps stderr.
+fn run_reject_probe_in_mode(mode: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        test_binary() + " run " + REJECT_PROBE_PATH + " 2>&1"
     val out = process_run("sh", ["-c", cmd])
     out.0
 
@@ -83,15 +103,23 @@ describe "named-argument class construction versus static fn new":
         # @req REQ-SSPEC-COMPILER
         step("does not dispatch a named literal to static fn new on the parameter names")
         step("`path` is a parameter of `new` and NOT a field of Font; the sentinel id=77 is reachable only from inside `new`'s body")
-        val interp = run_probe_in_mode("interpreter")
-        expect(interp).to_contain("PASS param_names_do_not_hijack")
+        val interp = run_reject_probe_in_mode("interpreter")
+
+        step("Non-vacuity: the probe ran up to the literal")
+        expect(interp).to_contain("NAMED_CTOR_REJECT PROBE: reached")
+
+        step("The literal is rejected by name, and no instance was ever constructed")
+        expect(interp).to_contain(REJECT_DIAGNOSTIC)
+        expect(interp).to_not_contain("HIJACKED")
 
     it "does not dispatch on the run path either":
         # @req REQ-SSPEC-COMPILER
         step("does not dispatch on the run path either")
-        step("The same hijack reproduces under `bin/simple run`, so the fix must cover both engines")
-        val jit = run_probe_in_mode("jit")
-        expect(jit).to_contain("PASS param_names_do_not_hijack")
+        step("The same hijack reproduced under `bin/simple run`, so the fix must cover both engines")
+        val jit = run_reject_probe_in_mode("jit")
+        expect(jit).to_contain("NAMED_CTOR_REJECT PROBE: reached")
+        expect(jit).to_contain(REJECT_DIAGNOSTIC)
+        expect(jit).to_not_contain("HIJACKED")
 
-        step("The aggregate verdict line is the authoritative result")
-        expect(jit).to_contain("NAMED_CTOR_HIJACK PROBE: ALL PASS")
+        step("The controls' aggregate verdict line stays authoritative on the run path")
+        expect(run_probe_in_mode("jit")).to_contain("NAMED_CTOR_HIJACK PROBE: ALL PASS")
