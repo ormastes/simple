@@ -1041,3 +1041,7 @@ These saved documents were consulted for continuity; they are not substituted fo
 - **[E17]** BaM research paper, [GPU-Initiated On-Demand High-Throughput Storage Access in the BaM System](https://arxiv.org/abs/2203.04910).
 - **[E18]** Peter et al., [Arrakis: The Operating System Is the Control Plane](https://www.usenix.org/conference/osdi14/technical-sessions/presentation/peter), OSDI 2014.
 - **[E19]** Linux kernel documentation, [PCI peer-to-peer DMA support](https://docs.kernel.org/driver-api/pci/p2pdma.html).
+
+### 2026-09-26 RU-001 census addendum
+
+The [positioned file I/O route manifest v1](sosix_route_manifest_v1_2026-09-26.md) records the first inspected route family and its unresolved evidence. It is a partial inventory; the global RU-001 acceptance gate remains open.
