@@ -1,0 +1,102 @@
+# SimpleOS SOSIX positioned I/O: live route to release evidence
+
+Status: implementation plan; not an installed service or release claim. This
+advances RU-070 and V28 in the SOSIX unification design. Final SOSIX feature
+and NFR requirements still require user selection.
+
+## Source-backed starting state
+
+- `src/os/kernel/abi/syscall_shim_positioned.spl` exports C leaves for
+  syscalls 134/135 and retains a state value. `shim_init` resets it to
+  uninstalled. No production caller invokes `shim_positioned_install_owner_v1`.
+- Boot chooses the typed NVFS, DBFS, or FAT32 backend route, but
+  `sosix_positioned_acceptance_round_trip_v1` owns a separate local registry
+  with fixed process, capability, buffer, and operation identities. Its success
+  proves backend composition only.
+- `registry_lifecycle_v1.spl` and `service_buffer_registry_v1.spl` provide
+  bounded transitions once authenticated facts and kernel-issued identities
+  exist. `positioned_syscall_provider_v1.spl` requires exactly one capability
+  and one registered buffer owned by the trap caller.
+- The VFS IPC service's received wire header contains a source **port**, not
+  an authenticated sender task ID. `IpcManager.send_owned` checks source-port
+  ownership using a `TaskId` supplied by the syscall dispatcher, but the
+  copied service message does not carry that authenticated task identity to
+  `VfsService`. The current VFS IPC fd is also not a MountTable positioned
+  file-object ID. Do not derive positioned authority from either number.
+
+## Contract and owner placement
+
+1. Keep the registry and request-token state beside the existing
+   `g_shim_positioned_state`. A kernel-owned control function may publish a
+   replacement state only after the matching registry transition accepts.
+   Calls that fail must retain the prior state. The shim's 134/135 leaves keep
+   using `g_shim_scheduler.get_current()` for caller identity.
+2. Install the owner after the real filesystem backend and service endpoint
+   are live. Endpoint and generation must come from the owning kernel/service
+   lifecycle, not from the test route or an arbitrary caller value. Installation
+   may start with an empty registry, but boot must still report user positioned
+   I/O unavailable until the first real capability and buffer are admitted.
+3. Add control requests at the kernel trap boundary, where the scheduler's
+   current task is authenticated. Allocate any new syscall numbers through the
+   canonical syscall registry and review their ABI before implementation.
+   Do not add a VFS IPC control method until its delivery path supplies an
+   authenticated sender identity retained across queueing and reception.
+4. The kernel opens a positioned VFS file object under the caller's file
+   policy, issues a fresh capability slot/generation, and registers only the
+   rights granted by the open. The returned handle is an opaque capability
+   reference. The caller cannot submit a raw file-object ID as authority.
+5. Buffer registration copies a bounded user byte range into service-owned
+   storage, issues a fresh slot/generation and registration ID, and returns a
+   receipt. Reads update the owned copy; a separate authenticated fetch copies
+   the result back to the caller. Never retain a user pointer after the
+   registration trap. All byte copies use the existing kernel user-memory
+   validation/copy boundary, with overflow and maximum-size checks before
+   allocation or effect.
+6. Existing 134/135 envelopes resolve the opaque capability to one file
+   object for the authenticated caller, then resolve one owned buffer receipt
+   and execute the canonical service transaction. The dispatcher must not
+   emulate positioned I/O with seek/read/write/restore. Failed authorization,
+   range, or backend checks leave the request token and buffer unchanged.
+7. Close, buffer unregister, process exit, service restart, unmount, and
+   backend replacement retire the matching entries and wait for or quarantine
+   in-flight operations before releasing file objects or owned bytes. Exhausted
+   generations and request tokens stay tombstoned (see PR #1688); an old
+   receipt never regains validity. Multiple cores require a serialized owner
+   transition, rather than unsynchronized writes to the shim globals.
+
+## Implementation order
+
+| Step | Source owner | Required exit evidence |
+|---|---|---|
+| 1. Freeze control ABI and identity issuer | canonical syscall registry, `src/os/sosix/fs/` | no ID collision; malformed, stale, cross-process, and exhaustion cases specified |
+| 2. Kernel control transitions | `src/os/kernel/abi/`, registry and buffer owners | authenticated scheduler caller; one state publication per accepted transition; rejected transitions preserve state |
+| 3. Boot and lifecycle wiring | `src/os/kernel/boot/`, VFS mount/service lifecycle | real endpoint/generation and typed backend installed; restart/unmount removes stale authority |
+| 4. Caller API | `src/os/userlib/` | open/register/pwrite/pread/fetch/retire use only returned opaque identities and bounded copies |
+| 5. Guest execution | `test/03_system/os/qemu/` | real user task enters both 134/135 C-ABI leaves; file offset and fetched bytes checked independently |
+| 6. Release verification | SOSIX V05/V12/V28, SimpleOS release ledger | capability, trap, service, driver, retirement, and failure evidence from guest; all required gates PASS |
+
+Keep the legacy VFS IPC service and the local backend route as separate
+compatibility/oracle paths until the guest route passes. The control ABI and
+ownership transition are the immediate implementation dependencies; a boot
+call that installs a fabricated registry would not satisfy the gate.
+
+## Minimum executable matrix
+
+- Valid process: open a real mounted file, register a four-byte owned buffer,
+  write two bytes at nonzero offset, read four bytes at offset zero, fetch the
+  owned result, and compare both file bytes and unchanged cursor. Observe
+  actual trap entry and selected backend identity in the guest.
+- Denials: no owner, no capability, missing read/write right, wrong process,
+  wrong buffer slot/generation/registration ID, range overflow, stale file,
+  stale endpoint, and duplicate identity. Every denial leaves file bytes,
+  registry bytes, cursor, and request token unchanged.
+- Lifetime: retire during outstanding work, process exit, unmount/remount,
+  service generation change, token/generation exhaustion, and backend loss.
+  Delayed completion cannot write into a new owner generation.
+- Resource/performance: 64-buffer and capability-table bounds, owned-byte
+  budget, no unbounded trap allocation, and measured guest startup, positioned
+  request latency, and maximum RSS against selected NFRs.
+
+Passing existing unit seams or the boot local round trip does not replace the
+guest V28 test. The route remains unavailable for release until that test and
+its negative controls execute on an admitted self-hosted toolchain.

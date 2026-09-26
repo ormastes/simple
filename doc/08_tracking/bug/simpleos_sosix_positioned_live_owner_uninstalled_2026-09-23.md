@@ -21,3 +21,8 @@ both C-ABI positioned traps with real caller identity and bytes in QEMU.
 Preserve bounded registry state and O(1) shim dispatch outside the existing
 bounded capability/buffer lookup. Do not mark the local route test as live trap
 verification.
+
+Implementation order, owner placement, and guest acceptance matrix:
+`doc/03_plan/os/simpleos_sosix_positioned_live_route_2026-09-27.md`. The copied
+VFS IPC header carries a source port but no authenticated sender task ID; it
+cannot be used as the registration authority without an IPC provenance change.
