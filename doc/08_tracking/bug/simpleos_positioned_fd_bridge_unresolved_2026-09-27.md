@@ -24,7 +24,10 @@ the managed `/srv/data` path fails ENOSYS instead of publishing an unowned FD.
 
 ## Required fix
 
-Define one exact MountTable virtual-object binding with generation and kind;
+Define one exact MountTable virtual-object binding with generation and kind.
+`src/lib/nogc_async_mut/fs_driver/mount_table.spl` reuses slots after close
+and encodes the generation into the virtual handle; binding only a slot or
+hardcoding generation one would accept stale aliases after reuse. Then
 complete transactional descriptor reserve/install/close and OFD
 pin/complete/indeterminate operations in their existing owners. A failed
 open must roll back its reserved FD and close the exact MountTable object.
