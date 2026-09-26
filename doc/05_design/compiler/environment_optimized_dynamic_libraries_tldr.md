@@ -23,6 +23,8 @@ and cache publication still need to consume its projection. Its V2 provider
 receipt rechecks live uses and declared publication trust before binding both
 registry profiles into the receipt hash. Its activated entry point now joins a
 live publication-activation owner and requires revalidation by consumers; the
+selected artifact must match the published root variant and the live registry
+row's full target tuple, including OS. The
 raw-publication receipt remains a candidate. A copied binding digest alone grants
 no build authority. Parser scalar parity, emitted
 and executed ISA evidence, and actual GPU completion remain separate promotion

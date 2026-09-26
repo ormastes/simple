@@ -6,11 +6,12 @@ use std.common.crypto.sha256.sha256_bytes
 use std.common.crypto.sha256.sha256_text
 use std.common.string_core.text_to_utf8_bytes
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
-    EnvironmentDigest256V1, EnvironmentFeatureSetV1}
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1, VariantDescriptorV1}
 use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.TargetCodegenProfileV1
 use compiler.driver.canonical_target_registry_owner_v2.{
     CanonicalTargetRegistryOwnerV2, CanonicalTargetUseTokenV2,
-    CanonicalTargetProfileBindingV2, canonical_target_registry_bind_profile_v2}
+    CanonicalTargetProfileBindingV2, canonical_target_registry_bind_profile_v2,
+    canonical_target_registry_project_v2}
 use compiler.driver.environment_variant_build_planner_v1.{
     EnvironmentVariantBuildRequestV1, EnvironmentVariantArtifactPlanV1,
     EnvironmentVariantBuildPlanV1, environment_variant_build_plan_v1}
@@ -73,6 +74,7 @@ pub struct EnvironmentRegistryProviderReceiptCandidateV2:
     schema_version: u16
     provider_receipt_hash: text
     plan_identity: EnvironmentDigest256V1
+    selected_variant_identity: EnvironmentDigest256V1
     selected_artifact_identity: EnvironmentDigest256V1
     selected_cache_key: EnvironmentDigest256V1
     baseline_profile_binding_digest: text
@@ -274,6 +276,25 @@ pub fn environment_registry_build_plan_release_v2(
 fn _digest_text_erbp(value: EnvironmentDigest256V1) -> text:
     "{value.w0}:{value.w1}:{value.w2}:{value.w3}"
 
+fn _registry_target_matches_root_erbp(owner: EnvironmentRegistryBuildPlanOwnerV2,
+    registry: CanonicalTargetRegistryOwnerV2, token: EnvironmentRegistryBuildPlanTokenV2,
+    artifact_index: i64, root: VariantDescriptorV1) -> bool:
+    for record in owner.records:
+        if record.token == token:
+            if artifact_index < 0 or artifact_index >= record.artifact_uses.len():
+                return false
+            val projected = canonical_target_registry_project_v2(registry,
+                record.artifact_uses[artifact_index])
+            if projected.is_err(): return false
+            val target = projected.unwrap()
+            return target.architecture_id == root.target_architecture and
+                target.os_id == root.required_os_id and
+                target.abi_id == root.required_abi_id and
+                target.object_format_id == root.required_object_format_id and
+                target.endian_id == root.required_endian_id and
+                target.pointer_width_bits == root.required_pointer_width_bits
+    false
+
 # The V2 receipt identity is issued only from a still-live registry-bound plan.
 # Feature words come from the owner's retained request, never a caller copy.
 # Publication is still caller-carried; production issuance needs a live
@@ -321,6 +342,7 @@ pub fn environment_registry_provider_receipt_candidate_v2(
                 schema_version: ENV_REGISTRY_PROVIDER_RECEIPT_SCHEMA_V2,
                 provider_receipt_hash: sha256_text(material),
                 plan_identity: plan.plan_identity,
+                selected_variant_identity: artifact.base_artifact.variant_identity,
                 selected_artifact_identity: artifact.artifact_identity,
                 selected_cache_key: artifact.cache_key,
                 baseline_profile_binding_digest: baseline.profile_binding_digest,
@@ -352,11 +374,26 @@ pub fn environment_registry_activated_provider_receipt_v2(
         activation_owner, activation_token)
     if publication.is_err() or activation.is_err():
         return Err(EnvironmentRegistryProviderReceiptErrorV2.ActivationRejected)
+    val published = publication.unwrap()
     val candidate = environment_registry_provider_receipt_candidate_v2(owner, registry,
-        token, publication.unwrap().admission, artifact_index)
+        token, published.admission, artifact_index)
     if candidate.is_err(): return Err(candidate.unwrap_err())
     val receipt = candidate.unwrap()
     if receipt.publication_plan_digest != activation.unwrap().publication_plan_digest:
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.IdentityMismatch)
+    val projected = environment_registry_build_plan_project_v2(owner, registry, token)
+    if projected.is_err(): return Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected)
+    val current_plan = projected.unwrap()
+    if artifact_index < 0 or artifact_index >= current_plan.artifacts.len():
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.ArtifactIndexInvalid)
+    if current_plan.plan_identity != receipt.plan_identity:
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.IdentityMismatch)
+    val artifact = current_plan.artifacts[artifact_index].base_artifact
+    if receipt.selected_variant_identity != published.admission.root_variant_identity or
+       receipt.selected_variant_identity != published.root_descriptor.variant_identity or
+       receipt.selected_variant_identity != artifact.variant_identity or
+       not _registry_target_matches_root_erbp(owner, registry, token,
+           artifact_index, published.root_descriptor):
         return Err(EnvironmentRegistryProviderReceiptErrorV2.IdentityMismatch)
     Ok(EnvironmentRegistryActivatedProviderReceiptV2(receipt: receipt,
         activation_token: activation_token))

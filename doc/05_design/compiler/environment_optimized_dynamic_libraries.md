@@ -798,8 +798,11 @@ without a declared authenticated trust receipt fail before a V2 receipt is
 issued. The raw-publication result is a candidate, not publication authority.
 The activated V2 receipt entry point joins a live publication-activation token,
 projects its retained canonical publication, and checks that its plan digest
-matches the activation projection. Consumers must revalidate the activated
-receipt against both live owners before using it. Emission/cache consumers
+matches the activation projection. It also requires the selected build artifact
+to be the published root variant and checks the live registry row's architecture,
+OS, ABI, object format, endian, and pointer width against the root descriptor.
+Consumers must revalidate
+the activated receipt against both live owners before using it. Emission/cache consumers
 still need to use these V2 identities and the live check.
 
 ### Backend feature receipt boundary
