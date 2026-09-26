@@ -181,6 +181,9 @@ then patches only the instruction's imm19 field.
 `R_AARCH64_GOT_LD_PREL19` now allocates a linker GOT slot and applies the same
 checked literal-load encoding against the slot address, covering the compact
 single-instruction AArch64 GOT access model in addition to ADRP+LDR pairs.
+`R_AARCH64_LD64_GOTPAGE_LO15` now supports the medium-GOT sequence by encoding
+an aligned 15-bit slot offset from `Page(.got)`. The ELF driver supplies that
+page base explicitly and rejects entries outside the ABI's 32 KiB window.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 
