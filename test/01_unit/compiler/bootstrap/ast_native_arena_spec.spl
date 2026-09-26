@@ -44,7 +44,10 @@ fn expect_current_native_arena(value: i64):
     expect(stmt_count()).to_equal(stmt_tag.len())
     expect(expr_count()).to_equal(expr_tag.len())
 
-    val body = decl_get_body(module_decl_at(0))
+    # Module decl 0 is the fixture's leading struct (f7853bd7a01 put
+    # `struct FirstOnly`/`struct SecondOnly` ahead of the fn); the fn whose
+    # single-statement body this helper inspects is module decl 1.
+    val body = decl_get_body(module_decl_at(1))
     expect(body.len()).to_equal(1)
     val stmt_id = body[0]
     expect(stmt_id).to_equal(0)
@@ -92,25 +95,33 @@ describe "bootstrap native AST arena isolation":
         expect(module_source).to_contain("decl_body_stmts_flat.clear()")
         expect(stmt_source).to_contain("stmt_gpu_grid_exprs.clear()")
         expect(stmt_source).to_contain("stmt_gpu_block_exprs.clear()")
-        expect(expr_source).to_contain("var expr_env_mirror_slot: [bool]")
+        # 4b88aebf00b replaced the one-element `[bool]` mode slots with
+        # `*_mode_ready` + cached scalar bools refreshed once per reset.
+        expect(expr_source).to_contain("var expr_env_mirror_cached: bool")
         expect(expr_source).to_contain("fn expr_mode_slots_refresh()")
-        expect(expr_source).to_contain("return expr_env_mirror_slot[0]")
-        expect(expr_source).to_contain("var expr_trace_tags_slot: [bool]")
+        expect(expr_source).to_contain("return expr_env_mirror_cached")
+        expect(expr_source).to_contain("var expr_trace_tags_cached: bool")
         expect(expr_source).to_contain("fn expr_trace_tags_enabled() -> bool:")
-        expect(expr_source).to_contain("expr_trace_tags_slot[0] = (rt_env_get(\"SIMPLE_TRACE_EXPR_TAGS\") ?? \"\") != \"\"")
+        expect(expr_source).to_contain("expr_trace_tags_cached = (rt_env_get(\"SIMPLE_TRACE_EXPR_TAGS\") ?? \"\") != \"\"")
         expect(expr_source).to_contain("if expr_trace_tags_enabled() and (idx < 8 or tag <= 0):")
         expect(expr_accessor_source).to_contain("if expr_trace_tags_enabled() and (idx < 8 or fallback <= 0):")
         expect(expr_accessor_source.contains("rt_env_get(\"SIMPLE_TRACE_EXPR_TAGS\")")).to_equal(false)
         expect(expr_source).to_contain("expr_args.push(expr_empty_i64)")
         expect(expr_source).to_contain("expr_arg_names.push(expr_empty_text)")
         expect(expr_source.contains("expr_args.push([])")).to_equal(false)
-        expect(stmt_source).to_contain("var stmt_env_mirror_slot: [bool]")
+        expect(stmt_source).to_contain("var stmt_env_mirror_cached: bool")
         expect(stmt_source).to_contain("fn stmt_mode_slots_refresh()")
-        expect(stmt_source).to_contain("return stmt_env_mirror_slot[0]")
-        expect(decl_source).to_contain("rt_env_get_i64(\"SIMPLE_NATIVE_ARENA_DECLS\", 0)")
+        expect(stmt_source).to_contain("return stmt_env_mirror_cached")
+        # 402241622e9 retired the per-index env-mirror READ for expr and stmt.
+        expect(stmt_source.contains("stmt_env_read(")).to_equal(false)
+        # 9a297cdec8b moved the decl arena gate onto the SFFI env reader with a
+        # bootstrap-aware default.
+        expect(decl_source).to_contain("_sffi_env_get_i64(\"SIMPLE_NATIVE_ARENA_DECLS\", ast_decl_arena_default())")
         expect(module_source).to_contain("rt_env_get_i64(\"SIMPLE_NATIVE_ARENA_DECLS\", 0)")
-        expect(type_source).to_contain("span_pool_start = clear_i64_pool(span_pool_start)")
-        expect(type_source.contains("\n    span_pool_start = []\n")).to_equal(false)
+        # c8e3f105de5 replaced clear_i64_pool with whole-owner replacement and
+        # retargeted these two lines; e274cd33719 rewound them.
+        expect(type_source).to_contain("span_pool_start = []")
+        expect(type_source.contains("clear_i64_pool(span_pool_start)")).to_equal(false)
         expect(bridge_source).to_contain("reset_all_pools()\n    parser_init_with_path(source, path)")
 
     it "ignores stale env IDs and tags across sequential module resets":
@@ -173,17 +184,29 @@ describe "bootstrap native AST arena isolation":
         expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_TAG") ?? "").to_equal("5")
         expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_I") ?? "").to_equal("99")
 
-    it "preserves an unknown written return type name":
+    it "preserves an unknown written return type name and keeps an unknown generic return present":
         val parsed = parse_and_build_module("fn make() -> SiblingRecord:\n    nil\nfn boxed() -> SiblingBox<i64>:\n    nil\nstruct SiblingRecord:\n    value: i64\n", "named/bootstrap_main.spl")
         val make = parsed.functions["make"] ?? panic("missing make")
         val boxed = parsed.functions["boxed"] ?? panic("missing boxed")
         expect(make.has_return_type).to_equal(true)
         expect(parser_type_kind_named_name(make.return_type.kind)).to_equal("SiblingRecord")
+        # An unknown generic HEAD is deliberately kept as `Any`, not its written
+        # name (core/parser.spl "Unknown generic type" branch; pinned by
+        # compiler_core/parser_spec + parser_option_coverage_spec). Preserving
+        # the name is blocked on the cross-module struct fallback: without it
+        # every cross-module generic annotation would turn from a lenient Any
+        # into `unresolved type: <Name>` — see Class C in
+        # doc/08_tracking/bug/unresolved_type_declared_nowhere_family_2026-08-01.md.
+        # The written annotation must still survive (not collapse to void).
         expect(boxed.has_return_type).to_equal(true)
-        expect(parser_type_kind_named_name(boxed.return_type.kind)).to_equal("SiblingBox")
+        expect(parser_type_kind_named_name(boxed.return_type.kind)).to_equal("Any")
         expect(named_type_fields(named_type_find("SiblingRecord")).len()).to_equal(1)
 
-    it "preserves interpreter bootstrap env mirrors when native arena is disabled":
+    it "keeps the arena authoritative over stale env mirror fields when native arena is disabled":
+        # 402241622e9 retired the per-index env-mirror READ (its A/B disproved
+        # the "interpreter arrays do not persist" premise, and env-first reads
+        # bypassed the OOB guard and served a previous unit's nodes). Count
+        # mirrors are still WRITTEN in this mode, so those stay asserted.
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
         val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
         val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
@@ -218,7 +241,7 @@ describe "bootstrap native AST arena isolation":
         expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", "77")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "5")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", "88")).to_equal(true)
-        expect(stmt_get_tag(stmt_id)).to_equal(5)
-        expect(stmt_get_expr(stmt_id)).to_equal(77)
-        expect(expr_get_tag(expr_id)).to_equal(5)
-        expect(expr_get_int(expr_id)).to_equal(88)
+        expect(stmt_get_tag(stmt_id)).to_equal(STMT_EXPR)
+        expect(stmt_get_expr(stmt_id)).to_equal(expr_id)
+        expect(expr_get_tag(expr_id)).to_equal(EXPR_INT_LIT)
+        expect(expr_get_int(expr_id)).to_equal(7)

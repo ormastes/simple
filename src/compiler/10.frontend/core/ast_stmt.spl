@@ -129,11 +129,6 @@ fn stmt_env_mirror_enabled() -> bool:
     # compatibility mirror while compiled Stage4 uses the cached fast path.
     (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
 
-fn stmt_env_read(idx: i64, field: text) -> text:
-    if not stmt_env_mirror_enabled():
-        return ""
-    rt_env_get(stmt_key(idx, field)) ?? ""
-
 fn stmt_mode_slots_refresh():
     val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
     stmt_env_mirror_cached = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
@@ -335,9 +330,7 @@ fn stmt_if_val_decl(name: text, init_expr: i64, span_id: i64) -> i64:
     idx
 
 fn stmt_is_if_val_decl(idx: i64) -> bool:
-    if not stmt_env_mirror_enabled():
-        return idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
-    stmt_env_read(idx, "IF_VAL") == "1"
+    idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
 
 fn stmt_lazy_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_LAZY_VAL_DECL, span_id)
@@ -573,14 +566,9 @@ fn stmt_get_gpu_block(idx: i64) -> [i64]:
 # ===== Statement Accessors =====
 
 fn stmt_get_tag(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "TAG")
-    if direct != "":
-        val parsed = stmt_parse_i64(direct)
-        val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
-        if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
-            (idx < 8 or parsed <= 0)):
-            print "[stmt_get_tag] idx={idx} env={direct} parsed={parsed}"
-        return parsed
+    # The arena is the only authority (402241622e9 retired the per-index env
+    # mirror READ: an env-first read ran ahead of this bounds guard and served
+    # a previous compilation unit's node for a stale index).
     # Bounds guard: a stale stmt index (captured before an interleaved
     # ast_reset/stmt_reset cleared the shared arena) can exceed the live arena
     # length (stage-4 "index is 48 but length is 13" class). Return -1 so tag
@@ -599,7 +587,7 @@ fn stmt_get_tag(idx: i64) -> i64:
     val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
     if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
         (idx < 8 or fallback <= 0)):
-        print "[stmt_get_tag] idx={idx} env=<missing> fallback={fallback}"
+        print "[stmt_get_tag] idx={idx} arena={fallback}"
     fallback
 
 # Sibling bounds guards for the rest of the statement accessor family.
@@ -623,10 +611,11 @@ fn stmt_get_tag(idx: i64) -> i64:
 # names the statement half as "the measured reproducer"); the statement half
 # was left behind. Closed here.
 #
-# The env-mirror read stays FIRST, exactly as in `stmt_get_tag`: in the
-# interpreter bootstrap (`SIMPLE_BOOTSTRAP=1`) module-var arrays do not persist
-# and the env mirror is the only live store, so a length check on the arrays
-# ahead of it would reject live indices.
+# No env-mirror read precedes these guards. The premise that the interpreter
+# bootstrap (`SIMPLE_BOOTSTRAP=1`) cannot persist module-var arrays was
+# disproved by A/B in 402241622e9, which retired the read side for expr and
+# stmt; a2be680ac02 (authored on a pre-retirement snapshot) re-added the stmt
+# prologues only, and they are removed again here so both halves agree.
 #
 # Neutral returns match the established precedent in this arena family
 # (`decl_get`, `expr_get_tag`, `stmt_get_tag`); -1 / "" / [] are already the
@@ -648,53 +637,35 @@ fn stmt_idx_is_live(idx: i64, arena_len: i64) -> bool:
     idx >= 0 and idx < arena_len
 
 fn stmt_get_span(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "SPAN")
-    if direct != "":
-        return stmt_parse_i64(direct)
     if not stmt_idx_is_live(idx, stmt_span.len()):
         stmt_oob_trace("stmt_get_span", idx, stmt_span.len())
         return -1
     stmt_span[idx]
 
 fn stmt_get_expr(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "EXPR")
-    if direct != "":
-        return stmt_parse_i64(direct)
     if not stmt_idx_is_live(idx, stmt_expr.len()):
         stmt_oob_trace("stmt_get_expr", idx, stmt_expr.len())
         return -1
     stmt_expr[idx]
 
 fn stmt_get_name(idx: i64) -> text:
-    val direct = stmt_env_read(idx, "NAME")
-    if direct != "":
-        return direct
     if not stmt_idx_is_live(idx, stmt_name.len()):
         stmt_oob_trace("stmt_get_name", idx, stmt_name.len())
         return ""
     stmt_name[idx]
 
 fn stmt_get_type(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "TYPE")
-    if direct != "":
-        return stmt_parse_i64(direct)
     if not stmt_idx_is_live(idx, stmt_type_tag.len()):
         stmt_oob_trace("stmt_get_type", idx, stmt_type_tag.len())
         return -1
     stmt_type_tag[idx]
 
 fn stmt_get_if_single_else(idx: i64) -> i64:
-    val direct = stmt_env_read(idx, "IF_ELSE_SINGLE")
-    if direct != "":
-        return stmt_parse_i64(direct)
     if idx < 0 or idx >= stmt_if_single_else.len():
         return -1
     stmt_if_single_else[idx]
 
 fn stmt_get_body(idx: i64) -> [i64]:
-    val direct = stmt_env_read(idx, "BODY")
-    if direct != "":
-        return stmt_i64_list_split(direct)
     if not stmt_idx_is_live(idx, stmt_body_offsets.len()):
         stmt_oob_trace("stmt_get_body", idx, stmt_body_offsets.len())
         return []
