@@ -111,6 +111,7 @@ class VfsService:
     request_count: u64
     receive_buffer: [u8]
     reply_owned: bool
+    accept_legacy_requests: bool
 
 impl VfsService:
     static fn new(vfs: VfsManager) -> VfsService:
@@ -121,7 +122,8 @@ impl VfsService:
             executor: OsExecutor.new(),
             request_count: 0,
             receive_buffer: _vfs_recv_buffer(),
-            reply_owned: false
+            reply_owned: false,
+            accept_legacy_requests: true
         )
 
     static fn with_executor(vfs: VfsManager, executor: OsExecutor) -> VfsService:
@@ -133,13 +135,23 @@ impl VfsService:
             executor: executor,
             request_count: 0,
             receive_buffer: _vfs_recv_buffer(),
-            reply_owned: false
+            reply_owned: false,
+            accept_legacy_requests: true
         )
 
     me start():
         """Create IPC port and start the yielding service loop."""
         self.init_port()
         self.run_loop()
+
+    me start_catalogue_owned() -> bool:
+        """Run the PID1 catalog service with copied IPC requests only."""
+        self.accept_legacy_requests = false
+        self.init_port()
+        if not self.running:
+            return false
+        self.run_loop()
+        true
 
     me init_port():
         """Create IPC port without entering the blocking loop.
@@ -188,6 +200,8 @@ impl VfsService:
         val payload_addr = msg_addr + IPC_OWNED_V1_HEADER_BYTES
 
         if flags != 0u32 and flags != (IpcFlags.Async as u32):
+            return
+        if flags == 0u32 and not self.accept_legacy_requests:
             return
         self.reply_owned = flags == (IpcFlags.Async as u32)
         if payload_len.to_u64() > record_len - IPC_OWNED_V1_HEADER_BYTES:

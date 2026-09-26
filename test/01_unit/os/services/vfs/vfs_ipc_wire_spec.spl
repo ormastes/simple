@@ -31,8 +31,9 @@ Covers the behavior asserted here; platform-specific behavior is out of scope.
 The VFS service uses a named endpoint and bounded copied reception. Userlib
 clients send the method and payload through syscall 132, receive a checked
 copied reply through 133, and own their anonymous reply port. Kernel fd_io
-retains its tagged syscall-20 bridge and the service selects its reply route
-from the received flags. Kernel dual-ABI coverage belongs to the IPC specs.
+shares that client transport and preserves the numeric VFS status. The inline
+service still selects its reply route from received flags. Kernel dual-ABI
+coverage belongs to the IPC specs.
 """
 use std.spec.step
 
@@ -92,17 +93,14 @@ describe "VFS copied IPC wire":
         expect(source).to_contain("append: (flags_raw & VFS_OPEN_O_APPEND) != 0u32")
         expect(source).to_contain("truncate: (flags_raw & VFS_OPEN_O_TRUNC) != 0u32")
 
-    it "uses caller-owned reply ports and copied method-prefix frames in fd_io":
+    it "shares the owned client transport with fd_io":
         # @req: REQ-SSPEC-LOCAL-001
-        step("Verify: uses caller-owned reply ports and copied method-prefix frames in fd_io")
+        step("Verify: fd_io shares the bounded owned VFS client transport")
         val source = read_file("src/os/kernel/fd_io.spl")
-        expect(source).to_contain("val _VFS_SERVICE_NAME: text = \"vfs\"")
-        expect(source).to_contain("_SYS_IPC_CREATE_PORT")
-        expect(source).to_contain("_SYS_IPC_CONNECT")
-        expect(source).to_contain("_push_u32(request, method)")
-        expect(source).to_contain("unsafe_addr_of(request) + _VFS_IPC_BYTE_ARRAY_HEADER_BYTES")
-        expect(source).to_contain("request.len(), _IPC_COPIED_SERVICE_TAG")
-        expect(source).to_contain("syscall(_SYS_IPC_RECV, reply_port.to_u64()")
+        expect(source).to_contain("use os.userlib.fs.{vfs_ipc_request_status_bytes}")
+        expect(source).to_contain("vfs_ipc_request_status_bytes(method, payload)")
+        expect(source).to_contain("VfsIpcReply(status: reply.status, payload: reply.payload, transport_failed: false)")
+        expect(source.contains("_SYS_IPC_SEND")).to_equal(false)
         expect(source).to_contain("VFS_SEEK")
         expect(source.contains("_VFS_PORT")).to_equal(false)
 
@@ -174,6 +172,8 @@ describe "VFS copied IPC wire":
         val mounts_source = read_file("src/os/userlib/mounts.spl")
         val protocol_source = read_file("src/os/userlib/ipc_protocol.spl")
         expect(fs_source).to_contain("pub fn vfs_ipc_request_bytes")
+        expect(fs_source).to_contain("pub fn vfs_ipc_request_status_bytes")
+        expect(fs_source).to_contain("val reply = vfs_ipc_request_status_bytes(method, payload)?")
         expect(fs_source).to_contain("_SYS_IPC_CREATE_PORT")
         expect(fs_source).to_contain("ipc_connect_named_port(_VFS_SERVICE_NAME)")
         expect(fs_source).to_contain("ipc_send_owned_v1(service_port, method, payload, reply_port.to_u64())")

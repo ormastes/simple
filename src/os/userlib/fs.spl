@@ -196,8 +196,12 @@ fn _vfs_text_bytes(value: text) -> [u8]:
         index = index + 1u64
     bytes
 
-pub fn vfs_ipc_request_bytes(method: u32, payload: [u8]) -> Result<[u8], text>:
-    """Send one bounded copied VFS request and return reply payload bytes.
+pub struct VfsIpcStatusReply:
+    status: i32
+    payload: [u8]
+
+pub fn vfs_ipc_request_status_bytes(method: u32, payload: [u8]) -> Result<VfsIpcStatusReply, text>:
+    """Send one bounded copied VFS request and retain its numeric status.
 
     An anonymous reply port belongs to the calling task. The kernel checks
     the named service connection and mints one exact reverse-port reply right.
@@ -252,11 +256,15 @@ pub fn vfs_ipc_request_bytes(method: u32, payload: [u8]) -> Result<[u8], text>:
     while reply_index < record_len:
         bytes.push(record[reply_index])
         reply_index = reply_index + 1u64
-    if status < 0:
-        _vfs_destroy_reply_port(reply_port)
-        return Err(bytes_to_string(bytes))
     _vfs_destroy_reply_port(reply_port)
-    Ok(bytes)
+    Ok(VfsIpcStatusReply(status: status, payload: bytes))
+
+pub fn vfs_ipc_request_bytes(method: u32, payload: [u8]) -> Result<[u8], text>:
+    """Return the payload of a successful VFS copied-IPC reply."""
+    val reply = vfs_ipc_request_status_bytes(method, payload)?
+    if reply.status < 0:
+        return Err(bytes_to_string(reply.payload))
+    Ok(reply.payload)
 
 fn _vfs_request(method: u32, payload: text) -> Result<text, text>:
     val response = vfs_ipc_request_bytes(method, _vfs_text_bytes(payload))?

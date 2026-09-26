@@ -26,12 +26,14 @@ and NFR requirements still require user selection.
   positioned authority from either number.
 - `VfsService` now has source wiring for bounded syscall 133 reception and
   selects a 132 reply only for an `Async` request that minted a reverse-port
-  permit; zero-flag legacy requests retain tagged syscall 20 replies. The
-  source contract checks this transition, but it has no admitted runtime or
-  guest evidence. `os.userlib.fs.vfs_ipc_request_bytes` now uses 132 for the
-  request and 133 for the checked reply. Kernel `fd_io` still uses tagged 20
-  and legacy 21; the service's zero-flag branch preserves that bridge. The
-  updated wire specs remain unexecuted without an admitted Simple binary.
+  permit. The PID1 catalogue entry point now exists and rejects zero-flag
+  legacy requests before filesystem effects; its filter excludes syscall 20.
+  The inline boot service still accepts tagged syscall 20 replies for its
+  legacy caller bridge. `os.userlib.fs` and kernel `fd_io` now share one
+  132/133 client transport; the latter retains the numeric VFS status needed
+  by POSIX callers. This source route is compatible with the catalogue filter
+  but has no admitted guest round trip or response-latency evidence.
+  The updated wire specs remain unexecuted without an admitted Simple binary.
 - The kernel copied-receive status/header/payload/provenance has one canonical
   `OwnedIpcReceiveResult` type in `ipc_types.spl`, replacing the syscall's
   local `any` view. The 32-byte user wire is unchanged, and the positioned
@@ -115,22 +117,25 @@ assumption needs a serialized transition before multicore release.
 1. `VfsService` now calls bounded syscall 133 with a fixed receive arena and
    yields in its dedicated loop. The kernel's tagged syscall 20 enqueues
    copied payloads, so the existing client request frame can enter this path.
-   Its header flags are zero and mint no owned reply permit; the legacy reply
-   route remains. The service selects a checked 132 reply for `Async` input.
-   Verify both branches in an admitted guest before promotion.
+   Its header flags are zero and mint no owned reply permit; only the inline
+   boot service retains that legacy reply route. The PID1 catalogue service
+   rejects it, while both modes select a checked 132 reply for `Async` input.
+   Verify both service modes in an admitted guest before promotion.
 2. `vfs_ipc_request_bytes` now calls 132 with its caller-owned reply port and
    separate method word. A 132 request carries `Async` and mints the exact
    reverse-port permit. The service chooses the checked 132 reply from that
    flag; the client receives and validates the 133 header and frame length.
    It yields on EAGAIN to preserve its synchronous caller API. Admit this
-   round trip and the kernel `fd_io` legacy bridge in a guest before promotion.
+   round trip and the kernel `fd_io` shared transport in a guest before promotion.
    Measure wait-loop yield count, response latency, and CPU service time under
    a delayed or failed VFS service; replace the polling wait with an admitted
    blocking notification or receive transition if it misses the selected NFR.
-3. The source contracts now reflect both routes. Add executable old-client /
-   new-service and new-client / new-service round trips, malformed lengths,
+3. The source contracts now reflect both routes. Add executable inline-legacy /
+   inline-service and owned-client / catalogue-service round trips, malformed lengths,
    wrong receiver, missing reply permit, and EAGAIN handling. The 133 path is
    nonblocking, so the dedicated service loop yields rather than spins.
+   Verify kernel `fd_io._vfs_ipc_request` preserves numeric VFS status and
+   transport-failure cleanup through the shared 132/133 route.
 4. Only after the copied transport is live should the selected provenance
    ABI feed a task identity to positioned control. Neither the source port nor
    the VFS fd may stand in for that identity.
