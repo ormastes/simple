@@ -1,8 +1,8 @@
 # ELF Read-Only Inspector - Pure-Simple ELF header parser for compiler diagnostics.
 use compiler.hir.hir_types.{Effect}
 #
-# Parses ELF64 binary headers and section tables from raw byte arrays.
-# Supports x86_64, AArch64, and RISC-V ELF files.
+# Parses ELF32/ELF64 binary headers and section tables from raw byte arrays.
+# Supports ARM32, x86_64, AArch64, and RISC-V ELF files.
 # No file I/O — caller supplies the raw bytes (e.g. from file_read_bytes).
 
 use std.io_runtime.{file_exists}
@@ -37,9 +37,11 @@ val ELF_MAGIC_3: i64 = 0x46  # 'F'
 
 # ELF64 header size
 val ELF64_HEADER_SIZE: i64 = 64
+val ELF32_HEADER_SIZE: i64 = 52
 
 # ELF64 section header size
 val ELF64_SHDR_SIZE: i64 = 64
+val ELF32_SHDR_SIZE: i64 = 40
 
 # ============================================================================
 # Structs
@@ -105,13 +107,13 @@ fn elf_read_u64_le(bytes: [u8], offset: i64) -> i64:
 # ============================================================================
 
 fn elf_parse_header(bytes: [u8]) -> Result<ElfHeader, text>:
-    """Parse the 64-byte ELF64 header from raw bytes.
+    """Parse an ELF32 or ELF64 header from raw bytes.
 
     Checks magic bytes [0x7f, 0x45, 0x4c, 0x46] ("\\x7fELF").
     Parses fields at standard ELF64 offsets (little-endian).
     """
-    if bytes.len() < ELF64_HEADER_SIZE:
-        return Err("Buffer too small for ELF header: need {ELF64_HEADER_SIZE} bytes, got {bytes.len()}")
+    if bytes.len() < ELF32_HEADER_SIZE:
+        return Err("Buffer too small for ELF header: need at least {ELF32_HEADER_SIZE} bytes, got {bytes.len()}")
 
     # Check ELF magic
     if (bytes[0] as i64) != ELF_MAGIC_0:
@@ -123,24 +125,25 @@ fn elf_parse_header(bytes: [u8]) -> Result<ElfHeader, text>:
     if (bytes[3] as i64) != ELF_MAGIC_3:
         return Err("Invalid ELF magic: expected 0x46 ('F') at offset 3")
 
-    # EI_CLASS at offset 4: 2 = ELFCLASS64
+    # EI_CLASS at offset 4: 1 = ELFCLASS32, 2 = ELFCLASS64
     val ei_class = bytes[4] as i64
-    if ei_class != 2:
-        return Err("Only ELF64 is supported (EI_CLASS={ei_class}, expected 2)")
+    if ei_class != 1 and ei_class != 2:
+        return Err("Unsupported ELF class {ei_class}")
+    if ei_class == 2 and bytes.len() < ELF64_HEADER_SIZE:
+        return Err("Buffer too small for ELF64 header: need {ELF64_HEADER_SIZE} bytes, got {bytes.len()}")
 
     # EI_DATA at offset 5: 1 = little-endian
     val ei_data = bytes[5] as i64
     if ei_data != 1:
         return Err("Only little-endian ELF is supported (EI_DATA={ei_data}, expected 1)")
 
-    # Parse header fields at ELF64 offsets
     val e_type    = elf_read_u16_le(bytes, 16)
     val e_machine = elf_read_u16_le(bytes, 18)
-    val e_entry   = elf_read_u64_le(bytes, 24)
-    val e_phoff   = elf_read_u64_le(bytes, 32)
-    val e_shoff   = elf_read_u64_le(bytes, 40)
-    val e_shnum   = elf_read_u16_le(bytes, 60)
-    val e_shstrndx = elf_read_u16_le(bytes, 62)
+    val e_entry = if ei_class == 1: elf_read_u32_le(bytes, 24) else: elf_read_u64_le(bytes, 24)
+    val e_phoff = if ei_class == 1: elf_read_u32_le(bytes, 28) else: elf_read_u64_le(bytes, 32)
+    val e_shoff = if ei_class == 1: elf_read_u32_le(bytes, 32) else: elf_read_u64_le(bytes, 40)
+    val e_shnum = if ei_class == 1: elf_read_u16_le(bytes, 48) else: elf_read_u16_le(bytes, 60)
+    val e_shstrndx = if ei_class == 1: elf_read_u16_le(bytes, 50) else: elf_read_u16_le(bytes, 62)
 
     Ok(ElfHeader(
         e_type: e_type,
@@ -165,21 +168,23 @@ fn elf_parse_sections(bytes: [u8], header: ElfHeader) -> [ElfSectionHeader]:
 
     val shoff = header.e_shoff
     val shnum = header.e_shnum
-    val table_end = shoff + shnum * ELF64_SHDR_SIZE
+    val elf32 = bytes.len() > 4 and bytes[4] == 1
+    val shdr_size = if elf32: ELF32_SHDR_SIZE else: ELF64_SHDR_SIZE
+    val table_end = shoff + shnum * shdr_size
 
     if shoff < 0 or table_end > bytes.len():
         return sections
 
     var i: i64 = 0
     while i < shnum:
-        val base = shoff + i * ELF64_SHDR_SIZE
+        val base = shoff + i * shdr_size
 
         val sh_name  = elf_read_u32_le(bytes, base + 0)
         val sh_type  = elf_read_u32_le(bytes, base + 4)
-        val sh_flags = elf_read_u64_le(bytes, base + 8)
-        val sh_addr  = elf_read_u64_le(bytes, base + 16)
-        val sh_size  = elf_read_u64_le(bytes, base + 32)
-        val sh_info  = elf_read_u32_le(bytes, base + 44)
+        val sh_flags = if elf32: elf_read_u32_le(bytes, base + 8) else: elf_read_u64_le(bytes, base + 8)
+        val sh_addr = if elf32: elf_read_u32_le(bytes, base + 12) else: elf_read_u64_le(bytes, base + 16)
+        val sh_size = if elf32: elf_read_u32_le(bytes, base + 20) else: elf_read_u64_le(bytes, base + 32)
+        val sh_info = if elf32: elf_read_u32_le(bytes, base + 28) else: elf_read_u32_le(bytes, base + 44)
 
         sections = sections.push(ElfSectionHeader(
             sh_name: sh_name,
@@ -250,4 +255,4 @@ export elf_machine_name
 export ET_NONE, ET_REL, ET_EXEC, ET_DYN
 export EM_X86_64, EM_ARM, EM_AARCH64, EM_RISCV
 export SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB
-export ELF64_HEADER_SIZE, ELF64_SHDR_SIZE
+export ELF32_HEADER_SIZE, ELF32_SHDR_SIZE, ELF64_HEADER_SIZE, ELF64_SHDR_SIZE

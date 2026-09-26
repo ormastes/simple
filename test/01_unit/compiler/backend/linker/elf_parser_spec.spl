@@ -6,7 +6,7 @@
 use compiler.backend.linker.elf_inspect.{
     elf_parse_header,
     ElfHeader, ElfSectionHeader,
-    ELF64_HEADER_SIZE, ELF64_SHDR_SIZE,
+    ELF32_HEADER_SIZE, ELF32_SHDR_SIZE, ELF64_HEADER_SIZE, ELF64_SHDR_SIZE,
     SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB
 }
 use compiler.backend.linker.elf_parser.{
@@ -24,10 +24,10 @@ use compiler.backend.linker.elf_parser.{
     elf_defined_symbols,
     elf_undefined_symbols,
     elf_make_empty_strtab,
-    SHT_RELA, SHN_UNDEF,
+    SHT_RELA, SHT_REL, SHN_UNDEF,
     STB_LOCAL, STB_GLOBAL, STB_WEAK,
     STT_NOTYPE, STT_OBJECT, STT_FUNC,
-    ELF64_SYM_SIZE, ELF64_RELA_SIZE
+    ELF32_SYM_SIZE, ELF32_REL_SIZE, ELF32_RELA_SIZE, ELF64_SYM_SIZE, ELF64_RELA_SIZE
 }
 
 # ============================================================================
@@ -92,6 +92,21 @@ fn make_elf_header_bytes(e_shoff: i64, e_shnum: i64, e_shstrndx: i64) -> [i64]:
         e_shstrndx & 0xff, (e_shstrndx >> 8) & 0xff
     ]
     b
+
+fn make_elf32_header_bytes(e_shoff: i64, e_shnum: i64, e_shstrndx: i64) -> [i64]:
+    """Build a minimal ELF32 little-endian EM_ARM relocatable header."""
+    [
+        0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 40, 0, 1, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        e_shoff & 0xff, (e_shoff >> 8) & 0xff, (e_shoff >> 16) & 0xff, (e_shoff >> 24) & 0xff,
+        0, 0, 0, 0,
+        52, 0, 32, 0, 0, 0, 40, 0,
+        e_shnum & 0xff, (e_shnum >> 8) & 0xff,
+        e_shstrndx & 0xff, (e_shstrndx >> 8) & 0xff
+    ]
 
 fn make_section_header_bytes(
     sh_name: i64, sh_type: i64, sh_flags: i64,
@@ -185,6 +200,55 @@ describe "ELF Parser - header parsing":
         val short_bytes: [i64] = [0x7f, 0x45, 0x4c, 0x46]
         val result = elf_parse_header(short_bytes)
         expect(result.is_ok()).to_equal(false)
+
+    it "parses a minimal ELF32 EM_ARM header and object":
+        val bytes = make_elf32_header_bytes(52, 0, 0)
+        val header = elf_parse_header(bytes)
+        val object = elf_parse_object(bytes)
+
+        expect(header.is_ok()).to_equal(true)
+        expect(header.unwrap().e_machine).to_equal(40)
+        expect(header.unwrap().e_shoff).to_equal(52)
+        expect(object.is_ok()).to_equal(true)
+        expect(object.unwrap().sections.len()).to_equal(0)
+
+describe "ELF Parser - ELF32 symbols and relocations":
+    it "normalizes an ELF32 symbol entry into the shared symbol model":
+        val entry: [i64] = [
+            1, 0, 0, 0,
+            0x35, 0x12, 0, 0,
+            4, 0, 0, 0,
+            0x12, 0, 1, 0
+        ]
+        val raw = concat_bytes(make_elf32_header_bytes(0, 0, 0), entry)
+        val symtab = ElfSectionHeader(
+            sh_name: 0, sh_type: SHT_SYMTAB, sh_flags: 0,
+            sh_addr: ELF32_HEADER_SIZE, sh_size: ELF32_SYM_SIZE, sh_info: 0)
+        val strtab = ElfStringTable(data: [0, 109, 97, 105, 110, 0], offset: 0)
+
+        val symbols = elf_parse_symbols(raw, symtab, strtab)
+
+        expect(symbols.len()).to_equal(1)
+        expect(symbols[0].name).to_equal("main")
+        expect(symbols[0].st_value).to_equal(0x1235)
+        expect(symbols[0].st_size).to_equal(4)
+        expect(symbols[0].st_info).to_equal(0x12)
+
+    it "canonicalizes ELF32 REL symbol and type packing":
+        val entry: [i64] = [4, 0, 0, 0, 10, 2, 0, 0]
+        val raw = concat_bytes(make_elf32_header_bytes(0, 0, 0), entry)
+        val rel = ElfSectionHeader(
+            sh_name: 0, sh_type: SHT_REL, sh_flags: 0,
+            sh_addr: ELF32_HEADER_SIZE, sh_size: ELF32_REL_SIZE, sh_info: 3)
+
+        val records = elf_parse_relocations(raw, rel, 5)
+
+        expect(records.len()).to_equal(1)
+        expect(records[0].r_offset).to_equal(4)
+        expect(elf_reloc_sym(records[0])).to_equal(2)
+        expect(elf_reloc_type(records[0])).to_equal(10)
+        expect(records[0].r_addend).to_equal(0)
+        expect(records[0].target_section_idx).to_equal(3)
 
     it "returns error on bad magic bytes":
         val bad_bytes: [i64] = [

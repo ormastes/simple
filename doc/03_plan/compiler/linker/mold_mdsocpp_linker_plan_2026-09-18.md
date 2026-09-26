@@ -280,9 +280,12 @@ relocation layer now recognizes `EM_ARM` and applies the foundational AAELF32
 range/alignment and opcode-preserving ARM branch patching. Thumb-2 `THM_CALL`,
 `THM_JUMP24`, and absolute/PC-relative `THM_MOVW`/`THM_MOVT` records are also
 encoded with checked signed branch reach and split-immediate preservation.
-ELF32 parsing, the remaining Thumb/data relocation corpus, and ARM executable
-emission remain before that lane can consume the existing LLVM ARM32 object
-backend.
+The shared ELF object parser now accepts little-endian ELF32 headers and
+section tables, decodes ELF32 symbols, and canonicalizes both REL and RELA
+records into the same symbol/type representation used by ELF64. Implicit REL
+addend extraction, the remaining Thumb/data relocation corpus, and ARM
+executable emission remain before that lane can consume the existing LLVM
+ARM32 object backend end to end.
 
 Implemented source slice:
 
