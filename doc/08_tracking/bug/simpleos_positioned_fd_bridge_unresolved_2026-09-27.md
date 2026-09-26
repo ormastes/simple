@@ -22,6 +22,16 @@ The bridge also accesses `dispatch.backend.positioned`, while
 production caller of the bridge. Kernel syscall 30 continues to open FAT32;
 the managed `/srv/data` path fails ENOSYS instead of publishing an unowned FD.
 
+## Progress after initial inspection
+
+`open_file_description_complete_io_indeterminate_v1` and
+`open_file_description_cancel_undispatched_io_v1` now have owner
+implementations and a package-scoped behavior spec. They are **unverified**:
+the isolated macOS Stage 2 bootstrap stopped at the Cocoa runtime owner
+preflight before producing an admitted product runtime. See
+`macos_cocoa_runtime_owner_blocks_stage2_2026-09-27.md`. Ten originally
+missing definitions and the backend-binding mismatch remain.
+
 ## Required fix
 
 Define one exact MountTable virtual-object binding with generation and kind.

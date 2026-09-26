@@ -510,6 +510,69 @@ pub(package) fn open_file_description_complete_io_v1(
     if not _ofd_unlock_v1(): return Err("serialization-unavailable")
     Ok(result)
 
+pub(package) fn open_file_description_cancel_undispatched_io_v1(
+    pin: OpenFileDescriptionPinV1
+) -> Result<OpenFileDescriptionIoCompleteV1, text>:
+    """Release a pin only when backend dispatch has not begun."""
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_pin_index_v1(pin)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-pin")
+    var slot = _ofd_owner_v1.slots[index]
+    if slot.io_dispatched:
+        _ = _ofd_unlock_v1()
+        return Err("dispatch-already-resolved")
+    val cancelled = sosix_ofd_commit(
+        slot.io, slot.active_ticket, -1, 0u64, 0u64, false)
+    if not cancelled.accepted:
+        _ = _ofd_unlock_v1()
+        return Err(cancelled.reason)
+    slot.io = cancelled.state
+    slot.pin_count = 0u32
+    slot.active_pin_nonce = 0u64
+    slot.active_ticket = _ofd_empty_ticket_v1()
+    _ofd_owner_v1.slots[index] = slot
+    var close_ready: OpenFileDescriptionCloseTicketV1? = nil
+    if (slot.state == OpenFileDescriptionStateV1.Closing and
+        slot.ref_count == 0u32):
+        val issued = _ofd_issue_close_ticket_v1(index, slot)
+        if issued.is_err():
+            _ofd_owner_v1.slots[index].state =
+                OpenFileDescriptionStateV1.CloseQuarantined
+        else:
+            close_ready = Some(issued.unwrap())
+    val result = OpenFileDescriptionIoCompleteV1(
+        shared_offset: cancelled.state.shared_offset, close_ready: close_ready)
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(result)
+
+pub(package) fn open_file_description_complete_io_indeterminate_v1(
+    pin: OpenFileDescriptionPinV1
+) -> Result<OpenFileDescriptionIoCompleteV1, text>:
+    """Quarantine a dispatched OFD when actual backend progress is unknown."""
+    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    val index = _ofd_pin_index_v1(pin)
+    if index < 0:
+        _ = _ofd_unlock_v1()
+        return Err("stale-pin")
+    var slot = _ofd_owner_v1.slots[index]
+    if not slot.io_dispatched:
+        _ = _ofd_unlock_v1()
+        return Err("dispatch-not-resolved")
+    val offset = slot.io.shared_offset
+    slot.state = OpenFileDescriptionStateV1.CloseQuarantined
+    slot.pin_count = 0u32
+    slot.active_pin_nonce = 0u64
+    slot.active_ticket = _ofd_empty_ticket_v1()
+    slot.io_dispatched = false
+    slot.io = sosix_ofd_io_state_new(offset)
+    _ofd_owner_v1.slots[index] = slot
+    val result = OpenFileDescriptionIoCompleteV1(
+        shared_offset: offset, close_ready: nil)
+    if not _ofd_unlock_v1(): return Err("serialization-unavailable")
+    Ok(result)
+
 pub(package) fn open_file_description_set_status_v1(
     ref_: OpenFileDescriptionRefV1, requested_flags: u32
 ) -> Result<u32, text>:
