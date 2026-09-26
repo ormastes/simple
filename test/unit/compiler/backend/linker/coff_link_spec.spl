@@ -111,6 +111,31 @@ fn _cl_archive(member: [u8]) -> [u8]:
     if member.len() % 2 != 0: bytes = bytes.push(0x0a)
     bytes
 
+fn _cl_directive_object(content: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".drectve")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, content.len())
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x200)
+    var index: i64 = 0
+    while index < content.len():
+        bytes = bytes.push(content.byte_at(index) as u8)
+        index = index + 1
+    bytes
+
 fn _cl_importing_object() -> [u8]:
     # CALL rel32 ExitProcess; RET. Symbol table has _start plus the import.
     var bytes: [u8] = []
@@ -209,6 +234,19 @@ fn _cl_weak_calling_object() -> [u8]:
     _cl_u32(bytes, 4)
 
 describe "internal freestanding Windows linker":
+    it "uses .drectve INCLUDE symbols as archive closure roots":
+        val linked = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1), _cl_directive_object(" /INCLUDE:forced")],
+            archives: [_cl_archive(_cl_object("forced", 1))], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        expect(pe_inspect(linked.unwrap()).unwrap().sections[0].virtual_size).to_equal(2)
+
+        val missing = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1), _cl_directive_object(" /INCLUDE:missing")],
+            archives: [], entry: "_start"))
+        expect(missing.is_err()).to_equal(true)
+        expect(missing.unwrap_err()).to_contain("retained COFF symbol not found")
+
     it "retained symbols pull otherwise-unreferenced library members":
         val request = CoffLinkRequest(objects: [_cl_object("_start", 1)],
             archives: [_cl_archive(_cl_object("kept_fn", 1))], entry: "_start")

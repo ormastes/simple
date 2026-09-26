@@ -17,6 +17,7 @@ use compiler.backend.linker.coff.pe_image_writer.{
 use compiler.backend.linker.coff.archive_closure.{coff_archive_closure_retained}
 use compiler.backend.linker.coff.pe_import_builder.{pe_build_amd64_imports}
 use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
+use compiler.backend.linker.coff.coff_directives.{coff_collect_directives}
 
 struct CoffLinkRequest:
     objects: [[u8]]
@@ -554,11 +555,32 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
         objects = objects.push(object)
         input_index = input_index + 1
 
-    val closure = coff_archive_closure_retained(objects, request.archives, retained_symbols)
+    val directives_result = coff_collect_directives(objects)
+    if directives_result.is_err(): return Err(directives_result.unwrap_err())
+    val directives = directives_result.unwrap()
+    var closure_roots = retained_symbols
+    for name in directives.includes:
+        if not closure_roots.contains(name): closure_roots = closure_roots.push(name)
+    var closure = coff_archive_closure_retained(objects, request.archives, closure_roots)
     if closure.is_err(): return Err(closure.unwrap_err())
-    val selected = closure.unwrap()
+    var selected = closure.unwrap()
+    var roots_changed = true
+    while roots_changed:
+        roots_changed = false
+        var directive_objects = objects
+        for member in selected.members: directive_objects = directive_objects.push(member.object)
+        val selected_directives = coff_collect_directives(directive_objects)
+        if selected_directives.is_err(): return Err(selected_directives.unwrap_err())
+        for name in selected_directives.unwrap().includes:
+            if not closure_roots.contains(name):
+                closure_roots = closure_roots.push(name)
+                roots_changed = true
+        if roots_changed:
+            closure = coff_archive_closure_retained(objects, request.archives, closure_roots)
+            if closure.is_err(): return Err(closure.unwrap_err())
+            selected = closure.unwrap()
     for member in selected.members: objects = objects.push(member.object)
-    for name in retained_symbols:
+    for name in closure_roots:
         if name == "": continue
         var found = false
         for object in objects:

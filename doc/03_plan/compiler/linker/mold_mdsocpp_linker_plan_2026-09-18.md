@@ -258,6 +258,15 @@ remain open. The user-expanded completion boundary includes
 Windows x86_64 and therefore supersedes the earlier statement that COFF did not
 gate completion.
 
+The hosted COFF continuation now has a bounded pure parser for compiler-emitted
+`.drectve` resolution inputs. It recognizes quoted `/DEFAULTLIB`, `/INCLUDE`,
+and `/ALTERNATENAME:weak=default` rows, deduplicates identical requests, rejects
+conflicting aliases and malformed owned directives, and collects them only from
+sections marked `LNK_INFO`. `/INCLUDE` rows now join explicit retained symbols
+as archive-closure roots and fail by name when no object, archive member, or
+import satisfies them. Native-wrapper `/DEFAULTLIB` discovery and symbol
+resolution through `/ALTERNATENAME` remain the next Windows integration slices.
+
 The admitted aggregate producer is
 `src/app/test/mold_completion_receipt.spl`. It accepts exactly nine receipt
 paths in the fixed `MoldCompletionEvidence` order. Each input must use

@@ -1,0 +1,34 @@
+use std.spec.{describe, expect, it}
+use compiler.backend.linker.coff.coff_directives.{coff_parse_directives}
+
+describe "COFF .drectve parser":
+    it "collects resolution directives and preserves quoted values":
+        val parsed = coff_parse_directives(
+            " /DEFAULTLIB:\"runtime support.lib\" /INCLUDE:forced " +
+            "/ALTERNATENAME:weak=strong /defaultlib:kernel32.lib")
+        expect(parsed.is_ok()).to_equal(true)
+        val directives = parsed.unwrap()
+        expect(directives.default_libraries).to_equal(
+            ["runtime support.lib", "kernel32.lib"])
+        expect(directives.includes).to_equal(["forced"])
+        expect(directives.alternate_names.len()).to_equal(1)
+        expect(directives.alternate_names[0].weak_name).to_equal("weak")
+        expect(directives.alternate_names[0].default_name).to_equal("strong")
+
+    it "deduplicates identical rows and rejects malformed owned directives":
+        val deduplicated = coff_parse_directives(
+            "/INCLUDE:root /include:root /ALTERNATENAME:a=b /alternatename:a=b")
+        expect(deduplicated.unwrap().includes.len()).to_equal(1)
+        expect(deduplicated.unwrap().alternate_names.len()).to_equal(1)
+        expect(coff_parse_directives("/DEFAULTLIB:").is_err()).to_equal(true)
+        expect(coff_parse_directives("/DEFAULTLIB").is_err()).to_equal(true)
+        expect(coff_parse_directives("/INCLUDE").is_err()).to_equal(true)
+        expect(coff_parse_directives("/ALTERNATENAME:a").is_err()).to_equal(true)
+        expect(coff_parse_directives(
+            "/ALTERNATENAME:a=b /ALTERNATENAME:a=c").is_err()).to_equal(true)
+        expect(coff_parse_directives("/DEFAULTLIB:\"unterminated").is_err()).to_equal(true)
+
+    it "ignores unrelated directives without accepting malformed owned prefixes":
+        val parsed = coff_parse_directives("/DEBUG /OPT:REF /SUBSYSTEM:CONSOLE")
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().default_libraries.len()).to_equal(0)

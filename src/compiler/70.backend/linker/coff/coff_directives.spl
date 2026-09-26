@@ -1,0 +1,107 @@
+# Parser for MSVC/LLVM `.drectve` section payloads.
+# Unknown directives remain outside this resolution-focused contract; malformed
+# forms of the directives we own fail closed rather than being partly applied.
+
+use compiler.backend.linker.coff.coff_object.{CoffObject, COFF_SECTION_LNK_INFO}
+
+struct CoffAlternateName:
+    weak_name: text
+    default_name: text
+
+struct CoffDirectives:
+    default_libraries: [text]
+    includes: [text]
+    alternate_names: [CoffAlternateName]
+
+fn _coff_directive_tokens(content: text) -> Result<[text], text>:
+    var result: [text] = []
+    var token = ""
+    var quoted = false
+    var index: i64 = 0
+    while index < content.len():
+        val ch = content[index:index + 1]
+        if ch == "\"":
+            quoted = not quoted
+        elif (ch == " " or ch == "\t" or ch == "\r" or ch == "\n") and not quoted:
+            if token != "":
+                result = result.push(token)
+                token = ""
+        else:
+            token = token + ch
+        index = index + 1
+    if quoted: return Err("unterminated quote in COFF .drectve section")
+    if token != "": result = result.push(token)
+    Ok(result)
+
+fn _coff_directive_add_unique(values: [text], value: text) -> [text]:
+    if values.contains(value): return values
+    values.push(value)
+
+fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
+    val tokens = _coff_directive_tokens(content)?
+    var defaults: [text] = []
+    var includes: [text] = []
+    var alternates: [CoffAlternateName] = []
+    for token in tokens:
+        val lower = token.lower()
+        if lower.starts_with("/defaultlib:") or lower.starts_with("-defaultlib:"):
+            val value = token.substring("/defaultlib:".len())
+            if value == "": return Err("COFF /DEFAULTLIB requires a library name")
+            defaults = _coff_directive_add_unique(defaults, value)
+        elif lower.starts_with("/include:") or lower.starts_with("-include:"):
+            val value = token.substring("/include:".len())
+            if value == "": return Err("COFF /INCLUDE requires a symbol name")
+            includes = _coff_directive_add_unique(includes, value)
+        elif lower.starts_with("/alternatename:") or lower.starts_with("-alternatename:"):
+            val value = token.substring("/alternatename:".len())
+            val parts = value.split("=")
+            if parts.len() != 2 or parts[0] == "" or parts[1] == "":
+                return Err("COFF /ALTERNATENAME requires weak=default names")
+            var duplicate = false
+            for alternate in alternates:
+                if alternate.weak_name == parts[0]:
+                    if alternate.default_name != parts[1]:
+                        return Err("conflicting COFF /ALTERNATENAME for '{parts[0]}'")
+                    duplicate = true
+            if not duplicate:
+                alternates = alternates.push(CoffAlternateName(
+                    weak_name: parts[0], default_name: parts[1]))
+        elif lower.starts_with("/defaultlib") or lower.starts_with("-defaultlib"):
+            return Err("malformed COFF /DEFAULTLIB directive")
+        elif lower.starts_with("/include") or lower.starts_with("-include"):
+            return Err("malformed COFF /INCLUDE directive")
+        elif lower.starts_with("/alternatename") or lower.starts_with("-alternatename"):
+            return Err("malformed COFF /ALTERNATENAME directive")
+    Ok(CoffDirectives(default_libraries: defaults,
+        includes: includes, alternate_names: alternates))
+
+fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text>:
+    var defaults: [text] = []
+    var includes: [text] = []
+    var alternates: [CoffAlternateName] = []
+    for object in objects:
+        for section in object.sections:
+            if section.name != ".drectve": continue
+            if (section.characteristics & COFF_SECTION_LNK_INFO) == 0:
+                return Err("COFF .drectve section is missing LNK_INFO")
+            var content = ""
+            for byte in section.data:
+                if byte != 0: content = content + text.from_char_code(byte)
+            val parsed = coff_parse_directives(content)?
+            for value in parsed.default_libraries:
+                defaults = _coff_directive_add_unique(defaults, value)
+            for value in parsed.includes:
+                includes = _coff_directive_add_unique(includes, value)
+            for alternate in parsed.alternate_names:
+                var duplicate = false
+                for existing in alternates:
+                    if existing.weak_name == alternate.weak_name:
+                        if existing.default_name != alternate.default_name:
+                            return Err("conflicting COFF /ALTERNATENAME for '{alternate.weak_name}'")
+                        duplicate = true
+                if not duplicate: alternates = alternates.push(alternate)
+    Ok(CoffDirectives(default_libraries: defaults,
+        includes: includes, alternate_names: alternates))
+
+export CoffAlternateName, CoffDirectives
+export coff_parse_directives, coff_collect_directives
