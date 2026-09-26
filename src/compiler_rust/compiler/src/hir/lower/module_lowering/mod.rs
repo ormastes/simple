@@ -22,3 +22,4 @@ mod validation;
 // Re-export the main entry point
 pub use module_pass::*;
 pub use nested_def_hoist::module_with_hoisted_defs;
+pub(crate) use function::block_uses_self;

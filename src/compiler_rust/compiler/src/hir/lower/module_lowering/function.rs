@@ -531,7 +531,7 @@ fn append_gpu_attribute_metadata(attrs: &mut Vec<String>, attr: &ast::Attribute)
     }
 }
 
-fn block_uses_self(body: &ast::Block) -> bool {
+pub(crate) fn block_uses_self(body: &ast::Block) -> bool {
     body.statements.iter().any(node_uses_self)
 }
 
