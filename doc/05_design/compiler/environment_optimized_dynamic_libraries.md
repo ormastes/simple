@@ -759,6 +759,15 @@ feature reorder/duplication, every maximum and maximum-plus-one, each individual
 field mutation, receipt/namespace domain separation, and deterministic
 round-trip. This encoding gate precedes compiler-owned receipt issuance.
 
+The startup parse-cache projection uses a distinct V2 key before driver state
+is changed: a fixed domain tag, five ordered 32-byte digests, little-endian
+environment generation, one status byte, and a little-endian u16 length plus
+UTF-8 rejection bytes. Rejection text is capped at 256 characters and 1024
+bytes; total material is capped at 1239 bytes. The app owner rolls its startup
+session back if this key cannot be issued. The V1 text key remains a compatibility
+helper and is not the production startup key. This startup projection does not
+qualify the broader action/material cache V2 or generated parser artifacts.
+
 ### Publication-owner gate
 
 `EnvironmentCompositePublicationOwnerV1` accepts original admission inputs and
