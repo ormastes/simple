@@ -170,11 +170,17 @@ fn parse_lex_program(
 # Total structural check. A malformed program is a HARD REJECT, never
 # coerced to a default (CONVENTIONS §2.3).
 fn parse_lex_program_valid(program: ParseLexProgram) -> bool:
-    if program.class_count <= 0 or program.state_count <= 0:
+    if program.schema_id != PARSE_SCHEMA_ID:
+        return false
+    if program.class_count <= 0 or program.class_count > 256 or program.state_count <= 0:
         return false
     if program.byte_class.len().to_i64() != 256:
         return false
-    if program.transition.len().to_i64() != program.state_count * program.class_count:
+    # Divide the existing bounded array length instead of multiplying untrusted
+    # dimensions, which could overflow before the malformed table is rejected.
+    val cell_count = program.transition.len().to_i64()
+    if cell_count % program.class_count != 0 or
+        cell_count / program.class_count != program.state_count:
         return false
     if program.state_token_kind.len().to_i64() != program.state_count:
         return false
@@ -185,6 +191,12 @@ fn parse_lex_program_valid(program: ParseLexProgram) -> bool:
     var i = 0
     while i < 256:
         if program.byte_class[i].to_i64() >= program.class_count:
+            return false
+        i = i + 1
+    i = 0
+    while i < cell_count:
+        val target = program.transition[i]
+        if target != PARSE_NO_ID and target.to_i64() >= program.state_count:
             return false
         i = i + 1
     true
