@@ -42,3 +42,7 @@ Signatures below use the source declaration's parameter and result types; member
 ### 2026-09-26 async completion addendum
 
 The companion [async completion route manifest](sosix_async_completion_route_manifest_v1_2026-09-26.md) classifies the legacy, hosted, SOSIX ring, and SimpleOS Future/task surfaces. It closes one family of RU-001 classification, while the global census and RU-021 runtime qualification remain open.
+
+### 2026-09-26 compiler/interpreter/loader addendum
+
+The companion [compiler, interpreter, and SMF loader route manifest](sosix_compiler_interpreter_loader_route_manifest_v1_2026-09-26.md) inventories selected file, environment, process, and executable-memory effects across those owners. RU-001 remains open for all unclassified services and providers.
