@@ -27,6 +27,7 @@
 #     other TLS models remain unsupported
 #   - no text relocs; relocation-graph section GC includes FDE-level unwind pruning
 #   - exact string and fixed-size SHF_MERGE entities coalesce with relocation remapping
+#   - x86_64 SIZE32/SIZE64 use the resolved definition extent across objects/DSOs
 #   - no COMDAT dedup; GNU versioned imports and default-version binding are emitted
 #   - single-threaded; no StageReceipts yet
 
@@ -52,7 +53,7 @@ use compiler.backend.linker.elf.reloc_scan.{
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
-    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE
+    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE
 }
 use compiler.backend.linker.elf.synthetic_sections.{
     ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy, elf_dyn_tpoff64,
@@ -539,9 +540,10 @@ fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text
     if bind != STB_LOCAL and sym.name != "":
         val weak = bind == STB_WEAK
         if ctx.res.defined.has(sym.name):
-            if ctx.res.defined[sym.name].section_idx == SHN_ABS:
-                return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, sym.name, 0, sym.st_size, 1, weak))
-            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, sym.st_size, 1, weak))
+            val definition = ctx.res.defined[sym.name]
+            if definition.section_idx == SHN_ABS:
+                return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, sym.name, 0, definition.size, 1, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, definition.size, 1, weak))
         if elf_is_synth(sym.name):
             return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, sym.st_size, 1, weak))
         val t = elf_lib_export(ctx.libs, sym.name)
@@ -1300,6 +1302,12 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
                 rtype = 1  # R_X86_64_64 encodes the signed TPOFF64 result
             else:
                 rtype = 11  # R_X86_64_32S encodes the signed TPOFF32 result
+        else if r.rclass == RC_SIZE:
+            s = r.size
+            if r.rtype == 33:
+                rtype = 1   # R_X86_64_64 applies Z + A
+            else:
+                rtype = 10  # R_X86_64_32 applies Z + A with width checking
         else if r.rclass == RC_TLS_IE:
             s = got_v + sc.got_idx[r.key] * 8
             rtype = 2  # R_X86_64_PC32 applies GOTTPOFF's GOT + A - P formula
