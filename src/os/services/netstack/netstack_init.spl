@@ -153,6 +153,7 @@ fn net_boot_init_arm64_mmio() -> bool:
     g_arm64_net_fd_map = []
     g_arm64_net_fd_ready = true
     g_arm64_net_next_fd = 100
+    g_arm64_net_quarantine_pending = false
     var driver = VirtioNetDriver.new()
     val initialized = driver.init_arm64_mmio()
     if initialized.is_err():
@@ -190,6 +191,7 @@ val ARM64_NET_CLOSING: u8 = 4u8
 var g_arm64_net_fd_map: [Arm64NetFdMap] = []
 var g_arm64_net_fd_ready: bool = false
 var g_arm64_net_next_fd: i32 = 100
+var g_arm64_net_quarantine_pending: bool = false
 
 pub struct Arm64NetRetirementReceiptV1:
     attempted: u64
@@ -201,6 +203,7 @@ fn _arm64_net_fd_ensure():
         g_arm64_net_fd_map = []
         g_arm64_net_fd_ready = true
         g_arm64_net_next_fd = 100
+        g_arm64_net_quarantine_pending = false
 
 fn _arm64_net_external_fd_valid(external: u64) -> bool:
     external >= 100u64 and external < 2147483647u64
@@ -299,6 +302,7 @@ fn _arm64_net_fd_begin_close(external_fd: i32) -> i32:
                 owner_task: entry.owner_task, external_fd: entry.external_fd,
                 internal_fd: entry.internal_fd, route: ARM64_NET_CLOSING,
                 address: entry.address, port: entry.port)
+            g_arm64_net_quarantine_pending = true
             return entry.internal_fd
         i = i + 1
     -4096
@@ -327,6 +331,7 @@ pub fn net_arm64_reap_quarantine_v1(max_attempts: u64) -> Arm64NetRetirementRece
     for entry in g_arm64_net_fd_map:
         if entry.route == ARM64_NET_CLOSING:
             pending = pending + 1u64
+    g_arm64_net_quarantine_pending = pending > 0u64
     Arm64NetRetirementReceiptV1(
         attempted: attempted, retired: retired, pending: pending)
 
@@ -349,6 +354,7 @@ pub fn net_arm64_task_teardown(owner_task: u64) -> Arm64NetRetirementReceiptV1:
                     owner_task: entry.owner_task, external_fd: entry.external_fd,
                     internal_fd: entry.internal_fd, route: ARM64_NET_CLOSING,
                     address: entry.address, port: entry.port)
+                g_arm64_net_quarantine_pending = true
                 i = i + 1
             else:
                 g_arm64_net_fd_map.remove(i)
@@ -385,6 +391,8 @@ fn spl_arm64_net_socket_direct(domain: u64, type_: u64, protocol: u64, a3: u64, 
         return -22
     if spl_shim_net_direct_socket_check() < 0:
         return -1
+    if g_arm64_net_quarantine_pending:
+        _ = net_arm64_reap_quarantine_v1(1u64)
     _arm64_net_fd_reserve()
 
 @export("C", name: "spl_arm64_net_bind_direct")
@@ -429,6 +437,8 @@ fn spl_arm64_net_accept_direct(external: u64, out_addr: u64, out_len: u64, a3: u
         return -9
     if spl_shim_net_direct_listener_check(port as u16) < 0:
         return -1
+    if g_arm64_net_quarantine_pending:
+        _ = net_arm64_reap_quarantine_v1(1u64)
     val listener = _arm64_net_fd_resolve(external as i32)
     if listener < 0:
         return -9
@@ -544,6 +554,8 @@ fn net_service_poll():
     """
     if g_net_initialized and g_netstack != nil:
         g_netstack.poll_once()
+        if g_arm64_net_quarantine_pending:
+            _ = net_arm64_reap_quarantine_v1(1u64)
 
 # ============================================================================
 # Query Helpers

@@ -46,8 +46,11 @@ Release impact: ARM64 network parity and the SimpleOS release row remain unquali
   now retain a `Closing` quarantine entry when `net_tcp_close` fails, rather
   than reporting success or losing the last mapping. A bounded owner drain
   returns attempted, retired, and pending counts; task teardown retries and
-  refuses a successful launcher result while any quarantine remains. A full
-  recurring supervisor schedule and durable physical-retirement receipt are
+  refuses a successful launcher result while any quarantine remains. Authorized
+  socket and accept calls and the cooperative network poll each retry at most
+  one quarantined close when a pending hint is set. The ARM64 direct server does
+  not call that cooperative poll, so these retries are opportunistic; a
+  guaranteed supervisor schedule and durable physical-retirement receipt are
   still absent. The earlier all-descriptor
   strong-shim close caused a kernel fault, so this narrower path still needs
   a ring-3 guest close/reopen and file-close regression before admission. The
