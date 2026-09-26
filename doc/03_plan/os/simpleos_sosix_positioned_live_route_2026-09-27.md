@@ -18,15 +18,16 @@ and NFR requirements still require user selection.
   exist. `positioned_syscall_provider_v1.spl` requires exactly one capability
   and one registered buffer owned by the trap caller.
 - The VFS IPC service's received wire header contains a source **port**, not
-  an authenticated sender task ID. `IpcManager.send_owned` checks source-port
-  ownership using a `TaskId` supplied by the syscall dispatcher, but the
-  copied service message does not carry that authenticated task identity to
-  `VfsService`. The current VFS IPC fd is also not a MountTable positioned
-  file-object ID. Do not derive positioned authority from either number.
-- The kernel copied-receive status/header/payload now has one canonical
+  an authenticated sender task ID. The kernel queue and typed receive result
+  now retain `Scheduler.get_current()` only for trap-originated copied sends;
+  direct manager sends and legacy metadata carry no provenance. The user IPC
+  wire still does not carry that identity to `VfsService`. The current VFS IPC
+  fd is also not a MountTable positioned file-object ID. Do not derive
+  positioned authority from either number.
+- The kernel copied-receive status/header/payload/provenance has one canonical
   `OwnedIpcReceiveResult` type in `ipc_types.spl`, replacing the syscall's
-  local `any` view. It does not add sender provenance to the queue or wire;
-  the positioned control route remains uninstalled.
+  local `any` view. The 32-byte user wire is unchanged, and the positioned
+  control route remains uninstalled.
 - The existing syscall IDs occupy 132/133 (owned IPC), 134/135 (positioned
   reads/writes), and 136/137 (PID1 root-service controls). `SyscallId` now
   names those six existing IDs; none is available for positioned control.
