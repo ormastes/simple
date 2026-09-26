@@ -28,6 +28,8 @@ clang --target=x86_64-linux-gnu -c pc64_x64.s -o pc64_x64.o
 clang --target=x86_64-linux-gnu -c pc64_def_x64.s -o pc64_def_x64.o
 clang --target=x86_64-linux-gnu -c pc_narrow_x64.s -o pc_narrow_x64.o
 clang --target=x86_64-linux-gnu -c pc_narrow_def_x64.s -o pc_narrow_def_x64.o
+clang --target=x86_64-linux-gnu -c abs_narrow_x64.s -o abs_narrow_x64.o
+clang --target=x86_64-linux-gnu -c abs_narrow_def_x64.s -o abs_narrow_def_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=initial-exec tls_import_x64.c -o tls_import_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=global-dynamic tls_import_x64.c -o tls_global_dynamic_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=local-dynamic tls_sections_x64.c -o tls_local_dynamic_x64.o
@@ -62,6 +64,7 @@ Relocations exercised (`llvm-readelf -r`):
 | symbol_size_{x64,def_x64}.o | cross-object R_X86_64_SIZE32/SIZE64 relocations resolved from the defining symbol extent |
 | pc64_{x64,def_x64}.o | cross-object R_X86_64_PC64 resolved as the full-width `S + A - P` delta; ld.lld 23.1 oracle bytes are `f8 df ff ff ff ff ff ff` |
 | pc_narrow_{x64,def_x64}.o | cross-object R_X86_64_PC16/PC8 with checked signed widths; ld.lld 23.1 `.data` oracle is `03 00 01 6b` |
+| abs_narrow_{x64,def_x64}.o | cross-object R_X86_64_16/8 against absolute symbols with checked unsigned widths; ld.lld 23.1 `.data` oracle is `34 12 7f` |
 | tls_import_x64.o | R_X86_64_GOTTPOFF (`imported_tls`), bound through a GOT slot carrying R_X86_64_TPOFF64 |
 | tls_global_dynamic_x64.o | canonical R_X86_64_TLSGD + `__tls_get_addr` sequence, relaxed to initial-exec/TPOFF64 |
 | tls_local_dynamic_x64.o | canonical R_X86_64_TLSLD + `__tls_get_addr` with DTPOFF32 uses, relaxed to local-exec/TPOFF32 |
