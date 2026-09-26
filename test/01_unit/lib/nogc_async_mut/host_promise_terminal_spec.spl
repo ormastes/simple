@@ -1,0 +1,43 @@
+"""HostPromise and HostFuture publish one terminal result to the same owner."""
+
+use std.spec.*
+use std.async_core.{AsyncError, Poll}
+use std.async_host.future.{HostFuture}
+use std.async_host.promise.{HostPromise}
+use std.async_host.waker.{Context, Waker}
+
+fn ready_value(future: HostFuture<i64>) -> i64:
+    val cx = Context.from_waker(Waker.new(0, 0))
+    match future.poll(cx):
+        case Poll.Ready(value): value
+        case Poll.Pending: -1
+
+describe "HostPromise terminal publication":
+    it "publishes a completed value and keeps it after a duplicate":
+        var pair = HostPromise<i64>.new()
+        var future = pair[0]
+        var promise = pair[1]
+        expect(future.is_terminal()).to_be(false)
+        expect(promise.complete(42)).to_be(true)
+        expect(promise.complete(99)).to_be(false)
+        expect(promise.is_completed()).to_be(true)
+        expect(ready_value(future)).to_equal(42)
+
+    it "rejects a promise write after direct future completion":
+        var pair = HostPromise<i64>.new()
+        var future = pair[0]
+        var promise = pair[1]
+        expect(future.complete(12)).to_be(true)
+        expect(future.complete(13)).to_be(false)
+        expect(promise.complete(14)).to_be(false)
+        expect(promise.is_completed()).to_be(true)
+        expect(ready_value(future)).to_equal(12)
+
+    it "keeps failure terminal against later completion":
+        var pair = HostPromise<i64>.new()
+        var future = pair[0]
+        var promise = pair[1]
+        expect(promise.fail(AsyncError.Timeout)).to_be(true)
+        expect(promise.complete(7)).to_be(false)
+        expect(future.fail(AsyncError.Timeout)).to_be(false)
+        expect(future.is_terminal()).to_be(true)
