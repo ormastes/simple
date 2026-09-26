@@ -7,7 +7,9 @@ precede mapping, and selected provider generations remain pinned until calls,
 callbacks, and device work retire.
 
 The canonical target registry owns versioned triple-to-numeric mappings and
-declared aliases. A live V2 use token authorizes a target projection. Profile
+declared aliases, including the supported 64-bit SimpleOS userland triples.
+Their three-part spellings retain explicit ABI IDs in registry rows. A live V2
+use token authorizes a target projection. Profile
 binding checks the architecture, ABI, object format, endian, and pointer width
 against that projection. Its digest uses canonical content and selected feature
 words, so aliases and owner-local serials do not split build/cache identity.
