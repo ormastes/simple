@@ -53,7 +53,12 @@ int stat(const char *path, struct stat *buf) {
 }
 
 int fstat(int fd, struct stat *buf) {
-    /* arg3=1 signals fd-mode to the kernel (SimpleOS doesn't distinguish yet) */
+    /* arg3=1 selects fd-mode: the arm64 kernel answers from its fd table
+     * (real size with a NON-regular mode so LLVM streams the content
+     * instead of mmap'ing it — the guest kernel's mmap is anonymous-only;
+     * stdio fds 0/1/2 get a zeroed stat). LLVM's MemoryBuffer trusts
+     * st_size — a zeroed size makes clang compile an empty translation
+     * unit without a read (lane-C1 R5b). */
     int64_t r = simpleos_syscall(34, (int64_t)fd, 0, (int64_t)buf, 1, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
     return 0;

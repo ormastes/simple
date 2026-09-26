@@ -1344,7 +1344,7 @@ static int64_t arm64_svc_file_open(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_file_read(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_file_write(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_file_close(uint64_t);
-static int64_t arm64_svc_file_stat(uint64_t, uint64_t, uint64_t);
+static int64_t arm64_svc_file_stat(uint64_t, uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_clock_gettime(uint64_t, uint64_t);
 static int64_t arm64_svc_file_lseek(uint64_t, uint64_t, uint64_t);
 static int64_t arm64_svc_file_fcntl(uint64_t, uint64_t, uint64_t);
@@ -1399,13 +1399,15 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
          * handlers below, NOT the Simple strong shims: the strong-shim
          * execution parks the guest after a syscall (run-20260926_045921 —
          * the CPU parks at arm64_enter_el0 after a strong-shim stat), while
-         * the C-only mmap path round-trips fine. stat is path-metadata
-         * (fstat is answered locally by the guest libc — see the lane-C1
-         * sysroot fstat patch). */
+         * the C-only mmap path round-trips fine. stat is path-metadata;
+         * a3=1 selects fd-mode (the guest libc's fstat), answered from the
+         * fd table so LLVM sees the real size (R5b: a zeroed fstat made
+         * cc1 compile an empty translation unit — the linked product lost
+         * main/printf). */
         case 30: return arm64_svc_file_open(a0, a1, a2);
         case 31: return arm64_svc_file_read(a0, a1, a2);
         case 32: return arm64_svc_file_write(a0, a1, a2);
-        case 34: return arm64_svc_file_stat(a0, a1, a2);
+        case 34: return arm64_svc_file_stat(a0, a1, a2, a3);
         /* clock_gettime (id 50): the guest toolchain aborts on ENOSYS here
          * (run-20260926_071342: "clock_gettime(CLOCK_MONOTONIC) failed" ->
          * abort, rc=134, after cc1 opened /HELLO.C). C handler like the file
@@ -4906,8 +4908,36 @@ static void svc_fat32_ensure_queue(void)
 }
 
 /* syscall 34: stat(path, len, statbuf). Returns 0 on success, -errno. */
-static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t stat_va)
+static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t stat_va, uint64_t a3)
 {
+    /* fd-mode (a3=1, the guest libc's fstat): answer from the fd table so
+     * LLVM's MemoryBuffer learns the real file size. A zeroed SIZE here is
+     * fatal upstream: clang trusts st_size=0 and builds an empty buffer
+     * WITHOUT a read syscall (R5b: cc1 compiled an empty translation unit
+     * from /HELLO.C, the in-guest-linked product lost main/printf, and the
+     * gate's R5 was a hollow rc=0). The mode stays NON-regular (0) on
+     * purpose: LLVM only mmaps regular files, and the guest kernel's mmap
+     * is anonymous-only — it would hand back zeroed pages and lld would
+     * read a zeroed /LIBC.A ("unknown file type"). With a non-regular mode
+     * LLVM takes getMemoryBufferForStream (read-to-EOF), which is correct
+     * for every file size (the pre-fix lld read its inputs exactly this
+     * way). stdio fds (0/1/2) keep the fully-zeroed stat the guest-libc
+     * stub used to return (R3-proven); unknown fds get -EBADF. */
+    if (a3 == 1) {
+        int fd = (int)path_va;
+        uint8_t st[96];
+        __builtin_memset(st, 0, sizeof(st));
+        if (fd >= 3) {
+            if (fd >= SVC_MAX_FDS || !g_svc_fds[fd].used) return -9; /* EBADF */
+            uint32_t size = g_svc_fds[fd].size;
+            st[48] = (uint8_t)(size & 0xFF);
+            st[49] = (uint8_t)((size >> 8) & 0xFF);
+            st[50] = (uint8_t)((size >> 16) & 0xFF);
+            st[51] = (uint8_t)((size >> 24) & 0xFF);
+        }
+        if (!arm64_user_range_accessible(stat_va, sizeof(st), 1)) return -14;
+        return svc_user_memcpy_to(stat_va, st, sizeof(st)) == sizeof(st) ? 0 : -14;
+    }
     char path[128];
     if (svc_copy_path(path_va, path_len, path, sizeof(path) - 1) < 0) return -14;
     /* The root directory always exists. LLVM's FileManager stats the PARENT

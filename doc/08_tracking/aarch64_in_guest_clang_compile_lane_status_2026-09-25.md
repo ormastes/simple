@@ -1404,3 +1404,118 @@ NOT the cause — that would abort at 0, not exit 0.
    HELLO_C_FROM_GUEST_ARM64 (a real product run, not a hollow rc=0).
 2. Keep the guest-toolchain sysroot assembled from libc-build-aarch64
    objects; only swap fixed members. Do not full-script-rebuild it.
+
+---
+
+# 2026-09-26 (agent-45) session — R5b RESOLVED: the product prints HELLO_C_FROM_GUEST_ARM64; gate ALL RUNGS PASS (real product output)
+
+Boot cycles this session: 3 (run-20260926_162227 first-fix attempt —
+R4b mmap wall; _163247 verify — ALL PASS) + 3 manual capture boots
+(memsave of the payload region + the C RAM file table). Kernel rebuilds: 2.
+
+## R5b root cause (byte-exact): guest libc fstat zeroed-stat starved cc1's
+## input read — the in-guest lld was innocent
+
+The handoff's suspicion (in-guest lld mis-links crt0→main→printf) resolved
+to an UPSTREAM defect: the guest cc1 compiled an EMPTY translation unit.
+
+1. Guest RAM-table dump (QEMU monitor `memsave` of `g_svc_ram_files`):
+   `/HELLO.O` = 696 B, `.text` size 0 — a degenerate object (no `main`,
+   no rodata). The guest cc1 never read /HELLO.C: the SVC trace shows
+   `open("/HELLO.C")` → fd 3 (kernel FAT resolve `cluster=11 size=108`)
+   then NO `id=31` read for fd 3 before `R4a rc=0`.
+2. Mechanism: the guest libc's `fstat` was the R3-era lane-local
+   zeroed-stat stub (`memset(buf,0,sizeof *buf); return 0;` — RECORDED
+   adaptation in build-os-llvm/scripts/sysroot-mirror-aarch64.shs). clang's
+   FileManager fstats the OPEN FD for the size; st_size=0 →
+   MemoryBuffer builds an empty buffer with NO read → empty object, rc=0.
+   (The stub's comment claimed LLVM "streams via getMemoryBufferForStream,
+   always correct" — true for stdio STREAMS, FALSE for the input-file
+   size-from-fstat path.)
+3. In-guest /HELLO2.ELF (payload-region memsave, 110,408 B): `main` is the
+   libc archive's WEAK `main_shim.o` stub (`w F .text 4` at 0x100000f0,
+   `b _Z4mainiPPc` — undefined weak → lld fallthrough into `__cxa_atexit`),
+   which returned 0 → exit(0). No `bl printf`/`bl puts`, the format string
+   ABSENT from .rodata — the whole .text after 0x100000f0 is the correct
+   host link's shifted down 24 bytes. crt0 was correct all along; the host
+   link (110,400 B, main→printf at 0x10004b08) was the reference.
+4. Full analysis: doc/08_tracking/bug/
+   guest_aarch64_cc1_fstat_zeroed_stat_empty_hello_o_r5b_2026-09-26.md
+
+## Fix (two coordinated parts + one refinement)
+
+1. Kernel (this repo): `arm64_svc_file_stat` honors fd-mode (a3=1) —
+   file fds get the fd table's tracked size, stdio fds 0/1/2 stay zeroed
+   (R3-proven), unknown fds -EBADF; dispatch passes a3. The repo libc's
+   fstat already syscalls `(34, fd, 0, buf, 1, 0)` (comment updated).
+2. Guest toolchain (fork `simpleos`, 0fead4889fc4): drop the fstat
+   zeroed-stub sed patch; libc-build-aarch64 synced from the repo source;
+   simpleos_fs.o rebuilt and swapped into sysroot libsimpleos_c.a; guest
+   clang-20 + lld relinked (fstat verified `bl simpleos_syscall`, id 34
+   a3=1).
+3. REFINEMENT (run-20260926_162227 named it): the first fix returned
+   S_IFREG + size — that routed LLVM's getOpenFileImpl into shouldUseMmap
+   for files >= 16 KiB, and the guest kernel's mmap is ANONYMOUS-only
+   (hands back zeroed pages), so the relinked lld read a zeroed /LIBC.A
+   ("error: /LIBC.A: unknown file type"). The file-fd stat now carries the
+   real size with a NON-regular mode: LLVM takes
+   getMemoryBufferForStream (read-to-EOF) for every size — the same path
+   the pre-fix lld used to read its inputs correctly. The guest mmap is
+   never invoked for MemoryBuffer.
+
+## Verification (run-20260926_163247, REBUILD_KERNEL=1 ACCEL=tcg)
+
+```
+[clang-bringup] rung=R3-clang-version rc=0        (clang version 20.1.8 banner)
+[clang-bringup] rung=R4a-cc1-compile rc=0         (cc1 reads /HELLO.C: id=31 ret=0x6c=108)
+[clang-bringup] rung=R4b-lld-link rc=0            (/HELLO2.ELF 110,400 B written)
+[clang-bringup] rung=R5-run-hello2 exec=/HELLO2.ELF
+[vfs-read] ram-hit path=/HELLO2.ELF bytes=110400  (= the host-reproduced size)
+[payload] eret to EL0
+HELLO_C_FROM_GUEST_ARM64                          ← printed BY THE PRODUCT
+[payload] payload exited code=0
+[clang-bringup] rung=R5-run-hello2 rc=0
+CLANG_IN_GUEST_ARM64_OK
+rung table: R1=PASS R2=PASS R3=PASS R4=PASS R5=PASS FINAL=PASS
+[a64-clang] ALL RUNGS PASS
+```
+
+The product's printf reaches serial through the guest libc's
+write(1)→DebugWrite (syscall 60) per-char path — the same path that
+carried the R3 banner. The in-guest product is now 110,400 B, byte-size
+identical to the host-reproduced link.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | run-20260926_163247 |
+| R2 guest boots | PASS | run-20260926_163247 |
+| R3 clang --version in guest | PASS | rc=0, clang version 20.1.8 banner |
+| R4a cc1 compile /HELLO.C | PASS | rc=0, real 108 B read, real HELLO.O |
+| R4b lld link /HELLO2.ELF | PASS | rc=0, /HELLO2.ELF 110,400 B |
+| R5 run /HELLO2.ELF | **PASS (real)** | rc=0 + `HELLO_C_FROM_GUEST_ARM64` on serial, printed by the product |
+
+R5b is CLOSED — the gate is a REAL green, not a hollow one.
+
+## Landed this session (committed)
+
+- This repo: kernel fd-mode stat (baremetal_stubs.c) + libc fstat comment
+  (src/os/libc/simpleos_fs.c) + this lane doc + the R5b bug doc.
+- Fork `simpleos` 0fead4889fc4: fstat zeroed-stub patch dropped; guest
+  clang-20 + lld relinked against the updated sysroot libc.
+
+## Exact next actions
+
+1. None for R5b. If the guest toolchain is ever full-rebuilt via the
+   script, the fstat fix flows from the repo source automatically (the
+   script no longer stubs it); keep the kernel's fd-mode stat with it.
+2. Latent (unchanged, other lanes): the guest kernel's anonymous-only
+   mmap means any FUTURE LLVM file read >= 16 KiB relies on the
+   non-regular fstat mode steering it to the stream path — do not
+   "optimize" the fd-mode stat to S_IFREG without also teaching the
+   kernel file-backed mmap.
+3. The low-16-pages DIAGNOSTIC map in rt_arm_payload_elf64_ring3_enter is
+   still present (toolchain 0xb1c8 deref); it is harmless for the current
+   binaries (no low-page adrp refs) but should be removed when the
+   toolchain next rebuilds the guest binaries.
