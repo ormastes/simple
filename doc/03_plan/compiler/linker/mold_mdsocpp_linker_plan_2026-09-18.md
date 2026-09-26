@@ -391,6 +391,10 @@ Implemented source slice:
   fallback;
 - Windows SDK/CRT search-root discovery plus demand-driven system and
   `simple_native_all` import-library closure for hosted runtime archives;
+- specification-defined COFF weak externals: `NOLIBRARY` and `ALIAS` resolve
+  directly through their fallback, while `LIBRARY` prefers an ordinary or
+  short-import archive provider for the primary and falls back only when no
+  library advertises one; unknown policies remain fail-closed;
 - host-independent SimpleOS x86_64/arm64 routing through the existing
   `BootLayoutPlan` + `elf_boot_link` engine.
 

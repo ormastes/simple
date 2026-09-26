@@ -53,6 +53,30 @@ fn _ca_object(symbol: text, section: i64) -> [u8]:
     bytes = bytes.push(2).push(0)
     _ca_u32(bytes, 4)
 
+fn _ca_weak_object(policy: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ca_u16(bytes, 0x8664)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 20)
+    bytes = _ca_u32(bytes, 3)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_name(bytes, "weak")
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = bytes.push(105).push(1)
+    bytes = _ca_u32(bytes, 2)
+    bytes = _ca_u32(bytes, policy)
+    bytes = _ca_name(bytes, "").push(0).push(0)
+    bytes = _ca_name(bytes, "strong")
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = bytes.push(2).push(0)
+    _ca_u32(bytes, 4)
+
 fn _ca_archive(name: text, member: [u8]) -> [u8]:
     var bytes: [u8] = []
     bytes = _ca_ascii(bytes, "!<arch>\n", 8)
@@ -86,3 +110,18 @@ describe "COFF archive closure":
         val closure = coff_archive_closure([root], [_ca_archive("other.obj", _ca_object("bar", 1))])
         expect(closure.is_ok()).to_equal(true)
         expect(closure.unwrap().members.len()).to_equal(0)
+
+    it "honors weak external library-search policy during extraction":
+        val no_library = coff_archive_closure(
+            [coff_parse_object(_ca_weak_object(1)).unwrap()], [
+                _ca_archive("weak.obj", _ca_object("weak", 1)),
+                _ca_archive("strong.obj", _ca_object("strong", 1))]).unwrap()
+        expect(no_library.members.len()).to_equal(1)
+        expect(no_library.members[0].name).to_equal("strong.obj")
+
+        val search_library = coff_archive_closure(
+            [coff_parse_object(_ca_weak_object(2)).unwrap()], [
+                _ca_archive("weak.obj", _ca_object("weak", 1)),
+                _ca_archive("strong.obj", _ca_object("strong", 1))]).unwrap()
+        expect(search_library.members.len()).to_equal(1)
+        expect(search_library.members[0].name).to_equal("weak.obj")

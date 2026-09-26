@@ -13,6 +13,8 @@ val COFF_RELOCATION_SIZE: i64 = 10
 val COFF_STORAGE_CLASS_EXTERNAL: i64 = 2
 val COFF_STORAGE_CLASS_STATIC: i64 = 3
 val COFF_STORAGE_CLASS_WEAK_EXTERNAL: i64 = 105
+val COFF_WEAK_SEARCH_NOLIBRARY: i64 = 1
+val COFF_WEAK_SEARCH_LIBRARY: i64 = 2
 val COFF_WEAK_SEARCH_ALIAS: i64 = 3
 val COFF_SECTION_CNT_UNINITIALIZED_DATA: i64 = 0x00000080
 val COFF_SECTION_LNK_INFO: i64 = 0x00000200
@@ -286,7 +288,9 @@ fn coff_symbol_at_table_index(object: CoffObject, table_index: i64) -> Result<Co
 fn coff_symbol_resolution_name(object: CoffObject, symbol: CoffSymbol) -> Result<text, text>:
     """Return the strong name used to satisfy an undefined weak external."""
     if not symbol.is_weak_external(): return Ok(symbol.name)
-    if symbol.weak_characteristics != COFF_WEAK_SEARCH_ALIAS:
+    if symbol.weak_characteristics != COFF_WEAK_SEARCH_NOLIBRARY and
+            symbol.weak_characteristics != COFF_WEAK_SEARCH_LIBRARY and
+            symbol.weak_characteristics != COFF_WEAK_SEARCH_ALIAS:
         return Err("weak external COFF symbol '{symbol.name}' uses unsupported search policy {symbol.weak_characteristics}")
     val fallback = coff_symbol_at_table_index(object, symbol.weak_default_index)
     if fallback.is_err(): return Err("weak external COFF symbol '{symbol.name}': {fallback.unwrap_err()}")
@@ -302,6 +306,15 @@ fn coff_weak_primary_for_fallback(object: CoffObject, table_index: i64) -> Optio
         if candidate.is_weak_external() and candidate.weak_default_index == table_index:
             return Some(candidate.name)
     nil
+
+fn coff_weak_primary_searches_library_for_fallback(
+        object: CoffObject, table_index: i64) -> bool:
+    for candidate in object.symbols:
+        if candidate.is_weak_external() and
+                candidate.weak_default_index == table_index and
+                candidate.weak_characteristics == COFF_WEAK_SEARCH_LIBRARY:
+            return true
+    false
 
 fn coff_symbol_is_relocated(object: CoffObject, table_index: i64) -> bool:
     for section in object.sections:
@@ -336,7 +349,7 @@ fn coff_apply_amd64_relocation(relocation_type: i64, symbol_address: i64,
 export CoffRelocation, CoffSection, CoffSymbol, CoffObject, CoffRelocationValue
 export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64
 export COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC, COFF_STORAGE_CLASS_WEAK_EXTERNAL
-export COFF_WEAK_SEARCH_ALIAS
+export COFF_WEAK_SEARCH_NOLIBRARY, COFF_WEAK_SEARCH_LIBRARY, COFF_WEAK_SEARCH_ALIAS
 export COFF_SECTION_CNT_UNINITIALIZED_DATA, COFF_SECTION_LNK_INFO
 export COFF_SECTION_LNK_REMOVE, COFF_SECTION_LNK_COMDAT
 export COFF_REL_AMD64_ABSOLUTE, COFF_REL_AMD64_ADDR64, COFF_REL_AMD64_ADDR32, COFF_REL_AMD64_ADDR32NB
@@ -344,5 +357,6 @@ export COFF_REL_AMD64_REL32, COFF_REL_AMD64_REL32_1, COFF_REL_AMD64_REL32_2
 export COFF_REL_AMD64_REL32_3, COFF_REL_AMD64_REL32_4, COFF_REL_AMD64_REL32_5
 export COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL, COFF_REL_AMD64_SECREL7
 export coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name
-export coff_weak_primary_for_fallback, coff_symbol_is_relocated
+export coff_weak_primary_for_fallback
+export coff_weak_primary_searches_library_for_fallback, coff_symbol_is_relocated
 export coff_apply_amd64_relocation
