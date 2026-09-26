@@ -21,6 +21,7 @@ clang --target=x86_64-linux-gnu -c -ffreestanding -fno-pic -fno-stack-protector 
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector canonical_plt_x64.c -o canonical_plt_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector tls_sections_x64.c -o tls_sections_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -ftls-model=local-exec tls_local_exec_x64.c -o tls_local_exec_x64.o
+clang --target=x86_64-linux-gnu -c tls_tpoff64_x64.s -o tls_tpoff64_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=initial-exec tls_import_x64.c -o tls_import_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=global-dynamic tls_import_x64.c -o tls_global_dynamic_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=local-dynamic tls_sections_x64.c -o tls_local_dynamic_x64.o
@@ -51,6 +52,7 @@ Relocations exercised (`llvm-readelf -r`):
 | canonical_plt_x64.o | R_X86_64_64 (`add_val`) in `.data`, resolved to the executable's canonical PLT entry |
 | tls_sections_x64.o | `.tdata` + `.tbss` with `SHF_TLS`; two R_X86_64_TPOFF32 references keep both templates live for PT_TLS layout |
 | tls_local_exec_x64.o | R_X86_64_TPOFF32 (`local_tls`), resolved relative to the end of the static TLS block |
+| tls_tpoff64_x64.o | static R_X86_64_TPOFF64 data word resolved as the signed offset from the TLS block end |
 | tls_import_x64.o | R_X86_64_GOTTPOFF (`imported_tls`), bound through a GOT slot carrying R_X86_64_TPOFF64 |
 | tls_global_dynamic_x64.o | canonical R_X86_64_TLSGD + `__tls_get_addr` sequence, relaxed to initial-exec/TPOFF64 |
 | tls_local_dynamic_x64.o | canonical R_X86_64_TLSLD + `__tls_get_addr` with DTPOFF32 uses, relaxed to local-exec/TPOFF32 |
