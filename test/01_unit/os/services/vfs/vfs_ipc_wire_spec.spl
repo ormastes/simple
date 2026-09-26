@@ -37,8 +37,6 @@ coverage belongs to the IPC specs.
 """
 use std.spec.step
 
-use std.spec.step
-
 use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file}
 
@@ -126,14 +124,17 @@ describe "VFS copied IPC wire":
         expect(source).to_contain("if _fd_io_is_write_only(fd_get_status_flags(fd)):")
         expect(source).to_contain("if _fd_io_is_read_only(fd_get_status_flags(fd)):")
 
-    it "destroys kernel fd_io reply ports on all terminal request paths":
+    it "routes shared reply-port cleanup through the live owner shim":
         # @req: REQ-SSPEC-LOCAL-001
-        step("Verify: destroys kernel fd_io reply ports on all terminal request paths")
-        val source = read_file("src/os/kernel/fd_io.spl")
-        expect(source).to_contain("val _SYS_IPC_DESTROY_PORT: u64 = 18")
-        expect(source).to_contain("fn _vfs_destroy_reply_port(reply_port: i64)")
-        expect(source).to_contain("_vfs_destroy_reply_port(reply_port)\n        return _vfs_ipc_error(-5)")
-        expect(source).to_contain("_vfs_destroy_reply_port(reply_port)\n    VfsIpcReply(status: status, payload: response)")
+        step("Verify: shared VFS cleanup reaches the live x86 owner shim")
+        val fs_source = read_file("src/os/userlib/fs.spl")
+        val shim_source = read_file("src/os/kernel/abi/syscall_shim_ipc.spl")
+        val x86_source = read_file("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
+        expect(fs_source).to_contain("syscall(_SYS_IPC_DESTROY_PORT, reply_port.to_u64()")
+        expect(fs_source).to_contain("_vfs_destroy_reply_port(reply_port)\n    Ok(VfsIpcStatusReply")
+        expect(shim_source).to_contain("_handle_ipc_destroy_port_state(")
+        expect(shim_source).to_contain("g_shim_ipc = state.ipc")
+        expect(x86_source).to_contain("case 18: return spl_handle_ipc_destroy_port(a0, a1, a2, a3, a4, a5);")
 
     it "closes only the final alias and matches VFS remote-handle retirement":
         step("Verify: closes only the final alias and matches VFS remote-handle retirement")
@@ -159,7 +160,7 @@ describe "VFS copied IPC wire":
         step("Verify: keeps close receipts bounded and rejects never-issued handles")
         val source = read_file("src/os/services/vfs/vfs.spl")
         expect(source).to_contain("fn _was_issued_handle(handle: u64) -> bool")
-        expect(source).to_contain("handle != 0u64 and handle < self.handles.next_handle")
+        expect(source).to_contain("self.handles.was_issued(handle)")
         expect(source.contains("retired_handles: [u64]")).to_equal(false)
         expect(source).to_contain("if self._was_issued_handle(handle):\n                return Ok(true)")
         expect(source).to_contain("return Err(\"unknown VFS handle: {handle}\")")
@@ -207,7 +208,7 @@ describe "VFS copied IPC wire":
         expect(source).to_contain("val _SYS_IPC_DESTROY_PORT: u64 = 18")
         expect(source).to_contain("fn _vfs_destroy_reply_port(reply_port: i64)")
         expect(source).to_contain("_vfs_destroy_reply_port(reply_port)")
-        expect(source).to_contain("_vfs_push_u32(request, method)")
+        expect(source).to_contain("ipc_send_owned_v1(service_port, method, payload, reply_port.to_u64())")
         expect(source).to_contain("_vfs_open(path, _VFS_OPEN_READ)")
         expect(source).to_contain("_vfs_push_u64(read_payload, handle)")
         expect(source).to_contain("_vfs_push_u64(read_payload, node.size)")
@@ -222,5 +223,6 @@ describe "VFS copied IPC wire":
         # @req: REQ-SSPEC-LOCAL-001
         val source = read_file("src/os/userlib/fs.spl")
         expect(source).to_contain("val separator = line.index_of(\":\")")
-        expect(source).to_contain("line.slice(0, separator).parse_u8()")
+        expect(source).to_contain("val kind_text = line.slice(0, separator)")
+        expect(source).to_contain("val kind_val = kind_text.parse_u8()")
         expect(source).to_contain("line.slice(separator + 1, line.len())")
