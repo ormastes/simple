@@ -2,9 +2,8 @@
 #
 # These functions provide the standard POSIX file I/O API.
 # Internally they use async_io.spl for non-blocking IPC to the VFS service.
-# posix_open sends a copied, method-prefixed IPC request to the named VFS
-# service.  Each transaction owns its anonymous reply port; replies are raw
-# status-prefixed bytes, never legacy metadata on the service port.
+# posix_open uses the shared bounded 132/133 VFS client transport. Each
+# transaction owns its anonymous reply port and retains the numeric VFS status.
 # FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
 
 use os.kernel.errno.{ENOENT, ENOSYS, EMFILE}
@@ -23,23 +22,14 @@ use os.kernel.fs.active_fd_context_owner_v1.{
 use os.kernel.async_io_rw.{sync_read, sync_write}
 use os.kernel.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.kernel.socket_compat.{posix_close_socket}
-use os.userlib.syscall_raw.{syscall}
-val _VFS_SERVICE_NAME: text = "vfs"
+use os.userlib.fs.{vfs_ipc_request_status_bytes}
 val VFS_OPEN: u32 = 1
 val VFS_READ: u32 = 2
 val VFS_WRITE: u32 = 3
 val VFS_CLOSE: u32 = 4
 val VFS_SEEK: u32 = 11
 
-# Syscall numbers for IPC
-val _SYS_IPC_SEND: u64 = 20
-val _SYS_IPC_RECV: u64 = 21
-val _SYS_IPC_CREATE_PORT: u64 = 22
-val _SYS_IPC_CONNECT: u64 = 23
-val _SYS_IPC_DESTROY_PORT: u64 = 18
-val _VFS_IPC_REQUEST_FRAME_MAX: u64 = 4100
 val _VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16
-val _IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
 extern fn unsafe_addr_of(ref: any) -> u64
 
@@ -161,56 +151,13 @@ fn posix_vfs_cleanup_failure() -> i32:
 fn _record_posix_vfs_cleanup_failure(status: i32):
     g_posix_vfs_cleanup_failure = status
 
-fn _vfs_destroy_reply_port(reply_port: i64):
-    syscall(_SYS_IPC_DESTROY_PORT, reply_port.to_u64(), 0, 0, 0, 0)
-
 fn _vfs_ipc_request(method: u32, payload: [u8]) -> VfsIpcReply:
-    """Issue one copied VFS request through a caller-owned reply port.
-
-    The anonymous source port makes the kernel interpret the first four bytes
-    as the request method.  VFS's named service port makes the response raw,
-    so the returned serialized IpcMessage carries status(i32)|payload bytes.
-    """
-    if payload.len().to_u64() > _VFS_IPC_REQUEST_FRAME_MAX - 4u64:
+    """Share the 132/133 transport while preserving POSIX status and cleanup."""
+    val result = vfs_ipc_request_status_bytes(method, payload)
+    if result.is_err():
         return _vfs_ipc_error(-5)
-    val reply_port = syscall(_SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
-    if reply_port < 0:
-        return _vfs_ipc_error(-5)
-    val service_port = syscall(_SYS_IPC_CONNECT, unsafe_addr_of(_VFS_SERVICE_NAME), _VFS_SERVICE_NAME.len(), 0, 0, 0)
-    if service_port < 0:
-        _vfs_destroy_reply_port(reply_port)
-        return _vfs_ipc_error(-5)
-
-    var request: [u8] = []
-    _push_u32(request, method)
-    var request_index: u64 = 0
-    while request_index < payload.len():
-        request.push(payload[request_index])
-        request_index = request_index + 1u64
-    val request_bytes = unsafe_addr_of(request) + _VFS_IPC_BYTE_ARRAY_HEADER_BYTES
-    val send_result = syscall(_SYS_IPC_SEND, service_port.to_u64(), reply_port.to_u64(), request_bytes, request.len(), _IPC_COPIED_SERVICE_TAG)
-    if send_result < 0:
-        _vfs_destroy_reply_port(reply_port)
-        return _vfs_ipc_error(-5)
-
-    val message_raw = syscall(_SYS_IPC_RECV, reply_port.to_u64(), 0xFFFFFFFFFFFFFFFFu64, 0, 0, 0)
-    if message_raw <= 0:
-        _vfs_destroy_reply_port(reply_port)
-        return _vfs_ipc_error(-5)
-    val message_addr = message_raw.to_u64()
-    val payload_len = _read_u32_at(message_addr + 24u64).to_u64()
-    if payload_len < 4u64 or payload_len > 4096u64:
-        _vfs_destroy_reply_port(reply_port)
-        return _vfs_ipc_error(-5)
-    val payload_addr = message_addr + 32u64
-    val status = _read_i32_at(payload_addr)
-    var response: [u8] = []
-    var response_index: u64 = 4u64
-    while response_index < payload_len:
-        response.push(_read_u8_at(payload_addr + response_index))
-        response_index = response_index + 1u64
-    _vfs_destroy_reply_port(reply_port)
-    VfsIpcReply(status: status, payload: response, transport_failed: false)
+    val reply = result.unwrap()
+    VfsIpcReply(status: reply.status, payload: reply.payload, transport_failed: false)
 
 fn posix_open(path: text, flags: u32, mode: u32) -> i32:
     """Open a file via VFS IPC service. Returns FD on success, -errno on error.
@@ -752,13 +699,3 @@ fn _read_u64(buf: [u8], offset: u64) -> u64:
 
 extern fn mmio_read8(addr: u64) -> u8
 extern fn mmio_write8(addr: u64, val_: u8)
-extern fn mmio_read32(addr: u64) -> u32
-
-fn _read_u8_at(addr: u64) -> u8:
-    mmio_read8(addr)
-
-fn _read_u32_at(addr: u64) -> u32:
-    mmio_read32(addr)
-
-fn _read_i32_at(addr: u64) -> i32:
-    _read_u32_at(addr).to_i32()

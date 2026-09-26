@@ -5,11 +5,15 @@ use os.kernel.ipc.syscall_ipc.{
     IPC_OWNED_V1_HEADER_BYTES,
     ipc_owned_v1_encode,
     _handle_ipc_send_owned_v1_state,
-    _handle_ipc_recv_owned_v1_state
+    _handle_ipc_recv_owned_v1_state,
+    _handle_ipc_create_port_state,
+    _handle_ipc_connect_state
 }
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.ipc_types.{IpcMessage, IpcFlags}
+use os.kernel.types.task_types.{TaskId, TaskPriority}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet}
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallId}
 use os.kernel.errno.{EAGAIN, EFAULT, EMSGSIZE, ENOSYS, EPERM}
 
@@ -59,7 +63,7 @@ describe "owned-copy IPC syscall authentication and bounds":
         val caller = scheduler.get_current()
         val source = ipc.create_port(caller, "owned-source")
         val destination = ipc.create_port(caller, "owned-destination")
-        val state = _handle_ipc_send_owned_v1_state(_args(132, destination.id, 7, 0x1000, 0, source.id + 1000, 0), scheduler, ipc)
+        val state = _handle_ipc_send_owned_v1_state(_args(132, destination.id, 7, 1, 1, source.id + 1000, 0), scheduler, ipc)
         expect(state.result.value).to_equal(-(EPERM as i64))
         expect(state.ipc.next_owned_payload_len(caller, destination)).to_equal(-3)
 
@@ -73,12 +77,58 @@ describe "owned-copy IPC syscall authentication and bounds":
         expect(state.result.value).to_equal(0)
         expect(state.ipc.next_owned_payload_len(caller, destination)).to_equal(0)
 
+    it "denies a cross-task named destination without its exact connect grant":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val source = ipc.create_port(caller, "owned-cap-client")
+        val service = TaskId(id: caller.id + 1u64)
+        val destination = ipc.create_port(service, "owned-cap-service")
+        val state = _handle_ipc_send_owned_v1_state(
+            _args(132, destination.id, 5, 0, 0, source.id, 0), scheduler, ipc)
+        expect(state.result.value).to_equal(-(EPERM as i64))
+        expect(state.ipc.next_owned_payload_len(service, destination)).to_equal(-3)
+
+    it "accepts a cross-task named destination with its exact minted grant":
+        var scheduler = Scheduler.new()
+        val launched = scheduler.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        scheduler.schedule()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        expect(caller.id).to_equal(launched.id)
+        val source = ipc.create_port(caller, "owned-granted-client")
+        val service = TaskId(id: caller.id + 1u64)
+        val destination = ipc.create_port(service, "owned-granted-service")
+        val granted = ipc.mint_task_capability_set(
+            caller, [CapabilityKind.IpcConnect(port_name: "owned-granted-service")])
+        expect(granted != nil).to_equal(true)
+        val state = _handle_ipc_send_owned_v1_state(
+            _args(132, destination.id, 5, 0, 0, source.id, 0), scheduler, ipc)
+        expect(state.result.value).to_equal(0i64)
+        expect(state.ipc.next_owned_payload_len(service, destination)).to_equal(0)
+        val preview = state.ipc.peek_owned(service, destination)
+        expect(preview.authenticated_sender != nil).to_equal(true)
+        if preview.authenticated_sender != nil:
+            val authenticated = preview.authenticated_sender
+            expect(authenticated.id).to_equal(caller.id)
+        val delivered = state.ipc.recv_owned(service, destination)
+        expect(delivered.authenticated_sender != nil).to_equal(true)
+        if delivered.authenticated_sender != nil:
+            val authenticated = delivered.authenticated_sender
+            expect(authenticated.id).to_equal(caller.id)
+
     it "rejects oversized send before touching the user pointer":
         val state = _handle_ipc_send_owned_v1_state(_args(132, 1, 1, 0, 4097, 1, 0), Scheduler.new(), IpcManager.new())
         expect(state.result.value).to_equal(-(EMSGSIZE as i64))
 
     it "returns EFAULT for an unreadable send buffer":
-        val state = _handle_ipc_send_owned_v1_state(_args(132, 1, 1, 0, 1, 1, 0), Scheduler.new(), IpcManager.new())
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val caller = scheduler.get_current()
+        val source = ipc.create_port(caller, "owned-unreadable-source")
+        val destination = ipc.create_port(caller, "owned-unreadable-destination")
+        val state = _handle_ipc_send_owned_v1_state(
+            _args(132, destination.id, 1, 1, 1, source.id, 0), scheduler, ipc)
         expect(state.result.value).to_equal(-(EFAULT as i64))
 
     it "distinguishes empty receive, undersized buffer, bad output pointer, and unsupported timeout":
@@ -101,3 +151,21 @@ describe "owned-copy IPC syscall authentication and bounds":
 
         val timeout = _handle_ipc_recv_owned_v1_state(_args(133, destination.id, 0x1000, 32, 1, 10, 0), fault.scheduler, fault.ipc)
         expect(timeout.result.value).to_equal(-(ENOSYS as i64))
+
+describe "live IPC endpoint creation and name-copy bounds":
+    it "creates a caller-owned anonymous reply port without a named listen grant":
+        val scheduler = Scheduler.new()
+        val current = scheduler.get_current()
+        val state = _handle_ipc_create_port_state(
+            _args(22, 0, 0, 0, 0, 0, 0), scheduler, IpcManager.new())
+        expect(state.result.value).to_be_greater_than(0)
+        expect(state.ipc.port_is_owned_by(state.result.value as u64, current.id)).to_equal(true)
+
+    it "rejects invalid name pointers before creating or resolving a port":
+        val scheduler = Scheduler.new()
+        val created = _handle_ipc_create_port_state(
+            _args(22, 0, 3, 0, 0, 0, 0), scheduler, IpcManager.new())
+        expect(created.result.value).to_equal(-(EFAULT as i64))
+        val connected = _handle_ipc_connect_state(
+            _args(23, 0, 3, 0, 0, 0, 0), scheduler, created.ipc)
+        expect(connected.result.value).to_equal(-(EFAULT as i64))

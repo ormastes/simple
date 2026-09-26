@@ -1,0 +1,61 @@
+"""Kernel-owned finite capability mint for admitted SimpleOS tasks.
+
+The caller must be a trusted kernel launch owner. This method does not expose
+authority through a syscall and never creates an ambient full-trust set.
+"""
+
+use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilityToken, CapabilitySet}
+
+val CAPABILITY_MINT_MAX_KINDS_V1: i64 = 64
+val CAPABILITY_MINT_U64_MAX_V1: u64 = 0xFFFFFFFFFFFFFFFFu64
+
+impl CapabilityManager:
+    me mint_task_capability_set(task: TaskId, kinds: [CapabilityKind]) -> CapabilitySet?:
+        """Publish one pledged root set with fresh, nonwrapping identities."""
+        if task.id == 0u64 or kinds.len() == 0 or kinds.len() > CAPABILITY_MINT_MAX_KINDS_V1:
+            return nil
+        if self._find_record(task) != nil:
+            return nil
+
+        var next_token = self.next_token_id
+        var next_generation = self.next_generation
+        if next_token == 0u64 or next_generation == 0u64:
+            return nil
+        # Boot-installed pouches may predate this manager's local counters.
+        # Advance past every observed identity before issuing a new root set.
+        for record in self.records:
+            for existing in record.caps.caps:
+                if existing.token_id >= next_token:
+                    if existing.token_id == CAPABILITY_MINT_U64_MAX_V1:
+                        return nil
+                    next_token = existing.token_id + 1u64
+                if existing.generation >= next_generation:
+                    if existing.generation == CAPABILITY_MINT_U64_MAX_V1:
+                        return nil
+                    next_generation = existing.generation + 1u64
+
+        val count = kinds.len() as u64
+        if count > CAPABILITY_MINT_U64_MAX_V1 - next_token or
+           count > CAPABILITY_MINT_U64_MAX_V1 - next_generation:
+            return nil
+        var tokens: [CapabilityToken] = []
+        var index: i64 = 0
+        while index < kinds.len():
+            tokens.push(CapabilityToken(
+                kind: kinds[index],
+                generation: next_generation + index as u64,
+                owner: task.id,
+                token_id: next_token + index as u64,
+                parent_token_id: 0u64,
+                depth: 2
+            ))
+            index = index + 1
+
+        val issued = CapabilitySet(caps: tokens, is_pledged: true)
+        if not self.install_scheduler_task_capabilities_v1(task, issued):
+            return nil
+        self.next_token_id = next_token + count
+        self.next_generation = next_generation + count
+        Some(issued)

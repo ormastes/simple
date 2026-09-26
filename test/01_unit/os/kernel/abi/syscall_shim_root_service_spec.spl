@@ -1,0 +1,33 @@
+"""PID1 catalog trap bridge preserves wire bounds and authority denials."""
+
+use std.spec.{describe, it, expect}
+use os.kernel.abi.syscall_shim_root_service.{
+    root_service_spawn_dispatch_v1, root_service_stop_dispatch_v1
+}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+
+describe "PID1 root-service trap bridge":
+    it "rejects an unknown priority before catalog or image lookup":
+        val scheduler = Scheduler.new()
+        val result = root_service_spawn_dispatch_v1(1u64, 5u64, scheduler)
+        expect(result.pid).to_equal(-22)
+        expect(result.scheduler.get_current().id).to_equal(0u64)
+
+    it "preserves the catalog's rejection of an unprivileged caller":
+        val result = root_service_spawn_dispatch_v1(1u64, 1u64, Scheduler.new())
+        expect(result.pid).to_equal(-13)
+
+    it "rejects malformed stop identities and exit codes":
+        val scheduler = Scheduler.new()
+        val ipc = IpcManager.new()
+        expect(root_service_stop_dispatch_v1(0u64, 0u64, scheduler, ipc).result).to_equal(-22)
+        expect(root_service_stop_dispatch_v1(
+            0x8000000000000000u64, 0u64, scheduler, ipc).result).to_equal(-22)
+        expect(root_service_stop_dispatch_v1(
+            1u64, 0x00000000FFFFFFFFu64, scheduler, ipc).result).to_equal(-22)
+
+    it "passes a sign-extended exit code to the PID1 authority check":
+        val result = root_service_stop_dispatch_v1(
+            1u64, (-125i64) as u64, Scheduler.new(), IpcManager.new())
+        expect(result.result).to_equal(-1)
