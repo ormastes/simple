@@ -58,10 +58,13 @@ and NFR requirements still require user selection.
 the receive transaction. The current `ipc_owned_syscall_v1_spec.spl` and
 `ipc_endpoint_namespace_spec.spl` reference further names missing from their
 source owners, including the 132/133 handlers, header encoder, endpoint
-inspection helpers, and reply-permit methods. Their presence is not passing
-evidence. Implement and execute those contracts before using owned IPC for
-positioned control. The queue's `send_owned` owner check receives a `TaskId`
-argument; only the trap shim may supply it from `Scheduler.get_current()`.
+inspection helpers, and reply-permit methods. Endpoint inspection and a
+bounded exact-pair reply-permit ledger now exist; no trap handler grants or
+consumes those permits yet. The handler and encoder imports remain unresolved,
+so these tests are not passing evidence. Implement and execute those contracts
+before using owned IPC for positioned control. The queue's `send_owned` owner
+check receives a `TaskId` argument; only the trap shim may supply it from
+`Scheduler.get_current()`.
 
 ## Contract and owner placement
 

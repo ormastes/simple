@@ -24,6 +24,7 @@ val MAX_PORTS: i32 = 1024
 val MAX_MESSAGES: i32 = 64         # Per-port queue depth
 val MAX_OWNED_PAYLOAD_BYTES: i64 = 4096
 val MAX_OWNED_QUEUE_BYTES: u64 = 65536u64
+val MAX_REPLY_PERMITS: i32 = 1024
 
 # Owner-checked copied-delivery status values. The caller-provided TaskId is
 # consistency data only; K2 must supply dispatcher current-task context before
@@ -157,6 +158,12 @@ struct IpcPortState:
     waiters: [TaskId]           # Tasks blocked on recv for this port
     max_depth: i32
 
+struct IpcReplyPermit:
+    """One bounded, exact reverse-port reply right."""
+    owner_task_id: u64
+    source_port: u64
+    destination_port: u64
+
 fn _copy_owned_payload(payload: [u8]) -> [u8]:
     """Make the queue's byte copy without retaining caller storage."""
     var copied: [u8] = []
@@ -190,6 +197,7 @@ class IpcManager:
     ports: [IpcPortState?]          # Port table (nil = unused slot)
     next_port_id: u64               # Monotonic port ID allocator
     cap_manager: CapabilityManager  # Capability subsystem
+    reply_permits: [IpcReplyPermit?]
 
 impl IpcManager:
     static fn new() -> IpcManager:
@@ -202,7 +210,8 @@ impl IpcManager:
         IpcManager(
             ports: ports,
             next_port_id: 1,
-            cap_manager: CapabilityManager.new()
+            cap_manager: CapabilityManager.new(),
+            reply_permits: []
         )
 
     pub(package) me install_boot_task_pouch_exact_v1(
@@ -272,6 +281,14 @@ impl IpcManager:
         live.queue.clear()
         live.waiters = []
         self.ports[slot] = nil
+        var permit_index = 0
+        while permit_index < self.reply_permits.len():
+            val permit = self.reply_permits[permit_index]
+            if permit != nil:
+                val present = permit
+                if present.source_port == port_id or present.destination_port == port_id:
+                    self.reply_permits[permit_index] = nil
+            permit_index = permit_index + 1
         true
 
     me connect(name: text) -> IpcPort?:
@@ -326,6 +343,84 @@ impl IpcManager:
             return false
         val live = state
         live.port.owner == owner_id
+
+    fn port_owned_by(port_id: u64, owner: TaskId) -> bool:
+        self.port_is_owned_by(port_id, owner.id)
+
+    fn port_name(port_id: u64) -> text?:
+        val slot = self._find_port_by_id(port_id)
+        if slot < 0:
+            return nil
+        val state = self.ports[slot]
+        if state == nil:
+            return nil
+        val live = state
+        Some(live.name)
+
+    me grant_reply_permit(owner: TaskId, source_port: u64, destination_port: u64) -> bool:
+        """Record one exact reply right after the kernel accepts a request.
+
+        The caller must supply a scheduler-authenticated task and prove that
+        the request was delivered; this ledger does not authenticate either.
+        """
+        if not self.port_is_owned_by(source_port, owner.id):
+            return false
+        if self._find_port_by_id(destination_port) < 0:
+            return false
+        var i = 0
+        while i < self.reply_permits.len():
+            if self.reply_permits[i] == nil:
+                self.reply_permits[i] = IpcReplyPermit(
+                    owner_task_id: owner.id,
+                    source_port: source_port,
+                    destination_port: destination_port
+                )
+                return true
+            i = i + 1
+        if self.reply_permits.len() >= MAX_REPLY_PERMITS as i64:
+            return false
+        self.reply_permits.push(IpcReplyPermit(
+            owner_task_id: owner.id,
+            source_port: source_port,
+            destination_port: destination_port
+        ))
+        true
+
+    fn reply_permit_allows(owner: TaskId, source_port: u64, destination_port: u64) -> bool:
+        if not self.port_is_owned_by(source_port, owner.id):
+            return false
+        if self._find_port_by_id(destination_port) < 0:
+            return false
+        var i = 0
+        while i < self.reply_permits.len():
+            val permit = self.reply_permits[i]
+            if permit != nil:
+                val present = permit
+                if (present.owner_task_id == owner.id and
+                    present.source_port == source_port and
+                    present.destination_port == destination_port):
+                    return true
+            i = i + 1
+        false
+
+    me consume_reply_permit(owner: TaskId, source_port: u64, destination_port: u64) -> bool:
+        """Consume exactly one live right; a failed lookup leaves all rights."""
+        if not self.port_is_owned_by(source_port, owner.id):
+            return false
+        if self._find_port_by_id(destination_port) < 0:
+            return false
+        var i = 0
+        while i < self.reply_permits.len():
+            val permit = self.reply_permits[i]
+            if permit != nil:
+                val present = permit
+                if (present.owner_task_id == owner.id and
+                    present.source_port == source_port and
+                    present.destination_port == destination_port):
+                    self.reply_permits[i] = nil
+                    return true
+            i = i + 1
+        false
 
     fn next_owned_payload_len(receiver_task: TaskId, port: IpcPort) -> i64:
         """Preflight a copied receive without consuming or exposing the FIFO head.
