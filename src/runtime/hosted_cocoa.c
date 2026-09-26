@@ -330,6 +330,7 @@ bool rt_cocoa_window_resize(int64_t win, int64_t w, int64_t h) {
 }
 
 bool rt_cocoa_window_close(int64_t win) {
+    if (!is_main_thread()) return false;
     pthread_mutex_lock(&g_mutex);
     CocoaWindow *wnd = (CocoaWindow *)handle_remove(win, KIND_WINDOW);
     pthread_mutex_unlock(&g_mutex);
@@ -445,30 +446,41 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
     pthread_mutex_lock(&g_mutex);
     CocoaLayer  *l   = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
     CocoaWindow *wnd = (CocoaWindow *)handle_get(win,      KIND_WINDOW);
-    pthread_mutex_unlock(&g_mutex);
-    if (!l || !wnd) return false;
+    if (!l || !wnd || !l->pixels || !wnd->ns_view || l->w <= 0 || l->h <= 0) {
+        pthread_mutex_unlock(&g_mutex);
+        return false;
+    }
 
-    size_t  pw = (size_t)l->w;
-    size_t  ph = (size_t)l->h;
-    if (pw == 0 || ph == 0) return false;
-    if (pw > SIZE_MAX / ph) return false;
+    size_t pw = (size_t)l->w;
+    size_t ph = (size_t)l->h;
+    if (pw > SIZE_MAX / ph || pw > (size_t)INT64_MAX / 4) {
+        pthread_mutex_unlock(&g_mutex);
+        return false;
+    }
     size_t pixel_count = pw * ph;
-    if (pixel_count > SIZE_MAX / 4) return false;
+    if (pixel_count > SIZE_MAX / 4) {
+        pthread_mutex_unlock(&g_mutex);
+        return false;
+    }
+    size_t nbytes = pixel_count * 4;
+    uint8_t *rgba = (uint8_t *)malloc(nbytes);
+    if (!rgba) {
+        pthread_mutex_unlock(&g_mutex);
+        return false;
+    }
+    /* Retain the view and finish reading the layer while both handles are
+     * protected. A concurrent layer_free may run after the unlock. */
+    NSImageView *view = (NSImageView *)CFRetain((__bridge CFTypeRef)wnd->ns_view);
+    for (size_t i = 0; i < pixel_count; i++) {
+        uint32_t px = l->pixels[i];
+        rgba[i*4+0] = (uint8_t)((px >> 16) & 0xff); /* R */
+        rgba[i*4+1] = (uint8_t)((px >>  8) & 0xff); /* G */
+        rgba[i*4+2] = (uint8_t)( px        & 0xff); /* B */
+        rgba[i*4+3] = (uint8_t)((px >> 24) & 0xff); /* A */
+    }
+    pthread_mutex_unlock(&g_mutex);
 
     @autoreleasepool {
-        /* Convert ARGB (0xAARRGGBB) → RGBA bytes for NSBitmapImageRep. */
-        size_t  nbytes = pixel_count * 4;
-        uint8_t *rgba  = (uint8_t *)malloc(nbytes);
-        if (!rgba) return false;
-
-        for (size_t i = 0; i < pixel_count; i++) {
-            uint32_t px = l->pixels[i];
-            rgba[i*4+0] = (uint8_t)((px >> 16) & 0xff); /* R */
-            rgba[i*4+1] = (uint8_t)((px >>  8) & 0xff); /* G */
-            rgba[i*4+2] = (uint8_t)( px        & 0xff); /* B */
-            rgba[i*4+3] = (uint8_t)((px >> 24) & 0xff); /* A */
-        }
-
         NSBitmapImageRep *bmp = [[NSBitmapImageRep alloc]
             initWithBitmapDataPlanes:NULL
                           pixelsWide:(NSInteger)pw
@@ -483,6 +495,7 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
 
         if (!bmp || ![bmp bitmapData]) {
             free(rgba);
+            CFRelease((__bridge CFTypeRef)view);
             return false;
         }
         memcpy([bmp bitmapData], rgba, nbytes);
@@ -490,12 +503,14 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
             initWithSize:NSMakeSize((CGFloat)pw, (CGFloat)ph)];
         if (!image) {
             free(rgba);
+            CFRelease((__bridge CFTypeRef)view);
             return false;
         }
         [image addRepresentation:bmp];
-        [wnd->ns_view setImage:image];
+        [view setImage:image];
 
         free(rgba);
+        CFRelease((__bridge CFTypeRef)view);
     }
     return true;
 }
