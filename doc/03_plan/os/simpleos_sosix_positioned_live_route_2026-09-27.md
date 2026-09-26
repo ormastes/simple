@@ -41,6 +41,27 @@ and NFR requirements still require user selection.
   copied send/receive traps, bounded user copies, and one-use reply permits
   still need implementation and executable evidence before this ABI can carry
   service control traffic.
+- `root_service_catalog.spl` calls 136/137, and the same live x86_64 dispatch
+  switch has no cases for either ID. PID1 service lifecycle evidence must
+  exercise those traps, rather than inferring support from the user library.
+
+## Live syscall ingress and copied IPC prerequisite
+
+| ID | User request | Live x86_64 route at this revision | Release action |
+|---|---|---|---|
+| 132 | `ipc_send_owned_v1` / `ipc_reply_owned_v1` | No `rt_syscall_dispatch` case or strong shim | Add bounded copy-in, scheduler-current source-port check, exact destination authority, and atomic one-use reply-permit transition. |
+| 133 | `ipc_recv_owned_v1_into` | No `rt_syscall_dispatch` case or strong shim | Check owner, timeout mode, FIFO head size, output capacity, and writable mapping before dequeue; serialize the 32-byte little-endian header plus owned payload through `vmm_copyout_bytes`. |
+| 134/135 | Registered positioned read/write | C switch and strong Simple shim present | Install a real registry owner and issue real file/buffer identities before claiming guest behavior. |
+| 136/137 | PID1 root-service spawn/stop | No `rt_syscall_dispatch` case | Wire scheduler-authenticated PID1 authority and test a real ring-3 service lifecycle. |
+
+`IpcManager.next_owned_payload_len` is a non-consuming length preflight, not
+the receive transaction. The current `ipc_owned_syscall_v1_spec.spl` and
+`ipc_endpoint_namespace_spec.spl` reference further names missing from their
+source owners, including the 132/133 handlers, header encoder, endpoint
+inspection helpers, and reply-permit methods. Their presence is not passing
+evidence. Implement and execute those contracts before using owned IPC for
+positioned control. The queue's `send_owned` owner check receives a `TaskId`
+argument; only the trap shim may supply it from `Scheduler.get_current()`.
 
 ## Contract and owner placement
 
