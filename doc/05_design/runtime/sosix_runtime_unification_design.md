@@ -66,7 +66,7 @@ Ownership rules that the plan enforces per task: `common/contracts/sosix` import
 
 `SosixOperationId{slot,generation}` + `SosixOperationSlot` state machine from `operation_v1` is the single lifecycle. Mapping to the ring: a hosted `sosix_fs_read_at` reserves on `SimpleRing`, commits, and records the `RingToken` inside the operation record; completion arrives as `RingCompletion` -> `sosix_operation_complete` -> `SosixCompletion` published to a `SosixCompletionQueue`. Two additions the research asked for and the core lacks:
 
-- **Retirement**: `SosixOperationSlot` gains no new field. Retirement is the ring's `RingPayloadLease` release; `sosix_operation_release` is only legal after the lease is released. Enforced in `fs.spl`, tested by "timeout then late completion cannot release the lease".
+- **Retirement**: `SosixOperationSlot` gains no new field. Provider completion retires its `RingPayloadLease`; `pump` then takes the completion in retained mode, keeping the ring slot occupied. `sosix_operation_release` is legal only after provider retirement and frees the exact retained ring token after the consumer releases the terminal result. Enforced in `fs.spl`, including timeout and out-of-order release tests.
 - **Generation exhaustion**: `operation_v1` wraps to 1 today. Change to fail closed: when `generation == 0xFFFF_FFFF`, `sosix_operation_release` returns `accepted: false, reason: "generation-exhausted"` and the slot stays terminal. Wrap-to-1 was never exercised by a spec; add one that proves the new behavior and one that proves 56 importers still compile (shim parity).
 
 ### 4.2 Async / sync policy

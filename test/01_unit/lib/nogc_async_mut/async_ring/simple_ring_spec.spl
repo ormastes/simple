@@ -83,6 +83,43 @@ describe "SimpleRing fixed-capacity lifecycle":
             case Ok(_): expect(value.occupancy()).to_equal(1u64)
             case Err(_): fail("second release failed")
 
+    it "retains a terminal slot until its consumer releases the result":
+        val value = ring(1)
+        val reserved = reservation(value, 10u64)
+        match value.commit(7u64, reserved, 101):
+            case Ok(_): ()
+            case Err(_): fail("commit failed")
+        val submitted = match value.provider_take(1):
+            case Ok(Some(item)): item
+            case Ok(nil): fail("provider submission missing")
+            case Err(_): fail("provider take failed")
+        expect(value.complete_success(submitted.token, 1001)).to_equal(Ok(()))
+        expect(value.release_retained_completion(7u64, submitted.token)).to_equal(
+            Err(SimpleRingError.InvalidTransition))
+        val completed = match value.take_completion_retained(7u64):
+            case Ok(Some(item)): item
+            case Ok(nil): fail("terminal completion missing")
+            case Err(_): fail("retained completion take failed")
+        expect(completed.task_key).to_equal(10u64)
+        expect(value.occupancy()).to_equal(1u64)
+        match value.reserve(7u64, 20u64):
+            case Err(error): expect(error).to_equal(SimpleRingError.Full)
+            case Ok(_): fail("retained slot was reused early")
+        expect(value.complete_success(submitted.token, 1002)).to_equal(
+            Err(SimpleRingError.TerminalAlreadyPublished))
+        expect(value.release_retained_completion(8u64, submitted.token)).to_equal(
+            Err(SimpleRingError.WrongOwner))
+        match value.cancel(7u64, submitted.token):
+            case RingCancelOutcome.AlreadyTerminal(_): ()
+            case _: fail("retained terminal accepted cancellation")
+        expect(value.release_retained_completion(7u64, completed.token)).to_equal(Ok(()))
+        expect(value.occupancy()).to_equal(0u64)
+        expect(value.release_retained_completion(7u64, completed.token)).to_equal(
+            Err(SimpleRingError.StaleToken))
+        val reused = reservation(value, 20u64)
+        expect(reused.token.slot).to_equal(completed.token.slot)
+        expect(reused.token.generation.value).to_be_greater_than(completed.token.generation.value)
+
     it "keeps provider submission and completion FIFO across wrap":
         # @req REQ-SSPEC-LIB
         step("keeps provider submission and completion FIFO across wrap")

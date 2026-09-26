@@ -3,6 +3,7 @@
 use std.spec.*
 use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
 use std.common.contracts.sosix.operation_v1.{SosixOperationId, SOSIX_OPERATION_TIMED_OUT, SOSIX_OPERATION_FREE, SOSIX_OPERATION_COMPLETED}
+use std.common.contracts.sosix.completion_v1.SOSIX_COMPLETION_QUEUE_MAX_CAPACITY
 use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
 use std.common.contracts.sosix.error_v1.{
     SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_INVALID_BUFFER, SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE
@@ -174,6 +175,64 @@ describe "SOSIX hosted positioned read over SimpleRing":
         val released = fs.release(submit.operation)
         expect(released.accepted).to_be(true)
         expect(released.slot.state).to_equal(SOSIX_OPERATION_FREE)
+
+    it "reuses a slot after poll and release without filling the notification queue":
+        # @req REQ-SOSIX-FS-ASYNC
+        val fs = setup_sosix_software_ring(1)
+        var previous_generation = 0u32
+        var cycle: i64 = 0
+        while cycle < 4:
+            val submit = submit_read(fs, 8u64, 0u64)
+            expect(submit.accepted).to_be(true)
+            expect(submit.operation.generation > previous_generation).to_be(true)
+            previous_generation = submit.operation.generation
+            expect(fs.service_one(0, 8u64)).to_be(true)
+            expect(fs.pump()).to_equal(1)
+            match fs.poll(submit.operation):
+                case TaskPollResult.Ready(result):
+                    match result:
+                        case Ok(completion): expect(completion.transferred).to_equal(8u64)
+                        case Err(_): fail("completed read reported an error")
+                case TaskPollResult.Pending(_): fail("completed read still pending")
+            expect(fs.release(submit.operation).accepted).to_be(true)
+            expect(fs.take_completion() == nil).to_be(true)
+            cycle = cycle + 1
+        expect(fs.completions.rejected_count()).to_equal(0u64)
+
+    it "rejects a ring whose unread completion capacity would be clamped":
+        val created = SosixHostedFs.create(95u64, 7u64, SOSIX_COMPLETION_QUEUE_MAX_CAPACITY + 1)
+        expect(created.is_err()).to_be(true)
+
+    it "releasing a later result keeps the earlier notification available":
+        val fs = setup_sosix_software_ring(2)
+        val first = submit_read(fs, 8u64, 0u64)
+        val second = submit_read(fs, 8u64, 0u64)
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.pump()).to_equal(2)
+        expect(fs.occupancy()).to_equal(2u64)
+        expect(fs.release(second.operation).accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(1u64)
+        val third = submit_read(fs, 8u64, 0u64)
+        expect(third.accepted).to_be(true)
+        expect(third.operation.slot).to_equal(second.operation.slot)
+        expect(third.operation.generation > second.operation.generation).to_be(true)
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        if val completion = fs.take_completion():
+            expect(completion.operation.slot).to_equal(first.operation.slot)
+            expect(completion.operation.generation).to_equal(first.operation.generation)
+        else:
+            fail("earlier notification was lost")
+        if val completion = fs.take_completion():
+            expect(completion.operation.slot).to_equal(third.operation.slot)
+            expect(completion.operation.generation).to_equal(third.operation.generation)
+        else:
+            fail("reused-slot notification was lost")
+        expect(fs.take_completion() == nil).to_be(true)
+        expect(fs.release(first.operation).accepted).to_be(true)
+        expect(fs.release(third.operation).accepted).to_be(true)
+        expect(fs.occupancy()).to_equal(0u64)
 
     it "keeps each operation's result independent of its sibling":
         step("Submit two reads and let the first fail natively")

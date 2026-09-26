@@ -51,6 +51,26 @@ describe "SOSIX typed completion and notification wait set":
         if val completion = queue.take():
             expect(completion.operation.slot).to_equal(8)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 
+    it "discards a released operation while preserving wrapped FIFO order":
+        val queue = SosixCompletionQueue.create(3)
+        expect(queue.publish(completed_read(1, sosix_operation_slot_new()))).to_be(true)
+        expect(queue.publish(completed_read(2, sosix_operation_slot_new()))).to_be(true)
+        expect(queue.publish(completed_read(3, sosix_operation_slot_new()))).to_be(true)
+        expect(queue.take() != nil).to_be(true)
+        expect(queue.publish(completed_read(4, sosix_operation_slot_new()))).to_be(true)
+        expect(queue.discard(SosixOperationId(slot: 3, generation: 2))).to_be(false)
+        expect(queue.discard(SosixOperationId(slot: 3, generation: 1))).to_be(true)
+        expect(queue.discard(SosixOperationId(slot: 3, generation: 1))).to_be(false)
+        if val second = queue.take():
+            expect(second.operation.slot).to_equal(2)
+        else:
+            fail("second completion was lost")
+        if val fourth = queue.take():
+            expect(fourth.operation.slot).to_equal(4)
+        else:
+            fail("wrapped fourth completion was lost")
+        expect(queue.take() == nil).to_be(true)
+
     it "prevents completion type confusion":
         # @req REQ-SSPEC-OS
         step("prevents completion type confusion")
