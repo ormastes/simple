@@ -477,3 +477,13 @@ archive extraction; SimpleOS validates roots against its keep-all object and
 script definitions; every route fails unresolved roots by name. `strip_output`
 is implemented across internal ELF, SimpleOS, and PE routing rather than being
 silently ignored.
+
+SimpleOS boot linking now preserves `SHF_TLS`, requires TLS output sections to
+form one contiguous image, and emits an overlapping read-only `PT_TLS` header
+whose file size excludes `.tbss` while its memory size includes zero-fill.
+The static boot model resolves module ID 1 plus local-dynamic and local-exec
+offsets for x86-64 variant II and AArch64 variant I; x86 `TPOFF32` is lowered
+through the signed 32-bit relocation path while `TPOFF64` remains full-width.
+Initial-exec, imported/dynamic, and unsupported instruction TLS forms remain
+explicit errors. This closes the structural linker slice, but not the open
+SimpleOS x86-64/arm64 full-boot or performance evidence gates.

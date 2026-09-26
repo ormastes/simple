@@ -43,6 +43,15 @@ ASSERT(_kernel_end - _kernel_start <= 0x100000, "kernel too big")
 
 val LLD_TEXT: [i64] = [253, 123, 191, 169, 32, 0, 128, 82, 1, 0, 0, 176, 33, 0, 0, 145, 8, 8, 128, 82, 98, 0, 128, 82, 1, 0, 0, 212, 0, 5, 128, 82, 253, 3, 0, 145, 6, 0, 0, 148, 168, 11, 128, 82, 225, 3, 31, 170, 226, 3, 31, 170, 1, 0, 0, 212, 0, 0, 0, 20, 9, 0, 0, 176, 232, 3, 0, 170, 10, 0, 0, 176, 41, 5, 64, 249, 72, 17, 0, 249, 32, 1, 0, 139, 192, 3, 95, 214]
 
+val TLS_SCRIPT: text = """ENTRY(_start)
+SECTIONS {
+    . = 0x400000;
+    .text : { *(.text*) }
+    .tdata : { *(.tdata*) }
+    .tbss (NOLOAD) : { *(.tbss*) }
+}
+"""
+
 fn load_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("{FIX}/{name}")
     var out: [i64] = []
@@ -108,6 +117,15 @@ fn sec_size(im: ElfBootImage, name: text) -> i64:
         i = i + 1
     -1
 
+fn sec_file_off(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            val shoff = u64_at(im.bytes, 40)
+            return u64_at(im.bytes, shoff + (i + 1) * 64 + 24)
+        i = i + 1
+    -1
+
 describe "elf_boot_link - PHDRS segments with AT() load addresses":
     it "strip_output removes the two static symbol-table sections":
         val normal = img().bytes
@@ -166,6 +184,20 @@ describe "elf_boot_link - section placement":
         expect(sec_size(im, ".data")).to_equal(0x18)       # 8 bytes + `. += 0x10`
         expect(sec_vma(im, ".bss")).to_equal(HH + 0x201020)
         expect(sec_size(im, ".bss")).to_equal(8)
+
+    it "emits a PT_TLS image and applies x86-64 local-exec relocations":
+        val im = elf_boot_link_image([load_fixture("tls_sections_x64.o")], plan_of(TLS_SCRIPT), RelocArch.X86_64).unwrap()
+        val b = im.bytes
+        expect(b[56] | (b[57] << 8)).to_equal(3)
+        expect(ph32(b, 2, 0)).to_equal(7)                  # PT_TLS
+        expect(ph32(b, 2, 4)).to_equal(4)                  # PF_R
+        expect(ph(b, 2, 32)).to_equal(8)                   # initialized image
+        expect(ph(b, 2, 40)).to_equal(16)                  # initialized + zero-fill
+        expect(ph(b, 2, 48)).to_equal(8)
+        expect(sec_vma(im, ".tbss") - sec_vma(im, ".tdata")).to_equal(8)
+        val text_off = sec_file_off(im, ".text")
+        expect(u32_at(b, text_off + 5)).to_equal(0xfffffff0) # initialized_tls - TP
+        expect(u32_at(b, text_off + 14)).to_equal(0xfffffff8) # zero_tls - TP
 
     it "places SHN_COMMON through the script COMMON selector as NOBITS storage":
         val script = """ENTRY(_start)

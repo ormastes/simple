@@ -26,7 +26,7 @@
 # Slice limits (Err, never silently degraded): no section GC (keep-all; KEEP
 # roots are therefore always present), no orphan placement other than .got
 # (an unplaced allocatable input section is an Err), no linker relaxation, no
-# TLS, no dynamic relocations, file patterns other than `*` need
+# dynamic TLS/import relocations are unsupported; file patterns other than `*` need
 # elf_boot_link_named, EXCLUDE_FILE / SORT are rejected.
 
 use compiler.backend.linker.boot_layout.boot_layout_plan.{
@@ -43,11 +43,12 @@ use compiler.backend.linker.elf_parser.{
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
-use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_NONE, RC_BRANCH, RC_GOT, RC_GOT_RELAX}
+use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_NONE, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD}
 use compiler.backend.linker.elf.elf_exec_writer.{
     ElfOutSec, ElfExecSegment, ElfExecPlan, elf_write_image,
-    ELF_SEG_R, PT_LOAD, PT_NOTE, PT_PHDR, PT_GNU_STACK, PF_R, PF_W, PF_X,
-    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
+    ELF_SEG_R, PT_LOAD, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_STACK, PF_R, PF_W, PF_X,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
+    SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
 }
 use compiler.backend.linker.elf_writer.{write_zeros, write_u16_le, write_u32_le, write_u64_le}
 use std.string_core.{char_code}
@@ -55,7 +56,6 @@ use std.string_core.{char_code}
 val BOOT_SHN_ABS: i64 = 0xfff1
 val BOOT_SHN_COMMON: i64 = 0xfff2
 val BOOT_SHN_LORESERVE: i64 = 0xff00
-val BOOT_SHF_TLS: i64 = 0x400
 val BOOT_SHT_SYMTAB: i64 = 2
 val BOOT_ET_EXEC: i64 = 2
 val BOOT_EHDR: i64 = 64
@@ -265,8 +265,6 @@ fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan) -> Resul
             val sh = obj.sections[si]
             if out_of[base[oi] + si] == BOOT_UNPLACED and sh.sh_flags & SHF_ALLOC != 0 and sh.sh_size > 0:
                 return Err("elf_boot_link: orphan section {elf_section_name(obj, si)} in {names[oi]} is not placed by the script (orphan placement is not modelled)")
-            if out_of[base[oi] + si] >= 0 and sh.sh_flags & BOOT_SHF_TLS != 0:
-                return Err("elf_boot_link: section {elf_section_name(obj, si)}: TLS is unsupported")
             si = si + 1
         oi = oi + 1
     Ok(_BootIn(objects: objects, names: names, base: base, out_of: out_of, op_of: op_of, off_of: off_of,
@@ -446,7 +444,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                             align = al
                         if sh.sh_type != SHT_NOBITS:
                             any_prog = true
-                        flags = flags | (sh.sh_flags & (SHF_WRITE | SHF_EXECINSTR))
+                        flags = flags | (sh.sh_flags & (SHF_WRITE | SHF_EXECINSTR | SHF_TLS))
                     si = si + 1
                 oi = oi + 1
             var region_idx: i64 = -1
@@ -709,7 +707,24 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
                 at_exprs = at_exprs.push("")
                 prev_key = key
             seg_of = seg_of.push(types.len() - 1)
-    val phnum = types.len()
+    # TLS occupies one contiguous memory image and gets an overlapping PT_TLS.
+    # Its bytes remain owned by the ordinary PT_LOAD segment.
+    var tls_first: i64 = -1
+    var tls_last: i64 = -1
+    var tls_align: i64 = 1
+    var ti: i64 = 0
+    while ti < outs.len():
+        if outs[ti].sh_flags & SHF_TLS != 0:
+            if tls_first < 0:
+                tls_first = ti
+            elif ti != tls_last + 1:
+                return Err("elf_boot_link: TLS output sections must be contiguous")
+            tls_last = ti
+            if outs[ti].align > tls_align:
+                tls_align = outs[ti].align
+        ti = ti + 1
+    val primary_phnum = types.len()
+    val phnum = primary_phnum + (if tls_first >= 0: 1 else: 0)
     val hdr_end = BOOT_EHDR + phnum * BOOT_PHDR
 
     # 2. file offsets (lld: first section of a load congruent to its VMA mod page)
@@ -746,7 +761,7 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
     var hdr_load_vaddr: i64 = 0
     var hdr_load_paddr: i64 = 0
     var has_hdr_load = false
-    while sj < phnum:
+    while sj < primary_phnum:
         var first: i64 = -1
         var last: i64 = -1
         var last_file_end: i64 = -1
@@ -789,9 +804,24 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
                 p_paddr: p_p, p_filesz: filesz, p_memsz: memsz, p_align: al))
         sj = sj + 1
 
+    if tls_first >= 0:
+        var tls_file_end: i64 = -1
+        ti = tls_first
+        while ti <= tls_last:
+            if outs[ti].sh_type != SHT_NOBITS_E:
+                tls_file_end = offsets[ti] + outs[ti].size
+            ti = ti + 1
+        var tls_filesz: i64 = 0
+        if tls_file_end >= 0:
+            tls_filesz = tls_file_end - offsets[tls_first]
+        segs = segs.push(ElfExecSegment(p_type: PT_TLS, p_flags: PF_R,
+            p_offset: offsets[tls_first], p_vaddr: outs[tls_first].vma, p_paddr: outs[tls_first].lma,
+            p_filesz: tls_filesz, p_memsz: outs[tls_last].vma + outs[tls_last].size - outs[tls_first].vma,
+            p_align: tls_align))
+
     # PT_PHDR / PHDRS keyword: the table inside the FILEHDR load.
     sj = 0
-    while sj < phnum:
+    while sj < primary_phnum:
         if types[sj] == PT_PHDR:
             if not has_hdr_load:
                 return Err("elf_boot_link: PT_PHDR needs a PT_LOAD with FILEHDR PHDRS")
@@ -1024,6 +1054,21 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     if got_out >= 0:
         got_vma = outs[got_out].vma
 
+    var has_tls = false
+    var tls_start: i64 = 0
+    var tls_end: i64 = 0
+    for o in outs:
+        if o.sh_flags & SHF_TLS != 0:
+            if not has_tls:
+                has_tls = true
+                tls_start = o.vma
+                tls_end = o.vma + o.size
+            else:
+                if o.vma < tls_start:
+                    tls_start = o.vma
+                if o.vma + o.size > tls_end:
+                    tls_end = o.vma + o.size
+
     # --- relocate ---
     var undef: [text] = []
     oi = 0
@@ -1037,7 +1082,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             if k < 0:
                 continue
             val ok = lay.plan_to_out[k]
-            val rtype = elf_reloc_type(r)
+            var rtype = elf_reloc_type(r)
             val rc = elf_reloc_class(target, rtype)
             if rc == RC_NONE:
                 continue
@@ -1083,6 +1128,32 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                 s = got_vma + got_idx[key] * 8
                 if a64:
                     a = 0
+            elif rc == RC_TLS_IE:
+                return Err("object {names[oi]}: initial-exec TLS relocation type {rtype} is unsupported in a boot image")
+            elif rc == RC_TLS_MOD:
+                if not has_tls:
+                    return Err("object {names[oi]}: TLS module relocation has no TLS image")
+                s = 1
+                a = 0
+            elif rc == RC_TLS_LD:
+                if not has_tls:
+                    return Err("object {names[oi]}: TLS local-dynamic relocation has no TLS image")
+                s = s + a - tls_start
+                a = 0
+            elif rc == RC_TLS_LE:
+                if not has_tls:
+                    return Err("object {names[oi]}: TLS local-exec relocation has no TLS image")
+                if a64:
+                    # AArch64 variant I: TP points 16 bytes before the TLS block.
+                    s = s + a - tls_start + 16
+                else:
+                    # x86-64 variant II: TP points immediately after the TLS block.
+                    s = s + a - tls_end
+                    if rtype == 23:
+                        rtype = 11
+                    elif rtype != 18:
+                        return Err("object {names[oi]}: unsupported x86 boot TLS local-exec relocation type {rtype}")
+                a = 0
             val applied = reloc_apply(target, contents[ok], place, rtype, s, a, p)
             if not applied.success:
                 return Err("object {names[oi]}: relocation type {rtype} against '{sym.name}' at {p}: {applied.error}")
