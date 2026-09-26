@@ -154,6 +154,11 @@ Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7
 Next: remaining TLS relocation models beyond local/initial-exec, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed. Exact `SHF_MERGE` pooling now matches the lld `-O1` duplicate-string and aligned `.rodata.cst8` oracles, including symbol/addend remapping. Installed Mold and lld both retain non-identical suffix strings, so tail folding is not part of the compatibility contract. Cross-object `R_X86_64_PC64` now patches the complete signed `S + A - P` value and is pinned by an ld.lld 23.1 fixture oracle. Explicit `R_X86_64_GOTPC32` now resolves the linker-synthesized `_GLOBAL_OFFSET_TABLE_`: hosted ELF emits lld-compatible `.got.plt` storage and the SimpleOS boot path emits a minimal `.got`, with mirrored fixture-backed tests. AArch64 now applies the canonical initial-exec ADR_GOTTPREL_PAGE21/LD64_GOTTPREL_LO12_NC pair and local-exec ADD_TPREL_HI12/LO12 pair, including variant-I TCB bias, checked immediates, GOT TPREL values, and `R_AARCH64_TLS_TPREL64` dynamic relocations.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
+The AArch64 local-exec slice also covers checked and `_NC` TLSLE
+LDST8/16/32/64/128 TPREL low-12 relocations, preserving natural scaling and
+rejecting misaligned targets.
+
+`R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 silently emitting their low 32 bits, matching mold/lld overflow behavior.
 Cross-object `R_X86_64_PC16` and `R_X86_64_PC8` now apply only when their
 signed deltas fit, with the successful bytes pinned to an ld.lld 23.1 oracle.
