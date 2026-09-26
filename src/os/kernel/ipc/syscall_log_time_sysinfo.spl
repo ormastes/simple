@@ -9,6 +9,10 @@ use os.kernel.types.task_types.{BlockReason}
 use os.kernel.memory.vmm.{vmm_verify_user_write}
 use os.kernel.boot.mmio.{mmio_write64}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
+use std.common.contracts.sosix.time_v1.{
+    sosix_time_ceil_div_u64, sosix_time_ticks_to_ns,
+    sosix_time_deadline_from_ticks
+}
 
 # ============================================================================
 # Logging Handlers
@@ -78,7 +82,7 @@ fn _handle_clock_get_time(args: SyscallArgs, scheduler: Scheduler) -> SyscallRes
         case 1:     # CLOCK_MONOTONIC
             var sched = scheduler
             val ticks = sched.tick_count()
-            val total_ns = ticks * 10000000
+            val total_ns = sosix_time_ticks_to_ns(ticks, 10000000u64)
             val seconds = total_ns / 1000000000
             val nanoseconds = total_ns % 1000000000
             mmio_write64(out_ptr, seconds)
@@ -97,13 +101,10 @@ fn _handle_sleep(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     val nanos = args.arg0
     if nanos == 0:
         return SyscallResult(value: 0)
-    val rounded = nanos + 9999999
-    val ticks_to_wait = if rounded < nanos:
-        0xFFFFFFFFFFFFFFFF
-    else:
-        rounded / 10000000
+    val ticks_to_wait = sosix_time_ceil_div_u64(nanos, 10000000u64)
     var sched = scheduler
-    val deadline_ns = (sched.tick_count() + ticks_to_wait) * 10000000
+    val deadline_ns = sosix_time_deadline_from_ticks(
+        sched.tick_count(), ticks_to_wait, 10000000u64)
     val current = sched.get_current()
     sched.block_task(current, BlockReason.Sleep(until_ns: deadline_ns))
     SyscallResult(value: 0)
