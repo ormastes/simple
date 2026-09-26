@@ -58,6 +58,14 @@ fn _cl_set_section_name(bytes: [u8], name: text) -> [u8]:
         i = i + 1
     result
 
+fn _cl_set_second_symbol_name(bytes: [u8], name: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result[94 + i] = (if i < name.len(): name.byte_at(i) else: 0) as u8
+        i = i + 1
+    result
+
 fn _cl_ascii(bytes: [u8], value: text, width: i64) -> [u8]:
     var result = bytes
     var i: i64 = 0
@@ -320,6 +328,28 @@ describe "internal freestanding Windows linker":
         object[74] = 0x0a
         val invalid = coff_link_amd64(CoffLinkRequest(objects: [object],
             archives: [], entry: "_start"))
+        expect(invalid.is_err()).to_equal(true)
+        expect(invalid.unwrap_err()).to_contain("cannot target absolute COFF symbol")
+
+    it "resolves an external reference to an absolute definition in another object":
+        var reference = _cl_set_second_symbol_name(_cl_importing_object(), "constant")
+        reference[74] = 0x02
+        var definition = _cl_object("constant", -1)
+        definition[69] = 0x78
+        definition[70] = 0x56
+        definition[71] = 0x34
+        definition[72] = 0x12
+        val image = coff_link_amd64(CoffLinkRequest(
+            objects: [reference, definition], archives: [], entry: "_start")).unwrap()
+
+        expect(image[0x201] as i64).to_equal(0x78)
+        expect(image[0x202] as i64).to_equal(0x56)
+        expect(image[0x203] as i64).to_equal(0x34)
+        expect(image[0x204] as i64).to_equal(0x12)
+
+        reference[74] = 0x0a
+        val invalid = coff_link_amd64(CoffLinkRequest(
+            objects: [reference, definition], archives: [], entry: "_start"))
         expect(invalid.is_err()).to_equal(true)
         expect(invalid.unwrap_err()).to_contain("cannot target absolute COFF symbol")
 
