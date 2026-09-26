@@ -1,0 +1,97 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Generalization spec for
+# doc/08_tracking/bug/stage2_starts_with_literal_arg_double_tagged_returns_false_2026-09-26.md
+#
+# The reproducing spec (text_predicate_literal_arg_native_spec.spl) pins a
+# literal argument on a `val` receiver. This one probes the adjacent shapes
+# the same lowering rules serve: a literal RECEIVER, a variable (runtime)
+# argument, a concat-result receiver, and `contains`, which already routed its
+# needle through the runtime-checked tagging the fix now applies to
+# starts_with/ends_with. Every shape must decide the same way natively as the
+# interpreter does. Same positional in-process route and SIMPLE_BINARY /
+# SIMPLE_RUNTIME_PATH contract as the reproducing spec.
+
+use std.spec.step
+
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val PROGRAM = """fn main():
+    val prefix = "src/"
+    val suffix = ".spl"
+    val p = "src/app/cli/x" + suffix
+    print(if "src/app/cli/x.spl".starts_with("src/"): "lit_recv=T" else: "lit_recv=F")
+    print(if p.starts_with(prefix): "var_prefix=T" else: "var_prefix=F")
+    print(if p.ends_with(suffix): "var_suffix=T" else: "var_suffix=F")
+    print(if p.ends_with(".spl"): "concat_recv=T" else: "concat_recv=F")
+    print(if p.contains("cli/"): "contains=T" else: "contains=F")
+    print(if p.contains("nope"): "contains2=T" else: "contains2=F")
+    print(if p.starts_with(""): "empty=T" else: "empty=F")
+"""
+
+val EXPECTED = "lit_recv=T\nvar_prefix=T\nvar_suffix=T\nconcat_recv=T\ncontains=T\ncontains2=F\nempty=T"
+
+# Same runner contract as the reproducing spec: spec-private variables name
+# a stage candidate; SIMPLE_BINARY is the fallback for a self-hosted runner.
+fn compiler_binary() -> text:
+    val spec_compiler = env_get("SIMPLE_SPEC_COMPILER")
+    if spec_compiler != "":
+        return spec_compiler
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == "": "bin/simple" else: configured
+
+fn runtime_capsule() -> text:
+    val spec_runtime = env_get("SIMPLE_SPEC_RUNTIME_PATH")
+    if spec_runtime != "": spec_runtime else: env_get("SIMPLE_RUNTIME_PATH")
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-text-predicate-argument-shapes"
+    dir_create_all(dir)
+    dir
+
+fn native_build_positional(dir: text, source: text, exe: text) -> (text, text, i64):
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_NO_STUB_FALLBACK", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", "direct")
+    env_set("SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE", "none")
+    val runtime = runtime_capsule()
+    var args = ["native-build", "--backend", "cranelift", "--runtime-bundle", "core-c-bootstrap",
+        "--threads", "1", "--cache-dir", dir + "/cache"]
+    if runtime == "":
+        args.push("--mode")
+        args.push("one-binary")
+    else:
+        env_set("SIMPLE_RUNTIME_PATH", runtime)
+        args.push("--mode")
+        args.push("dynload")
+        args.push("--runtime-path")
+        args.push(runtime)
+    args.push("-o")
+    args.push(exe)
+    args.push(source)
+    process_run(compiler_binary(), args)
+
+describe "text predicates decide correctly for every argument and receiver shape":
+
+    """Literal receivers, variable arguments, concat-result receivers and
+    `contains` all cross the same tagged rt_string_* boundary. Each must be
+    tagged exactly once on the way in, whatever the backend emitted."""
+
+    it "matches the interpreter's answers across all shapes":
+        step("write the program")
+        val dir = work_dir()
+        assert_true(file_write(dir + "/main.spl", PROGRAM))
+
+        step("native-build through the compiler's positional in-process route")
+        val exe = dir + "/main.bin"
+        val built = native_build_positional(dir, dir + "/main.spl", exe)
+        assert_equal(built[2], 0)
+
+        step("every shape prints the expected verdict")
+        val ran = process_run(exe, [])
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), EXPECTED)
