@@ -95,6 +95,7 @@ clang --target=aarch64-linux-gnu $PIE -fdirect-access-external-data start_a64.c 
 clang --target=aarch64-linux-gnu $PIE lib_a64.c   -o pie_lib_a64.o
 clang --target=x86_64-linux-gnu  $PIE start_x64.c -o pie_start_x64.o
 clang --target=x86_64-linux-gnu  $PIE lib_x64.c   -o pie_lib_x64.o
+clang --target=x86_64-linux-gnu -c gotpc32_x64.s -o gotpc32_x64.o
 clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables hello_libc.c -o hello_libc_a64.o
 ```
 
@@ -109,6 +110,7 @@ clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -f
 | pie_start_x64.o | REX_GOTPCRELX (msg, relaxed to `lea`), PLT32 (add_val) |
 | pie_lib_x64.o | PC32 (scratch, base) |
 | hello_libc_a64.o | ADR_PREL_PG_HI21 + ADD_ABS_LO12_NC (.rodata.str1.1), CALL26 (puts, exit); `main` is in `.text.unlikely.` |
+| gotpc32_x64.o | explicit R_X86_64_GOTPC32 reference to the linker-synthesized `_GLOBAL_OFFSET_TABLE_` |
 
 `hello_libc_a64.o` is linked by `elf_dynamic_link_spec` and `link_engine_external_spec`
 together with the HOST glibc startup objects and `libc.so.6` from

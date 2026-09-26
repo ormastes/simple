@@ -910,6 +910,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     var got_oi: [i64] = []      # -1 for a global symbol key
     var got_si: [i64] = []
     var got_idx: {text: i64} = {}
+    var need_got_base = false
     var oi: i64 = 0
     while oi < parsed.len():
         val obj = parsed[oi]
@@ -917,8 +918,11 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             val t = r.target_section_idx
             if t >= 0 and t < obj.sections.len() and ins0.out_of[ins0.base[oi] + t] >= 0:
                 val rc = elf_reloc_class(target, elf_reloc_type(r))
+                val rsym = obj.symbols[elf_reloc_sym(r)]
+                if rsym.name == "_GLOBAL_OFFSET_TABLE_":
+                    need_got_base = true
                 if rc == RC_GOT or rc == RC_GOT_RELAX:
-                    val sym = obj.symbols[elf_reloc_sym(r)]
+                    val sym = rsym
                     var key = "{oi}#{elf_reloc_sym(r)}"
                     var koi = oi
                     if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
@@ -979,7 +983,10 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     got_oi = oi2
     got_si = si2
 
-    val lay = _bl_layout(plan, ins0, res, defines, got_keys.len() * 8)?
+    var got_size = got_keys.len() * 8
+    if need_got_base and got_size == 0:
+        got_size = 8
+    val lay = _bl_layout(plan, ins0, res, defines, got_size)?
     val ins = lay.ins
     val outs = lay.outs
     var script_val: {text: i64} = {}
@@ -1052,6 +1059,8 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                         if a64 and rc == RC_BRANCH:
                             # ld.lld: a branch to an undefined weak symbol targets the next instruction
                             s = p + 4 - r.r_addend
+                    else if sym.name == "_GLOBAL_OFFSET_TABLE_" and got_out >= 0:
+                        s = got_vma
                     else:
                         if not undef.contains(sym.name):
                             undef = undef.push(sym.name)

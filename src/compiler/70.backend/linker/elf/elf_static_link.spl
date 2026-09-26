@@ -466,7 +466,8 @@ fn elf_sort_outs(secs: [ElfOutSec]) -> [ElfOutSec]:
 # ============================================================================
 
 fn elf_is_synth(name: text) -> bool:
-    name == "_DYNAMIC" or name == "__ehdr_start" or name == "__executable_start" or
+    name == "_DYNAMIC" or name == "_GLOBAL_OFFSET_TABLE_" or
+        name == "__ehdr_start" or name == "__executable_start" or
         name == "__init_array_start" or name == "__init_array_end" or
         name == "__fini_array_start" or name == "__fini_array_end" or
         name == "__preinit_array_start" or name == "__preinit_array_end"
@@ -479,6 +480,11 @@ fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text) -> Result<i64, text>
         if d < 0:
             return Err("undefined symbol: _DYNAMIC (output has no .dynamic)")
         return Ok(plan.vaddrs[d])
+    if name == "_GLOBAL_OFFSET_TABLE_":
+        val g = elf_exec_find(plan, ".got.plt")
+        if g < 0:
+            return Err("undefined symbol: _GLOBAL_OFFSET_TABLE_ (output has no .got.plt)")
+        return Ok(plan.vaddrs[g])
     var sec = ".init_array"
     if name.starts_with("__fini_array"):
         sec = ".fini_array"
@@ -843,6 +849,8 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text) -> i64:
     var sec = ".init_array"
     if name == "_DYNAMIC":
         sec = ".dynamic"
+    else if name == "_GLOBAL_OFFSET_TABLE_":
+        sec = ".got.plt"
     else if name.starts_with("__fini_array"):
         sec = ".fini_array"
     else if name.starts_with("__preinit_array"):
@@ -1156,6 +1164,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val initial_contents = elf_static_contents(common.inputs)
     val refs = elf_collect_refs(ctx0, initial_contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
+    var need_got_base = false
+    for r in refs:
+        if r.name == "_GLOBAL_OFFSET_TABLE_":
+            need_got_base = true
     val copies = elf_place_copies(common.inputs, sc)
     val inputs = copies.inputs
     val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
@@ -1247,6 +1259,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     if nplt > 0:
         secs = secs.push(elf_sec_with(elf_out_sec(".rela.plt", SHT_RELA_S, SHF_ALLOC | SHF_INFO_LINK_S, 8, nplt * 24, ELF_SEG_R), 24, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, elf_plt_size(target, nplt), ELF_SEG_RX))
+    if nplt > 0 or need_got_base:
         secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, elf_gotplt_size(nplt), ELF_SEG_RW))
     if sc.got_keys.len() > 0:
         secs = secs.push(elf_out_sec(".got", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, sc.got_keys.len() * 8, ELF_SEG_RW))
