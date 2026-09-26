@@ -51,7 +51,9 @@ Release impact: ARM64 network parity and the SimpleOS release row remain unquali
   one quarantined close when a pending hint is set. The ARM64 direct server does
   not call that cooperative poll, so these retries are opportunistic; a
   guaranteed supervisor schedule and durable physical-retirement receipt are
-  still absent. The earlier all-descriptor
+  still absent. ARM64 network initialization now refuses a second attempt while
+  the netstack is active or any direct descriptor remains, preserving live and
+  quarantined owners instead of resetting the map. The earlier all-descriptor
   strong-shim close caused a kernel fault, so this narrower path still needs
   a ring-3 guest close/reopen and file-close regression before admission. The
   map retains its single-core transition assumption; multicore delivery needs
