@@ -17,7 +17,14 @@ the complete typed integer/bool family. It uses raw i64 arguments as declared
 by the Simple atomic SFFI and accepts tagged bool literals. The separate
 `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c`
 constructor is an example route, not the canonical RISC-V product provider.
-Host contention and raw-8/tagged-bool tests passed for the shared provider;
+The shared provider now owns a static 4096-slot table and returns opaque slot
+handles instead of unchecked heap pointers. Its atomic admission/free state
+revokes new operations on free and retains slots for calls already admitted;
+invalid, stale, and exhausted handles fail closed. Concurrent construction no
+longer enters the unsynchronized boot bump allocator. Slots are not reused, so
+4096 is a lifetime allocation limit for this candidate, not a qualified
+long-running capacity target. Host contention, concurrent construction,
+invalid/stale handle, capacity, and raw-8/tagged-bool tests passed;
 AArch64 and RV64 objects emitted hardware atomic instructions. The AArch64
 full boot C file cross-compiled. Standalone compilation of the canonical RV64
 C file hit unrelated existing declarations before target emission, so this
@@ -27,7 +34,8 @@ Repeatable focused gates are
 `sh scripts/check/check-simpleos-x86-baremetal-atomics.shs` and
 `sh scripts/check/check-simpleos-multiplatform-atomic-provider.shs`.
 
-Completion still requires linked provider identity, explicit handle lifecycle
-and invalid-handle behavior, allocator safety after SMP bring-up, and guest
-contention tests on x86_64, AArch64, and RISC-V 64. The guest test must
+Completion still requires linked provider identity, x86 handle-lifecycle and
+invalid-handle parity, a selected lifetime-capacity or reusable-slot policy,
+whole-runtime allocator safety after SMP bring-up, and guest contention tests
+on x86_64, AArch64, and RISC-V 64. The guest test must
 exercise the Simple `AtomicI64` call route rather than only a C helper.
