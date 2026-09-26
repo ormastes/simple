@@ -9,6 +9,7 @@
 
 use std.spec.*
 use common.structural.parse.*
+use std.nogc_async_mut.structural.parse.runtime.{parse_result_fingerprint, parse_results_equal}
 
 # --------------------------------------------------------------------------
 # Test dialect: a four-class, four-state DFA.
@@ -112,6 +113,49 @@ describe "PARSE cpu-reference runtime":
         expect(number.start.to_i64()).to_equal(3)
         expect(number.count.to_i64()).to_equal(2)
 
+    it "rejects different tokens even when the candidate repeats the oracle receipt":
+        val oracle = run_cpu("ab 12")
+        val altered = ParseResult(
+            schema_id: oracle.schema_id,
+            ok: oracle.ok,
+            tokens: ParseTokenArena(
+                schema_id: oracle.tokens.schema_id,
+                kind: [1u16, 1u16],
+                start: oracle.tokens.start,
+                count: oracle.tokens.count),
+            diagnostics: oracle.diagnostics,
+            tags_emitted: oracle.tags_emitted,
+            receipt: oracle.receipt)
+        expect(parse_result_fingerprint(altered)).to_equal(parse_result_fingerprint(oracle))
+        expect(parse_results_equal(altered, oracle)).to_equal(false)
+
+    it "rejects different diagnostics and malformed output columns":
+        val oracle = run_cpu("a##b")
+        val changed_diagnostic = ParseResult(
+            schema_id: oracle.schema_id,
+            ok: oracle.ok,
+            tokens: oracle.tokens,
+            diagnostics: ParseDiagnosticArena(
+                schema_id: oracle.diagnostics.schema_id,
+                code: [2u16],
+                start: oracle.diagnostics.start,
+                count: oracle.diagnostics.count),
+            tags_emitted: oracle.tags_emitted,
+            receipt: oracle.receipt)
+        val malformed_tokens = ParseResult(
+            schema_id: oracle.schema_id,
+            ok: oracle.ok,
+            tokens: ParseTokenArena(
+                schema_id: oracle.tokens.schema_id,
+                kind: oracle.tokens.kind,
+                start: [],
+                count: oracle.tokens.count),
+            diagnostics: oracle.diagnostics,
+            tags_emitted: oracle.tags_emitted,
+            receipt: oracle.receipt)
+        expect(parse_results_equal(changed_diagnostic, oracle)).to_equal(false)
+        expect(parse_results_equal(malformed_tokens, oracle)).to_equal(false)
+
     it "consumes trivia states without emitting a token for them":
         val result = run_cpu("a   b")
 
@@ -200,6 +244,55 @@ describe "PARSE cpu-reference runtime":
         val dialect = parse_dialect_lexical(11u32, broken)
         val result = parse_run(dialect, request_for("ab", PARSE_MODE_CPU_REFERENCE))
 
+        expect(result.receipt.fallback_reason).to_equal("parse_lex_program_malformed")
+        assert_false(result.ok)
+
+    it "rejects a transition to a nonexistent state before indexing the token table":
+        var transitions = fixture_transitions()
+        transitions[3] = 9u32
+        val broken = parse_lex_program(
+            7u32, 4, 4, 0u32, fixture_byte_class(), transitions,
+            [0u16, 1u16, 2u16, 3u16],
+            [0u16, 0u16, PARSE_STATE_FLAG_SKIP, 0u16])
+        val result = parse_run(
+            parse_dialect_lexical(11u32, broken),
+            request_for("a", PARSE_MODE_CPU_REFERENCE))
+        expect(result.receipt.fallback_reason).to_equal("parse_lex_program_malformed")
+        assert_false(result.ok)
+
+    it "rejects overflowing table dimensions before arithmetic can wrap":
+        val broken = parse_lex_program(
+            7u32, 4, 9223372036854775807, 0u32,
+            fixture_byte_class(), fixture_transitions(),
+            [0u16, 1u16, 2u16, 3u16],
+            [0u16, 0u16, PARSE_STATE_FLAG_SKIP, 0u16])
+        val result = parse_run(
+            parse_dialect_lexical(11u32, broken),
+            request_for("a", PARSE_MODE_CPU_REFERENCE))
+        expect(result.receipt.fallback_reason).to_equal("parse_lex_program_malformed")
+        assert_false(result.ok)
+
+    it "rejects unknown state flag bits before executing the DFA":
+        var flags = [0u16, 0u16, PARSE_STATE_FLAG_SKIP, 0u16]
+        flags[1] = 2u16
+        val broken = parse_lex_program(
+            7u32, 4, 4, 0u32, fixture_byte_class(), fixture_transitions(),
+            [0u16, 1u16, 2u16, 3u16], flags)
+        val result = parse_run(
+            parse_dialect_lexical(11u32, broken),
+            request_for("12", PARSE_MODE_CPU_REFERENCE))
+        expect(result.receipt.fallback_reason).to_equal("parse_lex_program_malformed")
+        assert_false(result.ok)
+
+    it "rejects skip on a non-accepting state":
+        var flags = [0u16, 0u16, PARSE_STATE_FLAG_SKIP, 0u16]
+        flags[0] = PARSE_STATE_FLAG_SKIP
+        val broken = parse_lex_program(
+            7u32, 4, 4, 0u32, fixture_byte_class(), fixture_transitions(),
+            [0u16, 1u16, 2u16, 3u16], flags)
+        val result = parse_run(
+            parse_dialect_lexical(11u32, broken),
+            request_for("12", PARSE_MODE_CPU_REFERENCE))
         expect(result.receipt.fallback_reason).to_equal("parse_lex_program_malformed")
         assert_false(result.ok)
 

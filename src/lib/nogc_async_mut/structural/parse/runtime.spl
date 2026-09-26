@@ -10,8 +10,10 @@ use std.common.structural.parse.parse_types.{
     PARSE_MODE_RESIDENT_GPU,
     PARSE_REJECT_UNKNOWN_MODE,
     ParseDialect,
+    ParseDiagnosticArena,
     ParseRequest,
-    ParseResult
+    ParseResult,
+    ParseTokenArena
 }
 use std.common.structural.parse.parse_cpu_reference.{
     parse_run,
@@ -54,6 +56,8 @@ fn parse_runtime_with_mode(dialect: ParseDialect, _mode: text) -> ParseRuntime:
         Ok(runtime) -> runtime
         Err(_) -> ParseRuntime(dialect: dialect, runtime_version: PARSE_RUNTIME_VERSION)
 
+# Compact receipt projection for reporting; it does not contain emitted
+# token/diagnostic columns and must not serve as an equality oracle.
 fn parse_result_fingerprint(result: ParseResult) -> text:
     val tags = result.tags_emitted
     val input_hash = result.receipt.input_hash
@@ -70,12 +74,49 @@ fn parse_result_fingerprint(result: ParseResult) -> text:
         + count_in.to_text() + "|" + count_out.to_text() + "|" + bytes_read.to_text() + "|"
         + malformed.to_text() + "|" + overflow.to_text() + "|" + tags.to_text() + "|" + ok
 
+fn _parse_token_arenas_equal(left: ParseTokenArena, right: ParseTokenArena) -> bool:
+    if left.schema_id != right.schema_id:
+        return false
+    val count = left.kind.len()
+    if left.start.len() != count or left.count.len() != count or
+       right.kind.len() != count or right.start.len() != count or
+       right.count.len() != count:
+        return false
+    var i = 0
+    while i < count:
+        if left.kind[i] != right.kind[i] or left.start[i] != right.start[i] or
+           left.count[i] != right.count[i]:
+            return false
+        i = i + 1
+    true
+
+fn _parse_diagnostic_arenas_equal(left: ParseDiagnosticArena, right: ParseDiagnosticArena) -> bool:
+    if left.schema_id != right.schema_id:
+        return false
+    val count = left.code.len()
+    if left.start.len() != count or left.count.len() != count or
+       right.code.len() != count or right.start.len() != count or
+       right.count.len() != count:
+        return false
+    var i = 0
+    while i < count:
+        if left.code[i] != right.code[i] or left.start[i] != right.start[i] or
+           left.count[i] != right.count[i]:
+            return false
+        i = i + 1
+    true
+
 fn parse_results_equal(left: ParseResult, right: ParseResult) -> bool:
+    """Compare emitted lexical output exactly; a receipt hash is not an oracle."""
     if left.schema_id != right.schema_id:
         return false
     if left.ok != right.ok:
         return false
     if left.tags_emitted != right.tags_emitted:
+        return false
+    if not _parse_token_arenas_equal(left.tokens, right.tokens):
+        return false
+    if not _parse_diagnostic_arenas_equal(left.diagnostics, right.diagnostics):
         return false
     return parse_result_fingerprint(left) == parse_result_fingerprint(right)
 
