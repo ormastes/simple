@@ -135,7 +135,10 @@ assumption needs a serialized transition before multicore release.
    wrong receiver, missing reply permit, and EAGAIN handling. The 133 path is
    nonblocking, so the dedicated service loop yields rather than spins.
    Verify kernel `fd_io._vfs_ipc_request` preserves numeric VFS status and
-   transport-failure cleanup through the shared 132/133 route.
+   transport-failure cleanup through the shared 132/133 route. The live x86
+   dispatcher now routes syscall 18 to the owner-checked Simple handler, so
+   each completed or failed client request can destroy its temporary reply
+   port; admit repeated requests and wrong-owner denial in the guest.
 4. Only after the copied transport is live should the selected provenance
    ABI feed a task identity to positioned control. Neither the source port nor
    the VFS fd may stand in for that identity.
