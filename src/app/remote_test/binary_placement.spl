@@ -22,7 +22,41 @@ fn _remote_windows_command_value(value: text) -> Result<text, text>:
     Ok(_remote_powershell_quote(value))
 
 fn _remote_windows_same_path(left: text, right: text) -> bool:
-    left.trim().replace("/", "\\").lower() == right.trim().replace("/", "\\").lower()
+    _remote_normalize_path(left, true) == _remote_normalize_path(right, true)
+
+fn _remote_path_is_absolute(value: text, windows: bool) -> bool:
+    val path = value.trim().replace("\\", "/")
+    if windows:
+        val drive = if path.len() > 0: path[0:1].lower() else: ""
+        return path.starts_with("//") or
+            (path.len() >= 3 and drive >= "a" and drive <= "z" and
+                path[1:2] == ":" and path[2:3] == "/")
+    path.starts_with("/")
+
+fn _remote_normalize_path(value: text, windows: bool) -> text:
+    """Lexically normalize a target path without consulting the local host."""
+    var path = value.trim().replace("\\", "/")
+    var prefix = ""
+    if windows and path.len() >= 2 and path[1:2] == ":":
+        prefix = path[0:2].lower() + "/"
+        path = path.substring(2)
+    elif windows and path.starts_with("//"):
+        prefix = "//"
+        path = path.substring(2)
+    elif path.starts_with("/"):
+        prefix = "/"
+        path = path.substring(1)
+    var parts: [text] = []
+    for part in path.split("/"):
+        if part == "" or part == ".": continue
+        if part == "..":
+            if parts.len() > 0 and parts[parts.len() - 1] != "..":
+                parts.pop()
+            elif prefix == "":
+                parts = parts.push(part)
+        else:
+            parts = parts.push(if windows: part.lower() else: part)
+    prefix + parts.join("/")
 
 fn _remote_validate_staging_path(remote_os: text, staged_path: text,
         destination: text) -> Result<bool, text>:
@@ -31,11 +65,20 @@ fn _remote_validate_staging_path(remote_os: text, staged_path: text,
     val temporary = destination + ".remote-test-new"
     val platform = remote_os.trim().lower()
     if platform == "windows" or platform == "win":
+        if not _remote_path_is_absolute(staged, true) or
+                not _remote_path_is_absolute(destination, true):
+            return Err("remote Windows Simple staging and installed paths must be absolute")
         if _remote_windows_same_path(staged, destination) or
                 _remote_windows_same_path(staged, temporary):
             return Err("remote Simple staging path must differ from the installed and publication paths")
-    elif staged == destination or staged == temporary:
-        return Err("remote Simple staging path must differ from the installed and publication paths")
+    else:
+        if not _remote_path_is_absolute(staged, false) or
+                not _remote_path_is_absolute(destination, false):
+            return Err("remote POSIX Simple staging and installed paths must be absolute")
+        val normalized = _remote_normalize_path(staged, false)
+        if normalized == _remote_normalize_path(destination, false) or
+                normalized == _remote_normalize_path(temporary, false):
+            return Err("remote Simple staging path must differ from the installed and publication paths")
     Ok(true)
 
 fn remote_simple_test_command(remote_os: text, configured: text,

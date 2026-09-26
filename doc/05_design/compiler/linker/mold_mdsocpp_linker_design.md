@@ -262,6 +262,11 @@ quoted test command, and `RemotePcAdapter.execute` consumes it instead of the
 old hardcoded checkout-relative `bin/simple` path. Windows execution is pinned
 to non-interactive PowerShell with single-quoted arguments and propagated
 `$LASTEXITCODE`; quote or line-break injection attempts fail closed.
+Placement validation is target-lexical rather than host-canonical: both staging
+and installed paths must be absolute, and normalized dot segments, separators,
+Windows drive letters, and Windows case are compared before any upload begins.
+This prevents an alias of either the live interpreter or its sibling temporary
+publication file from bypassing the pre-transfer guard.
 
 ## 14. Linux runtime and library input completion (2026-09-27)
 

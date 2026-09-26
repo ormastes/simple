@@ -322,6 +322,10 @@ explicit staging path and publish it at the target-owned location. Linux and
 SimpleOS use a mode-0755 sibling followed by atomic rename; Windows uses a
 sibling file and fail-fast PowerShell replacement. Upload or publication
 failure is returned as an error rather than running an older remote binary.
+Remote publication now requires absolute staging and installed paths and
+compares lexical canonical forms before upload. Dot segments, repeated
+separators, slash direction, drive-letter case, and Windows path case can no
+longer disguise the live destination or its sibling publication file.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and
