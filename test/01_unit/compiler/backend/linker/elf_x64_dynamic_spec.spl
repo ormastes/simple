@@ -27,6 +27,7 @@ use std.string_core.{char_from_code}
 val FIX: text = "test/fixtures/linker/elf"
 val INTERP: text = "/lib64/ld-linux-x86-64.so.2"
 val PT_INTERP: i64 = 3
+val PT_GNU_RELRO: i64 = 0x6474e552
 
 fn load_path(path: text) -> [i64]:
     val raw = file_read_bytes(path)
@@ -134,6 +135,23 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
             i = i + 1
         expect(cstr(b, rd64(b, ip + 8))).to_equal(INTERP)
         expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, 1))).to_equal("libadd_x64.so")
+
+    it "seals dynamic metadata and the GOT with PT_GNU_RELRO":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        var relro: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = rd64(b, 32) + i * 56
+            if rd32(b, p) == PT_GNU_RELRO:
+                relro = p
+            i = i + 1
+        expect(relro > 0).to_equal(true)
+        val start = rd64(b, relro + 16)
+        val finish = start + rd64(b, relro + 40)
+        expect(sec_addr(b, ".dynamic") >= start).to_equal(true)
+        expect(sec_addr(b, ".dynamic") + sec_size(b, ".dynamic") <= finish).to_equal(true)
+        expect(sec_addr(b, ".got") >= start).to_equal(true)
+        expect(sec_addr(b, ".got") + sec_size(b, ".got") <= finish).to_equal(true)
 
     it "writes ld.lld's lazy PLT0 and PLT1 encodings":
         val b = structural(ELF_LINK_DYNAMIC_EXEC)
