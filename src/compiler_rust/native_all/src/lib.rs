@@ -30,13 +30,10 @@ pub use mem_snapshot_provider::rt_phase_profile_record;
 // LNK2005; the runtime's copy is the authoritative one.
 pub use simple_runtime::mem_snapshot::{rt_mem_snapshot_close, rt_mem_snapshot_open, rt_mem_snapshot_record};
 
-// Row 3 hosted-compositor SFFI bindings. This `extern crate` is the
-// load-bearing reference that forces rustc to link the staticlib's
-// object files into `libsimple_native_all.a`, exporting the
-// `rt_cocoa_*` / `rt_win32_*` / `rt_hosted_select_surface` symbols.
-// The crate itself compiles as "stubs only" on all hosts by default;
-// real Cocoa / Win32 code is gated behind its `cocoa-real` / `win32-real`
-// features.
+// Row 3 hosted-compositor SFFI bindings. macOS Cocoa is exported solely by
+// libsimple_runtime.dylib; linking this crate into native-all on macOS would
+// add a second rt_cocoa_* provider. Other hosts still need the hosted stubs.
+#[cfg(not(target_os = "macos"))]
 use spl_hosted_runtime as _;
 
 use std::collections::{BTreeMap, HashMap};

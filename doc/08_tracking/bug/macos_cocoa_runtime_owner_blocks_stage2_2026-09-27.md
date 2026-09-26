@@ -1,6 +1,7 @@
 # macOS Cocoa ownership blocks admitted Stage 2 bootstrap
 
-Status: open, reproduced on aarch64-apple-darwin on 2026-09-27.
+Status: Cocoa artifact ownership fixed in this branch; Stage 2 admission
+rerun pending. Reproduced on aarch64-apple-darwin on 2026-09-27.
 
 ## Reproduction
 
@@ -44,3 +45,19 @@ runtime symbols in release candidates.
 
 The SimpleOS OFD completion changes on this branch remain unverified by
 the self-hosted product runtime until this bootstrap blocker is resolved.
+
+## Repair and artifact check
+
+The macOS Rust build now renames the twelve Objective-C entry points to
+`simple_cocoa_impl_*`. `simple-runtime` forwards them through local
+`#[no_mangle]` functions, which rustc includes in the dylib export list.
+`simple-native-all` no longer pulls the hosted Cocoa stub on macOS. The
+missing `cocoa_dynload_owner_selfcheck.c` now probes all twelve `dlsym`
+entries and rejects invalid window dimensions without opening a GUI.
+
+Both Rust artifacts were rebuilt from this worktree. The existing
+`check-macos-cocoa-runtime-owner.shs` returned `macOS Cocoa runtime
+ownership: PASS` against the resulting dylib and native archive. This
+proves the Cocoa ownership repair, not the separate generic C provider
+export gap in `cdylib_hides_c_runtime_exports_2026-09-06.md` or Stage 2
+admission. A fresh immutable bootstrap must still verify that whole chain.
