@@ -282,6 +282,8 @@ static spl_i64 rt_index_arg(spl_i64 value) {
     return value;
 }
 
+#include "../../../../../runtime/startup/baremetal/atomic_runtime.inc.c"
+
 static void rt_write_decimal(char *buf, spl_u64 *len, spl_u64 value) {
     char tmp[20];
     spl_u64 count = 0;

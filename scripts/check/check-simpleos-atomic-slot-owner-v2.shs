@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
+host_cc=${CC:-clang}
+cross_cc=${CROSS_CC:-clang}
+if [ -z "${CROSS_CC:-}" ] && [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+    cross_cc=/opt/homebrew/opt/llvm/bin/clang
+fi
+case "$(uname -s)" in
+    Darwin) strip_flag=-Wl,-dead_strip ;;
+    *) strip_flag=-Wl,--gc-sections ;;
+esac
+
+shared_probe="$repo_root/test/01_unit/os/libc/simpleos_baremetal_atomic_shared_test.c"
+x86_runtime="$repo_root/examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c"
+x86_tests="$repo_root/test/01_unit/os/libc"
+
+"$host_cc" -O2 -pthread "$shared_probe" -o "$work_dir/shared-host"
+"$work_dir/shared-host"
+for case_name in contention bool_tag lifecycle; do
+    "$host_cc" -O2 -pthread -ffunction-sections -fdata-sections "$strip_flag" \
+        "$x86_tests/simpleos_x86_baremetal_atomic_${case_name}_test.c" \
+        "$x86_runtime" -o "$work_dir/x86-$case_name"
+    "$work_dir/x86-$case_name"
+done
+
+"$cross_cc" --target=aarch64-unknown-none-elf \
+    -DSIMPLEOS_FREESTANDING_ATOMIC_PROBE -O2 -ffreestanding -nostdlib \
+    -S "$shared_probe" -o "$work_dir/shared-aarch64.s"
+grep -Eq 'ldaxr|casal|ldadd' "$work_dir/shared-aarch64.s"
+
+"$cross_cc" --target=riscv64-unknown-none-elf -march=rv64gc -mabi=lp64d \
+    -DSIMPLEOS_FREESTANDING_ATOMIC_PROBE -O2 -ffreestanding -nostdlib \
+    -S "$shared_probe" -o "$work_dir/shared-rv64.s"
+grep -Eq 'amoadd\.d|lr\.d' "$work_dir/shared-rv64.s"
+
+"$cross_cc" --target=x86_64-unknown-elf -S -O2 -ffreestanding -nostdlib \
+    -fno-pie -mno-red-zone "$x86_runtime" -o "$work_dir/x86.s"
+grep -Eq 'lock[[:space:]]+cmpxchgq' "$work_dir/x86.s"
+grep -Eq 'lock[[:space:]]+xaddq' "$work_dir/x86.s"
+printf 'PASS: shared three-architecture atomic slot owner, ABA refusal, ABI, and hardware atomics\n'
