@@ -218,7 +218,12 @@ undefined-symbol descriptor sequences fail closed.
 Linux AArch64 `TLS_DTPREL64`, `TLS_DTPMOD64`, and `TLS_TPREL64` input records
 now resolve statically for defined TLS symbols using the `PT_TLS` block start,
 main-module ID 1, and variant-I thread-pointer bias respectively. Imported
-records remain fail-closed until loader-relocation emission is implemented.
+records now remain as symbol-bound `.rela.dyn` entries for the loader. The
+equivalent x86-64 raw `DTPMOD64`, `DTPOFF64`, and `TPOFF64` words use the same
+path. Static links and instruction-field imported TLS forms remain fail-closed.
+The AArch64 numeric mapping is pinned to the LLVM/GNU ABI: relocation 1028 is
+`TLS_DTPMOD64` and 1029 is `TLS_DTPREL64`; the previously reversed local names
+and relocation classes are corrected.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 
